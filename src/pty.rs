@@ -149,7 +149,46 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // implemented in a later test cycle
+        if self.child > 0 {
+            // Polite first: SIGHUP lets shells flush history etc.  If the
+            // child does not exit quickly, escalate to SIGKILL.  In all cases
+            // we must waitpid() to avoid leaving zombies.
+            unsafe {
+                libc::kill(self.child, libc::SIGHUP);
+            }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            let mut reaped = false;
+            while std::time::Instant::now() < deadline {
+                let mut status: c_int = 0;
+                let r = unsafe { libc::waitpid(self.child, &mut status, libc::WNOHANG) };
+                if r > 0 {
+                    reaped = true;
+                    break;
+                }
+                if r < 0 {
+                    // ECHILD = already reaped by someone else.  Treat as done.
+                    reaped = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            if !reaped {
+                unsafe {
+                    libc::kill(self.child, libc::SIGKILL);
+                    let mut status: c_int = 0;
+                    libc::waitpid(self.child, &mut status, 0);
+                }
+            }
+            self.child = 0;
+        }
+        if self.master >= 0 {
+            unsafe {
+                libc::close(self.master);
+            }
+            self.master = -1;
+        }
     }
 }
 
@@ -358,6 +397,53 @@ mod tests {
         assert!(s.contains("ping"), "expected 'ping' to round-trip via /bin/cat, got: {:?}", s);
 
         force_cleanup(&mut pty);
+    }
+
+    #[test]
+    fn drop_kills_child_and_closes_fd() {
+        let pid;
+        let master_fd;
+        {
+            let pty = Pty::spawn(PtyConfig {
+                program: "/bin/sleep".into(),
+                args: vec!["60".into()],
+                size: TerminalSize::default(),
+            })
+            .expect("spawn /bin/sleep");
+
+            pid = pty.child_pid();
+            master_fd = pty.raw_master();
+
+            // Pre-condition: child is alive and fd is valid.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "child {} should be alive", pid);
+            assert_ne!(unsafe { libc::fcntl(master_fd, libc::F_GETFD) }, -1, "fd should be open");
+        } // Drop runs here
+
+        // Give the kernel a beat to finish reaping.  100ms is generous; SIGHUP
+        // on /bin/sleep terminates immediately so we expect well under that.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Child must be gone.
+        let probe = unsafe { libc::kill(pid, 0) };
+        let err = io::Error::last_os_error();
+        assert_eq!(probe, -1, "child {} should be reaped", pid);
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ESRCH),
+            "expected ESRCH after Drop, got {:?}",
+            err
+        );
+
+        // Master fd must be closed.
+        let r = unsafe { libc::fcntl(master_fd, libc::F_GETFD) };
+        let fd_err = io::Error::last_os_error();
+        assert_eq!(r, -1, "master fd should be closed");
+        assert_eq!(
+            fd_err.raw_os_error(),
+            Some(libc::EBADF),
+            "expected EBADF on closed fd, got {:?}",
+            fd_err
+        );
     }
 
     #[test]
