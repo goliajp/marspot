@@ -48,3 +48,12 @@ BIN="target/$PROFILE/mars"
 echo "==> launching $BIN"
 "$BIN" &
 disown
+
+# Wait for the process to actually appear in the process list before returning,
+# so callers chaining `./bin/run.sh && pgrep mars` don't race.  Up to ~2s.
+for _ in $(seq 1 40); do
+  pgrep -x mars > /dev/null && exit 0
+  sleep 0.05
+done
+echo "warn: mars did not appear in process list within 2s" >&2
+exit 1
