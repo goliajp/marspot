@@ -25,9 +25,9 @@ Each entry: target subdir, upstream URL, pinned commit/tag, why it's available.
 
 | Subdir | Upstream | Pin | Available for (when stuck on…) |
 |---|---|---|---|
-| `alacritty/` | https://github.com/alacritty/alacritty | tbd | VT100/xterm edge cases, GPU renderer ideas, PTY handling on macOS |
-| `libvterm/` | https://github.com/neovim/libvterm | tbd | "What does this VT sequence actually do" — compact C reference (~7k LOC) |
-| `ctlseqs/` | https://invisible-island.net/xterm/ctlseqs/ctlseqs.txt | n/a (snapshot) | The canonical xterm control sequences spec — Tom Dickey's exhaustive reference |
+| `alacritty/` | https://github.com/alacritty/alacritty | `79adb086` | VT100/xterm edge cases, GPU renderer ideas, PTY handling on macOS |
+| `libvterm/` | https://github.com/neovim/libvterm | `934bc2fb` | "What does this VT sequence actually do" — compact C reference (~7k LOC) |
+| `ctlseqs/` | https://invisible-island.net/xterm/ctlseqs/ctlseqs.txt | snapshot 2026-05-02 | The canonical xterm control sequences spec — Tom Dickey's exhaustive reference |
 
 Add more references as needed; record what they're for so future sessions know.
 
