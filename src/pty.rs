@@ -399,6 +399,123 @@ mod tests {
         force_cleanup(&mut pty);
     }
 
+    // ----- soak tests -----
+    //
+    // These run 1000+ spawn/drop cycles to verify Pty doesn't leak fds, child
+    // processes, or memory.  They are #[ignore]'d so `cargo test` stays fast;
+    // run them explicitly via `bin/soak.sh` or:
+    //   cargo test pty::tests::soak_ -- --ignored --test-threads=1
+
+    /// Number of file descriptors currently open by this process.  /dev/fd
+    /// on macOS lists this process's fds; the readdir itself uses one fd
+    /// briefly, but that offset cancels when we diff before/after.
+    fn count_open_fds() -> usize {
+        std::fs::read_dir("/dev/fd").map(|d| d.count()).unwrap_or(0)
+    }
+
+    /// Current resident set size in bytes via proc_pidinfo.  Unlike
+    /// getrusage's ru_maxrss (peak), this returns the live value so we can
+    /// detect a process that grew and stayed grown.
+    fn current_rss_bytes() -> u64 {
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<libc::proc_taskinfo>() as i32,
+            )
+        };
+        assert!(r > 0, "proc_pidinfo failed: {}", io::Error::last_os_error());
+        info.pti_resident_size
+    }
+
+    fn quick_spawn() -> Pty {
+        Pty::spawn(PtyConfig {
+            program: "/usr/bin/true".into(),
+            args: vec![],
+            size: TerminalSize::default(),
+        })
+        .expect("spawn /usr/bin/true")
+    }
+
+    const SOAK_ITERATIONS: usize = 1000;
+
+    #[test]
+    #[ignore = "soak; run via bin/soak.sh"]
+    fn soak_no_fd_leak_over_1000_spawns() {
+        // Warm up so any one-time allocator/library opens are absorbed into
+        // the baseline rather than counted as growth.
+        for _ in 0..20 {
+            drop(quick_spawn());
+        }
+        let baseline = count_open_fds();
+        for _ in 0..SOAK_ITERATIONS {
+            drop(quick_spawn());
+        }
+        let after = count_open_fds();
+        let delta = after.saturating_sub(baseline);
+        assert!(
+            delta <= 1,
+            "fd leak: baseline {} -> after {} ({} delta) over {} iters",
+            baseline,
+            after,
+            delta,
+            SOAK_ITERATIONS
+        );
+    }
+
+    #[test]
+    #[ignore = "soak; run via bin/soak.sh"]
+    fn soak_no_unreaped_children_over_1000_spawns() {
+        for _ in 0..SOAK_ITERATIONS {
+            drop(quick_spawn());
+        }
+        // After Drop, every child must already be reaped.  waitpid(-1, WNOHANG)
+        // returning -1 (with errno=ECHILD) means "no children" — the success
+        // case.  Any positive return is an unreaped zombie.
+        let mut status: c_int = 0;
+        let r = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        if r > 0 {
+            panic!(
+                "found unreaped child pid={} after {} spawns",
+                r, SOAK_ITERATIONS
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "soak; run via bin/soak.sh"]
+    fn soak_no_memory_growth_over_1000_spawns() {
+        // Warm up the allocator's arena pool — first few spawns trigger
+        // one-time mappings we don't want to count as a leak.
+        for _ in 0..50 {
+            drop(quick_spawn());
+        }
+        let baseline = current_rss_bytes();
+        for _ in 0..SOAK_ITERATIONS {
+            drop(quick_spawn());
+        }
+        let after = current_rss_bytes();
+
+        // 5 MB tolerance: macOS allocator keeps some arenas mapped post-free.
+        // A real per-iter leak of even 5 KB would surface as 5 MB across 1000.
+        const TOLERANCE_BYTES: u64 = 5 * 1024 * 1024;
+        let growth = after.saturating_sub(baseline);
+        assert!(
+            growth <= TOLERANCE_BYTES,
+            "RSS grew {} bytes (baseline {} -> after {}) over {} iters; tolerance {} bytes",
+            growth,
+            baseline,
+            after,
+            SOAK_ITERATIONS,
+            TOLERANCE_BYTES
+        );
+    }
+
+    // ----- end soak tests -----
+
     #[test]
     fn drop_kills_child_and_closes_fd() {
         let pid;
