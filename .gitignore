@@ -1,0 +1,9 @@
+# Rust
+/target/
+
+# Local build logs (run.sh output)
+/build/
+
+# macOS
+.DS_Store
+*.swp
