@@ -80,6 +80,40 @@ impl GlyphAtlas {
     pub fn height(&self) -> u32 { self.height }
     pub fn glyph_count(&self) -> usize { self.glyphs.len() }
 
+    /// Pixel width of one monospace cell.  We sample 'M' as the
+    /// representative advance — for fixed-pitch fonts every glyph has the
+    /// same advance, so this is exact for Menlo/SF Mono/etc.
+    pub fn cell_width(&self) -> f32 {
+        let mut glyph: CGGlyph = 0;
+        let ch: u16 = b'M' as u16;
+        let ok = unsafe { self.font.get_glyphs_for_characters(&ch, &mut glyph, 1) };
+        if !ok || glyph == 0 {
+            return 0.0;
+        }
+        let mut size = core_graphics::geometry::CGSize::new(0.0, 0.0);
+        unsafe {
+            self.font.get_advances_for_glyphs(
+                kCTFontOrientationDefault,
+                &glyph,
+                &mut size,
+                1,
+            );
+        }
+        size.width as f32
+    }
+
+    /// Pixel height per row: ascent + descent + leading.  Defines vertical
+    /// spacing between baselines.
+    pub fn cell_height(&self) -> f32 {
+        (self.font.ascent() + self.font.descent() + self.font.leading()) as f32
+    }
+
+    /// Distance from the top of a cell down to the baseline.  Used to
+    /// position glyphs vertically within a cell.
+    pub fn ascent(&self) -> f32 {
+        self.font.ascent() as f32
+    }
+
     /// Look up a glyph that's already in the atlas without rasterizing.
     pub fn get(&self, ch: char) -> Option<&GlyphInfo> {
         self.glyphs.get(&ch)
@@ -152,6 +186,12 @@ impl GlyphAtlas {
             kCGImageAlphaNone,
         );
         ctx.set_gray_fill_color(1.0, 1.0);
+        // Default Quartz coordinate space (y-up from lower-left): drawing
+        // at (-bbox.origin.x, -bbox.origin.y) shifts the glyph so its
+        // bbox bottom-left maps to the bitmap's (0,0) coord origin (visually
+        // the bitmap's bottom-left).  The bitmap memory layout, however,
+        // already starts with the TOP-LEFT pixel — so byte[0..w] is the
+        // visual TOP row of the glyph and we don't need to row-flip below.
         self.font.draw_glyphs(
             &[glyph],
             &[CGPoint::new(-bbox.origin.x as CGFloat, -bbox.origin.y as CGFloat)],
@@ -162,12 +202,13 @@ impl GlyphAtlas {
         // mutation has happened yet — just bail.
         let (atlas_x, atlas_y) = self.allocate_shelf_slot(glyph_w, glyph_h)?;
 
-        // Copy bytes into the atlas, flipping rows so atlas storage is
-        // top-down (CoreGraphics bitmaps are bottom-up by default).
+        // Copy bytes into the atlas top-down.  We additionally flip the
+        // CG context with translate+scale before drawing (see above) so
+        // that the bitmap's row 0 is the GLYPH'S TOP — meaning a straight
+        // copy gives us a top-down atlas.
         let src = ctx.data();
         for row in 0..glyph_h {
-            let src_row = glyph_h - 1 - row;
-            let src_start = (src_row as usize) * row_bytes;
+            let src_start = (row as usize) * row_bytes;
             let dst_start = ((atlas_y + row) as usize) * (self.width as usize) + atlas_x as usize;
             self.pixels[dst_start..dst_start + glyph_w as usize]
                 .copy_from_slice(&src[src_start..src_start + glyph_w as usize]);

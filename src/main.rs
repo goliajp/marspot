@@ -45,6 +45,7 @@ impl ApplicationHandler for Mars {
 
         // Initialize the layer's drawable size to the window's pixel size.
         let size = window.inner_size();
+        let mut renderer = renderer;
         renderer.resize(size.width as f64, size.height as f64);
 
         // Trigger an initial paint so the user sees our clear color
@@ -64,7 +65,7 @@ impl ApplicationHandler for Mars {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(r) = &self.renderer {
+                if let Some(r) = self.renderer.as_mut() {
                     r.resize(size.width as f64, size.height as f64);
                 }
                 if let Some(w) = &self.window {
@@ -72,7 +73,7 @@ impl ApplicationHandler for Mars {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(r) = &self.renderer {
+                if let Some(r) = self.renderer.as_mut() {
                     r.render();
                 }
             }

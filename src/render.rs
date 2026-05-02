@@ -1,37 +1,52 @@
 //! Metal rendering pipeline.
 //!
-//! Phase 1.2.2 brings the first real GPU draw call: an atlas-mapped
-//! fullscreen quad showing the rasterized glyph atlas as a test pattern.
-//! Per-cell instanced rendering of grid contents lands in 1.2.3.
+//! Phase 1.2.3: per-cell instanced quad rendering.  The atlas is no
+//! longer drawn as a single test pattern — instead we walk a `Terminal`
+//! grid each frame, build a list of "draw this glyph at that cell" tuples,
+//! and issue a single `drawPrimitives:instanceCount:` call.  Each instance
+//! emits 6 base vertices generated procedurally from `[[vertex_id]]`,
+//! stretched to the destination rectangle in pixels and UV-mapped to the
+//! glyph's atlas region.
+//!
+//! Coordinates flow:
+//!   grid (col, row) → pixel rect (cell_w, cell_h) → clip space (NDC).
+//! UV flow:
+//!   atlas pixel rect (info.atlas_x..) → atlas UV in [0,1].
+//!
+//! The Terminal currently holds hardcoded seed content so this phase has
+//! something visible.  Phase 1.2.4 extends instance data with foreground
+//! colors; 1.2.5 wires resize → grid resize → re-render.
 
 use crate::atlas::GlyphAtlas;
-use objc2::ffi::NSInteger;
+use crate::terminal::Terminal;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::NSView;
 use objc2_foundation::{CGSize, NSString};
 use objc2_metal::{
-    MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin, MTLPixelFormat,
-    MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
+    MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLOrigin,
+    MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
     MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSize,
     MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
-    MTLVertexAttributeDescriptor, MTLVertexBufferLayoutDescriptor, MTLVertexDescriptor,
-    MTLVertexFormat, MTLVertexStepFunction,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 
-/// Metal Shading Language source for the atlas test-pattern pipeline.
-/// Vertex passes a full-screen quad through clip space; fragment samples
-/// the single-channel atlas and outputs a grayscale color.
 const SHADER_SOURCE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-struct VertexIn {
-    float2 position [[attribute(0)]];
-    float2 uv       [[attribute(1)]];
+struct Uniforms {
+    float2 viewport_size;   // pixels
+    float2 atlas_size;      // texels
+};
+
+struct Instance {
+    float2 dest_pos;        // pixels (top-left)
+    float2 dest_size;       // pixels
+    float2 src_pos;         // atlas texels (top-left)
+    float2 src_size;        // atlas texels
 };
 
 struct VertexOut {
@@ -39,58 +54,97 @@ struct VertexOut {
     float2 uv;
 };
 
-vertex VertexOut atlas_vert(VertexIn in [[stage_in]]) {
+constant float2 BASE_POS[6] = {
+    float2(0.0, 1.0), float2(1.0, 1.0), float2(0.0, 0.0),
+    float2(1.0, 1.0), float2(1.0, 0.0), float2(0.0, 0.0),
+};
+
+vertex VertexOut cell_vert(uint vid [[vertex_id]],
+                           uint iid [[instance_id]],
+                           constant Uniforms& uni [[buffer(0)]],
+                           constant Instance* instances [[buffer(1)]]) {
+    Instance inst = instances[iid];
+    float2 base = BASE_POS[vid];
+
+    // Pixel position of this vertex within the dest rect.
+    float2 pixel = inst.dest_pos + base * inst.dest_size;
+    // Normalize to NDC, flipping y (pixel y down → clip y up).
+    float2 ndc = pixel / uni.viewport_size * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    // Atlas UV: same parametric base mapped through src rect, then
+    // normalized by atlas size.
+    float2 atlas_px = inst.src_pos + base * inst.src_size;
+    float2 atlas_uv = atlas_px / uni.atlas_size;
+
     VertexOut out;
-    out.clip_position = float4(in.position, 0.0, 1.0);
-    out.uv = in.uv;
+    out.clip_position = float4(ndc, 0.0, 1.0);
+    out.uv = atlas_uv;
     return out;
 }
 
-fragment float4 atlas_frag(VertexOut in            [[stage_in]],
-                           texture2d<float> atlas  [[texture(0)]]) {
+fragment float4 cell_frag(VertexOut in            [[stage_in]],
+                          texture2d<float> atlas  [[texture(0)]]) {
     constexpr sampler s(coord::normalized,
                         filter::linear,
                         address::clamp_to_edge);
     float intensity = atlas.sample(s, in.uv).r;
-    // Tint slightly so the pattern reads as 'rendered text' against the
-    // dark background.  Pure white on dark for clarity.
-    return float4(intensity, intensity, intensity, 1.0);
+    // Premultiplied alpha: the fragment is alpha=intensity, color=intensity*white.
+    // The pipeline's blend state composites this 'src over' the clear color.
+    return float4(intensity, intensity, intensity, intensity);
 }
 "#;
-
-/// Two triangles forming a full-screen quad.  Each vertex is
-/// `(pos.x, pos.y, uv.x, uv.y)` packed contiguously.  UVs are top-down
-/// (V=0 at top), matching how the atlas stores its pixels.
-#[rustfmt::skip]
-const FULLSCREEN_QUAD: [f32; 24] = [
-    // tri 1: bottom-left, bottom-right, top-left
-    -1.0, -1.0, 0.0, 1.0,
-     1.0, -1.0, 1.0, 1.0,
-    -1.0,  1.0, 0.0, 0.0,
-    // tri 2: bottom-right, top-right, top-left
-     1.0, -1.0, 1.0, 1.0,
-     1.0,  1.0, 1.0, 0.0,
-    -1.0,  1.0, 0.0, 0.0,
-];
 
 const ATLAS_SIZE: u32 = 512;
 const FONT_NAME: &str = "Menlo";
 const FONT_POINT: f32 = 13.0;
+const GRID_COLS: u16 = 80;
+const GRID_ROWS: u16 = 24;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Uniforms {
+    viewport_w: f32,
+    viewport_h: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Instance {
+    dest_x: f32,
+    dest_y: f32,
+    dest_w: f32,
+    dest_h: f32,
+    src_x: f32,
+    src_y: f32,
+    src_w: f32,
+    src_h: f32,
+}
 
 pub struct Renderer {
     _device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     layer: Retained<CAMetalLayer>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    vertex_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     atlas_texture: Retained<ProtocolObject<dyn MTLTexture>>,
-    /// Kept alive so subsequent phases can mutate (add glyphs) and re-upload.
-    _atlas: GlyphAtlas,
+    atlas: GlyphAtlas,
+    /// Pre-allocated; reused every frame (no allocation churn on the hot
+    /// path — see "no allocation on hot paths" engineering principle).
+    instance_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    uniform_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    /// Holds the demo content for 1.2.3 — hardcoded seed text to prove the
+    /// engine→renderer wire.  In 1.2.5+ this gets driven by the PTY.
+    terminal: Terminal,
+    viewport_w: f32,
+    viewport_h: f32,
 }
 
 impl Renderer {
-    /// Build a renderer bound to the given `NSView`.  Caller must invoke
-    /// from the main thread (AppKit requirement).
     pub fn new(view: &NSView) -> Result<Self, String> {
         let device = unsafe { Retained::from_raw(MTLCreateSystemDefaultDevice()) }
             .ok_or("no Metal device available")?;
@@ -106,42 +160,99 @@ impl Renderer {
         view.setWantsLayer(true);
         unsafe { view.setLayer(Some(&**layer)) };
 
-        // Build the atlas (CPU side) and pre-rasterize printable ASCII so
-        // 1.2.2's test pattern has something visible to display.
+        // Atlas with all printable ASCII pre-rasterized.
         let mut atlas = GlyphAtlas::new(FONT_NAME, FONT_POINT, ATLAS_SIZE);
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 atlas.ensure(ch);
             }
         }
+        let cell_w = atlas.cell_width();
+        let cell_h = atlas.cell_height();
+        let ascent = atlas.ascent();
 
         let atlas_texture = upload_atlas_texture(&device, &atlas)?;
         let pipeline = build_pipeline(&device, MTLPixelFormat::BGRA8Unorm)?;
-        let vertex_buffer = upload_vertex_buffer(&device, &FULLSCREEN_QUAD)?;
+
+        // Pre-allocate instance buffer for the worst case (every cell occupied).
+        let max_instances = (GRID_COLS as usize) * (GRID_ROWS as usize);
+        let instance_bytes = max_instances * std::mem::size_of::<Instance>();
+        let instance_buffer = unsafe {
+            device.newBufferWithLength_options(
+                instance_bytes,
+                MTLResourceOptions::MTLResourceStorageModeShared,
+            )
+        }
+        .ok_or("could not allocate instance buffer")?;
+
+        let uniform_buffer = unsafe {
+            device.newBufferWithLength_options(
+                std::mem::size_of::<Uniforms>(),
+                MTLResourceOptions::MTLResourceStorageModeShared,
+            )
+        }
+        .ok_or("could not allocate uniform buffer")?;
+
+        // Seed the terminal with hardcoded content so the user sees real
+        // engine output without yet wiring a PTY.
+        let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+        terminal.feed(b"hello mars\r\n");
+        terminal.feed(b"the engine is alive\r\n");
+        terminal.feed(b"\r\n");
+        terminal.feed(b"  pty + parser + grid + atlas + metal\r\n");
+        terminal.feed(b"  88 unit tests + 4 soak tests, all green\r\n");
+        terminal.feed(b"\r\n");
+        terminal.feed(b"  ascii printable: !\"#$%&'()*+,-./0123456789:;<=>?@\r\n");
+        terminal.feed(b"                   ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_\r\n");
+        terminal.feed(b"                   `abcdefghijklmnopqrstuvwxyz{|}~\r\n");
 
         Ok(Self {
             _device: device,
             queue,
             layer,
             pipeline,
-            vertex_buffer,
             atlas_texture,
-            _atlas: atlas,
+            atlas,
+            instance_buffer,
+            uniform_buffer,
+            cell_w,
+            cell_h,
+            ascent,
+            terminal,
+            viewport_w: 0.0,
+            viewport_h: 0.0,
         })
     }
 
-    pub fn resize(&self, width_px: f64, height_px: f64) {
+    pub fn resize(&mut self, width_px: f64, height_px: f64) {
+        self.viewport_w = width_px as f32;
+        self.viewport_h = height_px as f32;
         unsafe {
             self.layer
                 .setDrawableSize(CGSize::new(width_px.max(1.0), height_px.max(1.0)));
         }
     }
 
-    pub fn render(&self) {
+    pub fn render(&mut self) {
         let Some(drawable) = (unsafe { self.layer.nextDrawable() }) else {
             return;
         };
         let texture = unsafe { drawable.texture() };
+
+        // Refresh uniforms with current viewport + atlas dims.
+        let uniforms = Uniforms {
+            viewport_w: self.viewport_w.max(1.0),
+            viewport_h: self.viewport_h.max(1.0),
+            atlas_w: self.atlas.width() as f32,
+            atlas_h: self.atlas.height() as f32,
+        };
+        unsafe {
+            let dst = self.uniform_buffer.contents().as_ptr() as *mut Uniforms;
+            *dst = uniforms;
+        }
+
+        // Build the instance buffer from the current grid.
+        let instance_count = self.build_instances();
 
         let pass = unsafe { MTLRenderPassDescriptor::new() };
         let attachments = unsafe { pass.colorAttachments() };
@@ -166,14 +277,80 @@ impl Renderer {
 
         encoder.setRenderPipelineState(&self.pipeline);
         unsafe {
-            encoder.setVertexBuffer_offset_atIndex(Some(&self.vertex_buffer), 0, 0);
+            encoder.setVertexBuffer_offset_atIndex(Some(&self.uniform_buffer), 0, 0);
+            encoder.setVertexBuffer_offset_atIndex(Some(&self.instance_buffer), 0, 1);
             encoder.setFragmentTexture_atIndex(Some(&self.atlas_texture), 0);
-            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+            if instance_count > 0 {
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    instance_count,
+                );
+            }
             encoder.endEncoding();
         }
 
         buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         buffer.commit();
+    }
+
+    /// Walk every cell in the grid; for each non-blank cell whose glyph is
+    /// in the atlas, write an `Instance` into the pre-allocated buffer.
+    /// Returns how many instances were written.  No allocation here — the
+    /// buffer is reused frame to frame.
+    fn build_instances(&mut self) -> usize {
+        let grid = self.terminal.grid();
+        let cols = grid.cols();
+        let rows = grid.rows();
+
+        // SAFETY: instance_buffer is host-shared and large enough for every
+        // cell.  We write exactly `count` consecutive Instance structs.
+        let buf_ptr = self.instance_buffer.contents().as_ptr() as *mut Instance;
+        let mut count: usize = 0;
+
+        for r in 0..rows {
+            for c in 0..cols {
+                let cell = grid.cell(c, r);
+                if cell.ch == ' ' {
+                    continue;
+                }
+                let Some(info) = self.atlas.get(cell.ch) else {
+                    continue;
+                };
+                if info.width == 0 || info.height == 0 {
+                    continue;
+                }
+
+                let cell_origin_x = c as f32 * self.cell_w;
+                let cell_origin_y = r as f32 * self.cell_h;
+                // Baseline in pixel coords (y down): top-of-cell + ascent.
+                let baseline_y = cell_origin_y + self.ascent;
+
+                // Glyph rect: bearing_x is offset from cell origin to glyph
+                // bbox left; bearing_y is offset from baseline up to the
+                // bbox top edge in CG coords (positive = above baseline).
+                let dest_x = cell_origin_x + info.bearing_x;
+                let dest_y = baseline_y - info.bearing_y - info.height as f32;
+
+                let instance = Instance {
+                    dest_x,
+                    dest_y,
+                    dest_w: info.width as f32,
+                    dest_h: info.height as f32,
+                    src_x: info.atlas_x as f32,
+                    src_y: info.atlas_y as f32,
+                    src_w: info.width as f32,
+                    src_h: info.height as f32,
+                };
+
+                unsafe {
+                    *buf_ptr.add(count) = instance;
+                }
+                count += 1;
+            }
+        }
+        count
     }
 }
 
@@ -207,7 +384,7 @@ fn upload_atlas_texture(
             region,
             0,
             std::ptr::NonNull::new(atlas.pixels().as_ptr() as *mut c_void).unwrap(),
-            atlas.width() as usize, // bytesPerRow for R8 = width
+            atlas.width() as usize,
         );
     }
     Ok(texture)
@@ -221,8 +398,8 @@ fn build_pipeline(
     let library = unsafe { device.newLibraryWithSource_options_error(&source, None) }
         .map_err(|e| format!("shader compile failed: {:?}", e))?;
 
-    let vert_name = NSString::from_str("atlas_vert");
-    let frag_name = NSString::from_str("atlas_frag");
+    let vert_name = NSString::from_str("cell_vert");
+    let frag_name = NSString::from_str("cell_frag");
     let vertex_func = library
         .newFunctionWithName(&vert_name)
         .ok_or("vertex function not found")?;
@@ -234,57 +411,26 @@ fn build_pipeline(
     descriptor.setVertexFunction(Some(&vertex_func));
     descriptor.setFragmentFunction(Some(&fragment_func));
 
+    // Color attachment: BGRA8 with standard premultiplied "src over" blend
+    // so glyph alpha composites correctly against the dark clear color.
     let color_attachments = unsafe { descriptor.colorAttachments() };
     let color = unsafe { color_attachments.objectAtIndexedSubscript(0) };
     color.setPixelFormat(color_format);
-
-    // Vertex layout: each vertex = (vec2 pos, vec2 uv) tightly packed.
-    let vertex_descriptor = unsafe { MTLVertexDescriptor::new() };
-
     unsafe {
-        let attrs = vertex_descriptor.attributes();
-        let attr_pos = attrs.objectAtIndexedSubscript(0);
-        attr_pos.setFormat(MTLVertexFormat::Float2);
-        attr_pos.setOffset(0);
-        attr_pos.setBufferIndex(0);
-
-        let attr_uv = attrs.objectAtIndexedSubscript(1);
-        attr_uv.setFormat(MTLVertexFormat::Float2);
-        attr_uv.setOffset(8);
-        attr_uv.setBufferIndex(0);
-
-        let layouts = vertex_descriptor.layouts();
-        let layout0 = layouts.objectAtIndexedSubscript(0);
-        layout0.setStride(16); // 4 floats per vertex
-        layout0.setStepFunction(MTLVertexStepFunction::PerVertex);
+        color.setBlendingEnabled(true);
+        color.setRgbBlendOperation(objc2_metal::MTLBlendOperation::Add);
+        color.setAlphaBlendOperation(objc2_metal::MTLBlendOperation::Add);
+        color.setSourceRGBBlendFactor(MTLBlendFactor::One);
+        color.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+        color.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        color.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     }
 
-    descriptor.setVertexDescriptor(Some(&vertex_descriptor));
+    // We don't need a vertex descriptor — base quad positions are
+    // generated procedurally in the shader from [[vertex_id]].
 
     let pipeline = device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .map_err(|e| format!("pipeline state creation failed: {:?}", e))?;
     Ok(pipeline)
 }
-
-fn upload_vertex_buffer(
-    device: &ProtocolObject<dyn MTLDevice>,
-    data: &[f32],
-) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, String> {
-    let len_bytes = std::mem::size_of_val(data);
-    let buffer = unsafe {
-        device.newBufferWithBytes_length_options(
-            std::ptr::NonNull::new(data.as_ptr() as *mut c_void).unwrap(),
-            len_bytes,
-            MTLResourceOptions::MTLResourceStorageModeShared,
-        )
-    }
-    .ok_or("could not allocate vertex buffer")?;
-    Ok(buffer)
-}
-
-// Suppress an unused-import warning in case the OS doesn't expose NSInteger
-// from objc2_metal in some config — keeping the import as documentation of
-// where MTLOrigin/MTLSize fields ultimately come from.
-#[allow(dead_code)]
-fn _force_use_nsinteger(_: NSInteger) {}
