@@ -120,6 +120,24 @@ impl Pty {
         Ok(n as usize)
     }
 
+    /// Update the terminal's window size.  TIOCSWINSZ also delivers SIGWINCH
+    /// to the foreground process group, so curses-style apps repaint.
+    pub fn resize(&mut self, size: TerminalSize) -> io::Result<()> {
+        let ws = libc::winsize {
+            ws_row: size.rows,
+            ws_col: size.cols,
+            ws_xpixel: size.pixel_width,
+            ws_ypixel: size.pixel_height,
+        };
+        // SAFETY: master is a valid fd; ioctl is async-signal-safe and the
+        // pointer outlives the call.
+        let r = unsafe { libc::ioctl(self.master, libc::TIOCSWINSZ, &ws) };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn raw_master(&self) -> RawFd {
         self.master
     }
@@ -275,6 +293,49 @@ mod tests {
             pid,
             probe,
             io::Error::last_os_error()
+        );
+
+        force_cleanup(&mut pty);
+    }
+
+    /// Read back the kernel's idea of the pty's winsize via the master fd —
+    /// works on either side of the pty pair since they share the struct.
+    fn read_winsize(fd: RawFd) -> libc::winsize {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+        assert_eq!(r, 0, "TIOCGWINSZ failed: {}", io::Error::last_os_error());
+        ws
+    }
+
+    #[test]
+    fn resize_propagates_winsize() {
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/sleep".into(),
+            args: vec!["60".into()],
+            size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+        })
+        .expect("spawn /bin/sleep");
+
+        let initial = read_winsize(pty.raw_master());
+        assert_eq!(
+            (initial.ws_col, initial.ws_row),
+            (80, 24),
+            "initial winsize wrong"
+        );
+
+        pty.resize(TerminalSize {
+            cols: 132,
+            rows: 50,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize");
+
+        let after = read_winsize(pty.raw_master());
+        assert_eq!(
+            (after.ws_col, after.ws_row),
+            (132, 50),
+            "resize did not propagate"
         );
 
         force_cleanup(&mut pty);
