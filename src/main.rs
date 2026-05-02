@@ -1,4 +1,5 @@
 mod grid;
+mod parser;
 mod pty;
 
 use winit::application::ApplicationHandler;
