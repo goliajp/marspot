@@ -183,4 +183,70 @@ mod tests {
         let s = String::from_utf8_lossy(&output);
         assert!(s.contains("hello mars"), "expected 'hello mars' in output, got: {:?}", s);
     }
+
+    #[test]
+    fn spawn_returns_live_child_pid() {
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/sleep".into(),
+            args: vec!["60".into()],
+            size: TerminalSize::default(),
+        })
+        .expect("spawn /bin/sleep");
+
+        let pid = pty.child_pid();
+        assert!(pid > 0, "expected positive pid, got {}", pid);
+
+        // kill -0 probes existence without signaling.  Returning 0 means the
+        // process exists and we have permission to signal it.
+        let probe = unsafe { libc::kill(pid, 0) };
+        assert_eq!(
+            probe,
+            0,
+            "expected child {} to be alive, kill -0 returned {} (errno {:?})",
+            pid,
+            probe,
+            io::Error::last_os_error()
+        );
+
+        // Manual cleanup — Drop is implemented in a later cycle.  Without
+        // this, sleep(60) outlives the test run.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            let mut status: c_int = 0;
+            libc::waitpid(pid, &mut status, 0);
+            libc::close(pty.master);
+        }
+        // Mark as cleaned so future Drop won't double-close.
+        pty.master = -1;
+        pty.child = 0;
+    }
+
+    #[test]
+    fn read_after_child_exits_returns_eof() {
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/usr/bin/true".into(),
+            args: vec![],
+            size: TerminalSize::default(),
+        })
+        .expect("spawn /usr/bin/true");
+
+        // /usr/bin/true exits immediately; drain must reach EOF/EIO well before
+        // the timeout — this is the real assertion (no infinite blocking).
+        let start = Instant::now();
+        let _ = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(3));
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "expected EOF within 2s of /usr/bin/true exit, took {:?}",
+            start.elapsed()
+        );
+
+        // After EOF, subsequent reads must report end-of-stream cleanly,
+        // not block.  macOS reports EIO once the slave side is fully closed.
+        let mut buf = [0u8; 16];
+        match pty.read(&mut buf) {
+            Ok(0) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => {}
+            other => panic!("expected EOF/EIO after child exit, got {:?}", other),
+        }
+    }
 }
