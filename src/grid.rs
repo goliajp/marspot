@@ -85,6 +85,14 @@ impl Grid {
             self.cursor_col -= 1;
         }
     }
+
+    /// Clamp-and-set the cursor to (col, row).  Used by the emulator layer
+    /// for CSI cursor positioning.  Out-of-bounds values are clamped to the
+    /// last valid position; the cursor is always within `[0, cols) x [0, rows)`.
+    pub fn set_cursor(&mut self, col: u16, row: u16) {
+        self.cursor_col = col.min(self.cols - 1);
+        self.cursor_row = row.min(self.rows - 1);
+    }
 }
 
 #[cfg(test)]

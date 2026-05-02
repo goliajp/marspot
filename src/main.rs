@@ -1,6 +1,7 @@
 mod grid;
 mod parser;
 mod pty;
+mod terminal;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
