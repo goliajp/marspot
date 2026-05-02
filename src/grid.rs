@@ -1,11 +1,16 @@
-//! Terminal cell grid and basic print path.
+//! Terminal cell grid + bounded scrollback.
 //!
-//! The grid is the rectangular buffer of `Cell`s that backs the visible
-//! screen.  Bytes interpreted by the (future) escape parser turn into
-//! mutations on this grid: print a character, move the cursor, erase
-//! regions, scroll lines, etc.  This module only handles the foundational
-//! ops (print, CR, LF, BS) — escape-sequence-driven mutations land in
-//! later phases on top of this.
+//! `Grid` is a passive container: a rectangle of `Cell`s, a cursor position,
+//! and a ring of scrolled-off lines.  It exposes primitive operations
+//! (`set_cell`, `set_cursor`, `scroll_up`) and lets the emulator layer
+//! (`terminal::Handler`) implement VT semantics on top of them.
+//!
+//! Scrollback is a ring buffer with a fixed capacity allocated at
+//! construction.  This is **load-bearing** for the project's "cannot get
+//! slower over time" commitment: terminal output is unbounded, but our
+//! memory cost is not.  Once the ring is full, oldest lines are evicted
+//! O(1).  Disk-backed scrollback (truly unlimited history) is a later
+//! phase; it will live behind the same `Grid` interface.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
@@ -49,6 +54,11 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+/// Default scrollback capacity — 10 000 lines.  At 80 cols × ~12 bytes/cell
+/// this is ~9 MB per terminal pre-allocated.  Tunable via
+/// [`Grid::with_scrollback`].
+pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
 pub struct Grid {
     cols: u16,
     rows: u16,
@@ -57,13 +67,25 @@ pub struct Grid {
     /// Cursor as (col, row).  Always bounded to [0, cols-1] x [0, rows-1].
     cursor_col: u16,
     cursor_row: u16,
+    scrollback: ScrollbackRing,
 }
 
 impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
+        Self::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES)
+    }
+
+    pub fn with_scrollback(cols: u16, rows: u16, scrollback_lines: usize) -> Self {
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
         let cells = vec![Cell::default(); cols as usize * rows as usize];
-        Self { cols, rows, cells, cursor_col: 0, cursor_row: 0 }
+        Self {
+            cols,
+            rows,
+            cells,
+            cursor_col: 0,
+            cursor_row: 0,
+            scrollback: ScrollbackRing::new(scrollback_lines, cols as usize),
+        }
     }
 
     pub fn cols(&self) -> u16 { self.cols }
@@ -75,65 +97,116 @@ impl Grid {
         self.cells[row as usize * self.cols as usize + col as usize]
     }
 
-    /// Place a styled cell at the cursor and advance.  Accepts anything that
-    /// converts into `Cell` so callers can pass a bare `char` (default attrs)
-    /// or a fully-stamped `Cell` from the emulator's current SGR state.
-    ///
-    /// At end-of-line we wrap to the next row (simple immediate wrap; the
-    /// delayed-wrap nicety from xterm is deferred).  At end-of-screen we
-    /// clamp for now; scrolling lands in phase 1.1.5.
-    pub fn print(&mut self, cell: impl Into<Cell>) {
-        let idx = self.cursor_row as usize * self.cols as usize + self.cursor_col as usize;
-        self.cells[idx] = cell.into();
-        self.cursor_col += 1;
-        if self.cursor_col >= self.cols {
-            self.cursor_col = 0;
-            if self.cursor_row + 1 < self.rows {
-                self.cursor_row += 1;
-            } else {
-                // Bottom-row wrap: clamp until we have scrolling.  This means
-                // text overflows onto the same last row — acceptable until
-                // 1.1.5 replaces this with scroll-up + scrollback push.
-            }
-        }
-    }
-
-    /// CR (\r): cursor to column 0 of current row.
-    pub fn carriage_return(&mut self) {
-        self.cursor_col = 0;
-    }
-
-    /// LF (\n): cursor down one row.  Clamps at the last row until phase
-    /// 1.1.5 introduces scrolling + scrollback.
-    pub fn linefeed(&mut self) {
-        if self.cursor_row + 1 < self.rows {
-            self.cursor_row += 1;
-        }
-    }
-
-    /// BS (\x08): cursor left one column, clamped at column 0.  Does not
-    /// erase the cell — that's the caller's responsibility (BS in xterm
-    /// is non-destructive).
-    pub fn backspace(&mut self) {
-        if self.cursor_col > 0 {
-            self.cursor_col -= 1;
-        }
-    }
-
-    /// Clamp-and-set the cursor to (col, row).  Used by the emulator layer
-    /// for CSI cursor positioning.  Out-of-bounds values are clamped to the
-    /// last valid position; the cursor is always within `[0, cols) x [0, rows)`.
+    /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
+    /// valid position; the cursor is always within `[0, cols) x [0, rows)`.
     pub fn set_cursor(&mut self, col: u16, row: u16) {
         self.cursor_col = col.min(self.cols - 1);
         self.cursor_row = row.min(self.rows - 1);
     }
 
-    /// Overwrite a single cell.  Caller is responsible for valid coords —
-    /// this exists so the emulator layer can implement erase ops without
-    /// granting it raw access to the cell vector.
+    /// Overwrite a single cell.  Caller is responsible for valid coords.
     pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) {
         debug_assert!(col < self.cols && row < self.rows);
         self.cells[row as usize * self.cols as usize + col as usize] = cell;
+    }
+
+    /// Scroll the visible region up by `lines`.  The displaced top rows are
+    /// pushed into scrollback (in order, oldest first) and the bottom
+    /// `lines` rows are filled with `fill` — pass a Cell carrying the
+    /// current SGR background to honor BCE.  The cursor is NOT moved.
+    pub fn scroll_up(&mut self, lines: u16, fill: Cell) {
+        if lines == 0 {
+            return;
+        }
+        let lines = lines.min(self.rows) as usize;
+        let cols = self.cols as usize;
+        let rows = self.rows as usize;
+
+        // 1) Push displaced top rows into scrollback in chronological order.
+        for r in 0..lines {
+            let start = r * cols;
+            self.scrollback.push_line(&self.cells[start..start + cols]);
+        }
+        // 2) Shift the rest up.  copy_within handles the overlapping ranges.
+        if lines < rows {
+            let shift = rows - lines;
+            let src = lines * cols;
+            let len = shift * cols;
+            self.cells.copy_within(src..src + len, 0);
+        }
+        // 3) Fill the bottom `lines` rows with `fill`.
+        let blank_start = (rows - lines) * cols;
+        for c in &mut self.cells[blank_start..] {
+            *c = fill;
+        }
+    }
+
+    pub fn scrollback_len(&self) -> usize { self.scrollback.len }
+    pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity }
+    pub fn scrollback_line(&self, idx: usize) -> Option<&[Cell]> { self.scrollback.line(idx) }
+    pub fn clear_scrollback(&mut self) { self.scrollback.clear(); }
+}
+
+/// Bounded ring of scrolled-off lines.  Memory is allocated once at
+/// construction (`capacity_lines * cols * size_of::<Cell>()`) and never
+/// grows; once full, `push_line` evicts the oldest in O(1).
+struct ScrollbackRing {
+    /// Flat backing buffer: `capacity * cols` cells when capacity > 0.
+    cells: Vec<Cell>,
+    /// Number of lines this ring can hold.  0 disables scrollback entirely.
+    capacity: usize,
+    cols: usize,
+    /// Index (in lines) of the oldest entry within `cells`.
+    head: usize,
+    /// Number of valid lines currently stored.  `len <= capacity`.
+    len: usize,
+}
+
+impl ScrollbackRing {
+    fn new(capacity: usize, cols: usize) -> Self {
+        let cells = if capacity == 0 || cols == 0 {
+            Vec::new()
+        } else {
+            vec![Cell::default(); capacity * cols]
+        };
+        Self { cells, capacity, cols, head: 0, len: 0 }
+    }
+
+    fn push_line(&mut self, source: &[Cell]) {
+        if self.capacity == 0 {
+            return;
+        }
+        debug_assert_eq!(source.len(), self.cols, "pushed line width mismatches scrollback cols");
+
+        let target = if self.len < self.capacity {
+            let line = (self.head + self.len) % self.capacity;
+            self.len += 1;
+            line
+        } else {
+            // Capacity reached: overwrite oldest, advance head.
+            let line = self.head;
+            self.head = (self.head + 1) % self.capacity;
+            line
+        };
+        let start = target * self.cols;
+        self.cells[start..start + self.cols].copy_from_slice(source);
+    }
+
+    fn line(&self, idx: usize) -> Option<&[Cell]> {
+        if idx >= self.len {
+            return None;
+        }
+        let line = (self.head + idx) % self.capacity;
+        let start = line * self.cols;
+        Some(&self.cells[start..start + self.cols])
+    }
+
+    fn clear(&mut self) {
+        // Don't zero the backing memory — `len = 0` makes existing data
+        // invisible and the next push will overwrite cleanly.  This keeps
+        // clear() O(1) regardless of capacity.
+        self.head = 0;
+        self.len = 0;
     }
 }
 
@@ -142,108 +215,126 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_grid_is_all_spaces_with_origin_cursor() {
+    fn empty_grid_is_all_default_cells_with_origin_cursor() {
         let g = Grid::new(80, 24);
         assert_eq!(g.cols(), 80);
         assert_eq!(g.rows(), 24);
         assert_eq!(g.cursor(), (0, 0));
         for r in 0..24 {
             for c in 0..80 {
-                assert_eq!(g.cell(c, r).ch, ' ', "cell ({}, {}) not space", c, r);
+                assert_eq!(g.cell(c, r), Cell::default());
+            }
+        }
+        assert_eq!(g.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn set_cursor_clamps_to_grid_bounds() {
+        let mut g = Grid::new(10, 5);
+        g.set_cursor(99, 99);
+        assert_eq!(g.cursor(), (9, 4));
+    }
+
+    #[test]
+    fn scroll_up_one_pushes_top_row_to_scrollback() {
+        let mut g = Grid::new(3, 2);
+        g.set_cell(0, 0, 'a'.into());
+        g.set_cell(1, 0, 'b'.into());
+        g.set_cell(2, 0, 'c'.into());
+        g.set_cell(0, 1, 'd'.into());
+        g.set_cell(1, 1, 'e'.into());
+        g.set_cell(2, 1, 'f'.into());
+
+        g.scroll_up(1, Cell::default());
+
+        // Row 0 became scrollback line 0, row 1 moved up to row 0, row 1 blank.
+        let sb = g.scrollback_line(0).expect("scrollback[0] should exist");
+        assert_eq!(sb.iter().map(|c| c.ch).collect::<String>(), "abc");
+        assert_eq!(g.cell(0, 0).ch, 'd');
+        assert_eq!(g.cell(2, 0).ch, 'f');
+        assert_eq!(g.cell(0, 1), Cell::default());
+        assert_eq!(g.scrollback_len(), 1);
+    }
+
+    #[test]
+    fn scroll_up_uses_fill_cell_for_blank_bottom() {
+        // BCE: caller passes a stamped Cell; the new bottom rows must adopt it.
+        let mut g = Grid::new(3, 3);
+        let blank = Cell {
+            ch: ' ',
+            attrs: CellAttrs { bg: Color::Indexed(1), ..CellAttrs::default() },
+        };
+        g.scroll_up(2, blank);
+        for c in 0..3 {
+            for r in 1..3 {
+                assert_eq!(g.cell(c, r), blank);
             }
         }
     }
 
     #[test]
-    fn print_writes_cell_and_advances_cursor() {
-        let mut g = Grid::new(80, 24);
-        g.print('A');
-        assert_eq!(g.cell(0, 0).ch, 'A');
-        assert_eq!(g.cursor(), (1, 0));
-        g.print('B');
-        assert_eq!(g.cell(1, 0).ch, 'B');
-        assert_eq!(g.cursor(), (2, 0));
-    }
-
-    #[test]
-    fn print_at_end_of_line_wraps_to_next_row() {
-        let mut g = Grid::new(5, 3);
-        for ch in "abcdef".chars() {
-            g.print(ch);
+    fn scroll_up_more_than_height_clears_screen_and_pushes_all() {
+        let mut g = Grid::new(2, 2);
+        g.set_cell(0, 0, 'A'.into());
+        g.set_cell(0, 1, 'B'.into());
+        g.scroll_up(5, Cell::default()); // scroll farther than height
+        // All 2 rows pushed (capped at rows).
+        assert_eq!(g.scrollback_len(), 2);
+        // Visible region is fully blank.
+        for r in 0..2 {
+            for c in 0..2 {
+                assert_eq!(g.cell(c, r), Cell::default());
+            }
         }
-        assert_eq!(g.cell(0, 0).ch, 'a');
-        assert_eq!(g.cell(4, 0).ch, 'e');
-        assert_eq!(g.cell(0, 1).ch, 'f');
-        assert_eq!(g.cursor(), (1, 1));
     }
 
     #[test]
-    fn print_overflowing_bottom_clamps_for_now() {
-        // v0: no scrolling yet.  Filling past the screen should not panic
-        // and the final cursor sits within bounds.  Phase 1.1.5 replaces
-        // this clamp with scroll-up + scrollback.
+    fn scrollback_evicts_oldest_at_capacity() {
+        let mut g = Grid::with_scrollback(2, 2, 3); // capacity 3 lines
+        // Fill row 0 with 'X', row 1 blank, scroll once → scrollback[0] = "XX".
+        // Repeat with markers to verify eviction order.
+        for marker in ['1', '2', '3', '4'].iter() {
+            g.set_cell(0, 0, Cell::from(*marker));
+            g.set_cell(1, 0, Cell::from(*marker));
+            g.scroll_up(1, Cell::default());
+        }
+        // After 4 pushes into a capacity-3 ring: '1' was evicted, ring holds
+        // ['2','3','4'] in chronological order.
+        assert_eq!(g.scrollback_len(), 3);
+        let to_string = |line: &[Cell]| line.iter().map(|c| c.ch).collect::<String>();
+        assert_eq!(to_string(g.scrollback_line(0).unwrap()), "22");
+        assert_eq!(to_string(g.scrollback_line(1).unwrap()), "33");
+        assert_eq!(to_string(g.scrollback_line(2).unwrap()), "44");
+        assert_eq!(g.scrollback_line(3), None);
+    }
+
+    #[test]
+    fn clear_scrollback_zeroes_len_in_o1() {
+        let mut g = Grid::with_scrollback(2, 2, 5);
+        for _ in 0..5 {
+            g.scroll_up(1, Cell::default());
+        }
+        assert_eq!(g.scrollback_len(), 5);
+        g.clear_scrollback();
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.scrollback_line(0), None);
+    }
+
+    #[test]
+    fn scroll_up_zero_is_noop() {
         let mut g = Grid::new(3, 2);
-        for ch in "abcdefghij".chars() {
-            g.print(ch);
-        }
-        let (col, row) = g.cursor();
-        assert!(col < g.cols(), "cursor col {} out of bounds", col);
-        assert!(row < g.rows(), "cursor row {} out of bounds", row);
+        g.set_cell(0, 0, 'A'.into());
+        g.scroll_up(0, Cell::default());
+        assert_eq!(g.cell(0, 0).ch, 'A');
+        assert_eq!(g.scrollback_len(), 0);
     }
 
     #[test]
-    fn carriage_return_zeros_column_only() {
-        let mut g = Grid::new(80, 24);
-        g.print('a'); g.print('b'); g.print('c');
-        g.linefeed();
-        g.print('d');
-        assert_eq!(g.cursor(), (4, 1));
-        g.carriage_return();
-        assert_eq!(g.cursor(), (0, 1));
-    }
-
-    #[test]
-    fn linefeed_advances_row() {
-        let mut g = Grid::new(80, 24);
-        g.linefeed();
-        assert_eq!(g.cursor(), (0, 1));
-        g.linefeed();
-        assert_eq!(g.cursor(), (0, 2));
-    }
-
-    #[test]
-    fn linefeed_at_bottom_clamps_for_now() {
-        // v0 placeholder: at the last row LF clamps.  Phase 1.1.5 will scroll.
-        let mut g = Grid::new(80, 3);
-        g.linefeed(); g.linefeed(); g.linefeed(); g.linefeed();
-        assert_eq!(g.cursor(), (0, 2));
-    }
-
-    #[test]
-    fn backspace_decrements_column() {
-        let mut g = Grid::new(80, 24);
-        g.print('a'); g.print('b');
-        assert_eq!(g.cursor(), (2, 0));
-        g.backspace();
-        assert_eq!(g.cursor(), (1, 0));
-    }
-
-    #[test]
-    fn backspace_at_column_zero_stays() {
-        let mut g = Grid::new(80, 24);
-        g.backspace();
-        assert_eq!(g.cursor(), (0, 0));
-        g.linefeed();
-        g.backspace();
-        assert_eq!(g.cursor(), (0, 1)); // stays at col 0; row unchanged
-    }
-
-    #[test]
-    fn backspace_does_not_erase_the_cell_under_cursor() {
-        // xterm BS is non-destructive: it just moves the cursor.
-        let mut g = Grid::new(80, 24);
-        g.print('x');
-        g.backspace();
-        assert_eq!(g.cell(0, 0).ch, 'x', "BS must not clear the cell");
+    fn zero_capacity_scrollback_silently_drops_pushes() {
+        let mut g = Grid::with_scrollback(3, 2, 0);
+        g.set_cell(0, 0, 'A'.into());
+        g.scroll_up(1, Cell::default());
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.scrollback_capacity(), 0);
     }
 }

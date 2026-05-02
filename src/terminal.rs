@@ -62,15 +62,56 @@ struct Handler<'a> {
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        self.grid.print(Cell { ch, attrs: *self.attrs });
+        let cell = Cell { ch, attrs: *self.attrs };
+        let (col, row) = self.grid.cursor();
+        self.grid.set_cell(col, row, cell);
+
+        let cols = self.grid.cols();
+        let rows = self.grid.rows();
+        let next_col = col + 1;
+
+        if next_col < cols {
+            // Stay on the same row.
+            self.grid.set_cursor(next_col, row);
+        } else if row + 1 < rows {
+            // Wrap to start of next row.
+            self.grid.set_cursor(0, row + 1);
+        } else {
+            // Wrap onto a row past the bottom: scroll first, then park at
+            // start of the (now blank) last row.
+            self.grid.scroll_up(1, blank_with(*self.attrs));
+            self.grid.set_cursor(0, rows - 1);
+        }
     }
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            0x08 => self.grid.backspace(),
-            0x0A | 0x0B | 0x0C => self.grid.linefeed(), // LF, VT, FF all advance row
-            0x0D => self.grid.carriage_return(),
-            0x09 => {} // TAB — handled when we add tab stops in a later phase
+            0x08 => {
+                // BS: cursor left one column, clamped at column 0.  Does
+                // not erase the cell.
+                let (col, row) = self.grid.cursor();
+                if col > 0 {
+                    self.grid.set_cursor(col - 1, row);
+                }
+            }
+            0x0A | 0x0B | 0x0C => {
+                // LF / VT / FF: cursor down one row, scrolling at the
+                // bottom.  Does not change column (LNM mode unset).
+                let (col, row) = self.grid.cursor();
+                let rows = self.grid.rows();
+                if row + 1 < rows {
+                    self.grid.set_cursor(col, row + 1);
+                } else {
+                    self.grid.scroll_up(1, blank_with(*self.attrs));
+                    // Cursor stays at the now-blank last row.
+                }
+            }
+            0x0D => {
+                // CR: cursor to column 0 of current row.
+                let (_col, row) = self.grid.cursor();
+                self.grid.set_cursor(0, row);
+            }
+            0x09 => {} // TAB — tab stops land in a later phase
             0x07 => {} // BEL — visible bell deferred
             _ => {}    // unknown C0 control: ignore for now
         }
@@ -131,9 +172,13 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 0 (default) — from cursor (inclusive) to end of screen
                 // 1           — from start of screen to cursor (inclusive)
                 // 2           — entire screen
-                // 3           — entire scrollback (deferred to 1.1.5)
+                // 3           — entire scrollback (xterm extension)
                 let mode = param_raw(params, 0, 0);
-                erase_in_display(self.grid, col, row, cols, rows, mode, *self.attrs);
+                if mode == 3 {
+                    self.grid.clear_scrollback();
+                } else {
+                    erase_in_display(self.grid, col, row, cols, rows, mode, *self.attrs);
+                }
             }
             b'K' => {
                 // EL: erase in line.  Cursor not moved.
@@ -173,12 +218,17 @@ fn param_raw(params: &[u16], idx: usize, default: u16) -> u16 {
     params.get(idx).copied().unwrap_or(default)
 }
 
-/// Erase fill: a blank space stamped with the *current* SGR attrs (BCE).
-/// Apps like vim and tmux rely on this — clearing a region with a non-default
-/// background color must produce a colored region, not a transparent one.
+/// A blank ' ' stamped with the supplied attrs.  Used wherever new cells
+/// appear (BCE for erase, scroll-fill for the new bottom row).  Apps like
+/// vim and tmux rely on this — clearing or scrolling under a non-default
+/// background must produce colored cells, not transparent ones.
+fn blank_with(attrs: CellAttrs) -> Cell {
+    Cell { ch: ' ', attrs }
+}
+
 fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32, attrs: CellAttrs) {
     let cols = grid.cols() as u32;
-    let blank = Cell { ch: ' ', attrs };
+    let blank = blank_with(attrs);
     for idx in start..end_exclusive {
         let col = (idx % cols) as u16;
         let row = (idx / cols) as u16;
@@ -702,5 +752,163 @@ mod tests {
         }
         // Other rows untouched.
         assert_eq!(t.grid().cell(0, 1).attrs.bg, Color::Default);
+    }
+
+    // ----- print path: wrap and BS -----
+
+    #[test]
+    fn print_at_eol_wraps_to_next_row() {
+        let mut t = Terminal::new(5, 3);
+        t.feed(b"abcdef"); // 5 chars fill row 0; 'f' wraps to row 1 col 0
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cell(4, 0).ch, 'e');
+        assert_eq!(t.grid().cell(0, 1).ch, 'f');
+        assert_eq!(t.grid().cursor(), (1, 1));
+    }
+
+    #[test]
+    fn bs_decrements_column_and_does_not_erase() {
+        let mut t = Terminal::new(10, 3);
+        t.feed(b"ab\x08"); // print ab, then BS
+        assert_eq!(t.grid().cursor(), (1, 0));
+        // BS is non-destructive — 'b' must remain.
+        assert_eq!(t.grid().cell(1, 0).ch, 'b');
+    }
+
+    #[test]
+    fn bs_at_column_zero_is_clamped() {
+        let mut t = Terminal::new(10, 3);
+        t.feed(b"\x08");
+        assert_eq!(t.grid().cursor(), (0, 0));
+        t.feed(b"\n\x08"); // LF then BS — col stays 0, row stays 1
+        assert_eq!(t.grid().cursor(), (0, 1));
+    }
+
+    // ----- scrolling -----
+
+    #[test]
+    fn lf_at_bottom_row_scrolls_up_and_pushes_to_scrollback() {
+        let mut t = Terminal::new(3, 2);
+        t.feed(b"abc"); // row 0 full, cursor at (3 wraps to row 1)
+        assert_eq!(t.grid().cursor(), (0, 1));
+        // Manually park cursor at last row, last col, then LF.
+        t.feed(b"\x1B[2;3H"); // CUP row 2 col 3 (1-indexed) → (col 2, row 1)
+        t.feed(b"\n");
+        // Row 0 ("abc") goes to scrollback, row 1 becomes blank.
+        assert_eq!(t.grid().scrollback_len(), 1);
+        let sb = t.grid().scrollback_line(0).unwrap();
+        assert_eq!(sb.iter().map(|c| c.ch).collect::<String>(), "abc");
+        // Cursor stays on the (now blank) last row.
+        assert_eq!(t.grid().cursor(), (2, 1));
+        for c in 0..3 {
+            assert_eq!(t.grid().cell(c, 1), Cell::default());
+        }
+    }
+
+    #[test]
+    fn print_overflow_at_bottom_row_scrolls() {
+        // Print enough to fill the entire 2-row grid; the next print must
+        // trigger a scroll, not clamp.
+        let mut t = Terminal::new(3, 2);
+        t.feed(b"abcdefg"); // 6 chars fill the grid; 'g' triggers scroll
+        // After scroll: scrollback contains "abc", visible row 0 = "def",
+        // 'g' lands at (0, 1).
+        assert_eq!(t.grid().scrollback_len(), 1);
+        let sb = t.grid().scrollback_line(0).unwrap();
+        assert_eq!(sb.iter().map(|c| c.ch).collect::<String>(), "abc");
+        assert_eq!(t.grid().cell(0, 0).ch, 'd');
+        assert_eq!(t.grid().cell(2, 0).ch, 'f');
+        assert_eq!(t.grid().cell(0, 1).ch, 'g');
+        assert_eq!(t.grid().cursor(), (1, 1));
+    }
+
+    #[test]
+    fn scroll_inherits_current_bg_for_blank_row() {
+        // BCE for scroll-fill: when SGR has bg=red and we scroll, the new
+        // blank row at the bottom must carry that bg.
+        let mut t = Terminal::new(3, 2);
+        t.feed(b"\x1B[41m"); // bg red
+        t.feed(b"abc\x1B[2;3H\n"); // park cursor at last row, LF → scroll
+        for c in 0..3 {
+            let cell = t.grid().cell(c, 1);
+            assert_eq!(cell.ch, ' ');
+            assert_eq!(cell.attrs.bg, Color::Indexed(1));
+        }
+    }
+
+    #[test]
+    fn csi_3_J_clears_scrollback_only() {
+        let mut t = Terminal::new(3, 2);
+        // Build some scrollback by feeding many lines.
+        for _ in 0..5 {
+            t.feed(b"xxx\x1B[2;3H\n");
+        }
+        assert!(t.grid().scrollback_len() > 0);
+        // ESC[3J clears scrollback; visible region untouched.
+        t.feed(b"\x1B[3J");
+        assert_eq!(t.grid().scrollback_len(), 0);
+        // Visible row 0 should still hold what was there.
+        assert_eq!(t.grid().cell(0, 0).ch, 'x');
+    }
+
+    // ----- soak: long-running scroll must not grow memory -----
+
+    /// Read this process's resident set size in bytes.  Used by the soak
+    /// test to assert that millions of scrolled lines don't grow the
+    /// process — the scrollback ring is pre-allocated and bounded.
+    fn current_rss_bytes() -> u64 {
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDTASKINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                std::mem::size_of::<libc::proc_taskinfo>() as i32,
+            )
+        };
+        assert!(r > 0, "proc_pidinfo failed");
+        info.pti_resident_size
+    }
+
+    #[test]
+    #[ignore = "soak; run via bin/soak.sh"]
+    fn soak_scrollback_bounded_under_million_lines() {
+        let mut t = Terminal::new(80, 24);
+        // Warm up: fill the scrollback ring once so its memory stabilizes.
+        let warmup = b"\x1B[24;80H\n".repeat(15_000);
+        t.feed(&warmup);
+
+        let baseline = current_rss_bytes();
+
+        // Now feed a million more newlines worth of scroll churn.
+        let line = b"this is a fairly typical 50-character log line!\n";
+        let park = b"\x1B[24;80H";
+        for _ in 0..1_000_000 {
+            t.feed(line);
+            // After each line, park cursor at last row so the next \n scrolls.
+            t.feed(park);
+        }
+
+        let after = current_rss_bytes();
+        let growth = after.saturating_sub(baseline);
+
+        // Tolerance: 5 MB.  The ring is pre-allocated to capacity at
+        // construction; once warmed up, additional lines reuse slots.
+        const TOLERANCE: u64 = 5 * 1024 * 1024;
+        assert!(
+            growth < TOLERANCE,
+            "scrollback ring grew {} bytes ({}→{}); expected bounded",
+            growth,
+            baseline,
+            after
+        );
+
+        // Sanity: scrollback is exactly capped at the configured capacity.
+        assert_eq!(
+            t.grid().scrollback_len(),
+            t.grid().scrollback_capacity(),
+            "scrollback should be at capacity after the soak"
+        );
     }
 }
