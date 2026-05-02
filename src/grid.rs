@@ -93,6 +93,14 @@ impl Grid {
         self.cursor_col = col.min(self.cols - 1);
         self.cursor_row = row.min(self.rows - 1);
     }
+
+    /// Overwrite a single cell.  Caller is responsible for valid coords —
+    /// this exists so the emulator layer can implement erase ops without
+    /// granting it raw access to the cell vector.
+    pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) {
+        debug_assert!(col < self.cols && row < self.rows);
+        self.cells[row as usize * self.cols as usize + col as usize] = cell;
+    }
 }
 
 #[cfg(test)]

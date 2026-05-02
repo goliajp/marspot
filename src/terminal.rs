@@ -12,7 +12,7 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::Grid;
+use crate::grid::{Cell, Grid};
 use crate::parser::{Parser, ParserCallbacks};
 
 pub struct Terminal {
@@ -116,7 +116,24 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let r = param(params, 0, 1).saturating_sub(1);
                 self.grid.set_cursor(col, r);
             }
-            _ => {} // erase, SGR, scrolling, etc. arrive in later phases
+            b'J' => {
+                // ED: erase in display.  Cursor is not moved.
+                // 0 (default) — from cursor (inclusive) to end of screen
+                // 1           — from start of screen to cursor (inclusive)
+                // 2           — entire screen
+                // 3           — entire scrollback (deferred to 1.1.5)
+                let mode = param_raw(params, 0, 0);
+                erase_in_display(self.grid, col, row, cols, rows, mode);
+            }
+            b'K' => {
+                // EL: erase in line.  Cursor not moved.
+                // 0 (default) — from cursor (inclusive) to end of line
+                // 1           — from start of line to cursor (inclusive)
+                // 2           — entire line
+                let mode = param_raw(params, 0, 0);
+                erase_in_line(self.grid, col, row, cols, mode);
+            }
+            _ => {} // SGR, scrolling, etc. arrive in later phases
         }
     }
 
@@ -132,6 +149,46 @@ fn param(params: &[u16], idx: usize, default: u16) -> u16 {
     match params.get(idx).copied() {
         Some(0) | None => default,
         Some(n) => n,
+    }
+}
+
+/// Look up a CSI parameter without folding `0` into the default.  ED and EL
+/// use this convention: the explicit `0` is a real selector (= "from cursor
+/// to end"), distinct from "omitted" which is also `0` here.
+fn param_raw(params: &[u16], idx: usize, default: u16) -> u16 {
+    params.get(idx).copied().unwrap_or(default)
+}
+
+fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32) {
+    let cols = grid.cols() as u32;
+    for idx in start..end_exclusive {
+        let col = (idx % cols) as u16;
+        let row = (idx / cols) as u16;
+        grid.set_cell(col, row, Cell::default());
+    }
+}
+
+fn erase_in_display(grid: &mut Grid, col: u16, row: u16, cols: u16, rows: u16, mode: u16) {
+    let total = cols as u32 * rows as u32;
+    let cursor_idx = row as u32 * cols as u32 + col as u32;
+    match mode {
+        0 => fill_range(grid, cursor_idx, total),
+        1 => fill_range(grid, 0, cursor_idx + 1),
+        2 => fill_range(grid, 0, total),
+        // 3 = erase scrollback — deferred until scrollback exists (1.1.5).
+        _ => {}
+    }
+}
+
+fn erase_in_line(grid: &mut Grid, col: u16, row: u16, cols: u16, mode: u16) {
+    let row_start = row as u32 * cols as u32;
+    let row_end = row_start + cols as u32;
+    let cursor_idx = row_start + col as u32;
+    match mode {
+        0 => fill_range(grid, cursor_idx, row_end),
+        1 => fill_range(grid, row_start, cursor_idx + 1),
+        2 => fill_range(grid, row_start, row_end),
+        _ => {}
     }
 }
 
@@ -260,5 +317,120 @@ mod tests {
         let t = term_with(80, 24, b"\x1B[5;3HX");
         assert_eq!(t.grid().cell(2, 4).ch, 'X');
         assert_eq!(t.grid().cursor(), (3, 4));
+    }
+
+    /// Fill the grid with a marker char at every cell so erase regions are
+    /// visible by absence.  Returns a Terminal with cursor parked at the
+    /// requested (col, row) and all cells populated.
+    fn filled_terminal(cols: u16, rows: u16, marker: char, cur_col: u16, cur_row: u16) -> Terminal {
+        let mut t = Terminal::new(cols, rows);
+        // Manually fill: write `marker` cols times per row, no parsing.
+        // We use direct grid access only in tests — production code goes
+        // through Terminal::feed.
+        for r in 0..rows {
+            for c in 0..cols {
+                t.grid.set_cell(c, r, Cell { ch: marker });
+            }
+        }
+        t.grid.set_cursor(cur_col, cur_row);
+        t
+    }
+
+    fn count_marker(t: &Terminal, marker: char) -> usize {
+        let g = t.grid();
+        let mut n = 0;
+        for r in 0..g.rows() {
+            for c in 0..g.cols() {
+                if g.cell(c, r).ch == marker {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn ed_zero_erases_from_cursor_to_end_of_screen() {
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        let before = count_marker(&t, '#'); // 50
+        t.feed(b"\x1B[J"); // ED default = 0
+        let cleared = before - count_marker(&t, '#');
+        // From (3, 2) inclusive to end of screen: row 2 has cols 3..10 = 7,
+        // rows 3 and 4 each have 10, total = 7 + 20 = 27.
+        assert_eq!(cleared, 27);
+        // Cursor unchanged.
+        assert_eq!(t.grid().cursor(), (3, 2));
+        // Cells before cursor untouched.
+        assert_eq!(t.grid().cell(2, 2).ch, '#');
+        assert_eq!(t.grid().cell(3, 2).ch, ' ');
+        assert_eq!(t.grid().cell(0, 4).ch, ' ');
+    }
+
+    #[test]
+    fn ed_one_erases_from_start_to_cursor_inclusive() {
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        t.feed(b"\x1B[1J");
+        let remaining = count_marker(&t, '#');
+        // Row 2 cols 0..=3 cleared (4 cells), rows 0 and 1 cleared (20).
+        // Total cleared: 24.  Remaining: 50 - 24 = 26.
+        assert_eq!(remaining, 26);
+        assert_eq!(t.grid().cursor(), (3, 2));
+        assert_eq!(t.grid().cell(3, 2).ch, ' ', "cursor cell must be cleared");
+        assert_eq!(t.grid().cell(4, 2).ch, '#', "cell after cursor must remain");
+    }
+
+    #[test]
+    fn ed_two_erases_entire_screen() {
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        t.feed(b"\x1B[2J");
+        assert_eq!(count_marker(&t, '#'), 0);
+        assert_eq!(t.grid().cursor(), (3, 2), "cursor must not move");
+    }
+
+    #[test]
+    fn el_zero_erases_from_cursor_to_end_of_line() {
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        t.feed(b"\x1B[K");
+        // Row 2 cols 3..10 = 7 cleared.
+        assert_eq!(count_marker(&t, '#'), 50 - 7);
+        assert_eq!(t.grid().cursor(), (3, 2));
+        assert_eq!(t.grid().cell(2, 2).ch, '#');
+        assert_eq!(t.grid().cell(9, 2).ch, ' ');
+        // Other rows untouched.
+        assert_eq!(t.grid().cell(5, 1).ch, '#');
+        assert_eq!(t.grid().cell(5, 3).ch, '#');
+    }
+
+    #[test]
+    fn el_one_erases_from_start_of_line_to_cursor_inclusive() {
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        t.feed(b"\x1B[1K");
+        // Row 2 cols 0..=3 = 4 cleared.
+        assert_eq!(count_marker(&t, '#'), 50 - 4);
+        assert_eq!(t.grid().cell(3, 2).ch, ' ');
+        assert_eq!(t.grid().cell(4, 2).ch, '#');
+        // Other rows untouched.
+        assert_eq!(t.grid().cell(0, 1).ch, '#');
+    }
+
+    #[test]
+    fn el_two_erases_entire_line() {
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        t.feed(b"\x1B[2K");
+        // Row 2 fully cleared (10 cells).
+        assert_eq!(count_marker(&t, '#'), 50 - 10);
+        assert_eq!(t.grid().cursor(), (3, 2));
+        // Other rows untouched.
+        assert_eq!(t.grid().cell(0, 1).ch, '#');
+        assert_eq!(t.grid().cell(0, 3).ch, '#');
+    }
+
+    #[test]
+    fn ed_three_does_not_panic_or_modify_screen() {
+        // ED 3 erases scrollback in xterm; we have no scrollback yet, so it
+        // must be a no-op (not panic, not clear visible screen).
+        let mut t = filled_terminal(10, 5, '#', 3, 2);
+        t.feed(b"\x1B[3J");
+        assert_eq!(count_marker(&t, '#'), 50);
     }
 }
