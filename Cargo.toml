@@ -12,6 +12,9 @@ objc2-foundation = { version = "0.2", features = ["all"] }
 objc2-metal = { version = "0.2", features = ["all"] }
 objc2-quartz-core = { version = "0.2", features = ["all", "objc2-metal"] }
 raw-window-handle = "0.6"
+core-text = "21.0"
+core-graphics = "0.24"
+core-foundation = "0.10"
 
 [profile.release]
 lto = "thin"

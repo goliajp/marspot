@@ -1,3 +1,4 @@
+mod atlas;
 mod grid;
 mod parser;
 mod pty;
