@@ -1,3 +1,4 @@
+mod grid;
 mod pty;
 
 use winit::application::ApplicationHandler;
