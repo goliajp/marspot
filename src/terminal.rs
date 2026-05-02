@@ -12,12 +12,15 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::{Cell, Grid};
+use crate::grid::{Cell, CellAttrs, Color, Grid};
 use crate::parser::{Parser, ParserCallbacks};
 
 pub struct Terminal {
     grid: Grid,
     parser: Parser,
+    /// Current SGR state — every printed glyph (and every BCE-erased cell)
+    /// is stamped with this snapshot.  Persists across `feed` calls.
+    attrs: CellAttrs,
 }
 
 impl Terminal {
@@ -25,11 +28,16 @@ impl Terminal {
         Self {
             grid: Grid::new(cols, rows),
             parser: Parser::new(),
+            attrs: CellAttrs::default(),
         }
     }
 
     pub fn grid(&self) -> &Grid {
         &self.grid
+    }
+
+    pub fn current_attrs(&self) -> CellAttrs {
+        self.attrs
     }
 
     /// Feed bytes from the PTY through the parser, applying their effects to
@@ -39,7 +47,8 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) {
         let parser = &mut self.parser;
         let grid = &mut self.grid;
-        let mut handler = Handler { grid };
+        let attrs = &mut self.attrs;
+        let mut handler = Handler { grid, attrs };
         for &b in bytes {
             parser.advance(&mut handler, b);
         }
@@ -48,11 +57,12 @@ impl Terminal {
 
 struct Handler<'a> {
     grid: &'a mut Grid,
+    attrs: &'a mut CellAttrs,
 }
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        self.grid.print(ch);
+        self.grid.print(Cell { ch, attrs: *self.attrs });
     }
 
     fn execute(&mut self, byte: u8) {
@@ -123,7 +133,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 2           — entire screen
                 // 3           — entire scrollback (deferred to 1.1.5)
                 let mode = param_raw(params, 0, 0);
-                erase_in_display(self.grid, col, row, cols, rows, mode);
+                erase_in_display(self.grid, col, row, cols, rows, mode, *self.attrs);
             }
             b'K' => {
                 // EL: erase in line.  Cursor not moved.
@@ -131,9 +141,13 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 1           — from start of line to cursor (inclusive)
                 // 2           — entire line
                 let mode = param_raw(params, 0, 0);
-                erase_in_line(self.grid, col, row, cols, mode);
+                erase_in_line(self.grid, col, row, cols, mode, *self.attrs);
             }
-            _ => {} // SGR, scrolling, etc. arrive in later phases
+            b'm' => {
+                // SGR: set graphic rendition.  Mutates self.attrs in place.
+                apply_sgr(self.attrs, params);
+            }
+            _ => {} // scrolling, mode-set, etc. arrive in later phases
         }
     }
 
@@ -159,36 +173,120 @@ fn param_raw(params: &[u16], idx: usize, default: u16) -> u16 {
     params.get(idx).copied().unwrap_or(default)
 }
 
-fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32) {
+/// Erase fill: a blank space stamped with the *current* SGR attrs (BCE).
+/// Apps like vim and tmux rely on this — clearing a region with a non-default
+/// background color must produce a colored region, not a transparent one.
+fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32, attrs: CellAttrs) {
     let cols = grid.cols() as u32;
+    let blank = Cell { ch: ' ', attrs };
     for idx in start..end_exclusive {
         let col = (idx % cols) as u16;
         let row = (idx / cols) as u16;
-        grid.set_cell(col, row, Cell::default());
+        grid.set_cell(col, row, blank);
     }
 }
 
-fn erase_in_display(grid: &mut Grid, col: u16, row: u16, cols: u16, rows: u16, mode: u16) {
+fn erase_in_display(
+    grid: &mut Grid,
+    col: u16,
+    row: u16,
+    cols: u16,
+    rows: u16,
+    mode: u16,
+    attrs: CellAttrs,
+) {
     let total = cols as u32 * rows as u32;
     let cursor_idx = row as u32 * cols as u32 + col as u32;
     match mode {
-        0 => fill_range(grid, cursor_idx, total),
-        1 => fill_range(grid, 0, cursor_idx + 1),
-        2 => fill_range(grid, 0, total),
+        0 => fill_range(grid, cursor_idx, total, attrs),
+        1 => fill_range(grid, 0, cursor_idx + 1, attrs),
+        2 => fill_range(grid, 0, total, attrs),
         // 3 = erase scrollback — deferred until scrollback exists (1.1.5).
         _ => {}
     }
 }
 
-fn erase_in_line(grid: &mut Grid, col: u16, row: u16, cols: u16, mode: u16) {
+fn erase_in_line(grid: &mut Grid, col: u16, row: u16, cols: u16, mode: u16, attrs: CellAttrs) {
     let row_start = row as u32 * cols as u32;
     let row_end = row_start + cols as u32;
     let cursor_idx = row_start + col as u32;
     match mode {
-        0 => fill_range(grid, cursor_idx, row_end),
-        1 => fill_range(grid, row_start, cursor_idx + 1),
-        2 => fill_range(grid, row_start, row_end),
+        0 => fill_range(grid, cursor_idx, row_end, attrs),
+        1 => fill_range(grid, row_start, cursor_idx + 1, attrs),
+        2 => fill_range(grid, row_start, row_end, attrs),
         _ => {}
+    }
+}
+
+/// Apply a CSI SGR (Select Graphic Rendition) sequence.  Empty params is
+/// equivalent to `[0]` (reset), per the standard.
+///
+/// We walk the param list with an explicit index because 38/48 (extended
+/// color) consume additional params depending on the second value.
+fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
+    if params.is_empty() {
+        *attrs = CellAttrs::default();
+        return;
+    }
+    let mut i = 0;
+    while i < params.len() {
+        match params[i] {
+            0 => *attrs = CellAttrs::default(),
+            1 => attrs.bold = true,
+            3 => attrs.italic = true,
+            4 => attrs.underline = true,
+            7 => attrs.reverse = true,
+            22 => attrs.bold = false,
+            23 => attrs.italic = false,
+            24 => attrs.underline = false,
+            27 => attrs.reverse = false,
+            // Standard 8-color foreground.
+            n @ 30..=37 => attrs.fg = Color::Indexed((n - 30) as u8),
+            // Extended foreground: 38;5;n (256-color) or 38;2;r;g;b (RGB).
+            38 => {
+                if let Some((color, consumed)) = parse_extended_color(&params[i + 1..]) {
+                    attrs.fg = color;
+                    i += consumed;
+                }
+            }
+            39 => attrs.fg = Color::Default,
+            n @ 40..=47 => attrs.bg = Color::Indexed((n - 40) as u8),
+            48 => {
+                if let Some((color, consumed)) = parse_extended_color(&params[i + 1..]) {
+                    attrs.bg = color;
+                    i += consumed;
+                }
+            }
+            49 => attrs.bg = Color::Default,
+            // Bright foreground (8–15).
+            n @ 90..=97 => attrs.fg = Color::Indexed(8 + (n - 90) as u8),
+            n @ 100..=107 => attrs.bg = Color::Indexed(8 + (n - 100) as u8),
+            _ => {} // unknown / unimplemented SGR code: silently skip
+        }
+        i += 1;
+    }
+}
+
+/// Parse the tail of a 38/48 sequence.  Returns the resulting `Color` and
+/// the number of *additional* params consumed beyond the 38/48 itself, so
+/// the caller can advance its index.
+///
+/// 5;n           → Indexed(n) — 256-color palette
+/// 2;r;g;b       → Rgb(r,g,b) — direct color
+/// anything else → None (caller leaves attrs unchanged and advances 1)
+fn parse_extended_color(rest: &[u16]) -> Option<(Color, usize)> {
+    match rest.first().copied()? {
+        5 => {
+            let n = rest.get(1).copied()?;
+            Some((Color::Indexed(n.min(255) as u8), 2))
+        }
+        2 => {
+            let r = rest.get(1).copied()?;
+            let g = rest.get(2).copied()?;
+            let b = rest.get(3).copied()?;
+            Some((Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8), 4))
+        }
+        _ => None,
     }
 }
 
@@ -329,7 +427,7 @@ mod tests {
         // through Terminal::feed.
         for r in 0..rows {
             for c in 0..cols {
-                t.grid.set_cell(c, r, Cell { ch: marker });
+                t.grid.set_cell(c, r, Cell { ch: marker, ..Default::default() });
             }
         }
         t.grid.set_cursor(cur_col, cur_row);
@@ -432,5 +530,177 @@ mod tests {
         let mut t = filled_terminal(10, 5, '#', 3, 2);
         t.feed(b"\x1B[3J");
         assert_eq!(count_marker(&t, '#'), 50);
+    }
+
+    // ----- SGR (Select Graphic Rendition) -----
+
+    #[test]
+    fn sgr_empty_is_full_reset() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[1;31;42m");
+        assert!(t.current_attrs().bold);
+        assert_eq!(t.current_attrs().fg, Color::Indexed(1));
+        t.feed(b"\x1B[m");
+        assert_eq!(t.current_attrs(), CellAttrs::default());
+    }
+
+    #[test]
+    fn sgr_zero_resets_all() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[1;31;42m");
+        t.feed(b"\x1B[0m");
+        assert_eq!(t.current_attrs(), CellAttrs::default());
+    }
+
+    #[test]
+    fn sgr_bold_on_off_independent_of_color() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[31m\x1B[1m");
+        assert!(t.current_attrs().bold);
+        assert_eq!(t.current_attrs().fg, Color::Indexed(1));
+        t.feed(b"\x1B[22m"); // un-bold; fg stays
+        assert!(!t.current_attrs().bold);
+        assert_eq!(t.current_attrs().fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn sgr_individual_attribute_toggles() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[3m\x1B[4m\x1B[7m");
+        let a = t.current_attrs();
+        assert!(a.italic && a.underline && a.reverse);
+        t.feed(b"\x1B[23m\x1B[24m\x1B[27m");
+        let a = t.current_attrs();
+        assert!(!a.italic && !a.underline && !a.reverse);
+    }
+
+    #[test]
+    fn sgr_standard_8_color_fg() {
+        for (code, idx) in (30u16..=37).zip(0u8..=7) {
+            let mut t = Terminal::new(10, 5);
+            t.feed(format!("\x1B[{}m", code).as_bytes());
+            assert_eq!(t.current_attrs().fg, Color::Indexed(idx), "code {} -> idx {}", code, idx);
+        }
+    }
+
+    #[test]
+    fn sgr_standard_8_color_bg() {
+        for (code, idx) in (40u16..=47).zip(0u8..=7) {
+            let mut t = Terminal::new(10, 5);
+            t.feed(format!("\x1B[{}m", code).as_bytes());
+            assert_eq!(t.current_attrs().bg, Color::Indexed(idx), "code {} -> idx {}", code, idx);
+        }
+    }
+
+    #[test]
+    fn sgr_bright_8_color() {
+        // 90–97 → indices 8–15 (bright fg); 100–107 → bright bg.
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[91m"); // bright red fg
+        assert_eq!(t.current_attrs().fg, Color::Indexed(9));
+        t.feed(b"\x1B[105m"); // bright magenta bg
+        assert_eq!(t.current_attrs().bg, Color::Indexed(13));
+    }
+
+    #[test]
+    fn sgr_default_fg_and_bg() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[31;41m\x1B[39;49m");
+        assert_eq!(t.current_attrs().fg, Color::Default);
+        assert_eq!(t.current_attrs().bg, Color::Default);
+    }
+
+    #[test]
+    fn sgr_256_color_fg() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[38;5;208m");
+        assert_eq!(t.current_attrs().fg, Color::Indexed(208));
+    }
+
+    #[test]
+    fn sgr_256_color_bg() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[48;5;42m");
+        assert_eq!(t.current_attrs().bg, Color::Indexed(42));
+    }
+
+    #[test]
+    fn sgr_truecolor_fg() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[38;2;100;200;50m");
+        assert_eq!(t.current_attrs().fg, Color::Rgb(100, 200, 50));
+    }
+
+    #[test]
+    fn sgr_truecolor_bg() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[48;2;10;20;30m");
+        assert_eq!(t.current_attrs().bg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn sgr_combined_in_single_sequence() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[1;31;42m");
+        let a = t.current_attrs();
+        assert!(a.bold);
+        assert_eq!(a.fg, Color::Indexed(1));
+        assert_eq!(a.bg, Color::Indexed(2));
+    }
+
+    #[test]
+    fn sgr_unknown_code_is_skipped_not_panicked() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[1;999;31m"); // 999 unknown
+        let a = t.current_attrs();
+        assert!(a.bold);
+        assert_eq!(a.fg, Color::Indexed(1)); // 31 still applied after 999 skipped
+    }
+
+    #[test]
+    fn printed_cell_carries_current_attrs() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1B[1;31mA");
+        let cell = t.grid().cell(0, 0);
+        assert_eq!(cell.ch, 'A');
+        assert!(cell.attrs.bold);
+        assert_eq!(cell.attrs.fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn already_printed_cells_unaffected_by_later_sgr() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"A\x1B[31mB");
+        // 'A' was printed before SGR — must keep default attrs.
+        assert_eq!(t.grid().cell(0, 0).attrs.fg, Color::Default);
+        // 'B' was printed after — must have red fg.
+        assert_eq!(t.grid().cell(1, 0).attrs.fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn bce_erase_fills_with_current_attrs() {
+        // Background Color Erase: ED/EL fills cleared cells with the
+        // current SGR attrs, not default.  Critical for vim/tmux which
+        // paint full-screen backgrounds via CSI 41 m + CSI 2 J.
+        let mut t = Terminal::new(10, 3);
+        t.feed(b"\x1B[41m\x1B[2J"); // bg red + clear screen
+        for r in 0..3 {
+            for c in 0..10 {
+                let cell = t.grid().cell(c, r);
+                assert_eq!(cell.ch, ' ');
+                assert_eq!(cell.attrs.bg, Color::Indexed(1), "cell ({},{}) bg", c, r);
+            }
+        }
+    }
+
+    #[test]
+    fn bce_erase_in_line_uses_current_bg() {
+        let mut t = Terminal::new(10, 3);
+        t.feed(b"\x1B[42m\x1B[K"); // bg green + EL 0
+        for c in 0..10 {
+            assert_eq!(t.grid().cell(c, 0).attrs.bg, Color::Indexed(2));
+        }
+        // Other rows untouched.
+        assert_eq!(t.grid().cell(0, 1).attrs.bg, Color::Default);
     }
 }

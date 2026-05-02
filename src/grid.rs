@@ -10,12 +10,43 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
+    pub attrs: CellAttrs,
 }
 
 impl Default for Cell {
     fn default() -> Self {
-        Cell { ch: ' ' }
+        Cell { ch: ' ', attrs: CellAttrs::default() }
     }
+}
+
+impl From<char> for Cell {
+    fn from(ch: char) -> Self {
+        Cell { ch, attrs: CellAttrs::default() }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct CellAttrs {
+    pub fg: Color,
+    pub bg: Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub reverse: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Color {
+    /// "Use the default foreground/background" — the renderer picks the
+    /// theme's default.  This is distinct from Indexed(0), which is the
+    /// palette's first color.
+    #[default]
+    Default,
+    /// Indexed palette entry.  0–7 = standard, 8–15 = bright variants,
+    /// 16–255 = 256-color extended palette.
+    Indexed(u8),
+    /// Direct 24-bit color.
+    Rgb(u8, u8, u8),
 }
 
 pub struct Grid {
@@ -44,13 +75,16 @@ impl Grid {
         self.cells[row as usize * self.cols as usize + col as usize]
     }
 
-    /// Place a printable character at the cursor and advance.  At end-of-line
-    /// we wrap to the next row (simple immediate wrap; delayed-wrap behavior
-    /// matching xterm exactly is a later refinement).  At end-of-screen we
+    /// Place a styled cell at the cursor and advance.  Accepts anything that
+    /// converts into `Cell` so callers can pass a bare `char` (default attrs)
+    /// or a fully-stamped `Cell` from the emulator's current SGR state.
+    ///
+    /// At end-of-line we wrap to the next row (simple immediate wrap; the
+    /// delayed-wrap nicety from xterm is deferred).  At end-of-screen we
     /// clamp for now; scrolling lands in phase 1.1.5.
-    pub fn print(&mut self, ch: char) {
+    pub fn print(&mut self, cell: impl Into<Cell>) {
         let idx = self.cursor_row as usize * self.cols as usize + self.cursor_col as usize;
-        self.cells[idx] = Cell { ch };
+        self.cells[idx] = cell.into();
         self.cursor_col += 1;
         if self.cursor_col >= self.cols {
             self.cursor_col = 0;
