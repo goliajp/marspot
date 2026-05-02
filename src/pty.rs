@@ -109,6 +109,17 @@ impl Pty {
         Ok(n as usize)
     }
 
+    pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // SAFETY: master is a valid fd as long as `self` is alive.
+        let n = unsafe {
+            libc::write(self.master, buf.as_ptr() as *const libc::c_void, buf.len())
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
+
     pub fn raw_master(&self) -> RawFd {
         self.master
     }
@@ -128,6 +139,64 @@ impl Drop for Pty {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Read from PTY until `needle` appears in the accumulated bytes, or until
+    /// `timeout` elapses, or until EOF.  Used when the child stays alive and
+    /// we just want to wait for a specific output to appear.
+    fn read_until(pty: &mut Pty, needle: &[u8], timeout: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + timeout;
+        let mut acc: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            if acc.windows(needle.len()).any(|w| w == needle) || Instant::now() >= deadline {
+                break;
+            }
+            let mut pfd = libc::pollfd {
+                fd: pty.raw_master(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let r = unsafe { libc::poll(&mut pfd, 1, 100) };
+            if r < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            if r == 0 {
+                continue;
+            }
+            match pty.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => acc.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                Err(_) => break,
+            }
+        }
+        acc
+    }
+
+    /// Reap a PTY's child process and close the master fd manually.  Used in
+    /// tests until the real Drop impl is in place; afterwards this becomes a
+    /// no-op safety net.
+    fn force_cleanup(pty: &mut Pty) {
+        if pty.child > 0 {
+            unsafe {
+                libc::kill(pty.child, libc::SIGKILL);
+                let mut status: c_int = 0;
+                libc::waitpid(pty.child, &mut status, 0);
+            }
+            pty.child = 0;
+        }
+        if pty.master >= 0 {
+            unsafe {
+                libc::close(pty.master);
+            }
+            pty.master = -1;
+        }
+    }
 
     /// Read from PTY until EOF or until `timeout` elapses, polling so the
     /// test never hangs.  Returns whatever bytes arrived.
@@ -208,17 +277,26 @@ mod tests {
             io::Error::last_os_error()
         );
 
-        // Manual cleanup — Drop is implemented in a later cycle.  Without
-        // this, sleep(60) outlives the test run.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            let mut status: c_int = 0;
-            libc::waitpid(pid, &mut status, 0);
-            libc::close(pty.master);
-        }
-        // Mark as cleaned so future Drop won't double-close.
-        pty.master = -1;
-        pty.child = 0;
+        force_cleanup(&mut pty);
+    }
+
+    #[test]
+    fn write_to_child_round_trips() {
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/cat".into(),
+            args: vec![],
+            size: TerminalSize::default(),
+        })
+        .expect("spawn /bin/cat");
+
+        let n = pty.write(b"ping\n").expect("write");
+        assert_eq!(n, 5);
+
+        let acc = read_until(&mut pty, b"ping", Duration::from_secs(2));
+        let s = String::from_utf8_lossy(&acc);
+        assert!(s.contains("ping"), "expected 'ping' to round-trip via /bin/cat, got: {:?}", s);
+
+        force_cleanup(&mut pty);
     }
 
     #[test]
