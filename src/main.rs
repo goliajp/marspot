@@ -1,3 +1,5 @@
+mod pty;
+
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
