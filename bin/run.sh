@@ -46,7 +46,10 @@ fi
 
 BIN="target/$PROFILE/mars"
 echo "==> launching $BIN"
-"$BIN" &
+# Fully detach stdio so the child outlives this script.  Without redirecting,
+# closing the script's stdin/out/err can take mars down with it on macOS.
+# nohup additionally ignores SIGHUP for safety.
+nohup "$BIN" > /dev/null 2>&1 < /dev/null &
 disown
 
 # Wait for the process to actually appear in the process list before returning,
