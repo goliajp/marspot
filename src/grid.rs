@@ -257,10 +257,17 @@ struct ScrollbackRing {
 
 impl ScrollbackRing {
     fn new(capacity: usize, cols: usize) -> Self {
+        // Reserve the full final capacity but **don't** populate it —
+        // pay for ring memory as lines actually scroll off the visible
+        // grid.  At the documented 10 000-line × 122-col × 16 B cell
+        // size that's a 19 MiB allocation we used to take up-front per
+        // session; with N sessions on screen those add up fast.
+        // Idle RSS pre-fix on a 9-cell mars: ~229 MiB; this commit
+        // alone drops it dramatically (verified by `bin/bench.sh`).
         let cells = if capacity == 0 || cols == 0 {
             Vec::new()
         } else {
-            vec![Cell::default(); capacity * cols]
+            Vec::with_capacity(capacity * cols)
         };
         Self { cells, capacity, cols, head: 0, len: 0 }
     }
@@ -271,17 +278,19 @@ impl ScrollbackRing {
         }
         debug_assert_eq!(source.len(), self.cols, "pushed line width mismatches scrollback cols");
 
-        let target = if self.len < self.capacity {
-            let line = (self.head + self.len) % self.capacity;
+        if self.len < self.capacity {
+            // Growing phase: append onto the end of `cells`.  After
+            // exactly `capacity` push_lines, `cells.len() == capacity ×
+            // cols` and we never re-extend it from here on.
+            self.cells.extend_from_slice(source);
             self.len += 1;
-            line
-        } else {
-            // Capacity reached: overwrite oldest, advance head.
-            let line = self.head;
-            self.head = (self.head + 1) % self.capacity;
-            line
-        };
-        let start = target * self.cols;
+            return;
+        }
+
+        // Steady-state: overwrite the oldest line, advance head.
+        let line = self.head;
+        self.head = (self.head + 1) % self.capacity;
+        let start = line * self.cols;
         self.cells[start..start + self.cols].copy_from_slice(source);
     }
 
@@ -295,11 +304,13 @@ impl ScrollbackRing {
     }
 
     fn clear(&mut self) {
-        // Don't zero the backing memory — `len = 0` makes existing data
-        // invisible and the next push will overwrite cleanly.  This keeps
-        // clear() O(1) regardless of capacity.
+        // O(1): drop logical contents but keep the Vec's capacity, so a
+        // post-clear scroll storm doesn't pay for re-allocation.  Note
+        // we *must* truncate `cells` (not just zero `len`) because the
+        // lazy-growth `push_line` extends from the end of `cells`.
         self.head = 0;
         self.len = 0;
+        self.cells.clear();
     }
 }
 
