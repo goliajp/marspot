@@ -189,10 +189,15 @@ impl GlyphAtlas {
         ctx.set_gray_fill_color(1.0, 1.0);
         ctx.set_allows_antialiasing(true);
         ctx.set_should_antialias(true);
-        // No smoothing, no subpixel positioning — terminals are grid-
-        // aligned, those just blur the cached bitmap.
-        ctx.set_allows_font_smoothing(false);
-        ctx.set_should_smooth_fonts(false);
+        // Font smoothing ON: in a DeviceGray context this is the
+        // stem-darkening pass that gives small glyphs their visible
+        // weight (no LCD-subpixel chromatic effect since the context
+        // has no chroma channels).  Without it, thin strokes at 13pt
+        // collapse below 1px alpha and the glyph silhouette breaks.
+        ctx.set_allows_font_smoothing(true);
+        ctx.set_should_smooth_fonts(true);
+        // Subpixel positioning OFF: cells are integer-pixel aligned in
+        // a terminal, so this just blurs the cached bitmap with no win.
         ctx.set_allows_font_subpixel_positioning(false);
         ctx.set_should_subpixel_position_fonts(false);
         ctx.set_allows_font_subpixel_quantization(false);

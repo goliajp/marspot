@@ -6,6 +6,7 @@ mod render;
 mod terminal;
 
 use objc2_app_kit::{NSScreen, NSView};
+use objc2_foundation::NSArray;
 use objc2_foundation::MainThreadMarker;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
@@ -37,19 +38,30 @@ impl ApplicationHandler for Mars {
         // we can hand it a CAMetalLayer.  Safe on macOS — winit's AppKit
         // backend is the only valid path here.
         //
-        // Use the actual screen's backing scale.  Forcing 2x on a 1x
-        // display didn't behave as a supersample as I'd hoped — CA
-        // didn't downsample, just enlarged the text.  Override via
-        // MARS_SCALE if needed for testing.
+        // Survey all screens, log their backing scales, and use the max.
+        // mainScreen() can return a 1x screen when mars's window will end
+        // up on a 2x screen, leading to atlas being rasterized at half
+        // the right resolution and looking thin/broken.
         let main_thread = MainThreadMarker::new()
             .expect("Mars must be created on the main thread");
-        let display_scale = NSScreen::mainScreen(main_thread)
+        let screens = NSScreen::screens(main_thread);
+        let mut scales: Vec<f32> = Vec::new();
+        for i in 0..screens.len() {
+            let s = unsafe { screens.objectAtIndex(i) };
+            scales.push(s.backingScaleFactor() as f32);
+        }
+        let main_scale = NSScreen::mainScreen(main_thread)
             .map(|s| s.backingScaleFactor() as f32)
             .unwrap_or(1.0);
+        let max_scale = scales.iter().cloned().fold(1.0_f32, f32::max);
+        eprintln!(
+            "live: screens scales={:?} mainScreen={} max={} winit_scale={}",
+            scales, main_scale, max_scale, window.scale_factor()
+        );
         let scale: f32 = std::env::var("MARS_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(display_scale);
+            .unwrap_or(max_scale);
         let renderer = unsafe {
             let handle = window
                 .window_handle()
@@ -117,6 +129,10 @@ impl ApplicationHandler for Mars {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Some(path) = parse_atlas_dump_arg(&args) {
+        run_atlas_dump(&path);
+        return;
+    }
     if let Some(path) = parse_snapshot_arg(&args) {
         run_snapshot(&path);
         return;
@@ -132,16 +148,63 @@ fn main() {
 /// when present.  Anything else (including bare flag with no value) is
 /// treated as no snapshot.
 fn parse_snapshot_arg(args: &[String]) -> Option<String> {
+    parse_named_arg(args, "--snapshot")
+}
+
+fn parse_atlas_dump_arg(args: &[String]) -> Option<String> {
+    parse_named_arg(args, "--dump-atlas")
+}
+
+fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
     let mut iter = args.iter().skip(1);
+    let prefix = format!("{}=", name);
     while let Some(a) = iter.next() {
-        if a == "--snapshot" {
+        if a == name {
             return iter.next().cloned();
         }
-        if let Some(rest) = a.strip_prefix("--snapshot=") {
+        if let Some(rest) = a.strip_prefix(prefix.as_str()) {
             return Some(rest.to_string());
         }
     }
     None
+}
+
+/// Dump the raw atlas (single-channel grayscale) as a PNG so we can
+/// inspect what CoreText actually wrote — pre-GPU, pre-shader, pre-blend.
+/// This is the most direct way to verify glyph rasterization is correct.
+fn run_atlas_dump(path: &str) {
+    use crate::atlas::GlyphAtlas;
+    let pt: f32 = std::env::var("MARS_DUMP_PT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(13.0);
+    let size: u32 = std::env::var("MARS_DUMP_ATLAS_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    // MARS_DUMP_CHARS lets us isolate one or a few characters in a big
+    // canvas — useful to verify shape correctness at large sizes.
+    // Default: full printable ASCII.
+    let chars: Vec<char> = std::env::var("MARS_DUMP_CHARS")
+        .ok()
+        .map(|s| s.chars().collect())
+        .unwrap_or_else(|| (0x20u32..0x7F).filter_map(char::from_u32).collect());
+    let mut atlas = GlyphAtlas::new("Menlo", pt, size);
+    for ch in &chars {
+        atlas.ensure(*ch);
+    }
+
+    let file = std::fs::File::create(path).expect("create atlas-dump");
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(file),
+        atlas.width(),
+        atlas.height(),
+    );
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("png header");
+    writer.write_image_data(atlas.pixels()).expect("png write");
+    eprintln!("wrote atlas: {} ({}x{})", path, atlas.width(), atlas.height());
 }
 
 /// Headless render: build a Renderer with no view, render one frame into

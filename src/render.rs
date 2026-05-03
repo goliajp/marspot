@@ -173,10 +173,12 @@ impl Renderer {
             let layer = unsafe { CAMetalLayer::new() };
             unsafe {
                 layer.setDevice(Some(&device));
-                layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-                // contentsScale tells CA the layer's intrinsic resolution so
-                // the compositor doesn't try to magnify it again on top of
-                // our already-physical-pixel drawable.
+                // sRGB framebuffer: shader outputs are LINEAR; the driver
+                // gamma-encodes on store.  Non-sRGB BGRA8 makes mid-tones
+                // (the antialiased internal strokes — e.g. the V inside
+                // 'M' at small sizes) display way darker than they should
+                // and effectively disappear.
+                layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm_sRGB);
                 layer.setContentsScale(scale as f64);
             }
             view.setWantsLayer(true);
@@ -228,7 +230,7 @@ impl Renderer {
         }
 
         let atlas_texture = upload_atlas_texture(&device, &atlas)?;
-        let pipeline = build_pipeline(&device, MTLPixelFormat::BGRA8Unorm)?;
+        let pipeline = build_pipeline(&device, MTLPixelFormat::BGRA8Unorm_sRGB)?;
 
         // Pre-allocate instance buffer for the worst case (every cell occupied).
         let max_instances = (GRID_COLS as usize) * (GRID_ROWS as usize);
@@ -323,7 +325,7 @@ impl Renderer {
     pub fn snapshot(&mut self, width: u32, height: u32) -> Result<Vec<u8>, String> {
         let descriptor = unsafe { MTLTextureDescriptor::new() };
         unsafe {
-            descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm_sRGB);
             descriptor.setWidth(width as usize);
             descriptor.setHeight(height as usize);
             descriptor.setUsage(
