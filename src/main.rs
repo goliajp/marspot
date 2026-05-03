@@ -56,6 +56,17 @@ struct Mars {
     /// winit's KeyEvent does not carry the live modifier flags on macOS, so
     /// we have to track them out-of-band.
     modifiers: ModifiersState,
+    /// Self-instrumentation: when set to `Some(t0)`, the next render that
+    /// commits to the layer will measure `t0.elapsed()` as the
+    /// keystroke-to-pixel latency and record it.  Cleared after the next
+    /// successful layer.setContents.  Off-path entirely when MARS_LATENCY
+    /// is unset (taken once at startup → `record_latency`).
+    pending_keystroke_t0: Option<std::time::Instant>,
+    /// Cumulative latency samples, written to MARS_LATENCY's path on Drop.
+    /// Always allocated but only pushed to when `record_latency` is true.
+    latency_samples: Vec<u64>,
+    record_latency: bool,
+    latency_out_path: Option<String>,
 }
 
 impl ApplicationHandler<MarsEvent> for Mars {
@@ -162,12 +173,24 @@ impl ApplicationHandler<MarsEvent> for Mars {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
+                    if self.record_latency && self.pending_keystroke_t0.is_none() {
+                        self.pending_keystroke_t0 = Some(std::time::Instant::now());
+                    }
                     let _ = self.pty.write(&bytes);
                 }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.render(self.terminal.grid());
+                    // Latency instrumentation — close the loop opened by
+                    // the most recent keystroke.  Renderer::render returns
+                    // after layer.setContents, which is the closest
+                    // cheap-to-measure proxy for "pixels visible" without
+                    // hooking into CoreAnimation's display server.
+                    if let Some(t0) = self.pending_keystroke_t0.take() {
+                        let ns = t0.elapsed().as_nanos() as u64;
+                        self.latency_samples.push(ns);
+                    }
                 }
             }
             _ => {}
@@ -277,13 +300,22 @@ fn main() {
         run_snapshot(&path);
         return;
     }
+    if let Some(spec) = parse_named_arg(&args, "--bench") {
+        run_bench(&spec);
+        return;
+    }
 
     let event_loop: EventLoop<MarsEvent> = EventLoop::with_user_event()
         .build()
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    // MARS_SHELL takes precedence over SHELL.  Lets the bench harness
+    // point mars at a one-shot script (no keystroke pumping needed) so we
+    // get a clean PTY → render measurement without zsh-init interference.
+    let shell = std::env::var("MARS_SHELL")
+        .or_else(|_| std::env::var("SHELL"))
+        .unwrap_or_else(|_| "/bin/zsh".into());
     let pty = Pty::spawn(PtyConfig {
         program: shell,
         // Pty::spawn already pushes `program` as argv[0]; this vec is for
@@ -302,6 +334,11 @@ fn main() {
     let proxy = event_loop.create_proxy();
     spawn_pty_reader(pty.raw_master(), tx, proxy);
 
+    // MARS_LATENCY=/path/out.json — write a JSON list of keystroke→
+    // setContents nanoseconds to the given path on exit.  Off otherwise.
+    let latency_out_path = std::env::var("MARS_LATENCY").ok();
+    let record_latency = latency_out_path.is_some();
+
     let mut app = Mars {
         window: None,
         renderer: None,
@@ -309,8 +346,31 @@ fn main() {
         pty,
         rx,
         modifiers: ModifiersState::empty(),
+        pending_keystroke_t0: None,
+        latency_samples: Vec::new(),
+        record_latency,
+        latency_out_path,
     };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+impl Drop for Mars {
+    fn drop(&mut self) {
+        if let Some(path) = self.latency_out_path.take() {
+            let mut s = String::with_capacity(self.latency_samples.len() * 12);
+            s.push('[');
+            for (i, ns) in self.latency_samples.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&ns.to_string());
+            }
+            s.push(']');
+            if let Err(e) = std::fs::write(&path, s) {
+                eprintln!("mars: failed to write latency log to {path}: {e}");
+            }
+        }
+    }
 }
 
 fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
@@ -371,6 +431,125 @@ fn run_snapshot(path: &str) {
     eprintln!(
         "wrote snapshot: {} ({}x{} physical, scale={})",
         path, phys_w, phys_h, scale
+    );
+}
+
+/// Headless benchmark dispatcher.  Spec is `<mode>:<arg>`.
+///
+/// Modes:
+///   parse:<path>   feed bytes from `path` through Terminal::feed and
+///                  report wall-clock throughput (bytes/sec)
+///   render:<n>     run `n` full-frame renders against a synthetic
+///                  worst-case grid (full coloured cells), report
+///                  per-frame p50/p95/p99 nanoseconds
+///
+/// Both modes write a single line of JSON to stdout so harness scripts
+/// can grep / parse without depending on prose formatting.
+fn run_bench(spec: &str) {
+    let (mode, arg) = match spec.split_once(':') {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "--bench expects <mode>:<arg>, e.g. parse:/tmp/cat-ascii.bin or render:1000"
+            );
+            std::process::exit(2);
+        }
+    };
+    match mode {
+        "parse" => bench_parse(arg),
+        "render" => bench_render(arg),
+        other => {
+            eprintln!("unknown bench mode: {other}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn bench_parse(path: &str) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("bench: read {path}: {e}");
+        std::process::exit(2);
+    });
+    // Use the same grid dimensions as a typical mars window (auto-fit
+    // 122×39 on the user's default 960×600 layout) so the parser path
+    // exercises wrap / scroll the way it does in real use.
+    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+    let t0 = std::time::Instant::now();
+    terminal.feed(&bytes);
+    let elapsed_ns = t0.elapsed().as_nanos() as u64;
+    let bytes_per_sec = if elapsed_ns > 0 {
+        (bytes.len() as u128 * 1_000_000_000 / elapsed_ns as u128) as u64
+    } else {
+        0
+    };
+    println!(
+        r#"{{"mode":"parse","path":"{}","bytes":{},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
+        path,
+        bytes.len(),
+        elapsed_ns,
+        bytes_per_sec
+    );
+}
+
+fn bench_render(arg: &str) {
+    let n: u32 = arg.parse().unwrap_or_else(|_| {
+        eprintln!("bench: render needs an integer iteration count");
+        std::process::exit(2);
+    });
+
+    // Build a worst-case grid: every cell carries a non-default fg colour
+    // (forces a SetRGBFillColor per glyph run), every cell is non-blank
+    // (no skipping), and the content alternates printable ASCII so glyph
+    // run-length compression has to stop frequently.  This is the upper
+    // bound on per-frame cost given the current architecture.
+    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+    // Fill with rotating SGR colours + printable ASCII.
+    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
+    for r in 0..GRID_ROWS {
+        for c in 0..GRID_COLS {
+            // SGR 30..=37 cycling foreground.
+            let colour = 30 + ((r as u32 + c as u32) % 8) as u8;
+            payload.extend_from_slice(format!("\x1b[{}m", colour).as_bytes());
+            let ch = ((c % 95) as u8) + 32; // printable ASCII 32..127
+            payload.push(ch);
+        }
+        if r + 1 < GRID_ROWS {
+            payload.extend_from_slice(b"\r\n");
+        }
+    }
+    terminal.feed(&payload);
+
+    // Render headlessly into an offscreen Renderer.  Use scale=1 to
+    // match the user's display so numbers transfer to the live path.
+    let mut renderer = Renderer::new_offscreen(1.0).expect("offscreen renderer");
+    // Default 960×600 logical → physical at scale 1.
+    let phys_w = 960.0_f64;
+    let phys_h = 600.0_f64;
+
+    // Warm-up: 5 iterations to fill char_cache and prime CGContext alloc.
+    for _ in 0..5 {
+        let _ = renderer.snapshot(phys_w as u32, phys_h as u32, terminal.grid());
+    }
+
+    let mut samples: Vec<u64> = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let t0 = std::time::Instant::now();
+        let _ = renderer.snapshot(phys_w as u32, phys_h as u32, terminal.grid());
+        samples.push(t0.elapsed().as_nanos() as u64);
+    }
+    samples.sort_unstable();
+    let p = |q: f64| -> u64 {
+        let idx = ((samples.len() as f64) * q) as usize;
+        samples[idx.min(samples.len() - 1)]
+    };
+    println!(
+        r#"{{"mode":"render","iterations":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
+        n,
+        p(0.50),
+        p(0.95),
+        p(0.99),
+        samples[0],
+        samples[samples.len() - 1],
     );
 }
 

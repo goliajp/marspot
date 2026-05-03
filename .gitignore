@@ -12,3 +12,5 @@
 # macOS
 .DS_Store
 *.swp
+bench/scenarios/
+bench/results/
