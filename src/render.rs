@@ -226,7 +226,48 @@ impl Renderer {
             self.font.draw_glyphs(&glyphs, &positions, ctx.clone());
         }
 
+        self.draw_cursor(&ctx, height, grid);
+
         ctx
+    }
+
+    /// Standard "block" cursor: fill the cursor cell with the foreground
+    /// colour, then re-draw that cell's glyph in the background colour so
+    /// the character under the cursor stays readable. Always rendered for
+    /// now — focus-aware (hollow when unfocused) is a later refinement.
+    fn draw_cursor(&self, ctx: &CGContext, height: u32, grid: &Grid) {
+        let (col, row) = grid.cursor();
+        let cx = col as f64 * self.cell_w;
+        let cy_bottom = height as f64 - (row as f64 + 1.0) * self.cell_h;
+
+        ctx.set_rgb_fill_color(FG.0, FG.1, FG.2, 1.0);
+        ctx.fill_rect(CGRect::new(
+            &CGPoint::new(cx, cy_bottom),
+            &CGSize::new(self.cell_w, self.cell_h),
+        ));
+
+        // Punch the cell's glyph back through in the background colour.
+        // Skip if the cell is blank — saves a CoreText call per frame
+        // when the cursor sits on a space (the common idle case).
+        let cell = grid.cell(col, row);
+        if cell.ch != ' ' && cell.ch != '\0' {
+            let cp = cell.ch as u32;
+            let ch16: u16 = if cp <= 0xFFFF { cp as u16 } else { b'?' as u16 };
+            let mut glyph: CGGlyph = 0;
+            unsafe {
+                self.font.get_glyphs_for_characters(&ch16, &mut glyph, 1);
+            }
+            if glyph != 0 {
+                ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
+                let baseline_y =
+                    height as f64 - (row as f64 * self.cell_h + self.ascent);
+                self.font.draw_glyphs(
+                    &[glyph],
+                    &[CGPoint::new(cx, baseline_y)],
+                    ctx.clone(),
+                );
+            }
+        }
     }
 }
 
