@@ -20,7 +20,10 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use mars::input::key_event_to_bytes;
+use mars::input::{
+    key_event_to_bytes, KeyState, LogicalKey, MarsKeyEvent,
+    Modifiers as MarsModifiers, NamedKey as MarsNamedKey,
+};
 use mars::render::{Renderer, SessionView};
 use mars::session::Session;
 
@@ -141,7 +144,9 @@ impl ApplicationHandler<McliEvent> for Mcli {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
+                let mars_event = winit_to_mars_key_event(&event);
+                let mars_mods = winit_to_mars_modifiers(self.modifiers);
+                if let Some(bytes) = key_event_to_bytes(&mars_event, mars_mods) {
                     if self.view_offset != 0 {
                         self.view_offset = 0;
                         if let Some(w) = &self.window {
@@ -211,4 +216,48 @@ fn main() {
         view_offset: 0,
     };
     event_loop.run_app(&mut app).expect("run app");
+}
+
+/// Translate a winit KeyEvent into Mars's portable representation.
+/// Mirror of the helper in main.rs — see comment there.  Both go away
+/// when winit is dropped in favour of an AppKit-direct event loop.
+fn winit_to_mars_key_event(event: &winit::event::KeyEvent) -> MarsKeyEvent {
+    use winit::event::ElementState;
+    use winit::keyboard::{Key, NamedKey as WNamed};
+
+    let state = match event.state {
+        ElementState::Pressed => KeyState::Pressed,
+        ElementState::Released => KeyState::Released,
+    };
+    let logical = match &event.logical_key {
+        Key::Character(s) => s
+            .chars()
+            .next()
+            .map(LogicalKey::Char)
+            .unwrap_or(LogicalKey::Other),
+        Key::Named(WNamed::Enter) => LogicalKey::Named(MarsNamedKey::Enter),
+        Key::Named(WNamed::Backspace) => LogicalKey::Named(MarsNamedKey::Backspace),
+        Key::Named(WNamed::Tab) => LogicalKey::Named(MarsNamedKey::Tab),
+        Key::Named(WNamed::Escape) => LogicalKey::Named(MarsNamedKey::Escape),
+        Key::Named(WNamed::ArrowUp) => LogicalKey::Named(MarsNamedKey::ArrowUp),
+        Key::Named(WNamed::ArrowDown) => LogicalKey::Named(MarsNamedKey::ArrowDown),
+        Key::Named(WNamed::ArrowLeft) => LogicalKey::Named(MarsNamedKey::ArrowLeft),
+        Key::Named(WNamed::ArrowRight) => LogicalKey::Named(MarsNamedKey::ArrowRight),
+        _ => LogicalKey::Other,
+    };
+    let text = event.text.as_ref().map(|s| s.as_str().to_string());
+    MarsKeyEvent {
+        state,
+        logical,
+        text,
+    }
+}
+
+fn winit_to_mars_modifiers(m: ModifiersState) -> MarsModifiers {
+    MarsModifiers {
+        shift: m.shift_key(),
+        control: m.control_key(),
+        alt: m.alt_key(),
+        super_: m.super_key(),
+    }
 }
