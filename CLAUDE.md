@@ -121,6 +121,23 @@ cleanup if any of these signals fire:
 If a commit includes a micro-refactor, mention it explicitly in the
 commit message — it makes review fast and keeps the practice visible.
 
+## Working with the user
+
+**No multi-choice menus at decision points.**  Once a linear plan is
+agreed (e.g. render-floor → metal-renderer → local-echo), keep
+executing it.  At natural pauses, the only acceptable next-turn
+prompts are:
+
+  - **continue** (proceed with the next step of the agreed plan), or
+  - **stop** (the user wants to halt), or
+  - **adjust the plan** (the user wants to change scope / order)
+
+Do NOT lay out 2–3 alternatives and ask the user to pick.  That
+shifts the planning load back onto the user every turn — exactly
+what the agreed plan was meant to absorb.  Either execute, or
+say "next is X, continuing" and do it.  If genuinely blocked, say
+what's blocking and stop — don't dress it up as a menu.
+
 ## Project conventions
 
 - **Pure Rust binary**, no Swift / Xcode. Target is macOS only — we use Metal and AppKit directly via Rust bindings.
