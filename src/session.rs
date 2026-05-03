@@ -62,9 +62,25 @@ impl Session {
         let shell = std::env::var("MARS_SHELL")
             .or_else(|_| std::env::var("SHELL"))
             .unwrap_or_else(|_| "/bin/zsh".into());
+        Self::spawn_with(&shell, &[], cols, rows, wake)
+    }
+
+    /// Spawn variant with explicit program + args.  Useful for tests
+    /// (no env-var racing) and for any future "open this session
+    /// running <command>" UI affordance.
+    pub fn spawn_with<W>(
+        program: &str,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+        wake: W,
+    ) -> io::Result<Self>
+    where
+        W: Fn() + Send + Sync + 'static,
+    {
         let pty = Pty::spawn(PtyConfig {
-            program: shell,
-            args: Vec::new(),
+            program: program.into(),
+            args: args.iter().map(|s| (*s).to_string()).collect(),
             size: TerminalSize {
                 cols,
                 rows,
@@ -188,4 +204,139 @@ where
             }
         })
         .expect("spawn pty reader thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    /// Spin until `pred` returns true or `deadline_ms` elapses.  Pumps
+    /// the session each tick so the test sees fresh state.  Returns
+    /// the time taken (or panics on timeout).
+    fn spin_until<F: FnMut(&mut Session) -> bool>(
+        s: &mut Session,
+        deadline_ms: u64,
+        mut pred: F,
+    ) -> Duration {
+        let start = std::time::Instant::now();
+        loop {
+            s.pump();
+            if pred(s) {
+                return start.elapsed();
+            }
+            if start.elapsed() > Duration::from_millis(deadline_ms) {
+                panic!("spin_until timed out after {} ms", deadline_ms);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn first_row(s: &Session) -> String {
+        let g = s.terminal.grid();
+        (0..g.cols()).map(|c| g.cell(c, 0).ch).collect()
+    }
+
+    /// Concatenate every row of the visible grid into one string.
+    /// Useful for tests that don't care which line a substring landed
+    /// on (PTY echo + shell stdout can split a single round-trip
+    /// across rows).
+    fn all_rows(s: &Session) -> String {
+        let g = s.terminal.grid();
+        let mut out = String::new();
+        for r in 0..g.rows() {
+            for c in 0..g.cols() {
+                out.push(g.cell(c, r).ch);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn spawn_with_runs_to_eof_and_marks_exited() {
+        // `/bin/sh -c 'true'` exits immediately; the reader thread sees
+        // EOF, sets the exited flag, and fires the wake callback.
+        let woke = Arc::new(AtomicUsize::new(0));
+        let woke_clone = woke.clone();
+        let mut s = Session::spawn_with(
+            "/bin/sh",
+            &["-c", "true"],
+            40,
+            10,
+            move || {
+                woke_clone.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .expect("spawn");
+
+        spin_until(&mut s, 1000, |s| s.is_exited());
+        assert!(s.is_exited());
+        // EOF wake always fires; reader-thread chunks may add more.
+        assert!(woke.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn pump_feeds_bytes_into_terminal_grid() {
+        let mut s = Session::spawn_with(
+            "/bin/sh",
+            &["-c", "printf hello && exit"],
+            40,
+            10,
+            || {},
+        )
+        .expect("spawn");
+
+        spin_until(&mut s, 1000, |s| first_row(s).starts_with("hello"));
+        assert!(first_row(&s).starts_with("hello"));
+    }
+
+    #[test]
+    fn write_round_trips_through_pty() {
+        // `stty -echo` so PTY won't echo our input back as a separate
+        // visible line; output ends up with just shell's printf result.
+        let mut s = Session::spawn_with(
+            "/bin/sh",
+            &["-c", "stty -echo; read line; printf '<%s>' \"$line\""],
+            40,
+            10,
+            || {},
+        )
+        .expect("spawn");
+
+        // Give stty time to apply before we write.
+        std::thread::sleep(Duration::from_millis(50));
+        s.write(b"sentinel\n").expect("write");
+
+        spin_until(&mut s, 1500, |s| all_rows(s).contains("<sentinel>"));
+        assert!(all_rows(&s).contains("<sentinel>"));
+    }
+
+    #[test]
+    fn pump_returns_zero_when_no_data_pending() {
+        // Use `sleep` so the child stays alive but never writes.
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {})
+            .expect("spawn");
+
+        // Give the reader thread a moment to settle, then pump should
+        // find nothing in the channel.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(s.pump(), 0);
+        assert!(!s.is_exited());
+
+        // Drop the session — Pty::drop reaps the sleep child.
+        drop(s);
+    }
+
+    #[test]
+    fn resize_propagates_to_terminal_grid() {
+        let mut s = Session::spawn_with("/bin/sh", &["-c", "sleep 5"], 40, 10, || {})
+            .expect("spawn");
+        assert_eq!(s.terminal.grid().cols(), 40);
+        assert_eq!(s.terminal.grid().rows(), 10);
+        s.resize(60, 20);
+        assert_eq!(s.terminal.grid().cols(), 60);
+        assert_eq!(s.terminal.grid().rows(), 20);
+    }
 }
