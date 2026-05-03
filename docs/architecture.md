@@ -7,9 +7,13 @@ and where is the next bottleneck**."
 ## Modules and ownership
 
 ```
-main.rs         entry point + winit event loop
-                owns: Window, Renderer, Terminal, Pty, Receiver<Vec<u8>>
+main.rs         entry point + MarsApp impl
+                owns: Renderer, Terminal, Pty, Receiver<Vec<u8>>
                 threads: main (event loop) + 1 PTY-reader
+
+app.rs          AppKit-direct window + run loop (NSApplication.run)
+                owns: NSWindow, custom NSView, CFRunLoopSource (wake)
+                dispatches MarsApp callbacks on the main thread
 
 pty.rs          forkpty wrapper
                 owns: master fd, child pid (Drop reaps both)
@@ -37,7 +41,7 @@ The two paths that determine perf:
 ```
 kernel pipe → reader thread (libc::read, blocking)
             → mpsc::sync_channel(64) (bounded — backpressure)
-            → main thread (winit user_event)
+            → main thread (MarsApp::user_event via CFRunLoopSource wake)
             → Terminal::feed (Parser::advance per byte → Handler callbacks)
             → Grid::set_cell / scroll_up / set_cursor
             → window.request_redraw()
@@ -86,11 +90,13 @@ hot path**. Status:
 
 ## Latent issues (architectural, not just bugs)
 
-- **Retina double-scale**: WindowEvent::Resized used to multiply size by
-  backingScaleFactor (winit already returns physical). Fixed in resize
-  path; initial sizing in `resumed()` still has the same bug. On 1x
-  displays it cancels out so it looks fine. Will bite when the user
-  moves the window to a Retina monitor.
+- **Retina double-scale**: long-standing bug from the winit-era code —
+  initial sizing in `resumed()` could use the wrong backing scale on
+  multi-display setups.  After the winit removal, `app::run_app` fires
+  an explicit Resized after window mount that uses the actual
+  view-bounds × backingScaleFactor, so the bug should now be self-
+  correcting; the `Latent issue` line stays here until verified
+  on a real multi-monitor setup.
 
 - **No dirty tracking**: every redraw rebuilds the entire CGImage from
   scratch. For a typing session where only one cell changes per
