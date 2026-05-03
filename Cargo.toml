@@ -1,12 +1,30 @@
 [package]
 name = "mars"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 winit = "0.30"
+libc = "0.2"
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["all"] }
+objc2-foundation = { version = "0.2", features = ["all"] }
+objc2-quartz-core = { version = "0.2", features = ["all"] }
+objc2-metal = { version = "0.2", features = ["all"] }
+raw-window-handle = "0.6"
+core-text = "21.0"
+core-graphics = "0.24"
+core-foundation = "0.10"
+foreign-types = "0.5"
+png = "0.17"
 
 [profile.release]
-lto = "thin"
+# Fat LTO matters now that we split into a lib + multiple bins (mars,
+# mcli): the render and parser hot paths cross the lib↔bin boundary
+# every frame, and `thin` LTO leaves them un-inlined.  Measured
+# regression on `bin/bench.sh` jumping from ~1 ms to ~20 ms p99
+# render with `thin` after the split; `fat` recovers it.
+lto = "fat"
 codegen-units = 1
 strip = true

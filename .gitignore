@@ -4,6 +4,13 @@
 # Local build logs (run.sh output)
 /build/
 
+# Reference open-source projects and specs — local-only, not committed.
+# Pinned versions tracked in references/README.md.
+/references/*
+!/references/README.md
+
 # macOS
 .DS_Store
 *.swp
+bench/scenarios/
+bench/results/
