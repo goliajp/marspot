@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 
-use objc2_app_kit::{NSScreen, NSView};
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSScreen, NSView};
 use objc2_foundation::MainThreadMarker;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
@@ -298,9 +298,20 @@ fn key_event_to_bytes(
         return None;
     }
 
-    // Cmd combos belong to the OS / app layer (Cmd-Q to quit, Cmd-C/V for
-    // clipboard, etc.) — never forward them to the PTY.
+    // Cmd combos: a few are ours (Cmd-V paste from clipboard); the rest
+    // belong to the OS / app layer (Cmd-Q to quit, Cmd-C copy, etc.).
     if modifiers.super_key() {
+        if let Key::Character(s) = &event.logical_key {
+            if s.as_str().eq_ignore_ascii_case("v") {
+                if let Some(text) = read_clipboard_text() {
+                    // Paste as raw bytes; bracketed paste support comes
+                    // later (DECSET ?2004) — for now CR is forwarded
+                    // verbatim, which matches Terminal.app's default
+                    // when bracketed paste isn't enabled.
+                    return Some(Cow::Owned(text.into_bytes()));
+                }
+            }
+        }
         return None;
     }
 
@@ -342,6 +353,17 @@ fn key_event_to_bytes(
             .text
             .as_ref()
             .map(|t| Cow::Owned(t.as_bytes().to_vec())),
+    }
+}
+
+/// Read the current macOS general-pasteboard string, if any.  Used to
+/// implement Cmd-V → write to PTY.  Returns None if the clipboard
+/// holds non-text content (image, file URLs, etc.).
+fn read_clipboard_text() -> Option<String> {
+    unsafe {
+        let pb = NSPasteboard::generalPasteboard();
+        let s = pb.stringForType(NSPasteboardTypeString)?;
+        Some(s.to_string())
     }
 }
 
