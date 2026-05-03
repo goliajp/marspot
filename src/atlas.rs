@@ -14,11 +14,11 @@
 //! - Same path Apple's Terminal.app, iTerm2, Ghostty, kitty, alacritty
 //!   all use.  Visual output matches the rest of macOS.
 
-use core_graphics::base::{kCGImageAlphaNone, CGFloat};
+use core_graphics::base::{kCGImageAlphaPremultipliedFirst, CGFloat};
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::CGContext;
 use core_graphics::font::CGGlyph;
-use core_graphics::geometry::CGPoint;
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use core_text::font::{new_from_name, CTFont};
 use core_text::font_descriptor::kCTFontOrientationDefault;
 use std::collections::HashMap;
@@ -171,11 +171,15 @@ impl GlyphAtlas {
             });
         }
 
-        // Allocate a tight grayscale bitmap for this glyph and draw it.
-        // Translation `(-bbox.origin.x, -bbox.origin.y)` shifts the bbox's
-        // bottom-left corner to the bitmap's (0,0) origin.
-        let space = CGColorSpace::create_device_gray();
-        let row_bytes = glyph_w as usize;
+        // Rasterize via an RGBA premultiplied context (matching the
+        // pipeline alacritty/crossfont use): black opaque background,
+        // white glyph fill, all CT smoothing/subpixel hints ON so we get
+        // the visual weight Apple's Terminal.app and iTerm2 produce.
+        // After rasterization the glyph's coverage is encoded in any one
+        // of R/G/B (they're equal for grayscale) — we extract R into the
+        // atlas's single-channel buffer.
+        let space = CGColorSpace::create_device_rgb();
+        let row_bytes = glyph_w as usize * 4;
         let mut ctx = CGContext::create_bitmap_context(
             None,
             glyph_w as usize,
@@ -183,35 +187,54 @@ impl GlyphAtlas {
             8,
             row_bytes,
             &space,
-            kCGImageAlphaNone,
+            kCGImageAlphaPremultipliedFirst,
         );
-        ctx.set_gray_fill_color(1.0, 1.0);
-        // Default Quartz coordinate space (y-up from lower-left): drawing
-        // at (-bbox.origin.x, -bbox.origin.y) shifts the glyph so its
-        // bbox bottom-left maps to the bitmap's (0,0) coord origin (visually
-        // the bitmap's bottom-left).  The bitmap memory layout, however,
-        // already starts with the TOP-LEFT pixel — so byte[0..w] is the
-        // visual TOP row of the glyph and we don't need to row-flip below.
+        // Fill the bitmap with opaque black.  CT's smoothing pass works
+        // against an opaque background — that's the "stem-darkening"
+        // behavior that gives glyphs their visual weight.
+        ctx.set_rgb_fill_color(0.0, 0.0, 0.0, 1.0);
+        ctx.fill_rect(CGRect::new(
+            &CGPoint::new(0.0, 0.0),
+            &CGSize::new(glyph_w as f64, glyph_h as f64),
+        ));
+        // Enable every smoothing knob (matches Apple's default + alacritty).
+        ctx.set_allows_antialiasing(true);
+        ctx.set_should_antialias(true);
+        ctx.set_allows_font_smoothing(true);
+        ctx.set_should_smooth_fonts(true);
+        ctx.set_allows_font_subpixel_positioning(true);
+        ctx.set_should_subpixel_position_fonts(true);
+        ctx.set_allows_font_subpixel_quantization(true);
+        ctx.set_should_subpixel_quantize_fonts(true);
+        // White glyph on the black backdrop — the resulting RGB channels
+        // ARE the per-channel coverage from CT's smoothing pass.
+        ctx.set_rgb_fill_color(1.0, 1.0, 1.0, 1.0);
         self.font.draw_glyphs(
             &[glyph],
             &[CGPoint::new(-bbox.origin.x as CGFloat, -bbox.origin.y as CGFloat)],
             ctx.clone(),
         );
 
-        // Reserve atlas space.  If the shelf packer can't fit, no atlas
-        // mutation has happened yet — just bail.
         let (atlas_x, atlas_y) = self.allocate_shelf_slot(glyph_w, glyph_h)?;
 
-        // Copy bytes into the atlas top-down.  We additionally flip the
-        // CG context with translate+scale before drawing (see above) so
-        // that the bitmap's row 0 is the GLYPH'S TOP — meaning a straight
-        // copy gives us a top-down atlas.
+        // Bitmap layout under kCGImageAlphaPremultipliedFirst on macOS
+        // little-endian is A,R,G,B per pixel in memory order.  Background
+        // is opaque black so A=255 everywhere — we cannot use it as the
+        // coverage signal.  R/G/B carry the actual coverage (white text
+        // means R=G=B=255 at the glyph center, decaying with antialiasing
+        // toward 0 at the edges).  Pick R as canonical (G/B equal it for
+        // grayscale rendering).
         let src = ctx.data();
         for row in 0..glyph_h {
-            let src_start = (row as usize) * row_bytes;
-            let dst_start = ((atlas_y + row) as usize) * (self.width as usize) + atlas_x as usize;
-            self.pixels[dst_start..dst_start + glyph_w as usize]
-                .copy_from_slice(&src[src_start..src_start + glyph_w as usize]);
+            for col in 0..glyph_w as usize {
+                let src_idx = (row as usize) * row_bytes + col * 4;
+                // [A, R, G, B] in memory order — index 1 is R.
+                let coverage = src[src_idx + 1];
+                let dst_idx = ((atlas_y + row) as usize) * (self.width as usize)
+                    + atlas_x as usize
+                    + col;
+                self.pixels[dst_idx] = coverage;
+            }
         }
 
         Some(GlyphInfo {

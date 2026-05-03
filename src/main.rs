@@ -15,6 +15,9 @@ use winit::window::{Window, WindowId};
 
 use crate::render::Renderer;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
+
 #[derive(Default)]
 struct Mars {
     window: Option<Window>,
@@ -23,14 +26,16 @@ struct Mars {
 
 impl ApplicationHandler for Mars {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let title = format!("Mars v{} ({})", VERSION, GIT_SHA);
         let attrs = Window::default_attributes()
-            .with_title("Mars")
+            .with_title(title)
             .with_inner_size(LogicalSize::new(960.0, 600.0));
         let window = event_loop.create_window(attrs).expect("create window");
 
         // Reach into AppKit to get the NSView backing this winit window so
         // we can hand it a CAMetalLayer.  Safe on macOS — winit's AppKit
         // backend is the only valid path here.
+        let scale = window.scale_factor() as f32;
         let renderer = unsafe {
             let handle = window
                 .window_handle()
@@ -40,7 +45,7 @@ impl ApplicationHandler for Mars {
                 panic!("Mars only supports the AppKit backend");
             };
             let nsview: &NSView = &*(appkit.ns_view.as_ptr() as *const NSView);
-            Renderer::new(nsview).expect("renderer init")
+            Renderer::new(nsview, scale).expect("renderer init")
         };
 
         // Initialize the layer's drawable size to the window's pixel size.

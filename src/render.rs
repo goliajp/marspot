@@ -85,19 +85,28 @@ vertex VertexOut cell_vert(uint vid [[vertex_id]],
 
 fragment float4 cell_frag(VertexOut in            [[stage_in]],
                           texture2d<float> atlas  [[texture(0)]]) {
+    // Linear sampling: at HiDPI the atlas is already at physical pixel
+    // resolution; linear gives clean alpha edges where atlas texels and
+    // drawable pixels nearly align.  Nearest produces hard staircase
+    // edges (good for pixel art, bad for glyph antialiasing).
     constexpr sampler s(coord::normalized,
                         filter::linear,
                         address::clamp_to_edge);
     float intensity = atlas.sample(s, in.uv).r;
-    // Premultiplied alpha: the fragment is alpha=intensity, color=intensity*white.
-    // The pipeline's blend state composites this 'src over' the clear color.
     return float4(intensity, intensity, intensity, intensity);
 }
 "#;
 
-const ATLAS_SIZE: u32 = 512;
+/// Atlas backing-store size in **logical** pixels.  Multiplied by the
+/// device scale factor at construction time so the atlas has enough
+/// physical pixels to hold rasterized glyphs at the device's native
+/// resolution (without scaling artifacts).
+const ATLAS_SIZE_LOGICAL: u32 = 512;
 const FONT_NAME: &str = "Menlo";
-const FONT_POINT: f32 = 13.0;
+/// Nominal point size of the terminal font.  Multiplied by the device
+/// scale factor when handed to CoreText so glyphs rasterize at native
+/// resolution on HiDPI (Retina) displays.
+const FONT_POINT_LOGICAL: f32 = 13.0;
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
 
@@ -145,7 +154,11 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(view: &NSView) -> Result<Self, String> {
+    /// Build a renderer.  `scale` is the display's backing scale factor
+    /// (1.0 on standard displays, 2.0 on Retina, 3.0 on some external 4K).
+    /// All geometry below is computed in **physical pixels** so glyphs
+    /// rasterize at native resolution.
+    pub fn new(view: &NSView, scale: f32) -> Result<Self, String> {
         let device = unsafe { Retained::from_raw(MTLCreateSystemDefaultDevice()) }
             .ok_or("no Metal device available")?;
         let queue = device
@@ -156,12 +169,18 @@ impl Renderer {
         unsafe {
             layer.setDevice(Some(&device));
             layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            // contentsScale tells CA the layer's intrinsic resolution so
+            // the compositor doesn't try to magnify it again on top of
+            // our already-physical-pixel drawable.
+            layer.setContentsScale(scale as f64);
         }
         view.setWantsLayer(true);
         unsafe { view.setLayer(Some(&**layer)) };
 
-        // Atlas with all printable ASCII pre-rasterized.
-        let mut atlas = GlyphAtlas::new(FONT_NAME, FONT_POINT, ATLAS_SIZE);
+        // Rasterize at physical pixel resolution: 13pt × 2 = 26pt on Retina.
+        let effective_pt = FONT_POINT_LOGICAL * scale;
+        let atlas_size = ((ATLAS_SIZE_LOGICAL as f32) * scale) as u32;
+        let mut atlas = GlyphAtlas::new(FONT_NAME, effective_pt, atlas_size);
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 atlas.ensure(ch);
@@ -196,6 +215,13 @@ impl Renderer {
         // Seed the terminal with hardcoded content so the user sees real
         // engine output without yet wiring a PTY.
         let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+        let banner = format!(
+            "mars v{} ({})\r\n",
+            env!("CARGO_PKG_VERSION"),
+            env!("MARS_GIT_SHA")
+        );
+        terminal.feed(banner.as_bytes());
+        terminal.feed(b"\r\n");
         terminal.feed(b"hello mars\r\n");
         terminal.feed(b"the engine is alive\r\n");
         terminal.feed(b"\r\n");
