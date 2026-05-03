@@ -76,6 +76,40 @@ done
 echo "==> headless render"
 "$ROOT/target/release/mars" --bench render:1000 > "$CUR_DIR/render.json"
 
+# ---- binary size + idle memory ----------------------------------------
+# Cheap (sub-second) so we can include them in the fast gate.  Catches
+# regressions like accidental dep bloat or per-session memory growth.
+echo "==> binary sizes"
+for bin in mars mcli; do
+  if [[ -x "$ROOT/target/release/$bin" ]]; then
+    stat -f%z "$ROOT/target/release/$bin" > "$CUR_DIR/size-$bin.txt"
+    printf "    %-6s %s bytes\n" "$bin" "$(cat "$CUR_DIR/size-$bin.txt")"
+  fi
+done
+
+echo "==> idle memory (3 trials each, taking median)"
+for bin in mars mcli; do
+  if [[ ! -x "$ROOT/target/release/$bin" ]]; then continue; fi
+  : > "$CUR_DIR/rss-$bin.samples"
+  for trial in 1 2 3; do
+    pkill -x "$bin" 2>/dev/null || true
+    sleep 0.2
+    "$ROOT/target/release/$bin" >/dev/null 2>&1 &
+    pid=$!
+    disown 2>/dev/null || true
+    sleep 1.5  # let the binary settle past startup allocs
+    rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    sleep 0.1
+    [[ -n "$rss" ]] && echo "$rss" >> "$CUR_DIR/rss-$bin.samples"
+  done
+  if [[ -s "$CUR_DIR/rss-$bin.samples" ]]; then
+    printf "    %-6s %s KiB\n" "$bin" \
+      "$(python3 -c "import sys; xs=sorted(int(x) for x in open('$CUR_DIR/rss-$bin.samples')); print(xs[len(xs)//2])")"
+  fi
+done
+
 if [[ $MODE == "full" ]]; then
   echo "==> live PTY (this takes a minute)"
   pkill -x mars 2>/dev/null || true
@@ -154,6 +188,29 @@ if render is not None:
     p99_us = render["p99_ns"] / 1000
     check("render p99 (µs)", p99_us, baseline["render_full_repaint"]["p99_us_max"], lower_better=True)
 
+# Binary size: lower-better, ceiling = baseline value
+for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
+    if bin_name.startswith("_"):
+        continue
+    p = os.path.join(cur_dir, f"size-{bin_name}.txt")
+    if not os.path.exists(p):
+        continue
+    bytes_now = int(open(p).read().strip())
+    check(f"size {bin_name:6} (bytes)", bytes_now, ceiling, lower_better=True)
+
+# Idle memory (KiB): lower-better
+for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
+    if bin_name.startswith("_"):
+        continue
+    p = os.path.join(cur_dir, f"rss-{bin_name}.samples")
+    if not os.path.exists(p):
+        continue
+    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
+    if not samples:
+        continue
+    median = samples[len(samples) // 2]
+    check(f"rss  {bin_name:6} (KiB)", median, ceiling, lower_better=True)
+
 # Print
 print()
 header = f"{'metric':<24} {'current':>10} {'floor':>10}   {'verdict'}"
@@ -198,6 +255,24 @@ if do_update:
                     entry["mars_vs_best_other_min"] = round(cl / best_other * 0.90, 2)
     if render is not None:
         baseline["render_full_repaint"]["p99_us_max"] = round(render["p99_ns"] / 1000 * 1.10)
+    # Size: 10 % ceiling above current.
+    if "binary_size_bytes_max" in baseline:
+        for bin_name in list(baseline["binary_size_bytes_max"].keys()):
+            if bin_name.startswith("_"): continue
+            p = os.path.join(cur_dir, f"size-{bin_name}.txt")
+            if os.path.exists(p):
+                cur = int(open(p).read().strip())
+                baseline["binary_size_bytes_max"][bin_name] = round(cur * 1.10)
+    # Memory: 20 % ceiling above current (more variance than size).
+    if "memory_idle_kb_max" in baseline:
+        for bin_name in list(baseline["memory_idle_kb_max"].keys()):
+            if bin_name.startswith("_"): continue
+            p = os.path.join(cur_dir, f"rss-{bin_name}.samples")
+            if os.path.exists(p):
+                samples = sorted(int(x) for x in open(p).read().split() if x.strip())
+                if samples:
+                    median = samples[len(samples) // 2]
+                    baseline["memory_idle_kb_max"][bin_name] = round(median * 1.20)
     json.dump(baseline, open(baseline_path, "w"), indent=2)
     print("==> wrote", baseline_path)
 

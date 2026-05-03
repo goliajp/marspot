@@ -47,6 +47,16 @@
   "render_full_repaint": {
     "p99_us_max": 1500
   },
+  "binary_size_bytes_max": {
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current.",
+    "mars": 800000,
+    "mcli": 660000
+  },
+  "memory_idle_kb_max": {
+    "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Includes per-session scrollback ring pre-allocations (~19 MiB each at 10 000-line capacity) — a known architectural cost flagged in docs/perf.md.  20 % headroom over current.",
+    "mars": 280000,
+    "mcli": 160000
+  },
   "competitors_snapshot": {
     "_comment": "Last cross-terminal observation, used to compute mars_vs_best_other.  Refresh by running bin/measure-other.sh and updating these.",
     "captured_at": "2026-05-03",
