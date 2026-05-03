@@ -22,18 +22,30 @@ source "$ROOT/bin/_lib.sh"
 cmd=${1:-}
 shift || true
 
+# Common: build the requested binary if missing.
+ensure_build() {
+  local bin=$1
+  if [[ ! -x "$ROOT/target/release/$bin" ]]; then
+    ( cd "$ROOT" && cargo build --release --bin "$bin" 2>&1 | tail -3 ) >&2
+  fi
+}
+
 case "$cmd" in
-  run-shell)
+  run-shell|run-shell-mcli)
+    # run-shell      → launch mars (multi-session, 3×3)
+    # run-shell-mcli → launch mcli (single-session) — used by scenarios
+    #                  that need exactly one session, since mars auto-
+    #                  spawns 9 and applies MARS_SHELL to every one.
+    bin=mars
+    [[ "$cmd" == "run-shell-mcli" ]] && bin=mcli
     shell_script=${1:-}
     shift || true
     if [[ -z "$shell_script" || ! -x "$shell_script" ]]; then
       echo "mars.sh: shell script missing or not executable: $shell_script" >&2
       exit 2
     fi
-    if [[ ! -x "$ROOT/target/release/mars" ]]; then
-      ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 ) >&2
-    fi
-    kill_app mars || true
+    ensure_build "$bin"
+    kill_app "$bin" || true
     # Forward profiling env-vars so per-trial counters can be captured.
     env_pass=""
     for v in MARS_PROFILE MARS_LATENCY MARS_SCALE MARS_TMUX_DEBUG; do
@@ -42,13 +54,14 @@ case "$cmd" in
     # nohup + redirect so the bench harness isn't tied to mars's output;
     # its result is reported through the marker file.
     (cd "$ROOT" && env $env_pass MARS_SHELL="$shell_script" \
-      nohup target/release/mars "$@" > /dev/null 2>&1 < /dev/null &) || true
+      nohup "target/release/$bin" "$@" > /dev/null 2>&1 < /dev/null &) || true
     disown 2>/dev/null || true
     # Don't `wait` — mars exits when all sessions exit, scenario script polls marker.
     ;;
   *)
     echo "mars.sh: unknown sub-command: ${cmd:-(none)}" >&2
-    echo "  usage: mars.sh run-shell <shell-script-path> [extra-args...]" >&2
+    echo "  usage: mars.sh run-shell      <script>  # multi-session (3×3 grid)" >&2
+    echo "         mars.sh run-shell-mcli <script>  # single-session (mcli)" >&2
     exit 2
     ;;
 esac
