@@ -10,7 +10,7 @@
 //! for pixel — same font hinting, same antialiasing, same gamma path
 //! Apple uses everywhere else.
 
-use crate::grid::{CellAttrs, Color, Grid};
+use crate::grid::{Cell, CellAttrs, Color, Grid};
 use core_foundation::base::{CFRange, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::base::{
@@ -130,6 +130,10 @@ pub struct Renderer {
     viewport_w: f64,
     viewport_h: f64,
     scale: f64,
+    /// Lines of scrollback to show above the live grid.  0 = live view
+    /// (current grid only).  Bumped by mouse-wheel events; reset to 0
+    /// on keyboard input.
+    view_offset: u16,
 }
 
 /// Holds the base font plus any fallback fonts discovered at runtime, with
@@ -233,7 +237,43 @@ impl Renderer {
             viewport_w: 0.0,
             viewport_h: 0.0,
             scale: scale as f64,
+            view_offset: 0,
         })
+    }
+
+    pub fn view_offset(&self) -> u16 {
+        self.view_offset
+    }
+
+    /// Clamp + set the scrollback view offset.  `max` is typically the
+    /// number of lines available in scrollback (so the user can scroll
+    /// up at most `max` lines past the live grid).
+    pub fn set_view_offset(&mut self, offset: u16, max: u16) {
+        self.view_offset = offset.min(max);
+    }
+
+    /// Returns the cell to render at the given viewport position,
+    /// honouring `view_offset`.  Pulls from `grid` for live rows and
+    /// from `grid.scrollback_line(_)` for scrolled-up rows.  Returns a
+    /// blank cell for positions past the oldest scrollback line.
+    fn cell_at_viewport(&self, col: u16, viewport_row: u16, grid: &Grid) -> Cell {
+        let rows = grid.rows() as usize;
+        let abs = self.view_offset as usize + (rows - 1 - viewport_row as usize);
+        if abs < rows {
+            grid.cell(col, (rows - 1 - abs) as u16)
+        } else {
+            let from_end = abs - rows;
+            let sb_len = grid.scrollback_len();
+            if from_end < sb_len {
+                let sb_idx = sb_len - 1 - from_end;
+                if let Some(line) = grid.scrollback_line(sb_idx) {
+                    if (col as usize) < line.len() {
+                        return line[col as usize];
+                    }
+                }
+            }
+            Cell::default()
+        }
     }
 
     /// Resolve a character to (font_idx, glyph).  The base font is tried
@@ -370,14 +410,14 @@ impl Renderer {
             let row_bottom_y = height as f64 - (r as f64 + 1.0) * self.cell_h;
             let mut c = 0usize;
             while c < cols {
-                let bg = resolve_attrs(grid.cell(c as u16, r).attrs).1;
+                let bg = resolve_attrs(self.cell_at_viewport(c as u16, r, grid).attrs).1;
                 if bg == BG {
                     c += 1;
                     continue;
                 }
                 let start = c;
                 c += 1;
-                while c < cols && resolve_attrs(grid.cell(c as u16, r).attrs).1 == bg {
+                while c < cols && resolve_attrs(self.cell_at_viewport(c as u16, r, grid).attrs).1 == bg {
                     c += 1;
                 }
                 ctx.set_rgb_fill_color(bg.0, bg.1, bg.2, 1.0);
@@ -394,7 +434,7 @@ impl Renderer {
             let baseline_y = height as f64 - (r as f64 * self.cell_h + self.ascent);
             let mut i = 0usize;
             while i < cols {
-                let cell = grid.cell(i as u16, r);
+                let cell = self.cell_at_viewport(i as u16, r, grid);
                 if cell.ch == ' ' || cell.ch == '\0' {
                     i += 1;
                     continue;
@@ -407,7 +447,7 @@ impl Renderer {
                 run_positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
                 i += 1;
                 while i < cols {
-                    let cur = grid.cell(i as u16, r);
+                    let cur = self.cell_at_viewport(i as u16, r, grid);
                     if cur.ch == ' ' || cur.ch == '\0' {
                         break;
                     }
@@ -425,7 +465,12 @@ impl Renderer {
             }
         }
 
-        self.draw_cursor(&ctx, height, grid);
+        // Cursor only makes sense in live view.  When the user is
+        // scrolled up looking at history, hide it — drawing it on a
+        // historical line would be misleading.
+        if self.view_offset == 0 {
+            self.draw_cursor(&ctx, height, grid);
+        }
 
         ctx
     }

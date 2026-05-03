@@ -13,7 +13,7 @@ use objc2_foundation::MainThreadMarker;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, Modifiers, WindowEvent};
+use winit::event::{ElementState, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -213,7 +213,52 @@ impl ApplicationHandler<MarsEvent> for Mars {
                     if self.record_latency && self.pending_keystroke_t0.is_none() {
                         self.pending_keystroke_t0 = Some(std::time::Instant::now());
                     }
+                    // Typing always snaps view back to live — the user
+                    // isn't going to want to send keys while looking at
+                    // historical output.
+                    if let Some(r) = self.renderer.as_mut() {
+                        if r.view_offset() != 0 {
+                            r.set_view_offset(0, 0);
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    }
                     let _ = self.pty.write(&bytes);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Convert delta to lines.  macOS trackpads emit
+                // PixelDelta in logical pixels (we divide by cell_h).
+                // External wheels emit LineDelta where 1.0 ≈ one notch.
+                let cell_h = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.cell_dims().1)
+                    .unwrap_or(15.0);
+                // winit on macOS reports negative y for scroll-up
+                // gestures (the user moves the wheel up / swipes up,
+                // expecting older content to come into view).  Negate
+                // so positive lines_f means "scroll up to see older".
+                let lines_f = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -(y as f64) * 3.0,
+                    MouseScrollDelta::PixelDelta(p) => -p.y / cell_h,
+                };
+                if lines_f.abs() < 0.5 {
+                    return;
+                }
+                let max = self.terminal.grid().scrollback_len() as i32;
+                let cur = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.view_offset() as i32)
+                    .unwrap_or(0);
+                let new = (cur + lines_f as i32).clamp(0, max) as u16;
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_view_offset(new, max as u16);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
