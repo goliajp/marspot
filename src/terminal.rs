@@ -36,6 +36,10 @@ impl Terminal {
         &self.grid
     }
 
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.grid.resize(cols, rows);
+    }
+
     pub fn current_attrs(&self) -> CellAttrs {
         self.attrs
     }

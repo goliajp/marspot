@@ -100,6 +100,13 @@ impl Renderer {
         self.viewport_h = height_px;
     }
 
+    /// Cell dimensions in physical pixels — the unit the renderer uses
+    /// internally.  Callers (e.g. the resize path) divide the viewport by
+    /// these to get the grid dimensions that fit.
+    pub fn cell_dims(&self) -> (f64, f64) {
+        (self.cell_w, self.cell_h)
+    }
+
     pub fn render(&mut self, grid: &Grid) {
         if self.layer.is_none() {
             return;

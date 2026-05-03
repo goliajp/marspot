@@ -145,6 +145,41 @@ impl Grid {
     pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity }
     pub fn scrollback_line(&self, idx: usize) -> Option<&[Cell]> { self.scrollback.line(idx) }
     pub fn clear_scrollback(&mut self) { self.scrollback.clear(); }
+
+    /// Resize the visible grid. Cells in the overlap region are preserved
+    /// (top-left anchored); new area is filled with default cells; rows or
+    /// columns that fall outside the new size are dropped.  Cursor clamps
+    /// into bounds.  Scrollback is reset because its rows are stored at the
+    /// old column width — proper reflow is a later refinement.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
+        let new_total = cols as usize * rows as usize;
+        let mut new_cells = vec![Cell::default(); new_total];
+        let copy_rows = self.rows.min(rows) as usize;
+        let copy_cols = self.cols.min(cols) as usize;
+        let old_cols = self.cols as usize;
+        let new_cols = cols as usize;
+        for r in 0..copy_rows {
+            let old_off = r * old_cols;
+            let new_off = r * new_cols;
+            new_cells[new_off..new_off + copy_cols]
+                .copy_from_slice(&self.cells[old_off..old_off + copy_cols]);
+        }
+        self.cells = new_cells;
+        self.cols = cols;
+        self.rows = rows;
+        if self.cursor_col >= cols {
+            self.cursor_col = cols - 1;
+        }
+        if self.cursor_row >= rows {
+            self.cursor_row = rows - 1;
+        }
+        let cap = self.scrollback.capacity;
+        self.scrollback = ScrollbackRing::new(cap, cols as usize);
+    }
 }
 
 /// Bounded ring of scrolled-off lines.  Memory is allocated once at

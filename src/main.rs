@@ -130,14 +130,26 @@ impl ApplicationHandler<MarsEvent> for Mars {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                let scale = MainThreadMarker::new()
-                    .and_then(NSScreen::mainScreen)
-                    .map(|s| s.backingScaleFactor() as f64)
-                    .unwrap_or(1.0);
-                let phys_w = size.width as f64 * scale;
-                let phys_h = size.height as f64 * scale;
+                // winit's PhysicalSize on macOS is already physical pixels —
+                // do NOT multiply by backingScaleFactor again (that would
+                // double-scale on Retina; on the user's 1x display the
+                // previous code happened to work because scale=1).
+                let phys_w = size.width as f64;
+                let phys_h = size.height as f64;
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(phys_w, phys_h);
+                    let (cell_w, cell_h) = r.cell_dims();
+                    let cols = ((phys_w / cell_w).floor() as u16).max(1);
+                    let rows = ((phys_h / cell_h).floor() as u16).max(1);
+                    if (cols, rows) != (self.terminal.grid().cols(), self.terminal.grid().rows()) {
+                        self.terminal.resize(cols, rows);
+                        let _ = self.pty.resize(TerminalSize {
+                            cols,
+                            rows,
+                            pixel_width: phys_w as u16,
+                            pixel_height: phys_h as u16,
+                        });
+                    }
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
