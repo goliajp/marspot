@@ -11,7 +11,8 @@
 //! Apple uses everywhere else.
 
 use crate::grid::{CellAttrs, Color, Grid};
-use core_foundation::base::TCFType;
+use core_foundation::base::{CFRange, TCFType};
+use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::base::{
     kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat,
 };
@@ -19,7 +20,7 @@ use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::{CGContext, CGTextDrawingMode};
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
-use core_text::font::{new_from_name, CTFont};
+use core_text::font::{new_from_name, CTFont, CTFontRef};
 use core_text::font_descriptor::kCTFontOrientationDefault;
 use foreign_types::ForeignType;
 use objc2::rc::Retained;
@@ -27,6 +28,20 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSImage, NSView};
 use objc2_foundation::NSSize;
 use objc2_quartz_core::CALayer;
+use std::collections::HashMap;
+
+/// CoreText's per-string font fallback resolver: given a base font and a
+/// CFString, returns a font that can render the characters in `range`.
+/// The core-text crate doesn't expose this binding so we declare it
+/// directly — falls under CLAUDE.md's "necessary FFI bindings, kept".
+#[link(name = "CoreText", kind = "framework")]
+extern "C" {
+    fn CTFontCreateForString(
+        currentFont: CTFontRef,
+        string: CFStringRef,
+        range: CFRange,
+    ) -> CTFontRef;
+}
 
 const FONT_NAME: &str = "Menlo";
 const FONT_POINT: f64 = 13.0;
@@ -101,13 +116,54 @@ pub struct Renderer {
     /// When attached to an NSView, we update its CALayer's `contents` on
     /// each render with a fresh CGImage.  In headless mode this is None.
     layer: Option<Retained<CALayer>>,
-    font: CTFont,
+    /// `fonts.fonts[0]` is the base font; subsequent indices are fallback
+    /// fonts discovered lazily via `CTFontCreateForString` for codepoints
+    /// the base font lacks.
+    fonts: FontRegistry,
+    /// Per-codepoint resolution: which font (by index into `fonts`) and
+    /// glyph id can render this codepoint.  Filled lazily; entries are
+    /// stable for the renderer's lifetime.
+    char_cache: HashMap<u32, (usize, CGGlyph)>,
     cell_w: f64,
     cell_h: f64,
     ascent: f64,
     viewport_w: f64,
     viewport_h: f64,
     scale: f64,
+}
+
+/// Holds the base font plus any fallback fonts discovered at runtime, with
+/// a postscript-name → index map so we can dedup fallbacks (CoreText hands
+/// us a fresh `CTFontRef` each lookup even when the underlying font is the
+/// same one).
+struct FontRegistry {
+    fonts: Vec<CTFont>,
+    by_name: HashMap<String, usize>,
+}
+
+impl FontRegistry {
+    fn new(base: CTFont) -> Self {
+        let name = base.postscript_name();
+        let mut by_name = HashMap::new();
+        by_name.insert(name, 0);
+        Self {
+            fonts: vec![base],
+            by_name,
+        }
+    }
+
+    /// Insert a font if its postscript name isn't already known; in either
+    /// case returns the index of the canonical instance.
+    fn intern(&mut self, font: CTFont) -> usize {
+        let name = font.postscript_name();
+        if let Some(&idx) = self.by_name.get(&name) {
+            return idx;
+        }
+        let idx = self.fonts.len();
+        self.by_name.insert(name, idx);
+        self.fonts.push(font);
+        idx
+    }
 }
 
 impl Renderer {
@@ -145,7 +201,8 @@ impl Renderer {
 
         Ok(Self {
             layer,
-            font,
+            fonts: FontRegistry::new(font),
+            char_cache: HashMap::new(),
             cell_w,
             cell_h,
             ascent,
@@ -153,6 +210,28 @@ impl Renderer {
             viewport_h: 0.0,
             scale: scale as f64,
         })
+    }
+
+    /// Resolve a character to (font_idx, glyph).  The base font is tried
+    /// first; on .notdef we ask CoreText for a per-string fallback and
+    /// intern the result.  Cached by codepoint.
+    fn resolve_char(&mut self, ch: char) -> (usize, CGGlyph) {
+        let cp = ch as u32;
+        if let Some(&entry) = self.char_cache.get(&cp) {
+            return entry;
+        }
+        let base = self.fonts.fonts[0].clone();
+        let glyph = lookup_glyph(&base, ch);
+        let entry = if glyph != 0 {
+            (0, glyph)
+        } else {
+            let fallback = create_fallback_font(&base, ch);
+            let fb_glyph = lookup_glyph(&fallback, ch);
+            let idx = self.fonts.intern(fallback);
+            (idx, fb_glyph)
+        };
+        self.char_cache.insert(cp, entry);
+        entry
     }
 
     pub fn resize(&mut self, width_px: f64, height_px: f64) {
@@ -212,7 +291,7 @@ impl Renderer {
     /// CGBitmapContext at `width × height` physical pixels.  The caller
     /// can either turn the context into a CGImage (for live layer
     /// contents) or read its bytes directly (for snapshot/PNG).
-    fn draw_frame(&self, width: u32, height: u32, grid: &Grid) -> CGContext {
+    fn draw_frame(&mut self, width: u32, height: u32, grid: &Grid) -> CGContext {
         let space = CGColorSpace::create_device_rgb();
         let row_bytes = width as usize * 4;
         // Bitmap info: RGBA in memory order (alpha last + big-endian
@@ -256,31 +335,12 @@ impl Renderer {
         ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
 
         let cols = grid.cols() as usize;
-        let mut chars: Vec<u16> = Vec::with_capacity(cols);
-        let mut glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
         // Reusable per-run scratch buffers for batched draw_glyphs calls.
         let mut run_glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
         let mut run_positions: Vec<CGPoint> = Vec::with_capacity(cols);
 
         for r in 0..grid.rows() {
-            // 1) Resolve chars → glyph IDs once per row (one CoreText call).
-            chars.clear();
-            for c in 0..grid.cols() {
-                let ch = grid.cell(c, r).ch;
-                let cp = ch as u32;
-                chars.push(if cp <= 0xFFFF { cp as u16 } else { b'?' as u16 });
-            }
-            glyphs.clear();
-            glyphs.resize(chars.len(), 0);
-            unsafe {
-                self.font.get_glyphs_for_characters(
-                    chars.as_ptr(),
-                    glyphs.as_mut_ptr(),
-                    chars.len() as core_foundation::base::CFIndex,
-                );
-            }
-
-            // 2) Background pass — fill runs of cells that share a non-default
+            // 1) Background pass — fill runs of cells that share a non-default
             //    background color.  Cells with the default BG inherit the
             //    frame fill we already laid down above.
             let row_bottom_y = height as f64 - (r as f64 + 1.0) * self.cell_h;
@@ -303,8 +363,10 @@ impl Renderer {
                 ));
             }
 
-            // 3) Foreground pass — group consecutive non-blank cells with the
-            //    same fg color and emit one draw_glyphs call per run.
+            // 2) Foreground pass — group consecutive non-blank cells that
+            //    share both font (base or fallback) and fg color, emit one
+            //    draw_glyphs call per run.  Font transitions break runs
+            //    because draw_glyphs is bound to a single CTFont.
             let baseline_y = height as f64 - (r as f64 * self.cell_h + self.ascent);
             let mut i = 0usize;
             while i < cols {
@@ -313,25 +375,29 @@ impl Renderer {
                     i += 1;
                     continue;
                 }
+                let (font_idx, glyph) = self.resolve_char(cell.ch);
                 let fg = resolve_attrs(cell.attrs).0;
                 run_glyphs.clear();
                 run_positions.clear();
+                run_glyphs.push(glyph);
+                run_positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
+                i += 1;
                 while i < cols {
                     let cur = grid.cell(i as u16, r);
                     if cur.ch == ' ' || cur.ch == '\0' {
                         break;
                     }
-                    if resolve_attrs(cur.attrs).0 != fg {
+                    let (cur_font, cur_glyph) = self.resolve_char(cur.ch);
+                    if cur_font != font_idx || resolve_attrs(cur.attrs).0 != fg {
                         break;
                     }
-                    run_glyphs.push(glyphs[i]);
+                    run_glyphs.push(cur_glyph);
                     run_positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
                     i += 1;
                 }
-                if !run_glyphs.is_empty() {
-                    ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
-                    self.font.draw_glyphs(&run_glyphs, &run_positions, ctx.clone());
-                }
+                ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
+                let font = &self.fonts.fonts[font_idx];
+                font.draw_glyphs(&run_glyphs, &run_positions, ctx.clone());
             }
         }
 
@@ -344,7 +410,7 @@ impl Renderer {
     /// colour, then re-draw that cell's glyph in the background colour so
     /// the character under the cursor stays readable. Always rendered for
     /// now — focus-aware (hollow when unfocused) is a later refinement.
-    fn draw_cursor(&self, ctx: &CGContext, height: u32, grid: &Grid) {
+    fn draw_cursor(&mut self, ctx: &CGContext, height: u32, grid: &Grid) {
         let (col, row) = grid.cursor();
         let cx = col as f64 * self.cell_w;
         let cy_bottom = height as f64 - (row as f64 + 1.0) * self.cell_h;
@@ -360,23 +426,67 @@ impl Renderer {
         // when the cursor sits on a space (the common idle case).
         let cell = grid.cell(col, row);
         if cell.ch != ' ' && cell.ch != '\0' {
-            let cp = cell.ch as u32;
-            let ch16: u16 = if cp <= 0xFFFF { cp as u16 } else { b'?' as u16 };
-            let mut glyph: CGGlyph = 0;
-            unsafe {
-                self.font.get_glyphs_for_characters(&ch16, &mut glyph, 1);
-            }
+            let (font_idx, glyph) = self.resolve_char(cell.ch);
             if glyph != 0 {
                 ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
                 let baseline_y =
                     height as f64 - (row as f64 * self.cell_h + self.ascent);
-                self.font.draw_glyphs(
+                let font = &self.fonts.fonts[font_idx];
+                font.draw_glyphs(
                     &[glyph],
                     &[CGPoint::new(cx, baseline_y)],
                     ctx.clone(),
                 );
             }
         }
+    }
+}
+
+/// Look up the glyph id for `ch` in `font`.  Handles both BMP and non-BMP
+/// codepoints (the latter as a UTF-16 surrogate pair, where CoreText puts
+/// the actual glyph in the trailing slot).  Returns 0 if the font can't
+/// render this codepoint.
+fn lookup_glyph(font: &CTFont, ch: char) -> CGGlyph {
+    let cp = ch as u32;
+    if cp <= 0xFFFF {
+        let cu = cp as u16;
+        let mut g: CGGlyph = 0;
+        unsafe {
+            font.get_glyphs_for_characters(&cu, &mut g, 1);
+        }
+        g
+    } else {
+        let mut buf = [0u16; 2];
+        ch.encode_utf16(&mut buf);
+        let mut glyphs = [0 as CGGlyph; 2];
+        unsafe {
+            font.get_glyphs_for_characters(buf.as_ptr(), glyphs.as_mut_ptr(), 2);
+        }
+        // Apple's docs disagree across versions about whether surrogate
+        // pairs put the glyph at the lead or trail index — empirically
+        // pick whichever is non-zero so we don't render .notdef.
+        if glyphs[0] != 0 { glyphs[0] } else { glyphs[1] }
+    }
+}
+
+/// Ask CoreText for a font that can render `ch`, falling back to `base`
+/// itself if CT returns nothing.  CoreText walks the system fallback chain
+/// (Hiragino for Japanese, PingFang for Chinese, Apple Color Emoji, etc.).
+fn create_fallback_font(base: &CTFont, ch: char) -> CTFont {
+    let s = ch.to_string();
+    let cf = CFString::new(&s);
+    let len = ch.len_utf16() as isize;
+    let range = CFRange { location: 0, length: len };
+    unsafe {
+        let raw = CTFontCreateForString(
+            base.as_concrete_TypeRef(),
+            cf.as_concrete_TypeRef(),
+            range,
+        );
+        if raw.is_null() {
+            return base.clone();
+        }
+        CTFont::wrap_under_create_rule(raw)
     }
 }
 
