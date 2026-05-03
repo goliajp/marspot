@@ -9,6 +9,7 @@
 //! (mcli today, perhaps a headless ssh-host server tomorrow) consumes
 //! the same API.
 
+pub mod app;
 pub mod grid;
 pub mod input;
 pub mod layout;
