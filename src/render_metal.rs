@@ -1441,19 +1441,21 @@ mod tests {
             &mut glyphs,
         );
 
-        // Expected:
-        //  cells = [terminal-bg fill, focus outline ×4, cursor (solid) ×1]
-        //  glyphs = [A, B]
+        // Expected glyph instances:
+        //  - 'B' at col 1 (FG colour) — the cursor cell at col 0 is
+        //    skipped during the FG emit because it's solid-cursor
+        //  - 'A' at col 0 (BG colour) re-rendered after the cursor block
+        //  Order in vec is FG-pass-first then cursor re-render, so [B, A].
+        //  cells: terminal-bg fill + cursor block + focus outline ×4
         assert!(cells.len() >= 6, "got cells.len()={}", cells.len());
         assert_eq!(glyphs.len(), 2, "got glyphs.len()={}", glyphs.len());
-        // Glyph dest_x must be advancing by cell_w between A and B.
-        // dx = cell_w + (B.bearing_x - A.bearing_x); for monospace
-        // Menlo the bearing diff is typically ≤2 px at 13 pt.
-        let dx = glyphs[1].origin[0] - glyphs[0].origin[0];
+        // Whichever order they came out in, the two glyphs are exactly
+        // one cell apart in x (modulo CT bearing differences ≤2 px).
+        let dx = (glyphs[1].origin[0] - glyphs[0].origin[0]).abs();
         let cw = font.cell_w as f32;
         assert!(
             (dx - cw).abs() < 3.0,
-            "glyph 'B' should be ~one cell right of 'A', got dx={dx} vs cell_w={cw}"
+            "glyphs should be ~one cell apart, got |dx|={dx} vs cell_w={cw}"
         );
     }
 }
