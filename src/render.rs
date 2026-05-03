@@ -25,9 +25,9 @@ use core_text::font_descriptor::kCTFontOrientationDefault;
 use foreign_types::ForeignType;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSImage, NSView};
+use objc2_app_kit::{NSColor, NSImage, NSView};
 use objc2_foundation::NSSize;
-use objc2_quartz_core::CALayer;
+use objc2_quartz_core::{kCAGravityTopLeft, CALayer};
 use std::collections::HashMap;
 
 /// CoreText's per-string font fallback resolver: given a base font and a
@@ -193,7 +193,31 @@ impl Renderer {
                 view.layer()
                     .ok_or("layer not available on view".to_string())?
             };
-            unsafe { layer.setContentsScale(scale as f64) };
+            unsafe {
+                layer.setContentsScale(scale as f64);
+                // Default contentsGravity is `resize` — during a live
+                // resize the previous frame's CGImage gets stretched to
+                // the new layer bounds before our redraw lands, which
+                // looks like the BG flickering / changing colour.  Pin
+                // the existing image to the top-left and let the BG show
+                // through the gap until the next frame is ready.
+                layer.setContentsGravity(kCAGravityTopLeft);
+                // The terminal is fully opaque; tell CA so it can skip
+                // compositing anything underneath.
+                layer.setOpaque(true);
+            }
+            // Make the NSWindow's background match the terminal BG so
+            // the gap that briefly shows during live resize (before our
+            // newly-sized CGImage arrives on the layer) is the same
+            // colour as the terminal — visually no flicker.
+            unsafe {
+                if let Some(window) = view.window() {
+                    let bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+                        BG.0, BG.1, BG.2, 1.0,
+                    );
+                    window.setBackgroundColor(Some(&bg));
+                }
+            }
             Some(layer)
         } else {
             None

@@ -150,9 +150,11 @@ impl ApplicationHandler<MarsEvent> for Mars {
                             pixel_height: phys_h as u16,
                         });
                     }
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                    // Render synchronously here so the next CA commit lands
+                    // a CGImage at the new size; deferring via request_redraw
+                    // leaves a one-frame gap during live resize where the
+                    // layer shows stale-or-stretched contents.
+                    r.render(self.terminal.grid());
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
