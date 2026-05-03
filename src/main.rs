@@ -60,14 +60,35 @@ struct TmuxState {
     /// Window list as we've seen it from %window-add / %window-renamed.
     /// Order is insertion-order; sidebar renders in this order.
     windows: Vec<TmuxWindow>,
-    /// tmux command serial number; pre-increment before send.
-    next_cmd: u32,
+    /// Currently-active window id (last %window-pane-changed / explicit
+    /// select-window we sent).  None until tmux first tells us.
+    active_window: Option<u32>,
+    /// What we last asked tmux to do.  Used to route the next
+    /// `%end` block back to the right parser.  `None` when no
+    /// command is in flight.
+    pending: Option<PendingCommand>,
+    /// True until we've issued the initial `list-windows` query.
+    needs_initial_query: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingCommand {
+    ListWindows,
+    /// `select-window` etc. — fire-and-forget, no response parsing.
+    FireAndForget,
 }
 
 #[derive(Clone, Debug)]
 struct TmuxWindow {
     id: u32,
     name: String,
+    /// Wall-clock instant of the most recent `%output` we saw for any
+    /// pane in this window.  Drives the sidebar's per-window state
+    /// dot (Active vs Idle).
+    last_output: Option<std::time::Instant>,
+    /// Set once we see `%window-close` for this id.  Kept in the list
+    /// briefly so the sidebar can render Exited; pruned afterwards.
+    closed: bool,
 }
 
 impl TmuxState {
@@ -75,7 +96,9 @@ impl TmuxState {
         Self {
             parser: tmux::Parser::new(),
             windows: Vec::new(),
-            next_cmd: 1,
+            active_window: None,
+            pending: None,
+            needs_initial_query: true,
         }
     }
 }
@@ -317,9 +340,36 @@ impl ApplicationHandler<MarsEvent> for Mars {
                             .and_then(NSScreen::mainScreen)
                             .map(|s| s.backingScaleFactor() as f64)
                             .unwrap_or(1.0);
-                        // Sidebar row constants in physical pixels.
                         let row_phys = SIDEBAR_ROW_PT * scale;
                         let top_pad_phys = SIDEBAR_TOP_PAD_PT * scale;
+
+                        // In tmux mode, sidebar rows map to tmux windows;
+                        // a click sends `select-window` to tmux instead
+                        // of changing mars's focused_idx.
+                        if self.tmux.is_some() {
+                            let n_windows = self.tmux.as_ref().unwrap().windows.len();
+                            if let Some(row) = layout.hit_test_sidebar_row(
+                                px,
+                                py,
+                                top_pad_phys,
+                                row_phys,
+                                n_windows,
+                            ) {
+                                let target =
+                                    self.tmux.as_ref().unwrap().windows.get(row).map(|w| w.id);
+                                if let Some(id) = target {
+                                    self.tmux_select_window(id);
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                }
+                                return;
+                            }
+                            // Fall through: clicks on the (single) cell
+                            // do nothing in tmux mode.
+                            return;
+                        }
+
                         let new_focus = layout
                             .hit_test_sidebar_row(
                                 px,
@@ -398,47 +448,186 @@ impl Mars {
         if raw.is_empty() {
             return 0;
         }
-        let tmux = self.tmux.as_mut().unwrap();
-        let events = tmux.parser.feed(&raw);
+        let events = self.tmux.as_mut().unwrap().parser.feed(&raw);
         let mut bytes_fed = 0;
+        let mut got_signal_from_tmux = false;
         for ev in events {
+            got_signal_from_tmux = true;
+            if std::env::var("MARS_TMUX_DEBUG").is_ok() {
+                eprintln!("[tmux] {:?}", ev);
+            }
             match ev {
                 tmux::Event::Output { bytes, .. } => {
                     bytes_fed += bytes.len();
+                    // Mark the active window as recently-active so its
+                    // sidebar dot turns green.  Only the attached
+                    // client's window streams output in -CC mode, so
+                    // tagging the active one is the right call.
+                    let now = std::time::Instant::now();
+                    let tmux = self.tmux.as_mut().unwrap();
+                    if let Some(active) = tmux.active_window {
+                        if let Some(w) = tmux.windows.iter_mut().find(|w| w.id == active) {
+                            w.last_output = Some(now);
+                        }
+                    }
                     self.sessions[0].feed_terminal(&bytes);
                 }
                 tmux::Event::WindowAdd { window_id } => {
+                    let tmux = self.tmux.as_mut().unwrap();
                     if !tmux.windows.iter().any(|w| w.id == window_id) {
                         tmux.windows.push(TmuxWindow {
                             id: window_id,
                             name: format!("@{}", window_id),
+                            last_output: None,
+                            closed: false,
                         });
                     }
+                    // A new window appeared — refresh the list to pick
+                    // up its name (tmux doesn't always send a separate
+                    // %window-renamed for the default name).
+                    self.queue_list_windows();
                 }
                 tmux::Event::WindowClose { window_id } => {
-                    tmux.windows.retain(|w| w.id != window_id);
+                    let tmux = self.tmux.as_mut().unwrap();
+                    if let Some(w) = tmux.windows.iter_mut().find(|w| w.id == window_id) {
+                        w.closed = true;
+                    }
                 }
                 tmux::Event::WindowRenamed { window_id, name } => {
+                    let tmux = self.tmux.as_mut().unwrap();
                     if let Some(w) = tmux.windows.iter_mut().find(|w| w.id == window_id) {
                         w.name = name;
                     } else {
                         tmux.windows.push(TmuxWindow {
                             id: window_id,
                             name,
+                            last_output: None,
+                            closed: false,
                         });
                     }
                 }
+                tmux::Event::WindowPaneChanged { window_id, .. } => {
+                    self.tmux.as_mut().unwrap().active_window = Some(window_id);
+                }
+                tmux::Event::SessionsChanged => {
+                    // Window list might have changed in a way we can't
+                    // infer from per-window events alone — re-query.
+                    self.queue_list_windows();
+                }
+                tmux::Event::End { output, .. } => {
+                    // Always try to interpret %end blocks as window-list
+                    // format.  tmux's attach handshake unsolicitedly
+                    // emits such a block, and we want it as much as we
+                    // want our own list-windows response.  Parsing is
+                    // tolerant: if output isn't `@<id> <name>\n` lines,
+                    // ingest leaves the windows list alone.
+                    let tmux = self.tmux.as_mut().unwrap();
+                    Self::ingest_list_windows_response(tmux, &output);
+                    tmux.pending = None;
+                }
+                tmux::Event::CommandError { .. } => {
+                    // tmux rejected our command (probably timing —
+                    // we sent before tmux finished initialising).
+                    // Just clear pending; queue_list_windows will
+                    // retry when a future event prompts us.
+                    self.tmux.as_mut().unwrap().pending = None;
+                }
                 tmux::Event::Exit { .. } => {
-                    // Tmux server exited; leave the window open so
-                    // the user can read whatever was on screen, and
-                    // let the all-sessions-exited path eventually
-                    // close mars (Session::is_exited will flip true
-                    // when the PTY EOFs).
+                    // Tmux server exited; let the all-sessions-exited
+                    // path close mars naturally.
                 }
                 _ => {}
             }
         }
+        // First time we hear from tmux at all — refresh the client so
+        // the current pane re-streams its visible content (tmux doesn't
+        // auto-redraw on attach), and request the window list in case
+        // the implicit handshake didn't already include it.
+        if got_signal_from_tmux {
+            let needs_init = self.tmux.as_mut().unwrap().needs_initial_query;
+            if needs_init {
+                self.tmux.as_mut().unwrap().needs_initial_query = false;
+                let _ = self.sessions[0].write(b"refresh-client\n");
+                self.queue_list_windows();
+            }
+        }
         bytes_fed
+    }
+
+    /// Send `list-windows -F "#{window_id} #{window_name}"` to tmux,
+    /// flagging that we're expecting a parseable response.  No-op if a
+    /// command is already in flight (we serialise — multiple in-flight
+    /// commands would need response routing we don't have).
+    fn queue_list_windows(&mut self) {
+        let tmux = match self.tmux.as_mut() {
+            Some(t) => t,
+            None => return,
+        };
+        if tmux.pending.is_some() {
+            return;
+        }
+        tmux.pending = Some(PendingCommand::ListWindows);
+        let _ = self.sessions[0].write(b"list-windows -F \"#{window_id} #{window_name}\"\n");
+    }
+
+    /// Send `select-window -t @<id>` for the user-clicked window.
+    /// Fire-and-forget: tmux will emit %window-pane-changed when the
+    /// switch lands, which updates `active_window` for us.
+    fn tmux_select_window(&mut self, window_id: u32) {
+        let tmux = match self.tmux.as_mut() {
+            Some(t) => t,
+            None => return,
+        };
+        // Don't queue if list-windows is in flight; select-window's
+        // own response can collide.  In practice they're cheap and
+        // serial; rare flap is acceptable for v1.
+        if tmux.pending.is_none() {
+            tmux.pending = Some(PendingCommand::FireAndForget);
+        }
+        let cmd = format!("select-window -t @{}\n", window_id);
+        let _ = self.sessions[0].write(cmd.as_bytes());
+    }
+
+    /// Parse the body of a list-windows %end block — one
+    /// `@<id> <name>` per line — and reconcile with `tmux.windows`.
+    /// Preserves `last_output` on existing windows; appends new ones;
+    /// drops entries that vanished from the new list.
+    fn ingest_list_windows_response(tmux: &mut TmuxState, output: &[u8]) {
+        let mut new_list: Vec<TmuxWindow> = Vec::new();
+        for line in output.split(|b| *b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let s = match std::str::from_utf8(line) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let s = s.trim();
+            if !s.starts_with('@') {
+                continue;
+            }
+            let mut iter = s[1..].splitn(2, ' ');
+            let id: u32 = match iter.next().and_then(|t| t.parse().ok()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let name = iter.next().unwrap_or("").to_string();
+            // Carry over last_output if we already had this window.
+            let last_output = tmux
+                .windows
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| w.last_output);
+            new_list.push(TmuxWindow {
+                id,
+                name,
+                last_output,
+                closed: false,
+            });
+        }
+        if !new_list.is_empty() {
+            tmux.windows = new_list;
+        }
     }
 
     /// Build a SessionView for each session and hand them all to the
@@ -453,24 +642,51 @@ impl Mars {
 
         // Sidebar source-of-truth depends on mode: in tmux mode, list
         // tmux windows; otherwise list sessions by ordinal number.
-        let labels: Vec<String> = if let Some(t) = &self.tmux {
+        const PER_WINDOW_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+        if let Some(t) = &self.tmux {
+            if std::env::var("MARS_TMUX_DEBUG").is_ok() {
+                eprintln!("[render] tmux.windows.len()={}", t.windows.len());
+            }
+        }
+        let (labels, states, sidebar_focus) = if let Some(t) = &self.tmux {
             if t.windows.is_empty() {
-                vec!["(no windows)".into()]
+                (
+                    vec!["(no windows)".to_string()],
+                    vec![SessionState::Idle],
+                    0usize,
+                )
             } else {
-                t.windows.iter().map(|w| w.name.clone()).collect()
+                let labels: Vec<String> = t.windows.iter().map(|w| w.name.clone()).collect();
+                let states: Vec<SessionState> = t
+                    .windows
+                    .iter()
+                    .map(|w| {
+                        if w.closed {
+                            SessionState::Exited
+                        } else {
+                            match w.last_output {
+                                Some(t) if t.elapsed() < PER_WINDOW_ACTIVE_WINDOW => {
+                                    SessionState::Active
+                                }
+                                _ => SessionState::Idle,
+                            }
+                        }
+                    })
+                    .collect();
+                let active = t.active_window;
+                let sidebar_focus = t
+                    .windows
+                    .iter()
+                    .position(|w| Some(w.id) == active)
+                    .unwrap_or(0);
+                (labels, states, sidebar_focus)
             }
         } else {
-            (1..=self.sessions.len()).map(|n| n.to_string()).collect()
-        };
-        let states: Vec<SessionState> = if self.tmux.is_some() {
-            // Tmux mode: each entry's state = the underlying session
-            // state (Active/Idle/Exited) — finer-grained per-window
-            // tracking will come with output-tagging in a follow-up.
-            std::iter::repeat(self.sessions[0].state())
-                .take(labels.len())
-                .collect()
-        } else {
-            self.sessions.iter().map(|s| s.state()).collect()
+            (
+                (1..=self.sessions.len()).map(|n| n.to_string()).collect(),
+                self.sessions.iter().map(|s| s.state()).collect(),
+                focused,
+            )
         };
 
         let views: Vec<SessionView> = self
@@ -494,7 +710,7 @@ impl Mars {
             .collect();
         let layout = self.layout.as_ref().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
-        renderer.render_layout(layout, &views, &entries, focused);
+        renderer.render_layout(layout, &views, &entries, sidebar_focus);
     }
 }
 
