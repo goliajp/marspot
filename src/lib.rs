@@ -18,6 +18,7 @@ pub mod font_cache;
 pub mod glyph_atlas;
 pub mod render;
 pub mod render_metal;
+pub mod scrollback;
 pub mod session;
 pub mod terminal;
 pub mod tmux;
