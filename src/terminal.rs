@@ -14,6 +14,22 @@
 
 use crate::grid::{char_width, Cell, CellAttrs, Color, Grid};
 use crate::parser::{Parser, ParserCallbacks};
+use std::collections::VecDeque;
+
+/// One outstanding local-echo prediction: a byte we expect the PTY
+/// to echo back, plus the grid state we need to restore if it
+/// mispredicts.
+#[derive(Debug)]
+struct Prediction {
+    /// Byte we wrote to the PTY and expect to come back as echo.
+    byte: u8,
+    /// Cell at the predicted column at the moment we predicted —
+    /// reinstated on rollback.
+    saved_cell: Cell,
+    /// Cursor before this prediction.  Rolling back N predictions
+    /// in reverse restores the original cursor exactly.
+    saved_cursor: (u16, u16),
+}
 
 pub struct Terminal {
     grid: Grid,
@@ -28,6 +44,16 @@ pub struct Terminal {
     attrs: CellAttrs,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
+    /// Local-echo predictions awaiting PTY confirmation.  Each matching
+    /// byte from `feed()` pops the front; the first mismatching byte
+    /// rolls back the whole queue (restores cells + cursor in reverse
+    /// order) and falls through to the parser.
+    predictions: VecDeque<Prediction>,
+    /// Diagnostics — predictions confirmed by an echo byte.
+    pub predictions_hit: u64,
+    /// Diagnostics — predictions rolled back on mismatch (or alt-screen
+    /// invalidation).
+    pub predictions_miss: u64,
 }
 
 struct SavedMain {
@@ -43,6 +69,9 @@ impl Terminal {
             parser: Parser::new(),
             attrs: CellAttrs::default(),
             cursor_visible: true,
+            predictions: VecDeque::new(),
+            predictions_hit: 0,
+            predictions_miss: 0,
         }
     }
 
@@ -71,19 +100,110 @@ impl Terminal {
         self.attrs
     }
 
-    /// Feed bytes from the PTY through the parser, applying their effects to
-    /// the grid.  Splits the &mut self borrow so the parser (which mutates
-    /// its own internal state) and the handler (which mutates the grid) can
-    /// both be live for each call to `Parser::advance`.
+    /// True iff local-echo prediction is currently safe.  Heuristic:
+    /// not in alt-screen mode (vim / less / htop don't echo keys
+    /// verbatim).  Future: also peek at termios `ICANON|ECHO` via
+    /// PTY ioctl when the bookkeeping cost is worth it.
+    pub fn can_predict(&self) -> bool {
+        self.saved_main.is_none()
+    }
+
+    /// Try to local-echo `byte`: if it's printable ASCII and we're
+    /// in cooked-echo territory, write it to the grid + advance the
+    /// cursor + queue a prediction so the matching PTY echo will be
+    /// silently consumed.  Returns true when the prediction was
+    /// applied (caller should request a redraw).
+    ///
+    /// We deliberately predict only `0x20..=0x7E`.  Other bytes have
+    /// shell-side side effects we can't model from the keystroke
+    /// alone: `\r` becomes `\r\n` under ONLCR, Tab triggers
+    /// completion, Ctrl-* delivers signals, etc.
+    pub fn predict_byte(&mut self, byte: u8) -> bool {
+        if !self.can_predict() {
+            return false;
+        }
+        if !(0x20..=0x7E).contains(&byte) {
+            return false;
+        }
+        let cols = self.grid.cols();
+        let (col, row) = self.grid.cursor();
+        // Decline at-or-past the right edge — the wrap rule depends
+        // on DECAWM and we don't track it precisely.
+        if col >= cols {
+            return false;
+        }
+        let saved_cell = self.grid.cell(col, row);
+        let saved_cursor = (col, row);
+        self.grid
+            .set_cell(col, row, Cell { ch: byte as char, attrs: self.attrs });
+        if col + 1 < cols {
+            self.grid.set_cursor(col + 1, row);
+        }
+        // Cap the queue so a runaway typing session can't grow it
+        // unbounded if echoes never come.  64 is generous — typical
+        // round-trip is one byte before the next key.
+        const MAX_PREDICTIONS: usize = 64;
+        if self.predictions.len() >= MAX_PREDICTIONS {
+            self.rollback_predictions();
+            return false;
+        }
+        self.predictions.push_back(Prediction {
+            byte,
+            saved_cell,
+            saved_cursor,
+        });
+        true
+    }
+
+    /// Reverse-pop every pending prediction, restoring its saved
+    /// cell + cursor.  After this, the grid is back to whatever it
+    /// looked like before the first un-confirmed prediction.
+    fn rollback_predictions(&mut self) {
+        while let Some(p) = self.predictions.pop_back() {
+            self.grid
+                .set_cell(p.saved_cursor.0, p.saved_cursor.1, p.saved_cell);
+            self.grid.set_cursor(p.saved_cursor.0, p.saved_cursor.1);
+            self.predictions_miss += 1;
+        }
+    }
+
+    /// Feed bytes from the PTY through the parser, applying their effects
+    /// to the grid.  Each byte is first checked against the front-of-queue
+    /// prediction: a match silently consumes both (the prediction already
+    /// painted the result), a mismatch rolls back the whole prediction
+    /// queue and feeds the byte normally through the parser.
     pub fn feed(&mut self, bytes: &[u8]) {
-        let parser = &mut self.parser;
-        let grid = &mut self.grid;
-        let saved_main = &mut self.saved_main;
-        let attrs = &mut self.attrs;
-        let cursor_visible = &mut self.cursor_visible;
-        let mut handler = Handler { grid, saved_main, attrs, cursor_visible };
-        for &b in bytes {
-            parser.advance(&mut handler, b);
+        let mut i = 0;
+        while i < bytes.len() {
+            // Validate against pending predictions before the parser
+            // sees the byte.
+            if let Some(p) = self.predictions.front() {
+                if bytes[i] == p.byte {
+                    self.predictions.pop_front();
+                    self.predictions_hit += 1;
+                    i += 1;
+                    continue;
+                }
+                self.rollback_predictions();
+            }
+            // Normal feed.
+            let parser = &mut self.parser;
+            let grid = &mut self.grid;
+            let saved_main = &mut self.saved_main;
+            let attrs = &mut self.attrs;
+            let cursor_visible = &mut self.cursor_visible;
+            let mut handler = Handler { grid, saved_main, attrs, cursor_visible };
+            parser.advance(&mut handler, bytes[i]);
+            i += 1;
+
+            // Entering alt-screen mid-feed swaps the grid wholesale —
+            // any predictions queued beforehand were anchored to the
+            // old grid and are now garbage.  Drop them.
+            if !self.predictions.is_empty() && self.saved_main.is_some() {
+                let n = self.predictions.len();
+                self.predictions.clear();
+                self.predictions_miss += n as u64;
+            }
         }
     }
 }
@@ -1099,5 +1219,82 @@ mod tests {
         t.feed(b"\x1b[?1049l");
         assert_eq!(t.grid().cols(), 30);
         assert_eq!(t.grid().rows(), 8);
+    }
+
+    // -------- local-echo prediction tests --------------------------------
+
+    #[test]
+    fn predict_paints_cell_and_advances_cursor() {
+        let mut t = Terminal::new(20, 3);
+        assert!(t.predict_byte(b'a'));
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cursor(), (1, 0));
+        // Hit/miss counters: prediction is queued, neither yet.
+        assert_eq!(t.predictions_hit, 0);
+        assert_eq!(t.predictions_miss, 0);
+    }
+
+    #[test]
+    fn predict_then_matching_echo_is_silently_consumed() {
+        let mut t = Terminal::new(20, 3);
+        t.predict_byte(b'a');
+        t.predict_byte(b'b');
+        // PTY echoes both verbatim — grid stays the same, predictions
+        // confirmed.
+        t.feed(b"ab");
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cell(1, 0).ch, 'b');
+        assert_eq!(t.grid().cursor(), (2, 0));
+        assert_eq!(t.predictions_hit, 2);
+        assert_eq!(t.predictions_miss, 0);
+    }
+
+    #[test]
+    fn mismatch_rolls_back_all_predictions_then_feeds_byte() {
+        let mut t = Terminal::new(20, 3);
+        // Pre-state: cell(0,0) blank, cursor at (0,0).
+        t.predict_byte(b'a');
+        t.predict_byte(b'b');
+        // PTY sends 'X' instead of expected 'a' — rollback both
+        // predictions, then write 'X' at the original cursor.
+        t.feed(b"X");
+        assert_eq!(t.grid().cell(0, 0).ch, 'X');
+        // The 'b' prediction's cell (col 1) is back to blank.
+        assert_eq!(t.grid().cell(1, 0).ch, ' ');
+        assert_eq!(t.grid().cursor(), (1, 0));
+        assert_eq!(t.predictions_hit, 0);
+        assert_eq!(t.predictions_miss, 2);
+    }
+
+    #[test]
+    fn predict_refused_in_alt_screen() {
+        let mut t = Terminal::new(20, 3);
+        t.feed(b"\x1b[?1049h"); // enter alt screen
+        assert!(!t.can_predict());
+        assert!(!t.predict_byte(b'a'));
+        // No grid mutation, no queue growth.
+        assert_eq!(t.grid().cell(0, 0).ch, ' ');
+        assert!(t.predictions.is_empty());
+    }
+
+    #[test]
+    fn predict_refused_for_control_chars() {
+        let mut t = Terminal::new(20, 3);
+        // Tab, CR, LF, BS, ESC all unsafe — shell-side meaning varies.
+        for b in [b'\t', b'\r', b'\n', 0x08u8, 0x1Bu8, 0x03u8] {
+            assert!(!t.predict_byte(b), "byte {b:#04x} should not predict");
+        }
+        assert!(t.predictions.is_empty());
+    }
+
+    #[test]
+    fn alt_screen_mid_feed_drops_pending_predictions() {
+        let mut t = Terminal::new(20, 3);
+        t.predict_byte(b'a');
+        // PTY response opens alt screen — predictions are anchored to
+        // the now-discarded main grid, so they get tossed.
+        t.feed(b"\x1b[?1049h");
+        assert!(t.predictions.is_empty());
+        assert_eq!(t.predictions_miss, 1);
     }
 }

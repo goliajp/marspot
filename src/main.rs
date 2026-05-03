@@ -374,7 +374,24 @@ impl ApplicationHandler<MarsEvent> for Mars {
                             w.request_redraw();
                         }
                     }
-                    let _ = self.sessions[self.focused_idx].write(&bytes);
+                    let session = &mut self.sessions[self.focused_idx];
+                    let _ = session.write(&bytes);
+                    // Local-echo: paint each printable-ASCII byte to
+                    // the grid immediately, ahead of the PTY round
+                    // trip.  Terminal::predict_byte is a no-op for
+                    // bytes that aren't safe to predict (control
+                    // chars, alt-screen mode, atlas full, etc.).
+                    let mut predicted = false;
+                    for &b in bytes.as_ref() {
+                        if session.terminal.predict_byte(b) {
+                            predicted = true;
+                        }
+                    }
+                    if predicted {
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
