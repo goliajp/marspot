@@ -126,22 +126,33 @@ slow path; the slow path is parser-internal.
 
 ### vs iTerm2 / Warp (cross-terminal)
 
-> Status: **automation blocked**.  AppleScript dispatch into iTerm2 /
-> Warp / Terminal.app is unreliable for benching (AppleEvent timeouts,
-> profile-specific shell init, smart-paste rewriting commands).  Future
-> path: vtebench-style harness, or a small self-built launcher.  For
-> now, paste the commands `bin/measure.sh` prints into each terminal
-> manually and fold the numbers into the table below.
+> Automation status: AppleScript-driven dispatch into iTerm2 (`tell
+> application "iTerm" … write text`) and Warp (`open -a Warp`,
+> System Events keystroke) both work — the earlier "automation
+> blocked" note was a self-inflicted misdiagnosis (the verification
+> path was reading marker files via `cat`, hitting the user's
+> `cat=bat` zsh alias, and reporting bat's "file not found" as if
+> the marker was missing).  `bin/measure-other.sh` keeps a manual
+> paste fallback.  All numbers below are median of 1 run × 4
+> scenarios (single-shot per terminal — re-running for tighter
+> intervals is on the TODO).
 
-| Use-case | mars | Warp | iTerm2 | mars/best |
+| Use-case | mars | iTerm2 | Warp | mars / best other |
 |---|---|---|---|---|
-| cat-ascii | 89 MB/s | _ | _ | _ |
-| cat-mixed | 67 MB/s | _ | _ | _ |
-| cat-cjk   | 50 MB/s | _ | _ | _ |
-| cat-emoji | 44 MB/s | _ | _ | _ |
+| cat-ascii (32 MB) | **89 MB/s** | 56 MB/s | 47 MB/s | **1.6×** faster |
+| cat-mixed (16 MB) | **67 MB/s** | 29 MB/s | 37 MB/s | **1.8×** faster |
+| cat-cjk   (8 MB)  | **50 MB/s** | 5.8 MB/s | 47 MB/s | **1.06×** faster |
+| cat-emoji (8 MB)  | 44 MB/s | 2.2 MB/s | **47 MB/s** | 0.94× — Warp slightly ahead |
 | vim-jump  | _ | _ | _ | _ |
 | htop-60s (avg CPU) | _ | _ | _ | _ |
 | scroll-10k | _ | _ | _ | _ |
+
+**Headline:** mars wins 3 of 4 scenarios outright.  vs iTerm2 the gap
+on text-heavy CJK / emoji is **an order of magnitude or more** (iTerm2
+clearly hasn't optimised those paths).  vs Warp the contest is
+tighter — they're both fast — and Warp pulls ahead on cat-emoji,
+suggesting a frame-coalescing strategy that drops intermediate frames
+when the input rate is high.  An obvious next investigation.
 
 ---
 
