@@ -12,7 +12,7 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::{Cell, CellAttrs, Color, Grid};
+use crate::grid::{char_width, Cell, CellAttrs, Color, Grid};
 use crate::parser::{Parser, ParserCallbacks};
 
 pub struct Terminal {
@@ -66,23 +66,45 @@ struct Handler<'a> {
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        let cell = Cell { ch, attrs: *self.attrs };
-        let (col, row) = self.grid.cursor();
-        self.grid.set_cell(col, row, cell);
-
+        let w = char_width(ch);
+        if w == 0 {
+            // Zero-width / control marker — terminal already executes
+            // C0 controls separately.  Nothing to draw or advance.
+            return;
+        }
         let cols = self.grid.cols();
         let rows = self.grid.rows();
-        let next_col = col + 1;
+        let (mut col, mut row) = self.grid.cursor();
 
+        // A wide char at the last column can't fit. Wrap first, then print
+        // at the start of the new row.
+        if w == 2 && col + 1 >= cols {
+            if row + 1 < rows {
+                self.grid.set_cursor(0, row + 1);
+            } else {
+                self.grid.scroll_up(1, blank_with(*self.attrs));
+                self.grid.set_cursor(0, rows - 1);
+            }
+            let next = self.grid.cursor();
+            col = next.0;
+            row = next.1;
+        }
+
+        // Lead cell carries the printable char.  For wide chars, the trail
+        // cell stores NUL with the same attrs — the renderer skips drawing
+        // its glyph (NUL is treated as blank), and the lead glyph extends
+        // visually across both cells via its natural advance width.
+        self.grid.set_cell(col, row, Cell { ch, attrs: *self.attrs });
+        if w == 2 {
+            self.grid.set_cell(col + 1, row, Cell { ch: '\0', attrs: *self.attrs });
+        }
+
+        let next_col = col + w as u16;
         if next_col < cols {
-            // Stay on the same row.
             self.grid.set_cursor(next_col, row);
         } else if row + 1 < rows {
-            // Wrap to start of next row.
             self.grid.set_cursor(0, row + 1);
         } else {
-            // Wrap onto a row past the bottom: scroll first, then park at
-            // start of the (now blank) last row.
             self.grid.scroll_up(1, blank_with(*self.attrs));
             self.grid.set_cursor(0, rows - 1);
         }

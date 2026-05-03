@@ -59,6 +59,39 @@ pub enum Color {
 /// [`Grid::with_scrollback`].
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
+/// East Asian Wide / Fullwidth / emoji cells occupy two grid columns.
+/// Anything else is one.  Coarse range-based — covers the common blocks
+/// of Unicode 15.x EastAsianWidth=W/F plus the main emoji ranges.  Edge
+/// cases (Variation Selectors, joining sequences, regional indicators)
+/// are not yet handled — they'd need ZWJ / cluster awareness in the
+/// parser, separate from raw width.
+pub fn char_width(ch: char) -> u8 {
+    let cp = ch as u32;
+    if cp == 0 {
+        // The trail half of a wide pair uses NUL as a sentinel; it has
+        // no inherent width of its own.
+        return 0;
+    }
+    let wide = matches!(
+        cp,
+        0x1100..=0x115F        // Hangul Jamo
+        | 0x2E80..=0x303E      // CJK Radicals … CJK Symbols & Punctuation
+        | 0x3041..=0x33FF      // Hiragana, Katakana, …, CJK Compatibility
+        | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF      // CJK Unified Ideographs
+        | 0xA000..=0xA4CF      // Yi Syllables
+        | 0xAC00..=0xD7A3      // Hangul Syllables
+        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
+        | 0xFF00..=0xFF60      // Halfwidth & Fullwidth Forms (fullwidth half)
+        | 0xFFE0..=0xFFE6      // Fullwidth Sign Forms
+        | 0x1F300..=0x1FAFF    // Emoji + Symbols & Pictographs
+        | 0x20000..=0x2FFFD    // CJK Extension B–F
+        | 0x30000..=0x3FFFD    // CJK Extension G–H
+    );
+    if wide { 2 } else { 1 }
+}
+
 pub struct Grid {
     cols: u16,
     rows: u16,
