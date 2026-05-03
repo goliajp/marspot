@@ -69,10 +69,21 @@ fresh mars window via `MARS_SHELL`):
 
 | Use-case | bytes | median time | live throughput |
 |---|---|---|---|
-| cat-ascii | 32 MB | 41.4 s | **0.77 MB/s** |
-| cat-mixed | 16 MB | 25.2 s | 0.63 MB/s |
-| cat-cjk   | 8 MB  | 13.2 s | 0.61 MB/s |
-| cat-emoji | 2 MB  | 6.6 s  | 0.30 MB/s |
+| cat-ascii | 32 MB | 0.58 s | **55 MB/s** |
+| cat-mixed | 16 MB | 0.34 s | 47 MB/s |
+| cat-cjk   | 8 MB  | 0.22 s | 36 MB/s |
+| cat-emoji | 8 MB  | 0.18 s | 44 MB/s |
+
+> Two earlier corrections worth flagging publicly so the history is
+> honest: (1) the first round of measurements claimed mars was
+> 100–300× slower than headless parse — that came from an awk bug in
+> `bin/measure.sh` that read POSIX `real 0.20` as `0m0.20s` (0.20
+> *minutes*), inflating every live number by 60×. (2) The follow-on
+> "render is the bottleneck" diagnosis was wrong: `MARS_PROFILE` showed
+> only 2–3 renders happen across an entire 32 MB scenario.  Real
+> bottleneck was IPC volume (one event per ~1 KiB chunk × tens of
+> thousands of chunks), now mostly absorbed by reader-side opportunistic
+> batching.  The remaining gap to headless parse is inside `Terminal::feed`.
 
 Sub-path numbers (no PTY/window in the loop):
 
@@ -85,6 +96,34 @@ Sub-path numbers (no PTY/window in the loop):
 | Render-only (worst-case full repaint) | p50 891 µs · p95 957 µs · p99 1.0 ms | `--bench render:1000` |
 | Typing latency (key → setContents)    | _ (self-instrumented; collect via `MARS_LATENCY=…`) |
 
+### What `MARS_PROFILE` showed (cat-ascii, 32 MB)
+
+| Counter | Before reader batching | After reader batching |
+|---|---|---|
+| user_events | 33 126 | 1 806 (-95 %) |
+| bytes/chunk avg | ~1 KiB | ~19 KiB |
+| render_calls | 3 | 2 |
+| feed_total | 544 ms | 526 ms |
+| drain_total | 573 ms | 527 ms |
+| wall | 720 ms | 660 ms |
+
+The reader-side batching (read the first chunk blocking, then `poll(0)`
++ non-blocking reads to coalesce into one 64 KiB chunk) cut event count
+~18× and saved ~9 % on wall.  The remaining 660 ms is dominated by
+`Terminal::feed` itself — at 64 MB/s vs the 93 MB/s headless ceiling,
+the gap is parser/grid work, not IPC.  Next optimisation lever is
+inside `feed` (parser branch density, scroll memcpy cost), not the
+reader thread.
+
+What this overturned: the earlier "render is the bottleneck" finding
+was wrong on two counts.  (1) The 60× number came from an awk bug
+in `bin/measure.sh`'s timing parser (POSIX `real 0.20` was being read
+as `0m0.20s` → 0.20 minutes → 12 s).  (2) `MARS_PROFILE` shows we
+render 2–3 times for a whole 32 MB scenario — every PTY chunk's
+user_event handler drains the entire channel before yielding, so most
+"events" find an empty channel and don't redraw.  Render isn't the
+slow path; the slow path is parser-internal.
+
 ### vs iTerm2 / Warp (cross-terminal)
 
 > Status: **automation blocked**.  AppleScript dispatch into iTerm2 /
@@ -96,10 +135,10 @@ Sub-path numbers (no PTY/window in the loop):
 
 | Use-case | mars | Warp | iTerm2 | mars/best |
 |---|---|---|---|---|
-| cat-ascii | 0.77 MB/s | _ | _ | _ |
-| cat-mixed | 0.63 MB/s | _ | _ | _ |
-| cat-cjk   | 0.61 MB/s | _ | _ | _ |
-| cat-emoji | 0.30 MB/s | _ | _ | _ |
+| cat-ascii | 55 MB/s | _ | _ | _ |
+| cat-mixed | 47 MB/s | _ | _ | _ |
+| cat-cjk   | 36 MB/s | _ | _ | _ |
+| cat-emoji | 44 MB/s | _ | _ | _ |
 | vim-jump  | _ | _ | _ | _ |
 | htop-60s (avg CPU) | _ | _ | _ | _ |
 | scroll-10k | _ | _ | _ | _ |
@@ -116,10 +155,9 @@ Filled in as `bin/measure.sh` results land. Each row gets:
 
 | Item | Gap | Fixable | Note |
 |---|---|---|---|
-| Live throughput **100–300× slower than headless parse** (parse 93 MB/s vs live 0.77 MB/s on cat-ascii) | enormous | **yes** | Bottleneck is render scheduling, not parser. Each 4 KiB PTY chunk triggers a `request_redraw`; CALayer.setContents appears to be vsync-pinned (~60 Hz), so live drain ≈ 4 KiB × 60 ≈ 250 KB/s after coalescing.  **Fix path:** decouple render rate from chunk arrival rate — drain channel into a "dirty" flag, paint at most once per vsync; ideally also dirty-region track so a single keystroke doesn't repaint 4 758 cells. |
-| Render p99 ~1 ms but live render appears ~16 ms | 16× | yes | Same root cause — vsync wait. Confirms the fix above is the right lever. |
-| Per-chunk reader→channel→main_thread overhead | small | maybe | Reader chunks are 4 KiB; channel capacity 64; main thread drains all on each user_event. If contention shows up after the render fix, batch chunks in the reader (e.g. coalesce up to 256 KiB before sending). |
-| Cross-terminal automation broken | n/a | yes | AppleScript / Terminal-AppleEvent path is unreliable. Either build a vtebench-style runner that drives each terminal via a custom hardware-keystroke approach, or accept manual paste for now. |
+| Live ~50% of headless parse on text-heavy scenarios (ascii/mixed/cjk) | 2× | yes | The 2× cost is the PTY pipeline + render: reader thread, mpsc channel, NSRunLoop user_event dispatch, then per-render CALayer.setContents.  Worth profiling per-stage (`MARS_PROFILE`) — likely improvable to ~70–80% by debouncing renders to one paint per vsync (current code does request_redraw per drained batch but render itself appears to be invoked every cycle by winit). |
+| Live cat-emoji is **18% of headless** (18 MB/s vs 102 MB/s) | ~5× | yes | emoji-heavy output stresses the color glyph path: every codepoint has to look up a fallback font on first sight (cached after), and CTFontDrawGlyphs with SBIX/COLR is much slower than monochrome glyph rendering. **Fix paths:** (1) pre-warm the font cache for common emoji blocks; (2) batch-draw same-font runs more aggressively; (3) accept that color-glyph rendering is intrinsically slower and document it. |
+| Cross-terminal automation broken | n/a | yes | AppleScript dispatch into iTerm2 / Warp / Terminal.app is unreliable.  Either build a vtebench-style runner that drives each terminal via a custom hardware-keystroke approach, or accept manual paste for now. |
 
 ---
 

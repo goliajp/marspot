@@ -61,7 +61,15 @@ EOF
   killall mars 2>/dev/null || true
   sleep 0.3
 
-  (cd "$ROOT" && MARS_SHELL="$cmd_script" \
+  # Forward MARS_PROFILE / MARS_LATENCY through if set, so a profiling
+  # run can capture per-trial counters under the harness.
+  local profile_env=""
+  if [[ -n "${MARS_PROFILE:-}" ]]; then
+    # Tag per-(scenario,trial) so they don't overwrite each other.
+    local pf="${MARS_PROFILE}.${scenario}.${trial:-x}"
+    profile_env="MARS_PROFILE=$pf"
+  fi
+  (cd "$ROOT" && env $profile_env MARS_SHELL="$cmd_script" \
     nohup target/release/mars > /dev/null 2>&1 < /dev/null &)
   disown || true
 
@@ -111,14 +119,21 @@ run_in() {
 
 parse_real_ns() {
   local marker=$1
+  # `/usr/bin/time -p` writes POSIX format (`real 1.234`), zsh/bash
+  # builtin `time` writes `real 0m1.234s`.  Handle both.
   awk '
     /real/ {
-      # Format is "0m1.234s" — supports >=60s with the minute part.
-      split($2, parts, "m")
-      mins = parts[1]+0
-      sub("s", "", parts[2])
-      secs = parts[2]+0
-      printf "%d", (mins*60 + secs) * 1e9
+      s = $2
+      if (s ~ /m/) {
+        split(s, parts, "m")
+        mins = parts[1]+0
+        sub("s", "", parts[2])
+        secs = parts[2]+0
+        total = mins*60 + secs
+      } else {
+        total = s+0
+      }
+      printf "%d", total * 1e9
       exit
     }
   ' "$marker"

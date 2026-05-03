@@ -28,9 +28,12 @@ pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
 
-/// Bytes per chunk handed off from the reader thread.  4 KiB matches the
-/// typical pipe buffer granule and keeps allocations small.
-const READ_BUF: usize = 4096;
+/// Bytes per chunk handed off from the reader thread.  64 KiB is the
+/// opportunistic upper bound — for interactive output (a single keystroke
+/// echoing back) we send what arrived; for bulk output (`cat`) we keep
+/// reading non-blocking until the PTY drains, coalescing into one chunk
+/// before incurring the per-event NSRunLoop dispatch cost.
+const READ_BUF: usize = 64 * 1024;
 
 /// Bounded capacity of the PTY → main-thread channel.  Once full the reader
 /// thread blocks on send, which propagates backpressure to the kernel pipe
@@ -44,6 +47,9 @@ const PTY_CHANNEL_CAPACITY: usize = 64;
 #[derive(Debug)]
 enum MarsEvent {
     PtyBytes,
+    /// PTY master returned EOF — the child shell exited.  Main loop
+    /// should commit the final frame and shut down so Drop runs.
+    ShellExited,
 }
 
 struct Mars {
@@ -67,6 +73,26 @@ struct Mars {
     latency_samples: Vec<u64>,
     record_latency: bool,
     latency_out_path: Option<String>,
+    /// MARS_PROFILE counters — set when MARS_PROFILE_OUT is configured.
+    /// Counts paths through user_event / RedrawRequested / render / feed
+    /// so we can tell whether the live pipeline is render-throttled,
+    /// event-throttled, or feed-throttled.
+    prof: ProfileCounters,
+    profile_out_path: Option<String>,
+}
+
+#[derive(Default)]
+struct ProfileCounters {
+    user_events: u64,
+    chunks_drained: u64,
+    bytes_fed: u64,
+    request_redraws: u64,
+    redraw_requested_calls: u64,
+    render_calls: u64,
+    render_total_ns: u64,
+    feed_total_ns: u64,
+    drain_total_ns: u64,
+    started_at: Option<std::time::Instant>,
 }
 
 impl ApplicationHandler<MarsEvent> for Mars {
@@ -115,19 +141,30 @@ impl ApplicationHandler<MarsEvent> for Mars {
         self.renderer = Some(renderer);
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: MarsEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: MarsEvent) {
         match event {
             MarsEvent::PtyBytes => {
+                self.prof.user_events += 1;
+                let drain_t0 = std::time::Instant::now();
                 let mut got_any = false;
                 while let Ok(chunk) = self.rx.try_recv() {
+                    self.prof.chunks_drained += 1;
+                    self.prof.bytes_fed += chunk.len() as u64;
+                    let feed_t0 = std::time::Instant::now();
                     self.terminal.feed(&chunk);
+                    self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
                     got_any = true;
                 }
+                self.prof.drain_total_ns += drain_t0.elapsed().as_nanos() as u64;
                 if got_any {
                     if let Some(w) = &self.window {
                         w.request_redraw();
+                        self.prof.request_redraws += 1;
                     }
                 }
+            }
+            MarsEvent::ShellExited => {
+                event_loop.exit();
             }
         }
     }
@@ -180,8 +217,15 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.prof.redraw_requested_calls += 1;
                 if let Some(r) = self.renderer.as_mut() {
+                    let render_t0 = std::time::Instant::now();
                     r.render(self.terminal.grid());
+                    self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
+                    self.prof.render_calls += 1;
+                    if self.prof.started_at.is_none() {
+                        self.prof.started_at = Some(std::time::Instant::now());
+                    }
                     // Latency instrumentation — close the loop opened by
                     // the most recent keystroke.  Renderer::render returns
                     // after layer.setContents, which is the closest
@@ -269,6 +313,7 @@ fn spawn_pty_reader(
         .spawn(move || {
             let mut buf = [0u8; READ_BUF];
             loop {
+                // First read: blocks until at least one byte arrives.
                 let n = unsafe {
                     libc::read(
                         master_fd,
@@ -277,10 +322,43 @@ fn spawn_pty_reader(
                     )
                 };
                 if n <= 0 {
-                    // EOF or error → child gone or fd closed.
+                    // EOF or error → child gone or fd closed.  Tell the
+                    // main loop so it can commit the final frame and
+                    // exit cleanly (lets Drop run).
+                    let _ = proxy.send_event(MarsEvent::ShellExited);
                     break;
                 }
-                let chunk = buf[..n as usize].to_vec();
+                let mut total = n as usize;
+
+                // Opportunistic drain: poll(0) and read whatever else is
+                // already in the kernel pipe.  Cuts IPC × main-loop
+                // dispatch cost on bulk output (cat large file) without
+                // adding latency for interactive output (single byte sent
+                // immediately because poll says "no more").
+                while total < buf.len() {
+                    let mut pfd = libc::pollfd {
+                        fd: master_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+                    if ready <= 0 {
+                        break;
+                    }
+                    let n2 = unsafe {
+                        libc::read(
+                            master_fd,
+                            buf.as_mut_ptr().add(total) as *mut libc::c_void,
+                            buf.len() - total,
+                        )
+                    };
+                    if n2 <= 0 {
+                        break;
+                    }
+                    total += n2 as usize;
+                }
+
+                let chunk = buf[..total].to_vec();
                 if tx.send(chunk).is_err() {
                     // Main thread dropped the receiver — we're shutting down.
                     break;
@@ -339,6 +417,10 @@ fn main() {
     let latency_out_path = std::env::var("MARS_LATENCY").ok();
     let record_latency = latency_out_path.is_some();
 
+    // MARS_PROFILE=/path/profile.json — write event/render counters and
+    // timings on exit so we can tell which loop is actually slow.
+    let profile_out_path = std::env::var("MARS_PROFILE").ok();
+
     let mut app = Mars {
         window: None,
         renderer: None,
@@ -350,6 +432,8 @@ fn main() {
         latency_samples: Vec::new(),
         record_latency,
         latency_out_path,
+        prof: ProfileCounters::default(),
+        profile_out_path,
     };
     event_loop.run_app(&mut app).expect("run app");
 }
@@ -368,6 +452,24 @@ impl Drop for Mars {
             s.push(']');
             if let Err(e) = std::fs::write(&path, s) {
                 eprintln!("mars: failed to write latency log to {path}: {e}");
+            }
+        }
+        if let Some(path) = self.profile_out_path.take() {
+            let p = &self.prof;
+            let json = format!(
+                r#"{{"user_events":{ue},"chunks_drained":{cd},"bytes_fed":{bf},"request_redraws":{rr},"redraw_requested_calls":{rrc},"render_calls":{rc},"render_total_ns":{rtn},"feed_total_ns":{ftn},"drain_total_ns":{dtn}}}"#,
+                ue = p.user_events,
+                cd = p.chunks_drained,
+                bf = p.bytes_fed,
+                rr = p.request_redraws,
+                rrc = p.redraw_requested_calls,
+                rc = p.render_calls,
+                rtn = p.render_total_ns,
+                ftn = p.feed_total_ns,
+                dtn = p.drain_total_ns,
+            );
+            if let Err(e) = std::fs::write(&path, json) {
+                eprintln!("mars: failed to write profile log to {path}: {e}");
             }
         }
     }

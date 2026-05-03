@@ -76,8 +76,8 @@ print(f"  {out}: {os.path.getsize(out):,} bytes")
 PY
 
 # ---- cat-emoji: 8 MiB of emoji-heavy text ---------------------------------
-echo "==> cat-emoji (2 MiB)"
-python3 - "$OUT/cat-emoji.bin" 2 <<'PY'
+echo "==> cat-emoji (8 MiB)"
+python3 - "$OUT/cat-emoji.bin" 8 <<'PY'
 import sys, os
 out, mb = sys.argv[1], int(sys.argv[2])
 target = mb * 1024 * 1024
