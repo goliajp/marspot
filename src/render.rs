@@ -12,6 +12,7 @@
 
 use crate::grid::{Cell, CellAttrs, Color, Grid};
 use crate::layout::{CellRect, Layout};
+use crate::session::SessionState;
 use core_foundation::base::{CFRange, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::base::{
@@ -76,6 +77,30 @@ pub struct SessionView<'a> {
     /// Drives the focus outline + cursor style (filled vs hollow).
     pub focused: bool,
 }
+
+/// One row of the sidebar — what the user sees on the left.  Length
+/// of the slice passed to [`Renderer::render_layout`] should match
+/// `views.len()`; entry `i` describes session `i`.
+pub struct SidebarEntry<'a> {
+    /// Short label drawn after the state dot, e.g. `"1"`, `"build"`.
+    pub label: &'a str,
+    /// Drives the colour of the state dot.
+    pub state: SessionState,
+}
+
+/// Sidebar typography (in points-equivalent pixels at scale = 1).
+/// Tuned for the default 200-pt-wide sidebar.
+const SIDEBAR_DOT_R: f64 = 4.5;
+const SIDEBAR_LEFT_PAD: f64 = 14.0;
+const SIDEBAR_TOP_PAD: f64 = 14.0;
+const SIDEBAR_ROW_H: f64 = 22.0;
+/// Gap between the dot's right edge and the start of the label text.
+const SIDEBAR_DOT_LABEL_GAP: f64 = 10.0;
+const SIDEBAR_TEXT_FG: (CGFloat, CGFloat, CGFloat) = (0.78, 0.82, 0.88);
+const SIDEBAR_FOCUSED_BG: (CGFloat, CGFloat, CGFloat) = (0.13, 0.18, 0.30);
+const STATE_ACTIVE: (CGFloat, CGFloat, CGFloat) = (0.30, 0.85, 0.45);
+const STATE_IDLE: (CGFloat, CGFloat, CGFloat) = (0.55, 0.58, 0.62);
+const STATE_EXITED: (CGFloat, CGFloat, CGFloat) = (0.85, 0.30, 0.30);
 
 /// Standard ANSI 16-colour palette (xterm values).  Indices 0–7 are the
 /// basic colours; 8–15 are their bright variants.  256-colour and 24-bit
@@ -381,14 +406,21 @@ impl Renderer {
             self.cell_w,
             self.cell_h,
         );
-        self.render_layout(&layout, std::slice::from_ref(&view));
+        self.render_layout(&layout, std::slice::from_ref(&view), &[], 0);
     }
 
-    /// Render N session views into a window-sized frame.  Each view's
-    /// rect is taken from `layout.cells[i]`; cells beyond `views.len()`
-    /// stay as the default frame background (so a partially-filled
-    /// grid layout reads as empty cells).
-    pub fn render_layout(&mut self, layout: &Layout, views: &[SessionView]) {
+    /// Render N session views + a sidebar into a window-sized frame.
+    /// Each view's rect is taken from `layout.cells[i]`; cells beyond
+    /// `views.len()` stay as the default frame background (so a
+    /// partially-filled grid reads as empty cells).  When `sidebar`
+    /// is empty no chrome text is drawn (mcli passes `&[]`).
+    pub fn render_layout(
+        &mut self,
+        layout: &Layout,
+        views: &[SessionView],
+        sidebar: &[SidebarEntry],
+        focused_idx: usize,
+    ) {
         if self.layer.is_none() {
             return;
         }
@@ -402,6 +434,9 @@ impl Renderer {
             if let Some(rect) = layout.cells.get(i) {
                 self.draw_session_in_rect(&ctx, total_h, rect, view);
             }
+        }
+        if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
+            self.draw_sidebar(&ctx, total_h, layout, sidebar, focused_idx);
         }
         let cgimage = ctx
             .create_image()
@@ -646,6 +681,82 @@ impl Renderer {
                 &CGPoint::new(rect.x, rect_top_y_up - rect.h),
                 &CGSize::new(rect.w, rect.h),
             ));
+        }
+    }
+
+    /// Sidebar pass: one row per session.  Row N: [focus highlight bg,]
+    /// state dot, label.  Caller is responsible for matching the row
+    /// height & top padding constants when hit-testing clicks
+    /// (`SIDEBAR_TOP_PAD`, `SIDEBAR_ROW_H`).
+    fn draw_sidebar(
+        &mut self,
+        ctx: &CGContext,
+        total_h: u32,
+        layout: &Layout,
+        entries: &[SidebarEntry],
+        focused_idx: usize,
+    ) {
+        for (i, entry) in entries.iter().enumerate() {
+            let row_top_y_down = SIDEBAR_TOP_PAD + i as f64 * SIDEBAR_ROW_H;
+            let row_top_y_up = total_h as f64 - row_top_y_down;
+            let row_bottom_y = row_top_y_up - SIDEBAR_ROW_H;
+
+            // Focus highlight: subtle blue-grey fill behind the focused row.
+            if i == focused_idx {
+                ctx.set_rgb_fill_color(
+                    SIDEBAR_FOCUSED_BG.0,
+                    SIDEBAR_FOCUSED_BG.1,
+                    SIDEBAR_FOCUSED_BG.2,
+                    1.0,
+                );
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(0.0, row_bottom_y),
+                    &CGSize::new(layout.sidebar_w, SIDEBAR_ROW_H),
+                ));
+            }
+
+            // State dot.  Vertically-centred in the row.
+            let dot_color = match entry.state {
+                SessionState::Active => STATE_ACTIVE,
+                SessionState::Idle => STATE_IDLE,
+                SessionState::Exited => STATE_EXITED,
+            };
+            let dot_cx = SIDEBAR_LEFT_PAD + SIDEBAR_DOT_R;
+            let dot_cy = row_top_y_up - SIDEBAR_ROW_H / 2.0;
+            ctx.set_rgb_fill_color(dot_color.0, dot_color.1, dot_color.2, 1.0);
+            ctx.fill_ellipse_in_rect(CGRect::new(
+                &CGPoint::new(dot_cx - SIDEBAR_DOT_R, dot_cy - SIDEBAR_DOT_R),
+                &CGSize::new(SIDEBAR_DOT_R * 2.0, SIDEBAR_DOT_R * 2.0),
+            ));
+
+            // Label text.  Reuse the base font; lay out via cell_w
+            // monospace metrics — sidebar chars are typically 1–8
+            // ASCII so cell_w accuracy is fine.
+            let label_x = dot_cx + SIDEBAR_DOT_R + SIDEBAR_DOT_LABEL_GAP;
+            let baseline_y = row_top_y_up - SIDEBAR_ROW_H / 2.0
+                + self.ascent * 0.40 - self.cell_h * 0.20;
+            ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
+            ctx.set_rgb_fill_color(
+                SIDEBAR_TEXT_FG.0,
+                SIDEBAR_TEXT_FG.1,
+                SIDEBAR_TEXT_FG.2,
+                1.0,
+            );
+            let mut glyphs: Vec<CGGlyph> = Vec::with_capacity(entry.label.len());
+            let mut positions: Vec<CGPoint> = Vec::with_capacity(entry.label.len());
+            let mut x = label_x;
+            for ch in entry.label.chars() {
+                let (font_idx, g) = self.resolve_char(ch, false, false);
+                if g != 0 && font_idx == 0 {
+                    glyphs.push(g);
+                    positions.push(CGPoint::new(x, baseline_y));
+                }
+                x += self.cell_w;
+            }
+            if !glyphs.is_empty() {
+                let font = &self.fonts.fonts[0];
+                font.draw_glyphs(&glyphs, &positions, ctx.clone());
+            }
         }
     }
 

@@ -19,7 +19,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// "Output produced within this window ⇒ Active, else Idle."  Two
+/// seconds is short enough to feel live (a `make` finishing pulses
+/// the dot) without flickering on every keystroke echo.
+const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    /// Produced output recently (within ACTIVE_WINDOW).
+    Active,
+    /// Alive, child process still running, but quiet.
+    Idle,
+    /// Reader thread saw EOF — child has exited.  Final-frame contents
+    /// remain readable but no new bytes will arrive.
+    Exited,
+}
 
 use crate::pty::{Pty, PtyConfig, TerminalSize};
 use crate::terminal::Terminal;
@@ -142,6 +158,18 @@ impl Session {
     /// Borrow the terminal for reading (used by render).
     pub fn terminal(&self) -> &Terminal {
         &self.terminal
+    }
+
+    /// Roll up `is_exited()` + `last_output` into a single state suitable
+    /// for the sidebar's status dot.  See [`SessionState`].
+    pub fn state(&self) -> SessionState {
+        if self.is_exited() {
+            return SessionState::Exited;
+        }
+        match self.last_output {
+            Some(t) if t.elapsed() < ACTIVE_WINDOW => SessionState::Active,
+            _ => SessionState::Idle,
+        }
     }
 }
 

@@ -10,7 +10,7 @@ use winit::window::{Window, WindowId};
 
 use mars::input::key_event_to_bytes;
 use mars::layout::Layout;
-use mars::render::{Renderer, SessionView};
+use mars::render::{Renderer, SessionView, SidebarEntry};
 use mars::session::Session;
 use mars::terminal::Terminal;
 
@@ -35,6 +35,12 @@ const DEFAULT_WIN_H: f64 = 900.0;
 /// them properly.  Resized fires almost immediately at startup.
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
+
+/// Sidebar layout constants in **logical points** — must match
+/// `render.rs::SIDEBAR_TOP_PAD` / `SIDEBAR_ROW_H` so click hit-testing
+/// lands on the same pixels as the drawn rows.
+const SIDEBAR_TOP_PAD_PT: f64 = 14.0;
+const SIDEBAR_ROW_PT: f64 = 22.0;
 
 /// Headless modes (snapshot / bench parse / bench render) use a fixed
 /// terminal grid so numbers are reproducible across runs.
@@ -260,7 +266,24 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 use winit::event::{ElementState, MouseButton};
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(layout) = &self.layout {
-                        if let Some(idx) = layout.hit_test(self.cursor_phys.0, self.cursor_phys.1) {
+                        let (px, py) = self.cursor_phys;
+                        let scale = MainThreadMarker::new()
+                            .and_then(NSScreen::mainScreen)
+                            .map(|s| s.backingScaleFactor() as f64)
+                            .unwrap_or(1.0);
+                        // Sidebar row constants in physical pixels.
+                        let row_phys = SIDEBAR_ROW_PT * scale;
+                        let top_pad_phys = SIDEBAR_TOP_PAD_PT * scale;
+                        let new_focus = layout
+                            .hit_test_sidebar_row(
+                                px,
+                                py,
+                                top_pad_phys,
+                                row_phys,
+                                self.sessions.len(),
+                            )
+                            .or_else(|| layout.hit_test(px, py));
+                        if let Some(idx) = new_focus {
                             if idx < self.sessions.len() && idx != self.focused_idx {
                                 self.focused_idx = idx;
                                 self.view_offset = 0;
@@ -326,10 +349,12 @@ impl Mars {
         if self.layout.is_none() || self.renderer.is_none() {
             return;
         }
-        // Build views in a Vec so we can hand a slice to render_layout.
-        // SessionView borrows the grid, so build them in one pass.
         let focused = self.focused_idx;
         let view_offset = self.view_offset;
+        // SessionView borrows from session.terminal.grid; sidebar entries
+        // also borrow from per-session label storage.  Materialise the
+        // labels first so they outlive the SidebarEntry slice we pass.
+        let labels: Vec<String> = (1..=self.sessions.len()).map(|n| n.to_string()).collect();
         let views: Vec<SessionView> = self
             .sessions
             .iter()
@@ -341,9 +366,18 @@ impl Mars {
                 focused: i == focused,
             })
             .collect();
+        let entries: Vec<SidebarEntry> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| SidebarEntry {
+                label: labels[i].as_str(),
+                state: s.state(),
+            })
+            .collect();
         let layout = self.layout.as_ref().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
-        renderer.render_layout(layout, &views);
+        renderer.render_layout(layout, &views, &entries, focused);
     }
 }
 

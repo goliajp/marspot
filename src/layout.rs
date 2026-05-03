@@ -102,8 +102,9 @@ impl Layout {
     }
 
     /// Hit-test a click at physical coords `(px, py)`.  Returns the
-    /// session index when the click landed inside one of the cells,
-    /// else `None` (sidebar hit, or outside the window).
+    /// session index when the click landed inside one of the grid
+    /// cells, else `None` (sidebar hit, or outside the window).  For
+    /// sidebar clicks, see [`hit_test_sidebar_row`](Self::hit_test_sidebar_row).
     pub fn hit_test(&self, px: f64, py: f64) -> Option<usize> {
         if px < self.sidebar_w {
             return None;
@@ -114,6 +115,30 @@ impl Layout {
             }
         }
         None
+    }
+
+    /// Map a click in the sidebar to the session-list row index.
+    /// Returns `None` if the click was outside the sidebar or above /
+    /// below the entry list.  `row_height_phys` is the per-entry
+    /// height the renderer used (in physical pixels), and `top_pad`
+    /// is the gap between the window's top edge and the first entry.
+    pub fn hit_test_sidebar_row(
+        &self,
+        px: f64,
+        py: f64,
+        top_pad: f64,
+        row_height_phys: f64,
+        rows: usize,
+    ) -> Option<usize> {
+        if px < 0.0 || px >= self.sidebar_w || py < top_pad {
+            return None;
+        }
+        let idx = ((py - top_pad) / row_height_phys).floor() as usize;
+        if idx >= rows {
+            None
+        } else {
+            Some(idx)
+        }
     }
 }
 
