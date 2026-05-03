@@ -64,3 +64,54 @@ vertex VOut bg_vertex(
 fragment float4 bg_fragment(VOut in [[stage_in]]) {
     return in.color;
 }
+
+// ----------------------------------------------------------------------
+// FG pass — textured glyph quads sampling the alpha-only atlas.
+//
+// One instance per visible glyph.  `uv0`/`uv1` are normalised
+// (0..1) atlas coords; `color` is the foreground tint.  The
+// fragment shader multiplies the atlas's alpha into `color.a`
+// and lets the pipeline's alpha-blend equation composite onto
+// the BG underneath.
+// ----------------------------------------------------------------------
+
+struct Glyph {
+    float2 origin;
+    float2 size;
+    float2 uv0;
+    float2 uv1;
+    float4 color;
+};
+
+struct GVOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+vertex GVOut fg_vertex(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const Glyph* glyphs [[buffer(0)]],
+    constant float2& viewport_px [[buffer(1)]]
+) {
+    Glyph g = glyphs[iid];
+    float2 px = g.origin + g.size * corners[vid];
+    float2 ndc = (px / viewport_px) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    GVOut o;
+    o.position = float4(ndc, 0.0, 1.0);
+    o.uv = mix(g.uv0, g.uv1, corners[vid]);
+    o.color = g.color;
+    return o;
+}
+
+fragment float4 fg_fragment(
+    GVOut in [[stage_in]],
+    texture2d<float> atlas [[texture(0)]],
+    sampler atlas_sampler [[sampler(0)]]
+) {
+    float coverage = atlas.sample(atlas_sampler, in.uv).r;
+    return float4(in.color.rgb, in.color.a * coverage);
+}

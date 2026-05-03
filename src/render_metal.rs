@@ -35,11 +35,12 @@ use objc2::runtime::ProtocolObject;
 use objc2_app_kit::NSView;
 use objc2_foundation::{CGSize, NSString};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
-    MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLStoreAction,
-    MTLTexture,
+    MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer,
+    MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
+    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+    MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
+    MTLSamplerState, MTLStoreAction, MTLTexture,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
@@ -56,6 +57,20 @@ use std::ptr::NonNull;
 pub struct CellInstance {
     pub origin: [f32; 2],
     pub size: [f32; 2],
+    pub color: [f32; 4],
+}
+
+/// One glyph's draw data, layout-compatible with `Glyph` in
+/// `src/shaders/cells.metal`.  `uv0` / `uv1` are normalised
+/// 0..1 atlas coords (top-left + bottom-right corners of the
+/// glyph's slot).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GlyphInstance {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+    pub uv0: [f32; 2],
+    pub uv1: [f32; 2],
     pub color: [f32; 4],
 }
 
@@ -86,6 +101,14 @@ pub struct MetalRenderer {
     /// Pre-built pipeline state for the BG pass — created once at
     /// `new()` so per-frame draw calls don't pay shader-compile cost.
     bg_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Pre-built pipeline state for the FG (textured glyph) pass.
+    /// Has alpha blending enabled — composites onto the BG pass.
+    fg_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Sampler used by the FG fragment shader.  Linear min/mag for
+    /// smooth glyph edges, ClampToEdge so sampling outside the
+    /// glyph's atlas slot reads padding (transparent) — not the
+    /// neighbouring glyph.
+    fg_sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
 }
 
 impl MetalRenderer {
@@ -98,7 +121,10 @@ impl MetalRenderer {
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "MTLDevice.newCommandQueue returned nil".to_string())?;
-        let bg_pipeline = build_bg_pipeline(&device)?;
+        let library = build_shader_library(&device)?;
+        let bg_pipeline = build_bg_pipeline(&device, &library)?;
+        let fg_pipeline = build_fg_pipeline(&device, &library)?;
+        let fg_sampler = build_fg_sampler(&device)?;
 
         let layer = unsafe { CAMetalLayer::new() };
         unsafe {
@@ -123,6 +149,8 @@ impl MetalRenderer {
             width_px: 0.0,
             height_px: 0.0,
             bg_pipeline,
+            fg_pipeline,
+            fg_sampler,
         })
     }
 
@@ -135,7 +163,10 @@ impl MetalRenderer {
         let queue = device
             .newCommandQueue()
             .ok_or_else(|| "MTLDevice.newCommandQueue returned nil".to_string())?;
-        let bg_pipeline = build_bg_pipeline(&device)?;
+        let library = build_shader_library(&device)?;
+        let bg_pipeline = build_bg_pipeline(&device, &library)?;
+        let fg_pipeline = build_fg_pipeline(&device, &library)?;
+        let fg_sampler = build_fg_sampler(&device)?;
         Ok(Self {
             device,
             queue,
@@ -143,6 +174,8 @@ impl MetalRenderer {
             width_px: 0.0,
             height_px: 0.0,
             bg_pipeline,
+            fg_pipeline,
+            fg_sampler,
         })
     }
 
@@ -212,37 +245,94 @@ impl MetalRenderer {
     }
 }
 
-/// Compile `cells.metal` and build the BG-pass MTLRenderPipelineState.
-/// Called once at renderer construction; the pipeline is then reused
-/// for every frame.
+/// Compile `cells.metal` once.  Both the BG and FG pipelines pull
+/// their entry-point functions out of the same library — the .metal
+/// file declares them side-by-side.
+fn build_shader_library(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, String> {
+    let src = NSString::from_str(SHADER_SRC);
+    device
+        .newLibraryWithSource_options_error(&src, None)
+        .map_err(|e| format!("MTLDevice.newLibraryWithSource error: {:?}", e))
+}
+
+fn pipeline_function(
+    library: &ProtocolObject<dyn MTLLibrary>,
+    name: &str,
+) -> Result<Retained<ProtocolObject<dyn objc2_metal::MTLFunction>>, String> {
+    let n = NSString::from_str(name);
+    library
+        .newFunctionWithName(&n)
+        .ok_or_else(|| format!("library has no function {name:?}"))
+}
+
+/// BG-pass pipeline.  No blending — opaque cells fill the whole quad.
 fn build_bg_pipeline(
     device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
 ) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
-    let src = NSString::from_str(SHADER_SRC);
-    let library = device
-        .newLibraryWithSource_options_error(&src, None)
-        .map_err(|e| format!("MTLDevice.newLibraryWithSource error: {:?}", e))?;
-    let vfn_name = NSString::from_str("bg_vertex");
-    let ffn_name = NSString::from_str("bg_fragment");
-    let vfn = library
-        .newFunctionWithName(&vfn_name)
-        .ok_or_else(|| "library has no bg_vertex".to_string())?;
-    let ffn = library
-        .newFunctionWithName(&ffn_name)
-        .ok_or_else(|| "library has no bg_fragment".to_string())?;
+    let vfn = pipeline_function(library, "bg_vertex")?;
+    let ffn = pipeline_function(library, "bg_fragment")?;
 
     let descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
     descriptor.setVertexFunction(Some(&vfn));
     descriptor.setFragmentFunction(Some(&ffn));
-    let attachments = descriptor.colorAttachments();
-    let attachment = unsafe { attachments.objectAtIndexedSubscript(0) };
+    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     unsafe {
         attachment.setPixelFormat(TARGET_FORMAT);
     }
 
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .map_err(|e| format!("newRenderPipelineState error: {:?}", e))
+        .map_err(|e| format!("newRenderPipelineState (BG) error: {:?}", e))
+}
+
+/// FG-pass pipeline.  Alpha blending on so the glyph's coverage
+/// composites onto whatever the BG pass painted underneath:
+///
+///     final.rgb = src.rgb * src.a + dst.rgb * (1 - src.a)
+///     final.a   = src.a   * src.a + dst.a   * (1 - src.a)
+fn build_fg_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    let vfn = pipeline_function(library, "fg_vertex")?;
+    let ffn = pipeline_function(library, "fg_fragment")?;
+
+    let descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
+    descriptor.setVertexFunction(Some(&vfn));
+    descriptor.setFragmentFunction(Some(&ffn));
+    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    unsafe {
+        attachment.setPixelFormat(TARGET_FORMAT);
+        attachment.setBlendingEnabled(true);
+        attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+        attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    }
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .map_err(|e| format!("newRenderPipelineState (FG) error: {:?}", e))
+}
+
+fn build_fg_sampler(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLSamplerState>>, String> {
+    let descriptor = unsafe { MTLSamplerDescriptor::new() };
+    unsafe {
+        descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
+        descriptor.setMagFilter(MTLSamplerMinMagFilter::Linear);
+        descriptor.setSAddressMode(MTLSamplerAddressMode::ClampToEdge);
+        descriptor.setTAddressMode(MTLSamplerAddressMode::ClampToEdge);
+    }
+    device
+        .newSamplerStateWithDescriptor(&descriptor)
+        .ok_or_else(|| "newSamplerStateWithDescriptor returned nil".to_string())
 }
 
 impl MetalRenderer {
@@ -380,6 +470,140 @@ fn cells_as_bytes(cells: &[CellInstance]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(cells.as_ptr() as *const u8, len) }
 }
 
+/// SAFETY: same reasoning as `cells_as_bytes` — `GlyphInstance` is
+/// `#[repr(C)]` with no padding.
+fn glyphs_as_bytes(glyphs: &[GlyphInstance]) -> &[u8] {
+    let len = std::mem::size_of_val(glyphs);
+    unsafe { std::slice::from_raw_parts(glyphs.as_ptr() as *const u8, len) }
+}
+
+impl MetalRenderer {
+    /// Phase-4 FG pass into a freshly-allocated MTLTexture, with
+    /// pixel readback.  Atlas is the R8 texture from `GlyphAtlas`.
+    /// `clear` is the colour painted before glyphs are composited
+    /// (in tests this is typically opaque black so glyph alpha
+    /// trivially shows up in the readback).
+    pub fn render_glyphs_fg_offscreen(
+        &self,
+        width: u32,
+        height: u32,
+        atlas: &ProtocolObject<dyn MTLTexture>,
+        glyphs: &[GlyphInstance],
+        clear: (f64, f64, f64, f64),
+    ) -> Result<Vec<u8>, String> {
+        let descriptor = unsafe {
+            objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                TARGET_FORMAT,
+                width as usize,
+                height as usize,
+                false,
+            )
+        };
+        unsafe {
+            descriptor.setUsage(
+                objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+            );
+            descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
+        }
+        let texture = self
+            .device
+            .newTextureWithDescriptor(&descriptor)
+            .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
+
+        let glyph_bytes = glyphs_as_bytes(glyphs);
+        let buffer = if glyph_bytes.is_empty() {
+            None
+        } else {
+            unsafe {
+                self.device.newBufferWithBytes_length_options(
+                    NonNull::new(glyph_bytes.as_ptr() as *mut c_void).unwrap(),
+                    glyph_bytes.len(),
+                    MTLResourceOptions::MTLResourceStorageModeShared,
+                )
+            }
+        };
+
+        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let attachments = pass.colorAttachments();
+            let color = attachments.objectAtIndexedSubscript(0);
+            color.setTexture(Some(&texture));
+            color.setLoadAction(MTLLoadAction::Clear);
+            color.setStoreAction(MTLStoreAction::Store);
+            color.setClearColor(MTLClearColor {
+                red: clear.0,
+                green: clear.1,
+                blue: clear.2,
+                alpha: clear.3,
+            });
+        }
+
+        let cmd = self
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+        let encoder = cmd
+            .renderCommandEncoderWithDescriptor(&pass)
+            .ok_or_else(|| "renderCommandEncoder returned nil".to_string())?;
+        encoder.setRenderPipelineState(&self.fg_pipeline);
+        if let Some(buf) = &buffer {
+            unsafe {
+                encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
+            }
+        }
+        let viewport_px: [f32; 2] = [width as f32, height as f32];
+        unsafe {
+            encoder.setVertexBytes_length_atIndex(
+                NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap(),
+                std::mem::size_of::<[f32; 2]>(),
+                1,
+            );
+            encoder.setFragmentTexture_atIndex(Some(atlas), 0);
+            encoder.setFragmentSamplerState_atIndex(Some(&self.fg_sampler), 0);
+            if !glyphs.is_empty() {
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    glyphs.len(),
+                );
+            }
+        }
+        encoder.endEncoding();
+
+        let blit = cmd
+            .blitCommandEncoder()
+            .ok_or_else(|| "blitCommandEncoder returned nil".to_string())?;
+        let resource: &ProtocolObject<dyn objc2_metal::MTLResource> =
+            ProtocolObject::from_ref(&*texture);
+        blit.synchronizeResource(resource);
+        blit.endEncoding();
+
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+
+        let bytes_per_row = (width as usize) * 4;
+        let mut bytes = vec![0u8; bytes_per_row * height as usize];
+        let region = objc2_metal::MTLRegion {
+            origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            size: objc2_metal::MTLSize {
+                width: width as usize,
+                height: height as usize,
+                depth: 1,
+            },
+        };
+        unsafe {
+            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                NonNull::new(bytes.as_mut_ptr() as *mut c_void).unwrap(),
+                bytes_per_row,
+                region,
+                0,
+            );
+        }
+        Ok(bytes)
+    }
+}
+
 pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>, String> {
     // SAFETY: MTLCreateSystemDefaultDevice returns a +1 retained pointer
     // (per Apple docs) or null on failure.  Wrap with Retained::from_raw
@@ -458,5 +682,83 @@ mod tests {
         assert!(l_g < 50, "left half should be red, got G={l_g}");
         assert!(r_r < 50, "right half should be green, got R={r_r}");
         assert!(r_g > 200, "right half should be green, got G={r_g}");
+    }
+
+    /// End-to-end FG-pass test: rasterise glyph 'A' through the
+    /// real GlyphAtlas, then run a single FG draw of that glyph onto
+    /// a small texture and confirm the alpha-blended result is at
+    /// least somewhere in the destination.  Validates: shader compile,
+    /// FG pipeline state w/ blending, sampler, atlas-texture binding,
+    /// instanced draw + readback.
+    #[test]
+    fn fg_pass_renders_one_atlas_glyph() {
+        use crate::glyph_atlas::{GlyphAtlas, GlyphKey};
+        use core_text::font::new_from_name;
+
+        let r = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("skipping: no Metal device");
+                return;
+            }
+        };
+
+        let mut atlas = GlyphAtlas::new(&r.device, 256, 256).expect("atlas");
+        let font = new_from_name("Menlo", 13.0).expect("Menlo");
+
+        let mut cg_glyph: core_graphics::font::CGGlyph = 0;
+        let cu: u16 = b'A' as u16;
+        unsafe {
+            font.get_glyphs_for_characters(&cu, &mut cg_glyph, 1);
+        }
+        assert!(cg_glyph != 0);
+
+        let entry = atlas
+            .get_or_rasterize(GlyphKey { font_id: 0, glyph: cg_glyph }, &font)
+            .expect("rasterise A");
+        let (atlas_w, atlas_h) = atlas.dims();
+
+        // One glyph instance, drawn at (8, 8) with the atlas's pixel
+        // size, fully opaque white tint.  Atlas R8 alpha modulates
+        // through to the readable colour.
+        let glyphs = vec![GlyphInstance {
+            origin: [8.0, 8.0],
+            size: [entry.px_w as f32, entry.px_h as f32],
+            uv0: [
+                entry.u0 as f32 / atlas_w as f32,
+                entry.v0 as f32 / atlas_h as f32,
+            ],
+            uv1: [
+                entry.u1 as f32 / atlas_w as f32,
+                entry.v1 as f32 / atlas_h as f32,
+            ],
+            color: [1.0, 1.0, 1.0, 1.0],
+        }];
+
+        let bytes = r
+            .render_glyphs_fg_offscreen(64, 64, atlas.texture(), &glyphs, (0.0, 0.0, 0.0, 1.0))
+            .expect("fg offscreen");
+        assert_eq!(bytes.len(), 64 * 64 * 4);
+
+        // Find at least one pixel inside the glyph's destination
+        // rect that's substantially brighter than the cleared
+        // background (which was opaque black).
+        let mut max_brightness = 0u8;
+        for y in 8..(8 + entry.px_h as usize) {
+            for x in 8..(8 + entry.px_w as usize) {
+                let off = (y * 64 + x) * 4;
+                let b = bytes[off];
+                let g = bytes[off + 1];
+                let r_byte = bytes[off + 2];
+                let lum = ((b as u16 + g as u16 + r_byte as u16) / 3) as u8;
+                if lum > max_brightness {
+                    max_brightness = lum;
+                }
+            }
+        }
+        assert!(
+            max_brightness > 100,
+            "expected at least one bright pixel inside glyph rect, got max={max_brightness}"
+        );
     }
 }
