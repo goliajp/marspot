@@ -1234,6 +1234,127 @@ mod tests {
         );
     }
 
+    /// Sister of the in-RAM soak: build a Terminal with a disk-backed
+    /// scrollback (small ring + small disk cap) and feed millions of
+    /// scrolled lines.  Asserts:
+    ///
+    ///   1. RSS stays bounded — RAM ring is fixed, page cache is one
+    ///      slot, no leak per scrolled line.
+    ///   2. The disk file size stays bounded — pre-`set_len`'d to its
+    ///      ring extent, never grows past it.
+    ///   3. Open fd count doesn't grow — we hold a single File and
+    ///      `try_clone()` only on faulted reads (which release fd on
+    ///      drop of the temporary).
+    ///
+    /// Run via `bin/soak.sh`.  Skipped without an explicit dir to keep
+    /// the bench gate's working set hermetic.
+    #[test]
+    #[ignore = "soak; run via bin/soak.sh"]
+    fn soak_disk_scrollback_bounded_under_million_lines() {
+        use crate::scrollback::{Scrollback, LINES_PER_PAGE};
+        use std::path::PathBuf;
+
+        let dir: PathBuf = std::env::temp_dir().join(format!(
+            "mars-soak-disk-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let cleanup = scopeguard(&dir);
+
+        let cols: u16 = 80;
+        // Tight caps so we exercise the ring overwrite path heavily.
+        let ram_cap = 256;
+        let max_pages = 4; // 4 × 256 = 1024 lines on disk
+        let scrollback = Scrollback::disk(&dir, ram_cap, max_pages, cols as usize)
+            .expect("disk scrollback");
+
+        let grid = Grid::with_scrollback_kind(cols, 24, scrollback);
+        let mut t = Terminal {
+            grid,
+            saved_main: None,
+            parser: Parser::new(),
+            attrs: CellAttrs::default(),
+            cursor_visible: true,
+            predictions: VecDeque::new(),
+            predictions_hit: 0,
+            predictions_miss: 0,
+        };
+
+        // Warm up: prime the ring + write a couple of disk pages.
+        let warmup_lines = ram_cap + 2 * LINES_PER_PAGE;
+        let park = b"\x1B[24;80H";
+        let line = b"this is a fairly typical 50-character log line!\n";
+        for _ in 0..warmup_lines {
+            t.feed(line);
+            t.feed(park);
+        }
+        let baseline_rss = current_rss_bytes();
+        let baseline_disk = file_size_total(&dir);
+
+        // Push 1 M more lines.
+        for _ in 0..1_000_000 {
+            t.feed(line);
+            t.feed(park);
+        }
+
+        let after_rss = current_rss_bytes();
+        let after_disk = file_size_total(&dir);
+        let rss_growth = after_rss.saturating_sub(baseline_rss);
+        let disk_growth = after_disk.saturating_sub(baseline_disk);
+
+        // RSS tolerance: 5 MB.  Disk tolerance: 0 — file is
+        // pre-`set_len`'d, ring writes overwrite in place.
+        const RSS_TOL: u64 = 5 * 1024 * 1024;
+        assert!(
+            rss_growth < RSS_TOL,
+            "RSS grew {rss_growth} bytes after 1M lines (baseline {baseline_rss}, after {after_rss})"
+        );
+        assert_eq!(
+            disk_growth, 0,
+            "disk file grew {disk_growth} bytes; ring should be fixed-size"
+        );
+
+        // Capacity-cap sanity: total stored == RAM cap + disk cap.
+        let expected_cap = ram_cap + max_pages * LINES_PER_PAGE;
+        assert_eq!(
+            t.grid().scrollback_len(),
+            expected_cap,
+            "scrollback should be capped at RAM + disk cap"
+        );
+        assert_eq!(t.grid().scrollback_capacity(), expected_cap);
+
+        drop(cleanup);
+    }
+
+    /// Total bytes across all files in `dir` (just the file sizes
+    /// reported by `metadata().len()`; APFS sparse files report
+    /// the apparent size, which is what's bounded by the ring).
+    fn file_size_total(dir: &std::path::Path) -> u64 {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+            .sum()
+    }
+
+    /// Tiny RAII guard so the soak test always cleans up its scratch
+    /// dir, even on panic.  Not std::ops::Drop on a path because we
+    /// don't want to drop on `&` — return a Drop value instead.
+    fn scopeguard(dir: &std::path::Path) -> impl Drop {
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        Guard(dir.to_path_buf())
+    }
+
     // ----- alt screen (?1049) ---------------------------------------------
 
     fn first_row_text(t: &Terminal) -> String {

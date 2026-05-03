@@ -303,22 +303,26 @@ pub struct DiskScrollback {
     ram_head: usize,
     ram_len: usize,
 
-    // Disk ring.
+    // Disk ring — line-granular.  `max_disk_lines = max_pages_on_disk *
+    // LINES_PER_PAGE` slots, each `line_bytes` wide.  Slot for global
+    // line N = `(N % max_disk_lines) * line_bytes`.
+    //
+    // Note: per-line writes mean we can't safely page-cache (a page
+    // is half-old half-new at any moment we're partway through it).
+    // Read cache is per-line instead — `cell_at_view` iterates cols
+    // within a row → all cells of a scrollback row hit the cache;
+    // each new row pays one read syscall (~µs).
     file: File,
     path: PathBuf,
     max_pages_on_disk: usize,
-    /// Total pages ever written.  `total_pages_written *
-    /// LINES_PER_PAGE` lines have been spilled.  When this exceeds
-    /// `max_pages_on_disk`, older pages have been overwritten and
+    max_disk_lines: u64,
+    /// Total lines ever spilled to disk.  When this exceeds
+    /// `max_disk_lines`, older lines have been overwritten and are
     /// no longer addressable.
-    total_pages_written: u64,
-    /// Slot in the in-RAM "page being filled" buffer.  Lines spill
-    /// into here until LINES_PER_PAGE accumulates, then the page is
-    /// written to disk in one go.
-    pending_page: Vec<Cell>,
+    total_disk_lines_written: u64,
 
-    // Single-slot read cache.  `(global_page_idx, decoded cells)`.
-    page_cache: RefCell<Option<(u64, Vec<Cell>)>>,
+    // Single-slot read cache.  `(global_line_idx, decoded cells)`.
+    line_cache: RefCell<Option<(u64, Vec<Cell>)>>,
 }
 
 impl DiskScrollback {
@@ -372,9 +376,9 @@ impl DiskScrollback {
             file,
             path,
             max_pages_on_disk,
-            total_pages_written: 0,
-            pending_page: Vec::with_capacity(LINES_PER_PAGE * cols),
-            page_cache: RefCell::new(None),
+            max_disk_lines: (max_pages_on_disk * LINES_PER_PAGE) as u64,
+            total_disk_lines_written: 0,
+            line_cache: RefCell::new(None),
         })
     }
 
@@ -386,13 +390,10 @@ impl DiskScrollback {
         self.ram_capacity + self.max_pages_on_disk * LINES_PER_PAGE
     }
 
-    /// Lines currently addressable on disk = pending lines waiting
-    /// to be written + already-written lines (capped by ring size).
+    /// Lines currently addressable on disk: capped by the ring size.
     fn disk_lines(&self) -> usize {
-        let pending = self.pending_page.len() / self.cols;
-        let written = (self.total_pages_written.min(self.max_pages_on_disk as u64) as usize)
-            * LINES_PER_PAGE;
-        pending + written
+        self.total_disk_lines_written
+            .min(self.max_disk_lines) as usize
     }
 
     pub fn push_line(&mut self, source: &[Cell]) {
@@ -405,55 +406,43 @@ impl DiskScrollback {
             return;
         }
 
-        // RAM ring full: spill the oldest RAM line to the pending
-        // page buffer; if the buffer fills, write a page to disk.
-        // Then overwrite the oldest RAM slot with the new line.
+        // RAM ring full: spill the oldest RAM line to disk, then
+        // overwrite the oldest RAM slot with the new line.  Per-line
+        // disk write — one seek + one write syscall, ~few µs amortised
+        // by the page cache on the kernel side.  Errors degrade to
+        // "stay in RAM, lose oldest silently" without crashing.
         let oldest_slot = self.ram_head;
         let start = oldest_slot * self.cols;
         let end = start + self.cols;
-        // Spill: append a copy of the oldest RAM line to pending_page.
-        let spilled: Vec<Cell> = self.ram_cells[start..end].to_vec();
-        self.pending_page.extend_from_slice(&spilled);
-        if self.pending_page.len() >= LINES_PER_PAGE * self.cols {
-            // Flush the full page to disk and clear the buffer.
-            // Errors here are silent (logged to stderr) — we don't
-            // want a transient I/O hiccup to crash mars and lose all
-            // future scrollback.  Lines that fail to spill stay in
-            // RAM via the ring (oldest is just lost).
-            if let Err(e) = self.flush_pending_page() {
-                eprintln!("mars: scrollback spill failed: {e} (continuing without disk)");
-                self.pending_page.clear();
-            }
+        let oldest: Vec<Cell> = self.ram_cells[start..end].to_vec();
+        if let Err(e) = self.spill_one_to_disk(&oldest) {
+            eprintln!("mars: scrollback spill failed: {e} (continuing without disk)");
         }
-        // Overwrite oldest RAM slot with the new line.
         self.ram_cells[start..end].copy_from_slice(source);
         self.ram_head = (self.ram_head + 1) % self.ram_capacity;
     }
 
-    fn flush_pending_page(&mut self) -> std::io::Result<()> {
-        let slot = (self.total_pages_written % self.max_pages_on_disk as u64) as usize;
-        let offset = (slot * self.page_bytes) as u64;
+    fn spill_one_to_disk(&mut self, line: &[Cell]) -> std::io::Result<()> {
+        let global_line = self.total_disk_lines_written;
+        let slot = (global_line % self.max_disk_lines) as usize;
+        let offset = (slot * self.line_bytes) as u64;
         self.file.seek(SeekFrom::Start(offset))?;
-        let bytes = cells_as_bytes(&self.pending_page);
-        self.file.write_all(bytes)?;
-        // No fsync — scrollback is ephemeral; we trade durability for
-        // throughput.  A crash loses some scrolled-off history; the
-        // visible grid is reconstructed by the next shell invocation.
-        self.total_pages_written += 1;
-        // Invalidate the read cache if it held the page we just
-        // overwrote (ring reuse).
-        if let Some((cached_global, _)) = self.page_cache.borrow().as_ref() {
-            if (cached_global % self.max_pages_on_disk as u64) == slot as u64 {
-                drop(self.page_cache.borrow_mut().take());
+        self.file.write_all(cells_as_bytes(line))?;
+        self.total_disk_lines_written += 1;
+        // Invalidate read cache if it held the global_line we just
+        // overwrote (only happens once a slot is recycled).
+        let cached = self.line_cache.borrow().as_ref().map(|(g, _)| *g);
+        if let Some(g) = cached {
+            if (g % self.max_disk_lines) == global_line % self.max_disk_lines {
+                self.line_cache.borrow_mut().take();
             }
         }
-        self.pending_page.clear();
         Ok(())
     }
 
     /// Map an external `idx` (0 = oldest stored, len-1 = newest) to
-    /// (global_page_idx, line_in_page) when the line lives on disk,
-    /// or to a RAM slot otherwise.
+    /// the global line index when the line lives on disk, or to a
+    /// RAM slot otherwise.
     fn locate(&self, idx: usize) -> Option<Location> {
         let total = self.len();
         if idx >= total {
@@ -461,31 +450,13 @@ impl DiskScrollback {
         }
         let disk_lines = self.disk_lines();
         if idx >= disk_lines {
-            // In RAM.
             let ram_idx = idx - disk_lines;
             let slot = (self.ram_head + ram_idx) % self.ram_capacity;
             return Some(Location::Ram(slot));
         }
-        // On disk (or in pending_page).  Map idx to a global line
-        // number, where "global" counts every line ever spilled
-        // (including ones long-since overwritten).
-        // earliest_addressable_global_line = total_lines_spilled - disk_lines
-        let total_lines_spilled = self.total_pages_written * LINES_PER_PAGE as u64
-            + (self.pending_page.len() / self.cols) as u64;
-        let earliest = total_lines_spilled - disk_lines as u64;
+        let earliest = self.total_disk_lines_written - disk_lines as u64;
         let global_line = earliest + idx as u64;
-
-        // pending_page covers [total_pages_written * LINES_PER_PAGE,
-        //                      total_lines_spilled).  Catch that range
-        // before falling through to a disk read.
-        let pending_start = self.total_pages_written * LINES_PER_PAGE as u64;
-        if global_line >= pending_start {
-            let in_pending = (global_line - pending_start) as usize;
-            return Some(Location::Pending(in_pending));
-        }
-        let global_page = global_line / LINES_PER_PAGE as u64;
-        let line_in_page = (global_line % LINES_PER_PAGE as u64) as usize;
-        Some(Location::Disk { global_page, line_in_page })
+        Some(Location::Disk { global_line })
     }
 
     pub fn cell_at(&self, line_idx: usize, col: usize) -> Option<Cell> {
@@ -497,12 +468,8 @@ impl DiskScrollback {
                 let start = slot * self.cols;
                 Some(self.ram_cells[start + col])
             }
-            Location::Pending(line) => {
-                let start = line * self.cols;
-                Some(self.pending_page[start + col])
-            }
-            Location::Disk { global_page, line_in_page } => {
-                self.with_page(global_page, |cells| cells[line_in_page * self.cols + col])
+            Location::Disk { global_line } => {
+                self.with_disk_line(global_line, |cells| cells[col])
             }
         }
     }
@@ -513,44 +480,40 @@ impl DiskScrollback {
                 let start = slot * self.cols;
                 Some(self.ram_cells[start..start + self.cols].to_vec())
             }
-            Location::Pending(line) => {
-                let start = line * self.cols;
-                Some(self.pending_page[start..start + self.cols].to_vec())
-            }
-            Location::Disk { global_page, line_in_page } => {
-                self.with_page(global_page, |cells| {
-                    let start = line_in_page * self.cols;
-                    cells[start..start + self.cols].to_vec()
-                })
+            Location::Disk { global_line } => {
+                self.with_disk_line(global_line, |cells| cells.to_vec())
             }
         }
     }
 
-    /// Run `f` on the cells of `global_page`, faulting the page in
-    /// from disk if it isn't already cached.  Single-slot cache.
-    fn with_page<R>(&self, global_page: u64, f: impl FnOnce(&[Cell]) -> R) -> Option<R> {
+    /// Run `f` on `global_line`'s cells, faulting from disk on miss.
+    /// Single-line cache: `cell_at_view` iterates cols within a row →
+    /// all cols of one scrollback row hit the cache; each new row
+    /// pays one read syscall.
+    fn with_disk_line<R>(
+        &self,
+        global_line: u64,
+        f: impl FnOnce(&[Cell]) -> R,
+    ) -> Option<R> {
         let cached_hit = self
-            .page_cache
+            .line_cache
             .borrow()
             .as_ref()
-            .map(|(p, _)| *p)
-            == Some(global_page);
+            .map(|(g, _)| *g)
+            == Some(global_line);
         if !cached_hit {
-            // Read fresh page from disk into the cache.
-            let slot = (global_page % self.max_pages_on_disk as u64) as usize;
-            let offset = (slot * self.page_bytes) as u64;
-            let mut buf = vec![0u8; self.page_bytes];
+            let slot = (global_line % self.max_disk_lines) as usize;
+            let offset = (slot * self.line_bytes) as u64;
+            let mut buf = vec![0u8; self.line_bytes];
             // Cloning the file FD gives us an independent seek
-            // cursor — `file.try_clone()` is the standard idiom for
-            // sharing a file across &self readers.  Cheap on macOS
-            // (dup3-style fd duplication).
+            // cursor — `try_clone()` is dup3 on macOS, cheap.
             let mut fd = self.file.try_clone().ok()?;
             fd.seek(SeekFrom::Start(offset)).ok()?;
             fd.read_exact(&mut buf).ok()?;
             let cells = bytes_to_cells(&buf);
-            *self.page_cache.borrow_mut() = Some((global_page, cells));
+            *self.line_cache.borrow_mut() = Some((global_line, cells));
         }
-        let cache = self.page_cache.borrow();
+        let cache = self.line_cache.borrow();
         let (_, cells) = cache.as_ref()?;
         Some(f(cells))
     }
@@ -559,13 +522,10 @@ impl DiskScrollback {
         self.ram_cells.clear();
         self.ram_head = 0;
         self.ram_len = 0;
-        self.pending_page.clear();
-        self.total_pages_written = 0;
-        *self.page_cache.borrow_mut() = None;
-        // Truncate file to 0 then re-extend; cheaper to set_len 0
-        // and let the next push_line / flush trigger a re-extend
-        // — but `file.set_len(0)` works.  We re-set to ring length
-        // immediately so seeks past EOF still work.
+        self.total_disk_lines_written = 0;
+        *self.line_cache.borrow_mut() = None;
+        // Truncate + re-set_len keeps the ring file at its
+        // canonical size so subsequent seeks are valid.
         let _ = self.file.set_len(0);
         let _ = self.file.set_len((self.max_pages_on_disk * self.page_bytes) as u64);
     }
@@ -582,8 +542,7 @@ impl Drop for DiskScrollback {
 #[derive(Clone, Copy, Debug)]
 enum Location {
     Ram(usize),         // ring slot
-    Pending(usize),     // line index in pending_page
-    Disk { global_page: u64, line_in_page: usize },
+    Disk { global_line: u64 },
 }
 
 /// View `&[Cell]` as raw bytes.  SAFETY: `Cell` is `Copy + 'static`
@@ -711,24 +670,21 @@ mod tests {
     #[test]
     fn disk_spills_past_ram_capacity_to_disk() {
         let dir = temp_dir("disk-spill");
-        // RAM capacity 2, max disk pages 1 → page = LINES_PER_PAGE
-        // lines.  Push 2 + LINES_PER_PAGE + 3 = matches a full page
-        // worth of spilled lines plus 3 in the next page (held in
-        // pending_page until full).
+        // RAM 2, 1 disk page → total cap = 2 + 256 = 258.  Push the
+        // exact cap amount, all addressable.
         let mut sb = Scrollback::disk(&dir, 2, 1, 4).expect("disk sb");
-        for i in 0..(2 + LINES_PER_PAGE + 3) {
+        let total_cap = 2 + LINES_PER_PAGE;
+        for i in 0..total_cap {
             let byte = b'a' + (i % 26) as u8;
             sb.push_line(&fill(byte, 4));
         }
-        // Total stored = all of them (we pushed less than total cap).
-        assert_eq!(sb.len(), 2 + LINES_PER_PAGE + 3);
-        // Index 0 (oldest) is the first 'a' we pushed; it lives on
-        // disk now (got spilled long ago via pending_page → flush).
+        assert_eq!(sb.len(), total_cap);
+        assert_eq!(sb.capacity(), total_cap);
+        // Oldest (index 0) is on disk; it's the first byte we pushed.
         assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'a');
-        // Newest is in RAM.
-        let newest = sb.len() - 1;
-        let expected_newest = b'a' + ((2 + LINES_PER_PAGE + 3 - 1) % 26) as u8;
-        assert_eq!(sb.cell_at(newest, 0).unwrap().ch, expected_newest as char);
+        // Newest is in RAM, last byte we pushed.
+        let newest_byte = b'a' + ((total_cap - 1) % 26) as u8;
+        assert_eq!(sb.cell_at(total_cap - 1, 0).unwrap().ch, newest_byte as char);
     }
 
     #[test]

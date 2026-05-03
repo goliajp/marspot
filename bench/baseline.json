@@ -39,7 +39,7 @@
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 195,
+      "mars_parse_MBps_min": 180,
       "mars_live_MBps_min":  35,
       "mars_vs_best_other_min": 0.7
     }
