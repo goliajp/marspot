@@ -48,9 +48,11 @@ run_in_mars() {
   local scenario=$1
   local marker=$2
 
-  # Drive mars by pointing its PTY shell at a one-shot script — avoids
-  # the osascript-keystroke route entirely (chars get lost to zsh init,
-  # `cat` was alias-expanding to `bat`, etc.).
+  # Drive the single-session `mcli` binary, NOT the 9-session `mars`
+  # app.  `mars` runs MARS_SHELL in every cell (3×3 = 9 parallel
+  # cats), so the per-scenario "live throughput" timed via marker
+  # would be ~1/9 of the real per-session number.  The product-level
+  # multi-session test lives in `bin/scenarios/multi-session-9x.sh`.
   local cmd_script="/tmp/mars-bench-cmd.sh"
   cat > "$cmd_script" <<EOF
 #!/bin/sh
@@ -58,26 +60,25 @@ run_in_mars() {
 EOF
   chmod +x "$cmd_script"
 
-  killall mars 2>/dev/null || true
+  killall mcli mars 2>/dev/null || true
   sleep 0.3
 
-  # Forward MARS_PROFILE / MARS_LATENCY through if set, so a profiling
-  # run can capture per-trial counters under the harness.
+  # Forward MARS_PROFILE through if set, so a profiling run can
+  # capture per-trial counters under the harness.
   local profile_env=""
   if [[ -n "${MARS_PROFILE:-}" ]]; then
-    # Tag per-(scenario,trial) so they don't overwrite each other.
     local pf="${MARS_PROFILE}.${scenario}.${trial:-x}"
     profile_env="MARS_PROFILE=$pf"
   fi
   (cd "$ROOT" && env $profile_env MARS_SHELL="$cmd_script" \
-    nohup target/release/mars > /dev/null 2>&1 < /dev/null &)
+    nohup target/release/mcli > /dev/null 2>&1 < /dev/null &)
   disown || true
 
   if ! wait_for_marker "$marker"; then
-    killall mars 2>/dev/null || true
+    killall mcli 2>/dev/null || true
     return 1
   fi
-  killall mars 2>/dev/null || true
+  killall mcli 2>/dev/null || true
   sleep 0.3
 }
 
