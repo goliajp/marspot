@@ -115,3 +115,46 @@ fragment float4 fg_fragment(
     float coverage = atlas.sample(atlas_sampler, in.uv).r;
     return float4(in.color.rgb, in.color.a * coverage);
 }
+
+// ----------------------------------------------------------------------
+// Dot pass — circle-clipped coloured quad.  Reuses the BG vertex
+// shader for placement; the fragment discards pixels outside the
+// inscribed circle and antialiases a 1-px ring at the edge.  Used
+// for the sidebar status dots that the AppKit renderer draws via
+// `fill_ellipse_in_rect`.
+// ----------------------------------------------------------------------
+
+struct DVOut {
+    float4 position [[position]];
+    float2 quad_uv;   // 0..1 across the source quad
+    float4 color;
+};
+
+vertex DVOut dot_vertex(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const Cell* cells [[buffer(0)]],
+    constant float2& viewport_px [[buffer(1)]]
+) {
+    Cell c = cells[iid];
+    float2 px = c.origin + c.size * corners[vid];
+    float2 ndc = (px / viewport_px) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    DVOut o;
+    o.position = float4(ndc, 0.0, 1.0);
+    o.quad_uv = corners[vid];
+    o.color = c.color;
+    return o;
+}
+
+fragment float4 dot_fragment(DVOut in [[stage_in]]) {
+    float d = distance(in.quad_uv, float2(0.5, 0.5));
+    // Hard radius 0.5; antialias band 1 / quad-size-in-px.  We don't
+    // know the quad's exact pixel size in the shader without a
+    // uniform, but the dot is tiny (9 px) so a fixed `fwidth`-style
+    // gradient gives an acceptable single-pixel soft edge on Retina.
+    float aa = fwidth(d);
+    float coverage = 1.0 - smoothstep(0.5 - aa, 0.5, d);
+    return float4(in.color.rgb, in.color.a * coverage);
+}

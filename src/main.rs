@@ -16,8 +16,10 @@ use mars::session::{Session, SessionState};
 use mars::terminal::Terminal;
 use mars::tmux;
 
-/// Renderer dispatch: AppKit-on-CGImage (default) or Metal-on-CAMetalLayer
-/// (set `MARS_METAL=1`).  Both implement the same surface — keep this
+/// Renderer dispatch: Metal-on-CAMetalLayer (default — 7× faster
+/// typing latency per docs/perf.md) or AppKit-on-CGImage (set
+/// `MARS_APPKIT=1`, kept as a fallback for regression bisects /
+/// troubleshooting).  Both implement the same surface — keep this
 /// enum in lock-step with their public API.
 enum RendererImpl {
     Appkit(Renderer),
@@ -235,14 +237,16 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 panic!("Mars only supports the AppKit backend");
             };
             let nsview: &NSView = &*(appkit.ns_view.as_ptr() as *const NSView);
-            if std::env::var("MARS_METAL").as_deref() == Ok("1") {
-                eprintln!("[mars] MARS_METAL=1 → using MetalRenderer");
-                RendererImpl::Metal(
-                    MetalRenderer::new(nsview, scale).expect("metal renderer init"),
-                )
-            } else {
+            // Metal is the default; MARS_APPKIT=1 falls back to the
+            // AppKit/CGImage path (kept for regression bisects).
+            if std::env::var("MARS_APPKIT").as_deref() == Ok("1") {
+                eprintln!("[mars] MARS_APPKIT=1 → using AppKit Renderer");
                 RendererImpl::Appkit(
                     Renderer::new(nsview, scale).expect("renderer init"),
+                )
+            } else {
+                RendererImpl::Metal(
+                    MetalRenderer::new(nsview, scale).expect("metal renderer init"),
                 )
             }
         };

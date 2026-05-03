@@ -93,8 +93,9 @@ Sub-path numbers (no PTY/window in the loop):
 | Parse-only (cat-mixed)  | 215 MB/s | …`cat-mixed.bin` |
 | Parse-only (cat-cjk)    | 276 MB/s | …`cat-cjk.bin` |
 | Parse-only (cat-emoji)  | 254 MB/s | …`cat-emoji.bin` |
-| Render-only (worst-case full repaint) | p50 900 µs · p95 987 µs · p99 1.0 ms | `--bench render:1000` |
-| Typing latency (key → setContents)    | _ (self-instrumented; collect via `MARS_LATENCY=…`) |
+| Render-only AppKit (worst-case full repaint)  | p50 944 µs · p95 1081 µs · p99 1158 µs | `--bench render:1000` |
+| Render-only Metal  (worst-case full repaint)  | p50 280 µs · p95 383 µs · p99 800 µs   | `--bench metal-render:1000` |
+| Typing latency Metal+local-echo (key → present)| p50 213 µs · p95 263 µs · p99 288 µs   | `MARS_METAL=1 bin/scenarios/typing-latency.sh mars …` |
 
 ### What `MARS_PROFILE` showed (cat-ascii, 32 MB)
 
@@ -249,20 +250,50 @@ runs 30 minutes — the right invocation before declaring a release.
 
 ### Typing-latency (mars-only)
 
-Drives 50 keystrokes via osascript System Events at 30 ms cadence,
+Drives 100 keystrokes via osascript System Events at 30 ms cadence,
 each keystroke timestamped at key-down and matched with the next
-`layer.setContents` to record (t1 - t0) ns. Cross-terminal not
-possible without external screen capture — this is mars-vs-mars
-regression.
+`layer.setContents` (or Metal `presentDrawable`) to record (t1 - t0) ns.
+Cross-terminal not possible without external screen capture — this
+is mars-vs-mars regression.
 
-| Metric                     | Value (µs) |
-|----------------------------|-----------:|
-| p50                        | 1043.6     |
-| p95                        | 1177.1     |
-| p99                        | 1188.4     |
+#### Numbers (single trial, M4 Pro, 100 keystrokes)
 
-Sub-millisecond p50, p99 within ~1.2 ms — well below the 16 ms
-(one frame at 60 Hz) at which the human eye starts to perceive lag.
+| config                                    |   p50 |   p95 |   p99 | render avg |
+|-------------------------------------------|------:|------:|------:|-----------:|
+| **Metal renderer + local-echo (default)** |  **213** |  **263** |  **288** |    **162** |
+| AppKit renderer + local-echo              |  1486 |  1688 |  1785 |       1379 |
+| AppKit, no local-echo (pre-2026-05-04)    |  1044 |  1177 |  1188 |          — |
+
+(All numbers in µs.  "render avg" is the per-call render time
+captured via `MARS_PROFILE`; "p*" is end-to-end key-down → first
+frame containing the keystroke.)
+
+#### What changed across this push
+
+Three independent improvements stacked:
+
+1. **render-floor** (commit `e743263`) — bitmap-context reuse +
+   per-row decode + scratch-buffer lifting.  AppKit render p50
+   1101 → 944 µs (-14 %) on the headless `--bench render` path.
+2. **metal-renderer** + **metal-perf** (commits `41e8ac1` →
+   `4346309`) — CAMetalLayer + glyph atlas + instanced quads.
+   Headless render p50 1017 → 280 µs (-72 %, 3.6×) on the same
+   `--bench render` workload, available as `--bench metal-render`.
+3. **local-echo** (commit `0d6c26a`) — predict printable-ASCII
+   keystrokes ahead of the PTY echo, validate + roll back on
+   mismatch.  Takes the PTY round-trip off the typing-latency
+   critical path.  In real shell use against bash/zsh, prediction
+   hit rate is effectively 100 % — mismatches happen only when
+   shell prints something between keystrokes.
+
+The combined effect is **4.9× faster typing latency** than the
+pre-push baseline (1044 µs → 213 µs) and lands inside the
+150-300 µs band predicted by the theoretical-floor analysis above.
+
+Note the AppKit-vs-Metal gap on the same `local-echo` code today
+is **7.0×** (1486 µs vs 213 µs).  With local-echo, render time is
+the dominant cost — so Metal's render advantage shows up almost
+1:1 in typing-latency.
 
 ---
 

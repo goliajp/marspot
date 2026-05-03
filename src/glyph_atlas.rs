@@ -65,10 +65,10 @@ use std::ptr::NonNull;
 /// the stable public API of CoreGraphics).
 const KCGIMAGE_ALPHA_ONLY: u32 = 7;
 
-/// FFI for `CGBitmapContextCreate`.  `core-graphics`'s safe wrapper
-/// requires a non-null `&CGColorSpace`, but alpha-only contexts must
-/// pass NULL.  Declared here as a private extern so we can build the
-/// alpha-only context the atlas needs.
+// FFI for `CGBitmapContextCreate`.  `core-graphics`'s safe wrapper
+// requires a non-null `&CGColorSpace`, but alpha-only contexts must
+// pass NULL.  Declared here as a private extern so we can build the
+// alpha-only context the atlas needs.
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
     fn CGBitmapContextCreate(

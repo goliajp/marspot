@@ -42,7 +42,8 @@ use objc2_metal::{
     MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
     MTLSamplerState, MTLStoreAction, MTLTexture,
 };
-use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use objc2_app_kit::NSColor;
+use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -116,6 +117,11 @@ pub struct MetalRenderer {
     /// glyph's atlas slot reads padding (transparent) — not the
     /// neighbouring glyph.
     fg_sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+    /// Pipeline state for the dot pass — same `CellInstance` input
+    /// as the BG pass but the fragment shader clips to a circle
+    /// inscribed in the quad.  Alpha-blended so the AA edge composites
+    /// over the underlying sidebar BG.
+    dot_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Shared font handling — same data the AppKit renderer uses.
     font: FontCache,
     /// Glyph atlas backing the FG pass.  Constructed in `new` /
@@ -126,6 +132,9 @@ pub struct MetalRenderer {
     /// steady state.
     cells_scratch: Vec<CellInstance>,
     glyphs_scratch: Vec<GlyphInstance>,
+    /// Sidebar status dots — same instance layout as cells, but the
+    /// dot pipeline clips them to a circle.
+    dots_scratch: Vec<CellInstance>,
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
@@ -145,6 +154,7 @@ impl MetalRenderer {
         let bg_pipeline = build_bg_pipeline(&device, &library)?;
         let fg_pipeline = build_fg_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
+        let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 1024×1024 R8 atlas = 1 MiB.  Fits ~1500 Menlo 13pt 2× glyphs;
         // huge headroom for the realistic working set of a few hundred
@@ -161,11 +171,31 @@ impl MetalRenderer {
             // to read pixels back during compositing.
             layer.setFramebufferOnly(true);
             layer.setContentsScale(scale as f64);
+            // Live-resize flicker fix — same as render.rs's CALayer
+            // setup.  Default `contentsGravity = resize` would stretch
+            // the previous frame's drawable to the new bounds before
+            // our redraw lands; pin to top-left so the BG shows through
+            // the gap until the next frame.  setOpaque(true) lets CA
+            // skip compositing anything underneath us.
+            layer.setContentsGravity(kCAGravityTopLeft);
+            layer.setOpaque(true);
         }
 
         view.setWantsLayer(true);
         unsafe {
             view.setLayer(Some(&layer));
+            // Window BG = terminal BG so the gap between resize +
+            // first repaint reads as the same colour, not the system
+            // window BG.  Mirrors the AppKit renderer.
+            if let Some(window) = view.window() {
+                let bg = NSColor::colorWithSRGBRed_green_blue_alpha(
+                    crate::font_cache::BG.0,
+                    crate::font_cache::BG.1,
+                    crate::font_cache::BG.2,
+                    1.0,
+                );
+                window.setBackgroundColor(Some(&bg));
+            }
         }
 
         Ok(Self {
@@ -177,9 +207,11 @@ impl MetalRenderer {
             bg_pipeline,
             fg_pipeline,
             fg_sampler,
+            dot_pipeline,
             font,
             atlas,
             cells_scratch: Vec::new(),
+            dots_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
             window_focused: true,
         })
@@ -198,6 +230,7 @@ impl MetalRenderer {
         let bg_pipeline = build_bg_pipeline(&device, &library)?;
         let fg_pipeline = build_fg_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
+        let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 1024×1024 R8 atlas = 1 MiB.  Fits ~1500 Menlo 13pt 2× glyphs;
         // huge headroom for the realistic working set of a few hundred
@@ -213,9 +246,11 @@ impl MetalRenderer {
             bg_pipeline,
             fg_pipeline,
             fg_sampler,
+            dot_pipeline,
             font,
             atlas,
             cells_scratch: Vec::new(),
+            dots_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
             window_focused: true,
         })
@@ -322,10 +357,12 @@ impl MetalRenderer {
             ref bg_pipeline,
             ref fg_pipeline,
             ref fg_sampler,
+            ref dot_pipeline,
             ref mut font,
             ref mut atlas,
             ref mut cells_scratch,
             ref mut glyphs_scratch,
+            ref mut dots_scratch,
             window_focused,
             width_px,
             height_px,
@@ -334,6 +371,7 @@ impl MetalRenderer {
 
         cells_scratch.clear();
         glyphs_scratch.clear();
+        dots_scratch.clear();
         build_instances(
             layout,
             views,
@@ -344,6 +382,7 @@ impl MetalRenderer {
             atlas,
             cells_scratch,
             glyphs_scratch,
+            dots_scratch,
         );
 
         let layer = layer.as_ref().unwrap();
@@ -362,11 +401,13 @@ impl MetalRenderer {
             &cmd,
             &texture,
             bg_pipeline,
+            dot_pipeline,
             fg_pipeline,
             fg_sampler,
             atlas,
             device,
             cells_scratch,
+            dots_scratch,
             glyphs_scratch,
             width_px as f32,
             height_px as f32,
@@ -411,16 +452,19 @@ impl MetalRenderer {
             ref bg_pipeline,
             ref fg_pipeline,
             ref fg_sampler,
+            ref dot_pipeline,
             ref mut font,
             ref mut atlas,
             ref mut cells_scratch,
             ref mut glyphs_scratch,
+            ref mut dots_scratch,
             window_focused,
             ..
         } = *self;
 
         cells_scratch.clear();
         glyphs_scratch.clear();
+        dots_scratch.clear();
         build_instances(
             layout,
             views,
@@ -431,6 +475,7 @@ impl MetalRenderer {
             atlas,
             cells_scratch,
             glyphs_scratch,
+            dots_scratch,
         );
 
         let cmd = match queue.commandBuffer() {
@@ -441,11 +486,13 @@ impl MetalRenderer {
             &cmd,
             target,
             bg_pipeline,
+            dot_pipeline,
             fg_pipeline,
             fg_sampler,
             atlas,
             device,
             cells_scratch,
+            dots_scratch,
             glyphs_scratch,
             width_px as f32,
             height_px as f32,
@@ -455,30 +502,37 @@ impl MetalRenderer {
     }
 }
 
-/// Encode BG + FG passes against `target`.  Shared by the live
+/// Encode BG → dot → FG passes against `target`.  Shared by the live
 /// `render_layout` (drawable target) and the offscreen
-/// `render_layout_to_texture` (caller-provided target).
+/// `render_layout_to_texture` (caller-provided target).  Pass order
+/// matters: BG paints opaquely (no blend); dot + FG are alpha-blended
+/// on top.
 #[allow(clippy::too_many_arguments)]
 fn encode_passes(
     cmd: &ProtocolObject<dyn MTLCommandBuffer>,
     target: &ProtocolObject<dyn MTLTexture>,
     bg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    dot_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
     atlas: &GlyphAtlas,
     device: &ProtocolObject<dyn MTLDevice>,
     cells: &[CellInstance],
+    dots: &[CellInstance],
     glyphs: &[GlyphInstance],
     viewport_w: f32,
     viewport_h: f32,
 ) {
     let viewport: [f32; 2] = [viewport_w, viewport_h];
+    let viewport_ptr = NonNull::new(viewport.as_ptr() as *mut c_void).unwrap();
+    let viewport_len = std::mem::size_of::<[f32; 2]>();
 
-    // BG pass.
+    // BG pass — clear to gutter, draw all opaque cells on top in
+    // submission order (chrome → sidebar → per-session bg → cursor →
+    // focus outline → underline).
     let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
     unsafe {
-        let attachments = bg_pass.colorAttachments();
-        let color = attachments.objectAtIndexedSubscript(0);
+        let color = bg_pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
         color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
@@ -495,16 +549,10 @@ fn encode_passes(
         .expect("bg encoder");
     bg_encoder.setRenderPipelineState(bg_pipeline);
     if let Some(buf) = &bg_buffer {
-        unsafe {
-            bg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
-        }
+        unsafe { bg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
     }
     unsafe {
-        bg_encoder.setVertexBytes_length_atIndex(
-            NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
-            std::mem::size_of::<[f32; 2]>(),
-            1,
-        );
+        bg_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
         if !cells.is_empty() {
             bg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
                 MTLPrimitiveType::Triangle,
@@ -516,11 +564,41 @@ fn encode_passes(
     }
     bg_encoder.endEncoding();
 
-    // FG pass.
+    // Dot pass — circle-clipped, alpha-blended.  Skipped entirely if
+    // no dots queued (fast path for the bench / mcli single-session
+    // case where there's no sidebar).
+    if !dots.is_empty() {
+        let dot_pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = dot_pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let dot_buffer = make_instance_buffer(device, cells_as_bytes(dots));
+        let dot_encoder = cmd
+            .renderCommandEncoderWithDescriptor(&dot_pass)
+            .expect("dot encoder");
+        dot_encoder.setRenderPipelineState(dot_pipeline);
+        if let Some(buf) = &dot_buffer {
+            unsafe { dot_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
+        }
+        unsafe {
+            dot_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            dot_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                dots.len(),
+            );
+        }
+        dot_encoder.endEncoding();
+    }
+
+    // FG pass — textured glyph quads, alpha-blended on top.
     let fg_pass = unsafe { MTLRenderPassDescriptor::new() };
     unsafe {
-        let attachments = fg_pass.colorAttachments();
-        let color = attachments.objectAtIndexedSubscript(0);
+        let color = fg_pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
         color.setLoadAction(MTLLoadAction::Load);
         color.setStoreAction(MTLStoreAction::Store);
@@ -531,16 +609,10 @@ fn encode_passes(
         .expect("fg encoder");
     fg_encoder.setRenderPipelineState(fg_pipeline);
     if let Some(buf) = &fg_buffer {
-        unsafe {
-            fg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
-        }
+        unsafe { fg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
     }
     unsafe {
-        fg_encoder.setVertexBytes_length_atIndex(
-            NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
-            std::mem::size_of::<[f32; 2]>(),
-            1,
-        );
+        fg_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
         fg_encoder.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
         fg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
         if !glyphs.is_empty() {
@@ -627,6 +699,7 @@ fn build_instances(
     atlas: &mut GlyphAtlas,
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
+    dots: &mut Vec<CellInstance>,
 ) {
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
@@ -685,15 +758,16 @@ fn build_instances(
             atlas,
             cells,
             glyphs,
+            dots,
         );
     }
 }
 
-/// Sidebar rows.  Per row: optional focus-bg highlight, a state dot
-/// (rendered as a small square — TODO: a circle shader for v2),
-/// and the label glyphs.  Mirrors `Renderer::draw_sidebar` in
-/// `render.rs` so click hit-testing on the same constants lands on
-/// the same pixels.
+/// Sidebar rows.  Per row: optional focus-bg highlight, a state
+/// dot (rendered through the dot pipeline so it's a real circle,
+/// not a square), and the label glyphs.  Mirrors
+/// `Renderer::draw_sidebar` in `render.rs` so click hit-testing on
+/// the same constants lands on the same pixels.
 #[allow(clippy::too_many_arguments)]
 fn push_sidebar(
     entries: &[SidebarEntry],
@@ -707,6 +781,7 @@ fn push_sidebar(
     atlas: &mut GlyphAtlas,
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
+    dots: &mut Vec<CellInstance>,
 ) {
     for (i, entry) in entries.iter().enumerate() {
         let row_top_y = SIDEBAR_TOP_PAD + i as f32 * SIDEBAR_ROW_H;
@@ -731,9 +806,9 @@ fn push_sidebar(
         };
         let dot_cx = SIDEBAR_LEFT_PAD + SIDEBAR_DOT_R;
         let dot_cy = row_top_y + SIDEBAR_ROW_H / 2.0;
-        // Square-shaped dot — circle would need a discard-on-radius
-        // fragment shader; visual fidelity bump is phase 5e+.
-        cells.push(CellInstance {
+        // Routed through the dot pipeline (separate vec): same quad,
+        // but its fragment shader smoothsteps to a circle.
+        dots.push(CellInstance {
             origin: [dot_cx - SIDEBAR_DOT_R, dot_cy - SIDEBAR_DOT_R],
             size: [SIDEBAR_DOT_R * 2.0, SIDEBAR_DOT_R * 2.0],
             color: [dot_color.0, dot_color.1, dot_color.2, 1.0],
@@ -1078,6 +1153,37 @@ fn build_fg_pipeline(
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .map_err(|e| format!("newRenderPipelineState (FG) error: {:?}", e))
+}
+
+/// Dot-pass pipeline.  Same `CellInstance` input as BG, but the
+/// fragment shader smoothsteps to a circle inscribed in the quad.
+/// Alpha-blended (same equation as FG) so the AA edge composites
+/// cleanly over the underlying sidebar BG.
+fn build_dot_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    let vfn = pipeline_function(library, "dot_vertex")?;
+    let ffn = pipeline_function(library, "dot_fragment")?;
+
+    let descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
+    descriptor.setVertexFunction(Some(&vfn));
+    descriptor.setFragmentFunction(Some(&ffn));
+    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    unsafe {
+        attachment.setPixelFormat(TARGET_FORMAT);
+        attachment.setBlendingEnabled(true);
+        attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+        attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    }
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .map_err(|e| format!("newRenderPipelineState (dot) error: {:?}", e))
 }
 
 fn build_fg_sampler(
@@ -1569,6 +1675,7 @@ mod tests {
 
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut dots: Vec<CellInstance> = Vec::new();
         build_instances(
             &layout,
             std::slice::from_ref(&view),
@@ -1579,6 +1686,7 @@ mod tests {
             &mut atlas,
             &mut cells,
             &mut glyphs,
+            &mut dots,
         );
 
         // Expected glyph instances:
