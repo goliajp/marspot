@@ -183,30 +183,6 @@ impl Renderer {
         self.window_focused = focused;
     }
 
-    /// Returns the cell to render at the given viewport position
-    /// inside one session, honouring its `view_offset`.  Pulls from
-    /// `grid` for live rows and from `grid.scrollback_line(_)` for
-    /// scrolled-up rows.  Returns a blank cell for positions past
-    /// the oldest scrollback line.
-    fn cell_at_viewport(view_offset: u16, col: u16, viewport_row: u16, grid: &Grid) -> Cell {
-        let rows = grid.rows() as usize;
-        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
-        if abs < rows {
-            grid.cell(col, (rows - 1 - abs) as u16)
-        } else {
-            let from_end = abs - rows;
-            let sb_len = grid.scrollback_len();
-            if from_end < sb_len {
-                let sb_idx = sb_len - 1 - from_end;
-                if let Some(line) = grid.scrollback_line(sb_idx) {
-                    if (col as usize) < line.len() {
-                        return line[col as usize];
-                    }
-                }
-            }
-            Cell::default()
-        }
-    }
 
     pub fn resize(&mut self, width_px: f64, height_px: f64) {
         self.viewport_w = width_px;
@@ -425,7 +401,7 @@ impl Renderer {
             scratch.row_cells.clear();
             scratch.row_attrs.clear();
             for c in 0..cols {
-                let cell = Self::cell_at_viewport(view.view_offset, c as u16, r, grid);
+                let cell = grid.cell_at_view(view.view_offset, c as u16, r);
                 scratch.row_cells.push(cell);
                 scratch.row_attrs.push(resolve_attrs(cell.attrs));
             }

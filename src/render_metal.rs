@@ -46,6 +46,12 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
+use crate::font_cache::{resolve_attrs, FontCache, BG};
+use crate::glyph_atlas::{GlyphAtlas, GlyphKey};
+use crate::grid::{Cell, Grid};
+use crate::layout::{CellRect, Layout};
+use crate::render::{SessionView, SidebarEntry};
+
 /// One cell's draw data, layout-compatible with `Cell` in
 /// `src/shaders/cells.metal`.  Repr-C; no padding shenanigans.
 ///
@@ -109,6 +115,19 @@ pub struct MetalRenderer {
     /// glyph's atlas slot reads padding (transparent) — not the
     /// neighbouring glyph.
     fg_sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+    /// Shared font handling — same data the AppKit renderer uses.
+    font: FontCache,
+    /// Glyph atlas backing the FG pass.  Constructed in `new` /
+    /// `new_headless`; grows lazily as cells reference new glyphs.
+    atlas: GlyphAtlas,
+    /// Per-frame instance scratch.  Reset at the start of each
+    /// `render_layout` so per-frame allocations stay zero in the
+    /// steady state.
+    cells_scratch: Vec<CellInstance>,
+    glyphs_scratch: Vec<GlyphInstance>,
+    /// Window-level focus.  Mirror of the AppKit renderer's flag —
+    /// drives whether the focused-session cursor is filled or hollow.
+    window_focused: bool,
 }
 
 impl MetalRenderer {
@@ -125,6 +144,12 @@ impl MetalRenderer {
         let bg_pipeline = build_bg_pipeline(&device, &library)?;
         let fg_pipeline = build_fg_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
+        let font = FontCache::build()?;
+        // 1024×1024 R8 atlas = 1 MiB.  Fits ~1500 Menlo 13pt 2× glyphs;
+        // huge headroom for the realistic working set of a few hundred
+        // unique characters.  Bounded — get_or_rasterize returns None
+        // on full and the renderer skips the glyph that frame.
+        let atlas = GlyphAtlas::new(&device, 1024, 1024)?;
 
         let layer = unsafe { CAMetalLayer::new() };
         unsafe {
@@ -151,6 +176,11 @@ impl MetalRenderer {
             bg_pipeline,
             fg_pipeline,
             fg_sampler,
+            font,
+            atlas,
+            cells_scratch: Vec::new(),
+            glyphs_scratch: Vec::new(),
+            window_focused: true,
         })
     }
 
@@ -167,6 +197,12 @@ impl MetalRenderer {
         let bg_pipeline = build_bg_pipeline(&device, &library)?;
         let fg_pipeline = build_fg_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
+        let font = FontCache::build()?;
+        // 1024×1024 R8 atlas = 1 MiB.  Fits ~1500 Menlo 13pt 2× glyphs;
+        // huge headroom for the realistic working set of a few hundred
+        // unique characters.  Bounded — get_or_rasterize returns None
+        // on full and the renderer skips the glyph that frame.
+        let atlas = GlyphAtlas::new(&device, 1024, 1024)?;
         Ok(Self {
             device,
             queue,
@@ -176,7 +212,20 @@ impl MetalRenderer {
             bg_pipeline,
             fg_pipeline,
             fg_sampler,
+            font,
+            atlas,
+            cells_scratch: Vec::new(),
+            glyphs_scratch: Vec::new(),
+            window_focused: true,
         })
+    }
+
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.window_focused = focused;
+    }
+
+    pub fn cell_dims(&self) -> (f64, f64) {
+        self.font.cell_dims()
     }
 
     /// Update the drawable size after a host-window resize.  Cheap on
@@ -242,6 +291,388 @@ impl MetalRenderer {
         cmd.presentDrawable(mtl_drawable);
         cmd.commit();
         true
+    }
+
+    /// Phase 5b live render — same call shape as
+    /// `crate::render::Renderer::render_layout`.  Walks each session's
+    /// grid + scrollback, emits BG cell instances + FG glyph
+    /// instances, then runs both passes against the next CAMetalLayer
+    /// drawable and presents.  No-op in headless mode.
+    pub fn render_layout(
+        &mut self,
+        layout: &Layout,
+        views: &[SessionView],
+        sidebar: &[SidebarEntry],
+        focused_idx: usize,
+    ) {
+        if self.layer.is_none() {
+            return;
+        }
+        if self.width_px < 1.0 || self.height_px < 1.0 {
+            return;
+        }
+
+        // Disjoint borrow so build_instances can mutate font + atlas
+        // + scratch while we still hold &references to the GPU bits.
+        let Self {
+            ref device,
+            ref queue,
+            ref layer,
+            ref bg_pipeline,
+            ref fg_pipeline,
+            ref fg_sampler,
+            ref mut font,
+            ref mut atlas,
+            ref mut cells_scratch,
+            ref mut glyphs_scratch,
+            window_focused,
+            width_px,
+            height_px,
+            ..
+        } = *self;
+
+        cells_scratch.clear();
+        glyphs_scratch.clear();
+        build_instances(
+            layout,
+            views,
+            sidebar,
+            focused_idx,
+            window_focused,
+            font,
+            atlas,
+            cells_scratch,
+            glyphs_scratch,
+        );
+
+        let layer = layer.as_ref().unwrap();
+        let drawable = match unsafe { layer.nextDrawable() } {
+            Some(d) => d,
+            None => return,
+        };
+        let texture = unsafe { drawable.texture() };
+
+        let cmd = match queue.commandBuffer() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // BG pass — clears to gutter colour, then draws all cell
+        // instances (chrome, sidebar, per-session bg, cursor, focus
+        // outline) on top in submission order.
+        let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let attachments = bg_pass.colorAttachments();
+            let color = attachments.objectAtIndexedSubscript(0);
+            color.setTexture(Some(&texture));
+            color.setLoadAction(MTLLoadAction::Clear);
+            color.setStoreAction(MTLStoreAction::Store);
+            // Clear to chrome gutter — instances overpaint as needed.
+            color.setClearColor(MTLClearColor {
+                red: GUTTER.0 as f64,
+                green: GUTTER.1 as f64,
+                blue: GUTTER.2 as f64,
+                alpha: 1.0,
+            });
+        }
+        let bg_buffer = make_instance_buffer(device, cells_as_bytes(cells_scratch));
+        let bg_encoder = match cmd.renderCommandEncoderWithDescriptor(&bg_pass) {
+            Some(e) => e,
+            None => return,
+        };
+        bg_encoder.setRenderPipelineState(bg_pipeline);
+        if let Some(buf) = &bg_buffer {
+            unsafe {
+                bg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
+            }
+        }
+        let viewport: [f32; 2] = [width_px as f32, height_px as f32];
+        unsafe {
+            bg_encoder.setVertexBytes_length_atIndex(
+                NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
+                std::mem::size_of::<[f32; 2]>(),
+                1,
+            );
+            if !cells_scratch.is_empty() {
+                bg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    cells_scratch.len(),
+                );
+            }
+        }
+        bg_encoder.endEncoding();
+
+        // FG pass — Load (don't clear), draws glyph instances on top
+        // of the BG result.  Alpha-blended via the FG pipeline.
+        let fg_pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let attachments = fg_pass.colorAttachments();
+            let color = attachments.objectAtIndexedSubscript(0);
+            color.setTexture(Some(&texture));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let fg_buffer = make_instance_buffer(device, glyphs_as_bytes(glyphs_scratch));
+        let fg_encoder = match cmd.renderCommandEncoderWithDescriptor(&fg_pass) {
+            Some(e) => e,
+            None => return,
+        };
+        fg_encoder.setRenderPipelineState(fg_pipeline);
+        if let Some(buf) = &fg_buffer {
+            unsafe {
+                fg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
+            }
+        }
+        unsafe {
+            fg_encoder.setVertexBytes_length_atIndex(
+                NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
+                std::mem::size_of::<[f32; 2]>(),
+                1,
+            );
+            fg_encoder.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+            fg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+            if !glyphs_scratch.is_empty() {
+                fg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    glyphs_scratch.len(),
+                );
+            }
+        }
+        fg_encoder.endEncoding();
+
+        let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
+            ProtocolObject::from_ref(&*drawable);
+        cmd.presentDrawable(mtl_drawable);
+        cmd.commit();
+    }
+}
+
+/// Chrome / cursor / focus-outline constants, kept in sync with
+/// `render.rs`.  Shaders consume `f32`s, so duplicate as `f32`-tuples
+/// here rather than convert per call.
+const GUTTER: (f32, f32, f32) = (0.02, 0.03, 0.06);
+const SIDEBAR_BG_F: (f32, f32, f32) = (0.08, 0.10, 0.14);
+const FOCUS_OUTLINE: (f32, f32, f32) = (0.30, 0.55, 0.95);
+const CURSOR_FG: (f32, f32, f32) = (0.92, 0.92, 0.92);
+
+/// Walk each session view + sidebar entry, emit BG cell instances
+/// and FG glyph instances into the caller-owned scratch vecs.
+/// Stays a free function so its `&mut FontCache, &mut GlyphAtlas,
+/// &mut Vec<…>` arguments don't conflict with the GPU references
+/// the encoder needs to hold.
+#[allow(clippy::too_many_arguments)]
+fn build_instances(
+    layout: &Layout,
+    views: &[SessionView],
+    sidebar: &[SidebarEntry],
+    focused_idx: usize,
+    window_focused: bool,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    let _ = sidebar;
+    let _ = focused_idx; // sidebar text/dot deferred to phase 5d
+
+    let cell_w = font.cell_w as f32;
+    let cell_h = font.cell_h as f32;
+    let ascent = font.ascent as f32;
+    let (atlas_w, atlas_h) = atlas.dims();
+    let atlas_w_f = atlas_w as f32;
+    let atlas_h_f = atlas_h as f32;
+
+    // Sidebar BG over the gutter clear.  Painted before the per-
+    // session BG so the session rect can overpaint cleanly.
+    if layout.sidebar_w > 0.0 {
+        let h = layout
+            .cells
+            .iter()
+            .map(|c| c.y_top + c.h)
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
+        cells.push(CellInstance {
+            origin: [0.0, 0.0],
+            size: [layout.sidebar_w as f32, h as f32],
+            color: [SIDEBAR_BG_F.0, SIDEBAR_BG_F.1, SIDEBAR_BG_F.2, 1.0],
+        });
+    }
+
+    for (i, view) in views.iter().enumerate() {
+        let rect = match layout.cells.get(i) {
+            Some(r) => r,
+            None => continue,
+        };
+        push_session(
+            rect,
+            view,
+            window_focused,
+            cell_w,
+            cell_h,
+            ascent,
+            atlas_w_f,
+            atlas_h_f,
+            font,
+            atlas,
+            cells,
+            glyphs,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_session(
+    rect: &CellRect,
+    view: &SessionView,
+    window_focused: bool,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    // Terminal-bg fill for the rect.
+    cells.push(CellInstance {
+        origin: [rect.x as f32, rect.y_top as f32],
+        size: [rect.w as f32, rect.h as f32],
+        color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
+    });
+
+    let grid = view.grid;
+    let cols = grid.cols() as usize;
+
+    for r in 0..grid.rows() {
+        let row_y = rect.y_top as f32 + (r as f32) * cell_h;
+        let baseline_y = row_y + ascent;
+
+        // Run-length BG fills (skip default BG; it inherits the rect fill).
+        let mut c = 0usize;
+        while c < cols {
+            let cell = grid.cell_at_view(view.view_offset, c as u16, r);
+            let bg = resolve_attrs(cell.attrs).1;
+            if bg == BG {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            c += 1;
+            while c < cols {
+                let cur = grid.cell_at_view(view.view_offset, c as u16, r);
+                if resolve_attrs(cur.attrs).1 != bg {
+                    break;
+                }
+                c += 1;
+            }
+            cells.push(CellInstance {
+                origin: [rect.x as f32 + start as f32 * cell_w, row_y],
+                size: [(c - start) as f32 * cell_w, cell_h],
+                color: [bg.0 as f32, bg.1 as f32, bg.2 as f32, 1.0],
+            });
+        }
+
+        // Glyphs.
+        for c in 0..cols {
+            let cell = grid.cell_at_view(view.view_offset, c as u16, r);
+            if cell.ch == ' ' || cell.ch == '\0' {
+                continue;
+            }
+            let (font_idx, glyph) =
+                font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
+            if glyph == 0 {
+                continue;
+            }
+            let ct_font = font.font(font_idx).clone();
+            let entry = match atlas.get_or_rasterize(
+                GlyphKey {
+                    font_id: font_idx as u32,
+                    glyph,
+                },
+                &ct_font,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            let fg = resolve_attrs(cell.attrs).0;
+            let cell_origin_x = rect.x as f32 + c as f32 * cell_w;
+            // bearing_x = horizontal offset from pen to bitmap left.
+            // bearing_y = pixels from baseline up to bitmap top — so
+            // dest_y (top edge in y-down coords) = baseline - bearing_y.
+            let dest_x = cell_origin_x + entry.bearing_x as f32;
+            let dest_y = baseline_y - entry.bearing_y as f32;
+            glyphs.push(GlyphInstance {
+                origin: [dest_x, dest_y],
+                size: [entry.px_w as f32, entry.px_h as f32],
+                uv0: [
+                    entry.u0 as f32 / atlas_w,
+                    entry.v0 as f32 / atlas_h,
+                ],
+                uv1: [
+                    entry.u1 as f32 / atlas_w,
+                    entry.v1 as f32 / atlas_h,
+                ],
+                color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
+            });
+        }
+    }
+
+    // Cursor (live view + DECTCEM on).
+    if view.view_offset == 0 && view.cursor_visible {
+        let (col, row) = grid.cursor();
+        let cx = rect.x as f32 + col as f32 * cell_w;
+        let cy = rect.y_top as f32 + row as f32 * cell_h;
+        let solid = view.focused && window_focused;
+        let color = [CURSOR_FG.0, CURSOR_FG.1, CURSOR_FG.2, 1.0];
+        if solid {
+            cells.push(CellInstance {
+                origin: [cx, cy],
+                size: [cell_w, cell_h],
+                color,
+            });
+        } else {
+            // Hollow: 4 stroke quads.  Stroke width tracks render.rs.
+            let stroke = (cell_h * 0.07).max(1.0);
+            cells.push(CellInstance { origin: [cx, cy], size: [cell_w, stroke], color });
+            cells.push(CellInstance { origin: [cx, cy + cell_h - stroke], size: [cell_w, stroke], color });
+            cells.push(CellInstance { origin: [cx, cy], size: [stroke, cell_h], color });
+            cells.push(CellInstance { origin: [cx + cell_w - stroke, cy], size: [stroke, cell_h], color });
+        }
+    }
+
+    // Focus outline.
+    if view.focused {
+        let stroke = (cell_h * 0.10).max(1.0);
+        let color = [FOCUS_OUTLINE.0, FOCUS_OUTLINE.1, FOCUS_OUTLINE.2, 1.0];
+        let (rx, ry, rw, rh) = (rect.x as f32, rect.y_top as f32, rect.w as f32, rect.h as f32);
+        cells.push(CellInstance { origin: [rx, ry], size: [rw, stroke], color });
+        cells.push(CellInstance { origin: [rx, ry + rh - stroke], size: [rw, stroke], color });
+        cells.push(CellInstance { origin: [rx, ry], size: [stroke, rh], color });
+        cells.push(CellInstance { origin: [rx + rw - stroke, ry], size: [stroke, rh], color });
+    }
+}
+
+/// Build a Shared-storage MTLBuffer over `bytes`.  Returns `None`
+/// for an empty payload so the caller can skip the bind/draw.
+fn make_instance_buffer(
+    device: &ProtocolObject<dyn MTLDevice>,
+    bytes: &[u8],
+) -> Option<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>> {
+    if bytes.is_empty() {
+        return None;
+    }
+    unsafe {
+        device.newBufferWithBytes_length_options(
+            NonNull::new(bytes.as_ptr() as *mut c_void).unwrap(),
+            bytes.len(),
+            MTLResourceOptions::MTLResourceStorageModeShared,
+        )
     }
 }
 
@@ -759,6 +1190,81 @@ mod tests {
         assert!(
             max_brightness > 100,
             "expected at least one bright pixel inside glyph rect, got max={max_brightness}"
+        );
+    }
+
+    /// Translation-layer smoke test: feed a tiny one-session layout
+    /// + a grid with "AB" on it through `build_instances` and check
+    /// that the scratch vecs come out populated.  Doesn't render —
+    /// the BG/FG passes are tested end-to-end in the offscreen
+    /// tests above.
+    #[test]
+    fn build_instances_emits_cells_and_glyphs() {
+        use crate::grid::Grid;
+        use crate::layout::Layout;
+
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+
+        let mut grid = Grid::new(10, 4);
+        let cell_a = Cell {
+            ch: 'A',
+            attrs: Default::default(),
+        };
+        let cell_b = Cell {
+            ch: 'B',
+            attrs: Default::default(),
+        };
+        grid.set_cell(0, 0, cell_a);
+        grid.set_cell(1, 0, cell_b);
+
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0,
+            1,
+            1,
+            font.cell_w,
+            font.cell_h,
+        );
+        let view = SessionView {
+            grid: &grid,
+            view_offset: 0,
+            cursor_visible: true,
+            focused: true,
+        };
+
+        let mut cells: Vec<CellInstance> = Vec::new();
+        let mut glyphs: Vec<GlyphInstance> = Vec::new();
+        build_instances(
+            &layout,
+            std::slice::from_ref(&view),
+            &[],
+            0,
+            true,
+            &mut font,
+            &mut atlas,
+            &mut cells,
+            &mut glyphs,
+        );
+
+        // Expected:
+        //  cells = [terminal-bg fill, focus outline ×4, cursor (solid) ×1]
+        //  glyphs = [A, B]
+        assert!(cells.len() >= 6, "got cells.len()={}", cells.len());
+        assert_eq!(glyphs.len(), 2, "got glyphs.len()={}", glyphs.len());
+        // Glyph dest_x must be advancing by cell_w between A and B.
+        // dx = cell_w + (B.bearing_x - A.bearing_x); for monospace
+        // Menlo the bearing diff is typically ≤2 px at 13 pt.
+        let dx = glyphs[1].origin[0] - glyphs[0].origin[0];
+        let cw = font.cell_w as f32;
+        assert!(
+            (dx - cw).abs() < 3.0,
+            "glyph 'B' should be ~one cell right of 'A', got dx={dx} vs cell_w={cw}"
         );
     }
 }
