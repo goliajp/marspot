@@ -51,6 +51,7 @@ use crate::glyph_atlas::{GlyphAtlas, GlyphKey};
 use crate::grid::{Cell, Grid};
 use crate::layout::{CellRect, Layout};
 use crate::render::{SessionView, SidebarEntry};
+use crate::session::SessionState;
 
 /// One cell's draw data, layout-compatible with `Cell` in
 /// `src/shaders/cells.metal`.  Repr-C; no padding shenanigans.
@@ -459,6 +460,17 @@ const SIDEBAR_BG_F: (f32, f32, f32) = (0.08, 0.10, 0.14);
 const FOCUS_OUTLINE: (f32, f32, f32) = (0.30, 0.55, 0.95);
 const CURSOR_FG: (f32, f32, f32) = (0.92, 0.92, 0.92);
 
+const SIDEBAR_DOT_R: f32 = 4.5;
+const SIDEBAR_LEFT_PAD: f32 = 14.0;
+const SIDEBAR_TOP_PAD: f32 = 14.0;
+const SIDEBAR_ROW_H: f32 = 22.0;
+const SIDEBAR_DOT_LABEL_GAP: f32 = 10.0;
+const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
+const SIDEBAR_FOCUSED_BG: (f32, f32, f32) = (0.13, 0.18, 0.30);
+const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
+const STATE_IDLE: (f32, f32, f32) = (0.55, 0.58, 0.62);
+const STATE_EXITED: (f32, f32, f32) = (0.85, 0.30, 0.30);
+
 /// Walk each session view + sidebar entry, emit BG cell instances
 /// and FG glyph instances into the caller-owned scratch vecs.
 /// Stays a free function so its `&mut FontCache, &mut GlyphAtlas,
@@ -476,9 +488,6 @@ fn build_instances(
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
 ) {
-    let _ = sidebar;
-    let _ = focused_idx; // sidebar text/dot deferred to phase 5d
-
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
     let ascent = font.ascent as f32;
@@ -521,6 +530,107 @@ fn build_instances(
             cells,
             glyphs,
         );
+    }
+
+    if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
+        push_sidebar(
+            sidebar,
+            focused_idx,
+            layout.sidebar_w as f32,
+            cell_w,
+            ascent,
+            atlas_w_f,
+            atlas_h_f,
+            font,
+            atlas,
+            cells,
+            glyphs,
+        );
+    }
+}
+
+/// Sidebar rows.  Per row: optional focus-bg highlight, a state dot
+/// (rendered as a small square — TODO: a circle shader for v2),
+/// and the label glyphs.  Mirrors `Renderer::draw_sidebar` in
+/// `render.rs` so click hit-testing on the same constants lands on
+/// the same pixels.
+#[allow(clippy::too_many_arguments)]
+fn push_sidebar(
+    entries: &[SidebarEntry],
+    focused_idx: usize,
+    sidebar_w: f32,
+    cell_w: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    for (i, entry) in entries.iter().enumerate() {
+        let row_top_y = SIDEBAR_TOP_PAD + i as f32 * SIDEBAR_ROW_H;
+
+        if i == focused_idx {
+            cells.push(CellInstance {
+                origin: [0.0, row_top_y],
+                size: [sidebar_w, SIDEBAR_ROW_H],
+                color: [
+                    SIDEBAR_FOCUSED_BG.0,
+                    SIDEBAR_FOCUSED_BG.1,
+                    SIDEBAR_FOCUSED_BG.2,
+                    1.0,
+                ],
+            });
+        }
+
+        let dot_color = match entry.state {
+            SessionState::Active => STATE_ACTIVE,
+            SessionState::Idle => STATE_IDLE,
+            SessionState::Exited => STATE_EXITED,
+        };
+        let dot_cx = SIDEBAR_LEFT_PAD + SIDEBAR_DOT_R;
+        let dot_cy = row_top_y + SIDEBAR_ROW_H / 2.0;
+        // Square-shaped dot — circle would need a discard-on-radius
+        // fragment shader; visual fidelity bump is phase 5e+.
+        cells.push(CellInstance {
+            origin: [dot_cx - SIDEBAR_DOT_R, dot_cy - SIDEBAR_DOT_R],
+            size: [SIDEBAR_DOT_R * 2.0, SIDEBAR_DOT_R * 2.0],
+            color: [dot_color.0, dot_color.1, dot_color.2, 1.0],
+        });
+
+        // Label text.  Lay out monospace via cell_w (sidebar labels
+        // are ASCII / short tmux names, so cell_w accuracy is fine).
+        let label_x = dot_cx + SIDEBAR_DOT_R + SIDEBAR_DOT_LABEL_GAP;
+        let baseline_y = dot_cy + ascent * 0.40 - SIDEBAR_ROW_H * 0.20;
+        let mut x = label_x;
+        for ch in entry.label.chars() {
+            let (font_idx, glyph) = font.resolve_char(ch, false, false);
+            if glyph != 0 {
+                let ct_font = font.font(font_idx).clone();
+                if let Some(e) = atlas.get_or_rasterize(
+                    GlyphKey {
+                        font_id: font_idx as u32,
+                        glyph,
+                    },
+                    &ct_font,
+                ) {
+                    glyphs.push(GlyphInstance {
+                        origin: [x + e.bearing_x as f32, baseline_y - e.bearing_y as f32],
+                        size: [e.px_w as f32, e.px_h as f32],
+                        uv0: [e.u0 as f32 / atlas_w, e.v0 as f32 / atlas_h],
+                        uv1: [e.u1 as f32 / atlas_w, e.v1 as f32 / atlas_h],
+                        color: [
+                            SIDEBAR_TEXT_FG.0,
+                            SIDEBAR_TEXT_FG.1,
+                            SIDEBAR_TEXT_FG.2,
+                            1.0,
+                        ],
+                    });
+                }
+            }
+            x += cell_w;
+        }
     }
 }
 
