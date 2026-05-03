@@ -11,7 +11,7 @@ use winit::window::{Window, WindowId};
 use mars::input::key_event_to_bytes;
 use mars::layout::Layout;
 use mars::render::{Renderer, SessionView, SidebarEntry};
-use mars::render_metal::MetalRenderer;
+use mars::render_metal::{make_target_texture, MetalRenderer};
 use mars::session::{Session, SessionState};
 use mars::terminal::Terminal;
 use mars::tmux;
@@ -962,6 +962,7 @@ fn run_bench(spec: &str) {
     match mode {
         "parse" => bench_parse(arg),
         "render" => bench_render(arg),
+        "metal-render" => bench_metal_render(arg),
         other => {
             eprintln!("unknown bench mode: {other}");
             std::process::exit(2);
@@ -1048,6 +1049,91 @@ fn bench_render(arg: &str) {
     };
     println!(
         r#"{{"mode":"render","iterations":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
+        n,
+        p(0.50),
+        p(0.95),
+        p(0.99),
+        samples[0],
+        samples[samples.len() - 1],
+    );
+}
+
+/// Metal counterpart to `bench_render`.  Same worst-case grid (every
+/// cell coloured + non-blank, alternating ASCII so glyph runs break
+/// frequently) and same 960×600 target dims, but routes through
+/// `MetalRenderer::render_layout_to_texture` so the timing covers
+/// `build_instances` + BG/FG-pass encoding + GPU execution
+/// (waitUntilCompleted blocks until the frame is fully rendered).
+///
+/// Apples-to-apples vs `--bench render` modulo two intentional
+/// differences:
+///   * No CGImage create + setContents (Metal renders straight to
+///     the target).  This is the architectural reason for using Metal.
+///   * No CPU-side pixel readback (the texture is StorageModePrivate).
+///     The AppKit path's `snapshot` does include the BGRA copy-out.
+fn bench_metal_render(arg: &str) {
+    let n: u32 = arg.parse().unwrap_or_else(|_| {
+        eprintln!("bench: metal-render needs an integer iteration count");
+        std::process::exit(2);
+    });
+
+    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
+    for r in 0..GRID_ROWS {
+        for c in 0..GRID_COLS {
+            let colour = 30 + ((r as u32 + c as u32) % 8) as u8;
+            payload.extend_from_slice(format!("\x1b[{}m", colour).as_bytes());
+            let ch = ((c % 95) as u8) + 32;
+            payload.push(ch);
+        }
+        if r + 1 < GRID_ROWS {
+            payload.extend_from_slice(b"\r\n");
+        }
+    }
+    terminal.feed(&payload);
+
+    let mut renderer = MetalRenderer::new_headless().expect("headless metal renderer");
+    let phys_w: u32 = 960;
+    let phys_h: u32 = 600;
+    let target = make_target_texture(renderer.device(), phys_w, phys_h)
+        .expect("render-target texture");
+
+    let (cell_w, cell_h) = renderer.cell_dims();
+    let layout = Layout::build(
+        phys_w as f64,
+        phys_h as f64,
+        0.0,
+        1,
+        1,
+        cell_w,
+        cell_h,
+    );
+    let view = SessionView {
+        grid: terminal.grid(),
+        view_offset: 0,
+        cursor_visible: true,
+        focused: true,
+    };
+    let views = std::slice::from_ref(&view);
+
+    // Warm-up: 5 iters fill char_cache + atlas + GPU caches.
+    for _ in 0..5 {
+        renderer.render_layout_to_texture(&target, &layout, views, &[], 0);
+    }
+
+    let mut samples: Vec<u64> = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let t0 = std::time::Instant::now();
+        renderer.render_layout_to_texture(&target, &layout, views, &[], 0);
+        samples.push(t0.elapsed().as_nanos() as u64);
+    }
+    samples.sort_unstable();
+    let p = |q: f64| -> u64 {
+        let idx = ((samples.len() as f64) * q) as usize;
+        samples[idx.min(samples.len() - 1)]
+    };
+    println!(
+        r#"{{"mode":"metal-render","iterations":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
         n,
         p(0.50),
         p(0.95),

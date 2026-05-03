@@ -358,97 +358,237 @@ impl MetalRenderer {
             None => return,
         };
 
-        // BG pass — clears to gutter colour, then draws all cell
-        // instances (chrome, sidebar, per-session bg, cursor, focus
-        // outline) on top in submission order.
-        let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let attachments = bg_pass.colorAttachments();
-            let color = attachments.objectAtIndexedSubscript(0);
-            color.setTexture(Some(&texture));
-            color.setLoadAction(MTLLoadAction::Clear);
-            color.setStoreAction(MTLStoreAction::Store);
-            // Clear to chrome gutter — instances overpaint as needed.
-            color.setClearColor(MTLClearColor {
-                red: GUTTER.0 as f64,
-                green: GUTTER.1 as f64,
-                blue: GUTTER.2 as f64,
-                alpha: 1.0,
-            });
-        }
-        let bg_buffer = make_instance_buffer(device, cells_as_bytes(cells_scratch));
-        let bg_encoder = match cmd.renderCommandEncoderWithDescriptor(&bg_pass) {
-            Some(e) => e,
-            None => return,
-        };
-        bg_encoder.setRenderPipelineState(bg_pipeline);
-        if let Some(buf) = &bg_buffer {
-            unsafe {
-                bg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
-            }
-        }
-        let viewport: [f32; 2] = [width_px as f32, height_px as f32];
-        unsafe {
-            bg_encoder.setVertexBytes_length_atIndex(
-                NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
-                std::mem::size_of::<[f32; 2]>(),
-                1,
-            );
-            if !cells_scratch.is_empty() {
-                bg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                    MTLPrimitiveType::Triangle,
-                    0,
-                    6,
-                    cells_scratch.len(),
-                );
-            }
-        }
-        bg_encoder.endEncoding();
-
-        // FG pass — Load (don't clear), draws glyph instances on top
-        // of the BG result.  Alpha-blended via the FG pipeline.
-        let fg_pass = unsafe { MTLRenderPassDescriptor::new() };
-        unsafe {
-            let attachments = fg_pass.colorAttachments();
-            let color = attachments.objectAtIndexedSubscript(0);
-            color.setTexture(Some(&texture));
-            color.setLoadAction(MTLLoadAction::Load);
-            color.setStoreAction(MTLStoreAction::Store);
-        }
-        let fg_buffer = make_instance_buffer(device, glyphs_as_bytes(glyphs_scratch));
-        let fg_encoder = match cmd.renderCommandEncoderWithDescriptor(&fg_pass) {
-            Some(e) => e,
-            None => return,
-        };
-        fg_encoder.setRenderPipelineState(fg_pipeline);
-        if let Some(buf) = &fg_buffer {
-            unsafe {
-                fg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
-            }
-        }
-        unsafe {
-            fg_encoder.setVertexBytes_length_atIndex(
-                NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
-                std::mem::size_of::<[f32; 2]>(),
-                1,
-            );
-            fg_encoder.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
-            fg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
-            if !glyphs_scratch.is_empty() {
-                fg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                    MTLPrimitiveType::Triangle,
-                    0,
-                    6,
-                    glyphs_scratch.len(),
-                );
-            }
-        }
-        fg_encoder.endEncoding();
+        encode_passes(
+            &cmd,
+            &texture,
+            bg_pipeline,
+            fg_pipeline,
+            fg_sampler,
+            atlas,
+            device,
+            cells_scratch,
+            glyphs_scratch,
+            width_px as f32,
+            height_px as f32,
+        );
 
         let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
             ProtocolObject::from_ref(&*drawable);
         cmd.presentDrawable(mtl_drawable);
         cmd.commit();
+    }
+
+    /// Bench / test variant of `render_layout`.  Encodes the BG + FG
+    /// passes against `target` (any Render-Target MTLTexture) and
+    /// blocks on `waitUntilCompleted` so the caller can time the
+    /// full GPU round-trip without racing the next frame.
+    ///
+    /// Use case: `--bench metal-render` headless harness in main.rs
+    /// — same per-frame work as the live path but no CAMetalLayer /
+    /// drawable / present.
+    pub fn render_layout_to_texture(
+        &mut self,
+        target: &ProtocolObject<dyn MTLTexture>,
+        layout: &Layout,
+        views: &[SessionView],
+        sidebar: &[SidebarEntry],
+        focused_idx: usize,
+    ) {
+        let width_px = target.width() as f64;
+        let height_px = target.height() as f64;
+        if width_px < 1.0 || height_px < 1.0 {
+            return;
+        }
+        // Mirror the live path's drawableSize side-effect so any
+        // viewport-driven downstream logic on `self` sees the right
+        // dims after the call.
+        self.width_px = width_px;
+        self.height_px = height_px;
+
+        let Self {
+            ref device,
+            ref queue,
+            ref bg_pipeline,
+            ref fg_pipeline,
+            ref fg_sampler,
+            ref mut font,
+            ref mut atlas,
+            ref mut cells_scratch,
+            ref mut glyphs_scratch,
+            window_focused,
+            ..
+        } = *self;
+
+        cells_scratch.clear();
+        glyphs_scratch.clear();
+        build_instances(
+            layout,
+            views,
+            sidebar,
+            focused_idx,
+            window_focused,
+            font,
+            atlas,
+            cells_scratch,
+            glyphs_scratch,
+        );
+
+        let cmd = match queue.commandBuffer() {
+            Some(c) => c,
+            None => return,
+        };
+        encode_passes(
+            &cmd,
+            target,
+            bg_pipeline,
+            fg_pipeline,
+            fg_sampler,
+            atlas,
+            device,
+            cells_scratch,
+            glyphs_scratch,
+            width_px as f32,
+            height_px as f32,
+        );
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+    }
+}
+
+/// Encode BG + FG passes against `target`.  Shared by the live
+/// `render_layout` (drawable target) and the offscreen
+/// `render_layout_to_texture` (caller-provided target).
+#[allow(clippy::too_many_arguments)]
+fn encode_passes(
+    cmd: &ProtocolObject<dyn MTLCommandBuffer>,
+    target: &ProtocolObject<dyn MTLTexture>,
+    bg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
+    atlas: &GlyphAtlas,
+    device: &ProtocolObject<dyn MTLDevice>,
+    cells: &[CellInstance],
+    glyphs: &[GlyphInstance],
+    viewport_w: f32,
+    viewport_h: f32,
+) {
+    let viewport: [f32; 2] = [viewport_w, viewport_h];
+
+    // BG pass.
+    let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
+    unsafe {
+        let attachments = bg_pass.colorAttachments();
+        let color = attachments.objectAtIndexedSubscript(0);
+        color.setTexture(Some(target));
+        color.setLoadAction(MTLLoadAction::Clear);
+        color.setStoreAction(MTLStoreAction::Store);
+        color.setClearColor(MTLClearColor {
+            red: GUTTER.0 as f64,
+            green: GUTTER.1 as f64,
+            blue: GUTTER.2 as f64,
+            alpha: 1.0,
+        });
+    }
+    let bg_buffer = make_instance_buffer(device, cells_as_bytes(cells));
+    let bg_encoder = cmd
+        .renderCommandEncoderWithDescriptor(&bg_pass)
+        .expect("bg encoder");
+    bg_encoder.setRenderPipelineState(bg_pipeline);
+    if let Some(buf) = &bg_buffer {
+        unsafe {
+            bg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
+        }
+    }
+    unsafe {
+        bg_encoder.setVertexBytes_length_atIndex(
+            NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
+            std::mem::size_of::<[f32; 2]>(),
+            1,
+        );
+        if !cells.is_empty() {
+            bg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                cells.len(),
+            );
+        }
+    }
+    bg_encoder.endEncoding();
+
+    // FG pass.
+    let fg_pass = unsafe { MTLRenderPassDescriptor::new() };
+    unsafe {
+        let attachments = fg_pass.colorAttachments();
+        let color = attachments.objectAtIndexedSubscript(0);
+        color.setTexture(Some(target));
+        color.setLoadAction(MTLLoadAction::Load);
+        color.setStoreAction(MTLStoreAction::Store);
+    }
+    let fg_buffer = make_instance_buffer(device, glyphs_as_bytes(glyphs));
+    let fg_encoder = cmd
+        .renderCommandEncoderWithDescriptor(&fg_pass)
+        .expect("fg encoder");
+    fg_encoder.setRenderPipelineState(fg_pipeline);
+    if let Some(buf) = &fg_buffer {
+        unsafe {
+            fg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0);
+        }
+    }
+    unsafe {
+        fg_encoder.setVertexBytes_length_atIndex(
+            NonNull::new(viewport.as_ptr() as *mut c_void).unwrap(),
+            std::mem::size_of::<[f32; 2]>(),
+            1,
+        );
+        fg_encoder.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+        fg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+        if !glyphs.is_empty() {
+            fg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                glyphs.len(),
+            );
+        }
+    }
+    fg_encoder.endEncoding();
+}
+
+/// Allocate a render-target MTLTexture.  Helper for tests + the
+/// `--bench metal-render` harness.  StorageModePrivate (GPU-only)
+/// because we never read the bytes back in the bench path; for
+/// readback (existing offscreen render_cells_bg_offscreen / fg)
+/// the caller still allocates Managed + blit-synchronizes.
+pub fn make_target_texture(
+    device: &ProtocolObject<dyn MTLDevice>,
+    width: u32,
+    height: u32,
+) -> Result<Retained<ProtocolObject<dyn MTLTexture>>, String> {
+    let descriptor = unsafe {
+        objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            TARGET_FORMAT,
+            width as usize,
+            height as usize,
+            false,
+        )
+    };
+    unsafe {
+        descriptor.setUsage(
+            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+        );
+        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Private);
+    }
+    device
+        .newTextureWithDescriptor(&descriptor)
+        .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())
+}
+
+impl MetalRenderer {
+    /// Expose the device so the bench harness can allocate a
+    /// render-target texture without a public `device` field.
+    pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
+        &self.device
     }
 }
 

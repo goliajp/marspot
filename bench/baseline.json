@@ -49,8 +49,8 @@
     "p99_us_max": 1800
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current.",
-    "mars": 800000,
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).",
+    "mars": 880000,
     "mcli": 660000
   },
   "memory_idle_kb_max": {
