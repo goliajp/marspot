@@ -10,7 +10,7 @@
 //! for pixel — same font hinting, same antialiasing, same gamma path
 //! Apple uses everywhere else.
 
-use crate::grid::Grid;
+use crate::grid::{CellAttrs, Color, Grid};
 use core_foundation::base::TCFType;
 use core_graphics::base::{
     kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat,
@@ -36,6 +36,66 @@ const FONT_POINT: f64 = 13.0;
 const BG: (CGFloat, CGFloat, CGFloat) = (0.05, 0.07, 0.12);
 /// Default foreground (white text).
 const FG: (CGFloat, CGFloat, CGFloat) = (0.92, 0.92, 0.92);
+
+/// Standard ANSI 16-colour palette (xterm values).  Indices 0–7 are the
+/// basic colours; 8–15 are their bright variants.  256-colour and 24-bit
+/// modes resolve through `palette_color`.
+const ANSI_16: [(CGFloat, CGFloat, CGFloat); 16] = [
+    (0.00, 0.00, 0.00), // 0  black
+    (0.67, 0.00, 0.00), // 1  red
+    (0.00, 0.67, 0.00), // 2  green
+    (0.67, 0.33, 0.00), // 3  yellow
+    (0.00, 0.00, 0.67), // 4  blue
+    (0.67, 0.00, 0.67), // 5  magenta
+    (0.00, 0.67, 0.67), // 6  cyan
+    (0.67, 0.67, 0.67), // 7  white (light grey)
+    (0.33, 0.33, 0.33), // 8  bright black
+    (1.00, 0.33, 0.33), // 9  bright red
+    (0.33, 1.00, 0.33), // 10 bright green
+    (1.00, 1.00, 0.33), // 11 bright yellow
+    (0.33, 0.33, 1.00), // 12 bright blue
+    (1.00, 0.33, 1.00), // 13 bright magenta
+    (0.33, 1.00, 1.00), // 14 bright cyan
+    (1.00, 1.00, 1.00), // 15 bright white
+];
+
+fn palette_color(idx: u8) -> (CGFloat, CGFloat, CGFloat) {
+    if (idx as usize) < ANSI_16.len() {
+        return ANSI_16[idx as usize];
+    }
+    if idx < 232 {
+        // 6×6×6 colour cube; xterm uses {0, 95, 135, 175, 215, 255} as the
+        // per-channel ramp.
+        const RAMP: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let n = idx - 16;
+        let r = RAMP[(n / 36) as usize];
+        let g = RAMP[((n / 6) % 6) as usize];
+        let b = RAMP[(n % 6) as usize];
+        return (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    }
+    // 24-step grayscale ramp from #080808 to #eeeeee.
+    let v = 8 + (idx - 232) as i32 * 10;
+    let f = v as f64 / 255.0;
+    (f, f, f)
+}
+
+fn resolve_color(c: Color, default_rgb: (CGFloat, CGFloat, CGFloat)) -> (CGFloat, CGFloat, CGFloat) {
+    match c {
+        Color::Default => default_rgb,
+        Color::Indexed(i) => palette_color(i),
+        Color::Rgb(r, g, b) => (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0),
+    }
+}
+
+/// Resolve a cell's attrs to (fg, bg) RGB, honoring SGR reverse.
+fn resolve_attrs(attrs: CellAttrs) -> ((CGFloat, CGFloat, CGFloat), (CGFloat, CGFloat, CGFloat)) {
+    let mut fg = resolve_color(attrs.fg, FG);
+    let mut bg = resolve_color(attrs.bg, BG);
+    if attrs.reverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    (fg, bg)
+}
 
 pub struct Renderer {
     /// When attached to an NSView, we update its CALayer's `contents` on
@@ -194,24 +254,21 @@ impl Renderer {
         ctx.set_should_subpixel_quantize_fonts(true);
 
         ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-        ctx.set_rgb_fill_color(FG.0, FG.1, FG.2, 1.0);
 
         let cols = grid.cols() as usize;
         let mut chars: Vec<u16> = Vec::with_capacity(cols);
         let mut glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
-        let mut positions: Vec<CGPoint> = Vec::with_capacity(cols);
+        // Reusable per-run scratch buffers for batched draw_glyphs calls.
+        let mut run_glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
+        let mut run_positions: Vec<CGPoint> = Vec::with_capacity(cols);
 
         for r in 0..grid.rows() {
+            // 1) Resolve chars → glyph IDs once per row (one CoreText call).
             chars.clear();
             for c in 0..grid.cols() {
                 let ch = grid.cell(c, r).ch;
-                // BMP only for now; non-BMP would need surrogate pairs.
                 let cp = ch as u32;
-                if cp <= 0xFFFF {
-                    chars.push(cp as u16);
-                } else {
-                    chars.push(b'?' as u16);
-                }
+                chars.push(if cp <= 0xFFFF { cp as u16 } else { b'?' as u16 });
             }
             glyphs.clear();
             glyphs.resize(chars.len(), 0);
@@ -222,15 +279,60 @@ impl Renderer {
                     chars.len() as core_foundation::base::CFIndex,
                 );
             }
-            // CG y-up: y=0 is bottom of image.  Row 0 (top of terminal)
-            // baseline is at y = height - ascent.  Row r baseline is
-            // y = height - (r * cell_h + ascent).
-            let baseline_y = height as f64 - (r as f64 * self.cell_h + self.ascent);
-            positions.clear();
-            for i in 0..glyphs.len() {
-                positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
+
+            // 2) Background pass — fill runs of cells that share a non-default
+            //    background color.  Cells with the default BG inherit the
+            //    frame fill we already laid down above.
+            let row_bottom_y = height as f64 - (r as f64 + 1.0) * self.cell_h;
+            let mut c = 0usize;
+            while c < cols {
+                let bg = resolve_attrs(grid.cell(c as u16, r).attrs).1;
+                if bg == BG {
+                    c += 1;
+                    continue;
+                }
+                let start = c;
+                c += 1;
+                while c < cols && resolve_attrs(grid.cell(c as u16, r).attrs).1 == bg {
+                    c += 1;
+                }
+                ctx.set_rgb_fill_color(bg.0, bg.1, bg.2, 1.0);
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(start as f64 * self.cell_w, row_bottom_y),
+                    &CGSize::new((c - start) as f64 * self.cell_w, self.cell_h),
+                ));
             }
-            self.font.draw_glyphs(&glyphs, &positions, ctx.clone());
+
+            // 3) Foreground pass — group consecutive non-blank cells with the
+            //    same fg color and emit one draw_glyphs call per run.
+            let baseline_y = height as f64 - (r as f64 * self.cell_h + self.ascent);
+            let mut i = 0usize;
+            while i < cols {
+                let cell = grid.cell(i as u16, r);
+                if cell.ch == ' ' || cell.ch == '\0' {
+                    i += 1;
+                    continue;
+                }
+                let fg = resolve_attrs(cell.attrs).0;
+                run_glyphs.clear();
+                run_positions.clear();
+                while i < cols {
+                    let cur = grid.cell(i as u16, r);
+                    if cur.ch == ' ' || cur.ch == '\0' {
+                        break;
+                    }
+                    if resolve_attrs(cur.attrs).0 != fg {
+                        break;
+                    }
+                    run_glyphs.push(glyphs[i]);
+                    run_positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
+                    i += 1;
+                }
+                if !run_glyphs.is_empty() {
+                    ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
+                    self.font.draw_glyphs(&run_glyphs, &run_positions, ctx.clone());
+                }
+            }
         }
 
         self.draw_cursor(&ctx, height, grid);
