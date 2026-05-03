@@ -17,3 +17,4 @@ pub mod pty;
 pub mod render;
 pub mod session;
 pub mod terminal;
+pub mod tmux;
