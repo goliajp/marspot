@@ -206,6 +206,35 @@ impl Renderer {
         let cell_h = atlas.cell_height();
         let ascent = atlas.ascent();
 
+        // Diagnostic: print actual font metrics + a few glyph dims so we
+        // can verify the rendering layout against expectations.
+        if let Some(info_a) = atlas.get('A') {
+            eprintln!(
+                "RENDER DIAG: scale={} font={} pt={} cell_w={:.2} cell_h={:.2} ascent={:.2}",
+                scale, FONT_NAME, FONT_POINT_LOGICAL * scale, cell_w, cell_h, ascent
+            );
+            eprintln!(
+                "RENDER DIAG: 'A' atlas=({},{}) wxh={}x{} bearing=({:.2},{:.2})",
+                info_a.atlas_x,
+                info_a.atlas_y,
+                info_a.width,
+                info_a.height,
+                info_a.bearing_x,
+                info_a.bearing_y
+            );
+        }
+        if let Some(info_m) = atlas.get('M') {
+            eprintln!(
+                "RENDER DIAG: 'M' atlas=({},{}) wxh={}x{} bearing=({:.2},{:.2})",
+                info_m.atlas_x,
+                info_m.atlas_y,
+                info_m.width,
+                info_m.height,
+                info_m.bearing_x,
+                info_m.bearing_y
+            );
+        }
+
         let atlas_texture = upload_atlas_texture(&device, &atlas)?;
         let pipeline = build_pipeline(&device, MTLPixelFormat::BGRA8Unorm)?;
 
