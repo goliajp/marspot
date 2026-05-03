@@ -97,15 +97,8 @@ fragment float4 cell_frag(VertexOut in            [[stage_in]],
 }
 "#;
 
-/// Atlas backing-store size in **logical** pixels.  Multiplied by the
-/// device scale factor at construction time so the atlas has enough
-/// physical pixels to hold rasterized glyphs at the device's native
-/// resolution (without scaling artifacts).
 const ATLAS_SIZE_LOGICAL: u32 = 512;
 const FONT_NAME: &str = "Menlo";
-/// Nominal point size of the terminal font.  Multiplied by the device
-/// scale factor when handed to CoreText so glyphs rasterize at native
-/// resolution on HiDPI (Retina) displays.
 const FONT_POINT_LOGICAL: f32 = 13.0;
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
@@ -193,10 +186,9 @@ impl Renderer {
             None
         };
 
-        // Rasterize at physical pixel resolution: 13pt × 2 = 26pt on Retina.
-        let effective_pt = FONT_POINT_LOGICAL * scale;
+        let raster_pt = FONT_POINT_LOGICAL * scale;
         let atlas_size = ((ATLAS_SIZE_LOGICAL as f32) * scale) as u32;
-        let mut atlas = GlyphAtlas::new(FONT_NAME, effective_pt, atlas_size);
+        let mut atlas = GlyphAtlas::new(FONT_NAME, raster_pt, atlas_size);
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 atlas.ensure(ch);
@@ -205,6 +197,35 @@ impl Renderer {
         let cell_w = atlas.cell_width();
         let cell_h = atlas.cell_height();
         let ascent = atlas.ascent();
+
+        // Diagnostic: print actual font metrics + a few glyph dims so we
+        // can verify the rendering layout against expectations.
+        if let Some(info_a) = atlas.get('A') {
+            eprintln!(
+                "RENDER DIAG: scale={} font={} pt={} cell_w={:.2} cell_h={:.2} ascent={:.2}",
+                scale, FONT_NAME, FONT_POINT_LOGICAL * scale, cell_w, cell_h, ascent
+            );
+            eprintln!(
+                "RENDER DIAG: 'A' atlas=({},{}) wxh={}x{} bearing=({:.2},{:.2})",
+                info_a.atlas_x,
+                info_a.atlas_y,
+                info_a.width,
+                info_a.height,
+                info_a.bearing_x,
+                info_a.bearing_y
+            );
+        }
+        if let Some(info_m) = atlas.get('M') {
+            eprintln!(
+                "RENDER DIAG: 'M' atlas=({},{}) wxh={}x{} bearing=({:.2},{:.2})",
+                info_m.atlas_x,
+                info_m.atlas_y,
+                info_m.width,
+                info_m.height,
+                info_m.bearing_x,
+                info_m.bearing_y
+            );
+        }
 
         let atlas_texture = upload_atlas_texture(&device, &atlas)?;
         let pipeline = build_pipeline(&device, MTLPixelFormat::BGRA8Unorm)?;
@@ -432,12 +453,7 @@ impl Renderer {
 
                 let cell_origin_x = c as f32 * self.cell_w;
                 let cell_origin_y = r as f32 * self.cell_h;
-                // Baseline in pixel coords (y down): top-of-cell + ascent.
                 let baseline_y = cell_origin_y + self.ascent;
-
-                // Glyph rect: bearing_x is offset from cell origin to glyph
-                // bbox left; bearing_y is offset from baseline up to the
-                // bbox top edge in CG coords (positive = above baseline).
                 let dest_x = cell_origin_x + info.bearing_x;
                 let dest_y = baseline_y - info.bearing_y - info.height as f32;
 
