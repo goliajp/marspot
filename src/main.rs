@@ -1,26 +1,26 @@
-mod grid;
-mod parser;
-mod pty;
-mod render;
-mod terminal;
-
-use std::borrow::Cow;
-use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::thread;
-
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSScreen, NSView};
+use objc2_app_kit::{NSScreen, NSView};
 use objc2_foundation::MainThreadMarker;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, Modifiers, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::event::{Modifiers, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use crate::pty::{Pty, PtyConfig, TerminalSize};
-use crate::render::Renderer;
-use crate::terminal::Terminal;
+use mars::input::key_event_to_bytes;
+use mars::render::Renderer;
+use mars::session::Session;
+use mars::terminal::Terminal;
+
+/// Mars's only proxy event — "something woke us up, drain all sessions".
+/// Sessions are pumped collectively so a wake from session N doesn't
+/// require us to know N here; downstream layouts can be added without
+/// changing the event surface.
+#[derive(Debug, Clone)]
+pub enum MarsEvent {
+    Wake,
+}
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
@@ -28,36 +28,15 @@ pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
 
-/// Bytes per chunk handed off from the reader thread.  64 KiB is the
-/// opportunistic upper bound — for interactive output (a single keystroke
-/// echoing back) we send what arrived; for bulk output (`cat`) we keep
-/// reading non-blocking until the PTY drains, coalescing into one chunk
-/// before incurring the per-event NSRunLoop dispatch cost.
-const READ_BUF: usize = 64 * 1024;
-
-/// Bounded capacity of the PTY → main-thread channel.  Once full the reader
-/// thread blocks on send, which propagates backpressure to the kernel pipe
-/// buffer, which propagates to the child's writes — so a runaway producer
-/// can't grow our memory unboundedly (CLAUDE.md "bounded queues").
-const PTY_CHANNEL_CAPACITY: usize = 64;
-
-/// Wake-up message from the PTY reader thread to the winit event loop.
-/// The bytes themselves travel via a separate mpsc channel so the proxy
-/// queue stays small (it just carries empty tokens).
-#[derive(Debug)]
-enum MarsEvent {
-    PtyBytes,
-    /// PTY master returned EOF — the child shell exited.  Main loop
-    /// should commit the final frame and shut down so Drop runs.
-    ShellExited,
-}
-
 struct Mars {
     window: Option<Window>,
     renderer: Option<Renderer>,
-    terminal: Terminal,
-    pty: Pty,
-    rx: Receiver<Vec<u8>>,
+    /// One Session per terminal cell on screen.  Phase A keeps len = 1;
+    /// later phases add Layout-driven multi-session and grow this vec.
+    sessions: Vec<Session>,
+    /// Index into `sessions` of the session currently receiving keyboard
+    /// input.  Mouse-wheel scrolling and rendering also key off this.
+    focused_idx: usize,
     /// Latest known modifier state, updated by WindowEvent::ModifiersChanged.
     /// winit's KeyEvent does not carry the live modifier flags on macOS, so
     /// we have to track them out-of-band.
@@ -143,28 +122,34 @@ impl ApplicationHandler<MarsEvent> for Mars {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: MarsEvent) {
         match event {
-            MarsEvent::PtyBytes => {
+            MarsEvent::Wake => {
                 self.prof.user_events += 1;
                 let drain_t0 = std::time::Instant::now();
-                let mut got_any = false;
-                while let Ok(chunk) = self.rx.try_recv() {
-                    self.prof.chunks_drained += 1;
-                    self.prof.bytes_fed += chunk.len() as u64;
+                let mut total_bytes = 0usize;
+                for s in &mut self.sessions {
                     let feed_t0 = std::time::Instant::now();
-                    self.terminal.feed(&chunk);
+                    let n = s.pump();
                     self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
-                    got_any = true;
+                    total_bytes += n;
                 }
+                self.prof.bytes_fed += total_bytes as u64;
                 self.prof.drain_total_ns += drain_t0.elapsed().as_nanos() as u64;
-                if got_any {
+                if total_bytes > 0 {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                         self.prof.request_redraws += 1;
                     }
                 }
-            }
-            MarsEvent::ShellExited => {
-                event_loop.exit();
+                // Single-session early exit: when the only session's
+                // child shell terminates, treat that as "quit mars".
+                // Multi-session (Phase B+) will keep the window open
+                // and mark the cell exited instead.
+                if self.sessions.len() == 1 && self.sessions[0].is_exited() {
+                    // Drain any final bytes before tearing down so the
+                    // last frame includes them.
+                    self.sessions[0].pump();
+                    event_loop.exit();
+                }
             }
         }
     }
@@ -189,20 +174,20 @@ impl ApplicationHandler<MarsEvent> for Mars {
                     let (cell_w, cell_h) = r.cell_dims();
                     let cols = ((phys_w / cell_w).floor() as u16).max(1);
                     let rows = ((phys_h / cell_h).floor() as u16).max(1);
-                    if (cols, rows) != (self.terminal.grid().cols(), self.terminal.grid().rows()) {
-                        self.terminal.resize(cols, rows);
-                        let _ = self.pty.resize(TerminalSize {
-                            cols,
-                            rows,
-                            pixel_width: phys_w as u16,
-                            pixel_height: phys_h as u16,
-                        });
+                    // Phase A: every session takes the full window.  When
+                    // Layout lands (Phase B), each session resizes to its
+                    // sub-rect's cell extent.
+                    for s in &mut self.sessions {
+                        if (cols, rows) != (s.terminal.grid().cols(), s.terminal.grid().rows()) {
+                            s.resize(cols, rows);
+                        }
                     }
                     // Render synchronously here so the next CA commit lands
                     // a CGImage at the new size; deferring via request_redraw
                     // leaves a one-frame gap during live resize where the
                     // layer shows stale-or-stretched contents.
-                    r.render(self.terminal.grid());
+                    let focused = &self.sessions[self.focused_idx];
+                    r.render(focused.terminal.grid());
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -232,7 +217,7 @@ impl ApplicationHandler<MarsEvent> for Mars {
                             }
                         }
                     }
-                    let _ = self.pty.write(&bytes);
+                    let _ = self.sessions[self.focused_idx].write(&bytes);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -255,7 +240,7 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 if lines_f.abs() < 0.5 {
                     return;
                 }
-                let max = self.terminal.grid().scrollback_len() as i32;
+                let max = self.sessions[self.focused_idx].terminal.grid().scrollback_len() as i32;
                 let cur = self
                     .renderer
                     .as_ref()
@@ -273,8 +258,9 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 self.prof.redraw_requested_calls += 1;
                 if let Some(r) = self.renderer.as_mut() {
                     let render_t0 = std::time::Instant::now();
-                    r.set_cursor_visible(self.terminal.cursor_visible());
-                    r.render(self.terminal.grid());
+                    let focused = &self.sessions[self.focused_idx];
+                    r.set_cursor_visible(focused.terminal.cursor_visible());
+                    r.render(focused.terminal.grid());
                     self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
                     self.prof.render_calls += 1;
                     if self.prof.started_at.is_none() {
@@ -296,158 +282,6 @@ impl ApplicationHandler<MarsEvent> for Mars {
     }
 }
 
-/// Map a winit key press to the byte sequence we send the PTY.  Returns
-/// `None` for events we don't translate (releases, modifier-only, Cmd
-/// combos that the OS handles, etc.).
-fn key_event_to_bytes(
-    event: &KeyEvent,
-    modifiers: ModifiersState,
-) -> Option<Cow<'static, [u8]>> {
-    if event.state != ElementState::Pressed {
-        return None;
-    }
-
-    // Cmd combos: a few are ours (Cmd-V paste from clipboard); the rest
-    // belong to the OS / app layer (Cmd-Q to quit, Cmd-C copy, etc.).
-    if modifiers.super_key() {
-        if let Key::Character(s) = &event.logical_key {
-            if s.as_str().eq_ignore_ascii_case("v") {
-                if let Some(text) = read_clipboard_text() {
-                    // Paste as raw bytes; bracketed paste support comes
-                    // later (DECSET ?2004) — for now CR is forwarded
-                    // verbatim, which matches Terminal.app's default
-                    // when bracketed paste isn't enabled.
-                    return Some(Cow::Owned(text.into_bytes()));
-                }
-            }
-        }
-        return None;
-    }
-
-    // Ctrl + letter → ASCII control code (Ctrl-A = 0x01 ... Ctrl-Z = 0x1A).
-    // Also: Ctrl-[ = ESC, Ctrl-\ = FS, Ctrl-] = GS, Ctrl-^ = RS, Ctrl-_ = US,
-    // Ctrl-Space = NUL.  Done before the named-key match so Ctrl-anything
-    // takes priority over the per-key text payload.
-    if modifiers.control_key() {
-        if let Key::Character(s) = &event.logical_key {
-            if let Some(c) = s.chars().next() {
-                let lc = c.to_ascii_lowercase();
-                let code = match lc {
-                    'a'..='z' => Some((lc as u8) - b'a' + 1),
-                    '[' => Some(0x1b),
-                    '\\' => Some(0x1c),
-                    ']' => Some(0x1d),
-                    '^' => Some(0x1e),
-                    '_' => Some(0x1f),
-                    ' ' => Some(0x00),
-                    _ => None,
-                };
-                if let Some(code) = code {
-                    return Some(Cow::Owned(vec![code]));
-                }
-            }
-        }
-    }
-
-    match &event.logical_key {
-        Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
-        Key::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
-        Key::Named(NamedKey::Tab) => Some(Cow::Borrowed(b"\t")),
-        Key::Named(NamedKey::Escape) => Some(Cow::Borrowed(b"\x1b")),
-        Key::Named(NamedKey::ArrowUp) => Some(Cow::Borrowed(b"\x1b[A")),
-        Key::Named(NamedKey::ArrowDown) => Some(Cow::Borrowed(b"\x1b[B")),
-        Key::Named(NamedKey::ArrowRight) => Some(Cow::Borrowed(b"\x1b[C")),
-        Key::Named(NamedKey::ArrowLeft) => Some(Cow::Borrowed(b"\x1b[D")),
-        _ => event
-            .text
-            .as_ref()
-            .map(|t| Cow::Owned(t.as_bytes().to_vec())),
-    }
-}
-
-/// Read the current macOS general-pasteboard string, if any.  Used to
-/// implement Cmd-V → write to PTY.  Returns None if the clipboard
-/// holds non-text content (image, file URLs, etc.).
-fn read_clipboard_text() -> Option<String> {
-    unsafe {
-        let pb = NSPasteboard::generalPasteboard();
-        let s = pb.stringForType(NSPasteboardTypeString)?;
-        Some(s.to_string())
-    }
-}
-
-/// Spawn a thread that blocks on `read(master_fd)` and forwards each chunk
-/// to the main loop. Closing `master_fd` (e.g. from `Pty::drop` on shutdown)
-/// makes the read return ≤0, which terminates the thread cleanly.
-fn spawn_pty_reader(
-    master_fd: std::os::unix::io::RawFd,
-    tx: SyncSender<Vec<u8>>,
-    proxy: EventLoopProxy<MarsEvent>,
-) {
-    thread::Builder::new()
-        .name("mars-pty-reader".into())
-        .spawn(move || {
-            let mut buf = [0u8; READ_BUF];
-            loop {
-                // First read: blocks until at least one byte arrives.
-                let n = unsafe {
-                    libc::read(
-                        master_fd,
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        buf.len(),
-                    )
-                };
-                if n <= 0 {
-                    // EOF or error → child gone or fd closed.  Tell the
-                    // main loop so it can commit the final frame and
-                    // exit cleanly (lets Drop run).
-                    let _ = proxy.send_event(MarsEvent::ShellExited);
-                    break;
-                }
-                let mut total = n as usize;
-
-                // Opportunistic drain: poll(0) and read whatever else is
-                // already in the kernel pipe.  Cuts IPC × main-loop
-                // dispatch cost on bulk output (cat large file) without
-                // adding latency for interactive output (single byte sent
-                // immediately because poll says "no more").
-                while total < buf.len() {
-                    let mut pfd = libc::pollfd {
-                        fd: master_fd,
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
-                    if ready <= 0 {
-                        break;
-                    }
-                    let n2 = unsafe {
-                        libc::read(
-                            master_fd,
-                            buf.as_mut_ptr().add(total) as *mut libc::c_void,
-                            buf.len() - total,
-                        )
-                    };
-                    if n2 <= 0 {
-                        break;
-                    }
-                    total += n2 as usize;
-                }
-
-                let chunk = buf[..total].to_vec();
-                if tx.send(chunk).is_err() {
-                    // Main thread dropped the receiver — we're shutting down.
-                    break;
-                }
-                if proxy.send_event(MarsEvent::PtyBytes).is_err() {
-                    // Event loop already exited.
-                    break;
-                }
-            }
-        })
-        .expect("spawn pty reader thread");
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {
@@ -464,29 +298,17 @@ fn main() {
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    // MARS_SHELL takes precedence over SHELL.  Lets the bench harness
-    // point mars at a one-shot script (no keystroke pumping needed) so we
-    // get a clean PTY → render measurement without zsh-init interference.
-    let shell = std::env::var("MARS_SHELL")
-        .or_else(|_| std::env::var("SHELL"))
-        .unwrap_or_else(|_| "/bin/zsh".into());
-    let pty = Pty::spawn(PtyConfig {
-        program: shell,
-        // Pty::spawn already pushes `program` as argv[0]; this vec is for
-        // additional args only.
-        args: Vec::new(),
-        size: TerminalSize {
-            cols: GRID_COLS,
-            rows: GRID_ROWS,
-            pixel_width: 0,
-            pixel_height: 0,
-        },
-    })
-    .expect("spawn pty");
-
-    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CAPACITY);
+    // Each session's reader thread calls this closure on every chunk
+    // and once on EOF; we forward to the winit event loop as a Wake.
     let proxy = event_loop.create_proxy();
-    spawn_pty_reader(pty.raw_master(), tx, proxy);
+    let wake = move || {
+        let _ = proxy.send_event(MarsEvent::Wake);
+    };
+
+    // Phase A: one session, fixed initial size — Resized fires almost
+    // immediately and right-sizes both the renderer viewport and this
+    // session's PTY.  Phase B will create one Session per layout cell.
+    let session = Session::spawn(GRID_COLS, GRID_ROWS, wake).expect("spawn initial session");
 
     // MARS_LATENCY=/path/out.json — write a JSON list of keystroke→
     // setContents nanoseconds to the given path on exit.  Off otherwise.
@@ -500,9 +322,8 @@ fn main() {
     let mut app = Mars {
         window: None,
         renderer: None,
-        terminal: Terminal::new(GRID_COLS, GRID_ROWS),
-        pty,
-        rx,
+        sessions: vec![session],
+        focused_idx: 0,
         modifiers: ModifiersState::empty(),
         pending_keystroke_t0: None,
         latency_samples: Vec::new(),
