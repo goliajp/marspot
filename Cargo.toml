@@ -16,6 +16,7 @@ raw-window-handle = "0.6"
 core-text = "21.0"
 core-graphics = "0.24"
 core-foundation = "0.10"
+png = "0.17"
 
 [profile.release]
 lto = "thin"

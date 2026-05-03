@@ -133,9 +133,12 @@ struct Instance {
 }
 
 pub struct Renderer {
-    _device: Retained<ProtocolObject<dyn MTLDevice>>,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    layer: Retained<CAMetalLayer>,
+    /// Present path: when bound to an `NSView`, render() pulls drawables
+    /// from this layer and presents.  In headless / snapshot mode it's
+    /// `None` and rendering goes to caller-supplied textures.
+    layer: Option<Retained<CAMetalLayer>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     atlas_texture: Retained<ProtocolObject<dyn MTLTexture>>,
     atlas: GlyphAtlas,
@@ -154,28 +157,41 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Build a renderer.  `scale` is the display's backing scale factor
-    /// (1.0 on standard displays, 2.0 on Retina, 3.0 on some external 4K).
-    /// All geometry below is computed in **physical pixels** so glyphs
-    /// rasterize at native resolution.
+    /// Build a renderer bound to an `NSView` for live display.  `scale`
+    /// is the display's backing scale factor (1.0 standard, 2.0 Retina).
     pub fn new(view: &NSView, scale: f32) -> Result<Self, String> {
+        Self::build(Some(view), scale)
+    }
+
+    /// Build an offscreen renderer for snapshots / tests.  No NSView, no
+    /// CAMetalLayer — just GPU resources and the seeded terminal content.
+    pub fn new_offscreen(scale: f32) -> Result<Self, String> {
+        Self::build(None, scale)
+    }
+
+    fn build(view: Option<&NSView>, scale: f32) -> Result<Self, String> {
         let device = unsafe { Retained::from_raw(MTLCreateSystemDefaultDevice()) }
             .ok_or("no Metal device available")?;
         let queue = device
             .newCommandQueue()
             .ok_or("could not create Metal command queue")?;
 
-        let layer = unsafe { CAMetalLayer::new() };
-        unsafe {
-            layer.setDevice(Some(&device));
-            layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            // contentsScale tells CA the layer's intrinsic resolution so
-            // the compositor doesn't try to magnify it again on top of
-            // our already-physical-pixel drawable.
-            layer.setContentsScale(scale as f64);
-        }
-        view.setWantsLayer(true);
-        unsafe { view.setLayer(Some(&**layer)) };
+        let layer = if let Some(view) = view {
+            let layer = unsafe { CAMetalLayer::new() };
+            unsafe {
+                layer.setDevice(Some(&device));
+                layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                // contentsScale tells CA the layer's intrinsic resolution so
+                // the compositor doesn't try to magnify it again on top of
+                // our already-physical-pixel drawable.
+                layer.setContentsScale(scale as f64);
+            }
+            view.setWantsLayer(true);
+            unsafe { view.setLayer(Some(&**layer)) };
+            Some(layer)
+        } else {
+            None
+        };
 
         // Rasterize at physical pixel resolution: 13pt × 2 = 26pt on Retina.
         let effective_pt = FONT_POINT_LOGICAL * scale;
@@ -233,7 +249,7 @@ impl Renderer {
         terminal.feed(b"                   `abcdefghijklmnopqrstuvwxyz{|}~\r\n");
 
         Ok(Self {
-            _device: device,
+            device,
             queue,
             layer,
             pipeline,
@@ -253,19 +269,87 @@ impl Renderer {
     pub fn resize(&mut self, width_px: f64, height_px: f64) {
         self.viewport_w = width_px as f32;
         self.viewport_h = height_px as f32;
-        unsafe {
-            self.layer
-                .setDrawableSize(CGSize::new(width_px.max(1.0), height_px.max(1.0)));
+        if let Some(layer) = &self.layer {
+            unsafe {
+                layer.setDrawableSize(CGSize::new(width_px.max(1.0), height_px.max(1.0)));
+            }
         }
     }
 
     pub fn render(&mut self) {
-        let Some(drawable) = (unsafe { self.layer.nextDrawable() }) else {
+        let Some(layer) = &self.layer else { return };
+        let Some(drawable) = (unsafe { layer.nextDrawable() }) else {
             return;
         };
         let texture = unsafe { drawable.texture() };
 
-        // Refresh uniforms with current viewport + atlas dims.
+        // Encode the render pass and commit a SEPARATE presentation
+        // buffer.  We commit twice in order: first the render commits,
+        // second a tiny present-only buffer (Metal sequences them on the
+        // queue automatically, so the present sees the rendered texture).
+        self.encode_render_pass(&texture);
+        let present_buffer = self
+            .queue
+            .commandBuffer()
+            .expect("present buffer allocation failed");
+        present_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
+        present_buffer.commit();
+    }
+
+    /// Render a single frame into an offscreen MTLTexture and return the
+    /// raw BGRA8 pixel bytes.  `width` and `height` are in physical pixels.
+    /// Used by `--snapshot` mode and tests; never touches the layer.
+    pub fn snapshot(&mut self, width: u32, height: u32) -> Result<Vec<u8>, String> {
+        let descriptor = unsafe { MTLTextureDescriptor::new() };
+        unsafe {
+            descriptor.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            descriptor.setWidth(width as usize);
+            descriptor.setHeight(height as usize);
+            descriptor.setUsage(
+                MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead,
+            );
+            descriptor.setStorageMode(MTLStorageMode::Shared);
+        }
+        let texture = self
+            .device
+            .newTextureWithDescriptor(&descriptor)
+            .ok_or("could not create snapshot texture")?;
+
+        self.viewport_w = width as f32;
+        self.viewport_h = height as f32;
+
+        let buffer = self.encode_render_pass(&texture);
+        unsafe { buffer.waitUntilCompleted() };
+
+        let row_bytes = width as usize * 4;
+        let mut pixels = vec![0u8; row_bytes * height as usize];
+        let region = MTLRegion {
+            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+            size: MTLSize {
+                width: width as usize,
+                height: height as usize,
+                depth: 1,
+            },
+        };
+        unsafe {
+            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                std::ptr::NonNull::new(pixels.as_mut_ptr() as *mut c_void).unwrap(),
+                row_bytes,
+                region,
+                0,
+            );
+        }
+        Ok(pixels)
+    }
+
+    /// Build instance buffer + encode the render pass into `target`.
+    /// Returns the (committed) command buffer so callers can wait or
+    /// chain a presentDrawable on the same buffer.
+    fn encode_render_pass(
+        &mut self,
+        target: &ProtocolObject<dyn MTLTexture>,
+    ) -> Retained<ProtocolObject<dyn MTLCommandBuffer>> {
+        // Refresh uniforms.
         let uniforms = Uniforms {
             viewport_w: self.viewport_w.max(1.0),
             viewport_h: self.viewport_h.max(1.0),
@@ -277,13 +361,12 @@ impl Renderer {
             *dst = uniforms;
         }
 
-        // Build the instance buffer from the current grid.
         let instance_count = self.build_instances();
 
         let pass = unsafe { MTLRenderPassDescriptor::new() };
         let attachments = unsafe { pass.colorAttachments() };
         let attachment = unsafe { attachments.objectAtIndexedSubscript(0) };
-        attachment.setTexture(Some(&texture));
+        attachment.setTexture(Some(target));
         attachment.setLoadAction(MTLLoadAction::Clear);
         attachment.setStoreAction(MTLStoreAction::Store);
         attachment.setClearColor(MTLClearColor {
@@ -316,9 +399,8 @@ impl Renderer {
             }
             encoder.endEncoding();
         }
-
-        buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         buffer.commit();
+        buffer
     }
 
     /// Walk every cell in the grid; for each non-blank cell whose glyph is
