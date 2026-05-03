@@ -196,6 +196,32 @@ impl Grid {
         }
     }
 
+    /// Return the cell at the given viewport position, honouring
+    /// `view_offset` (lines scrolled up from live, 0 = live view).
+    /// Pulls from the live grid for visible rows and from
+    /// `scrollback_line` for scrolled-up rows; returns a default
+    /// cell past the oldest scrollback line.  Both renderers
+    /// (`render.rs` AppKit, `render_metal.rs` Metal) call through
+    /// here so they read the same view of the grid.
+    pub fn cell_at_view(&self, view_offset: u16, col: u16, viewport_row: u16) -> Cell {
+        let rows = self.rows() as usize;
+        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
+        if abs < rows {
+            return self.cell(col, (rows - 1 - abs) as u16);
+        }
+        let from_end = abs - rows;
+        let sb_len = self.scrollback_len();
+        if from_end < sb_len {
+            let sb_idx = sb_len - 1 - from_end;
+            if let Some(line) = self.scrollback_line(sb_idx) {
+                if (col as usize) < line.len() {
+                    return line[col as usize];
+                }
+            }
+        }
+        Cell::default()
+    }
+
     pub fn scrollback_len(&self) -> usize { self.scrollback.len }
     pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity }
     pub fn scrollback_line(&self, idx: usize) -> Option<&[Cell]> { self.scrollback.line(idx) }
