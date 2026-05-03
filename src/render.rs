@@ -21,7 +21,9 @@ use core_graphics::context::{CGContext, CGTextDrawingMode};
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
 use core_text::font::{new_from_name, CTFont, CTFontRef};
-use core_text::font_descriptor::kCTFontOrientationDefault;
+use core_text::font_descriptor::{
+    kCTFontBoldTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
+};
 use foreign_types::ForeignType;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -120,10 +122,18 @@ pub struct Renderer {
     /// fonts discovered lazily via `CTFontCreateForString` for codepoints
     /// the base font lacks.
     fonts: FontRegistry,
-    /// Per-codepoint resolution: which font (by index into `fonts`) and
-    /// glyph id can render this codepoint.  Filled lazily; entries are
-    /// stable for the renderer's lifetime.
-    char_cache: HashMap<u32, (usize, CGGlyph)>,
+    /// Per-(codepoint, style) resolution: which font (by index into
+    /// `fonts`) and glyph id can render this codepoint with the given
+    /// bold/italic combination.  Filled lazily.
+    ///
+    /// Style is a 2-bit packed value: bit 0 = bold, bit 1 = italic, so
+    ///   0 = regular, 1 = bold, 2 = italic, 3 = bold-italic
+    char_cache: HashMap<(u32, u8), (usize, CGGlyph)>,
+    /// Indices into `fonts` for the four base styles of the primary
+    /// font, so styled cells can pick a variant in O(1).  When a
+    /// variant doesn't exist (e.g. Menlo lacks a true italic), this
+    /// falls back to the regular font index.
+    style_font_idx: [usize; 4],
     cell_w: f64,
     cell_h: f64,
     ascent: f64,
@@ -188,6 +198,19 @@ impl Renderer {
         let ascent = font.ascent();
         let cell_h = ascent + font.descent() + font.leading();
 
+        // Pre-compute the four style variants of the base font.  Some
+        // fonts lack a true italic — fall back to regular for any miss
+        // so SGR italic still renders something rather than panicking.
+        let bold_mask = kCTFontBoldTrait;
+        let italic_mask = kCTFontItalicTrait;
+        let try_variant =
+            |traits: u32| font.clone_with_symbolic_traits(traits, bold_mask | italic_mask);
+        let regular = font.clone();
+        let bold = try_variant(bold_mask).unwrap_or_else(|| font.clone());
+        let italic = try_variant(italic_mask).unwrap_or_else(|| font.clone());
+        let bold_italic =
+            try_variant(bold_mask | italic_mask).unwrap_or_else(|| font.clone());
+
         let layer = if let Some(view) = view {
             view.setWantsLayer(true);
             // The view is now layer-backed; AppKit creates a default
@@ -227,10 +250,16 @@ impl Renderer {
             None
         };
 
+        let mut fonts = FontRegistry::new(regular);
+        let bold_idx = fonts.intern(bold);
+        let italic_idx = fonts.intern(italic);
+        let bold_italic_idx = fonts.intern(bold_italic);
+
         Ok(Self {
             layer,
-            fonts: FontRegistry::new(font),
+            fonts,
             char_cache: HashMap::new(),
+            style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
             cell_w,
             cell_h,
             ascent,
@@ -276,25 +305,31 @@ impl Renderer {
         }
     }
 
-    /// Resolve a character to (font_idx, glyph).  The base font is tried
-    /// first; on .notdef we ask CoreText for a per-string fallback and
-    /// intern the result.  Cached by codepoint.
-    fn resolve_char(&mut self, ch: char) -> (usize, CGGlyph) {
-        let cp = ch as u32;
-        if let Some(&entry) = self.char_cache.get(&cp) {
+    /// Resolve a character + style to (font_idx, glyph).  Tries the
+    /// requested style first; on .notdef asks CoreText for a per-string
+    /// fallback (which loses the style — we don't try to bold/italic
+    /// fallback fonts).  Cached by (codepoint, style).
+    fn resolve_char(&mut self, ch: char, bold: bool, italic: bool) -> (usize, CGGlyph) {
+        let style: u8 = (bold as u8) | ((italic as u8) << 1);
+        let key = (ch as u32, style);
+        if let Some(&entry) = self.char_cache.get(&key) {
             return entry;
         }
-        let base = self.fonts.fonts[0].clone();
+        let style_idx = self.style_font_idx[style as usize];
+        let base = self.fonts.fonts[style_idx].clone();
         let glyph = lookup_glyph(&base, ch);
         let entry = if glyph != 0 {
-            (0, glyph)
+            (style_idx, glyph)
         } else {
+            // Fallback path: ignore style.  CoreText's per-string fallback
+            // gives us a CJK / emoji font that won't have its own bold or
+            // italic anyway.
             let fallback = create_fallback_font(&base, ch);
             let fb_glyph = lookup_glyph(&fallback, ch);
             let idx = self.fonts.intern(fallback);
             (idx, fb_glyph)
         };
-        self.char_cache.insert(cp, entry);
+        self.char_cache.insert(key, entry);
         entry
     }
 
@@ -439,7 +474,7 @@ impl Renderer {
                     i += 1;
                     continue;
                 }
-                let (font_idx, glyph) = self.resolve_char(cell.ch);
+                let (font_idx, glyph) = self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
                 let fg = resolve_attrs(cell.attrs).0;
                 run_glyphs.clear();
                 run_positions.clear();
@@ -451,7 +486,8 @@ impl Renderer {
                     if cur.ch == ' ' || cur.ch == '\0' {
                         break;
                     }
-                    let (cur_font, cur_glyph) = self.resolve_char(cur.ch);
+                    let (cur_font, cur_glyph) =
+                        self.resolve_char(cur.ch, cur.attrs.bold, cur.attrs.italic);
                     if cur_font != font_idx || resolve_attrs(cur.attrs).0 != fg {
                         break;
                     }
@@ -462,6 +498,36 @@ impl Renderer {
                 ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
                 let font = &self.fonts.fonts[font_idx];
                 font.draw_glyphs(&run_glyphs, &run_positions, ctx.clone());
+            }
+
+            // 3) Underline pass — run-length compress consecutive cells
+            //    with attrs.underline that share the same fg colour, draw
+            //    one filled rect per run.  Sits below the baseline by a
+            //    fraction of the descent so it doesn't cut into glyphs.
+            let underline_y = row_bottom_y + (self.cell_h - self.ascent) * 0.55;
+            let underline_h = (self.cell_h * 0.06).max(1.0);
+            let mut u = 0usize;
+            while u < cols {
+                let cell = self.cell_at_viewport(u as u16, r, grid);
+                if !cell.attrs.underline {
+                    u += 1;
+                    continue;
+                }
+                let fg = resolve_attrs(cell.attrs).0;
+                let start = u;
+                u += 1;
+                while u < cols {
+                    let cur = self.cell_at_viewport(u as u16, r, grid);
+                    if !cur.attrs.underline || resolve_attrs(cur.attrs).0 != fg {
+                        break;
+                    }
+                    u += 1;
+                }
+                ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(start as f64 * self.cell_w, underline_y),
+                    &CGSize::new((u - start) as f64 * self.cell_w, underline_h),
+                ));
             }
         }
 
@@ -495,7 +561,7 @@ impl Renderer {
         // when the cursor sits on a space (the common idle case).
         let cell = grid.cell(col, row);
         if cell.ch != ' ' && cell.ch != '\0' {
-            let (font_idx, glyph) = self.resolve_char(cell.ch);
+            let (font_idx, glyph) = self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
             if glyph != 0 {
                 ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
                 let baseline_y =
