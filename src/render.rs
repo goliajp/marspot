@@ -97,15 +97,8 @@ fragment float4 cell_frag(VertexOut in            [[stage_in]],
 }
 "#;
 
-/// Atlas backing-store size in **logical** pixels.  Multiplied by the
-/// device scale factor at construction time so the atlas has enough
-/// physical pixels to hold rasterized glyphs at the device's native
-/// resolution (without scaling artifacts).
 const ATLAS_SIZE_LOGICAL: u32 = 512;
 const FONT_NAME: &str = "Menlo";
-/// Nominal point size of the terminal font.  Multiplied by the device
-/// scale factor when handed to CoreText so glyphs rasterize at native
-/// resolution on HiDPI (Retina) displays.
 const FONT_POINT_LOGICAL: f32 = 13.0;
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
@@ -193,10 +186,9 @@ impl Renderer {
             None
         };
 
-        // Rasterize at physical pixel resolution: 13pt × 2 = 26pt on Retina.
-        let effective_pt = FONT_POINT_LOGICAL * scale;
+        let raster_pt = FONT_POINT_LOGICAL * scale;
         let atlas_size = ((ATLAS_SIZE_LOGICAL as f32) * scale) as u32;
-        let mut atlas = GlyphAtlas::new(FONT_NAME, effective_pt, atlas_size);
+        let mut atlas = GlyphAtlas::new(FONT_NAME, raster_pt, atlas_size);
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 atlas.ensure(ch);
@@ -461,12 +453,7 @@ impl Renderer {
 
                 let cell_origin_x = c as f32 * self.cell_w;
                 let cell_origin_y = r as f32 * self.cell_h;
-                // Baseline in pixel coords (y down): top-of-cell + ascent.
                 let baseline_y = cell_origin_y + self.ascent;
-
-                // Glyph rect: bearing_x is offset from cell origin to glyph
-                // bbox left; bearing_y is offset from baseline up to the
-                // bbox top edge in CG coords (positive = above baseline).
                 let dest_x = cell_origin_x + info.bearing_x;
                 let dest_y = baseline_y - info.bearing_y - info.height as f32;
 
