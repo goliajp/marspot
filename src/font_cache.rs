@@ -1,0 +1,294 @@
+//! Font + colour resolution shared across renderers.
+//!
+//! Both `render.rs` (AppKit/CGImage path) and `render_metal.rs` (CAMetalLayer
+//! path) need:
+//!   * a base font + bold / italic / bold-italic variants
+//!   * a fallback font registry for codepoints the base font lacks
+//!   * a `(codepoint, style) → (font_idx, glyph)` cache
+//!   * the standard ANSI palette + SGR-reverse handling
+//!
+//! Keeping that one canonical implementation here means the Metal path
+//! never drifts from the AppKit path's choices around hinting,
+//! fallback selection, or palette values — important during the A/B
+//! integration phase where pixels need to match.
+
+use crate::grid::{CellAttrs, Color};
+use core_foundation::base::TCFType;
+use core_foundation::string::{CFString, CFStringRef};
+use core_graphics::base::CGFloat;
+use core_graphics::font::CGGlyph;
+use core_graphics::geometry::CGSize;
+use core_text::font::{new_from_name, CTFont, CTFontRef};
+use core_text::font_descriptor::{
+    kCTFontBoldTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
+};
+use std::collections::HashMap;
+
+pub const FONT_NAME: &str = "Menlo";
+pub const FONT_POINT: f64 = 13.0;
+
+/// Background color for the terminal — normalised-sRGB-like space
+/// (the value you'd type in a CSS hex).  Both renderers paint with
+/// this constant so the BG matches across the A/B switch.
+pub const BG: (CGFloat, CGFloat, CGFloat) = (0.05, 0.07, 0.12);
+/// Default foreground (white text).
+pub const FG: (CGFloat, CGFloat, CGFloat) = (0.92, 0.92, 0.92);
+
+/// Standard ANSI 16-colour palette (xterm values).
+pub const ANSI_16: [(CGFloat, CGFloat, CGFloat); 16] = [
+    (0.00, 0.00, 0.00),
+    (0.67, 0.00, 0.00),
+    (0.00, 0.67, 0.00),
+    (0.67, 0.33, 0.00),
+    (0.00, 0.00, 0.67),
+    (0.67, 0.00, 0.67),
+    (0.00, 0.67, 0.67),
+    (0.67, 0.67, 0.67),
+    (0.33, 0.33, 0.33),
+    (1.00, 0.33, 0.33),
+    (0.33, 1.00, 0.33),
+    (1.00, 1.00, 0.33),
+    (0.33, 0.33, 1.00),
+    (1.00, 0.33, 1.00),
+    (0.33, 1.00, 1.00),
+    (1.00, 1.00, 1.00),
+];
+
+pub fn palette_color(idx: u8) -> (CGFloat, CGFloat, CGFloat) {
+    if (idx as usize) < ANSI_16.len() {
+        return ANSI_16[idx as usize];
+    }
+    if idx < 232 {
+        const RAMP: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let n = idx - 16;
+        let r = RAMP[(n / 36) as usize];
+        let g = RAMP[((n / 6) % 6) as usize];
+        let b = RAMP[(n % 6) as usize];
+        return (
+            r as f64 / 255.0,
+            g as f64 / 255.0,
+            b as f64 / 255.0,
+        );
+    }
+    let v = 8 + (idx - 232) as i32 * 10;
+    let f = v as f64 / 255.0;
+    (f, f, f)
+}
+
+pub fn resolve_color(
+    c: Color,
+    default_rgb: (CGFloat, CGFloat, CGFloat),
+) -> (CGFloat, CGFloat, CGFloat) {
+    match c {
+        Color::Default => default_rgb,
+        Color::Indexed(i) => palette_color(i),
+        Color::Rgb(r, g, b) => (
+            r as f64 / 255.0,
+            g as f64 / 255.0,
+            b as f64 / 255.0,
+        ),
+    }
+}
+
+/// Resolve a cell's attrs to (fg, bg) RGB, honouring SGR reverse.
+pub fn resolve_attrs(
+    attrs: CellAttrs,
+) -> (
+    (CGFloat, CGFloat, CGFloat),
+    (CGFloat, CGFloat, CGFloat),
+) {
+    let mut fg = resolve_color(attrs.fg, FG);
+    let mut bg = resolve_color(attrs.bg, BG);
+    if attrs.reverse {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    (fg, bg)
+}
+
+/// CoreText's per-string font fallback resolver — not in the
+/// `core-text` crate so we declare it directly.
+#[link(name = "CoreText", kind = "framework")]
+extern "C" {
+    fn CTFontCreateForString(
+        currentFont: CTFontRef,
+        string: CFStringRef,
+        range: core_foundation::base::CFRange,
+    ) -> CTFontRef;
+}
+
+/// Holds the base font + lazily-discovered fallbacks.  Postscript
+/// name → index map dedups instances (CT hands out a fresh CTFontRef
+/// each lookup even when the underlying font is the same).
+struct FontRegistry {
+    fonts: Vec<CTFont>,
+    by_name: HashMap<String, usize>,
+}
+
+impl FontRegistry {
+    fn new(base: CTFont) -> Self {
+        let name = base.postscript_name();
+        let mut by_name = HashMap::new();
+        by_name.insert(name, 0);
+        Self {
+            fonts: vec![base],
+            by_name,
+        }
+    }
+
+    fn intern(&mut self, font: CTFont) -> usize {
+        let name = font.postscript_name();
+        if let Some(&idx) = self.by_name.get(&name) {
+            return idx;
+        }
+        let idx = self.fonts.len();
+        self.by_name.insert(name, idx);
+        self.fonts.push(font);
+        idx
+    }
+}
+
+/// Shared font handling for both renderers.  Owns the font registry,
+/// the glyph cache, and the precomputed cell metrics.
+pub struct FontCache {
+    fonts: FontRegistry,
+    /// `(codepoint, style)` → `(font_idx, glyph)`.  Style is 2-bit:
+    /// bit 0 = bold, bit 1 = italic.
+    char_cache: HashMap<(u32, u8), (usize, CGGlyph)>,
+    /// Index into `fonts` for each of the 4 base styles (regular,
+    /// bold, italic, bold-italic).  Falls back to regular when a
+    /// variant doesn't exist (e.g. Menlo lacks true italic).
+    style_font_idx: [usize; 4],
+    pub cell_w: f64,
+    pub cell_h: f64,
+    pub ascent: f64,
+}
+
+impl FontCache {
+    pub fn build() -> Result<Self, String> {
+        let font = new_from_name(FONT_NAME, FONT_POINT)
+            .or_else(|_| new_from_name("Menlo", FONT_POINT))
+            .map_err(|_| "could not load font".to_string())?;
+
+        let cell_w = compute_cell_width(&font);
+        let ascent = font.ascent();
+        let cell_h = ascent + font.descent() + font.leading();
+
+        let bold_mask = kCTFontBoldTrait;
+        let italic_mask = kCTFontItalicTrait;
+        let try_variant =
+            |traits: u32| font.clone_with_symbolic_traits(traits, bold_mask | italic_mask);
+        let regular = font.clone();
+        let bold = try_variant(bold_mask).unwrap_or_else(|| font.clone());
+        let italic = try_variant(italic_mask).unwrap_or_else(|| font.clone());
+        let bold_italic =
+            try_variant(bold_mask | italic_mask).unwrap_or_else(|| font.clone());
+
+        let mut fonts = FontRegistry::new(regular);
+        let bold_idx = fonts.intern(bold);
+        let italic_idx = fonts.intern(italic);
+        let bold_italic_idx = fonts.intern(bold_italic);
+
+        Ok(Self {
+            fonts,
+            char_cache: HashMap::new(),
+            style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
+            cell_w,
+            cell_h,
+            ascent,
+        })
+    }
+
+    /// Resolve a `(char, bold, italic)` triple to `(font_idx, glyph)`.
+    /// Tries the requested style first; on `.notdef` falls back to a
+    /// per-string CT-discovered font (which loses the style — fallback
+    /// fonts rarely have their own bold/italic anyway).  Cached.
+    pub fn resolve_char(&mut self, ch: char, bold: bool, italic: bool) -> (usize, CGGlyph) {
+        let style: u8 = (bold as u8) | ((italic as u8) << 1);
+        let key = (ch as u32, style);
+        if let Some(&entry) = self.char_cache.get(&key) {
+            return entry;
+        }
+        let style_idx = self.style_font_idx[style as usize];
+        let base = self.fonts.fonts[style_idx].clone();
+        let glyph = lookup_glyph(&base, ch);
+        let entry = if glyph != 0 {
+            (style_idx, glyph)
+        } else {
+            let fallback = create_fallback_font(&base, ch);
+            let fb_glyph = lookup_glyph(&fallback, ch);
+            let idx = self.fonts.intern(fallback);
+            (idx, fb_glyph)
+        };
+        self.char_cache.insert(key, entry);
+        entry
+    }
+
+    pub fn font(&self, idx: usize) -> &CTFont {
+        &self.fonts.fonts[idx]
+    }
+
+    pub fn cell_dims(&self) -> (f64, f64) {
+        (self.cell_w, self.cell_h)
+    }
+}
+
+pub fn lookup_glyph(font: &CTFont, ch: char) -> CGGlyph {
+    let cp = ch as u32;
+    if cp <= 0xFFFF {
+        let cu = cp as u16;
+        let mut g: CGGlyph = 0;
+        unsafe {
+            font.get_glyphs_for_characters(&cu, &mut g, 1);
+        }
+        g
+    } else {
+        let mut buf = [0u16; 2];
+        ch.encode_utf16(&mut buf);
+        let mut glyphs = [0 as CGGlyph; 2];
+        unsafe {
+            font.get_glyphs_for_characters(buf.as_ptr(), glyphs.as_mut_ptr(), 2);
+        }
+        // Apple's docs disagree across versions about lead vs trail
+        // surrogate; pick the non-zero one to avoid .notdef.
+        if glyphs[0] != 0 {
+            glyphs[0]
+        } else {
+            glyphs[1]
+        }
+    }
+}
+
+pub fn create_fallback_font(base: &CTFont, ch: char) -> CTFont {
+    let s = ch.to_string();
+    let cf = CFString::new(&s);
+    let len = ch.len_utf16() as isize;
+    let range = core_foundation::base::CFRange {
+        location: 0,
+        length: len,
+    };
+    unsafe {
+        let raw = CTFontCreateForString(
+            base.as_concrete_TypeRef(),
+            cf.as_concrete_TypeRef(),
+            range,
+        );
+        if raw.is_null() {
+            return base.clone();
+        }
+        CTFont::wrap_under_create_rule(raw)
+    }
+}
+
+pub fn compute_cell_width(font: &CTFont) -> f64 {
+    let mut glyph: CGGlyph = 0;
+    let m: u16 = b'M' as u16;
+    let _ok = unsafe { font.get_glyphs_for_characters(&m, &mut glyph, 1) };
+    if glyph == 0 {
+        return 7.0;
+    }
+    let mut size = CGSize::new(0.0, 0.0);
+    unsafe {
+        font.get_advances_for_glyphs(kCTFontOrientationDefault, &glyph, &mut size, 1);
+    }
+    size.width
+}

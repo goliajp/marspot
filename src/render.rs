@@ -10,51 +10,22 @@
 //! for pixel — same font hinting, same antialiasing, same gamma path
 //! Apple uses everywhere else.
 
-use crate::grid::{Cell, CellAttrs, Color, Grid};
+use crate::font_cache::{resolve_attrs, FontCache, BG, FG};
+use crate::grid::{Cell, Grid};
 use crate::layout::{CellRect, Layout};
 use crate::session::SessionState;
-use core_foundation::base::{CFRange, TCFType};
-use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::base::{
     kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat,
 };
 use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::{CGContext, CGTextDrawingMode};
 use core_graphics::font::CGGlyph;
-use core_graphics::geometry::{CGAffineTransform, CGPoint, CGRect, CGSize};
-use core_text::font::{new_from_name, CTFont, CTFontRef};
-use core_text::font_descriptor::{
-    kCTFontBoldTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
-};
+use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use foreign_types::ForeignType;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSColor, NSImage, NSView};
-use objc2_foundation::NSSize;
+use objc2_app_kit::{NSColor, NSView};
 use objc2_quartz_core::{kCAGravityTopLeft, CALayer};
-use std::collections::HashMap;
-
-/// CoreText's per-string font fallback resolver: given a base font and a
-/// CFString, returns a font that can render the characters in `range`.
-/// The core-text crate doesn't expose this binding so we declare it
-/// directly — falls under CLAUDE.md's "necessary FFI bindings, kept".
-#[link(name = "CoreText", kind = "framework")]
-extern "C" {
-    fn CTFontCreateForString(
-        currentFont: CTFontRef,
-        string: CFStringRef,
-        range: CFRange,
-    ) -> CTFontRef;
-}
-
-const FONT_NAME: &str = "Menlo";
-const FONT_POINT: f64 = 13.0;
-
-/// Background color for the terminal.  In the **normalized linear-ish
-/// sRGB-display** space — what you'd type as a CSS hex.
-const BG: (CGFloat, CGFloat, CGFloat) = (0.05, 0.07, 0.12);
-/// Default foreground (white text).
-const FG: (CGFloat, CGFloat, CGFloat) = (0.92, 0.92, 0.92);
 /// Sidebar background — slightly different shade so it reads as
 /// chrome separate from terminal cells.
 const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = (0.08, 0.10, 0.14);
@@ -102,89 +73,14 @@ const STATE_ACTIVE: (CGFloat, CGFloat, CGFloat) = (0.30, 0.85, 0.45);
 const STATE_IDLE: (CGFloat, CGFloat, CGFloat) = (0.55, 0.58, 0.62);
 const STATE_EXITED: (CGFloat, CGFloat, CGFloat) = (0.85, 0.30, 0.30);
 
-/// Standard ANSI 16-colour palette (xterm values).  Indices 0–7 are the
-/// basic colours; 8–15 are their bright variants.  256-colour and 24-bit
-/// modes resolve through `palette_color`.
-const ANSI_16: [(CGFloat, CGFloat, CGFloat); 16] = [
-    (0.00, 0.00, 0.00), // 0  black
-    (0.67, 0.00, 0.00), // 1  red
-    (0.00, 0.67, 0.00), // 2  green
-    (0.67, 0.33, 0.00), // 3  yellow
-    (0.00, 0.00, 0.67), // 4  blue
-    (0.67, 0.00, 0.67), // 5  magenta
-    (0.00, 0.67, 0.67), // 6  cyan
-    (0.67, 0.67, 0.67), // 7  white (light grey)
-    (0.33, 0.33, 0.33), // 8  bright black
-    (1.00, 0.33, 0.33), // 9  bright red
-    (0.33, 1.00, 0.33), // 10 bright green
-    (1.00, 1.00, 0.33), // 11 bright yellow
-    (0.33, 0.33, 1.00), // 12 bright blue
-    (1.00, 0.33, 1.00), // 13 bright magenta
-    (0.33, 1.00, 1.00), // 14 bright cyan
-    (1.00, 1.00, 1.00), // 15 bright white
-];
-
-fn palette_color(idx: u8) -> (CGFloat, CGFloat, CGFloat) {
-    if (idx as usize) < ANSI_16.len() {
-        return ANSI_16[idx as usize];
-    }
-    if idx < 232 {
-        // 6×6×6 colour cube; xterm uses {0, 95, 135, 175, 215, 255} as the
-        // per-channel ramp.
-        const RAMP: [u8; 6] = [0, 95, 135, 175, 215, 255];
-        let n = idx - 16;
-        let r = RAMP[(n / 36) as usize];
-        let g = RAMP[((n / 6) % 6) as usize];
-        let b = RAMP[(n % 6) as usize];
-        return (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
-    }
-    // 24-step grayscale ramp from #080808 to #eeeeee.
-    let v = 8 + (idx - 232) as i32 * 10;
-    let f = v as f64 / 255.0;
-    (f, f, f)
-}
-
-fn resolve_color(c: Color, default_rgb: (CGFloat, CGFloat, CGFloat)) -> (CGFloat, CGFloat, CGFloat) {
-    match c {
-        Color::Default => default_rgb,
-        Color::Indexed(i) => palette_color(i),
-        Color::Rgb(r, g, b) => (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0),
-    }
-}
-
-/// Resolve a cell's attrs to (fg, bg) RGB, honoring SGR reverse.
-fn resolve_attrs(attrs: CellAttrs) -> ((CGFloat, CGFloat, CGFloat), (CGFloat, CGFloat, CGFloat)) {
-    let mut fg = resolve_color(attrs.fg, FG);
-    let mut bg = resolve_color(attrs.bg, BG);
-    if attrs.reverse {
-        std::mem::swap(&mut fg, &mut bg);
-    }
-    (fg, bg)
-}
-
 pub struct Renderer {
     /// When attached to an NSView, we update its CALayer's `contents` on
     /// each render with a fresh CGImage.  In headless mode this is None.
     layer: Option<Retained<CALayer>>,
-    /// `fonts.fonts[0]` is the base font; subsequent indices are fallback
-    /// fonts discovered lazily via `CTFontCreateForString` for codepoints
-    /// the base font lacks.
-    fonts: FontRegistry,
-    /// Per-(codepoint, style) resolution: which font (by index into
-    /// `fonts`) and glyph id can render this codepoint with the given
-    /// bold/italic combination.  Filled lazily.
-    ///
-    /// Style is a 2-bit packed value: bit 0 = bold, bit 1 = italic, so
-    ///   0 = regular, 1 = bold, 2 = italic, 3 = bold-italic
-    char_cache: HashMap<(u32, u8), (usize, CGGlyph)>,
-    /// Indices into `fonts` for the four base styles of the primary
-    /// font, so styled cells can pick a variant in O(1).  When a
-    /// variant doesn't exist (e.g. Menlo lacks a true italic), this
-    /// falls back to the regular font index.
-    style_font_idx: [usize; 4],
-    cell_w: f64,
-    cell_h: f64,
-    ascent: f64,
+    /// Shared font + glyph + colour resolution — see `font_cache.rs`.
+    /// `font.cell_w/cell_h/ascent` are this renderer's metrics; we
+    /// re-export them through `cell_dims()` for callers (main.rs).
+    font: FontCache,
     viewport_w: f64,
     viewport_h: f64,
     scale: f64,
@@ -220,40 +116,6 @@ struct Scratch {
     row_attrs: Vec<(RgbF, RgbF)>,
 }
 
-/// Holds the base font plus any fallback fonts discovered at runtime, with
-/// a postscript-name → index map so we can dedup fallbacks (CoreText hands
-/// us a fresh `CTFontRef` each lookup even when the underlying font is the
-/// same one).
-struct FontRegistry {
-    fonts: Vec<CTFont>,
-    by_name: HashMap<String, usize>,
-}
-
-impl FontRegistry {
-    fn new(base: CTFont) -> Self {
-        let name = base.postscript_name();
-        let mut by_name = HashMap::new();
-        by_name.insert(name, 0);
-        Self {
-            fonts: vec![base],
-            by_name,
-        }
-    }
-
-    /// Insert a font if its postscript name isn't already known; in either
-    /// case returns the index of the canonical instance.
-    fn intern(&mut self, font: CTFont) -> usize {
-        let name = font.postscript_name();
-        if let Some(&idx) = self.by_name.get(&name) {
-            return idx;
-        }
-        let idx = self.fonts.len();
-        self.by_name.insert(name, idx);
-        self.fonts.push(font);
-        idx
-    }
-}
-
 impl Renderer {
     pub fn new(view: &NSView, scale: f32) -> Result<Self, String> {
         Self::build(Some(view), scale)
@@ -264,26 +126,7 @@ impl Renderer {
     }
 
     fn build(view: Option<&NSView>, scale: f32) -> Result<Self, String> {
-        let font = new_from_name(FONT_NAME, FONT_POINT)
-            .or_else(|_| new_from_name("Menlo", FONT_POINT))
-            .map_err(|_| "could not load font".to_string())?;
-
-        let cell_w = compute_cell_width(&font);
-        let ascent = font.ascent();
-        let cell_h = ascent + font.descent() + font.leading();
-
-        // Pre-compute the four style variants of the base font.  Some
-        // fonts lack a true italic — fall back to regular for any miss
-        // so SGR italic still renders something rather than panicking.
-        let bold_mask = kCTFontBoldTrait;
-        let italic_mask = kCTFontItalicTrait;
-        let try_variant =
-            |traits: u32| font.clone_with_symbolic_traits(traits, bold_mask | italic_mask);
-        let regular = font.clone();
-        let bold = try_variant(bold_mask).unwrap_or_else(|| font.clone());
-        let italic = try_variant(italic_mask).unwrap_or_else(|| font.clone());
-        let bold_italic =
-            try_variant(bold_mask | italic_mask).unwrap_or_else(|| font.clone());
+        let font = FontCache::build()?;
 
         let layer = if let Some(view) = view {
             view.setWantsLayer(true);
@@ -324,19 +167,9 @@ impl Renderer {
             None
         };
 
-        let mut fonts = FontRegistry::new(regular);
-        let bold_idx = fonts.intern(bold);
-        let italic_idx = fonts.intern(italic);
-        let bold_italic_idx = fonts.intern(bold_italic);
-
         Ok(Self {
             layer,
-            fonts,
-            char_cache: HashMap::new(),
-            style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
-            cell_w,
-            cell_h,
-            ascent,
+            font,
             viewport_w: 0.0,
             viewport_h: 0.0,
             scale: scale as f64,
@@ -375,34 +208,6 @@ impl Renderer {
         }
     }
 
-    /// Resolve a character + style to (font_idx, glyph).  Tries the
-    /// requested style first; on .notdef asks CoreText for a per-string
-    /// fallback (which loses the style — we don't try to bold/italic
-    /// fallback fonts).  Cached by (codepoint, style).
-    fn resolve_char(&mut self, ch: char, bold: bool, italic: bool) -> (usize, CGGlyph) {
-        let style: u8 = (bold as u8) | ((italic as u8) << 1);
-        let key = (ch as u32, style);
-        if let Some(&entry) = self.char_cache.get(&key) {
-            return entry;
-        }
-        let style_idx = self.style_font_idx[style as usize];
-        let base = self.fonts.fonts[style_idx].clone();
-        let glyph = lookup_glyph(&base, ch);
-        let entry = if glyph != 0 {
-            (style_idx, glyph)
-        } else {
-            // Fallback path: ignore style.  CoreText's per-string fallback
-            // gives us a CJK / emoji font that won't have its own bold or
-            // italic anyway.
-            let fallback = create_fallback_font(&base, ch);
-            let fb_glyph = lookup_glyph(&fallback, ch);
-            let idx = self.fonts.intern(fallback);
-            (idx, fb_glyph)
-        };
-        self.char_cache.insert(key, entry);
-        entry
-    }
-
     pub fn resize(&mut self, width_px: f64, height_px: f64) {
         self.viewport_w = width_px;
         self.viewport_h = height_px;
@@ -412,7 +217,7 @@ impl Renderer {
     /// internally.  Callers (e.g. the resize path) divide the viewport by
     /// these to get the grid dimensions that fit.
     pub fn cell_dims(&self) -> (f64, f64) {
-        (self.cell_w, self.cell_h)
+        self.font.cell_dims()
     }
 
     /// Render a single session full-window (mcli + the snapshot bench).
@@ -431,8 +236,8 @@ impl Renderer {
             0.0,
             1,
             1,
-            self.cell_w,
-            self.cell_h,
+            self.font.cell_w,
+            self.font.cell_h,
         );
         self.render_layout(&layout, std::slice::from_ref(&view), &[], 0);
     }
@@ -499,8 +304,8 @@ impl Renderer {
             0.0,
             1,
             1,
-            self.cell_w,
-            self.cell_h,
+            self.font.cell_w,
+            self.font.cell_h,
         );
         let view = SessionView {
             grid,
@@ -628,7 +433,7 @@ impl Renderer {
             // 1) Background pass — fill runs of cells that share a non-default
             //    background color.  Cells with the default BG inherit the
             //    rect's terminal-bg fill we just laid down.
-            let row_bottom_y = rect_top_y_up - (r as f64 + 1.0) * self.cell_h;
+            let row_bottom_y = rect_top_y_up - (r as f64 + 1.0) * self.font.cell_h;
             let mut c = 0usize;
             while c < cols {
                 let bg = scratch.row_attrs[c].1;
@@ -643,14 +448,14 @@ impl Renderer {
                 }
                 ctx.set_rgb_fill_color(bg.0, bg.1, bg.2, 1.0);
                 ctx.fill_rect(CGRect::new(
-                    &CGPoint::new(rect.x + start as f64 * self.cell_w, row_bottom_y),
-                    &CGSize::new((c - start) as f64 * self.cell_w, self.cell_h),
+                    &CGPoint::new(rect.x + start as f64 * self.font.cell_w, row_bottom_y),
+                    &CGSize::new((c - start) as f64 * self.font.cell_w, self.font.cell_h),
                 ));
             }
 
             // 2) Foreground pass — group consecutive non-blank cells that
             //    share both font and fg color; one draw_glyphs call per run.
-            let baseline_y = rect_top_y_up - (r as f64 * self.cell_h + self.ascent);
+            let baseline_y = rect_top_y_up - (r as f64 * self.font.cell_h + self.font.ascent);
             let mut i = 0usize;
             while i < cols {
                 let cell = scratch.row_cells[i];
@@ -659,14 +464,14 @@ impl Renderer {
                     continue;
                 }
                 let (font_idx, glyph) =
-                    self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
+                    self.font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
                 let fg = scratch.row_attrs[i].0;
                 scratch.run_glyphs.clear();
                 scratch.run_positions.clear();
                 scratch.run_glyphs.push(glyph);
                 scratch
                     .run_positions
-                    .push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
+                    .push(CGPoint::new(rect.x + i as f64 * self.font.cell_w, baseline_y));
                 i += 1;
                 while i < cols {
                     let cur = scratch.row_cells[i];
@@ -674,24 +479,24 @@ impl Renderer {
                         break;
                     }
                     let (cur_font, cur_glyph) =
-                        self.resolve_char(cur.ch, cur.attrs.bold, cur.attrs.italic);
+                        self.font.resolve_char(cur.ch, cur.attrs.bold, cur.attrs.italic);
                     if cur_font != font_idx || scratch.row_attrs[i].0 != fg {
                         break;
                     }
                     scratch.run_glyphs.push(cur_glyph);
                     scratch
                         .run_positions
-                        .push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
+                        .push(CGPoint::new(rect.x + i as f64 * self.font.cell_w, baseline_y));
                     i += 1;
                 }
                 ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
-                let font = &self.fonts.fonts[font_idx];
+                let font = &self.font.font(font_idx);
                 font.draw_glyphs(&scratch.run_glyphs, &scratch.run_positions, ctx.clone());
             }
 
             // 3) Underline pass.
-            let underline_y = row_bottom_y + (self.cell_h - self.ascent) * 0.55;
-            let underline_h = (self.cell_h * 0.06).max(1.0);
+            let underline_y = row_bottom_y + (self.font.cell_h - self.font.ascent) * 0.55;
+            let underline_h = (self.font.cell_h * 0.06).max(1.0);
             let mut u = 0usize;
             while u < cols {
                 let cell = scratch.row_cells[u];
@@ -711,8 +516,8 @@ impl Renderer {
                 }
                 ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
                 ctx.fill_rect(CGRect::new(
-                    &CGPoint::new(rect.x + start as f64 * self.cell_w, underline_y),
-                    &CGSize::new((u - start) as f64 * self.cell_w, underline_h),
+                    &CGPoint::new(rect.x + start as f64 * self.font.cell_w, underline_y),
+                    &CGSize::new((u - start) as f64 * self.font.cell_w, underline_h),
                 ));
             }
         }
@@ -726,7 +531,7 @@ impl Renderer {
         // distinguish "the one currently receiving keystrokes" from the
         // others when more than one session is on screen.
         if view.focused {
-            let stroke = (self.cell_h * 0.10).max(1.0);
+            let stroke = (self.font.cell_h * 0.10).max(1.0);
             ctx.set_rgb_stroke_color(
                 FOCUS_OUTLINE.0,
                 FOCUS_OUTLINE.1,
@@ -791,7 +596,7 @@ impl Renderer {
             // ASCII so cell_w accuracy is fine.
             let label_x = dot_cx + SIDEBAR_DOT_R + SIDEBAR_DOT_LABEL_GAP;
             let baseline_y = row_top_y_up - SIDEBAR_ROW_H / 2.0
-                + self.ascent * 0.40 - self.cell_h * 0.20;
+                + self.font.ascent * 0.40 - self.font.cell_h * 0.20;
             ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
             ctx.set_rgb_fill_color(
                 SIDEBAR_TEXT_FG.0,
@@ -803,15 +608,15 @@ impl Renderer {
             let mut positions: Vec<CGPoint> = Vec::with_capacity(entry.label.len());
             let mut x = label_x;
             for ch in entry.label.chars() {
-                let (font_idx, g) = self.resolve_char(ch, false, false);
+                let (font_idx, g) = self.font.resolve_char(ch, false, false);
                 if g != 0 && font_idx == 0 {
                     glyphs.push(g);
                     positions.push(CGPoint::new(x, baseline_y));
                 }
-                x += self.cell_w;
+                x += self.font.cell_w;
             }
             if !glyphs.is_empty() {
-                let font = &self.fonts.fonts[0];
+                let font = &self.font.font(0);
                 font.draw_glyphs(&glyphs, &positions, ctx.clone());
             }
         }
@@ -829,11 +634,11 @@ impl Renderer {
         view: &SessionView,
     ) {
         let (col, row) = view.grid.cursor();
-        let cx = rect.x + col as f64 * self.cell_w;
-        let cy_bottom = rect_top_y_up - (row as f64 + 1.0) * self.cell_h;
+        let cx = rect.x + col as f64 * self.font.cell_w;
+        let cy_bottom = rect_top_y_up - (row as f64 + 1.0) * self.font.cell_h;
         let cursor_rect = CGRect::new(
             &CGPoint::new(cx, cy_bottom),
-            &CGSize::new(self.cell_w, self.cell_h),
+            &CGSize::new(self.font.cell_w, self.font.cell_h),
         );
         let solid = view.focused && self.window_focused;
 
@@ -844,12 +649,12 @@ impl Renderer {
             let cell = view.grid.cell(col, row);
             if cell.ch != ' ' && cell.ch != '\0' {
                 let (font_idx, glyph) =
-                    self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
+                    self.font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
                 if glyph != 0 {
                     ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
                     let baseline_y =
-                        rect_top_y_up - (row as f64 * self.cell_h + self.ascent);
-                    let font = &self.fonts.fonts[font_idx];
+                        rect_top_y_up - (row as f64 * self.font.cell_h + self.font.ascent);
+                    let font = &self.font.font(font_idx);
                     font.draw_glyphs(
                         &[glyph],
                         &[CGPoint::new(cx, baseline_y)],
@@ -859,7 +664,7 @@ impl Renderer {
             }
         } else {
             // Hollow outline.
-            let stroke = (self.cell_h * 0.07).max(1.0);
+            let stroke = (self.font.cell_h * 0.07).max(1.0);
             ctx.set_rgb_stroke_color(FG.0, FG.1, FG.2, 1.0);
             ctx.set_line_width(stroke);
             ctx.stroke_rect(cursor_rect);
@@ -867,67 +672,3 @@ impl Renderer {
     }
 }
 
-/// Look up the glyph id for `ch` in `font`.  Handles both BMP and non-BMP
-/// codepoints (the latter as a UTF-16 surrogate pair, where CoreText puts
-/// the actual glyph in the trailing slot).  Returns 0 if the font can't
-/// render this codepoint.
-fn lookup_glyph(font: &CTFont, ch: char) -> CGGlyph {
-    let cp = ch as u32;
-    if cp <= 0xFFFF {
-        let cu = cp as u16;
-        let mut g: CGGlyph = 0;
-        unsafe {
-            font.get_glyphs_for_characters(&cu, &mut g, 1);
-        }
-        g
-    } else {
-        let mut buf = [0u16; 2];
-        ch.encode_utf16(&mut buf);
-        let mut glyphs = [0 as CGGlyph; 2];
-        unsafe {
-            font.get_glyphs_for_characters(buf.as_ptr(), glyphs.as_mut_ptr(), 2);
-        }
-        // Apple's docs disagree across versions about whether surrogate
-        // pairs put the glyph at the lead or trail index — empirically
-        // pick whichever is non-zero so we don't render .notdef.
-        if glyphs[0] != 0 { glyphs[0] } else { glyphs[1] }
-    }
-}
-
-/// Ask CoreText for a font that can render `ch`, falling back to `base`
-/// itself if CT returns nothing.  CoreText walks the system fallback chain
-/// (Hiragino for Japanese, PingFang for Chinese, Apple Color Emoji, etc.).
-fn create_fallback_font(base: &CTFont, ch: char) -> CTFont {
-    let s = ch.to_string();
-    let cf = CFString::new(&s);
-    let len = ch.len_utf16() as isize;
-    let range = CFRange { location: 0, length: len };
-    unsafe {
-        let raw = CTFontCreateForString(
-            base.as_concrete_TypeRef(),
-            cf.as_concrete_TypeRef(),
-            range,
-        );
-        if raw.is_null() {
-            return base.clone();
-        }
-        CTFont::wrap_under_create_rule(raw)
-    }
-}
-
-fn compute_cell_width(font: &CTFont) -> f64 {
-    let mut glyph: CGGlyph = 0;
-    let m: u16 = b'M' as u16;
-    let _ok = unsafe { font.get_glyphs_for_characters(&m, &mut glyph, 1) };
-    if glyph == 0 {
-        return 7.0; // sane fallback
-    }
-    let mut size = CGSize::new(0.0, 0.0);
-    unsafe {
-        font.get_advances_for_glyphs(kCTFontOrientationDefault, &glyph, &mut size, 1);
-    }
-    size.width
-}
-
-#[allow(dead_code)]
-fn _force_use_nsimage(_: &NSImage, _: NSSize) {}
