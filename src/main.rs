@@ -208,6 +208,14 @@ impl ApplicationHandler<MarsEvent> for Mars {
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
+            WindowEvent::Focused(focused) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_focused(focused);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
                     if self.record_latency && self.pending_keystroke_t0.is_none() {

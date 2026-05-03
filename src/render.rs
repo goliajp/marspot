@@ -144,6 +144,10 @@ pub struct Renderer {
     /// (current grid only).  Bumped by mouse-wheel events; reset to 0
     /// on keyboard input.
     view_offset: u16,
+    /// Window focus state.  When false, the cursor is drawn as a
+    /// hollow outline instead of a filled block — the macOS native
+    /// terminal convention.
+    focused: bool,
 }
 
 /// Holds the base font plus any fallback fonts discovered at runtime, with
@@ -267,7 +271,12 @@ impl Renderer {
             viewport_h: 0.0,
             scale: scale as f64,
             view_offset: 0,
+            focused: true,
         })
+    }
+
+    pub fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     pub fn view_offset(&self) -> u16 {
@@ -541,38 +550,49 @@ impl Renderer {
         ctx
     }
 
-    /// Standard "block" cursor: fill the cursor cell with the foreground
-    /// colour, then re-draw that cell's glyph in the background colour so
-    /// the character under the cursor stays readable. Always rendered for
-    /// now — focus-aware (hollow when unfocused) is a later refinement.
+    /// Cursor: filled block when the window is focused, hollow outline
+    /// otherwise.  For the focused (filled) case we re-draw the cell's
+    /// glyph in the background colour on top so the character under the
+    /// cursor stays readable.
     fn draw_cursor(&mut self, ctx: &CGContext, height: u32, grid: &Grid) {
         let (col, row) = grid.cursor();
         let cx = col as f64 * self.cell_w;
         let cy_bottom = height as f64 - (row as f64 + 1.0) * self.cell_h;
-
-        ctx.set_rgb_fill_color(FG.0, FG.1, FG.2, 1.0);
-        ctx.fill_rect(CGRect::new(
+        let rect = CGRect::new(
             &CGPoint::new(cx, cy_bottom),
             &CGSize::new(self.cell_w, self.cell_h),
-        ));
+        );
 
-        // Punch the cell's glyph back through in the background colour.
-        // Skip if the cell is blank — saves a CoreText call per frame
-        // when the cursor sits on a space (the common idle case).
-        let cell = grid.cell(col, row);
-        if cell.ch != ' ' && cell.ch != '\0' {
-            let (font_idx, glyph) = self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
-            if glyph != 0 {
-                ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
-                let baseline_y =
-                    height as f64 - (row as f64 * self.cell_h + self.ascent);
-                let font = &self.fonts.fonts[font_idx];
-                font.draw_glyphs(
-                    &[glyph],
-                    &[CGPoint::new(cx, baseline_y)],
-                    ctx.clone(),
-                );
+        if self.focused {
+            ctx.set_rgb_fill_color(FG.0, FG.1, FG.2, 1.0);
+            ctx.fill_rect(rect);
+
+            // Punch the cell's glyph back through in BG so the character
+            // stays readable.  Skip blanks (common at idle).
+            let cell = grid.cell(col, row);
+            if cell.ch != ' ' && cell.ch != '\0' {
+                let (font_idx, glyph) =
+                    self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
+                if glyph != 0 {
+                    ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
+                    let baseline_y =
+                        height as f64 - (row as f64 * self.cell_h + self.ascent);
+                    let font = &self.fonts.fonts[font_idx];
+                    font.draw_glyphs(
+                        &[glyph],
+                        &[CGPoint::new(cx, baseline_y)],
+                        ctx.clone(),
+                    );
+                }
             }
+        } else {
+            // Unfocused: 1-pt outline, no glyph inversion.  Standard
+            // macOS terminal convention so the user knows keystrokes
+            // won't land here.
+            let stroke = (self.cell_h * 0.07).max(1.0);
+            ctx.set_rgb_stroke_color(FG.0, FG.1, FG.2, 1.0);
+            ctx.set_line_width(stroke);
+            ctx.stroke_rect(rect);
         }
     }
 }
