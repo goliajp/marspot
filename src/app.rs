@@ -15,12 +15,18 @@
 //! CFRunLoopSource registered on the main run loop; on the next
 //! main-thread iteration the source's perform fires `MarsApp::user_event`.
 //!
-//! ## Known regressions vs winit
+//! ## Known differences vs winit
 //!
-//! - **No IME / dead-key resolution.**  We pass `NSEvent.characters`
-//!   straight through.  Adding `NSTextInputClient` is a follow-up.
+//! - **IME via NSTextInputClient.**  `MarsView` implements the
+//!   protocol so CJK / Japanese / emoji input works.  Side-effect:
+//!   live-PTY throughput drops ~5-10% even when no IME is composing,
+//!   because AppKit treats text-input-clients differently in event
+//!   dispatch.  Trade accepted in exchange for the feature.
 //! - **No `CursorMoved` event.**  Mars only inspects the cursor at
 //!   click time; we read `locationInWindow` from `mouseDown:` instead.
+//! - **No inline preedit rendering.**  macOS draws its own candidate
+//!   window above the caret, but the marked text isn't currently
+//!   composited into the terminal grid.  Acceptable v1.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -34,14 +40,17 @@ use core_foundation::runloop::{
     CFRunLoopWakeUp,
 };
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{ProtocolObject, Sel};
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSEventModifierFlags, NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound,
+    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+    NSUInteger,
 };
 
 use crate::input::{KeyState, LogicalKey, MarsKeyEvent, Modifiers, NamedKey};
@@ -219,22 +228,41 @@ extern "C" fn source_perform(_info: *const c_void) {
 // Custom NSView subclass
 // ---------------------------------------------------------------------------
 
-/// Per-instance state for the custom view.  Empty for now; ivars
-/// are set by `set_ivars` to satisfy `DeclaredClass` even when we
-/// have no fields.
-pub struct MarsViewIvars;
+/// Per-instance state for the custom view.
+pub struct MarsViewIvars {
+    /// Marked (pre-edit) string from the active IME composition.
+    /// Stored to honour the NSTextInputClient `markedRange` /
+    /// `hasMarkedText` queries; not yet rendered as inline preview.
+    /// (macOS draws its own candidate window above the caret, so
+    /// the user can still see what they're composing.)
+    marked_text: RefCell<String>,
+    /// True after one of `insertText` / `setMarkedText` /
+    /// `doCommandBySelector` (with a mapped selector) has handled
+    /// the event during a `keyDown` dispatch.  Reset at the top of
+    /// every `keyDown`; checked after `interpretKeyEvents` returns
+    /// to decide whether to fall through to the raw-key path.
+    ime_consumed: Cell<bool>,
+    /// Modifier state captured when `keyDown` fires.  IME callbacks
+    /// (`insertText`, `doCommandBySelector`) don't carry an
+    /// `NSEvent`; we use this to forward modifiers to the app.
+    last_modifiers: Cell<Modifiers>,
+}
 
 declare_class!(
-    /// `NSView` subclass that captures key + mouse + scroll events.
-    /// We override `acceptsFirstResponder` so this view, not the
-    /// window itself, is the first responder for keyboard input.
+    /// `NSView` subclass that captures key + mouse + scroll events
+    /// and bridges them into `MarsApp`.  Implements
+    /// `NSTextInputClient` so CJK / emoji IMEs can compose into the
+    /// terminal.
     pub struct MarsView;
 
     // SAFETY:
     // - Superclass NSView has no special subclassing requirements.
+    // - `#[inherits(NSResponder, NSObject)]` exposes NSResponder
+    //   methods (notably `interpretKeyEvents`).
     // - Main-thread mutability is correct for an NSView subclass.
-    // - MarsView holds no Drop-relevant state.
+    // - Drop-relevant state in ivars is safe inside RefCell/Cell.
     unsafe impl ClassType for MarsView {
+        #[inherits(objc2_app_kit::NSResponder, objc2::runtime::NSObject)]
         type Super = NSView;
         type Mutability = mutability::MainThreadOnly;
         const NAME: &'static str = "MarsView";
@@ -261,14 +289,44 @@ declare_class!(
 
         #[method(keyDown:)]
         fn key_down(&self, event: &NSEvent) {
-            if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
-                let mods = nsevent_modifiers(event);
-                dispatch_event(EventKind::Key(ev, mods));
+            let mods = nsevent_modifiers(event);
+
+            // Cmd / Ctrl combos bypass the IME entirely.  This keeps
+            // shortcuts that the rest of mars expects (Cmd-V paste,
+            // Ctrl-C → 0x03, Ctrl-[ → ESC) working — IMEs typically
+            // don't consume these but we don't want to depend on that.
+            if mods.super_ || mods.control {
+                if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
+                    dispatch_event(EventKind::Key(ev, mods));
+                }
+                return;
+            }
+
+            self.ivars().ime_consumed.set(false);
+            self.ivars().last_modifiers.set(mods);
+
+            // interpretKeyEvents synchronously calls back into our
+            // NSTextInputClient methods (insertText / setMarkedText /
+            // doCommandBySelector) for the matching events.  When IME
+            // is composing CJK / emoji, only setMarkedText fires.
+            // When it commits, insertText fires.  When the key was
+            // navigation / editing, doCommandBySelector fires.
+            let array = NSArray::from_slice(&[event]);
+            unsafe { self.interpretKeyEvents(&array) };
+
+            // Nothing IME-relevant fired (e.g. an unmapped function
+            // key).  Fall back to raw nsevent translation so the app
+            // still sees a key_event.
+            if !self.ivars().ime_consumed.get() {
+                if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
+                    dispatch_event(EventKind::Key(ev, mods));
+                }
             }
         }
 
         #[method(keyUp:)]
         fn key_up(&self, event: &NSEvent) {
+            // Released events bypass IME — IMEs only consume key-down.
             if let Some(ev) = nsevent_to_mars_key(event, KeyState::Released) {
                 let mods = nsevent_modifiers(event);
                 dispatch_event(EventKind::Key(ev, mods));
@@ -278,9 +336,7 @@ declare_class!(
         #[method(flagsChanged:)]
         fn flags_changed(&self, event: &NSEvent) {
             // Modifiers carry on the event object; we surface them via
-            // the next key_event delivery.  For mouse-only sessions
-            // this still works because Mars currently doesn't gate any
-            // mouse behaviour on modifiers.  No callback to MarsApp
+            // the next key_event delivery.  No callback to MarsApp
             // here — modifiers ride along with the keystrokes that
             // actually arrive.
             let _ = event;
@@ -336,7 +392,179 @@ declare_class!(
             dispatch_event(EventKind::Scroll { dx, dy, precise });
         }
     }
+
+    unsafe impl NSTextInputClient for MarsView {
+        // Required: queries
+
+        #[method(hasMarkedText)]
+        fn has_marked_text(&self) -> bool {
+            !self.ivars().marked_text.borrow().is_empty()
+        }
+
+        #[method(markedRange)]
+        fn marked_range(&self) -> NSRange {
+            let len = self.ivars().marked_text.borrow().len();
+            if len > 0 {
+                NSRange::new(0, len as NSUInteger)
+            } else {
+                NSRange::new(NSNotFound as NSUInteger, 0)
+            }
+        }
+
+        #[method(selectedRange)]
+        fn selected_range(&self) -> NSRange {
+            // We don't maintain a selection model.  NSNotFound is
+            // documented to mean "no selection".
+            NSRange::new(NSNotFound as NSUInteger, 0)
+        }
+
+        #[method_id(validAttributesForMarkedText)]
+        fn valid_attributes_for_marked_text(
+            &self,
+        ) -> Retained<NSArray<NSAttributedStringKey>> {
+            // Empty → IME defaults to plain text only.  We don't
+            // honour underline / colour styling on preedit anyway.
+            NSArray::new()
+        }
+
+        #[method_id(attributedSubstringForProposedRange:actualRange:)]
+        fn attributed_substring_for_proposed_range(
+            &self,
+            _range: NSRange,
+            _actual_range: *mut NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            // We don't expose buffered terminal text to the IME.
+            None
+        }
+
+        #[method(characterIndexForPoint:)]
+        fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
+            0
+        }
+
+        #[method(firstRectForCharacterRange:actualRange:)]
+        fn first_rect_for_character_range(
+            &self,
+            _range: NSRange,
+            _actual_range: *mut NSRange,
+        ) -> NSRect {
+            // Returning a zero rect lands the IME candidate window
+            // in macOS's default position.  Plumbing through the
+            // real cursor position needs Mars-side state that we
+            // don't surface yet — follow-up.
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
+        }
+
+        // Required: composition lifecycle
+
+        #[method(setMarkedText:selectedRange:replacementRange:)]
+        fn set_marked_text(
+            &self,
+            string: &NSObject,
+            _selected_range: NSRange,
+            _replacement_range: NSRange,
+        ) {
+            self.ivars().ime_consumed.set(true);
+            let s = nsobject_string_to_string(string);
+            *self.ivars().marked_text.borrow_mut() = s;
+            // Mars doesn't render preedit inline yet — the IME's own
+            // candidate window covers UX.  When we add inline preview
+            // (Phase E?), this is where we'd notify the app.
+        }
+
+        #[method(unmarkText)]
+        fn unmark_text(&self) {
+            self.ivars().marked_text.borrow_mut().clear();
+        }
+
+        #[method(insertText:replacementRange:)]
+        fn insert_text(&self, string: &NSObject, _replacement_range: NSRange) {
+            self.ivars().ime_consumed.set(true);
+            let s = nsobject_string_to_string(string);
+            self.ivars().marked_text.borrow_mut().clear();
+            if s.is_empty() {
+                return;
+            }
+            // Treat IME-committed text as a single key-event with
+            // logical=Other and the resolved text payload.  The
+            // text fallback in input::key_event_to_bytes ships it
+            // straight to the PTY, regardless of byte width.
+            let ev = MarsKeyEvent {
+                state: KeyState::Pressed,
+                logical: LogicalKey::Other,
+                text: Some(s),
+            };
+            let mods = self.ivars().last_modifiers.get();
+            dispatch_event(EventKind::Key(ev, mods));
+        }
+
+        #[method(doCommandBySelector:)]
+        fn do_command_by_selector(&self, selector: Sel) {
+            // interpretKeyEvents calls this for keys the IME didn't
+            // consume that map to standard editing commands.  We
+            // translate the well-known selectors to NamedKey so the
+            // PTY sees Enter / Tab / Esc / Backspace / arrows.
+            // Unknown selectors leave ime_consumed=false so the
+            // raw-key fallback in keyDown still fires.
+            let named = match selector_named_key(selector) {
+                Some(k) => k,
+                None => return,
+            };
+            self.ivars().ime_consumed.set(true);
+            let ev = MarsKeyEvent {
+                state: KeyState::Pressed,
+                logical: LogicalKey::Named(named),
+                text: None,
+            };
+            let mods = self.ivars().last_modifiers.get();
+            dispatch_event(EventKind::Key(ev, mods));
+        }
+    }
 );
+
+/// Map a Cocoa `NSStandardKeyBindingResponding` selector — fired by
+/// `interpretKeyEvents` for non-text key presses — to our NamedKey
+/// enum.  Returns None for selectors we don't translate (typically
+/// `noop:`, fired for ctrl-letter combos that we already routed
+/// through the raw path before entering IME).
+fn selector_named_key(selector: Sel) -> Option<NamedKey> {
+    match selector.name() {
+        "insertNewline:" | "insertLineBreak:" | "insertNewlineIgnoringFieldEditor:" => {
+            Some(NamedKey::Enter)
+        }
+        "insertTab:" | "insertTabIgnoringFieldEditor:" => Some(NamedKey::Tab),
+        "deleteBackward:" => Some(NamedKey::Backspace),
+        "cancelOperation:" | "complete:" => Some(NamedKey::Escape),
+        "moveUp:" | "moveUpAndModifySelection:" | "moveToBeginningOfDocument:" => {
+            Some(NamedKey::ArrowUp)
+        }
+        "moveDown:" | "moveDownAndModifySelection:" | "moveToEndOfDocument:" => {
+            Some(NamedKey::ArrowDown)
+        }
+        "moveLeft:" | "moveLeftAndModifySelection:" | "moveBackward:" => {
+            Some(NamedKey::ArrowLeft)
+        }
+        "moveRight:" | "moveRightAndModifySelection:" | "moveForward:" => {
+            Some(NamedKey::ArrowRight)
+        }
+        _ => None,
+    }
+}
+
+/// Extract a Rust String from an NSString or NSAttributedString
+/// reference (the protocol declares `&AnyObject` for these
+/// arguments — runtime says it's always one of those two classes).
+fn nsobject_string_to_string(string: &NSObject) -> String {
+    if string.is_kind_of::<NSAttributedString>() {
+        let p: *const NSObject = string;
+        let p: *const NSAttributedString = p.cast();
+        unsafe { (*p).string().to_string() }
+    } else {
+        let p: *const NSObject = string;
+        let p: *const NSString = p.cast();
+        unsafe { (*p).to_string() }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // NSWindowDelegate subclass
@@ -490,7 +718,11 @@ pub fn run_app<A: MarsApp>(mut app: A, proxy: EventProxy, attrs: WindowAttrs) {
         NSSize::new(attrs.width_logical, attrs.height_logical),
     );
     let view: Retained<MarsView> = {
-        let alloc = mtm.alloc::<MarsView>().set_ivars(MarsViewIvars);
+        let alloc = mtm.alloc::<MarsView>().set_ivars(MarsViewIvars {
+            marked_text: RefCell::new(String::new()),
+            ime_consumed: Cell::new(false),
+            last_modifiers: Cell::new(Modifiers::default()),
+        });
         unsafe { msg_send_id![super(alloc), initWithFrame: frame] }
     };
 
