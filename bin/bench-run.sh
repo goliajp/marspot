@@ -31,12 +31,19 @@ source "$ROOT/bin/_lib.sh"
 
 # ---- defaults ----------------------------------------------------------
 
+# typing-latency is intentionally NOT in the default scenarios.  It
+# unavoidably steals focus to drive keystrokes (System Events is a
+# global event source), and a default `/benchmark` shouldn't surprise
+# the user mid-work.  Opt in with `--scenarios typing-latency` or
+# `--include-typing-latency`.
+DEFAULT_SCENARIOS=(multi-session-9x scrollback-1m idle-9x)
 ALL_SCENARIOS=(multi-session-9x scrollback-1m idle-9x typing-latency)
 ALL_TERMINALS=(mars iterm terminal warp)
 
-SCENARIOS=("${ALL_SCENARIOS[@]}")
+SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
 TERMINALS=("${ALL_TERMINALS[@]}")
 QUICK=0
+INCLUDE_TYPING=0
 
 while (( $# > 0 )); do
   case "$1" in
@@ -50,6 +57,9 @@ while (( $# > 0 )); do
       shift ;;
     --quick)
       QUICK=1
+      shift ;;
+    --include-typing-latency)
+      INCLUDE_TYPING=1
       shift ;;
     -h|--help)
       sed -n '2,28p' "$0"; exit 0 ;;
@@ -83,6 +93,12 @@ echo "    machine:   $machine_model / $machine_cpu / macOS $machine_macos"
 echo
 
 # ---- helpers -----------------------------------------------------------
+
+# If the user explicitly asked for typing-latency (via --include or
+# --scenarios), put it back in the matrix.
+if (( INCLUDE_TYPING )); then
+  SCENARIOS+=(typing-latency)
+fi
 
 # Whether `scenario` supports `terminal`.  Warp is paste-mode for almost
 # everything; typing-latency is mars-only by construction.

@@ -94,23 +94,43 @@ if [[ -z "$mars_pid" ]]; then
 fi
 sleep 0.6  # let the renderer reach steady state
 
-# Force-focus mars (Front-most via System Events).  The bench is
-# disrupted by anything else stealing focus mid-run; we accept that
-# cost for being able to drive keystrokes at all.
-osascript <<'APPLESCRIPT' >/dev/null
+# Force-focus mars (Front-most via System Events).
+#
+# SAFETY: System Events keystroke is a *global* input event — it goes
+# to whichever app is frontmost at the moment the keystroke fires.
+# If mars loses focus mid-loop (user clicks away, another app
+# auto-focuses), the keystrokes leak into the user's actual work.
+# Two mitigations below:
+#   1. Verify mars actually became frontmost before sending any key
+#      (abort otherwise — better to skip the metric than corrupt user state)
+#   2. Re-check between phases (here and after the keystroke loop)
+osascript <<'APPLESCRIPT' >/dev/null 2>&1
 tell application "System Events"
   try
     set frontmost of (first process whose unix id is (do shell script "pgrep -al ^mars$ | awk '{print $1}'") as integer) to true
   end try
 end tell
 APPLESCRIPT
-sleep 0.3
+sleep 0.4
+
+frontmost_now=$(osascript -e 'tell application "System Events" to return name of first process whose frontmost is true' 2>/dev/null || echo "")
+if [[ "$frontmost_now" != "mars" ]]; then
+  echo "typing-latency: mars failed to become frontmost (got '$frontmost_now')" >&2
+  echo "                aborting before sending keystrokes — otherwise they would" >&2
+  echo "                leak into the user's foreground app." >&2
+  cat > "$out_json" <<JSON
+{"scenario":"typing-latency","terminal":"mars","metrics":{},"skipped":["mars failed to gain focus; refused to send keystrokes to avoid corrupting user state (frontmost was $frontmost_now)"]}
+JSON
+  # Wait for workers to exit naturally then return.
+  sleep $((SLEEP_S + 5))
+  exit 0
+fi
 
 echo "==> driving $N_KEYS keystrokes (paced ~30 ms each)"
 
-# Use a single osascript invocation with a loop — invoking osascript
-# once per key adds ~80 ms of process spawn time per call which would
-# dominate the 1–2 ms latency we're trying to measure.
+# Single osascript invocation with a loop — invoking osascript once
+# per key adds ~80 ms of process spawn time which would dominate the
+# 1–2 ms latency we're trying to measure.
 osascript <<APPLESCRIPT >/dev/null
 tell application "System Events"
   repeat $N_KEYS times

@@ -73,16 +73,12 @@ APPLESCRIPT
     if (( $# == 0 )); then
       exit 0
     fi
-    # Build the AppleScript id list once.
-    ids_alist=""
-    for id in "$@"; do
-      [[ -n "$ids_alist" ]] && ids_alist+=", "
-      ids_alist+="$id"
-    done
 
     # Step 1: kill the shells running in each target window's tty.
-    # With shells dead, the windows show "process completed" and the
-    # AppleScript `close` command stops hitting the kill-prompt.
+    # This is the *primary* cleanup — once the shell is dead, the
+    # window stops doing any work even if its frame stays on screen.
+    # Any leftover "[Process completed]" window is harmless: no PTY,
+    # no CPU, no PID — just a static frame the user can close manually.
     for id in "$@"; do
       tty_path=$(osascript -e "tell application \"Terminal\" to return tty of tab 1 of (first window whose id is $id)" 2>/dev/null || echo "")
       [[ -z "$tty_path" ]] && continue
@@ -91,26 +87,17 @@ APPLESCRIPT
         kill "$pid" 2>/dev/null || true
       done
     done
-    sleep 0.6
-
-    # Step 2: close each by id.  After the shell is gone, plain
-    # `close ... saving no` works.  If a particular window survives
-    # (rare — usually a profile that re-prompts), fall back to focused
-    # Cmd-W on just that id, never a global Cmd-W loop.
-    for id in "$@"; do
-      osascript -e "tell application \"Terminal\" to close (first window whose id is $id) saving no" >/dev/null 2>&1 || true
-    done
     sleep 0.5
 
-    # Final pass: anything still alive gets a focused Cmd-W.
+    # Step 2: ask Terminal.app to close the window.  Best-effort —
+    # depends on the user's profile setting "When the shell exits".
+    # If "Close the window" is set, the window is already gone after
+    # step 1.  If "Don't close the window" is set, this AppleScript
+    # close request will dismiss the leftover frame on most configs.
+    # We do NOT fall back to Cmd-W keystrokes — those are global,
+    # and if focus drifts they hit the user's foreground app.
     for id in "$@"; do
-      still=$(osascript -e "tell application \"Terminal\" to return id of (first window whose id is $id)" 2>/dev/null || echo "")
-      [[ -z "$still" ]] && continue
-      osascript -e "tell application \"Terminal\" to set selected of tab 1 of (first window whose id is $id) to true" >/dev/null 2>&1 || true
-      osascript -e 'tell application "Terminal" to activate' >/dev/null 2>&1 || true
-      sleep 0.15
-      osascript -e 'tell application "System Events" to tell process "Terminal" to keystroke "w" using command down' >/dev/null 2>&1 || true
-      sleep 0.2
+      osascript -e "tell application \"Terminal\" to close (first window whose id is $id) saving no" >/dev/null 2>&1 || true
     done
     ;;
   quit)

@@ -111,12 +111,34 @@ APPLESCRIPT
     if (( $# == 0 )); then
       exit 0
     fi
+
+    # Step 1: kill the shell on each tracked window's tty.  This is
+    # the *primary* cleanup path — once the shell is dead, the window
+    # stops doing any real work, even if iTerm leaves the frame on
+    # screen with a "Process completed" status.  iTerm sessions expose
+    # their tty path as an attribute we can read.
+    for id in "$@"; do
+      tty_path=$(osascript -e "tell application \"iTerm\" to return tty of current session of (first window whose id is $id)" 2>/dev/null || echo "")
+      [[ -z "$tty_path" ]] && continue
+      tty_name=${tty_path#/dev/}
+      for pid in $(ps -t "$tty_name" -o pid= 2>/dev/null | tr -d ' '); do
+        kill "$pid" 2>/dev/null || true
+      done
+    done
+    sleep 0.5
+
+    # Step 2: ask iTerm to close each window by id.  Best-effort —
+    # works for most profiles after the shell is dead.  We do NOT
+    # fall back to Cmd-W keystrokes: those are global input events
+    # and if iTerm loses focus mid-loop they hit whatever foreground
+    # window the user has up, which is unacceptable.  A leftover
+    # "Process completed" frame is harmless (no PTY, no CPU); the
+    # user can close it manually.
     ids_list=""
     for id in "$@"; do
       [[ -n "$ids_list" ]] && ids_list+=","
       ids_list+="$id"
     done
-    # Path A: AppleScript `close`.  Works for most windows.
     osascript <<APPLESCRIPT >/dev/null 2>&1 || true
 tell application "iTerm"
   set targetIds to {$ids_list}
@@ -127,24 +149,6 @@ tell application "iTerm"
   end repeat
 end tell
 APPLESCRIPT
-    sleep 0.4
-    # Path B: any survivor (e.g. a window with no current session
-    # because `write text` failed after `create window`) gets a
-    # focused Cmd-W via System Events.  Targets only the specific
-    # window — never a global Cmd-W loop.
-    for id in "$@"; do
-      survives=$(osascript -e "tell application \"iTerm\"
-  try
-    return name of (first window whose id is $id)
-  end try
-end tell" 2>/dev/null)
-      [[ -z "$survives" ]] && continue
-      osascript -e "tell application \"iTerm\" to select (first window whose id is $id)" >/dev/null 2>&1 || true
-      osascript -e 'tell application "iTerm" to activate' >/dev/null 2>&1 || true
-      sleep 0.15
-      osascript -e 'tell application "System Events" to tell process "iTerm2" to keystroke "w" using command down' >/dev/null 2>&1 || true
-      sleep 0.2
-    done
     ;;
   quit)
     echo "iterm.sh: refusing to quit — that would kill the user's open work." >&2
