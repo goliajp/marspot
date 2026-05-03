@@ -192,6 +192,32 @@ pub struct Renderer {
     /// cursor draws hollow because the user clearly isn't typing
     /// into mars.
     window_focused: bool,
+    /// Reused CGBitmapContext for the layer-attached path.  Held as
+    /// `(ctx, width_px, height_px)` and rebuilt only when the viewport
+    /// resizes — `CGBitmapContextCreate` is ~50 µs of pure overhead.
+    /// CGImage from CGBitmapContextCreateImage is COW against this
+    /// buffer, so the previous frame's image stays valid for the
+    /// CALayer until our next draw triggers the copy.
+    bitmap_ctx: Option<(CGContext, u32, u32)>,
+    /// Per-frame scratch buffers, lifted out of the inner loops so the
+    /// per-row glyph runs and per-cell decode don't allocate.  Wrapped
+    /// in one struct so `mem::take` cleanly borrow-swaps it past the
+    /// `&mut self` we hold for `resolve_char` etc.
+    scratch: Scratch,
+}
+
+type RgbF = (CGFloat, CGFloat, CGFloat);
+
+#[derive(Default)]
+struct Scratch {
+    /// One glyph run inside a row, refilled per run.
+    run_glyphs: Vec<CGGlyph>,
+    run_positions: Vec<CGPoint>,
+    /// One full row of cells, decoded once and read by all three
+    /// passes (bg / fg / underline).  `row_attrs[i]` is the resolved
+    /// `(fg, bg)` for `row_cells[i]`.
+    row_cells: Vec<Cell>,
+    row_attrs: Vec<(RgbF, RgbF)>,
 }
 
 /// Holds the base font plus any fallback fonts discovered at runtime, with
@@ -315,6 +341,8 @@ impl Renderer {
             viewport_h: 0.0,
             scale: scale as f64,
             window_focused: true,
+            bitmap_ctx: None,
+            scratch: Scratch::default(),
         })
     }
 
@@ -430,14 +458,19 @@ impl Renderer {
         let total_w = self.viewport_w as u32;
         let total_h = self.viewport_h as u32;
         let ctx = self.frame_context(total_w, total_h, layout);
+        // Borrow-swap the scratch out of self so per-cell decode doesn't
+        // alias the `&mut self` the inner methods need for resolve_char
+        // / char_cache mutation.
+        let mut scratch = std::mem::take(&mut self.scratch);
         for (i, view) in views.iter().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
-                self.draw_session_in_rect(&ctx, total_h, rect, view);
+                self.draw_session_in_rect(&ctx, total_h, rect, view, &mut scratch);
             }
         }
         if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
             self.draw_sidebar(&ctx, total_h, layout, sidebar, focused_idx);
         }
+        self.scratch = scratch;
         let cgimage = ctx
             .create_image()
             .expect("CGContext should produce a CGImage");
@@ -476,9 +509,11 @@ impl Renderer {
             focused: true,
         };
         let mut ctx = self.frame_context(width, height, &layout);
+        let mut scratch = std::mem::take(&mut self.scratch);
         if let Some(rect) = layout.cells.first() {
-            self.draw_session_in_rect(&ctx, height, rect, &view);
+            self.draw_session_in_rect(&ctx, height, rect, &view, &mut scratch);
         }
+        self.scratch = scratch;
         let mut bytes = ctx.data().to_vec();
         for chunk in bytes.chunks_exact_mut(4) {
             chunk.swap(0, 2);
@@ -486,26 +521,38 @@ impl Renderer {
         Ok(bytes)
     }
 
-    /// Build a full-window CGBitmapContext, fill it with the chrome
-    /// background (sidebar + gutter colour), so per-session cells only
-    /// have to fill their own backgrounds — anything they don't paint
-    /// reads as chrome.
-    fn frame_context(&self, width: u32, height: u32, layout: &Layout) -> CGContext {
-        let space = CGColorSpace::create_device_rgb();
-        let row_bytes = width as usize * 4;
-        let bitmap_info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
-        let ctx = CGContext::create_bitmap_context(
-            None,
-            width as usize,
-            height as usize,
-            8,
-            row_bytes,
-            &space,
-            bitmap_info,
-        );
+    /// Acquire a CGBitmapContext sized to the viewport, filled with the
+    /// chrome background (gutter + sidebar) so per-session cells only
+    /// have to paint their own backgrounds.  Reuses `self.bitmap_ctx`
+    /// when the dims match — `CGBitmapContextCreate` is ~50 µs floor
+    /// of pure overhead on every frame.  Returns a clone (CFRetain,
+    /// few ns) so the caller can hand it around without holding a
+    /// borrow on `self`.
+    fn frame_context(&mut self, width: u32, height: u32, layout: &Layout) -> CGContext {
+        let ctx = match &self.bitmap_ctx {
+            Some((c, w, h)) if *w == width && *h == height => c.clone(),
+            _ => {
+                let space = CGColorSpace::create_device_rgb();
+                let row_bytes = width as usize * 4;
+                let bitmap_info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
+                let new_ctx = CGContext::create_bitmap_context(
+                    None,
+                    width as usize,
+                    height as usize,
+                    8,
+                    row_bytes,
+                    &space,
+                    bitmap_info,
+                );
+                self.bitmap_ctx = Some((new_ctx.clone(), width, height));
+                new_ctx
+            }
+        };
 
         // Chrome background: GUTTER colour everywhere.  The sidebar
-        // gets its own slightly different fill on top.
+        // gets its own slightly different fill on top.  We refill
+        // every frame even on cache hit — last frame's session BG
+        // fills are still in the buffer.
         ctx.set_rgb_fill_color(GUTTER.0, GUTTER.1, GUTTER.2, 1.0);
         ctx.fill_rect(CGRect::new(
             &CGPoint::new(0.0, 0.0),
@@ -524,12 +571,17 @@ impl Renderer {
     /// Render `view` into `rect` — fills the rect's terminal background,
     /// draws BG cells / glyphs / underlines / cursor, and (for the
     /// focused session) outlines the cell with a thin focus ring.
+    ///
+    /// `scratch` holds the per-row decode buffer + per-run glyph slices
+    /// — taken from `self.scratch` by the caller so the per-cell loop
+    /// here can still call `&mut self` methods (`resolve_char`).
     fn draw_session_in_rect(
         &mut self,
         ctx: &CGContext,
         total_h: u32,
         rect: &CellRect,
         view: &SessionView,
+        scratch: &mut Scratch,
     ) {
         // Top of the rect in CG's y-up coords (y=0 is the bottom of
         // the bitmap context).  All per-row baselines are computed
@@ -560,32 +612,33 @@ impl Renderer {
 
         let grid = view.grid;
         let cols = grid.cols() as usize;
-        let mut run_glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
-        let mut run_positions: Vec<CGPoint> = Vec::with_capacity(cols);
 
         for r in 0..grid.rows() {
+            // Decode the row once: cells + resolved (fg, bg).  All three
+            // passes below read from these instead of re-querying the
+            // grid + re-resolving SGR per cell per pass.
+            scratch.row_cells.clear();
+            scratch.row_attrs.clear();
+            for c in 0..cols {
+                let cell = Self::cell_at_viewport(view.view_offset, c as u16, r, grid);
+                scratch.row_cells.push(cell);
+                scratch.row_attrs.push(resolve_attrs(cell.attrs));
+            }
+
             // 1) Background pass — fill runs of cells that share a non-default
             //    background color.  Cells with the default BG inherit the
             //    rect's terminal-bg fill we just laid down.
             let row_bottom_y = rect_top_y_up - (r as f64 + 1.0) * self.cell_h;
             let mut c = 0usize;
             while c < cols {
-                let bg = resolve_attrs(
-                    Self::cell_at_viewport(view.view_offset, c as u16, r, grid).attrs,
-                )
-                .1;
+                let bg = scratch.row_attrs[c].1;
                 if bg == BG {
                     c += 1;
                     continue;
                 }
                 let start = c;
                 c += 1;
-                while c < cols
-                    && resolve_attrs(
-                        Self::cell_at_viewport(view.view_offset, c as u16, r, grid).attrs,
-                    )
-                    .1 == bg
-                {
+                while c < cols && scratch.row_attrs[c].1 == bg {
                     c += 1;
                 }
                 ctx.set_rgb_fill_color(bg.0, bg.1, bg.2, 1.0);
@@ -600,36 +653,40 @@ impl Renderer {
             let baseline_y = rect_top_y_up - (r as f64 * self.cell_h + self.ascent);
             let mut i = 0usize;
             while i < cols {
-                let cell = Self::cell_at_viewport(view.view_offset, i as u16, r, grid);
+                let cell = scratch.row_cells[i];
                 if cell.ch == ' ' || cell.ch == '\0' {
                     i += 1;
                     continue;
                 }
                 let (font_idx, glyph) =
                     self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
-                let fg = resolve_attrs(cell.attrs).0;
-                run_glyphs.clear();
-                run_positions.clear();
-                run_glyphs.push(glyph);
-                run_positions.push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
+                let fg = scratch.row_attrs[i].0;
+                scratch.run_glyphs.clear();
+                scratch.run_positions.clear();
+                scratch.run_glyphs.push(glyph);
+                scratch
+                    .run_positions
+                    .push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
                 i += 1;
                 while i < cols {
-                    let cur = Self::cell_at_viewport(view.view_offset, i as u16, r, grid);
+                    let cur = scratch.row_cells[i];
                     if cur.ch == ' ' || cur.ch == '\0' {
                         break;
                     }
                     let (cur_font, cur_glyph) =
                         self.resolve_char(cur.ch, cur.attrs.bold, cur.attrs.italic);
-                    if cur_font != font_idx || resolve_attrs(cur.attrs).0 != fg {
+                    if cur_font != font_idx || scratch.row_attrs[i].0 != fg {
                         break;
                     }
-                    run_glyphs.push(cur_glyph);
-                    run_positions.push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
+                    scratch.run_glyphs.push(cur_glyph);
+                    scratch
+                        .run_positions
+                        .push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
                     i += 1;
                 }
                 ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
                 let font = &self.fonts.fonts[font_idx];
-                font.draw_glyphs(&run_glyphs, &run_positions, ctx.clone());
+                font.draw_glyphs(&scratch.run_glyphs, &scratch.run_positions, ctx.clone());
             }
 
             // 3) Underline pass.
@@ -637,17 +694,17 @@ impl Renderer {
             let underline_h = (self.cell_h * 0.06).max(1.0);
             let mut u = 0usize;
             while u < cols {
-                let cell = Self::cell_at_viewport(view.view_offset, u as u16, r, grid);
+                let cell = scratch.row_cells[u];
                 if !cell.attrs.underline {
                     u += 1;
                     continue;
                 }
-                let fg = resolve_attrs(cell.attrs).0;
+                let fg = scratch.row_attrs[u].0;
                 let start = u;
                 u += 1;
                 while u < cols {
-                    let cur = Self::cell_at_viewport(view.view_offset, u as u16, r, grid);
-                    if !cur.attrs.underline || resolve_attrs(cur.attrs).0 != fg {
+                    let cur = scratch.row_cells[u];
+                    if !cur.attrs.underline || scratch.row_attrs[u].0 != fg {
                         break;
                     }
                     u += 1;
