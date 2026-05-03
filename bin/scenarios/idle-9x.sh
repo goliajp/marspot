@@ -120,8 +120,10 @@ cleanup_windows() {
 # A single foreground loop instead of a backgrounded sampler — we want
 # precise tick alignment and writes to the JSONL aren't time-critical.
 
-trap '{ cleanup_windows; rm -rf "$RUN_DIR"; } || true' EXIT INT TERM
+trap '{ cleanup_windows; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
+USER_APP=$(current_frontmost_app)
 dispatch
+restore_focus_to "$USER_APP"
 echo "==> waiting 10 s for $N sessions / windows to settle…"
 sleep 10
 

@@ -40,10 +40,18 @@ case "$cmd_word" in
     # window we created is reported, even if a per-window `write text`
     # fails after `create window` succeeded — otherwise the tracking
     # leaks windows that show up as "unknown" empty sessions.
+    #
+    # Focus isolation: we used to `activate` iTerm here so the new
+    # windows took focus.  That blocks the user's other work — they
+    # can't keep typing in their editor while the bench runs.  We now
+    # let iTerm get whatever focus AppleScript happens to give it
+    # (usually it does come to front momentarily); the scenario
+    # restores user focus immediately after.  Bench windows keep
+    # rendering / draining PTY in the background — focus doesn't
+    # affect throughput, only which app receives keystrokes.
     if [[ "$cmd_word" == "run-tabs" ]]; then
       osascript <<APPLESCRIPT
 tell application "iTerm"
-  activate
   set beforeIds to {}
   repeat with w in windows
     try
@@ -74,7 +82,6 @@ APPLESCRIPT
     else
       osascript <<APPLESCRIPT
 tell application "iTerm"
-  activate
   set beforeIds to {}
   repeat with w in windows
     try
@@ -101,31 +108,43 @@ APPLESCRIPT
     fi
     ;;
   close-windows)
-    # Close only the IDs we're given.  Each id may not exist anymore
-    # (window already closed by user) — we ignore those silently.
     if (( $# == 0 )); then
-      echo "iterm.sh close-windows: no ids given (nothing to close)" >&2
       exit 0
     fi
-    # Build the AppleScript id list.
     ids_list=""
     for id in "$@"; do
-      if [[ -n "$ids_list" ]]; then ids_list+=","; fi
+      [[ -n "$ids_list" ]] && ids_list+=","
       ids_list+="$id"
     done
-    osascript <<APPLESCRIPT >/dev/null
+    # Path A: AppleScript `close`.  Works for most windows.
+    osascript <<APPLESCRIPT >/dev/null 2>&1 || true
 tell application "iTerm"
   set targetIds to {$ids_list}
-  set closedN to 0
   repeat with wid in targetIds
     try
       close (first window whose id is wid)
-      set closedN to closedN + 1
     end try
   end repeat
-  return closedN
 end tell
 APPLESCRIPT
+    sleep 0.4
+    # Path B: any survivor (e.g. a window with no current session
+    # because `write text` failed after `create window`) gets a
+    # focused Cmd-W via System Events.  Targets only the specific
+    # window — never a global Cmd-W loop.
+    for id in "$@"; do
+      survives=$(osascript -e "tell application \"iTerm\"
+  try
+    return name of (first window whose id is $id)
+  end try
+end tell" 2>/dev/null)
+      [[ -z "$survives" ]] && continue
+      osascript -e "tell application \"iTerm\" to select (first window whose id is $id)" >/dev/null 2>&1 || true
+      osascript -e 'tell application "iTerm" to activate' >/dev/null 2>&1 || true
+      sleep 0.15
+      osascript -e 'tell application "System Events" to tell process "iTerm2" to keystroke "w" using command down' >/dev/null 2>&1 || true
+      sleep 0.2
+    done
     ;;
   quit)
     echo "iterm.sh: refusing to quit — that would kill the user's open work." >&2

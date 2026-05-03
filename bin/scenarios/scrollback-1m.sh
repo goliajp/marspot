@@ -156,9 +156,11 @@ sample_rss() {
 
 t_start_ns=$(python3 -c "import time;print(int(time.time()*1e9))")
 sample_rss & SAMPLER_PID=$!
-trap '{ kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"; } || true' EXIT INT TERM
+trap '{ kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
 
+USER_APP=$(current_frontmost_app)
 dispatch
+restore_focus_to "$USER_APP"
 
 # Wait for the single timing file.  Long timeout — slow terminals
 # (iTerm2 with unlimited scrollback) take a while to ingest 96 MiB.

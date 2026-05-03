@@ -192,3 +192,36 @@ fmt_mbps_from_ns() {
   # bytes ns → MiB/s
   python3 -c "print(f'{$1*1e9/$2/1048576:.1f}')"
 }
+
+# ---- focus isolation ---------------------------------------------------
+#
+# Bench windows must NOT steal focus from the user's foreground app —
+# popping iTerm to the front during a run blocks anyone trying to do
+# other work.  These helpers capture the user's current frontmost
+# process before we open bench windows, and restore focus to it
+# afterwards.  The bench windows still exist behind the user's window
+# (so they keep rendering / draining PTY), they just don't grab the
+# user's attention.
+
+# Returns the name of the currently-frontmost macOS process, or empty.
+# Use with caution: it returns the app's "process name" which usually
+# matches the value `tell application "<x>" to activate` accepts.
+current_frontmost_app() {
+  osascript -e 'tell application "System Events" to return name of first process whose frontmost is true' 2>/dev/null
+}
+
+# Re-activate the named app.  Best-effort.  Empty arg → no-op.
+# Uses System Events `set frontmost` because some apps (notably
+# WeChat, certain Electron apps) don't respond to direct AppleScript
+# `tell application X to activate`.
+restore_focus_to() {
+  local app=$1
+  [[ -z "$app" ]] && return 0
+  # Skip if the app is one of our bench targets — those need to come
+  # to front for typing-latency / scenarios that drive keystrokes.
+  case "$app" in
+    iTerm2|iTerm|Terminal|Warp|stable|mars|mcli) return 0 ;;
+  esac
+  osascript -e "tell application \"System Events\" to set frontmost of first process whose name is \"$app\" to true" \
+    >/dev/null 2>&1 || true
+}

@@ -137,9 +137,15 @@ t_start_ns=$(python3 -c "import time;print(int(time.time()*1e9))")
 sample_rss & SAMPLER_PID=$!
 # Trap also closes any bench windows we opened — guarantees cleanup
 # even on Ctrl-C / abort, not just on the happy path at the end.
-trap '{ kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"; } || true' EXIT INT TERM
+trap '{ kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
 
+# Focus isolation: capture the user's foreground app, dispatch (which
+# may briefly flash the bench terminal to front), then return focus.
+# The bench windows keep running their workload — they don't need
+# focus to drain PTY.
+USER_APP=$(current_frontmost_app)
 dispatch
+restore_focus_to "$USER_APP"
 
 # Each worker writes timing-<pid>.txt.  Wait for N such files.
 deadline=$(( $(date +%s) + 300 ))

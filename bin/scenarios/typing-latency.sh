@@ -64,6 +64,13 @@ exit 0
 EOF
 chmod +x "$WORKER"
 
+# typing-latency unavoidably needs to steal focus while keystrokes
+# are being driven (System Events keystroke → frontmost process).
+# Capture the user's app first; restore it at the end.  Trap also
+# restores in case of Ctrl-C.
+USER_APP=$(current_frontmost_app)
+trap 'restore_focus_to "$USER_APP" || true' EXIT INT TERM
+
 kill_app mars || true; kill_app mcli || true
 sleep 0.3
 
@@ -132,7 +139,7 @@ fi
 
 # ---- aggregate -------------------------------------------------------
 
-trap 'rm -rf "$RUN_DIR"' EXIT
+trap '{ rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
 
 python3 - "$LAT_PATH" "$PROF_PATH" "$out_json" "$N_KEYS" "$RUN_TAG" <<'PY'
 import json, os, sys, statistics

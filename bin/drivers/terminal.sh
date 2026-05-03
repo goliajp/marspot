@@ -37,9 +37,13 @@ case "$cmd_word" in
     # ID-diff approach: Terminal.app's `do script` returns a tab object
     # but extracting its window's id is awkward.  Snapshot the existing
     # window-id set, run do-script n times, the new ids are the diff.
+    # Focus isolation note: we used to `activate` Terminal here.
+    # That stole focus from whatever the user was working in.  We now
+    # rely on AppleScript's implicit foregrounding (Terminal gets a
+    # brief flash to front) and the scenario restores user focus
+    # immediately after dispatch.
     osascript <<APPLESCRIPT
 tell application "Terminal"
-  activate
   set beforeIds to {}
   repeat with w in windows
     try
