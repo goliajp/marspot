@@ -12,9 +12,75 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::{char_width, Cell, CellAttrs, Color, Grid};
+use crate::grid::{char_width, Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
 use crate::parser::{Parser, ParserCallbacks};
+use crate::scrollback::Scrollback;
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Resolve the scrollback scratch directory once, the first time
+/// any Terminal is constructed.  `None` ⇒ stay on RAM-only
+/// scrollback for every session in this process; `Some(dir)` ⇒
+/// every session opens a disk-backed scrollback in that directory.
+///
+/// Source order (first hit wins):
+///   1. `MARS_DISK_SCROLLBACK` env var = explicit path → use it
+///   2. `MARS_DISK_SCROLLBACK` env var = `1` → use the default
+///      `~/Library/Caches/mars/scrollback`
+///   3. unset → no disk scrollback
+fn disk_scrollback_dir() -> Option<&'static PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let v = std::env::var("MARS_DISK_SCROLLBACK").ok()?;
+        let path = if v == "1" {
+            let home = std::env::var("HOME").ok()?;
+            PathBuf::from(home).join("Library/Caches/mars/scrollback")
+        } else {
+            PathBuf::from(v)
+        };
+        eprintln!("[mars] MARS_DISK_SCROLLBACK → {}", path.display());
+        // Best-effort sweep of stale files left by previous mars
+        // processes that crashed / SIGKILL'd / SIGTERM'd before
+        // their Drop could fire (Rust on macOS doesn't run Drop on
+        // signal-induced exit).  Each file is named
+        // `mars-sb-<pid>-<nanos>.log`; if the pid isn't alive,
+        // unlink it.
+        if let Ok(entries) = std::fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with("mars-sb-") || !name.ends_with(".log") {
+                    continue;
+                }
+                let stem = &name["mars-sb-".len()..name.len() - ".log".len()];
+                let pid: Option<u32> = stem.split('-').next().and_then(|s| s.parse().ok());
+                if let Some(pid) = pid {
+                    // libc::kill(pid, 0) returns 0 if the pid exists.
+                    let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
+                    if !alive {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+        Some(path)
+    })
+    .as_ref()
+}
+
+/// In-RAM ring size when disk scrollback is active.  The renderer
+/// hits this for every `cell_at_view` past the live grid, so
+/// keeping the recent screenful in RAM avoids ever paging on
+/// typical scrollback (page-up / mouse-wheel by a few rows).
+const DISK_SCROLLBACK_RAM_LINES: usize = 1024;
+
+/// Disk pages cap (each = 256 lines).  100 pages × 256 lines × 80
+/// cols × 24 B/cell ≈ 50 MiB on-disk per session.  At 9 sessions
+/// that's ~450 MiB on disk, well under macOS's reasonable cache
+/// budget.  Bounded — file is fixed-size; oldest pages get
+/// overwritten in place.
+const DISK_SCROLLBACK_PAGES: usize = 100;
 
 /// One outstanding local-echo prediction: a byte we expect the PTY
 /// to echo back, plus the grid state we need to restore if it
@@ -63,8 +129,27 @@ struct SavedMain {
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
+        // If MARS_DISK_SCROLLBACK is set, every session gets a
+        // disk-backed scrollback in the configured directory.  Falls
+        // back to the in-RAM ring on any error (no panic — the user
+        // just gets the bounded-RAM history).
+        let scrollback = match disk_scrollback_dir() {
+            Some(dir) => Scrollback::disk(
+                dir,
+                DISK_SCROLLBACK_RAM_LINES,
+                DISK_SCROLLBACK_PAGES,
+                cols as usize,
+            )
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "[mars] disk scrollback init failed ({e}); falling back to RAM-only"
+                );
+                Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
+            }),
+            None => Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize),
+        };
         Self {
-            grid: Grid::new(cols, rows),
+            grid: Grid::with_scrollback_kind(cols, rows, scrollback),
             saved_main: None,
             parser: Parser::new(),
             attrs: CellAttrs::default(),

@@ -122,6 +122,18 @@ impl Grid {
     }
 
     pub fn with_scrollback(cols: u16, rows: u16, scrollback_lines: usize) -> Self {
+        Self::with_scrollback_kind(
+            cols,
+            rows,
+            Scrollback::memory(scrollback_lines, cols as usize),
+        )
+    }
+
+    /// Construct with a caller-supplied scrollback (memory or disk).
+    /// `Terminal::new` calls this so it can pick the disk variant
+    /// when `MARS_DISK_SCROLLBACK` is set without dragging the env
+    /// check through the Grid API.
+    pub fn with_scrollback_kind(cols: u16, rows: u16, scrollback: Scrollback) -> Self {
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
         let cells = vec![Cell::default(); cols as usize * rows as usize];
         Self {
@@ -131,7 +143,7 @@ impl Grid {
             cursor_col: 0,
             cursor_row: 0,
             top_row: 0,
-            scrollback: Scrollback::memory(scrollback_lines, cols as usize),
+            scrollback,
         }
     }
 
@@ -201,7 +213,7 @@ impl Grid {
     /// Return the cell at the given viewport position, honouring
     /// `view_offset` (lines scrolled up from live, 0 = live view).
     /// Pulls from the live grid for visible rows and from
-    /// `scrollback_line` for scrolled-up rows; returns a default
+    /// `scrollback.cell_at` for scrolled-up rows; returns a default
     /// cell past the oldest scrollback line.  Both renderers
     /// (`render.rs` AppKit, `render_metal.rs` Metal) call through
     /// here so they read the same view of the grid.
@@ -215,10 +227,8 @@ impl Grid {
         let sb_len = self.scrollback_len();
         if from_end < sb_len {
             let sb_idx = sb_len - 1 - from_end;
-            if let Some(line) = self.scrollback_line(sb_idx) {
-                if (col as usize) < line.len() {
-                    return line[col as usize];
-                }
+            if let Some(c) = self.scrollback_cell(sb_idx, col) {
+                return c;
             }
         }
         Cell::default()
@@ -226,7 +236,17 @@ impl Grid {
 
     pub fn scrollback_len(&self) -> usize { self.scrollback.len() }
     pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity() }
-    pub fn scrollback_line(&self, idx: usize) -> Option<&[Cell]> { self.scrollback.line(idx) }
+    /// One cell from scrollback by `(line_idx, col)`.  Hot path —
+    /// avoids per-line allocation that the disk-backed variant
+    /// would otherwise need to materialise a slice.
+    pub fn scrollback_cell(&self, line_idx: usize, col: u16) -> Option<Cell> {
+        self.scrollback.cell_at(line_idx, col as usize)
+    }
+    /// One whole scrollback line, owned.  For tests + the headless
+    /// `--snapshot` path; production rendering uses `scrollback_cell`.
+    pub fn scrollback_line(&self, idx: usize) -> Option<Vec<Cell>> {
+        self.scrollback.line_to_vec(idx)
+    }
     pub fn clear_scrollback(&mut self) { self.scrollback.clear(); }
 
     /// Resize the visible grid. Cells in the overlap region are preserved
@@ -263,8 +283,7 @@ impl Grid {
         if self.cursor_row >= rows {
             self.cursor_row = rows - 1;
         }
-        let cap = self.scrollback.capacity();
-        self.scrollback = Scrollback::memory(cap, cols as usize);
+        self.scrollback.restart(cols as usize);
     }
 }
 
@@ -360,9 +379,9 @@ mod tests {
         // ['2','3','4'] in chronological order.
         assert_eq!(g.scrollback_len(), 3);
         let to_string = |line: &[Cell]| line.iter().map(|c| c.ch).collect::<String>();
-        assert_eq!(to_string(g.scrollback_line(0).unwrap()), "22");
-        assert_eq!(to_string(g.scrollback_line(1).unwrap()), "33");
-        assert_eq!(to_string(g.scrollback_line(2).unwrap()), "44");
+        assert_eq!(to_string(&g.scrollback_line(0).unwrap()), "22");
+        assert_eq!(to_string(&g.scrollback_line(1).unwrap()), "33");
+        assert_eq!(to_string(&g.scrollback_line(2).unwrap()), "44");
         assert_eq!(g.scrollback_line(3), None);
     }
 
