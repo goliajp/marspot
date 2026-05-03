@@ -688,8 +688,18 @@ fn push_session(
             });
         }
 
-        // Glyphs.
+        // Glyphs.  Skip the cursor cell when the cursor is solid —
+        // we re-emit it after with BG colour so the glyph reads
+        // inverted on the white cursor block (mirrors render.rs).
+        let cursor = grid.cursor();
+        let solid_cursor = view.view_offset == 0
+            && view.cursor_visible
+            && view.focused
+            && window_focused;
         for c in 0..cols {
+            if solid_cursor && cursor == (c as u16, r) {
+                continue;
+            }
             let cell = grid.cell_at_view(view.view_offset, c as u16, r);
             if cell.ch == ' ' || cell.ch == '\0' {
                 continue;
@@ -730,6 +740,75 @@ fn push_session(
                 ],
                 color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
             });
+        }
+
+        // Underline pass — BG-pass coloured rectangles below the
+        // baseline.  Run-length over consecutive same-fg underlined
+        // cells.  Geometry matches render.rs (`(cell_h - ascent) * 0.55`,
+        // `(cell_h * 0.06).max(1.0)`).
+        let underline_y = row_y + cell_h - (cell_h - ascent) * 0.45;
+        let underline_h = (cell_h * 0.06).max(1.0);
+        let mut u = 0usize;
+        while u < cols {
+            let cell = grid.cell_at_view(view.view_offset, u as u16, r);
+            if !cell.attrs.underline {
+                u += 1;
+                continue;
+            }
+            let fg = resolve_attrs(cell.attrs).0;
+            let start = u;
+            u += 1;
+            while u < cols {
+                let cur = grid.cell_at_view(view.view_offset, u as u16, r);
+                if !cur.attrs.underline || resolve_attrs(cur.attrs).0 != fg {
+                    break;
+                }
+                u += 1;
+            }
+            cells.push(CellInstance {
+                origin: [rect.x as f32 + start as f32 * cell_w, underline_y],
+                size: [(u - start) as f32 * cell_w, underline_h],
+                color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
+            });
+        }
+    }
+
+    // Cursor cell glyph in BG colour (re-rendered atop the white
+    // cursor block) — only when the cursor is solid.  Hollow cursor
+    // doesn't cover the glyph, so the normal FG glyph above suffices.
+    if view.view_offset == 0
+        && view.cursor_visible
+        && view.focused
+        && window_focused
+    {
+        let (col, row) = grid.cursor();
+        let cell = grid.cell_at_view(0, col, row);
+        if cell.ch != ' ' && cell.ch != '\0' {
+            let (font_idx, glyph) =
+                font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
+            if glyph != 0 {
+                let ct_font = font.font(font_idx).clone();
+                if let Some(entry) = atlas.get_or_rasterize(
+                    GlyphKey {
+                        font_id: font_idx as u32,
+                        glyph,
+                    },
+                    &ct_font,
+                ) {
+                    let cell_origin_x = rect.x as f32 + col as f32 * cell_w;
+                    let row_y = rect.y_top as f32 + (row as f32) * cell_h;
+                    let baseline_y = row_y + ascent;
+                    let dest_x = cell_origin_x + entry.bearing_x as f32;
+                    let dest_y = baseline_y - entry.bearing_y as f32;
+                    glyphs.push(GlyphInstance {
+                        origin: [dest_x, dest_y],
+                        size: [entry.px_w as f32, entry.px_h as f32],
+                        uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+                        uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+                        color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
+                    });
+                }
+            }
         }
     }
 
