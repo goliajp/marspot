@@ -99,6 +99,7 @@ disk_baseline_kib=$(du_kib "$disk_dir")
 
 # ---- dispatch ----------------------------------------------------------
 
+WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
     mars)
@@ -109,10 +110,10 @@ dispatch() {
       "$ROOT/bin/drivers/mars.sh" run-shell-mcli "$WORKER"
       ;;
     iterm)
-      "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER"
+      "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER" > "$WIN_IDS_FILE"
       ;;
     terminal)
-      "$ROOT/bin/drivers/terminal.sh" run-single "$WORKER"
+      "$ROOT/bin/drivers/terminal.sh" run-single "$WORKER" > "$WIN_IDS_FILE"
       ;;
     warp)
       "$ROOT/bin/drivers/warp.sh" run-single "$WORKER"
@@ -121,6 +122,20 @@ dispatch() {
       echo "scrollback-1m: unsupported terminal: $terminal" >&2
       exit 2
       ;;
+  esac
+}
+
+cleanup_windows() {
+  local ids=()
+  [[ -f "$WIN_IDS_FILE" ]] || return 0
+  while IFS= read -r line; do
+    line=${line//[$'\r\n\t ']/}
+    [[ -n "$line" ]] && ids+=("$line")
+  done < "$WIN_IDS_FILE"
+  (( ${#ids[@]} > 0 )) || return 0
+  case "$terminal" in
+    iterm)    "$ROOT/bin/drivers/iterm.sh"    close-windows "${ids[@]}" 2>/dev/null || true ;;
+    terminal) "$ROOT/bin/drivers/terminal.sh" close-windows "${ids[@]}" 2>/dev/null || true ;;
   esac
 }
 
@@ -141,7 +156,7 @@ sample_rss() {
 
 t_start_ns=$(python3 -c "import time;print(int(time.time()*1e9))")
 sample_rss & SAMPLER_PID=$!
-trap 'kill $SAMPLER_PID 2>/dev/null; rm -rf "$RUN_DIR"' EXIT INT TERM
+trap 'kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"' EXIT INT TERM
 
 dispatch
 
@@ -252,7 +267,7 @@ else:
     print(f"    disk Δ                 n/a (terminal does not persist scrollback to disk)")
 PY
 
-if [[ "$terminal" != "mars" ]]; then
-  echo "  NOTE: 1 window was opened in $terminal — close it manually if your" >&2
-  echo "        profile keeps it after shell exit (tab title '$RUN_TAG')." >&2
+if [[ "$terminal" != "mars" && "$terminal" != "warp" ]]; then
+  echo "  cleanup: closing 1 $terminal window we opened (by tracked id)…" >&2
+  cleanup_windows
 fi

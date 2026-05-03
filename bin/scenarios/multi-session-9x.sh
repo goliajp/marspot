@@ -72,6 +72,7 @@ baseline_kib=$(rss_total_kib "$terminal" || echo 0)
 
 # ---- terminal-specific dispatch -----------------------------------------
 
+WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
     mars)
@@ -82,13 +83,13 @@ dispatch() {
       "$ROOT/bin/drivers/mars.sh" run-shell "$WORKER"
       ;;
     iterm)
-      # Open 9 fresh windows in the user's iTerm2 process — does not
-      # disturb existing windows.  After the bench the windows close
-      # themselves if the profile permits; otherwise leftover.
-      "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER"
+      # Open 9 fresh windows; capture their window IDs so we can close
+      # ONLY those at the end (no content matching, no collateral
+      # damage to the user's existing iTerm2 windows).
+      "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
       ;;
     terminal)
-      "$ROOT/bin/drivers/terminal.sh" run-windows "$N" "$WORKER"
+      "$ROOT/bin/drivers/terminal.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
       ;;
     warp)
       "$ROOT/bin/drivers/warp.sh" paste-block "$N" "$WORKER"
@@ -97,6 +98,20 @@ dispatch() {
       echo "multi-session-9x: unsupported terminal: $terminal" >&2
       exit 2
       ;;
+  esac
+}
+
+cleanup_windows() {
+  local ids=()
+  [[ -f "$WIN_IDS_FILE" ]] || return 0
+  while IFS= read -r line; do
+    line=${line//[$'\r\n\t ']/}
+    [[ -n "$line" ]] && ids+=("$line")
+  done < "$WIN_IDS_FILE"
+  (( ${#ids[@]} > 0 )) || return 0
+  case "$terminal" in
+    iterm)    "$ROOT/bin/drivers/iterm.sh"    close-windows "${ids[@]}" 2>/dev/null || true ;;
+    terminal) "$ROOT/bin/drivers/terminal.sh" close-windows "${ids[@]}" 2>/dev/null || true ;;
   esac
 }
 
@@ -120,7 +135,9 @@ sample_rss() {
 
 t_start_ns=$(python3 -c "import time;print(int(time.time()*1e9))")
 sample_rss & SAMPLER_PID=$!
-trap 'kill $SAMPLER_PID 2>/dev/null; rm -rf "$RUN_DIR"' EXIT INT TERM
+# Trap also closes any bench windows we opened — guarantees cleanup
+# even on Ctrl-C / abort, not just on the happy path at the end.
+trap 'kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"' EXIT INT TERM
 
 dispatch
 
@@ -240,10 +257,9 @@ if m['rss_peak_delta_KiB'] is not None:
     print(f"    RSS Δ peak / avg / post  {m['rss_peak_delta_KiB']/1024:.0f} / {m['rss_avg_delta_KiB']/1024:.0f} / {m['rss_post_delta_KiB']/1024:.0f} MiB  (baseline {baseline_kib/1024:.0f} MiB)")
 PY
 
-if [[ "$terminal" != "mars" ]]; then
-  echo "  NOTE: 9 windows were opened in $terminal — they close themselves if" >&2
-  echo "        your profile says 'close on shell exit'.  Otherwise close manually." >&2
-  echo "        Tab title set to '$RUN_TAG' so they're easy to spot." >&2
+if [[ "$terminal" != "mars" && "$terminal" != "warp" ]]; then
+  echo "  cleanup: closing $N $terminal window(s) we opened (by tracked IDs)…" >&2
+  cleanup_windows
 fi
 
 if (( count == 0 )); then

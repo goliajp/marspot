@@ -77,6 +77,7 @@ disk_baseline_kib=$(du_kib "$disk_dir")
 
 # ---- dispatch ----------------------------------------------------------
 
+WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
     mars)
@@ -84,10 +85,10 @@ dispatch() {
       "$ROOT/bin/drivers/mars.sh" run-shell "$WORKER"
       ;;
     iterm)
-      "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER"
+      "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
       ;;
     terminal)
-      "$ROOT/bin/drivers/terminal.sh" run-windows "$N" "$WORKER"
+      "$ROOT/bin/drivers/terminal.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
       ;;
     warp)
       echo "idle-9x: warp dispatch is paste-only (TODO automate)" >&2
@@ -100,11 +101,26 @@ dispatch() {
   esac
 }
 
+cleanup_windows() {
+  local ids=()
+  [[ -f "$WIN_IDS_FILE" ]] || return 0
+  while IFS= read -r line; do
+    line=${line//[$'\r\n\t ']/}
+    [[ -n "$line" ]] && ids+=("$line")
+  done < "$WIN_IDS_FILE"
+  (( ${#ids[@]} > 0 )) || return 0
+  case "$terminal" in
+    iterm)    "$ROOT/bin/drivers/iterm.sh"    close-windows "${ids[@]}" 2>/dev/null || true ;;
+    terminal) "$ROOT/bin/drivers/terminal.sh" close-windows "${ids[@]}" 2>/dev/null || true ;;
+  esac
+}
+
 # ---- sampling ---------------------------------------------------------
 #
 # A single foreground loop instead of a backgrounded sampler — we want
 # precise tick alignment and writes to the JSONL aren't time-critical.
 
+trap 'cleanup_windows; rm -rf "$RUN_DIR"' EXIT INT TERM
 dispatch
 echo "==> waiting 10 s for $N sessions / windows to settle…"
 sleep 10
@@ -142,9 +158,12 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 trap - INT
 
-# Tear down our SUT — never the user's foreign terminals.
+# Tear down our SUT (mars / mcli) directly; close foreign-terminal
+# bench windows by tracked id (the EXIT trap also runs cleanup_windows
+# in case we got interrupted before reaching here).
 case "$terminal" in
-  mars) kill_app mars || true ;;
+  mars)              kill_app mars || true ;;
+  iterm|terminal)    cleanup_windows ;;
 esac
 
 # ---- aggregate -------------------------------------------------------
@@ -227,8 +246,4 @@ if disk_dir:
     print(f"    disk Δ first / last        {m['disk_delta_first_KiB']/1024:.1f} / {m['disk_delta_last_KiB']/1024:.1f} MiB  (in {disk_dir})")
 PY
 
-if [[ "$terminal" != "mars" ]]; then
-  echo "  NOTE: $N idle window(s) opened in $terminal (run-tag '$RUN_TAG')." >&2
-  echo "        Each worker sleeps $((DURATION_S + 30))s — they'll exit on their own," >&2
-  echo "        but you can close manually if you want them gone now." >&2
-fi
+: # foreign-terminal cleanup already done above by id; nothing more to do.
