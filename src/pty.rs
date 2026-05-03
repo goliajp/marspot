@@ -27,6 +27,8 @@ impl Default for TerminalSize {
 #[derive(Clone, Debug)]
 pub struct PtyConfig {
     pub program: String,
+    /// Extra args (does **not** include argv[0]; we push `program` for that).
+    /// Matches `std::process::Command::args` semantics.
     pub args: Vec<String>,
     pub size: TerminalSize,
 }

@@ -10,7 +10,7 @@
 //! for pixel — same font hinting, same antialiasing, same gamma path
 //! Apple uses everywhere else.
 
-use crate::terminal::Terminal;
+use crate::grid::Grid;
 use core_foundation::base::TCFType;
 use core_graphics::base::{
     kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat,
@@ -30,8 +30,6 @@ use objc2_quartz_core::CALayer;
 
 const FONT_NAME: &str = "Menlo";
 const FONT_POINT: f64 = 13.0;
-const GRID_COLS: u16 = 80;
-const GRID_ROWS: u16 = 24;
 
 /// Background color for the terminal.  In the **normalized linear-ish
 /// sRGB-display** space — what you'd type as a CSS hex.
@@ -47,7 +45,6 @@ pub struct Renderer {
     cell_w: f64,
     cell_h: f64,
     ascent: f64,
-    terminal: Terminal,
     viewport_w: f64,
     viewport_h: f64,
     scale: f64,
@@ -86,31 +83,12 @@ impl Renderer {
             None
         };
 
-        let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
-        let banner = format!(
-            "mars v{} ({})\r\n",
-            env!("CARGO_PKG_VERSION"),
-            env!("MARS_GIT_SHA")
-        );
-        terminal.feed(banner.as_bytes());
-        terminal.feed(b"\r\n");
-        terminal.feed(b"hello mars\r\n");
-        terminal.feed(b"the engine is alive\r\n");
-        terminal.feed(b"\r\n");
-        terminal.feed(b"  pty + parser + grid + atlas + metal\r\n");
-        terminal.feed(b"  88 unit tests + 4 soak tests, all green\r\n");
-        terminal.feed(b"\r\n");
-        terminal.feed(b"  ascii printable: !\"#$%&'()*+,-./0123456789:;<=>?@\r\n");
-        terminal.feed(b"                   ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_\r\n");
-        terminal.feed(b"                   `abcdefghijklmnopqrstuvwxyz{|}~\r\n");
-
         Ok(Self {
             layer,
             font,
             cell_w,
             cell_h,
             ascent,
-            terminal,
             viewport_w: 0.0,
             viewport_h: 0.0,
             scale: scale as f64,
@@ -122,7 +100,7 @@ impl Renderer {
         self.viewport_h = height_px;
     }
 
-    pub fn render(&mut self) {
+    pub fn render(&mut self, grid: &Grid) {
         if self.layer.is_none() {
             return;
         }
@@ -131,7 +109,7 @@ impl Renderer {
         }
         let w = self.viewport_w as u32;
         let h = self.viewport_h as u32;
-        let ctx = self.draw_frame(w, h);
+        let ctx = self.draw_frame(w, h, grid);
         let cgimage = ctx
             .create_image()
             .expect("CGContext should produce a CGImage");
@@ -144,10 +122,15 @@ impl Renderer {
         }
     }
 
-    pub fn snapshot(&mut self, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    pub fn snapshot(
+        &mut self,
+        width: u32,
+        height: u32,
+        grid: &Grid,
+    ) -> Result<Vec<u8>, String> {
         self.viewport_w = width as f64;
         self.viewport_h = height as f64;
-        let mut ctx = self.draw_frame(width, height);
+        let mut ctx = self.draw_frame(width, height, grid);
         let mut bytes = ctx.data().to_vec();
         // PNG wants RGBA; if the bitmap context produced BGRA, swap
         // R and B per pixel.  We detect this empirically here rather
@@ -162,7 +145,7 @@ impl Renderer {
     /// CGBitmapContext at `width × height` physical pixels.  The caller
     /// can either turn the context into a CGImage (for live layer
     /// contents) or read its bytes directly (for snapshot/PNG).
-    fn draw_frame(&self, width: u32, height: u32) -> CGContext {
+    fn draw_frame(&self, width: u32, height: u32, grid: &Grid) -> CGContext {
         let space = CGColorSpace::create_device_rgb();
         let row_bytes = width as usize * 4;
         // Bitmap info: RGBA in memory order (alpha last + big-endian
@@ -206,7 +189,6 @@ impl Renderer {
         ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
         ctx.set_rgb_fill_color(FG.0, FG.1, FG.2, 1.0);
 
-        let grid = self.terminal.grid();
         let cols = grid.cols() as usize;
         let mut chars: Vec<u16> = Vec::with_capacity(cols);
         let mut glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
