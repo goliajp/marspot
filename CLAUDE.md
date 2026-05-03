@@ -69,9 +69,29 @@ Two living documents track this:
 - `docs/perf.md` — use-cases, theoretical lower bounds, current
   measurements, gaps with fixability triage, gate construction.
 
-Run `bin/measure.sh` to (re-)populate the cross-terminal numbers.  The
-benchmark gate (`bin/bench.sh`, when implemented) reads the committed
-baselines and fails any merge that regresses.
+### Benchmark gate
+
+Two tiers:
+
+- `bin/bench.sh` (fast, ~5 s) — headless `--bench parse` × 5 trials
+  with median + `--bench render`. Run on every commit / before
+  push. Catches any architectural regression in the parser, grid,
+  or render bench.
+- `bin/bench.sh --full` (~1–2 min) — also runs the live PTY pipeline
+  through `bin/measure.sh` and computes mars / best-other-terminal
+  ratio against the snapshot in `bench/baseline.json`. Run before
+  merging to develop, after any change touching the bytes path
+  (parser, terminal, render) or the event loop (main.rs).
+- `bin/bench.sh --update-baseline` — rewrites `bench/baseline.json`
+  with current measurements minus a 7 % (headless) / 10 % (live)
+  safety margin. Use after an intentional perf-affecting change
+  whose new numbers you want to lock in.  Refuses if the gate is
+  already failing.
+
+`bin/measure-other.sh` keeps cross-terminal numbers fresh: dispatches
+the same scenarios into iTerm2 and Warp via AppleScript, parses
+timings, writes JSON.  Re-run when iTerm2 / Warp updates or when
+mars's relative position needs re-validation.
 
 ### Architecture-review cadence
 

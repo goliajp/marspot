@@ -1,0 +1,66 @@
+{
+  "_comment": [
+    "Baseline numbers for bin/bench.sh.  Each scenario gets two floors",
+    "(mars_parse_MBps and mars_live_MBps) plus a vs-best-other ratio.",
+    "If a current measurement falls below the floor, the gate fails.",
+    "Tolerances bake observed run-to-run noise (~5% headless, ~10% live)",
+    "into the floor so the gate doesn't flap on identical code.",
+    "",
+    "Re-baseline: run `bin/bench.sh --update-baseline` after a change",
+    "you actually want to lock in.  Re-run cross-terminal numbers via",
+    "`bin/measure-other.sh` if the iTerm2 / Warp comparison drifts.",
+    "",
+    "Numbers below were locked in 2026-05-03 against:",
+    "  - mars  develop @ 4ce5778 (circular-row-indexing landed)",
+    "  - iTerm2 / Warp = whatever was installed on the user's machine"
+  ],
+  "scenarios": [
+    {
+      "id": "cat-ascii",
+      "bytes": 33554570,
+      "mars_parse_MBps_min": 175,
+      "mars_live_MBps_min":  70,
+      "mars_vs_best_other_min": 1.3
+    },
+    {
+      "id": "cat-mixed",
+      "bytes": 16777256,
+      "mars_parse_MBps_min": 170,
+      "mars_live_MBps_min":  50,
+      "mars_vs_best_other_min": 1.3
+    },
+    {
+      "id": "cat-cjk",
+      "bytes": 8388690,
+      "mars_parse_MBps_min": 230,
+      "mars_live_MBps_min":  35,
+      "mars_vs_best_other_min": 0.7
+    },
+    {
+      "id": "cat-emoji",
+      "bytes": 8388720,
+      "mars_parse_MBps_min": 215,
+      "mars_live_MBps_min":  35,
+      "mars_vs_best_other_min": 0.7
+    }
+  ],
+  "render_full_repaint": {
+    "p99_us_max": 1500
+  },
+  "competitors_snapshot": {
+    "_comment": "Last cross-terminal observation, used to compute mars_vs_best_other.  Refresh by running bin/measure-other.sh and updating these.",
+    "captured_at": "2026-05-03",
+    "iterm2": {
+      "cat-ascii_MBps": 56,
+      "cat-mixed_MBps": 29,
+      "cat-cjk_MBps":   5.8,
+      "cat-emoji_MBps": 2.2
+    },
+    "warp": {
+      "cat-ascii_MBps": 47,
+      "cat-mixed_MBps": 37,
+      "cat-cjk_MBps":   47,
+      "cat-emoji_MBps": 47
+    }
+  }
+}
