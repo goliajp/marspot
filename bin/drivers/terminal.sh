@@ -69,57 +69,44 @@ APPLESCRIPT
     if (( $# == 0 )); then
       exit 0
     fi
-    # Step 1: collect ttys for each id, kill the shells.
-    ttys=$(osascript <<APPLESCRIPT
-tell application "Terminal"
-  set out to {}
-  set targetIds to {$(IFS=,; echo "$*")}
-  repeat with wid in targetIds
-    try
-      set w to (first window whose id is wid)
-      set end of out to (tty of tab 1 of w)
-    end try
-  end repeat
-  set AppleScript's text item delimiters to linefeed
-  return out as text
-end tell
-APPLESCRIPT
-)
-    for tty_path in $ttys; do
+    # Build the AppleScript id list once.
+    ids_alist=""
+    for id in "$@"; do
+      [[ -n "$ids_alist" ]] && ids_alist+=", "
+      ids_alist+="$id"
+    done
+
+    # Step 1: kill the shells running in each target window's tty.
+    # With shells dead, the windows show "process completed" and the
+    # AppleScript `close` command stops hitting the kill-prompt.
+    for id in "$@"; do
+      tty_path=$(osascript -e "tell application \"Terminal\" to return tty of tab 1 of (first window whose id is $id)" 2>/dev/null || echo "")
+      [[ -z "$tty_path" ]] && continue
       tty_name=${tty_path#/dev/}
       for pid in $(ps -t "$tty_name" -o pid= 2>/dev/null | tr -d ' '); do
         kill "$pid" 2>/dev/null || true
       done
     done
-    sleep 0.3
+    sleep 0.6
 
-    # Step 2: focus Terminal.app and close each window via Cmd-W from
-    # System Events.  Terminal.app's AppleScript `close` returns
-    # success but the window doesn't actually close in some configs;
-    # Cmd-W from the foreground process reliably does.  We focus the
-    # window first to ensure Cmd-W targets it.
-    osascript <<APPLESCRIPT >/dev/null 2>&1
-tell application "Terminal" to activate
-delay 0.2
-APPLESCRIPT
+    # Step 2: close each by id.  After the shell is gone, plain
+    # `close ... saving no` works.  If a particular window survives
+    # (rare — usually a profile that re-prompts), fall back to focused
+    # Cmd-W on just that id, never a global Cmd-W loop.
     for id in "$@"; do
-      osascript <<APPLESCRIPT >/dev/null 2>&1 || true
-tell application "Terminal"
-  try
-    set w to (first window whose id is $id)
-    set frontmost of w to true
-  end try
-end tell
-delay 0.1
-tell application "System Events"
-  tell process "Terminal"
-    try
-      keystroke "w" using command down
-    end try
-  end tell
-end tell
-APPLESCRIPT
-      sleep 0.1
+      osascript -e "tell application \"Terminal\" to close (first window whose id is $id) saving no" >/dev/null 2>&1 || true
+    done
+    sleep 0.5
+
+    # Final pass: anything still alive gets a focused Cmd-W.
+    for id in "$@"; do
+      still=$(osascript -e "tell application \"Terminal\" to return id of (first window whose id is $id)" 2>/dev/null || echo "")
+      [[ -z "$still" ]] && continue
+      osascript -e "tell application \"Terminal\" to set selected of tab 1 of (first window whose id is $id) to true" >/dev/null 2>&1 || true
+      osascript -e 'tell application "Terminal" to activate' >/dev/null 2>&1 || true
+      sleep 0.15
+      osascript -e 'tell application "System Events" to tell process "Terminal" to keystroke "w" using command down' >/dev/null 2>&1 || true
+      sleep 0.2
     done
     ;;
   quit)
