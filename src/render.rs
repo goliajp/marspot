@@ -148,6 +148,9 @@ pub struct Renderer {
     /// hollow outline instead of a filled block — the macOS native
     /// terminal convention.
     focused: bool,
+    /// DECTCEM (?25) — when false, hide the cursor entirely.  Vim, less,
+    /// and other full-screen apps toggle this around their UI.
+    cursor_visible: bool,
 }
 
 /// Holds the base font plus any fallback fonts discovered at runtime, with
@@ -272,11 +275,16 @@ impl Renderer {
             scale: scale as f64,
             view_offset: 0,
             focused: true,
+            cursor_visible: true,
         })
     }
 
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+    }
+
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        self.cursor_visible = visible;
     }
 
     pub fn view_offset(&self) -> u16 {
@@ -542,8 +550,8 @@ impl Renderer {
 
         // Cursor only makes sense in live view.  When the user is
         // scrolled up looking at history, hide it — drawing it on a
-        // historical line would be misleading.
-        if self.view_offset == 0 {
+        // historical line would be misleading.  Also respect DECTCEM.
+        if self.view_offset == 0 && self.cursor_visible {
             self.draw_cursor(&ctx, height, grid);
         }
 

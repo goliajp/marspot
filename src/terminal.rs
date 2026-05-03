@@ -17,18 +17,32 @@ use crate::parser::{Parser, ParserCallbacks};
 
 pub struct Terminal {
     grid: Grid,
+    /// Saved main grid while the terminal is in alt-screen mode (`?1049h`).
+    /// `Some` ⇒ alt mode active and `grid` is the alt buffer; `None` ⇒
+    /// normal mode and `grid` is the only buffer.  When we exit alt mode
+    /// the saved cursor goes with this Grid.
+    saved_main: Option<SavedMain>,
     parser: Parser,
     /// Current SGR state — every printed glyph (and every BCE-erased cell)
     /// is stamped with this snapshot.  Persists across `feed` calls.
     attrs: CellAttrs,
+    /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
+    cursor_visible: bool,
+}
+
+struct SavedMain {
+    grid: Grid,
+    cursor: (u16, u16),
 }
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             grid: Grid::new(cols, rows),
+            saved_main: None,
             parser: Parser::new(),
             attrs: CellAttrs::default(),
+            cursor_visible: true,
         }
     }
 
@@ -36,8 +50,21 @@ impl Terminal {
         &self.grid
     }
 
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.grid.resize(cols, rows);
+        // The saved main grid (when in alt-screen mode) needs to track
+        // resizes too — otherwise leaving alt mode restores a grid
+        // sized for the old window dimensions.
+        if let Some(saved) = self.saved_main.as_mut() {
+            saved.grid.resize(cols, rows);
+            // Cursor was saved against the old size; clamp.
+            saved.cursor.0 = saved.cursor.0.min(cols.saturating_sub(1));
+            saved.cursor.1 = saved.cursor.1.min(rows.saturating_sub(1));
+        }
     }
 
     pub fn current_attrs(&self) -> CellAttrs {
@@ -51,8 +78,10 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) {
         let parser = &mut self.parser;
         let grid = &mut self.grid;
+        let saved_main = &mut self.saved_main;
         let attrs = &mut self.attrs;
-        let mut handler = Handler { grid, attrs };
+        let cursor_visible = &mut self.cursor_visible;
+        let mut handler = Handler { grid, saved_main, attrs, cursor_visible };
         for &b in bytes {
             parser.advance(&mut handler, b);
         }
@@ -61,7 +90,53 @@ impl Terminal {
 
 struct Handler<'a> {
     grid: &'a mut Grid,
+    saved_main: &'a mut Option<SavedMain>,
     attrs: &'a mut CellAttrs,
+    cursor_visible: &'a mut bool,
+}
+
+impl<'a> Handler<'a> {
+    /// `?1049h` — switch to a fresh alternate screen, save the main
+    /// grid + cursor.  No-op if already in alt mode.
+    fn enter_alt_screen(&mut self) {
+        if self.saved_main.is_some() {
+            return;
+        }
+        let cols = self.grid.cols();
+        let rows = self.grid.rows();
+        let cursor = self.grid.cursor();
+        // Alt buffer never needs scrollback — its job is to be discarded
+        // wholesale on `?1049l`.  Skip the allocation.
+        let alt = Grid::with_scrollback(cols, rows, 0);
+        let main = std::mem::replace(self.grid, alt);
+        *self.saved_main = Some(SavedMain { grid: main, cursor });
+    }
+
+    /// `?1049l` — restore the saved main grid + cursor.  No-op if not
+    /// in alt mode.
+    fn exit_alt_screen(&mut self) {
+        if let Some(saved) = self.saved_main.take() {
+            *self.grid = saved.grid;
+            self.grid.set_cursor(saved.cursor.0, saved.cursor.1);
+        }
+    }
+
+    fn dec_mode(&mut self, mode: u16, set: bool) {
+        match mode {
+            // DECTCEM — cursor visibility.
+            25 => *self.cursor_visible = set,
+            // smcup/rmcup — alt screen + save/restore cursor.  ?1047
+            // and ?47 are older variants; we accept them as aliases.
+            1049 | 1047 | 47 => {
+                if set {
+                    self.enter_alt_screen();
+                } else {
+                    self.exit_alt_screen();
+                }
+            }
+            _ => {} // unhandled DEC private mode — silently skip
+        }
+    }
 }
 
 impl<'a> ParserCallbacks for Handler<'a> {
@@ -148,9 +223,25 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+        if intermediates == b"?" {
+            // DEC private mode set/reset.  Each param is a separate mode.
+            match byte {
+                b'h' => {
+                    for &p in params {
+                        self.dec_mode(p, true);
+                    }
+                }
+                b'l' => {
+                    for &p in params {
+                        self.dec_mode(p, false);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if !intermediates.is_empty() {
-            // Private-marker sequences (e.g. CSI ? 25 h DECSET) are not yet
-            // implemented; ignore so we don't fire wrong actions.
+            // Other private-marker sequences not implemented yet.
             return;
         }
         let (col, row) = self.grid.cursor();
@@ -936,5 +1027,77 @@ mod tests {
             t.grid().scrollback_capacity(),
             "scrollback should be at capacity after the soak"
         );
+    }
+
+    // ----- alt screen (?1049) ---------------------------------------------
+
+    fn first_row_text(t: &Terminal) -> String {
+        let g = t.grid();
+        (0..g.cols()).map(|c| g.cell(c, 0).ch).collect()
+    }
+
+    #[test]
+    fn dec_1049_h_enters_alt_blank_grid() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"hello\r\n");
+        assert!(first_row_text(&t).starts_with("hello"));
+
+        t.feed(b"\x1b[?1049h"); // enter alt
+        // Alt grid is fresh: row 0 should be all spaces.
+        assert_eq!(first_row_text(&t).trim_end(), "");
+    }
+
+    #[test]
+    fn dec_1049_l_restores_main_contents_and_cursor() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"main_a\r\nmain_b");
+        let cursor_before = t.grid().cursor();
+
+        // Enter alt, write something only in alt.
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"alt_only");
+        assert_eq!(first_row_text(&t).trim_end(), "alt_only");
+
+        // Exit — main grid + cursor restored.
+        t.feed(b"\x1b[?1049l");
+        assert!(first_row_text(&t).starts_with("main_a"));
+        assert_eq!(t.grid().cursor(), cursor_before);
+    }
+
+    #[test]
+    fn dec_25_l_hides_cursor_h_shows() {
+        let mut t = Terminal::new(10, 5);
+        assert!(t.cursor_visible());
+        t.feed(b"\x1b[?25l");
+        assert!(!t.cursor_visible());
+        t.feed(b"\x1b[?25h");
+        assert!(t.cursor_visible());
+    }
+
+    #[test]
+    fn alt_screen_ignored_if_already_in_alt() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"main\r\n");
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"first_alt");
+        // Re-entering must NOT clobber the saved main grid.
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"\x1b[?1049l");
+        // Main is still there.
+        assert!(first_row_text(&t).starts_with("main"));
+    }
+
+    #[test]
+    fn alt_grid_resize_tracks_main() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b[?1049h"); // alt mode
+        t.resize(30, 8);
+        // Cursor must be in-bounds in the active (alt) grid.
+        let (c, r) = t.grid().cursor();
+        assert!(c < 30 && r < 8);
+        // Saved main grid resized too — exit and verify it's the new size.
+        t.feed(b"\x1b[?1049l");
+        assert_eq!(t.grid().cols(), 30);
+        assert_eq!(t.grid().rows(), 8);
     }
 }

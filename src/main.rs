@@ -273,6 +273,7 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 self.prof.redraw_requested_calls += 1;
                 if let Some(r) = self.renderer.as_mut() {
                     let render_t0 = std::time::Instant::now();
+                    r.set_cursor_visible(self.terminal.cursor_visible());
                     r.render(self.terminal.grid());
                     self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
                     self.prof.render_calls += 1;
