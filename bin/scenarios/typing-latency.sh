@@ -196,3 +196,5 @@ if prof:
     print(f"    render_calls        {m['render_calls']}")
     print(f"    render avg / total  {m['render_avg_us']} µs / {m['render_total_us']} µs")
 PY
+
+exit 0

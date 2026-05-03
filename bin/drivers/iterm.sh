@@ -31,41 +31,74 @@ cmd_word=${1:-}
 shift || true
 
 case "$cmd_word" in
-  run-tabs)
+  run-tabs|run-windows)
     n=${1:?n}; shift
     user_cmd=${1:?cmd}; shift || true
     esc_cmd=${user_cmd//\"/\\\"}
-    # First tab is the new window's initial session; create n-1 more tabs.
-    osascript <<APPLESCRIPT
+    # ID-diff approach: snapshot window IDs before, create windows /
+    # tabs, snapshot after, return the diff.  This guarantees every
+    # window we created is reported, even if a per-window `write text`
+    # fails after `create window` succeeded — otherwise the tracking
+    # leaks windows that show up as "unknown" empty sessions.
+    if [[ "$cmd_word" == "run-tabs" ]]; then
+      osascript <<APPLESCRIPT
 tell application "iTerm"
   activate
-  set newWin to (create window with default profile)
-  tell current session of newWin to write text "$esc_cmd"
-  repeat ($n - 1) times
-    tell newWin to create tab with default profile
-    tell current session of newWin to write text "$esc_cmd"
+  set beforeIds to {}
+  repeat with w in windows
+    try
+      set end of beforeIds to (id of w) as text
+    end try
   end repeat
-  return (id of newWin) as text
-end tell
-APPLESCRIPT
-    ;;
-  run-windows)
-    n=${1:?n}; shift
-    user_cmd=${1:?cmd}; shift || true
-    esc_cmd=${user_cmd//\"/\\\"}
-    osascript <<APPLESCRIPT
-tell application "iTerm"
-  activate
-  set ids to {}
-  repeat $n times
-    set newWin to (create window with default profile)
+  set newWin to (create window with default profile)
+  try
     tell current session of newWin to write text "$esc_cmd"
-    set end of ids to (id of newWin) as text
+  end try
+  repeat ($n - 1) times
+    try
+      tell newWin to create tab with default profile
+      tell current session of newWin to write text "$esc_cmd"
+    end try
+  end repeat
+  set newIds to {}
+  repeat with w in windows
+    try
+      set wid to (id of w) as text
+      if wid is not in beforeIds then set end of newIds to wid
+    end try
   end repeat
   set AppleScript's text item delimiters to linefeed
-  return ids as text
+  return newIds as text
 end tell
 APPLESCRIPT
+    else
+      osascript <<APPLESCRIPT
+tell application "iTerm"
+  activate
+  set beforeIds to {}
+  repeat with w in windows
+    try
+      set end of beforeIds to (id of w) as text
+    end try
+  end repeat
+  repeat $n times
+    set newWin to (create window with default profile)
+    try
+      tell current session of newWin to write text "$esc_cmd"
+    end try
+  end repeat
+  set newIds to {}
+  repeat with w in windows
+    try
+      set wid to (id of w) as text
+      if wid is not in beforeIds then set end of newIds to wid
+    end try
+  end repeat
+  set AppleScript's text item delimiters to linefeed
+  return newIds as text
+end tell
+APPLESCRIPT
+    fi
     ;;
   close-windows)
     # Close only the IDs we're given.  Each id may not exist anymore

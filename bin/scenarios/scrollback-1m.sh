@@ -156,7 +156,7 @@ sample_rss() {
 
 t_start_ns=$(python3 -c "import time;print(int(time.time()*1e9))")
 sample_rss & SAMPLER_PID=$!
-trap 'kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"' EXIT INT TERM
+trap '{ kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"; } || true' EXIT INT TERM
 
 dispatch
 
@@ -271,3 +271,4 @@ if [[ "$terminal" != "mars" && "$terminal" != "warp" ]]; then
   echo "  cleanup: closing 1 $terminal window we opened (by tracked id)…" >&2
   cleanup_windows
 fi
+exit 0

@@ -137,7 +137,7 @@ t_start_ns=$(python3 -c "import time;print(int(time.time()*1e9))")
 sample_rss & SAMPLER_PID=$!
 # Trap also closes any bench windows we opened — guarantees cleanup
 # even on Ctrl-C / abort, not just on the happy path at the end.
-trap 'kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"' EXIT INT TERM
+trap '{ kill $SAMPLER_PID 2>/dev/null; cleanup_windows; rm -rf "$RUN_DIR"; } || true' EXIT INT TERM
 
 dispatch
 

@@ -120,7 +120,7 @@ cleanup_windows() {
 # A single foreground loop instead of a backgrounded sampler — we want
 # precise tick alignment and writes to the JSONL aren't time-critical.
 
-trap 'cleanup_windows; rm -rf "$RUN_DIR"' EXIT INT TERM
+trap '{ cleanup_windows; rm -rf "$RUN_DIR"; } || true' EXIT INT TERM
 dispatch
 echo "==> waiting 10 s for $N sessions / windows to settle…"
 sleep 10
@@ -247,3 +247,4 @@ if disk_dir:
 PY
 
 : # foreign-terminal cleanup already done above by id; nothing more to do.
+exit 0
