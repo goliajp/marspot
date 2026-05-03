@@ -15,6 +15,7 @@ pub mod layout;
 pub mod parser;
 pub mod pty;
 pub mod render;
+pub mod render_metal;
 pub mod session;
 pub mod terminal;
 pub mod tmux;
