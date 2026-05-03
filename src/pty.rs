@@ -91,8 +91,11 @@ impl Pty {
         if pid == 0 {
             // Child.  Only async-signal-safe calls allowed here.
             unsafe {
-                libc::execv(program.as_ptr(), argv.as_ptr());
-                // execv only returns on failure.
+                // execvp does PATH search for relative names (e.g. "tmux")
+                // while still matching execv's behaviour for absolute
+                // paths.  Strict execv would refuse "tmux" outright.
+                libc::execvp(program.as_ptr(), argv.as_ptr());
+                // execvp only returns on failure.
                 libc::_exit(127);
             }
         }

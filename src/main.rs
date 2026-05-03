@@ -11,8 +11,9 @@ use winit::window::{Window, WindowId};
 use mars::input::key_event_to_bytes;
 use mars::layout::Layout;
 use mars::render::{Renderer, SessionView, SidebarEntry};
-use mars::session::Session;
+use mars::session::{Session, SessionState};
 use mars::terminal::Terminal;
+use mars::tmux;
 
 /// Mars's only proxy event — "something woke us up, drain all sessions".
 #[derive(Debug, Clone)]
@@ -24,8 +25,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
 
 /// Phase B: nine independent terminals in a 3×3 grid plus a sidebar.
+/// In tmux mode this collapses to 1×1 (the tmux client renders one
+/// active pane at a time; future work can split panes into cells).
 const GRID_COLS_LAYOUT: usize = 3;
 const GRID_ROWS_LAYOUT: usize = 3;
+const TMUX_GRID_COLS: usize = 1;
+const TMUX_GRID_ROWS: usize = 1;
 const SIDEBAR_W_LOGICAL: f64 = 200.0;
 /// Default window in logical points; physical pixels = logical × scale.
 const DEFAULT_WIN_W: f64 = 1440.0;
@@ -47,12 +52,43 @@ const SIDEBAR_ROW_PT: f64 = 22.0;
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
 
+/// In tmux mode mars hosts a single `Session` running `tmux -CC` and
+/// re-uses the rendering / sidebar machinery to surface tmux's
+/// windows.  When `Some`, normal multi-cell behaviour is bypassed.
+struct TmuxState {
+    parser: tmux::Parser,
+    /// Window list as we've seen it from %window-add / %window-renamed.
+    /// Order is insertion-order; sidebar renders in this order.
+    windows: Vec<TmuxWindow>,
+    /// tmux command serial number; pre-increment before send.
+    next_cmd: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TmuxWindow {
+    id: u32,
+    name: String,
+}
+
+impl TmuxState {
+    fn new() -> Self {
+        Self {
+            parser: tmux::Parser::new(),
+            windows: Vec::new(),
+            next_cmd: 1,
+        }
+    }
+}
+
 struct Mars {
     window: Option<Window>,
     renderer: Option<Renderer>,
     /// Cached layout from the last Resized.  Drives both rendering and
     /// mouse-click hit-testing.
     layout: Option<Layout>,
+    /// `Some` when launched with `--tmux`; otherwise we run the
+    /// standard 9-cell grid.
+    tmux: Option<TmuxState>,
     /// One Session per terminal cell on screen.
     sessions: Vec<Session>,
     /// Index into `sessions` of the session currently receiving keyboard
@@ -154,13 +190,18 @@ impl ApplicationHandler<MarsEvent> for Mars {
             MarsEvent::Wake => {
                 self.prof.user_events += 1;
                 let drain_t0 = std::time::Instant::now();
-                let mut total_bytes = 0usize;
-                for s in &mut self.sessions {
-                    let feed_t0 = std::time::Instant::now();
-                    let n = s.pump();
-                    self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
-                    total_bytes += n;
-                }
+                let total_bytes = if self.tmux.is_some() {
+                    self.pump_tmux_session()
+                } else {
+                    let mut total = 0;
+                    for s in &mut self.sessions {
+                        let feed_t0 = std::time::Instant::now();
+                        let n = s.pump();
+                        self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
+                        total += n;
+                    }
+                    total
+                };
                 self.prof.bytes_fed += total_bytes as u64;
                 self.prof.drain_total_ns += drain_t0.elapsed().as_nanos() as u64;
                 if total_bytes > 0 {
@@ -205,12 +246,17 @@ impl ApplicationHandler<MarsEvent> for Mars {
                         .map(|s| s.backingScaleFactor() as f64)
                         .unwrap_or(1.0);
                     let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
+                    let (lc, lr) = if self.tmux.is_some() {
+                        (TMUX_GRID_COLS, TMUX_GRID_ROWS)
+                    } else {
+                        (GRID_COLS_LAYOUT, GRID_ROWS_LAYOUT)
+                    };
                     let layout = Layout::build(
                         phys_w,
                         phys_h,
                         sidebar_phys,
-                        GRID_COLS_LAYOUT,
-                        GRID_ROWS_LAYOUT,
+                        lc,
+                        lr,
                         cell_w,
                         cell_h,
                     );
@@ -342,6 +388,59 @@ impl ApplicationHandler<MarsEvent> for Mars {
 }
 
 impl Mars {
+    /// In tmux mode: drain the single session's raw bytes, run them
+    /// through `tmux::Parser`, and route extracted pane Output back
+    /// to the terminal.  Window-state events update `tmux.windows`
+    /// so the sidebar re-renders with the new list on the next
+    /// redraw.  Returns the total bytes fed to the terminal.
+    fn pump_tmux_session(&mut self) -> usize {
+        let raw = self.sessions[0].drain_raw();
+        if raw.is_empty() {
+            return 0;
+        }
+        let tmux = self.tmux.as_mut().unwrap();
+        let events = tmux.parser.feed(&raw);
+        let mut bytes_fed = 0;
+        for ev in events {
+            match ev {
+                tmux::Event::Output { bytes, .. } => {
+                    bytes_fed += bytes.len();
+                    self.sessions[0].feed_terminal(&bytes);
+                }
+                tmux::Event::WindowAdd { window_id } => {
+                    if !tmux.windows.iter().any(|w| w.id == window_id) {
+                        tmux.windows.push(TmuxWindow {
+                            id: window_id,
+                            name: format!("@{}", window_id),
+                        });
+                    }
+                }
+                tmux::Event::WindowClose { window_id } => {
+                    tmux.windows.retain(|w| w.id != window_id);
+                }
+                tmux::Event::WindowRenamed { window_id, name } => {
+                    if let Some(w) = tmux.windows.iter_mut().find(|w| w.id == window_id) {
+                        w.name = name;
+                    } else {
+                        tmux.windows.push(TmuxWindow {
+                            id: window_id,
+                            name,
+                        });
+                    }
+                }
+                tmux::Event::Exit { .. } => {
+                    // Tmux server exited; leave the window open so
+                    // the user can read whatever was on screen, and
+                    // let the all-sessions-exited path eventually
+                    // close mars (Session::is_exited will flip true
+                    // when the PTY EOFs).
+                }
+                _ => {}
+            }
+        }
+        bytes_fed
+    }
+
     /// Build a SessionView for each session and hand them all to the
     /// renderer.  Used by both RedrawRequested and the synchronous
     /// path in WindowEvent::Resized.
@@ -351,10 +450,29 @@ impl Mars {
         }
         let focused = self.focused_idx;
         let view_offset = self.view_offset;
-        // SessionView borrows from session.terminal.grid; sidebar entries
-        // also borrow from per-session label storage.  Materialise the
-        // labels first so they outlive the SidebarEntry slice we pass.
-        let labels: Vec<String> = (1..=self.sessions.len()).map(|n| n.to_string()).collect();
+
+        // Sidebar source-of-truth depends on mode: in tmux mode, list
+        // tmux windows; otherwise list sessions by ordinal number.
+        let labels: Vec<String> = if let Some(t) = &self.tmux {
+            if t.windows.is_empty() {
+                vec!["(no windows)".into()]
+            } else {
+                t.windows.iter().map(|w| w.name.clone()).collect()
+            }
+        } else {
+            (1..=self.sessions.len()).map(|n| n.to_string()).collect()
+        };
+        let states: Vec<SessionState> = if self.tmux.is_some() {
+            // Tmux mode: each entry's state = the underlying session
+            // state (Active/Idle/Exited) — finer-grained per-window
+            // tracking will come with output-tagging in a follow-up.
+            std::iter::repeat(self.sessions[0].state())
+                .take(labels.len())
+                .collect()
+        } else {
+            self.sessions.iter().map(|s| s.state()).collect()
+        };
+
         let views: Vec<SessionView> = self
             .sessions
             .iter()
@@ -366,13 +484,12 @@ impl Mars {
                 focused: i == focused,
             })
             .collect();
-        let entries: Vec<SidebarEntry> = self
-            .sessions
+        let entries: Vec<SidebarEntry> = labels
             .iter()
-            .enumerate()
-            .map(|(i, s)| SidebarEntry {
-                label: labels[i].as_str(),
-                state: s.state(),
+            .zip(states.iter())
+            .map(|(label, state)| SidebarEntry {
+                label: label.as_str(),
+                state: *state,
             })
             .collect();
         let layout = self.layout.as_ref().unwrap();
@@ -401,19 +518,34 @@ fn main() {
     // EOF; we forward to the winit event loop as Wake.
     let proxy = event_loop.create_proxy();
 
-    // Phase B: nine sessions in a 3×3 grid.  All share one wake fn —
-    // the user_event handler pumps every session in turn so we don't
-    // need session-tagged wake-ups (slight extra work for empty
-    // channels in exchange for a much simpler event surface).
-    let n_sessions = GRID_COLS_LAYOUT * GRID_ROWS_LAYOUT;
+    let tmux_mode = args.iter().any(|a| a == "--tmux");
+    let n_sessions = if tmux_mode {
+        TMUX_GRID_COLS * TMUX_GRID_ROWS
+    } else {
+        GRID_COLS_LAYOUT * GRID_ROWS_LAYOUT
+    };
+
     let mut sessions = Vec::with_capacity(n_sessions);
     for _ in 0..n_sessions {
         let proxy_clone = proxy.clone();
         let wake = move || {
             let _ = proxy_clone.send_event(MarsEvent::Wake);
         };
-        let s = Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake)
-            .expect("spawn initial session");
+        let s = if tmux_mode {
+            // tmux -CC: attach to "mars" session (creating it if absent).
+            // -A is "attach if exists, else new" — handy for re-launches.
+            Session::spawn_with(
+                "tmux",
+                &["-CC", "new-session", "-A", "-s", "mars"],
+                INITIAL_COLS,
+                INITIAL_ROWS,
+                wake,
+            )
+            .expect("spawn tmux -CC session")
+        } else {
+            Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake)
+                .expect("spawn initial session")
+        };
         sessions.push(s);
     }
 
@@ -425,6 +557,7 @@ fn main() {
         window: None,
         renderer: None,
         layout: None,
+        tmux: if tmux_mode { Some(TmuxState::new()) } else { None },
         sessions,
         focused_idx: 0,
         view_offset: 0,

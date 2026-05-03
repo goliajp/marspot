@@ -131,6 +131,30 @@ impl Session {
         total
     }
 
+    /// Drain pending bytes from the reader thread *without* feeding
+    /// the terminal.  The caller takes responsibility for routing —
+    /// useful when something other than the VT parser owns the byte
+    /// stream first (e.g. tmux control mode, where `tmux::Parser`
+    /// extracts the per-pane output that then goes to `feed_terminal`).
+    pub fn drain_raw(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(chunk) = self.rx.try_recv() {
+            out.extend_from_slice(&chunk);
+        }
+        if !out.is_empty() {
+            self.last_output = Some(Instant::now());
+        }
+        out
+    }
+
+    /// Feed bytes directly into this session's terminal, bypassing
+    /// the channel.  Companion to [`drain_raw`](Self::drain_raw):
+    /// after the caller's own parser has extracted the payload bytes
+    /// from a wire-format chunk, those bytes are handed back here.
+    pub fn feed_terminal(&mut self, bytes: &[u8]) {
+        self.terminal.feed(bytes);
+    }
+
     /// True after the reader thread has observed EOF on the PTY master
     /// (i.e. the child shell exited).  The terminal's final-frame
     /// contents remain readable; callers may keep displaying them.
