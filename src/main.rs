@@ -9,14 +9,12 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use mars::input::key_event_to_bytes;
-use mars::render::Renderer;
+use mars::layout::Layout;
+use mars::render::{Renderer, SessionView};
 use mars::session::Session;
 use mars::terminal::Terminal;
 
 /// Mars's only proxy event — "something woke us up, drain all sessions".
-/// Sessions are pumped collectively so a wake from session N doesn't
-/// require us to know N here; downstream layouts can be added without
-/// changing the event surface.
 #[derive(Debug, Clone)]
 pub enum MarsEvent {
     Wake,
@@ -25,18 +23,43 @@ pub enum MarsEvent {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
 
+/// Phase B: nine independent terminals in a 3×3 grid plus a sidebar.
+const GRID_COLS_LAYOUT: usize = 3;
+const GRID_ROWS_LAYOUT: usize = 3;
+const SIDEBAR_W_LOGICAL: f64 = 200.0;
+/// Default window in logical points; physical pixels = logical × scale.
+const DEFAULT_WIN_W: f64 = 1440.0;
+const DEFAULT_WIN_H: f64 = 900.0;
+
+/// Initial dimensions for sessions before the first Resized event sizes
+/// them properly.  Resized fires almost immediately at startup.
+const INITIAL_COLS: u16 = 40;
+const INITIAL_ROWS: u16 = 12;
+
+/// Headless modes (snapshot / bench parse / bench render) use a fixed
+/// terminal grid so numbers are reproducible across runs.
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
 
 struct Mars {
     window: Option<Window>,
     renderer: Option<Renderer>,
-    /// One Session per terminal cell on screen.  Phase A keeps len = 1;
-    /// later phases add Layout-driven multi-session and grow this vec.
+    /// Cached layout from the last Resized.  Drives both rendering and
+    /// mouse-click hit-testing.
+    layout: Option<Layout>,
+    /// One Session per terminal cell on screen.
     sessions: Vec<Session>,
     /// Index into `sessions` of the session currently receiving keyboard
-    /// input.  Mouse-wheel scrolling and rendering also key off this.
+    /// input + mouse-wheel scrolling.
     focused_idx: usize,
+    /// Scrollback view offset of the focused session.  Phase B keeps a
+    /// single shared offset; Phase C will move this onto Session so each
+    /// cell remembers its own scroll position.
+    view_offset: u16,
+    /// Cursor position on screen at the last MouseInput event — used so
+    /// click hit-testing knows where the cursor was when the button
+    /// went down.
+    cursor_phys: (f64, f64),
     /// Latest known modifier state, updated by WindowEvent::ModifiersChanged.
     /// winit's KeyEvent does not carry the live modifier flags on macOS, so
     /// we have to track them out-of-band.
@@ -79,7 +102,7 @@ impl ApplicationHandler<MarsEvent> for Mars {
         let title = format!("Mars v{} ({})", VERSION, GIT_SHA);
         let attrs = Window::default_attributes()
             .with_title(title)
-            .with_inner_size(LogicalSize::new(960.0, 600.0));
+            .with_inner_size(LogicalSize::new(DEFAULT_WIN_W, DEFAULT_WIN_H));
         let window = event_loop.create_window(attrs).expect("create window");
 
         // mainScreen() can return a 1x screen even when our window will
@@ -140,14 +163,14 @@ impl ApplicationHandler<MarsEvent> for Mars {
                         self.prof.request_redraws += 1;
                     }
                 }
-                // Single-session early exit: when the only session's
-                // child shell terminates, treat that as "quit mars".
-                // Multi-session (Phase B+) will keep the window open
-                // and mark the cell exited instead.
-                if self.sessions.len() == 1 && self.sessions[0].is_exited() {
-                    // Drain any final bytes before tearing down so the
-                    // last frame includes them.
-                    self.sessions[0].pump();
+                // Multi-session: keep the window alive even when
+                // individual cells exit — they'll just stop producing
+                // bytes.  Phase D will draw an "exited" indicator in
+                // the sidebar.  Quit only when *every* session is dead.
+                if self.sessions.iter().all(|s| s.is_exited()) {
+                    for s in &mut self.sessions {
+                        s.pump();
+                    }
                     event_loop.exit();
                 }
             }
@@ -163,31 +186,43 @@ impl ApplicationHandler<MarsEvent> for Mars {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                // winit's PhysicalSize on macOS is already physical pixels —
-                // do NOT multiply by backingScaleFactor again (that would
-                // double-scale on Retina; on the user's 1x display the
-                // previous code happened to work because scale=1).
+                // winit's PhysicalSize on macOS is already physical pixels.
                 let phys_w = size.width as f64;
                 let phys_h = size.height as f64;
                 if let Some(r) = self.renderer.as_mut() {
                     r.resize(phys_w, phys_h);
                     let (cell_w, cell_h) = r.cell_dims();
-                    let cols = ((phys_w / cell_w).floor() as u16).max(1);
-                    let rows = ((phys_h / cell_h).floor() as u16).max(1);
-                    // Phase A: every session takes the full window.  When
-                    // Layout lands (Phase B), each session resizes to its
-                    // sub-rect's cell extent.
-                    for s in &mut self.sessions {
-                        if (cols, rows) != (s.terminal.grid().cols(), s.terminal.grid().rows()) {
-                            s.resize(cols, rows);
+                    // Sidebar is logical-points; convert by querying current
+                    // backing scale (1.0 fallback).
+                    let scale = MainThreadMarker::new()
+                        .and_then(NSScreen::mainScreen)
+                        .map(|s| s.backingScaleFactor() as f64)
+                        .unwrap_or(1.0);
+                    let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
+                    let layout = Layout::build(
+                        phys_w,
+                        phys_h,
+                        sidebar_phys,
+                        GRID_COLS_LAYOUT,
+                        GRID_ROWS_LAYOUT,
+                        cell_w,
+                        cell_h,
+                    );
+                    // Resize every session to its layout cell.
+                    for (i, s) in self.sessions.iter_mut().enumerate() {
+                        if let Some(rect) = layout.cells.get(i) {
+                            if (rect.cols, rect.rows)
+                                != (s.terminal.grid().cols(), s.terminal.grid().rows())
+                            {
+                                s.resize(rect.cols, rect.rows);
+                            }
                         }
                     }
-                    // Render synchronously here so the next CA commit lands
-                    // a CGImage at the new size; deferring via request_redraw
-                    // leaves a one-frame gap during live resize where the
-                    // layer shows stale-or-stretched contents.
-                    let focused = &self.sessions[self.focused_idx];
-                    r.render(focused.terminal.grid());
+                    self.layout = Some(layout);
+                    // Sync render so the next CA commit lands a fresh
+                    // CGImage at the new size — avoids the live-resize
+                    // flicker we worked through earlier.
+                    self.render_now();
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -195,7 +230,7 @@ impl ApplicationHandler<MarsEvent> for Mars {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(r) = self.renderer.as_mut() {
-                    r.set_focused(focused);
+                    r.set_window_focused(focused);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -206,33 +241,43 @@ impl ApplicationHandler<MarsEvent> for Mars {
                     if self.record_latency && self.pending_keystroke_t0.is_none() {
                         self.pending_keystroke_t0 = Some(std::time::Instant::now());
                     }
-                    // Typing always snaps view back to live — the user
-                    // isn't going to want to send keys while looking at
-                    // historical output.
-                    if let Some(r) = self.renderer.as_mut() {
-                        if r.view_offset() != 0 {
-                            r.set_view_offset(0, 0);
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
+                    // Typing snaps the focused session's view back to live.
+                    if self.view_offset != 0 {
+                        self.view_offset = 0;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
                         }
                     }
                     let _ = self.sessions[self.focused_idx].write(&bytes);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_phys = (position.x, position.y);
+            }
+            WindowEvent::MouseInput {
+                state, button, ..
+            } => {
+                use winit::event::{ElementState, MouseButton};
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    if let Some(layout) = &self.layout {
+                        if let Some(idx) = layout.hit_test(self.cursor_phys.0, self.cursor_phys.1) {
+                            if idx < self.sessions.len() && idx != self.focused_idx {
+                                self.focused_idx = idx;
+                                self.view_offset = 0;
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Convert delta to lines.  macOS trackpads emit
-                // PixelDelta in logical pixels (we divide by cell_h).
-                // External wheels emit LineDelta where 1.0 ≈ one notch.
                 let cell_h = self
                     .renderer
                     .as_ref()
                     .map(|r| r.cell_dims().1)
                     .unwrap_or(15.0);
-                // winit on macOS reports negative y for scroll-up
-                // gestures (the user moves the wheel up / swipes up,
-                // expecting older content to come into view).  Negate
-                // so positive lines_f means "scroll up to see older".
                 let lines_f = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -(y as f64) * 3.0,
                     MouseScrollDelta::PixelDelta(p) => -p.y / cell_h,
@@ -240,15 +285,13 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 if lines_f.abs() < 0.5 {
                     return;
                 }
-                let max = self.sessions[self.focused_idx].terminal.grid().scrollback_len() as i32;
-                let cur = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.view_offset() as i32)
-                    .unwrap_or(0);
-                let new = (cur + lines_f as i32).clamp(0, max) as u16;
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_view_offset(new, max as u16);
+                let max = self.sessions[self.focused_idx]
+                    .terminal
+                    .grid()
+                    .scrollback_len() as i32;
+                let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
+                if new != self.view_offset {
+                    self.view_offset = new;
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -256,29 +299,51 @@ impl ApplicationHandler<MarsEvent> for Mars {
             }
             WindowEvent::RedrawRequested => {
                 self.prof.redraw_requested_calls += 1;
-                if let Some(r) = self.renderer.as_mut() {
-                    let render_t0 = std::time::Instant::now();
-                    let focused = &self.sessions[self.focused_idx];
-                    r.set_cursor_visible(focused.terminal.cursor_visible());
-                    r.render(focused.terminal.grid());
-                    self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
-                    self.prof.render_calls += 1;
-                    if self.prof.started_at.is_none() {
-                        self.prof.started_at = Some(std::time::Instant::now());
-                    }
-                    // Latency instrumentation — close the loop opened by
-                    // the most recent keystroke.  Renderer::render returns
-                    // after layer.setContents, which is the closest
-                    // cheap-to-measure proxy for "pixels visible" without
-                    // hooking into CoreAnimation's display server.
-                    if let Some(t0) = self.pending_keystroke_t0.take() {
-                        let ns = t0.elapsed().as_nanos() as u64;
-                        self.latency_samples.push(ns);
-                    }
+                let render_t0 = std::time::Instant::now();
+                self.render_now();
+                self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
+                self.prof.render_calls += 1;
+                if self.prof.started_at.is_none() {
+                    self.prof.started_at = Some(std::time::Instant::now());
+                }
+                // Latency instrumentation — close the loop opened by
+                // the most recent keystroke.
+                if let Some(t0) = self.pending_keystroke_t0.take() {
+                    let ns = t0.elapsed().as_nanos() as u64;
+                    self.latency_samples.push(ns);
                 }
             }
             _ => {}
         }
+    }
+}
+
+impl Mars {
+    /// Build a SessionView for each session and hand them all to the
+    /// renderer.  Used by both RedrawRequested and the synchronous
+    /// path in WindowEvent::Resized.
+    fn render_now(&mut self) {
+        if self.layout.is_none() || self.renderer.is_none() {
+            return;
+        }
+        // Build views in a Vec so we can hand a slice to render_layout.
+        // SessionView borrows the grid, so build them in one pass.
+        let focused = self.focused_idx;
+        let view_offset = self.view_offset;
+        let views: Vec<SessionView> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| SessionView {
+                grid: s.terminal.grid(),
+                view_offset: if i == focused { view_offset } else { 0 },
+                cursor_visible: s.terminal.cursor_visible(),
+                focused: i == focused,
+            })
+            .collect();
+        let layout = self.layout.as_ref().unwrap();
+        let renderer = self.renderer.as_mut().unwrap();
+        renderer.render_layout(layout, &views);
     }
 }
 
@@ -298,32 +363,38 @@ fn main() {
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    // Each session's reader thread calls this closure on every chunk
-    // and once on EOF; we forward to the winit event loop as a Wake.
+    // Every session's reader thread calls the same closure on chunk +
+    // EOF; we forward to the winit event loop as Wake.
     let proxy = event_loop.create_proxy();
-    let wake = move || {
-        let _ = proxy.send_event(MarsEvent::Wake);
-    };
 
-    // Phase A: one session, fixed initial size — Resized fires almost
-    // immediately and right-sizes both the renderer viewport and this
-    // session's PTY.  Phase B will create one Session per layout cell.
-    let session = Session::spawn(GRID_COLS, GRID_ROWS, wake).expect("spawn initial session");
+    // Phase B: nine sessions in a 3×3 grid.  All share one wake fn —
+    // the user_event handler pumps every session in turn so we don't
+    // need session-tagged wake-ups (slight extra work for empty
+    // channels in exchange for a much simpler event surface).
+    let n_sessions = GRID_COLS_LAYOUT * GRID_ROWS_LAYOUT;
+    let mut sessions = Vec::with_capacity(n_sessions);
+    for _ in 0..n_sessions {
+        let proxy_clone = proxy.clone();
+        let wake = move || {
+            let _ = proxy_clone.send_event(MarsEvent::Wake);
+        };
+        let s = Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake)
+            .expect("spawn initial session");
+        sessions.push(s);
+    }
 
-    // MARS_LATENCY=/path/out.json — write a JSON list of keystroke→
-    // setContents nanoseconds to the given path on exit.  Off otherwise.
     let latency_out_path = std::env::var("MARS_LATENCY").ok();
     let record_latency = latency_out_path.is_some();
-
-    // MARS_PROFILE=/path/profile.json — write event/render counters and
-    // timings on exit so we can tell which loop is actually slow.
     let profile_out_path = std::env::var("MARS_PROFILE").ok();
 
     let mut app = Mars {
         window: None,
         renderer: None,
-        sessions: vec![session],
+        layout: None,
+        sessions,
         focused_idx: 0,
+        view_offset: 0,
+        cursor_phys: (0.0, 0.0),
         modifiers: ModifiersState::empty(),
         pending_keystroke_t0: None,
         latency_samples: Vec::new(),

@@ -21,7 +21,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use mars::input::key_event_to_bytes;
-use mars::render::Renderer;
+use mars::render::{Renderer, SessionView};
 use mars::session::Session;
 
 const INITIAL_COLS: u16 = 80;
@@ -37,6 +37,7 @@ struct Mcli {
     renderer: Option<Renderer>,
     session: Session,
     modifiers: ModifiersState,
+    view_offset: u16,
 }
 
 impl ApplicationHandler<McliEvent> for Mcli {
@@ -119,7 +120,13 @@ impl ApplicationHandler<McliEvent> for Mcli {
                     {
                         self.session.resize(cols, rows);
                     }
-                    r.render(self.session.terminal.grid());
+                    let view = SessionView {
+                        grid: self.session.terminal.grid(),
+                        view_offset: self.view_offset,
+                        cursor_visible: self.session.terminal.cursor_visible(),
+                        focused: true,
+                    };
+                    r.render(view);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -127,7 +134,7 @@ impl ApplicationHandler<McliEvent> for Mcli {
             }
             WindowEvent::Focused(focused) => {
                 if let Some(r) = self.renderer.as_mut() {
-                    r.set_focused(focused);
+                    r.set_window_focused(focused);
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -135,12 +142,10 @@ impl ApplicationHandler<McliEvent> for Mcli {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
-                    if let Some(r) = self.renderer.as_mut() {
-                        if r.view_offset() != 0 {
-                            r.set_view_offset(0, 0);
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
+                    if self.view_offset != 0 {
+                        self.view_offset = 0;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
                         }
                     }
                     let _ = self.session.write(&bytes);
@@ -160,14 +165,9 @@ impl ApplicationHandler<McliEvent> for Mcli {
                     return;
                 }
                 let max = self.session.terminal.grid().scrollback_len() as i32;
-                let cur = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.view_offset() as i32)
-                    .unwrap_or(0);
-                let new = (cur + lines_f as i32).clamp(0, max) as u16;
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_view_offset(new, max as u16);
+                let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
+                if new != self.view_offset {
+                    self.view_offset = new;
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -175,8 +175,13 @@ impl ApplicationHandler<McliEvent> for Mcli {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(r) = self.renderer.as_mut() {
-                    r.set_cursor_visible(self.session.terminal.cursor_visible());
-                    r.render(self.session.terminal.grid());
+                    let view = SessionView {
+                        grid: self.session.terminal.grid(),
+                        view_offset: self.view_offset,
+                        cursor_visible: self.session.terminal.cursor_visible(),
+                        focused: true,
+                    };
+                    r.render(view);
                 }
             }
             _ => {}
@@ -203,6 +208,7 @@ fn main() {
         renderer: None,
         session,
         modifiers: ModifiersState::empty(),
+        view_offset: 0,
     };
     event_loop.run_app(&mut app).expect("run app");
 }

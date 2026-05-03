@@ -11,6 +11,7 @@
 //! Apple uses everywhere else.
 
 use crate::grid::{Cell, CellAttrs, Color, Grid};
+use crate::layout::{CellRect, Layout};
 use core_foundation::base::{CFRange, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::base::{
@@ -53,6 +54,28 @@ const FONT_POINT: f64 = 13.0;
 const BG: (CGFloat, CGFloat, CGFloat) = (0.05, 0.07, 0.12);
 /// Default foreground (white text).
 const FG: (CGFloat, CGFloat, CGFloat) = (0.92, 0.92, 0.92);
+/// Sidebar background — slightly different shade so it reads as
+/// chrome separate from terminal cells.
+const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = (0.08, 0.10, 0.14);
+/// Thin gutter between session cells when more than one is on screen.
+const GUTTER: (CGFloat, CGFloat, CGFloat) = (0.02, 0.03, 0.06);
+/// Outline drawn around the focused session cell.
+const FOCUS_OUTLINE: (CGFloat, CGFloat, CGFloat) = (0.30, 0.55, 0.95);
+
+/// Per-session render parameters.  Caller bundles the relevant bits
+/// so the renderer doesn't need to know about Session, Mars, or
+/// MarsEvent — anything that can produce a Grid + view offset can
+/// drive a render.
+pub struct SessionView<'a> {
+    pub grid: &'a Grid,
+    /// Lines scrolled up from live (0 = live view).
+    pub view_offset: u16,
+    /// DECTCEM (?25) — false ⇒ hide cursor for this session.
+    pub cursor_visible: bool,
+    /// True for the session that owns the keyboard right now.
+    /// Drives the focus outline + cursor style (filled vs hollow).
+    pub focused: bool,
+}
 
 /// Standard ANSI 16-colour palette (xterm values).  Indices 0–7 are the
 /// basic colours; 8–15 are their bright variants.  256-colour and 24-bit
@@ -140,17 +163,10 @@ pub struct Renderer {
     viewport_w: f64,
     viewport_h: f64,
     scale: f64,
-    /// Lines of scrollback to show above the live grid.  0 = live view
-    /// (current grid only).  Bumped by mouse-wheel events; reset to 0
-    /// on keyboard input.
-    view_offset: u16,
-    /// Window focus state.  When false, the cursor is drawn as a
-    /// hollow outline instead of a filled block — the macOS native
-    /// terminal convention.
-    focused: bool,
-    /// DECTCEM (?25) — when false, hide the cursor entirely.  Vim, less,
-    /// and other full-screen apps toggle this around their UI.
-    cursor_visible: bool,
+    /// Window-level focus.  When false, even the focused-session
+    /// cursor draws hollow because the user clearly isn't typing
+    /// into mars.
+    window_focused: bool,
 }
 
 /// Holds the base font plus any fallback fonts discovered at runtime, with
@@ -273,38 +289,22 @@ impl Renderer {
             viewport_w: 0.0,
             viewport_h: 0.0,
             scale: scale as f64,
-            view_offset: 0,
-            focused: true,
-            cursor_visible: true,
+            window_focused: true,
         })
     }
 
-    pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.window_focused = focused;
     }
 
-    pub fn set_cursor_visible(&mut self, visible: bool) {
-        self.cursor_visible = visible;
-    }
-
-    pub fn view_offset(&self) -> u16 {
-        self.view_offset
-    }
-
-    /// Clamp + set the scrollback view offset.  `max` is typically the
-    /// number of lines available in scrollback (so the user can scroll
-    /// up at most `max` lines past the live grid).
-    pub fn set_view_offset(&mut self, offset: u16, max: u16) {
-        self.view_offset = offset.min(max);
-    }
-
-    /// Returns the cell to render at the given viewport position,
-    /// honouring `view_offset`.  Pulls from `grid` for live rows and
-    /// from `grid.scrollback_line(_)` for scrolled-up rows.  Returns a
-    /// blank cell for positions past the oldest scrollback line.
-    fn cell_at_viewport(&self, col: u16, viewport_row: u16, grid: &Grid) -> Cell {
+    /// Returns the cell to render at the given viewport position
+    /// inside one session, honouring its `view_offset`.  Pulls from
+    /// `grid` for live rows and from `grid.scrollback_line(_)` for
+    /// scrolled-up rows.  Returns a blank cell for positions past
+    /// the oldest scrollback line.
+    fn cell_at_viewport(view_offset: u16, col: u16, viewport_row: u16, grid: &Grid) -> Cell {
         let rows = grid.rows() as usize;
-        let abs = self.view_offset as usize + (rows - 1 - viewport_row as usize);
+        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
         if abs < rows {
             grid.cell(col, (rows - 1 - abs) as u16)
         } else {
@@ -362,21 +362,50 @@ impl Renderer {
         (self.cell_w, self.cell_h)
     }
 
-    pub fn render(&mut self, grid: &Grid) {
+    /// Render a single session full-window (mcli + the snapshot bench).
+    /// Convenience wrapper over [`render_layout`](Self::render_layout)
+    /// using a 1-cell layout that fills the viewport.
+    pub fn render(&mut self, view: SessionView) {
         if self.layer.is_none() {
             return;
         }
         if self.viewport_w < 1.0 || self.viewport_h < 1.0 {
             return;
         }
-        let w = self.viewport_w as u32;
-        let h = self.viewport_h as u32;
-        let ctx = self.draw_frame(w, h, grid);
+        let layout = Layout::build(
+            self.viewport_w,
+            self.viewport_h,
+            0.0,
+            1,
+            1,
+            self.cell_w,
+            self.cell_h,
+        );
+        self.render_layout(&layout, std::slice::from_ref(&view));
+    }
+
+    /// Render N session views into a window-sized frame.  Each view's
+    /// rect is taken from `layout.cells[i]`; cells beyond `views.len()`
+    /// stay as the default frame background (so a partially-filled
+    /// grid layout reads as empty cells).
+    pub fn render_layout(&mut self, layout: &Layout, views: &[SessionView]) {
+        if self.layer.is_none() {
+            return;
+        }
+        if self.viewport_w < 1.0 || self.viewport_h < 1.0 {
+            return;
+        }
+        let total_w = self.viewport_w as u32;
+        let total_h = self.viewport_h as u32;
+        let ctx = self.frame_context(total_w, total_h, layout);
+        for (i, view) in views.iter().enumerate() {
+            if let Some(rect) = layout.cells.get(i) {
+                self.draw_session_in_rect(&ctx, total_h, rect, view);
+            }
+        }
         let cgimage = ctx
             .create_image()
             .expect("CGContext should produce a CGImage");
-        // Push the image into the layer.  CGImageRef bridges to id;
-        // CALayer's `contents` setter accepts CGImageRef directly.
         let layer = self.layer.as_ref().unwrap();
         let cg_ptr = cgimage.as_ptr() as *const AnyObject;
         unsafe {
@@ -384,6 +413,10 @@ impl Renderer {
         }
     }
 
+    /// Headless-friendly variant: render a single session into a
+    /// freshly-allocated bitmap context at `width × height` physical
+    /// pixels and return the raw bytes (PNG wants RGBA; we swap
+    /// R↔B per pixel to honour that).
     pub fn snapshot(
         &mut self,
         width: u32,
@@ -392,28 +425,41 @@ impl Renderer {
     ) -> Result<Vec<u8>, String> {
         self.viewport_w = width as f64;
         self.viewport_h = height as f64;
-        let mut ctx = self.draw_frame(width, height, grid);
+        let layout = Layout::build(
+            width as f64,
+            height as f64,
+            0.0,
+            1,
+            1,
+            self.cell_w,
+            self.cell_h,
+        );
+        let view = SessionView {
+            grid,
+            view_offset: 0,
+            cursor_visible: true,
+            focused: true,
+        };
+        let mut ctx = self.frame_context(width, height, &layout);
+        if let Some(rect) = layout.cells.first() {
+            self.draw_session_in_rect(&ctx, height, rect, &view);
+        }
         let mut bytes = ctx.data().to_vec();
-        // PNG wants RGBA; if the bitmap context produced BGRA, swap
-        // R and B per pixel.  We detect this empirically here rather
-        // than relying on byte-order flag interpretation.
         for chunk in bytes.chunks_exact_mut(4) {
             chunk.swap(0, 2);
         }
         Ok(bytes)
     }
 
-    /// Render one frame of the current terminal grid into a fresh
-    /// CGBitmapContext at `width × height` physical pixels.  The caller
-    /// can either turn the context into a CGImage (for live layer
-    /// contents) or read its bytes directly (for snapshot/PNG).
-    fn draw_frame(&mut self, width: u32, height: u32, grid: &Grid) -> CGContext {
+    /// Build a full-window CGBitmapContext, fill it with the chrome
+    /// background (sidebar + gutter colour), so per-session cells only
+    /// have to fill their own backgrounds — anything they don't paint
+    /// reads as chrome.
+    fn frame_context(&self, width: u32, height: u32, layout: &Layout) -> CGContext {
         let space = CGColorSpace::create_device_rgb();
         let row_bytes = width as usize * 4;
-        // Bitmap info: RGBA in memory order (alpha last + big-endian
-        // byte order forces R/G/B/A on little-endian macOS too).
         let bitmap_info = kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big;
-        let mut ctx = CGContext::create_bitmap_context(
+        let ctx = CGContext::create_bitmap_context(
             None,
             width as usize,
             height as usize,
@@ -423,19 +469,46 @@ impl Renderer {
             bitmap_info,
         );
 
-        // Background fill.
-        ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
+        // Chrome background: GUTTER colour everywhere.  The sidebar
+        // gets its own slightly different fill on top.
+        ctx.set_rgb_fill_color(GUTTER.0, GUTTER.1, GUTTER.2, 1.0);
         ctx.fill_rect(CGRect::new(
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(width as f64, height as f64),
         ));
+        if layout.sidebar_w > 0.0 {
+            ctx.set_rgb_fill_color(SIDEBAR_BG.0, SIDEBAR_BG.1, SIDEBAR_BG.2, 1.0);
+            ctx.fill_rect(CGRect::new(
+                &CGPoint::new(0.0, 0.0),
+                &CGSize::new(layout.sidebar_w, height as f64),
+            ));
+        }
+        ctx
+    }
 
-        // Stay in CG's default y-up coordinate system.  Computing
-        // baselines from bottom-up is awkward but it avoids any text-
-        // matrix interaction we'd need with a flipped CTM.  CGBitmapContext
-        // memory is stored top-down regardless of the drawing coordinate
-        // system, so the resulting bytes still come out in conventional
-        // top-down RGBA order.
+    /// Render `view` into `rect` — fills the rect's terminal background,
+    /// draws BG cells / glyphs / underlines / cursor, and (for the
+    /// focused session) outlines the cell with a thin focus ring.
+    fn draw_session_in_rect(
+        &mut self,
+        ctx: &CGContext,
+        total_h: u32,
+        rect: &CellRect,
+        view: &SessionView,
+    ) {
+        // Top of the rect in CG's y-up coords (y=0 is the bottom of
+        // the bitmap context).  All per-row baselines are computed
+        // off this anchor.
+        let rect_top_y_up = total_h as f64 - rect.y_top;
+
+        // Terminal-cell background fill for this rect.  Sits on top
+        // of frame_context's chrome fill, so the rect now reads as a
+        // proper terminal cell.
+        ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
+        ctx.fill_rect(CGRect::new(
+            &CGPoint::new(rect.x, rect_top_y_up - rect.h),
+            &CGSize::new(rect.w, rect.h),
+        ));
 
         // Apple's default font rendering hints — turn ON everything so
         // CoreText produces the same output it would in Terminal.app.
@@ -450,56 +523,63 @@ impl Renderer {
 
         ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
 
+        let grid = view.grid;
         let cols = grid.cols() as usize;
-        // Reusable per-run scratch buffers for batched draw_glyphs calls.
         let mut run_glyphs: Vec<CGGlyph> = Vec::with_capacity(cols);
         let mut run_positions: Vec<CGPoint> = Vec::with_capacity(cols);
 
         for r in 0..grid.rows() {
             // 1) Background pass — fill runs of cells that share a non-default
             //    background color.  Cells with the default BG inherit the
-            //    frame fill we already laid down above.
-            let row_bottom_y = height as f64 - (r as f64 + 1.0) * self.cell_h;
+            //    rect's terminal-bg fill we just laid down.
+            let row_bottom_y = rect_top_y_up - (r as f64 + 1.0) * self.cell_h;
             let mut c = 0usize;
             while c < cols {
-                let bg = resolve_attrs(self.cell_at_viewport(c as u16, r, grid).attrs).1;
+                let bg = resolve_attrs(
+                    Self::cell_at_viewport(view.view_offset, c as u16, r, grid).attrs,
+                )
+                .1;
                 if bg == BG {
                     c += 1;
                     continue;
                 }
                 let start = c;
                 c += 1;
-                while c < cols && resolve_attrs(self.cell_at_viewport(c as u16, r, grid).attrs).1 == bg {
+                while c < cols
+                    && resolve_attrs(
+                        Self::cell_at_viewport(view.view_offset, c as u16, r, grid).attrs,
+                    )
+                    .1 == bg
+                {
                     c += 1;
                 }
                 ctx.set_rgb_fill_color(bg.0, bg.1, bg.2, 1.0);
                 ctx.fill_rect(CGRect::new(
-                    &CGPoint::new(start as f64 * self.cell_w, row_bottom_y),
+                    &CGPoint::new(rect.x + start as f64 * self.cell_w, row_bottom_y),
                     &CGSize::new((c - start) as f64 * self.cell_w, self.cell_h),
                 ));
             }
 
             // 2) Foreground pass — group consecutive non-blank cells that
-            //    share both font (base or fallback) and fg color, emit one
-            //    draw_glyphs call per run.  Font transitions break runs
-            //    because draw_glyphs is bound to a single CTFont.
-            let baseline_y = height as f64 - (r as f64 * self.cell_h + self.ascent);
+            //    share both font and fg color; one draw_glyphs call per run.
+            let baseline_y = rect_top_y_up - (r as f64 * self.cell_h + self.ascent);
             let mut i = 0usize;
             while i < cols {
-                let cell = self.cell_at_viewport(i as u16, r, grid);
+                let cell = Self::cell_at_viewport(view.view_offset, i as u16, r, grid);
                 if cell.ch == ' ' || cell.ch == '\0' {
                     i += 1;
                     continue;
                 }
-                let (font_idx, glyph) = self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
+                let (font_idx, glyph) =
+                    self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
                 let fg = resolve_attrs(cell.attrs).0;
                 run_glyphs.clear();
                 run_positions.clear();
                 run_glyphs.push(glyph);
-                run_positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
+                run_positions.push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
                 i += 1;
                 while i < cols {
-                    let cur = self.cell_at_viewport(i as u16, r, grid);
+                    let cur = Self::cell_at_viewport(view.view_offset, i as u16, r, grid);
                     if cur.ch == ' ' || cur.ch == '\0' {
                         break;
                     }
@@ -509,7 +589,7 @@ impl Renderer {
                         break;
                     }
                     run_glyphs.push(cur_glyph);
-                    run_positions.push(CGPoint::new(i as f64 * self.cell_w, baseline_y));
+                    run_positions.push(CGPoint::new(rect.x + i as f64 * self.cell_w, baseline_y));
                     i += 1;
                 }
                 ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
@@ -517,15 +597,12 @@ impl Renderer {
                 font.draw_glyphs(&run_glyphs, &run_positions, ctx.clone());
             }
 
-            // 3) Underline pass — run-length compress consecutive cells
-            //    with attrs.underline that share the same fg colour, draw
-            //    one filled rect per run.  Sits below the baseline by a
-            //    fraction of the descent so it doesn't cut into glyphs.
+            // 3) Underline pass.
             let underline_y = row_bottom_y + (self.cell_h - self.ascent) * 0.55;
             let underline_h = (self.cell_h * 0.06).max(1.0);
             let mut u = 0usize;
             while u < cols {
-                let cell = self.cell_at_viewport(u as u16, r, grid);
+                let cell = Self::cell_at_viewport(view.view_offset, u as u16, r, grid);
                 if !cell.attrs.underline {
                     u += 1;
                     continue;
@@ -534,7 +611,7 @@ impl Renderer {
                 let start = u;
                 u += 1;
                 while u < cols {
-                    let cur = self.cell_at_viewport(u as u16, r, grid);
+                    let cur = Self::cell_at_viewport(view.view_offset, u as u16, r, grid);
                     if !cur.attrs.underline || resolve_attrs(cur.attrs).0 != fg {
                         break;
                     }
@@ -542,49 +619,68 @@ impl Renderer {
                 }
                 ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
                 ctx.fill_rect(CGRect::new(
-                    &CGPoint::new(start as f64 * self.cell_w, underline_y),
+                    &CGPoint::new(rect.x + start as f64 * self.cell_w, underline_y),
                     &CGSize::new((u - start) as f64 * self.cell_w, underline_h),
                 ));
             }
         }
 
-        // Cursor only makes sense in live view.  When the user is
-        // scrolled up looking at history, hide it — drawing it on a
-        // historical line would be misleading.  Also respect DECTCEM.
-        if self.view_offset == 0 && self.cursor_visible {
-            self.draw_cursor(&ctx, height, grid);
+        // Cursor: only when this session is in live view + DECTCEM is on.
+        if view.view_offset == 0 && view.cursor_visible {
+            self.draw_cursor_in_rect(ctx, rect_top_y_up, rect, view);
         }
 
-        ctx
+        // Focus outline: a thin border around the focused cell.  Helps
+        // distinguish "the one currently receiving keystrokes" from the
+        // others when more than one session is on screen.
+        if view.focused {
+            let stroke = (self.cell_h * 0.10).max(1.0);
+            ctx.set_rgb_stroke_color(
+                FOCUS_OUTLINE.0,
+                FOCUS_OUTLINE.1,
+                FOCUS_OUTLINE.2,
+                1.0,
+            );
+            ctx.set_line_width(stroke);
+            ctx.stroke_rect(CGRect::new(
+                &CGPoint::new(rect.x, rect_top_y_up - rect.h),
+                &CGSize::new(rect.w, rect.h),
+            ));
+        }
     }
 
-    /// Cursor: filled block when the window is focused, hollow outline
-    /// otherwise.  For the focused (filled) case we re-draw the cell's
-    /// glyph in the background colour on top so the character under the
-    /// cursor stays readable.
-    fn draw_cursor(&mut self, ctx: &CGContext, height: u32, grid: &Grid) {
-        let (col, row) = grid.cursor();
-        let cx = col as f64 * self.cell_w;
-        let cy_bottom = height as f64 - (row as f64 + 1.0) * self.cell_h;
-        let rect = CGRect::new(
+    /// Cursor: filled block when this session is focused AND the window
+    /// is focused; hollow outline otherwise.  For the filled case we
+    /// re-draw the cell's glyph in the background colour so the
+    /// character stays readable.
+    fn draw_cursor_in_rect(
+        &mut self,
+        ctx: &CGContext,
+        rect_top_y_up: f64,
+        rect: &CellRect,
+        view: &SessionView,
+    ) {
+        let (col, row) = view.grid.cursor();
+        let cx = rect.x + col as f64 * self.cell_w;
+        let cy_bottom = rect_top_y_up - (row as f64 + 1.0) * self.cell_h;
+        let cursor_rect = CGRect::new(
             &CGPoint::new(cx, cy_bottom),
             &CGSize::new(self.cell_w, self.cell_h),
         );
+        let solid = view.focused && self.window_focused;
 
-        if self.focused {
+        if solid {
             ctx.set_rgb_fill_color(FG.0, FG.1, FG.2, 1.0);
-            ctx.fill_rect(rect);
+            ctx.fill_rect(cursor_rect);
 
-            // Punch the cell's glyph back through in BG so the character
-            // stays readable.  Skip blanks (common at idle).
-            let cell = grid.cell(col, row);
+            let cell = view.grid.cell(col, row);
             if cell.ch != ' ' && cell.ch != '\0' {
                 let (font_idx, glyph) =
                     self.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
                 if glyph != 0 {
                     ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
                     let baseline_y =
-                        height as f64 - (row as f64 * self.cell_h + self.ascent);
+                        rect_top_y_up - (row as f64 * self.cell_h + self.ascent);
                     let font = &self.fonts.fonts[font_idx];
                     font.draw_glyphs(
                         &[glyph],
@@ -594,13 +690,11 @@ impl Renderer {
                 }
             }
         } else {
-            // Unfocused: 1-pt outline, no glyph inversion.  Standard
-            // macOS terminal convention so the user knows keystrokes
-            // won't land here.
+            // Hollow outline.
             let stroke = (self.cell_h * 0.07).max(1.0);
             ctx.set_rgb_stroke_color(FG.0, FG.1, FG.2, 1.0);
             ctx.set_line_width(stroke);
-            ctx.stroke_rect(rect);
+            ctx.stroke_rect(cursor_rect);
         }
     }
 }

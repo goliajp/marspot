@@ -11,6 +11,7 @@
 
 pub mod grid;
 pub mod input;
+pub mod layout;
 pub mod parser;
 pub mod pty;
 pub mod render;
