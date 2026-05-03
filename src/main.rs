@@ -13,9 +13,9 @@ use objc2_foundation::MainThreadMarker;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::pty::{Pty, PtyConfig, TerminalSize};
@@ -52,6 +52,10 @@ struct Mars {
     terminal: Terminal,
     pty: Pty,
     rx: Receiver<Vec<u8>>,
+    /// Latest known modifier state, updated by WindowEvent::ModifiersChanged.
+    /// winit's KeyEvent does not carry the live modifier flags on macOS, so
+    /// we have to track them out-of-band.
+    modifiers: ModifiersState,
 }
 
 impl ApplicationHandler<MarsEvent> for Mars {
@@ -139,8 +143,11 @@ impl ApplicationHandler<MarsEvent> for Mars {
                     w.request_redraw();
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = key_event_to_bytes(&event) {
+                if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
                     let _ = self.pty.write(&bytes);
                 }
             }
@@ -155,11 +162,47 @@ impl ApplicationHandler<MarsEvent> for Mars {
 }
 
 /// Map a winit key press to the byte sequence we send the PTY.  Returns
-/// `None` for events we don't translate (releases, modifier-only, etc.).
-fn key_event_to_bytes(event: &KeyEvent) -> Option<Cow<'static, [u8]>> {
+/// `None` for events we don't translate (releases, modifier-only, Cmd
+/// combos that the OS handles, etc.).
+fn key_event_to_bytes(
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+) -> Option<Cow<'static, [u8]>> {
     if event.state != ElementState::Pressed {
         return None;
     }
+
+    // Cmd combos belong to the OS / app layer (Cmd-Q to quit, Cmd-C/V for
+    // clipboard, etc.) — never forward them to the PTY.
+    if modifiers.super_key() {
+        return None;
+    }
+
+    // Ctrl + letter → ASCII control code (Ctrl-A = 0x01 ... Ctrl-Z = 0x1A).
+    // Also: Ctrl-[ = ESC, Ctrl-\ = FS, Ctrl-] = GS, Ctrl-^ = RS, Ctrl-_ = US,
+    // Ctrl-Space = NUL.  Done before the named-key match so Ctrl-anything
+    // takes priority over the per-key text payload.
+    if modifiers.control_key() {
+        if let Key::Character(s) = &event.logical_key {
+            if let Some(c) = s.chars().next() {
+                let lc = c.to_ascii_lowercase();
+                let code = match lc {
+                    'a'..='z' => Some((lc as u8) - b'a' + 1),
+                    '[' => Some(0x1b),
+                    '\\' => Some(0x1c),
+                    ']' => Some(0x1d),
+                    '^' => Some(0x1e),
+                    '_' => Some(0x1f),
+                    ' ' => Some(0x00),
+                    _ => None,
+                };
+                if let Some(code) = code {
+                    return Some(Cow::Owned(vec![code]));
+                }
+            }
+        }
+    }
+
     match &event.logical_key {
         Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
         Key::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
@@ -251,6 +294,7 @@ fn main() {
         terminal: Terminal::new(GRID_COLS, GRID_ROWS),
         pty,
         rx,
+        modifiers: ModifiersState::empty(),
     };
     event_loop.run_app(&mut app).expect("run app");
 }
