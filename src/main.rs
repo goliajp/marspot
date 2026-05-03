@@ -1,4 +1,3 @@
-mod atlas;
 mod grid;
 mod parser;
 mod pty;
@@ -129,10 +128,6 @@ impl ApplicationHandler for Mars {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if let Some(path) = parse_atlas_dump_arg(&args) {
-        run_atlas_dump(&path);
-        return;
-    }
     if let Some(path) = parse_snapshot_arg(&args) {
         run_snapshot(&path);
         return;
@@ -149,10 +144,6 @@ fn main() {
 /// treated as no snapshot.
 fn parse_snapshot_arg(args: &[String]) -> Option<String> {
     parse_named_arg(args, "--snapshot")
-}
-
-fn parse_atlas_dump_arg(args: &[String]) -> Option<String> {
-    parse_named_arg(args, "--dump-atlas")
 }
 
 fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
@@ -172,41 +163,6 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
 /// Dump the raw atlas (single-channel grayscale) as a PNG so we can
 /// inspect what CoreText actually wrote — pre-GPU, pre-shader, pre-blend.
 /// This is the most direct way to verify glyph rasterization is correct.
-fn run_atlas_dump(path: &str) {
-    use crate::atlas::GlyphAtlas;
-    let pt: f32 = std::env::var("MARS_DUMP_PT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(13.0);
-    let size: u32 = std::env::var("MARS_DUMP_ATLAS_SIZE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
-    // MARS_DUMP_CHARS lets us isolate one or a few characters in a big
-    // canvas — useful to verify shape correctness at large sizes.
-    // Default: full printable ASCII.
-    let chars: Vec<char> = std::env::var("MARS_DUMP_CHARS")
-        .ok()
-        .map(|s| s.chars().collect())
-        .unwrap_or_else(|| (0x20u32..0x7F).filter_map(char::from_u32).collect());
-    let mut atlas = GlyphAtlas::new("Menlo", pt, size);
-    for ch in &chars {
-        atlas.ensure(*ch);
-    }
-
-    let file = std::fs::File::create(path).expect("create atlas-dump");
-    let mut encoder = png::Encoder::new(
-        std::io::BufWriter::new(file),
-        atlas.width(),
-        atlas.height(),
-    );
-    encoder.set_color(png::ColorType::Grayscale);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().expect("png header");
-    writer.write_image_data(atlas.pixels()).expect("png write");
-    eprintln!("wrote atlas: {} ({}x{})", path, atlas.width(), atlas.height());
-}
-
 /// Headless render: build a Renderer with no view, render one frame into
 /// an offscreen texture, encode the result as a PNG, write it to `path`,
 /// and exit.  The point: visually-verifiable output without screen-capture

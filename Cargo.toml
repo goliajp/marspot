@@ -10,12 +10,12 @@ libc = "0.2"
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["all"] }
 objc2-foundation = { version = "0.2", features = ["all"] }
-objc2-metal = { version = "0.2", features = ["all"] }
-objc2-quartz-core = { version = "0.2", features = ["all", "objc2-metal"] }
+objc2-quartz-core = { version = "0.2", features = ["all"] }
 raw-window-handle = "0.6"
 core-text = "21.0"
 core-graphics = "0.24"
 core-foundation = "0.10"
+foreign-types = "0.5"
 png = "0.17"
 
 [profile.release]
