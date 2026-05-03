@@ -73,8 +73,13 @@ for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
   done
 done
 
-echo "==> headless render"
-"$ROOT/target/release/mars" --bench render:1000 > "$CUR_DIR/render.json"
+echo "==> headless render (3 trials, taking median p99)"
+: > "$CUR_DIR/render.samples"
+for trial in 1 2 3; do
+  "$ROOT/target/release/mars" --bench render:1000 \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
+    >> "$CUR_DIR/render.samples"
+done
 
 # ---- binary size + idle memory ----------------------------------------
 # Cheap (sub-second) so we can include them in the fast gate.  Catches
@@ -137,9 +142,11 @@ def load_parse(scenario):
     return median / 1024 / 1024  # MB/s
 
 def load_render():
-    p = os.path.join(cur_dir, "render.json")
+    p = os.path.join(cur_dir, "render.samples")
     if not os.path.exists(p): return None
-    return json.load(open(p))
+    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
+    if not samples: return None
+    return {"p99_ns": samples[len(samples) // 2]}
 
 def load_live(scenario):
     p = os.path.join(cur_dir, "live.json")
