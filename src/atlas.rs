@@ -247,28 +247,30 @@ impl GlyphAtlas {
         })
     }
 
-    /// Reserve a `(w × h)` rectangle on the next available shelf.
-    /// Returns the top-left position in the atlas, or `None` if it won't fit.
+    /// Reserve a `(w × h)` rectangle on the next available shelf, with a
+    /// `GLYPH_PAD` buffer of empty pixels around it.  The buffer prevents
+    /// the GPU's linear sampler from bleeding adjacent glyphs into a
+    /// glyph's edges (the "white halo" artifact).
     fn allocate_shelf_slot(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        // A glyph that's wider than the entire atlas can never fit.
-        if w > self.width {
+        const GLYPH_PAD: u32 = 1;
+        let total_w = w + GLYPH_PAD * 2;
+        let total_h = h + GLYPH_PAD * 2;
+        if total_w > self.width {
             return None;
         }
-        // Wrap to a fresh shelf if the glyph won't fit on the current one.
-        if self.shelf_x + w > self.width {
+        if self.shelf_x + total_w > self.width {
             self.shelf_y += self.shelf_h;
             self.shelf_x = 0;
             self.shelf_h = 0;
         }
-        // Vertical overflow → atlas full.  Caller decides whether to evict
-        // (LRU lands later) or simply drop this glyph.
-        if self.shelf_y + h > self.height {
+        if self.shelf_y + total_h > self.height {
             return None;
         }
-        let placed = (self.shelf_x, self.shelf_y);
-        self.shelf_x += w;
-        if h > self.shelf_h {
-            self.shelf_h = h;
+        // The actual glyph lands GLYPH_PAD pixels in from the slot's corner.
+        let placed = (self.shelf_x + GLYPH_PAD, self.shelf_y + GLYPH_PAD);
+        self.shelf_x += total_w;
+        if total_h > self.shelf_h {
+            self.shelf_h = total_h;
         }
         Some(placed)
     }

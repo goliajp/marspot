@@ -5,7 +5,8 @@ mod pty;
 mod render;
 mod terminal;
 
-use objc2_app_kit::NSView;
+use objc2_app_kit::{NSScreen, NSView};
+use objc2_foundation::MainThreadMarker;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -35,7 +36,20 @@ impl ApplicationHandler for Mars {
         // Reach into AppKit to get the NSView backing this winit window so
         // we can hand it a CAMetalLayer.  Safe on macOS — winit's AppKit
         // backend is the only valid path here.
-        let scale = window.scale_factor() as f32;
+        //
+        // Use the actual screen's backing scale.  Forcing 2x on a 1x
+        // display didn't behave as a supersample as I'd hoped — CA
+        // didn't downsample, just enlarged the text.  Override via
+        // MARS_SCALE if needed for testing.
+        let main_thread = MainThreadMarker::new()
+            .expect("Mars must be created on the main thread");
+        let display_scale = NSScreen::mainScreen(main_thread)
+            .map(|s| s.backingScaleFactor() as f32)
+            .unwrap_or(1.0);
+        let scale: f32 = std::env::var("MARS_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(display_scale);
         let renderer = unsafe {
             let handle = window
                 .window_handle()
@@ -48,10 +62,16 @@ impl ApplicationHandler for Mars {
             Renderer::new(nsview, scale).expect("renderer init")
         };
 
-        // Initialize the layer's drawable size to the window's pixel size.
+        // Initialize the layer's drawable size.  winit's inner_size returns
+        // PhysicalSize — but on macOS at this stage it returns logical
+        // pixels (the Retina conversion hasn't kicked in via the window
+        // server yet).  Multiply by our authoritative scale to get the
+        // physical pixel size that matches what the layer needs.
         let size = window.inner_size();
+        let phys_w = (size.width as f64) * (scale as f64);
+        let phys_h = (size.height as f64) * (scale as f64);
         let mut renderer = renderer;
-        renderer.resize(size.width as f64, size.height as f64);
+        renderer.resize(phys_w, phys_h);
 
         // Trigger an initial paint so the user sees our clear color
         // immediately rather than the system default.
@@ -70,8 +90,16 @@ impl ApplicationHandler for Mars {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                // size is "physical" per winit but on macOS we apply our
+                // own scale factor to match what the layer needs.
+                let scale = MainThreadMarker::new()
+                    .and_then(|mt| NSScreen::mainScreen(mt))
+                    .map(|s| s.backingScaleFactor() as f64)
+                    .unwrap_or(1.0);
+                let phys_w = size.width as f64 * scale;
+                let phys_h = size.height as f64 * scale;
                 if let Some(r) = self.renderer.as_mut() {
-                    r.resize(size.width as f64, size.height as f64);
+                    r.resize(phys_w, phys_h);
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -121,9 +149,17 @@ fn parse_snapshot_arg(args: &[String]) -> Option<String> {
 /// and exit.  The point: visually-verifiable output without screen-capture
 /// permissions, window focus, or a graphical session.
 fn run_snapshot(path: &str) {
-    // Match the live default — 960x600 logical at 2x = 1920x1200 physical.
-    // Hardcoded for now; later we'll let the caller pick.
-    let scale: f32 = 2.0;
+    // Use the system's actual backing scale so snapshot matches live.
+    // Override with MARS_SNAPSHOT_SCALE for explicit testing.
+    let scale: f32 = std::env::var("MARS_SNAPSHOT_SCALE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| {
+            MainThreadMarker::new()
+                .and_then(|mt| NSScreen::mainScreen(mt))
+                .map(|s| s.backingScaleFactor() as f32)
+        })
+        .unwrap_or(1.0);
     let logical_w: u32 = 960;
     let logical_h: u32 = 600;
     let phys_w = (logical_w as f32 * scale) as u32;
