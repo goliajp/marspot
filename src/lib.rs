@@ -14,6 +14,7 @@ pub mod input;
 pub mod layout;
 pub mod parser;
 pub mod pty;
+pub mod glyph_atlas;
 pub mod render;
 pub mod render_metal;
 pub mod session;

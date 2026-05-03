@@ -176,7 +176,7 @@ impl MetalRenderer {
     }
 }
 
-fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>, String> {
+pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>, String> {
     // SAFETY: MTLCreateSystemDefaultDevice returns a +1 retained pointer
     // (per Apple docs) or null on failure.  Wrap with Retained::from_raw
     // to take ownership without an extra retain.
