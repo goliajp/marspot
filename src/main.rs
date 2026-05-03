@@ -11,9 +11,51 @@ use winit::window::{Window, WindowId};
 use mars::input::key_event_to_bytes;
 use mars::layout::Layout;
 use mars::render::{Renderer, SessionView, SidebarEntry};
+use mars::render_metal::MetalRenderer;
 use mars::session::{Session, SessionState};
 use mars::terminal::Terminal;
 use mars::tmux;
+
+/// Renderer dispatch: AppKit-on-CGImage (default) or Metal-on-CAMetalLayer
+/// (set `MARS_METAL=1`).  Both implement the same surface — keep this
+/// enum in lock-step with their public API.
+enum RendererImpl {
+    Appkit(Renderer),
+    Metal(MetalRenderer),
+}
+
+impl RendererImpl {
+    fn cell_dims(&self) -> (f64, f64) {
+        match self {
+            Self::Appkit(r) => r.cell_dims(),
+            Self::Metal(r) => r.cell_dims(),
+        }
+    }
+    fn resize(&mut self, w: f64, h: f64) {
+        match self {
+            Self::Appkit(r) => r.resize(w, h),
+            Self::Metal(r) => r.resize(w, h),
+        }
+    }
+    fn set_window_focused(&mut self, focused: bool) {
+        match self {
+            Self::Appkit(r) => r.set_window_focused(focused),
+            Self::Metal(r) => r.set_window_focused(focused),
+        }
+    }
+    fn render_layout(
+        &mut self,
+        layout: &Layout,
+        views: &[SessionView],
+        sidebar: &[SidebarEntry],
+        focused_idx: usize,
+    ) {
+        match self {
+            Self::Appkit(r) => r.render_layout(layout, views, sidebar, focused_idx),
+            Self::Metal(r) => r.render_layout(layout, views, sidebar, focused_idx),
+        }
+    }
+}
 
 /// Mars's only proxy event — "something woke us up, drain all sessions".
 #[derive(Debug, Clone)]
@@ -105,7 +147,7 @@ impl TmuxState {
 
 struct Mars {
     window: Option<Window>,
-    renderer: Option<Renderer>,
+    renderer: Option<RendererImpl>,
     /// Cached layout from the last Resized.  Drives both rendering and
     /// mouse-click hit-testing.
     layout: Option<Layout>,
@@ -193,7 +235,16 @@ impl ApplicationHandler<MarsEvent> for Mars {
                 panic!("Mars only supports the AppKit backend");
             };
             let nsview: &NSView = &*(appkit.ns_view.as_ptr() as *const NSView);
-            Renderer::new(nsview, scale).expect("renderer init")
+            if std::env::var("MARS_METAL").as_deref() == Ok("1") {
+                eprintln!("[mars] MARS_METAL=1 → using MetalRenderer");
+                RendererImpl::Metal(
+                    MetalRenderer::new(nsview, scale).expect("metal renderer init"),
+                )
+            } else {
+                RendererImpl::Appkit(
+                    Renderer::new(nsview, scale).expect("renderer init"),
+                )
+            }
         };
 
         let size = window.inner_size();
