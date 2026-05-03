@@ -69,9 +69,9 @@ fresh mars window via `MARS_SHELL`):
 
 | Use-case | bytes | median time | live throughput |
 |---|---|---|---|
-| cat-ascii | 32 MB | 0.58 s | **55 MB/s** |
-| cat-mixed | 16 MB | 0.34 s | 47 MB/s |
-| cat-cjk   | 8 MB  | 0.22 s | 36 MB/s |
+| cat-ascii | 32 MB | 0.36 s | **89 MB/s** |
+| cat-mixed | 16 MB | 0.24 s | 67 MB/s |
+| cat-cjk   | 8 MB  | 0.16 s | 50 MB/s |
 | cat-emoji | 8 MB  | 0.18 s | 44 MB/s |
 
 > Two earlier corrections worth flagging publicly so the history is
@@ -89,11 +89,11 @@ Sub-path numbers (no PTY/window in the loop):
 
 | Sub-path | Number | How |
 |---|---|---|
-| Parse-only (cat-ascii)  | 93 MB/s  | `target/release/mars --bench parse:cat-ascii.bin` |
-| Parse-only (cat-mixed)  | 74 MB/s  | …`cat-mixed.bin` |
-| Parse-only (cat-cjk)    | 99 MB/s  | …`cat-cjk.bin` |
-| Parse-only (cat-emoji)  | 102 MB/s | …`cat-emoji.bin` |
-| Render-only (worst-case full repaint) | p50 891 µs · p95 957 µs · p99 1.0 ms | `--bench render:1000` |
+| Parse-only (cat-ascii)  | 215 MB/s | `target/release/mars --bench parse:cat-ascii.bin` |
+| Parse-only (cat-mixed)  | 215 MB/s | …`cat-mixed.bin` |
+| Parse-only (cat-cjk)    | 276 MB/s | …`cat-cjk.bin` |
+| Parse-only (cat-emoji)  | 254 MB/s | …`cat-emoji.bin` |
+| Render-only (worst-case full repaint) | p50 900 µs · p95 987 µs · p99 1.0 ms | `--bench render:1000` |
 | Typing latency (key → setContents)    | _ (self-instrumented; collect via `MARS_LATENCY=…`) |
 
 ### What `MARS_PROFILE` showed (cat-ascii, 32 MB)
@@ -135,9 +135,9 @@ slow path; the slow path is parser-internal.
 
 | Use-case | mars | Warp | iTerm2 | mars/best |
 |---|---|---|---|---|
-| cat-ascii | 55 MB/s | _ | _ | _ |
-| cat-mixed | 47 MB/s | _ | _ | _ |
-| cat-cjk   | 36 MB/s | _ | _ | _ |
+| cat-ascii | 89 MB/s | _ | _ | _ |
+| cat-mixed | 67 MB/s | _ | _ | _ |
+| cat-cjk   | 50 MB/s | _ | _ | _ |
 | cat-emoji | 44 MB/s | _ | _ | _ |
 | vim-jump  | _ | _ | _ | _ |
 | htop-60s (avg CPU) | _ | _ | _ | _ |
@@ -155,8 +155,8 @@ Filled in as `bin/measure.sh` results land. Each row gets:
 
 | Item | Gap | Fixable | Note |
 |---|---|---|---|
-| Live ~50% of headless parse on text-heavy scenarios (ascii/mixed/cjk) | 2× | yes | The 2× cost is the PTY pipeline + render: reader thread, mpsc channel, NSRunLoop user_event dispatch, then per-render CALayer.setContents.  Worth profiling per-stage (`MARS_PROFILE`) — likely improvable to ~70–80% by debouncing renders to one paint per vsync (current code does request_redraw per drained batch but render itself appears to be invoked every cycle by winit). |
-| Live cat-emoji is **18% of headless** (18 MB/s vs 102 MB/s) | ~5× | yes | emoji-heavy output stresses the color glyph path: every codepoint has to look up a fallback font on first sight (cached after), and CTFontDrawGlyphs with SBIX/COLR is much slower than monochrome glyph rendering. **Fix paths:** (1) pre-warm the font cache for common emoji blocks; (2) batch-draw same-font runs more aggressively; (3) accept that color-glyph rendering is intrinsically slower and document it. |
+| Live ~40% of headless parse on cat-ascii (89 / 215 MB/s) | 2.4× | partly | Remaining gap is PTY syscall + reader thread + per-event NSRunLoop dispatch (~150 ms on 32 MB scenarios after batching).  Can be tightened further with read-side coalescing or a CADisplayLink-driven main loop, but cost-vs-benefit isn't obvious until we have a cross-terminal baseline. |
+| Live cat-emoji 44 MB/s vs cat-ascii 89 MB/s | 2× | yes | Color-glyph path is intrinsically expensive (CTFontDrawGlyphs through SBIX/COLR), and emoji-dense lines push more glyphs through it.  Mitigations: pre-warm font cache for common emoji blocks; aggregate same-font same-fg runs across rows. |
 | Cross-terminal automation broken | n/a | yes | AppleScript dispatch into iTerm2 / Warp / Terminal.app is unreliable.  Either build a vtebench-style runner that drives each terminal via a custom hardware-keystroke approach, or accept manual paste for now. |
 
 ---

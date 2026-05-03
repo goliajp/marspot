@@ -95,11 +95,22 @@ pub fn char_width(ch: char) -> u8 {
 pub struct Grid {
     cols: u16,
     rows: u16,
-    /// Row-major: index = row * cols + col.
+    /// Cell storage is row-major but **rotated**: logical row 0 lives at
+    /// physical row `top_row`, logical row 1 at `(top_row + 1) % rows`,
+    /// etc.  This turns `scroll_up(1)` from a `(rows-1) × cols` memcpy
+    /// (the displaced rows shift up by one) into an O(cols) blank +
+    /// pointer bump, since the new top simply becomes the cell after
+    /// the old top.  Every cell access does one extra add+mod, but
+    /// scrolls are by far the more frequent shape on real workloads
+    /// (`cat large.log` triggers one scroll per line, hundreds of
+    /// thousands of times for a 32 MB file).
     cells: Vec<Cell>,
     /// Cursor as (col, row).  Always bounded to [0, cols-1] x [0, rows-1].
     cursor_col: u16,
     cursor_row: u16,
+    /// Physical row index of logical row 0 (`0..rows`).  Bumped by
+    /// `scroll_up`; reset to 0 by `resize`.
+    top_row: u16,
     scrollback: ScrollbackRing,
 }
 
@@ -117,6 +128,7 @@ impl Grid {
             cells,
             cursor_col: 0,
             cursor_row: 0,
+            top_row: 0,
             scrollback: ScrollbackRing::new(scrollback_lines, cols as usize),
         }
     }
@@ -125,9 +137,21 @@ impl Grid {
     pub fn rows(&self) -> u16 { self.rows }
     pub fn cursor(&self) -> (u16, u16) { (self.cursor_col, self.cursor_row) }
 
+    /// Translate a logical row to its physical index in `cells`.
+    #[inline]
+    fn phys_row(&self, logical: u16) -> usize {
+        let r = self.top_row as usize + logical as usize;
+        if r >= self.rows as usize {
+            r - self.rows as usize
+        } else {
+            r
+        }
+    }
+
     pub fn cell(&self, col: u16, row: u16) -> Cell {
         debug_assert!(col < self.cols && row < self.rows);
-        self.cells[row as usize * self.cols as usize + col as usize]
+        let pr = self.phys_row(row);
+        self.cells[pr * self.cols as usize + col as usize]
     }
 
     /// Clamp-and-set the cursor.  Out-of-bounds values clamp to the last
@@ -140,7 +164,8 @@ impl Grid {
     /// Overwrite a single cell.  Caller is responsible for valid coords.
     pub fn set_cell(&mut self, col: u16, row: u16, cell: Cell) {
         debug_assert!(col < self.cols && row < self.rows);
-        self.cells[row as usize * self.cols as usize + col as usize] = cell;
+        let pr = self.phys_row(row);
+        self.cells[pr * self.cols as usize + col as usize] = cell;
     }
 
     /// Scroll the visible region up by `lines`.  The displaced top rows are
@@ -151,26 +176,23 @@ impl Grid {
         if lines == 0 {
             return;
         }
-        let lines = lines.min(self.rows) as usize;
+        let lines = lines.min(self.rows);
         let cols = self.cols as usize;
-        let rows = self.rows as usize;
-
-        // 1) Push displaced top rows into scrollback in chronological order.
-        for r in 0..lines {
-            let start = r * cols;
+        // For each scrolled-out line: snapshot its data into the scrollback
+        // ring, then blank that physical row (it becomes the new bottom),
+        // then advance `top_row` so the next logical row 0 is the row that
+        // used to be logical row 1.  No rows-1 × cols memcpy any more.
+        for _ in 0..lines {
+            let pr = self.top_row as usize;
+            let start = pr * cols;
             self.scrollback.push_line(&self.cells[start..start + cols]);
-        }
-        // 2) Shift the rest up.  copy_within handles the overlapping ranges.
-        if lines < rows {
-            let shift = rows - lines;
-            let src = lines * cols;
-            let len = shift * cols;
-            self.cells.copy_within(src..src + len, 0);
-        }
-        // 3) Fill the bottom `lines` rows with `fill`.
-        let blank_start = (rows - lines) * cols;
-        for c in &mut self.cells[blank_start..] {
-            *c = fill;
+            for c in &mut self.cells[start..start + cols] {
+                *c = fill;
+            }
+            self.top_row += 1;
+            if self.top_row >= self.rows {
+                self.top_row = 0;
+            }
         }
     }
 
@@ -196,7 +218,8 @@ impl Grid {
         let old_cols = self.cols as usize;
         let new_cols = cols as usize;
         for r in 0..copy_rows {
-            let old_off = r * old_cols;
+            // Read from logical row r in the old (rotated) grid.
+            let old_off = self.phys_row(r as u16) * old_cols;
             let new_off = r * new_cols;
             new_cells[new_off..new_off + copy_cols]
                 .copy_from_slice(&self.cells[old_off..old_off + copy_cols]);
@@ -204,6 +227,8 @@ impl Grid {
         self.cells = new_cells;
         self.cols = cols;
         self.rows = rows;
+        // Reset rotation — new grid is laid out logically.
+        self.top_row = 0;
         if self.cursor_col >= cols {
             self.cursor_col = cols - 1;
         }
