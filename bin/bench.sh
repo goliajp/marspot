@@ -94,6 +94,21 @@ for trial in 1 2 3 4 5; do
     >> "$CUR_DIR/scroll.samples"
 done
 
+# Cold-cache scroll: forces disk-backed scrollback and asks the kernel
+# to evict its resident pages (madvise(DONTNEED)) before walking.
+# Measures the realistic worst case — a user returning to scrollback
+# hours after the writes, when the unified buffer cache has reclaimed
+# pages.  Catches disk-path read regressions even when memory is the
+# default (so this gate is meaningful both pre- and post-flip).
+echo "==> headless scroll-cold (disk-on, 5 trials, taking median p99)"
+: > "$CUR_DIR/scroll-cold.samples"
+for trial in 1 2 3 4 5; do
+  MARS_DISK_SCROLLBACK=1 "$ROOT/target/release/mars" \
+    --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" 2>/dev/null \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
+    >> "$CUR_DIR/scroll-cold.samples"
+done
+
 # ---- binary size + idle memory ----------------------------------------
 # Cheap (sub-second) so we can include them in the fast gate.  Catches
 # regressions like accidental dep bloat or per-session memory growth.
@@ -168,6 +183,13 @@ def load_scroll():
     if not samples: return None
     return {"p99_ns": samples[len(samples) // 2]}
 
+def load_scroll_cold():
+    p = os.path.join(cur_dir, "scroll-cold.samples")
+    if not os.path.exists(p): return None
+    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
+    if not samples: return None
+    return {"p99_ns": samples[len(samples) // 2]}
+
 def load_live(scenario):
     p = os.path.join(cur_dir, "live.json")
     if not os.path.exists(p): return None
@@ -220,6 +242,12 @@ scroll = load_scroll()
 if scroll is not None and "scroll_repaint" in baseline:
     p99_us = scroll["p99_ns"] / 1000
     check("scroll p99 (µs)", p99_us, baseline["scroll_repaint"]["p99_us_max"], lower_better=True)
+
+# Scroll-cold (disk-backed, post-MADV_DONTNEED)
+scroll_cold = load_scroll_cold()
+if scroll_cold is not None and "scroll_cold_repaint" in baseline:
+    p99_us = scroll_cold["p99_ns"] / 1000
+    check("scroll-cold p99 (µs)", p99_us, baseline["scroll_cold_repaint"]["p99_us_max"], lower_better=True)
 
 # Binary size: lower-better, ceiling = baseline value
 for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
@@ -290,6 +318,8 @@ if do_update:
         baseline["render_full_repaint"]["p99_us_max"] = round(render["p99_ns"] / 1000 * 1.10)
     if scroll is not None and "scroll_repaint" in baseline:
         baseline["scroll_repaint"]["p99_us_max"] = round(scroll["p99_ns"] / 1000 * 1.30)
+    if scroll_cold is not None and "scroll_cold_repaint" in baseline:
+        baseline["scroll_cold_repaint"]["p99_us_max"] = round(scroll_cold["p99_ns"] / 1000 * 1.30)
     # Size: 10 % ceiling above current.
     if "binary_size_bytes_max" in baseline:
         for bin_name in list(baseline["binary_size_bytes_max"].keys()):

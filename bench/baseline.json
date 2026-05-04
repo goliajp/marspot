@@ -52,6 +52,10 @@
     "_comment": "p99 ns/repaint while walking view_offset from 5000 → 0 in 3-line steps over 100K-line scroll-history.bin (--bench scroll).  Picks up MARS_DISK_SCROLLBACK so the gate tracks whichever variant is current default.  Locked 2026-05-04 against develop @ 19bc10c, env unset → memory-backed scrollback.  Median of 5 trials with run-to-run noise ~30 %; floor at 5 µs catches a ~1.7× regression on the read path.",
     "p99_us_max": 5
   },
+  "scroll_cold_repaint": {
+    "_comment": "Sister gate to scroll_repaint, forced to disk-backed (MARS_DISK_SCROLLBACK=1) and with pages evicted via madvise(DONTNEED) before the walk.  Catches disk-path regressions that the default-env scroll bench misses when memory is the default.  Locked 2026-05-04 against feature/disk-scrollback-mmap with mmap + MADV_SEQUENTIAL: cold-cache p99 measured ~3-5 µs; floor at 10 µs gives 2× headroom for thermal noise + a real regression band.",
+    "p99_us_max": 10
+  },
   "binary_size_bytes_max": {
     "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).",
     "mars": 880000,

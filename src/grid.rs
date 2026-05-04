@@ -249,6 +249,11 @@ impl Grid {
     }
     pub fn clear_scrollback(&mut self) { self.scrollback.clear(); }
 
+    /// Bench-harness escape hatch — see `Scrollback::evict_disk_pages_for_bench`.
+    pub fn evict_disk_scrollback_pages_for_bench(&self) {
+        self.scrollback.evict_disk_pages_for_bench();
+    }
+
     /// Resize the visible grid. Cells in the overlap region are preserved
     /// (top-left anchored); new area is filled with default cells; rows or
     /// columns that fall outside the new size are dropped.  Cursor clamps

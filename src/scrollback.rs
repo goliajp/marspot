@@ -135,6 +135,17 @@ impl Scrollback {
         self.len() == 0
     }
 
+    /// Bench-harness escape hatch: hint the kernel to drop the disk
+    /// scrollback's resident pages, simulating the state of a session
+    /// after long idle when the unified buffer cache has evicted
+    /// scrollback pages under memory pressure.  No-op on the Memory
+    /// variant.  Subsequent reads page-fault back from the file.
+    pub fn evict_disk_pages_for_bench(&self) {
+        if let Self::Disk(d) = self {
+            d.evict_pages_for_bench();
+        }
+    }
+
     /// Drop all content and re-init for a new column width.  Used
     /// by `Grid::resize` — stored lines aren't valid at the new
     /// width.  Preserves the variant (Memory stays Memory; Disk
@@ -383,6 +394,13 @@ impl DiskScrollback {
         if mmap_ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
+        // Hint the kernel: access pattern is sequential (downward
+        // scrolling = sequential access through disk-resident slots).
+        // Safe to ignore the return — the call is purely advisory and
+        // any failure leaves us in the default access-pattern regime.
+        unsafe {
+            libc::madvise(mmap_ptr, mmap_len, libc::MADV_SEQUENTIAL);
+        }
         let mmap_ptr = mmap_ptr as *mut u8;
 
         Ok(Self {
@@ -541,6 +559,22 @@ impl DiskScrollback {
         // beyond `disk_lines()`).  No need to zero the bytes —
         // they'll be overwritten by future spills.
         self.total_disk_lines_written = 0;
+    }
+
+    /// Hint the kernel to discard our resident pages — used by
+    /// `--bench scroll-cold` to simulate a session where the unified
+    /// buffer cache has evicted scrollback under memory pressure.
+    /// macOS treats `MADV_DONTNEED` as "drop file-backed pages, fault
+    /// back in from disk on next access" which is exactly what we
+    /// want to measure.
+    fn evict_pages_for_bench(&self) {
+        unsafe {
+            libc::madvise(
+                self.mmap_ptr as *mut libc::c_void,
+                self.mmap_len,
+                libc::MADV_DONTNEED,
+            );
+        }
     }
 }
 

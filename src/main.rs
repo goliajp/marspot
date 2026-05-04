@@ -902,7 +902,8 @@ fn run_bench(spec: &str) {
         "parse" => bench_parse(arg),
         "render" => bench_render(arg),
         "metal-render" => bench_metal_render(arg),
-        "scroll" => bench_scroll(arg),
+        "scroll" => bench_scroll(arg, /* cold */ false),
+        "scroll-cold" => bench_scroll(arg, /* cold */ true),
         other => {
             eprintln!("unknown bench mode: {other}");
             std::process::exit(2);
@@ -1090,16 +1091,24 @@ fn bench_metal_render(arg: &str) {
 /// well under one frame budget (~16 ms; the floor we enforce is much
 /// tighter).
 ///
+/// `scroll-cold` is the same harness with one extra step between
+/// feed and walk: it asks the kernel to evict the disk-backed
+/// scrollback's resident pages (`MADV_DONTNEED`) so the walk
+/// measures cold-page page-fault cost — the realistic experience of
+/// a user who returns to scrollback hours after the writes.  No-op
+/// on the Memory variant.
+///
 /// Lifecycle:
 ///   1. Construct `Terminal` (honours `MARS_DISK_SCROLLBACK` so the
 ///      same bench probes memory and disk paths).
 ///   2. Feed the scenario file to populate scrollback.
-///   3. Starting at `view_offset = start` (clamped to scrollback len),
+///   3. (cold only) madvise(DONTNEED) on the disk region.
+///   4. Starting at `view_offset = start` (clamped to scrollback len),
 ///      walk every cell in the viewport via `Grid::cell_at_view` and
 ///      time the walk.  Decrement `view_offset` by `step` and repeat
 ///      until live (offset 0).
-///   4. Report p50/p95/p99 nanoseconds per repaint.
-fn bench_scroll(arg: &str) {
+///   5. Report p50/p95/p99 nanoseconds per repaint.
+fn bench_scroll(arg: &str, cold: bool) {
     let parts: Vec<&str> = arg.split(':').collect();
     if parts.is_empty() || parts[0].is_empty() {
         eprintln!("bench: scroll expects <path>[:<start>[:<step>]]");
@@ -1120,6 +1129,9 @@ fn bench_scroll(arg: &str) {
 
     let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
     terminal.feed(&bytes);
+    if cold {
+        terminal.grid().evict_disk_scrollback_pages_for_bench();
+    }
 
     // Clamp start to the actual scrollback depth — for memory storage
     // (10 K-line ring) feeding 100 K lines leaves only the most recent
@@ -1157,8 +1169,10 @@ fn bench_scroll(arg: &str) {
         let idx = ((n as f64 - 1.0) * q).round() as usize;
         samples[idx.min(n - 1)]
     };
+    let mode_label = if cold { "scroll-cold" } else { "scroll" };
     println!(
-        r#"{{"mode":"scroll","path":"{}","ticks":{},"start_offset":{},"step":{},"sb_len":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
+        r#"{{"mode":"{}","path":"{}","ticks":{},"start_offset":{},"step":{},"sb_len":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
+        mode_label,
         path,
         n,
         actual_start,
