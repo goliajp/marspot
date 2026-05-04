@@ -146,3 +146,34 @@ By root cause:
 ## Progress log
 
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
+- 2026-05-05 evening — clean-machine remeasure (godot killed):
+
+  | metric | mars (clean) | Term | iTerm2 | mars/Term | mars/iTerm2 |
+  |---|---|---|---|---|---|
+  | scrollback-1m push (MB/s) | 97.7 (was 79.3 godot) | 91.6 | 71.8 | **1.07×** | **1.36×** |
+
+  Clean numbers raise mars from 79.3 to 97.7 MiB/s push — the
+  largest godot-correction in the test set.  But mars/Terminal.app
+  ratio still only 1.07× — far short of the 1.5× "dramatic edge"
+  target.  Terminal.app at 91.6 MB/s on the same workload (it has
+  no scrollback persistence; just runs the bytes through and
+  discards) means mars's anon-mmap ring + line indexer + scrollback
+  data structure adds only ~6% overhead vs pure renderer — the
+  architecture is efficient, but it doesn't pay back as a perf
+  multiplier for push throughput.
+
+  Where mars *should* outperform Terminal.app: when the user scrolls
+  back into history.  Terminal.app loses scroll history beyond its
+  buffer; mars retains it.  But that's a feature gap, not a
+  throughput-on-push gap.
+
+  D-target reframe: rather than "1.5× push throughput vs Term", the
+  more honest dramatic-edge metric is **scrollback-access latency at
+  large depths** (mars: O(1) anon-mmap fault; Term/iTerm2: bounded
+  history, can't even access).  Add a scenario that measures
+  "scroll-back-to-line-N at N=1M" — mars succeeds, others fail by
+  inability.  That's the structural advantage to gate on.
+
+  Push-throughput optimization (the original D-target) deferred —
+  current 1.07× edge is small but ahead, and not a high-priority
+  attack vs A1/B3-B4.

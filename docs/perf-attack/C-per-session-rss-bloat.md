@@ -160,3 +160,26 @@ Branches by root cause:
 ## Progress log
 
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
+- 2026-05-05 evening — clean-machine remeasure (godot killed):
+
+  | scenario | mars Δ (clean) | Term Δ | iTerm2 Δ |
+  |---|---|---|---|
+  | idle-9x first sample | 90 MiB (was 81 godot) | 1 | 14 |
+  | vim-jump post        | 93 MiB (was 61 godot) | 0 | 2 |
+  | htop-60s mean        | 93 MiB (was 83 godot) | 0 | 2 |
+  | active-9x-soak max   | 228 MiB (was 195 godot) | 4 | 117 |
+
+  Notable: clean numbers are *higher* than godot-session for every C
+  metric.  godot was suppressing lazy-fault commits — pages mars
+  *would have* committed during normal lazy-fault didn't get touched
+  because godot was monopolising CPU.  Clean machine shows the true
+  page-commit ramp.
+
+  Gap to Terminal.app remains 80-200 MiB across all scenarios.  C is
+  a real per-session footprint issue, not a measurement artifact.
+
+  Investigation tied to A1's --extended verification (in flight).  If
+  A1 confirms lazy-fault-into-mmap-ring as the source, C1-C4 will
+  shrink in proportion to whatever ring-sizing change lands for A1.
+  C-specific work (e.g. atlas / glyph cache slicing) deferred until
+  A1's data points it.
