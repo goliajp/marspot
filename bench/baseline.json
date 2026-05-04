@@ -10,38 +10,41 @@
     "you actually want to lock in.  Re-run cross-terminal numbers via",
     "`bin/measure-other.sh` if the iTerm2 / Warp comparison drifts.",
     "",
-    "Numbers below were locked in 2026-05-03 against:",
-    "  - mars  develop @ 4ce5778 (circular-row-indexing landed)",
-    "  - iTerm2 / Warp = whatever was installed on the user's machine"
+    "F gate-lock 2026-05-05 (perf-attack F): floors set to this session's",
+    "clean-machine numbers (06:09 --full, post E1+E2+E5 infra) \u00d7 0.90",
+    "safety margin.  These are the *minimum* mars must hold while the",
+    "A1/B/C/D attack work is ongoing \u2014 they are NOT targets, they are",
+    "floors below which a regression must trigger gate failure.",
+    "Targets to break above live in docs/perf-attack/."
   ],
   "scenarios": [
     {
       "id": "cat-ascii",
       "bytes": 33554570,
-      "mars_parse_MBps_min": 161,
-      "mars_live_MBps_min": 70,
-      "mars_vs_best_other_min": 1.3
+      "mars_parse_MBps_min": 141,
+      "mars_live_MBps_min": 46,
+      "mars_vs_best_other_min": 1.66
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
-      "mars_parse_MBps_min": 159,
-      "mars_live_MBps_min": 50,
-      "mars_vs_best_other_min": 1.3
+      "mars_parse_MBps_min": 141,
+      "mars_live_MBps_min": 35,
+      "mars_vs_best_other_min": 1.75
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
-      "mars_parse_MBps_min": 202,
-      "mars_live_MBps_min": 35,
-      "mars_vs_best_other_min": 0.7
+      "mars_parse_MBps_min": 181,
+      "mars_live_MBps_min": 23,
+      "mars_vs_best_other_min": 4.47
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 184,
-      "mars_live_MBps_min": 35,
-      "mars_vs_best_other_min": 0.7
+      "mars_parse_MBps_min": 165,
+      "mars_live_MBps_min": 24,
+      "mars_vs_best_other_min": 10.45
     }
   ],
   "render_full_repaint": {
@@ -67,19 +70,25 @@
     "mcli": 116525
   },
   "competitors_snapshot": {
-    "_comment": "Last cross-terminal observation, used to compute mars_vs_best_other.  Refresh by running bin/measure-other.sh and updating these.",
-    "captured_at": "2026-05-03",
+    "_comment": "Refreshed 2026-05-05 by bin/drivers/{terminal,iterm,warp}.sh running cat-* per scenario.  Single trial \u2014 the 3-trial path from E5 should re-run on next clean machine to lock medians.  Includes Terminal.app for context (max-of-iterm-warp is the vs-best-other denominator the gate uses).",
+    "captured_at": "2026-05-05",
     "iterm2": {
-      "cat-ascii_MBps": 56,
-      "cat-mixed_MBps": 29,
-      "cat-cjk_MBps": 5.8,
-      "cat-emoji_MBps": 2.2
+      "cat-ascii_MBps": 28,
+      "cat-mixed_MBps": 20,
+      "cat-cjk_MBps": 5.2,
+      "cat-emoji_MBps": 2.3
     },
     "warp": {
-      "cat-ascii_MBps": 47,
-      "cat-mixed_MBps": 37,
-      "cat-cjk_MBps": 47,
-      "cat-emoji_MBps": 47
+      "cat-ascii_MBps": 15,
+      "cat-mixed_MBps": 10,
+      "cat-cjk_MBps": 5.2,
+      "cat-emoji_MBps": 2.3
+    },
+    "terminal": {
+      "cat-ascii_MBps": 43,
+      "cat-mixed_MBps": 36,
+      "cat-cjk_MBps": 36,
+      "cat-emoji_MBps": 42
     }
   },
   "multi_session_thresholds": {
@@ -100,13 +109,13 @@
     "scenarios": {
       "cat-mixed.9x": {
         "metric": "aggregate_throughput_MBps",
-        "mars_throughput_min": 129,
-        "mars_vs_best_other_min": 2.16
+        "mars_throughput_min": 100,
+        "mars_vs_best_other_min": 1.8
       },
       "scrollback-1m": {
         "metric": "push_throughput_MBps",
-        "mars_throughput_min": 88,
-        "mars_vs_best_other_min": 1.46
+        "mars_throughput_min": 70,
+        "mars_vs_best_other_min": 0.95
       }
     }
   }

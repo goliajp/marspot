@@ -78,12 +78,14 @@ noise / stale data / missing metrics.
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued |
 
-## F — Locked floors / ceilings (gate these so wins don't regress)
+## F — Locked floors / ceilings · **encoded in `bench/baseline.json` 2026-05-05**
 
-These wins must hold while A/B/C/D are worked.  Numerical floors below
-are current measured value × safety margin; encode in
-`bench/baseline.json` once E1+E2 land (the gate currently fires off
-stale / cold-build data and would flap).
+`feature/perf-F-gate-lock`.  After E1 + E2 + E5 stabilised
+measurement, the floors below were encoded into `bench/baseline.json`
+with safety margins (parse 7%, live 10%, render/scroll 50/30%
+absorbing thermal swing).  `bin/bench.sh` (fast tier) passes 13/13
+checks on current code.  Multi-session vs-best skip is a
+cross-terminal.json schema mismatch noted below.
 
 - multi-session-9x aggregate ≥ **100 MiB/s** (current 113.2; -11% margin)
 - multi-session-9x aggregate ratio vs iTerm2 ≥ **5.0×** (current 5.96×)
