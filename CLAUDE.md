@@ -149,7 +149,7 @@ what's blocking and stop — don't dress it up as a menu.
 - `src/term/` — terminal emulator (VT/xterm escape parser; self-built, grown iteratively against real apps)
 - `src/render/` — Metal renderer with glyph atlas (instanced quads, custom)
 - `src/pty/` — PTY management (libc syscalls directly, no wrapper crate)
-- `src/scrollback/` — disk-backed scrollback persistence (mmap + line index)
+- `src/scrollback.rs` — disk-backed scrollback (mmap'd ring file, default-on; `MARS_DISK_SCROLLBACK=0` opts out)
 - `src/tabs/` — multi-terminal lifecycle and shared GPU resources
 
 These modules are created as features are added, not preemptively.

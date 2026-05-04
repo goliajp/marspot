@@ -25,21 +25,31 @@ use std::sync::OnceLock;
 /// every session opens a disk-backed scrollback in that directory.
 ///
 /// Source order (first hit wins):
-///   1. `MARS_DISK_SCROLLBACK` env var = explicit path → use it
-///   2. `MARS_DISK_SCROLLBACK` env var = `1` → use the default
-///      `~/Library/Caches/mars/scrollback`
-///   3. unset → no disk scrollback
+///   1. `MARS_DISK_SCROLLBACK=0` → opt out, RAM-only.  Kept for
+///      regression bisects and `$HOME`-less environments.
+///   2. `MARS_DISK_SCROLLBACK=<path>` → use that path.
+///   3. `MARS_DISK_SCROLLBACK=1` → use the default
+///      `~/Library/Caches/mars/scrollback` (alias for unset).
+///   4. unset → use the default `~/Library/Caches/mars/scrollback`.
+///
+/// Disk-backed is the default since the mmap rewrite landed —
+/// measured equivalent to the in-RAM path on parse / scroll perf
+/// while giving 26 624-line bounded history vs 10 000.
 fn disk_scrollback_dir() -> Option<&'static PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
-        let v = std::env::var("MARS_DISK_SCROLLBACK").ok()?;
-        let path = if v == "1" {
-            let home = std::env::var("HOME").ok()?;
-            PathBuf::from(home).join("Library/Caches/mars/scrollback")
-        } else {
-            PathBuf::from(v)
+        let v = std::env::var("MARS_DISK_SCROLLBACK").ok();
+        if v.as_deref() == Some("0") {
+            return None;
+        }
+        let path = match v.as_deref() {
+            Some("1") | None => {
+                let home = std::env::var("HOME").ok()?;
+                PathBuf::from(home).join("Library/Caches/mars/scrollback")
+            }
+            Some(p) => PathBuf::from(p),
         };
-        eprintln!("[mars] MARS_DISK_SCROLLBACK → {}", path.display());
+        eprintln!("[mars] disk scrollback → {}", path.display());
         // Best-effort sweep of stale files left by previous mars
         // processes that crashed / SIGKILL'd / SIGTERM'd before
         // their Drop could fire (Rust on macOS doesn't run Drop on
@@ -69,10 +79,17 @@ fn disk_scrollback_dir() -> Option<&'static PathBuf> {
     .as_ref()
 }
 
-/// In-RAM ring size when disk scrollback is active.  The renderer
-/// hits this for every `cell_at_view` past the live grid, so
-/// keeping the recent screenful in RAM avoids ever paging on
-/// typical scrollback (page-up / mouse-wheel by a few rows).
+/// In-RAM ring size when disk scrollback is active.  Front-line
+/// cache for the most-recent N lines; older history goes through
+/// the mmap'd ring.  Kept at 1024 deliberately:
+///
+/// Tried 4096 (Phase 3 of disk-scrollback default-on roadmap, see
+/// `--bench scroll`) — the larger lazy-allocated `ram_cells` Vec
+/// pays first-touch page faults on the parse hot path, costing
+/// ~3 % cat-ascii throughput.  Scroll p99 didn't improve (mmap
+/// region access is already as fast as Vec index), so the trade
+/// failed: small idle-resident upside, measurable burst-output
+/// downside.  Data on `feature/disk-scrollback-mmap` 2026-05-04.
 const DISK_SCROLLBACK_RAM_LINES: usize = 1024;
 
 /// Disk pages cap (each = 256 lines).  100 pages × 256 lines × 80
@@ -129,10 +146,9 @@ struct SavedMain {
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
-        // If MARS_DISK_SCROLLBACK is set, every session gets a
-        // disk-backed scrollback in the configured directory.  Falls
-        // back to the in-RAM ring on any error (no panic — the user
-        // just gets the bounded-RAM history).
+        // Disk-backed scrollback is default-on; set MARS_DISK_SCROLLBACK=0
+        // to opt out.  Falls back to the in-RAM ring on any disk-init
+        // error (no panic — the user just gets the bounded-RAM history).
         let scrollback = match disk_scrollback_dir() {
             Some(dir) => Scrollback::disk(
                 dir,

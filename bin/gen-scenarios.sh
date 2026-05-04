@@ -93,6 +93,27 @@ with open(out, "wb") as f:
 print(f"  {out}: {os.path.getsize(out):,} bytes")
 PY
 
+# ---- scroll-history: 100K-line synthetic shell history --------------------
+# Lightweight, deterministic content that populates the scrollback ring
+# without exercising the parser much (no escape sequences, no wide chars).
+# Used by `--bench scroll`: feed populates ~100K lines of history, then the
+# bench drives view_offset downward (toward live) and times each viewport
+# repaint.  Sized so disk-backed scrollback's 26 624-line ring sees real
+# wraparound, and memory-backed (10K-line ring) sees its full window.
+echo "==> scroll-history (100K lines)"
+python3 - "$OUT/scroll-history.bin" 100000 <<'PY'
+import sys, os
+out, n = sys.argv[1], int(sys.argv[2])
+with open(out, "wb") as f:
+    for i in range(1, n + 1):
+        # 80-col-friendly content: "line " + 6-digit zero-padded i + filler
+        # to ~70 cols → leaves room before wrap, exercises the per-cell
+        # access pattern without forcing wraps mid-line.
+        line = f"line {i:06d} {'.' * (60 - len(str(i)))}\n"
+        f.write(line.encode("ascii"))
+print(f"  {out}: {os.path.getsize(out):,} bytes ({n} lines)")
+PY
+
 echo
 echo "scenarios in $OUT"
 ls -lh "$OUT"

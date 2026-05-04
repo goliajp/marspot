@@ -877,8 +877,16 @@ fn run_snapshot(path: &str) {
 ///   render:<n>     run `n` full-frame renders against a synthetic
 ///                  worst-case grid (full coloured cells), report
 ///                  per-frame p50/p95/p99 nanoseconds
+///   scroll:<path>[:<start>[:<step>]]
+///                  feed `path` to populate scrollback, then walk
+///                  view_offset from `start` (default 5000) toward 0
+///                  in `step`-line decrements (default 3 — one wheel
+///                  detent) and time each viewport repaint via
+///                  `Grid::cell_at_view`.  Reports per-tick p50/p95/p99
+///                  nanoseconds.  Picks up `MARS_DISK_SCROLLBACK` so
+///                  the same harness can probe both storage variants.
 ///
-/// Both modes write a single line of JSON to stdout so harness scripts
+/// All modes write a single line of JSON to stdout so harness scripts
 /// can grep / parse without depending on prose formatting.
 fn run_bench(spec: &str) {
     let (mode, arg) = match spec.split_once(':') {
@@ -894,6 +902,8 @@ fn run_bench(spec: &str) {
         "parse" => bench_parse(arg),
         "render" => bench_render(arg),
         "metal-render" => bench_metal_render(arg),
+        "scroll" => bench_scroll(arg, /* cold */ false),
+        "scroll-cold" => bench_scroll(arg, /* cold */ true),
         other => {
             eprintln!("unknown bench mode: {other}");
             std::process::exit(2);
@@ -1071,6 +1081,108 @@ fn bench_metal_render(arg: &str) {
         p(0.99),
         samples[0],
         samples[samples.len() - 1],
+    );
+}
+
+/// `--bench scroll:<path>[:<start>[:<step>]]` — measure viewport repaint
+/// latency under simulated downward scrolling.  This is the read-path
+/// gate for disk-backed scrollback: the user's 99 %-case is "scroll
+/// slowly toward live", so per-tick `cell_at_view` walks must stay
+/// well under one frame budget (~16 ms; the floor we enforce is much
+/// tighter).
+///
+/// `scroll-cold` is the same harness with one extra step between
+/// feed and walk: it asks the kernel to evict the disk-backed
+/// scrollback's resident pages (`MADV_DONTNEED`) so the walk
+/// measures cold-page page-fault cost — the realistic experience of
+/// a user who returns to scrollback hours after the writes.  No-op
+/// on the Memory variant.
+///
+/// Lifecycle:
+///   1. Construct `Terminal` (honours `MARS_DISK_SCROLLBACK` so the
+///      same bench probes memory and disk paths).
+///   2. Feed the scenario file to populate scrollback.
+///   3. (cold only) madvise(DONTNEED) on the disk region.
+///   4. Starting at `view_offset = start` (clamped to scrollback len),
+///      walk every cell in the viewport via `Grid::cell_at_view` and
+///      time the walk.  Decrement `view_offset` by `step` and repeat
+///      until live (offset 0).
+///   5. Report p50/p95/p99 nanoseconds per repaint.
+fn bench_scroll(arg: &str, cold: bool) {
+    let parts: Vec<&str> = arg.split(':').collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        eprintln!("bench: scroll expects <path>[:<start>[:<step>]]");
+        std::process::exit(2);
+    }
+    let path = parts[0];
+    let start: u16 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(5000);
+    let step: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
+    if step == 0 {
+        eprintln!("bench: scroll step must be > 0");
+        std::process::exit(2);
+    }
+
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("bench: read {path}: {e}");
+        std::process::exit(2);
+    });
+
+    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+    terminal.feed(&bytes);
+    if cold {
+        terminal.grid().evict_disk_scrollback_pages_for_bench();
+    }
+
+    // Clamp start to the actual scrollback depth — for memory storage
+    // (10 K-line ring) feeding 100 K lines leaves only the most recent
+    // 10 K addressable; pretending to start past that just measures
+    // the "default cell" return path.
+    let sb_len = terminal.grid().scrollback_len() as u16;
+    let actual_start = start.min(sb_len);
+
+    // Number of ticks: floor(actual_start / step) + 1 (final tick at 0).
+    let tick_count = (actual_start as usize / step as usize) + 1;
+    let mut samples: Vec<u64> = Vec::with_capacity(tick_count);
+    let mut sink: u64 = 0;
+
+    let mut offset = actual_start;
+    loop {
+        let t0 = std::time::Instant::now();
+        for r in 0..GRID_ROWS {
+            for c in 0..GRID_COLS {
+                let cell = terminal.grid().cell_at_view(offset, c, r);
+                sink = sink.wrapping_add(cell.ch as u64);
+            }
+        }
+        samples.push(t0.elapsed().as_nanos() as u64);
+        if offset == 0 {
+            break;
+        }
+        offset = offset.saturating_sub(step);
+    }
+    // Black-hole the read sum so the optimiser can't elide the cell walk.
+    std::hint::black_box(sink);
+
+    samples.sort_unstable();
+    let n = samples.len();
+    let p = |q: f64| -> u64 {
+        let idx = ((n as f64 - 1.0) * q).round() as usize;
+        samples[idx.min(n - 1)]
+    };
+    let mode_label = if cold { "scroll-cold" } else { "scroll" };
+    println!(
+        r#"{{"mode":"{}","path":"{}","ticks":{},"start_offset":{},"step":{},"sb_len":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
+        mode_label,
+        path,
+        n,
+        actual_start,
+        step,
+        sb_len,
+        p(0.50),
+        p(0.95),
+        p(0.99),
+        samples[0],
+        samples[n - 1],
     );
 }
 
