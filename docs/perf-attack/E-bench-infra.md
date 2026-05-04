@@ -15,7 +15,13 @@ vim-jump time capture · E4 stale-marker cleanup · E5 measure-other
 
 ---
 
-## E1 — competitors_snapshot staleness guard
+## E1 — competitors_snapshot staleness guard · **DONE 2026-05-05**
+
+Landed in `feature/perf-E1-staleness-guard`.  bin/bench.sh now refuses
+to run --full mode if competitors_snapshot.captured_at is older than 7
+days; pre-flight check fires in <1s before any measurement.  BASELINE
+env var honoured for fixture-based testing.  Test:
+`bench/tests/e1-staleness.sh` (~1s; synthesises 30-day-old fixture).
 
 ### What's broken
 

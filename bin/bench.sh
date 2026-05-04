@@ -22,7 +22,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BASELINE="$ROOT/bench/baseline.json"
+# BASELINE is overridable via env so tests can point at synthesised
+# fixture baselines without touching the real one.
+BASELINE="${BASELINE:-$ROOT/bench/baseline.json}"
 SCENARIOS_DIR="$ROOT/bench/scenarios"
 
 MODE=fast
@@ -41,6 +43,38 @@ done
 if [[ ! -f "$BASELINE" ]]; then
   echo "missing $BASELINE" >&2
   exit 2
+fi
+
+# Pre-flight: in --full mode the gate computes vs-best-other ratios
+# from baseline.competitors_snapshot.  Refuse to run if that snapshot
+# is stale (>7 days), otherwise silently-stale numbers can flip the
+# gate verdict (perf-attack E1).  Fast tier doesn't use this snapshot
+# so the check is mode-gated.
+if [[ $MODE == "full" ]]; then
+  python3 - "$BASELINE" <<'PY' || exit 2
+import json, sys, datetime
+b = json.load(open(sys.argv[1]))
+captured = b.get("competitors_snapshot", {}).get("captured_at")
+if not captured:
+    print("competitors_snapshot.captured_at missing — refresh via "
+          "bin/measure-other.sh and set captured_at in baseline.json.",
+          file=sys.stderr)
+    sys.exit(2)
+try:
+    cap = datetime.date.fromisoformat(captured)
+except ValueError as e:
+    print(f"competitors_snapshot.captured_at unparseable ({captured!r}): {e}",
+          file=sys.stderr)
+    sys.exit(2)
+age = (datetime.date.today() - cap).days
+if age > 7:
+    print(f"competitors_snapshot is stale: {age} days old (limit 7).",
+          file=sys.stderr)
+    print(f"Refresh via bin/measure-other.sh, then update "
+          f"competitors_snapshot.captured_at in {sys.argv[1]}.",
+          file=sys.stderr)
+    sys.exit(2)
+PY
 fi
 
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).

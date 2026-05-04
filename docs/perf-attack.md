@@ -71,7 +71,7 @@ noise / stale data / missing metrics.
 
 | ID | Item | File | Status |
 |---|---|---|---|
-| E1 | competitors_snapshot staleness guard | [E](perf-attack/E-bench-infra.md) | queued |
+| E1 | competitors_snapshot staleness guard | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E1-staleness-guard`) |
 | E2 | fast-gate warm-up trial | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E2-warmup`) |
 | E3 | vim-jump cross-term wall-time capture | [E](perf-attack/E-bench-infra.md) | queued |
 | E4 | measure-other.sh stale-marker cleanup | [E](perf-attack/E-bench-infra.md) | queued |
