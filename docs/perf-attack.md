@@ -33,17 +33,24 @@ Status legend: `queued` / `active` / `blocked` / `done`.
 | A1 | active-9x-soak RSS drift FAIL | q4/q1=2.11×, +123 MiB / 5 min | drift ≤ 1.10×, abs Δ ≤ 30 MiB | [A1](perf-attack/A1-soak-rss-drift.md) | queued |
 | A2 | CPU drift gate appears mis-keyed | gate marks 2.40× as ✓ vs threshold 2.0× | gate logic verified + drift ≤ 1.5× | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued |
 
-### B — Live cat-* single-cell regression vs floor + thin/lost lead
+### B — Live cat-* single-cell — **B1/B2 retracted as measurement artifact, B3/B4 still active**
 
-Shared bisect investigation across 88 commits since baseline lock; one
-file, four sub-targets.
+2026-05-05 evening: clean-machine remeasure (godot processes killed)
+showed all cat-* live numbers were ~30% slower under godot CPU
+contention.  B1 and B2 originally read 51.6 / 39.0 (vs Term 1.21× /
+1.10×); on clean machine they read **71.1 / 51.6** (vs Term **1.49× /
+1.23×**) — comfortably above the original floors and ahead of all
+competitors.  No regression.
 
-| ID | Metric | Current | Target | File | Status |
+B3 (cat-cjk) and B4 (cat-emoji) are smaller losses than first read but
+still real: mars vs Apple's CoreText/CJK and Apple Color Emoji paths.
+
+| ID | Metric | Clean current | Target | File | Status |
 |---|---|---|---|---|---|
-| B1 | live cat-ascii (MB/s) | 51.6 (vs floor 70, vs Term 1.21×) | ≥ 70 AND ratio ≥ 1.5× Term | [B](perf-attack/B-live-cat-regression.md) | queued |
-| B2 | live cat-mixed | 39.0 (vs floor 50, vs Term 1.10×) | ≥ 50 AND ratio ≥ 1.4× Term | [B](perf-attack/B-live-cat-regression.md) | queued |
-| B3 | live cat-cjk | 25.8 (vs floor 35, vs Term 0.71× — losing) | ≥ 35 AND ratio ≥ 1.2× Term | [B](perf-attack/B-live-cat-regression.md) | queued |
-| B4 | live cat-emoji | 26.7 (vs floor 35, vs Term 0.63× — losing) | ≥ 35 AND ratio ≥ 1.0× Term | [B](perf-attack/B-live-cat-regression.md) | queued |
+| B1 | live cat-ascii (MB/s) | 71.1 (vs Term 1.49×, iTerm 1.27×) | ≥ 70 ✓ already | [B](perf-attack/B-live-cat-regression.md) | **resolved 2026-05-05** (was godot artifact) |
+| B2 | live cat-mixed | 51.6 (vs Term 1.23×, iTerm 1.84×) | ≥ 50 ✓ already | [B](perf-attack/B-live-cat-regression.md) | **resolved 2026-05-05** (was godot artifact) |
+| B3 | live cat-cjk | 36.4 (vs Term 0.86×, **vs Warp 0.77× — losing**) | ≥ 42 (1.0× Term) AND ≥ 47 (1.0× Warp) | [B](perf-attack/B-live-cat-regression.md) | queued |
+| B4 | live cat-emoji | 42.1 (vs Term 0.84× — losing, vs Warp 0.95×) | ≥ 50 (1.0× Term) | [B](perf-attack/B-live-cat-regression.md) | queued |
 
 ### C — Per-session RSS bloat vs Terminal.app
 
@@ -78,14 +85,19 @@ noise / stale data / missing metrics.
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued |
 
-## F — Locked floors / ceilings · **encoded in `bench/baseline.json` 2026-05-05**
+## F — Locked floors / ceilings · **recalibrated to clean-machine 2026-05-05**
 
-`feature/perf-F-gate-lock`.  After E1 + E2 + E5 stabilised
-measurement, the floors below were encoded into `bench/baseline.json`
-with safety margins (parse 7%, live 10%, render/scroll 50/30%
-absorbing thermal swing).  `bin/bench.sh` (fast tier) passes 13/13
-checks on current code.  Multi-session vs-best skip is a
-cross-terminal.json schema mismatch noted below.
+`feature/perf-F-recalibrate-clean`.  Initial F-floors (`feature/perf-F-gate-lock`)
+were calibrated against godot-loaded numbers (~30% slow); recalibrated
+on clean machine after godot was killed.  Floors now reflect clean-
+machine reality with safety margins (parse 7%, live 10%, render/scroll
+50/30% thermal swing).  `bin/bench.sh` (fast tier) passes 13/13 with
+moderate margin on current code.
+
+Lesson: **always verify machine state before locking perf floors.**
+godot at ~500% CPU made every cat-* measurement under-state by 30%.
+The earlier "regression" diagnosis (B1/B2) was contamination, not a
+real perf change.
 
 - multi-session-9x aggregate ≥ **100 MiB/s** (current 113.2; -11% margin)
 - multi-session-9x aggregate ratio vs iTerm2 ≥ **5.0×** (current 5.96×)

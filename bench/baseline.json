@@ -3,48 +3,49 @@
     "Baseline numbers for bin/bench.sh.  Each scenario gets two floors",
     "(mars_parse_MBps and mars_live_MBps) plus a vs-best-other ratio.",
     "If a current measurement falls below the floor, the gate fails.",
-    "Tolerances bake observed run-to-run noise (~5% headless, ~10% live)",
+    "Tolerances bake observed run-to-run noise (~5-8% headless, ~10% live)",
     "into the floor so the gate doesn't flap on identical code.",
     "",
     "Re-baseline: run `bin/bench.sh --update-baseline` after a change",
     "you actually want to lock in.  Re-run cross-terminal numbers via",
-    "`bin/measure-other.sh` if the iTerm2 / Warp comparison drifts.",
+    "`bin/measure-other.sh` (now 3-trial median per E5) if the iTerm2 /",
+    "Warp comparison drifts.",
     "",
-    "F gate-lock 2026-05-05 (perf-attack F): floors set to this session's",
-    "clean-machine numbers (06:09 --full, post E1+E2+E5 infra) \u00d7 0.90",
-    "safety margin.  These are the *minimum* mars must hold while the",
-    "A1/B/C/D attack work is ongoing \u2014 they are NOT targets, they are",
-    "floors below which a regression must trigger gate failure.",
-    "Targets to break above live in docs/perf-attack/."
+    "F gate-lock 2026-05-05 (perf-attack F): clean-machine numbers from",
+    "bench-run + measure-other (3-trial), \u00d7 0.93 (parse) / 0.90 (live,",
+    "ratios) safety margin.  Earlier same-day floors were over-loose due",
+    "to godot CPU contention skewing measurements ~30% slower than truth.",
+    "These are the *minimum* mars must hold while A/B/C/D attack work is",
+    "ongoing; targets to break above live in docs/perf-attack/."
   ],
   "scenarios": [
     {
       "id": "cat-ascii",
       "bytes": 33554570,
-      "mars_parse_MBps_min": 141,
-      "mars_live_MBps_min": 46,
-      "mars_vs_best_other_min": 1.66
+      "mars_parse_MBps_min": 160,
+      "mars_live_MBps_min": 64,
+      "mars_vs_best_other_min": 1.14
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
-      "mars_parse_MBps_min": 141,
-      "mars_live_MBps_min": 35,
-      "mars_vs_best_other_min": 1.75
+      "mars_parse_MBps_min": 159,
+      "mars_live_MBps_min": 46,
+      "mars_vs_best_other_min": 1.19
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
-      "mars_parse_MBps_min": 181,
-      "mars_live_MBps_min": 23,
-      "mars_vs_best_other_min": 4.47
+      "mars_parse_MBps_min": 200,
+      "mars_live_MBps_min": 33,
+      "mars_vs_best_other_min": 0.7
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 165,
-      "mars_live_MBps_min": 24,
-      "mars_vs_best_other_min": 10.45
+      "mars_parse_MBps_min": 183,
+      "mars_live_MBps_min": 38,
+      "mars_vs_best_other_min": 0.85
     }
   ],
   "render_full_repaint": {
@@ -70,25 +71,25 @@
     "mcli": 116525
   },
   "competitors_snapshot": {
-    "_comment": "Refreshed 2026-05-05 by bin/drivers/{terminal,iterm,warp}.sh running cat-* per scenario.  Single trial \u2014 the 3-trial path from E5 should re-run on next clean machine to lock medians.  Includes Terminal.app for context (max-of-iterm-warp is the vs-best-other denominator the gate uses).",
+    "_comment": "3-trial median, clean-machine, 2026-05-05.  measure-other.sh with TRIALS=3 + auto-driven via bin/drivers/<term>.sh.  Includes Terminal.app for context (max-of-iterm-warp is the vs-best-other denominator the gate uses; Terminal.app is OS-vendor floor, not 'competitor').",
     "captured_at": "2026-05-05",
     "iterm2": {
-      "cat-ascii_MBps": 28,
-      "cat-mixed_MBps": 20,
-      "cat-cjk_MBps": 5.2,
-      "cat-emoji_MBps": 2.3
+      "cat-ascii_MBps": 56.1,
+      "cat-mixed_MBps": 28.1,
+      "cat-cjk_MBps": 5.7,
+      "cat-emoji_MBps": 2.4
     },
     "warp": {
-      "cat-ascii_MBps": 15,
-      "cat-mixed_MBps": 10,
-      "cat-cjk_MBps": 5.2,
-      "cat-emoji_MBps": 2.3
+      "cat-ascii_MBps": 47.8,
+      "cat-mixed_MBps": 39.0,
+      "cat-cjk_MBps": 47.1,
+      "cat-emoji_MBps": 44.4
     },
     "terminal": {
-      "cat-ascii_MBps": 43,
-      "cat-mixed_MBps": 36,
-      "cat-cjk_MBps": 36,
-      "cat-emoji_MBps": 42
+      "cat-ascii_MBps": 47.8,
+      "cat-mixed_MBps": 42.1,
+      "cat-cjk_MBps": 42.1,
+      "cat-emoji_MBps": 50.0
     }
   },
   "multi_session_thresholds": {
