@@ -272,6 +272,63 @@ for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
     median = samples[len(samples) // 2]
     check(f"rss  {bin_name:6} (KiB)", median, ceiling, lower_better=True)
 
+# Multi-session vs-best-other ratio gate (the structural protection
+# against silent competitive slippage — mars and competitors can both
+# slow down and the parse/render gate would still pass; this catches
+# it).  Reads the latest bench-run.sh snapshot (cross-terminal.json
+# symlink); doesn't run anything itself.  Sub-millisecond.
+multi_cfg = baseline.get("multi_session_thresholds")
+if multi_cfg:
+    snap_path = os.path.join(os.path.dirname(baseline_path), "..", "bench", "results", "cross-terminal.json")
+    snap_path = os.path.normpath(snap_path)
+    snap = None
+    snap_age_hours = None
+    if os.path.exists(snap_path):
+        try:
+            snap = json.load(open(snap_path))
+            mtime = os.path.getmtime(snap_path)
+            import datetime, time
+            snap_age_hours = (time.time() - mtime) / 3600.0
+        except Exception:
+            snap = None
+
+    max_age = multi_cfg.get("snapshot_max_age_hours", 168)
+    if snap is None:
+        results["fail"].append((
+            "fail",
+            "multi-session snapshot",
+            "missing",
+            "bench-run.sh first",
+        ))
+    elif snap_age_hours is not None and snap_age_hours > max_age:
+        results["fail"].append((
+            "fail",
+            "multi-session snapshot",
+            f"{snap_age_hours:.0f}h old",
+            f"≤{max_age}h",
+        ))
+    else:
+        for sid, cfg in multi_cfg.get("scenarios", {}).items():
+            metric = cfg["metric"]
+            scen = snap.get("scenarios", {}).get(sid, {})
+            mars_v = scen.get("mars", {}).get("metrics", {}).get(metric)
+            others = []
+            for tid in ("iterm", "terminal"):
+                v = scen.get(tid, {}).get("metrics", {}).get(metric)
+                if v is not None:
+                    others.append(v)
+            if mars_v is None or not others:
+                results["pass"].append((
+                    "skip",
+                    f"vs-best {sid:14}",
+                    "no data",
+                    None,
+                ))
+                continue
+            check(f"throughput {sid:10}", mars_v, cfg["mars_throughput_min"])
+            ratio = mars_v / max(others)
+            check(f"vs-best   {sid:10}", ratio, cfg["mars_vs_best_other_min"])
+
 # Print
 print()
 header = f"{'metric':<24} {'current':>10} {'floor':>10}   {'verdict'}"
@@ -338,6 +395,24 @@ if do_update:
                 if samples:
                     median = samples[len(samples) // 2]
                     baseline["memory_idle_kb_max"][bin_name] = round(median * 1.20)
+    # Multi-session thresholds: refresh from latest cross-terminal.json
+    # snapshot.  10 % safety margin on mars throughput AND on the
+    # vs-best ratio — the ratio is what protects against silent slip,
+    # so re-locking it from the same observation is the right move.
+    multi_cfg = baseline.get("multi_session_thresholds")
+    if multi_cfg and snap is not None:
+        for sid, cfg in multi_cfg.get("scenarios", {}).items():
+            metric = cfg["metric"]
+            scen = snap.get("scenarios", {}).get(sid, {})
+            mars_v = scen.get("mars", {}).get("metrics", {}).get(metric)
+            others = []
+            for tid in ("iterm", "terminal"):
+                v = scen.get(tid, {}).get("metrics", {}).get(metric)
+                if v is not None:
+                    others.append(v)
+            if mars_v is not None and others:
+                cfg["mars_throughput_min"] = round(mars_v * 0.90)
+                cfg["mars_vs_best_other_min"] = round(mars_v / max(others) * 0.90, 2)
     json.dump(baseline, open(baseline_path, "w"), indent=2)
     print("==> wrote", baseline_path)
 

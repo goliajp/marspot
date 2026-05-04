@@ -144,9 +144,9 @@ slow path; the slow path is parser-internal.
 | cat-mixed (16 MB) | **67 MB/s** | 29 MB/s | 37 MB/s | **1.8×** faster |
 | cat-cjk   (8 MB)  | **50 MB/s** | 5.8 MB/s | 47 MB/s | **1.06×** faster |
 | cat-emoji (8 MB)  | 44 MB/s | 2.2 MB/s | **47 MB/s** | 0.94× — Warp slightly ahead |
-| vim-jump  | _ | _ | _ | _ |
-| htop-60s (avg CPU) | _ | _ | _ | _ |
-| scroll-10k | _ | _ | _ | _ |
+| vim-jump | _ — cross-terminal driver bug, mars-only 1.23 s, see below | | | follow-up |
+| htop-60s (CPU mean) | see Multi-session section — mars 0.0% vs iTerm2 17.8% vs Term.app 0.0% | | | win |
+| scroll-10k | _ — deferred (wheel events not scriptable cross-terminal, see docs/bench.md) | | | n/a |
 
 **Headline:** mars wins 3 of 4 scenarios outright.  vs iTerm2 the gap
 on text-heavy CJK / emoji is **an order of magnitude or more** (iTerm2
@@ -184,10 +184,21 @@ that distinguishes the product. Captured by `bin/bench-run.sh`,
 schema in `docs/bench.md`, drivers track per-window IDs so the user's
 existing iTerm2 / Terminal.app windows are never disturbed.
 
-Numbers below are single-trial on the dev machine
-(Apple M4 Pro, 64 GB RAM, macOS 26.4.1) at run id
-`20260504-021406-828b55a`. Re-run via `bin/bench-run.sh --quick` to
-refresh; full matrix takes ~3 min.
+Numbers below are from run id `20260504-141951-ea25e62` — the first
+single-trial sweep after the **scrollback anon-mmap fix** landed
+2026-05-04. The fix replaced the file-backed mmap (file→anon COW on
+every first page write) with anonymous mmap; anon pages still page
+out under memory pressure (now to swap rather than the file), so
+the bounded-forever architecture is preserved.  Surfaces as a
++48 % multi-session-9x throughput improvement and recovers the
+~10 % parse-path regression that built up across the disk-scrollback
+phase work — see "Multi-session-9x" below for before/after.
+
+Single-trial numbers vary 10-20 % with machine thermal / open-app
+state; for headline / lock-the-floor work always run
+`bin/bench-run.sh` ≥3 times and median outside the harness.  Re-run
+to refresh; the bench gate (`bin/bench.sh`) consumes the latest
+snapshot symlinked at `bench/results/cross-terminal.json`.
 
 ### Multi-session-9x (cat-mixed × 9 parallel sessions)
 
@@ -198,35 +209,52 @@ fast does the terminal drain when 9 sessions are all spewing."
 
 | Terminal     | Wall    | Aggregate throughput | RSS Δ peak | mars / this |
 |--------------|---------|---------------------:|-----------:|------------:|
-| **mars**     | 1.2 s   | **119.2 MiB/s**      | 178 MiB    | —           |
-| Terminal.app | 2.2 s   | 65.9 MiB/s           | 0 MiB      | **1.81×**   |
-| iTerm2       | 7.5 s   | 19.1 MiB/s           | 448 MiB    | **6.24×**   |
+| **mars**     | 1.00 s  | **143.6 MiB/s**      | 14 MiB     | —           |
+| Terminal.app | 2.41 s  | 59.9 MiB/s           | 228 MiB    | **2.40×**   |
+| iTerm2       | 7.84 s  | 18.4 MiB/s           | 1710 MiB   | **7.80×**   |
 
-mars is **1.8× faster than Terminal.app**, **6.2× faster than iTerm2**.
-RSS is on the same order as Terminal.app (small) and 2.5× lighter
-than iTerm2.
+mars is **2.40× faster than Terminal.app** and **7.8× faster than
+iTerm2**.  RSS at peak is 16× lighter than Terminal.app and 122×
+lighter than iTerm2 — anon mmap with lazy commit means we only
+fault pages that are actually written during the run; in this
+single-trial 1 s scenario most ring slots stay un-touched.
+
+**Disk-path regression history (resolved 2026-05-04).** Earlier
+disk-scrollback Phase work used a file-backed mmap (MAP_SHARED →
+MAP_PRIVATE on a scratch file); the file→anon COW on first write
+to each page surfaced as ~6 % multi-session-9x and 5-15 % single-
+session parse regressions vs the pre-disk-scrollback baseline.
+Switching the mmap backing to `MAP_ANON | MAP_PRIVATE` (-1 fd, no
+file involved) eliminated both: the kernel's swap path handles
+eviction-on-pressure with the same outcome as the file path did,
+without the COW step.  Pre-fix disk-on multi-session-9x median (3
+trials): 96.7 MiB/s; post-fix (this snapshot): 143.6 MiB/s — a
+**+48 % improvement**, vs-Terminal ratio +50 %.  See `src/scrollback.rs`
+DiskScrollback::new comment block.
 
 ### Scrollback-1m (1 M lines, ~96 MiB) — single session
 
 Push 1 000 000 numbered lines into one session. mars uses mcli
 (single-session) since `mars` auto-spawns 9.
 
-| Terminal       | Push time | Throughput     | RSS Δ post |
-|----------------|-----------|---------------:|-----------:|
-| **mars (mcli)**| 0.94 s    | **85.2 MiB/s** | n/a (mcli exited) |
-| Terminal.app   | 1.09 s    | 73.6 MiB/s     | 3 MiB      |
-| iTerm2         | 1.47 s    | 54.6 MiB/s     | 40 MiB     |
+| Terminal       | Push throughput | RSS Δ post |
+|----------------|----------------:|-----------:|
+| **mars (mcli)**| **97.7 MiB/s**  | n/a (mcli exited) |
+| Terminal.app   | 54.5 MiB/s      | 12 MiB     |
+| iTerm2         | 60.2 MiB/s      | 31 MiB     |
 
-mars is **1.16× faster than Terminal.app**, **1.56× faster than iTerm2**.
-Disk-backed scrollback is now default-on (`MARS_DISK_SCROLLBACK=0`
-opts out for regression bisects); a single mmap'd ring file at
+mars is **1.62× faster than iTerm2**, **1.79× faster than Terminal.app**.
+Disk-backed scrollback is default-on (`MARS_DISK_SCROLLBACK=0` opts
+out for regression bisects); a single mmap'd ring file at
 `~/Library/Caches/mars/scrollback` holds ~26 K lines per session.
-The CLAUDE.md-mandated soak (`soak_disk_scrollback_bounded_under_million_lines`)
-asserts RSS growth < 5 MiB and disk file growth = 0 after 1 M lines —
-the bounded-forever architecture commitment.  Disk path matches
-memory path on parse / scroll perf within 2-3 % (within
-run-to-run noise) thanks to the unified mmap region: writes are
-direct memcpy, reads are slice access, kernel page cache is the LRU.
+Per the bounded-forever commitment, soak test
+`soak_disk_scrollback_bounded_under_million_lines` asserts RSS growth
+< 5 MiB and disk file growth = 0 after 1 M lines.  Single-session
+disk path is throughput parity with the legacy memory path (writes
+are direct memcpy through the mmap region, reads are slice access,
+kernel page cache is the LRU).  Multi-session is the regime where
+disk path costs measurable overhead — see the multi-session-9x note
+above.
 
 ### Idle-9x (60 s, 9 idle sessions)
 
@@ -237,9 +265,9 @@ RSS Δ > 1.10 × first-quarter-mean RSS Δ.
 
 | Terminal     | CPU mean | CPU max | RSS drift q4/q1 | Gate     |
 |--------------|---------:|--------:|----------------:|----------|
-| **mars**     | **0.0 %**| 0.0 %   | 1.000×          | ✓        |
-| Terminal.app | 0.03 %   | 0.4 %   | (essentially flat) | ✓     |
-| iTerm2       | **26.0 %**| **30.5 %** | (noisy)      | **✗ FAIL** |
+| **mars**     | **0.11 %**| 3.7 %  | 1.020×          | ✓        |
+| Terminal.app | 0.01 %   | 0.4 %   | 1.000×          | ✓        |
+| iTerm2       | **21.44 %**| **37.6 %** | 0.83× (noisy) | **✗ FAIL** |
 
 iTerm2's CPU figure is partly attributable to the user's pre-existing
 windows (single iTerm2 process — we can't separate "9 new idle windows"
@@ -250,6 +278,50 @@ adding 9 iTerm2 windows palpably does not.
 
 For longer / harder soak: `bin/scenarios/idle-9x.sh mars <out> --extended`
 runs 30 minutes — the right invocation before declaring a release.
+
+### htop-60s (sustained periodic full-screen redraw)
+
+Run `htop` in one window for 60 s, sample CPU + RSS at 1 Hz.  This
+catches anything that turns periodic-full-redraw into a CPU sink.
+
+| Terminal     | CPU mean | CPU max | RSS Δ max |
+|--------------|---------:|--------:|----------:|
+| **mars**     | **0.0 %**| 0.1 %   | 86 MiB    |
+| Terminal.app | 0.0 %    | 0.0 %   | 9 MiB     |
+| iTerm2       | **17.8 %**| 36.6 % | 5 MiB     |
+
+mars and Terminal.app are essentially zero — htop's once-per-second
+full repaint never escapes the dirty-skip / coalescing path.
+iTerm2 burns 17.8 % CPU mean / 36.6 % peak just rendering an idle
+htop screen, the same architectural gap visible in idle-9x.
+
+### vim-jump (escape-density + scroll stress)
+
+`vim -u NONE -S jump.vim 50000-line.txt` — script does
+`G / redraw / sleep 300ms / gg / redraw / sleep 300ms` × 2 then
+quit.  Stresses cursor-move + scroll redraw + syntax-highlight
+escape-density.  Drives vim entirely via `-c` script — no
+keystrokes injected.
+
+| Terminal     | Wall    | RSS Δ post |
+|--------------|--------:|-----------:|
+| **mars**     | 1.23 s  | 95 MiB     |
+| iTerm2       | _       | 1 MiB      |
+| Terminal.app | _       | 8 MiB      |
+
+**Cross-terminal numbers pending:** the iterm / terminal drivers
+inject the worker via AppleScript `write text`, but vim's
+`redraw / sleep / quit` script doesn't reliably write its `time -p`
+timing file when run that way (RSS deltas suggest vim ran briefly
+or not at all).  Tracked as a follow-up driver fix; for now the
+vim-jump scenario is mars-only.
+
+### scroll-10k (deferred)
+
+`docs/bench.md` notes scroll-10k as "partial — wheel events not
+scriptable cross-term."  Until we either build a hardware-keystroke
+runner (CGEvent) or accept manual paste, this scenario stays out of
+the gate.  Logged so it isn't forgotten.
 
 ### Typing-latency (mars-only)
 
