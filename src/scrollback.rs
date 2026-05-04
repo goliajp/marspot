@@ -2,44 +2,27 @@
 //! visible grid.
 //!
 //! `Scrollback` is the abstraction `Grid` calls into: append a line,
-//! ask for one back by reverse-index, drop the lot.  The current
-//! implementation is in-memory only (a fixed-cap ring buffer); the
-//! interface is shaped so a disk-backed variant can drop in behind
-//! it without touching `Grid` or the renderer.
+//! ask for one back by reverse-index, drop the lot.  Two enum-
+//! dispatched variants — `Memory` (a fixed-cap `Vec<Cell>` ring) and
+//! `Disk` (a fixed-cap anonymous-mmap ring).  Both bound RSS forever;
+//! the `Disk` variant trades a one-time 50 MiB virtual reservation
+//! per session for kernel-managed eviction-via-swap under memory
+//! pressure, so 1 M+ lines of history don't translate into 1 M+ lines
+//! of resident pages.
 //!
-//! ## Why this lives in its own module
+//! ## Why "Disk" is named that
 //!
-//! Two upcoming changes — disk-backed unlimited history and a page
-//! cache for the disk path — both need to swap the storage out
-//! without disturbing the cell-level `Grid` API.  Pulling the trait
-//! out now lets the next session focus on the disk implementation
-//! against a stable interface, and lets the renderer keep using
-//! `Grid::cell_at_view` unchanged.
-//!
-//! ## What the disk-backed variant will look like (next session)
-//!
-//! Sketch, not implemented here:
-//!
-//!   * Recent N lines (~1024) live in a `MemoryScrollback` ring,
-//!     fast-path for the common "scrolled up a screen or two" case.
-//!   * Older lines append-log to
-//!     `~/Library/Caches/mars/<session-id>.log`, fixed-size pages
-//!     (256 lines × cols × 16 B ≈ 128 KiB).
-//!   * Page index in RAM: `Vec<u64>` of file offsets.  ~8 B per
-//!     page → 8 KB for 1 M lines.
-//!   * Page cache: small LRU (4-8 pages) in RAM so consecutive
-//!     reads in the same neighbourhood don't re-seek.
-//!   * Cap: file truncates at e.g. 100 MiB; oldest pages dropped
-//!     by rebuilding the file with the surviving tail.
-//!
-//! Production-grade disk scrollback wants atomic page writes,
-//! crash recovery, and bounded growth — all reasons it deserves
-//! its own focused session rather than tacking on to a long one.
+//! Historical: an earlier implementation backed the ring with a
+//! file in `~/Library/Caches/mars/scrollback`, leaning on the
+//! kernel's unified buffer cache to evict pages back to that file
+//! under memory pressure.  Anonymous mmap (this version) does the
+//! same eviction via swap rather than a named file — bypassing the
+//! file-COW step that surfaced as ~10 % parse-throughput regression
+//! in the file-backed era.  The "Disk" name stays because the
+//! eviction target still _is_ disk (kernel swap), even though the
+//! file system layer is no longer involved.
 
 use crate::grid::Cell;
-use std::fs::{File, OpenOptions};
-use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
 
 /// Lines per disk page.  Page is the read-cache and ring-rotation
 /// granularity.  256 lines × 80 cols × 24 B/cell ≈ 480 KiB per page.
@@ -61,21 +44,18 @@ impl Scrollback {
         Self::Memory(MemoryScrollback::new(capacity, cols))
     }
 
-    /// Disk-backed scrollback.  Recent `ram_capacity` lines live in
-    /// RAM; older ones spill to a fixed-size ring file at
-    /// `scratch_dir/<unique>.log`.  Total cap (RAM + disk combined)
-    /// is `ram_capacity + max_pages_on_disk * LINES_PER_PAGE`.
-    /// Caller picks `scratch_dir` (typically `~/Library/Caches/mars/scrollback`
-    /// in production, `std::env::temp_dir()` in tests).  File is
-    /// deleted on Drop.
+    /// Disk-backed scrollback (anonymous mmap; see module-level doc).
+    /// Total cap = `ram_capacity + max_pages_on_disk * LINES_PER_PAGE`
+    /// lines.  The two-arg shape (rather than a single `max_lines`)
+    /// is preserved so `restart()` can rebuild the same ring shape
+    /// after a column-width change — `max_lines = a + b` doesn't
+    /// uniquely recover (`a`, `b`).
     pub fn disk(
-        scratch_dir: &Path,
         ram_capacity: usize,
         max_pages_on_disk: usize,
         cols: usize,
     ) -> std::io::Result<Self> {
         Ok(Self::Disk(DiskScrollback::new(
-            scratch_dir,
             ram_capacity,
             max_pages_on_disk,
             cols,
@@ -149,20 +129,18 @@ impl Scrollback {
     /// Drop all content and re-init for a new column width.  Used
     /// by `Grid::resize` — stored lines aren't valid at the new
     /// width.  Preserves the variant (Memory stays Memory; Disk
-    /// makes a fresh file in the same scratch dir, falling back to
-    /// Memory if the new file can't be created).
+    /// remaps a fresh anonymous ring at the same shape, falling
+    /// back to Memory only on the pathological case where mmap
+    /// itself fails).
     pub fn restart(&mut self, new_cols: usize) {
         let placeholder = std::mem::replace(self, Self::Memory(MemoryScrollback::new(0, 1)));
         *self = match placeholder {
             Self::Memory(m) => Self::Memory(MemoryScrollback::new(m.capacity, new_cols)),
             Self::Disk(d) => {
-                let scratch_dir = d.path.parent().map(|p| p.to_path_buf());
                 let ram_cap = d.init_ram_capacity;
                 let max_pages = d.init_max_pages_on_disk;
-                drop(d); // triggers Drop → deletes old file
-                match scratch_dir.and_then(|dir| {
-                    DiskScrollback::new(&dir, ram_cap, max_pages, new_cols).ok()
-                }) {
+                drop(d); // triggers Drop → munmap
+                match DiskScrollback::new(ram_cap, max_pages, new_cols).ok() {
                     Some(new_d) => Self::Disk(new_d),
                     None => Self::Memory(MemoryScrollback::new(ram_cap, new_cols)),
                 }
@@ -270,19 +248,19 @@ impl MemoryScrollback {
 }
 
 // =====================================================================
-// DiskScrollback — RAM ring + page-aligned ring file on disk.
+// DiskScrollback — anonymous mmap ring (kernel swap = "disk").
 // =====================================================================
 
 /// Disk-backed scrollback for unbounded history — single mmap'd
-/// ring, no separate RAM tier.
+/// ring of anonymous pages, no separate RAM tier, no scratch file.
 ///
-/// Layout: one fixed-size `mmap_len`-byte file, mapped into our
-/// address space and treated as a flat ring of `max_lines` slots
-/// each `line_bytes` wide.  `push_line` does one `memcpy` into
-/// slot `(global % max_lines)`.  `cell_at` reads back via a slice
-/// over the same offset.  Once `total_lines_written` exceeds
-/// `max_lines`, the oldest slot gets overwritten in place and that
-/// line falls off the addressable index.
+/// Layout: one fixed-size `mmap_len`-byte anonymous region, treated
+/// as a flat ring of `max_lines` slots each `line_bytes` wide.
+/// `push_line` does one `memcpy` into slot `(global % max_lines)`.
+/// `cell_at` reads back via a slice over the same offset.  Once
+/// `total_lines_written` exceeds `max_lines`, the oldest slot gets
+/// overwritten in place and that line falls off the addressable
+/// index.
 ///
 /// Why one tier and not two: this used to be `RAM ring + disk
 /// ring`, with the RAM ring serving as a fast-path cache for
@@ -297,28 +275,22 @@ impl MemoryScrollback {
 /// cat-ascii parse throughput.  Phase 4a deleted the RAM tier
 /// and gave parse parity with memory-only — see commit message.
 ///
-/// Bounded growth (per CLAUDE.md): file is fixed-size.  Past
-/// `max_lines`, oldest slots get overwritten and dropped lines
+/// Bounded growth (per CLAUDE.md): the mmap region is fixed-size.
+/// Past `max_lines`, oldest slots get overwritten and dropped lines
 /// fall off the addressable index.
 ///
-/// Lifecycle: file is created on `new` with a unique name in
-/// `scratch_dir`, mapped, deleted on `Drop` (after munmap).
-/// Per-session ephemeral — not designed to survive a mars restart
-/// in v1 (would need versioned headers + `#[repr(C)]` on `Cell`).
+/// Lifecycle: anonymous-mmap region created on `new`, munmap'd on
+/// Drop.  No file system involvement — eviction under memory
+/// pressure goes through kernel swap, not a named scratch file.
+/// Per-session ephemeral.
 ///
 /// Read path: direct slice into the mmap'd region.  No syscalls
-/// on access; the kernel's page cache is our LRU — viewport ± a
-/// few pages stay resident while older pages are evicted to disk
-/// transparently.  No software cache needed at this layer.
+/// on access; the kernel pages out idle regions to swap and
+/// faults them back in transparently — no software cache needed
+/// at this layer.
 pub struct DiskScrollback {
     cols: usize,
     line_bytes: usize,
-
-    /// File handle kept open for the lifetime of the mapping.
-    /// macOS allows closing it earlier, but holding it costs
-    /// nothing and keeps future operations (e.g. fcntl) simple.
-    _file: File,
-    path: PathBuf,
     mmap_ptr: *mut u8,
     mmap_len: usize,
     max_lines: u64,
@@ -334,61 +306,36 @@ pub struct DiskScrollback {
 
 impl DiskScrollback {
     fn new(
-        scratch_dir: &Path,
         ram_capacity: usize,
         max_pages_on_disk: usize,
         cols: usize,
     ) -> std::io::Result<Self> {
-        // `ram_capacity` is folded into `max_lines` for backwards
-        // compatibility with callers (terminal.rs, tests) that pre-date
-        // the unified-mmap refactor.  Total addressable history is the
-        // same: `ram_capacity + max_pages_on_disk * LINES_PER_PAGE`.
+        // `ram_capacity` and `max_pages_on_disk` were originally a
+        // RAM tier + on-disk-pages tier; Phase 4a unified them under
+        // one mmap.  We keep the two args because `restart()` needs
+        // to rebuild the same shape (`a + b` doesn't recover the
+        // pair).  Total addressable history = ram_capacity +
+        // max_pages_on_disk * LINES_PER_PAGE.
         assert!(ram_capacity > 0, "RAM capacity must be > 0 for disk scrollback");
         assert!(max_pages_on_disk > 0, "max disk pages must be > 0");
         assert!(cols > 0, "cols must be > 0");
-
-        std::fs::create_dir_all(scratch_dir)?;
-
-        // Unique-ish file name.  Ephemeral, deleted on Drop, so
-        // collision with a stale file from a crashed run is safe to
-        // ignore — we'll just truncate it.  Process pid + nanos
-        // since UNIX epoch is enough entropy for in-process uniqueness.
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = scratch_dir.join(format!("mars-sb-{pid}-{nanos}.log"));
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
 
         let line_bytes = cols * std::mem::size_of::<Cell>();
         let max_lines = (ram_capacity + max_pages_on_disk * LINES_PER_PAGE) as u64;
         let mmap_len = max_lines as usize * line_bytes;
 
-        // Pre-size the file to the full ring extent so the mmap
-        // covers all slots.  Unwritten slots read as zeroed Cell
-        // layouts, but the index logic refuses to read past
-        // `total_lines_written` so we never observe them.
-        file.set_len(mmap_len as u64)?;
-
-        // Map the whole ring as anonymous private memory.  We tried
-        // file-backed mmap (MAP_SHARED then MAP_PRIVATE on the
-        // ephemeral scratch file) first; both cost an extra
-        // file→anon COW on every first write to a page, which
-        // surfaces as ~5–15 % regression on parse-heavy single-session
-        // throughput.  We don't need persistence (file is unlinked on
-        // Drop, never read from another process) and we don't need
-        // the file's writeback path (eviction goes to swap with anon
-        // mmap, same outcome — bounded RSS under memory pressure
-        // via kernel-managed paging).  The scratch file lives on
-        // only because the existing diagnostics + soak test refer to
-        // its path; a future cleanup removes the file dependency
-        // entirely.
+        // Anonymous private mapping.  No backing file — the kernel
+        // pages dirty regions out to swap under memory pressure,
+        // same outcome as the old file-backed path without the
+        // file→anon COW cost on every first write to a page.
+        // (Earlier file-backed implementations cost ~10 % parse-heavy
+        // throughput; switching to MAP_ANON recovered it.)
+        //
+        // Pre-faulting all pages here would fold the lazy-fault cost
+        // of the first ring wrap into init time, but pegs idle RSS
+        // at the full ring size — directly violating the lazy-alloc
+        // contract (commit ed074bd) and the bench `rss mars` gate.
+        // Don't reintroduce.
         let mmap_ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -421,8 +368,6 @@ impl DiskScrollback {
         Ok(Self {
             cols,
             line_bytes,
-            _file: file,
-            path,
             mmap_ptr,
             mmap_len,
             max_lines,
@@ -529,8 +474,6 @@ impl DiskScrollback {
 
 impl Drop for DiskScrollback {
     fn drop(&mut self) {
-        // Release the mapping before unlinking; macOS allows unlink
-        // while mapped, but unmapping first is the documented order.
         if !self.mmap_ptr.is_null() {
             // SAFETY: pointer + length match the mmap call in `new`,
             // and no outstanding borrow into the region survives Drop
@@ -540,11 +483,6 @@ impl Drop for DiskScrollback {
                 libc::munmap(self.mmap_ptr as *mut libc::c_void, self.mmap_len);
             }
         }
-        // Best-effort unlink; the file is in ~/Library/Caches and
-        // macOS will eventually reclaim it on its own.  Stale-file
-        // sweep at next process start (terminal.rs) handles signal-
-        // induced exits where Drop never runs.
-        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -619,22 +557,14 @@ mod tests {
         assert!(sb.is_empty());
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("mars-test-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).expect("temp dir");
-        p
-    }
-
     #[test]
     fn disk_round_trips_within_ram_capacity() {
-        let dir = temp_dir("disk-round");
-        let mut sb = Scrollback::disk(&dir, 4, 1, 4).expect("disk sb");
+        let mut sb = Scrollback::disk(4, 1, 4).expect("disk sb");
         sb.push_line(&fill(b'a', 4));
         sb.push_line(&fill(b'b', 4));
         sb.push_line(&fill(b'c', 4));
         assert_eq!(sb.len(), 3);
-        // All three still in RAM, no disk write yet.
+        // All three still resident, no eviction yet.
         assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'a');
         assert_eq!(sb.cell_at(2, 0).unwrap().ch, 'c');
         let line1 = sb.line_to_vec(1).unwrap();
@@ -643,10 +573,9 @@ mod tests {
 
     #[test]
     fn disk_spills_past_ram_capacity_to_disk() {
-        let dir = temp_dir("disk-spill");
         // RAM 2, 1 disk page → total cap = 2 + 256 = 258.  Push the
         // exact cap amount, all addressable.
-        let mut sb = Scrollback::disk(&dir, 2, 1, 4).expect("disk sb");
+        let mut sb = Scrollback::disk(2, 1, 4).expect("disk sb");
         let total_cap = 2 + LINES_PER_PAGE;
         for i in 0..total_cap {
             let byte = b'a' + (i % 26) as u8;
@@ -654,18 +583,18 @@ mod tests {
         }
         assert_eq!(sb.len(), total_cap);
         assert_eq!(sb.capacity(), total_cap);
-        // Oldest (index 0) is on disk; it's the first byte we pushed.
+        // Oldest (index 0) is whatever-the-kernel-left-evictable; it's
+        // the first byte we pushed.
         assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'a');
-        // Newest is in RAM, last byte we pushed.
+        // Newest is the last byte we pushed.
         let newest_byte = b'a' + ((total_cap - 1) % 26) as u8;
         assert_eq!(sb.cell_at(total_cap - 1, 0).unwrap().ch, newest_byte as char);
     }
 
     #[test]
     fn disk_ring_drops_oldest_past_total_cap() {
-        let dir = temp_dir("disk-ring");
         // RAM 2, 1 disk page → total cap = 2 + 256 = 258 lines.
-        let mut sb = Scrollback::disk(&dir, 2, 1, 4).expect("disk sb");
+        let mut sb = Scrollback::disk(2, 1, 4).expect("disk sb");
         let total = 2 + LINES_PER_PAGE * 3; // overflows by 2 pages
         for i in 0..total {
             let byte = b'a' + (i % 26) as u8;
@@ -681,32 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn disk_drop_removes_file() {
-        let dir = temp_dir("disk-drop");
-        let path_before;
-        {
-            let sb = Scrollback::disk(&dir, 2, 1, 4).expect("disk sb");
-            // Capture the file path via the Disk variant.
-            let Scrollback::Disk(ref d) = sb else { panic!("expected Disk") };
-            path_before = d.path.clone();
-            assert!(path_before.exists(), "file should exist while sb alive");
-        }
-        assert!(
-            !path_before.exists(),
-            "file should be deleted on Drop, found: {path_before:?}"
-        );
-    }
-
-    #[test]
     fn disk_full_history_read_back_after_wraparound() {
         // Stress test: push enough lines to wrap the disk ring twice, then
         // verify every addressable line reads back its expected content.
         // Catches per-line corruption that single-cell tests would miss
         // (e.g. an mmap offset bug that interleaves bytes between slots).
-        let dir = temp_dir("disk-fullread");
         let cols = 8;
         let pages = 2;
-        let mut sb = Scrollback::disk(&dir, 4, pages, cols).expect("disk sb");
+        let mut sb = Scrollback::disk(4, pages, cols).expect("disk sb");
         let total_pushed = 4 + LINES_PER_PAGE * (pages + 1); // 1 wraparound past cap
         for i in 0..total_pushed {
             // Distinct content per line: unique character per col so a
@@ -736,8 +647,7 @@ mod tests {
 
     #[test]
     fn disk_clear_resets_addressable_lines() {
-        let dir = temp_dir("disk-clear");
-        let mut sb = Scrollback::disk(&dir, 4, 2, 4).expect("disk sb");
+        let mut sb = Scrollback::disk(4, 2, 4).expect("disk sb");
         for i in 0..(4 + 2 * LINES_PER_PAGE) {
             sb.push_line(&fill(b'a' + (i % 26) as u8, 4));
         }

@@ -371,12 +371,16 @@ if do_update:
                 )
                 if best_other > 0:
                     entry["mars_vs_best_other_min"] = round(cl / best_other * 0.90, 2)
+    # Lower-better ceilings: use math.ceil so the noise margin actually
+    # carries.  round() on something like 1.9 * 1.30 = 2.47 → 2 wipes
+    # the margin out and the gate flaps on identical code; ceil → 3.
+    import math
     if render is not None:
-        baseline["render_full_repaint"]["p99_us_max"] = round(render["p99_ns"] / 1000 * 1.10)
+        baseline["render_full_repaint"]["p99_us_max"] = math.ceil(render["p99_ns"] / 1000 * 1.10)
     if scroll is not None and "scroll_repaint" in baseline:
-        baseline["scroll_repaint"]["p99_us_max"] = round(scroll["p99_ns"] / 1000 * 1.30)
+        baseline["scroll_repaint"]["p99_us_max"] = math.ceil(scroll["p99_ns"] / 1000 * 1.30)
     if scroll_cold is not None and "scroll_cold_repaint" in baseline:
-        baseline["scroll_cold_repaint"]["p99_us_max"] = round(scroll_cold["p99_ns"] / 1000 * 1.30)
+        baseline["scroll_cold_repaint"]["p99_us_max"] = math.ceil(scroll_cold["p99_ns"] / 1000 * 1.30)
     # Size: 10 % ceiling above current.
     if "binary_size_bytes_max" in baseline:
         for bin_name in list(baseline["binary_size_bytes_max"].keys()):

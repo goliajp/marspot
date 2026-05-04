@@ -16,67 +16,20 @@ use crate::grid::{char_width, Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_L
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// Resolve the scrollback scratch directory once, the first time
-/// any Terminal is constructed.  `None` ⇒ stay on RAM-only
-/// scrollback for every session in this process; `Some(dir)` ⇒
-/// every session opens a disk-backed scrollback in that directory.
+/// Whether disk-backed scrollback is on for this process.  Resolved
+/// once on first call.  `MARS_DISK_SCROLLBACK=0` opts out (RAM-only,
+/// kept for regression bisects); any other value (or unset) gives
+/// disk-on, the default since the anon-mmap rewrite landed.
 ///
-/// Source order (first hit wins):
-///   1. `MARS_DISK_SCROLLBACK=0` → opt out, RAM-only.  Kept for
-///      regression bisects and `$HOME`-less environments.
-///   2. `MARS_DISK_SCROLLBACK=<path>` → use that path.
-///   3. `MARS_DISK_SCROLLBACK=1` → use the default
-///      `~/Library/Caches/mars/scrollback` (alias for unset).
-///   4. unset → use the default `~/Library/Caches/mars/scrollback`.
-///
-/// Disk-backed is the default since the mmap rewrite landed —
-/// measured equivalent to the in-RAM path on parse / scroll perf
-/// while giving 26 624-line bounded history vs 10 000.
-fn disk_scrollback_dir() -> Option<&'static PathBuf> {
-    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let v = std::env::var("MARS_DISK_SCROLLBACK").ok();
-        if v.as_deref() == Some("0") {
-            return None;
-        }
-        let path = match v.as_deref() {
-            Some("1") | None => {
-                let home = std::env::var("HOME").ok()?;
-                PathBuf::from(home).join("Library/Caches/mars/scrollback")
-            }
-            Some(p) => PathBuf::from(p),
-        };
-        eprintln!("[mars] disk scrollback → {}", path.display());
-        // Best-effort sweep of stale files left by previous mars
-        // processes that crashed / SIGKILL'd / SIGTERM'd before
-        // their Drop could fire (Rust on macOS doesn't run Drop on
-        // signal-induced exit).  Each file is named
-        // `mars-sb-<pid>-<nanos>.log`; if the pid isn't alive,
-        // unlink it.
-        if let Ok(entries) = std::fs::read_dir(&path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if !name.starts_with("mars-sb-") || !name.ends_with(".log") {
-                    continue;
-                }
-                let stem = &name["mars-sb-".len()..name.len() - ".log".len()];
-                let pid: Option<u32> = stem.split('-').next().and_then(|s| s.parse().ok());
-                if let Some(pid) = pid {
-                    // libc::kill(pid, 0) returns 0 if the pid exists.
-                    let alive = unsafe { libc::kill(pid as i32, 0) } == 0;
-                    if !alive {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
-        }
-        Some(path)
-    })
-    .as_ref()
+/// The pre-anon-mmap implementation accepted a path here so the
+/// scratch file's location was configurable; with anonymous mmap
+/// there's no file, so the env var is binary now.  Old custom
+/// paths are silently treated as "on".
+fn disk_scrollback_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("MARS_DISK_SCROLLBACK").as_deref() != Ok("0"))
 }
 
 /// In-RAM ring size when disk scrollback is active.  Front-line
@@ -147,11 +100,10 @@ struct SavedMain {
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
         // Disk-backed scrollback is default-on; set MARS_DISK_SCROLLBACK=0
-        // to opt out.  Falls back to the in-RAM ring on any disk-init
+        // to opt out.  Falls back to the in-RAM ring on any mmap-init
         // error (no panic — the user just gets the bounded-RAM history).
-        let scrollback = match disk_scrollback_dir() {
-            Some(dir) => Scrollback::disk(
-                dir,
+        let scrollback = if disk_scrollback_enabled() {
+            Scrollback::disk(
                 DISK_SCROLLBACK_RAM_LINES,
                 DISK_SCROLLBACK_PAGES,
                 cols as usize,
@@ -161,8 +113,9 @@ impl Terminal {
                     "[mars] disk scrollback init failed ({e}); falling back to RAM-only"
                 );
                 Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
-            }),
-            None => Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize),
+            })
+        } else {
+            Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
         };
         Self {
             grid: Grid::with_scrollback_kind(cols, rows, scrollback),
@@ -1268,24 +1221,12 @@ mod tests {
     #[ignore = "soak; run via bin/soak.sh"]
     fn soak_disk_scrollback_bounded_under_million_lines() {
         use crate::scrollback::{Scrollback, LINES_PER_PAGE};
-        use std::path::PathBuf;
-
-        let dir: PathBuf = std::env::temp_dir().join(format!(
-            "mars-soak-disk-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        let cleanup = scopeguard(&dir);
 
         let cols: u16 = 80;
         // Tight caps so we exercise the ring overwrite path heavily.
         let ram_cap = 256;
         let max_pages = 4; // 4 × 256 = 1024 lines on disk
-        let scrollback = Scrollback::disk(&dir, ram_cap, max_pages, cols as usize)
+        let scrollback = Scrollback::disk(ram_cap, max_pages, cols as usize)
             .expect("disk scrollback");
 
         let grid = Grid::with_scrollback_kind(cols, 24, scrollback);
@@ -1309,7 +1250,6 @@ mod tests {
             t.feed(park);
         }
         let baseline_rss = current_rss_bytes();
-        let baseline_disk = file_size_total(&dir);
 
         // Push 1 M more lines.
         for _ in 0..1_000_000 {
@@ -1318,20 +1258,17 @@ mod tests {
         }
 
         let after_rss = current_rss_bytes();
-        let after_disk = file_size_total(&dir);
         let rss_growth = after_rss.saturating_sub(baseline_rss);
-        let disk_growth = after_disk.saturating_sub(baseline_disk);
 
-        // RSS tolerance: 5 MB.  Disk tolerance: 0 — file is
-        // pre-`set_len`'d, ring writes overwrite in place.
+        // RSS tolerance: 5 MB.  Anon-mmap ring is fixed-size so
+        // RSS shouldn't grow with line count past warm-up — under
+        // memory pressure the kernel pages dirty regions out to swap
+        // rather than to a named file, but the test machine has
+        // plenty of RAM so no eviction is expected here either way.
         const RSS_TOL: u64 = 5 * 1024 * 1024;
         assert!(
             rss_growth < RSS_TOL,
             "RSS grew {rss_growth} bytes after 1M lines (baseline {baseline_rss}, after {after_rss})"
-        );
-        assert_eq!(
-            disk_growth, 0,
-            "disk file grew {disk_growth} bytes; ring should be fixed-size"
         );
 
         // Capacity-cap sanity: total stored == RAM cap + disk cap.
@@ -1342,33 +1279,6 @@ mod tests {
             "scrollback should be capped at RAM + disk cap"
         );
         assert_eq!(t.grid().scrollback_capacity(), expected_cap);
-
-        drop(cleanup);
-    }
-
-    /// Total bytes across all files in `dir` (just the file sizes
-    /// reported by `metadata().len()`; APFS sparse files report
-    /// the apparent size, which is what's bounded by the ring).
-    fn file_size_total(dir: &std::path::Path) -> u64 {
-        std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
-            .sum()
-    }
-
-    /// Tiny RAII guard so the soak test always cleans up its scratch
-    /// dir, even on panic.  Not std::ops::Drop on a path because we
-    /// don't want to drop on `&` — return a Drop value instead.
-    fn scopeguard(dir: &std::path::Path) -> impl Drop {
-        struct Guard(std::path::PathBuf);
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        Guard(dir.to_path_buf())
     }
 
     // ----- alt screen (?1049) ---------------------------------------------
