@@ -38,17 +38,34 @@ for arg in "${@:-}"; do
   esac
 done
 
+# Number of timed trials per (terminal, scenario).  Median is taken over
+# these so single-shot variance can't shift the verdict (perf-attack E5).
+TRIALS=${TRIALS:-3}
+
+# E4: stale-marker cleanup.  Pre-existing /tmp/measure-{terminal}-all.txt
+# files from earlier runs that still contain ==ALL_DONE== would be
+# picked up immediately by the polling loop, polluting fresh data.
+# Remove them up front; the build_command's `rm -f $marker` provides a
+# second line of defence at paste time.
+for t in "${OTHER_TERMINALS[@]}"; do
+  rm -f "/tmp/measure-${t}-all.txt"
+done
+
 build_command() {
   # Single one-liner that runs all scenarios, writes timings to one
   # marker, and finishes with an ALL_DONE sentinel so the polling side
   # knows it's safe to parse.  Uses absolute paths so the user's shell
-  # aliases / PATH don't matter.
+  # aliases / PATH don't matter.  Each scenario runs $TRIALS trials so
+  # the parser can take the median (perf-attack E5).
   local marker=$1
   local cmd=""
   cmd+="rm -f $marker; "
   for s in "${SCENARIOS[@]}"; do
-    cmd+="echo '==SCN== $s' >> $marker; "
-    cmd+="/usr/bin/time -p /bin/cat $SCENARIOS_DIR/$s.bin 2>> $marker; "
+    local trial
+    for ((trial = 1; trial <= TRIALS; trial++)); do
+      cmd+="echo '==SCN== $s' >> $marker; "
+      cmd+="/usr/bin/time -p /bin/cat $SCENARIOS_DIR/$s.bin 2>> $marker; "
+    done
   done
   cmd+="echo '==ALL_DONE==' >> $marker"
   echo "$cmd"
@@ -84,12 +101,15 @@ wait_for_marker() {
 }
 
 parse_marker() {
-  # Walk a marker and emit `<scenario>:<ns>` per line.  Format we wrote:
+  # Walk a marker and emit `<scenario>:<median_ns>` per line, with the
+  # median computed across however many trials the marker contains
+  # for that scenario (perf-attack E5).  Format we wrote:
   #   ==SCN== cat-ascii
-  #   real X.XX
+  #   real X.XX        <- trial 1
   #   user ...
   #   sys ...
-  #   ==SCN== cat-mixed
+  #   ==SCN== cat-ascii
+  #   real Y.YY        <- trial 2
   #   ...
   local marker=$1
   awk '
@@ -106,7 +126,28 @@ parse_marker() {
         total = s+0
       }
       ns = total * 1e9
-      printf "%s:%d\n", current, ns
+      n[current]++
+      samples[current, n[current]] = ns
+      # Preserve scenario order as first encountered.
+      if (!(current in seen)) {
+        seen[current] = 1
+        order[++ocount] = current
+      }
+    }
+    END {
+      for (oi = 1; oi <= ocount; oi++) {
+        k = order[oi]
+        cnt = n[k]
+        for (i = 1; i <= cnt; i++) v[i] = samples[k, i]
+        # In-place insertion sort (cnt is small, typically 3).
+        for (i = 2; i <= cnt; i++) {
+          key = v[i]; j = i - 1
+          while (j >= 1 && v[j] > key) { v[j+1] = v[j]; j-- }
+          v[j+1] = key
+        }
+        mid = int((cnt + 1) / 2)
+        printf "%s:%d\n", k, v[mid]
+      }
     }
   ' "$marker"
 }

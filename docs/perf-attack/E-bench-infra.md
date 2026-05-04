@@ -171,7 +171,13 @@ already used in `measure.sh` for cat-*; adapt to vim-jump.
 
 ---
 
-## E4 — measure-other.sh stale-marker cleanup
+## E4 — measure-other.sh stale-marker cleanup · **DONE 2026-05-05**
+
+Landed in `feature/perf-E4-E5-measure-other-hardening`.  Script now
+removes pre-existing /tmp/measure-{terminal}-all.txt at startup
+before printing paste blocks.  Stale ==ALL_DONE== markers from prior
+runs no longer pollute fresh measurements.  Test:
+`bench/tests/e4-e5-measure-other.sh`.
 
 ### What's broken
 
@@ -208,7 +214,16 @@ done
 
 ---
 
-## E5 — measure-other.sh 3-trial median
+## E5 — measure-other.sh 3-trial median · **DONE 2026-05-05**
+
+Landed in `feature/perf-E4-E5-measure-other-hardening`.
+build_command now emits TRIALS=3 invocations per (terminal, scenario);
+parse_marker collects all real-time samples per scenario, sorts, and
+emits the median.  TRIALS env var override available for future
+soak-style 9-trial runs.  Test:
+`bench/tests/e4-e5-measure-other.sh` (end-to-end with synthesised
+0.20 / 0.50 / 1.00s trials → median 0.50s, distinct from "last sample"
+of 1.00s so a regression to last-wins logic fails the gate).
 
 ### What's broken
 
