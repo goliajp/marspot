@@ -102,9 +102,14 @@ pub struct GlyphKey {
 }
 
 /// What the renderer needs to draw a cached glyph: where it lives
-/// in the atlas (`u0/v0/u1/v1`, in atlas pixel coords), its pixel
-/// size, and the offset from the cell's baseline-origin to the
-/// bitmap's top-left.
+/// in the atlas (`u0/v0/u1/v1`, in atlas pixel coords) and the slot
+/// dimensions.  Each slot is **exactly cell-sized** — 1 cell wide
+/// for normal glyphs, `n_cells` wide for east-asian-wide / emoji.
+/// The glyph is rasterised at an integer baseline position INSIDE
+/// the slot, identical for every glyph at the same font/size, so
+/// the renderer just draws a cell-sized quad at the cell origin —
+/// no per-glyph bearing maths, no fractional dest_y, no risk of one
+/// glyph's baseline landing 0.5 px below its neighbour's.
 #[derive(Clone, Copy, Debug)]
 pub struct AtlasEntry {
     pub u0: u16,
@@ -113,17 +118,9 @@ pub struct AtlasEntry {
     pub v1: u16,
     pub px_w: u16,
     pub px_h: u16,
-    /// Bitmap-top offset from the cell's pen-position baseline.
-    /// Stored as f32 (not i16) so glyphs whose ideal bearing lands
-    /// near a half-pixel boundary don't quantise to different
-    /// integer values: `l` rounding to 11 and `d` rounding to 10
-    /// pulled `l` 1 px higher than its row-mates and showed up
-    /// visually as "develop's l/p sit lower than the rest" (Monaco
-    /// 12 surfaced this; Menlo 13's metrics happened to round
-    /// uniformly).  Renderers do their own round-to-pixel at draw
-    /// time if they need crisp edges.
-    pub bearing_x: f32,
-    pub bearing_y: f32,
+    /// How many terminal cells wide this slot is (1 for ASCII /
+    /// most BMP, 2 for East Asian wide / emoji).
+    pub n_cells: u16,
 }
 
 /// One row in the shelf packer.
@@ -201,26 +198,28 @@ impl GlyphAtlas {
     }
 
     /// Look up `key` in the cache, rasterising into the atlas on miss.
-    /// `Some(entry)` on success; `None` only if the glyph itself has no
-    /// ink (control char, .notdef-with-degenerate-bbox) or is wider
-    /// than the entire atlas (pathological).  When the shelf packer
-    /// runs out of room we atomically rebuild and retry — see the
-    /// module-level "Eviction" doc.
+    /// Slot dimensions come from the caller's `metrics`; every glyph
+    /// for the same font gets a slot of the same size, with the glyph
+    /// drawn at an integer baseline position inside.  Renderers draw
+    /// cell-sized quads so all glyphs share an exact baseline row —
+    /// see the AtlasEntry doc.
+    ///
+    /// `Some(entry)` on success; `None` only when the glyph itself has
+    /// no ink (control char, .notdef-with-degenerate-bbox).  Atlas-full
+    /// triggers atomic rebuild and retry, never returns None.
     pub fn get_or_rasterize(
         &mut self,
         key: GlyphKey,
         font: &CTFont,
+        metrics: SlotMetrics,
     ) -> Option<AtlasEntry> {
         if let Some(&entry) = self.cache.get(&key) {
             return Some(entry);
         }
-        let raster = rasterise_glyph(font, key.glyph)?;
+        let raster = rasterise_glyph(font, key.glyph, metrics)?;
         let placed = match self.place(raster.px_w, raster.px_h) {
             Some(p) => p,
             None => {
-                // Atlas full.  Rebuild atomically and retry — next
-                // frame's render call will re-rasterise whichever
-                // glyphs are still on screen.
                 self.rebuild();
                 self.place(raster.px_w, raster.px_h)?
             }
@@ -233,8 +232,7 @@ impl GlyphAtlas {
             v1: (placed.1 + raster.px_h) as u16,
             px_w: raster.px_w as u16,
             px_h: raster.px_h as u16,
-            bearing_x: raster.bearing_x,
-            bearing_y: raster.bearing_y,
+            n_cells: raster.n_cells,
         };
         self.cache.insert(key, entry);
         Some(entry)
@@ -323,23 +321,46 @@ impl GlyphAtlas {
     }
 }
 
-/// Output of the CT-rasterise pass: alpha bytes + size + bearing.
+/// Per-render-context slot geometry.  Same for every glyph at a
+/// given font/size, supplied by the caller so this module doesn't
+/// need to know about FontCache or cell metrics.  Pixel units.
+#[derive(Clone, Copy, Debug)]
+pub struct SlotMetrics {
+    /// Cell width — slot width for non-wide chars.
+    pub cell_w: u32,
+    /// Cell height — slot height for ALL chars.
+    pub cell_h: u32,
+    /// Pixels from the slot's TOP edge down to the baseline (y-down).
+    /// Glyphs are positioned so their baseline sits exactly on this
+    /// integer row, identical for every glyph.
+    pub baseline_from_top: u32,
+}
+
+/// Output of the CT-rasterise pass.
 struct Raster {
     bytes: Vec<u8>,
     px_w: u32,
     px_h: u32,
-    bearing_x: f32,
-    bearing_y: f32,
+    n_cells: u16,
 }
 
-/// Rasterise one glyph into an alpha-only bitmap and return the bytes.
-/// Returns `None` if the glyph has no ink (e.g. .notdef → bbox is
-/// degenerate, or a control char).
-fn rasterise_glyph(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
-    // Ask CT for the glyph's bounding box in points.  This is the
-    // minimum rectangle the rasterised glyph fits in — we add 1 px
-    // of slack on each side to stay clear of subpixel-positioning
-    // overflow.
+/// Rasterise one glyph into a CELL-SIZED alpha-only bitmap.  The
+/// glyph's baseline is positioned at integer canvas y =
+/// `metrics.cell_h - metrics.baseline_from_top` (y-up) — identical
+/// for every glyph at the same font/size, so the renderer can place
+/// every cell-sized slot at the cell origin and every baseline lines
+/// up exactly.
+///
+/// Wide glyphs (advance > cell_w) get a 2-cell-wide slot.  Glyphs
+/// that don't fit even in 2 cells are clipped to fit.
+///
+/// Returns `None` only if the glyph has no ink (control char,
+/// .notdef-with-degenerate-bbox).
+fn rasterise_glyph(
+    font: &CTFont,
+    glyph: CGGlyph,
+    metrics: SlotMetrics,
+) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
         &[glyph],
@@ -348,17 +369,19 @@ fn rasterise_glyph(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
         return None;
     }
 
-    let slack: CGFloat = 1.0;
-    let px_w = (bbox.size.width.ceil() as u32) + 2 * slack as u32;
-    let px_h = (bbox.size.height.ceil() as u32) + 2 * slack as u32;
+    // Decide slot width: 2 cells if the glyph's advance is closer to
+    // 2× cell_w (CJK / emoji), else 1 cell.  Most fonts already align
+    // fullwidth glyphs to a 2-cell advance.
+    let advance_w = bbox.size.width;
+    let cell_w_f = metrics.cell_w as f64;
+    let n_cells: u16 = if advance_w > cell_w_f * 1.5 { 2 } else { 1 };
+    let px_w = metrics.cell_w * n_cells as u32;
+    let px_h = metrics.cell_h;
+
     let bytes_per_row = px_w as usize;
     let buf_len = bytes_per_row * px_h as usize;
     let mut bytes: Vec<u8> = vec![0u8; buf_len];
 
-    // Build an alpha-only CGBitmapContext over our own buffer.
-    // colorSpace = NULL is required for AlphaOnly.  CGBitmapContextCreate
-    // returns +1 retained, so wrap with `from_ptr` (takes ownership) — not
-    // `from_existing_context_ptr` (which would over-retain).
     let ctx = unsafe {
         let raw = CGBitmapContextCreate(
             bytes.as_mut_ptr() as *mut c_void,
@@ -375,9 +398,6 @@ fn rasterise_glyph(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
         CGContext::from_ptr(raw)
     };
 
-    // Apple's standard "draw with full hinting" knobs — same as the
-    // AppKit renderer in render.rs.  Keeps glyph appearance consistent
-    // across the two renderers during the A/B phase.
     ctx.set_should_antialias(true);
     ctx.set_allows_antialiasing(true);
     ctx.set_should_smooth_fonts(true);
@@ -385,43 +405,34 @@ fn rasterise_glyph(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
     ctx.set_should_subpixel_position_fonts(true);
     ctx.set_allows_font_subpixel_positioning(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-    // White fill = 100 % alpha coverage in alpha-only context.
     ctx.set_gray_fill_color(1.0, 1.0);
 
-    // Position the glyph so its bbox bottom-left lands at (slack, slack).
-    let origin = CGPoint::new(slack - bbox.origin.x, slack - bbox.origin.y);
+    // CGBitmapContext's default CTM is y-up with origin at lower-left.
+    // We want baseline at y-DOWN row `baseline_from_top` from top.
+    // In y-up, that's canvas y = `cell_h - baseline_from_top`.
+    let baseline_canvas_y = (metrics.cell_h as f64) - (metrics.baseline_from_top as f64);
+    // Horizontal: CT's pen position lands at the glyph's logical
+    // start; for a monospace font the ink left edge is at
+    // `bbox.origin.x` from the pen.  We anchor the pen at canvas
+    // x = -bbox.origin.x so the ink left edge falls exactly on
+    // canvas x = 0 (left edge of the slot).  Side-bearing variations
+    // (italic L overhang etc.) just shift the ink within the slot;
+    // it's clipped to slot bounds.
+    let origin = CGPoint::new(-bbox.origin.x, baseline_canvas_y);
     font.draw_glyphs(&[glyph], &[origin], ctx);
 
     Some(Raster {
         bytes,
         px_w,
         px_h,
-        // bearing_x = where the glyph's left edge is relative to the
-        // pen position the renderer uses to lay out the cell.  Float
-        // so half-pixel offsets stay consistent across all glyphs in
-        // the same row (no per-glyph round-to-int drift).
-        bearing_x: (bbox.origin.x - slack) as f32,
-        // bearing_y = bitmap rows from buffer-top down to the glyph
-        // baseline.  CGBitmapContext stores y-up internally, but the
-        // BUFFER bytes are written top-down — buffer row 0 = canvas
-        // top.  CT places baseline at canvas y = `slack - bbox.origin.y`
-        // (so the descender bottom lands at canvas y = slack and the
-        // top of the glyph ink lands at canvas y =
-        // `slack + bbox.size.height + bbox.origin.y` ≤ px_h).
-        // Therefore baseline lives at buffer row
-        // `(px_h - 1) - (slack - bbox.origin.y)`.
-        //
-        // This matters because px_h = `ceil(bbox.size.height) + 2*slack`
-        // (an integer) while `bbox.size.height` is fractional; the old
-        // formula `bbox.origin.y + bbox.size.height + slack` lost the
-        // `ceil`-padding above the glyph, so glyphs with the same
-        // numerical sum but different px_h (e.g. 'p' descender + 'o'
-        // x-only) ended up at the same dest_y and their baselines
-        // drifted apart by a fraction of a pixel — visible as "p sits
-        // lower than o" in 9-grid Monaco 12 prompts.
-        bearing_y: (px_h as f32 - 1.0) - (slack as f32 - bbox.origin.y as f32),
+        n_cells,
     })
 }
+
+// Legacy per-glyph bearing fields (bearing_x / bearing_y) and the
+// variable-sized bitmap they paired with were removed.  Slots are now
+// uniformly cell-sized and every glyph's baseline lands at a fixed
+// integer row inside the slot — see `rasterise_glyph` above.
 
 #[cfg(test)]
 mod tests {
@@ -431,6 +442,12 @@ mod tests {
 
     fn make_font() -> CTFont {
         new_from_name("Menlo", 13.0).expect("Menlo present on macOS")
+    }
+
+    fn test_metrics() -> SlotMetrics {
+        // 16x32 cell with baseline 24 px from top — a plausible
+        // Monaco-12-at-2x slot that tests don't depend on tightly.
+        SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 }
     }
 
     #[test]
@@ -454,11 +471,11 @@ mod tests {
         assert!(glyph != 0, "Menlo should have a glyph for 'A'");
 
         let key = GlyphKey { font_id: 0, glyph };
-        let entry1 = atlas.get_or_rasterize(key, &font).expect("first call rasterises");
+        let entry1 = atlas.get_or_rasterize(key, &font, test_metrics()).expect("first call rasterises");
         assert!(entry1.px_w > 0 && entry1.px_h > 0);
         assert_eq!(atlas.cache_len(), 1);
 
-        let entry2 = atlas.get_or_rasterize(key, &font).expect("second call from cache");
+        let entry2 = atlas.get_or_rasterize(key, &font, test_metrics()).expect("second call from cache");
         assert_eq!(entry1.u0, entry2.u0, "second call must return the same UV");
         assert_eq!(atlas.cache_len(), 1, "cache must not grow on hit");
     }
@@ -484,7 +501,7 @@ mod tests {
                 font.get_glyphs_for_characters(&cu, &mut glyph, 1);
             }
             let key = GlyphKey { font_id: 0, glyph };
-            if atlas.get_or_rasterize(key, &font).is_some() {
+            if atlas.get_or_rasterize(key, &font, test_metrics()).is_some() {
                 placed += 1;
             }
         }

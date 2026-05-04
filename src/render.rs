@@ -28,9 +28,11 @@ use objc2_app_kit::{NSColor, NSView};
 use objc2_quartz_core::{kCAGravityTopLeft, CALayer};
 /// Sidebar background — slightly different shade so it reads as
 /// chrome separate from terminal cells.
-const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = (0.08, 0.10, 0.14);
+const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = (0.045, 0.055, 0.075);
 /// Thin gutter between session cells when more than one is on screen.
-const GUTTER: (CGFloat, CGFloat, CGFloat) = (0.02, 0.03, 0.06);
+/// Light-grey hairline (iTerm2 style — divisions read as bright lines
+/// over the dark working area).
+const GUTTER: (CGFloat, CGFloat, CGFloat) = (0.32, 0.34, 0.38);
 /// Outline drawn around the focused session cell.
 const FOCUS_OUTLINE: (CGFloat, CGFloat, CGFloat) = (0.40, 0.75, 1.00);
 
@@ -68,7 +70,7 @@ const SIDEBAR_ROW_H: f64 = 22.0;
 /// Gap between the dot's right edge and the start of the label text.
 const SIDEBAR_DOT_LABEL_GAP: f64 = 10.0;
 const SIDEBAR_TEXT_FG: (CGFloat, CGFloat, CGFloat) = (0.78, 0.82, 0.88);
-const SIDEBAR_FOCUSED_BG: (CGFloat, CGFloat, CGFloat) = (0.13, 0.18, 0.30);
+const SIDEBAR_FOCUSED_BG: (CGFloat, CGFloat, CGFloat) = (0.06, 0.08, 0.13);
 const STATE_ACTIVE: (CGFloat, CGFloat, CGFloat) = (0.30, 0.85, 0.45);
 const STATE_IDLE: (CGFloat, CGFloat, CGFloat) = (0.55, 0.58, 0.62);
 const STATE_EXITED: (CGFloat, CGFloat, CGFloat) = (0.85, 0.30, 0.30);
@@ -503,23 +505,12 @@ impl Renderer {
             self.draw_cursor_in_rect(ctx, rect_top_y_up, rect, view);
         }
 
-        // Focus outline: a thin border around the focused cell.  Helps
-        // distinguish "the one currently receiving keystrokes" from the
-        // others when more than one session is on screen.
-        if view.focused {
-            let stroke = (self.font.cell_h * 0.18).max(2.0);
-            ctx.set_rgb_stroke_color(
-                FOCUS_OUTLINE.0,
-                FOCUS_OUTLINE.1,
-                FOCUS_OUTLINE.2,
-                1.0,
-            );
-            ctx.set_line_width(stroke);
-            ctx.stroke_rect(CGRect::new(
-                &CGPoint::new(rect.x, rect_top_y_up - rect.h),
-                &CGSize::new(rect.w, rect.h),
-            ));
-        }
+        // Focus indicator on the AppKit fallback path is just the
+        // pane-darken overlay (handled implicitly by the Metal path's
+        // BG-pipeline overlay; AppKit doesn't have a layered alpha
+        // pass yet).  The "focus frame is the gutter" treatment in
+        // render_metal.rs::push_session needs equivalent gutter-aware
+        // drawing here when AppKit comes back into rotation.
     }
 
     /// Sidebar pass: one row per session.  Row N: [focus highlight bg,]

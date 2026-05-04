@@ -319,6 +319,7 @@ mod tests {
             program: "/bin/echo".into(),
             args: vec!["hello mars".into()],
             size: TerminalSize::default(),
+            argv0: None,
         })
         .expect("spawn /bin/echo");
 
@@ -333,6 +334,7 @@ mod tests {
             program: "/bin/sleep".into(),
             args: vec!["60".into()],
             size: TerminalSize::default(),
+            argv0: None,
         })
         .expect("spawn /bin/sleep");
 
@@ -369,6 +371,7 @@ mod tests {
             program: "/bin/sleep".into(),
             args: vec!["60".into()],
             size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+            argv0: None,
         })
         .expect("spawn /bin/sleep");
 
@@ -403,6 +406,7 @@ mod tests {
             program: "/bin/cat".into(),
             args: vec![],
             size: TerminalSize::default(),
+            argv0: None,
         })
         .expect("spawn /bin/cat");
 
@@ -453,6 +457,7 @@ mod tests {
             program: "/usr/bin/true".into(),
             args: vec![],
             size: TerminalSize::default(),
+            argv0: None,
         })
         .expect("spawn /usr/bin/true")
     }
@@ -542,6 +547,7 @@ mod tests {
                 program: "/bin/sleep".into(),
                 args: vec!["60".into()],
                 size: TerminalSize::default(),
+            argv0: None,
             })
             .expect("spawn /bin/sleep");
 
@@ -586,6 +592,7 @@ mod tests {
             program: "/usr/bin/true".into(),
             args: vec![],
             size: TerminalSize::default(),
+            argv0: None,
         })
         .expect("spawn /usr/bin/true");
 

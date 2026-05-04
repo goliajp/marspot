@@ -50,6 +50,16 @@ pub struct Layout {
     /// The N session sub-rects, in row-major order.  Length is
     /// `grid_cols * grid_rows`.
     pub cells: Vec<CellRect>,
+    /// Inter-cell gutter width in physical pixels.  The renderer
+    /// uses this to paint the focus indicator AS the gutter around
+    /// the focused cell (focus frame and divider are the same
+    /// thing — no separate inner stroke).  0 if the grid is 1×1.
+    pub gutter: f64,
+    /// Inner padding on each side of every cell, in physical pixels.
+    /// `cell.cols` / `cell.rows` are counted off the area AFTER
+    /// padding; the renderer offsets glyph origins by this amount
+    /// so terminal content doesn't crowd the cell's visible edge.
+    pub padding: f64,
 }
 
 impl Layout {
@@ -71,16 +81,42 @@ impl Layout {
     ) -> Self {
         assert!(grid_cols > 0 && grid_rows > 0);
         let avail_w = (window_w - sidebar_w).max(0.0);
-        let cell_phys_w = avail_w / grid_cols as f64;
-        let cell_phys_h = window_h / grid_rows as f64;
+        // Inter-cell gutter in physical pixels — a thin strip of
+        // chrome (the GUTTER color cleared by the renderer) shows
+        // between sessions so the 3×3 grid reads as a grid, not as a
+        // single sea of identical-looking shells.  2 px = 1 logical
+        // point at 2× retina; iTerm2-style hairline.  Skipped when
+        // the grid is 1×1 (single session, nothing to divide).
+        let gutter = if grid_cols > 1 || grid_rows > 1 { 2.0 } else { 0.0 };
+        // Inner padding (physical px) — breathing room between the
+        // cell rect's edge and the first/last terminal column / row.
+        // Without this, "Last login: ..." crowds the very top-left
+        // pixel of the cell.  ~8 px ≈ 4 logical points at 2× retina,
+        // matches iTerm2's default leftmargin/topmargin feel.
+        let padding = 8.0;
+
+        // Each cell gets a "slot" of full width / height, then we
+        // shrink the visible rect by `gutter` and centre it in the
+        // slot.  That way the gap appears symmetrically between
+        // cells AND the cells stay equal-sized.
+        let slot_w = avail_w / grid_cols as f64;
+        let slot_h = window_h / grid_rows as f64;
+        let cell_phys_w = (slot_w - gutter).max(1.0);
+        let cell_phys_h = (slot_h - gutter).max(1.0);
+        // Inner content area (after padding) is what cols/rows are
+        // counted from.  The cell rect itself stays at the outer
+        // size — the BG fill covers the whole cell so the padding
+        // zone reads as terminal-bg, just empty.
+        let inner_w = (cell_phys_w - 2.0 * padding).max(1.0);
+        let inner_h = (cell_phys_h - 2.0 * padding).max(1.0);
 
         let mut cells = Vec::with_capacity(grid_cols * grid_rows);
         for r in 0..grid_rows {
             for c in 0..grid_cols {
-                let x = sidebar_w + c as f64 * cell_phys_w;
-                let y_top = r as f64 * cell_phys_h;
-                let cols = ((cell_phys_w / cell_w).floor() as u16).max(1);
-                let rows = ((cell_phys_h / cell_h).floor() as u16).max(1);
+                let x = sidebar_w + c as f64 * slot_w + gutter / 2.0;
+                let y_top = r as f64 * slot_h + gutter / 2.0;
+                let cols = ((inner_w / cell_w).floor() as u16).max(1);
+                let rows = ((inner_h / cell_h).floor() as u16).max(1);
                 cells.push(CellRect {
                     x,
                     y_top,
@@ -98,6 +134,8 @@ impl Layout {
             grid_cols,
             grid_rows,
             cells,
+            gutter,
+            padding,
         }
     }
 
@@ -148,17 +186,22 @@ mod tests {
 
     #[test]
     fn three_by_three_with_sidebar_uses_full_width() {
+        // 4 px inter-cell gutter; first cell offset is gutter/2.
+        let gutter = 2.0;
         let l = Layout::build(1440.0, 900.0, 200.0, 3, 3, 8.0, 16.0);
         assert_eq!(l.cells.len(), 9);
 
-        // First column at x = sidebar_w; last at sidebar_w + 2 * cell_w.
-        assert_eq!(l.cells[0].x, 200.0);
-        let cell_w = (1440.0 - 200.0) / 3.0;
-        assert!((l.cells[2].x - (200.0 + 2.0 * cell_w)).abs() < 1e-6);
+        // First column at x = sidebar_w + gutter/2.
+        assert!((l.cells[0].x - (200.0 + gutter / 2.0)).abs() < 1e-6);
+        let slot_w = (1440.0 - 200.0) / 3.0;
+        // Third column at x = sidebar_w + 2 * slot_w + gutter/2.
+        assert!((l.cells[2].x - (200.0 + 2.0 * slot_w + gutter / 2.0)).abs() < 1e-6);
 
-        // Per-cell terminal grid: floor(cell_w / 8) cols, floor(cell_h / 16) rows.
-        assert_eq!(l.cells[0].cols, (cell_w / 8.0).floor() as u16);
-        assert_eq!(l.cells[0].rows, ((900.0_f64 / 3.0) / 16.0).floor() as u16);
+        // Cell visible size = slot - gutter.
+        let visible_w = slot_w - gutter;
+        let visible_h = (900.0_f64 / 3.0) - gutter;
+        assert_eq!(l.cells[0].cols, (visible_w / 8.0).floor() as u16);
+        assert_eq!(l.cells[0].rows, (visible_h / 16.0).floor() as u16);
     }
 
     #[test]
@@ -178,8 +221,12 @@ mod tests {
 
     #[test]
     fn zero_sidebar_means_grid_uses_whole_window() {
+        // 3×1 has > 1 cell so gutter applies.  First cell at gutter/2, last at
+        // 2 * slot_w + gutter/2.
+        let gutter = 2.0;
         let l = Layout::build(900.0, 600.0, 0.0, 3, 1, 8.0, 16.0);
-        assert_eq!(l.cells[0].x, 0.0);
-        assert!((l.cells[2].x - 600.0).abs() < 1e-6);
+        assert!((l.cells[0].x - gutter / 2.0).abs() < 1e-6);
+        let slot_w = 900.0 / 3.0;
+        assert!((l.cells[2].x - (2.0 * slot_w + gutter / 2.0)).abs() < 1e-6);
     }
 }

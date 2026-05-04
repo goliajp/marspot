@@ -32,31 +32,38 @@ use std::collections::HashMap;
 pub const FONT_NAME: &str = "Monaco";
 pub const FONT_POINT: f64 = 12.0;
 
-/// Background color for the terminal — normalised-sRGB-like space
-/// (the value you'd type in a CSS hex).  Both renderers paint with
-/// this constant so the BG matches across the A/B switch.
-pub const BG: (CGFloat, CGFloat, CGFloat) = (0.05, 0.07, 0.12);
-/// Default foreground (white text).
-pub const FG: (CGFloat, CGFloat, CGFloat) = (0.92, 0.92, 0.92);
+/// Background color for the terminal.  Matches iTerm2's default
+/// "Background Color (Dark)" so users moving over from iTerm2 see
+/// identical-looking content.  Both renderers paint with this
+/// constant so the BG matches across the A/B switch.
+pub const BG: (CGFloat, CGFloat, CGFloat) = (0.0807, 0.0991, 0.1210);
+/// Default foreground.  Matches iTerm2's "Foreground Color (Dark)"
+/// — slightly off-white (`#dbdbdb`), softer than pure 0.92 grey on
+/// the eyes for long-running sessions.
+pub const FG: (CGFloat, CGFloat, CGFloat) = (0.8620, 0.8620, 0.8620);
 
-/// Standard ANSI 16-colour palette (xterm values).
+/// ANSI 16-colour palette — copied from iTerm2's default (Dark)
+/// profile so SGR 30..37 / 90..97 colours render identically to
+/// what the user is used to seeing in iTerm2.  Values via
+/// `defaults read com.googlecode.iterm2 "New Bookmarks"`,
+/// "Ansi N Color (Dark)" entries.
 pub const ANSI_16: [(CGFloat, CGFloat, CGFloat); 16] = [
-    (0.00, 0.00, 0.00),
-    (0.67, 0.00, 0.00),
-    (0.00, 0.67, 0.00),
-    (0.67, 0.33, 0.00),
-    (0.00, 0.00, 0.67),
-    (0.67, 0.00, 0.67),
-    (0.00, 0.67, 0.67),
-    (0.67, 0.67, 0.67),
-    (0.33, 0.33, 0.33),
-    (1.00, 0.33, 0.33),
-    (0.33, 1.00, 0.33),
-    (1.00, 1.00, 0.33),
-    (0.33, 0.33, 1.00),
-    (1.00, 0.33, 1.00),
-    (0.33, 1.00, 1.00),
-    (1.00, 1.00, 1.00),
+    (0.0784, 0.0980, 0.1176), //  0 black           #14191e
+    (0.7074, 0.2366, 0.1630), //  1 red             #b43c29
+    (0.0000, 0.7608, 0.0000), //  2 green           #00c200
+    (0.7806, 0.7696, 0.0000), //  3 yellow          #c7c400
+    (0.1540, 0.2647, 0.7822), //  4 blue            #2743c7
+    (0.7522, 0.2493, 0.7449), //  5 magenta         #bf3fbd
+    (0.0000, 0.7743, 0.7817), //  6 cyan            #00c5c7
+    (0.7810, 0.7811, 0.7810), //  7 white           #c7c7c7
+    (0.4078, 0.4078, 0.4078), //  8 bright black    #676767
+    (0.8660, 0.4752, 0.4583), //  9 bright red      #dc7974
+    (0.3450, 0.9043, 0.5654), // 10 bright green    #57e690
+    (0.9259, 0.8834, 0.0000), // 11 bright yellow   #ece100
+    (0.6535, 0.6704, 0.9485), // 12 bright blue     #a6aaf1
+    (0.8822, 0.4927, 0.8822), // 13 bright magenta  #e07de0
+    (0.3760, 0.9926, 1.0000), // 14 bright cyan     #5ffdff
+    (1.0000, 1.0000, 1.0000), // 15 bright white    #feffff
 ];
 
 pub fn palette_color(idx: u8) -> (CGFloat, CGFloat, CGFloat) {

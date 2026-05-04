@@ -48,7 +48,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
-use crate::glyph_atlas::{GlyphAtlas, GlyphKey};
+use crate::glyph_atlas::{GlyphAtlas, GlyphKey, SlotMetrics};
 use crate::grid::{Cell, Grid};
 use crate::layout::{CellRect, Layout};
 use crate::render::{SessionView, SidebarEntry};
@@ -675,8 +675,14 @@ impl MetalRenderer {
 /// Chrome / cursor / focus-outline constants, kept in sync with
 /// `render.rs`.  Shaders consume `f32`s, so duplicate as `f32`-tuples
 /// here rather than convert per call.
-const GUTTER: (f32, f32, f32) = (0.02, 0.03, 0.06);
-const SIDEBAR_BG_F: (f32, f32, f32) = (0.08, 0.10, 0.14);
+// Inter-cell divider colour — light grey so a thin "white-on-dark"
+// hairline shows between panes (iTerm2 style — the working area
+// stays at terminal BG, divisions read as bright lines).
+const GUTTER: (f32, f32, f32) = (0.32, 0.34, 0.38);
+// Sidebar BG sits a notch DARKER than the terminal cell BG so the
+// rail reads as its own surface — a subtle "behind" the working
+// area, not "above" it.
+const SIDEBAR_BG_F: (f32, f32, f32) = (0.045, 0.055, 0.075);
 // Brighter / more saturated than the previous (0.30, 0.55, 0.95) —
 // at the old contrast it was easy to miss in 9-grid layouts.
 const FOCUS_OUTLINE: (f32, f32, f32) = (0.40, 0.75, 1.00);
@@ -688,7 +694,11 @@ const SIDEBAR_TOP_PAD: f32 = 14.0;
 const SIDEBAR_ROW_H: f32 = 22.0;
 const SIDEBAR_DOT_LABEL_GAP: f32 = 10.0;
 const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
-const SIDEBAR_FOCUSED_BG: (f32, f32, f32) = (0.13, 0.18, 0.30);
+// Selected-row BG.  Just a hint above the sidebar BG — visible by
+// contrast with neighbouring rows, not by being a bright highlight.
+// Earlier values (0.13/0.18/0.30 then 0.09/0.13/0.22) read as
+// "active" rather than "selected"; this one whispers.
+const SIDEBAR_FOCUSED_BG: (f32, f32, f32) = (0.06, 0.08, 0.13);
 const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
 const STATE_IDLE: (f32, f32, f32) = (0.55, 0.58, 0.62);
 const STATE_EXITED: (f32, f32, f32) = (0.85, 0.30, 0.30);
@@ -752,6 +762,8 @@ fn build_instances(
             atlas,
             cells,
             glyphs,
+            layout.gutter as f32,
+            layout.padding as f32,
         );
     }
 
@@ -761,6 +773,7 @@ fn build_instances(
             focused_idx,
             layout.sidebar_w as f32,
             cell_w,
+            cell_h,
             ascent,
             atlas_w_f,
             atlas_h_f,
@@ -784,6 +797,7 @@ fn push_sidebar(
     focused_idx: usize,
     sidebar_w: f32,
     cell_w: f32,
+    cell_h: f32,
     ascent: f32,
     atlas_w: f32,
     atlas_h: f32,
@@ -834,7 +848,18 @@ fn push_sidebar(
         // `dot_cy + ascent*0.40 - SIDEBAR_ROW_H*0.20` happened to land
         // okay on Menlo 13 but pushes Monaco 12 digits ~3 px above the
         // dot — mismatch the user reported as "menulist 没对齐".
+        let metrics = SlotMetrics {
+            cell_w: cell_w.round() as u32,
+            cell_h: cell_h.round() as u32,
+            baseline_from_top: ascent.round() as u32,
+        };
+        // Where the digit's BASELINE should land on screen.  Aligns the
+        // visual centre of an ASCII digit with the dot's centre:
+        // cap_height ≈ 0.65 × ascent, so half of cap-height ≈ 0.30 ×
+        // ascent below dot_cy (y-down).
         let baseline_y = dot_cy + ascent * 0.30;
+        // Slot top = baseline minus baseline_from_top.
+        let slot_top_y = baseline_y - metrics.baseline_from_top as f32;
         let mut x = label_x;
         for ch in entry.label.chars() {
             let (font_idx, glyph) = font.resolve_char(ch, false, false);
@@ -846,10 +871,12 @@ fn push_sidebar(
                         glyph,
                     },
                     &ct_font,
+                    metrics,
                 ) {
+                    let slot_w = (metrics.cell_w * e.n_cells as u32) as f32;
                     glyphs.push(GlyphInstance {
-                        origin: [x + e.bearing_x, baseline_y - e.bearing_y],
-                        size: [e.px_w as f32, e.px_h as f32],
+                        origin: [x.round(), slot_top_y.round()],
+                        size: [slot_w, metrics.cell_h as f32],
                         uv0: [e.u0 as f32 / atlas_w, e.v0 as f32 / atlas_h],
                         uv1: [e.u1 as f32 / atlas_w, e.v1 as f32 / atlas_h],
                         color: [
@@ -880,6 +907,8 @@ fn push_session(
     atlas: &mut GlyphAtlas,
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
+    gutter: f32,
+    padding: f32,
 ) {
     // Terminal-bg fill for the rect.
     cells.push(CellInstance {
@@ -890,9 +919,12 @@ fn push_session(
 
     let grid = view.grid;
     let cols = grid.cols() as usize;
+    // Origin of the terminal content area (cell rect's top-left + inner padding).
+    let inner_x = rect.x as f32 + padding;
+    let inner_y = rect.y_top as f32 + padding;
 
     for r in 0..grid.rows() {
-        let row_y = rect.y_top as f32 + (r as f32) * cell_h;
+        let row_y = inner_y + (r as f32) * cell_h;
         let baseline_y = row_y + ascent;
 
         // Run-length BG fills (skip default BG; it inherits the rect fill).
@@ -914,7 +946,7 @@ fn push_session(
                 c += 1;
             }
             cells.push(CellInstance {
-                origin: [rect.x as f32 + start as f32 * cell_w, row_y],
+                origin: [inner_x + start as f32 * cell_w, row_y],
                 size: [(c - start) as f32 * cell_w, cell_h],
                 color: [bg.0 as f32, bg.1 as f32, bg.2 as f32, 1.0],
             });
@@ -942,26 +974,36 @@ fn push_session(
                 continue;
             }
             let ct_font = font.font(font_idx).clone();
+            let metrics = SlotMetrics {
+                cell_w: cell_w.round() as u32,
+                cell_h: cell_h.round() as u32,
+                baseline_from_top: ascent.round() as u32,
+            };
             let entry = match atlas.get_or_rasterize(
                 GlyphKey {
                     font_id: font_idx as u32,
                     glyph,
                 },
                 &ct_font,
+                metrics,
             ) {
                 Some(e) => e,
                 None => continue,
             };
             let fg = resolve_attrs(cell.attrs).0;
-            let cell_origin_x = rect.x as f32 + c as f32 * cell_w;
-            // bearing_x = horizontal offset from pen to bitmap left.
-            // bearing_y = pixels from baseline up to bitmap top — so
-            // dest_y (top edge in y-down coords) = baseline - bearing_y.
-            let dest_x = cell_origin_x + entry.bearing_x;
-            let dest_y = baseline_y - entry.bearing_y;
+            // Cell-sized slot: place the WHOLE slot at the cell
+            // origin.  The glyph's baseline is at integer row
+            // `baseline_from_top` inside the slot, identical for
+            // every glyph at this font/size — so every glyph's
+            // baseline lands on screen row `row_y + baseline_from_top`
+            // exactly.  No bearing maths, no fractional dest_y, no
+            // sub-pixel inter-glyph drift.
+            let dest_x = (inner_x + c as f32 * cell_w).round();
+            let dest_y = row_y.round();
+            let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
             glyphs.push(GlyphInstance {
                 origin: [dest_x, dest_y],
-                size: [entry.px_w as f32, entry.px_h as f32],
+                size: [slot_w, metrics.cell_h as f32],
                 uv0: [
                     entry.u0 as f32 / atlas_w,
                     entry.v0 as f32 / atlas_h,
@@ -998,7 +1040,7 @@ fn push_session(
                 u += 1;
             }
             cells.push(CellInstance {
-                origin: [rect.x as f32 + start as f32 * cell_w, underline_y],
+                origin: [inner_x + start as f32 * cell_w, underline_y],
                 size: [(u - start) as f32 * cell_w, underline_h],
                 color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
             });
@@ -1020,21 +1062,27 @@ fn push_session(
                 font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
             if glyph != 0 {
                 let ct_font = font.font(font_idx).clone();
+                let metrics = SlotMetrics {
+                    cell_w: cell_w.round() as u32,
+                    cell_h: cell_h.round() as u32,
+                    baseline_from_top: ascent.round() as u32,
+                };
                 if let Some(entry) = atlas.get_or_rasterize(
                     GlyphKey {
                         font_id: font_idx as u32,
                         glyph,
                     },
                     &ct_font,
+                    metrics,
                 ) {
-                    let cell_origin_x = rect.x as f32 + col as f32 * cell_w;
-                    let row_y = rect.y_top as f32 + (row as f32) * cell_h;
-                    let baseline_y = row_y + ascent;
-                    let dest_x = cell_origin_x + entry.bearing_x;
-                    let dest_y = baseline_y - entry.bearing_y;
+                    // Cell-sized slot — place at cell origin (see
+                    // comment in main glyph push).
+                    let dest_x = (inner_x + col as f32 * cell_w).round();
+                    let dest_y = (inner_y + (row as f32) * cell_h).round();
+                    let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
                     glyphs.push(GlyphInstance {
                         origin: [dest_x, dest_y],
-                        size: [entry.px_w as f32, entry.px_h as f32],
+                        size: [slot_w, metrics.cell_h as f32],
                         uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                         uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
                         color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
@@ -1047,8 +1095,8 @@ fn push_session(
     // Cursor (live view + DECTCEM on).
     if view.view_offset == 0 && view.cursor_visible {
         let (col, row) = grid.cursor();
-        let cx = rect.x as f32 + col as f32 * cell_w;
-        let cy = rect.y_top as f32 + row as f32 * cell_h;
+        let cx = inner_x + col as f32 * cell_w;
+        let cy = inner_y + row as f32 * cell_h;
         let solid = view.focused && window_focused;
         let color = [CURSOR_FG.0, CURSOR_FG.1, CURSOR_FG.2, 1.0];
         if solid {
@@ -1067,32 +1115,43 @@ fn push_session(
         }
     }
 
-    // Inactive-pane dim overlay.  iTerm2-style: every non-focused
-    // session gets a translucent black wash over its rect.  The
-    // overlay is in the BG pipeline and pushed after the BG fills,
-    // so the cell BG looks darker while the FG glyphs (drawn in a
-    // later pipeline) stay full-brightness.  Combined with the
-    // brighter focus outline below, the focused pane reads as the
-    // bright one even at a glance in 3×3.  Alpha tuned so the dim
-    // is visible without making inactive panes hard to read at all.
-    if !view.focused {
+    // Focused-pane darken overlay.  Reverses the previous "dim
+    // inactive" pattern — user wants the focused pane to read as the
+    // DARKER, "selected" surface.  Inactive panes stay at iTerm2's
+    // default BG; focused gets a translucent black wash that drops
+    // it noticeably below them.  Drawn in the BG pipeline after the
+    // BG fill, so glyphs (later pipeline) stay full-brightness.
+    if view.focused {
         cells.push(CellInstance {
             origin: [rect.x as f32, rect.y_top as f32],
             size: [rect.w as f32, rect.h as f32],
-            color: [0.0, 0.0, 0.0, 0.30],
+            color: [0.0, 0.0, 0.0, 0.45],
         });
     }
 
-    // Focus outline.  Thicker than the unfocused-cursor stroke so it
-    // reads at a glance in a 3×3 layout where every cell is small.
-    if view.focused {
-        let stroke = (cell_h * 0.18).max(2.0);
+    // Focus indicator IS the gutter around the focused pane — paint
+    // the surrounding gutter strip with FOCUS_OUTLINE colour.  No
+    // separate inner stroke; the pane's own edge is exactly where
+    // the divider hairline lives, so the focus frame and the
+    // divider are the same thing (iTerm2 reads this way).
+    if view.focused && gutter > 0.0 {
         let color = [FOCUS_OUTLINE.0, FOCUS_OUTLINE.1, FOCUS_OUTLINE.2, 1.0];
         let (rx, ry, rw, rh) = (rect.x as f32, rect.y_top as f32, rect.w as f32, rect.h as f32);
-        cells.push(CellInstance { origin: [rx, ry], size: [rw, stroke], color });
-        cells.push(CellInstance { origin: [rx, ry + rh - stroke], size: [rw, stroke], color });
-        cells.push(CellInstance { origin: [rx, ry], size: [stroke, rh], color });
-        cells.push(CellInstance { origin: [rx + rw - stroke, ry], size: [stroke, rh], color });
+        // Each side reaches gutter/2 outward (each cell carries
+        // half of the inter-cell strip in Layout::build).  Painting
+        // exactly gutter/2 means the focused side of the divider
+        // wins; the unfocused neighbour keeps its half in default
+        // GUTTER colour, so the line transitions cleanly at the
+        // midpoint.
+        let half = gutter / 2.0;
+        // top
+        cells.push(CellInstance { origin: [rx - half, ry - half], size: [rw + gutter, half], color });
+        // bottom
+        cells.push(CellInstance { origin: [rx - half, ry + rh],   size: [rw + gutter, half], color });
+        // left
+        cells.push(CellInstance { origin: [rx - half, ry],         size: [half, rh],          color });
+        // right
+        cells.push(CellInstance { origin: [rx + rw,   ry],         size: [half, rh],          color });
     }
 }
 
@@ -1627,7 +1686,11 @@ mod tests {
         assert!(cg_glyph != 0);
 
         let entry = atlas
-            .get_or_rasterize(GlyphKey { font_id: 0, glyph: cg_glyph }, &font)
+            .get_or_rasterize(
+                GlyphKey { font_id: 0, glyph: cg_glyph },
+                &font,
+                SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 },
+            )
             .expect("rasterise A");
         let (atlas_w, atlas_h) = atlas.dims();
 
