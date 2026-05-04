@@ -29,6 +29,40 @@ This is the architecture-level commitment. Every long-lived data structure must 
 
 We will write soak tests (run for hours, assert footprint stays bounded) before declaring any subsystem "stable".
 
+### 4. Hard-won pieces become independent crates
+
+When a sub-system inside mars meets all three of:
+
+- **Clean boundary**: well-defined input/output, no implicit reach into mars internals
+- **Earned by struggle**: real perf or correctness work went into it, the
+  shape isn't obvious from a casual read of the public API
+- **Plausibly reusable**: at least one external consumer exists in
+  imagination — another macOS terminal, a side project, a benchmark tool
+
+…it gets extracted into its own crate (or scripts repo for non-Rust
+pieces), even at the cost of workspace overhead.  Reasons it's worth
+the friction:
+
+1. **Cleaner mars architecture** — the boundary becomes load-bearing
+   instead of "the file imports happen to work."  Latent coupling
+   surfaces during extraction and gets fixed.
+2. **Performance discipline** — once a crate has its own bench /
+   soak, regressions can't sneak in via "incidentally a different
+   caller used to pad it."
+3. **Future-self leverage** — the pieces that took the most blood to
+   get right (cell-sized glyph atlas, anon-mmap ring, multi-terminal
+   bench harness) shouldn't have to be re-derived if a sibling
+   project needs them.
+
+The bar is "at least three of the above"; mars-internal helpers that
+fail any of those tests stay in `src/` as utility modules.
+
+Current extraction backlog (judgement-call, not commitments):
+`mars-pty`, `mars-anon-mmap-ring`, `mars-glyph-atlas`, the
+`bench-runner` shell-scripts repo.  These are the four pieces that
+clearly clear the bar; everything else stays internal until/unless
+it grows the same surface.
+
 ## Dependency audit (current)
 
 | Crate | Status | Reason |
