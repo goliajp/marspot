@@ -44,8 +44,8 @@ source "$ROOT/bin/_lib.sh"
 # global event source), and a default `/benchmark` shouldn't surprise
 # the user mid-work.  Opt in with `--scenarios typing-latency` or
 # `--include-typing-latency`.
-DEFAULT_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s)
-ALL_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s typing-latency)
+DEFAULT_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s active-9x-soak)
+ALL_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s active-9x-soak typing-latency)
 ALL_TERMINALS=(mars iterm terminal warp)
 
 SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
@@ -130,6 +130,7 @@ supports() {
     idle-9x:warp)                    return 1 ;;
     vim-jump:warp)                   return 1 ;;  # no warp driver; paste-mode unreliable
     htop-60s:warp)                   return 1 ;;  # no warp driver; paste-mode unreliable
+    active-9x-soak:warp)             return 1 ;;  # no warp 9-windows driver
     *)                               return 0 ;;
   esac
 }
@@ -138,7 +139,7 @@ supports() {
 scenario_args() {
   local scenario=$1
   case "$scenario" in
-    idle-9x)
+    idle-9x|active-9x-soak)
       if   (( EXTENDED )); then echo "--extended"
       elif (( QUICK ));    then echo "--quick"
       else echo ""
@@ -224,6 +225,7 @@ HEADLINE_METRICS = {
     "idle-9x":          ["cpu_pct_mean", "rss_drift_ratio_q4_over_q1", "rss_delta_last_KiB"],
     "vim-jump":         ["wall_s", "rss_post_delta_KiB"],
     "htop-60s":         ["cpu_pct_mean", "cpu_pct_max", "rss_delta_max_KiB"],
+    "active-9x-soak":   ["rss_drift_ratio_q4_over_q1", "cpu_drift_ratio_q4_over_q1", "cpu_pct_mean"],
     "typing-latency":   ["input_latency_us_p50", "input_latency_us_p95", "input_latency_us_p99"],
 }
 
