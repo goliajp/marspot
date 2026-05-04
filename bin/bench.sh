@@ -63,9 +63,17 @@ trap 'rm -rf "$CUR_DIR"' EXIT
 # N=5 trials per parse measurement; we take the median.  Single-run
 # numbers vary ~5–8 % on the same code (thermal / scheduler / kernel
 # cache), so a 1-shot gate flaps without contributing real signal.
+#
+# Each measurement loop is preceded by a discarded warm-up trial
+# (perf-attack E2): trial 1 after a fresh `cargo build --release` pays
+# cold-cache cost — file pages, binary text-section paging, glyph
+# atlas data dir touches — that drags the median by ~20% and
+# manufactures false gate failures.  The warm-up trial pre-pays
+# those costs; the recorded trials measure steady-state.
 echo "==> headless parse (5 trials each, taking median)"
 for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
   : > "$CUR_DIR/parse-$s.samples"
+  "$ROOT/target/release/mars" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
   for i in 1 2 3 4 5; do
     "$ROOT/target/release/mars" --bench "parse:$SCENARIOS_DIR/$s.bin" \
       | python3 -c "import sys,json; print(json.load(sys.stdin)['bytes_per_sec'])" \
@@ -75,6 +83,7 @@ done
 
 echo "==> headless render (3 trials, taking median p99)"
 : > "$CUR_DIR/render.samples"
+"$ROOT/target/release/mars" --bench render:1000 >/dev/null
 for trial in 1 2 3; do
   "$ROOT/target/release/mars" --bench render:1000 \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
@@ -88,6 +97,7 @@ done
 # auto-tracks via --update-baseline.
 echo "==> headless scroll (5 trials, taking median p99)"
 : > "$CUR_DIR/scroll.samples"
+"$ROOT/target/release/mars" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null
 for trial in 1 2 3 4 5; do
   "$ROOT/target/release/mars" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
@@ -102,6 +112,8 @@ done
 # default (so this gate is meaningful both pre- and post-flip).
 echo "==> headless scroll-cold (disk-on, 5 trials, taking median p99)"
 : > "$CUR_DIR/scroll-cold.samples"
+MARS_DISK_SCROLLBACK=1 "$ROOT/target/release/mars" \
+  --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null 2>&1
 for trial in 1 2 3 4 5; do
   MARS_DISK_SCROLLBACK=1 "$ROOT/target/release/mars" \
     --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" 2>/dev/null \

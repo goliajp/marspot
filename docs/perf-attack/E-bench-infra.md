@@ -67,7 +67,13 @@ if captured:
 
 ---
 
-## E2 — fast-gate warm-up trial
+## E2 — fast-gate warm-up trial · **DONE 2026-05-05**
+
+Landed in `feature/perf-E2-warmup`.  Each of the four measurement
+loops (parse, render, scroll, scroll-cold) now runs a discarded
+warm-up invocation before the timed trials.  Test:
+`bench/tests/e2-warmup.sh` (structural + behavioural, load-independent
+~1s runtime).
 
 ### What's broken
 
