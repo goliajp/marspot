@@ -348,27 +348,17 @@ declare_class!(
         fn mouse_down(&self, event: &NSEvent) {
             // locationInWindow is in window coords (logical points,
             // origin bottom-left of window).  Convert into our flipped
-            // view's coords (origin top-left, logical points), then to
-            // backing pixels.
+            // view's coords — with isFlipped=true that gives top-down
+            // y in logical points.  Then scale to backing pixels by
+            // hand: convertPointToBacking has under-documented Y-flip
+            // behaviour on isFlipped views (the previous
+            // `view_h + backing.y` workaround inverted top clicks
+            // into bottom y_phys, sending sidebar entry "1" to row 7).
             let loc_window = unsafe { event.locationInWindow() };
-            let loc_view =
-                self.convertPoint_fromView(loc_window, None);
-            let backing = unsafe { self.convertPointToBacking(loc_view) };
-            // convertPointToBacking flips Y back to bottom-left in the
-            // returned point's frame; with isFlipped=true on the view,
-            // the y is already top-down in `loc_view`, and
-            // convertPointToBacking just scales — but Apple actually
-            // negates y here regardless of `isFlipped`.  Compute via
-            // the bounds height instead so we get a top-left origin
-            // in backing pixels deterministically.
-            let view_h_phys = self.bounds().size.height
-                * self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
-            let x_phys = backing.x.abs();
-            let y_phys = if backing.y < 0.0 {
-                view_h_phys + backing.y
-            } else {
-                backing.y
-            };
+            let loc_view = self.convertPoint_fromView(loc_window, None);
+            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let x_phys = loc_view.x * scale;
+            let y_phys = loc_view.y * scale;
             dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys });
         }
 
