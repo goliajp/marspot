@@ -14,3 +14,6 @@
 *.swp
 bench/scenarios/
 bench/results/
+
+# Per-session handoff snapshot (managed by /handoff skill, not source).
+.claude/handoff.md
