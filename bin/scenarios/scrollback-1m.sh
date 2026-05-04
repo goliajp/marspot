@@ -79,7 +79,8 @@ chmod +x "$WORKER"
 # disk persistence (Terminal.app).
 scrollback_dir() {
   case "$1" in
-    mars)     echo "$HOME/.cache/mars/scrollback" ;;  # not implemented yet — directory may not exist
+    # mars: anon-mmap rings have no on-disk file (eviction-via-swap).
+    mars)     echo "" ;;
     iterm)    echo "$HOME/Library/Application Support/iTerm2/SavedState" ;;
     warp)     echo "$HOME/Library/Application Support/dev.warp.Warp-Stable" ;;
     terminal) echo "" ;;

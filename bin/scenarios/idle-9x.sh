@@ -61,7 +61,9 @@ baseline_kib=$(rss_total_kib "$terminal" || echo 0)
 
 scrollback_dir() {
   case "$1" in
-    mars)     echo "$HOME/.cache/mars/scrollback" ;;
+    # mars: anon-mmap rings have no on-disk file (eviction-via-swap,
+    # not eviction-to-named-file).  Nothing to du; emit empty.
+    mars)     echo "" ;;
     iterm)    echo "$HOME/Library/Application Support/iTerm2/SavedState" ;;
     warp)     echo "$HOME/Library/Application Support/dev.warp.Warp-Stable" ;;
     terminal) echo "" ;;

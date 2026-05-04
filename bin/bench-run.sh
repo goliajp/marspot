@@ -14,7 +14,15 @@
 #     Restrict the matrix.  Useful while iterating on one scenario.
 #
 #   bin/bench-run.sh --quick
-#     Faster matrix (idle-9x runs --quick, soak-style scenarios skipped).
+#     Faster matrix (idle-9x and htop-60s run --quick, soak-style
+#     scenarios skipped).  For dev iteration, not pre-merge gate.
+#
+#   bin/bench-run.sh --extended
+#     Pre-release / nightly soak.  idle-9x runs 30 min instead of
+#     5 min (catches CPU / RSS drift that only shows past the
+#     5 min sample window).  Run before declaring a release or as
+#     a scheduled nightly to keep CLAUDE.md's "cannot get slower
+#     the longer it runs" honest at the timescale that matters.
 #
 # Outputs:
 #   bench/results/<runid>.json       full snapshot of this run
@@ -43,6 +51,7 @@ ALL_TERMINALS=(mars iterm terminal warp)
 SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
 TERMINALS=("${ALL_TERMINALS[@]}")
 QUICK=0
+EXTENDED=0
 INCLUDE_TYPING=0
 
 while (( $# > 0 )); do
@@ -58,15 +67,23 @@ while (( $# > 0 )); do
     --quick)
       QUICK=1
       shift ;;
+    --extended)
+      EXTENDED=1
+      shift ;;
     --include-typing-latency)
       INCLUDE_TYPING=1
       shift ;;
     -h|--help)
-      sed -n '2,28p' "$0"; exit 0 ;;
+      sed -n '2,32p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+if (( QUICK && EXTENDED )); then
+  echo "--quick and --extended are mutually exclusive" >&2
+  exit 2
+fi
 
 # ---- run id + git fingerprint -----------------------------------------
 
@@ -88,6 +105,7 @@ echo "==> bench-run.sh $run_id"
 echo "    scenarios: ${SCENARIOS[*]}"
 echo "    terminals: ${TERMINALS[*]}"
 echo "    quick:     $QUICK"
+echo "    extended:  $EXTENDED"
 echo "    git:       $git_sha (dirty=$git_dirty)"
 echo "    machine:   $machine_model / $machine_cpu / macOS $machine_macos"
 echo
@@ -120,7 +138,11 @@ supports() {
 scenario_args() {
   local scenario=$1
   case "$scenario" in
-    idle-9x)         (( QUICK )) && echo "--quick" || echo "" ;;
+    idle-9x)
+      if   (( EXTENDED )); then echo "--extended"
+      elif (( QUICK ));    then echo "--quick"
+      else echo ""
+      fi ;;
     htop-60s)        (( QUICK )) && echo "--quick" || echo "" ;;
     typing-latency)  (( QUICK )) && echo 50 || echo 200 ;;
     *)               echo "" ;;
