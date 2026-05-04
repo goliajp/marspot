@@ -10,44 +10,25 @@
 //! same scrollback, same keyboard/mouse handling — just one cell
 //! and no sidebar / layout / multi-session bookkeeping.
 
-use objc2_app_kit::{NSScreen, NSView};
+use objc2_app_kit::NSScreen;
 use objc2_foundation::MainThreadMarker;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{Modifiers, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
 
-use mars::input::key_event_to_bytes;
+use mars::app::{run_app, EventProxy, MarsApp, MarsAppCtx, WindowAttrs};
+use mars::input::{key_event_to_bytes, MarsKeyEvent, Modifiers};
 use mars::render::{Renderer, SessionView};
 use mars::session::Session;
 
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
 
-#[derive(Debug, Clone)]
-enum McliEvent {
-    Wake,
-}
-
 struct Mcli {
-    window: Option<Window>,
     renderer: Option<Renderer>,
     session: Session,
-    modifiers: ModifiersState,
     view_offset: u16,
 }
 
-impl ApplicationHandler<McliEvent> for Mcli {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let title = format!("mcli — {} {}", env!("CARGO_PKG_VERSION"), env!("MARS_GIT_SHA"));
-        let attrs = Window::default_attributes()
-            .with_title(title)
-            .with_inner_size(LogicalSize::new(960.0, 600.0));
-        let window = event_loop.create_window(attrs).expect("create window");
-
+impl MarsApp for Mcli {
+    fn resumed(&mut self, ctx: &MarsAppCtx) {
         let mt = MainThreadMarker::new().expect("main thread");
         let screens = NSScreen::screens(mt);
         let mut max_scale = 1.0_f32;
@@ -60,155 +41,130 @@ impl ApplicationHandler<McliEvent> for Mcli {
             .and_then(|s| s.parse().ok())
             .unwrap_or(max_scale);
 
-        let renderer = unsafe {
-            let handle = window.window_handle().expect("window handle").as_raw();
-            let RawWindowHandle::AppKit(appkit) = handle else {
-                panic!("mcli only supports the AppKit backend");
-            };
-            let nsview: &NSView = &*(appkit.ns_view.as_ptr() as *const NSView);
-            Renderer::new(nsview, scale).expect("renderer init")
-        };
-
-        let size = window.inner_size();
-        let phys_w = (size.width as f64) * (scale as f64);
-        let phys_h = (size.height as f64) * (scale as f64);
-        let mut renderer = renderer;
-        renderer.resize(phys_w, phys_h);
-        window.request_redraw();
-
-        self.window = Some(window);
+        let renderer = Renderer::new(ctx.ns_view(), scale).expect("renderer init");
         self.renderer = Some(renderer);
+        // Initial size will arrive via the explicit Resized fired by run_app.
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: McliEvent) {
-        match event {
-            McliEvent::Wake => {
-                if self.session.pump() > 0 {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-                if self.session.is_exited() {
-                    self.session.pump(); // commit final bytes
-                    event_loop.exit();
-                }
-            }
+    fn user_event(&mut self, ctx: &MarsAppCtx) {
+        if self.session.pump() > 0 {
+            ctx.request_redraw();
+        }
+        if self.session.is_exited() {
+            self.session.pump(); // commit final bytes
+            ctx.exit();
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                let phys_w = size.width as f64;
-                let phys_h = size.height as f64;
-                if let Some(r) = self.renderer.as_mut() {
-                    r.resize(phys_w, phys_h);
-                    let (cell_w, cell_h) = r.cell_dims();
-                    let cols = ((phys_w / cell_w).floor() as u16).max(1);
-                    let rows = ((phys_h / cell_h).floor() as u16).max(1);
-                    if (cols, rows)
-                        != (
-                            self.session.terminal.grid().cols(),
-                            self.session.terminal.grid().rows(),
-                        )
-                    {
-                        self.session.resize(cols, rows);
-                    }
-                    let view = SessionView {
-                        grid: self.session.terminal.grid(),
-                        view_offset: self.view_offset,
-                        cursor_visible: self.session.terminal.cursor_visible(),
-                        focused: true,
-                    };
-                    r.render(view);
-                }
+    fn key_event(&mut self, ctx: &MarsAppCtx, event: MarsKeyEvent, modifiers: Modifiers) {
+        if let Some(bytes) = key_event_to_bytes(&event, modifiers) {
+            if self.view_offset != 0 {
+                self.view_offset = 0;
+                ctx.request_redraw();
             }
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-            }
-            WindowEvent::Focused(focused) => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_window_focused(focused);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
-                    if self.view_offset != 0 {
-                        self.view_offset = 0;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                    }
-                    let _ = self.session.write(&bytes);
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let cell_h = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.cell_dims().1)
-                    .unwrap_or(15.0);
-                let lines_f = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -(y as f64) * 3.0,
-                    MouseScrollDelta::PixelDelta(p) => -p.y / cell_h,
-                };
-                if lines_f.abs() < 0.5 {
-                    return;
-                }
-                let max = self.session.terminal.grid().scrollback_len() as i32;
-                let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
-                if new != self.view_offset {
-                    self.view_offset = new;
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                if let Some(r) = self.renderer.as_mut() {
-                    let view = SessionView {
-                        grid: self.session.terminal.grid(),
-                        view_offset: self.view_offset,
-                        cursor_visible: self.session.terminal.cursor_visible(),
-                        focused: true,
-                    };
-                    r.render(view);
-                }
-            }
-            _ => {}
+            let _ = self.session.write(&bytes);
         }
+    }
+
+    fn mouse_down(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {
+        // mcli has no sidebar / no layout — clicks are no-ops for now.
+    }
+
+    fn scroll(&mut self, ctx: &MarsAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
+        let cell_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.cell_dims().1)
+            .unwrap_or(15.0);
+        // See main.rs comment on the negation: NSEvent positive Y =
+        // scroll up; view_offset increases as we look back in
+        // scrollback, so negate.
+        let lines_f = if precise {
+            -dy_phys / cell_h
+        } else {
+            -dy_phys * 3.0
+        };
+        if lines_f.abs() < 0.5 {
+            return;
+        }
+        let max = self.session.terminal.grid().scrollback_len() as i32;
+        let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
+        if new != self.view_offset {
+            self.view_offset = new;
+            ctx.request_redraw();
+        }
+    }
+
+    fn resized(&mut self, _ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+        let Some(r) = self.renderer.as_mut() else { return };
+        r.resize(phys_w, phys_h);
+        let (cell_w, cell_h) = r.cell_dims();
+        let cols = ((phys_w / cell_w).floor() as u16).max(1);
+        let rows = ((phys_h / cell_h).floor() as u16).max(1);
+        if (cols, rows)
+            != (
+                self.session.terminal.grid().cols(),
+                self.session.terminal.grid().rows(),
+            )
+        {
+            self.session.resize(cols, rows);
+        }
+        let view = SessionView {
+            grid: self.session.terminal.grid(),
+            view_offset: self.view_offset,
+            cursor_visible: self.session.terminal.cursor_visible(),
+            focused: true,
+        };
+        r.render(view);
+    }
+
+    fn focused(&mut self, ctx: &MarsAppCtx, focused: bool) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_window_focused(focused);
+            ctx.request_redraw();
+        }
+    }
+
+    fn close_requested(&mut self, ctx: &MarsAppCtx) {
+        ctx.exit();
+    }
+
+    fn redraw(&mut self, _ctx: &MarsAppCtx) {
+        let Some(r) = self.renderer.as_mut() else { return };
+        let view = SessionView {
+            grid: self.session.terminal.grid(),
+            view_offset: self.view_offset,
+            cursor_visible: self.session.terminal.cursor_visible(),
+            focused: true,
+        };
+        r.render(view);
     }
 }
 
 fn main() {
-    let event_loop: EventLoop<McliEvent> = EventLoop::with_user_event()
-        .build()
-        .expect("create event loop");
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    let proxy = event_loop.create_proxy();
+    let proxy = EventProxy::new();
+    let proxy_clone = proxy.clone();
     let wake = move || {
-        let _ = proxy.send_event(McliEvent::Wake);
+        proxy_clone.wake();
     };
 
     let session =
         Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake).expect("spawn initial session");
 
-    let mut app = Mcli {
-        window: None,
+    let app = Mcli {
         renderer: None,
         session,
-        modifiers: ModifiersState::empty(),
         view_offset: 0,
     };
-    event_loop.run_app(&mut app).expect("run app");
+
+    let attrs = WindowAttrs {
+        title: format!(
+            "mcli — {} {}",
+            env!("CARGO_PKG_VERSION"),
+            env!("MARS_GIT_SHA"),
+        ),
+        width_logical: 960.0,
+        height_logical: 600.0,
+    };
+    run_app(app, proxy, attrs);
 }

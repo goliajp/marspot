@@ -1,14 +1,8 @@
-use objc2_app_kit::{NSScreen, NSView};
+use objc2_app_kit::NSScreen;
 use objc2_foundation::MainThreadMarker;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{Modifiers, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
 
-use mars::input::key_event_to_bytes;
+use mars::app::{run_app, EventProxy, MarsApp, MarsAppCtx, WindowAttrs};
+use mars::input::{key_event_to_bytes, MarsKeyEvent, Modifiers as MarsModifiers};
 use mars::layout::Layout;
 use mars::render::{Renderer, SessionView, SidebarEntry};
 use mars::render_metal::{make_target_texture, MetalRenderer};
@@ -57,12 +51,6 @@ impl RendererImpl {
             Self::Metal(r) => r.render_layout(layout, views, sidebar, focused_idx),
         }
     }
-}
-
-/// Mars's only proxy event — "something woke us up, drain all sessions".
-#[derive(Debug, Clone)]
-pub enum MarsEvent {
-    Wake,
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -148,7 +136,6 @@ impl TmuxState {
 }
 
 struct Mars {
-    window: Option<Window>,
     renderer: Option<RendererImpl>,
     /// Cached layout from the last Resized.  Drives both rendering and
     /// mouse-click hit-testing.
@@ -165,14 +152,6 @@ struct Mars {
     /// single shared offset; Phase C will move this onto Session so each
     /// cell remembers its own scroll position.
     view_offset: u16,
-    /// Cursor position on screen at the last MouseInput event — used so
-    /// click hit-testing knows where the cursor was when the button
-    /// went down.
-    cursor_phys: (f64, f64),
-    /// Latest known modifier state, updated by WindowEvent::ModifiersChanged.
-    /// winit's KeyEvent does not carry the live modifier flags on macOS, so
-    /// we have to track them out-of-band.
-    modifiers: ModifiersState,
     /// Self-instrumentation: when set to `Some(t0)`, the next render that
     /// commits to the layer will measure `t0.elapsed()` as the
     /// keystroke-to-pixel latency and record it.  Cleared after the next
@@ -206,14 +185,8 @@ struct ProfileCounters {
     started_at: Option<std::time::Instant>,
 }
 
-impl ApplicationHandler<MarsEvent> for Mars {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let title = format!("Mars v{} ({})", VERSION, GIT_SHA);
-        let attrs = Window::default_attributes()
-            .with_title(title)
-            .with_inner_size(LogicalSize::new(DEFAULT_WIN_W, DEFAULT_WIN_H));
-        let window = event_loop.create_window(attrs).expect("create window");
-
+impl MarsApp for Mars {
+    fn resumed(&mut self, ctx: &MarsAppCtx) {
         // mainScreen() can return a 1x screen even when our window will
         // land on a 2x one. Survey all screens and use the max so the
         // CALayer is composited at the right density.
@@ -231,280 +204,219 @@ impl ApplicationHandler<MarsEvent> for Mars {
             .and_then(|s| s.parse().ok())
             .unwrap_or(max_scale);
 
-        let renderer = unsafe {
-            let handle = window.window_handle().expect("window handle").as_raw();
-            let RawWindowHandle::AppKit(appkit) = handle else {
-                panic!("Mars only supports the AppKit backend");
-            };
-            let nsview: &NSView = &*(appkit.ns_view.as_ptr() as *const NSView);
-            // Metal is the default; MARS_APPKIT=1 falls back to the
-            // AppKit/CGImage path (kept for regression bisects).
-            if std::env::var("MARS_APPKIT").as_deref() == Ok("1") {
-                eprintln!("[mars] MARS_APPKIT=1 → using AppKit Renderer");
-                RendererImpl::Appkit(
-                    Renderer::new(nsview, scale).expect("renderer init"),
-                )
-            } else {
-                RendererImpl::Metal(
-                    MetalRenderer::new(nsview, scale).expect("metal renderer init"),
-                )
-            }
+        let nsview = ctx.ns_view();
+        // Metal is the default; MARS_APPKIT=1 falls back to the
+        // AppKit/CGImage path (kept for regression bisects).
+        let renderer = if std::env::var("MARS_APPKIT").as_deref() == Ok("1") {
+            eprintln!("[mars] MARS_APPKIT=1 → using AppKit Renderer");
+            RendererImpl::Appkit(
+                Renderer::new(nsview, scale).expect("renderer init"),
+            )
+        } else {
+            RendererImpl::Metal(
+                MetalRenderer::new(nsview, scale).expect("metal renderer init"),
+            )
         };
-
-        let size = window.inner_size();
-        let phys_w = (size.width as f64) * (scale as f64);
-        let phys_h = (size.height as f64) * (scale as f64);
-        let mut renderer = renderer;
-        renderer.resize(phys_w, phys_h);
-
-        window.request_redraw();
-
-        self.window = Some(window);
         self.renderer = Some(renderer);
+        // run_app delivers an explicit Resized after resumed; that does
+        // the renderer.resize + layout build + initial render.
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: MarsEvent) {
-        match event {
-            MarsEvent::Wake => {
-                self.prof.user_events += 1;
-                let drain_t0 = std::time::Instant::now();
-                let total_bytes = if self.tmux.is_some() {
-                    self.pump_tmux_session()
-                } else {
-                    let mut total = 0;
-                    for s in &mut self.sessions {
-                        let feed_t0 = std::time::Instant::now();
-                        let n = s.pump();
-                        self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
-                        total += n;
-                    }
-                    total
-                };
-                self.prof.bytes_fed += total_bytes as u64;
-                self.prof.drain_total_ns += drain_t0.elapsed().as_nanos() as u64;
-                if total_bytes > 0 {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                        self.prof.request_redraws += 1;
-                    }
+    fn user_event(&mut self, ctx: &MarsAppCtx) {
+        self.prof.user_events += 1;
+        let drain_t0 = std::time::Instant::now();
+        let total_bytes = if self.tmux.is_some() {
+            self.pump_tmux_session()
+        } else {
+            let mut total = 0;
+            for s in &mut self.sessions {
+                let feed_t0 = std::time::Instant::now();
+                let n = s.pump();
+                self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
+                total += n;
+            }
+            total
+        };
+        self.prof.bytes_fed += total_bytes as u64;
+        self.prof.drain_total_ns += drain_t0.elapsed().as_nanos() as u64;
+        if total_bytes > 0 {
+            ctx.request_redraw();
+            self.prof.request_redraws += 1;
+        }
+        // Multi-session: keep the window alive even when individual
+        // cells exit — they'll just stop producing bytes.  Phase D
+        // will draw an "exited" indicator in the sidebar.  Quit only
+        // when *every* session is dead.
+        if self.sessions.iter().all(|s| s.is_exited()) {
+            for s in &mut self.sessions {
+                s.pump();
+            }
+            ctx.exit();
+        }
+    }
+
+    fn key_event(&mut self, ctx: &MarsAppCtx, event: MarsKeyEvent, modifiers: MarsModifiers) {
+        if let Some(bytes) = key_event_to_bytes(&event, modifiers) {
+            if self.record_latency && self.pending_keystroke_t0.is_none() {
+                self.pending_keystroke_t0 = Some(std::time::Instant::now());
+            }
+            // Typing snaps the focused session's view back to live.
+            if self.view_offset != 0 {
+                self.view_offset = 0;
+                ctx.request_redraw();
+            }
+            let session = &mut self.sessions[self.focused_idx];
+            let _ = session.write(&bytes);
+            // Local-echo: paint each printable-ASCII byte to the grid
+            // immediately, ahead of the PTY round trip.
+            // Terminal::predict_byte is a no-op for bytes that aren't
+            // safe to predict (control chars, alt-screen mode, atlas
+            // full, etc.).
+            let mut predicted = false;
+            for &b in bytes.as_ref() {
+                if session.terminal.predict_byte(b) {
+                    predicted = true;
                 }
-                // Multi-session: keep the window alive even when
-                // individual cells exit — they'll just stop producing
-                // bytes.  Phase D will draw an "exited" indicator in
-                // the sidebar.  Quit only when *every* session is dead.
-                if self.sessions.iter().all(|s| s.is_exited()) {
-                    for s in &mut self.sessions {
-                        s.pump();
-                    }
-                    event_loop.exit();
-                }
+            }
+            if predicted {
+                ctx.request_redraw();
             }
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                // winit's PhysicalSize on macOS is already physical pixels.
-                let phys_w = size.width as f64;
-                let phys_h = size.height as f64;
-                if let Some(r) = self.renderer.as_mut() {
-                    r.resize(phys_w, phys_h);
-                    let (cell_w, cell_h) = r.cell_dims();
-                    // Sidebar is logical-points; convert by querying current
-                    // backing scale (1.0 fallback).
-                    let scale = MainThreadMarker::new()
-                        .and_then(NSScreen::mainScreen)
-                        .map(|s| s.backingScaleFactor() as f64)
-                        .unwrap_or(1.0);
-                    let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
-                    let (lc, lr) = if self.tmux.is_some() {
-                        (TMUX_GRID_COLS, TMUX_GRID_ROWS)
-                    } else {
-                        (GRID_COLS_LAYOUT, GRID_ROWS_LAYOUT)
-                    };
-                    let layout = Layout::build(
-                        phys_w,
-                        phys_h,
-                        sidebar_phys,
-                        lc,
-                        lr,
-                        cell_w,
-                        cell_h,
-                    );
-                    // Resize every session to its layout cell.
-                    for (i, s) in self.sessions.iter_mut().enumerate() {
-                        if let Some(rect) = layout.cells.get(i) {
-                            if (rect.cols, rect.rows)
-                                != (s.terminal.grid().cols(), s.terminal.grid().rows())
-                            {
-                                s.resize(rect.cols, rect.rows);
-                            }
-                        }
-                    }
-                    self.layout = Some(layout);
-                    // Sync render so the next CA commit lands a fresh
-                    // CGImage at the new size — avoids the live-resize
-                    // flicker we worked through earlier.
-                    self.render_now();
-                }
-            }
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
-            }
-            WindowEvent::Focused(focused) => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_window_focused(focused);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = key_event_to_bytes(&event, self.modifiers) {
-                    if self.record_latency && self.pending_keystroke_t0.is_none() {
-                        self.pending_keystroke_t0 = Some(std::time::Instant::now());
-                    }
-                    // Typing snaps the focused session's view back to live.
-                    if self.view_offset != 0 {
-                        self.view_offset = 0;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                    }
-                    let session = &mut self.sessions[self.focused_idx];
-                    let _ = session.write(&bytes);
-                    // Local-echo: paint each printable-ASCII byte to
-                    // the grid immediately, ahead of the PTY round
-                    // trip.  Terminal::predict_byte is a no-op for
-                    // bytes that aren't safe to predict (control
-                    // chars, alt-screen mode, atlas full, etc.).
-                    let mut predicted = false;
-                    for &b in bytes.as_ref() {
-                        if session.terminal.predict_byte(b) {
-                            predicted = true;
-                        }
-                    }
-                    if predicted {
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                    }
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_phys = (position.x, position.y);
-            }
-            WindowEvent::MouseInput {
-                state, button, ..
-            } => {
-                use winit::event::{ElementState, MouseButton};
-                if state == ElementState::Pressed && button == MouseButton::Left {
-                    if let Some(layout) = &self.layout {
-                        let (px, py) = self.cursor_phys;
-                        let scale = MainThreadMarker::new()
-                            .and_then(NSScreen::mainScreen)
-                            .map(|s| s.backingScaleFactor() as f64)
-                            .unwrap_or(1.0);
-                        let row_phys = SIDEBAR_ROW_PT * scale;
-                        let top_pad_phys = SIDEBAR_TOP_PAD_PT * scale;
+    fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
+        let Some(layout) = &self.layout else { return };
+        let scale = ctx.scale();
+        let row_phys = SIDEBAR_ROW_PT * scale;
+        let top_pad_phys = SIDEBAR_TOP_PAD_PT * scale;
 
-                        // In tmux mode, sidebar rows map to tmux windows;
-                        // a click sends `select-window` to tmux instead
-                        // of changing mars's focused_idx.
-                        if self.tmux.is_some() {
-                            let n_windows = self.tmux.as_ref().unwrap().windows.len();
-                            if let Some(row) = layout.hit_test_sidebar_row(
-                                px,
-                                py,
-                                top_pad_phys,
-                                row_phys,
-                                n_windows,
-                            ) {
-                                let target =
-                                    self.tmux.as_ref().unwrap().windows.get(row).map(|w| w.id);
-                                if let Some(id) = target {
-                                    self.tmux_select_window(id);
-                                    if let Some(w) = &self.window {
-                                        w.request_redraw();
-                                    }
-                                }
-                                return;
-                            }
-                            // Fall through: clicks on the (single) cell
-                            // do nothing in tmux mode.
-                            return;
-                        }
-
-                        let new_focus = layout
-                            .hit_test_sidebar_row(
-                                px,
-                                py,
-                                top_pad_phys,
-                                row_phys,
-                                self.sessions.len(),
-                            )
-                            .or_else(|| layout.hit_test(px, py));
-                        if let Some(idx) = new_focus {
-                            if idx < self.sessions.len() && idx != self.focused_idx {
-                                self.focused_idx = idx;
-                                self.view_offset = 0;
-                                if let Some(w) = &self.window {
-                                    w.request_redraw();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let cell_h = self
-                    .renderer
+        // In tmux mode, sidebar rows map to tmux windows; a click
+        // sends `select-window` to tmux instead of changing
+        // focused_idx.
+        if self.tmux.is_some() {
+            let n_windows = self.tmux.as_ref().unwrap().windows.len();
+            if let Some(row) = layout.hit_test_sidebar_row(
+                x_phys, y_phys, top_pad_phys, row_phys, n_windows,
+            ) {
+                let target = self
+                    .tmux
                     .as_ref()
-                    .map(|r| r.cell_dims().1)
-                    .unwrap_or(15.0);
-                let lines_f = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -(y as f64) * 3.0,
-                    MouseScrollDelta::PixelDelta(p) => -p.y / cell_h,
-                };
-                if lines_f.abs() < 0.5 {
-                    return;
+                    .unwrap()
+                    .windows
+                    .get(row)
+                    .map(|w| w.id);
+                if let Some(id) = target {
+                    self.tmux_select_window(id);
+                    ctx.request_redraw();
                 }
-                let max = self.sessions[self.focused_idx]
-                    .terminal
-                    .grid()
-                    .scrollback_len() as i32;
-                let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
-                if new != self.view_offset {
-                    self.view_offset = new;
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+            }
+            // Clicks on the (single) cell do nothing in tmux mode.
+            return;
+        }
+
+        let new_focus = layout
+            .hit_test_sidebar_row(
+                x_phys,
+                y_phys,
+                top_pad_phys,
+                row_phys,
+                self.sessions.len(),
+            )
+            .or_else(|| layout.hit_test(x_phys, y_phys));
+        if let Some(idx) = new_focus {
+            if idx < self.sessions.len() && idx != self.focused_idx {
+                self.focused_idx = idx;
+                self.view_offset = 0;
+                ctx.request_redraw();
+            }
+        }
+    }
+
+    fn scroll(&mut self, ctx: &MarsAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
+        let cell_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.cell_dims().1)
+            .unwrap_or(15.0);
+        // NSEvent scroll deltas: positive Y = scroll up (toward
+        // earlier content).  view_offset increases as we look further
+        // back in scrollback.  Negate to map.  Trackpad path is
+        // pixel-precise; wheel path is in lines (~3 lines per detent
+        // matches winit's old LineDelta(_, y) * 3.0).
+        let lines_f = if precise {
+            -dy_phys / cell_h
+        } else {
+            -dy_phys * 3.0
+        };
+        if lines_f.abs() < 0.5 {
+            return;
+        }
+        let max = self.sessions[self.focused_idx]
+            .terminal
+            .grid()
+            .scrollback_len() as i32;
+        let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
+        if new != self.view_offset {
+            self.view_offset = new;
+            ctx.request_redraw();
+        }
+    }
+
+    fn resized(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.resize(phys_w, phys_h);
+            let (cell_w, cell_h) = r.cell_dims();
+            let scale = ctx.scale();
+            let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
+            let (lc, lr) = if self.tmux.is_some() {
+                (TMUX_GRID_COLS, TMUX_GRID_ROWS)
+            } else {
+                (GRID_COLS_LAYOUT, GRID_ROWS_LAYOUT)
+            };
+            let layout = Layout::build(
+                phys_w, phys_h, sidebar_phys, lc, lr, cell_w, cell_h,
+            );
+            for (i, s) in self.sessions.iter_mut().enumerate() {
+                if let Some(rect) = layout.cells.get(i) {
+                    if (rect.cols, rect.rows)
+                        != (s.terminal.grid().cols(), s.terminal.grid().rows())
+                    {
+                        s.resize(rect.cols, rect.rows);
                     }
                 }
             }
-            WindowEvent::RedrawRequested => {
-                self.prof.redraw_requested_calls += 1;
-                let render_t0 = std::time::Instant::now();
-                self.render_now();
-                self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
-                self.prof.render_calls += 1;
-                if self.prof.started_at.is_none() {
-                    self.prof.started_at = Some(std::time::Instant::now());
-                }
-                // Latency instrumentation — close the loop opened by
-                // the most recent keystroke.
-                if let Some(t0) = self.pending_keystroke_t0.take() {
-                    let ns = t0.elapsed().as_nanos() as u64;
-                    self.latency_samples.push(ns);
-                }
-            }
-            _ => {}
+            self.layout = Some(layout);
+            // Sync render so the next CA commit lands a fresh frame
+            // at the new size — avoids the live-resize flicker.
+            self.render_now();
+        }
+    }
+
+    fn focused(&mut self, ctx: &MarsAppCtx, focused: bool) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_window_focused(focused);
+            ctx.request_redraw();
+        }
+    }
+
+    fn close_requested(&mut self, ctx: &MarsAppCtx) {
+        ctx.exit();
+    }
+
+    fn redraw(&mut self, _ctx: &MarsAppCtx) {
+        self.prof.redraw_requested_calls += 1;
+        let render_t0 = std::time::Instant::now();
+        self.render_now();
+        self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
+        self.prof.render_calls += 1;
+        if self.prof.started_at.is_none() {
+            self.prof.started_at = Some(std::time::Instant::now());
+        }
+        // Latency instrumentation — close the loop opened by the most
+        // recent keystroke.
+        if let Some(t0) = self.pending_keystroke_t0.take() {
+            let ns = t0.elapsed().as_nanos() as u64;
+            self.latency_samples.push(ns);
         }
     }
 }
@@ -797,14 +709,9 @@ fn main() {
         return;
     }
 
-    let event_loop: EventLoop<MarsEvent> = EventLoop::with_user_event()
-        .build()
-        .expect("create event loop");
-    event_loop.set_control_flow(ControlFlow::Wait);
-
     // Every session's reader thread calls the same closure on chunk +
-    // EOF; we forward to the winit event loop as Wake.
-    let proxy = event_loop.create_proxy();
+    // EOF; we forward to the AppKit run loop as user_event.
+    let proxy = EventProxy::new();
 
     let tmux_mode = args.iter().any(|a| a == "--tmux");
     let n_sessions = if tmux_mode {
@@ -817,7 +724,7 @@ fn main() {
     for _ in 0..n_sessions {
         let proxy_clone = proxy.clone();
         let wake = move || {
-            let _ = proxy_clone.send_event(MarsEvent::Wake);
+            proxy_clone.wake();
         };
         let s = if tmux_mode {
             // tmux -CC: attach to "mars" session (creating it if absent).
@@ -841,16 +748,13 @@ fn main() {
     let record_latency = latency_out_path.is_some();
     let profile_out_path = std::env::var("MARS_PROFILE").ok();
 
-    let mut app = Mars {
-        window: None,
+    let app = Mars {
         renderer: None,
         layout: None,
         tmux: if tmux_mode { Some(TmuxState::new()) } else { None },
         sessions,
         focused_idx: 0,
         view_offset: 0,
-        cursor_phys: (0.0, 0.0),
-        modifiers: ModifiersState::empty(),
         pending_keystroke_t0: None,
         latency_samples: Vec::new(),
         record_latency,
@@ -858,7 +762,13 @@ fn main() {
         prof: ProfileCounters::default(),
         profile_out_path,
     };
-    event_loop.run_app(&mut app).expect("run app");
+
+    let attrs = WindowAttrs {
+        title: format!("Mars v{} ({})", VERSION, GIT_SHA),
+        width_logical: DEFAULT_WIN_W,
+        height_logical: DEFAULT_WIN_H,
+    };
+    run_app(app, proxy, attrs);
 }
 
 impl Drop for Mars {

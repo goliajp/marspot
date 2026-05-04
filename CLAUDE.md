@@ -33,7 +33,6 @@ We will write soak tests (run for hours, assert footprint stays bounded) before 
 
 | Crate | Status | Reason |
 |---|---|---|
-| `winit` | **on probation** | Convenience wrapper over AppKit. Replaceable with direct `objc2-app-kit` (~few hundred LOC for window + event loop). Should be removed when next touched. |
 | `objc2`, `objc2-app-kit`, `objc2-foundation` | keep | FFI bindings to Apple frameworks — not "libraries that do work" |
 
 Future planned bindings (`objc2-metal`, `libc` for PTY) will be FFI-only — keep.
