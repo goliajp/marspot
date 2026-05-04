@@ -146,3 +146,55 @@ Branches by root cause (will narrow once #2/#3 above complete):
 (append-only, dated)
 
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
+- 2026-05-05 — static analysis pass on `feature/perf-A1-soak-rss-drift`:
+  - **font_cache char_cache (hypothesis 1)**: ruled OUT.  Hard cap at
+    `CHAR_CACHE_CAP = 8K` + atomic `clear()` on overflow; HashMap
+    capacity bounded ~500 KiB; not a growth source.
+  - **glyph atlas atomic-rebuild (hypothesis 2)**: ruled OUT.  Single
+    `MTLTexture(2048, 2048, R8) = 4 MiB` allocated once at Renderer
+    construction; rebuild calls `shelves.clear() + cache.clear()` on
+    the SAME texture; no per-rebuild texture allocation, no residue.
+  - **scrollback ring lazy-mmap (hypothesis 3)**: **most likely
+    explanation** but reframes A1.  Per `bin/scenarios/active-9x-soak.sh`
+    workload (~36 lines/s/session) and ring size (`DISK_SCROLLBACK_RAM_LINES
+    + DISK_SCROLLBACK_PAGES × LINES_PER_PAGE = 1024 + 100×256 = 26,624
+    slots ≈ ~100 MiB per session at 122 cols × ~32 B/Cell), 5-min default
+    mode writes only ~10,800 lines per session (40% ring fill).  The
+    entire 5-min window is the page-commit transient — RSS grows
+    linearly with lines written, plateauing only after the ring
+    fully wraps at ~12 min.  Observed q4/q1 = 2.11× corresponds to
+    a sub-linear page-commit ramp, **smaller** than the naïve
+    time-linear estimate of 3.84× (samples 230-300s vs samples
+    38-100s = 265s/69s).  Scenario doc itself flags this:
+    "5 min … some lazy-fault still expected; --extended 30 min …
+    past steady-state."
+
+  **Reframe**: A1 isn't an unbounded-growth bug.  The 5-min default
+  threshold of 1.3× q4/q1 was set without acknowledging the
+  pre-plateau transient; 30-min --extended (1.10× threshold) is the
+  real architectural-commitment test ("cannot get slower the longer
+  it runs" applies *post-plateau*, not during the lazy-fault ramp).
+
+  **Next steps** (require clean machine; deferred):
+  1. Run `bin/scenarios/active-9x-soak.sh mars /tmp/x.json --extended`
+     on a quiet machine; expected: q4/q1 ≤ 1.10× (architectural pass).
+     If yes → the 30-min run is the real gate, default 5-min is too
+     short to be meaningful.
+  2. Update default 5-min threshold to ~1.50× (acknowledging mid-fill
+     transient) AND require --extended to pass for any merge-blocking
+     soak gate.
+  3. If --extended ALSO fails → genuine leak; investigate hypothesis
+     4 (PTY-grid backpressure) and 5 (Session-side accumulation).
+
+  **Opportunistic improvement** to consider regardless: smaller ring
+  default (e.g. 8192 slots ≈ 32 MiB / session × 9 = 288 MiB total),
+  which would plateau within the 5-min window and tighten *both*
+  default and extended gates.  Trade-off: shallower scrollback;
+  acceptable since terminal users typically need recent pages, not
+  20+ K-line history.  Specific value (8192 vs 4096) wants empirical
+  pick once clean-machine measurement is available.
+
+  No code change in this branch — the diagnosis updates the
+  hypothesis ranking and validates that the existing scrollback
+  architecture is bounded.  Code-side action gated on clean-machine
+  --extended verification.
