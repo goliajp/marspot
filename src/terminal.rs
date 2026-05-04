@@ -69,10 +69,17 @@ fn disk_scrollback_dir() -> Option<&'static PathBuf> {
     .as_ref()
 }
 
-/// In-RAM ring size when disk scrollback is active.  The renderer
-/// hits this for every `cell_at_view` past the live grid, so
-/// keeping the recent screenful in RAM avoids ever paging on
-/// typical scrollback (page-up / mouse-wheel by a few rows).
+/// In-RAM ring size when disk scrollback is active.  Front-line
+/// cache for the most-recent N lines; older history goes through
+/// the mmap'd ring.  Kept at 1024 deliberately:
+///
+/// Tried 4096 (Phase 3 of disk-scrollback default-on roadmap, see
+/// `--bench scroll`) — the larger lazy-allocated `ram_cells` Vec
+/// pays first-touch page faults on the parse hot path, costing
+/// ~3 % cat-ascii throughput.  Scroll p99 didn't improve (mmap
+/// region access is already as fast as Vec index), so the trade
+/// failed: small idle-resident upside, measurable burst-output
+/// downside.  Data on `feature/disk-scrollback-mmap` 2026-05-04.
 const DISK_SCROLLBACK_RAM_LINES: usize = 1024;
 
 /// Disk pages cap (each = 256 lines).  100 pages × 256 lines × 80
