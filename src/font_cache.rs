@@ -152,8 +152,19 @@ impl FontRegistry {
 pub struct FontCache {
     fonts: FontRegistry,
     /// `(codepoint, style)` → `(font_idx, glyph)`.  Style is 2-bit:
-    /// bit 0 = bold, bit 1 = italic.
+    /// bit 0 = bold, bit 1 = italic.  Bounded at `CHAR_CACHE_CAP`;
+    /// atomic-rebuild on full (drop everything, re-resolve on next
+    /// access) — same pattern as `GlyphAtlas`.  Realistic terminal
+    /// use exposes a few hundred to a few thousand unique
+    /// codepoints across the 4 styles, well under cap; the rebuild
+    /// is the safety net for pathological "user types every
+    /// codepoint of CJK + emoji" cases.
     char_cache: HashMap<(u32, u8), (usize, CGGlyph)>,
+    /// Number of times the cache filled up and was rebuilt.
+    /// Should be 0 in steady-state terminal use; non-zero after
+    /// settling means we're hitting the cap (bump CHAR_CACHE_CAP
+    /// or move to a real LRU).
+    pub rebuild_count: u64,
     /// Index into `fonts` for each of the 4 base styles (regular,
     /// bold, italic, bold-italic).  Falls back to regular when a
     /// variant doesn't exist (e.g. Menlo lacks true italic).
@@ -162,6 +173,14 @@ pub struct FontCache {
     pub cell_h: f64,
     pub ascent: f64,
 }
+
+/// Hard cap on `char_cache` entries.  Realistic terminal use
+/// across 9 simultaneous sessions is well under 4 K unique
+/// codepoints × 4 styles = 16 K entries; 8 K cap holds a typical
+/// working set with headroom and rebuilds rarely.  Each entry is
+/// ~50–70 B with HashMap accounting, so 8 K cap = ~500 KiB resident
+/// — bounded for the lifetime of the process.
+const CHAR_CACHE_CAP: usize = 8192;
 
 impl FontCache {
     pub fn build() -> Result<Self, String> {
@@ -191,6 +210,7 @@ impl FontCache {
         Ok(Self {
             fonts,
             char_cache: HashMap::new(),
+            rebuild_count: 0,
             style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
             cell_w,
             cell_h,
@@ -207,6 +227,16 @@ impl FontCache {
         let key = (ch as u32, style);
         if let Some(&entry) = self.char_cache.get(&key) {
             return entry;
+        }
+        // Atomic rebuild when full.  Realistic terminal working sets
+        // stay well under cap, so this is a safety net rather than
+        // a frequent path; if rebuild_count climbs in the wild,
+        // raise the cap or upgrade to true LRU.  Note we don't drop
+        // the FontRegistry — fallback fonts already discovered stay
+        // interned (they're heavy to recreate via CT discover).
+        if self.char_cache.len() >= CHAR_CACHE_CAP {
+            self.char_cache.clear();
+            self.rebuild_count += 1;
         }
         let style_idx = self.style_font_idx[style as usize];
         let base = self.fonts.fonts[style_idx].clone();
@@ -291,4 +321,43 @@ pub fn compute_cell_width(font: &CTFont) -> f64 {
         font.get_advances_for_glyphs(kCTFontOrientationDefault, &glyph, &mut size, 1);
     }
     size.width
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn char_cache_atomic_rebuild_on_cap() {
+        let mut fc = match FontCache::build() {
+            Ok(f) => f,
+            Err(_) => return, // CI without the system font
+        };
+
+        // Push CHAR_CACHE_CAP unique (codepoint, style) keys through.
+        // ASCII printable space is 95 chars × 4 styles = 380 keys per
+        // round; iterate enough rounds with synthetic codepoints to
+        // exceed cap.
+        let mut pushed = 0;
+        for cp in 0x20u32..0x20u32 + (CHAR_CACHE_CAP as u32 + 100) {
+            if let Some(ch) = char::from_u32(cp) {
+                fc.resolve_char(ch, false, false);
+                pushed += 1;
+            }
+        }
+        assert!(pushed > CHAR_CACHE_CAP, "pushed enough to overflow");
+        assert!(
+            fc.rebuild_count > 0,
+            "cap should have triggered at least one rebuild"
+        );
+        // After rebuild, cache len is bounded.
+        assert!(
+            fc.char_cache.len() <= CHAR_CACHE_CAP,
+            "cache must respect cap"
+        );
+        // Re-resolving should still work — atomic rebuild doesn't
+        // break the public contract.
+        let (_idx, glyph) = fc.resolve_char('A', false, false);
+        assert!(glyph != 0, "resolve still works post-rebuild");
+    }
 }

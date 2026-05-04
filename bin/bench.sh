@@ -374,9 +374,16 @@ if do_update:
     # Lower-better ceilings: use math.ceil so the noise margin actually
     # carries.  round() on something like 1.9 * 1.30 = 2.47 → 2 wipes
     # the margin out and the gate flaps on identical code; ceil → 3.
+    # Per-metric multipliers reflect observed run-to-run noise:
+    #   - parse: ~5 % noise → 1.07 margin (handled in scenarios loop)
+    #   - render: ~30 % noise (GPU thermal) → 1.50 to absorb worst case
+    #   - scroll / scroll-cold: ~30 % noise (low-µs regime, one cache
+    #     eviction skews p99) → 1.30
+    # If a metric needs a different margin than auto-derived, edit
+    # baseline.json directly and skip --update-baseline for that field.
     import math
     if render is not None:
-        baseline["render_full_repaint"]["p99_us_max"] = math.ceil(render["p99_ns"] / 1000 * 1.10)
+        baseline["render_full_repaint"]["p99_us_max"] = math.ceil(render["p99_ns"] / 1000 * 1.50)
     if scroll is not None and "scroll_repaint" in baseline:
         baseline["scroll_repaint"]["p99_us_max"] = math.ceil(scroll["p99_ns"] / 1000 * 1.30)
     if scroll_cold is not None and "scroll_cold_repaint" in baseline:

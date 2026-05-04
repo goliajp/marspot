@@ -45,8 +45,8 @@
     }
   ],
   "render_full_repaint": {
-    "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms; ceiling at 1.8 ms catches an actual regression while tolerating thermal/scheduler noise.",
-    "p99_us_max": 1134
+    "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs \u2014 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
+    "p99_us_max": 1800
   },
   "scroll_repaint": {
     "_comment": "p99 ns/repaint while walking view_offset from 5000 \u2192 0 in 3-line steps over 100K-line scroll-history.bin (--bench scroll).  Picks up MARS_DISK_SCROLLBACK so the gate tracks whichever variant is current default.  Median of 5 trials with run-to-run noise ~30 % (scroll p99 hovers in the low-microsecond regime where one fault or cache eviction skews the result).  --update-baseline applies the default 10 % margin which is too tight for this metric; manually widen to ~2x current median so the gate doesn't flap.",
