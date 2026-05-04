@@ -24,13 +24,20 @@ impl Default for TerminalSize {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PtyConfig {
     pub program: String,
     /// Extra args (does **not** include argv[0]; we push `program` for that).
     /// Matches `std::process::Command::args` semantics.
     pub args: Vec<String>,
     pub size: TerminalSize,
+    /// Override for argv[0] passed to execvp.  `None` → use `program`
+    /// directly.  `Some("-zsh")` → tells the shell to behave as a
+    /// login shell (Unix convention: leading `-`).  iTerm2 / Terminal.app
+    /// do this; mars now matches so .zprofile / .bash_profile run and
+    /// zsh's PROMPT_EOL_MARK doesn't fire on a fresh prompt because the
+    /// non-login startup path leaves the cursor mid-line.
+    pub argv0: Option<String>,
 }
 
 /// Owned handle to a spawned child process attached to a pseudo-terminal.
@@ -50,6 +57,11 @@ impl Pty {
         // allocations after forkpty() returns in the child.
         let program = CString::new(config.program.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "program path contains NUL"))?;
+        let argv0 = match config.argv0.as_ref() {
+            Some(s) => CString::new(s.as_bytes())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argv0 contains NUL"))?,
+            None => program.clone(),
+        };
         let arg_cstrings: Vec<CString> = config
             .args
             .iter()
@@ -57,9 +69,9 @@ impl Pty {
             .collect::<Result<_, _>>()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))?;
 
-        // argv[0] = program, argv[1..] = args, argv[last] = NULL
+        // argv[0] = override-or-program, argv[1..] = args, argv[last] = NULL
         let mut argv: Vec<*const c_char> = Vec::with_capacity(arg_cstrings.len() + 2);
-        argv.push(program.as_ptr());
+        argv.push(argv0.as_ptr());
         for arg in &arg_cstrings {
             argv.push(arg.as_ptr());
         }

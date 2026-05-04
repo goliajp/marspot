@@ -75,10 +75,46 @@ impl Session {
     where
         W: Fn() + Send + Sync + 'static,
     {
-        let shell = std::env::var("MARS_SHELL")
-            .or_else(|_| std::env::var("SHELL"))
-            .unwrap_or_else(|_| "/bin/zsh".into());
-        Self::spawn_with(&shell, &[], cols, rows, wake)
+        // MARS_SHELL override path (tests, bench workers): direct exec
+        // with a login-style argv[0].  No /usr/bin/login wrapper here
+        // — the caller picked a specific program (often a shell
+        // script), and login would refuse to exec a non-login-shell.
+        if let Ok(custom_shell) = std::env::var("MARS_SHELL") {
+            let argv0 = format!(
+                "-{}",
+                std::path::Path::new(&custom_shell)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("sh")
+            );
+            return Self::spawn_with_config(
+                &custom_shell, &[], Some(argv0), cols, rows, wake,
+            );
+        }
+        // Real interactive use: wrap via /usr/bin/login -fpl so
+        // "Last login: ..." is printed (terminating in \r\n) before
+        // the shell starts.  Without that priming \n, zsh's PROMPT_SP
+        // option fires on the first prompt and renders a reverse-video
+        // "%" at the top of every fresh session.  iTerm2 /
+        // Terminal.app spawn through login for the same reason; mars
+        // now matches.
+        //   -f  no password
+        //   -p  preserve env
+        //   -l  exec the supplied shell
+        // login itself sets argv[0] = "-<shellname>" before exec'ing
+        // the shell, so we don't need our own argv0 override here.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "nobody".into());
+        Self::spawn_with_config(
+            "/usr/bin/login",
+            &["-fpl", &user, &shell],
+            None,
+            cols,
+            rows,
+            wake,
+        )
     }
 
     /// Spawn variant with explicit program + args.  Useful for tests
@@ -87,6 +123,20 @@ impl Session {
     pub fn spawn_with<W>(
         program: &str,
         args: &[&str],
+        cols: u16,
+        rows: u16,
+        wake: W,
+    ) -> io::Result<Self>
+    where
+        W: Fn() + Send + Sync + 'static,
+    {
+        Self::spawn_with_config(program, args, None, cols, rows, wake)
+    }
+
+    fn spawn_with_config<W>(
+        program: &str,
+        args: &[&str],
+        argv0: Option<String>,
         cols: u16,
         rows: u16,
         wake: W,
@@ -103,6 +153,7 @@ impl Session {
                 pixel_width: 0,
                 pixel_height: 0,
             },
+            argv0,
         })?;
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CAPACITY);
         let exited = Arc::new(AtomicBool::new(false));

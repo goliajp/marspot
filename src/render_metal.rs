@@ -1067,6 +1067,22 @@ fn push_session(
         }
     }
 
+    // Inactive-pane dim overlay.  iTerm2-style: every non-focused
+    // session gets a translucent black wash over its rect.  The
+    // overlay is in the BG pipeline and pushed after the BG fills,
+    // so the cell BG looks darker while the FG glyphs (drawn in a
+    // later pipeline) stay full-brightness.  Combined with the
+    // brighter focus outline below, the focused pane reads as the
+    // bright one even at a glance in 3×3.  Alpha tuned so the dim
+    // is visible without making inactive panes hard to read at all.
+    if !view.focused {
+        cells.push(CellInstance {
+            origin: [rect.x as f32, rect.y_top as f32],
+            size: [rect.w as f32, rect.h as f32],
+            color: [0.0, 0.0, 0.0, 0.30],
+        });
+    }
+
     // Focus outline.  Thicker than the unfocused-cursor stroke so it
     // reads at a glance in a 3×3 layout where every cell is small.
     if view.focused {
@@ -1134,6 +1150,19 @@ fn build_bg_pipeline(
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     unsafe {
         attachment.setPixelFormat(TARGET_FORMAT);
+        // Alpha blending so translucent BG cells (e.g. the
+        // inactive-pane dim overlay pushed at the end of
+        // push_session) composite over the colour BG fills below
+        // them.  Opaque cells (alpha = 1.0) render identically
+        // either way — `src.a = 1` makes destination contribution
+        // zero, same as no blending.
+        attachment.setBlendingEnabled(true);
+        attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+        attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     }
 
     device
