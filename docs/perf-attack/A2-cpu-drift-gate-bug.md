@@ -114,3 +114,38 @@ Add unit test coverage:
 ## Progress log
 
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
+- 2026-05-05 evening — investigated `bin/scenarios/active-9x-soak.sh`
+  lines 219-236.  **Not a bug — gate works as designed.**
+
+  ```python
+  cpu_drift_pass = (
+      cpu_drift is None
+      or cpu_q1 < 1.0    ← short-circuit when q1 < 1%
+      or cpu_drift <= cpu_max
+  )
+  ```
+
+  Comment in source: "CPU ratio is meaningless when q1 < 1 %; pass
+  through."  Reason: at sub-1% mean CPU, the ratio amplifies sample
+  noise — a swing from 0.3% to 0.9% (both essentially idle) gives a
+  drift of 3.0× but no actual perf event happened.
+
+  godot session mars showed `2.40× ✓` because cpu_q1 was low (godot
+  was hogging CPU during early samples → mars's cpu_q1 mean fell
+  below 1%); the short-circuit engaged.  Clean session shows
+  `0.69× ✓` — drift legitimately under threshold, gate behaved
+  identically.
+
+  Verdict: **A2 retracted as bug.**  The gate logic is correct.
+  Re-purposing this item to a tightening proposal:
+
+  **Optional improvement** (not blocking): supplement the q1<1%
+  short-circuit with an absolute-spread check (e.g. cpu_max - cpu_min
+  ≥ 5 percentage-points fails regardless of q1).  Catches the case
+  where mars goes from quiet to "burning a sustained 5%" — which the
+  ratio gate currently passes if q1 was 0.4%.  Whether this matters
+  depends on whether such a transition is realistic; deferring until
+  after A1 is resolved (A1 dominates the A-bucket).
+
+  Status: closed (not-a-bug).  Optional tightening retained as future
+  work.

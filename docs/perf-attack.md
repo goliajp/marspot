@@ -31,7 +31,7 @@ Status legend: `queued` / `active` / `blocked` / `done`.
 | ID | Title | Current (clean) | Target | File | Status |
 |---|---|---|---|---|---|
 | A1 | active-9x-soak RSS drift FAIL | q4/q1=**1.81×** clean (was 2.11× godot-tinted), +125 MiB / 5 min | drift ≤ 1.10× under --extended (30 min plateau) | [A1](perf-attack/A1-soak-rss-drift.md) | active — --extended in flight |
-| A2 | CPU drift gate appears mis-keyed | clean run shows 0.69× ✓ correctly; godot session fired 2.40× ✓ which is the inverted bug | gate logic verified | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued (lower priority — gate works on real data, only fired wrong on godot-tinted CPU spike) |
+| A2 | CPU drift gate appears mis-keyed | not actually a bug — gate works as designed; godot's 2.40× ✓ was the q1<1% short-circuit firing on a low-noise q1 (intentional behavior) | optional tightening for absolute-spread check | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted 2026-05-05** (not a bug); optional improvement deferred |
 
 ### B — Live cat-* single-cell — **B1/B2 retracted as measurement artifact, B3/B4 still active**
 
