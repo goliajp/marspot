@@ -37,9 +37,8 @@
 //! its own focused session rather than tacking on to a long one.
 
 use crate::grid::Cell;
-use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 /// Lines per disk page.  Page is the read-cache and ring-rotation
@@ -287,15 +286,14 @@ impl MemoryScrollback {
 /// not designed to survive a mars restart in v1 (would need
 /// versioned headers + `#[repr(C)]` on `Cell`).
 ///
-/// Read cache: single-slot.  `cell_at_view` iterates cols within a
-/// row → all cells of one scrollback row are in the same page; one
-/// slot is enough.  Multi-row scans (e.g. searching scrollback)
-/// would benefit from a small LRU; deferred until there's a
-/// caller for it.
+/// Read path: direct slice into the mmap'd region.  No syscalls per
+/// access; the kernel's page cache (macOS unified buffer cache) is
+/// our LRU — viewport ± a few pages stay resident while older
+/// pages are evicted to disk transparently.  No software cache
+/// needed at this layer.
 pub struct DiskScrollback {
     cols: usize,
     line_bytes: usize,
-    page_bytes: usize,
 
     // RAM ring (most-recent ram_capacity lines).
     ram_capacity: usize,
@@ -303,26 +301,29 @@ pub struct DiskScrollback {
     ram_head: usize,
     ram_len: usize,
 
-    // Disk ring — line-granular.  `max_disk_lines = max_pages_on_disk *
-    // LINES_PER_PAGE` slots, each `line_bytes` wide.  Slot for global
-    // line N = `(N % max_disk_lines) * line_bytes`.
+    // Disk ring — line-granular, backed by an mmap'd file.
+    // `max_disk_lines = max_pages_on_disk * LINES_PER_PAGE` slots,
+    // each `line_bytes` wide.  Slot for global line N =
+    // `(N % max_disk_lines) * line_bytes`.
     //
-    // Note: per-line writes mean we can't safely page-cache (a page
-    // is half-old half-new at any moment we're partway through it).
-    // Read cache is per-line instead — `cell_at_view` iterates cols
-    // within a row → all cells of a scrollback row hit the cache;
-    // each new row pays one read syscall (~µs).
-    file: File,
+    // Writes (push_line spilling oldest RAM line) are a memcpy into
+    // `mmap_ptr + offset`; the kernel handles physical write timing
+    // via dirty-page eviction.  No syscalls on the spill hot path.
+    //
+    // Reads materialise `&[Cell]` directly from the mmap region.
+    // FD is kept open for the lifetime of the mapping (macOS allows
+    // closing it earlier, but holding it costs nothing and keeps
+    // future fcntl/clear operations simple).
+    _file: File,
     path: PathBuf,
+    mmap_ptr: *mut u8,
+    mmap_len: usize,
     max_pages_on_disk: usize,
     max_disk_lines: u64,
     /// Total lines ever spilled to disk.  When this exceeds
     /// `max_disk_lines`, older lines have been overwritten and are
     /// no longer addressable.
     total_disk_lines_written: u64,
-
-    // Single-slot read cache.  `(global_line_idx, decoded cells)`.
-    line_cache: RefCell<Option<(u64, Vec<Cell>)>>,
 }
 
 impl DiskScrollback {
@@ -357,28 +358,47 @@ impl DiskScrollback {
 
         let line_bytes = cols * std::mem::size_of::<Cell>();
         let page_bytes = LINES_PER_PAGE * line_bytes;
+        let mmap_len = max_pages_on_disk * page_bytes;
 
-        // Pre-size the file to its full ring extent so seeks past
-        // EOF don't fail (set_len fills with zeros which decode as
-        // default cells if we ever read an unwritten slot — but the
-        // index logic refuses to read past `total_pages_written *
-        // LINES_PER_PAGE` so we never actually hit those bytes).
-        file.set_len((max_pages_on_disk * page_bytes) as u64)?;
+        // Pre-size the file to the full ring extent so the mmap
+        // covers all addressable slots.  Unwritten slots read as
+        // zeroed Cell layouts, but the index logic refuses to read
+        // past `total_disk_lines_written` so we never observe them.
+        file.set_len(mmap_len as u64)?;
+
+        // Map the whole ring into our address space.  Writes become
+        // memcpy + dirty-page bookkeeping (handled asynchronously by
+        // the kernel); reads become slice access into the mapped
+        // region with the unified buffer cache as our LRU.
+        let mmap_ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mmap_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if mmap_ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mmap_ptr = mmap_ptr as *mut u8;
 
         Ok(Self {
             cols,
             line_bytes,
-            page_bytes,
             ram_capacity,
             ram_cells: Vec::with_capacity(ram_capacity * cols),
             ram_head: 0,
             ram_len: 0,
-            file,
+            _file: file,
             path,
+            mmap_ptr,
+            mmap_len,
             max_pages_on_disk,
             max_disk_lines: (max_pages_on_disk * LINES_PER_PAGE) as u64,
             total_disk_lines_written: 0,
-            line_cache: RefCell::new(None),
         })
     }
 
@@ -406,38 +426,35 @@ impl DiskScrollback {
             return;
         }
 
-        // RAM ring full: spill the oldest RAM line to disk, then
-        // overwrite the oldest RAM slot with the new line.  Per-line
-        // disk write — one seek + one write syscall, ~few µs amortised
-        // by the page cache on the kernel side.  Errors degrade to
-        // "stay in RAM, lose oldest silently" without crashing.
+        // RAM ring full: spill the oldest RAM line into the mmap'd
+        // disk ring (memcpy, no syscall on the hot path), then
+        // overwrite the oldest RAM slot with the new line.
+        //
+        // Spill is inlined here rather than calling a helper so the
+        // borrow checker can see the source (`ram_cells` slice) and
+        // destination (mmap region) are disjoint without us having
+        // to clone the source line into a temporary `Vec`.
         let oldest_slot = self.ram_head;
         let start = oldest_slot * self.cols;
         let end = start + self.cols;
-        let oldest: Vec<Cell> = self.ram_cells[start..end].to_vec();
-        if let Err(e) = self.spill_one_to_disk(&oldest) {
-            eprintln!("mars: scrollback spill failed: {e} (continuing without disk)");
+        let global_line = self.total_disk_lines_written;
+        let dst_slot = (global_line % self.max_disk_lines) as usize;
+        let dst_offset = dst_slot * self.line_bytes;
+        debug_assert!(dst_offset + self.line_bytes <= self.mmap_len);
+        // SAFETY: source spans `cols` cells of `ram_cells` (alive,
+        // not being resized).  Destination spans `line_bytes` of the
+        // mmap region (offset bounded above).  Source and destination
+        // are disjoint memory regions (Vec heap vs mmap region).
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.ram_cells.as_ptr().add(start) as *const u8,
+                self.mmap_ptr.add(dst_offset),
+                self.line_bytes,
+            );
         }
+        self.total_disk_lines_written += 1;
         self.ram_cells[start..end].copy_from_slice(source);
         self.ram_head = (self.ram_head + 1) % self.ram_capacity;
-    }
-
-    fn spill_one_to_disk(&mut self, line: &[Cell]) -> std::io::Result<()> {
-        let global_line = self.total_disk_lines_written;
-        let slot = (global_line % self.max_disk_lines) as usize;
-        let offset = (slot * self.line_bytes) as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(cells_as_bytes(line))?;
-        self.total_disk_lines_written += 1;
-        // Invalidate read cache if it held the global_line we just
-        // overwrote (only happens once a slot is recycled).
-        let cached = self.line_cache.borrow().as_ref().map(|(g, _)| *g);
-        if let Some(g) = cached {
-            if (g % self.max_disk_lines) == global_line % self.max_disk_lines {
-                self.line_cache.borrow_mut().take();
-            }
-        }
-        Ok(())
     }
 
     /// Map an external `idx` (0 = oldest stored, len-1 = newest) to
@@ -486,35 +503,32 @@ impl DiskScrollback {
         }
     }
 
-    /// Run `f` on `global_line`'s cells, faulting from disk on miss.
-    /// Single-line cache: `cell_at_view` iterates cols within a row →
-    /// all cols of one scrollback row hit the cache; each new row
-    /// pays one read syscall.
+    /// Run `f` on `global_line`'s cells, materialising the slice
+    /// directly from the mmap'd region.  No syscalls on the hot path
+    /// when pages are warm; cold pages page-fault transparently
+    /// (handled by the kernel's unified buffer cache).
     fn with_disk_line<R>(
         &self,
         global_line: u64,
         f: impl FnOnce(&[Cell]) -> R,
     ) -> Option<R> {
-        let cached_hit = self
-            .line_cache
-            .borrow()
-            .as_ref()
-            .map(|(g, _)| *g)
-            == Some(global_line);
-        if !cached_hit {
-            let slot = (global_line % self.max_disk_lines) as usize;
-            let offset = (slot * self.line_bytes) as u64;
-            let mut buf = vec![0u8; self.line_bytes];
-            // Cloning the file FD gives us an independent seek
-            // cursor — `try_clone()` is dup3 on macOS, cheap.
-            let mut fd = self.file.try_clone().ok()?;
-            fd.seek(SeekFrom::Start(offset)).ok()?;
-            fd.read_exact(&mut buf).ok()?;
-            let cells = bytes_to_cells(&buf);
-            *self.line_cache.borrow_mut() = Some((global_line, cells));
-        }
-        let cache = self.line_cache.borrow();
-        let (_, cells) = cache.as_ref()?;
+        let slot = (global_line % self.max_disk_lines) as usize;
+        let offset = slot * self.line_bytes;
+        debug_assert!(offset + self.line_bytes <= self.mmap_len);
+        // SAFETY: offset bounds checked above.  The mmap region was
+        // sized to cover all addressable slots in `new`.  Cell layout
+        // matches what `spill_one_to_disk` wrote (same process, same
+        // build); alignment is fine because mmap returns a page-
+        // aligned pointer (4 KiB on macOS) and `Cell` alignment is
+        // ≤ 8 bytes.  The slice borrow lives only inside `f` — no
+        // outstanding reference can survive a future spill that
+        // overwrites the same slot.
+        let cells: &[Cell] = unsafe {
+            std::slice::from_raw_parts(
+                self.mmap_ptr.add(offset) as *const Cell,
+                self.cols,
+            )
+        };
         Some(f(cells))
     }
 
@@ -522,19 +536,31 @@ impl DiskScrollback {
         self.ram_cells.clear();
         self.ram_head = 0;
         self.ram_len = 0;
+        // Resetting the spill counter renders any previously written
+        // mmap slots logically inaccessible (locate() refuses idx
+        // beyond `disk_lines()`).  No need to zero the bytes —
+        // they'll be overwritten by future spills.
         self.total_disk_lines_written = 0;
-        *self.line_cache.borrow_mut() = None;
-        // Truncate + re-set_len keeps the ring file at its
-        // canonical size so subsequent seeks are valid.
-        let _ = self.file.set_len(0);
-        let _ = self.file.set_len((self.max_pages_on_disk * self.page_bytes) as u64);
     }
 }
 
 impl Drop for DiskScrollback {
     fn drop(&mut self) {
-        // Best-effort cleanup; ignore errors (the file is in
-        // ~/Library/Caches and macOS will eventually reclaim it).
+        // Release the mapping before unlinking; macOS allows unlink
+        // while mapped, but unmapping first is the documented order.
+        if !self.mmap_ptr.is_null() {
+            // SAFETY: pointer + length match the mmap call in `new`,
+            // and no outstanding borrow into the region survives Drop
+            // (Rust borrow checker enforces this — a live borrow would
+            // keep DiskScrollback alive).
+            unsafe {
+                libc::munmap(self.mmap_ptr as *mut libc::c_void, self.mmap_len);
+            }
+        }
+        // Best-effort unlink; the file is in ~/Library/Caches and
+        // macOS will eventually reclaim it on its own.  Stale-file
+        // sweep at next process start (terminal.rs) handles signal-
+        // induced exits where Drop never runs.
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -543,35 +569,6 @@ impl Drop for DiskScrollback {
 enum Location {
     Ram(usize),         // ring slot
     Disk { global_line: u64 },
-}
-
-/// View `&[Cell]` as raw bytes.  SAFETY: `Cell` is `Copy + 'static`
-/// with no internal pointers; reading its in-process layout as bytes
-/// and writing those bytes back to the same process produces an
-/// equivalent `Cell` value.  We never share these bytes across
-/// processes / compiler versions — the file is per-process scratch
-/// (created on construct, deleted on Drop).
-fn cells_as_bytes(cells: &[Cell]) -> &[u8] {
-    let len = std::mem::size_of_val(cells);
-    unsafe { std::slice::from_raw_parts(cells.as_ptr() as *const u8, len) }
-}
-
-/// Inverse of `cells_as_bytes`.  Same SAFETY argument: bytes were
-/// produced by `cells_as_bytes` of cells we ourselves wrote.
-fn bytes_to_cells(bytes: &[u8]) -> Vec<Cell> {
-    let cell_size = std::mem::size_of::<Cell>();
-    assert!(bytes.len() % cell_size == 0, "page bytes must be a multiple of Cell size");
-    let n = bytes.len() / cell_size;
-    let mut out: Vec<Cell> = Vec::with_capacity(n);
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            out.as_mut_ptr() as *mut u8,
-            bytes.len(),
-        );
-        out.set_len(n);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -721,6 +718,43 @@ mod tests {
             !path_before.exists(),
             "file should be deleted on Drop, found: {path_before:?}"
         );
+    }
+
+    #[test]
+    fn disk_full_history_read_back_after_wraparound() {
+        // Stress test: push enough lines to wrap the disk ring twice, then
+        // verify every addressable line reads back its expected content.
+        // Catches per-line corruption that single-cell tests would miss
+        // (e.g. an mmap offset bug that interleaves bytes between slots).
+        let dir = temp_dir("disk-fullread");
+        let cols = 8;
+        let pages = 2;
+        let mut sb = Scrollback::disk(&dir, 4, pages, cols).expect("disk sb");
+        let total_pushed = 4 + LINES_PER_PAGE * (pages + 1); // 1 wraparound past cap
+        for i in 0..total_pushed {
+            // Distinct content per line: unique character per col so a
+            // corrupted slot would mismatch on at least one cell.
+            let cells: Vec<Cell> = (0..cols)
+                .map(|c| Cell {
+                    ch: char::from_u32(((i + c) as u32 % 95) + 0x20).unwrap(),
+                    ..Default::default()
+                })
+                .collect();
+            sb.push_line(&cells);
+        }
+        let len = sb.len();
+        let dropped = total_pushed - len;
+        for idx in 0..len {
+            let original = idx + dropped;
+            for c in 0..cols {
+                let expected = char::from_u32(((original + c) as u32 % 95) + 0x20).unwrap();
+                let got = sb.cell_at(idx, c).expect("addressable").ch;
+                assert_eq!(
+                    got, expected,
+                    "mismatch at line idx {idx} col {c} (orig push {original})",
+                );
+            }
+        }
     }
 
     #[test]
