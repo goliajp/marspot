@@ -156,11 +156,15 @@ impl MetalRenderer {
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let font = FontCache::build()?;
-        // 1024×1024 R8 atlas = 1 MiB.  Fits ~1500 Menlo 13pt 2× glyphs;
-        // huge headroom for the realistic working set of a few hundred
-        // unique characters.  Bounded — get_or_rasterize returns None
-        // on full and the renderer skips the glyph that frame.
-        let atlas = GlyphAtlas::new(&device, 1024, 1024)?;
+        // 2048×2048 R8 atlas = 4 MiB.  Fits ~6000 Menlo 13pt 2× glyphs.
+        // 9-grid sessions all feed this single atlas and accumulate
+        // bold/italic/underline variants per ASCII character plus CJK
+        // and emoji over hours, easily clearing the 1500-glyph mark
+        // the original 1024×1024 sized for.  Bounded forever —
+        // `get_or_rasterize` does an atomic rebuild on full (drops
+        // shelves + clears cache, next frame re-rasterises visible
+        // glyphs) so the user never sees silently-blank cells.
+        let atlas = GlyphAtlas::new(&device, 2048, 2048)?;
 
         let layer = unsafe { CAMetalLayer::new() };
         unsafe {
@@ -232,11 +236,15 @@ impl MetalRenderer {
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let font = FontCache::build()?;
-        // 1024×1024 R8 atlas = 1 MiB.  Fits ~1500 Menlo 13pt 2× glyphs;
-        // huge headroom for the realistic working set of a few hundred
-        // unique characters.  Bounded — get_or_rasterize returns None
-        // on full and the renderer skips the glyph that frame.
-        let atlas = GlyphAtlas::new(&device, 1024, 1024)?;
+        // 2048×2048 R8 atlas = 4 MiB.  Fits ~6000 Menlo 13pt 2× glyphs.
+        // 9-grid sessions all feed this single atlas and accumulate
+        // bold/italic/underline variants per ASCII character plus CJK
+        // and emoji over hours, easily clearing the 1500-glyph mark
+        // the original 1024×1024 sized for.  Bounded forever —
+        // `get_or_rasterize` does an atomic rebuild on full (drops
+        // shelves + clears cache, next frame re-rasterises visible
+        // glyphs) so the user never sees silently-blank cells.
+        let atlas = GlyphAtlas::new(&device, 2048, 2048)?;
         Ok(Self {
             device,
             queue,

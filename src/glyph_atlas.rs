@@ -26,15 +26,25 @@
 //!
 //! ## Eviction (CLAUDE.md "bounded growth")
 //!
-//! Phase 2 (this commit): when the atlas can't fit a new glyph,
-//! `get_or_rasterize` returns `None`.  The renderer then renders that
-//! cell as `notdef` (a blank box) for the frame and tries again next
-//! frame.  Bounded, harmless degradation.
+//! When `place()` can't fit a new glyph, `get_or_rasterize` does an
+//! **atomic rebuild**: drops every shelf + clears the cache, then
+//! retries the placement on the (now empty) atlas.  Next-frame
+//! re-rasterises whichever glyphs are still on screen.  One stutter
+//! frame at the boundary, then back to bounded steady-state.
 //!
-//! Phase 2.5 (later): swap in LRU eviction once we have a real working
-//! set in the wild — terminal use rarely rotates more than a few
-//! hundred unique glyphs, so the simple "fail loudly, render notdef"
-//! gate may be all we need.
+//! The earlier "Phase 2 — return None, render notdef" plan was wrong
+//! on two counts: (1) the renderer didn't actually render notdef, it
+//! silently `continue`'d the cell, leaving the user-visible glyph
+//! invisible; (2) the assumption that "terminal use rarely rotates
+//! more than a few hundred unique glyphs" breaks under the realistic
+//! 9-session use case — each session feeds the same atlas, every
+//! bold/italic variant takes its own slot, and CJK + emoji blow
+//! past 1500 glyphs in hours of normal use.
+//!
+//! Atomic rebuild is bounded (atlas size is fixed forever) and
+//! self-healing (visible chars come back next frame).  Texture pixel
+//! data isn't cleared — UV coords are tight, so the regions we don't
+//! re-upload are simply unsampled.
 //!
 //! ## Padding
 //!
@@ -124,10 +134,12 @@ pub struct GlyphAtlas {
     height: u32,
     shelves: Vec<Shelf>,
     cache: HashMap<GlyphKey, AtlasEntry>,
-    /// Number of get_or_rasterize calls that returned None due to
-    /// atlas-full — surfaced for diagnostics.  Resets when the
-    /// atlas is rebuilt (phase 2.5+).
-    pub eviction_misses: u64,
+    /// Number of times the atlas filled up and was rebuilt.  Each
+    /// rebuild costs one stutter frame to re-rasterise visible glyphs.
+    /// In steady-state terminal use this should stay at 0; non-zero
+    /// after settling means working set exceeds atlas capacity (bump
+    /// the atlas dims).
+    pub rebuild_count: u64,
 }
 
 /// 1-px padding on every side of every glyph; prevents linear
@@ -167,7 +179,7 @@ impl GlyphAtlas {
             height,
             shelves: Vec::new(),
             cache: HashMap::new(),
-            eviction_misses: 0,
+            rebuild_count: 0,
         })
     }
 
@@ -180,9 +192,11 @@ impl GlyphAtlas {
     }
 
     /// Look up `key` in the cache, rasterising into the atlas on miss.
-    /// `Some(entry)` on success; `None` if the atlas is full and we
-    /// chose not to evict (phase 2 behaviour — render `notdef` and
-    /// retry next frame).
+    /// `Some(entry)` on success; `None` only if the glyph itself has no
+    /// ink (control char, .notdef-with-degenerate-bbox) or is wider
+    /// than the entire atlas (pathological).  When the shelf packer
+    /// runs out of room we atomically rebuild and retry — see the
+    /// module-level "Eviction" doc.
     pub fn get_or_rasterize(
         &mut self,
         key: GlyphKey,
@@ -192,7 +206,16 @@ impl GlyphAtlas {
             return Some(entry);
         }
         let raster = rasterise_glyph(font, key.glyph)?;
-        let placed = self.place(raster.px_w, raster.px_h)?;
+        let placed = match self.place(raster.px_w, raster.px_h) {
+            Some(p) => p,
+            None => {
+                // Atlas full.  Rebuild atomically and retry — next
+                // frame's render call will re-rasterise whichever
+                // glyphs are still on screen.
+                self.rebuild();
+                self.place(raster.px_w, raster.px_h)?
+            }
+        };
         self.upload(&raster.bytes, raster.px_w, raster.px_h, placed.0, placed.1);
         let entry = AtlasEntry {
             u0: placed.0 as u16,
@@ -208,6 +231,17 @@ impl GlyphAtlas {
         Some(entry)
     }
 
+    /// Drop every shelf + clear the lookup cache.  Texture pixel data
+    /// is left as-is; tight UV coords ensure unsampled regions don't
+    /// leak through.  Called from `get_or_rasterize` when the atlas is
+    /// full; ~ASCII-set's worth of glyphs re-rasterise on the next
+    /// frame.
+    fn rebuild(&mut self) {
+        self.shelves.clear();
+        self.cache.clear();
+        self.rebuild_count += 1;
+    }
+
     /// Find a position for a `(w, h)` glyph using the shelf packer.
     /// Returns the top-left pixel coords inside the atlas, or `None`
     /// when there's no room.
@@ -216,7 +250,6 @@ impl GlyphAtlas {
         let pad_h = h + 2 * PAD;
         if pad_w > self.width {
             // Glyph wider than the atlas — pathological; bail.
-            self.eviction_misses += 1;
             return None;
         }
 
@@ -237,7 +270,6 @@ impl GlyphAtlas {
         // Open a new shelf at the bottom of the atlas.
         let y_top = self.shelves.last().map(|s| s.y + s.h).unwrap_or(0);
         if y_top + pad_h > self.height {
-            self.eviction_misses += 1;
             return None;
         }
         self.shelves.push(Shelf {
@@ -404,20 +436,20 @@ mod tests {
     }
 
     #[test]
-    fn atlas_full_returns_none() {
+    fn atlas_full_triggers_rebuild_and_keeps_serving() {
         let device = match system_default_device() {
             Ok(d) => d,
             Err(_) => return,
         };
-        // Tiny atlas — first glyph fits on its own shelf, second
-        // shelf can't open because there's no vertical room.
+        // Tiny atlas — every couple of glyphs forces a rebuild.  The
+        // contract is "every individually-fit glyph eventually places
+        // successfully" — silent skip would leave gaps in the cache.
         let mut atlas = GlyphAtlas::new(&device, 32, 32).expect("atlas");
         let font = make_font();
 
-        let mut chars = b"abcdefghij".iter();
+        let chars = b"abcdefghij";
         let mut placed = 0;
-        let mut missed = 0;
-        for c in &mut chars {
+        for c in chars.iter() {
             let mut glyph: CGGlyph = 0;
             let cu: u16 = *c as u16;
             unsafe {
@@ -426,12 +458,12 @@ mod tests {
             let key = GlyphKey { font_id: 0, glyph };
             if atlas.get_or_rasterize(key, &font).is_some() {
                 placed += 1;
-            } else {
-                missed += 1;
             }
         }
-        assert!(placed > 0, "at least one glyph fits in 32×32");
-        assert!(missed > 0, "at least one glyph must miss in 32×32");
-        assert_eq!(missed as u64, atlas.eviction_misses);
+        assert_eq!(placed, chars.len(), "every glyph must place via rebuild");
+        assert!(
+            atlas.rebuild_count > 0,
+            "tiny atlas must have triggered at least one rebuild"
+        );
     }
 }
