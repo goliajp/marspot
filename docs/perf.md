@@ -218,12 +218,15 @@ Push 1 000 000 numbered lines into one session. mars uses mcli
 | iTerm2         | 1.47 s    | 54.6 MiB/s     | 40 MiB     |
 
 mars is **1.16× faster than Terminal.app**, **1.56× faster than iTerm2**.
-RSS comparison is **not yet apples-to-apples**: mars's scrollback is
-a 10 k-line in-memory ring (per `src/grid.rs`), so 990 k of the
-1 M pushed lines were discarded. When disk-backed scrollback lands
-the same scenario will additionally validate "RSS bounded, disk
-grows linearly with retention" — that's the real architecture win
-the test is calibrated for.
+Disk-backed scrollback is now default-on (`MARS_DISK_SCROLLBACK=0`
+opts out for regression bisects); a single mmap'd ring file at
+`~/Library/Caches/mars/scrollback` holds ~26 K lines per session.
+The CLAUDE.md-mandated soak (`soak_disk_scrollback_bounded_under_million_lines`)
+asserts RSS growth < 5 MiB and disk file growth = 0 after 1 M lines —
+the bounded-forever architecture commitment.  Disk path matches
+memory path on parse / scroll perf within 2-3 % (within
+run-to-run noise) thanks to the unified mmap region: writes are
+direct memcpy, reads are slice access, kernel page cache is the LRU.
 
 ### Idle-9x (60 s, 9 idle sessions)
 
