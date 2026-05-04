@@ -32,11 +32,12 @@ use std::collections::HashMap;
 pub const FONT_NAME: &str = "Monaco";
 pub const FONT_POINT: f64 = 12.0;
 
-/// Background color for the terminal.  Matches iTerm2's default
-/// "Background Color (Dark)" so users moving over from iTerm2 see
-/// identical-looking content.  Both renderers paint with this
-/// constant so the BG matches across the A/B switch.
-pub const BG: (CGFloat, CGFloat, CGFloat) = (0.0807, 0.0991, 0.1210);
+/// Background color for the terminal.  Near-pure-black with a
+/// near-imperceptible navy tint — the user's preferred direction
+/// after seeing iTerm2's #14191e default felt too grey in mars's
+/// 9-grid layout.  Both renderers paint with this constant so the
+/// BG matches across the AppKit / Metal switch.
+pub const BG: (CGFloat, CGFloat, CGFloat) = (0.006, 0.008, 0.014);
 /// Default foreground.  Matches iTerm2's "Foreground Color (Dark)"
 /// — slightly off-white (`#dbdbdb`), softer than pure 0.92 grey on
 /// the eyes for long-running sessions.

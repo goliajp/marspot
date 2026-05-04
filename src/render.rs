@@ -26,15 +26,20 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSColor, NSView};
 use objc2_quartz_core::{kCAGravityTopLeft, CALayer};
-/// Sidebar background — slightly different shade so it reads as
-/// chrome separate from terminal cells.
-const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = (0.045, 0.055, 0.075);
-/// Thin gutter between session cells when more than one is on screen.
-/// Light-grey hairline (iTerm2 style — divisions read as bright lines
-/// over the dark working area).
-const GUTTER: (CGFloat, CGFloat, CGFloat) = (0.32, 0.34, 0.38);
-/// Outline drawn around the focused session cell.
-const FOCUS_OUTLINE: (CGFloat, CGFloat, CGFloat) = (0.40, 0.75, 1.00);
+/// The dominant chrome surface — sidebar, header strip, unfocused
+/// cell rects.  Mirror of `render_metal::BG_PANEL`.
+const BG_PANEL: (CGFloat, CGFloat, CGFloat) = (0.022, 0.028, 0.042);
+/// Sidebar background = panel surface (the whole chrome region).
+const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = BG_PANEL;
+/// The deeper "this is the canvas I'm typing into" surface used
+/// for the focused 9-grid cell AND the focused sidebar row.
+/// Mirror of `render_metal::BG_FOCUSED`.
+const BG_FOCUSED: (CGFloat, CGFloat, CGFloat) = (0.006, 0.008, 0.014);
+/// Hair-darker than `BG_PANEL` — reads as a quiet depression line
+/// between adjacent panels.  One uniform tone for sidebar↔grid,
+/// header↔grid, and cell↔cell seams.  Mirror of
+/// `render_metal::SEAM`.
+const SEAM: (CGFloat, CGFloat, CGFloat) = (0.055, 0.062, 0.075);
 
 /// Per-session render parameters.  Caller bundles the relevant bits
 /// so the renderer doesn't need to know about Session, Mars, or
@@ -49,6 +54,16 @@ pub struct SessionView<'a> {
     /// True for the session that owns the keyboard right now.
     /// Drives the focus outline + cursor style (filled vs hollow).
     pub focused: bool,
+    /// Short label drawn in the title strip at the top of the
+    /// cell.  Empty string skips the strip entirely (useful for
+    /// snapshot / mcli single-session rendering).
+    pub title: &'a str,
+    /// Optional text selection for this session in the LIVE grid
+    /// (`(anchor_col, anchor_row, focus_col, focus_row)` in cell
+    /// coordinates).  `None` means no selection.  When set, the
+    /// renderer paints a SELECTION_BG highlight over the cells
+    /// in [start..=end] (row-major) inside the terminal area.
+    pub selection: Option<((u16, u16), (u16, u16))>,
 }
 
 /// One row of the sidebar — what the user sees on the left.  Length
@@ -70,7 +85,9 @@ const SIDEBAR_ROW_H: f64 = 22.0;
 /// Gap between the dot's right edge and the start of the label text.
 const SIDEBAR_DOT_LABEL_GAP: f64 = 10.0;
 const SIDEBAR_TEXT_FG: (CGFloat, CGFloat, CGFloat) = (0.78, 0.82, 0.88);
-const SIDEBAR_FOCUSED_BG: (CGFloat, CGFloat, CGFloat) = (0.06, 0.08, 0.13);
+// Sidebar focused row reuses the cell focused tone — one
+// "selected" affordance across the whole UI.
+const SIDEBAR_FOCUSED_BG: (CGFloat, CGFloat, CGFloat) = BG_FOCUSED;
 const STATE_ACTIVE: (CGFloat, CGFloat, CGFloat) = (0.30, 0.85, 0.45);
 const STATE_IDLE: (CGFloat, CGFloat, CGFloat) = (0.55, 0.58, 0.62);
 const STATE_EXITED: (CGFloat, CGFloat, CGFloat) = (0.85, 0.30, 0.30);
@@ -152,14 +169,13 @@ impl Renderer {
                 // compositing anything underneath.
                 layer.setOpaque(true);
             }
-            // Make the NSWindow's background match the terminal BG so
-            // the gap that briefly shows during live resize (before our
-            // newly-sized CGImage arrives on the layer) is the same
-            // colour as the terminal — visually no flicker.
+            // Window BG = panel tone, the dominant chrome surface.
+            // The resize-flicker zone shows BG_PANEL during live
+            // resize, smoothly continuous with the rendered frame.
             unsafe {
                 if let Some(window) = view.window() {
                     let bg = NSColor::colorWithSRGBRed_green_blue_alpha(
-                        BG.0, BG.1, BG.2, 1.0,
+                        BG_PANEL.0, BG_PANEL.1, BG_PANEL.2, 1.0,
                     );
                     window.setBackgroundColor(Some(&bg));
                 }
@@ -211,6 +227,8 @@ impl Renderer {
         let layout = Layout::build(
             self.viewport_w,
             self.viewport_h,
+            0.0,
+            0.0,
             0.0,
             1,
             1,
@@ -280,6 +298,8 @@ impl Renderer {
             width as f64,
             height as f64,
             0.0,
+            0.0,
+            0.0,
             1,
             1,
             self.font.cell_w,
@@ -290,6 +310,8 @@ impl Renderer {
             view_offset: 0,
             cursor_visible: true,
             focused: true,
+            title: "",
+            selection: None,
         };
         let mut ctx = self.frame_context(width, height, &layout);
         let mut scratch = std::mem::take(&mut self.scratch);
@@ -332,21 +354,64 @@ impl Renderer {
             }
         };
 
-        // Chrome background: GUTTER colour everywhere.  The sidebar
-        // gets its own slightly different fill on top.  We refill
-        // every frame even on cache hit — last frame's session BG
-        // fills are still in the buffer.
-        ctx.set_rgb_fill_color(GUTTER.0, GUTTER.1, GUTTER.2, 1.0);
+        // One dark surface plus uniformly weak SEAM hairlines on
+        // every internal boundary: sidebar↔grid, header↔grid, and
+        // cell↔cell — same colour, same width, same opacity.
+        ctx.set_rgb_fill_color(SIDEBAR_BG.0, SIDEBAR_BG.1, SIDEBAR_BG.2, 1.0);
         ctx.fill_rect(CGRect::new(
             &CGPoint::new(0.0, 0.0),
             &CGSize::new(width as f64, height as f64),
         ));
-        if layout.sidebar_w > 0.0 {
-            ctx.set_rgb_fill_color(SIDEBAR_BG.0, SIDEBAR_BG.1, SIDEBAR_BG.2, 1.0);
-            ctx.fill_rect(CGRect::new(
-                &CGPoint::new(0.0, 0.0),
-                &CGSize::new(layout.sidebar_w, height as f64),
-            ));
+        if layout.gutter > 0.0 && !layout.cells.is_empty() {
+            let h_total = height as f64;
+            let avail_h = layout.window_h - layout.top_inset;
+            let y_bottom_avail = h_total - layout.top_inset - avail_h;
+            ctx.set_rgb_fill_color(SEAM.0, SEAM.1, SEAM.2, 1.0);
+            // Sidebar↔grid vertical seam.
+            if layout.sidebar_w > 0.0 {
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(layout.sidebar_w, y_bottom_avail),
+                    &CGSize::new(layout.gutter, avail_h),
+                ));
+            }
+            // Header↔grid horizontal seam (full width, just below
+            // the top inset in y-down terms).
+            if layout.top_inset > 0.0 {
+                let y_b = h_total - layout.top_inset;
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(0.0, y_b),
+                    &CGSize::new(layout.window_w, layout.gutter),
+                ));
+            }
+            // Inter-cell vertical seams.
+            for c in 1..layout.grid_cols {
+                let prev = layout.cells[c - 1];
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(prev.x + prev.w, y_bottom_avail),
+                    &CGSize::new(layout.gutter, avail_h),
+                ));
+            }
+            // Inter-cell horizontal seams.
+            let grid_left = layout
+                .cells
+                .first()
+                .map(|c| c.x)
+                .unwrap_or(layout.sidebar_w);
+            let grid_right = layout
+                .cells
+                .last()
+                .map(|c| c.x + c.w)
+                .unwrap_or(layout.window_w);
+            let avail_w_grid = grid_right - grid_left;
+            for r in 1..layout.grid_rows {
+                let prev = layout.cells[(r - 1) * layout.grid_cols];
+                let y_top_down = prev.y_top + prev.h;
+                let y_b = h_total - y_top_down - layout.gutter;
+                ctx.fill_rect(CGRect::new(
+                    &CGPoint::new(grid_left, y_b),
+                    &CGSize::new(avail_w_grid, layout.gutter),
+                ));
+            }
         }
         ctx
     }
@@ -371,10 +436,15 @@ impl Renderer {
         // off this anchor.
         let rect_top_y_up = total_h as f64 - rect.y_top;
 
-        // Terminal-cell background fill for this rect.  Sits on top
-        // of frame_context's chrome fill, so the rect now reads as a
-        // proper terminal cell.
-        ctx.set_rgb_fill_color(BG.0, BG.1, BG.2, 1.0);
+        // Cell BG: BG_FOCUSED (deeper) for the active pane,
+        // BG_PANEL for the rest.  The DROP into deeper black is
+        // the focus indicator — matches `render_metal::push_session`.
+        let pane_bg = if view.focused && self.window_focused {
+            BG_FOCUSED
+        } else {
+            BG_PANEL
+        };
+        ctx.set_rgb_fill_color(pane_bg.0, pane_bg.1, pane_bg.2, 1.0);
         ctx.fill_rect(CGRect::new(
             &CGPoint::new(rect.x, rect_top_y_up - rect.h),
             &CGSize::new(rect.w, rect.h),
@@ -526,7 +596,7 @@ impl Renderer {
         focused_idx: usize,
     ) {
         for (i, entry) in entries.iter().enumerate() {
-            let row_top_y_down = SIDEBAR_TOP_PAD + i as f64 * SIDEBAR_ROW_H;
+            let row_top_y_down = layout.top_inset + SIDEBAR_TOP_PAD + i as f64 * SIDEBAR_ROW_H;
             let row_top_y_up = total_h as f64 - row_top_y_down;
             let row_bottom_y = row_top_y_up - SIDEBAR_ROW_H;
 

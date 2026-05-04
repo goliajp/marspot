@@ -164,6 +164,20 @@ pub fn read_clipboard_text() -> Option<String> {
     }
 }
 
+/// Replace the macOS general pasteboard contents with a single
+/// plain-text string.  Used to implement Cmd-C → copy current
+/// terminal selection.  Returns true on success.
+pub fn write_clipboard_text(text: &str) -> bool {
+    unsafe {
+        let pb = NSPasteboard::generalPasteboard();
+        // clearContents must precede setString or AppKit retains
+        // any prior reps and the new write may be ignored.
+        pb.clearContents();
+        let s = objc2_foundation::NSString::from_str(text);
+        pb.setString_forType(&s, NSPasteboardTypeString)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

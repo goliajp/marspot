@@ -77,11 +77,48 @@ const DEFAULT_WIN_H: f64 = 1300.0;
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
 
+/// Header strip height in **logical points** — top band that
+/// reserves space for the traffic-light buttons (and, later,
+/// focused-session status content).  All other vertical layout
+/// (sidebar items, cell rects) starts BELOW this band.  The strip
+/// renders in cell-BG colour so the window reads as one continuous
+/// dark surface; the buttons float over it without their own
+/// separator.
+const HEADER_PT: f64 = 32.0;
+
 /// Sidebar layout constants in **logical points** — must match
 /// `render.rs::SIDEBAR_TOP_PAD` / `SIDEBAR_ROW_H` so click hit-testing
-/// lands on the same pixels as the drawn rows.
-const SIDEBAR_TOP_PAD_PT: f64 = 14.0;
+/// lands on the same pixels as the drawn rows.  The top pad now
+/// adds the header strip on top of its own breathing room so
+/// item 1 isn't hidden behind the traffic-light buttons.
+const SIDEBAR_TOP_PAD_PT: f64 = HEADER_PT + 8.0;
 const SIDEBAR_ROW_PT: f64 = 22.0;
+
+/// Per-cell title strip height in **logical points** — the band at
+/// the top of every 9-grid cell that shows the session label and a
+/// SEAM hairline below.  Layout reserves it inside the cell rect;
+/// the renderer paints title text + bottom seam.  Tuned to fit one
+/// 12-pt monospace line plus 6 pt of breathing room.
+const CELL_TITLE_PT: f64 = 22.0;
+
+/// Sidebar label cap — at the default 200-pt sidebar with Monaco
+/// 12-pt metrics, ~22 ASCII glyphs fit between the dot+gap and the
+/// right edge.  Anything longer is truncated with `...` (three
+/// ASCII dots — same monospace cell width as the rest of the
+/// label, plays nicer with the user's preference than `…`).
+const MAX_SIDEBAR_LABEL_CHARS: usize = 22;
+
+/// Truncate a sidebar label to at most `max_chars` total characters,
+/// replacing the dropped tail with three ASCII dots.  Counts
+/// Unicode scalars, not bytes, so multi-byte characters survive
+/// uniformly.  Reserves three trailing slots for `...`.
+fn truncate_for_sidebar(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars - 3).collect();
+    format!("{head}...")
+}
 
 /// Headless modes (snapshot / bench parse / bench render) use a fixed
 /// terminal grid so numbers are reproducible across runs.
@@ -173,6 +210,41 @@ struct Mars {
     /// event-throttled, or feed-throttled.
     prof: ProfileCounters,
     profile_out_path: Option<String>,
+    /// User-edited cell titles, parallel to `sessions`.  `None` falls
+    /// back to the default session label (the row number, or the
+    /// tmux window name in tmux mode).  Persisting across runs is
+    /// out of scope for the first cut.
+    custom_titles: Vec<Option<String>>,
+    /// When `Some(i)`, session `i`'s cell title is being edited:
+    /// keyboard input goes into `title_edit_buffer` instead of the
+    /// PTY, and the renderer draws a caret at the end of the title.
+    /// Enter commits, Esc cancels.
+    editing_title: Option<usize>,
+    /// Current edit buffer for the title under edit (only meaningful
+    /// while `editing_title.is_some()`).
+    title_edit_buffer: String,
+    /// Active text selection in the live grid of one of the
+    /// sessions, if any.  Drag in the cell body extends `focus`;
+    /// `dragging` says whether the mouse is still down (drag
+    /// continues to grow the selection) vs released (selection is
+    /// final, ready to be copied).  Cleared on typing into the
+    /// PTY, focus change, or click in another cell.
+    selection: Option<Selection>,
+    /// True between mouse_down (in a cell body) and mouse_up — drag
+    /// events update the selection only while this is set.
+    selection_dragging: bool,
+}
+
+/// Live text selection inside one session's grid.  Coords are
+/// terminal cells (column, row), 0-indexed from the cell's inner
+/// origin.  `anchor` is where the drag started, `focus` is the
+/// current cursor position; serialise/render normalise so the
+/// pair always reads top-left → bottom-right.
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    session_idx: usize,
+    anchor: (u16, u16),
+    focus: (u16, u16),
 }
 
 #[derive(Default)]
@@ -192,17 +264,19 @@ struct ProfileCounters {
 impl MarsApp for Mars {
     fn resumed(&mut self, ctx: &MarsAppCtx) {
         // mainScreen() can return a 1x screen even when our window will
-        // land on a 2x one. Survey all screens and use the max so the
-        // CALayer is composited at the right density.
+        // land on a 2x one — we used to survey every screen and take
+        // the max, but on macOS 26 that goes through NSArray's `count`
+        // selector whose signed-vs-unsigned signature guard trips
+        // objc2 0.2 with a runtime panic.  Seed off mainScreen
+        // instead; the first `backingScaleFactor()` lookup on the
+        // live NSWindow (in `resized`) replaces it with the screen
+        // the window actually landed on, so a startup-on-1x-then-
+        // dragged-to-2x scenario self-corrects on the first resize.
         let main_thread = MainThreadMarker::new()
             .expect("Mars must be created on the main thread");
-        let screens = NSScreen::screens(main_thread);
-        let mut scales: Vec<f32> = Vec::new();
-        for i in 0..screens.len() {
-            let s = unsafe { screens.objectAtIndex(i) };
-            scales.push(s.backingScaleFactor() as f32);
-        }
-        let max_scale = scales.iter().cloned().fold(1.0_f32, f32::max);
+        let max_scale = NSScreen::mainScreen(main_thread)
+            .map(|s| s.backingScaleFactor() as f32)
+            .unwrap_or(2.0);
         let scale: f32 = std::env::var("MARS_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -260,6 +334,71 @@ impl MarsApp for Mars {
     }
 
     fn key_event(&mut self, ctx: &MarsAppCtx, event: MarsKeyEvent, modifiers: MarsModifiers) {
+        use mars::input::{KeyState, LogicalKey, NamedKey};
+
+        // Cmd-C: copy current text selection to the macOS clipboard.
+        // Must run before the title-edit fall-through so a selection
+        // captured before opening the title editor can still be
+        // copied without losing focus to the editor.  No-op when
+        // there's no selection — falls through to the PTY mapper
+        // which discards Cmd-* anyway.
+        if event.state == KeyState::Pressed
+            && modifiers.super_key()
+            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
+        {
+            if self.copy_selection_to_clipboard() {
+                return;
+            }
+        }
+
+        // Title-edit mode intercepts the keyboard before the PTY
+        // mapper sees anything.  Enter commits, Esc cancels,
+        // Backspace pops a char, printable text appends.  Cmd-bound
+        // shortcuts (paste, etc.) still fall through to the PTY
+        // path so we don't break copy/paste while editing.
+        if let Some(idx) = self.editing_title {
+            if event.state == KeyState::Pressed
+                && !modifiers.super_key()
+            {
+                match &event.logical {
+                    LogicalKey::Named(NamedKey::Enter) => {
+                        self.commit_title_edit();
+                        ctx.request_redraw();
+                        return;
+                    }
+                    LogicalKey::Named(NamedKey::Escape) => {
+                        self.cancel_title_edit();
+                        ctx.request_redraw();
+                        return;
+                    }
+                    LogicalKey::Named(NamedKey::Backspace) => {
+                        self.title_edit_buffer.pop();
+                        ctx.request_redraw();
+                        return;
+                    }
+                    _ => {
+                        if let Some(t) = &event.text {
+                            // Filter to printable chars — drop control
+                            // bytes the IME might attach to functional
+                            // keys (Tab, Arrows, etc.).
+                            for ch in t.chars() {
+                                if !ch.is_control() {
+                                    self.title_edit_buffer.push(ch);
+                                }
+                            }
+                            ctx.request_redraw();
+                            return;
+                        }
+                    }
+                }
+            }
+            // Non-pressed events / cmd combos in edit mode: silently
+            // ignore (don't fall through to PTY for the cell that's
+            // currently being edited).
+            let _ = idx;
+            return;
+        }
+
         if let Some(bytes) = key_event_to_bytes(&event, modifiers) {
             if self.record_latency && self.pending_keystroke_t0.is_none() {
                 self.pending_keystroke_t0 = Some(std::time::Instant::now());
@@ -267,6 +406,14 @@ impl MarsApp for Mars {
             // Typing snaps the focused session's view back to live.
             if self.view_offset != 0 {
                 self.view_offset = 0;
+                ctx.request_redraw();
+            }
+            // Typing into the PTY clears any text selection — once
+            // the underlying grid is going to change, the existing
+            // selection coordinates would point at moving content.
+            if self.selection.is_some() {
+                self.selection = None;
+                self.selection_dragging = false;
                 ctx.request_redraw();
             }
             let session = &mut self.sessions[self.focused_idx];
@@ -318,20 +465,143 @@ impl MarsApp for Mars {
             return;
         }
 
-        let new_focus = layout
-            .hit_test_sidebar_row(
-                x_phys,
-                y_phys,
-                top_pad_phys,
-                row_phys,
-                self.sessions.len(),
-            )
-            .or_else(|| layout.hit_test(x_phys, y_phys));
+        // Resolve all hit-tests up front so the immutable borrow on
+        // `layout` is dropped before we mutate self below.
+        let title_hit = layout.hit_test_cell_title(x_phys, y_phys);
+        let sidebar_hit = layout.hit_test_sidebar_row(
+            x_phys,
+            y_phys,
+            top_pad_phys,
+            row_phys,
+            self.sessions.len(),
+        );
+        let cell_hit = layout.hit_test(x_phys, y_phys);
+        let cell_pos_hit = self
+            .renderer
+            .as_ref()
+            .map(|r| r.cell_dims())
+            .and_then(|(cw, ch)| {
+                layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
+            });
+
+        // Title-strip click → enter edit mode for that cell.  Also
+        // moves focus to it so the visual highlight + cursor block
+        // line up with what the user is editing.
+        if let Some(idx) = title_hit {
+            if idx < self.sessions.len() {
+                self.commit_title_edit();
+                self.focused_idx = idx;
+                self.editing_title = Some(idx);
+                self.title_edit_buffer = self
+                    .custom_titles
+                    .get(idx)
+                    .and_then(|t| t.clone())
+                    .unwrap_or_default();
+                self.view_offset = 0;
+                self.selection = None;
+                self.selection_dragging = false;
+                ctx.request_redraw();
+                return;
+            }
+        }
+
+        // Click outside the title strip while editing commits the
+        // edit before doing anything else.
+        if self.editing_title.is_some() {
+            self.commit_title_edit();
+            ctx.request_redraw();
+        }
+
+        // Click in cell body → start a fresh text selection at that
+        // cell coord, AND focus that cell.  Drag continues the
+        // selection; release commits it (still selected; clipboard
+        // copy is bound to Cmd-C).  Click in cell body that's not
+        // covered by hit_test_cell_pos (e.g. clicked the padding
+        // band) just clears any existing selection.
+        let prior_selection = self.selection;
+        self.selection = None;
+        self.selection_dragging = false;
+        if let Some((idx, col, row)) = cell_pos_hit {
+            self.selection = Some(Selection {
+                session_idx: idx,
+                anchor: (col, row),
+                focus: (col, row),
+            });
+            self.selection_dragging = true;
+            if idx != self.focused_idx {
+                self.focused_idx = idx;
+                self.view_offset = 0;
+            }
+            ctx.request_redraw();
+            return;
+        }
+        if prior_selection.is_some() {
+            ctx.request_redraw();
+        }
+
+        let new_focus = sidebar_hit.or(cell_hit);
         if let Some(idx) = new_focus {
             if idx < self.sessions.len() && idx != self.focused_idx {
                 self.focused_idx = idx;
                 self.view_offset = 0;
                 ctx.request_redraw();
+            }
+        }
+    }
+
+    fn mouse_drag(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
+        if !self.selection_dragging {
+            return;
+        }
+        let Some(layout) = &self.layout else { return };
+        let cell_dims = self.renderer.as_ref().map(|r| r.cell_dims());
+        let Some((cw, ch)) = cell_dims else { return };
+        // While the user holds the mouse, the live focus end of the
+        // selection follows the cursor.  Hits outside the
+        // selection's owning cell are clamped to that cell's last
+        // valid (col, row), so a drag past the cell edge keeps
+        // extending to the bottom-right corner instead of
+        // jump-jumping into a neighbouring cell.
+        let Some(sel) = self.selection.as_mut() else { return };
+        let target_idx = sel.session_idx;
+        let cell = match layout.cells.get(target_idx) {
+            Some(c) => c,
+            None => return,
+        };
+        let inner_x = cell.x + layout.padding;
+        let inner_y = cell.y_top + layout.cell_title_h + layout.padding;
+        let dx = (x_phys - inner_x).max(0.0);
+        let dy = (y_phys - inner_y).max(0.0);
+        let mut col = (dx / cw).floor() as i64;
+        let mut row = (dy / ch).floor() as i64;
+        if col < 0 {
+            col = 0;
+        }
+        if row < 0 {
+            row = 0;
+        }
+        let max_col = cell.cols.saturating_sub(1) as i64;
+        let max_row = cell.rows.saturating_sub(1) as i64;
+        if col > max_col {
+            col = max_col;
+        }
+        if row > max_row {
+            row = max_row;
+        }
+        sel.focus = (col as u16, row as u16);
+        ctx.request_redraw();
+    }
+
+    fn mouse_up(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {
+        // A click without movement leaves anchor == focus → treat
+        // as "no selection" so a stray single-click doesn't ghost
+        // a single-cell highlight.
+        if self.selection_dragging {
+            self.selection_dragging = false;
+            if let Some(sel) = self.selection {
+                if sel.anchor == sel.focus {
+                    self.selection = None;
+                }
             }
         }
     }
@@ -392,8 +662,11 @@ impl MarsApp for Mars {
             } else {
                 (GRID_COLS_LAYOUT, GRID_ROWS_LAYOUT)
             };
+            let header_phys = HEADER_PT * scale;
+            let title_phys = CELL_TITLE_PT * scale;
             let layout = Layout::build(
-                phys_w, phys_h, sidebar_phys, lc, lr, cell_w, cell_h,
+                phys_w, phys_h, sidebar_phys, header_phys, title_phys,
+                lc, lr, cell_w, cell_h,
             );
             for (i, s) in self.sessions.iter_mut().enumerate() {
                 if let Some(rect) = layout.cells.get(i) {
@@ -441,6 +714,86 @@ impl MarsApp for Mars {
 }
 
 impl Mars {
+    /// Commit the current title edit (if any).  Empty buffer clears
+    /// any custom title for that cell, which falls back to the
+    /// default session label.  Idempotent if not editing.
+    fn commit_title_edit(&mut self) {
+        if let Some(idx) = self.editing_title.take() {
+            if idx < self.custom_titles.len() {
+                let trimmed = self.title_edit_buffer.trim().to_string();
+                self.custom_titles[idx] =
+                    if trimmed.is_empty() { None } else { Some(trimmed) };
+            }
+            self.title_edit_buffer.clear();
+        }
+    }
+
+    /// Cancel a title edit without committing.  Idempotent.
+    fn cancel_title_edit(&mut self) {
+        self.editing_title = None;
+        self.title_edit_buffer.clear();
+    }
+
+    /// Serialise the current text selection (if any) and write it
+    /// to the macOS general pasteboard.  Returns true on success
+    /// (something was actually copied), false otherwise — the
+    /// caller can fall through to the no-selection / no-clipboard
+    /// path.  Trailing whitespace on each row is dropped so a
+    /// selection that overshoots the line's text doesn't carry a
+    /// run of spaces; multi-row selections join with `\n`.
+    fn copy_selection_to_clipboard(&self) -> bool {
+        let Some(sel) = self.selection else { return false };
+        let Some(session) = self.sessions.get(sel.session_idx) else {
+            return false;
+        };
+        let grid = session.terminal.grid();
+        let cols = grid.cols();
+        let rows = grid.rows();
+        if cols == 0 || rows == 0 {
+            return false;
+        }
+        // Normalise anchor / focus into row-major (start, end).
+        let (a_col, a_row) = sel.anchor;
+        let (f_col, f_row) = sel.focus;
+        let (start, end) = if (a_row, a_col) <= (f_row, f_col) {
+            ((a_col, a_row), (f_col, f_row))
+        } else {
+            ((f_col, f_row), (a_col, a_row))
+        };
+        let (start_col, start_row) = start;
+        let (end_col, end_row) = end;
+        let mut out = String::new();
+        for r in start_row..=end_row {
+            if r >= rows {
+                break;
+            }
+            let col_lo = if r == start_row { start_col } else { 0 };
+            let col_hi = if r == end_row { end_col } else { cols.saturating_sub(1) };
+            let mut row_text = String::new();
+            for c in col_lo..=col_hi {
+                if c >= cols {
+                    break;
+                }
+                let cell = grid.cell_at_view(0, c, r);
+                let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
+                row_text.push(ch);
+            }
+            // Drop trailing spaces — terminal rows pad to full
+            // width with `' '`, so a 5-char "hello" plus 80-col
+            // grid leaves 75 spaces we don't want in the
+            // clipboard.
+            let trimmed = row_text.trim_end();
+            out.push_str(trimmed);
+            if r < end_row {
+                out.push('\n');
+            }
+        }
+        if out.is_empty() {
+            return false;
+        }
+        mars::input::write_clipboard_text(&out)
+    }
+
     /// In tmux mode: drain the single session's raw bytes, run them
     /// through `tmux::Parser`, and route extracted pane Output back
     /// to the terminal.  Window-state events update `tmux.windows`
@@ -692,6 +1045,52 @@ impl Mars {
             )
         };
 
+        // Resolved label per cell (used for the cell title strip
+        // AND the sidebar row, so both stay in sync).  Edit-mode
+        // buffer → user-set custom title → default label.
+        // tmux mode short-circuits to the tmux window name (already
+        // in `labels`) and skips the custom-title machinery —
+        // window names are managed by tmux itself.
+        let in_tmux = self.tmux.is_some();
+        let resolved_labels: Vec<String> = (0..self.sessions.len()
+            .max(labels.len()))
+            .map(|i| {
+                if !in_tmux && self.editing_title == Some(i) {
+                    self.title_edit_buffer.clone()
+                } else if !in_tmux {
+                    if let Some(Some(custom)) = self.custom_titles.get(i)
+                    {
+                        custom.clone()
+                    } else {
+                        labels.get(i).cloned().unwrap_or_default()
+                    }
+                } else {
+                    labels.get(i).cloned().unwrap_or_default()
+                }
+            })
+            .collect();
+
+        // Cell-title strings include a caret marker (▏) when the
+        // cell is being edited; sidebar copies the same text but
+        // without the caret + truncated with an ellipsis when it
+        // overflows the sidebar's narrow column.
+        let titles: Vec<String> = (0..self.sessions.len())
+            .map(|i| {
+                let mut s = resolved_labels
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
+                if !in_tmux && self.editing_title == Some(i) {
+                    s.push('▏');
+                }
+                s
+            })
+            .collect();
+        let sidebar_labels: Vec<String> = resolved_labels
+            .iter()
+            .map(|s| truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS))
+            .collect();
+
         let views: Vec<SessionView> = self
             .sessions
             .iter()
@@ -701,9 +1100,20 @@ impl Mars {
                 view_offset: if i == focused { view_offset } else { 0 },
                 cursor_visible: s.terminal.cursor_visible(),
                 focused: i == focused,
+                title: titles.get(i).map(|s| s.as_str()).unwrap_or(""),
+                // Selection only renders for the live (offset 0)
+                // view of its owning session — scrolled-back text
+                // isn't selectable in this first cut.
+                selection: self.selection.as_ref().and_then(|sel| {
+                    if sel.session_idx == i && view_offset == 0 {
+                        Some((sel.anchor, sel.focus))
+                    } else {
+                        None
+                    }
+                }),
             })
             .collect();
-        let entries: Vec<SidebarEntry> = labels
+        let entries: Vec<SidebarEntry> = sidebar_labels
             .iter()
             .zip(states.iter())
             .map(|(label, state)| SidebarEntry {
@@ -769,6 +1179,7 @@ fn main() {
     let record_latency = latency_out_path.is_some();
     let profile_out_path = std::env::var("MARS_PROFILE").ok();
 
+    let n_sessions = sessions.len();
     let app = Mars {
         renderer: None,
         layout: None,
@@ -782,6 +1193,11 @@ fn main() {
         latency_out_path,
         prof: ProfileCounters::default(),
         profile_out_path,
+        custom_titles: vec![None; n_sessions],
+        editing_title: None,
+        title_edit_buffer: String::new(),
+        selection: None,
+        selection_dragging: false,
     };
 
     let attrs = WindowAttrs {
@@ -1124,6 +1540,8 @@ fn bench_metal_render(arg: &str) {
         phys_w as f64,
         phys_h as f64,
         0.0,
+        0.0,
+        0.0,
         1,
         1,
         cell_w,
@@ -1134,6 +1552,8 @@ fn bench_metal_render(arg: &str) {
         view_offset: 0,
         cursor_visible: true,
         focused: true,
+        title: "",
+            selection: None,
     };
     let views = std::slice::from_ref(&view);
 

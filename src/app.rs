@@ -45,9 +45,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSTextInputClient, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
+    NSEventModifierFlags, NSTextInputClient, NSTitlebarSeparatorStyle, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound,
@@ -74,6 +74,14 @@ pub trait MarsApp: 'static {
 
     /// Mouse-down with location in physical pixels, origin top-left.
     fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64);
+
+    /// Mouse-dragged (button still pressed) at physical-pixel `(x, y)`.
+    /// Default implementation is a no-op — apps that want drag/select
+    /// behaviour override this.
+    fn mouse_drag(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {}
+
+    /// Mouse-up at physical-pixel `(x, y)`.  Default no-op.
+    fn mouse_up(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {}
 
     /// Scroll delta in physical pixels (positive Y = scroll content
     /// down).  `precise` is true for trackpad / Magic Mouse, false
@@ -362,6 +370,29 @@ declare_class!(
             dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys });
         }
 
+        #[method(mouseDragged:)]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            // Same coord conversion as mouse_down — AppKit only
+            // sends mouseDragged: between a paired mouseDown:
+            // and mouseUp:, so the app can rely on order.
+            let loc_window = unsafe { event.locationInWindow() };
+            let loc_view = self.convertPoint_fromView(loc_window, None);
+            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let x_phys = loc_view.x * scale;
+            let y_phys = loc_view.y * scale;
+            dispatch_event(EventKind::MouseDrag { x: x_phys, y: y_phys });
+        }
+
+        #[method(mouseUp:)]
+        fn mouse_up(&self, event: &NSEvent) {
+            let loc_window = unsafe { event.locationInWindow() };
+            let loc_view = self.convertPoint_fromView(loc_window, None);
+            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let x_phys = loc_view.x * scale;
+            let y_phys = loc_view.y * scale;
+            dispatch_event(EventKind::MouseUp { x: x_phys, y: y_phys });
+        }
+
         #[method(scrollWheel:)]
         fn scroll_wheel(&self, event: &NSEvent) {
             // hasPreciseScrollingDeltas distinguishes trackpads
@@ -619,6 +650,8 @@ enum EventKind {
     UserEvent,
     Key(MarsKeyEvent, Modifiers),
     MouseDown { x: f64, y: f64 },
+    MouseDrag { x: f64, y: f64 },
+    MouseUp { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
     Resized,
     Focused(bool),
@@ -646,6 +679,8 @@ fn dispatch_event(kind: EventKind) {
             EventKind::UserEvent => app.user_event(ctx),
             EventKind::Key(ev, mods) => app.key_event(ctx, ev, mods),
             EventKind::MouseDown { x, y } => app.mouse_down(ctx, x, y),
+            EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
+            EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),
             EventKind::Resized => {
                 let (w, h) = ctx.inner_size_phys();
@@ -719,10 +754,19 @@ pub fn run_app<A: MarsApp>(mut app: A, proxy: EventProxy, attrs: WindowAttrs) {
     };
 
     // 2. Create NSWindow with view as content.
+    //
+    // FullSizeContentView + titlebarAppearsTransparent fuse the title
+    // bar into the window content: the system traffic-light buttons
+    // float over the topmost row of the content, no separate
+    // chrome-grey strip cuts the working area off from the window
+    // edge.  Window backgroundColor matches the cell BG so the
+    // overlap is invisible — the user sees a single dark surface
+    // with the buttons floating in the corner.
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
-        | NSWindowStyleMask::Resizable;
+        | NSWindowStyleMask::Resizable
+        | NSWindowStyleMask::FullSizeContentView;
     let window: Retained<NSWindow> = unsafe {
         let alloc = mtm.alloc::<NSWindow>();
         msg_send_id![alloc,
@@ -733,6 +777,23 @@ pub fn run_app<A: MarsApp>(mut app: A, proxy: EventProxy, attrs: WindowAttrs) {
         ]
     };
     window.setTitle(&NSString::from_str(&attrs.title));
+    unsafe {
+        window.setTitlebarAppearsTransparent(true);
+        window.setTitleVisibility(NSWindowTitleVisibility::NSWindowTitleHidden);
+        // Kill the 1-px hairline AppKit draws under the titlebar
+        // (the visible darker strip the user kept seeing even after
+        // FullSizeContentView).  `NSTitlebarSeparatorStyleNone`
+        // is the macOS 11+ knob for "no separator at all".
+        window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+        // Window BG matches the dominant chrome tone (BG_PANEL in
+        // render_metal.rs) — sidebar, header, unfocused cells all
+        // sit at this colour, so the resize-flicker zone reads as
+        // a smooth continuation of the chrome rather than a darker
+        // stripe.  The focused-pane drop is drawn explicitly on
+        // top, not through this window-level color.
+        let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.022, 0.028, 0.042, 1.0);
+        window.setBackgroundColor(Some(&bg));
+    }
     window.setContentView(Some(unsafe {
         &*(Retained::as_ptr(&view) as *const NSView)
     }));

@@ -114,6 +114,8 @@ impl MarsApp for Mcli {
             view_offset: self.view_offset,
             cursor_visible: self.session.terminal.cursor_visible(),
             focused: true,
+            title: "",
+            selection: None,
         };
         r.render(view);
     }
@@ -136,6 +138,8 @@ impl MarsApp for Mcli {
             view_offset: self.view_offset,
             cursor_visible: self.session.terminal.cursor_visible(),
             focused: true,
+            title: "",
+            selection: None,
         };
         r.render(view);
     }

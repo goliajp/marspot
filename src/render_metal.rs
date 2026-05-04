@@ -544,10 +544,16 @@ fn encode_passes(
         color.setTexture(Some(target));
         color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
+        // Clear to cell BG so the entire window content rectangle —
+        // including the macOS rounded corners and the header strip
+        // above the 9-grid — reads as one continuous near-black
+        // surface.  Inter-cell GUTTER hairlines are now an internal
+        // detail painted as quads over the cleared BG, not a side-
+        // effect of letting the clear colour bleed through.
         color.setClearColor(MTLClearColor {
-            red: GUTTER.0 as f64,
-            green: GUTTER.1 as f64,
-            blue: GUTTER.2 as f64,
+            red: SIDEBAR_BG_F.0 as f64,
+            green: SIDEBAR_BG_F.1 as f64,
+            blue: SIDEBAR_BG_F.2 as f64,
             alpha: 1.0,
         });
     }
@@ -677,15 +683,39 @@ impl MetalRenderer {
 /// here rather than convert per call.
 // Inter-cell divider colour — light grey so a thin "white-on-dark"
 // hairline shows between panes (iTerm2 style — the working area
-// stays at terminal BG, divisions read as bright lines).
-const GUTTER: (f32, f32, f32) = (0.32, 0.34, 0.38);
-// Sidebar BG sits a notch DARKER than the terminal cell BG so the
-// rail reads as its own surface — a subtle "behind" the working
-// area, not "above" it.
-const SIDEBAR_BG_F: (f32, f32, f32) = (0.045, 0.055, 0.075);
-// Brighter / more saturated than the previous (0.30, 0.55, 0.95) —
-// at the old contrast it was easy to miss in 9-grid layouts.
-const FOCUS_OUTLINE: (f32, f32, f32) = (0.40, 0.75, 1.00);
+// === Visual design ===
+//
+// Two near-black tones plus one quiet seam.  The focused pane
+// READS DEEPER than the rest: the surrounding chrome (sidebar,
+// header, unfocused cells) sits at `BG_PANEL`, while the active
+// pane drops to `BG_FOCUSED` (= `font_cache::BG`) — one shade
+// below.  Focus = "the deep canvas I'm typing into", everything
+// else = "the surrounding panel".  Every internal boundary uses
+// one weak `SEAM` hairline at one width, so the eye reads
+// structure without any seam taking on chrome weight.
+//
+//   BG_PANEL    the dominant surface (sidebar + header +
+//               unfocused cell rects); has a faint blue tint
+//   BG_FOCUSED  the focused cell rect — visibly deeper, closer
+//               to pure black; this IS the focus indicator
+//   SEAM        a hair darker than BG_PANEL, reads as a quiet
+//               depression between adjacent panels — used for
+//               sidebar↔grid, header↔grid, and cell↔cell alike
+const BG_PANEL: (f32, f32, f32) = (0.022, 0.028, 0.042);
+const BG_FOCUSED: (f32, f32, f32) = (0.006, 0.008, 0.014);
+// Pre-mixed against BG_PANEL ≈ 50%, so the 0.5-px sub-pixel quad
+// reads as a translucent hairline.  Going through alpha blending
+// would need pipeline changes; this gets the same visual effect
+// at the BG-pipeline solid-fill cost.
+const SEAM: (f32, f32, f32) = (0.055, 0.062, 0.075);
+/// Selected-cell highlight — a muted brand blue that lifts cleanly
+/// over BG_FOCUSED without bleaching foreground text.  Used by the
+/// drag-to-select machinery; FG glyphs draw on top so selected
+/// content stays legible.
+const SELECTION_BG: (f32, f32, f32) = (0.16, 0.22, 0.34);
+// Old name retained for the existing sidebar BG drawing path
+// (kept flush with the panel surface).
+const SIDEBAR_BG_F: (f32, f32, f32) = BG_PANEL;
 const CURSOR_FG: (f32, f32, f32) = (0.92, 0.92, 0.92);
 
 const SIDEBAR_DOT_R: f32 = 4.5;
@@ -694,11 +724,8 @@ const SIDEBAR_TOP_PAD: f32 = 14.0;
 const SIDEBAR_ROW_H: f32 = 22.0;
 const SIDEBAR_DOT_LABEL_GAP: f32 = 10.0;
 const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
-// Selected-row BG.  Just a hint above the sidebar BG — visible by
-// contrast with neighbouring rows, not by being a bright highlight.
-// Earlier values (0.13/0.18/0.30 then 0.09/0.13/0.22) read as
-// "active" rather than "selected"; this one whispers.
-const SIDEBAR_FOCUSED_BG: (f32, f32, f32) = (0.06, 0.08, 0.13);
+// Selected-row BG kept as an alias of the cell-focused tone so
+// sidebar selection and 9-grid focus read as the same affordance.
 const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
 const STATE_IDLE: (f32, f32, f32) = (0.55, 0.58, 0.62);
 const STATE_EXITED: (f32, f32, f32) = (0.85, 0.30, 0.30);
@@ -728,20 +755,68 @@ fn build_instances(
     let atlas_w_f = atlas_w as f32;
     let atlas_h_f = atlas_h as f32;
 
-    // Sidebar BG over the gutter clear.  Painted before the per-
-    // session BG so the session rect can overpaint cleanly.
-    if layout.sidebar_w > 0.0 {
-        let h = layout
+    // Sidebar BG = cell BG (already covered by the clear pass).  No
+    // explicit fill needed unless the sidebar palette ever diverges.
+
+    // Every internal hairline — sidebar↔grid, header↔grid, and
+    // cell↔cell — uses one uniformly weak SEAM tone at one width.
+    // The eye reads structure (this is a sidebar / this is a grid /
+    // this is a cell) without any seam taking on chrome weight.
+    if layout.gutter > 0.0 && !layout.cells.is_empty() {
+        let g = layout.gutter as f32;
+        let inset = layout.top_inset as f32;
+        let avail_h = (layout.window_h - layout.top_inset) as f32;
+        let color = [SEAM.0, SEAM.1, SEAM.2, 1.0];
+        // Sidebar↔grid vertical seam (in the strip the layout
+        // reserved immediately after the sidebar).
+        if layout.sidebar_w > 0.0 {
+            cells.push(CellInstance {
+                origin: [layout.sidebar_w as f32, inset],
+                size: [g, avail_h],
+                color,
+            });
+        }
+        // Header↔grid horizontal seam — spans the full window width
+        // above the 9-grid (right of sidebar+seam if a sidebar
+        // exists; full width otherwise).  Sits exactly at y =
+        // top_inset, so it visually closes the top of the grid the
+        // same way the rounded window edge closes its sides.
+        if layout.top_inset > 0.0 {
+            cells.push(CellInstance {
+                origin: [0.0, inset - g],
+                size: [layout.window_w as f32, g],
+                color,
+            });
+        }
+        // Inter-cell vertical seams.
+        for c in 1..layout.grid_cols {
+            let prev = layout.cells[c - 1];
+            cells.push(CellInstance {
+                origin: [(prev.x + prev.w) as f32, inset],
+                size: [g, avail_h],
+                color,
+            });
+        }
+        // Inter-cell horizontal seams.
+        let grid_left = layout
             .cells
-            .iter()
-            .map(|c| c.y_top + c.h)
-            .fold(0.0_f64, f64::max)
-            .max(1.0);
-        cells.push(CellInstance {
-            origin: [0.0, 0.0],
-            size: [layout.sidebar_w as f32, h as f32],
-            color: [SIDEBAR_BG_F.0, SIDEBAR_BG_F.1, SIDEBAR_BG_F.2, 1.0],
-        });
+            .first()
+            .map(|c| c.x as f32)
+            .unwrap_or(layout.sidebar_w as f32);
+        let grid_right = layout
+            .cells
+            .last()
+            .map(|c| (c.x + c.w) as f32)
+            .unwrap_or(layout.window_w as f32);
+        let avail_w_grid = grid_right - grid_left;
+        for r in 1..layout.grid_rows {
+            let prev = layout.cells[(r - 1) * layout.grid_cols];
+            cells.push(CellInstance {
+                origin: [grid_left, (prev.y_top + prev.h) as f32],
+                size: [avail_w_grid, g],
+                color,
+            });
+        }
     }
 
     for (i, view) in views.iter().enumerate() {
@@ -764,6 +839,7 @@ fn build_instances(
             glyphs,
             layout.gutter as f32,
             layout.padding as f32,
+            layout.cell_title_h as f32,
         );
     }
 
@@ -772,6 +848,7 @@ fn build_instances(
             sidebar,
             focused_idx,
             layout.sidebar_w as f32,
+            layout.top_inset as f32,
             cell_w,
             cell_h,
             ascent,
@@ -796,6 +873,7 @@ fn push_sidebar(
     entries: &[SidebarEntry],
     focused_idx: usize,
     sidebar_w: f32,
+    top_inset: f32,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
@@ -808,16 +886,16 @@ fn push_sidebar(
     dots: &mut Vec<CellInstance>,
 ) {
     for (i, entry) in entries.iter().enumerate() {
-        let row_top_y = SIDEBAR_TOP_PAD + i as f32 * SIDEBAR_ROW_H;
+        let row_top_y = top_inset + SIDEBAR_TOP_PAD + i as f32 * SIDEBAR_ROW_H;
 
         if i == focused_idx {
             cells.push(CellInstance {
                 origin: [0.0, row_top_y],
                 size: [sidebar_w, SIDEBAR_ROW_H],
                 color: [
-                    SIDEBAR_FOCUSED_BG.0,
-                    SIDEBAR_FOCUSED_BG.1,
-                    SIDEBAR_FOCUSED_BG.2,
+                    BG_FOCUSED.0,
+                    BG_FOCUSED.1,
+                    BG_FOCUSED.2,
                     1.0,
                 ],
             });
@@ -909,19 +987,134 @@ fn push_session(
     glyphs: &mut Vec<GlyphInstance>,
     gutter: f32,
     padding: f32,
+    title_h: f32,
 ) {
-    // Terminal-bg fill for the rect.
+    // Cell-rect BG: BG_FOCUSED (deeper) for the active pane,
+    // BG_PANEL for everyone else.  The DROP into deeper black is
+    // the focus indicator — focused reads as "the canvas I'm
+    // typing into", surrounding cells stay at the chrome tone.
+    let pane_focused = view.focused && window_focused;
+    let pane_bg = if pane_focused {
+        [BG_FOCUSED.0, BG_FOCUSED.1, BG_FOCUSED.2, 1.0]
+    } else {
+        [BG_PANEL.0, BG_PANEL.1, BG_PANEL.2, 1.0]
+    };
     cells.push(CellInstance {
         origin: [rect.x as f32, rect.y_top as f32],
         size: [rect.w as f32, rect.h as f32],
-        color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
+        color: pane_bg,
     });
+
+    // Title strip — band at the top of the cell hosting the
+    // session label.  BG sits flush with the cell BG; a single
+    // SEAM hairline along the bottom of the strip separates it
+    // from the terminal content area below.  Glyphs in the strip
+    // use SIDEBAR_TEXT_FG (dim greyish-blue) so the title reads
+    // as quiet metadata, not as content competing with the
+    // terminal text.
+    if title_h > 0.0 && !view.title.is_empty() {
+        let strip_bottom = rect.y_top as f32 + title_h;
+        // Bottom seam (1 phys-px line just inside the strip's
+        // bottom edge — sits exactly where padding starts).
+        cells.push(CellInstance {
+            origin: [rect.x as f32, strip_bottom - gutter.max(1.0)],
+            size: [rect.w as f32, gutter.max(1.0)],
+            color: [SEAM.0, SEAM.1, SEAM.2, 1.0],
+        });
+        // Title text — same monospace metrics as the terminal
+        // body; vertically centred in the strip, left-aligned
+        // with the same padding the terminal uses.
+        let label_x = rect.x as f32 + padding;
+        let label_baseline_y = rect.y_top as f32
+            + (title_h - cell_h) * 0.5
+            + ascent;
+        let metrics = SlotMetrics {
+            cell_w: cell_w.round() as u32,
+            cell_h: cell_h.round() as u32,
+            baseline_from_top: ascent.round() as u32,
+        };
+        let mut x = label_x;
+        for ch in view.title.chars() {
+            let (font_idx, glyph) = font.resolve_char(ch, false, false);
+            if glyph != 0 {
+                let ct_font = font.font(font_idx).clone();
+                if let Some(entry) = atlas.get_or_rasterize(
+                    GlyphKey {
+                        font_id: font_idx as u32,
+                        glyph,
+                    },
+                    &ct_font,
+                    metrics,
+                ) {
+                    let dest_y = (label_baseline_y - ascent).round();
+                    let slot_w =
+                        (metrics.cell_w * entry.n_cells as u32) as f32;
+                    glyphs.push(GlyphInstance {
+                        origin: [x.round(), dest_y],
+                        size: [slot_w, metrics.cell_h as f32],
+                        uv0: [
+                            entry.u0 as f32 / atlas_w,
+                            entry.v0 as f32 / atlas_h,
+                        ],
+                        uv1: [
+                            entry.u1 as f32 / atlas_w,
+                            entry.v1 as f32 / atlas_h,
+                        ],
+                        color: [
+                            SIDEBAR_TEXT_FG.0,
+                            SIDEBAR_TEXT_FG.1,
+                            SIDEBAR_TEXT_FG.2,
+                            1.0,
+                        ],
+                    });
+                }
+            }
+            x += cell_w;
+        }
+    }
 
     let grid = view.grid;
     let cols = grid.cols() as usize;
-    // Origin of the terminal content area (cell rect's top-left + inner padding).
+    // Origin of the terminal content area — inside cell, below
+    // the title strip, then padded.
     let inner_x = rect.x as f32 + padding;
-    let inner_y = rect.y_top as f32 + padding;
+    let inner_y = rect.y_top as f32 + title_h + padding;
+
+    // Selection BG — paint a single quad per selected row, BEFORE
+    // the per-cell run-length BG fills so coloured cells (e.g.
+    // ANSI-bg text) overdraw correctly.  Selection coordinates
+    // come from the caller in cell coords; we normalise to a
+    // top-left → bottom-right pair inline.
+    if let Some((anchor, focus)) = view.selection {
+        let (start, end) = if (anchor.1, anchor.0) <= (focus.1, focus.0) {
+            (anchor, focus)
+        } else {
+            (focus, anchor)
+        };
+        let (s_col, s_row) = start;
+        let (e_col, e_row) = end;
+        let max_row = grid.rows().saturating_sub(1);
+        let max_col = grid.cols().saturating_sub(1);
+        let s_row = s_row.min(max_row);
+        let e_row = e_row.min(max_row);
+        for r in s_row..=e_row {
+            let col_lo = if r == s_row { s_col } else { 0 };
+            let col_hi = if r == e_row { e_col } else { max_col };
+            let col_lo = col_lo.min(max_col);
+            let col_hi = col_hi.min(max_col);
+            if col_hi < col_lo {
+                continue;
+            }
+            let x = inner_x + col_lo as f32 * cell_w;
+            let y = inner_y + r as f32 * cell_h;
+            let w = (col_hi - col_lo + 1) as f32 * cell_w;
+            cells.push(CellInstance {
+                origin: [x, y],
+                size: [w, cell_h],
+                color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+            });
+        }
+    }
 
     for r in 0..grid.rows() {
         let row_y = inner_y + (r as f32) * cell_h;
@@ -1115,44 +1308,12 @@ fn push_session(
         }
     }
 
-    // Focused-pane darken overlay.  Reverses the previous "dim
-    // inactive" pattern — user wants the focused pane to read as the
-    // DARKER, "selected" surface.  Inactive panes stay at iTerm2's
-    // default BG; focused gets a translucent black wash that drops
-    // it noticeably below them.  Drawn in the BG pipeline after the
-    // BG fill, so glyphs (later pipeline) stay full-brightness.
-    if view.focused {
-        cells.push(CellInstance {
-            origin: [rect.x as f32, rect.y_top as f32],
-            size: [rect.w as f32, rect.h as f32],
-            color: [0.0, 0.0, 0.0, 0.45],
-        });
-    }
-
-    // Focus indicator IS the gutter around the focused pane — paint
-    // the surrounding gutter strip with FOCUS_OUTLINE colour.  No
-    // separate inner stroke; the pane's own edge is exactly where
-    // the divider hairline lives, so the focus frame and the
-    // divider are the same thing (iTerm2 reads this way).
-    if view.focused && gutter > 0.0 {
-        let color = [FOCUS_OUTLINE.0, FOCUS_OUTLINE.1, FOCUS_OUTLINE.2, 1.0];
-        let (rx, ry, rw, rh) = (rect.x as f32, rect.y_top as f32, rect.w as f32, rect.h as f32);
-        // Each side reaches gutter/2 outward (each cell carries
-        // half of the inter-cell strip in Layout::build).  Painting
-        // exactly gutter/2 means the focused side of the divider
-        // wins; the unfocused neighbour keeps its half in default
-        // GUTTER colour, so the line transitions cleanly at the
-        // midpoint.
-        let half = gutter / 2.0;
-        // top
-        cells.push(CellInstance { origin: [rx - half, ry - half], size: [rw + gutter, half], color });
-        // bottom
-        cells.push(CellInstance { origin: [rx - half, ry + rh],   size: [rw + gutter, half], color });
-        // left
-        cells.push(CellInstance { origin: [rx - half, ry],         size: [half, rh],          color });
-        // right
-        cells.push(CellInstance { origin: [rx + rw,   ry],         size: [half, rh],          color });
-    }
+    // No darken overlay.  No FOCUS_OUTLINE blue frame.  The focus
+    // affordance is the BG_FOCUSED tint applied to the cell rect at
+    // the top of this fn, plus the solid-vs-hollow cursor — both
+    // already done above.  iTerm2 reads exactly this way: no
+    // chrome, no border, just a quiet BG lift on the active pane.
+    let _ = gutter; // pane-internal layout doesn't use it any more
 }
 
 /// Build a Shared-storage MTLBuffer over `bytes`.  Returns `None`
@@ -1771,6 +1932,8 @@ mod tests {
             font.cell_w * 10.0,
             font.cell_h * 4.0,
             0.0,
+            0.0,
+            0.0,
             1,
             1,
             font.cell_w,
@@ -1781,6 +1944,8 @@ mod tests {
             view_offset: 0,
             cursor_visible: true,
             focused: true,
+            title: "",
+            selection: None,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -1804,8 +1969,10 @@ mod tests {
         //    skipped during the FG emit because it's solid-cursor
         //  - 'A' at col 0 (BG colour) re-rendered after the cursor block
         //  Order in vec is FG-pass-first then cursor re-render, so [B, A].
-        //  cells: terminal-bg fill + cursor block + focus outline ×4
-        assert!(cells.len() >= 6, "got cells.len()={}", cells.len());
+        //  cells: at minimum a terminal-bg fill + cursor block.
+        //  Focus outline (×4) only fires when gutter > 0, which a
+        //  1×1 layout doesn't have, so it can be absent here.
+        assert!(cells.len() >= 2, "got cells.len()={}", cells.len());
         assert_eq!(glyphs.len(), 2, "got glyphs.len()={}", glyphs.len());
         // Whichever order they came out in, the two glyphs are exactly
         // one cell apart in x (modulo CT bearing differences ≤2 px).
