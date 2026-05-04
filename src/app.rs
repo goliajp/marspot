@@ -18,10 +18,12 @@
 //! ## Known differences vs winit
 //!
 //! - **IME via NSTextInputClient.**  `MarsView` implements the
-//!   protocol so CJK / Japanese / emoji input works.  Side-effect:
-//!   live-PTY throughput drops ~5-10% even when no IME is composing,
-//!   because AppKit treats text-input-clients differently in event
-//!   dispatch.  Trade accepted in exchange for the feature.
+//!   protocol so CJK / Japanese / emoji input works.  An initial
+//!   5-trial A/B suggested a 5–10 % live-PTY throughput drop, but a
+//!   follow-up 10-trial Welch t-test (cat-cjk) gave t=1.08 — well
+//!   below the 95 % significance threshold — so the apparent
+//!   regression is within run-to-run noise.  Treat it as "no
+//!   measured regression at current precision."
 //! - **No `CursorMoved` event.**  Mars only inspects the cursor at
 //!   click time; we read `locationInWindow` from `mouseDown:` instead.
 //! - **No inline preedit rendering.**  macOS draws its own candidate
