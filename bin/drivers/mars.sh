@@ -47,8 +47,11 @@ case "$cmd" in
     ensure_build "$bin"
     kill_app "$bin" || true
     # Forward profiling env-vars so per-trial counters can be captured.
+    # MARS_DISK_SCROLLBACK is the documented opt-out for regression bisects
+    # (see commit 86e81d1) — it must reach the bench-spawned mars process,
+    # otherwise the bisect tool isn't actually usable from the harness.
     env_pass=""
-    for v in MARS_PROFILE MARS_LATENCY MARS_SCALE MARS_TMUX_DEBUG; do
+    for v in MARS_PROFILE MARS_LATENCY MARS_SCALE MARS_TMUX_DEBUG MARS_DISK_SCROLLBACK; do
       if [[ -n "${!v:-}" ]]; then env_pass+=" $v=${!v}"; fi
     done
     # nohup + redirect so the bench harness isn't tied to mars's output;
