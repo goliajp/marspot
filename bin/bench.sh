@@ -44,7 +44,7 @@ if [[ ! -f "$BASELINE" ]]; then
 fi
 
 # Make sure scenarios exist; regenerate if missing (cheap, deterministic).
-if [[ ! -f "$SCENARIOS_DIR/cat-ascii.bin" ]]; then
+if [[ ! -f "$SCENARIOS_DIR/cat-ascii.bin" || ! -f "$SCENARIOS_DIR/scroll-history.bin" ]]; then
   echo "==> generating bench scenarios"
   "$ROOT/bin/gen-scenarios.sh" >/dev/null
 fi
@@ -79,6 +79,19 @@ for trial in 1 2 3; do
   "$ROOT/target/release/mars" --bench render:1000 \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/render.samples"
+done
+
+# Scroll-down read-path gate.  Whatever scrollback variant the env
+# selects (memory by default, disk if MARS_DISK_SCROLLBACK is set) is
+# what gets measured — the floor in baseline.json must be calibrated
+# for the corresponding default.  When the default flips this gate
+# auto-tracks via --update-baseline.
+echo "==> headless scroll (5 trials, taking median p99)"
+: > "$CUR_DIR/scroll.samples"
+for trial in 1 2 3 4 5; do
+  "$ROOT/target/release/mars" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
+    >> "$CUR_DIR/scroll.samples"
 done
 
 # ---- binary size + idle memory ----------------------------------------
@@ -148,6 +161,13 @@ def load_render():
     if not samples: return None
     return {"p99_ns": samples[len(samples) // 2]}
 
+def load_scroll():
+    p = os.path.join(cur_dir, "scroll.samples")
+    if not os.path.exists(p): return None
+    samples = sorted(int(x) for x in open(p).read().split() if x.strip())
+    if not samples: return None
+    return {"p99_ns": samples[len(samples) // 2]}
+
 def load_live(scenario):
     p = os.path.join(cur_dir, "live.json")
     if not os.path.exists(p): return None
@@ -194,6 +214,12 @@ render = load_render()
 if render is not None:
     p99_us = render["p99_ns"] / 1000
     check("render p99 (µs)", p99_us, baseline["render_full_repaint"]["p99_us_max"], lower_better=True)
+
+# Scroll (read-path under simulated downward scrolling)
+scroll = load_scroll()
+if scroll is not None and "scroll_repaint" in baseline:
+    p99_us = scroll["p99_ns"] / 1000
+    check("scroll p99 (µs)", p99_us, baseline["scroll_repaint"]["p99_us_max"], lower_better=True)
 
 # Binary size: lower-better, ceiling = baseline value
 for bin_name, ceiling in baseline.get("binary_size_bytes_max", {}).items():
@@ -262,6 +288,8 @@ if do_update:
                     entry["mars_vs_best_other_min"] = round(cl / best_other * 0.90, 2)
     if render is not None:
         baseline["render_full_repaint"]["p99_us_max"] = round(render["p99_ns"] / 1000 * 1.10)
+    if scroll is not None and "scroll_repaint" in baseline:
+        baseline["scroll_repaint"]["p99_us_max"] = round(scroll["p99_ns"] / 1000 * 1.30)
     # Size: 10 % ceiling above current.
     if "binary_size_bytes_max" in baseline:
         for bin_name in list(baseline["binary_size_bytes_max"].keys()):
