@@ -376,17 +376,26 @@ impl DiskScrollback {
         // `total_lines_written` so we never observe them.
         file.set_len(mmap_len as u64)?;
 
-        // Map the whole ring.  Writes become memcpy + dirty-page
-        // bookkeeping (handled asynchronously by the kernel); reads
-        // are slice access into the mapped region with the unified
-        // buffer cache as our LRU.
+        // Map the whole ring as anonymous private memory.  We tried
+        // file-backed mmap (MAP_SHARED then MAP_PRIVATE on the
+        // ephemeral scratch file) first; both cost an extra
+        // file→anon COW on every first write to a page, which
+        // surfaces as ~5–15 % regression on parse-heavy single-session
+        // throughput.  We don't need persistence (file is unlinked on
+        // Drop, never read from another process) and we don't need
+        // the file's writeback path (eviction goes to swap with anon
+        // mmap, same outcome — bounded RSS under memory pressure
+        // via kernel-managed paging).  The scratch file lives on
+        // only because the existing diagnostics + soak test refer to
+        // its path; a future cleanup removes the file dependency
+        // entirely.
         let mmap_ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 mmap_len,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                file.as_raw_fd(),
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
                 0,
             )
         };
@@ -400,6 +409,14 @@ impl DiskScrollback {
             libc::madvise(mmap_ptr, mmap_len, libc::MADV_SEQUENTIAL);
         }
         let mmap_ptr = mmap_ptr as *mut u8;
+        // NOTE: tried pre-faulting all pages here to fold the
+        // first-wrap COW cost into init.  It worked (parse +5–10 %)
+        // but pegged the bench `rss mars` gate at 290 MiB (9 sessions
+        // × 50 MiB committed up-front) — the lazy-alloc commit
+        // ed074bd's whole point was to keep idle RSS flat, so we
+        // can't pre-commit at session create.  If parse perf needs
+        // more, a smarter on-first-push warmup or moving back to a
+        // small RAM-fronted ring is the way; not pre-fault at init.
 
         Ok(Self {
             cols,
