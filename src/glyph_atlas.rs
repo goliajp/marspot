@@ -113,8 +113,17 @@ pub struct AtlasEntry {
     pub v1: u16,
     pub px_w: u16,
     pub px_h: u16,
-    pub bearing_x: i16,
-    pub bearing_y: i16,
+    /// Bitmap-top offset from the cell's pen-position baseline.
+    /// Stored as f32 (not i16) so glyphs whose ideal bearing lands
+    /// near a half-pixel boundary don't quantise to different
+    /// integer values: `l` rounding to 11 and `d` rounding to 10
+    /// pulled `l` 1 px higher than its row-mates and showed up
+    /// visually as "develop's l/p sit lower than the rest" (Monaco
+    /// 12 surfaced this; Menlo 13's metrics happened to round
+    /// uniformly).  Renderers do their own round-to-pixel at draw
+    /// time if they need crisp edges.
+    pub bearing_x: f32,
+    pub bearing_y: f32,
 }
 
 /// One row in the shelf packer.
@@ -319,8 +328,8 @@ struct Raster {
     bytes: Vec<u8>,
     px_w: u32,
     px_h: u32,
-    bearing_x: i16,
-    bearing_y: i16,
+    bearing_x: f32,
+    bearing_y: f32,
 }
 
 /// Rasterise one glyph into an alpha-only bitmap and return the bytes.
@@ -388,10 +397,29 @@ fn rasterise_glyph(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
         px_w,
         px_h,
         // bearing_x = where the glyph's left edge is relative to the
-        // pen position the renderer uses to lay out the cell.
-        bearing_x: bbox.origin.x.round() as i16 - slack as i16,
-        // bearing_y = pixels from the cell baseline UP to the bitmap top.
-        bearing_y: (bbox.origin.y + bbox.size.height).round() as i16 + slack as i16,
+        // pen position the renderer uses to lay out the cell.  Float
+        // so half-pixel offsets stay consistent across all glyphs in
+        // the same row (no per-glyph round-to-int drift).
+        bearing_x: (bbox.origin.x - slack) as f32,
+        // bearing_y = bitmap rows from buffer-top down to the glyph
+        // baseline.  CGBitmapContext stores y-up internally, but the
+        // BUFFER bytes are written top-down — buffer row 0 = canvas
+        // top.  CT places baseline at canvas y = `slack - bbox.origin.y`
+        // (so the descender bottom lands at canvas y = slack and the
+        // top of the glyph ink lands at canvas y =
+        // `slack + bbox.size.height + bbox.origin.y` ≤ px_h).
+        // Therefore baseline lives at buffer row
+        // `(px_h - 1) - (slack - bbox.origin.y)`.
+        //
+        // This matters because px_h = `ceil(bbox.size.height) + 2*slack`
+        // (an integer) while `bbox.size.height` is fractional; the old
+        // formula `bbox.origin.y + bbox.size.height + slack` lost the
+        // `ceil`-padding above the glyph, so glyphs with the same
+        // numerical sum but different px_h (e.g. 'p' descender + 'o'
+        // x-only) ended up at the same dest_y and their baselines
+        // drifted apart by a fraction of a pixel — visible as "p sits
+        // lower than o" in 9-grid Monaco 12 prompts.
+        bearing_y: (px_h as f32 - 1.0) - (slack as f32 - bbox.origin.y as f32),
     })
 }
 

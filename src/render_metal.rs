@@ -677,7 +677,9 @@ impl MetalRenderer {
 /// here rather than convert per call.
 const GUTTER: (f32, f32, f32) = (0.02, 0.03, 0.06);
 const SIDEBAR_BG_F: (f32, f32, f32) = (0.08, 0.10, 0.14);
-const FOCUS_OUTLINE: (f32, f32, f32) = (0.30, 0.55, 0.95);
+// Brighter / more saturated than the previous (0.30, 0.55, 0.95) —
+// at the old contrast it was easy to miss in 9-grid layouts.
+const FOCUS_OUTLINE: (f32, f32, f32) = (0.40, 0.75, 1.00);
 const CURSOR_FG: (f32, f32, f32) = (0.92, 0.92, 0.92);
 
 const SIDEBAR_DOT_R: f32 = 4.5;
@@ -825,7 +827,14 @@ fn push_sidebar(
         // Label text.  Lay out monospace via cell_w (sidebar labels
         // are ASCII / short tmux names, so cell_w accuracy is fine).
         let label_x = dot_cx + SIDEBAR_DOT_R + SIDEBAR_DOT_LABEL_GAP;
-        let baseline_y = dot_cy + ascent * 0.40 - SIDEBAR_ROW_H * 0.20;
+        // Align the visual centre of an ASCII digit / letter with the
+        // dot's centre.  cap_height ≈ 0.65 × ascent for most monospace
+        // faces, so half of cap_height ≈ 0.30 × ascent below the
+        // baseline (in y-down).  The previous formula
+        // `dot_cy + ascent*0.40 - SIDEBAR_ROW_H*0.20` happened to land
+        // okay on Menlo 13 but pushes Monaco 12 digits ~3 px above the
+        // dot — mismatch the user reported as "menulist 没对齐".
+        let baseline_y = dot_cy + ascent * 0.30;
         let mut x = label_x;
         for ch in entry.label.chars() {
             let (font_idx, glyph) = font.resolve_char(ch, false, false);
@@ -839,7 +848,7 @@ fn push_sidebar(
                     &ct_font,
                 ) {
                     glyphs.push(GlyphInstance {
-                        origin: [x + e.bearing_x as f32, baseline_y - e.bearing_y as f32],
+                        origin: [x + e.bearing_x, baseline_y - e.bearing_y],
                         size: [e.px_w as f32, e.px_h as f32],
                         uv0: [e.u0 as f32 / atlas_w, e.v0 as f32 / atlas_h],
                         uv1: [e.u1 as f32 / atlas_w, e.v1 as f32 / atlas_h],
@@ -948,8 +957,8 @@ fn push_session(
             // bearing_x = horizontal offset from pen to bitmap left.
             // bearing_y = pixels from baseline up to bitmap top — so
             // dest_y (top edge in y-down coords) = baseline - bearing_y.
-            let dest_x = cell_origin_x + entry.bearing_x as f32;
-            let dest_y = baseline_y - entry.bearing_y as f32;
+            let dest_x = cell_origin_x + entry.bearing_x;
+            let dest_y = baseline_y - entry.bearing_y;
             glyphs.push(GlyphInstance {
                 origin: [dest_x, dest_y],
                 size: [entry.px_w as f32, entry.px_h as f32],
@@ -1021,8 +1030,8 @@ fn push_session(
                     let cell_origin_x = rect.x as f32 + col as f32 * cell_w;
                     let row_y = rect.y_top as f32 + (row as f32) * cell_h;
                     let baseline_y = row_y + ascent;
-                    let dest_x = cell_origin_x + entry.bearing_x as f32;
-                    let dest_y = baseline_y - entry.bearing_y as f32;
+                    let dest_x = cell_origin_x + entry.bearing_x;
+                    let dest_y = baseline_y - entry.bearing_y;
                     glyphs.push(GlyphInstance {
                         origin: [dest_x, dest_y],
                         size: [entry.px_w as f32, entry.px_h as f32],
@@ -1058,9 +1067,10 @@ fn push_session(
         }
     }
 
-    // Focus outline.
+    // Focus outline.  Thicker than the unfocused-cursor stroke so it
+    // reads at a glance in a 3×3 layout where every cell is small.
     if view.focused {
-        let stroke = (cell_h * 0.10).max(1.0);
+        let stroke = (cell_h * 0.18).max(2.0);
         let color = [FOCUS_OUTLINE.0, FOCUS_OUTLINE.1, FOCUS_OUTLINE.2, 1.0];
         let (rx, ry, rw, rh) = (rect.x as f32, rect.y_top as f32, rect.w as f32, rect.h as f32);
         cells.push(CellInstance { origin: [rx, ry], size: [rw, stroke], color });

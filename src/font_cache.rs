@@ -24,8 +24,13 @@ use core_text::font_descriptor::{
 };
 use std::collections::HashMap;
 
-pub const FONT_NAME: &str = "Menlo";
-pub const FONT_POINT: f64 = 13.0;
+// Match iTerm2's default profile (Normal Font = "Monaco 12") so a
+// user switching from iTerm2 to mars sees identical text.  Menlo is
+// retained as the fallback chain target inside FontCache::build for
+// the rare case where Monaco isn't installed (it ships with macOS,
+// so this should never fire in practice).
+pub const FONT_NAME: &str = "Monaco";
+pub const FONT_POINT: f64 = 12.0;
 
 /// Background color for the terminal — normalised-sRGB-like space
 /// (the value you'd type in a CSS hex).  Both renderers paint with

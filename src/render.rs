@@ -32,7 +32,7 @@ const SIDEBAR_BG: (CGFloat, CGFloat, CGFloat) = (0.08, 0.10, 0.14);
 /// Thin gutter between session cells when more than one is on screen.
 const GUTTER: (CGFloat, CGFloat, CGFloat) = (0.02, 0.03, 0.06);
 /// Outline drawn around the focused session cell.
-const FOCUS_OUTLINE: (CGFloat, CGFloat, CGFloat) = (0.30, 0.55, 0.95);
+const FOCUS_OUTLINE: (CGFloat, CGFloat, CGFloat) = (0.40, 0.75, 1.00);
 
 /// Per-session render parameters.  Caller bundles the relevant bits
 /// so the renderer doesn't need to know about Session, Mars, or
@@ -507,7 +507,7 @@ impl Renderer {
         // distinguish "the one currently receiving keystrokes" from the
         // others when more than one session is on screen.
         if view.focused {
-            let stroke = (self.font.cell_h * 0.10).max(1.0);
+            let stroke = (self.font.cell_h * 0.18).max(2.0);
             ctx.set_rgb_stroke_color(
                 FOCUS_OUTLINE.0,
                 FOCUS_OUTLINE.1,
@@ -571,8 +571,11 @@ impl Renderer {
             // monospace metrics — sidebar chars are typically 1–8
             // ASCII so cell_w accuracy is fine.
             let label_x = dot_cx + SIDEBAR_DOT_R + SIDEBAR_DOT_LABEL_GAP;
-            let baseline_y = row_top_y_up - SIDEBAR_ROW_H / 2.0
-                + self.font.ascent * 0.40 - self.font.cell_h * 0.20;
+            // See render_metal.rs sidebar baseline note: align an ASCII
+            // digit's visual centre with the dot centre.  In y-up,
+            // baseline sits ~0.30 × ascent BELOW the dot centre.
+            let baseline_y =
+                row_top_y_up - SIDEBAR_ROW_H / 2.0 - self.font.ascent * 0.30;
             ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
             ctx.set_rgb_fill_color(
                 SIDEBAR_TEXT_FG.0,

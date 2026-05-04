@@ -338,15 +338,30 @@ impl MarsApp for Mars {
             .as_ref()
             .map(|r| r.cell_dims().1)
             .unwrap_or(15.0);
-        // NSEvent scroll deltas: positive Y = scroll up (toward
-        // earlier content).  view_offset increases as we look further
-        // back in scrollback.  Negate to map.  Trackpad path is
-        // pixel-precise; wheel path is in lines (~3 lines per detent
-        // matches winit's old LineDelta(_, y) * 3.0).
+        // Match iTerm2 / native macOS scrolling: with the OS-level
+        // natural-scrolling preference on (the default), swiping
+        // FINGER DOWN on the trackpad reveals earlier content (look
+        // back into scrollback).  The OS already gives the right
+        // sign in scrollingDeltaY for that mapping; no negation
+        // needed (the previous negation inverted the gesture and
+        // felt wrong to users coming from iTerm2).
+        //
+        // Configurable via env (read once on first scroll):
+        //   MARS_SCROLL_INVERT=1     flip direction (for users who
+        //                            keep "natural scroll" off in
+        //                            System Settings or just prefer
+        //                            it that way).
+        //   MARS_SCROLL_FACTOR=<f>   multiplier; default 1.0.  Use
+        //                            0.5 for slower, 2.0 for faster.
+        //                            Trackpad path divides by cell_h
+        //                            so the factor scales line count
+        //                            proportionally.
+        let (invert, factor) = scroll_config();
+        let sign: f64 = if invert { -1.0 } else { 1.0 };
         let lines_f = if precise {
-            -dy_phys / cell_h
+            sign * factor * dy_phys / cell_h
         } else {
-            -dy_phys * 3.0
+            sign * factor * dy_phys * 3.0
         };
         if lines_f.abs() < 0.5 {
             return;
@@ -806,6 +821,24 @@ impl Drop for Mars {
             }
         }
     }
+}
+
+/// Read scroll behaviour overrides from env once.  See `MarsApp::scroll`
+/// for the default mapping.  Returns `(invert, factor)`.
+fn scroll_config() -> (bool, f64) {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<(bool, f64)> = OnceLock::new();
+    *CFG.get_or_init(|| {
+        let invert = std::env::var("MARS_SCROLL_INVERT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let factor = std::env::var("MARS_SCROLL_FACTOR")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|f| *f > 0.0 && *f < 100.0)
+            .unwrap_or(1.0);
+        (invert, factor)
+    })
 }
 
 fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
