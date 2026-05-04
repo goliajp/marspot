@@ -1164,18 +1164,28 @@ mod tests {
 
     #[test]
     #[ignore = "soak; run via bin/soak.sh"]
-    fn soak_scrollback_bounded_under_million_lines() {
+    fn soak_scrollback_bounded_under_ten_million_lines() {
         let mut t = Terminal::new(80, 24);
-        // Warm up: fill the scrollback ring once so its memory stabilizes.
-        let warmup = b"\x1B[24;80H\n".repeat(15_000);
+        // Warm up enough to fully wrap the ring once so all anon-mmap
+        // pages have been faulted in before we baseline.  Default
+        // Terminal uses the disk variant (DISK_SCROLLBACK_RAM_LINES +
+        // DISK_SCROLLBACK_PAGES × LINES_PER_PAGE = 26 624 slots);
+        // 40 000 warmup lines covers that with ~1.5x margin and
+        // also fully wraps the 10 000-slot Memory variant.  Without
+        // this the test's "baseline" lands mid-fill and the next
+        // burst's lazy faults look like a leak.
+        let warmup = b"\x1B[24;80H\n".repeat(40_000);
         t.feed(&warmup);
 
         let baseline = current_rss_bytes();
 
-        // Now feed a million more newlines worth of scroll churn.
+        // 10 M lines = ~7.8x the previous 1 M target.  At default
+        // scrollback capacity (10 K lines) we wrap the ring ~1000
+        // times — far past the point any per-write leak would
+        // accumulate measurably.
         let line = b"this is a fairly typical 50-character log line!\n";
         let park = b"\x1B[24;80H";
-        for _ in 0..1_000_000 {
+        for _ in 0..10_000_000 {
             t.feed(line);
             // After each line, park cursor at last row so the next \n scrolls.
             t.feed(park);
@@ -1204,22 +1214,25 @@ mod tests {
     }
 
     /// Sister of the in-RAM soak: build a Terminal with a disk-backed
-    /// scrollback (small ring + small disk cap) and feed millions of
-    /// scrolled lines.  Asserts:
+    /// (anon-mmap) scrollback and feed millions of scrolled lines.
+    /// Asserts:
     ///
-    ///   1. RSS stays bounded — RAM ring is fixed, page cache is one
-    ///      slot, no leak per scrolled line.
-    ///   2. The disk file size stays bounded — pre-`set_len`'d to its
-    ///      ring extent, never grows past it.
-    ///   3. Open fd count doesn't grow — we hold a single File and
-    ///      `try_clone()` only on faulted reads (which release fd on
-    ///      drop of the temporary).
+    ///   1. RSS stays bounded — anon-mmap region is fixed-size, page
+    ///      writes after warm-up reuse already-faulted pages, no leak
+    ///      per scrolled line.
+    ///   2. The ring's logical capacity stays at the configured cap
+    ///      (RAM cap + disk cap) — wrap-around overwrites in place,
+    ///      `len` never exceeds capacity.
     ///
-    /// Run via `bin/soak.sh`.  Skipped without an explicit dir to keep
-    /// the bench gate's working set hermetic.
+    /// 10 M lines = ~7800 ring wraps at the small test-cap of ~1280
+    /// total lines.  Catches drift from cumulative state that
+    /// 1 M-line tests can hide (e.g. if a per-wrap operation
+    /// allocates O(1) but with leaked drop, 10 M wraps shows it).
+    ///
+    /// Run via `bin/soak.sh`.
     #[test]
     #[ignore = "soak; run via bin/soak.sh"]
-    fn soak_disk_scrollback_bounded_under_million_lines() {
+    fn soak_disk_scrollback_bounded_under_ten_million_lines() {
         use crate::scrollback::{Scrollback, LINES_PER_PAGE};
 
         let cols: u16 = 80;
@@ -1251,8 +1264,8 @@ mod tests {
         }
         let baseline_rss = current_rss_bytes();
 
-        // Push 1 M more lines.
-        for _ in 0..1_000_000 {
+        // Push 10 M more lines — ~7800 wraps of the test ring.
+        for _ in 0..10_000_000 {
             t.feed(line);
             t.feed(park);
         }
@@ -1268,7 +1281,7 @@ mod tests {
         const RSS_TOL: u64 = 5 * 1024 * 1024;
         assert!(
             rss_growth < RSS_TOL,
-            "RSS grew {rss_growth} bytes after 1M lines (baseline {baseline_rss}, after {after_rss})"
+            "RSS grew {rss_growth} bytes after 10M lines (baseline {baseline_rss}, after {after_rss})"
         );
 
         // Capacity-cap sanity: total stored == RAM cap + disk cap.
