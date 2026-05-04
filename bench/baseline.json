@@ -94,29 +94,31 @@
   },
   "multi_session_thresholds": {
     "_comment": [
-      "Floors for the bench-run.sh scenarios (multi-session-9x, scrollback-1m).",
-      "Read from bench/results/cross-terminal.json (latest bench-run.sh snapshot).",
-      "Two checks per scenario: mars's own absolute throughput floor, and the",
-      "mars-vs-best-other ratio floor.  The ratio floor is the structural",
-      "protection \u2014 without it, mars and competitors can both slow down and",
-      "the gate stays green even though our relative advantage shrunk.",
+      "Floors for the bench-run.sh scenarios (cat-mixed.9x = multi-session-9x,",
+      "scrollback-1m).  Read from bench/results/cross-terminal.json (latest",
+      "bench-run.sh snapshot).  Two checks per scenario: mars's own absolute",
+      "throughput floor, and the mars-vs-best-other ratio floor.  The ratio",
+      "floor is the structural protection \u2014 without it, mars and competitors",
+      "can both slow down and the gate stays green even though our relative",
+      "advantage shrunk.",
       "",
-      "Locked 2026-05-04 against develop @ ea25e62 (post-disk-scrollback +",
-      "atlas-rebuild).  Medians of 3 trials \u00d7 0.90 safety margin.  Re-lock",
-      "via `bin/bench.sh --full --update-baseline` after running",
-      "`bin/bench-run.sh` \u22653 times to populate snapshots."
+      "Locked 2026-05-05 against c43d26b (clean-machine, post-godot-cleanup):",
+      "  multi-session-9x: mars 104.6 / iterm 18.2 / terminal 60.1 MiB/s",
+      "  scrollback-1m:    mars 97.7  / iterm 71.8 / terminal 91.6 MiB/s",
+      "10% safety margin.  Re-lock via `bin/bench.sh --full --update-baseline`",
+      "after re-running `bin/bench-run.sh` \u22653\u00d7 to populate snapshots."
     ],
     "snapshot_max_age_hours": 168,
     "scenarios": {
       "cat-mixed.9x": {
         "metric": "aggregate_throughput_MBps",
-        "mars_throughput_min": 100,
-        "mars_vs_best_other_min": 1.8
+        "mars_throughput_min": 94,
+        "mars_vs_best_other_min": 1.57
       },
       "scrollback-1m": {
         "metric": "push_throughput_MBps",
-        "mars_throughput_min": 70,
-        "mars_vs_best_other_min": 0.95
+        "mars_throughput_min": 88,
+        "mars_vs_best_other_min": 0.96
       }
     }
   }

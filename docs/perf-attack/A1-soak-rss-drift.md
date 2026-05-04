@@ -146,6 +146,35 @@ Branches by root cause (will narrow once #2/#3 above complete):
 (append-only, dated)
 
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
+- 2026-05-05 evening — clean-machine bench-run rerun, post godot-cleanup:
+
+  | terminal | drift q4/q1 | abs Δ | CPU mean |
+  |---|---|---|---|
+  | mars         | **1.81× ✗ FAIL** | +125 MiB | 1.49% |
+  | iTerm2       | 1.30× ✓ borderline | +33 MiB  | 37.33% |
+  | Terminal.app | 1.05× ✓           | +1 MiB   | 9.76% |
+
+  godot-tinted earlier numbers (mars 2.11×) shifted only modestly on
+  clean machine (1.81×); absolute Δ is essentially identical (+123 →
+  +125 MiB).  godot was NOT the cause of A1 — it's a real mars-side
+  drift, larger than competitors' (iTerm2 +33, Terminal.app +1).
+
+  iTerm2 and Terminal.app both plateau within 5 min — Terminal.app
+  trivially (only ~3 MiB total), iTerm2 with its fixed-size per-session
+  state.  mars does NOT plateau in 5 min: per-session anon-mmap ring
+  is ~100 MiB virtual (1024 + 100×256 lines × cols × Cell_size), and
+  the 36 lines/s/session workload only pushes ~10800 lines (40% of
+  ring capacity) in 5 min.  Page-commit ramp continues throughout the
+  5-min window.
+
+  **Verification underway**: `bin/scenarios/active-9x-soak.sh mars
+  /tmp/x.json --extended` (30 min run, in flight).  If drift ≤ 1.10×
+  under --extended (post-plateau), confirms lazy-fault transient is
+  the dominant cause and the fix is to relax the 5-min threshold or
+  shrink the ring default to plateau within the sample window.  If
+  drift still > 1.10× in --extended, dig further (PTY queue / Session
+  accumulation).
+
 - 2026-05-05 — static analysis pass on `feature/perf-A1-soak-rss-drift`:
   - **font_cache char_cache (hypothesis 1)**: ruled OUT.  Hard cap at
     `CHAR_CACHE_CAP = 8K` + atomic `clear()` on overflow; HashMap

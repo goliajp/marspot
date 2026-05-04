@@ -28,10 +28,10 @@ Status legend: `queued` / `active` / `blocked` / `done`.
 
 ### A — Architectural commitment violations (existential)
 
-| ID | Title | Current | Target | File | Status |
+| ID | Title | Current (clean) | Target | File | Status |
 |---|---|---|---|---|---|
-| A1 | active-9x-soak RSS drift FAIL | q4/q1=2.11×, +123 MiB / 5 min | drift ≤ 1.10×, abs Δ ≤ 30 MiB | [A1](perf-attack/A1-soak-rss-drift.md) | queued |
-| A2 | CPU drift gate appears mis-keyed | gate marks 2.40× as ✓ vs threshold 2.0× | gate logic verified + drift ≤ 1.5× | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued |
+| A1 | active-9x-soak RSS drift FAIL | q4/q1=**1.81×** clean (was 2.11× godot-tinted), +125 MiB / 5 min | drift ≤ 1.10× under --extended (30 min plateau) | [A1](perf-attack/A1-soak-rss-drift.md) | active — --extended in flight |
+| A2 | CPU drift gate appears mis-keyed | clean run shows 0.69× ✓ correctly; godot session fired 2.40× ✓ which is the inverted bug | gate logic verified | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued (lower priority — gate works on real data, only fired wrong on godot-tinted CPU spike) |
 
 ### B — Live cat-* single-cell — **B1/B2 retracted as measurement artifact, B3/B4 still active**
 
@@ -66,10 +66,13 @@ disappear if A1 turns out to be a different cause.
 
 ### D — scrollback dramatic-edge gap
 
-| ID | Metric | Current | Target | File | Status |
+Clean-machine numbers reveal the gap is smaller than first read but
+still real.
+
+| ID | Metric | Clean current | Target | File | Status |
 |---|---|---|---|---|---|
-| D1 | scrollback-1m vs Term push | mars 79.3 / Term 79.1 (1.003×) | ≥ 1.5× Term | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
-| D2 | scrollback-1m vs iTerm2 | 79.3 / 73.1 (1.08×) | ≥ 1.5× iTerm2 | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
+| D1 | scrollback-1m vs Term push | mars **97.7** / Term 91.6 (**1.07×**, was 1.003× godot) | ≥ 1.5× Term | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
+| D2 | scrollback-1m vs iTerm2 | mars 97.7 / iTerm2 71.8 (**1.36×**, was 1.08× godot) | ≥ 1.5× iTerm2 | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
 
 ### E — Bench infrastructure fixes (block honest measurement)
 
