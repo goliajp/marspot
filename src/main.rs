@@ -74,13 +74,44 @@ impl RendererImpl {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
 
-/// Phase B: nine independent terminals in a 3×3 grid plus a sidebar.
-/// In tmux mode this collapses to 1×1 (the tmux client renders one
-/// active pane at a time; future work can split panes into cells).
-const GRID_COLS_LAYOUT: usize = 3;
-const GRID_ROWS_LAYOUT: usize = 3;
-const TMUX_GRID_COLS: usize = 1;
-const TMUX_GRID_ROWS: usize = 1;
+/// Switchable session-grid layouts (mouse-driven via the [layout]
+/// button in the main area).  Cell counts ∈ {1, 2, 4, 6, 9}; 2 and 6
+/// have horizontal / vertical orientation variants.  Sessions live
+/// independently — the layout decides how many cells get rendered in
+/// the main area, not how many sessions exist.  When N sessions <
+/// cells, extra cells render as empty placeholders; when N > cells,
+/// extra sessions stay in the sidebar but don't get a main-area cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutMode {
+    Single,
+    SplitH,
+    SplitV,
+    Quad,
+    SixH,
+    SixV,
+    Nine,
+}
+
+impl LayoutMode {
+    /// `(grid_cols, grid_rows)` — the shape passed straight to
+    /// `Layout::build`.  Names follow the orientation of the *split*:
+    /// `SplitH` is a horizontal split = 2 cells side by side = (2,1).
+    fn dims(self) -> (usize, usize) {
+        match self {
+            Self::Single => (1, 1),
+            Self::SplitH => (2, 1),
+            Self::SplitV => (1, 2),
+            Self::Quad => (2, 2),
+            Self::SixH => (3, 2),
+            Self::SixV => (2, 3),
+            Self::Nine => (3, 3),
+        }
+    }
+    fn cells(self) -> usize {
+        let (c, r) = self.dims();
+        c * r
+    }
+}
 const SIDEBAR_W_LOGICAL: f64 = 200.0;
 /// Default window in logical points; physical pixels = logical × scale.
 /// 2100×1300 means a 3×3 grid fits ~75 cols × 30 rows per cell with
@@ -104,13 +135,13 @@ const INITIAL_ROWS: u16 = 12;
 /// separator.
 const HEADER_PT: f64 = 32.0;
 
-/// Sidebar layout constants in **logical points** — must match
-/// `render.rs::SIDEBAR_TOP_PAD` / `SIDEBAR_ROW_H` so click hit-testing
-/// lands on the same pixels as the drawn rows.  The top pad now
-/// adds the header strip on top of its own breathing room so
-/// item 1 isn't hidden behind the traffic-light buttons.
-const SIDEBAR_TOP_PAD_PT: f64 = HEADER_PT + 8.0;
-const SIDEBAR_ROW_PT: f64 = 22.0;
+// Sidebar row geometry now lives on `Layout` itself
+// (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H_PHYS`),
+// so render*.rs paint and main.rs hit-test consume the same source
+// of truth.  The earlier scaled-logical-point constants sat on
+// values that didn't actually match the renderer (40 logical-pt at
+// 2x = 80 phys vs renderer's 14 phys), causing click hit-tests to
+// drift below the visually painted rows.
 
 /// Per-cell title strip height in **logical points** — the band at
 /// the top of every 9-grid cell that shows the session label and a
@@ -251,6 +282,13 @@ struct Mars {
     /// True between mouse_down (in a cell body) and mouse_up — drag
     /// events update the selection only while this is set.
     selection_dragging: bool,
+    /// Current main-area grid shape.  Determines how many cells the
+    /// layout builder lays down; NOT tied to `sessions.len()`.
+    layout_mode: LayoutMode,
+    /// `true` while the layout-picker overlay is showing.  The picker
+    /// floats over the main area; while open, mouse_down hits hit-test
+    /// the picker first and swallow background clicks.
+    layout_picker_open: bool,
     /// MARS_PROFILE_RSS instrumentation — when set, every ~1 s the
     /// main loop appends one TSV row of per-subsystem RSS to this
     /// path.  Off-path entirely when the env var is unset.  See
@@ -263,6 +301,10 @@ struct Mars {
     rss_dump_started_at: Option<std::time::Instant>,
     /// Most recent dump instant — drives the 1 Hz throttle.
     last_rss_dump: Option<std::time::Instant>,
+    /// Cross-thread wake handle, cloned on demand to power
+    /// per-session reader threads spawned at runtime (e.g. via the
+    /// sidebar [+] button).  Same proxy main passed into `run_app`.
+    event_proxy: EventProxy,
 }
 
 /// Live text selection inside one session's grid.  Coords are
@@ -471,10 +513,94 @@ impl MarsApp for Mars {
     }
 
     fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
+        // Layout-button + picker-overlay + close-[×] dispatch: a top-
+        // level intercept that fires before any cell/sidebar handling.
+        // Done in a tight borrow scope so the immutable borrow on
+        // `self.layout` ends before we mutate `self`.
+        let (
+            layout_btn_hit,
+            picker_option_hit,
+            picker_panel_hit,
+            close_session_hit,
+        ) = {
+            let Some(layout) = &self.layout else { return };
+            (
+                layout.hit_test_layout_button(x_phys, y_phys),
+                layout.hit_test_picker_option(x_phys, y_phys),
+                layout.hit_test_picker_panel(x_phys, y_phys),
+                layout.hit_test_close_session(x_phys, y_phys),
+            )
+        };
+        if self.layout_picker_open {
+            if let Some(opt_idx) = picker_option_hit {
+                self.layout_mode = PICKER_LAYOUTS[opt_idx];
+                self.layout_picker_open = false;
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+                return;
+            }
+            if layout_btn_hit || picker_panel_hit {
+                // Re-click button or click panel BG (not on an option):
+                // close picker without other side effects.
+                self.layout_picker_open = false;
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+                return;
+            }
+            // Click landed outside the picker entirely — close picker
+            // and let the click fall through so the user doesn't have
+            // to click twice (close, then act) when they meant to go
+            // straight to a cell or sidebar row.
+            self.layout_picker_open = false;
+            self.rebuild_layout(ctx);
+            // No early return — fall through to cell/sidebar dispatch.
+        } else if layout_btn_hit {
+            self.layout_picker_open = true;
+            self.rebuild_layout(ctx);
+            ctx.request_redraw();
+            return;
+        }
+
+        // Sidebar close-[×] click: terminate `sessions[idx]`, but
+        // refuse to close the last remaining session (mars without a
+        // session is a confusing dead-end UI; the user can spawn
+        // again first via the [+] button).
+        if let Some(idx) = close_session_hit {
+            if self.sessions.len() > 1 && idx < self.sessions.len() {
+                self.close_session(idx);
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+            }
+            return;
+        }
+
+        // Sidebar [+] add-session click: spawn a new session up to
+        // the SESSION_COUNT_HARD_CAP of 9.  Reuses the same Session
+        // spawn path as startup.
+        let add_session_hit = self
+            .layout
+            .as_ref()
+            .map(|l| l.hit_test_add_session_button(x_phys, y_phys))
+            .unwrap_or(false);
+        if add_session_hit {
+            if self.sessions.len() < SESSION_COUNT_HARD_CAP {
+                self.spawn_session();
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+            }
+            return;
+        }
+
         let Some(layout) = &self.layout else { return };
-        let scale = ctx.scale();
-        let row_phys = SIDEBAR_ROW_PT * scale;
-        let top_pad_phys = SIDEBAR_TOP_PAD_PT * scale;
+        // Sidebar row geometry now lives on Layout (so render*.rs
+        // and hit-tests stay in lockstep).  Previous code computed
+        // `SIDEBAR_TOP_PAD_PT * scale` (= 80 phys at 2x) even though
+        // the renderer drew row 0 at top_inset + 14 phys — clicks
+        // were misaligned with what was visually rendered.  Reading
+        // from `layout.sidebar_top_pad_phys` (set by Layout::build
+        // to reserve the [+] header band) fixes that.
+        let row_phys = mars::layout::SIDEBAR_ROW_H_PHYS;
+        let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
 
         // In tmux mode, sidebar rows map to tmux windows; a click
         // sends `select-window` to tmux instead of changing
@@ -689,34 +815,11 @@ impl MarsApp for Mars {
     fn resized(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
         if let Some(r) = self.renderer.as_mut() {
             r.resize(phys_w, phys_h);
-            let (cell_w, cell_h) = r.cell_dims();
-            let scale = ctx.scale();
-            let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
-            let (lc, lr) = if self.tmux.is_some() {
-                (TMUX_GRID_COLS, TMUX_GRID_ROWS)
-            } else {
-                (GRID_COLS_LAYOUT, GRID_ROWS_LAYOUT)
-            };
-            let header_phys = HEADER_PT * scale;
-            let title_phys = CELL_TITLE_PT * scale;
-            let layout = Layout::build(
-                phys_w, phys_h, sidebar_phys, header_phys, title_phys,
-                lc, lr, cell_w, cell_h,
-            );
-            for (i, s) in self.sessions.iter_mut().enumerate() {
-                if let Some(rect) = layout.cells.get(i) {
-                    if (rect.cols, rect.rows)
-                        != (s.terminal.grid().cols(), s.terminal.grid().rows())
-                    {
-                        s.resize(rect.cols, rect.rows);
-                    }
-                }
-            }
-            self.layout = Some(layout);
-            // Sync render so the next CA commit lands a fresh frame
-            // at the new size — avoids the live-resize flicker.
-            self.render_now();
         }
+        self.rebuild_layout_at(ctx, phys_w, phys_h);
+        // Sync render so the next CA commit lands a fresh frame at
+        // the new size — avoids the live-resize flicker.
+        self.render_now();
     }
 
     fn focused(&mut self, ctx: &MarsAppCtx, focused: bool) {
@@ -753,7 +856,154 @@ impl MarsApp for Mars {
     }
 }
 
+/// Hard cap on how many sessions mars permits at once.  The
+/// sidebar [+] button is disabled past this count; the layout
+/// picker only offers shapes whose cells ≤ cap (== 9).
+const SESSION_COUNT_HARD_CAP: usize = 9;
+
+/// Picker option index → LayoutMode.  Order must match
+/// `layout::PICKER_LAYOUT_DIMS` (private to layout.rs but the
+/// dims line up): Single, SplitH, SplitV, Quad, SixH, SixV, Nine.
+const PICKER_LAYOUTS: [LayoutMode; 7] = [
+    LayoutMode::Single,
+    LayoutMode::SplitH,
+    LayoutMode::SplitV,
+    LayoutMode::Quad,
+    LayoutMode::SixH,
+    LayoutMode::SixV,
+    LayoutMode::Nine,
+];
+
 impl Mars {
+    /// Rebuild the cached `Layout` at the given window physical
+    /// dims, honouring the current `layout_mode` + picker open
+    /// state.  Called from `resized()` (with fresh dims) and from
+    /// `rebuild_layout()` (read dims back from the cached layout —
+    /// for layout-mode / picker-state changes that don't resize the
+    /// window).  Resizes any session whose cell rect changed shape.
+    fn rebuild_layout_at(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+        let Some(r) = self.renderer.as_ref() else { return };
+        let (cell_w, cell_h) = r.cell_dims();
+        let scale = ctx.scale();
+        let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
+        let (lc, lr) = self.layout_mode.dims();
+        let header_phys = HEADER_PT * scale;
+        let title_phys = CELL_TITLE_PT * scale;
+        let layout = Layout::build(
+            phys_w, phys_h, sidebar_phys, header_phys, title_phys,
+            lc, lr, cell_w, cell_h,
+        )
+        .with_chrome(
+            scale,
+            self.layout_picker_open,
+            self.sessions.len(),
+        );
+        for (i, s) in self.sessions.iter_mut().enumerate() {
+            if let Some(rect) = layout.cells.get(i) {
+                if (rect.cols, rect.rows)
+                    != (s.terminal.grid().cols(), s.terminal.grid().rows())
+                {
+                    s.resize(rect.cols, rect.rows);
+                }
+            }
+        }
+        self.layout = Some(layout);
+    }
+
+    /// Rebuild layout using the current cached window dims.  Used
+    /// after layout-mode / picker-open changes that don't come from
+    /// the AppKit Resized event (e.g. clicking the [layout] button).
+    fn rebuild_layout(&mut self, ctx: &MarsAppCtx) {
+        let dims = self.layout.as_ref().map(|l| (l.window_w, l.window_h));
+        if let Some((w, h)) = dims {
+            self.rebuild_layout_at(ctx, w, h);
+        }
+    }
+
+    /// Spawn a fresh session and append it to `self.sessions` /
+    /// `self.custom_titles`.  Reuses the wake-via-EventProxy path
+    /// startup uses; safe to call from any `MarsApp` callback.
+    /// Refuses past `SESSION_COUNT_HARD_CAP`.  No-op in tmux mode
+    /// (the single tmux -CC session is created at startup; runtime
+    /// spawn would attach a second client and confuse the parser).
+    fn spawn_session(&mut self) {
+        if self.tmux.is_some() {
+            return;
+        }
+        if self.sessions.len() >= SESSION_COUNT_HARD_CAP {
+            return;
+        }
+        let proxy_clone = self.event_proxy.clone();
+        let wake = move || {
+            proxy_clone.wake();
+        };
+        match Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake) {
+            Ok(s) => {
+                self.sessions.push(s);
+                self.custom_titles.push(None);
+            }
+            Err(e) => {
+                eprintln!("mars: failed to spawn session: {e}");
+            }
+        }
+    }
+
+    /// Terminate `sessions[idx]` and keep all parallel state in
+    /// sync.  Caller is responsible for refusing the call when this
+    /// would leave mars with zero sessions.  Drop on `Session`
+    /// triggers `Pty::Drop` (SIGHUP → SIGKILL fallback → close fd
+    /// → reader thread sees EOF and exits).
+    fn close_session(&mut self, idx: usize) {
+        if idx >= self.sessions.len() {
+            return;
+        }
+        // Drop the session — this fires Session/Pty teardown.
+        self.sessions.remove(idx);
+        // Parallel-array state must shrink in lockstep so the
+        // post-close indices line up with what's left.
+        if idx < self.custom_titles.len() {
+            self.custom_titles.remove(idx);
+        }
+        // focused_idx: clamp into the new range.  If we just closed
+        // the focused session, walk back one (or stay at 0 if it was
+        // the leftmost); otherwise nudge down by one for any session
+        // that lived to the right of the closed slot.
+        if !self.sessions.is_empty() {
+            if self.focused_idx == idx {
+                self.focused_idx = idx.min(self.sessions.len() - 1);
+            } else if self.focused_idx > idx {
+                self.focused_idx -= 1;
+            }
+        } else {
+            self.focused_idx = 0;
+        }
+        // Selection: clear if it lived in the closed session;
+        // shift down if it lived to the right.
+        if let Some(sel) = self.selection {
+            if sel.session_idx == idx {
+                self.selection = None;
+                self.selection_dragging = false;
+            } else if sel.session_idx > idx {
+                self.selection = Some(Selection {
+                    session_idx: sel.session_idx - 1,
+                    ..sel
+                });
+            }
+        }
+        // Title-edit: cancel if editing the closed cell, else
+        // shift the index for cells to its right.
+        match self.editing_title {
+            Some(i) if i == idx => {
+                self.editing_title = None;
+                self.title_edit_buffer.clear();
+            }
+            Some(i) if i > idx => {
+                self.editing_title = Some(i - 1);
+            }
+            _ => {}
+        }
+    }
+
     /// MARS_PROFILE_RSS sampler.  When the env-derived path is unset
     /// this is a single Option-check; when set, throttled to 1 Hz, it
     /// appends a TSV row so Phase 1.3's analyze-rss-dump.py can do
@@ -1189,9 +1439,17 @@ impl Mars {
             .map(|s| truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS))
             .collect();
 
+        // Cap views to the active layout's cell count so we don't
+        // build SessionViews for sessions that won't fit on screen
+        // (e.g. 9 sessions in a Quad layout — only sessions[0..4]
+        // get rendered, the rest stay alive in the sidebar).  The
+        // renderer paints any extra cells (layout.cells[N..]) as
+        // empty placeholders.
+        let cell_count = self.layout.as_ref().map(|l| l.cells.len()).unwrap_or(0);
         let views: Vec<SessionView> = self
             .sessions
             .iter()
+            .take(cell_count)
             .enumerate()
             .map(|(i, s)| SessionView {
                 grid: s.terminal.grid(),
@@ -1243,11 +1501,12 @@ fn main() {
     let proxy = EventProxy::new();
 
     let tmux_mode = args.iter().any(|a| a == "--tmux");
-    let n_sessions = if tmux_mode {
-        TMUX_GRID_COLS * TMUX_GRID_ROWS
+    let initial_layout = if tmux_mode {
+        LayoutMode::Single
     } else {
-        GRID_COLS_LAYOUT * GRID_ROWS_LAYOUT
+        LayoutMode::Nine
     };
+    let n_sessions = initial_layout.cells();
 
     let mut sessions = Vec::with_capacity(n_sessions);
     for _ in 0..n_sessions {
@@ -1299,9 +1558,12 @@ fn main() {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
+        layout_mode: initial_layout,
+        layout_picker_open: false,
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
+        event_proxy: proxy.clone(),
     };
 
     let attrs = WindowAttrs {
@@ -1576,9 +1838,12 @@ fn bench_rss_format_dump(arg: &str) {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
+        layout_mode: LayoutMode::Nine,
+        layout_picker_open: false,
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
+        event_proxy: EventProxy::new(),
     };
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);

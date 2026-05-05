@@ -80,7 +80,9 @@ pub struct SidebarEntry<'a> {
 /// Tuned for the default 200-pt-wide sidebar.
 const SIDEBAR_DOT_R: f64 = 4.5;
 const SIDEBAR_LEFT_PAD: f64 = 14.0;
-const SIDEBAR_TOP_PAD: f64 = 14.0;
+// SIDEBAR_TOP_PAD is now a per-Layout value (`layout::sidebar_top_pad_phys`)
+// so it stays in lockstep with the [+] add-session button band; row
+// height is still a fixed phys constant.
 const SIDEBAR_ROW_H: f64 = 22.0;
 /// Gap between the dot's right edge and the start of the label text.
 const SIDEBAR_DOT_LABEL_GAP: f64 = 10.0;
@@ -612,7 +614,9 @@ impl Renderer {
         focused_idx: usize,
     ) {
         for (i, entry) in entries.iter().enumerate() {
-            let row_top_y_down = layout.top_inset + SIDEBAR_TOP_PAD + i as f64 * SIDEBAR_ROW_H;
+            let row_top_y_down = layout.top_inset
+                + layout.sidebar_top_pad_phys
+                + i as f64 * SIDEBAR_ROW_H;
             let row_top_y_up = total_h as f64 - row_top_y_down;
             let row_bottom_y = row_top_y_up - SIDEBAR_ROW_H;
 
