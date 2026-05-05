@@ -86,7 +86,8 @@ noise / stale data / missing metrics.
 | E3 | vim-jump cross-term wall-time capture | [E](perf-attack/E-bench-infra.md) | queued |
 | E4 | measure-other.sh stale-marker cleanup | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
-| E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | queued |
+| E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted** (not a bug — q1<1% short-circuit by design) |
+| E7 | bench scripts kill mars/mcli by name (friendly-fire) | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-F-recalibrate-clean`) |
 
 ## F — Locked floors / ceilings · **recalibrated to clean-machine 2026-05-05**
 

@@ -171,8 +171,12 @@ for bin in mars mcli; do
   if [[ ! -x "$ROOT/target/release/$bin" ]]; then continue; fi
   : > "$CUR_DIR/rss-$bin.samples"
   for trial in 1 2 3; do
-    pkill -x "$bin" 2>/dev/null || true
-    sleep 0.2
+    # Spawn a fresh instance and sample its OWN PID — do NOT pkill the
+    # binary by name first.  Earlier code did `pkill -x "$bin"` to
+    # nuke stale instances, but that's friendly-fire on any parallel
+    # bench (e.g. an active-9x-soak run already in flight gets killed
+    # by a sanity bench.sh invocation).  We measure $pid directly so
+    # other instances are irrelevant; perf-attack E7.
     "$ROOT/target/release/$bin" >/dev/null 2>&1 &
     pid=$!
     disown 2>/dev/null || true
@@ -191,7 +195,9 @@ done
 
 if [[ $MODE == "full" ]]; then
   echo "==> live PTY (this takes a minute)"
-  pkill -x mars 2>/dev/null || true
+  # No pkill of the mars binary by name — friendly-fire risk against
+  # a parallel active-9x-soak / soak run.  measure.sh manages its own
+  # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
   (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
   cp "$ROOT/bench/results/cross-terminal.json" "$CUR_DIR/live.json" || true
 fi
