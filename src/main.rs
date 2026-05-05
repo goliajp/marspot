@@ -509,6 +509,48 @@ impl MarsApp for Mars {
     }
 
     fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
+        // Layout-button + picker-overlay dispatch: a top-level intercept
+        // that fires before any cell/sidebar handling.  Done in a tight
+        // borrow scope so the immutable borrow on `self.layout` ends
+        // before we mutate `self` (set layout_mode / rebuild layout).
+        let (layout_btn_hit, picker_option_hit, picker_panel_hit) = {
+            let Some(layout) = &self.layout else { return };
+            (
+                layout.hit_test_layout_button(x_phys, y_phys),
+                layout.hit_test_picker_option(x_phys, y_phys),
+                layout.hit_test_picker_panel(x_phys, y_phys),
+            )
+        };
+        if self.layout_picker_open {
+            if let Some(opt_idx) = picker_option_hit {
+                self.layout_mode = PICKER_LAYOUTS[opt_idx];
+                self.layout_picker_open = false;
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+                return;
+            }
+            if layout_btn_hit || picker_panel_hit {
+                // Re-click button or click panel BG (not on an option):
+                // close picker without other side effects.
+                self.layout_picker_open = false;
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+                return;
+            }
+            // Click landed outside the picker entirely — close picker
+            // and let the click fall through so the user doesn't have
+            // to click twice (close, then act) when they meant to go
+            // straight to a cell or sidebar row.
+            self.layout_picker_open = false;
+            self.rebuild_layout(ctx);
+            // No early return — fall through to cell/sidebar dispatch.
+        } else if layout_btn_hit {
+            self.layout_picker_open = true;
+            self.rebuild_layout(ctx);
+            ctx.request_redraw();
+            return;
+        }
+
         let Some(layout) = &self.layout else { return };
         let scale = ctx.scale();
         let row_phys = SIDEBAR_ROW_PT * scale;
@@ -727,30 +769,11 @@ impl MarsApp for Mars {
     fn resized(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
         if let Some(r) = self.renderer.as_mut() {
             r.resize(phys_w, phys_h);
-            let (cell_w, cell_h) = r.cell_dims();
-            let scale = ctx.scale();
-            let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
-            let (lc, lr) = self.layout_mode.dims();
-            let header_phys = HEADER_PT * scale;
-            let title_phys = CELL_TITLE_PT * scale;
-            let layout = Layout::build(
-                phys_w, phys_h, sidebar_phys, header_phys, title_phys,
-                lc, lr, cell_w, cell_h,
-            );
-            for (i, s) in self.sessions.iter_mut().enumerate() {
-                if let Some(rect) = layout.cells.get(i) {
-                    if (rect.cols, rect.rows)
-                        != (s.terminal.grid().cols(), s.terminal.grid().rows())
-                    {
-                        s.resize(rect.cols, rect.rows);
-                    }
-                }
-            }
-            self.layout = Some(layout);
-            // Sync render so the next CA commit lands a fresh frame
-            // at the new size — avoids the live-resize flicker.
-            self.render_now();
         }
+        self.rebuild_layout_at(ctx, phys_w, phys_h);
+        // Sync render so the next CA commit lands a fresh frame at
+        // the new size — avoids the live-resize flicker.
+        self.render_now();
     }
 
     fn focused(&mut self, ctx: &MarsAppCtx, focused: bool) {
@@ -787,7 +810,61 @@ impl MarsApp for Mars {
     }
 }
 
+/// Picker option index → LayoutMode.  Order must match
+/// `layout::PICKER_LAYOUT_DIMS` (private to layout.rs but the
+/// dims line up): Single, SplitH, SplitV, Quad, SixH, SixV, Nine.
+const PICKER_LAYOUTS: [LayoutMode; 7] = [
+    LayoutMode::Single,
+    LayoutMode::SplitH,
+    LayoutMode::SplitV,
+    LayoutMode::Quad,
+    LayoutMode::SixH,
+    LayoutMode::SixV,
+    LayoutMode::Nine,
+];
+
 impl Mars {
+    /// Rebuild the cached `Layout` at the given window physical
+    /// dims, honouring the current `layout_mode` + picker open
+    /// state.  Called from `resized()` (with fresh dims) and from
+    /// `rebuild_layout()` (read dims back from the cached layout —
+    /// for layout-mode / picker-state changes that don't resize the
+    /// window).  Resizes any session whose cell rect changed shape.
+    fn rebuild_layout_at(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+        let Some(r) = self.renderer.as_ref() else { return };
+        let (cell_w, cell_h) = r.cell_dims();
+        let scale = ctx.scale();
+        let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
+        let (lc, lr) = self.layout_mode.dims();
+        let header_phys = HEADER_PT * scale;
+        let title_phys = CELL_TITLE_PT * scale;
+        let layout = Layout::build(
+            phys_w, phys_h, sidebar_phys, header_phys, title_phys,
+            lc, lr, cell_w, cell_h,
+        )
+        .with_chrome(scale, self.layout_picker_open);
+        for (i, s) in self.sessions.iter_mut().enumerate() {
+            if let Some(rect) = layout.cells.get(i) {
+                if (rect.cols, rect.rows)
+                    != (s.terminal.grid().cols(), s.terminal.grid().rows())
+                {
+                    s.resize(rect.cols, rect.rows);
+                }
+            }
+        }
+        self.layout = Some(layout);
+    }
+
+    /// Rebuild layout using the current cached window dims.  Used
+    /// after layout-mode / picker-open changes that don't come from
+    /// the AppKit Resized event (e.g. clicking the [layout] button).
+    fn rebuild_layout(&mut self, ctx: &MarsAppCtx) {
+        let dims = self.layout.as_ref().map(|l| (l.window_w, l.window_h));
+        if let Some((w, h)) = dims {
+            self.rebuild_layout_at(ctx, w, h);
+        }
+    }
+
     /// MARS_PROFILE_RSS sampler.  When the env-derived path is unset
     /// this is a single Option-check; when set, throttled to 1 Hz, it
     /// appends a TSV row so Phase 1.3's analyze-rss-dump.py can do

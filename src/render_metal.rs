@@ -50,7 +50,7 @@ use std::ptr::NonNull;
 use crate::font_cache::{resolve_attrs, FontCache, BG};
 use crate::glyph_atlas::{GlyphAtlas, GlyphKey, SlotMetrics};
 use crate::grid::{Cell, Grid};
-use crate::layout::{CellRect, Layout};
+use crate::layout::{CellRect, Layout, Rect};
 use crate::render::{SessionView, SidebarEntry};
 use crate::session::SessionState;
 
@@ -880,6 +880,146 @@ fn build_instances(
             glyphs,
             dots,
         );
+    }
+
+    // Floating chrome (layout button + picker overlay).  Drawn last
+    // so it composites over the cells / sidebar.  Picker only paints
+    // when its rect is `Some`.
+    push_layout_chrome(layout, cells);
+}
+
+// Chrome colours for the [layout] button and the picker overlay.
+// Tuned against the cell BG (see font_cache::BG ≈ (0.006, 0.008,
+// 0.014)) so the chrome reads as a slightly lighter raised surface,
+// not as a competing pure-black panel.
+const CHROME_BTN_BG: [f32; 4] = [0.085, 0.095, 0.115, 1.0];
+const CHROME_BTN_BORDER: [f32; 4] = [0.18, 0.20, 0.23, 1.0];
+const CHROME_PANEL_BG: [f32; 4] = [0.055, 0.065, 0.085, 1.0];
+const CHROME_OPTION_BG: [f32; 4] = [0.13, 0.14, 0.17, 1.0];
+const CHROME_ICON_FG: [f32; 4] = [0.55, 0.60, 0.65, 1.0];
+
+fn push_rect(cells: &mut Vec<CellInstance>, rect: Rect, color: [f32; 4]) {
+    cells.push(CellInstance {
+        origin: [rect.x as f32, rect.y_top as f32],
+        size: [rect.w as f32, rect.h as f32],
+        color,
+    });
+}
+
+/// Draw a 1-px-equivalent border around `rect` (four hairline rects)
+/// in `color`.  Cheap — four extra instances; chrome only fires once
+/// per frame.
+fn push_border(
+    cells: &mut Vec<CellInstance>,
+    rect: Rect,
+    width: f64,
+    color: [f32; 4],
+) {
+    let w = width.max(1.0);
+    // top
+    push_rect(
+        cells,
+        Rect { x: rect.x, y_top: rect.y_top, w: rect.w, h: w },
+        color,
+    );
+    // bottom
+    push_rect(
+        cells,
+        Rect {
+            x: rect.x,
+            y_top: rect.y_top + rect.h - w,
+            w: rect.w,
+            h: w,
+        },
+        color,
+    );
+    // left
+    push_rect(
+        cells,
+        Rect { x: rect.x, y_top: rect.y_top, w, h: rect.h },
+        color,
+    );
+    // right
+    push_rect(
+        cells,
+        Rect {
+            x: rect.x + rect.w - w,
+            y_top: rect.y_top,
+            w,
+            h: rect.h,
+        },
+        color,
+    );
+}
+
+/// Draw a `dims.0 × dims.1` mini-grid of small filled rectangles
+/// inside `container`.  Used for both the [layout] button (showing
+/// the current grid shape) and each picker option (showing the
+/// shape that option would switch to).  Pad shrinks the grid into
+/// the container so a rim of CHROME_BTN_BG / CHROME_OPTION_BG shows
+/// around it.
+fn push_grid_icon(
+    cells: &mut Vec<CellInstance>,
+    container: Rect,
+    dims: (usize, usize),
+    color: [f32; 4],
+) {
+    let (gc, gr) = dims;
+    if gc == 0 || gr == 0 {
+        return;
+    }
+    // Pad ≈ 22 % of the smaller container dim — keeps the icon
+    // visually centred + breathing.
+    let pad = (container.w.min(container.h) * 0.22).max(2.0);
+    let inner_x = container.x + pad;
+    let inner_y = container.y_top + pad;
+    let inner_w = (container.w - 2.0 * pad).max(1.0);
+    let inner_h = (container.h - 2.0 * pad).max(1.0);
+    // Gap between icon cells — proportional to pad so the gap reads
+    // like a hairline at any size.
+    let gap = (pad * 0.35).max(1.0);
+    let cell_w =
+        ((inner_w - (gc - 1) as f64 * gap) / gc as f64).max(1.0);
+    let cell_h =
+        ((inner_h - (gr - 1) as f64 * gap) / gr as f64).max(1.0);
+    for r in 0..gr {
+        for c in 0..gc {
+            let x = inner_x + c as f64 * (cell_w + gap);
+            let y = inner_y + r as f64 * (cell_h + gap);
+            push_rect(
+                cells,
+                Rect { x, y_top: y, w: cell_w, h: cell_h },
+                color,
+            );
+        }
+    }
+}
+
+fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
+    // Layout button is always present (even at 1×1); shows the
+    // current grid shape so the user can tell at a glance.
+    push_rect(cells, layout.layout_button_rect, CHROME_BTN_BG);
+    push_border(cells, layout.layout_button_rect, 1.0, CHROME_BTN_BORDER);
+    push_grid_icon(
+        cells,
+        layout.layout_button_rect,
+        (layout.grid_cols, layout.grid_rows),
+        CHROME_ICON_FG,
+    );
+
+    // Picker overlay.  Painted only when open; option rects are
+    // pre-computed in `Layout::with_chrome`.
+    if let Some(panel) = layout.picker_panel_rect {
+        push_rect(cells, panel, CHROME_PANEL_BG);
+        push_border(cells, panel, 1.0, CHROME_BTN_BORDER);
+        for (rect, dims) in layout
+            .picker_option_rects
+            .iter()
+            .zip(layout.picker_option_dims.iter())
+        {
+            push_rect(cells, *rect, CHROME_OPTION_BG);
+            push_grid_icon(cells, *rect, *dims, CHROME_ICON_FG);
+        }
     }
 }
 
