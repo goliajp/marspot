@@ -117,23 +117,35 @@ real perf change.
 
 ## Recommended attack order
 
-1. **E1 + E2 + E5** (1 week) — measurement infrastructure must be honest
-   before diagnosing A/B/C/D
-2. **F gate-lock** (½ day) — encode floors/ceilings into
-   `bench/baseline.json`; protects wins during attack work
-3. **A1** (1-2 weeks) — Instruments allocation profile + bisect; this
-   is the single most existential item (architectural commitment broken)
-4. **B-investigation** (1-2 weeks, possibly overlaps A1's fix) — bisect
-   the 88 commits on the live cat-* axis; expect substantial overlap
-   with A1's root cause
-5. **C** (few days, likely subset of A1 fix) — verify per-session
-   footprint reductions land alongside A1
-6. **A2** (½ day) — small gate-logic fix; depends on having E1/E2 stable
-7. **B3 + B4 specific** (1 week) — CJK/emoji-specific path optimisation;
-   independent of B1/B2 root cause
-8. **D** (1 week) — scrollback dramatic-edge work; likely needs PTY
-   read profile + parser tightening
-9. **E3 + E4** (1 day) — small infrastructure additions
+**Updated 2026-05-05** based on this session's findings.
+
+Done in this session:
+- E1 + E2 + E4 + E5 ✓ (bench infra hardened)
+- E7 ✓ (friendly-fire fix; surfaced from --extended interaction)
+- F ✓ (recalibrated against clean-machine numbers; gate 13/13 ✓)
+- A2 ✗ retracted (not a bug — gate by-design short-circuit)
+- B1 + B2 ✗ retracted (godot CPU contention, not a real regression)
+- A1 in flight (--extended verification of lazy-fault hypothesis)
+
+Remaining queue:
+
+1. **A1 finish** — based on --extended outcome:
+   - if drift ≤ 1.10× → confirm lazy-fault transient; relax 5-min
+     gate or add fill-rate check
+   - if drift > 1.10× → real leak; Instruments allocations + per-
+     subsystem RSS slicing
+2. **B3 + B4** (1-2 weeks) — CJK/emoji vs Apple's CoreText/SBIX paths.
+   Cleanup target after E7 unblocks reliable measurements.
+   Specific tactic: pool CGBitmapContext + reuse bitmap buffer in
+   `glyph_atlas::rasterise_glyph` (per-glyph context creation +
+   property setting is ~10-30% of CJK/emoji raster cost).
+3. **C** (few days, probably folded into A1 fix) — per-session RSS
+   bloat is largely the same lazy-fault footprint as A1
+4. **D-rescope** (1 week) — D-target reframed: scrollback ACCESS at
+   large depth (mars: O(1) mmap fault; Term/iTerm2: cap'd, can't
+   even access).  Add new scenario gating that, rather than push
+   throughput.
+5. **E3** (1 day) — vim-jump cross-term wall time capture (driver gap)
 
 ## How to update this file
 
