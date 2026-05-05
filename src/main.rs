@@ -1439,9 +1439,17 @@ impl Mars {
             .map(|s| truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS))
             .collect();
 
+        // Cap views to the active layout's cell count so we don't
+        // build SessionViews for sessions that won't fit on screen
+        // (e.g. 9 sessions in a Quad layout — only sessions[0..4]
+        // get rendered, the rest stay alive in the sidebar).  The
+        // renderer paints any extra cells (layout.cells[N..]) as
+        // empty placeholders.
+        let cell_count = self.layout.as_ref().map(|l| l.cells.len()).unwrap_or(0);
         let views: Vec<SessionView> = self
             .sessions
             .iter()
+            .take(cell_count)
             .enumerate()
             .map(|(i, s)| SessionView {
                 grid: s.terminal.grid(),

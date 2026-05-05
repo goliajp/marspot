@@ -866,6 +866,13 @@ fn build_instances(
         );
     }
 
+    // Cells past the last view are "empty" — N sessions < layout
+    // cells.  Paint a subtle highlight + a centred [+] glyph so
+    // they read as "open slot" rather than "broken layout".  The
+    // [+] glyph itself goes in `push_empty_cell_glyphs` below
+    // because it needs the atlas + font borrows.
+    push_empty_cells(layout, views.len(), cells);
+
     if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
         push_sidebar(
             sidebar,
@@ -915,6 +922,109 @@ fn build_instances(
         atlas,
         glyphs,
     );
+    // Empty-cell [+] hints — drawn through the FG pipeline because
+    // the glyph wants real font shape, not a rect cross.
+    push_empty_cell_glyphs(
+        layout,
+        views.len(),
+        cell_w,
+        cell_h,
+        ascent,
+        atlas_w_f,
+        atlas_h_f,
+        font,
+        atlas,
+        glyphs,
+    );
+}
+
+/// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`
+/// when sessions count is less than layout cell count so the
+/// "open slot" reads as a softer, slightly elevated area.  Low-
+/// alpha black-ish overlay over the existing cell BG keeps the
+/// terminal palette intact.
+const EMPTY_CELL_OVERLAY: [f32; 4] = [0.04, 0.05, 0.07, 0.6];
+const EMPTY_CELL_GLYPH_FG: [f32; 4] = [0.30, 0.34, 0.38, 0.85];
+
+fn push_empty_cells(
+    layout: &Layout,
+    n_visible: usize,
+    cells: &mut Vec<CellInstance>,
+) {
+    for rect in layout.cells.iter().skip(n_visible) {
+        // Skip the cell title strip area so empties read with the
+        // same band as live sessions (no title strip painted).
+        let inner_top = rect.y_top + layout.cell_title_h;
+        let inner_h = (rect.h - layout.cell_title_h).max(0.0);
+        push_rect(
+            cells,
+            Rect {
+                x: rect.x,
+                y_top: inner_top,
+                w: rect.w,
+                h: inner_h,
+            },
+            EMPTY_CELL_OVERLAY,
+        );
+    }
+}
+
+/// Centre a `+` glyph in each empty cell — a lightweight hint
+/// that the slot exists and (eventually) accepts a click to
+/// spawn.  Today empty-cell clicks are a no-op; the user spawns
+/// via the sidebar `[+]`.
+#[allow(clippy::too_many_arguments)]
+fn push_empty_cell_glyphs(
+    layout: &Layout,
+    n_visible: usize,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    if layout.cells.len() <= n_visible {
+        return;
+    }
+    let metrics = SlotMetrics {
+        cell_w: cell_w.round() as u32,
+        cell_h: cell_h.round() as u32,
+        baseline_from_top: ascent.round() as u32,
+    };
+    let (font_idx, glyph) = font.resolve_char('+', false, false);
+    if glyph == 0 {
+        return;
+    }
+    let ct_font = font.font(font_idx).clone();
+    let entry = match atlas.get_or_rasterize(
+        GlyphKey {
+            font_id: font_idx as u32,
+            glyph,
+        },
+        &ct_font,
+        metrics,
+    ) {
+        Some(e) => e,
+        None => return,
+    };
+    let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+    let slot_h = metrics.cell_h as f32;
+    for rect in layout.cells.iter().skip(n_visible) {
+        let inner_top = rect.y_top + layout.cell_title_h;
+        let inner_h = (rect.h - layout.cell_title_h).max(0.0);
+        let cx = rect.x as f32 + rect.w as f32 / 2.0;
+        let cy = (inner_top + inner_h / 2.0) as f32;
+        glyphs.push(GlyphInstance {
+            origin: [(cx - slot_w / 2.0).round(), (cy - slot_h / 2.0).round()],
+            size: [slot_w, slot_h],
+            uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+            uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+            color: EMPTY_CELL_GLYPH_FG,
+        });
+    }
 }
 
 /// Same FG-pipeline trick as `push_close_glyphs`, but for the
