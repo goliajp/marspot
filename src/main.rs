@@ -135,13 +135,13 @@ const INITIAL_ROWS: u16 = 12;
 /// separator.
 const HEADER_PT: f64 = 32.0;
 
-/// Sidebar layout constants in **logical points** — must match
-/// `render.rs::SIDEBAR_TOP_PAD` / `SIDEBAR_ROW_H` so click hit-testing
-/// lands on the same pixels as the drawn rows.  The top pad now
-/// adds the header strip on top of its own breathing room so
-/// item 1 isn't hidden behind the traffic-light buttons.
-const SIDEBAR_TOP_PAD_PT: f64 = HEADER_PT + 8.0;
-const SIDEBAR_ROW_PT: f64 = 22.0;
+// Sidebar row geometry now lives on `Layout` itself
+// (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H_PHYS`),
+// so render*.rs paint and main.rs hit-test consume the same source
+// of truth.  The earlier scaled-logical-point constants sat on
+// values that didn't actually match the renderer (40 logical-pt at
+// 2x = 80 phys vs renderer's 14 phys), causing click hit-tests to
+// drift below the visually painted rows.
 
 /// Per-cell title strip height in **logical points** — the band at
 /// the top of every 9-grid cell that shows the session label and a
@@ -301,6 +301,10 @@ struct Mars {
     rss_dump_started_at: Option<std::time::Instant>,
     /// Most recent dump instant — drives the 1 Hz throttle.
     last_rss_dump: Option<std::time::Instant>,
+    /// Cross-thread wake handle, cloned on demand to power
+    /// per-session reader threads spawned at runtime (e.g. via the
+    /// sidebar [+] button).  Same proxy main passed into `run_app`.
+    event_proxy: EventProxy,
 }
 
 /// Live text selection inside one session's grid.  Coords are
@@ -560,7 +564,7 @@ impl MarsApp for Mars {
         // Sidebar close-[×] click: terminate `sessions[idx]`, but
         // refuse to close the last remaining session (mars without a
         // session is a confusing dead-end UI; the user can spawn
-        // again first via the [+] button planned for the next phase).
+        // again first via the [+] button).
         if let Some(idx) = close_session_hit {
             if self.sessions.len() > 1 && idx < self.sessions.len() {
                 self.close_session(idx);
@@ -570,10 +574,33 @@ impl MarsApp for Mars {
             return;
         }
 
+        // Sidebar [+] add-session click: spawn a new session up to
+        // the SESSION_COUNT_HARD_CAP of 9.  Reuses the same Session
+        // spawn path as startup.
+        let add_session_hit = self
+            .layout
+            .as_ref()
+            .map(|l| l.hit_test_add_session_button(x_phys, y_phys))
+            .unwrap_or(false);
+        if add_session_hit {
+            if self.sessions.len() < SESSION_COUNT_HARD_CAP {
+                self.spawn_session();
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+            }
+            return;
+        }
+
         let Some(layout) = &self.layout else { return };
-        let scale = ctx.scale();
-        let row_phys = SIDEBAR_ROW_PT * scale;
-        let top_pad_phys = SIDEBAR_TOP_PAD_PT * scale;
+        // Sidebar row geometry now lives on Layout (so render*.rs
+        // and hit-tests stay in lockstep).  Previous code computed
+        // `SIDEBAR_TOP_PAD_PT * scale` (= 80 phys at 2x) even though
+        // the renderer drew row 0 at top_inset + 14 phys — clicks
+        // were misaligned with what was visually rendered.  Reading
+        // from `layout.sidebar_top_pad_phys` (set by Layout::build
+        // to reserve the [+] header band) fixes that.
+        let row_phys = mars::layout::SIDEBAR_ROW_H_PHYS;
+        let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
 
         // In tmux mode, sidebar rows map to tmux windows; a click
         // sends `select-window` to tmux instead of changing
@@ -829,6 +856,11 @@ impl MarsApp for Mars {
     }
 }
 
+/// Hard cap on how many sessions mars permits at once.  The
+/// sidebar [+] button is disabled past this count; the layout
+/// picker only offers shapes whose cells ≤ cap (== 9).
+const SESSION_COUNT_HARD_CAP: usize = 9;
+
 /// Picker option index → LayoutMode.  Order must match
 /// `layout::PICKER_LAYOUT_DIMS` (private to layout.rs but the
 /// dims line up): Single, SplitH, SplitV, Quad, SixH, SixV, Nine.
@@ -885,6 +917,34 @@ impl Mars {
         let dims = self.layout.as_ref().map(|l| (l.window_w, l.window_h));
         if let Some((w, h)) = dims {
             self.rebuild_layout_at(ctx, w, h);
+        }
+    }
+
+    /// Spawn a fresh session and append it to `self.sessions` /
+    /// `self.custom_titles`.  Reuses the wake-via-EventProxy path
+    /// startup uses; safe to call from any `MarsApp` callback.
+    /// Refuses past `SESSION_COUNT_HARD_CAP`.  No-op in tmux mode
+    /// (the single tmux -CC session is created at startup; runtime
+    /// spawn would attach a second client and confuse the parser).
+    fn spawn_session(&mut self) {
+        if self.tmux.is_some() {
+            return;
+        }
+        if self.sessions.len() >= SESSION_COUNT_HARD_CAP {
+            return;
+        }
+        let proxy_clone = self.event_proxy.clone();
+        let wake = move || {
+            proxy_clone.wake();
+        };
+        match Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake) {
+            Ok(s) => {
+                self.sessions.push(s);
+                self.custom_titles.push(None);
+            }
+            Err(e) => {
+                eprintln!("mars: failed to spawn session: {e}");
+            }
         }
     }
 
@@ -1495,6 +1555,7 @@ fn main() {
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
+        event_proxy: proxy.clone(),
     };
 
     let attrs = WindowAttrs {
@@ -1774,6 +1835,7 @@ fn bench_rss_format_dump(arg: &str) {
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
+        event_proxy: EventProxy::new(),
     };
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);

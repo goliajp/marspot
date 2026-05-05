@@ -121,6 +121,18 @@ pub struct Layout {
     /// (only) rect is the "last session" — `mouse_down` may choose
     /// to ignore clicks on it to prevent killing the final session.
     pub close_session_rects: Vec<Rect>,
+    /// [+] add-session button — a row-tall band immediately under
+    /// the macOS header strip, above sidebar row 0.  Always present
+    /// when the sidebar is shown (renderer paints it disabled when
+    /// `n_sessions >= 9`).  Width spans the sidebar minus padding.
+    pub add_session_button_rect: Rect,
+    /// Y offset (physical px) from `top_inset` to the top of
+    /// sidebar row 0.  Reserves space for the header gap + add-
+    /// session button + body gap when the sidebar is shown; zero
+    /// when sidebar_w == 0.  Both renderers (Metal / AppKit) read
+    /// this instead of a hard-coded constant so the row positions
+    /// + chrome rects stay in lockstep.
+    pub sidebar_top_pad_phys: f64,
 }
 
 /// Layouts the picker offers, in the order they appear in the
@@ -150,12 +162,15 @@ const PICKER_OPTION_LOGICAL_GAP: f64 = 4.0;
 const PICKER_PANEL_LOGICAL_PAD: f64 = 8.0;
 const PICKER_PANEL_LOGICAL_GAP_FROM_BUTTON: f64 = 6.0;
 
-/// Sidebar row geometry — these mirror `render_metal.rs`'s
-/// `SIDEBAR_TOP_PAD` / `SIDEBAR_ROW_H` so the close-[×] rects line
-/// up with the visually rendered rows.  Treated as physical pixels
-/// (constant regardless of scale; matches the renderer).
-const SIDEBAR_TOP_PAD_PHYS: f64 = 14.0;
-const SIDEBAR_ROW_H_PHYS: f64 = 22.0;
+/// Sidebar geometry, all in physical pixels.  Renderer reads
+/// `Layout::sidebar_top_pad_phys` (computed at build time so the
+/// header band reserved for the [+] add-session button is accounted
+/// for); session-row height stays a fixed phys constant.
+pub const SIDEBAR_ROW_H_PHYS: f64 = 22.0;
+const SIDEBAR_HEADER_GAP_PHYS: f64 = 8.0;
+const SIDEBAR_ADD_BTN_H_PHYS: f64 = 22.0;
+const SIDEBAR_BODY_GAP_PHYS: f64 = 8.0;
+const SIDEBAR_ADD_BTN_X_PAD_PHYS: f64 = 8.0;
 const SIDEBAR_CLOSE_PHYS_SIZE: f64 = 14.0;
 const SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT: f64 = 8.0;
 
@@ -239,6 +254,16 @@ impl Layout {
                 });
             }
         }
+        // Sidebar-top pad: header gap + add-session button + body
+        // gap when the sidebar is shown.  Zero otherwise (snapshot /
+        // bench paths don't reserve a header band).  Computed here
+        // (not in `with_chrome`) because the renderer's row math
+        // reads it whether or not chrome was layered on.
+        let sidebar_top_pad_phys = if sidebar_w > 0.0 {
+            SIDEBAR_HEADER_GAP_PHYS + SIDEBAR_ADD_BTN_H_PHYS + SIDEBAR_BODY_GAP_PHYS
+        } else {
+            0.0
+        };
         Self {
             window_w,
             window_h,
@@ -259,6 +284,8 @@ impl Layout {
             picker_option_rects: Vec::new(),
             picker_option_dims: Vec::new(),
             close_session_rects: Vec::new(),
+            add_session_button_rect: Rect::ZERO,
+            sidebar_top_pad_phys,
         }
     }
 
@@ -327,10 +354,11 @@ impl Layout {
             self.picker_option_dims = dims;
         }
 
-        // Sidebar close-[×] rects.  Geometry mirrors render_metal.rs's
-        // `top_inset + SIDEBAR_TOP_PAD + i * SIDEBAR_ROW_H` so the
-        // hit-target sits exactly over the visually painted row.  Skip
-        // when the sidebar is absent (snapshot / 1-pane bench paths).
+        // Sidebar close-[×] rects.  Geometry uses
+        // `sidebar_top_pad_phys` (set by `build`) so it always lines
+        // up with the visually painted row — both renderers consume
+        // the same value.  Skip when the sidebar is absent
+        // (snapshot / 1-pane bench paths).
         if self.sidebar_w > 0.0 && n_sessions > 0 {
             let mut rects = Vec::with_capacity(n_sessions);
             let close_size = SIDEBAR_CLOSE_PHYS_SIZE;
@@ -338,8 +366,9 @@ impl Layout {
                 - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT
                 - close_size;
             for i in 0..n_sessions {
-                let row_top =
-                    self.top_inset + SIDEBAR_TOP_PAD_PHYS + i as f64 * SIDEBAR_ROW_H_PHYS;
+                let row_top = self.top_inset
+                    + self.sidebar_top_pad_phys
+                    + i as f64 * SIDEBAR_ROW_H_PHYS;
                 let close_y = row_top + (SIDEBAR_ROW_H_PHYS - close_size) / 2.0;
                 rects.push(Rect {
                     x: close_x,
@@ -349,6 +378,22 @@ impl Layout {
                 });
             }
             self.close_session_rects = rects;
+        }
+
+        // [+] add-session button — sits in the header band above
+        // row 0, spans (most of) the sidebar width.  Always built
+        // when sidebar exists; renderer paints it disabled when
+        // n_sessions >= 9 and `mouse_down` ignores the click.
+        if self.sidebar_w > 0.0 {
+            let x = SIDEBAR_ADD_BTN_X_PAD_PHYS;
+            let w = (self.sidebar_w - 2.0 * SIDEBAR_ADD_BTN_X_PAD_PHYS).max(1.0);
+            let y = self.top_inset + SIDEBAR_HEADER_GAP_PHYS;
+            self.add_session_button_rect = Rect {
+                x,
+                y_top: y,
+                w,
+                h: SIDEBAR_ADD_BTN_H_PHYS,
+            };
         }
 
         self
@@ -385,6 +430,14 @@ impl Layout {
         self.close_session_rects
             .iter()
             .position(|r| r.contains(px, py))
+    }
+
+    /// True when `(px, py)` lands on the sidebar's [+] add-session
+    /// button.  The button is always present when the sidebar is
+    /// shown; the renderer dims it (and `mouse_down` ignores the
+    /// click) when `sessions.len() >= 9`.
+    pub fn hit_test_add_session_button(&self, px: f64, py: f64) -> bool {
+        self.add_session_button_rect.contains(px, py)
     }
 
     /// Hit-test a click at physical coords `(px, py)`.  Returns the

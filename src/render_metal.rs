@@ -740,7 +740,10 @@ const CURSOR_FG: (f32, f32, f32) = (0.92, 0.92, 0.92);
 
 const SIDEBAR_DOT_R: f32 = 4.5;
 const SIDEBAR_LEFT_PAD: f32 = 14.0;
-const SIDEBAR_TOP_PAD: f32 = 14.0;
+// Sidebar's row 0 offset is now `layout::sidebar_top_pad_phys` —
+// computed by Layout::build to reserve room for the [+] header
+// band.  Threaded through `push_sidebar` instead of read from a
+// local const.
 const SIDEBAR_ROW_H: f32 = 22.0;
 const SIDEBAR_DOT_LABEL_GAP: f32 = 10.0;
 const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
@@ -869,6 +872,7 @@ fn build_instances(
             focused_idx,
             layout.sidebar_w as f32,
             layout.top_inset as f32,
+            layout.sidebar_top_pad_phys as f32,
             cell_w,
             cell_h,
             ascent,
@@ -882,12 +886,13 @@ fn build_instances(
         );
     }
 
-    // Floating chrome (layout button + picker overlay + close BGs).
-    // Drawn last so it composites over the cells / sidebar.  Picker
-    // only paints when its rect is `Some`.
+    // Floating chrome (layout button + picker overlay + close BGs
+    // + add-button BG).  Drawn last so it composites over the
+    // cells / sidebar.  Picker only paints when its rect is `Some`.
     push_layout_chrome(layout, cells);
-    // Close-[×] glyphs piggy-back on the FG (atlas) pipeline so the
-    // cross is a real diagonal × from the font, not a rect cross.
+    // Close-[×] and add-[+] glyphs piggy-back on the FG (atlas)
+    // pipeline so they're real font glyphs (× = U+00D7, + = U+002B)
+    // — not axis-aligned rect crosses.
     push_close_glyphs(
         layout,
         cell_w,
@@ -899,6 +904,74 @@ fn build_instances(
         atlas,
         glyphs,
     );
+    push_add_button_glyph(
+        layout,
+        cell_w,
+        cell_h,
+        ascent,
+        atlas_w_f,
+        atlas_h_f,
+        font,
+        atlas,
+        glyphs,
+    );
+}
+
+/// Same FG-pipeline trick as `push_close_glyphs`, but for the
+/// sidebar [+] add-session button.  Glyph is `+` (U+002B PLUS
+/// SIGN); colour follows the disabled / enabled state derived
+/// from `close_session_rects.len()` (== n_sessions).
+#[allow(clippy::too_many_arguments)]
+fn push_add_button_glyph(
+    layout: &Layout,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    let rect = layout.add_session_button_rect;
+    if rect.w <= 0.0 {
+        return;
+    }
+    let metrics = SlotMetrics {
+        cell_w: cell_w.round() as u32,
+        cell_h: cell_h.round() as u32,
+        baseline_from_top: ascent.round() as u32,
+    };
+    let (font_idx, glyph) = font.resolve_char('+', false, false);
+    if glyph == 0 {
+        return;
+    }
+    let ct_font = font.font(font_idx).clone();
+    let entry = match atlas.get_or_rasterize(
+        GlyphKey {
+            font_id: font_idx as u32,
+            glyph,
+        },
+        &ct_font,
+        metrics,
+    ) {
+        Some(e) => e,
+        None => return,
+    };
+    let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+    let slot_h = metrics.cell_h as f32;
+    let n_sessions = layout.close_session_rects.len();
+    let disabled = n_sessions >= SESSION_COUNT_HARD_CAP;
+    let color = if disabled { ADD_BTN_FG_DISABLED } else { ADD_BTN_FG };
+    let cx = rect.x as f32 + rect.w as f32 / 2.0;
+    let cy = rect.y_top as f32 + rect.h as f32 / 2.0;
+    glyphs.push(GlyphInstance {
+        origin: [(cx - slot_w / 2.0).round(), (cy - slot_h / 2.0).round()],
+        size: [slot_w, slot_h],
+        uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+        uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+        color,
+    });
 }
 
 // Chrome colours for the [layout] button and the picker overlay.
@@ -1021,6 +1094,16 @@ const CLOSE_BTN_FG: [f32; 4] = [0.92, 0.62, 0.62, 1.0];
 const CLOSE_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
 const CLOSE_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
 
+// Add-[+] button colours.  Green-tinted BG to read as
+// "constructive action".  Disabled (N == 9) drops to gray —
+// `mouse_down` ignores the click but the dim look explains why.
+const ADD_BTN_BG: [f32; 4] = [0.07, 0.16, 0.10, 0.85];
+const ADD_BTN_FG: [f32; 4] = [0.65, 0.92, 0.72, 1.0];
+const ADD_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
+const ADD_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
+
+const SESSION_COUNT_HARD_CAP: usize = 9;
+
 fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
     // Layout button is always present (even at 1×1); shows the
     // current grid shape so the user can tell at a glance.
@@ -1053,10 +1136,30 @@ fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
     // When this is the last remaining session, the BG fades to
     // gray — `mouse_down` already refuses the click, the dim look
     // tells the user *why* nothing happened.
-    let disabled = layout.close_session_rects.len() == 1;
-    let bg = if disabled { CLOSE_BTN_BG_DISABLED } else { CLOSE_BTN_BG };
+    let n_sessions = layout.close_session_rects.len();
+    let close_disabled = n_sessions == 1;
+    let close_bg = if close_disabled {
+        CLOSE_BTN_BG_DISABLED
+    } else {
+        CLOSE_BTN_BG
+    };
     for rect in &layout.close_session_rects {
-        push_rect(cells, *rect, bg);
+        push_rect(cells, *rect, close_bg);
+    }
+
+    // Sidebar [+] add-session button BG (FG `+` glyph laid down
+    // later in `push_add_button_glyph`).  Disabled at the hard cap
+    // of 9 sessions; `mouse_down` ignores the click then.  Painted
+    // before close × so close × always reads as a per-row
+    // affordance even on the same y-band.
+    if layout.add_session_button_rect.w > 0.0 {
+        let add_disabled = n_sessions >= SESSION_COUNT_HARD_CAP;
+        let add_bg = if add_disabled {
+            ADD_BTN_BG_DISABLED
+        } else {
+            ADD_BTN_BG
+        };
+        push_rect(cells, layout.add_session_button_rect, add_bg);
     }
 }
 
@@ -1131,6 +1234,7 @@ fn push_sidebar(
     focused_idx: usize,
     sidebar_w: f32,
     top_inset: f32,
+    sidebar_top_pad: f32,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
@@ -1143,7 +1247,7 @@ fn push_sidebar(
     dots: &mut Vec<CellInstance>,
 ) {
     for (i, entry) in entries.iter().enumerate() {
-        let row_top_y = top_inset + SIDEBAR_TOP_PAD + i as f32 * SIDEBAR_ROW_H;
+        let row_top_y = top_inset + sidebar_top_pad + i as f32 * SIDEBAR_ROW_H;
 
         if i == focused_idx {
             cells.push(CellInstance {
