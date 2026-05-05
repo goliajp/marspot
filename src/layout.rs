@@ -114,6 +114,13 @@ pub struct Layout {
     /// `LayoutMode` enum variants (Single, SplitH, SplitV, Quad,
     /// SixH, SixV, Nine).
     pub picker_option_dims: Vec<(usize, usize)>,
+    /// One rect per sidebar row — the close [×] hit-target on the
+    /// row's right edge.  Length == n_sessions.  Empty when the
+    /// chrome wasn't built or n_sessions == 0.  Renderer paints a
+    /// [×] glyph or hairline cross inside each rect.  The first
+    /// (only) rect is the "last session" — `mouse_down` may choose
+    /// to ignore clicks on it to prevent killing the final session.
+    pub close_session_rects: Vec<Rect>,
 }
 
 /// Layouts the picker offers, in the order they appear in the
@@ -142,6 +149,15 @@ const PICKER_OPTION_LOGICAL_SIZE: f64 = 28.0;
 const PICKER_OPTION_LOGICAL_GAP: f64 = 4.0;
 const PICKER_PANEL_LOGICAL_PAD: f64 = 8.0;
 const PICKER_PANEL_LOGICAL_GAP_FROM_BUTTON: f64 = 6.0;
+
+/// Sidebar row geometry — these mirror `render_metal.rs`'s
+/// `SIDEBAR_TOP_PAD` / `SIDEBAR_ROW_H` so the close-[×] rects line
+/// up with the visually rendered rows.  Treated as physical pixels
+/// (constant regardless of scale; matches the renderer).
+const SIDEBAR_TOP_PAD_PHYS: f64 = 14.0;
+const SIDEBAR_ROW_H_PHYS: f64 = 22.0;
+const SIDEBAR_CLOSE_PHYS_SIZE: f64 = 14.0;
+const SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT: f64 = 8.0;
 
 impl Layout {
     /// Build a layout for `grid_cols × grid_rows` sessions inside a
@@ -242,17 +258,25 @@ impl Layout {
             picker_panel_rect: None,
             picker_option_rects: Vec::new(),
             picker_option_dims: Vec::new(),
+            close_session_rects: Vec::new(),
         }
     }
 
-    /// Layer the floating-chrome rects (the [layout] button and,
-    /// when `picker_open`, the picker overlay) onto an already-built
-    /// `Layout`.  Done as a post-build step so snapshot / bench /
-    /// test paths that don't render chrome can call the original
-    /// `build` unchanged.  `scale` is the device pixel ratio
-    /// (caller already has it from `ctx.scale()`); we use it to
-    /// translate logical-point chrome sizes to physical pixels.
-    pub fn with_chrome(mut self, scale: f64, picker_open: bool) -> Self {
+    /// Layer the floating-chrome rects (the [layout] button, the
+    /// picker overlay when `picker_open`, and the per-row close [×]
+    /// rects) onto an already-built `Layout`.  Done as a post-build
+    /// step so snapshot / bench / test paths that don't render
+    /// chrome can call the original `build` unchanged.
+    /// `scale` is the device pixel ratio (caller already has it
+    /// from `ctx.scale()`); we use it for the layout button +
+    /// picker (logical-pt sizing).  `n_sessions` populates the
+    /// close-[×] rects (one per row).
+    pub fn with_chrome(
+        mut self,
+        scale: f64,
+        picker_open: bool,
+        n_sessions: usize,
+    ) -> Self {
         let btn_w = LAYOUT_BUTTON_LOGICAL_W * scale;
         let btn_h = LAYOUT_BUTTON_LOGICAL_H * scale;
         let btn_margin = LAYOUT_BUTTON_LOGICAL_MARGIN * scale;
@@ -303,6 +327,30 @@ impl Layout {
             self.picker_option_dims = dims;
         }
 
+        // Sidebar close-[×] rects.  Geometry mirrors render_metal.rs's
+        // `top_inset + SIDEBAR_TOP_PAD + i * SIDEBAR_ROW_H` so the
+        // hit-target sits exactly over the visually painted row.  Skip
+        // when the sidebar is absent (snapshot / 1-pane bench paths).
+        if self.sidebar_w > 0.0 && n_sessions > 0 {
+            let mut rects = Vec::with_capacity(n_sessions);
+            let close_size = SIDEBAR_CLOSE_PHYS_SIZE;
+            let close_x = self.sidebar_w
+                - SIDEBAR_CLOSE_PHYS_MARGIN_RIGHT
+                - close_size;
+            for i in 0..n_sessions {
+                let row_top =
+                    self.top_inset + SIDEBAR_TOP_PAD_PHYS + i as f64 * SIDEBAR_ROW_H_PHYS;
+                let close_y = row_top + (SIDEBAR_ROW_H_PHYS - close_size) / 2.0;
+                rects.push(Rect {
+                    x: close_x,
+                    y_top: close_y,
+                    w: close_size,
+                    h: close_size,
+                });
+            }
+            self.close_session_rects = rects;
+        }
+
         self
     }
 
@@ -327,6 +375,16 @@ impl Layout {
         self.picker_panel_rect
             .map(|r| r.contains(px, py))
             .unwrap_or(false)
+    }
+
+    /// Returns the sidebar row index whose close-[×] button
+    /// `(px, py)` falls inside, or `None`.  Hit-target lives on the
+    /// row's right edge; clicks to its left fall through to
+    /// `hit_test_sidebar_row` for normal focus switching.
+    pub fn hit_test_close_session(&self, px: f64, py: f64) -> Option<usize> {
+        self.close_session_rects
+            .iter()
+            .position(|r| r.contains(px, py))
     }
 
     /// Hit-test a click at physical coords `(px, py)`.  Returns the

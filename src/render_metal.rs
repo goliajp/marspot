@@ -882,10 +882,23 @@ fn build_instances(
         );
     }
 
-    // Floating chrome (layout button + picker overlay).  Drawn last
-    // so it composites over the cells / sidebar.  Picker only paints
-    // when its rect is `Some`.
+    // Floating chrome (layout button + picker overlay + close BGs).
+    // Drawn last so it composites over the cells / sidebar.  Picker
+    // only paints when its rect is `Some`.
     push_layout_chrome(layout, cells);
+    // Close-[×] glyphs piggy-back on the FG (atlas) pipeline so the
+    // cross is a real diagonal × from the font, not a rect cross.
+    push_close_glyphs(
+        layout,
+        cell_w,
+        cell_h,
+        ascent,
+        atlas_w_f,
+        atlas_h_f,
+        font,
+        atlas,
+        glyphs,
+    );
 }
 
 // Chrome colours for the [layout] button and the picker overlay.
@@ -995,6 +1008,19 @@ fn push_grid_icon(
     }
 }
 
+// Close-[×] button colours.  Subtle red-tinted BG so the user
+// reads "destructive action zone" without it screaming; the
+// actual `×` glyph is rasterised via the FG pass so it's a
+// true diagonal cross (NOT the axis-aligned `+` an earlier
+// attempt drew, which read as "add" — wrong affordance).
+// When this is the only session (close_session_rects.len() == 1)
+// a softer gray pair is used so the user sees the affordance
+// is disabled.
+const CLOSE_BTN_BG: [f32; 4] = [0.18, 0.07, 0.08, 0.85];
+const CLOSE_BTN_FG: [f32; 4] = [0.92, 0.62, 0.62, 1.0];
+const CLOSE_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
+const CLOSE_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
+
 fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
     // Layout button is always present (even at 1×1); shows the
     // current grid shape so the user can tell at a glance.
@@ -1020,6 +1046,77 @@ fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
             push_rect(cells, *rect, CHROME_OPTION_BG);
             push_grid_icon(cells, *rect, *dims, CHROME_ICON_FG);
         }
+    }
+
+    // Sidebar close-[×] BG tints (FG `×` glyph is laid down later
+    // in `push_close_glyphs`, since glyphs need atlas + font).
+    // When this is the last remaining session, the BG fades to
+    // gray — `mouse_down` already refuses the click, the dim look
+    // tells the user *why* nothing happened.
+    let disabled = layout.close_session_rects.len() == 1;
+    let bg = if disabled { CLOSE_BTN_BG_DISABLED } else { CLOSE_BTN_BG };
+    for rect in &layout.close_session_rects {
+        push_rect(cells, *rect, bg);
+    }
+}
+
+/// Rasterise the `×` glyph (Unicode U+00D7 MULTIPLICATION SIGN)
+/// once via the existing atlas + font pipeline, then push one
+/// `GlyphInstance` per close button so the FG pass paints a real
+/// diagonal cross — not the axis-aligned `+` shape a hand-drawn
+/// rect-pair would produce.  Slot is cell-sized; centred over each
+/// button (button is smaller than the cell, but the actual `×` ink
+/// sits in the slot's middle and lands inside the button BG).
+#[allow(clippy::too_many_arguments)]
+fn push_close_glyphs(
+    layout: &Layout,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    if layout.close_session_rects.is_empty() {
+        return;
+    }
+    let metrics = SlotMetrics {
+        cell_w: cell_w.round() as u32,
+        cell_h: cell_h.round() as u32,
+        baseline_from_top: ascent.round() as u32,
+    };
+    let (font_idx, glyph) = font.resolve_char('×', false, false);
+    if glyph == 0 {
+        return;
+    }
+    let ct_font = font.font(font_idx).clone();
+    let entry = match atlas.get_or_rasterize(
+        GlyphKey {
+            font_id: font_idx as u32,
+            glyph,
+        },
+        &ct_font,
+        metrics,
+    ) {
+        Some(e) => e,
+        None => return,
+    };
+    let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+    let slot_h = metrics.cell_h as f32;
+    let disabled = layout.close_session_rects.len() == 1;
+    let color = if disabled { CLOSE_BTN_FG_DISABLED } else { CLOSE_BTN_FG };
+    for rect in &layout.close_session_rects {
+        let cx = rect.x as f32 + rect.w as f32 / 2.0;
+        let cy = rect.y_top as f32 + rect.h as f32 / 2.0;
+        glyphs.push(GlyphInstance {
+            origin: [(cx - slot_w / 2.0).round(), (cy - slot_h / 2.0).round()],
+            size: [slot_w, slot_h],
+            uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+            uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+            color,
+        });
     }
 }
 

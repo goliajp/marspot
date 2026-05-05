@@ -509,16 +509,22 @@ impl MarsApp for Mars {
     }
 
     fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
-        // Layout-button + picker-overlay dispatch: a top-level intercept
-        // that fires before any cell/sidebar handling.  Done in a tight
-        // borrow scope so the immutable borrow on `self.layout` ends
-        // before we mutate `self` (set layout_mode / rebuild layout).
-        let (layout_btn_hit, picker_option_hit, picker_panel_hit) = {
+        // Layout-button + picker-overlay + close-[×] dispatch: a top-
+        // level intercept that fires before any cell/sidebar handling.
+        // Done in a tight borrow scope so the immutable borrow on
+        // `self.layout` ends before we mutate `self`.
+        let (
+            layout_btn_hit,
+            picker_option_hit,
+            picker_panel_hit,
+            close_session_hit,
+        ) = {
             let Some(layout) = &self.layout else { return };
             (
                 layout.hit_test_layout_button(x_phys, y_phys),
                 layout.hit_test_picker_option(x_phys, y_phys),
                 layout.hit_test_picker_panel(x_phys, y_phys),
+                layout.hit_test_close_session(x_phys, y_phys),
             )
         };
         if self.layout_picker_open {
@@ -548,6 +554,19 @@ impl MarsApp for Mars {
             self.layout_picker_open = true;
             self.rebuild_layout(ctx);
             ctx.request_redraw();
+            return;
+        }
+
+        // Sidebar close-[×] click: terminate `sessions[idx]`, but
+        // refuse to close the last remaining session (mars without a
+        // session is a confusing dead-end UI; the user can spawn
+        // again first via the [+] button planned for the next phase).
+        if let Some(idx) = close_session_hit {
+            if self.sessions.len() > 1 && idx < self.sessions.len() {
+                self.close_session(idx);
+                self.rebuild_layout(ctx);
+                ctx.request_redraw();
+            }
             return;
         }
 
@@ -842,7 +861,11 @@ impl Mars {
             phys_w, phys_h, sidebar_phys, header_phys, title_phys,
             lc, lr, cell_w, cell_h,
         )
-        .with_chrome(scale, self.layout_picker_open);
+        .with_chrome(
+            scale,
+            self.layout_picker_open,
+            self.sessions.len(),
+        );
         for (i, s) in self.sessions.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 if (rect.cols, rect.rows)
@@ -862,6 +885,62 @@ impl Mars {
         let dims = self.layout.as_ref().map(|l| (l.window_w, l.window_h));
         if let Some((w, h)) = dims {
             self.rebuild_layout_at(ctx, w, h);
+        }
+    }
+
+    /// Terminate `sessions[idx]` and keep all parallel state in
+    /// sync.  Caller is responsible for refusing the call when this
+    /// would leave mars with zero sessions.  Drop on `Session`
+    /// triggers `Pty::Drop` (SIGHUP → SIGKILL fallback → close fd
+    /// → reader thread sees EOF and exits).
+    fn close_session(&mut self, idx: usize) {
+        if idx >= self.sessions.len() {
+            return;
+        }
+        // Drop the session — this fires Session/Pty teardown.
+        self.sessions.remove(idx);
+        // Parallel-array state must shrink in lockstep so the
+        // post-close indices line up with what's left.
+        if idx < self.custom_titles.len() {
+            self.custom_titles.remove(idx);
+        }
+        // focused_idx: clamp into the new range.  If we just closed
+        // the focused session, walk back one (or stay at 0 if it was
+        // the leftmost); otherwise nudge down by one for any session
+        // that lived to the right of the closed slot.
+        if !self.sessions.is_empty() {
+            if self.focused_idx == idx {
+                self.focused_idx = idx.min(self.sessions.len() - 1);
+            } else if self.focused_idx > idx {
+                self.focused_idx -= 1;
+            }
+        } else {
+            self.focused_idx = 0;
+        }
+        // Selection: clear if it lived in the closed session;
+        // shift down if it lived to the right.
+        if let Some(sel) = self.selection {
+            if sel.session_idx == idx {
+                self.selection = None;
+                self.selection_dragging = false;
+            } else if sel.session_idx > idx {
+                self.selection = Some(Selection {
+                    session_idx: sel.session_idx - 1,
+                    ..sel
+                });
+            }
+        }
+        // Title-edit: cancel if editing the closed cell, else
+        // shift the index for cells to its right.
+        match self.editing_title {
+            Some(i) if i == idx => {
+                self.editing_title = None;
+                self.title_edit_buffer.clear();
+            }
+            Some(i) if i > idx => {
+                self.editing_title = Some(i - 1);
+            }
+            _ => {}
         }
     }
 
