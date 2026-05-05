@@ -256,12 +256,51 @@ parser to compute median.
 
 ---
 
-## E6 — active-9x-soak CPU drift gate direction
+## E6 — active-9x-soak CPU drift gate direction · **RETRACTED 2026-05-05**
 
-Covered fully in [A2](A2-cpu-drift-gate-bug.md).  Listed here for
-completeness — same fix benefits the bench-infra hygiene story.
+Covered in [A2](A2-cpu-drift-gate-bug.md).  Investigation showed the
+gate works as designed: the `cpu_q1 < 1.0` short-circuit is intentional
+(sub-1% mean amplifies sample noise into meaningless drift).  godot's
+"2.40× ✓" was the short-circuit firing on a low cpu_q1 from CPU
+starvation, not an inverted comparison.  Closed not-a-bug.
 
 ---
+
+## E7 — bench scripts kill mars/mcli by name (friendly-fire) · **DONE 2026-05-05**
+
+Discovered while running active-9x-soak --extended (30 min) in
+background and a sanity bench.sh in foreground.  bench.sh's idle-RSS
+loop did `pkill -x "$bin"` (mars/mcli) before each trial, intending
+to clear stale instances from prior fast-gate runs but actually
+nuking the live --extended mars binary.  At t=41 s of the 30-min
+soak, mars died; remaining 1759 s of samples were zero-RSS, drift
+ratio computed as 0.0 ✓ (false-pass against the failure condition
+the gate was designed to catch).
+
+measure.sh had the same hazard (`killall mcli mars` before spawn).
+
+Fix landed in `feature/perf-F-recalibrate-clean`:
+- bin/bench.sh idle-RSS loop: removed `pkill -x "$bin"`; the captured
+  `pid=$!` is enough to manage just-our-instance.
+- bin/bench.sh --full block: removed `pkill -x mars`; measure.sh
+  now manages its own mcli by PID.
+- bin/measure.sh run_in_mars: replaced `killall mcli mars` (pre)
+  and `killall mcli` (post) with explicit `kill "$mcli_pid"`.
+  Captured PID via direct `&` rather than nested subshell so $! is
+  the mcli PID we can target.
+
+Test: bench/tests/e7-no-friendly-fire.sh — greps bench scripts for
+`pkill -x mars/mcli`, `killall mars`, `killall mcli` patterns
+(excluding comment lines).  Currently passes.
+
+### Why it matters
+
+Long-running bench scenarios (active-9x-soak, especially --extended
+at 30 min) overlap with the natural cadence of dev work — running a
+fast-gate sanity bench while a soak is in flight should be safe.
+Without E7, every concurrent invocation invalidates whatever soak
+was running.  Fixing this unblocks parallel bench work and removes
+a phantom-failure source from soak diagnostics.
 
 ## Combined exit criteria for E
 

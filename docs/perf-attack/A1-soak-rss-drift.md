@@ -146,6 +146,83 @@ Branches by root cause (will narrow once #2/#3 above complete):
 (append-only, dated)
 
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
+- 2026-05-05 evening — clean-machine bench-run rerun, post godot-cleanup:
+
+  | terminal | drift q4/q1 | abs Δ | CPU mean |
+  |---|---|---|---|
+  | mars         | **1.81× ✗ FAIL** | +125 MiB | 1.49% |
+  | iTerm2       | 1.30× ✓ borderline | +33 MiB  | 37.33% |
+  | Terminal.app | 1.05× ✓           | +1 MiB   | 9.76% |
+
+  godot-tinted earlier numbers (mars 2.11×) shifted only modestly on
+  clean machine (1.81×); absolute Δ is essentially identical (+123 →
+  +125 MiB).  godot was NOT the cause of A1 — it's a real mars-side
+  drift, larger than competitors' (iTerm2 +33, Terminal.app +1).
+
+  iTerm2 and Terminal.app both plateau within 5 min — Terminal.app
+  trivially (only ~3 MiB total), iTerm2 with its fixed-size per-session
+  state.  mars does NOT plateau in 5 min: per-session anon-mmap ring
+  is ~100 MiB virtual (1024 + 100×256 lines × cols × Cell_size), and
+  the 36 lines/s/session workload only pushes ~10800 lines (40% of
+  ring capacity) in 5 min.  Page-commit ramp continues throughout the
+  5-min window.
+
+  **Verification result**: --extended (30 min) drift = **2.065× ✗ FAIL**.
+  RSS first/last/max = **105 / 413 / 413 MiB**, +308 MiB net growth
+  over 30 min = **~10 MiB/min** sustained leak rate.  Larger drift,
+  not smaller: the lazy-fault hypothesis is **REJECTED**.
+
+  Updated cross-terminal landscape (clean machine):
+
+  | terminal     | 5-min drift | 5-min Δ peak | 30-min drift | Verdict |
+  |---|---|---|---|---|
+  | mars         | 1.81×       | +228 MiB     | **2.07×**    | leaks ~10 MiB/min |
+  | iTerm2       | 1.30×       | +117 MiB     | (not measured) | plateaus by 5 min |
+  | Terminal.app | 1.05×       | +16 MiB      | (not measured) | trivial growth |
+
+  At 10 MiB/min × 8-hour workday × 9 sessions ≈ 4.8 GB sustained
+  growth.  This is not lazy-fault; it's a real leak.  CLAUDE.md #3
+  ("cannot get slower the longer it runs") fully violated.
+
+  Hypotheses 1+2 (font_cache / atlas) ruled out by static analysis.
+  Hypothesis 3 (scrollback ring lazy-mmap) cannot account for
+  unbounded growth — ring is fixed-size, fully wraps in ~12 min.
+  Remaining candidates 4-5 + new ones to explore:
+
+  4. **PTY chunk Vec<u8> heap fragmentation** — 64 KiB chunks
+     allocated/freed every PTY read can fragment the heap; system
+     malloc on macOS doesn't release back to OS.  Test: switch to
+     mimalloc / jemalloc; observe drift change.
+  5. **Per-cell stateful accumulation in Session / Terminal** — alt-
+     screen `saved_main`, `predictions` (bounded), parser internal
+     state, anything not bounded that lives per-session.
+  6. **Render scratch high-water-mark** — cells_scratch /
+     glyphs_scratch / dots_scratch in render_metal.rs `clear()` per
+     frame but don't shrink capacity.  Should plateau though.
+  7. **MTLBuffer / MTLCommandBuffer accumulation** — Metal command
+     buffers from previous frames not released; objc autorelease
+     pool drain timing.
+
+  **Next-step: per-subsystem RSS slicing instrumentation**.  Add
+  `MARS_PROFILE_RSS=1` mode that, on each render or every N seconds,
+  logs:
+
+  ```
+  total_rss=X
+    grid_bytes=...      (sum across sessions)
+    scrollback_bytes=...
+    atlas_bytes=...
+    fontcache_bytes=...
+    metal_buffers_bytes=...
+    other=delta
+  ```
+
+  Run --extended with this on; the subsystem whose `bytes` grows
+  monotonically is the leak.  ~50-100 LoC instrumentation work, then
+  one --extended re-run to localise.  Defer this work to next
+  focused session — it's the right surgical entry rather than
+  guess-and-check fixes.
+
 - 2026-05-05 — static analysis pass on `feature/perf-A1-soak-rss-drift`:
   - **font_cache char_cache (hypothesis 1)**: ruled OUT.  Hard cap at
     `CHAR_CACHE_CAP = 8K` + atomic `clear()` on overflow; HashMap

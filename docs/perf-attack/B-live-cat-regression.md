@@ -210,3 +210,29 @@ For each sub-target Bk:
 ## Progress log
 
 - 2026-05-05 — item filed from bench-run + measure-other-fresh
+- 2026-05-05 evening — **B1 and B2 retracted as measurement artifact**.
+  Cause: godot game-engine processes burning ~500% CPU during the
+  initial measurement window made every cat-* run ~30% slower than
+  clean-machine truth.  After killing godot and re-measuring with
+  3-trial median (E5):
+
+  | metric | godot-load (false) | clean (real) | clean vs Terminal | clean vs iTerm2 |
+  |---|---|---|---|---|
+  | cat-ascii live | 51.6  | **71.1** | 1.49× ✓ | 1.27× |
+  | cat-mixed live | 39.0  | **51.6** | 1.23× ✓ | 1.84× |
+  | cat-cjk live   | 25.8  | 36.4     | 0.86× ✗ | 4.87× |
+  | cat-emoji live | 26.7  | 42.1     | 0.84× ✗ | 17.5× |
+
+  The "B1/B2 regression vs floor" never existed — clean numbers comfortably
+  exceed the original 70 / 50 MB/s floors that were thought to be
+  failing.  88-commit bisect cancelled.
+
+  **B3 + B4 remain active** but with smaller deficit than first read:
+  cjk 0.86× / 0.77× (vs Term / Warp), emoji 0.84× / 0.95×.  Apple
+  CoreText (CJK system path) and Apple Color Emoji (SBIX/COLR fast
+  path) still beat mars's self-built atlas + CT raster.  Investigation
+  remains under hypothesis 1 (per-glyph CT raster) and hypothesis 2
+  (color glyph software blend); B3-B4 sub-targets still hold.
+
+  Lesson: **kill foreign load before measuring perf.**  /tmp/mars-bench
+  scenarios + active scenario drivers must be the only competing CPU.

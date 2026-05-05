@@ -60,9 +60,6 @@ run_in_mars() {
 EOF
   chmod +x "$cmd_script"
 
-  killall mcli mars 2>/dev/null || true
-  sleep 0.3
-
   # Forward MARS_PROFILE through if set, so a profiling run can
   # capture per-trial counters under the harness.
   local profile_env=""
@@ -70,16 +67,25 @@ EOF
     local pf="${MARS_PROFILE}.${scenario}.${trial:-x}"
     profile_env="MARS_PROFILE=$pf"
   fi
-  (cd "$ROOT" && env $profile_env MARS_SHELL="$cmd_script" \
-    nohup target/release/mcli > /dev/null 2>&1 < /dev/null &)
-  disown || true
+  # Spawn mcli and remember its PID so cleanup is targeted.  Earlier
+  # code did `killall mcli mars` to nuke any prior instance, but that
+  # is friendly-fire on parallel mars sessions (e.g. an active-9x-soak
+  # already in flight gets clobbered by a measure.sh sanity run).
+  # measure.sh can run concurrent with other mars instances now.
+  # perf-attack E7.
+  cd "$ROOT" && env $profile_env MARS_SHELL="$cmd_script" \
+    nohup target/release/mcli > /dev/null 2>&1 < /dev/null &
+  local mcli_pid=$!
+  disown 2>/dev/null || true
 
+  local rc=0
   if ! wait_for_marker "$marker"; then
-    killall mcli 2>/dev/null || true
-    return 1
+    rc=1
   fi
-  killall mcli 2>/dev/null || true
+  kill "$mcli_pid" 2>/dev/null || true
+  wait "$mcli_pid" 2>/dev/null || true
   sleep 0.3
+  return $rc
 }
 
 run_in_iterm() {
