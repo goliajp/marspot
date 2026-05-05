@@ -115,6 +115,12 @@ real perf change.
 - vs iTerm2 cat-cjk live ratio ≥ **4.0×** (current 4.87×)
 - vs iTerm2 cat-emoji live ratio ≥ **10.0×** (current 11.6×)
 
+## Execution plan
+
+The detailed phased plan with TDD tests, exit criteria, and rollback
+paths lives in [`execution-plan.md`](perf-attack/execution-plan.md).
+Summary order below.
+
 ## Recommended attack order
 
 **Updated 2026-05-05** based on this session's findings.
