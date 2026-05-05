@@ -74,13 +74,44 @@ impl RendererImpl {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
 
-/// Phase B: nine independent terminals in a 3×3 grid plus a sidebar.
-/// In tmux mode this collapses to 1×1 (the tmux client renders one
-/// active pane at a time; future work can split panes into cells).
-const GRID_COLS_LAYOUT: usize = 3;
-const GRID_ROWS_LAYOUT: usize = 3;
-const TMUX_GRID_COLS: usize = 1;
-const TMUX_GRID_ROWS: usize = 1;
+/// Switchable session-grid layouts (mouse-driven via the [layout]
+/// button in the main area).  Cell counts ∈ {1, 2, 4, 6, 9}; 2 and 6
+/// have horizontal / vertical orientation variants.  Sessions live
+/// independently — the layout decides how many cells get rendered in
+/// the main area, not how many sessions exist.  When N sessions <
+/// cells, extra cells render as empty placeholders; when N > cells,
+/// extra sessions stay in the sidebar but don't get a main-area cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LayoutMode {
+    Single,
+    SplitH,
+    SplitV,
+    Quad,
+    SixH,
+    SixV,
+    Nine,
+}
+
+impl LayoutMode {
+    /// `(grid_cols, grid_rows)` — the shape passed straight to
+    /// `Layout::build`.  Names follow the orientation of the *split*:
+    /// `SplitH` is a horizontal split = 2 cells side by side = (2,1).
+    fn dims(self) -> (usize, usize) {
+        match self {
+            Self::Single => (1, 1),
+            Self::SplitH => (2, 1),
+            Self::SplitV => (1, 2),
+            Self::Quad => (2, 2),
+            Self::SixH => (3, 2),
+            Self::SixV => (2, 3),
+            Self::Nine => (3, 3),
+        }
+    }
+    fn cells(self) -> usize {
+        let (c, r) = self.dims();
+        c * r
+    }
+}
 const SIDEBAR_W_LOGICAL: f64 = 200.0;
 /// Default window in logical points; physical pixels = logical × scale.
 /// 2100×1300 means a 3×3 grid fits ~75 cols × 30 rows per cell with
@@ -251,6 +282,13 @@ struct Mars {
     /// True between mouse_down (in a cell body) and mouse_up — drag
     /// events update the selection only while this is set.
     selection_dragging: bool,
+    /// Current main-area grid shape.  Determines how many cells the
+    /// layout builder lays down; NOT tied to `sessions.len()`.
+    layout_mode: LayoutMode,
+    /// `true` while the layout-picker overlay is showing.  The picker
+    /// floats over the main area; while open, mouse_down hits hit-test
+    /// the picker first and swallow background clicks.
+    layout_picker_open: bool,
     /// MARS_PROFILE_RSS instrumentation — when set, every ~1 s the
     /// main loop appends one TSV row of per-subsystem RSS to this
     /// path.  Off-path entirely when the env var is unset.  See
@@ -692,11 +730,7 @@ impl MarsApp for Mars {
             let (cell_w, cell_h) = r.cell_dims();
             let scale = ctx.scale();
             let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
-            let (lc, lr) = if self.tmux.is_some() {
-                (TMUX_GRID_COLS, TMUX_GRID_ROWS)
-            } else {
-                (GRID_COLS_LAYOUT, GRID_ROWS_LAYOUT)
-            };
+            let (lc, lr) = self.layout_mode.dims();
             let header_phys = HEADER_PT * scale;
             let title_phys = CELL_TITLE_PT * scale;
             let layout = Layout::build(
@@ -1243,11 +1277,12 @@ fn main() {
     let proxy = EventProxy::new();
 
     let tmux_mode = args.iter().any(|a| a == "--tmux");
-    let n_sessions = if tmux_mode {
-        TMUX_GRID_COLS * TMUX_GRID_ROWS
+    let initial_layout = if tmux_mode {
+        LayoutMode::Single
     } else {
-        GRID_COLS_LAYOUT * GRID_ROWS_LAYOUT
+        LayoutMode::Nine
     };
+    let n_sessions = initial_layout.cells();
 
     let mut sessions = Vec::with_capacity(n_sessions);
     for _ in 0..n_sessions {
@@ -1299,6 +1334,8 @@ fn main() {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
+        layout_mode: initial_layout,
+        layout_picker_open: false,
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
@@ -1576,6 +1613,8 @@ fn bench_rss_format_dump(arg: &str) {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
+        layout_mode: LayoutMode::Nine,
+        layout_picker_open: false,
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
