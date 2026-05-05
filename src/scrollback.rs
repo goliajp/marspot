@@ -126,6 +126,24 @@ impl Scrollback {
         }
     }
 
+    /// Approximate resident bytes held by this scrollback for the
+    /// MARS_PROFILE_RSS sampler.  Memory variant: lazy-grown
+    /// `Vec<Cell>` capacity.  Disk variant: bytes-worth of lines
+    /// actually written into the mmap ring (NOT the full
+    /// reservation) — `total_lines_written.min(max_lines) *
+    /// line_bytes`.  Querying real resident pages via `mincore` on
+    /// every sample is too expensive; written-bytes is a cheap,
+    /// monotonic proxy that tracks real lazy-fault growth so Phase
+    /// 1.3's slope analysis surfaces a scrollback leak directly in
+    /// this column rather than hiding it as a constant reservation
+    /// while the leak shows up in `other`.
+    pub fn approx_bytes(&self) -> usize {
+        match self {
+            Self::Memory(m) => m.approx_bytes(),
+            Self::Disk(d) => d.approx_bytes(),
+        }
+    }
+
     /// Drop all content and re-init for a new column width.  Used
     /// by `Grid::resize` — stored lines aren't valid at the new
     /// width.  Preserves the variant (Memory stays Memory; Disk
@@ -244,6 +262,10 @@ impl MemoryScrollback {
         self.head = 0;
         self.len = 0;
         self.cells.clear();
+    }
+
+    pub fn approx_bytes(&self) -> usize {
+        self.cells.capacity() * std::mem::size_of::<Cell>()
     }
 }
 
@@ -469,6 +491,11 @@ impl DiskScrollback {
                 libc::MADV_DONTNEED,
             );
         }
+    }
+
+    pub fn approx_bytes(&self) -> usize {
+        let written = self.total_lines_written.min(self.max_lines) as usize;
+        written * self.line_bytes
     }
 }
 

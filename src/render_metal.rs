@@ -272,6 +272,26 @@ impl MetalRenderer {
         self.font.cell_dims()
     }
 
+    pub fn atlas_approx_bytes(&self) -> usize {
+        self.atlas.approx_bytes()
+    }
+
+    pub fn fontcache_approx_bytes(&self) -> usize {
+        self.font.approx_bytes()
+    }
+
+    /// Bytes held in this renderer's per-frame scratch buffers.  The
+    /// pipeline-state / sampler / queue handles are CFRetain'd Apple
+    /// objects whose footprint lives in CoreGraphics / Metal heaps;
+    /// not counted here.  Per-frame `MTLBuffer`s are constructed and
+    /// dropped each frame via `make_buffer_from_bytes` so they don't
+    /// live in this struct.
+    pub fn metal_buffers_approx_bytes(&self) -> usize {
+        self.cells_scratch.capacity() * std::mem::size_of::<CellInstance>()
+            + self.glyphs_scratch.capacity() * std::mem::size_of::<GlyphInstance>()
+            + self.dots_scratch.capacity() * std::mem::size_of::<CellInstance>()
+    }
+
     /// Update the drawable size after a host-window resize.  Cheap on
     /// no-op (same dims).
     pub fn resize(&mut self, width_px: f64, height_px: f64) {

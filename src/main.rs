@@ -51,6 +51,24 @@ impl RendererImpl {
             Self::Metal(r) => r.render_layout(layout, views, sidebar, focused_idx),
         }
     }
+    fn atlas_approx_bytes(&self) -> usize {
+        match self {
+            Self::Appkit(r) => r.atlas_approx_bytes(),
+            Self::Metal(r) => r.atlas_approx_bytes(),
+        }
+    }
+    fn fontcache_approx_bytes(&self) -> usize {
+        match self {
+            Self::Appkit(r) => r.fontcache_approx_bytes(),
+            Self::Metal(r) => r.fontcache_approx_bytes(),
+        }
+    }
+    fn metal_buffers_approx_bytes(&self) -> usize {
+        match self {
+            Self::Appkit(r) => r.metal_buffers_approx_bytes(),
+            Self::Metal(r) => r.metal_buffers_approx_bytes(),
+        }
+    }
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -233,6 +251,18 @@ struct Mars {
     /// True between mouse_down (in a cell body) and mouse_up — drag
     /// events update the selection only while this is set.
     selection_dragging: bool,
+    /// MARS_PROFILE_RSS instrumentation — when set, every ~1 s the
+    /// main loop appends one TSV row of per-subsystem RSS to this
+    /// path.  Off-path entirely when the env var is unset.  See
+    /// `Mars::maybe_dump_rss` for the row format and the Phase 1
+    /// docs for why we sample.
+    profile_rss_path: Option<std::path::PathBuf>,
+    /// Wall-clock origin for the elapsed-seconds column in the dump.
+    /// Lazily set on the first `maybe_dump_rss` so a `MARS_PROFILE_RSS`
+    /// run that starts mid-soak still gets a `t=0` row.
+    rss_dump_started_at: Option<std::time::Instant>,
+    /// Most recent dump instant — drives the 1 Hz throttle.
+    last_rss_dump: Option<std::time::Instant>,
 }
 
 /// Live text selection inside one session's grid.  Coords are
@@ -325,6 +355,11 @@ impl MarsApp for Mars {
         // cells exit — they'll just stop producing bytes.  Phase D
         // will draw an "exited" indicator in the sidebar.  Quit only
         // when *every* session is dead.
+        // RSS profile sample (1 Hz throttle inside).  Catches the
+        // active-soak's leak shape — `user_event` fires hundreds of
+        // times per second under load, so the 1 Hz gate is what
+        // actually rate-limits us.
+        self.maybe_dump_rss();
         if self.sessions.iter().all(|s| s.is_exited()) {
             for s in &mut self.sessions {
                 s.pump();
@@ -710,10 +745,73 @@ impl MarsApp for Mars {
             let ns = t0.elapsed().as_nanos() as u64;
             self.latency_samples.push(ns);
         }
+        // RSS profile sample.  Mirrors the user_event hook — quiet
+        // periods where redraw doesn't fire still get covered by the
+        // user_event path; under active load both fire and the 1 Hz
+        // throttle inside coalesces them into one sample per second.
+        self.maybe_dump_rss();
     }
 }
 
 impl Mars {
+    /// MARS_PROFILE_RSS sampler.  When the env-derived path is unset
+    /// this is a single Option-check; when set, throttled to 1 Hz, it
+    /// appends a TSV row so Phase 1.3's analyze-rss-dump.py can do
+    /// per-subsystem slope analysis.  Columns:
+    ///
+    ///   `elapsed_s  total_b  grid_b  scrollback_b  atlas_b  fontcache_b  mtl_b  other_b`
+    ///
+    /// `other = total - sum(named)` so a leak in any unmodelled
+    /// subsystem (CTFont's heap, MTL drawables, anonymous mmap pages
+    /// the kernel hasn't evicted, …) surfaces there.  IO failures are
+    /// silently swallowed — instrumentation must never crash mars
+    /// during a 30-min soak.
+    fn maybe_dump_rss(&mut self) {
+        use std::io::Write;
+        let path = match &self.profile_rss_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_rss_dump {
+            if now.duration_since(last).as_secs() < 1 {
+                return;
+            }
+        }
+        let started = *self.rss_dump_started_at.get_or_insert(now);
+        self.last_rss_dump = Some(now);
+        let elapsed_s = now.duration_since(started).as_secs();
+
+        let total_b = read_self_rss_kib() * 1024;
+        let mut grid_b: usize = 0;
+        let mut scrollback_b: usize = 0;
+        for s in &self.sessions {
+            let g = s.terminal.grid();
+            grid_b += g.approx_bytes();
+            scrollback_b += g.scrollback_approx_bytes();
+        }
+        let (atlas_b, fontcache_b, mtl_b) = match &self.renderer {
+            Some(r) => (
+                r.atlas_approx_bytes(),
+                r.fontcache_approx_bytes(),
+                r.metal_buffers_approx_bytes(),
+            ),
+            None => (0, 0, 0),
+        };
+        let known = grid_b + scrollback_b + atlas_b + fontcache_b + mtl_b;
+        let other_b = total_b.saturating_sub(known);
+
+        let line = format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            elapsed_s, total_b, grid_b, scrollback_b, atlas_b, fontcache_b, mtl_b, other_b,
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(line.as_bytes()));
+    }
+
     /// Commit the current title edit (if any).  Empty buffer clears
     /// any custom title for that cell, which falls back to the
     /// default session label.  Idempotent if not editing.
@@ -1178,6 +1276,9 @@ fn main() {
     let latency_out_path = std::env::var("MARS_LATENCY").ok();
     let record_latency = latency_out_path.is_some();
     let profile_out_path = std::env::var("MARS_PROFILE").ok();
+    let profile_rss_path = std::env::var("MARS_PROFILE_RSS")
+        .ok()
+        .map(std::path::PathBuf::from);
 
     let n_sessions = sessions.len();
     let app = Mars {
@@ -1198,6 +1299,9 @@ fn main() {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
+        profile_rss_path,
+        rss_dump_started_at: None,
+        last_rss_dump: None,
     };
 
     let attrs = WindowAttrs {
@@ -1384,6 +1488,30 @@ fn run_snapshot(path: &str) {
 ///
 /// All modes write a single line of JSON to stdout so harness scripts
 /// can grep / parse without depending on prose formatting.
+/// Read this process's resident set size in KiB via Mach
+/// `task_info(MACH_TASK_BASIC_INFO)`.  ~10 µs per call on Apple
+/// Silicon — fine for the 1 Hz `MARS_PROFILE_RSS` sampler.  Returns
+/// 0 if the syscall fails (we never want instrumentation to crash a
+/// soak).
+fn read_self_rss_kib() -> usize {
+    unsafe {
+        let mut info: libc::mach_task_basic_info = std::mem::zeroed();
+        let mut count = (std::mem::size_of::<libc::mach_task_basic_info>()
+            / std::mem::size_of::<libc::natural_t>())
+            as libc::mach_msg_type_number_t;
+        let result = libc::task_info(
+            libc::mach_task_self(),
+            libc::MACH_TASK_BASIC_INFO,
+            &mut info as *mut _ as libc::task_info_t,
+            &mut count,
+        );
+        if result != libc::KERN_SUCCESS {
+            return 0;
+        }
+        (info.resident_size / 1024) as usize
+    }
+}
+
 fn run_bench(spec: &str) {
     let (mode, arg) = match spec.split_once(':') {
         Some(p) => p,
@@ -1400,10 +1528,63 @@ fn run_bench(spec: &str) {
         "metal-render" => bench_metal_render(arg),
         "scroll" => bench_scroll(arg, /* cold */ false),
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
+        "rss-format-dump" => bench_rss_format_dump(arg),
         other => {
             eprintln!("unknown bench mode: {other}");
             std::process::exit(2);
         }
+    }
+}
+
+/// `--bench rss-format-dump:<seconds>` — headless driver for the
+/// MARS_PROFILE_RSS dump format contract test (Phase 1.1).  Builds
+/// a minimal Mars (no renderer, no sessions, no GUI) and pumps
+/// `maybe_dump_rss` for the requested number of seconds; the 1 Hz
+/// throttle inside lays down N+1 rows so the format checker has
+/// enough samples.  Renderer-bucket columns read 0 in this mode —
+/// real numbers come from running mars proper under a soak with the
+/// same env var (Phase 1.2).
+fn bench_rss_format_dump(arg: &str) {
+    let secs: u64 = arg.parse().unwrap_or_else(|_| {
+        eprintln!("--bench rss-format-dump expects an integer second count");
+        std::process::exit(2);
+    });
+    let profile_rss_path = std::env::var("MARS_PROFILE_RSS")
+        .ok()
+        .map(std::path::PathBuf::from);
+    if profile_rss_path.is_none() {
+        eprintln!(
+            "--bench rss-format-dump requires MARS_PROFILE_RSS env to point to an output path"
+        );
+        std::process::exit(2);
+    }
+    let mut app = Mars {
+        renderer: None,
+        layout: None,
+        tmux: None,
+        sessions: Vec::new(),
+        focused_idx: 0,
+        view_offset: 0,
+        pending_keystroke_t0: None,
+        latency_samples: Vec::new(),
+        record_latency: false,
+        latency_out_path: None,
+        prof: ProfileCounters::default(),
+        profile_out_path: None,
+        custom_titles: Vec::new(),
+        editing_title: None,
+        title_edit_buffer: String::new(),
+        selection: None,
+        selection_dragging: false,
+        profile_rss_path,
+        rss_dump_started_at: None,
+        last_rss_dump: None,
+    };
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);
+    while std::time::Instant::now() < deadline {
+        app.maybe_dump_rss();
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 

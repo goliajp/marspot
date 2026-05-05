@@ -273,6 +273,30 @@ impl FontCache {
     pub fn cell_dims(&self) -> (f64, f64) {
         (self.cell_w, self.cell_h)
     }
+
+    /// Approximate resident bytes for instrumentation
+    /// (MARS_PROFILE_RSS).  Counts the `(codepoint, style) → glyph`
+    /// HashMap and the FontRegistry's bookkeeping (Vec<CTFont>
+    /// pointer slots + by_name keys).  CTFont's underlying font data
+    /// lives in CoreText's heap and isn't counted here — it shows up
+    /// in the `other` bucket.  HashMap bucket overhead is approximated
+    /// as one extra `usize` per slot; same simplification as
+    /// `GlyphAtlas::approx_bytes`.
+    pub fn approx_bytes(&self) -> usize {
+        let char_entry =
+            std::mem::size_of::<(u32, u8)>() + std::mem::size_of::<(usize, CGGlyph)>();
+        let char_cache_bytes =
+            self.char_cache.capacity() * (char_entry + std::mem::size_of::<usize>());
+        let fonts_vec_bytes =
+            self.fonts.fonts.capacity() * std::mem::size_of::<CTFont>();
+        let by_name_entry =
+            std::mem::size_of::<String>() + std::mem::size_of::<usize>();
+        let by_name_bytes = self.fonts.by_name.capacity()
+            * (by_name_entry + std::mem::size_of::<usize>());
+        let by_name_keys_bytes: usize =
+            self.fonts.by_name.keys().map(|k| k.capacity()).sum();
+        char_cache_bytes + fonts_vec_bytes + by_name_bytes + by_name_keys_bytes
+    }
 }
 
 pub fn lookup_glyph(font: &CTFont, ch: char) -> CGGlyph {

@@ -214,6 +214,22 @@ impl Renderer {
         self.font.cell_dims()
     }
 
+    /// AppKit path has no glyph atlas (CGImage drawn through CT each
+    /// frame); reported as 0 for symmetry with the Metal renderer's
+    /// MARS_PROFILE_RSS instrumentation.
+    pub fn atlas_approx_bytes(&self) -> usize {
+        0
+    }
+
+    pub fn fontcache_approx_bytes(&self) -> usize {
+        self.font.approx_bytes()
+    }
+
+    /// AppKit path uses no Metal buffers; reported as 0.
+    pub fn metal_buffers_approx_bytes(&self) -> usize {
+        0
+    }
+
     /// Render a single session full-window (mcli + the snapshot bench).
     /// Convenience wrapper over [`render_layout`](Self::render_layout)
     /// using a 1-cell layout that fills the viewport.
