@@ -1,4 +1,15 @@
-# Mars — macOS terminal (pure Rust)
+# Marspot — macOS terminal (pure Rust)
+
+> Product name: **Marspot** (domain: `marspot.com`). Repo:
+> `~/workspace/goliajp/marspot`. Target: **v1.0.0 (self-use)**.
+>
+> The on-disk crate / library / main binary are still named `mars`
+> (lib name, `[[bin]] mars`, `MARS_*` env vars, `Mars` struct, bench
+> identifier `"mars"`). A full code-internal rename to `marspot` is
+> queued as the first post-migration feature — see
+> `.claude/handoff.md`. Until then, "mars" inside `src/`,
+> `Cargo.toml`, `bin/`, and `bench/baseline.json` is the **internal
+> code name**; "Marspot" is the **product name**.
 
 ## Engineering principles
 
