@@ -733,7 +733,7 @@ fn post_dummy_event(nsapp: &NSApplication) {
 
 /// Block on the AppKit run loop, dispatching events into `app`.
 /// Returns when `ctx.exit()` has been called and the run loop drains.
-pub fn run_app<A: MarsApp>(mut app: A, proxy: EventProxy, attrs: WindowAttrs) {
+pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     let mtm = MainThreadMarker::new()
         .expect("run_app must be called on the main thread");
     let nsapp = NSApplication::sharedApplication(mtm);
@@ -798,7 +798,7 @@ pub fn run_app<A: MarsApp>(mut app: A, proxy: EventProxy, attrs: WindowAttrs) {
         &*(Retained::as_ptr(&view) as *const NSView)
     }));
     window.setAcceptsMouseMovedEvents(false);
-    unsafe { window.makeFirstResponder(Some(&view)) };
+    window.makeFirstResponder(Some(&view));
 
     // 3. Window delegate.
     let delegate: Retained<MarsWindowDelegate> = {
@@ -830,8 +830,9 @@ pub fn run_app<A: MarsApp>(mut app: A, proxy: EventProxy, attrs: WindowAttrs) {
         exit_requested: Cell::new(false),
     };
 
-    // Show + focus + activate.
-    nsapp.activateIgnoringOtherApps(true);
+    // Show + focus + activate.  `activate()` replaces the deprecated
+    // `activateIgnoringOtherApps(true)`; macOS 14+ is our target floor.
+    unsafe { nsapp.activate() };
     window.makeKeyAndOrderFront(None);
 
     // Hand control to the app's resumed handler.  Borrow the cell as

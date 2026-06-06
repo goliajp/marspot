@@ -104,7 +104,6 @@ pub struct Renderer {
     font: FontCache,
     viewport_w: f64,
     viewport_h: f64,
-    scale: f64,
     /// Window-level focus.  When false, even the focused-session
     /// cursor draws hollow because the user clearly isn't typing
     /// into mars.
@@ -192,7 +191,6 @@ impl Renderer {
             font,
             viewport_w: 0.0,
             viewport_h: 0.0,
-            scale: scale as f64,
             window_focused: true,
             bitmap_ctx: None,
             scratch: Scratch::default(),

@@ -1755,6 +1755,12 @@ fn run_snapshot(path: &str) {
 /// Silicon — fine for the 1 Hz `MARS_PROFILE_RSS` sampler.  Returns
 /// 0 if the syscall fails (we never want instrumentation to crash a
 /// soak).
+// libc 0.2 deprecates its mach bindings (both `mach_task_self()` the
+// function and `mach_task_self_` the static) in favour of the `mach2`
+// crate.  Adding a new FFI dep just to silence the warning would
+// violate CLAUDE.md's self-build principle for a static that is
+// still fully functional — accept the deprecation locally instead.
+#[allow(deprecated)]
 fn read_self_rss_kib() -> usize {
     unsafe {
         let mut info: libc::mach_task_basic_info = std::mem::zeroed();
@@ -1762,7 +1768,7 @@ fn read_self_rss_kib() -> usize {
             / std::mem::size_of::<libc::natural_t>())
             as libc::mach_msg_type_number_t;
         let result = libc::task_info(
-            libc::mach_task_self(),
+            libc::mach_task_self_,
             libc::MACH_TASK_BASIC_INFO,
             &mut info as *mut _ as libc::task_info_t,
             &mut count,

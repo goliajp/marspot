@@ -49,7 +49,6 @@ use std::ptr::NonNull;
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
 use crate::glyph_atlas::{GlyphAtlas, GlyphKey, SlotMetrics};
-use crate::grid::{Cell, Grid};
 use crate::layout::{CellRect, Layout, Rect};
 use crate::render::{SessionView, SidebarEntry};
 use crate::session::SessionState;
@@ -679,12 +678,10 @@ pub fn make_target_texture(
             false,
         )
     };
-    unsafe {
-        descriptor.setUsage(
-            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
-        );
-        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Private);
-    }
+    descriptor.setUsage(
+        objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+    );
+    descriptor.setStorageMode(objc2_metal::MTLStorageMode::Private);
     device
         .newTextureWithDescriptor(&descriptor)
         .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())
@@ -1589,7 +1586,7 @@ fn push_session(
 
     for r in 0..grid.rows() {
         let row_y = inner_y + (r as f32) * cell_h;
-        let baseline_y = row_y + ascent;
+        let _baseline_y = row_y + ascent;
 
         // Run-length BG fills (skip default BG; it inherits the rect fill).
         let mut c = 0usize;
@@ -1835,26 +1832,24 @@ fn build_bg_pipeline(
     let vfn = pipeline_function(library, "bg_vertex")?;
     let ffn = pipeline_function(library, "bg_fragment")?;
 
-    let descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
+    let descriptor = MTLRenderPipelineDescriptor::new();
     descriptor.setVertexFunction(Some(&vfn));
     descriptor.setFragmentFunction(Some(&ffn));
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    unsafe {
-        attachment.setPixelFormat(TARGET_FORMAT);
-        // Alpha blending so translucent BG cells (e.g. the
-        // inactive-pane dim overlay pushed at the end of
-        // push_session) composite over the colour BG fills below
-        // them.  Opaque cells (alpha = 1.0) render identically
-        // either way — `src.a = 1` makes destination contribution
-        // zero, same as no blending.
-        attachment.setBlendingEnabled(true);
-        attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-        attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
-        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    }
+    attachment.setPixelFormat(TARGET_FORMAT);
+    // Alpha blending so translucent BG cells (e.g. the
+    // inactive-pane dim overlay pushed at the end of
+    // push_session) composite over the colour BG fills below
+    // them.  Opaque cells (alpha = 1.0) render identically
+    // either way — `src.a = 1` makes destination contribution
+    // zero, same as no blending.
+    attachment.setBlendingEnabled(true);
+    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
@@ -1873,20 +1868,18 @@ fn build_fg_pipeline(
     let vfn = pipeline_function(library, "fg_vertex")?;
     let ffn = pipeline_function(library, "fg_fragment")?;
 
-    let descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
+    let descriptor = MTLRenderPipelineDescriptor::new();
     descriptor.setVertexFunction(Some(&vfn));
     descriptor.setFragmentFunction(Some(&ffn));
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    unsafe {
-        attachment.setPixelFormat(TARGET_FORMAT);
-        attachment.setBlendingEnabled(true);
-        attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-        attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
-        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    }
+    attachment.setPixelFormat(TARGET_FORMAT);
+    attachment.setBlendingEnabled(true);
+    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
@@ -1904,20 +1897,18 @@ fn build_dot_pipeline(
     let vfn = pipeline_function(library, "dot_vertex")?;
     let ffn = pipeline_function(library, "dot_fragment")?;
 
-    let descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
+    let descriptor = MTLRenderPipelineDescriptor::new();
     descriptor.setVertexFunction(Some(&vfn));
     descriptor.setFragmentFunction(Some(&ffn));
     let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    unsafe {
-        attachment.setPixelFormat(TARGET_FORMAT);
-        attachment.setBlendingEnabled(true);
-        attachment.setRgbBlendOperation(MTLBlendOperation::Add);
-        attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
-        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-    }
+    attachment.setPixelFormat(TARGET_FORMAT);
+    attachment.setBlendingEnabled(true);
+    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
@@ -1927,13 +1918,11 @@ fn build_dot_pipeline(
 fn build_fg_sampler(
     device: &ProtocolObject<dyn MTLDevice>,
 ) -> Result<Retained<ProtocolObject<dyn MTLSamplerState>>, String> {
-    let descriptor = unsafe { MTLSamplerDescriptor::new() };
-    unsafe {
-        descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
-        descriptor.setMagFilter(MTLSamplerMinMagFilter::Linear);
-        descriptor.setSAddressMode(MTLSamplerAddressMode::ClampToEdge);
-        descriptor.setTAddressMode(MTLSamplerAddressMode::ClampToEdge);
-    }
+    let descriptor = MTLSamplerDescriptor::new();
+    descriptor.setMinFilter(MTLSamplerMinMagFilter::Linear);
+    descriptor.setMagFilter(MTLSamplerMinMagFilter::Linear);
+    descriptor.setSAddressMode(MTLSamplerAddressMode::ClampToEdge);
+    descriptor.setTAddressMode(MTLSamplerAddressMode::ClampToEdge);
     device
         .newSamplerStateWithDescriptor(&descriptor)
         .ok_or_else(|| "newSamplerStateWithDescriptor returned nil".to_string())
@@ -1959,12 +1948,10 @@ impl MetalRenderer {
                 false,
             )
         };
-        unsafe {
-            descriptor.setUsage(
-                objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
-            );
-            descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
-        }
+        descriptor.setUsage(
+            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+        );
+        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
         let texture = self
             .device
             .newTextureWithDescriptor(&descriptor)
@@ -2103,12 +2090,10 @@ impl MetalRenderer {
                 false,
             )
         };
-        unsafe {
-            descriptor.setUsage(
-                objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
-            );
-            descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
-        }
+        descriptor.setUsage(
+            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+        );
+        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
         let texture = self
             .device
             .newTextureWithDescriptor(&descriptor)
@@ -2377,7 +2362,7 @@ mod tests {
     /// tests above.
     #[test]
     fn build_instances_emits_cells_and_glyphs() {
-        use crate::grid::Grid;
+        use crate::grid::{Cell, Grid};
         use crate::layout::Layout;
 
         let device = match system_default_device() {

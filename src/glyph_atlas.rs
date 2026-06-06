@@ -53,10 +53,9 @@
 //! of the bugs that killed the previous Metal+atlas attempt
 //! (`render.rs`'s header note "atlas neighbor … issues").
 
-use core_graphics::base::CGFloat;
 use core_graphics::context::{CGContext, CGTextDrawingMode};
 use core_graphics::font::CGGlyph;
-use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use core_graphics::geometry::CGPoint;
 use core_text::font::CTFont;
 use foreign_types::ForeignType;
 use objc2::rc::Retained;
@@ -166,15 +165,13 @@ impl GlyphAtlas {
                 false,
             )
         };
-        unsafe {
-            // Managed: CPU writes via replaceRegion, GPU reads.  On
-            // Apple Silicon (UMA) Shared would also work and skip
-            // the synchronize step, but Managed is portable across
-            // Intel + Apple Silicon and the perf delta is irrelevant
-            // for an atlas updated on cache miss only.
-            descriptor.setStorageMode(MTLStorageMode::Managed);
-            descriptor.setUsage(MTLTextureUsage::ShaderRead);
-        }
+        // Managed: CPU writes via replaceRegion, GPU reads.  On
+        // Apple Silicon (UMA) Shared would also work and skip
+        // the synchronize step, but Managed is portable across
+        // Intel + Apple Silicon and the perf delta is irrelevant
+        // for an atlas updated on cache miss only.
+        descriptor.setStorageMode(MTLStorageMode::Managed);
+        descriptor.setUsage(MTLTextureUsage::ShaderRead);
         let texture = device
             .newTextureWithDescriptor(&descriptor)
             .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
