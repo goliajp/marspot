@@ -341,8 +341,17 @@ for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
 # slow down and the parse/render gate would still pass; this catches
 # it).  Reads the latest bench-run.sh snapshot (cross-terminal.json
 # symlink); doesn't run anything itself.  Sub-millisecond.
+#
+# **--full only.**  The numbers in the snapshot are single-trial
+# multi-session-9x / scrollback-1m measurements; per perf.md and
+# baseline.json's own _comment, they're ±10–20 % volatile to thermal /
+# foreground-load on the dev box.  Floors are locked clean-machine
+# (≥3-trial median outside the harness), so dev-box pre-push runs flap
+# even when nothing regressed.  Gate them at `--full` (intended to run
+# on `ssh mini` via bench-remote.sh — clean idle Apple Silicon) and
+# leave fast pre-push deterministic.
 multi_cfg = baseline.get("multi_session_thresholds")
-if multi_cfg:
+if multi_cfg and mode == "full":
     snap_path = os.path.join(os.path.dirname(baseline_path), "..", "bench", "results", "cross-terminal.json")
     snap_path = os.path.normpath(snap_path)
     snap = None

@@ -235,6 +235,37 @@ The **vs-best-other-ratio** is the literal "outperform iTerm2/Warp"
 check. If the ratio falls below 1.0× on a scenario where it used to
 be > 1.0×, the gate fails and the PR description has to acknowledge it.
 
+### Tier split (fast vs --full)
+
+The gate is split across two tiers so pre-push runs stay deterministic
+on a loaded dev box and the noisy-but-load-bearing checks only fire
+where they can be trusted:
+
+| Check class | fast (every commit / pre-push) | `--full` (pre-merge / clean machine) |
+|---|---|---|
+| `parse-MBps` (headless 5-trial median) | ✓ | ✓ |
+| `render-p99-µs`, `scroll-p99-µs` (headless) | ✓ | ✓ |
+| binary size, idle RSS | ✓ | ✓ |
+| `live-MBps` (cat-ascii / mixed / cjk / emoji) | — | ✓ |
+| `vs-best cat-*` ratio (vs competitors_snapshot) | — | ✓ |
+| `multi-session-9x` throughput + vs-best | — | ✓ |
+| `scrollback-1m` throughput + vs-best | — | ✓ |
+
+**Why the split.**  multi-session-9x and scrollback-1m are
+single-trial AppleScript-driven measurements with ±10–20 % thermal /
+foreground-load variance on the dev box.  Floors are locked
+clean-machine (≥3-trial median, M1 Max, post-godot-cleanup; see
+`baseline.json._comment`) with only 10 % safety margin, so they will
+flap on a busy dev box even when nothing regressed.  Gating them at
+fast tier would break the "fast bench is deterministic" property the
+pre-push hook depends on.
+
+**Where `--full` should run.**  `bin/bench-remote.sh --full`
+dispatches it to `ssh mini` (clean idle M4 / 64 GB).  Running
+`--full` locally on a loaded dev box is allowed but expected to flap
+on multi-session; the warning is `bench-remote.sh` exists for a
+reason.
+
 ---
 
 ## 6. How to extend
