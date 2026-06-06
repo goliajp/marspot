@@ -33,17 +33,24 @@ shift || true
 case "$cmd_word" in
   run-single)
     user_cmd=${1:?cmd}; shift || true
+    # Same paste-threshold pattern as iterm.sh / terminal.sh — Warp's
+    # AI command-bar intercepts and rewrites long typed input even when
+    # SE keystroke succeeds at the OS level. Stash the long cmd in a
+    # wrapper file, keystroke only `bash <wrapper>; exit` so Warp's
+    # interceptor sees a tiny invocation it can't mangle.
+    wrapper=$(mktemp /tmp/warp-wrapper-XXXXXX)
+    printf '#!/bin/bash\n%s\n' "$user_cmd" > "$wrapper"
+    chmod 0755 "$wrapper"
+    short_cmd="bash $wrapper; exit"
     open -a Warp
     sleep 0.8  # focus settle
-    # The keystroke approach is fragile but tolerable for run-single.
-    # If this misfires, fall back to paste-block.
     osascript <<APPLESCRIPT >/dev/null
 tell application "System Events"
-  tell process "Warp"
+  tell process "stable"
     set frontmost to true
   end tell
   delay 0.2
-  keystroke "$user_cmd"
+  keystroke "$short_cmd"
   keystroke return
 end tell
 APPLESCRIPT

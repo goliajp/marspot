@@ -25,7 +25,13 @@ TRIALS=3
 # first-fire, after which subsequent LaunchAgent-spawned runs reuse
 # the cached TCC scope.
 TERMS=(iterm warp ghostty terminal)
-MARKER_TIMEOUT_S=600
+# 4 scenarios × 3 trials × ~2 MB/s worst case = ~96 s budget; cap at
+# 120 s so a single-terminal failure (Warp keystroke mangle, paste
+# warning, frozen surface) doesn't hang the whole refresh for 10 min
+# of wait-loop dead time. Terminals that don't produce a marker by
+# then are skipped — their previous-day snapshot stays via per-
+# terminal merge in remote-measure-others.sh.
+MARKER_TIMEOUT_S=120
 
 # ssh→GUI bridge. Direct ssh dispatch can't reach Aqua / WindowServer.
 # After exhaustive testing on macOS 26.5 / iTerm 3.6.11 / Ghostty 1.3.1
@@ -93,12 +99,112 @@ build_one_cmd() {
   echo "$cmd"
 }
 
+# ---- pre-flight inventory + trap cleanup ----------------------------
+# Test must not leave residue. Inventory records what state each app
+# was in BEFORE we touched it, and the cleanup trap uses that to undo
+# only what we created. Three categories of state are tracked:
+#
+#   - iTerm / Terminal.app windows: AppleScript-trackable by integer
+#     id. Drivers return the ids of windows they create; trap closes
+#     exactly those (no collateral close of the user's other work).
+#   - Warp / Ghostty processes: no AppleScript dictionary, no per-
+#     window handle. We record whether the app was running before; if
+#     NOT, the trap quits the app entirely (we are the only cause).
+#     If yes, we leave it alone — the user had a session.
+#   - Temp wrapper / marker files: always cleaned at exit.
+SESSION_DIR="/tmp/marspot-bench-session-$$"
+mkdir -p "$SESSION_DIR"
+
+# Sweep orphan session dirs from prior runs that were SIGKILL'd before
+# their EXIT trap fired (parent killed -9, host rebooted mid-run, etc).
+# A dir whose pid is no longer running can be safely removed — bench
+# wrapper / marker leaks from that aborted run are addressed below in
+# the normal cleanup paths.
+for stale in /tmp/marspot-bench-session-*; do
+  [[ -d "$stale" ]] || continue
+  pid=${stale##*-}
+  [[ "$pid" == "$$" ]] && continue
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "==> pre-flight: sweeping orphan session dir $stale (pid $pid dead)" >&2
+    rm -rf "$stale" 2>/dev/null || true
+  fi
+done
+
+inventory_pid_running() {
+  # 1 if any non-grep process matches; 0 otherwise.
+  pgrep -f "$1" >/dev/null 2>&1 && echo 1 || echo 0
+}
+
+# Snapshot pre-existing state.
+PRE_ITERM=$(inventory_pid_running "iTerm.app/Contents/MacOS")
+PRE_TERMINAL=$(inventory_pid_running "Terminal.app/Contents/MacOS/Terminal")
+PRE_WARP=$(inventory_pid_running "Warp.app/Contents/MacOS/stable")
+PRE_GHOSTTY=$(inventory_pid_running "Ghostty.app/Contents/MacOS/ghostty")
+printf 'PRE_ITERM=%s\nPRE_TERMINAL=%s\nPRE_WARP=%s\nPRE_GHOSTTY=%s\n' \
+  "$PRE_ITERM" "$PRE_TERMINAL" "$PRE_WARP" "$PRE_GHOSTTY" \
+  > "$SESSION_DIR/inventory"
+echo "==> pre-flight: iterm=$PRE_ITERM terminal=$PRE_TERMINAL warp=$PRE_WARP ghostty=$PRE_GHOSTTY" >&2
+
 # macOS ships bash 3.2 → no `declare -A`. Use one var per terminal.
 WIN_iterm=""
 WIN_warp=""
 WIN_ghostty=""
 WIN_terminal=""
 LAUNCHED_TERMS=()
+
+quit_app_if_we_spawned() {
+  # $1=app-display-name, $2=ps-pattern, $3=PRE_<APP> snapshot value.
+  # If app was NOT running before our test, quit it now. If it was
+  # already up, leave it (user had a session).
+  local name=$1 pat=$2 was_running=$3
+  if [[ "$was_running" == "0" ]]; then
+    # Polite AE quit first — works for Cocoa apps even without an
+    # AS dictionary (NSApplication respects the standard quit event).
+    osascript -e "tell application \"$name\" to quit" 2>/dev/null || true
+    sleep 0.5
+    # Backstop for processes that ignore the AE (Ghostty 1.x sometimes
+    # does). Match the binary path to avoid friendly fire on similarly-
+    # named user processes.
+    pkill -f "$pat" 2>/dev/null || true
+    echo "==> cleanup: quit $name (we spawned it)" >&2
+  else
+    echo "==> cleanup: leaving $name running (was up before this run)" >&2
+  fi
+}
+
+cleanup() {
+  local rc=$?
+  # Disarm the trap before doing any work so a fail inside cleanup
+  # doesn't re-enter via set -e (we'd recurse forever). Also drop -e
+  # so partial cleanup is preferred over an early abort.
+  trap - EXIT INT TERM
+  set +e
+
+  # iTerm / Terminal: precise close by the ids we recorded — leaves the
+  # user's other windows untouched even if both were already running.
+  [[ -n "$WIN_iterm" ]]    && bin/drivers/iterm.sh    close-windows "$WIN_iterm"    >/dev/null 2>&1 || true
+  [[ -n "$WIN_terminal" ]] && bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
+
+  # If the app wasn't running pre-flight, we caused the whole launch —
+  # quit the app entirely so the process count returns to zero. If it
+  # was running, we already closed only our windows above and leave the
+  # rest of the user's session alone.
+  quit_app_if_we_spawned "iTerm"    "iTerm.app/Contents/MacOS"              "$PRE_ITERM"
+  quit_app_if_we_spawned "Terminal" "Terminal.app/Contents/MacOS/Terminal"  "$PRE_TERMINAL"
+  quit_app_if_we_spawned "Warp"     "Warp.app/Contents/MacOS/stable"        "$PRE_WARP"
+  quit_app_if_we_spawned "Ghostty"  "Ghostty.app/Contents/MacOS/ghostty"    "$PRE_GHOSTTY"
+
+  # Always-clean residue: driver wrappers + scenario markers. Markers
+  # may be root-owned from a sudo-asuser-driven ghostty run; the rm
+  # falls through to sudo -n if NOPASSWD is configured, else best-
+  # effort plain rm.
+  rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
+  rm -f /tmp/measure-*-all.txt 2>/dev/null || sudo -n rm -f /tmp/measure-*-all.txt 2>/dev/null || true
+  rm -rf "$SESSION_DIR" 2>/dev/null || true
+  echo "==> cleanup done (script rc=$rc)" >&2
+  exit "$rc"
+}
+trap cleanup EXIT INT TERM
 for t in "${TERMS[@]}"; do
   # In ssh mode, only Ghostty is reachable (see header comment for
   # why iTerm/Warp/Terminal are unreachable from ssh). Skip the rest;
@@ -141,17 +247,23 @@ done
 for t in "${LAUNCHED_TERMS[@]}"; do
   marker="/tmp/measure-${t}-all.txt"
   echo "==> wait $t marker" >&2
+  saw_done=0
   for _ in $(seq 1 "$MARKER_TIMEOUT_S"); do
-    [[ -s "$marker" ]] && grep -q '==ALL_DONE==' "$marker" && break
+    if [[ -s "$marker" ]] && grep -q '==ALL_DONE==' "$marker"; then
+      saw_done=1
+      break
+    fi
     sleep 1
   done
+  if (( saw_done == 0 )); then
+    echo "==> $t marker not done after ${MARKER_TIMEOUT_S}s — skipping" >&2
+  fi
 done
 
-# Close windows by id (skip warp + ghostty — their drivers explicitly
-# refuse to quit the app to avoid killing the user's session; their
-# marker shells already exited via the trailing `exit`).
-[[ -n "$WIN_iterm" ]]    && bin/drivers/iterm.sh    close-windows "$WIN_iterm"    >/dev/null 2>&1 || true
-[[ -n "$WIN_terminal" ]] && bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
+# Note: window/process cleanup runs in the EXIT trap above so it
+# triggers on success AND on any mid-run die (SIGINT from the
+# LaunchAgent receiver, set -e from a driver, marker-wait timeout,
+# anything). Don't duplicate cleanup here.
 
 # Parse markers → JSON on stdout. Markers may be root-owned (when the
 # surface ran under sudo asuser); they're mode 0644 world-readable so
