@@ -506,10 +506,16 @@ mod tests {
             Ok(d) => d,
             Err(_) => return,
         };
-        // Tiny atlas — every couple of glyphs forces a rebuild.  The
-        // contract is "every individually-fit glyph eventually places
-        // successfully" — silent skip would leave gaps in the cache.
-        let mut atlas = GlyphAtlas::new(&device, 32, 32).expect("atlas");
+        // Atlas just big enough for ~8 cell-sized slots (4 wide × 2
+        // tall, given test_metrics cell_w=16, cell_h=32, PAD=1).
+        // Feeding 10 chars therefore forces a rebuild + a couple of
+        // post-rebuild placements.  The contract is "every
+        // individually-fit glyph eventually places successfully" —
+        // silent skip would leave gaps in the cache.
+        let m = test_metrics();
+        let atlas_w = (m.cell_w + 2 * PAD) * 4;
+        let atlas_h = (m.cell_h + 2 * PAD) * 2;
+        let mut atlas = GlyphAtlas::new(&device, atlas_w, atlas_h).expect("atlas");
         let font = make_font();
 
         let chars = b"abcdefghij";
