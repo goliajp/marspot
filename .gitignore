@@ -17,3 +17,6 @@ bench/results/
 
 # Per-session handoff snapshot (managed by /handoff skill, not source).
 .claude/handoff.md
+
+# Per-user Claude Code permission profile — not source.
+.claude/settings.json
