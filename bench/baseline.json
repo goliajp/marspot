@@ -71,31 +71,53 @@
     "marspot": 112493
   },
   "competitors_snapshot": {
-    "_comment": "captured_at + per-key timestamps. iterm2/ghostty/terminal refreshed 2026-06-07 via LaunchAgent on mini (under-load, GUI session active). warp last refreshed 2026-05-05 \u2014 SE keystroke is TCC Accessibility-gated for /usr/bin/osascript and system TCC.db is SIP write-protected, so warp can't be ssh-refreshed without manual System Settings grant. vs-best-other denominator = max(iterm2, warp, ghostty); terminal excluded as OS-vendor reference floor.",
+    "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).",
     "captured_at": "2026-06-07",
+    "host": {
+      "name": "mini",
+      "hardware": "Apple M4 / 64 GB",
+      "os": "macOS 26.5.1 (build 25F80)",
+      "arch": "arm64 (Darwin 25.5.0)"
+    },
     "iterm2": {
+      "version": "3.6.11",
+      "bundle_id": "com.googlecode.iterm2",
+      "captured_at": "2026-06-07",
+      "method": "ssh\u2192LaunchAgent (com.marspot.bench-trigger)",
       "cat-ascii_MBps": 68.1,
       "cat-mixed_MBps": 24.2,
       "cat-cjk_MBps": 5.2,
       "cat-emoji_MBps": 2.7
     },
     "warp": {
+      "version": "unknown at measure time (Warp auto-updates; current is 0.2026.06.03.09.49.01)",
+      "bundle_id": "dev.warp.Warp-Stable",
+      "captured_at": "2026-05-05",
+      "method": "console paste (cannot ssh-refresh: SE keystroke TCC + SIP-protected system TCC.db)",
       "cat-ascii_MBps": 47.8,
       "cat-mixed_MBps": 39.0,
       "cat-cjk_MBps": 47.1,
       "cat-emoji_MBps": 44.4
     },
-    "terminal": {
-      "cat-ascii_MBps": 50.0,
-      "cat-mixed_MBps": 39.0,
-      "cat-cjk_MBps": 44.4,
-      "cat-emoji_MBps": 50.0
-    },
     "ghostty": {
+      "version": "1.3.1 (build 15212)",
+      "bundle_id": "com.mitchellh.ghostty",
+      "captured_at": "2026-06-07",
+      "method": "ssh\u2192LaunchAgent (com.marspot.bench-trigger)",
       "cat-ascii_MBps": 78.0,
       "cat-mixed_MBps": 84.2,
       "cat-cjk_MBps": 114.3,
       "cat-emoji_MBps": 100.0
+    },
+    "terminal": {
+      "version": "2.15 (build 470.2, ships with macOS 26.5.1)",
+      "bundle_id": "com.apple.Terminal",
+      "captured_at": "2026-06-07",
+      "method": "ssh\u2192LaunchAgent (com.marspot.bench-trigger)",
+      "cat-ascii_MBps": 50.0,
+      "cat-mixed_MBps": 39.0,
+      "cat-cjk_MBps": 44.4,
+      "cat-emoji_MBps": 50.0
     }
   },
   "multi_session_thresholds": {

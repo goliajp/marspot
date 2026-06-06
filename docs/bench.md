@@ -70,6 +70,37 @@ snapshot rather than hardcoding two terminals, so adding a competitor
 is a baseline-only edit. Terminal.app is excluded from the floor by
 design (OS-vendor reference, not a competitor we measure against).
 
+### Snapshot schema (per terminal)
+
+Each entry under `competitors_snapshot` self-describes when and against
+what build it was measured, so a drifting snapshot (one terminal
+refreshed today, another stuck on an older date) is auditable at a
+glance:
+
+```json
+"ghostty": {
+  "version":     "1.3.1 (build 15212)",
+  "bundle_id":   "com.mitchellh.ghostty",
+  "captured_at": "2026-06-07",
+  "method":      "ssh→LaunchAgent (com.marspot.bench-trigger)",
+  "cat-ascii_MBps":  78.0,
+  "cat-mixed_MBps":  84.2,
+  "cat-cjk_MBps":   114.3,
+  "cat-emoji_MBps": 100.0
+}
+```
+
+`competitors_snapshot.host` records the bench host (model, OS, arch)
+all four entries were measured on. `competitors_snapshot.captured_at`
+(top-level) tracks the most-recent per-entry refresh. The
+`vs-best-other` iteration skips non-MBps entries (`host`, `_comment`)
+automatically via `if key in v`.
+
+`bin/_remote-measure-others-mini.sh` probes
+`/Applications/<App>.app/Contents/Info.plist` for version + bundle_id
+on each run so the metadata is filled in automatically — no manual
+edit needed when refreshing.
+
 Cross-terminal driving uses a single contract: each driver puts a
 fresh window in a known state, executes the scenario, and writes
 `/tmp/measure-<terminal>-<scenario>.txt` with `/usr/bin/time -p`

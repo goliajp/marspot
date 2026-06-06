@@ -157,7 +157,7 @@ done
 # surface ran under sudo asuser); they're mode 0644 world-readable so
 # this user-mode parse can still read them.
 python3 - "${SCENARIOS[@]}" <<'PY'
-import json, re, os, sys
+import json, re, os, sys, datetime, subprocess, platform
 SCENARIOS = sys.argv[1:]
 # Internal driver / marker names use "iterm" (matches iterm.sh); the
 # baseline.json snapshot uses "iterm2" (matches the product / bundle id
@@ -165,8 +165,54 @@ SCENARIOS = sys.argv[1:]
 # parent script doesn't create two separate competitor entries.
 TERMS = ["iterm", "warp", "ghostty", "terminal"]
 TERM_TO_KEY = {"iterm": "iterm2"}
+
+# App bundle paths per terminal — used to probe version + bundle_id so
+# each refresh records what was measured against what build. Terminal.app
+# lives under /System/Applications/Utilities on macOS 13+.
+APP_PATH = {
+    "iterm":    "/Applications/iTerm.app",
+    "warp":     "/Applications/Warp.app",
+    "ghostty":  "/Applications/Ghostty.app",
+    "terminal": "/System/Applications/Utilities/Terminal.app",
+}
+
+def plist_read(plist, key):
+    try:
+        return subprocess.check_output(
+            ["defaults", "read", plist, key],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return None
+
+def probe_version(term):
+    p = APP_PATH.get(term)
+    if not p: return None, None
+    plist = f"{p}/Contents/Info.plist"
+    if not os.path.exists(plist): return None, None
+    v = plist_read(plist, "CFBundleShortVersionString") or ""
+    build = plist_read(plist, "CFBundleVersion") or ""
+    bundle = plist_read(plist, "CFBundleIdentifier") or ""
+    version = f"{v} (build {build})" if build and build != v else v
+    return version or None, bundle or None
+
+def probe_host():
+    out = {"name": platform.node().split(".")[0],
+           "arch": f"{platform.machine()} ({platform.system()} {platform.release()})"}
+    try:
+        sw = subprocess.check_output(["sw_vers"], text=True)
+        prod, ver, build = "macOS", "?", "?"
+        for line in sw.splitlines():
+            if line.startswith("ProductVersion:"): ver = line.split(":", 1)[1].strip()
+            if line.startswith("BuildVersion:"):   build = line.split(":", 1)[1].strip()
+        out["os"] = f"{prod} {ver} (build {build})"
+    except Exception:
+        out["os"] = "unknown"
+    return out
+
 ROOT = os.environ.get("PWD", os.getcwd())
-out = {}
+today = datetime.date.today().isoformat()
+out = {"host": probe_host()}
 for t in TERMS:
     marker = f"/tmp/measure-{t}-all.txt"
     if not os.path.exists(marker):
@@ -188,6 +234,13 @@ for t in TERMS:
                 secs = float(s)
             by_scn[current].append(int(secs * 1e9))
     rec = {}
+    version, bundle = probe_version(t)
+    if version: rec["version"] = version
+    if bundle:  rec["bundle_id"] = bundle
+    rec["captured_at"] = today
+    rec["method"] = ("ssh→LaunchAgent (com.marspot.bench-trigger)"
+                     if os.environ.get("XPC_SERVICE_NAME", "").startswith("com.marspot")
+                     else "console / Screen Sharing")
     for s, vs in by_scn.items():
         if not vs:
             continue
@@ -196,7 +249,9 @@ for t in TERMS:
         size = os.path.getsize(f"{ROOT}/bench/scenarios/{s}.bin")
         bps = size * 1_000_000_000 // med
         rec[f"{s}_MBps"] = round(bps / 1048576, 1)
-    if rec:
+    # Only emit if we got at least one MBps measurement; metadata alone
+    # isn't worth surfacing.
+    if any(k.endswith("_MBps") for k in rec):
         out[TERM_TO_KEY.get(t, t)] = rec
 print(json.dumps(out, indent=2))
 PY
