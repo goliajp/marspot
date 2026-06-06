@@ -143,6 +143,15 @@ jitter, dedicated `CARGO_TARGET_DIR`, lock + cleanup contract,
 results land in `bench/remote-runs/<UTC-iso>/`.  Use when the dev
 box is busy or when locking in a new baseline.
 
+`bin/remote-measure-others.sh` is the companion that refreshes
+`bench/baseline.json.competitors_snapshot` from the remote host.
+ssh sessions on macOS cannot dispatch AppleEvents to GUI apps;
+the script health-checks for that and either auto-runs or prints
+the Screen-Sharing workaround.  When refreshing isn't possible
+right now, `MARS_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh
+--full` runs the gate anyway (with a stamped warning) using the
+existing snapshot.
+
 ### Correctness gate
 
 `bin/fuzz.sh` runs libfuzzer targets in `fuzz/fuzz_targets/` (default

@@ -107,11 +107,18 @@ if (( $# > 0 )); then
   ARGS_Q="$(printf '%q ' "$@")"
 fi
 echo "==> running bench on $HOST: bin/bench.sh $ARGS_Q"
+# Forward the stale-competitors bypass so users can `--full` without
+# a fresh competitors_snapshot when the GUI-AppleEvent workaround
+# isn't available (see bin/remote-measure-others.sh).
+STALE_PASS=""
+[[ "${MARS_BENCH_ALLOW_STALE_COMPETITORS:-}" == "1" ]] && \
+  STALE_PASS="export MARS_BENCH_ALLOW_STALE_COMPETITORS=1;"
 set +e
 ssh "$HOST" "
   set -e
   cd ~/$REMOTE_DIR
   export CARGO_TARGET_DIR=\$HOME/$REMOTE_DIR/target
+  $STALE_PASS
   echo \$\$ > $REMOTE_PIDF
   exec caffeinate -dims ./bin/bench.sh $ARGS_Q
 " </dev/null
