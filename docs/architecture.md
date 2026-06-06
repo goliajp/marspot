@@ -124,3 +124,49 @@ Run before each merge to develop:
 
 If any answer is "yes, made worse": refactor before merging or open an
 explicit "tech-debt" task with a deadline.
+
+## Gates and dev-loop tooling
+
+The benchmark gate alone won't keep marspot honest — perf is necessary
+but not sufficient.  Correctness (no UB, no parser panics), dependency
+hygiene (no audit-flagged crates, no license drift, no unused deps),
+and footprint stability (no fd / RSS leak over thousands of cycles)
+each get their own gate.  Together they form the "every push is
+honest" envelope; missing any one and a regression class becomes
+invisible.
+
+| Script | Tier | Runs | Catches |
+|---|---|---|---|
+| `bin/bench.sh` | fast | every commit / pre-push | parse / render perf floor (median over 5 trials) |
+| `bin/bench.sh --full` | gate | pre-merge to develop | live PTY throughput + vs-best-other ratio against `bench/baseline.json` |
+| `bin/bench-remote.sh [--full]` | gate | when local box is busy or baseline lock-in needed | the same gate on `ssh mini` — clean idle Apple Silicon host, no foreground jitter |
+| `bin/bench-run.sh` | refresh | manual; refreshes multi-session snapshot | multi-session-9x, scrollback-1m, idle-9x, vim-jump, htop-60s, active-9x-soak |
+| `bin/test.sh` | fast | per change | `cargo nextest run --lib` — 134 tests with parallel scheduling + per-test process isolation |
+| `bin/soak.sh` | nightly / pre-release | manual | the 5 `#[ignore = "soak"]` tests: 1000 spawn fd / child / RSS leak (pty.rs), 10 M-line scrollback bound for mem + disk variants (terminal.rs) |
+| `bin/fuzz.sh` | nightly / on parser change | manual; `DURATION_S=` configurable | parser panics on arbitrary byte input (cargo-fuzz, libFuzzer) |
+| `bin/miri.sh` | on UB risk | manual | UB / aliasing violations in pure-Rust modules (parser, grid, tmux, input — 44 tests; FFI-using modules covered by integration tests) |
+| `bin/lint-deps.sh` | pre-push | manual / hook | `cargo audit` (RustSec advisories) + `cargo deny check` (license policy, duplicate-version=deny, source provenance) + `cargo machete` (unused declared deps) |
+| `bin/profile-samply.sh` | when investigating regression | manual; `--attach <pid>` supported | flamegraph-friendly profile via samply (Speedscope / Firefox-profiler JSON) — visual complement to `bin/profile-live.sh`'s text sample report |
+| `bin/sync-toolchain.sh` | onboarding / when bench host drifts | manual; `HOST=mini` | one-command alignment of 13 cargo bins between dev box and remote bench host |
+
+### Why this layering matters
+
+The bench gate catches "did this change make marspot slower," but
+several whole regression classes are invisible to it:
+
+- A parser that panics on a CSI edge case still benches fine on
+  realistic input — `fuzz.sh` is what surfaces it.
+- A use-after-free in the grid that only manifests under specific
+  alias patterns benches fine until it doesn't — `miri.sh` catches
+  it on the pure-Rust modules where Miri can run.
+- A dep upgrade that pulls in an RustSec-flagged transitive dep
+  benches fine — `lint-deps.sh` (`cargo audit`) catches it.
+- A debug-print left in a hot path benches fine in release builds —
+  `cargo build` is gated against warnings (0 warnings invariant
+  re-established 2026-06-06).
+- An fd or process leak that only shows after 1000+ PTY spawns
+  benches fine on the 5-trial median — `soak.sh` is what catches it
+  before it manifests in a 9-hour Claude-Code working day.
+
+Each tool is one cheap, automatic check; together they make "every
+green merge" mean meaningfully more than "the bench gate passed."

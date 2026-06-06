@@ -263,7 +263,65 @@ let it leak into the matrix.
 
 ---
 
-## 7. Why this matters more than the cat-* numbers alone
+## 7. Remote bench host (clean idle Apple Silicon)
+
+The local dev box is a poor place to lock in a baseline — foreground
+apps, browser tabs, IDE language servers, and the bench harness
+itself contend for the same cores.  A 5–10 % thermal / scheduler tail
+on the dev box is normal and would otherwise force margin-wide
+baselines that mask real regressions.
+
+`bin/bench-remote.sh` dispatches the same gate (`bin/bench.sh` or
+`bin/bench.sh --full`) on a dedicated quiet host:
+
+- Default `HOST=mini` (`doracawl@mini` — M4 / 64 GB / macOS 26.5.1,
+  same Apple Silicon arch as the studio).  Override with
+  `HOST=<ssh-alias> bin/bench-remote.sh`.
+- Independent working tree at `~/bench-marspot/` with its own
+  `CARGO_TARGET_DIR`, so building on the remote host doesn't fight
+  with local builds for the cargo lock or target/.
+- Lock + cleanup contract: refuses to start if a previous run is
+  still holding the lock; cleans the lock + working state on exit
+  (success or failure).
+- Results land in `bench/remote-runs/<UTC-iso>/` with the full
+  stdout + exit code preserved for inspection.
+
+Use `bin/bench-remote.sh --full` before any merge that intends to
+update `bench/baseline.json`, and any time the local dev box is
+under load while you'd otherwise have to choose between flaky
+numbers and waiting.
+
+### Cross-terminal numbers on the remote host
+
+ssh sessions on macOS **cannot dispatch AppleEvents to GUI apps**
+(by design — AppleEvents need an authenticated GUI session).
+`bin/remote-measure-others.sh` health-checks for that and either:
+
+1. Auto-runs if a console / Screen Sharing session is active on the
+   remote host (AppleEvents can dispatch).
+2. Prints the Screen Sharing workaround if not — open Screen Sharing
+   to `mini`, run the script, capture, and let
+   `bench-remote.sh --full` consume the refreshed snapshot.
+
+When the snapshot can't be refreshed right now (remote host is
+headless, you're in a hurry), set
+`MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1` to bypass the freshness
+check with a stamped warning.  The gate still runs against the
+existing `competitors_snapshot` numbers; the warning is the audit
+trail.
+
+### Toolchain alignment
+
+`bin/sync-toolchain.sh` (default `HOST=mini`) one-shots the
+13 cargo bins the bench / gate scripts depend on (`cargo-nextest`,
+`cargo-fuzz`, `cargo-deny`, `cargo-audit`, `cargo-machete`,
+`samply`, etc.) to the same versions on the remote host as on the
+dev box.  Run after upgrading any of those locally, or as the
+first step of bringing up a new bench host.
+
+---
+
+## 8. Why this matters more than the cat-* numbers alone
 
 The 4 `cat-*` scenarios were sufficient when the goal was "be fast on
 a stream of bytes." The product goal is bigger: **be the terminal
