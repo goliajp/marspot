@@ -286,11 +286,18 @@ for entry in baseline["scenarios"]:
     if mode == "full":
         cur_live = load_live(sid)
         check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"])
-        # vs best other
-        best_other = max(
-            baseline["competitors_snapshot"]["iterm2"][f"{sid}_MBps"],
-            baseline["competitors_snapshot"]["warp"][f"{sid}_MBps"],
-        )
+        # vs best other — across every recorded competitor (iterm2, warp,
+        # ghostty, …). Pulled from competitors_snapshot so adding a new
+        # terminal is a baseline.json edit only, no bench.sh churn.
+        # Terminal.app is excluded by design: it's the OS-vendor reference
+        # floor, not a competitor we measure ourselves against.
+        cs = baseline["competitors_snapshot"]
+        key = f"{sid}_MBps"
+        competitor_mbps = [
+            v[key] for name, v in cs.items()
+            if isinstance(v, dict) and name != "terminal" and key in v
+        ]
+        best_other = max(competitor_mbps) if competitor_mbps else 0
         if cur_live is not None and best_other > 0:
             ratio = cur_live / best_other
             check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"])
