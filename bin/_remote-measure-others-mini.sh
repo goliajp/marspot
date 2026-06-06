@@ -116,14 +116,25 @@ for t in "${TERMS[@]}"; do
   rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
   cmd="$(build_one_cmd "$marker")"
   echo "==> launch $t" >&2
+  # Driver failures are tolerated — under LaunchAgent SE keystroke is
+  # TCC-blocked for /usr/bin/osascript (system TCC.db is SIP write-
+  # protected, can't be granted from ssh) so Warp specifically fails
+  # rc=1 here. Other drivers may also throw; keep going so the run still
+  # returns whatever subset DID work. Failed terminal's previous-day
+  # snapshot stays in baseline via per-terminal merge.
+  launch_rc=0
   case "$t" in
-    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd")" ;;
-    warp)     bin/drivers/warp.sh run-single "$cmd" ;;
+    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
+    warp)     bin/drivers/warp.sh run-single "$cmd" || launch_rc=$? ;;
     # Ghostty's binary needs full Aqua launchd domain (NSApp init +
     # Metal) → ASUSER (root) under ssh. Local runs use empty prefix.
-    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" ;;
-    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd")" ;;
+    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" || launch_rc=$? ;;
+    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
   esac
+  if (( launch_rc != 0 )); then
+    echo "==> $t driver failed rc=$launch_rc — continuing without it" >&2
+    continue
+  fi
   LAUNCHED_TERMS+=("$t")
 done
 
@@ -148,7 +159,12 @@ done
 python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys
 SCENARIOS = sys.argv[1:]
+# Internal driver / marker names use "iterm" (matches iterm.sh); the
+# baseline.json snapshot uses "iterm2" (matches the product / bundle id
+# `com.googlecode.iterm2`). Map on the way out so the merge in the
+# parent script doesn't create two separate competitor entries.
 TERMS = ["iterm", "warp", "ghostty", "terminal"]
+TERM_TO_KEY = {"iterm": "iterm2"}
 ROOT = os.environ.get("PWD", os.getcwd())
 out = {}
 for t in TERMS:
@@ -181,6 +197,6 @@ for t in TERMS:
         bps = size * 1_000_000_000 // med
         rec[f"{s}_MBps"] = round(bps / 1048576, 1)
     if rec:
-        out[t] = rec
+        out[TERM_TO_KEY.get(t, t)] = rec
 print(json.dumps(out, indent=2))
 PY

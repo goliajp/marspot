@@ -41,7 +41,11 @@ case "$cmd_word" in
     # Write the user command to a temp script so we can pass an
     # executable path to `-e`. Ghostty does not accept an inline
     # bash-style string here.
-    wrapper=$(mktemp /tmp/ghostty-wrapper-XXXXXX.sh)
+    # mktemp(1) on macOS only random-replaces a trailing run of X's.
+    # `…XXXXXX.sh` keeps XXXXXX literal and collides after the first
+    # call; use trailing-X form, no extension (Ghostty's `-e` accepts
+    # any executable path).
+    wrapper=$(mktemp /tmp/ghostty-wrapper-XXXXXX)
     {
       echo "#!/bin/bash"
       echo "$user_cmd"

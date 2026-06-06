@@ -34,7 +34,16 @@ case "$cmd_word" in
   run-tabs|run-windows)
     n=${1:?n}; shift
     user_cmd=${1:?cmd}; shift || true
-    esc_cmd=${user_cmd//\"/\\\"}
+    # iTerm 3.x triggers a multi-line paste confirmation dialog when
+    # `write text` injects >~256 chars. The dialog blocks execution
+    # waiting for a click that never arrives in headless dispatch.
+    # Workaround: stash the long cmd in a wrapper script and write
+    # only a short `bash <wrapper>; exit` to the session — well under
+    # the paste threshold.
+    wrapper=$(mktemp /tmp/iterm-wrapper-XXXXXX)
+    printf '#!/bin/bash\n%s\n' "$user_cmd" > "$wrapper"
+    chmod 0755 "$wrapper"
+    esc_cmd="bash $wrapper; exit"
     # ID-diff approach: snapshot window IDs before, create windows /
     # tabs, snapshot after, return the diff.  This guarantees every
     # window we created is reported, even if a per-window `write text`

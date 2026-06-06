@@ -9,12 +9,17 @@ hardcoded `max(iterm2, warp)`:
 
 | ID | Scenario | marspot live | Ghostty | ratio | floor | gap |
 |---|---|---|---|---|---|---|
-| G1 | cat-mixed  | 100.0 MB/s | 88.9 MB/s | 1.12× | 1.19× | marspot leads but margin under floor |
-| G2 | cat-cjk    | 80.0 MB/s | 160.0 MB/s | **0.50×** | 0.70× | **marspot half of Ghostty** |
-| G3 | cat-emoji  | 80.0 MB/s | 114.3 MB/s | 0.70× | 0.85× | marspot 30% behind Ghostty |
+| G1 | cat-mixed  | 94.1 MB/s  | 84.2 MB/s  | 1.12× | 1.19× | marspot leads, margin under floor |
+| G2 | cat-cjk    | 80.0 MB/s  | 114.3 MB/s | 0.70× | 0.70× | **at the floor** — borderline FAIL |
+| G3 | cat-emoji  | 80.0 MB/s  | 100.0 MB/s | 0.80× | 0.85× | marspot 20% behind Ghostty |
 
-Reference (unchanged): cat-ascii marspot 118.5 / Ghostty 94.1 → 1.26×,
-still ahead.
+Reference (still ahead): cat-ascii marspot 114.3 / Ghostty 78.0 → 1.5×.
+
+(Numbers reflect 2026-06-07 LaunchAgent-driven refresh on mini with
+iTerm/Terminal/Ghostty co-spawned under a shared GUI-session load —
+slightly slower across the board than the 2026-06-06 idle-mini run
+that first surfaced the gap. The relative shape is unchanged: marspot
+behind on CJK + emoji, even on mixed.)
 
 ## Why Ghostty is faster on CJK / emoji
 

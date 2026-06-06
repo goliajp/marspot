@@ -71,13 +71,13 @@
     "marspot": 112493
   },
   "competitors_snapshot": {
-    "_comment": "3-trial median, clean-machine, 2026-05-05.  measure-other.sh with TRIALS=3 + auto-driven via bin/drivers/<term>.sh.  Includes Terminal.app for context (max-of-iterm-warp is the vs-best-other denominator the gate uses; Terminal.app is OS-vendor floor, not 'competitor').",
-    "captured_at": "2026-06-06",
+    "_comment": "captured_at + per-key timestamps. iterm2/ghostty/terminal refreshed 2026-06-07 via LaunchAgent on mini (under-load, GUI session active). warp last refreshed 2026-05-05 \u2014 SE keystroke is TCC Accessibility-gated for /usr/bin/osascript and system TCC.db is SIP write-protected, so warp can't be ssh-refreshed without manual System Settings grant. vs-best-other denominator = max(iterm2, warp, ghostty); terminal excluded as OS-vendor reference floor.",
+    "captured_at": "2026-06-07",
     "iterm2": {
-      "cat-ascii_MBps": 56.1,
-      "cat-mixed_MBps": 28.1,
-      "cat-cjk_MBps": 5.7,
-      "cat-emoji_MBps": 2.4
+      "cat-ascii_MBps": 68.1,
+      "cat-mixed_MBps": 24.2,
+      "cat-cjk_MBps": 5.2,
+      "cat-emoji_MBps": 2.7
     },
     "warp": {
       "cat-ascii_MBps": 47.8,
@@ -86,16 +86,16 @@
       "cat-emoji_MBps": 44.4
     },
     "terminal": {
-      "cat-ascii_MBps": 47.8,
-      "cat-mixed_MBps": 42.1,
-      "cat-cjk_MBps": 42.1,
+      "cat-ascii_MBps": 50.0,
+      "cat-mixed_MBps": 39.0,
+      "cat-cjk_MBps": 44.4,
       "cat-emoji_MBps": 50.0
     },
     "ghostty": {
-      "cat-ascii_MBps": 94.1,
-      "cat-mixed_MBps": 88.9,
-      "cat-cjk_MBps": 160.0,
-      "cat-emoji_MBps": 114.3
+      "cat-ascii_MBps": 78.0,
+      "cat-mixed_MBps": 84.2,
+      "cat-cjk_MBps": 114.3,
+      "cat-emoji_MBps": 100.0
     }
   },
   "multi_session_thresholds": {

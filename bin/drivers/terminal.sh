@@ -33,7 +33,14 @@ case "$cmd_word" in
       n=${1:?n}; shift
     fi
     user_cmd=${1:?cmd}; shift || true
-    esc_cmd=${user_cmd//\"/\\\"}
+    # Same paste-threshold pattern as iterm.sh — Terminal.app's
+    # `do script` accepts long strings but smart-paste / autocompletion
+    # can mangle escape-heavy bench cmds. Stash in a wrapper, dispatch
+    # a short `bash <wrapper>` instead.
+    wrapper=$(mktemp /tmp/terminal-wrapper-XXXXXX)
+    printf '#!/bin/bash\n%s\n' "$user_cmd" > "$wrapper"
+    chmod 0755 "$wrapper"
+    esc_cmd="bash $wrapper"
     # ID-diff approach: Terminal.app's `do script` returns a tab object
     # but extracting its window's id is awkward.  Snapshot the existing
     # window-id set, run do-script n times, the new ids are the diff.
