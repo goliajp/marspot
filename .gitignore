@@ -14,6 +14,7 @@
 *.swp
 bench/scenarios/
 bench/results/
+bench/remote-runs/
 
 # Per-session handoff snapshot (managed by /handoff skill, not source).
 .claude/handoff.md
