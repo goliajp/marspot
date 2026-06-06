@@ -22,9 +22,54 @@ TRIALS=3
 # Terminal.app intentionally omitted: requires a one-time Automation
 # permission grant on the remote host (System Settings → Privacy &
 # Security → Automation), and the bench gate only consults iTerm /
-# Warp anyway. Re-add `terminal` here once the host is onboarded.
-TERMS=(iterm warp)
+# Warp / Ghostty anyway. Re-add `terminal` here once the host is
+# onboarded.
+TERMS=(iterm warp ghostty)
 MARKER_TIMEOUT_S=600
+
+# ssh→GUI bridge. Direct ssh dispatch can't reach Aqua / WindowServer.
+# After exhaustive testing on macOS 26.5 / iTerm 3.6.11 / Ghostty 1.3.1
+# the only terminal we can drive automatically via ssh is **Ghostty**,
+# using `sudo -n launchctl asuser <uid>` to inject the spawn into the
+# user's GUI launchd domain so NSApp init + Metal surface bootstrap.
+# Requires a one-time NOPASSWD sudoers entry:
+#   doracawl ALL=(root) NOPASSWD: /bin/launchctl asuser <uid> *
+#
+# Why the other terminals can't be driven from ssh:
+#  * iTerm 3.6.11 AppleScript dispatch fails under both `launchctl
+#    bsexec gui/<uid>` (-1728 "Can't get application iTerm" — iTerm's
+#    AE entry is session-scoped, ssh-launched instances don't register
+#    where bsexec-spawned osascript can find them) and `sudo -n
+#    launchctl asuser` (-1712 timeout — root osascript needs a separate
+#    TCC Automation grant that can't be granted non-interactively).
+#    AS syntax also varies between versions — `create window with
+#    profile "Default"` errors at parse time in 3.6.11 even when iTerm
+#    is fully running.
+#  * Warp's driver depends on `tell application "System Events" to
+#    keystroke`. SE keystroke is a TCC Accessibility-gated path that
+#    is unreachable from any ssh-spawned osascript regardless of
+#    bridge (-1712 in both).
+#
+# Result: iTerm / Warp / Terminal.app baseline data must be refreshed
+# from a console (Screen Sharing) session via direct `bash
+# bin/_remote-measure-others-mini.sh` with no SSH_CONNECTION env. Per-
+# terminal merge keeps their previous snapshot intact when this ssh
+# run produces no entry for them.
+ASUSER=""
+SSH_MODE=0
+if [[ -n "${SSH_CONNECTION:-}" ]]; then
+  SSH_MODE=1
+  uid="$(id -u)"
+  if sudo -n launchctl asuser "$uid" /usr/bin/true 2>/dev/null; then
+    ASUSER="sudo -n launchctl asuser $uid"
+  fi
+  if [[ -z "$ASUSER" ]]; then
+    echo "==> ssh mode: NOPASSWD launchctl asuser not configured — even Ghostty will fail. Add to /etc/sudoers.d/marspot-bench:" >&2
+    echo "    doracawl ALL=(root) NOPASSWD: /bin/launchctl asuser $uid *" >&2
+  else
+    echo "==> ssh mode: ASUSER=on. Driving Ghostty only; iTerm/Warp/Terminal need console refresh." >&2
+  fi
+fi
 
 # Make sure scenarios are present. gen-scenarios.sh writes the .bin
 # files this script's cat targets read.
@@ -51,18 +96,34 @@ build_one_cmd() {
 # macOS ships bash 3.2 → no `declare -A`. Use one var per terminal.
 WIN_iterm=""
 WIN_warp=""
+WIN_ghostty=""
+LAUNCHED_TERMS=()
 for t in "${TERMS[@]}"; do
+  # In ssh mode, only Ghostty is reachable (see header comment for
+  # why iTerm/Warp/Terminal are unreachable from ssh). Skip the rest;
+  # their previous baseline snapshot stays intact via per-terminal
+  # merge in the parent script.
+  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" ]]; then
+    echo "==> skip $t (ssh mode — needs console refresh)" >&2
+    continue
+  fi
   marker="/tmp/measure-${t}-all.txt"
-  rm -f "$marker"
+  # Marker may be root-owned from a previous ssh-mode run; use sudo to
+  # be safe. Local runs (no ASUSER) just succeed on the plain rm.
+  rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
   cmd="$(build_one_cmd "$marker")"
   echo "==> launch $t" >&2
   case "$t" in
-    iterm) WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd")" ;;
-    warp)  bin/drivers/warp.sh run-single "$cmd" ;;
+    iterm)   WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd")" ;;
+    warp)    bin/drivers/warp.sh run-single "$cmd" ;;
+    # Ghostty's binary needs full Aqua launchd domain (NSApp init +
+    # Metal) → ASUSER (root) under ssh. Local runs use empty prefix.
+    ghostty) $ASUSER bin/drivers/ghostty.sh run-single "$cmd" ;;
   esac
+  LAUNCHED_TERMS+=("$t")
 done
 
-for t in "${TERMS[@]}"; do
+for t in "${LAUNCHED_TERMS[@]}"; do
   marker="/tmp/measure-${t}-all.txt"
   echo "==> wait $t marker" >&2
   for _ in $(seq 1 "$MARKER_TIMEOUT_S"); do
@@ -71,16 +132,18 @@ for t in "${TERMS[@]}"; do
   done
 done
 
-# Close windows by id (skip warp — its driver explicitly refuses to
-# quit Warp to avoid killing the user's session; the marker shell
-# already exited via the trailing `exit`).
+# Close windows by id (skip warp + ghostty — their drivers explicitly
+# refuse to quit the app to avoid killing the user's session; their
+# marker shells already exited via the trailing `exit`).
 [[ -n "$WIN_iterm" ]] && bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true
 
-# Parse markers → JSON on stdout.
+# Parse markers → JSON on stdout. Markers may be root-owned (when the
+# surface ran under sudo asuser); they're mode 0644 world-readable so
+# this user-mode parse can still read them.
 python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys
 SCENARIOS = sys.argv[1:]
-TERMS = ["iterm", "warp"]
+TERMS = ["iterm", "warp", "ghostty"]
 ROOT = os.environ.get("PWD", os.getcwd())
 out = {}
 for t in TERMS:

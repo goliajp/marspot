@@ -72,7 +72,7 @@
   },
   "competitors_snapshot": {
     "_comment": "3-trial median, clean-machine, 2026-05-05.  measure-other.sh with TRIALS=3 + auto-driven via bin/drivers/<term>.sh.  Includes Terminal.app for context (max-of-iterm-warp is the vs-best-other denominator the gate uses; Terminal.app is OS-vendor floor, not 'competitor').",
-    "captured_at": "2026-05-05",
+    "captured_at": "2026-06-06",
     "iterm2": {
       "cat-ascii_MBps": 56.1,
       "cat-mixed_MBps": 28.1,
@@ -90,6 +90,12 @@
       "cat-mixed_MBps": 42.1,
       "cat-cjk_MBps": 42.1,
       "cat-emoji_MBps": 50.0
+    },
+    "ghostty": {
+      "cat-ascii_MBps": 94.1,
+      "cat-mixed_MBps": 88.9,
+      "cat-cjk_MBps": 160.0,
+      "cat-emoji_MBps": 114.3
     }
   },
   "multi_session_thresholds": {
