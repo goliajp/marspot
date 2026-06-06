@@ -58,10 +58,17 @@ doesn't measure those doesn't measure the product.
 
 | Terminal | Role | Driver |
 |---|---|---|
-| `marspot`     | the subject under test | direct (`MARSPOT_SHELL` one-shot script, `--bench` modes, env-var instrumentation) |
-| `iterm2`   | primary competitor | AppleScript → `tell application "iTerm" … write text` |
-| `warp`     | primary competitor | AppleScript → `open -a Warp`, System Events keystroke |
+| `marspot`  | the subject under test | direct (`MARSPOT_SHELL` one-shot script, `--bench` modes, env-var instrumentation) |
+| `iterm2`   | competitor | AppleScript → `tell application "iTerm" … write text` |
+| `warp`     | competitor | AppleScript → `open -a Warp`, System Events keystroke |
+| `ghostty`  | competitor | binary `-e <wrapper-script>` (Ghostty has no AS dict; no keystroke needed) |
 | `terminal` | OS-vendor reference floor | AppleScript → `tell application "Terminal" … do script` |
+
+`competitors_snapshot` updates of `iterm2` / `warp` / `ghostty` all
+participate in the `vs-best-other` floor — `bin/bench.sh` iterates the
+snapshot rather than hardcoding two terminals, so adding a competitor
+is a baseline-only edit. Terminal.app is excluded from the floor by
+design (OS-vendor reference, not a competitor we measure against).
 
 Cross-terminal driving uses a single contract: each driver puts a
 fresh window in a known state, executes the scenario, and writes
@@ -150,6 +157,11 @@ for each (scenario, terminal) where the scenario doesn't declare
 - **warp**: `open -a Warp` for a fresh window, `osascript`
   System-Events keystrokes for the command. Brittle — `--print-only`
   paste fallback when it misfires.
+- **ghostty**: binary `-e <wrapper-script>`. Ghostty 1.3.x exposes no
+  meaningful AppleScript dictionary and `--command=` is single-binary
+  only, so the driver writes the shell command to a temp script and
+  passes its path to `-e`. The surface spawns the wrapper, the wrapper
+  writes the marker, the shell exits — no keystroke, no AS.
 - **terminal.app**: `osascript`, `do script`. Most stable of the
   three; useful as a sanity check when iterm2/warp drivers misbehave.
 
@@ -277,9 +289,11 @@ re-run `bin/bench.sh --update-baseline`.
 
 **Add a terminal**: drop `bin/drivers/<term>.sh` implementing the
 launcher contract (single function: `run_in_<term> <cmd> <marker>`),
-register it in `bin/measure-other.sh`'s `OTHER_TERMINALS` list, run
-`bin/measure-other.sh` to capture a competitor snapshot, paste the
-numbers into `bench/baseline.json` `competitors_snapshot`.
+register it in `bin/measure-other.sh`'s `OTHER_TERMINALS` list and in
+`bin/_remote-measure-others-mini.sh`'s `TERMS` list, run the latter to
+capture a competitor snapshot, paste the numbers into
+`bench/baseline.json` `competitors_snapshot`. No edits to `bin/bench.sh`
+— the `vs-best-other` gate iterates the snapshot automatically.
 
 **Add a metric**: it must be defined for every cell where it could
 apply (or explicitly marked unsupported). Add it to the metrics table
@@ -326,13 +340,29 @@ numbers and waiting.
 
 ssh sessions on macOS **cannot dispatch AppleEvents to GUI apps**
 (by design — AppleEvents need an authenticated GUI session).
-`bin/remote-measure-others.sh` health-checks for that and either:
+What survives ssh varies by terminal and was mapped empirically:
 
-1. Auto-runs if a console / Screen Sharing session is active on the
-   remote host (AppleEvents can dispatch).
-2. Prints the Screen Sharing workaround if not — open Screen Sharing
-   to `mini`, run the script, capture, and let
-   `bench-remote.sh --full` consume the refreshed snapshot.
+| Terminal | ssh-driven? | Bridge |
+|---|---|---|
+| `ghostty` | **yes** | `sudo -n launchctl asuser <uid> ghostty -e <wrapper>` — injects spawn into the user's GUI launchd domain so NSApp + Metal bootstrap. Surface runs as root, but throughput numbers are PTY-bound and unaffected by uid. |
+| `iterm2`  | no | `bsexec gui/<uid>` lets osascript find iTerm by name but `tell application "iTerm" to count windows` returns -1728 even when iTerm is running; `sudo asuser` osascript hits a TCC Automation grant the console user has to authorize once. AS syntax also varies between iTerm versions (3.6.11 rejects `create window with profile "Default"` at parse time). |
+| `warp`    | no | Driver depends on `tell application "System Events" to keystroke`. SE keystroke is TCC-Accessibility-gated and unreachable from any ssh-spawned osascript regardless of bridge (-1712 timeout). |
+| `terminal`| no | Same SE / Automation gating as warp/iterm2. |
+
+One-time NOPASSWD sudoers entry on the bench host enables the asuser
+bridge:
+
+```
+echo "doracawl ALL=(root) NOPASSWD: /bin/launchctl asuser $(id -u) *" \
+  | sudo tee /etc/sudoers.d/marspot-bench
+sudo chmod 0440 /etc/sudoers.d/marspot-bench
+```
+
+`bin/_remote-measure-others-mini.sh` auto-detects SSH_CONNECTION and
+runs only Ghostty in ssh mode; iTerm/Warp/Terminal snapshots are
+preserved untouched by per-terminal merge in
+`bin/remote-measure-others.sh`. To refresh those, Screen Share into
+the bench host and invoke the script with no SSH_CONNECTION set.
 
 When the snapshot can't be refreshed right now (remote host is
 headless, you're in a hurry), set

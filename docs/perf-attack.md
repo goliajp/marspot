@@ -74,6 +74,21 @@ still real.
 | D1 | scrollback-1m vs Term push | marspot **97.7** / Term 91.6 (**1.07×**, was 1.003× godot) | ≥ 1.5× Term | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
 | D2 | scrollback-1m vs iTerm2 | marspot 97.7 / iTerm2 71.8 (**1.36×**, was 1.08× godot) | ≥ 1.5× iTerm2 | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
 
+### G — marspot vs Ghostty (new competitor 2026-06-06)
+
+Ghostty 1.3.1 entered `competitors_snapshot` 2026-06-06 (mini, M4,
+3-trial median). `bin/bench.sh` `vs-best-other` now iterates the
+snapshot rather than hardcoding `max(iterm2, warp)`, so Ghostty's
+numbers participate. cat-mixed / cat-cjk / cat-emoji fail floor;
+cat-ascii stays ahead. Same underlying mechanism as B3/B4 (CoreText
+glyph atlas), bundled with that attack window.
+
+| ID | Metric | Current (vs Ghostty) | Target | File | Status |
+|---|---|---|---|---|---|
+| G1 | live cat-mixed | 1.12× (100.0 / 88.9) | ≥ 1.19× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | queued (bundled with B3/B4) |
+| G2 | live cat-cjk   | **0.50×** (80.0 / 160.0) | ≥ 0.70× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | **active — biggest known gap** |
+| G3 | live cat-emoji | 0.70× (80.0 / 114.3) | ≥ 0.85× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | queued (bundled with B3/B4) |
+
 ### E — Bench infrastructure fixes (block honest measurement)
 
 Must land before A/B/C/D so subsequent diagnoses aren't polluted by
@@ -140,11 +155,14 @@ Remaining queue:
      gate or add fill-rate check
    - if drift > 1.10× → real leak; Instruments allocations + per-
      subsystem RSS slicing
-2. **B3 + B4** (1-2 weeks) — CJK/emoji vs Apple's CoreText/SBIX paths.
-   Cleanup target after E7 unblocks reliable measurements.
-   Specific tactic: pool CGBitmapContext + reuse bitmap buffer in
-   `glyph_atlas::rasterise_glyph` (per-glyph context creation +
-   property setting is ~10-30% of CJK/emoji raster cost).
+2. **B3 + B4 + G1/G2/G3** (1-2 weeks) — CJK/emoji vs Apple's
+   CoreText/SBIX paths, and vs Ghostty's hot glyph atlas. Same root
+   cause; G-series exposed when Ghostty entered the snapshot and the
+   gate stopped masking it. Specific tactic: pool CGBitmapContext +
+   reuse bitmap buffer in `glyph_atlas::rasterise_glyph` (per-glyph
+   context creation + property setting is ~10-30% of CJK/emoji
+   raster cost). Exit when `bench-remote --full` passes 21/21 with
+   Ghostty in the snapshot (current: fails 3/21 on G1/G2/G3).
 3. **C** (few days, probably folded into A1 fix) — per-session RSS
    bloat is largely the same lazy-fault footprint as A1
 4. **D-rescope** (1 week) — D-target reframed: scrollback ACCESS at
