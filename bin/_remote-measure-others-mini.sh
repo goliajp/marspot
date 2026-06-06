@@ -19,12 +19,12 @@ cd "$ROOT"
 
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 TRIALS=3
-# Terminal.app intentionally omitted: requires a one-time Automation
-# permission grant on the remote host (System Settings → Privacy &
-# Security → Automation), and the bench gate only consults iTerm /
-# Warp / Ghostty anyway. Re-add `terminal` here once the host is
-# onboarded.
-TERMS=(iterm warp ghostty)
+# Console mode drives all four terminals. ssh mode falls back to
+# ghostty-only (see ASUSER block below). Terminal.app onboarding is
+# the one-time Automation grant during install-bench-launchagent.sh
+# first-fire, after which subsequent LaunchAgent-spawned runs reuse
+# the cached TCC scope.
+TERMS=(iterm warp ghostty terminal)
 MARKER_TIMEOUT_S=600
 
 # ssh→GUI bridge. Direct ssh dispatch can't reach Aqua / WindowServer.
@@ -97,28 +97,32 @@ build_one_cmd() {
 WIN_iterm=""
 WIN_warp=""
 WIN_ghostty=""
+WIN_terminal=""
 LAUNCHED_TERMS=()
 for t in "${TERMS[@]}"; do
   # In ssh mode, only Ghostty is reachable (see header comment for
   # why iTerm/Warp/Terminal are unreachable from ssh). Skip the rest;
   # their previous baseline snapshot stays intact via per-terminal
-  # merge in the parent script.
+  # merge in the parent script. To refresh iTerm/Warp/Terminal use the
+  # LaunchAgent route (bin/install-bench-launchagent.sh) so the
+  # measure runs inside the user's Aqua session, not over ssh.
   if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" ]]; then
-    echo "==> skip $t (ssh mode — needs console refresh)" >&2
+    echo "==> skip $t (ssh mode — use LaunchAgent trigger for full refresh)" >&2
     continue
   fi
   marker="/tmp/measure-${t}-all.txt"
-  # Marker may be root-owned from a previous ssh-mode run; use sudo to
-  # be safe. Local runs (no ASUSER) just succeed on the plain rm.
+  # Marker may be root-owned from a previous ssh-mode ghostty run; use
+  # sudo to be safe. Local/LaunchAgent runs just succeed on plain rm.
   rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
   cmd="$(build_one_cmd "$marker")"
   echo "==> launch $t" >&2
   case "$t" in
-    iterm)   WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd")" ;;
-    warp)    bin/drivers/warp.sh run-single "$cmd" ;;
+    iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd")" ;;
+    warp)     bin/drivers/warp.sh run-single "$cmd" ;;
     # Ghostty's binary needs full Aqua launchd domain (NSApp init +
     # Metal) → ASUSER (root) under ssh. Local runs use empty prefix.
-    ghostty) $ASUSER bin/drivers/ghostty.sh run-single "$cmd" ;;
+    ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" ;;
+    terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd")" ;;
   esac
   LAUNCHED_TERMS+=("$t")
 done
@@ -135,7 +139,8 @@ done
 # Close windows by id (skip warp + ghostty — their drivers explicitly
 # refuse to quit the app to avoid killing the user's session; their
 # marker shells already exited via the trailing `exit`).
-[[ -n "$WIN_iterm" ]] && bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true
+[[ -n "$WIN_iterm" ]]    && bin/drivers/iterm.sh    close-windows "$WIN_iterm"    >/dev/null 2>&1 || true
+[[ -n "$WIN_terminal" ]] && bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
 
 # Parse markers → JSON on stdout. Markers may be root-owned (when the
 # surface ran under sudo asuser); they're mode 0644 world-readable so
@@ -143,7 +148,7 @@ done
 python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys
 SCENARIOS = sys.argv[1:]
-TERMS = ["iterm", "warp", "ghostty"]
+TERMS = ["iterm", "warp", "ghostty", "terminal"]
 ROOT = os.environ.get("PWD", os.getcwd())
 out = {}
 for t in TERMS:
