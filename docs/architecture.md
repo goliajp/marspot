@@ -142,7 +142,9 @@ invisible.
 | `bin/bench-remote.sh [--full]` | gate | when local box is busy or baseline lock-in needed | the same gate on `ssh mini` — clean idle Apple Silicon host, no foreground jitter |
 | `bin/bench-run.sh` | refresh | manual; refreshes multi-session snapshot | multi-session-9x, scrollback-1m, idle-9x, vim-jump, htop-60s, active-9x-soak |
 | `bin/test.sh` | fast | per change | `cargo nextest run --lib` — 134 tests with parallel scheduling + per-test process isolation |
-| `bin/soak.sh` | nightly / pre-release | manual | the 5 `#[ignore = "soak"]` tests: 1000 spawn fd / child / RSS leak (pty.rs), 10 M-line scrollback bound for mem + disk variants (terminal.rs) |
+| `bin/soak.sh --smoke` | pre-push (when touching PTY / spawn / fd code) | manual; ~30 s warm | the 3 pty spawn-loop assertions (fd / child / RSS leak over 1000 spawns) — every push catches OS-resource leaks without slowing the gate by minutes |
+| `bin/soak.sh` | nightly / pre-release | manual; ~5–10 min | all 5 `#[ignore = "soak"]` tests: above + 10 M-line scrollback bound for mem + disk variants (terminal.rs) |
+| `bin/scenarios/idle-9x.sh marspot <out> --extended` + `active-9x-soak` (via `bench-run.sh --extended`) | pre-release | manual; 30 min each | end-to-end process soak — mcli + glyph atlas + Metal + AppKit; what `soak.sh` can't cover because it stays headless cargo-test territory |
 | `bin/fuzz.sh` | nightly / on parser change | manual; `DURATION_S=` configurable | parser panics on arbitrary byte input (cargo-fuzz, libFuzzer) |
 | `bin/miri.sh` | on UB risk | manual | UB / aliasing violations in pure-Rust modules (parser, grid, tmux, input — 44 tests; FFI-using modules covered by integration tests) |
 | `bin/lint-deps.sh` | pre-push | manual / hook | `cargo audit` (RustSec advisories) + `cargo deny check` (license policy, duplicate-version=deny, source provenance) + `cargo machete` (unused declared deps) |
