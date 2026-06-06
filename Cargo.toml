@@ -16,7 +16,7 @@ core-text = "21.0"
 core-graphics = "0.24"
 core-foundation = "0.10"
 foreign-types = "0.5"
-png = "0.17"
+png = "0.18"
 
 [profile.release]
 # Fat LTO matters now that we split into a lib + multiple bins (mars,

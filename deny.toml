@@ -28,10 +28,11 @@ confidence-threshold = 0.8
 
 [bans]
 # Duplicate versions of the same crate inflate binary size — direct
-# enemy of the binary_size_bytes_max bench gate. Start at "warn" so
-# fixing transitive dup chains isn't a blocker; flip to "deny" once
-# the graph is clean.
-multiple-versions = "warn"
+# enemy of the binary_size_bytes_max bench gate. The graph is now
+# dup-free (png 0.17 → 0.18 fixed the last bitflags dup); keep it
+# that way at "deny" so any future dep that drags a dup in fails
+# the gate, forcing a conscious decision.
+multiple-versions = "deny"
 wildcards = "deny"
 # Crates explicitly disallowed go here, with a reason note.
 deny = []
