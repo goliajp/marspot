@@ -19,7 +19,7 @@
 # subcommands print iTerm2's window IDs which are stable identifiers
 # (not the visible "name").  History/contents matching as a fallback
 # is intentionally avoided — it can collateral-close the user's real
-# windows that happen to mention "mars-bench" somewhere.
+# windows that happen to mention "marspot-bench" somewhere.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

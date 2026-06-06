@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/scenarios/multi-session-9x.sh — 9 parallel cat workloads.
 #
-# Why this scenario exists: mars's no.1 value proposition is hosting
+# Why this scenario exists: marspot's no.1 value proposition is hosting
 # many concurrent sessions for multi-session Claude-Code work.  A
 # benchmark that doesn't measure the multi-session case doesn't
 # measure the product.
@@ -13,7 +13,7 @@
 # the pre-launch baseline so the user's existing windows don't bias
 # the measurement.
 #
-# Cross-terminal safety: mars (our SUT) is killed and relaunched.
+# Cross-terminal safety: marspot (our SUT) is killed and relaunched.
 # iterm2 / warp / terminal.app are NEVER killed — quitting them would
 # destroy the user's open work.  We only open new windows in those
 # apps; if their profile setting is "keep window open after exit",
@@ -44,7 +44,7 @@ RUN_DIR="$MARKER_PREFIX/multi9x-$terminal-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 
 # Worker tags its tab title with this so we can spot leftover windows.
-RUN_TAG="mars-bench-$$"
+RUN_TAG="marspot-bench-$$"
 
 WORKER="$RUN_DIR/worker.sh"
 cat > "$WORKER" <<EOF
@@ -75,12 +75,12 @@ baseline_kib=$(rss_total_kib "$terminal" || echo 0)
 WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
-    mars)
-      # mars is the SUT and not the user's daily driver in this repo —
+    marspot)
+      # marspot is the SUT and not the user's daily driver in this repo —
       # killing it is fine.  Auto-spawns 9 sessions in 3×3 grid;
-      # MARS_SHELL is per-session so all 9 run our worker.sh.
-      kill_app mars || true
-      "$ROOT/bin/drivers/mars.sh" run-shell "$WORKER"
+      # MARSPOT_SHELL is per-session so all 9 run our worker.sh.
+      kill_app marspot || true
+      "$ROOT/bin/drivers/marspot.sh" run-shell "$WORKER"
       ;;
     iterm)
       # Open 9 fresh windows; capture their window IDs so we can close
@@ -167,7 +167,7 @@ post_kib=$(rss_total_kib "$terminal" || echo 0)
 
 # Quit our SUT — never the user's iterm/warp/terminal.
 case "$terminal" in
-  mars) kill_app mars || true ;;
+  marspot) kill_app marspot || true ;;
 esac
 
 count=$(find "$RUN_DIR" -maxdepth 1 -name 'timing-*.txt' 2>/dev/null | wc -l | tr -d ' ')
@@ -263,7 +263,7 @@ if m['rss_peak_delta_KiB'] is not None:
     print(f"    RSS Δ peak / avg / post  {m['rss_peak_delta_KiB']/1024:.0f} / {m['rss_avg_delta_KiB']/1024:.0f} / {m['rss_post_delta_KiB']/1024:.0f} MiB  (baseline {baseline_kib/1024:.0f} MiB)")
 PY
 
-if [[ "$terminal" != "mars" && "$terminal" != "warp" ]]; then
+if [[ "$terminal" != "marspot" && "$terminal" != "warp" ]]; then
   echo "  cleanup: closing $N $terminal window(s) we opened (by tracked IDs)…" >&2
   cleanup_windows
 fi

@@ -45,7 +45,7 @@ fi
 RUN_DIR="$MARKER_PREFIX/htop-$terminal-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
-RUN_TAG="mars-bench-htop-$$"
+RUN_TAG="marspot-bench-htop-$$"
 
 WORKER="$RUN_DIR/worker.sh"
 cat > "$WORKER" <<EOF
@@ -75,7 +75,7 @@ cleanup_windows() {
 }
 
 case "$terminal" in
-  mars)     sample_proc=mcli ;;
+  marspot)     sample_proc=mcli ;;
   *)        sample_proc=$terminal ;;
 esac
 
@@ -86,9 +86,9 @@ baseline_kib=$(rss_total_kib "$sample_proc" || echo 0)
 [[ -z "$baseline_kib" ]] && baseline_kib=0
 
 case "$terminal" in
-  mars)
-    kill_app mars || true; kill_app mcli || true
-    "$ROOT/bin/drivers/mars.sh" run-shell-mcli "$WORKER"
+  marspot)
+    kill_app marspot || true; kill_app mcli || true
+    "$ROOT/bin/drivers/marspot.sh" run-shell-mcli "$WORKER"
     ;;
   iterm)
     "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER" > "$WIN_IDS_FILE"

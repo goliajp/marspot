@@ -7,23 +7,23 @@
 ## What's broken
 
 `scrollback-1m` pushes 1,000,000 lines (~80 MiB) into the terminal,
-measuring how fast it ingests.  This is a flagship mars scenario —
+measuring how fast it ingests.  This is a flagship marspot scenario —
 the whole "unlimited scroll" architecture (anon-mmap ring, line
 indexer, MADV_SEQUENTIAL) was built for it.  Numbers from
 2026-05-05:
 
-| ID | mars | iTerm2 | Terminal.app | mars edge |
+| ID | marspot | iTerm2 | Terminal.app | marspot edge |
 |---|---|---|---|---|
 | D1 | 79.3 MB/s | – | 79.1 MB/s | **1.003×** ⚠️ basically tied |
 | D2 | 79.3 MB/s | 73.1 MB/s | – | 1.08× ⚠️ thin |
 
 Terminal.app has *no scrollback persistence at all* — it just runs
-text through the renderer.  mars doing the full anon-mmap ring
+text through the renderer.  marspot doing the full anon-mmap ring
 write + index + render + scrollback structure should be either
 *faster* (if the architecture pays for itself) or *clearly slower
 with a structural reason* (if write throughput is bounded by mmap
 dirty-page rate).  Tied is the worst result: the architecture
-isn't paying off, AND mars is doing more work.
+isn't paying off, AND marspot is doing more work.
 
 The push throughput should be ≥ 1.5× both competitors for the
 "dramatic perf advantage" framing — current state is "noise gap."
@@ -32,7 +32,7 @@ The push throughput should be ≥ 1.5× both competitors for the
 
 `scrollback-1m` is the closest analog to the multi-hour
 Claude-Code session use-case (lots of output, history matters).
-If mars can't beat Terminal.app on the simplest variant (1 session,
+If marspot can't beat Terminal.app on the simplest variant (1 session,
 1M lines), the multi-session case is at risk too.  Plus: the
 unlimited-scroll value prop is sold on this number.
 
@@ -41,10 +41,10 @@ unlimited-scroll value prop is sold on this number.
 ### D1: scrollback-1m vs Terminal.app
 
 ```sh
-bin/scenarios/scrollback-1m.sh mars     /tmp/d-mars.json
+bin/scenarios/scrollback-1m.sh marspot     /tmp/d-marspot.json
 bin/scenarios/scrollback-1m.sh terminal /tmp/d-term.json
 # Currently: 79.3 / 79.1 = 1.003×
-# Target:   mars/Term ≥ 1.5× (mars ≥ ~119 MB/s if Term holds 79)
+# Target:   marspot/Term ≥ 1.5× (marspot ≥ ~119 MB/s if Term holds 79)
 ```
 
 ### D2: scrollback-1m vs iTerm2
@@ -52,10 +52,10 @@ bin/scenarios/scrollback-1m.sh terminal /tmp/d-term.json
 ```sh
 bin/scenarios/scrollback-1m.sh iterm    /tmp/d-iterm.json
 # Currently: 79.3 / 73.1 = 1.08×
-# Target:   mars/iTerm2 ≥ 1.5× (mars ≥ ~110 MB/s if iTerm2 holds 73)
+# Target:   marspot/iTerm2 ≥ 1.5× (marspot ≥ ~110 MB/s if iTerm2 holds 73)
 ```
 
-Combined exit: mars ≥ 110 MB/s on push throughput (clears both
+Combined exit: marspot ≥ 110 MB/s on push throughput (clears both
 floors comfortably).
 
 ## Hypotheses
@@ -67,9 +67,9 @@ floors comfortably).
    Profile to find the dominant step.
 2. **mmap dirty-page rate caps writes** — anon mmap ring is
    page-aligned; writing across pages dirties them; OS page-out
-   pressure on a 16 GB Mac with mars loaded could cap us around 80
+   pressure on a 16 GB Mac with marspot loaded could cap us around 80
    MB/s on the ring path.  Verify: same scenario with
-   `MARS_DISK_SCROLLBACK=0` (memory mode) — if numbers jump, the
+   `MARSPOT_DISK_SCROLLBACK=0` (memory mode) — if numbers jump, the
    mmap path is the cap.  If not, we're upstream-bottlenecked.
 3. **Renderer wakeup cost dominates** — every batch of lines
    wakes the renderer for a frame; if the wakeup cost is high,
@@ -82,14 +82,14 @@ floors comfortably).
 
 ## Investigation roadmap
 
-1. **Memory-mode A/B**: run `MARS_DISK_SCROLLBACK=0
-   bin/scenarios/scrollback-1m.sh mars` 3× and compare to
+1. **Memory-mode A/B**: run `MARSPOT_DISK_SCROLLBACK=0
+   bin/scenarios/scrollback-1m.sh marspot` 3× and compare to
    default (disk-backed).  Quantifies hypothesis 2.
 2. **Time-profile push** — Instruments while running scrollback-1m.
    Categorise: PTY syscalls, parser, grid append, ring write,
    render submit.  Identify > 30% bucket.
-3. **mcli vs mars (1×1) comparison** — if mcli is faster than
-   mars 1-cell, the multi-session machinery is paying tax on
+3. **mcli vs marspot (1×1) comparison** — if mcli is faster than
+   marspot 1-cell, the multi-session machinery is paying tax on
    single-session.  If they match, machinery is fine.
 4. **MADV_SEQUENTIAL effectiveness** — confirm via vmstat /
    `sysctl vm.swapusage` that pages are being released as
@@ -123,9 +123,9 @@ By root cause:
 
 ## Exit criteria
 
-1. D1: mars ≥ 110 MB/s (≥ 1.5× Terminal.app's 79.1)
+1. D1: marspot ≥ 110 MB/s (≥ 1.5× Terminal.app's 79.1)
 2. D2: same ≥ 110 satisfies vs iTerm2 too
-3. mars per-cell (1×1) push ≥ 110 MB/s — confirms machinery
+3. marspot per-cell (1×1) push ≥ 110 MB/s — confirms machinery
    isn't taxing single-session
 4. RSS during 1M-line push stays ≤ 200 MiB total (no unbounded
    growth on flood)
@@ -148,30 +148,30 @@ By root cause:
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
 - 2026-05-05 evening — clean-machine remeasure (godot killed):
 
-  | metric | mars (clean) | Term | iTerm2 | mars/Term | mars/iTerm2 |
+  | metric | marspot (clean) | Term | iTerm2 | marspot/Term | marspot/iTerm2 |
   |---|---|---|---|---|---|
   | scrollback-1m push (MB/s) | 97.7 (was 79.3 godot) | 91.6 | 71.8 | **1.07×** | **1.36×** |
 
-  Clean numbers raise mars from 79.3 to 97.7 MiB/s push — the
-  largest godot-correction in the test set.  But mars/Terminal.app
+  Clean numbers raise marspot from 79.3 to 97.7 MiB/s push — the
+  largest godot-correction in the test set.  But marspot/Terminal.app
   ratio still only 1.07× — far short of the 1.5× "dramatic edge"
   target.  Terminal.app at 91.6 MB/s on the same workload (it has
   no scrollback persistence; just runs the bytes through and
-  discards) means mars's anon-mmap ring + line indexer + scrollback
+  discards) means marspot's anon-mmap ring + line indexer + scrollback
   data structure adds only ~6% overhead vs pure renderer — the
   architecture is efficient, but it doesn't pay back as a perf
   multiplier for push throughput.
 
-  Where mars *should* outperform Terminal.app: when the user scrolls
+  Where marspot *should* outperform Terminal.app: when the user scrolls
   back into history.  Terminal.app loses scroll history beyond its
-  buffer; mars retains it.  But that's a feature gap, not a
+  buffer; marspot retains it.  But that's a feature gap, not a
   throughput-on-push gap.
 
   D-target reframe: rather than "1.5× push throughput vs Term", the
   more honest dramatic-edge metric is **scrollback-access latency at
-  large depths** (mars: O(1) anon-mmap fault; Term/iTerm2: bounded
+  large depths** (marspot: O(1) anon-mmap fault; Term/iTerm2: bounded
   history, can't even access).  Add a scenario that measures
-  "scroll-back-to-line-N at N=1M" — mars succeeds, others fail by
+  "scroll-back-to-line-N at N=1M" — marspot succeeds, others fail by
   inability.  That's the structural advantage to gate on.
 
   Push-throughput optimization (the original D-target) deferred —

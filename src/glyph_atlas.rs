@@ -318,7 +318,7 @@ impl GlyphAtlas {
     }
 
     /// Approximate resident bytes for instrumentation
-    /// (MARS_PROFILE_RSS).  Texture is reported at its full
+    /// (MARSPOT_PROFILE_RSS).  Texture is reported at its full
     /// `width * height` R8 footprint (the renderer holds it via
     /// MTLTextureDescriptor::Managed, which keeps a CPU mirror), and
     /// the cache + shelves are reported at their `Vec`/`HashMap`

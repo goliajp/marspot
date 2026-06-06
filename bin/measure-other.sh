@@ -26,7 +26,7 @@ mkdir -p "$RESULTS_DIR"
 
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 # terminal.app is the OS-vendor reference floor — ships with macOS, no
-# downloads, defines the bar mars needs to clear. iterm2 / warp are the
+# downloads, defines the bar marspot needs to clear. iterm2 / warp are the
 # real competitors. All three driven by the same paste-and-wait
 # protocol; for fully-automated runs see bin/drivers/<term>.sh.
 OTHER_TERMINALS=(terminal iterm warp)

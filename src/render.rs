@@ -42,8 +42,8 @@ const BG_FOCUSED: (CGFloat, CGFloat, CGFloat) = (0.006, 0.008, 0.014);
 const SEAM: (CGFloat, CGFloat, CGFloat) = (0.055, 0.062, 0.075);
 
 /// Per-session render parameters.  Caller bundles the relevant bits
-/// so the renderer doesn't need to know about Session, Mars, or
-/// MarsEvent — anything that can produce a Grid + view offset can
+/// so the renderer doesn't need to know about Session, Marspot, or
+/// MarspotEvent — anything that can produce a Grid + view offset can
 /// drive a render.
 pub struct SessionView<'a> {
     pub grid: &'a Grid,
@@ -106,7 +106,7 @@ pub struct Renderer {
     viewport_h: f64,
     /// Window-level focus.  When false, even the focused-session
     /// cursor draws hollow because the user clearly isn't typing
-    /// into mars.
+    /// into marspot.
     window_focused: bool,
     /// Reused CGBitmapContext for the layer-attached path.  Held as
     /// `(ctx, width_px, height_px)` and rebuilt only when the viewport
@@ -216,7 +216,7 @@ impl Renderer {
 
     /// AppKit path has no glyph atlas (CGImage drawn through CT each
     /// frame); reported as 0 for symmetry with the Metal renderer's
-    /// MARS_PROFILE_RSS instrumentation.
+    /// MARSPOT_PROFILE_RSS instrumentation.
     pub fn atlas_approx_bytes(&self) -> usize {
         0
     }

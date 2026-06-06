@@ -31,7 +31,7 @@
 # CPU drift is computed only when q1 mean > 1 %; below that the ratio
 # is dominated by sub-percent measurement noise and isn't meaningful.
 #
-# Cross-terminal: mars + iterm + terminal.  warp excluded (no
+# Cross-terminal: marspot + iterm + terminal.  warp excluded (no
 # 9-windows driver; paste-mode is unreliable for indefinite-loop
 # workers).
 #
@@ -62,11 +62,11 @@ SAMPLE_INTERVAL_S=5
 N=9
 RUN_DIR="$MARKER_PREFIX/active-9x-soak-$terminal-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
-RUN_TAG="mars-bench-active9-$$"
+RUN_TAG="marspot-bench-active9-$$"
 
 # ---- worker -----------------------------------------------------------
 #
-# Indefinite-loop active worker.  Killed by either kill_app (mars) or
+# Indefinite-loop active worker.  Killed by either kill_app (marspot) or
 # close-windows (iterm/terminal) once the sample loop hits its deadline.
 # `set -e` is intentionally NOT set: we want the loop to keep going even
 # if one printf hits a closed pipe at shutdown.
@@ -106,9 +106,9 @@ baseline_kib=$(rss_total_kib "$terminal" || echo 0)
 WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
-    mars)
-      kill_app mars || true
-      "$ROOT/bin/drivers/mars.sh" run-shell "$WORKER"
+    marspot)
+      kill_app marspot || true
+      "$ROOT/bin/drivers/marspot.sh" run-shell "$WORKER"
       ;;
     iterm)
       "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
@@ -174,9 +174,9 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 trap - INT
 
-# Tear down: mars killed directly; foreign-terminal windows closed by id.
+# Tear down: marspot killed directly; foreign-terminal windows closed by id.
 case "$terminal" in
-  mars)              kill_app mars || true ;;
+  marspot)              kill_app marspot || true ;;
   iterm|terminal)    cleanup_windows ;;
 esac
 

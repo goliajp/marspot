@@ -14,7 +14,7 @@
 #   - exclusive : mkdir lock both ends (atomic; macOS has no flock(1))
 #   - clean     : dedicated CARGO_TARGET_DIR, caffeinate -dims
 #   - terminating: trap on EXIT/INT/TERM kills the remote PGID + sweeps
-#                  any orphan mars/mcli; lock released unconditionally
+#                  any orphan marspot/mcli; lock released unconditionally
 #   - bounded   : cargo sweep --time 30 prunes stale target/ artefacts
 #   - retrievable: bench/results/ rsync'd back to bench/remote-runs/<ts>/
 #
@@ -57,7 +57,7 @@ cleanup() {
       fi
       rm -f $REMOTE_PIDF
     fi
-    pkill -x mars 2>/dev/null || true
+    pkill -x marspot 2>/dev/null || true
     pkill -x mcli 2>/dev/null || true
     rm -rf $REMOTE_LOCK
   " </dev/null >/dev/null 2>&1 || true
@@ -111,8 +111,8 @@ echo "==> running bench on $HOST: bin/bench.sh $ARGS_Q"
 # a fresh competitors_snapshot when the GUI-AppleEvent workaround
 # isn't available (see bin/remote-measure-others.sh).
 STALE_PASS=""
-[[ "${MARS_BENCH_ALLOW_STALE_COMPETITORS:-}" == "1" ]] && \
-  STALE_PASS="export MARS_BENCH_ALLOW_STALE_COMPETITORS=1;"
+[[ "${MARSPOT_BENCH_ALLOW_STALE_COMPETITORS:-}" == "1" ]] && \
+  STALE_PASS="export MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1;"
 set +e
 ssh "$HOST" "
   set -e

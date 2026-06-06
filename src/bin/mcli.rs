@@ -1,22 +1,22 @@
 //! mcli — minimal standalone single-session terminal.
 //!
 //! `mcli` is the acid test for the Session API's independence: it owns
-//! one Session, one Renderer, one window — nothing else from mars's
+//! one Session, one Renderer, one window — nothing else from marspot's
 //! multi-terminal machinery.  If the Session API can't power mcli
-//! cleanly, the Mars container is leaning on private state and the
+//! cleanly, the Marspot container is leaning on private state and the
 //! abstraction is wrong.
 //!
-//! Behaviourally mcli is a pared-down mars: same shell, same fonts,
+//! Behaviourally mcli is a pared-down marspot: same shell, same fonts,
 //! same scrollback, same keyboard/mouse handling — just one cell
 //! and no sidebar / layout / multi-session bookkeeping.
 
 use objc2_app_kit::NSScreen;
 use objc2_foundation::MainThreadMarker;
 
-use mars::app::{run_app, EventProxy, MarsApp, MarsAppCtx, WindowAttrs};
-use mars::input::{key_event_to_bytes, MarsKeyEvent, Modifiers};
-use mars::render::{Renderer, SessionView};
-use mars::session::Session;
+use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
+use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
+use marspot::render::{Renderer, SessionView};
+use marspot::session::Session;
 
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
@@ -27,8 +27,8 @@ struct Mcli {
     view_offset: u16,
 }
 
-impl MarsApp for Mcli {
-    fn resumed(&mut self, ctx: &MarsAppCtx) {
+impl MarspotApp for Mcli {
+    fn resumed(&mut self, ctx: &MarspotAppCtx) {
         let mt = MainThreadMarker::new().expect("main thread");
         let screens = NSScreen::screens(mt);
         let mut max_scale = 1.0_f32;
@@ -36,7 +36,7 @@ impl MarsApp for Mcli {
             let s = unsafe { screens.objectAtIndex(i) };
             max_scale = max_scale.max(s.backingScaleFactor() as f32);
         }
-        let scale: f32 = std::env::var("MARS_SCALE")
+        let scale: f32 = std::env::var("MARSPOT_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(max_scale);
@@ -46,7 +46,7 @@ impl MarsApp for Mcli {
         // Initial size will arrive via the explicit Resized fired by run_app.
     }
 
-    fn user_event(&mut self, ctx: &MarsAppCtx) {
+    fn user_event(&mut self, ctx: &MarspotAppCtx) {
         if self.session.pump() > 0 {
             ctx.request_redraw();
         }
@@ -56,7 +56,7 @@ impl MarsApp for Mcli {
         }
     }
 
-    fn key_event(&mut self, ctx: &MarsAppCtx, event: MarsKeyEvent, modifiers: Modifiers) {
+    fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, modifiers: Modifiers) {
         if let Some(bytes) = key_event_to_bytes(&event, modifiers) {
             if self.view_offset != 0 {
                 self.view_offset = 0;
@@ -66,11 +66,11 @@ impl MarsApp for Mcli {
         }
     }
 
-    fn mouse_down(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {
+    fn mouse_down(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {
         // mcli has no sidebar / no layout — clicks are no-ops for now.
     }
 
-    fn scroll(&mut self, ctx: &MarsAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
+    fn scroll(&mut self, ctx: &MarspotAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
         let cell_h = self
             .renderer
             .as_ref()
@@ -95,7 +95,7 @@ impl MarsApp for Mcli {
         }
     }
 
-    fn resized(&mut self, _ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+    fn resized(&mut self, _ctx: &MarspotAppCtx, phys_w: f64, phys_h: f64) {
         let Some(r) = self.renderer.as_mut() else { return };
         r.resize(phys_w, phys_h);
         let (cell_w, cell_h) = r.cell_dims();
@@ -120,18 +120,18 @@ impl MarsApp for Mcli {
         r.render(view);
     }
 
-    fn focused(&mut self, ctx: &MarsAppCtx, focused: bool) {
+    fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
         if let Some(r) = self.renderer.as_mut() {
             r.set_window_focused(focused);
             ctx.request_redraw();
         }
     }
 
-    fn close_requested(&mut self, ctx: &MarsAppCtx) {
+    fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         ctx.exit();
     }
 
-    fn redraw(&mut self, _ctx: &MarsAppCtx) {
+    fn redraw(&mut self, _ctx: &MarspotAppCtx) {
         let Some(r) = self.renderer.as_mut() else { return };
         let view = SessionView {
             grid: self.session.terminal.grid(),
@@ -165,7 +165,7 @@ fn main() {
         title: format!(
             "mcli — {} {}",
             env!("CARGO_PKG_VERSION"),
-            env!("MARS_GIT_SHA"),
+            env!("MARSPOT_GIT_SHA"),
         ),
         width_logical: 960.0,
         height_logical: 600.0,

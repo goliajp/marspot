@@ -46,7 +46,7 @@ source "$ROOT/bin/_lib.sh"
 # `--include-typing-latency`.
 DEFAULT_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s active-9x-soak)
 ALL_SCENARIOS=(multi-session-9x scrollback-1m idle-9x vim-jump htop-60s active-9x-soak typing-latency)
-ALL_TERMINALS=(mars iterm terminal warp)
+ALL_TERMINALS=(marspot iterm terminal warp)
 
 SCENARIOS=("${DEFAULT_SCENARIOS[@]}")
 TERMINALS=("${ALL_TERMINALS[@]}")
@@ -119,11 +119,11 @@ if (( INCLUDE_TYPING )); then
 fi
 
 # Whether `scenario` supports `terminal`.  Warp is paste-mode for almost
-# everything; typing-latency is mars-only by construction.
+# everything; typing-latency is marspot-only by construction.
 supports() {
   local scenario=$1 terminal=$2
   case "$scenario:$terminal" in
-    typing-latency:mars)             return 0 ;;
+    typing-latency:marspot)             return 0 ;;
     typing-latency:*)                return 1 ;;
     multi-session-9x:warp)           return 1 ;;  # paste-mode unreliable for 9-up
     scrollback-1m:warp)              return 1 ;;  # paste-mode + we don't auto-close

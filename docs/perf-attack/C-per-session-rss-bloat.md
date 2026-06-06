@@ -6,21 +6,21 @@
 
 ## What's broken
 
-Across every scenario where mars and Terminal.app both run, mars
+Across every scenario where marspot and Terminal.app both run, marspot
 holds substantially more RSS per session.  Terminal.app is the
 macOS-vendor reference floor — beating Apple's minimal terminal on
 CPU is one thing, paying 10×–80× more per-session RSS is a
 structural-bloat tell.
 
-| ID | Scenario | mars Δ | Term Δ | Multiplier |
+| ID | Scenario | marspot Δ | Term Δ | Multiplier |
 |---|---|---|---|---|
 | C1 | idle-9x first sample      | +81 MiB | ~0 | n/a (Term is rounding-down) |
 | C2 | vim-jump post             | +61 MiB | ~0 | n/a |
 | C3 | htop-60s mean             | +83 MiB | +1 | 83× |
 | C4 | active-9x-soak max        | +195 MiB| +16 | 12× |
 
-iTerm2 numbers are between mars and Terminal.app: idle-9x +17 MiB,
-htop +3 MiB, vim-jump +5 MiB, active-soak +90 MiB.  So mars is
+iTerm2 numbers are between marspot and Terminal.app: idle-9x +17 MiB,
+htop +3 MiB, vim-jump +5 MiB, active-soak +90 MiB.  So marspot is
 heavier than *both* competitors on every one of these scenarios.
 
 C4 is also the per-instant peak from A1's drift trajectory; if A1's
@@ -32,8 +32,8 @@ the same root.
 The product proposition is "9 sessions held all day, never gets
 slower."  Even if A1 fixes the *drift*, holding 81 MiB at idle for 9
 sessions when Terminal.app holds ~0 means the per-cell static
-footprint is heavy.  On a 16 GB machine the user keeps 9 mars +
-Slack + browser + IDE — mars's static budget matters.
+footprint is heavy.  On a 16 GB machine the user keeps 9 marspot +
+Slack + browser + IDE — marspot's static budget matters.
 
 Also: a heavy idle baseline is a leak-magnet.  Bugs that cause +5
 MiB/hour are obvious against +0 MiB baseline, invisible against +83
@@ -45,7 +45,7 @@ MiB baseline.
 
 ```sh
 # Currently:
-bin/scenarios/idle-9x.sh mars /tmp/c1.json
+bin/scenarios/idle-9x.sh marspot /tmp/c1.json
 # RSS Δ first sample = +81 MiB
 # Target: ≤ 30 MiB (still allows realistic 9 × ~3 MiB per session)
 ```
@@ -53,7 +53,7 @@ bin/scenarios/idle-9x.sh mars /tmp/c1.json
 ### C2: vim-jump post-state RSS
 
 ```sh
-bin/scenarios/vim-jump.sh mars /tmp/c2.json
+bin/scenarios/vim-jump.sh marspot /tmp/c2.json
 # RSS Δ post = +61 MiB
 # Target: ≤ 25 MiB
 ```
@@ -61,7 +61,7 @@ bin/scenarios/vim-jump.sh mars /tmp/c2.json
 ### C3: htop-60s mean RSS
 
 ```sh
-bin/scenarios/htop-60s.sh mars /tmp/c3.json
+bin/scenarios/htop-60s.sh marspot /tmp/c3.json
 # RSS Δ mean = +83 MiB
 # Target: ≤ 30 MiB
 ```
@@ -75,7 +75,7 @@ bin/scenarios/htop-60s.sh mars /tmp/c3.json
 ```
 
 **Single combined gate after fix lands**: `bench/baseline.json`
-gains `per_session_rss_max` cells per scenario; gate fires if mars's
+gains `per_session_rss_max` cells per scenario; gate fires if marspot's
 RSS Δ exceeds.
 
 ## Hypotheses
@@ -99,12 +99,12 @@ RSS Δ exceeds.
 ## Investigation roadmap
 
 1. **Per-component RSS breakdown** (also done for A1 — share
-   instrumentation): for a 9-session idle mars, log
+   instrumentation): for a 9-session idle marspot, log
    `atlas_bytes / scrollback_bytes / fontcache_bytes /
     pty_buffer_bytes / mtl_layer_bytes / session_struct_bytes`,
    sum vs total RSS; the gap is leaks.
 2. **Idle-1 vs idle-9 scaling** — how much of the +81 MiB is
-   per-cell?  Run `mars` with 1 cell only ( `MARS_GRID=1x1` or
+   per-cell?  Run `marspot` with 1 cell only ( `MARSPOT_GRID=1x1` or
    similar; if not exposed, add a flag for the bench).  If
    idle-1 is +9 MiB and idle-9 is +81 MiB, scaling is linear =
    per-cell footprint dominates.  If idle-1 is also +30 MiB,
@@ -146,7 +146,7 @@ Branches by root cause:
 2. C2: vim-jump post Δ ≤ 25 MiB
 3. C3: htop-60s mean Δ ≤ 30 MiB
 4. C4: active-9x-soak max Δ ≤ 100 MiB (also satisfies A1's bound)
-5. New gate: `mars` 1-session vs 9-session RSS scales linearly
+5. New gate: `marspot` 1-session vs 9-session RSS scales linearly
    (Δ_9 ≤ 9 × Δ_1 + 30 MiB shared overhead)
 
 ## Risks
@@ -162,7 +162,7 @@ Branches by root cause:
 - 2026-05-05 — item filed from bench-run 20260505-055755-6889ffb
 - 2026-05-05 evening — clean-machine remeasure (godot killed):
 
-  | scenario | mars Δ (clean) | Term Δ | iTerm2 Δ |
+  | scenario | marspot Δ (clean) | Term Δ | iTerm2 Δ |
   |---|---|---|---|
   | idle-9x first sample | 90 MiB (was 81 godot) | 1 | 14 |
   | vim-jump post        | 93 MiB (was 61 godot) | 0 | 2 |
@@ -170,7 +170,7 @@ Branches by root cause:
   | active-9x-soak max   | 228 MiB (was 195 godot) | 4 | 117 |
 
   Notable: clean numbers are *higher* than godot-session for every C
-  metric.  godot was suppressing lazy-fault commits — pages mars
+  metric.  godot was suppressing lazy-fault commits — pages marspot
   *would have* committed during normal lazy-fault didn't get touched
   because godot was monopolising CPU.  Clean machine shows the true
   page-commit ramp.

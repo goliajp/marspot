@@ -1,15 +1,11 @@
 # Marspot — macOS terminal (pure Rust)
 
-> Product name: **Marspot** (domain: `marspot.com`). Repo:
+> Product: **Marspot** (`marspot.com`). Repo:
 > `~/workspace/goliajp/marspot`. Target: **v1.0.0 (self-use)**.
->
-> The on-disk crate / library / main binary are still named `mars`
-> (lib name, `[[bin]] mars`, `MARS_*` env vars, `Mars` struct, bench
-> identifier `"mars"`). A full code-internal rename to `marspot` is
-> queued as the first post-migration feature — see
-> `.claude/handoff.md`. Until then, "mars" inside `src/`,
-> `Cargo.toml`, `bin/`, and `bench/baseline.json` is the **internal
-> code name**; "Marspot" is the **product name**.
+> Crate / lib / main binary / `Marspot` struct / `MARSPOT_*` env
+> vars / `bench/baseline.json` keys all use the unified `marspot`
+> name as of the post-migration rename. The companion single-session
+> binary is `mcli` (kept short — "marspot cli").
 
 ## Engineering principles
 
@@ -42,9 +38,9 @@ We will write soak tests (run for hours, assert footprint stays bounded) before 
 
 ### 4. Hard-won pieces become independent crates
 
-When a sub-system inside mars meets all three of:
+When a sub-system inside marspot meets all three of:
 
-- **Clean boundary**: well-defined input/output, no implicit reach into mars internals
+- **Clean boundary**: well-defined input/output, no implicit reach into marspot internals
 - **Earned by struggle**: real perf or correctness work went into it, the
   shape isn't obvious from a casual read of the public API
 - **Plausibly reusable**: at least one external consumer exists in
@@ -54,7 +50,7 @@ When a sub-system inside mars meets all three of:
 pieces), even at the cost of workspace overhead.  Reasons it's worth
 the friction:
 
-1. **Cleaner mars architecture** — the boundary becomes load-bearing
+1. **Cleaner marspot architecture** — the boundary becomes load-bearing
    instead of "the file imports happen to work."  Latent coupling
    surfaces during extraction and gets fixed.
 2. **Performance discipline** — once a crate has its own bench /
@@ -65,11 +61,11 @@ the friction:
    bench harness) shouldn't have to be re-derived if a sibling
    project needs them.
 
-The bar is "at least three of the above"; mars-internal helpers that
+The bar is "at least three of the above"; marspot-internal helpers that
 fail any of those tests stay in `src/` as utility modules.
 
 Current extraction backlog (judgement-call, not commitments):
-`mars-pty`, `mars-anon-mmap-ring`, `mars-glyph-atlas`, the
+`marspot-pty`, `marspot-anon-mmap-ring`, `marspot-glyph-atlas`, the
 `bench-runner` shell-scripts repo.  These are the four pieces that
 clearly clear the bar; everything else stays internal until/unless
 it grows the same surface.
@@ -100,7 +96,7 @@ For perf testing use `./bin/run.sh --release`.
 
 ## Performance is the architecture
 
-The first-principles project requirement: **mars must outperform iTerm2
+The first-principles project requirement: **marspot must outperform iTerm2
 and Warp on realistic use-cases**.  Performance is a property of the
 architecture, not just the implementation — once the structure is wrong,
 no amount of micro-optimisation reaches the ceiling.
@@ -122,7 +118,7 @@ Two tiers:
   push. Catches any architectural regression in the parser, grid,
   or render bench.
 - `bin/bench.sh --full` (~1–2 min) — also runs the live PTY pipeline
-  through `bin/measure.sh` and computes mars / best-other-terminal
+  through `bin/measure.sh` and computes marspot / best-other-terminal
   ratio against the snapshot in `bench/baseline.json`. Run before
   merging to develop, after any change touching the bytes path
   (parser, terminal, render) or the event loop (main.rs).
@@ -135,7 +131,7 @@ Two tiers:
 `bin/measure-other.sh` keeps cross-terminal numbers fresh: dispatches
 the same scenarios into iTerm2 and Warp via AppleScript, parses
 timings, writes JSON.  Re-run when iTerm2 / Warp updates or when
-mars's relative position needs re-validation.
+marspot's relative position needs re-validation.
 
 `bin/bench-remote.sh` runs the same gate on a clean idle Apple
 Silicon host (default `ssh mini`) — same-arch, no foreground
@@ -148,7 +144,7 @@ box is busy or when locking in a new baseline.
 ssh sessions on macOS cannot dispatch AppleEvents to GUI apps;
 the script health-checks for that and either auto-runs or prints
 the Screen-Sharing workaround.  When refreshing isn't possible
-right now, `MARS_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh
+right now, `MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh
 --full` runs the gate anyway (with a stamped warning) using the
 existing snapshot.
 
@@ -182,7 +178,7 @@ scheduling cuts wall clock at ~140 tests.
 samply (Speedscope / Firefox-profiler JSON) — the visual complement
 to `bin/profile-live.sh`'s textual `/usr/bin/sample` report.  Default
 runs an internal cat-ascii workload; `--attach <pid>` samples an
-already-running mars/mcli instead.
+already-running marspot/mcli instead.
 
 ### Dep hygiene gate
 
@@ -252,7 +248,7 @@ what's blocking and stop — don't dress it up as a menu.
 - `src/term/` — terminal emulator (VT/xterm escape parser; self-built, grown iteratively against real apps)
 - `src/render/` — Metal renderer with glyph atlas (instanced quads, custom)
 - `src/pty/` — PTY management (libc syscalls directly, no wrapper crate)
-- `src/scrollback.rs` — disk-backed scrollback (mmap'd ring file, default-on; `MARS_DISK_SCROLLBACK=0` opts out)
+- `src/scrollback.rs` — disk-backed scrollback (mmap'd ring file, default-on; `MARSPOT_DISK_SCROLLBACK=0` opts out)
 - `src/tabs/` — multi-terminal lifecycle and shared GPU resources
 
 These modules are created as features are added, not preemptively.

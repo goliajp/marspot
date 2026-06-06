@@ -41,7 +41,7 @@ SAMPLE_INTERVAL_S=5
 N=9
 RUN_DIR="$MARKER_PREFIX/idle-9x-$terminal-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
-RUN_TAG="mars-bench-idle-$$"
+RUN_TAG="marspot-bench-idle-$$"
 
 # Worker that just sleeps forever (idle).  Kept alive for DURATION + slack
 # so the scenario can sample without races.
@@ -61,9 +61,9 @@ baseline_kib=$(rss_total_kib "$terminal" || echo 0)
 
 scrollback_dir() {
   case "$1" in
-    # mars: anon-mmap rings have no on-disk file (eviction-via-swap,
+    # marspot: anon-mmap rings have no on-disk file (eviction-via-swap,
     # not eviction-to-named-file).  Nothing to du; emit empty.
-    mars)     echo "" ;;
+    marspot)     echo "" ;;
     iterm)    echo "$HOME/Library/Application Support/iTerm2/SavedState" ;;
     warp)     echo "$HOME/Library/Application Support/dev.warp.Warp-Stable" ;;
     terminal) echo "" ;;
@@ -82,9 +82,9 @@ disk_baseline_kib=$(du_kib "$disk_dir")
 WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
-    mars)
-      kill_app mars || true
-      "$ROOT/bin/drivers/mars.sh" run-shell "$WORKER"
+    marspot)
+      kill_app marspot || true
+      "$ROOT/bin/drivers/marspot.sh" run-shell "$WORKER"
       ;;
     iterm)
       "$ROOT/bin/drivers/iterm.sh" run-windows "$N" "$WORKER" > "$WIN_IDS_FILE"
@@ -162,11 +162,11 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 trap - INT
 
-# Tear down our SUT (mars / mcli) directly; close foreign-terminal
+# Tear down our SUT (marspot / mcli) directly; close foreign-terminal
 # bench windows by tracked id (the EXIT trap also runs cleanup_windows
 # in case we got interrupted before reaching here).
 case "$terminal" in
-  mars)              kill_app mars || true ;;
+  marspot)              kill_app marspot || true ;;
   iterm|terminal)    cleanup_windows ;;
 esac
 

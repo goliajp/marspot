@@ -10,14 +10,14 @@
 # Usage:
 #   bin/profile-samply.sh                # default duration 10 s
 #   bin/profile-samply.sh 30             # 30 s
-#   bin/profile-samply.sh --attach <pid> # attach to a running mars/mcli
+#   bin/profile-samply.sh --attach <pid> # attach to a running marspot/mcli
 #
 # Output: bench/results/profiles/samply-<ts>.json.gz
 # Open later with: samply load <file>
 #
 # Launching the workload here uses the same cat-ascii loop as
 # profile-live.sh — workload changes belong in one place; if you need
-# a different workload, set MARS_SHELL before invoking.
+# a different workload, set MARSPOT_SHELL before invoking.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,7 +49,7 @@ fi
 SCN="$SCENARIOS_DIR/cat-ascii.bin"
 [[ -f "$SCN" ]] || "$ROOT/bin/gen-scenarios.sh" >/dev/null
 
-WORKER=$(mktemp -t mars-samply-worker.XXXXXX.sh)
+WORKER=$(mktemp -t marspot-samply-worker.XXXXXX.sh)
 cat > "$WORKER" <<EOF
 #!/bin/sh
 # Drive mcli with cat-ascii in a tight loop for $DURATION_S seconds.
@@ -61,12 +61,12 @@ EOF
 chmod +x "$WORKER"
 trap 'rm -f "$WORKER"' EXIT INT TERM
 
-if [[ ! -x "$(mars_bin mcli)" ]]; then
+if [[ ! -x "$(marspot_bin mcli)" ]]; then
   ( cd "$ROOT" && cargo build --release --bin mcli 2>&1 | tail -3 )
 fi
 
 echo "==> samply record mcli for ~${DURATION_S}s → $OUT"
-MARS_SHELL="$WORKER" samply record --save-only -o "$OUT" -- "$(mars_bin mcli)"
+MARSPOT_SHELL="$WORKER" samply record --save-only -o "$OUT" -- "$(marspot_bin mcli)"
 
 echo "==> profile saved: $OUT"
 echo "    view with: samply load $OUT"

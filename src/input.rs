@@ -1,12 +1,12 @@
 //! Translate keyboard events into terminal bytes.
 //!
-//! Owned by the lib because `mars` (multi-session) and `mcli`
+//! Owned by the lib because `marspot` (multi-session) and `mcli`
 //! (single-session) both feed the same Session API.  Anything that
 //! depends only on a key press + modifier state belongs here;
 //! per-binary policy (which session receives the keystroke, how
 //! view-offset interacts with typing, etc.) stays in the caller.
 //!
-//! Key events are described by Mars-owned types (`MarsKeyEvent`,
+//! Key events are described by Marspot-owned types (`MarspotKeyEvent`,
 //! `LogicalKey`, `NamedKey`, `Modifiers`) so this module has no
 //! window-system dependency.  The window layer (currently winit,
 //! soon `app::run_app` over AppKit directly) is responsible for
@@ -16,10 +16,10 @@ use std::borrow::Cow;
 
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 
-/// Mars's portable key event.  Window backends (winit today,
+/// Marspot's portable key event.  Window backends (winit today,
 /// AppKit-direct tomorrow) translate their native events into this.
 #[derive(Clone, Debug)]
-pub struct MarsKeyEvent {
+pub struct MarspotKeyEvent {
     pub state: KeyState,
     /// Modifier-independent identifier of the pressed key.
     /// `Char('a')` for `a` and `shift+a` alike; the resolved text
@@ -90,7 +90,7 @@ impl Modifiers {
 /// `None` for events we don't translate (releases, modifier-only, Cmd
 /// combos that the OS handles, etc.).
 pub fn key_event_to_bytes(
-    event: &MarsKeyEvent,
+    event: &MarspotKeyEvent,
     modifiers: Modifiers,
 ) -> Option<Cow<'static, [u8]>> {
     if event.state != KeyState::Pressed {
@@ -182,8 +182,8 @@ pub fn write_clipboard_text(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn pressed(logical: LogicalKey, text: Option<&str>) -> MarsKeyEvent {
-        MarsKeyEvent {
+    fn pressed(logical: LogicalKey, text: Option<&str>) -> MarspotKeyEvent {
+        MarspotKeyEvent {
             state: KeyState::Pressed,
             logical,
             text: text.map(|s| s.to_string()),
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn release_returns_none() {
-        let ev = MarsKeyEvent {
+        let ev = MarspotKeyEvent {
             state: KeyState::Released,
             logical: LogicalKey::Char('a'),
             text: Some("a".into()),

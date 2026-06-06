@@ -25,7 +25,7 @@ use core_text::font_descriptor::{
 use std::collections::HashMap;
 
 // Match iTerm2's default profile (Normal Font = "Monaco 12") so a
-// user switching from iTerm2 to mars sees identical text.  Menlo is
+// user switching from iTerm2 to marspot sees identical text.  Menlo is
 // retained as the fallback chain target inside FontCache::build for
 // the rare case where Monaco isn't installed (it ships with macOS,
 // so this should never fire in practice).
@@ -34,7 +34,7 @@ pub const FONT_POINT: f64 = 12.0;
 
 /// Background color for the terminal.  Near-pure-black with a
 /// near-imperceptible navy tint — the user's preferred direction
-/// after seeing iTerm2's #14191e default felt too grey in mars's
+/// after seeing iTerm2's #14191e default felt too grey in marspot's
 /// 9-grid layout.  Both renderers paint with this constant so the
 /// BG matches across the AppKit / Metal switch.
 pub const BG: (CGFloat, CGFloat, CGFloat) = (0.006, 0.008, 0.014);
@@ -275,7 +275,7 @@ impl FontCache {
     }
 
     /// Approximate resident bytes for instrumentation
-    /// (MARS_PROFILE_RSS).  Counts the `(codepoint, style) → glyph`
+    /// (MARSPOT_PROFILE_RSS).  Counts the `(codepoint, style) → glyph`
     /// HashMap and the FontRegistry's bookkeeping (Vec<CTFont>
     /// pointer slots + by_name keys).  CTFont's underlying font data
     /// lives in CoreText's heap and isn't counted here — it shows up

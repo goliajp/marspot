@@ -1,5 +1,5 @@
 [package]
-name = "mars"
+name = "marspot"
 version = "0.2.0"
 edition = "2021"
 build = "build.rs"
@@ -19,7 +19,7 @@ foreign-types = "0.5"
 png = "0.18"
 
 [profile.release]
-# Fat LTO matters now that we split into a lib + multiple bins (mars,
+# Fat LTO matters now that we split into a lib + multiple bins (marspot,
 # mcli): the render and parser hot paths cross the lib↔bin boundary
 # every frame, and `thin` LTO leaves them un-inlined.  Measured
 # regression on `bin/bench.sh` jumping from ~1 ms to ~20 ms p99

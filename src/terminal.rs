@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 /// Whether disk-backed scrollback is on for this process.  Resolved
-/// once on first call.  `MARS_DISK_SCROLLBACK=0` opts out (RAM-only,
+/// once on first call.  `MARSPOT_DISK_SCROLLBACK=0` opts out (RAM-only,
 /// kept for regression bisects); any other value (or unset) gives
 /// disk-on, the default since the anon-mmap rewrite landed.
 ///
@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 /// paths are silently treated as "on".
 fn disk_scrollback_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("MARS_DISK_SCROLLBACK").as_deref() != Ok("0"))
+    *ENABLED.get_or_init(|| std::env::var("MARSPOT_DISK_SCROLLBACK").as_deref() != Ok("0"))
 }
 
 /// In-RAM ring size when disk scrollback is active.  Front-line
@@ -99,7 +99,7 @@ struct SavedMain {
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
-        // Disk-backed scrollback is default-on; set MARS_DISK_SCROLLBACK=0
+        // Disk-backed scrollback is default-on; set MARSPOT_DISK_SCROLLBACK=0
         // to opt out.  Falls back to the in-RAM ring on any mmap-init
         // error (no panic — the user just gets the bounded-RAM history).
         let scrollback = if disk_scrollback_enabled() {
@@ -110,7 +110,7 @@ impl Terminal {
             )
             .unwrap_or_else(|e| {
                 eprintln!(
-                    "[mars] disk scrollback init failed ({e}); falling back to RAM-only"
+                    "[marspot] disk scrollback init failed ({e}); falling back to RAM-only"
                 );
                 Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
             })

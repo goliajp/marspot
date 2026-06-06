@@ -34,7 +34,7 @@ pub struct PtyConfig {
     /// Override for argv[0] passed to execvp.  `None` → use `program`
     /// directly.  `Some("-zsh")` → tells the shell to behave as a
     /// login shell (Unix convention: leading `-`).  iTerm2 / Terminal.app
-    /// do this; mars now matches so .zprofile / .bash_profile run and
+    /// do this; marspot now matches so .zprofile / .bash_profile run and
     /// zsh's PROMPT_EOL_MARK doesn't fire on a fresh prompt because the
     /// non-login startup path leaves the cursor mid-line.
     pub argv0: Option<String>,
@@ -317,7 +317,7 @@ mod tests {
     fn spawn_echo_outputs_message() {
         let mut pty = Pty::spawn(PtyConfig {
             program: "/bin/echo".into(),
-            args: vec!["hello mars".into()],
+            args: vec!["hello marspot".into()],
             size: TerminalSize::default(),
             argv0: None,
         })
@@ -325,7 +325,7 @@ mod tests {
 
         let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
         let s = String::from_utf8_lossy(&output);
-        assert!(s.contains("hello mars"), "expected 'hello mars' in output, got: {:?}", s);
+        assert!(s.contains("hello marspot"), "expected 'hello marspot' in output, got: {:?}", s);
     }
 
     #[test]

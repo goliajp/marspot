@@ -20,13 +20,13 @@ On a clean post-warmup run measured on 2026-05-05:
 Two distinct sub-problems:
 
 - **B1+B2**: post-parse pipeline has gotten slower on plain ASCII +
-  ANSI text; mars is still ahead of iTerm2 but the *dramatic* edge
+  ANSI text; marspot is still ahead of iTerm2 but the *dramatic* edge
   has eroded.  Likely cumulative from the 88 commits / 5238 LoC
   added since baseline lock (Metal renderer arrival, disk-backed
   scrollback default-on, atlas restructures, palette changes).
-- **B3+B4**: mars is *slower than the macOS reference floor* on
+- **B3+B4**: marspot is *slower than the macOS reference floor* on
   wide-char and emoji.  Apple Terminal.app's CoreText + system
-  Apple Color Emoji path is structurally favourable; mars's
+  Apple Color Emoji path is structurally favourable; marspot's
   self-built atlas + CT raster lags.
 
 Headless `--bench parse` passes for all four (167-211 MB/s, +4-5%
@@ -36,10 +36,10 @@ update, scrollback append, Metal command encoding, draw submission.
 ## Why it matters
 
 Throughput on `cat 32MB` is the most reproducible single-cell perf
-demo a user runs.  When mars's "fastest terminal" claim is checked
+demo a user runs.  When marspot's "fastest terminal" claim is checked
 that way, today the answer is "1.21× Terminal.app" — visible but
 not dramatic, exactly the threat the perf-edge memory warns against.
-On CJK / emoji mars is *slower* than the OS-vendor floor — that line
+On CJK / emoji marspot is *slower* than the OS-vendor floor — that line
 in marketing copy literally cannot be claimed today.
 
 ## TDD failing tests
@@ -48,7 +48,7 @@ in marketing copy literally cannot be claimed today.
 
 ```sh
 # Currently fails both arms:
-./bin/measure.sh cat-ascii        # mars live = 51.6, target ≥ 70
+./bin/measure.sh cat-ascii        # marspot live = 51.6, target ≥ 70
 # vs Terminal.app:
 # Terminal.app cat-ascii: 42.6 MB/s (cross-terminal-other.json, 2026-05-05)
 # Required: 51.6 → ≥ 64 (1.5× × 42.6) — current 1.21× ratio insufficient
@@ -57,23 +57,23 @@ in marketing copy literally cannot be claimed today.
 ### B2: live cat-mixed ≥ 50 MB/s AND vs-Terminal ratio ≥ 1.4×
 
 ```sh
-./bin/measure.sh cat-mixed        # mars live = 39.0, target ≥ 50
-# Terminal.app: 35.5 MB/s; required ratio 1.4× → mars ≥ 50
+./bin/measure.sh cat-mixed        # marspot live = 39.0, target ≥ 50
+# Terminal.app: 35.5 MB/s; required ratio 1.4× → marspot ≥ 50
 ```
 
 ### B3: live cat-cjk ≥ 35 MB/s AND vs-Terminal ratio ≥ 1.2×
 
 ```sh
-./bin/measure.sh cat-cjk          # mars = 25.8, target ≥ 35
-# Terminal.app: 36.3 MB/s; required ratio 1.2× → mars ≥ 44
+./bin/measure.sh cat-cjk          # marspot = 25.8, target ≥ 35
+# Terminal.app: 36.3 MB/s; required ratio 1.2× → marspot ≥ 44
 # B3's stricter exit: ≥ 44 (overtake Apple's wide-char path)
 ```
 
 ### B4: live cat-emoji ≥ 35 MB/s AND vs-Terminal ratio ≥ 1.0×
 
 ```sh
-./bin/measure.sh cat-emoji        # mars = 26.7, target ≥ 35
-# Terminal.app: 42.1 MB/s; required ratio 1.0× → mars ≥ 42
+./bin/measure.sh cat-emoji        # marspot = 26.7, target ≥ 35
+# Terminal.app: 42.1 MB/s; required ratio 1.0× → marspot ≥ 42
 # B4's stricter exit: ≥ 42 (parity with Apple Color Emoji path)
 ```
 
@@ -103,11 +103,11 @@ after E5 makes measurement stable.
 ### B3 + B4 (CJK / emoji loss to Terminal.app)
 
 1. **Per-glyph CT raster on first sight** — every wide-char / emoji
-   has higher raster cost; mars caches but the *first* render of
+   has higher raster cost; marspot caches but the *first* render of
    each unique glyph is on the hot path.  Apple's path uses shared
    system glyph cache.
 2. **Emoji color glyph (SBIX/COLR) path goes through software
-   blend** — if mars's atlas treats color glyphs same as monochrome,
+   blend** — if marspot's atlas treats color glyphs same as monochrome,
    Apple's hardware path wins.
 3. **Wide-char width calculation** — every CJK char triggers a
    `wcwidth`-style call.  If naïve, hits 100% of bytes; if Unicode
@@ -146,7 +146,7 @@ need fast-path for wide-char / color glyph.
 ### Step 4: confirm hypothesis with a switch
 
 If hypothesis 1 (disk scrollback) suspected: re-run with
-`MARS_DISK_SCROLLBACK=0` (memory mode).  If throughput recovers
+`MARSPOT_DISK_SCROLLBACK=0` (memory mode).  If throughput recovers
 to floor, confirmed; the disk path needs sharpening.
 
 If hypothesis 2 (atlas changes) suspected: build with prior
@@ -230,9 +230,9 @@ For each sub-target Bk:
   **B3 + B4 remain active** but with smaller deficit than first read:
   cjk 0.86× / 0.77× (vs Term / Warp), emoji 0.84× / 0.95×.  Apple
   CoreText (CJK system path) and Apple Color Emoji (SBIX/COLR fast
-  path) still beat mars's self-built atlas + CT raster.  Investigation
+  path) still beat marspot's self-built atlas + CT raster.  Investigation
   remains under hypothesis 1 (per-glyph CT raster) and hypothesis 2
   (color glyph software blend); B3-B4 sub-targets still hold.
 
-  Lesson: **kill foreign load before measuring perf.**  /tmp/mars-bench
+  Lesson: **kill foreign load before measuring perf.**  /tmp/marspot-bench
   scenarios + active scenario drivers must be the only competing CPU.

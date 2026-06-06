@@ -6,16 +6,16 @@
 
 ## What's broken
 
-Running 9 mars sessions under sustained activity for 5 minutes, RSS
+Running 9 marspot sessions under sustained activity for 5 minutes, RSS
 grows from +72 MiB to +195 MiB above baseline.  q4/q1 drift ratio
 **2.11×** vs gate threshold **1.3×**.  CLAUDE.md architectural
 commitment #3 ("cannot get slower the longer it runs") directly
 violated at the 5-minute mark — the soak window the user actually
-hits keeps mars open all day.
+hits keeps marspot open all day.
 
 ## Why it matters
 
-mars's product proposition is "9 Claude-Code sessions held all day."
+marspot's product proposition is "9 Claude-Code sessions held all day."
 If RSS climbs 2× over 5 min, by hour 8 the process is OOM'd or
 swapping.  No amount of cat-throughput perf rescues a terminal that
 can't stay open.  This single failure invalidates the architectural
@@ -25,13 +25,13 @@ story.
 
 ```sh
 # This must pass:
-bin/scenarios/active-9x-soak.sh mars /tmp/a1-test.json
+bin/scenarios/active-9x-soak.sh marspot /tmp/a1-test.json
 # Pass criteria embedded in scenario:
 #   RSS drift q4/q1 ≤ 1.30×                  ← currently 2.11× ✗
 #   (target tightened post-fix to ≤ 1.10×)
 ```
 
-Current run output (`bench/results/20260505-055755-6889ffb/active-9x-soak-mars.json`):
+Current run output (`bench/results/20260505-055755-6889ffb/active-9x-soak-marspot.json`):
 ```
 RSS Δ first / last / max  72 / 195 / 195 MiB  (baseline 0 MiB)
 RSS drift q4/q1            2.1104   ✗ FAIL
@@ -76,7 +76,7 @@ RSS drift q4/q1            2.1104   ✗ FAIL
 
 ## Investigation roadmap
 
-1. **Reproducible isolation** — re-run `active-9x-soak.sh mars` 3×
+1. **Reproducible isolation** — re-run `active-9x-soak.sh marspot` 3×
    confirm 2.11× drift is stable (rule out one-shot noise).  If
    highly variable, expand soak to 30-min `--extended` mode for
    stronger signal.
@@ -92,7 +92,7 @@ RSS drift q4/q1            2.1104   ✗ FAIL
    (`d2b13bb..6889ffb` for scrollback, `1039f4e..6889ffb` for atlas,
    `c55c3db..6889ffb` for fontcache).
 5. **Confirm root cause** — implement minimal repro
-   (`mars --bench soak`) that reliably shows the leak in <30s.
+   (`marspot --bench soak`) that reliably shows the leak in <30s.
 
 ## Implementation roadmap (post-confirmation)
 
@@ -119,7 +119,7 @@ Branches by root cause (will narrow once #2/#3 above complete):
 
 ## Exit criteria
 
-1. `bin/scenarios/active-9x-soak.sh mars` passes with q4/q1 ≤ 1.10
+1. `bin/scenarios/active-9x-soak.sh marspot` passes with q4/q1 ≤ 1.10
    on 3 consecutive runs
 2. `--extended` (30-min) variant also passes
 3. Per-component RSS instrumentation shows total bounded (no
@@ -150,18 +150,18 @@ Branches by root cause (will narrow once #2/#3 above complete):
 
   | terminal | drift q4/q1 | abs Δ | CPU mean |
   |---|---|---|---|
-  | mars         | **1.81× ✗ FAIL** | +125 MiB | 1.49% |
+  | marspot         | **1.81× ✗ FAIL** | +125 MiB | 1.49% |
   | iTerm2       | 1.30× ✓ borderline | +33 MiB  | 37.33% |
   | Terminal.app | 1.05× ✓           | +1 MiB   | 9.76% |
 
-  godot-tinted earlier numbers (mars 2.11×) shifted only modestly on
+  godot-tinted earlier numbers (marspot 2.11×) shifted only modestly on
   clean machine (1.81×); absolute Δ is essentially identical (+123 →
-  +125 MiB).  godot was NOT the cause of A1 — it's a real mars-side
+  +125 MiB).  godot was NOT the cause of A1 — it's a real marspot-side
   drift, larger than competitors' (iTerm2 +33, Terminal.app +1).
 
   iTerm2 and Terminal.app both plateau within 5 min — Terminal.app
   trivially (only ~3 MiB total), iTerm2 with its fixed-size per-session
-  state.  mars does NOT plateau in 5 min: per-session anon-mmap ring
+  state.  marspot does NOT plateau in 5 min: per-session anon-mmap ring
   is ~100 MiB virtual (1024 + 100×256 lines × cols × Cell_size), and
   the 36 lines/s/session workload only pushes ~10800 lines (40% of
   ring capacity) in 5 min.  Page-commit ramp continues throughout the
@@ -176,7 +176,7 @@ Branches by root cause (will narrow once #2/#3 above complete):
 
   | terminal     | 5-min drift | 5-min Δ peak | 30-min drift | Verdict |
   |---|---|---|---|---|
-  | mars         | 1.81×       | +228 MiB     | **2.07×**    | leaks ~10 MiB/min |
+  | marspot         | 1.81×       | +228 MiB     | **2.07×**    | leaks ~10 MiB/min |
   | iTerm2       | 1.30×       | +117 MiB     | (not measured) | plateaus by 5 min |
   | Terminal.app | 1.05×       | +16 MiB      | (not measured) | trivial growth |
 
@@ -204,7 +204,7 @@ Branches by root cause (will narrow once #2/#3 above complete):
      pool drain timing.
 
   **Next-step: per-subsystem RSS slicing instrumentation**.  Add
-  `MARS_PROFILE_RSS=1` mode that, on each render or every N seconds,
+  `MARSPOT_PROFILE_RSS=1` mode that, on each render or every N seconds,
   logs:
 
   ```
@@ -253,7 +253,7 @@ Branches by root cause (will narrow once #2/#3 above complete):
   it runs" applies *post-plateau*, not during the lazy-fault ramp).
 
   **Next steps** (require clean machine; deferred):
-  1. Run `bin/scenarios/active-9x-soak.sh mars /tmp/x.json --extended`
+  1. Run `bin/scenarios/active-9x-soak.sh marspot /tmp/x.json --extended`
      on a quiet machine; expected: q4/q1 ≤ 1.10× (architectural pass).
      If yes → the 30-min run is the real gate, default 5-min is too
      short to be meaningful.

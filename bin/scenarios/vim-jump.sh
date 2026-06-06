@@ -14,7 +14,7 @@
 #
 #   vim -u NONE -c 'normal G' -c 'normal gg' -c 'q!' <bigfile>
 #
-# Cross-terminal: yes — same vim invocation in mars / iTerm2 /
+# Cross-terminal: yes — same vim invocation in marspot / iTerm2 /
 # Terminal.app / Warp.
 #
 # Usage:
@@ -50,7 +50,7 @@ fi
 RUN_DIR="$MARKER_PREFIX/vim-jump-$terminal-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
-RUN_TAG="mars-bench-vim-$$"
+RUN_TAG="marspot-bench-vim-$$"
 
 # Worker: time the vim run.  -u NONE skips the user's vimrc so the
 # scenario is deterministic.  Output goes to a per-trial timing file.
@@ -100,7 +100,7 @@ cleanup_windows() {
 }
 
 case "$terminal" in
-  mars)     sample_proc=mcli ;;
+  marspot)     sample_proc=mcli ;;
   *)        sample_proc=$terminal ;;
 esac
 baseline_kib=$(rss_total_kib "$sample_proc" || echo 0)
@@ -110,10 +110,10 @@ USER_APP=$(current_frontmost_app)
 trap '{ cleanup_windows; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
 
 case "$terminal" in
-  mars)
+  marspot)
     # mcli (single-session) — vim drives the workload itself.
-    kill_app mars || true; kill_app mcli || true
-    "$ROOT/bin/drivers/mars.sh" run-shell-mcli "$WORKER"
+    kill_app marspot || true; kill_app mcli || true
+    "$ROOT/bin/drivers/marspot.sh" run-shell-mcli "$WORKER"
     ;;
   iterm)
     "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER" > "$WIN_IDS_FILE"
@@ -141,7 +141,7 @@ post_kib=$(rss_total_kib "$sample_proc" || echo 0)
 [[ -z "$post_kib" ]] && post_kib=0
 
 case "$terminal" in
-  mars) kill_app mars || true; kill_app mcli || true ;;
+  marspot) kill_app marspot || true; kill_app mcli || true ;;
 esac
 
 # ---- aggregate -------------------------------------------------------

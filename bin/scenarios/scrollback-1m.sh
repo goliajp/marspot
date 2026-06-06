@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/scenarios/scrollback-1m.sh — 1M-line push, single session.
 #
-# Why this scenario exists: mars's no.1 value includes "unlimited
+# Why this scenario exists: marspot's no.1 value includes "unlimited
 # scrollback" — but each terminal makes a different policy choice for
 # how much history to retain.  This bench surfaces the trade-off.
 #
@@ -11,12 +11,12 @@
 #   - disk Δ in scrollback dir  (cost of disk-backed retention, where applicable)
 #
 # Retention is policy-dependent and not directly comparable today:
-#   mars         in-memory ring, 10k-line cap   → RSS small, disk 0
+#   marspot         in-memory ring, 10k-line cap   → RSS small, disk 0
 #   iTerm2       unlimited (default profile)    → RSS large
 #   Terminal.app ~100k-line cap (default)        → RSS small-medium
 #   Warp         unlimited                       → RSS + disk grow
 #
-# When mars's disk-backed scrollback lands, the same scenario will
+# When marspot's disk-backed scrollback lands, the same scenario will
 # additionally validate "RSS stays small + disk grows ~linearly".
 #
 # Usage:
@@ -32,10 +32,10 @@ source "$ROOT/bin/_lib.sh"
 terminal=${1:?usage: scrollback-1m.sh <terminal> <out-json>}
 out_json=${2:?usage: scrollback-1m.sh <terminal> <out-json>}
 
-# What process name to sample.  For mars we sample mcli, since this
+# What process name to sample.  For marspot we sample mcli, since this
 # scenario uses the single-session binary (see dispatch).
 case "$terminal" in
-  mars) sample_proc=mcli ;;
+  marspot) sample_proc=mcli ;;
   *)    sample_proc=$terminal ;;
 esac
 
@@ -60,7 +60,7 @@ BYTES=$(stat -f%z "$SCENARIO_FILE")
 
 RUN_DIR="$MARKER_PREFIX/scrollback-1m-$terminal-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
-RUN_TAG="mars-bench-$$"
+RUN_TAG="marspot-bench-$$"
 
 WORKER="$RUN_DIR/worker.sh"
 cat > "$WORKER" <<EOF
@@ -79,8 +79,8 @@ chmod +x "$WORKER"
 # disk persistence (Terminal.app).
 scrollback_dir() {
   case "$1" in
-    # mars: anon-mmap rings have no on-disk file (eviction-via-swap).
-    mars)     echo "" ;;
+    # marspot: anon-mmap rings have no on-disk file (eviction-via-swap).
+    marspot)     echo "" ;;
     iterm)    echo "$HOME/Library/Application Support/iTerm2/SavedState" ;;
     warp)     echo "$HOME/Library/Application Support/dev.warp.Warp-Stable" ;;
     terminal) echo "" ;;
@@ -103,12 +103,12 @@ disk_baseline_kib=$(du_kib "$disk_dir")
 WIN_IDS_FILE="$RUN_DIR/window-ids.txt"
 dispatch() {
   case "$terminal" in
-    mars)
-      # Use mcli (single-session) — mars auto-spawns 9 and applies the
-      # same MARS_SHELL to every one, which would push 9× the bytes.
-      kill_app mars || true
+    marspot)
+      # Use mcli (single-session) — marspot auto-spawns 9 and applies the
+      # same MARSPOT_SHELL to every one, which would push 9× the bytes.
+      kill_app marspot || true
       kill_app mcli || true
-      "$ROOT/bin/drivers/mars.sh" run-shell-mcli "$WORKER"
+      "$ROOT/bin/drivers/marspot.sh" run-shell-mcli "$WORKER"
       ;;
     iterm)
       "$ROOT/bin/drivers/iterm.sh" run-windows 1 "$WORKER" > "$WIN_IDS_FILE"
@@ -184,7 +184,7 @@ post_kib=$(rss_total_kib "$sample_proc" || echo 0)
 disk_post_kib=$(du_kib "$disk_dir")
 
 case "$terminal" in
-  mars) kill_app mars || true; kill_app mcli || true ;;
+  marspot) kill_app marspot || true; kill_app mcli || true ;;
 esac
 
 # ---- aggregate --------------------------------------------------------
@@ -270,7 +270,7 @@ else:
     print(f"    disk Δ                 n/a (terminal does not persist scrollback to disk)")
 PY
 
-if [[ "$terminal" != "mars" && "$terminal" != "warp" ]]; then
+if [[ "$terminal" != "marspot" && "$terminal" != "warp" ]]; then
   echo "  cleanup: closing 1 $terminal window we opened (by tracked id)…" >&2
   cleanup_windows
 fi

@@ -1,15 +1,15 @@
-# Mars bench mechanism
+# Marspot bench mechanism
 
-This is the **persistent benchmark system** that validates Mars's
+This is the **persistent benchmark system** that validates Marspot's
 first-principles value: ultra-high-performance unlimited scrolling
 across many concurrent terminal sessions, used as a working surface for
 multi-session Claude-Code development.
 
 It must answer, on demand and over time:
 
-1. Is mars faster than iTerm2 / Warp on every realistic use-case the
+1. Is marspot faster than iTerm2 / Warp on every realistic use-case the
    user actually hits? (Terminal.app is the OS-vendor reference floor.)
-2. Does mars hold those numbers steady — across releases, across hours
+2. Does marspot hold those numbers steady — across releases, across hours
    of uptime, across a 9-session day?
 3. When something regresses, can we localise the cause without
    guessing?
@@ -41,16 +41,16 @@ scenarios get a `bench/scenarios/<id>.spec.md` with the rationale.
 | `vim-jump` | open 50 k-line file, jump to bottom + back | escape density, scroll, cursor | yes (manual) |
 | `htop-60s` | `htop` for 60 s, full repaint per second | sustained periodic repaint | yes |
 | `scroll-10k` | print 10 k lines, wheel-scroll back | scrollback access + render | partial — wheel events not scriptable cross-term |
-| `scrollback-1m` | push 1 M lines, sample random-access scroll | large history index + disk spill | yes for fill+RSS+disk; mars-only for jump latency |
-| `multi-session-9x` | 9 sessions, each running a mid-load workload | aggregate throughput, total RSS, per-window FPS | yes for RSS+wall-time; mars-only for FPS |
+| `scrollback-1m` | push 1 M lines, sample random-access scroll | large history index + disk spill | yes for fill+RSS+disk; marspot-only for jump latency |
+| `multi-session-9x` | 9 sessions, each running a mid-load workload | aggregate throughput, total RSS, per-window FPS | yes for RSS+wall-time; marspot-only for FPS |
 | `idle-9x` | 9 sessions opened, then idle 5 min (or 30 m extended) | CPU at rest, RSS drift, disk drift | yes |
-| `session-switch` | sidebar / tab click between 9 active sessions | TTFF (time-to-first-frame) | mars-only (UI-internal) |
-| `typing-latency` | scripted keystrokes, measure input → pixel | input latency tail | mars-only (instrumented); cross-term via screen capture is a future item |
+| `session-switch` | sidebar / tab click between 9 active sessions | TTFF (time-to-first-frame) | marspot-only (UI-internal) |
+| `typing-latency` | scripted keystrokes, measure input → pixel | input latency tail | marspot-only (instrumented); cross-term via screen capture is a future item |
 | `startup` | spawn terminal cold → first prompt | startup cost + first-paint | yes |
 
 The first 4 (`cat-*`) are the legacy throughput row. The middle group
 adds the **realistic interactive surface**. The last 5 are
-**Mars-as-a-product** scenarios — they exist because the project's
+**Marspot-as-a-product** scenarios — they exist because the project's
 no.1 value is multi-session / unlimited-scroll, and a bench that
 doesn't measure those doesn't measure the product.
 
@@ -58,7 +58,7 @@ doesn't measure those doesn't measure the product.
 
 | Terminal | Role | Driver |
 |---|---|---|
-| `mars`     | the subject under test | direct (`MARS_SHELL` one-shot script, `--bench` modes, env-var instrumentation) |
+| `marspot`     | the subject under test | direct (`MARSPOT_SHELL` one-shot script, `--bench` modes, env-var instrumentation) |
 | `iterm2`   | primary competitor | AppleScript → `tell application "iTerm" … write text` |
 | `warp`     | primary competitor | AppleScript → `open -a Warp`, System Events keystroke |
 | `terminal` | OS-vendor reference floor | AppleScript → `tell application "Terminal" … do script` |
@@ -81,12 +81,12 @@ For every (scenario, terminal) cell we collect a subset of:
 | **rss-active**       | MiB  | ✓ | `ps -o rss=` while scenario runs |
 | **rss-idle-after**   | MiB  | ✓ | `ps -o rss=` 5 s after scenario completes |
 | **cpu-active-avg**   | %    | ✓ | `ps -o %cpu=` polled every 250 ms |
-| **disk-bytes**       | bytes | ✓ | sum of files in the terminal's scrollback dir (mars: `~/.cache/mars/scrollback`; iterm2: `~/Library/Application Support/iTerm2/SavedState`; warp: SQLite db; terminal.app: 0 — no disk persistence) |
-| **fps-p50/p95**      | hz   | mars-only | renderer counter via `MARS_PROFILE` |
-| **input-latency-p50/p95** | ms | mars-only | keystroke→setContents via `MARS_LATENCY` |
-| **ttff-switch**      | ms   | mars-only | sidebar click → first frame committed |
+| **disk-bytes**       | bytes | ✓ | sum of files in the terminal's scrollback dir (marspot: `~/.cache/marspot/scrollback`; iterm2: `~/Library/Application Support/iTerm2/SavedState`; warp: SQLite db; terminal.app: 0 — no disk persistence) |
+| **fps-p50/p95**      | hz   | marspot-only | renderer counter via `MARSPOT_PROFILE` |
+| **input-latency-p50/p95** | ms | marspot-only | keystroke→setContents via `MARSPOT_LATENCY` |
+| **ttff-switch**      | ms   | marspot-only | sidebar click → first frame committed |
 | **startup-cold**     | ms   | ✓ | spawn → window-visible (osascript polling) |
-| **binary-size**      | bytes | mars-only | `stat -f%z target/release/{mars,mcli}` |
+| **binary-size**      | bytes | marspot-only | `stat -f%z target/release/{marspot,mcli}` |
 
 Cells without a measurement record `null`, not 0. Skipping is loud
 (`- skip` in the gate output) so a silently-missing metric can't fool
@@ -104,12 +104,12 @@ We do not pretend to compare what isn't comparable.
   `bench/results/cross-terminal.json` and the comparison table in
   `docs/perf.md`.
 
-- **FPS, input-latency, TTFF**: instrumented from inside mars, no
+- **FPS, input-latency, TTFF**: instrumented from inside marspot, no
   way to measure the same thing in iTerm2 / Warp / Terminal.app
   without invasive screen-capture or hardware-camera setups. We
-  track them longitudinally for **mars vs mars** regression. A
+  track them longitudinally for **marspot vs marspot** regression. A
   rough cross-term "screen-capture latency" track is a future
-  scenario; for now we declare these mars-only.
+  scenario; for now we declare these marspot-only.
 
 - **Multi-session aggregate FPS**: meaningless cross-term — iTerm2 /
   Warp redraw via different mechanisms (Cocoa retained mode vs
@@ -126,7 +126,7 @@ driver implements a small, fixed contract:
 
 ```sh
 # bin/scenarios/<id>.sh <terminal> <out-json>
-#   <terminal>  one of mars|iterm2|warp|terminal
+#   <terminal>  one of marspot|iterm2|warp|terminal
 #   <out-json>  path to write per-(terminal,scenario) result JSON
 #
 # Exit 0 = ran successfully; emits JSON with at least:
@@ -142,8 +142,8 @@ for each (scenario, terminal) where the scenario doesn't declare
 
 ### Terminal-specific dispatch
 
-- **mars**: pointed at a one-shot `MARS_SHELL` script. Profiling
-  env-vars (`MARS_PROFILE=…`, `MARS_LATENCY=…`) get forwarded so
+- **marspot**: pointed at a one-shot `MARSPOT_SHELL` script. Profiling
+  env-vars (`MARSPOT_PROFILE=…`, `MARSPOT_LATENCY=…`) get forwarded so
   per-trial counters land alongside throughput.
 - **iterm2**: `osascript` creating a fresh window with the default
   profile, `write text` for the command, polling for marker.
@@ -160,7 +160,7 @@ different per-terminal logic — they spawn N tabs / push synthetic
 events / watch many markers, and trying to share that with the simple
 `cat` flow leads to a 500-line `case` statement. (2) Per-file scripts
 are individually runnable for debugging (`bin/scenarios/scrollback-1m.sh
-mars /tmp/foo.json`). (3) When iTerm2 changes its AppleScript surface
+marspot /tmp/foo.json`). (3) When iTerm2 changes its AppleScript surface
 (this happens), one driver file rots, not the whole bench.
 
 ---
@@ -183,7 +183,7 @@ matrix in one file. Schema:
   "machine": { "model": "MacBookPro18,2", "cpu": "Apple M1 Max", "ram_gb": 32, "macos": "14.4" },
   "scenarios": {
     "cat-ascii": {
-      "mars":     { "metrics": { "throughput_MBps_p50": 92.1, "rss_active_MiB": 41, … } },
+      "marspot":     { "metrics": { "throughput_MBps_p50": 92.1, "rss_active_MiB": 41, … } },
       "iterm2":   { "metrics": { "throughput_MBps_p50": 56.4, … } },
       "warp":     { "metrics": { "throughput_MBps_p50": 47.3, … } },
       "terminal": { "metrics": { "throughput_MBps_p50": 38.0, … } }
@@ -223,7 +223,7 @@ breaks any of:
 |---|---|
 | **Floors** (higher = better) | `parse-MBps`, `live-MBps`, `vs-best-other-ratio` ≥ floor |
 | **Ceilings** (lower = better) | `render-p99-µs`, `binary-size`, `idle-RSS` ≤ ceiling |
-| **Tail** | `input-latency-p99` ≤ ceiling (mars-only) |
+| **Tail** | `input-latency-p99` ≤ ceiling (marspot-only) |
 | **Drift** | `idle-9x`: RSS at t=5 min ≤ RSS at t=30 s × 1.10 (no creep) |
 | **Multi-session** | `multi-session-9x` aggregate throughput ≥ floor; total RSS ≤ ceiling |
 

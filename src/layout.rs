@@ -1,7 +1,7 @@
 //! Window layout: where each session and the sidebar live, in
 //! physical pixels.
 //!
-//! mars carves the window into:
+//! marspot carves the window into:
 //!
 //! ```text
 //!   ┌─────────┬───────────────────────────┐
@@ -278,7 +278,7 @@ impl Layout {
             // Chrome rects default to ZERO / empty — call `with_chrome`
             // to populate them after build.  Snapshot/bench/test
             // call sites that don't render the picker leave them
-            // zeroed; mars's main path always layers on the chrome.
+            // zeroed; marspot's main path always layers on the chrome.
             layout_button_rect: Rect::ZERO,
             picker_panel_rect: None,
             picker_option_rects: Vec::new(),

@@ -15,7 +15,7 @@
     "bench-run + measure-other (3-trial), \u00d7 0.93 (parse) / 0.90 (live,",
     "ratios) safety margin.  Earlier same-day floors were over-loose due",
     "to godot CPU contention skewing measurements ~30% slower than truth.",
-    "These are the *minimum* mars must hold while A/B/C/D attack work is",
+    "These are the *minimum* marspot must hold while A/B/C/D attack work is",
     "ongoing; targets to break above live in docs/perf-attack/."
   ],
   "scenarios": [
@@ -62,13 +62,13 @@
   },
   "binary_size_bytes_max": {
     "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).",
-    "mars": 741611,
-    "mcli": 504328
+    "mcli": 504328,
+    "marspot": 741611
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
-    "mars": 112493,
-    "mcli": 116525
+    "mcli": 116525,
+    "marspot": 112493
   },
   "competitors_snapshot": {
     "_comment": "3-trial median, clean-machine, 2026-05-05.  measure-other.sh with TRIALS=3 + auto-driven via bin/drivers/<term>.sh.  Includes Terminal.app for context (max-of-iterm-warp is the vs-best-other denominator the gate uses; Terminal.app is OS-vendor floor, not 'competitor').",
@@ -96,15 +96,15 @@
     "_comment": [
       "Floors for the bench-run.sh scenarios (cat-mixed.9x = multi-session-9x,",
       "scrollback-1m).  Read from bench/results/cross-terminal.json (latest",
-      "bench-run.sh snapshot).  Two checks per scenario: mars's own absolute",
-      "throughput floor, and the mars-vs-best-other ratio floor.  The ratio",
-      "floor is the structural protection \u2014 without it, mars and competitors",
+      "bench-run.sh snapshot).  Two checks per scenario: marspot's own absolute",
+      "throughput floor, and the marspot-vs-best-other ratio floor.  The ratio",
+      "floor is the structural protection \u2014 without it, marspot and competitors",
       "can both slow down and the gate stays green even though our relative",
       "advantage shrunk.",
       "",
       "Locked 2026-05-05 against c43d26b (clean-machine, post-godot-cleanup):",
-      "  multi-session-9x: mars 104.6 / iterm 18.2 / terminal 60.1 MiB/s",
-      "  scrollback-1m:    mars 97.7  / iterm 71.8 / terminal 91.6 MiB/s",
+      "  multi-session-9x: marspot 104.6 / iterm 18.2 / terminal 60.1 MiB/s",
+      "  scrollback-1m:    marspot 97.7  / iterm 71.8 / terminal 91.6 MiB/s",
       "10% safety margin.  Re-lock via `bin/bench.sh --full --update-baseline`",
       "after re-running `bin/bench-run.sh` \u22653\u00d7 to populate snapshots."
     ],

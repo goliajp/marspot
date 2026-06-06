@@ -1,11 +1,11 @@
-//! Mars's AppKit-direct window + event loop.
+//! Marspot's AppKit-direct window + event loop.
 //!
 //! Replaces winit.  We talk to NSApplication / NSWindow / NSView
-//! through `objc2-app-kit` and dispatch events into a `MarsApp` impl.
+//! through `objc2-app-kit` and dispatch events into a `MarspotApp` impl.
 //!
 //! The shape mirrors winit's `ApplicationHandler` (resumed → events
-//! → user_event) but on a smaller surface — only the events Mars
-//! actually consumes.  Lives in the lib because both `mars` and
+//! → user_event) but on a smaller surface — only the events Marspot
+//! actually consumes.  Lives in the lib because both `marspot` and
 //! `mcli` use it.
 //!
 //! ## Threading
@@ -13,18 +13,18 @@
 //! Everything runs on the main thread except `EventProxy::wake()`,
 //! which can be called from any thread.  Wake signals a
 //! CFRunLoopSource registered on the main run loop; on the next
-//! main-thread iteration the source's perform fires `MarsApp::user_event`.
+//! main-thread iteration the source's perform fires `MarspotApp::user_event`.
 //!
 //! ## Known differences vs winit
 //!
-//! - **IME via NSTextInputClient.**  `MarsView` implements the
+//! - **IME via NSTextInputClient.**  `MarspotView` implements the
 //!   protocol so CJK / Japanese / emoji input works.  An initial
 //!   5-trial A/B suggested a 5–10 % live-PTY throughput drop, but a
 //!   follow-up 10-trial Welch t-test (cat-cjk) gave t=1.08 — well
 //!   below the 95 % significance threshold — so the apparent
 //!   regression is within run-to-run noise.  Treat it as "no
 //!   measured regression at current precision."
-//! - **No `CursorMoved` event.**  Mars only inspects the cursor at
+//! - **No `CursorMoved` event.**  Marspot only inspects the cursor at
 //!   click time; we read `locationInWindow` from `mouseDown:` instead.
 //! - **No inline preedit rendering.**  macOS draws its own candidate
 //!   window above the caret, but the marked text isn't currently
@@ -55,66 +55,66 @@ use objc2_foundation::{
     NSUInteger,
 };
 
-use crate::input::{KeyState, LogicalKey, MarsKeyEvent, Modifiers, NamedKey};
+use crate::input::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
 
 /// Trait that the binary's main loop implements.  Methods are called
-/// on the main thread; the `MarsAppCtx` argument lets handlers
+/// on the main thread; the `MarspotAppCtx` argument lets handlers
 /// request a redraw or schedule exit.
-pub trait MarsApp: 'static {
+pub trait MarspotApp: 'static {
     /// Called once after the window is created and the run loop has
     /// started.  Renderer setup belongs here.
-    fn resumed(&mut self, ctx: &MarsAppCtx);
+    fn resumed(&mut self, ctx: &MarspotAppCtx);
 
     /// Called whenever `EventProxy::wake()` is signalled from any
     /// thread.  Coalesced — multiple wakes between iterations may
     /// collapse into one call.
-    fn user_event(&mut self, ctx: &MarsAppCtx);
+    fn user_event(&mut self, ctx: &MarspotAppCtx);
 
-    fn key_event(&mut self, ctx: &MarsAppCtx, event: MarsKeyEvent, modifiers: Modifiers);
+    fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, modifiers: Modifiers);
 
     /// Mouse-down with location in physical pixels, origin top-left.
-    fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64);
+    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64);
 
     /// Mouse-dragged (button still pressed) at physical-pixel `(x, y)`.
     /// Default implementation is a no-op — apps that want drag/select
     /// behaviour override this.
-    fn mouse_drag(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {}
+    fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
 
     /// Mouse-up at physical-pixel `(x, y)`.  Default no-op.
-    fn mouse_up(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {}
+    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
 
     /// Scroll delta in physical pixels (positive Y = scroll content
     /// down).  `precise` is true for trackpad / Magic Mouse, false
     /// for traditional mouse wheels (where deltas come in lines).
-    fn scroll(&mut self, ctx: &MarsAppCtx, dx_phys: f64, dy_phys: f64, precise: bool);
+    fn scroll(&mut self, ctx: &MarspotAppCtx, dx_phys: f64, dy_phys: f64, precise: bool);
 
     /// Window content size in physical pixels.  Fired on every step
     /// of a live resize plus once after the window is initially shown.
-    fn resized(&mut self, ctx: &MarsAppCtx, width_phys: f64, height_phys: f64);
+    fn resized(&mut self, ctx: &MarspotAppCtx, width_phys: f64, height_phys: f64);
 
-    fn focused(&mut self, ctx: &MarsAppCtx, focused: bool);
+    fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool);
 
-    fn close_requested(&mut self, ctx: &MarsAppCtx);
+    fn close_requested(&mut self, ctx: &MarspotAppCtx);
 
     /// Fired when a previous `ctx.request_redraw()` is being honoured.
     /// Repaint the window here.
-    fn redraw(&mut self, ctx: &MarsAppCtx);
+    fn redraw(&mut self, ctx: &MarspotAppCtx);
 }
 
-/// Handle passed to every `MarsApp` callback.  Owns the NSWindow /
+/// Handle passed to every `MarspotApp` callback.  Owns the NSWindow /
 /// NSView retain counts; lets the app request redraws or exit.
-pub struct MarsAppCtx {
-    inner: Retained<MarsView>,
+pub struct MarspotAppCtx {
+    inner: Retained<MarspotView>,
     nswindow: Retained<NSWindow>,
     nsapp: Retained<NSApplication>,
     redraw_pending: Cell<bool>,
     exit_requested: Cell<bool>,
 }
 
-impl MarsAppCtx {
+impl MarspotAppCtx {
     /// The NSView the renderer attaches to.
     pub fn ns_view(&self) -> &NSView {
-        // MarsView ⊆ NSView (subclass); deref via cast.
+        // MarspotView ⊆ NSView (subclass); deref via cast.
         unsafe { &*(Retained::as_ptr(&self.inner) as *const NSView) }
     }
 
@@ -130,7 +130,7 @@ impl MarsAppCtx {
         self.nswindow.backingScaleFactor() as f64
     }
 
-    /// Schedule a `MarsApp::redraw` after the current event handler
+    /// Schedule a `MarspotApp::redraw` after the current event handler
     /// returns.  Coalesced — multiple calls per event collapse.
     pub fn request_redraw(&self) {
         self.redraw_pending.set(true);
@@ -153,7 +153,7 @@ pub struct WindowAttrs {
 
 /// Cross-thread wake signal.  Construct once before run_app starts;
 /// clones are cheap (`Arc` bump) and `Send + Sync`.  `wake()` from
-/// any thread schedules a `MarsApp::user_event` on the main thread.
+/// any thread schedules a `MarspotApp::user_event` on the main thread.
 pub struct EventProxy {
     inner: Arc<ProxyInner>,
 }
@@ -239,7 +239,7 @@ extern "C" fn source_perform(_info: *const c_void) {
 // ---------------------------------------------------------------------------
 
 /// Per-instance state for the custom view.
-pub struct MarsViewIvars {
+pub struct MarspotViewIvars {
     /// Marked (pre-edit) string from the active IME composition.
     /// Stored to honour the NSTextInputClient `markedRange` /
     /// `hasMarkedText` queries; not yet rendered as inline preview.
@@ -260,10 +260,10 @@ pub struct MarsViewIvars {
 
 declare_class!(
     /// `NSView` subclass that captures key + mouse + scroll events
-    /// and bridges them into `MarsApp`.  Implements
+    /// and bridges them into `MarspotApp`.  Implements
     /// `NSTextInputClient` so CJK / emoji IMEs can compose into the
     /// terminal.
-    pub struct MarsView;
+    pub struct MarspotView;
 
     // SAFETY:
     // - Superclass NSView has no special subclassing requirements.
@@ -271,20 +271,20 @@ declare_class!(
     //   methods (notably `interpretKeyEvents`).
     // - Main-thread mutability is correct for an NSView subclass.
     // - Drop-relevant state in ivars is safe inside RefCell/Cell.
-    unsafe impl ClassType for MarsView {
+    unsafe impl ClassType for MarspotView {
         #[inherits(objc2_app_kit::NSResponder, objc2::runtime::NSObject)]
         type Super = NSView;
         type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MarsView";
+        const NAME: &'static str = "MarspotView";
     }
 
-    impl DeclaredClass for MarsView {
-        type Ivars = MarsViewIvars;
+    impl DeclaredClass for MarspotView {
+        type Ivars = MarspotViewIvars;
     }
 
-    unsafe impl NSObjectProtocol for MarsView {}
+    unsafe impl NSObjectProtocol for MarspotView {}
 
-    unsafe impl MarsView {
+    unsafe impl MarspotView {
         #[method(acceptsFirstResponder)]
         fn accepts_first_responder(&self) -> bool {
             true
@@ -302,7 +302,7 @@ declare_class!(
             let mods = nsevent_modifiers(event);
 
             // Cmd / Ctrl combos bypass the IME entirely.  This keeps
-            // shortcuts that the rest of mars expects (Cmd-V paste,
+            // shortcuts that the rest of marspot expects (Cmd-V paste,
             // Ctrl-C → 0x03, Ctrl-[ → ESC) working — IMEs typically
             // don't consume these but we don't want to depend on that.
             if mods.super_ || mods.control {
@@ -346,7 +346,7 @@ declare_class!(
         #[method(flagsChanged:)]
         fn flags_changed(&self, event: &NSEvent) {
             // Modifiers carry on the event object; we surface them via
-            // the next key_event delivery.  No callback to MarsApp
+            // the next key_event delivery.  No callback to MarspotApp
             // here — modifiers ride along with the keystrokes that
             // actually arrive.
             let _ = event;
@@ -416,7 +416,7 @@ declare_class!(
         }
     }
 
-    unsafe impl NSTextInputClient for MarsView {
+    unsafe impl NSTextInputClient for MarspotView {
         // Required: queries
 
         #[method(hasMarkedText)]
@@ -473,7 +473,7 @@ declare_class!(
         ) -> NSRect {
             // Returning a zero rect lands the IME candidate window
             // in macOS's default position.  Plumbing through the
-            // real cursor position needs Mars-side state that we
+            // real cursor position needs Marspot-side state that we
             // don't surface yet — follow-up.
             NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
         }
@@ -490,7 +490,7 @@ declare_class!(
             self.ivars().ime_consumed.set(true);
             let s = nsobject_string_to_string(string);
             *self.ivars().marked_text.borrow_mut() = s;
-            // Mars doesn't render preedit inline yet — the IME's own
+            // Marspot doesn't render preedit inline yet — the IME's own
             // candidate window covers UX.  When we add inline preview
             // (Phase E?), this is where we'd notify the app.
         }
@@ -512,7 +512,7 @@ declare_class!(
             // logical=Other and the resolved text payload.  The
             // text fallback in input::key_event_to_bytes ships it
             // straight to the PTY, regardless of byte width.
-            let ev = MarsKeyEvent {
+            let ev = MarspotKeyEvent {
                 state: KeyState::Pressed,
                 logical: LogicalKey::Other,
                 text: Some(s),
@@ -534,7 +534,7 @@ declare_class!(
                 None => return,
             };
             self.ivars().ime_consumed.set(true);
-            let ev = MarsKeyEvent {
+            let ev = MarspotKeyEvent {
                 state: KeyState::Pressed,
                 logical: LogicalKey::Named(named),
                 text: None,
@@ -593,34 +593,34 @@ fn nsobject_string_to_string(string: &NSObject) -> String {
 // NSWindowDelegate subclass
 // ---------------------------------------------------------------------------
 
-pub struct MarsWindowDelegateIvars;
+pub struct MarspotWindowDelegateIvars;
 
 declare_class!(
-    pub struct MarsWindowDelegate;
+    pub struct MarspotWindowDelegate;
 
     // SAFETY:
     // - Superclass NSObject has no subclassing requirements.
     // - Window delegates are main-thread-only.
     // - No Drop logic here.
-    unsafe impl ClassType for MarsWindowDelegate {
+    unsafe impl ClassType for MarspotWindowDelegate {
         type Super = objc2::runtime::NSObject;
         type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MarsWindowDelegate";
+        const NAME: &'static str = "MarspotWindowDelegate";
     }
 
-    impl DeclaredClass for MarsWindowDelegate {
-        type Ivars = MarsWindowDelegateIvars;
+    impl DeclaredClass for MarspotWindowDelegate {
+        type Ivars = MarspotWindowDelegateIvars;
     }
 
-    unsafe impl NSObjectProtocol for MarsWindowDelegate {}
+    unsafe impl NSObjectProtocol for MarspotWindowDelegate {}
 
-    unsafe impl NSWindowDelegate for MarsWindowDelegate {
+    unsafe impl NSWindowDelegate for MarspotWindowDelegate {
         #[method(windowShouldClose:)]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
             dispatch_event(EventKind::CloseRequested);
             // Returning false lets the app handle the close; if the
             // app calls ctx.exit() inside close_requested, the run
-            // loop stops and we return.  Mars's current behaviour is
+            // loop stops and we return.  Marspot's current behaviour is
             // "close = exit", but we honour the indirection cleanly.
             false
         }
@@ -648,7 +648,7 @@ declare_class!(
 
 enum EventKind {
     UserEvent,
-    Key(MarsKeyEvent, Modifiers),
+    Key(MarspotKeyEvent, Modifiers),
     MouseDown { x: f64, y: f64 },
     MouseDrag { x: f64, y: f64 },
     MouseUp { x: f64, y: f64 },
@@ -659,12 +659,12 @@ enum EventKind {
 }
 
 struct AppState {
-    app: Box<dyn MarsApp>,
-    ctx: MarsAppCtx,
+    app: Box<dyn MarspotApp>,
+    ctx: MarspotAppCtx,
 }
 
 thread_local! {
-    /// Owns the user's `MarsApp` and the per-window context.
+    /// Owns the user's `MarspotApp` and the per-window context.
     /// Populated by `run_app`; accessed from every event handler.
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
@@ -733,7 +733,7 @@ fn post_dummy_event(nsapp: &NSApplication) {
 
 /// Block on the AppKit run loop, dispatching events into `app`.
 /// Returns when `ctx.exit()` has been called and the run loop drains.
-pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
+pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     let mtm = MainThreadMarker::new()
         .expect("run_app must be called on the main thread");
     let nsapp = NSApplication::sharedApplication(mtm);
@@ -744,8 +744,8 @@ pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         NSPoint::new(0.0, 0.0),
         NSSize::new(attrs.width_logical, attrs.height_logical),
     );
-    let view: Retained<MarsView> = {
-        let alloc = mtm.alloc::<MarsView>().set_ivars(MarsViewIvars {
+    let view: Retained<MarspotView> = {
+        let alloc = mtm.alloc::<MarspotView>().set_ivars(MarspotViewIvars {
             marked_text: RefCell::new(String::new()),
             ime_consumed: Cell::new(false),
             last_modifiers: Cell::new(Modifiers::default()),
@@ -801,10 +801,10 @@ pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     window.makeFirstResponder(Some(&view));
 
     // 3. Window delegate.
-    let delegate: Retained<MarsWindowDelegate> = {
+    let delegate: Retained<MarspotWindowDelegate> = {
         let alloc = mtm
-            .alloc::<MarsWindowDelegate>()
-            .set_ivars(MarsWindowDelegateIvars);
+            .alloc::<MarspotWindowDelegate>()
+            .set_ivars(MarspotWindowDelegateIvars);
         unsafe { msg_send_id![super(alloc), init] }
     };
     let proto: &ProtocolObject<dyn NSWindowDelegate> =
@@ -822,7 +822,7 @@ pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
 
     // 5. Build the ctx and stash app state.  After this the NSView
     //    callbacks are live.
-    let ctx = MarsAppCtx {
+    let ctx = MarspotAppCtx {
         inner: view.clone(),
         nswindow: window.clone(),
         nsapp: nsapp.clone(),
@@ -836,7 +836,7 @@ pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     window.makeKeyAndOrderFront(None);
 
     // Hand control to the app's resumed handler.  Borrow the cell as
-    // `Box<dyn MarsApp>` so `dispatch_event` and resumed share state.
+    // `Box<dyn MarspotApp>` so `dispatch_event` and resumed share state.
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
             app: Box::new(app),
@@ -865,7 +865,7 @@ pub fn run_app<A: MarsApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
 }
 
 // ---------------------------------------------------------------------------
-// NSEvent → MarsKeyEvent
+// NSEvent → MarspotKeyEvent
 // ---------------------------------------------------------------------------
 
 fn nsevent_modifiers(event: &NSEvent) -> Modifiers {
@@ -878,7 +878,7 @@ fn nsevent_modifiers(event: &NSEvent) -> Modifiers {
     }
 }
 
-fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarsKeyEvent> {
+fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEvent> {
     let key_code = unsafe { event.keyCode() };
     let logical = match key_code {
         // Carbon HIToolbox keyCodes — stable across macOS versions.
@@ -911,7 +911,7 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarsKeyEvent>
         unsafe { event.characters() }.map(|s| s.to_string())
     };
 
-    Some(MarsKeyEvent {
+    Some(MarspotKeyEvent {
         state,
         logical,
         text,

@@ -6,7 +6,7 @@
 
 ## What's broken
 
-`bin/scenarios/active-9x-soak.sh mars` reports:
+`bin/scenarios/active-9x-soak.sh marspot` reports:
 
 ```
 CPU drift q4/q1            2.4037   ✓ (threshold 2.0×)
@@ -45,8 +45,8 @@ test_a2_cpu_drift_gate_direction() {
 Manual reproduction:
 ```sh
 # See the bug live:
-bin/scenarios/active-9x-soak.sh mars /tmp/a2-test.json
-# Output shows mars 2.4037 ✓; iTerm2 0.7598 ✓; Terminal.app 1.1798 ✓
+bin/scenarios/active-9x-soak.sh marspot /tmp/a2-test.json
+# Output shows marspot 2.4037 ✓; iTerm2 0.7598 ✓; Terminal.app 1.1798 ✓
 # Whatever the rule is, 2.40 must not silently ✓ if the threshold is 2.0
 ```
 
@@ -82,7 +82,7 @@ bin/scenarios/active-9x-soak.sh mars /tmp/a2-test.json
 
 If hypothesis 1 confirms:
 - Flip comparison to `>` (fail when drift exceeds threshold)
-- Re-run scenario → mars's 2.40 should now show ✗ FAIL
+- Re-run scenario → marspot's 2.40 should now show ✗ FAIL
 - Confirm iTerm2 0.76 and Terminal.app 1.18 still ✓ (under threshold)
 
 If hypothesis 2:
@@ -97,7 +97,7 @@ Add unit test coverage:
 
 ## Exit criteria
 
-1. Active-9x-soak gate fires ✗ on mars's current 2.40 CPU drift
+1. Active-9x-soak gate fires ✗ on marspot's current 2.40 CPU drift
 2. Synthetic-input test suite covers all four corner combinations
    (low/high RSS drift × low/high CPU drift)
 3. Threshold + comparison rationale documented in the scenario script
@@ -107,7 +107,7 @@ Add unit test coverage:
 - **Don't tighten the threshold while fixing the bug** unless the
   numeric value needs adjustment too.  Mixing semantic fix with
   threshold change makes regression harder to localise.
-- After fix, mars will show **two ✗** on active-9x-soak (RSS + CPU
+- After fix, marspot will show **two ✗** on active-9x-soak (RSS + CPU
   drift).  This is correct exposure of A1's full impact, not a new
   regression.
 
@@ -130,8 +130,8 @@ Add unit test coverage:
   noise — a swing from 0.3% to 0.9% (both essentially idle) gives a
   drift of 3.0× but no actual perf event happened.
 
-  godot session mars showed `2.40× ✓` because cpu_q1 was low (godot
-  was hogging CPU during early samples → mars's cpu_q1 mean fell
+  godot session marspot showed `2.40× ✓` because cpu_q1 was low (godot
+  was hogging CPU during early samples → marspot's cpu_q1 mean fell
   below 1%); the short-circuit engaged.  Clean session shows
   `0.69× ✓` — drift legitimately under threshold, gate behaved
   identically.
@@ -142,7 +142,7 @@ Add unit test coverage:
   **Optional improvement** (not blocking): supplement the q1<1%
   short-circuit with an absolute-spread check (e.g. cpu_max - cpu_min
   ≥ 5 percentage-points fails regardless of q1).  Catches the case
-  where mars goes from quiet to "burning a sustained 5%" — which the
+  where marspot goes from quiet to "burning a sustained 5%" — which the
   ratio gate currently passes if q1 was 0.4%.  Whether this matters
   depends on whether such a transition is realistic; deferring until
   after A1 is resolved (A1 dominates the A-bucket).

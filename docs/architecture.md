@@ -1,4 +1,4 @@
-# Mars architecture
+# Marspot architecture
 
 A living document. Updated alongside any structural change. The point is
 not "how was it built" but "**where does work happen, what's the cost,

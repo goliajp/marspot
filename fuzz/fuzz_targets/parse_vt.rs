@@ -8,7 +8,7 @@
 //! fuzz targets, not this one.
 
 use libfuzzer_sys::fuzz_target;
-use mars::parser::{Parser, ParserCallbacks};
+use marspot::parser::{Parser, ParserCallbacks};
 
 struct Sink;
 impl ParserCallbacks for Sink {

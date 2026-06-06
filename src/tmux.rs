@@ -6,7 +6,7 @@
 //! that byte stream into a sequence of [`Event`]s suitable for a UI
 //! layer to act on.
 //!
-//! Deliberately ignorant of mars internals: this parser knows
+//! Deliberately ignorant of marspot internals: this parser knows
 //! nothing about Session / Renderer / winit.  It takes `&[u8]` in
 //! and emits typed events out, making it independently testable
 //! and reusable for any other front-end (mcli, a hypothetical

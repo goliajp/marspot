@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate the bench scenario files used by `bin/measure.sh` and the mars
+# Generate the bench scenario files used by `bin/measure.sh` and the marspot
 # `--bench` modes.  Outputs go in `bench/scenarios/`.
 #
 # Re-run any time the scenario definitions change.  The files are
@@ -14,7 +14,7 @@ mkdir -p "$OUT"
 
 # ---- cat-ascii: 32 MiB of mixed ASCII text --------------------------------
 # Sized so a slow terminal (iTerm2 at ~10 MB/s) finishes in a few seconds
-# but a fast one (mars target) finishes well under a second — gives us
+# but a fast one (marspot target) finishes well under a second — gives us
 # resolution at both ends.
 echo "==> cat-ascii (32 MiB)"
 python3 - "$OUT/cat-ascii.bin" 32 <<'PY'

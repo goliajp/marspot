@@ -1,18 +1,18 @@
 use objc2_app_kit::NSScreen;
 use objc2_foundation::MainThreadMarker;
 
-use mars::app::{run_app, EventProxy, MarsApp, MarsAppCtx, WindowAttrs};
-use mars::input::{key_event_to_bytes, MarsKeyEvent, Modifiers as MarsModifiers};
-use mars::layout::Layout;
-use mars::render::{Renderer, SessionView, SidebarEntry};
-use mars::render_metal::{make_target_texture, MetalRenderer};
-use mars::session::{Session, SessionState};
-use mars::terminal::Terminal;
-use mars::tmux;
+use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
+use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers as MarspotModifiers};
+use marspot::layout::Layout;
+use marspot::render::{Renderer, SessionView, SidebarEntry};
+use marspot::render_metal::{make_target_texture, MetalRenderer};
+use marspot::session::{Session, SessionState};
+use marspot::terminal::Terminal;
+use marspot::tmux;
 
 /// Renderer dispatch: Metal-on-CAMetalLayer (default — 7× faster
 /// typing latency per docs/perf.md) or AppKit-on-CGImage (set
-/// `MARS_APPKIT=1`, kept as a fallback for regression bisects /
+/// `MARSPOT_APPKIT=1`, kept as a fallback for regression bisects /
 /// troubleshooting).  Both implement the same surface — keep this
 /// enum in lock-step with their public API.
 enum RendererImpl {
@@ -72,7 +72,7 @@ impl RendererImpl {
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const GIT_SHA: &str = env!("MARS_GIT_SHA");
+pub const GIT_SHA: &str = env!("MARSPOT_GIT_SHA");
 
 /// Switchable session-grid layouts (mouse-driven via the [layout]
 /// button in the main area).  Cell counts ∈ {1, 2, 4, 6, 9}; 2 and 6
@@ -174,7 +174,7 @@ fn truncate_for_sidebar(s: &str, max_chars: usize) -> String {
 const GRID_COLS: u16 = 80;
 const GRID_ROWS: u16 = 24;
 
-/// In tmux mode mars hosts a single `Session` running `tmux -CC` and
+/// In tmux mode marspot hosts a single `Session` running `tmux -CC` and
 /// re-uses the rendering / sidebar machinery to surface tmux's
 /// windows.  When `Some`, normal multi-cell behaviour is bypassed.
 struct TmuxState {
@@ -225,7 +225,7 @@ impl TmuxState {
     }
 }
 
-struct Mars {
+struct Marspot {
     renderer: Option<RendererImpl>,
     /// Cached layout from the last Resized.  Drives both rendering and
     /// mouse-click hit-testing.
@@ -245,15 +245,15 @@ struct Mars {
     /// Self-instrumentation: when set to `Some(t0)`, the next render that
     /// commits to the layer will measure `t0.elapsed()` as the
     /// keystroke-to-pixel latency and record it.  Cleared after the next
-    /// successful layer.setContents.  Off-path entirely when MARS_LATENCY
+    /// successful layer.setContents.  Off-path entirely when MARSPOT_LATENCY
     /// is unset (taken once at startup → `record_latency`).
     pending_keystroke_t0: Option<std::time::Instant>,
-    /// Cumulative latency samples, written to MARS_LATENCY's path on Drop.
+    /// Cumulative latency samples, written to MARSPOT_LATENCY's path on Drop.
     /// Always allocated but only pushed to when `record_latency` is true.
     latency_samples: Vec<u64>,
     record_latency: bool,
     latency_out_path: Option<String>,
-    /// MARS_PROFILE counters — set when MARS_PROFILE_OUT is configured.
+    /// MARSPOT_PROFILE counters — set when MARSPOT_PROFILE_OUT is configured.
     /// Counts paths through user_event / RedrawRequested / render / feed
     /// so we can tell whether the live pipeline is render-throttled,
     /// event-throttled, or feed-throttled.
@@ -289,14 +289,14 @@ struct Mars {
     /// floats over the main area; while open, mouse_down hits hit-test
     /// the picker first and swallow background clicks.
     layout_picker_open: bool,
-    /// MARS_PROFILE_RSS instrumentation — when set, every ~1 s the
+    /// MARSPOT_PROFILE_RSS instrumentation — when set, every ~1 s the
     /// main loop appends one TSV row of per-subsystem RSS to this
     /// path.  Off-path entirely when the env var is unset.  See
-    /// `Mars::maybe_dump_rss` for the row format and the Phase 1
+    /// `Marspot::maybe_dump_rss` for the row format and the Phase 1
     /// docs for why we sample.
     profile_rss_path: Option<std::path::PathBuf>,
     /// Wall-clock origin for the elapsed-seconds column in the dump.
-    /// Lazily set on the first `maybe_dump_rss` so a `MARS_PROFILE_RSS`
+    /// Lazily set on the first `maybe_dump_rss` so a `MARSPOT_PROFILE_RSS`
     /// run that starts mid-soak still gets a `t=0` row.
     rss_dump_started_at: Option<std::time::Instant>,
     /// Most recent dump instant — drives the 1 Hz throttle.
@@ -333,8 +333,8 @@ struct ProfileCounters {
     started_at: Option<std::time::Instant>,
 }
 
-impl MarsApp for Mars {
-    fn resumed(&mut self, ctx: &MarsAppCtx) {
+impl MarspotApp for Marspot {
+    fn resumed(&mut self, ctx: &MarspotAppCtx) {
         // mainScreen() can return a 1x screen even when our window will
         // land on a 2x one — we used to survey every screen and take
         // the max, but on macOS 26 that goes through NSArray's `count`
@@ -345,20 +345,20 @@ impl MarsApp for Mars {
         // the window actually landed on, so a startup-on-1x-then-
         // dragged-to-2x scenario self-corrects on the first resize.
         let main_thread = MainThreadMarker::new()
-            .expect("Mars must be created on the main thread");
+            .expect("Marspot must be created on the main thread");
         let max_scale = NSScreen::mainScreen(main_thread)
             .map(|s| s.backingScaleFactor() as f32)
             .unwrap_or(2.0);
-        let scale: f32 = std::env::var("MARS_SCALE")
+        let scale: f32 = std::env::var("MARSPOT_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(max_scale);
 
         let nsview = ctx.ns_view();
-        // Metal is the default; MARS_APPKIT=1 falls back to the
+        // Metal is the default; MARSPOT_APPKIT=1 falls back to the
         // AppKit/CGImage path (kept for regression bisects).
-        let renderer = if std::env::var("MARS_APPKIT").as_deref() == Ok("1") {
-            eprintln!("[mars] MARS_APPKIT=1 → using AppKit Renderer");
+        let renderer = if std::env::var("MARSPOT_APPKIT").as_deref() == Ok("1") {
+            eprintln!("[marspot] MARSPOT_APPKIT=1 → using AppKit Renderer");
             RendererImpl::Appkit(
                 Renderer::new(nsview, scale).expect("renderer init"),
             )
@@ -372,7 +372,7 @@ impl MarsApp for Mars {
         // the renderer.resize + layout build + initial render.
     }
 
-    fn user_event(&mut self, ctx: &MarsAppCtx) {
+    fn user_event(&mut self, ctx: &MarspotAppCtx) {
         self.prof.user_events += 1;
         let drain_t0 = std::time::Instant::now();
         let total_bytes = if self.tmux.is_some() {
@@ -410,8 +410,8 @@ impl MarsApp for Mars {
         }
     }
 
-    fn key_event(&mut self, ctx: &MarsAppCtx, event: MarsKeyEvent, modifiers: MarsModifiers) {
-        use mars::input::{KeyState, LogicalKey, NamedKey};
+    fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, modifiers: MarspotModifiers) {
+        use marspot::input::{KeyState, LogicalKey, NamedKey};
 
         // Cmd-C: copy current text selection to the macOS clipboard.
         // Must run before the title-edit fall-through so a selection
@@ -512,7 +512,7 @@ impl MarsApp for Mars {
         }
     }
 
-    fn mouse_down(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
+    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64) {
         // Layout-button + picker-overlay + close-[×] dispatch: a top-
         // level intercept that fires before any cell/sidebar handling.
         // Done in a tight borrow scope so the immutable borrow on
@@ -562,7 +562,7 @@ impl MarsApp for Mars {
         }
 
         // Sidebar close-[×] click: terminate `sessions[idx]`, but
-        // refuse to close the last remaining session (mars without a
+        // refuse to close the last remaining session (marspot without a
         // session is a confusing dead-end UI; the user can spawn
         // again first via the [+] button).
         if let Some(idx) = close_session_hit {
@@ -599,7 +599,7 @@ impl MarsApp for Mars {
         // were misaligned with what was visually rendered.  Reading
         // from `layout.sidebar_top_pad_phys` (set by Layout::build
         // to reserve the [+] header band) fixes that.
-        let row_phys = mars::layout::SIDEBAR_ROW_H_PHYS;
+        let row_phys = marspot::layout::SIDEBAR_ROW_H_PHYS;
         let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
 
         // In tmux mode, sidebar rows map to tmux windows; a click
@@ -710,7 +710,7 @@ impl MarsApp for Mars {
         }
     }
 
-    fn mouse_drag(&mut self, ctx: &MarsAppCtx, x_phys: f64, y_phys: f64) {
+    fn mouse_drag(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64) {
         if !self.selection_dragging {
             return;
         }
@@ -753,7 +753,7 @@ impl MarsApp for Mars {
         ctx.request_redraw();
     }
 
-    fn mouse_up(&mut self, _ctx: &MarsAppCtx, _x_phys: f64, _y_phys: f64) {
+    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {
         // A click without movement leaves anchor == focus → treat
         // as "no selection" so a stray single-click doesn't ghost
         // a single-cell highlight.
@@ -767,7 +767,7 @@ impl MarsApp for Mars {
         }
     }
 
-    fn scroll(&mut self, ctx: &MarsAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
+    fn scroll(&mut self, ctx: &MarspotAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
         let cell_h = self
             .renderer
             .as_ref()
@@ -782,11 +782,11 @@ impl MarsApp for Mars {
         // felt wrong to users coming from iTerm2).
         //
         // Configurable via env (read once on first scroll):
-        //   MARS_SCROLL_INVERT=1     flip direction (for users who
+        //   MARSPOT_SCROLL_INVERT=1     flip direction (for users who
         //                            keep "natural scroll" off in
         //                            System Settings or just prefer
         //                            it that way).
-        //   MARS_SCROLL_FACTOR=<f>   multiplier; default 1.0.  Use
+        //   MARSPOT_SCROLL_FACTOR=<f>   multiplier; default 1.0.  Use
         //                            0.5 for slower, 2.0 for faster.
         //                            Trackpad path divides by cell_h
         //                            so the factor scales line count
@@ -812,7 +812,7 @@ impl MarsApp for Mars {
         }
     }
 
-    fn resized(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+    fn resized(&mut self, ctx: &MarspotAppCtx, phys_w: f64, phys_h: f64) {
         if let Some(r) = self.renderer.as_mut() {
             r.resize(phys_w, phys_h);
         }
@@ -822,18 +822,18 @@ impl MarsApp for Mars {
         self.render_now();
     }
 
-    fn focused(&mut self, ctx: &MarsAppCtx, focused: bool) {
+    fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
         if let Some(r) = self.renderer.as_mut() {
             r.set_window_focused(focused);
             ctx.request_redraw();
         }
     }
 
-    fn close_requested(&mut self, ctx: &MarsAppCtx) {
+    fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         ctx.exit();
     }
 
-    fn redraw(&mut self, _ctx: &MarsAppCtx) {
+    fn redraw(&mut self, _ctx: &MarspotAppCtx) {
         self.prof.redraw_requested_calls += 1;
         let render_t0 = std::time::Instant::now();
         self.render_now();
@@ -856,7 +856,7 @@ impl MarsApp for Mars {
     }
 }
 
-/// Hard cap on how many sessions mars permits at once.  The
+/// Hard cap on how many sessions marspot permits at once.  The
 /// sidebar [+] button is disabled past this count; the layout
 /// picker only offers shapes whose cells ≤ cap (== 9).
 const SESSION_COUNT_HARD_CAP: usize = 9;
@@ -874,14 +874,14 @@ const PICKER_LAYOUTS: [LayoutMode; 7] = [
     LayoutMode::Nine,
 ];
 
-impl Mars {
+impl Marspot {
     /// Rebuild the cached `Layout` at the given window physical
     /// dims, honouring the current `layout_mode` + picker open
     /// state.  Called from `resized()` (with fresh dims) and from
     /// `rebuild_layout()` (read dims back from the cached layout —
     /// for layout-mode / picker-state changes that don't resize the
     /// window).  Resizes any session whose cell rect changed shape.
-    fn rebuild_layout_at(&mut self, ctx: &MarsAppCtx, phys_w: f64, phys_h: f64) {
+    fn rebuild_layout_at(&mut self, ctx: &MarspotAppCtx, phys_w: f64, phys_h: f64) {
         let Some(r) = self.renderer.as_ref() else { return };
         let (cell_w, cell_h) = r.cell_dims();
         let scale = ctx.scale();
@@ -913,7 +913,7 @@ impl Mars {
     /// Rebuild layout using the current cached window dims.  Used
     /// after layout-mode / picker-open changes that don't come from
     /// the AppKit Resized event (e.g. clicking the [layout] button).
-    fn rebuild_layout(&mut self, ctx: &MarsAppCtx) {
+    fn rebuild_layout(&mut self, ctx: &MarspotAppCtx) {
         let dims = self.layout.as_ref().map(|l| (l.window_w, l.window_h));
         if let Some((w, h)) = dims {
             self.rebuild_layout_at(ctx, w, h);
@@ -922,7 +922,7 @@ impl Mars {
 
     /// Spawn a fresh session and append it to `self.sessions` /
     /// `self.custom_titles`.  Reuses the wake-via-EventProxy path
-    /// startup uses; safe to call from any `MarsApp` callback.
+    /// startup uses; safe to call from any `MarspotApp` callback.
     /// Refuses past `SESSION_COUNT_HARD_CAP`.  No-op in tmux mode
     /// (the single tmux -CC session is created at startup; runtime
     /// spawn would attach a second client and confuse the parser).
@@ -943,14 +943,14 @@ impl Mars {
                 self.custom_titles.push(None);
             }
             Err(e) => {
-                eprintln!("mars: failed to spawn session: {e}");
+                eprintln!("marspot: failed to spawn session: {e}");
             }
         }
     }
 
     /// Terminate `sessions[idx]` and keep all parallel state in
     /// sync.  Caller is responsible for refusing the call when this
-    /// would leave mars with zero sessions.  Drop on `Session`
+    /// would leave marspot with zero sessions.  Drop on `Session`
     /// triggers `Pty::Drop` (SIGHUP → SIGKILL fallback → close fd
     /// → reader thread sees EOF and exits).
     fn close_session(&mut self, idx: usize) {
@@ -1004,7 +1004,7 @@ impl Mars {
         }
     }
 
-    /// MARS_PROFILE_RSS sampler.  When the env-derived path is unset
+    /// MARSPOT_PROFILE_RSS sampler.  When the env-derived path is unset
     /// this is a single Option-check; when set, throttled to 1 Hz, it
     /// appends a TSV row so Phase 1.3's analyze-rss-dump.py can do
     /// per-subsystem slope analysis.  Columns:
@@ -1014,7 +1014,7 @@ impl Mars {
     /// `other = total - sum(named)` so a leak in any unmodelled
     /// subsystem (CTFont's heap, MTL drawables, anonymous mmap pages
     /// the kernel hasn't evicted, …) surfaces there.  IO failures are
-    /// silently swallowed — instrumentation must never crash mars
+    /// silently swallowed — instrumentation must never crash marspot
     /// during a 30-min soak.
     fn maybe_dump_rss(&mut self) {
         use std::io::Write;
@@ -1139,7 +1139,7 @@ impl Mars {
         if out.is_empty() {
             return false;
         }
-        mars::input::write_clipboard_text(&out)
+        marspot::input::write_clipboard_text(&out)
     }
 
     /// In tmux mode: drain the single session's raw bytes, run them
@@ -1157,7 +1157,7 @@ impl Mars {
         let mut got_signal_from_tmux = false;
         for ev in events {
             got_signal_from_tmux = true;
-            if std::env::var("MARS_TMUX_DEBUG").is_ok() {
+            if std::env::var("MARSPOT_TMUX_DEBUG").is_ok() {
                 eprintln!("[tmux] {:?}", ev);
             }
             match ev {
@@ -1238,7 +1238,7 @@ impl Mars {
                 }
                 tmux::Event::Exit { .. } => {
                     // Tmux server exited; let the all-sessions-exited
-                    // path close mars naturally.
+                    // path close marspot naturally.
                 }
                 _ => {}
             }
@@ -1348,7 +1348,7 @@ impl Mars {
         // tmux windows; otherwise list sessions by ordinal number.
         const PER_WINDOW_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
         if let Some(t) = &self.tmux {
-            if std::env::var("MARS_TMUX_DEBUG").is_ok() {
+            if std::env::var("MARSPOT_TMUX_DEBUG").is_ok() {
                 eprintln!("[render] tmux.windows.len()={}", t.windows.len());
             }
         }
@@ -1515,11 +1515,11 @@ fn main() {
             proxy_clone.wake();
         };
         let s = if tmux_mode {
-            // tmux -CC: attach to "mars" session (creating it if absent).
+            // tmux -CC: attach to "marspot" session (creating it if absent).
             // -A is "attach if exists, else new" — handy for re-launches.
             Session::spawn_with(
                 "tmux",
-                &["-CC", "new-session", "-A", "-s", "mars"],
+                &["-CC", "new-session", "-A", "-s", "marspot"],
                 INITIAL_COLS,
                 INITIAL_ROWS,
                 wake,
@@ -1532,15 +1532,15 @@ fn main() {
         sessions.push(s);
     }
 
-    let latency_out_path = std::env::var("MARS_LATENCY").ok();
+    let latency_out_path = std::env::var("MARSPOT_LATENCY").ok();
     let record_latency = latency_out_path.is_some();
-    let profile_out_path = std::env::var("MARS_PROFILE").ok();
-    let profile_rss_path = std::env::var("MARS_PROFILE_RSS")
+    let profile_out_path = std::env::var("MARSPOT_PROFILE").ok();
+    let profile_rss_path = std::env::var("MARSPOT_PROFILE_RSS")
         .ok()
         .map(std::path::PathBuf::from);
 
     let n_sessions = sessions.len();
-    let app = Mars {
+    let app = Marspot {
         renderer: None,
         layout: None,
         tmux: if tmux_mode { Some(TmuxState::new()) } else { None },
@@ -1567,14 +1567,14 @@ fn main() {
     };
 
     let attrs = WindowAttrs {
-        title: format!("Mars v{} ({})", VERSION, GIT_SHA),
+        title: format!("Marspot v{} ({})", VERSION, GIT_SHA),
         width_logical: DEFAULT_WIN_W,
         height_logical: DEFAULT_WIN_H,
     };
     run_app(app, proxy, attrs);
 }
 
-impl Drop for Mars {
+impl Drop for Marspot {
     fn drop(&mut self) {
         if let Some(path) = self.latency_out_path.take() {
             let mut s = String::with_capacity(self.latency_samples.len() * 12);
@@ -1587,7 +1587,7 @@ impl Drop for Mars {
             }
             s.push(']');
             if let Err(e) = std::fs::write(&path, s) {
-                eprintln!("mars: failed to write latency log to {path}: {e}");
+                eprintln!("marspot: failed to write latency log to {path}: {e}");
             }
         }
         if let Some(path) = self.profile_out_path.take() {
@@ -1605,7 +1605,7 @@ impl Drop for Mars {
                 dtn = p.drain_total_ns,
             );
             if let Err(e) = std::fs::write(&path, json) {
-                eprintln!("mars: failed to write profile log to {path}: {e}");
+                eprintln!("marspot: failed to write profile log to {path}: {e}");
             }
         }
     }
@@ -1616,13 +1616,13 @@ impl Drop for Mars {
 /// emit a reverse-video `%` ("PROMPT_EOL_MARK") on every fresh
 /// session.
 ///
-/// Why: mars's parser doesn't fully reconcile the byte sequence zsh
+/// Why: marspot's parser doesn't fully reconcile the byte sequence zsh
 /// emits when PROMPT_SP fires (the `%` mark + line-fill + CR + space
 /// + CR + `\033[J` + ...).  The space at col 0 should overwrite the
-/// `%` cell, but mars leaves it visible.  Until the parser bug is
+/// `%` cell, but marspot leaves it visible.  Until the parser bug is
 /// found, suppress the trigger at the shell level.
 ///
-/// Side-effects: mars sets `ZDOTDIR` for the whole process so all
+/// Side-effects: marspot sets `ZDOTDIR` for the whole process so all
 /// child shells pick it up.  The shim sources $HOME/.zshrc so the
 /// user's normal init still runs.
 fn install_shell_zdot_shim() {
@@ -1630,14 +1630,14 @@ fn install_shell_zdot_shim() {
         Ok(h) => h,
         Err(_) => return,
     };
-    let dir = std::path::PathBuf::from(&home).join(".cache/mars/zdot");
+    let dir = std::path::PathBuf::from(&home).join(".cache/marspot/zdot");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
     // Write/overwrite the shim every launch so updates ship without
     // user intervention.  The body is short and deterministic — diff
     // before write would be just-as-much I/O.
-    let shim = r#"# Auto-generated by mars: ZDOTDIR shim that sources the user's
+    let shim = r#"# Auto-generated by marspot: ZDOTDIR shim that sources the user's
 # real .zshrc, then disables zsh's PROMPT_SP option (and clears
 # PROMPT_EOL_MARK as belt-and-braces) so fresh sessions don't show a
 # reverse-video "%" mark before the prompt.
@@ -1652,16 +1652,16 @@ PROMPT_EOL_MARK=""
     unsafe { std::env::set_var("ZDOTDIR", &dir) };
 }
 
-/// Read scroll behaviour overrides from env once.  See `MarsApp::scroll`
+/// Read scroll behaviour overrides from env once.  See `MarspotApp::scroll`
 /// for the default mapping.  Returns `(invert, factor)`.
 fn scroll_config() -> (bool, f64) {
     use std::sync::OnceLock;
     static CFG: OnceLock<(bool, f64)> = OnceLock::new();
     *CFG.get_or_init(|| {
-        let invert = std::env::var("MARS_SCROLL_INVERT")
+        let invert = std::env::var("MARSPOT_SCROLL_INVERT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let factor = std::env::var("MARS_SCROLL_FACTOR")
+        let factor = std::env::var("MARSPOT_SCROLL_FACTOR")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|f| *f > 0.0 && *f < 100.0)
@@ -1689,7 +1689,7 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
 /// pre-loaded with a demo banner so the snapshot has visible content
 /// without needing a live PTY.
 fn run_snapshot(path: &str) {
-    let scale: f32 = std::env::var("MARS_SNAPSHOT_SCALE")
+    let scale: f32 = std::env::var("MARSPOT_SNAPSHOT_SCALE")
         .ok()
         .and_then(|s| s.parse().ok())
         .or_else(|| {
@@ -1745,14 +1745,14 @@ fn run_snapshot(path: &str) {
 ///                  in `step`-line decrements (default 3 — one wheel
 ///                  detent) and time each viewport repaint via
 ///                  `Grid::cell_at_view`.  Reports per-tick p50/p95/p99
-///                  nanoseconds.  Picks up `MARS_DISK_SCROLLBACK` so
+///                  nanoseconds.  Picks up `MARSPOT_DISK_SCROLLBACK` so
 ///                  the same harness can probe both storage variants.
 ///
 /// All modes write a single line of JSON to stdout so harness scripts
 /// can grep / parse without depending on prose formatting.
 /// Read this process's resident set size in KiB via Mach
 /// `task_info(MACH_TASK_BASIC_INFO)`.  ~10 µs per call on Apple
-/// Silicon — fine for the 1 Hz `MARS_PROFILE_RSS` sampler.  Returns
+/// Silicon — fine for the 1 Hz `MARSPOT_PROFILE_RSS` sampler.  Returns
 /// 0 if the syscall fails (we never want instrumentation to crash a
 /// soak).
 // libc 0.2 deprecates its mach bindings (both `mach_task_self()` the
@@ -1805,28 +1805,28 @@ fn run_bench(spec: &str) {
 }
 
 /// `--bench rss-format-dump:<seconds>` — headless driver for the
-/// MARS_PROFILE_RSS dump format contract test (Phase 1.1).  Builds
-/// a minimal Mars (no renderer, no sessions, no GUI) and pumps
+/// MARSPOT_PROFILE_RSS dump format contract test (Phase 1.1).  Builds
+/// a minimal Marspot (no renderer, no sessions, no GUI) and pumps
 /// `maybe_dump_rss` for the requested number of seconds; the 1 Hz
 /// throttle inside lays down N+1 rows so the format checker has
 /// enough samples.  Renderer-bucket columns read 0 in this mode —
-/// real numbers come from running mars proper under a soak with the
+/// real numbers come from running marspot proper under a soak with the
 /// same env var (Phase 1.2).
 fn bench_rss_format_dump(arg: &str) {
     let secs: u64 = arg.parse().unwrap_or_else(|_| {
         eprintln!("--bench rss-format-dump expects an integer second count");
         std::process::exit(2);
     });
-    let profile_rss_path = std::env::var("MARS_PROFILE_RSS")
+    let profile_rss_path = std::env::var("MARSPOT_PROFILE_RSS")
         .ok()
         .map(std::path::PathBuf::from);
     if profile_rss_path.is_none() {
         eprintln!(
-            "--bench rss-format-dump requires MARS_PROFILE_RSS env to point to an output path"
+            "--bench rss-format-dump requires MARSPOT_PROFILE_RSS env to point to an output path"
         );
         std::process::exit(2);
     }
-    let mut app = Mars {
+    let mut app = Marspot {
         renderer: None,
         layout: None,
         tmux: None,
@@ -1864,7 +1864,7 @@ fn bench_parse(path: &str) {
         eprintln!("bench: read {path}: {e}");
         std::process::exit(2);
     });
-    // Use the same grid dimensions as a typical mars window (auto-fit
+    // Use the same grid dimensions as a typical marspot window (auto-fit
     // 122×39 on the user's default 960×600 layout) so the parser path
     // exercises wrap / scroll the way it does in real use.
     let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
@@ -2051,7 +2051,7 @@ fn bench_metal_render(arg: &str) {
 /// on the Memory variant.
 ///
 /// Lifecycle:
-///   1. Construct `Terminal` (honours `MARS_DISK_SCROLLBACK` so the
+///   1. Construct `Terminal` (honours `MARSPOT_DISK_SCROLLBACK` so the
 ///      same bench probes memory and disk paths).
 ///   2. Feed the scenario file to populate scrollback.
 ///   3. (cold only) madvise(DONTNEED) on the disk region.
@@ -2139,10 +2139,10 @@ fn bench_scroll(arg: &str, cold: bool) {
 }
 
 fn feed_demo_content(terminal: &mut Terminal) {
-    let banner = format!("mars v{} ({})\r\n", VERSION, GIT_SHA);
+    let banner = format!("marspot v{} ({})\r\n", VERSION, GIT_SHA);
     terminal.feed(banner.as_bytes());
     terminal.feed(b"\r\n");
-    terminal.feed(b"hello mars\r\n");
+    terminal.feed(b"hello marspot\r\n");
     terminal.feed(b"the engine is alive\r\n");
     terminal.feed(b"\r\n");
     terminal.feed(b"  pty + parser + grid + render (CoreText)\r\n");

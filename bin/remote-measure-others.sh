@@ -97,7 +97,7 @@ if [[ "$HEALTH" == *"-1712"* ]] || [[ "$HEALTH" == *"timed out"* ]] || [[ "$HEAL
   echo "  4. Re-run this script with REMOTE_MEAS_JSON=$OUT_DIR/measured.json to merge into baseline." >&2
   echo "" >&2
   echo "Or skip the freshness gate for this run:" >&2
-  echo "  MARS_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh --full" >&2
+  echo "  MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 bin/bench-remote.sh --full" >&2
   exit 3
 fi
 

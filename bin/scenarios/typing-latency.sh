@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# bin/scenarios/typing-latency.sh — input → pixel latency, mars-only.
+# bin/scenarios/typing-latency.sh — input → pixel latency, marspot-only.
 #
 # Why this scenario exists: docs/bench.md records typing-latency as a
-# mars-internal metric.  No way to measure the same property in iTerm2
+# marspot-internal metric.  No way to measure the same property in iTerm2
 # / Warp / Terminal.app without external screen capture or hardware
-# camera, so this is purely longitudinal mars-vs-mars regression.
+# camera, so this is purely longitudinal marspot-vs-marspot regression.
 #
 # Method:
-#   1. Launch mars with MARS_LATENCY=<path> and MARS_PROFILE=<path>.
-#      mars's keystroke handler timestamps t0 on key-down and pairs
+#   1. Launch marspot with MARSPOT_LATENCY=<path> and MARSPOT_PROFILE=<path>.
+#      marspot's keystroke handler timestamps t0 on key-down and pairs
 #      it with the next layer.setContents — recording (t1 - t0) ns
 #      into latency_samples.  On Drop, samples are written as a
-#      JSON array.  MARS_PROFILE captures render_calls / feed_ns /
+#      JSON array.  MARSPOT_PROFILE captures render_calls / feed_ns /
 #      etc. so we also get fps for the run.
 #   2. Wait for the window to appear and focus.
 #   3. osascript drives N keystrokes through System Events, paced so
 #      each one starts after the previous one's render.
-#   4. Cleanly tear mars down so the Drop handler flushes samples.
+#   4. Cleanly tear marspot down so the Drop handler flushes samples.
 #   5. Aggregate p50 / p95 / p99 / mean.
 #
 # Usage:
-#   bin/scenarios/typing-latency.sh mars <out-json> [n_keys=200]
+#   bin/scenarios/typing-latency.sh marspot <out-json> [n_keys=200]
 # (Other terminals exit code 2 — scenario unsupported.)
 
 set -euo pipefail
@@ -34,10 +34,10 @@ terminal=${1:?usage: typing-latency.sh <terminal> <out-json> [n_keys]}
 out_json=${2:?usage: typing-latency.sh <terminal> <out-json> [n_keys]}
 N_KEYS=${3:-200}
 
-if [[ "$terminal" != "mars" ]]; then
-  echo "typing-latency: unsupported on $terminal — instrumented in mars only." >&2
+if [[ "$terminal" != "marspot" ]]; then
+  echo "typing-latency: unsupported on $terminal — instrumented in marspot only." >&2
   cat > "$out_json" <<EOF
-{"scenario":"typing-latency","terminal":"$terminal","metrics":{},"skipped":["unsupported — mars-only"]}
+{"scenario":"typing-latency","terminal":"$terminal","metrics":{},"skipped":["unsupported — marspot-only"]}
 EOF
   exit 2
 fi
@@ -46,13 +46,13 @@ RUN_DIR="$MARKER_PREFIX/typing-latency-$$"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 LAT_PATH="$RUN_DIR/latency.json"
 PROF_PATH="$RUN_DIR/profile.json"
-RUN_TAG="mars-bench-typing-$$"
+RUN_TAG="marspot-bench-typing-$$"
 
 # Worker: sleep just long enough for the keystroke loop to finish,
-# then exit.  When all 9 mars sessions exit, mars exits naturally
-# (event_loop.exit), Drop runs, MARS_LATENCY/MARS_PROFILE files are
+# then exit.  When all 9 marspot sessions exit, marspot exits naturally
+# (event_loop.exit), Drop runs, MARSPOT_LATENCY/MARSPOT_PROFILE files are
 # written.  This is the only reliable teardown path — Rust on macOS
-# doesn't run Drop on SIGTERM, and mars consumes Cmd-Q in its input
+# doesn't run Drop on SIGTERM, and marspot consumes Cmd-Q in its input
 # handler so System Events keystroke can't close the window.
 SLEEP_S=$(( N_KEYS / 30 + 6 ))   # 30-ms cadence + 6 s slack
 WORKER="$RUN_DIR/worker.sh"
@@ -71,56 +71,56 @@ chmod +x "$WORKER"
 USER_APP=$(current_frontmost_app)
 trap 'restore_focus_to "$USER_APP" || true' EXIT INT TERM
 
-kill_app mars || true; kill_app mcli || true
+kill_app marspot || true; kill_app mcli || true
 sleep 0.3
 
-# Launch mars with both instrumentation paths set.
-MARS_BIN_PATH="$(mars_bin mars)"
-( cd "$ROOT" && MARS_LATENCY="$LAT_PATH" MARS_PROFILE="$PROF_PATH" \
-  MARS_SHELL="$WORKER" \
-  nohup "$MARS_BIN_PATH" > /dev/null 2>&1 < /dev/null & ) || true
+# Launch marspot with both instrumentation paths set.
+MARSPOT_BIN_PATH="$(marspot_bin marspot)"
+( cd "$ROOT" && MARSPOT_LATENCY="$LAT_PATH" MARSPOT_PROFILE="$PROF_PATH" \
+  MARSPOT_SHELL="$WORKER" \
+  nohup "$MARSPOT_BIN_PATH" > /dev/null 2>&1 < /dev/null & ) || true
 disown 2>/dev/null || true
 
-# Wait for mars to come up + accept focus.
-echo "==> waiting for mars window…"
+# Wait for marspot to come up + accept focus.
+echo "==> waiting for marspot window…"
 for _ in $(seq 1 30); do
-  if [[ -n "$(pids_of mars)" ]]; then break; fi
+  if [[ -n "$(pids_of marspot)" ]]; then break; fi
   sleep 0.2
 done
 
-mars_pid=$(pids_of mars | head -1)
+mars_pid=$(pids_of marspot | head -1)
 if [[ -z "$mars_pid" ]]; then
-  echo "typing-latency: mars did not start" >&2
+  echo "typing-latency: marspot did not start" >&2
   exit 1
 fi
 sleep 0.6  # let the renderer reach steady state
 
-# Force-focus mars (Front-most via System Events).
+# Force-focus marspot (Front-most via System Events).
 #
 # SAFETY: System Events keystroke is a *global* input event — it goes
 # to whichever app is frontmost at the moment the keystroke fires.
-# If mars loses focus mid-loop (user clicks away, another app
+# If marspot loses focus mid-loop (user clicks away, another app
 # auto-focuses), the keystrokes leak into the user's actual work.
 # Two mitigations below:
-#   1. Verify mars actually became frontmost before sending any key
+#   1. Verify marspot actually became frontmost before sending any key
 #      (abort otherwise — better to skip the metric than corrupt user state)
 #   2. Re-check between phases (here and after the keystroke loop)
 osascript <<'APPLESCRIPT' >/dev/null 2>&1
 tell application "System Events"
   try
-    set frontmost of (first process whose unix id is (do shell script "pgrep -al ^mars$ | awk '{print $1}'") as integer) to true
+    set frontmost of (first process whose unix id is (do shell script "pgrep -al ^marspot$ | awk '{print $1}'") as integer) to true
   end try
 end tell
 APPLESCRIPT
 sleep 0.4
 
 frontmost_now=$(osascript -e 'tell application "System Events" to return name of first process whose frontmost is true' 2>/dev/null || echo "")
-if [[ "$frontmost_now" != "mars" ]]; then
-  echo "typing-latency: mars failed to become frontmost (got '$frontmost_now')" >&2
+if [[ "$frontmost_now" != "marspot" ]]; then
+  echo "typing-latency: marspot failed to become frontmost (got '$frontmost_now')" >&2
   echo "                aborting before sending keystrokes — otherwise they would" >&2
   echo "                leak into the user's foreground app." >&2
   cat > "$out_json" <<JSON
-{"scenario":"typing-latency","terminal":"mars","metrics":{},"skipped":["mars failed to gain focus; refused to send keystrokes to avoid corrupting user state (frontmost was $frontmost_now)"]}
+{"scenario":"typing-latency","terminal":"marspot","metrics":{},"skipped":["marspot failed to gain focus; refused to send keystrokes to avoid corrupting user state (frontmost was $frontmost_now)"]}
 JSON
   # Wait for workers to exit naturally then return.
   sleep $((SLEEP_S + 5))
@@ -144,15 +144,15 @@ APPLESCRIPT
 # Let final renders settle.
 sleep 1.0
 
-# Wait for mars to exit naturally — workers will sleep $SLEEP_S then
-# exit, mars exits when all 9 sessions are gone, Drop runs.
-echo "==> waiting for mars to exit (all 9 workers sleeping ${SLEEP_S}s)…"
+# Wait for marspot to exit naturally — workers will sleep $SLEEP_S then
+# exit, marspot exits when all 9 sessions are gone, Drop runs.
+echo "==> waiting for marspot to exit (all 9 workers sleeping ${SLEEP_S}s)…"
 for _ in $(seq 1 $((SLEEP_S * 2 + 30))); do
-  [[ -z "$(pids_of mars)" ]] && break
+  [[ -z "$(pids_of marspot)" ]] && break
   sleep 0.5
 done
-if [[ -n "$(pids_of mars)" ]]; then
-  echo "typing-latency: mars didn't exit within $((SLEEP_S * 2 + 30))*0.5s — forcing SIGTERM (Drop won't run, samples lost)" >&2
+if [[ -n "$(pids_of marspot)" ]]; then
+  echo "typing-latency: marspot didn't exit within $((SLEEP_S * 2 + 30))*0.5s — forcing SIGTERM (Drop won't run, samples lost)" >&2
   kill -TERM "$mars_pid" 2>/dev/null || true
   sleep 0.5
   kill -KILL "$mars_pid" 2>/dev/null || true
@@ -193,7 +193,7 @@ def fmt_us(ns):
 
 result = {
     "scenario": "typing-latency",
-    "terminal": "mars",
+    "terminal": "marspot",
     "metrics": {
         "n_keys_attempted": n_keys,
         "n_samples_captured": len(samples_ns),
@@ -209,14 +209,14 @@ result = {
         "user_events":    prof.get("user_events"),
         "run_tag": run_tag,
     },
-    "skipped": [] if samples_ns else ["no latency samples captured — mars may have been SIGKILLed before Drop"],
+    "skipped": [] if samples_ns else ["no latency samples captured — marspot may have been SIGKILLed before Drop"],
 }
 
 with open(out_json, "w") as f:
     json.dump(result, f, indent=2)
 
 m = result["metrics"]
-print(f"  mars     typing-latency (attempted {n_keys} keys, captured {m['n_samples_captured']}):")
+print(f"  marspot     typing-latency (attempted {n_keys} keys, captured {m['n_samples_captured']}):")
 if samples_ns:
     print(f"    p50 / p95 / p99   {m['input_latency_us_p50']} / {m['input_latency_us_p95']} / {m['input_latency_us_p99']} µs")
     print(f"    mean / max        {m['input_latency_us_mean']} / {m['input_latency_us_max']} µs")

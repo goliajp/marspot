@@ -1,6 +1,6 @@
-# mars perf attack — master tracker
+# marspot perf attack — master tracker
 
-This file is the **检验基础**: the canonical inventory of every place mars
+This file is the **检验基础**: the canonical inventory of every place marspot
 loses, ties, or holds only a thin lead, plus the gate-locked wins we
 must not regress.  Every per-item roadmap lives under `docs/perf-attack/`
 and links back here.
@@ -43,7 +43,7 @@ contention.  B1 and B2 originally read 51.6 / 39.0 (vs Term 1.21× /
 competitors.  No regression.
 
 B3 (cat-cjk) and B4 (cat-emoji) are smaller losses than first read but
-still real: mars vs Apple's CoreText/CJK and Apple Color Emoji paths.
+still real: marspot vs Apple's CoreText/CJK and Apple Color Emoji paths.
 
 | ID | Metric | Clean current | Target | File | Status |
 |---|---|---|---|---|---|
@@ -57,7 +57,7 @@ still real: mars vs Apple's CoreText/CJK and Apple Color Emoji paths.
 Likely shares root with A1.  Tracked separately so it doesn't
 disappear if A1 turns out to be a different cause.
 
-| ID | Scenario | mars Δ | Term Δ | File | Status |
+| ID | Scenario | marspot Δ | Term Δ | File | Status |
 |---|---|---|---|---|---|
 | C1 | idle-9x first sample | +81 MiB | ~0 | [C](perf-attack/C-per-session-rss-bloat.md) | queued |
 | C2 | vim-jump post | +61 MiB | ~0 | [C](perf-attack/C-per-session-rss-bloat.md) | queued |
@@ -71,8 +71,8 @@ still real.
 
 | ID | Metric | Clean current | Target | File | Status |
 |---|---|---|---|---|---|
-| D1 | scrollback-1m vs Term push | mars **97.7** / Term 91.6 (**1.07×**, was 1.003× godot) | ≥ 1.5× Term | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
-| D2 | scrollback-1m vs iTerm2 | mars 97.7 / iTerm2 71.8 (**1.36×**, was 1.08× godot) | ≥ 1.5× iTerm2 | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
+| D1 | scrollback-1m vs Term push | marspot **97.7** / Term 91.6 (**1.07×**, was 1.003× godot) | ≥ 1.5× Term | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
+| D2 | scrollback-1m vs iTerm2 | marspot 97.7 / iTerm2 71.8 (**1.36×**, was 1.08× godot) | ≥ 1.5× iTerm2 | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
 
 ### E — Bench infrastructure fixes (block honest measurement)
 
@@ -87,7 +87,7 @@ noise / stale data / missing metrics.
 | E4 | measure-other.sh stale-marker cleanup | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted** (not a bug — q1<1% short-circuit by design) |
-| E7 | bench scripts kill mars/mcli by name (friendly-fire) | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-F-recalibrate-clean`) |
+| E7 | bench scripts kill marspot/mcli by name (friendly-fire) | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-F-recalibrate-clean`) |
 
 ## F — Locked floors / ceilings · **recalibrated to clean-machine 2026-05-05**
 
@@ -148,7 +148,7 @@ Remaining queue:
 3. **C** (few days, probably folded into A1 fix) — per-session RSS
    bloat is largely the same lazy-fault footprint as A1
 4. **D-rescope** (1 week) — D-target reframed: scrollback ACCESS at
-   large depth (mars: O(1) mmap fault; Term/iTerm2: cap'd, can't
+   large depth (marspot: O(1) mmap fault; Term/iTerm2: cap'd, can't
    even access).  Add new scenario gating that, rather than push
    throughput.
 5. **E3** (1 day) — vim-jump cross-term wall time capture (driver gap)

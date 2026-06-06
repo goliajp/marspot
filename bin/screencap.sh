@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Screenshot the live mars window so the AI session can `Read` and analyze it.
-# Requires a running mars instance — start one with `bin/run.sh` first.
+# Screenshot the live marspot window so the AI session can `Read` and analyze it.
+# Requires a running marspot instance — start one with `bin/run.sh` first.
 #
 # Usage:
 #   bin/screencap.sh                    -> writes build/screencap.png
@@ -8,7 +8,7 @@
 #
 # Exit codes:
 #   0  success
-#   1  no mars window found
+#   1  no marspot window found
 #   2  screencapture failed / output unreadable
 #   3  output looks blank (occlusion, no first frame, missing permission)
 
@@ -18,15 +18,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/build/screencap.png}"
 mkdir -p "$(dirname "$OUT")"
 
-# Locate the mars window via CGWindowList. We pick the first onscreen window
-# whose owner name is "mars" (case-insensitive).
+# Locate the marspot window via CGWindowList. We pick the first onscreen window
+# whose owner name is "marspot" (case-insensitive).
 read -r WID GX GY GW GH < <(swift - <<'SWIFT'
 import Cocoa
 let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 let info = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] ?? []
 for w in info {
   let n = (w[kCGWindowOwnerName as String] as? String) ?? ""
-  if n.lowercased() == "mars" {
+  if n.lowercased() == "marspot" {
     let wid = w[kCGWindowNumber as String] ?? 0
     let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
     print("\(wid) \(b["X"] ?? 0) \(b["Y"] ?? 0) \(b["Width"] ?? 0) \(b["Height"] ?? 0)")
@@ -35,7 +35,7 @@ for w in info {
 }
 exit(1)
 SWIFT
-) || { echo "screencap: no mars window found — start mars with bin/run.sh first" >&2; exit 1; }
+) || { echo "screencap: no marspot window found — start marspot with bin/run.sh first" >&2; exit 1; }
 
 # -l <wid>: capture by window id (independent of stacking order)
 # -o      : drop the window's drop-shadow

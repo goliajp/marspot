@@ -3,7 +3,7 @@
 > Status: queued (E1+E2+E5 must finish before A/B/C/D start)
 > Master:  ../perf-attack.md
 
-These items don't directly improve mars's perf — they fix the
+These items don't directly improve marspot's perf — they fix the
 *measurement system*.  Without honest, reproducible numbers,
 diagnosing A/B/C/D will chase phantom regressions and miss real
 ones.  Bundled here because each is small (½ day or less); split
@@ -28,9 +28,9 @@ env var honoured for fixture-based testing.  Test:
 `bench/baseline.json` `competitors_snapshot.captured_at` was
 2026-05-03 when the 2026-05-05 `--full` gate fired.  Two-day-old
 Warp numbers (47 MB/s flat across cjk/emoji — clearly stale or
-test-anomalous) caused the gate to report "mars losing to iTerm2 on
+test-anomalous) caused the gate to report "marspot losing to iTerm2 on
 cat-ascii (0.92×)" — a false alarm.  Fresh measurement actually
-shows mars 1.84× iTerm2.
+shows marspot 1.84× iTerm2.
 
 ### TDD failing test
 
@@ -119,7 +119,7 @@ cargo build --release
 In `bin/bench.sh` parse-trials loop (currently `for i in 1 2 3 4 5`):
 ```sh
 # Run a warm-up trial whose result is discarded
-"$ROOT/target/release/mars" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
+"$ROOT/target/release/marspot" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
 # Then collect the 5 measurement trials as before
 for i in 1 2 3 4 5; do
   ...
@@ -141,7 +141,7 @@ Same pattern for render (3 trials) and scroll (5 trials).
 
 ### What's broken
 
-`bin/scenarios/vim-jump.sh` for mars captures wall-time (mars
+`bin/scenarios/vim-jump.sh` for marspot captures wall-time (marspot
 1.23s on 50K lines).  For iTerm2 / Terminal.app / Warp the same
 scenario only captures RSS; wall-time is missing.  Cross-terminal
 comparison on the vim-jump axis is impossible.
@@ -153,7 +153,7 @@ comparison on the vim-jump axis is impossible.
 bin/scenarios/vim-jump.sh iterm    /tmp/vim-iterm.json
 bin/scenarios/vim-jump.sh terminal /tmp/vim-term.json
 # Expect each output JSON has "wall_time_s" key with a number
-# Currently only "rss_delta" present in non-mars JSON outputs
+# Currently only "rss_delta" present in non-marspot JSON outputs
 ```
 
 ### Implementation
@@ -164,7 +164,7 @@ already used in `measure.sh` for cat-*; adapt to vim-jump.
 
 ### Exit criteria
 
-- All 4 (mars, iterm, terminal, warp) produce wall-time on
+- All 4 (marspot, iterm, terminal, warp) produce wall-time on
   vim-jump.json
 - Cross-term comparison reproduces in `bench-run.sh` snapshot
 - `docs/bench.md` matrix updated to mark vim-jump as fully cross-term
@@ -266,31 +266,31 @@ starvation, not an inverted comparison.  Closed not-a-bug.
 
 ---
 
-## E7 — bench scripts kill mars/mcli by name (friendly-fire) · **DONE 2026-05-05**
+## E7 — bench scripts kill marspot/mcli by name (friendly-fire) · **DONE 2026-05-05**
 
 Discovered while running active-9x-soak --extended (30 min) in
 background and a sanity bench.sh in foreground.  bench.sh's idle-RSS
-loop did `pkill -x "$bin"` (mars/mcli) before each trial, intending
+loop did `pkill -x "$bin"` (marspot/mcli) before each trial, intending
 to clear stale instances from prior fast-gate runs but actually
-nuking the live --extended mars binary.  At t=41 s of the 30-min
-soak, mars died; remaining 1759 s of samples were zero-RSS, drift
+nuking the live --extended marspot binary.  At t=41 s of the 30-min
+soak, marspot died; remaining 1759 s of samples were zero-RSS, drift
 ratio computed as 0.0 ✓ (false-pass against the failure condition
 the gate was designed to catch).
 
-measure.sh had the same hazard (`killall mcli mars` before spawn).
+measure.sh had the same hazard (`killall mcli marspot` before spawn).
 
 Fix landed in `feature/perf-F-recalibrate-clean`:
 - bin/bench.sh idle-RSS loop: removed `pkill -x "$bin"`; the captured
   `pid=$!` is enough to manage just-our-instance.
-- bin/bench.sh --full block: removed `pkill -x mars`; measure.sh
+- bin/bench.sh --full block: removed `pkill -x marspot`; measure.sh
   now manages its own mcli by PID.
-- bin/measure.sh run_in_mars: replaced `killall mcli mars` (pre)
+- bin/measure.sh run_in_mars: replaced `killall mcli marspot` (pre)
   and `killall mcli` (post) with explicit `kill "$mcli_pid"`.
   Captured PID via direct `&` rather than nested subshell so $! is
   the mcli PID we can target.
 
 Test: bench/tests/e7-no-friendly-fire.sh — greps bench scripts for
-`pkill -x mars/mcli`, `killall mars`, `killall mcli` patterns
+`pkill -x marspot/mcli`, `killall marspot`, `killall mcli` patterns
 (excluding comment lines).  Currently passes.
 
 ### Why it matters

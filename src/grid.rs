@@ -131,7 +131,7 @@ impl Grid {
 
     /// Construct with a caller-supplied scrollback (memory or disk).
     /// `Terminal::new` calls this so it can pick the disk variant
-    /// when `MARS_DISK_SCROLLBACK` is set without dragging the env
+    /// when `MARSPOT_DISK_SCROLLBACK` is set without dragging the env
     /// check through the Grid API.
     pub fn with_scrollback_kind(cols: u16, rows: u16, scrollback: Scrollback) -> Self {
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
@@ -152,7 +152,7 @@ impl Grid {
     pub fn cursor(&self) -> (u16, u16) { (self.cursor_col, self.cursor_row) }
 
     /// Approximate resident bytes for the live grid (cell storage
-    /// only — scalar fields are negligible).  Per-MARS_PROFILE_RSS
+    /// only — scalar fields are negligible).  Per-MARSPOT_PROFILE_RSS
     /// sampling.
     pub fn approx_bytes(&self) -> usize {
         self.cells.capacity() * std::mem::size_of::<Cell>()

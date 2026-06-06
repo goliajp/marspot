@@ -1,4 +1,4 @@
-# mars perf attack — execution plan
+# marspot perf attack — execution plan
 
 Linear phased plan to close the backlog identified in [`master`](../perf-attack.md).
 Each phase: one feature branch · TDD test landed first · exit criterion
@@ -21,7 +21,7 @@ parallel branches (they create rebase pain when fixes interact).
 **Goal**: identify the subsystem accounting for ~10 MiB/min RSS growth
 during active 9-session soak.
 
-### Phase 1.1 — MARS_PROFILE_RSS instrumentation (4-6 h)
+### Phase 1.1 — MARSPOT_PROFILE_RSS instrumentation (4-6 h)
 
 Branch: `feature/perf-A1-rss-profile-instrument`
 
@@ -40,7 +40,7 @@ cat > /tmp/dump-test.sh <<EOF
 EOF
 chmod +x /tmp/dump-test.sh
 
-MARS_PROFILE_RSS="$out" MARS_SHELL=/tmp/dump-test.sh \
+MARSPOT_PROFILE_RSS="$out" MARSPOT_SHELL=/tmp/dump-test.sh \
   timeout 6 ./target/release/mcli >/dev/null 2>&1 || true
 
 # Expect ≥ 4 lines (1Hz × 5 sec) of 8-column TSV
@@ -57,13 +57,13 @@ Run on current `develop` → **expect FAIL** (instrumentation absent).
 
 - `src/main.rs`:
   ```rust
-  // Mars struct gains:
+  // Marspot struct gains:
   profile_rss_path: Option<PathBuf>,
   rss_dump_started_at: Option<Instant>,
   last_rss_dump: Option<Instant>,
 
-  // In main(), after reading MARS_LATENCY:
-  let profile_rss_path = std::env::var("MARS_PROFILE_RSS").ok().map(PathBuf::from);
+  // In main(), after reading MARSPOT_LATENCY:
+  let profile_rss_path = std::env::var("MARSPOT_PROFILE_RSS").ok().map(PathBuf::from);
 
   // After each render call (or once per second):
   fn maybe_dump_rss(&mut self) {
@@ -175,8 +175,8 @@ mkdir -p bench/results/a1-leak
 out=bench/results/a1-leak/soak-$(date +%H%M%S).json
 rss=bench/results/a1-leak/rss-$(date +%H%M%S).tsv
 
-MARS_PROFILE_RSS="$rss" \
-  ./bin/scenarios/active-9x-soak.sh mars "$out" --extended \
+MARSPOT_PROFILE_RSS="$rss" \
+  ./bin/scenarios/active-9x-soak.sh marspot "$out" --extended \
   > bench/results/a1-leak/soak-$(date +%H%M%S).log 2>&1 &
 echo "wait 31 min, do nothing else"
 ```
@@ -200,7 +200,7 @@ Branch: `feature/perf-A1-rss-leak-analysis`
 
 ```python
 #!/usr/bin/env python3
-"""Find monotonically growing columns in a MARS_PROFILE_RSS dump.
+"""Find monotonically growing columns in a MARSPOT_PROFILE_RSS dump.
 
 Reports per-subsystem slope (bytes/sec); flags any with > 80 KiB/sec
 (= 5 MiB/min) as a leak candidate.
@@ -264,7 +264,7 @@ autorelease pool drain timing under sustained renders.
 # Run 5-min soak; assert q4/q1 ≤ 1.30.  Assumes A1 instrumentation
 # is in place from Phase 1.
 out=$(mktemp /tmp/a1-fix.json)
-./bin/scenarios/active-9x-soak.sh mars "$out" >/dev/null 2>&1
+./bin/scenarios/active-9x-soak.sh marspot "$out" >/dev/null 2>&1
 drift=$(python3 -c "import json; print(json.load(open('$out'))['metrics']['rss_drift_ratio_q4_over_q1'])")
 python3 -c "exit(0 if $drift <= 1.30 else 1)" \
   && echo "PASS: drift $drift ≤ 1.30" \
@@ -307,7 +307,7 @@ Re-run --extended; expect `other` slope drops dramatically.
 ### Phase 2 exit criteria
 
 - `bench/tests/a1-fix-soak-drift.sh`: passes 3 consecutive runs
-- `bin/scenarios/active-9x-soak.sh mars … --extended`:
+- `bin/scenarios/active-9x-soak.sh marspot … --extended`:
   drift ≤ 1.10× AND max - first ≤ 30 MiB
 - `bench/baseline.json` `multi_session_thresholds.active-9x-soak`
   added with `rss_drift_max: 1.20` (10 % safety over fix's measurement)
@@ -325,10 +325,10 @@ After A1 fix, re-measure C1-C4 with the new code.
 ```sh
 # Run all C scenarios; assert bounds
 out=$(mktemp -d)
-./bin/scenarios/idle-9x.sh mars "$out/c1.json" >/dev/null
-./bin/scenarios/vim-jump.sh mars "$out/c2.json" >/dev/null
-./bin/scenarios/htop-60s.sh mars "$out/c3.json" >/dev/null
-./bin/scenarios/active-9x-soak.sh mars "$out/c4.json" >/dev/null
+./bin/scenarios/idle-9x.sh marspot "$out/c1.json" >/dev/null
+./bin/scenarios/vim-jump.sh marspot "$out/c2.json" >/dev/null
+./bin/scenarios/htop-60s.sh marspot "$out/c3.json" >/dev/null
+./bin/scenarios/active-9x-soak.sh marspot "$out/c4.json" >/dev/null
 
 # C1: idle-9x first sample ≤ 30 MiB
 # C2: vim-jump post ≤ 25 MiB
@@ -363,8 +363,8 @@ Branch: `feature/perf-B-raster-pool`
 
 `bench/tests/b3-cjk-throughput.sh`:
 ```sh
-# Asserts mars cat-cjk live ≥ 42 MB/s (= 1.0× Term)
-mb=$(./bin/measure.sh cat-cjk mars 2>&1 | grep -oE 'cat-cjk.*[0-9.]+ MB/s' | grep -oE '[0-9.]+ MB/s' | head -1 | awk '{print $1}')
+# Asserts marspot cat-cjk live ≥ 42 MB/s (= 1.0× Term)
+mb=$(./bin/measure.sh cat-cjk marspot 2>&1 | grep -oE 'cat-cjk.*[0-9.]+ MB/s' | grep -oE '[0-9.]+ MB/s' | head -1 | awk '{print $1}')
 python3 -c "exit(0 if float('$mb') >= 42 else 1)" \
   && echo "PASS $mb ≥ 42 MB/s" \
   || { echo "FAIL $mb < 42"; exit 1; }
@@ -471,7 +471,7 @@ Branch: `feature/perf-D-access-latency-scenario`
 
 `bin/scenarios/scroll-access-1m.sh`:
 ```sh
-# For mars: push 1M lines, then issue scroll-back-to-line-N for
+# For marspot: push 1M lines, then issue scroll-back-to-line-N for
 # N in {1, 100K, 500K, 999_999}; measure access latency per N.
 # For Term/iTerm2/Warp: same workload, expect skip if history
 # capped below N.
@@ -481,18 +481,18 @@ Branch: `feature/perf-D-access-latency-scenario`
 
 ### Phase 5.2 — Drivers + gate
 
-Each terminal driver runs the scenario; mars-only emits per-N
+Each terminal driver runs the scenario; marspot-only emits per-N
 latency.  Term/iTerm2 fail with `unsupported (history capped at N)`.
 
 `bench/baseline.json` adds:
 ```json
 "scroll_access_1m_us_max": {
-  "_comment": "p99 access latency for mars at 1M-line depth.  Structural advantage gate: this query is meaningless for terminals with cap'd history.",
+  "_comment": "p99 access latency for marspot at 1M-line depth.  Structural advantage gate: this query is meaningless for terminals with cap'd history.",
   "view_offset_999_999_us_max": 100
 }
 ```
 
-**Exit criterion**: mars accesses depth-1M scrollback in ≤ 100 µs;
+**Exit criterion**: marspot accesses depth-1M scrollback in ≤ 100 µs;
 gate fails if latency exceeds.  Term/iTerm2 explicitly skipped (not
 "failed").
 
@@ -552,10 +552,10 @@ on develop pulls a phase out cleanly if needed.
 ## What "ready to ship" looks like
 
 - `bin/bench.sh --full` passes 13/13 + multi-session 4/4 + soak 4/4
-- `bin/scenarios/active-9x-soak.sh mars … --extended` drift ≤ 1.10×
+- `bin/scenarios/active-9x-soak.sh marspot … --extended` drift ≤ 1.10×
 - `bench/tests/b3-cjk-throughput.sh` PASS
 - `bench/tests/b4-emoji-throughput.sh` PASS
-- New "scroll-access-1m" scenario gated mars-only
+- New "scroll-access-1m" scenario gated marspot-only
 - All 7 E items either done or retracted
 - All A/B/C/D bucket items either done or rescoped explicitly
 

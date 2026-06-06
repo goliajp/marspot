@@ -2,7 +2,7 @@
 # Shared helpers for bench scripts.  Source this; do not execute.
 #
 # Conventions every script that sources this should follow:
-#  - $ROOT points at mars repo root (set by source path resolution below)
+#  - $ROOT points at marspot repo root (set by source path resolution below)
 #  - $SCENARIOS_DIR / $RESULTS_DIR exist
 #  - All marker files go under /tmp with a known prefix so we can clean
 #    them between trials without fighting old runs
@@ -10,7 +10,7 @@
 # The whole bench mechanism is documented in docs/bench.md.  Read that
 # before adding to this file.
 
-# Resolve $ROOT to the mars repo root from wherever we're sourced.
+# Resolve $ROOT to the marspot repo root from wherever we're sourced.
 # This works whether the caller is bin/foo.sh or bin/scenarios/bar.sh.
 if [[ -z "${ROOT:-}" ]]; then
   _self="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
@@ -24,25 +24,25 @@ SCENARIOS_DIR="$ROOT/bench/scenarios"
 RESULTS_DIR="$ROOT/bench/results"
 mkdir -p "$RESULTS_DIR"
 
-MARKER_PREFIX="/tmp/mars-bench"
+MARKER_PREFIX="/tmp/marspot-bench"
 
 # ---- cargo binary resolution -------------------------------------------
 #
 # On systems with a global CARGO_TARGET_DIR (e.g. external SSD per
 # cargo-target-dir.md), `$ROOT/target/release/<bin>` does NOT exist.
 # Resolve target_directory via `cargo metadata` once and cache it.
-# Callers should use `mars_bin <bin>` instead of hardcoding paths.
-_MARS_TARGET_DIR=""
+# Callers should use `marspot_bin <bin>` instead of hardcoding paths.
+_MARSPOT_TARGET_DIR=""
 _mars_target_dir() {
-  if [[ -z "$_MARS_TARGET_DIR" ]]; then
-    _MARS_TARGET_DIR=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+  if [[ -z "$_MARSPOT_TARGET_DIR" ]]; then
+    _MARSPOT_TARGET_DIR=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
-    [[ -z "$_MARS_TARGET_DIR" ]] && _MARS_TARGET_DIR="$ROOT/target"
+    [[ -z "$_MARSPOT_TARGET_DIR" ]] && _MARSPOT_TARGET_DIR="$ROOT/target"
   fi
-  echo "$_MARS_TARGET_DIR"
+  echo "$_MARSPOT_TARGET_DIR"
 }
-# mars_bin <name> [profile=release] → absolute path of built binary
-mars_bin() {
+# marspot_bin <name> [profile=release] → absolute path of built binary
+marspot_bin() {
   local name=$1
   local profile=${2:-release}
   echo "$(_mars_target_dir)/$profile/$name"
@@ -140,13 +140,13 @@ pids_of() {
   # `-f` (match full cmdline) gives inconsistent results across
   # macOS versions for paths under `/Applications`, so we avoid it.
   # Process basename map:
-  #   mars     → mars      (our binary)
+  #   marspot     → marspot      (our binary)
   #   mcli     → mcli      (our binary)
   #   iterm    → iTerm2    (iTerm2 main process)
   #   warp     → stable    (Warp's binary name; verified via ps -axo comm)
   #   terminal → Terminal  (Terminal.app)
   case "$1" in
-    mars)     pgrep -al '^mars$'     2>/dev/null | awk '{print $1}' ;;
+    marspot)     pgrep -al '^marspot$'     2>/dev/null | awk '{print $1}' ;;
     mcli)     pgrep -al '^mcli$'     2>/dev/null | awk '{print $1}' ;;
     iterm)    pgrep -al '^iTerm2$'   2>/dev/null | awk '{print $1}' ;;
     warp)     pgrep -al '^stable$'   2>/dev/null | awk '{print $1}' ;;
@@ -187,15 +187,15 @@ json_emit_kv() {
 
 # kill_app <name>
 # DANGEROUS — quits the named terminal app entirely, including the
-# user's open windows.  Only safe for `mars` (our SUT) and `mcli`.
+# user's open windows.  Only safe for `marspot` (our SUT) and `mcli`.
 # For iterm2 / warp / terminal.app, use close_bench_windows below
 # to close ONLY the windows we opened, leaving the user's work alone.
 kill_app() {
   case "$1" in
-    mars|mcli)
-      # mars/mcli are not the user's daily driver in this repo.
+    marspot|mcli)
+      # marspot/mcli are not the user's daily driver in this repo.
       # Match by the release/debug binary path so we don't hit any
-      # `mars` script the user might have on PATH.
+      # `marspot` script the user might have on PATH.
       local pids; pids=$(pids_of "$1")
       for p in $pids; do kill "$p" 2>/dev/null || true; done
       sleep 0.3
@@ -242,7 +242,7 @@ restore_focus_to() {
   # Skip if the app is one of our bench targets — those need to come
   # to front for typing-latency / scenarios that drive keystrokes.
   case "$app" in
-    iTerm2|iTerm|Terminal|Warp|stable|mars|mcli) return 0 ;;
+    iTerm2|iTerm|Terminal|Warp|stable|marspot|mcli) return 0 ;;
   esac
   osascript -e "tell application \"System Events\" to set frontmost of first process whose name is \"$app\" to true" \
     >/dev/null 2>&1 || true

@@ -28,7 +28,7 @@ fn main() {
         sha
     };
 
-    println!("cargo:rustc-env=MARS_GIT_SHA={}", tag);
+    println!("cargo:rustc-env=MARSPOT_GIT_SHA={}", tag);
     // Re-run when HEAD moves (branch switch, checkout) or staged changes change.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");

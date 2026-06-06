@@ -13,7 +13,7 @@
 //! ## Why "Disk" is named that
 //!
 //! Historical: an earlier implementation backed the ring with a
-//! file in `~/Library/Caches/mars/scrollback`, leaning on the
+//! file in `~/Library/Caches/marspot/scrollback`, leaning on the
 //! kernel's unified buffer cache to evict pages back to that file
 //! under memory pressure.  Anonymous mmap (this version) does the
 //! same eviction via swap rather than a named file — bypassing the
@@ -127,7 +127,7 @@ impl Scrollback {
     }
 
     /// Approximate resident bytes held by this scrollback for the
-    /// MARS_PROFILE_RSS sampler.  Memory variant: lazy-grown
+    /// MARSPOT_PROFILE_RSS sampler.  Memory variant: lazy-grown
     /// `Vec<Cell>` capacity.  Disk variant: bytes-worth of lines
     /// actually written into the mmap ring (NOT the full
     /// reservation) — `total_lines_written.min(max_lines) *
@@ -356,7 +356,7 @@ impl DiskScrollback {
         // Pre-faulting all pages here would fold the lazy-fault cost
         // of the first ring wrap into init time, but pegs idle RSS
         // at the full ring size — directly violating the lazy-alloc
-        // contract (commit ed074bd) and the bench `rss mars` gate.
+        // contract (commit ed074bd) and the bench `rss marspot` gate.
         // Don't reintroduce.
         let mmap_ptr = unsafe {
             libc::mmap(
@@ -380,7 +380,7 @@ impl DiskScrollback {
         let mmap_ptr = mmap_ptr as *mut u8;
         // NOTE: tried pre-faulting all pages here to fold the
         // first-wrap COW cost into init.  It worked (parse +5–10 %)
-        // but pegged the bench `rss mars` gate at 290 MiB (9 sessions
+        // but pegged the bench `rss marspot` gate at 290 MiB (9 sessions
         // × 50 MiB committed up-front) — the lazy-alloc commit
         // ed074bd's whole point was to keep idle RSS flat, so we
         // can't pre-commit at session create.  If parse perf needs

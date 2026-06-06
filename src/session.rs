@@ -10,7 +10,7 @@
 //! whenever new bytes are available (or the child has exited).  The
 //! caller's event loop then calls [`Session::pump`] to drain those
 //! bytes through the parser into the grid.  This decoupling is what
-//! lets the same Session power both `mars` (multi-terminal grid app)
+//! lets the same Session power both `marspot` (multi-terminal grid app)
 //! and `mcli` (single-terminal standalone app).
 
 use std::io;
@@ -68,18 +68,18 @@ impl Session {
     /// reader thread that pumps bytes into a bounded channel and calls
     /// `wake` on each chunk and once on EOF.
     ///
-    /// The shell is `MARS_SHELL` → `$SHELL` → `/bin/zsh`, in that order.
+    /// The shell is `MARSPOT_SHELL` → `$SHELL` → `/bin/zsh`, in that order.
     /// `wake` typically posts a user event into the caller's event loop
     /// so the main thread comes around to call [`pump`](Self::pump).
     pub fn spawn<W>(cols: u16, rows: u16, wake: W) -> io::Result<Self>
     where
         W: Fn() + Send + Sync + 'static,
     {
-        // MARS_SHELL override path (tests, bench workers): direct exec
+        // MARSPOT_SHELL override path (tests, bench workers): direct exec
         // with a login-style argv[0].  No /usr/bin/login wrapper here
         // — the caller picked a specific program (often a shell
         // script), and login would refuse to exec a non-login-shell.
-        if let Ok(custom_shell) = std::env::var("MARS_SHELL") {
+        if let Ok(custom_shell) = std::env::var("MARSPOT_SHELL") {
             let argv0 = format!(
                 "-{}",
                 std::path::Path::new(&custom_shell)
@@ -96,7 +96,7 @@ impl Session {
         // the shell starts.  Without that priming \n, zsh's PROMPT_SP
         // option fires on the first prompt and renders a reverse-video
         // "%" at the top of every fresh session.  iTerm2 /
-        // Terminal.app spawn through login for the same reason; mars
+        // Terminal.app spawn through login for the same reason; marspot
         // now matches.
         //   -f  no password
         //   -p  preserve env
@@ -253,7 +253,7 @@ where
     W: Fn() + Send + Sync + 'static,
 {
     thread::Builder::new()
-        .name("mars-pty-reader".into())
+        .name("marspot-pty-reader".into())
         .spawn(move || {
             let mut buf = [0u8; READ_BUF];
             loop {

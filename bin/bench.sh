@@ -23,7 +23,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=/dev/null
-source "$ROOT/bin/_lib.sh"   # mars_bin resolves CARGO_TARGET_DIR
+source "$ROOT/bin/_lib.sh"   # marspot_bin resolves CARGO_TARGET_DIR
 # BASELINE is overridable via env so tests can point at synthesised
 # fixture baselines without touching the real one.
 BASELINE="${BASELINE:-$ROOT/bench/baseline.json}"
@@ -53,12 +53,12 @@ fi
 # gate verdict (perf-attack E1).  Fast tier doesn't use this snapshot
 # so the check is mode-gated.
 if [[ $MODE == "full" ]]; then
-  # MARS_BENCH_ALLOW_STALE_COMPETITORS=1 bypasses this check. Use it
+  # MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 bypasses this check. Use it
   # when you accept that the vs-best-other ratio is computed against
   # old competitor numbers — e.g. for a quick verification run when
   # you can't refresh measure-other.sh right now. The age is still
   # printed so the cost is visible.
-  python3 - "$BASELINE" "${MARS_BENCH_ALLOW_STALE_COMPETITORS:-0}" <<'PY' || exit 2
+  python3 - "$BASELINE" "${MARSPOT_BENCH_ALLOW_STALE_COMPETITORS:-0}" <<'PY' || exit 2
 import json, sys, datetime
 b = json.load(open(sys.argv[1]))
 allow_stale = sys.argv[2] == "1"
@@ -78,12 +78,12 @@ age = (datetime.date.today() - cap).days
 if age > 7:
     msg = f"competitors_snapshot is stale: {age} days old (limit 7)."
     if allow_stale:
-        print(f"WARN: {msg} Running anyway (MARS_BENCH_ALLOW_STALE_COMPETITORS=1).",
+        print(f"WARN: {msg} Running anyway (MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1).",
               file=sys.stderr)
     else:
         print(msg, file=sys.stderr)
         print(f"Refresh via bin/measure-other.sh (or set "
-              f"MARS_BENCH_ALLOW_STALE_COMPETITORS=1 to skip).",
+              f"MARSPOT_BENCH_ALLOW_STALE_COMPETITORS=1 to skip).",
               file=sys.stderr)
         sys.exit(2)
 PY
@@ -96,8 +96,8 @@ if [[ ! -f "$SCENARIOS_DIR/cat-ascii.bin" || ! -f "$SCENARIOS_DIR/scroll-history
 fi
 
 # Build release if missing or stale.
-if [[ ! -x "$(mars_bin mars)" ]]; then
-  echo "==> building mars (release)"
+if [[ ! -x "$(marspot_bin marspot)" ]]; then
+  echo "==> building marspot (release)"
   ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
 fi
 
@@ -119,9 +119,9 @@ trap 'rm -rf "$CUR_DIR"' EXIT
 echo "==> headless parse (5 trials each, taking median)"
 for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
   : > "$CUR_DIR/parse-$s.samples"
-  "$(mars_bin mars)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
+  "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
   for i in 1 2 3 4 5; do
-    "$(mars_bin mars)" --bench "parse:$SCENARIOS_DIR/$s.bin" \
+    "$(marspot_bin marspot)" --bench "parse:$SCENARIOS_DIR/$s.bin" \
       | python3 -c "import sys,json; print(json.load(sys.stdin)['bytes_per_sec'])" \
       >> "$CUR_DIR/parse-$s.samples"
   done
@@ -129,23 +129,23 @@ done
 
 echo "==> headless render (3 trials, taking median p99)"
 : > "$CUR_DIR/render.samples"
-"$(mars_bin mars)" --bench render:1000 >/dev/null
+"$(marspot_bin marspot)" --bench render:1000 >/dev/null
 for trial in 1 2 3; do
-  "$(mars_bin mars)" --bench render:1000 \
+  "$(marspot_bin marspot)" --bench render:1000 \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/render.samples"
 done
 
 # Scroll-down read-path gate.  Whatever scrollback variant the env
-# selects (memory by default, disk if MARS_DISK_SCROLLBACK is set) is
+# selects (memory by default, disk if MARSPOT_DISK_SCROLLBACK is set) is
 # what gets measured — the floor in baseline.json must be calibrated
 # for the corresponding default.  When the default flips this gate
 # auto-tracks via --update-baseline.
 echo "==> headless scroll (5 trials, taking median p99)"
 : > "$CUR_DIR/scroll.samples"
-"$(mars_bin mars)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null
+"$(marspot_bin marspot)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null
 for trial in 1 2 3 4 5; do
-  "$(mars_bin mars)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
+  "$(marspot_bin marspot)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/scroll.samples"
 done
@@ -158,10 +158,10 @@ done
 # default (so this gate is meaningful both pre- and post-flip).
 echo "==> headless scroll-cold (disk-on, 5 trials, taking median p99)"
 : > "$CUR_DIR/scroll-cold.samples"
-MARS_DISK_SCROLLBACK=1 "$(mars_bin mars)" \
+MARSPOT_DISK_SCROLLBACK=1 "$(marspot_bin marspot)" \
   --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null 2>&1
 for trial in 1 2 3 4 5; do
-  MARS_DISK_SCROLLBACK=1 "$(mars_bin mars)" \
+  MARSPOT_DISK_SCROLLBACK=1 "$(marspot_bin marspot)" \
     --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" 2>/dev/null \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/scroll-cold.samples"
@@ -171,16 +171,16 @@ done
 # Cheap (sub-second) so we can include them in the fast gate.  Catches
 # regressions like accidental dep bloat or per-session memory growth.
 echo "==> binary sizes"
-for bin in mars mcli; do
-  if [[ -x "$(mars_bin "$bin")" ]]; then
-    stat -f%z "$(mars_bin "$bin")" > "$CUR_DIR/size-$bin.txt"
+for bin in marspot mcli; do
+  if [[ -x "$(marspot_bin "$bin")" ]]; then
+    stat -f%z "$(marspot_bin "$bin")" > "$CUR_DIR/size-$bin.txt"
     printf "    %-6s %s bytes\n" "$bin" "$(cat "$CUR_DIR/size-$bin.txt")"
   fi
 done
 
 echo "==> idle memory (3 trials each, taking median)"
-for bin in mars mcli; do
-  if [[ ! -x "$(mars_bin "$bin")" ]]; then continue; fi
+for bin in marspot mcli; do
+  if [[ ! -x "$(marspot_bin "$bin")" ]]; then continue; fi
   : > "$CUR_DIR/rss-$bin.samples"
   for trial in 1 2 3; do
     # Spawn a fresh instance and sample its OWN PID — do NOT pkill the
@@ -189,7 +189,7 @@ for bin in mars mcli; do
     # bench (e.g. an active-9x-soak run already in flight gets killed
     # by a sanity bench.sh invocation).  We measure $pid directly so
     # other instances are irrelevant; perf-attack E7.
-    "$(mars_bin "$bin")" >/dev/null 2>&1 &
+    "$(marspot_bin "$bin")" >/dev/null 2>&1 &
     pid=$!
     disown 2>/dev/null || true
     sleep 1.5  # let the binary settle past startup allocs
@@ -207,7 +207,7 @@ done
 
 if [[ $MODE == "full" ]]; then
   echo "==> live PTY (this takes a minute)"
-  # No pkill of the mars binary by name — friendly-fire risk against
+  # No pkill of the marspot binary by name — friendly-fire risk against
   # a parallel active-9x-soak / soak run.  measure.sh manages its own
   # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
   (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
@@ -258,7 +258,7 @@ def load_live(scenario):
     p = os.path.join(cur_dir, "live.json")
     if not os.path.exists(p): return None
     j = json.load(open(p))
-    s = j.get(scenario, {}).get("mars", {})
+    s = j.get(scenario, {}).get("marspot", {})
     bps = s.get("bytes_per_sec", 0)
     if bps <= 0: return None
     return bps / 1024 / 1024
@@ -337,7 +337,7 @@ for bin_name, ceiling in baseline.get("memory_idle_kb_max", {}).items():
     check(f"rss  {bin_name:6} (KiB)", median, ceiling, lower_better=True)
 
 # Multi-session vs-best-other ratio gate (the structural protection
-# against silent competitive slippage — mars and competitors can both
+# against silent competitive slippage — marspot and competitors can both
 # slow down and the parse/render gate would still pass; this catches
 # it).  Reads the latest bench-run.sh snapshot (cross-terminal.json
 # symlink); doesn't run anything itself.  Sub-millisecond.
@@ -375,7 +375,7 @@ if multi_cfg:
         for sid, cfg in multi_cfg.get("scenarios", {}).items():
             metric = cfg["metric"]
             scen = snap.get("scenarios", {}).get(sid, {})
-            mars_v = scen.get("mars", {}).get("metrics", {}).get(metric)
+            mars_v = scen.get("marspot", {}).get("metrics", {}).get(metric)
             others = []
             for tid in ("iterm", "terminal"):
                 v = scen.get(tid, {}).get("metrics", {}).get(metric)
@@ -471,7 +471,7 @@ if do_update:
                     median = samples[len(samples) // 2]
                     baseline["memory_idle_kb_max"][bin_name] = round(median * 1.20)
     # Multi-session thresholds: refresh from latest cross-terminal.json
-    # snapshot.  10 % safety margin on mars throughput AND on the
+    # snapshot.  10 % safety margin on marspot throughput AND on the
     # vs-best ratio — the ratio is what protects against silent slip,
     # so re-locking it from the same observation is the right move.
     multi_cfg = baseline.get("multi_session_thresholds")
@@ -479,7 +479,7 @@ if do_update:
         for sid, cfg in multi_cfg.get("scenarios", {}).items():
             metric = cfg["metric"]
             scen = snap.get("scenarios", {}).get(sid, {})
-            mars_v = scen.get("mars", {}).get("metrics", {}).get(metric)
+            mars_v = scen.get("marspot", {}).get("metrics", {}).get(metric)
             others = []
             for tid in ("iterm", "terminal"):
                 v = scen.get(tid, {}).get("metrics", {}).get(metric)

@@ -10,18 +10,18 @@
 //! 1. (this commit) **Scaffold** — `MTLDevice`, `MTLCommandQueue`,
 //!    `CAMetalLayer` attached to an `NSView`, single-frame clear-color
 //!    render pass.  Proves the Metal pipeline runs end-to-end inside
-//!    mars without disturbing the AppKit renderer.
+//!    marspot without disturbing the AppKit renderer.
 //! 2. **Glyph atlas** — CoreText-rasterise glyphs into an MTLTexture,
 //!    LRU-evict per CLAUDE.md "bounded growth".
 //! 3. **BG pass** — instanced coloured quads, one per cell.
 //! 4. **FG pass** — textured glyph quads sampling the atlas.
 //! 5. **Integration** — wire to the terminal grid; A/B against
-//!    `Renderer` via `MARS_METAL=1`.  Once visually equivalent and
+//!    `Renderer` via `MARSPOT_METAL=1`.  Once visually equivalent and
 //!    measurably faster, retire the AppKit path.
 //!
 //! ## Why "previously failed at this" doesn't apply
 //!
-//! `render.rs`'s header notes mars *did* try Metal+atlas before and
+//! `render.rs`'s header notes marspot *did* try Metal+atlas before and
 //! pivoted away due to "gamma + atlas neighbor + sampling issues".
 //! This rebuild is informed by that — explicit gamma in the shader
 //! (sRGB pixel format, premultiplied alpha), atlas allocator that

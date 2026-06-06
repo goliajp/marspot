@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bin/profile-live.sh — sampling profile of mars during a workload.
+# bin/profile-live.sh — sampling profile of marspot during a workload.
 #
 # Why this exists: docs/perf.md notes a 2.4× live-vs-headless gap on
 # cat-ascii (89 MiB/s live, 215 MiB/s headless --bench parse).  The
@@ -8,12 +8,12 @@
 # to know where to optimise.
 #
 # This is a *diagnostic* tool, not a recurring bench scenario.  Run
-# it manually when you want to know "where is mars spending time
+# it manually when you want to know "where is marspot spending time
 # during a sustained burst?"  Output is a one-shot text report; the
 # top hot frames go into docs/perf.md § Gaps as quoted findings.
 #
 # Method:
-#   1. Launch mcli with MARS_SHELL pointing at a script that runs
+#   1. Launch mcli with MARSPOT_SHELL pointing at a script that runs
 #      `cat cat-ascii.bin` in a loop (so the workload sustains for
 #      the full sample duration).
 #   2. Wait for mcli to start, find its PID.
@@ -66,12 +66,12 @@ EOF
 chmod +x "$WORKER"
 
 USER_APP=$(current_frontmost_app)
-trap '{ kill_app mars 2>/dev/null; kill_app mcli 2>/dev/null; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
+trap '{ kill_app marspot 2>/dev/null; kill_app mcli 2>/dev/null; rm -rf "$RUN_DIR"; restore_focus_to "$USER_APP"; } || true' EXIT INT TERM
 
 echo "==> launching mcli with continuous cat-ascii workload"
-kill_app mars || true; kill_app mcli || true
+kill_app marspot || true; kill_app mcli || true
 sleep 0.3
-( cd "$ROOT" && MARS_SHELL="$WORKER" \
+( cd "$ROOT" && MARSPOT_SHELL="$WORKER" \
   nohup target/release/mcli > /dev/null 2>&1 < /dev/null & ) || true
 disown 2>/dev/null || true
 

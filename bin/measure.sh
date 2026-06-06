@@ -21,9 +21,9 @@ mkdir -p "$RESULTS_DIR"
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 # AppleScript dispatch to iTerm/Warp/Terminal.app is fragile (AppleEvent
 # timeouts, profile-specific shell init differences), so for now we
-# automate mars and print paste-ready commands for the others — see
+# automate marspot and print paste-ready commands for the others — see
 # docs/perf.md → "Cross-terminal comparison" for the manual flow.
-TERMINALS=(mars)
+TERMINALS=(marspot)
 
 # Number of trials per (terminal, scenario).  We keep only the median.
 TRIALS=3
@@ -44,36 +44,36 @@ wait_for_marker() {
   return 1
 }
 
-run_in_mars() {
+run_in_marspot() {
   local scenario=$1
   local marker=$2
 
-  # Drive the single-session `mcli` binary, NOT the 9-session `mars`
-  # app.  `mars` runs MARS_SHELL in every cell (3×3 = 9 parallel
+  # Drive the single-session `mcli` binary, NOT the 9-session `marspot`
+  # app.  `marspot` runs MARSPOT_SHELL in every cell (3×3 = 9 parallel
   # cats), so the per-scenario "live throughput" timed via marker
   # would be ~1/9 of the real per-session number.  The product-level
   # multi-session test lives in `bin/scenarios/multi-session-9x.sh`.
-  local cmd_script="/tmp/mars-bench-cmd.sh"
+  local cmd_script="/tmp/marspot-bench-cmd.sh"
   cat > "$cmd_script" <<EOF
 #!/bin/sh
 /usr/bin/time -p /bin/cat "$scenario" 2> "$marker"
 EOF
   chmod +x "$cmd_script"
 
-  # Forward MARS_PROFILE through if set, so a profiling run can
+  # Forward MARSPOT_PROFILE through if set, so a profiling run can
   # capture per-trial counters under the harness.
   local profile_env=""
-  if [[ -n "${MARS_PROFILE:-}" ]]; then
-    local pf="${MARS_PROFILE}.${scenario}.${trial:-x}"
-    profile_env="MARS_PROFILE=$pf"
+  if [[ -n "${MARSPOT_PROFILE:-}" ]]; then
+    local pf="${MARSPOT_PROFILE}.${scenario}.${trial:-x}"
+    profile_env="MARSPOT_PROFILE=$pf"
   fi
   # Spawn mcli and remember its PID so cleanup is targeted.  Earlier
-  # code did `killall mcli mars` to nuke any prior instance, but that
-  # is friendly-fire on parallel mars sessions (e.g. an active-9x-soak
+  # code did `killall mcli marspot` to nuke any prior instance, but that
+  # is friendly-fire on parallel marspot sessions (e.g. an active-9x-soak
   # already in flight gets clobbered by a measure.sh sanity run).
-  # measure.sh can run concurrent with other mars instances now.
+  # measure.sh can run concurrent with other marspot instances now.
   # perf-attack E7.
-  cd "$ROOT" && env $profile_env MARS_SHELL="$cmd_script" \
+  cd "$ROOT" && env $profile_env MARSPOT_SHELL="$cmd_script" \
     nohup target/release/mcli > /dev/null 2>&1 < /dev/null &
   local mcli_pid=$!
   disown 2>/dev/null || true
@@ -110,7 +110,7 @@ APPLESCRIPT
 run_in() {
   local terminal=$1; shift
   case "$terminal" in
-    mars)  run_in_mars  "$@" ;;
+    marspot)  run_in_marspot  "$@" ;;
     iterm) run_in_iterm "$@" ;;
     *)     echo "unknown terminal: $terminal" >&2; return 2 ;;
   esac
