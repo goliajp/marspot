@@ -143,6 +143,24 @@ jitter, dedicated `CARGO_TARGET_DIR`, lock + cleanup contract,
 results land in `bench/remote-runs/<UTC-iso>/`.  Use when the dev
 box is busy or when locking in a new baseline.
 
+### Correctness gate
+
+`bin/fuzz.sh` runs libfuzzer targets in `fuzz/fuzz_targets/` (default
+60 s per target, parametrise via `DURATION_S` / `TARGET`).  Current
+targets:
+
+- `parse_vt` — feeds arbitrary bytes to the VT/xterm parser through
+  a no-op callback sink; asserts the parser never panics.  Stops
+  spec-edge-case bugs at the input boundary.
+
+`bin/miri.sh` runs Miri on the four pure-Rust modules (parser, grid,
+tmux, input — 44 tests).  Miri cannot execute marspot's FFI
+(libc::mmap/madvise, pthread, Metal, AppKit, CoreText), so the rest
+of the lib is covered by real-process integration tests instead.  This
+catches UB / dangling pointers / aliasing violations in the algorithmic
+core — the class of bug that silently degrades long-running terminals
+and is invisible to `cargo test`.
+
 ### Dep hygiene gate
 
 `bin/lint-deps.sh` runs three peer checks on Cargo.toml / Cargo.lock:
