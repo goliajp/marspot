@@ -26,6 +26,28 @@ mkdir -p "$RESULTS_DIR"
 
 MARKER_PREFIX="/tmp/mars-bench"
 
+# ---- cargo binary resolution -------------------------------------------
+#
+# On systems with a global CARGO_TARGET_DIR (e.g. external SSD per
+# cargo-target-dir.md), `$ROOT/target/release/<bin>` does NOT exist.
+# Resolve target_directory via `cargo metadata` once and cache it.
+# Callers should use `mars_bin <bin>` instead of hardcoding paths.
+_MARS_TARGET_DIR=""
+_mars_target_dir() {
+  if [[ -z "$_MARS_TARGET_DIR" ]]; then
+    _MARS_TARGET_DIR=$(cd "$ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null)
+    [[ -z "$_MARS_TARGET_DIR" ]] && _MARS_TARGET_DIR="$ROOT/target"
+  fi
+  echo "$_MARS_TARGET_DIR"
+}
+# mars_bin <name> [profile=release] → absolute path of built binary
+mars_bin() {
+  local name=$1
+  local profile=${2:-release}
+  echo "$(_mars_target_dir)/$profile/$name"
+}
+
 # ---- timing parser -------------------------------------------------------
 #
 # `/usr/bin/time -p` writes POSIX format (`real 1.234`); zsh/bash builtin

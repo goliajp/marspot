@@ -75,9 +75,10 @@ kill_app mars || true; kill_app mcli || true
 sleep 0.3
 
 # Launch mars with both instrumentation paths set.
+MARS_BIN_PATH="$(mars_bin mars)"
 ( cd "$ROOT" && MARS_LATENCY="$LAT_PATH" MARS_PROFILE="$PROF_PATH" \
   MARS_SHELL="$WORKER" \
-  nohup target/release/mars > /dev/null 2>&1 < /dev/null & ) || true
+  nohup "$MARS_BIN_PATH" > /dev/null 2>&1 < /dev/null & ) || true
 disown 2>/dev/null || true
 
 # Wait for mars to come up + accept focus.

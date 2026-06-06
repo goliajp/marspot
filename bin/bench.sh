@@ -22,6 +22,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/bin/_lib.sh"   # mars_bin resolves CARGO_TARGET_DIR
 # BASELINE is overridable via env so tests can point at synthesised
 # fixture baselines without touching the real one.
 BASELINE="${BASELINE:-$ROOT/bench/baseline.json}"
@@ -84,7 +86,7 @@ if [[ ! -f "$SCENARIOS_DIR/cat-ascii.bin" || ! -f "$SCENARIOS_DIR/scroll-history
 fi
 
 # Build release if missing or stale.
-if [[ ! -x "$ROOT/target/release/mars" ]]; then
+if [[ ! -x "$(mars_bin mars)" ]]; then
   echo "==> building mars (release)"
   ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
 fi
@@ -107,9 +109,9 @@ trap 'rm -rf "$CUR_DIR"' EXIT
 echo "==> headless parse (5 trials each, taking median)"
 for s in cat-ascii cat-mixed cat-cjk cat-emoji; do
   : > "$CUR_DIR/parse-$s.samples"
-  "$ROOT/target/release/mars" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
+  "$(mars_bin mars)" --bench "parse:$SCENARIOS_DIR/$s.bin" >/dev/null
   for i in 1 2 3 4 5; do
-    "$ROOT/target/release/mars" --bench "parse:$SCENARIOS_DIR/$s.bin" \
+    "$(mars_bin mars)" --bench "parse:$SCENARIOS_DIR/$s.bin" \
       | python3 -c "import sys,json; print(json.load(sys.stdin)['bytes_per_sec'])" \
       >> "$CUR_DIR/parse-$s.samples"
   done
@@ -117,9 +119,9 @@ done
 
 echo "==> headless render (3 trials, taking median p99)"
 : > "$CUR_DIR/render.samples"
-"$ROOT/target/release/mars" --bench render:1000 >/dev/null
+"$(mars_bin mars)" --bench render:1000 >/dev/null
 for trial in 1 2 3; do
-  "$ROOT/target/release/mars" --bench render:1000 \
+  "$(mars_bin mars)" --bench render:1000 \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/render.samples"
 done
@@ -131,9 +133,9 @@ done
 # auto-tracks via --update-baseline.
 echo "==> headless scroll (5 trials, taking median p99)"
 : > "$CUR_DIR/scroll.samples"
-"$ROOT/target/release/mars" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null
+"$(mars_bin mars)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null
 for trial in 1 2 3 4 5; do
-  "$ROOT/target/release/mars" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
+  "$(mars_bin mars)" --bench scroll:"$SCENARIOS_DIR/scroll-history.bin" \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/scroll.samples"
 done
@@ -146,10 +148,10 @@ done
 # default (so this gate is meaningful both pre- and post-flip).
 echo "==> headless scroll-cold (disk-on, 5 trials, taking median p99)"
 : > "$CUR_DIR/scroll-cold.samples"
-MARS_DISK_SCROLLBACK=1 "$ROOT/target/release/mars" \
+MARS_DISK_SCROLLBACK=1 "$(mars_bin mars)" \
   --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" >/dev/null 2>&1
 for trial in 1 2 3 4 5; do
-  MARS_DISK_SCROLLBACK=1 "$ROOT/target/release/mars" \
+  MARS_DISK_SCROLLBACK=1 "$(mars_bin mars)" \
     --bench scroll-cold:"$SCENARIOS_DIR/scroll-history.bin" 2>/dev/null \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['p99_ns'])" \
     >> "$CUR_DIR/scroll-cold.samples"
@@ -160,15 +162,15 @@ done
 # regressions like accidental dep bloat or per-session memory growth.
 echo "==> binary sizes"
 for bin in mars mcli; do
-  if [[ -x "$ROOT/target/release/$bin" ]]; then
-    stat -f%z "$ROOT/target/release/$bin" > "$CUR_DIR/size-$bin.txt"
+  if [[ -x "$(mars_bin "$bin")" ]]; then
+    stat -f%z "$(mars_bin "$bin")" > "$CUR_DIR/size-$bin.txt"
     printf "    %-6s %s bytes\n" "$bin" "$(cat "$CUR_DIR/size-$bin.txt")"
   fi
 done
 
 echo "==> idle memory (3 trials each, taking median)"
 for bin in mars mcli; do
-  if [[ ! -x "$ROOT/target/release/$bin" ]]; then continue; fi
+  if [[ ! -x "$(mars_bin "$bin")" ]]; then continue; fi
   : > "$CUR_DIR/rss-$bin.samples"
   for trial in 1 2 3; do
     # Spawn a fresh instance and sample its OWN PID — do NOT pkill the
@@ -177,7 +179,7 @@ for bin in mars mcli; do
     # bench (e.g. an active-9x-soak run already in flight gets killed
     # by a sanity bench.sh invocation).  We measure $pid directly so
     # other instances are irrelevant; perf-attack E7.
-    "$ROOT/target/release/$bin" >/dev/null 2>&1 &
+    "$(mars_bin "$bin")" >/dev/null 2>&1 &
     pid=$!
     disown 2>/dev/null || true
     sleep 1.5  # let the binary settle past startup allocs

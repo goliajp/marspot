@@ -44,7 +44,15 @@ if ! cargo build ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} > "$LOG" 2>&1; then
   exit 1
 fi
 
-BIN="target/$PROFILE/mars"
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' \
+  2>/dev/null)"
+TARGET_DIR="${TARGET_DIR:-target}"
+BIN="$TARGET_DIR/$PROFILE/mars"
+if [ ! -x "$BIN" ]; then
+  echo "error: binary not found at $BIN" >&2
+  exit 1
+fi
 echo "==> launching $BIN"
 # Fully detach stdio so the child outlives this script.  Without redirecting,
 # closing the script's stdin/out/err can take mars down with it on macOS.

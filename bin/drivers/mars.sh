@@ -25,7 +25,7 @@ shift || true
 # Common: build the requested binary if missing.
 ensure_build() {
   local bin=$1
-  if [[ ! -x "$ROOT/target/release/$bin" ]]; then
+  if [[ ! -x "$(mars_bin "$bin")" ]]; then
     ( cd "$ROOT" && cargo build --release --bin "$bin" 2>&1 | tail -3 ) >&2
   fi
 }
@@ -56,8 +56,9 @@ case "$cmd" in
     done
     # nohup + redirect so the bench harness isn't tied to mars's output;
     # its result is reported through the marker file.
+    bin_path="$(mars_bin "$bin")"
     (cd "$ROOT" && env $env_pass MARS_SHELL="$shell_script" \
-      nohup "target/release/$bin" "$@" > /dev/null 2>&1 < /dev/null &) || true
+      nohup "$bin_path" "$@" > /dev/null 2>&1 < /dev/null &) || true
     disown 2>/dev/null || true
     # Don't `wait` — mars exits when all sessions exit, scenario script polls marker.
     ;;
