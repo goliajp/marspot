@@ -1,0 +1,45 @@
+# cargo-deny policy for Marspot.
+#
+# Three independent gates run by `cargo deny check licenses bans sources`
+# (advisories are handled separately by `cargo audit` in lint-deps.sh).
+#
+# Tightening over time is expected: dup-version warnings should drop to
+# zero as deps stabilise; sources should remain crates.io-only.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# Permissive licenses compatible with the project's dual Apache-2.0
+# OR MIT distribution. Trimmed to exactly what current deps need —
+# cargo deny warns on unmatched entries, so this list is also a
+# tripwire when a new dep introduces something unfamiliar (review
+# both that it is OK and that the dep is necessary per CLAUDE.md
+# "Self-build over libraries", then add the license here).
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "0BSD",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions of the same crate inflate binary size — direct
+# enemy of the binary_size_bytes_max bench gate. Start at "warn" so
+# fixing transitive dup chains isn't a blocker; flip to "deny" once
+# the graph is clean.
+multiple-versions = "warn"
+wildcards = "deny"
+# Crates explicitly disallowed go here, with a reason note.
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

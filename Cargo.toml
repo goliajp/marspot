@@ -3,6 +3,7 @@ name = "mars"
 version = "0.2.0"
 edition = "2021"
 build = "build.rs"
+license = "Apache-2.0 OR MIT"
 
 [dependencies]
 libc = "0.2"

@@ -137,6 +137,23 @@ the same scenarios into iTerm2 and Warp via AppleScript, parses
 timings, writes JSON.  Re-run when iTerm2 / Warp updates or when
 mars's relative position needs re-validation.
 
+`bin/bench-remote.sh` runs the same gate on a clean idle Apple
+Silicon host (default `ssh mini`) — same-arch, no foreground
+jitter, dedicated `CARGO_TARGET_DIR`, lock + cleanup contract,
+results land in `bench/remote-runs/<UTC-iso>/`.  Use when the dev
+box is busy or when locking in a new baseline.
+
+### Dep hygiene gate
+
+`bin/lint-deps.sh` runs three peer checks on Cargo.toml / Cargo.lock:
+`cargo audit` (RustSec advisories), `cargo deny check`
+(license policy + duplicate-version warn + source provenance), and
+`cargo machete` (unused declared deps).  Run pre-push alongside
+`bin/bench.sh`.  Allowed licenses live in `deny.toml` and are
+trimmed to exactly what current deps need — adding a license entry
+is a forcing function to review whether the introducing dep is
+justified under the self-build principle.
+
 ### Architecture-review cadence
 
 Run before each merge to develop, when bench regresses, and proactively
