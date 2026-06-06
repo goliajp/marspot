@@ -161,6 +161,20 @@ catches UB / dangling pointers / aliasing violations in the algorithmic
 core — the class of bug that silently degrades long-running terminals
 and is invisible to `cargo test`.
 
+### Tests + profiling
+
+`bin/test.sh` runs the lib suite via `cargo nextest run --lib`.
+nextest's per-test process isolation makes individual failures
+visible by name (vs. `cargo test`'s long combined output where one
+panic can get lost among hundreds of pass lines), and parallel
+scheduling cuts wall clock at ~140 tests.
+
+`bin/profile-samply.sh` records a flamegraph-friendly profile via
+samply (Speedscope / Firefox-profiler JSON) — the visual complement
+to `bin/profile-live.sh`'s textual `/usr/bin/sample` report.  Default
+runs an internal cat-ascii workload; `--attach <pid>` samples an
+already-running mars/mcli instead.
+
 ### Dep hygiene gate
 
 `bin/lint-deps.sh` runs three peer checks on Cargo.toml / Cargo.lock:
