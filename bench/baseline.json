@@ -82,40 +82,40 @@
       "version": "3.6.11",
       "bundle_id": "com.googlecode.iterm2",
       "captured_at": "2026-06-07",
-      "method": "ssh\u2192LaunchAgent (com.marspot.bench-trigger)",
-      "cat-ascii_MBps": 68.1,
-      "cat-mixed_MBps": 24.2,
-      "cat-cjk_MBps": 5.2,
-      "cat-emoji_MBps": 2.7
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 80.0,
+      "cat-mixed_MBps": 25.0,
+      "cat-cjk_MBps": 5.5,
+      "cat-emoji_MBps": 2.6
     },
     "warp": {
-      "version": "unknown at measure time (Warp auto-updates; current is 0.2026.06.03.09.49.01)",
+      "version": "0.2026.06.03.09.49.01",
       "bundle_id": "dev.warp.Warp-Stable",
-      "captured_at": "2026-05-05",
-      "method": "console paste (cannot ssh-refresh: SE keystroke TCC + SIP-protected system TCC.db)",
-      "cat-ascii_MBps": 47.8,
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 43.2,
       "cat-mixed_MBps": 39.0,
-      "cat-cjk_MBps": 47.1,
-      "cat-emoji_MBps": 44.4
+      "cat-cjk_MBps": 53.3,
+      "cat-emoji_MBps": 47.1
     },
     "ghostty": {
       "version": "1.3.1 (build 15212)",
       "bundle_id": "com.mitchellh.ghostty",
       "captured_at": "2026-06-07",
       "method": "console / Screen Sharing",
-      "cat-ascii_MBps": 97.0,
-      "cat-mixed_MBps": 94.1,
-      "cat-cjk_MBps": 133.3,
-      "cat-emoji_MBps": 114.3
+      "cat-ascii_MBps": 68.1,
+      "cat-mixed_MBps": 76.2,
+      "cat-cjk_MBps": 88.9,
+      "cat-emoji_MBps": 88.9
     },
     "terminal": {
       "version": "2.15 (build 470.2)",
       "bundle_id": "com.apple.Terminal",
       "captured_at": "2026-06-07",
       "method": "console / Screen Sharing",
-      "cat-ascii_MBps": 55.2,
-      "cat-mixed_MBps": 39.0,
-      "cat-cjk_MBps": 42.1,
+      "cat-ascii_MBps": 46.4,
+      "cat-mixed_MBps": 42.1,
+      "cat-cjk_MBps": 50.0,
       "cat-emoji_MBps": 53.3
     }
   },
