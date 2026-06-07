@@ -76,6 +76,16 @@ rm -f "$REQ"
 # ambiguously.
 rm -f "$TRIG_DIR/result.json" "$TRIG_DIR/err.log" "$TRIG_DIR/done"
 
+# Pre-flight: pull brew-managed terminal casks up to latest stable so
+# every bench run measures the current shipping versions. iTerm2 / Warp
+# / Ghostty are all `auto_updates` casks, so brew upgrade is a no-op
+# when they're current — fast (a few seconds when nothing to do).
+PATH="/opt/homebrew/bin:$PATH"
+if command -v brew >/dev/null 2>&1; then
+  echo "==> brew upgrade --cask iterm2 warp ghostty"
+  brew upgrade --cask iterm2 warp ghostty 2>&1 | tail -5 || true
+fi
+
 # Critical: LaunchAgent inherits no SSH_CONNECTION; this also makes
 # _remote-measure-others-mini.sh fall into console mode where iTerm,
 # Warp, Terminal AND Ghostty all get driven.
