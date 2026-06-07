@@ -223,28 +223,49 @@ trap cleanup EXIT INT TERM
 # same pre=1 → leave-running rule as the EXIT trap applies.
 close_one() {
   local t=$1
+  # Use `if` blocks instead of `[[ test ]] && { block }` — the latter
+  # returns false when the test is false and trips `set -e` at the end
+  # of the function, killing the script mid-cycle. `if` short-circuits
+  # cleanly with no failing exit code.
   case "$t" in
     iterm)
-      [[ -n "$WIN_iterm" ]] && bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true
-      [[ "$PRE_ITERM" == "0" ]] && osascript -e 'tell application "iTerm" to quit' >/dev/null 2>&1 || true
+      if [[ -n "$WIN_iterm" ]]; then
+        bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true
+      fi
+      if [[ "$PRE_ITERM" == "0" ]]; then
+        # iTerm's "Prompt before quitting" preference can block an AS
+        # quit indefinitely waiting for a Confirm dialog the receiver
+        # can't answer. Polite AS quit first (clean teardown if the
+        # prompt is disabled), pkill backstop within 1 s otherwise.
+        osascript -e 'tell application "iTerm" to quit saving no' >/dev/null 2>&1 &
+        sleep 1
+        pkill -f "iTerm.app/Contents/MacOS/iTerm2" 2>/dev/null || true
+      fi
       ;;
     terminal)
-      [[ -n "$WIN_terminal" ]] && bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
-      [[ "$PRE_TERMINAL" == "0" ]] && osascript -e 'tell application "Terminal" to quit' >/dev/null 2>&1 || true
+      if [[ -n "$WIN_terminal" ]]; then
+        bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
+      fi
+      if [[ "$PRE_TERMINAL" == "0" ]]; then
+        # Same Confirm-dialog risk as iTerm.
+        osascript -e 'tell application "Terminal" to quit' >/dev/null 2>&1 &
+        sleep 1
+        pkill -f "Terminal.app/Contents/MacOS/Terminal" 2>/dev/null || true
+      fi
       ;;
     warp)
-      [[ "$PRE_WARP" == "0" ]] && {
+      if [[ "$PRE_WARP" == "0" ]]; then
         osascript -e 'tell application "Warp" to quit' >/dev/null 2>&1 || true
         sleep 0.5
         pkill -f "Warp.app/Contents/MacOS/stable" 2>/dev/null || true
-      }
+      fi
       ;;
     ghostty)
-      [[ "$PRE_GHOSTTY" == "0" ]] && {
+      if [[ "$PRE_GHOSTTY" == "0" ]]; then
         osascript -e 'tell application "Ghostty" to quit' >/dev/null 2>&1 || true
         sleep 0.5
         pkill -f "Ghostty.app/Contents/MacOS/ghostty" 2>/dev/null || true
-      }
+      fi
       ;;
     marspot)
       # mcli exits when its single session finishes (wrapper ends with
@@ -253,6 +274,7 @@ close_one() {
       pkill -x marspot 2>/dev/null || true
       ;;
   esac
+  return 0
 }
 
 # Single sequential cycle: launch → wait → close → cooldown. At any

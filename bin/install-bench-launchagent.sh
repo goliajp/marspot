@@ -86,6 +86,15 @@ if command -v brew >/dev/null 2>&1; then
   brew upgrade --cask iterm2 warp ghostty 2>&1 | tail -5 || true
 fi
 
+# Disable "Confirm Quit" prompts so AS quit in the close cycle isn't
+# blocked by a Are-you-sure dialog. iTerm + Terminal both default to
+# prompting; setting these once per LaunchAgent fire is idempotent and
+# zero-cost when already off. Warp / Ghostty don't have an equivalent
+# pref (and the cycle pkills them anyway).
+defaults write com.googlecode.iterm2 PromptOnQuit -bool false 2>/dev/null || true
+defaults write com.apple.Terminal "Confirm Quit Even if Background Process" -bool false 2>/dev/null || true
+defaults write com.apple.Terminal "Confirm Close Window" -bool false 2>/dev/null || true
+
 # Critical: LaunchAgent inherits no SSH_CONNECTION; this also makes
 # _remote-measure-others-mini.sh fall into console mode where iTerm,
 # Warp, Terminal AND Ghostty all get driven.
