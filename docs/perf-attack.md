@@ -85,9 +85,9 @@ glyph atlas), bundled with that attack window.
 
 | ID | Metric | Current (vs Ghostty) | Target | File | Status |
 |---|---|---|---|---|---|
-| G1 | live cat-mixed | 1.12× (100.0 / 88.9) | ≥ 1.19× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | queued (bundled with B3/B4) |
-| G2 | live cat-cjk   | **0.50×** (80.0 / 160.0) | ≥ 0.70× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | **active — biggest known gap** |
-| G3 | live cat-emoji | 0.70× (80.0 / 114.3) | ≥ 0.85× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | queued (bundled with B3/B4) |
+| G1 | live cat-mixed | 1.50× (133.3 / 88.9)  | ≥ 1.19× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | **retracted 2026-06-07** — bench harness was measuring competitors concurrently, not sequentially |
+| G2 | live cat-cjk   | 1.17× (133.3 / 114.3) | ≥ 0.70× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | **retracted 2026-06-07** — was contention artefact, marspot actually outperforms |
+| G3 | live cat-emoji | 1.40× (160.0 / 114.3) | ≥ 0.85× | [G](perf-attack/G-vs-ghostty-cjk-emoji-mixed.md) | **retracted 2026-06-07** — same fairness bug |
 
 ### E — Bench infrastructure fixes (block honest measurement)
 

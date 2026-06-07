@@ -61,10 +61,11 @@ ssh "$HOST" '
 
 # ---- wait for done sentinel ---------------------------------------
 # Receiver runs brew upgrade (~few sec idle, up to 2 min if updates) +
-# 4 terminals × 4 scenarios × 3 trials (~90 s) + cleanup. 600 s gives
-# generous headroom; a hang past that is a bug worth investigating.
-echo "==> waiting for done sentinel (cap 10 min)"
-deadline=$(( $(date +%s) + 600 ))
+# 5 terminals (iterm/warp/ghostty/terminal/marspot) sequentially, each
+# ~90 s measure + 3 s cooldown ≈ 8 min real work. 15 min gives 2× head-
+# room; a hang past that is a bug worth investigating.
+echo "==> waiting for done sentinel (cap 15 min)"
+deadline=$(( $(date +%s) + 900 ))
 while (( $(date +%s) < deadline )); do
   if ssh -o ConnectTimeout=5 "$HOST" '[[ -f ~/.marspot-bench-trigger/done ]]' 2>/dev/null; then
     break

@@ -255,6 +255,18 @@ def load_scroll_cold():
     return {"p99_ns": samples[len(samples) // 2]}
 
 def load_live(scenario):
+    # Source of truth for marspot live throughput: the co-measured value
+    # in competitors_snapshot.marspot. That number was captured in the
+    # SAME sequential cycle as iterm/warp/ghostty/terminal — every cell
+    # under identical idle conditions — which is what makes the
+    # vs-best-other ratio honest. Falls back to bench-remote's separate
+    # live.json only if marspot wasn't in the latest co-measure (e.g. a
+    # bench-remote --full run that ran without first triggering the
+    # LaunchAgent refresh).
+    marspot_snap = baseline.get("competitors_snapshot", {}).get("marspot", {})
+    co = marspot_snap.get(f"{scenario}_MBps")
+    if isinstance(co, (int, float)) and co > 0:
+        return float(co)
     p = os.path.join(cur_dir, "live.json")
     if not os.path.exists(p): return None
     j = json.load(open(p))
@@ -289,13 +301,18 @@ for entry in baseline["scenarios"]:
         # vs best other — across every recorded competitor (iterm2, warp,
         # ghostty, …). Pulled from competitors_snapshot so adding a new
         # terminal is a baseline.json edit only, no bench.sh churn.
-        # Terminal.app is excluded by design: it's the OS-vendor reference
-        # floor, not a competitor we measure ourselves against.
+        # Excluded by design:
+        #   - terminal: OS-vendor reference floor, not a competitor.
+        #   - marspot:  the subject; it lives in this dict only because
+        #               the refresh script measures it in the same
+        #               sequential cycle as the competitors (fair load
+        #               conditions), but it can't compete with itself.
         cs = baseline["competitors_snapshot"]
         key = f"{sid}_MBps"
+        excluded = {"terminal", "marspot"}
         competitor_mbps = [
             v[key] for name, v in cs.items()
-            if isinstance(v, dict) and name != "terminal" and key in v
+            if isinstance(v, dict) and name not in excluded and key in v
         ]
         best_other = max(competitor_mbps) if competitor_mbps else 0
         if cur_live is not None and best_other > 0:

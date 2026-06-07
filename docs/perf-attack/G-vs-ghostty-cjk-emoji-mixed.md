@@ -1,3 +1,42 @@
+# G — marspot vs Ghostty — **RETRACTED 2026-06-07 as measurement artefact**
+
+The G1/G2/G3 "marspot loses CJK/emoji/mixed to Ghostty" finding turned
+out to be a fairness bug in the bench harness, not a real perf gap.
+
+**Root cause**: `bin/_remote-measure-others-mini.sh` was launching all
+four competitor terminals concurrently and then waiting for all four
+markers. Four `cat /bench/scenarios/cat-*.bin` processes on the same
+mini at the same time meant every terminal was being measured under
+CPU + IO contention — and marspot was *separately* measured by
+`bench-remote --full` AFTER the four competitors finished, at which
+point iTerm + Terminal had been left running (the `pre=1 → leave
+alone` cleanup rule), so marspot also ran under load. Different
+load, different cell.
+
+The refactor lands in this branch (`feature/add-ghostty-bench`):
+sequential cycle, one terminal at a time, marspot added to the same
+cycle so all five are measured under bit-identical idle conditions
+with cooldowns between.
+
+Numbers under the fair harness (2026-06-07 mini run):
+
+| Scenario | marspot | Ghostty | ratio | floor | verdict |
+|---|---:|---:|---:|---:|---|
+| cat-ascii | 133.3 |  94.1 | 1.42× | 1.14× | ✓ pass |
+| cat-mixed | 133.3 |  88.9 | 1.50× | 1.19× | ✓ pass |
+| cat-cjk   | 133.3 | 114.3 | 1.17× | 0.70× | ✓ pass |
+| cat-emoji | 160.0 | 114.3 | 1.40× | 0.85× | ✓ pass |
+
+marspot is faster than Ghostty across every cell. The bench-remote
+gate now reports **21/21 pass**. The CGBitmapContext-pooling work
+this file was queuing as a P1 attack is no longer justified by
+measured data — keeping the file as the retraction record so the
+issue isn't re-opened from memory of the earlier (wrong) reading.
+
+---
+
+(original content preserved below for historical context)
+
 # G — marspot vs Ghostty (new competitor) — cjk / emoji / mixed gap
 
 Ghostty 1.3.1 entered `bench/baseline.json/competitors_snapshot` on

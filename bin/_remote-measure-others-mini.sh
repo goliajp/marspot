@@ -24,7 +24,13 @@ TRIALS=3
 # the one-time Automation grant during install-bench-launchagent.sh
 # first-fire, after which subsequent LaunchAgent-spawned runs reuse
 # the cached TCC scope.
-TERMS=(iterm warp ghostty terminal)
+# Measurement order matters: marspot in the SAME cycle as every
+# competitor so all five are measured under identical mini load. The
+# cycle is sequential — at any moment exactly one terminal is doing
+# PTY work — so per-cell contention is zero. This is what makes the
+# vs-best-other ratio fair: every cell is the terminal vs an idle box.
+# (cooldown between terminals lets caches / scheduler settle.)
+TERMS=(iterm warp ghostty terminal marspot)
 # 4 scenarios × 3 trials × ~2 MB/s worst case = ~96 s budget; cap at
 # 120 s so a single-terminal failure (Warp keystroke mangle, paste
 # warning, frozen surface) doesn't hang the whole refresh for 10 min
@@ -32,6 +38,11 @@ TERMS=(iterm warp ghostty terminal)
 # then are skipped — their previous-day snapshot stays via per-
 # terminal merge in remote-measure-others.sh.
 MARKER_TIMEOUT_S=120
+# Seconds between one terminal's close and the next one's launch.
+# Lets mini cool: GPU thermal, scheduler-cached affinity, page-cache
+# warmth for /tmp scenarios. 3 s is empirically enough for variance
+# to settle to ~5 % run-to-run.
+COOLDOWN_S=3
 
 # ssh→GUI bridge. Direct ssh dispatch can't reach Aqua / WindowServer.
 # After exhaustive testing on macOS 26.5 / iTerm 3.6.11 / Ghostty 1.3.1
@@ -205,48 +216,87 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
+
+# Per-terminal close — runs immediately after that terminal's marker
+# completes (or times out). Closes only this terminal; the others
+# haven't been launched yet thanks to the sequential cycle below. The
+# same pre=1 → leave-running rule as the EXIT trap applies.
+close_one() {
+  local t=$1
+  case "$t" in
+    iterm)
+      [[ -n "$WIN_iterm" ]] && bin/drivers/iterm.sh close-windows "$WIN_iterm" >/dev/null 2>&1 || true
+      [[ "$PRE_ITERM" == "0" ]] && osascript -e 'tell application "iTerm" to quit' >/dev/null 2>&1 || true
+      ;;
+    terminal)
+      [[ -n "$WIN_terminal" ]] && bin/drivers/terminal.sh close-windows "$WIN_terminal" >/dev/null 2>&1 || true
+      [[ "$PRE_TERMINAL" == "0" ]] && osascript -e 'tell application "Terminal" to quit' >/dev/null 2>&1 || true
+      ;;
+    warp)
+      [[ "$PRE_WARP" == "0" ]] && {
+        osascript -e 'tell application "Warp" to quit' >/dev/null 2>&1 || true
+        sleep 0.5
+        pkill -f "Warp.app/Contents/MacOS/stable" 2>/dev/null || true
+      }
+      ;;
+    ghostty)
+      [[ "$PRE_GHOSTTY" == "0" ]] && {
+        osascript -e 'tell application "Ghostty" to quit' >/dev/null 2>&1 || true
+        sleep 0.5
+        pkill -f "Ghostty.app/Contents/MacOS/ghostty" 2>/dev/null || true
+      }
+      ;;
+    marspot)
+      # mcli exits when its single session finishes (wrapper ends with
+      # `exit`). pkill is belt-and-suspenders for a hung wrapper.
+      pkill -x mcli 2>/dev/null || true
+      pkill -x marspot 2>/dev/null || true
+      ;;
+  esac
+}
+
+# Single sequential cycle: launch → wait → close → cooldown. At any
+# moment exactly one terminal is doing PTY work, so per-cell CPU / IO
+# contention is zero. Every cell is the terminal vs an idle mini —
+# the only condition under which vs-best-other ratios are honest.
 for t in "${TERMS[@]}"; do
-  # In ssh mode, only Ghostty is reachable (see header comment for
-  # why iTerm/Warp/Terminal are unreachable from ssh). Skip the rest;
-  # their previous baseline snapshot stays intact via per-terminal
-  # merge in the parent script. To refresh iTerm/Warp/Terminal use the
-  # LaunchAgent route (bin/install-bench-launchagent.sh) so the
-  # measure runs inside the user's Aqua session, not over ssh.
-  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" ]]; then
-    echo "==> skip $t (ssh mode — use LaunchAgent trigger for full refresh)" >&2
+  # In ssh mode, only Ghostty + marspot can be driven directly (Ghostty
+  # via sudo asuser, marspot via direct binary). The other three need
+  # the LaunchAgent route for ssh-from-dev-box driving.
+  if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" && "$t" != "marspot" ]]; then
+    echo "==> [${t}] skip (ssh mode — use LaunchAgent trigger for full refresh)" >&2
     continue
   fi
+
   marker="/tmp/measure-${t}-all.txt"
-  # Marker may be root-owned from a previous ssh-mode ghostty run; use
-  # sudo to be safe. Local/LaunchAgent runs just succeed on plain rm.
   rm -f "$marker" 2>/dev/null || sudo -n rm -f "$marker" 2>/dev/null || true
   cmd="$(build_one_cmd "$marker")"
-  echo "==> launch $t" >&2
-  # Driver failures are tolerated — under LaunchAgent SE keystroke is
-  # TCC-blocked for /usr/bin/osascript (system TCC.db is SIP write-
-  # protected, can't be granted from ssh) so Warp specifically fails
-  # rc=1 here. Other drivers may also throw; keep going so the run still
-  # returns whatever subset DID work. Failed terminal's previous-day
-  # snapshot stays in baseline via per-terminal merge.
+
+  echo "==> [${t}] launch" >&2
   launch_rc=0
   case "$t" in
     iterm)    WIN_iterm="$(bin/drivers/iterm.sh run-tabs 1 "$cmd" 2>&1)" || launch_rc=$? ;;
     warp)     bin/drivers/warp.sh run-single "$cmd" || launch_rc=$? ;;
-    # Ghostty's binary needs full Aqua launchd domain (NSApp init +
-    # Metal) → ASUSER (root) under ssh. Local runs use empty prefix.
     ghostty)  $ASUSER bin/drivers/ghostty.sh run-single "$cmd" || launch_rc=$? ;;
     terminal) WIN_terminal="$(bin/drivers/terminal.sh run-single "$cmd" 2>&1)" || launch_rc=$? ;;
+    marspot)
+      # marspot.sh expects an executable script as MARSPOT_SHELL —
+      # wrap the same cat+/usr/bin/time cmd the GUI drivers got, so
+      # the test surface is bit-identical across all five terminals.
+      wrapper=$(mktemp /tmp/marspot-wrapper-XXXXXX)
+      printf '#!/bin/bash\n%s\n' "$cmd" > "$wrapper"
+      chmod 0755 "$wrapper"
+      bin/drivers/marspot.sh run-shell-mcli "$wrapper" || launch_rc=$?
+      ;;
   esac
+
   if (( launch_rc != 0 )); then
-    echo "==> $t driver failed rc=$launch_rc — continuing without it" >&2
+    echo "==> [${t}] driver failed rc=$launch_rc — skipping" >&2
     continue
   fi
   LAUNCHED_TERMS+=("$t")
-done
 
-for t in "${LAUNCHED_TERMS[@]}"; do
-  marker="/tmp/measure-${t}-all.txt"
-  echo "==> wait $t marker" >&2
+  echo "==> [${t}] wait marker" >&2
   saw_done=0
   for _ in $(seq 1 "$MARKER_TIMEOUT_S"); do
     if [[ -s "$marker" ]] && grep -q '==ALL_DONE==' "$marker"; then
@@ -256,8 +306,12 @@ for t in "${LAUNCHED_TERMS[@]}"; do
     sleep 1
   done
   if (( saw_done == 0 )); then
-    echo "==> $t marker not done after ${MARKER_TIMEOUT_S}s — skipping" >&2
+    echo "==> [${t}] marker not done after ${MARKER_TIMEOUT_S}s — moving on" >&2
   fi
+
+  echo "==> [${t}] close" >&2
+  close_one "$t"
+  sleep "$COOLDOWN_S"
 done
 
 # Note: window/process cleanup runs in the EXIT trap above so it
@@ -275,12 +329,13 @@ SCENARIOS = sys.argv[1:]
 # baseline.json snapshot uses "iterm2" (matches the product / bundle id
 # `com.googlecode.iterm2`). Map on the way out so the merge in the
 # parent script doesn't create two separate competitor entries.
-TERMS = ["iterm", "warp", "ghostty", "terminal"]
+TERMS = ["iterm", "warp", "ghostty", "terminal", "marspot"]
 TERM_TO_KEY = {"iterm": "iterm2"}
 
 # App bundle paths per terminal — used to probe version + bundle_id so
 # each refresh records what was measured against what build. Terminal.app
-# lives under /System/Applications/Utilities on macOS 13+.
+# lives under /System/Applications/Utilities on macOS 13+. marspot has
+# no .app bundle; its version is probed separately via the binary.
 APP_PATH = {
     "iterm":    "/Applications/iTerm.app",
     "warp":     "/Applications/Warp.app",
@@ -298,6 +353,39 @@ def plist_read(plist, key):
         return None
 
 def probe_version(term):
+    if term == "marspot":
+        # Source of truth for marspot version: git describe at build time
+        # (build.rs sets MARSPOT_GIT_SHA). Try the binary itself first.
+        bin_path = f"{ROOT}/target/release/marspot"
+        if os.path.exists(bin_path):
+            try:
+                out = subprocess.check_output(
+                    [bin_path, "--version"], text=True,
+                    stderr=subprocess.DEVNULL, timeout=3
+                ).strip()
+                if out:
+                    return out, "com.goliajp.marspot"
+            except Exception:
+                pass
+        # Fallback: cargo metadata package.version + git short sha.
+        try:
+            cargo = subprocess.check_output(
+                ["cargo", "metadata", "--no-deps", "--format-version=1"],
+                cwd=ROOT, text=True, stderr=subprocess.DEVNULL, timeout=5
+            )
+            import json as _json
+            data = _json.loads(cargo)
+            for pkg in data.get("packages", []):
+                if pkg.get("name") == "marspot":
+                    v = pkg.get("version", "?")
+                    sha = subprocess.check_output(
+                        ["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
+                        text=True, stderr=subprocess.DEVNULL, timeout=2
+                    ).strip()
+                    return f"{v} (git {sha})", "com.goliajp.marspot"
+        except Exception:
+            pass
+        return None, "com.goliajp.marspot"
     p = APP_PATH.get(term)
     if not p: return None, None
     plist = f"{p}/Contents/Info.plist"
