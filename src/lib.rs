@@ -13,6 +13,7 @@ pub mod app;
 pub mod grid;
 pub mod input;
 pub mod layout;
+pub mod pane;
 pub mod parser;
 pub mod pty;
 pub mod font_cache;
@@ -23,3 +24,10 @@ pub mod scrollback;
 pub mod session;
 pub mod terminal;
 pub mod tmux;
+
+/// Top chrome strip in **logical points** that every Marspot-style
+/// window must reserve so the macOS traffic-light buttons don't paint
+/// over the terminal grid. Shared between binaries so a single-session
+/// consumer (mcli) gets the same window chrome as the multi-session
+/// container (marspot) automatically.
+pub const HEADER_PT: f64 = 32.0;

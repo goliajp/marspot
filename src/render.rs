@@ -104,6 +104,13 @@ pub struct Renderer {
     font: FontCache,
     viewport_w: f64,
     viewport_h: f64,
+    /// Physical pixels of top inset reserved above the grid for window
+    /// chrome (macOS traffic-light buttons). Single-session callers
+    /// (mcli) set this via `set_top_inset` so `render(view)` builds a
+    /// 1×1 Layout that pushes the grid below the chrome. Multi-session
+    /// callers (marspot) build their own Layout with `top_inset` baked
+    /// in and call `render_layout` directly — they bypass this field.
+    top_inset_phys: f64,
     /// Window-level focus.  When false, even the focused-session
     /// cursor draws hollow because the user clearly isn't typing
     /// into marspot.
@@ -191,10 +198,29 @@ impl Renderer {
             font,
             viewport_w: 0.0,
             viewport_h: 0.0,
+            top_inset_phys: 0.0,
             window_focused: true,
             bitmap_ctx: None,
             scratch: Scratch::default(),
         })
+    }
+
+    /// Reserve a top strip (physical pixels) above the grid so window
+    /// chrome (traffic lights, focused-session status, …) doesn't paint
+    /// over terminal content. Single-session callers set this once at
+    /// `resumed` from `HEADER_PT * scale`. Multi-session callers route
+    /// the same value through `Layout::build`'s `top_inset` param and
+    /// don't need to touch this.
+    pub fn set_top_inset(&mut self, phys: f64) {
+        self.top_inset_phys = phys;
+    }
+
+    /// Top inset in physical pixels currently in effect. mcli reads this
+    /// in `resized()` to subtract from window height before computing
+    /// row count, so the session grid doesn't request rows that would
+    /// be clipped under the chrome strip.
+    pub fn top_inset_phys(&self) -> f64 {
+        self.top_inset_phys
     }
 
     pub fn set_window_focused(&mut self, focused: bool) {
@@ -244,7 +270,7 @@ impl Renderer {
             self.viewport_w,
             self.viewport_h,
             0.0,
-            0.0,
+            self.top_inset_phys,
             0.0,
             1,
             1,
