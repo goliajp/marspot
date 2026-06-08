@@ -233,15 +233,14 @@ struct Marspot {
     /// `Some` when launched with `--tmux`; otherwise we run the
     /// standard 9-cell grid.
     tmux: Option<TmuxState>,
-    /// One Session per terminal cell on screen.
-    sessions: Vec<Session>,
-    /// Index into `sessions` of the session currently receiving keyboard
+    /// One Pane per terminal cell on screen. Each Pane owns its
+    /// Session + its own scrollback view offset, so switching focus
+    /// across panes preserves each pane's scroll position (Phase C
+    /// done — this used to be a single `view_offset` field).
+    panes: Vec<marspot::pane::Pane>,
+    /// Index into `panes` of the pane currently receiving keyboard
     /// input + mouse-wheel scrolling.
     focused_idx: usize,
-    /// Scrollback view offset of the focused session.  Phase B keeps a
-    /// single shared offset; Phase C will move this onto Session so each
-    /// cell remembers its own scroll position.
-    view_offset: u16,
     /// Self-instrumentation: when set to `Some(t0)`, the next render that
     /// commits to the layer will measure `t0.elapsed()` as the
     /// keystroke-to-pixel latency and record it.  Cleared after the next
@@ -379,9 +378,9 @@ impl MarspotApp for Marspot {
             self.pump_tmux_session()
         } else {
             let mut total = 0;
-            for s in &mut self.sessions {
+            for p in &mut self.panes {
                 let feed_t0 = std::time::Instant::now();
-                let n = s.pump();
+                let n = p.pump();
                 self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
                 total += n;
             }
@@ -402,9 +401,9 @@ impl MarspotApp for Marspot {
         // times per second under load, so the 1 Hz gate is what
         // actually rate-limits us.
         self.maybe_dump_rss();
-        if self.sessions.iter().all(|s| s.is_exited()) {
-            for s in &mut self.sessions {
-                s.pump();
+        if self.panes.iter().all(|p| p.is_exited()) {
+            for p in &mut self.panes {
+                p.pump();
             }
             ctx.exit();
         }
@@ -480,9 +479,8 @@ impl MarspotApp for Marspot {
             if self.record_latency && self.pending_keystroke_t0.is_none() {
                 self.pending_keystroke_t0 = Some(std::time::Instant::now());
             }
-            // Typing snaps the focused session's view back to live.
-            if self.view_offset != 0 {
-                self.view_offset = 0;
+            // Typing snaps the focused pane's view back to live.
+            if self.panes[self.focused_idx].snap_to_live() {
                 ctx.request_redraw();
             }
             // Typing into the PTY clears any text selection — once
@@ -493,7 +491,7 @@ impl MarspotApp for Marspot {
                 self.selection_dragging = false;
                 ctx.request_redraw();
             }
-            let session = &mut self.sessions[self.focused_idx];
+            let session = self.panes[self.focused_idx].session_mut();
             let _ = session.write(&bytes);
             // Local-echo: paint each printable-ASCII byte to the grid
             // immediately, ahead of the PTY round trip.
@@ -566,7 +564,7 @@ impl MarspotApp for Marspot {
         // session is a confusing dead-end UI; the user can spawn
         // again first via the [+] button).
         if let Some(idx) = close_session_hit {
-            if self.sessions.len() > 1 && idx < self.sessions.len() {
+            if self.panes.len() > 1 && idx < self.panes.len() {
                 self.close_session(idx);
                 self.rebuild_layout(ctx);
                 ctx.request_redraw();
@@ -583,7 +581,7 @@ impl MarspotApp for Marspot {
             .map(|l| l.hit_test_add_session_button(x_phys, y_phys))
             .unwrap_or(false);
         if add_session_hit {
-            if self.sessions.len() < SESSION_COUNT_HARD_CAP {
+            if self.panes.len() < SESSION_COUNT_HARD_CAP {
                 self.spawn_session();
                 self.rebuild_layout(ctx);
                 ctx.request_redraw();
@@ -634,7 +632,7 @@ impl MarspotApp for Marspot {
             y_phys,
             top_pad_phys,
             row_phys,
-            self.sessions.len(),
+            self.panes.len(),
         );
         let cell_hit = layout.hit_test(x_phys, y_phys);
         let cell_pos_hit = self
@@ -649,7 +647,7 @@ impl MarspotApp for Marspot {
         // moves focus to it so the visual highlight + cursor block
         // line up with what the user is editing.
         if let Some(idx) = title_hit {
-            if idx < self.sessions.len() {
+            if idx < self.panes.len() {
                 self.commit_title_edit();
                 self.focused_idx = idx;
                 self.editing_title = Some(idx);
@@ -658,7 +656,7 @@ impl MarspotApp for Marspot {
                     .get(idx)
                     .and_then(|t| t.clone())
                     .unwrap_or_default();
-                self.view_offset = 0;
+                let _ = self.panes[self.focused_idx].snap_to_live();
                 self.selection = None;
                 self.selection_dragging = false;
                 ctx.request_redraw();
@@ -691,7 +689,7 @@ impl MarspotApp for Marspot {
             self.selection_dragging = true;
             if idx != self.focused_idx {
                 self.focused_idx = idx;
-                self.view_offset = 0;
+                let _ = self.panes[self.focused_idx].snap_to_live();
             }
             ctx.request_redraw();
             return;
@@ -702,9 +700,9 @@ impl MarspotApp for Marspot {
 
         let new_focus = sidebar_hit.or(cell_hit);
         if let Some(idx) = new_focus {
-            if idx < self.sessions.len() && idx != self.focused_idx {
+            if idx < self.panes.len() && idx != self.focused_idx {
                 self.focused_idx = idx;
-                self.view_offset = 0;
+                let _ = self.panes[self.focused_idx].snap_to_live();
                 ctx.request_redraw();
             }
         }
@@ -801,13 +799,11 @@ impl MarspotApp for Marspot {
         if lines_f.abs() < 0.5 {
             return;
         }
-        let max = self.sessions[self.focused_idx]
-            .terminal
-            .grid()
-            .scrollback_len() as i32;
-        let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
-        if new != self.view_offset {
-            self.view_offset = new;
+        // Pane handles the clamp + view_offset mutation. Sign /
+        // invert / factor are container-level prefs (the focused
+        // pane shouldn't know about marspot's env-var config), so
+        // we compute the final row delta here.
+        if self.panes[self.focused_idx].apply_scroll_lines(lines_f as i32) {
             ctx.request_redraw();
         }
     }
@@ -896,15 +892,11 @@ impl Marspot {
         .with_chrome(
             scale,
             self.layout_picker_open,
-            self.sessions.len(),
+            self.panes.len(),
         );
-        for (i, s) in self.sessions.iter_mut().enumerate() {
+        for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
-                if (rect.cols, rect.rows)
-                    != (s.terminal.grid().cols(), s.terminal.grid().rows())
-                {
-                    s.resize(rect.cols, rect.rows);
-                }
+                p.resize(rect.cols, rect.rows);
             }
         }
         self.layout = Some(layout);
@@ -920,7 +912,7 @@ impl Marspot {
         }
     }
 
-    /// Spawn a fresh session and append it to `self.sessions` /
+    /// Spawn a fresh session and append it to `self.panes` /
     /// `self.custom_titles`.  Reuses the wake-via-EventProxy path
     /// startup uses; safe to call from any `MarspotApp` callback.
     /// Refuses past `SESSION_COUNT_HARD_CAP`.  No-op in tmux mode
@@ -930,7 +922,7 @@ impl Marspot {
         if self.tmux.is_some() {
             return;
         }
-        if self.sessions.len() >= SESSION_COUNT_HARD_CAP {
+        if self.panes.len() >= SESSION_COUNT_HARD_CAP {
             return;
         }
         let proxy_clone = self.event_proxy.clone();
@@ -939,7 +931,7 @@ impl Marspot {
         };
         match Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake) {
             Ok(s) => {
-                self.sessions.push(s);
+                self.panes.push(marspot::pane::Pane::new(s));
                 self.custom_titles.push(None);
             }
             Err(e) => {
@@ -954,11 +946,11 @@ impl Marspot {
     /// triggers `Pty::Drop` (SIGHUP → SIGKILL fallback → close fd
     /// → reader thread sees EOF and exits).
     fn close_session(&mut self, idx: usize) {
-        if idx >= self.sessions.len() {
+        if idx >= self.panes.len() {
             return;
         }
         // Drop the session — this fires Session/Pty teardown.
-        self.sessions.remove(idx);
+        self.panes.remove(idx);
         // Parallel-array state must shrink in lockstep so the
         // post-close indices line up with what's left.
         if idx < self.custom_titles.len() {
@@ -968,9 +960,9 @@ impl Marspot {
         // the focused session, walk back one (or stay at 0 if it was
         // the leftmost); otherwise nudge down by one for any session
         // that lived to the right of the closed slot.
-        if !self.sessions.is_empty() {
+        if !self.panes.is_empty() {
             if self.focused_idx == idx {
-                self.focused_idx = idx.min(self.sessions.len() - 1);
+                self.focused_idx = idx.min(self.panes.len() - 1);
             } else if self.focused_idx > idx {
                 self.focused_idx -= 1;
             }
@@ -1035,8 +1027,8 @@ impl Marspot {
         let total_b = read_self_rss_kib() * 1024;
         let mut grid_b: usize = 0;
         let mut scrollback_b: usize = 0;
-        for s in &self.sessions {
-            let g = s.terminal.grid();
+        for p in &self.panes {
+            let g = p.session().terminal.grid();
             grid_b += g.approx_bytes();
             scrollback_b += g.scrollback_approx_bytes();
         }
@@ -1091,10 +1083,10 @@ impl Marspot {
     /// run of spaces; multi-row selections join with `\n`.
     fn copy_selection_to_clipboard(&self) -> bool {
         let Some(sel) = self.selection else { return false };
-        let Some(session) = self.sessions.get(sel.session_idx) else {
+        let Some(pane) = self.panes.get(sel.session_idx) else {
             return false;
         };
-        let grid = session.terminal.grid();
+        let grid = pane.session().terminal.grid();
         let cols = grid.cols();
         let rows = grid.rows();
         if cols == 0 || rows == 0 {
@@ -1148,7 +1140,7 @@ impl Marspot {
     /// so the sidebar re-renders with the new list on the next
     /// redraw.  Returns the total bytes fed to the terminal.
     fn pump_tmux_session(&mut self) -> usize {
-        let raw = self.sessions[0].drain_raw();
+        let raw = self.panes[0].session_mut().drain_raw();
         if raw.is_empty() {
             return 0;
         }
@@ -1174,7 +1166,7 @@ impl Marspot {
                             w.last_output = Some(now);
                         }
                     }
-                    self.sessions[0].feed_terminal(&bytes);
+                    self.panes[0].session_mut().feed_terminal(&bytes);
                 }
                 tmux::Event::WindowAdd { window_id } => {
                     let tmux = self.tmux.as_mut().unwrap();
@@ -1251,7 +1243,7 @@ impl Marspot {
             let needs_init = self.tmux.as_mut().unwrap().needs_initial_query;
             if needs_init {
                 self.tmux.as_mut().unwrap().needs_initial_query = false;
-                let _ = self.sessions[0].write(b"refresh-client\n");
+                let _ = self.panes[0].session_mut().write(b"refresh-client\n");
                 self.queue_list_windows();
             }
         }
@@ -1271,7 +1263,7 @@ impl Marspot {
             return;
         }
         tmux.pending = Some(PendingCommand::ListWindows);
-        let _ = self.sessions[0].write(b"list-windows -F \"#{window_id} #{window_name}\"\n");
+        let _ = self.panes[0].session_mut().write(b"list-windows -F \"#{window_id} #{window_name}\"\n");
     }
 
     /// Send `select-window -t @<id>` for the user-clicked window.
@@ -1289,7 +1281,7 @@ impl Marspot {
             tmux.pending = Some(PendingCommand::FireAndForget);
         }
         let cmd = format!("select-window -t @{}\n", window_id);
-        let _ = self.sessions[0].write(cmd.as_bytes());
+        let _ = self.panes[0].session_mut().write(cmd.as_bytes());
     }
 
     /// Parse the body of a list-windows %end block — one
@@ -1342,7 +1334,13 @@ impl Marspot {
             return;
         }
         let focused = self.focused_idx;
-        let view_offset = self.view_offset;
+        // view_offset is now per-Pane (panes[focused_idx].view_offset()),
+        // looked up at view-construction time below.
+        let view_offset = self
+            .panes
+            .get(focused)
+            .map(|p| p.view_offset())
+            .unwrap_or(0);
 
         // Sidebar source-of-truth depends on mode: in tmux mode, list
         // tmux windows; otherwise list sessions by ordinal number.
@@ -1387,8 +1385,8 @@ impl Marspot {
             }
         } else {
             (
-                (1..=self.sessions.len()).map(|n| n.to_string()).collect(),
-                self.sessions.iter().map(|s| s.state()).collect(),
+                (1..=self.panes.len()).map(|n| n.to_string()).collect(),
+                self.panes.iter().map(|p| p.session().state()).collect(),
                 focused,
             )
         };
@@ -1400,7 +1398,7 @@ impl Marspot {
         // in `labels`) and skips the custom-title machinery —
         // window names are managed by tmux itself.
         let in_tmux = self.tmux.is_some();
-        let resolved_labels: Vec<String> = (0..self.sessions.len()
+        let resolved_labels: Vec<String> = (0..self.panes.len()
             .max(labels.len()))
             .map(|i| {
                 if !in_tmux && self.editing_title == Some(i) {
@@ -1422,7 +1420,7 @@ impl Marspot {
         // cell is being edited; sidebar copies the same text but
         // without the caret + truncated with an ellipsis when it
         // overflows the sidebar's narrow column.
-        let titles: Vec<String> = (0..self.sessions.len())
+        let titles: Vec<String> = (0..self.panes.len())
             .map(|i| {
                 let mut s = resolved_labels
                     .get(i)
@@ -1447,26 +1445,23 @@ impl Marspot {
         // empty placeholders.
         let cell_count = self.layout.as_ref().map(|l| l.cells.len()).unwrap_or(0);
         let views: Vec<SessionView> = self
-            .sessions
+            .panes
             .iter()
             .take(cell_count)
             .enumerate()
-            .map(|(i, s)| SessionView {
-                grid: s.terminal.grid(),
-                view_offset: if i == focused { view_offset } else { 0 },
-                cursor_visible: s.terminal.cursor_visible(),
-                focused: i == focused,
-                title: titles.get(i).map(|s| s.as_str()).unwrap_or(""),
+            .map(|(i, p)| {
+                let mut v = p.view(i == focused, titles.get(i).map(|s| s.as_str()).unwrap_or(""));
                 // Selection only renders for the live (offset 0)
                 // view of its owning session — scrolled-back text
                 // isn't selectable in this first cut.
-                selection: self.selection.as_ref().and_then(|sel| {
+                v.selection = self.selection.as_ref().and_then(|sel| {
                     if sel.session_idx == i && view_offset == 0 {
                         Some((sel.anchor, sel.focus))
                     } else {
                         None
                     }
-                }),
+                });
+                v
             })
             .collect();
         let entries: Vec<SidebarEntry> = sidebar_labels
@@ -1494,7 +1489,8 @@ fn main() {
         return;
     }
 
-    install_shell_zdot_shim();
+    // Session::spawn handles ZDOTDIR shim install internally now
+    // (moved to lib so mcli and any future binary get it too).
 
     // Every session's reader thread calls the same closure on chunk +
     // EOF; we forward to the AppKit run loop as user_event.
@@ -1539,14 +1535,15 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
 
-    let n_sessions = sessions.len();
+    let panes: Vec<marspot::pane::Pane> =
+        sessions.into_iter().map(marspot::pane::Pane::new).collect();
+    let n_sessions = panes.len();
     let app = Marspot {
         renderer: None,
         layout: None,
         tmux: if tmux_mode { Some(TmuxState::new()) } else { None },
-        sessions,
+        panes,
         focused_idx: 0,
-        view_offset: 0,
         pending_keystroke_t0: None,
         latency_samples: Vec::new(),
         record_latency,
@@ -1611,46 +1608,10 @@ impl Drop for Marspot {
     }
 }
 
-/// Lay down a per-user ZDOTDIR shim so the spawned zsh sources the
-/// user's real `~/.zshrc`, then `unsetopt PROMPT_SP` so zsh doesn't
-/// emit a reverse-video `%` ("PROMPT_EOL_MARK") on every fresh
-/// session.
-///
-/// Why: marspot's parser doesn't fully reconcile the byte sequence zsh
-/// emits when PROMPT_SP fires (the `%` mark + line-fill + CR + space
-/// + CR + `\033[J` + ...).  The space at col 0 should overwrite the
-/// `%` cell, but marspot leaves it visible.  Until the parser bug is
-/// found, suppress the trigger at the shell level.
-///
-/// Side-effects: marspot sets `ZDOTDIR` for the whole process so all
-/// child shells pick it up.  The shim sources $HOME/.zshrc so the
-/// user's normal init still runs.
-fn install_shell_zdot_shim() {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    let dir = std::path::PathBuf::from(&home).join(".cache/marspot/zdot");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    // Write/overwrite the shim every launch so updates ship without
-    // user intervention.  The body is short and deterministic — diff
-    // before write would be just-as-much I/O.
-    let shim = r#"# Auto-generated by marspot: ZDOTDIR shim that sources the user's
-# real .zshrc, then disables zsh's PROMPT_SP option (and clears
-# PROMPT_EOL_MARK as belt-and-braces) so fresh sessions don't show a
-# reverse-video "%" mark before the prompt.
-[[ -f "$HOME/.zshrc" ]] && source "$HOME/.zshrc"
-unsetopt PROMPT_SP 2>/dev/null
-PROMPT_EOL_MARK=""
-"#;
-    let path = dir.join(".zshrc");
-    let _ = std::fs::write(&path, shim);
-    // SAFETY: we're at startup, no threads have spawned yet.  This
-    // env-var change is inherited by every forkpty child.
-    unsafe { std::env::set_var("ZDOTDIR", &dir) };
-}
+// Note: ZDOTDIR shim install has moved to `Session::spawn` (lib) so
+// every binary that spawns a session — marspot, mcli, future — picks
+// up the same shell sanitisation without each having to remember to
+// call it at main(). Kept this comment as a breadcrumb for greps.
 
 /// Read scroll behaviour overrides from env once.  See `MarspotApp::scroll`
 /// for the default mapping.  Returns `(invert, factor)`.
@@ -1830,9 +1791,8 @@ fn bench_rss_format_dump(arg: &str) {
         renderer: None,
         layout: None,
         tmux: None,
-        sessions: Vec::new(),
+        panes: Vec::new(),
         focused_idx: 0,
-        view_offset: 0,
         pending_keystroke_t0: None,
         latency_samples: Vec::new(),
         record_latency: false,

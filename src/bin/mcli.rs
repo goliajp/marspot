@@ -1,30 +1,30 @@
 //! mcli — minimal standalone single-session terminal.
 //!
-//! `mcli` is the acid test for the Session API's independence: it owns
-//! one Session, one Renderer, one window — nothing else from marspot's
-//! multi-terminal machinery.  If the Session API can't power mcli
-//! cleanly, the Marspot container is leaning on private state and the
-//! abstraction is wrong.
-//!
-//! Behaviourally mcli is a pared-down marspot: same shell, same fonts,
-//! same scrollback, same keyboard/mouse handling — just one cell
-//! and no sidebar / layout / multi-session bookkeeping.
+//! Holds one `Pane` (from `marspot::pane`). All single-session
+//! behaviour — key encoding, scroll-into-scrollback, resize, render —
+//! lives on `Pane` in the library; this file just dispatches AppKit
+//! callbacks to it. That's the steel-cement-stone separation: any
+//! single-session feature added to `Pane` is automatically picked up
+//! by marspot's N panes too, so mcli is the smallest possible
+//! reference implementation of the single-pane terminal — fast,
+//! polish-friendly, and a credible standalone product.
 
 use objc2_app_kit::NSScreen;
 use objc2_foundation::MainThreadMarker;
 
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
-use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
-use marspot::render::{Renderer, SessionView};
+use marspot::input::{MarspotKeyEvent, Modifiers};
+use marspot::pane::Pane;
+use marspot::render::Renderer;
 use marspot::session::Session;
+use marspot::HEADER_PT;
 
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
 
 struct Mcli {
     renderer: Option<Renderer>,
-    session: Session,
-    view_offset: u16,
+    pane: Pane,
 }
 
 impl MarspotApp for Mcli {
@@ -41,28 +41,26 @@ impl MarspotApp for Mcli {
             .and_then(|s| s.parse().ok())
             .unwrap_or(max_scale);
 
-        let renderer = Renderer::new(ctx.ns_view(), scale).expect("renderer init");
+        let mut renderer = Renderer::new(ctx.ns_view(), scale).expect("renderer init");
+        // Reserve the same top chrome strip marspot does so the macOS
+        // traffic-light buttons don't paint over the grid's first row.
+        renderer.set_top_inset(HEADER_PT * scale as f64);
         self.renderer = Some(renderer);
-        // Initial size will arrive via the explicit Resized fired by run_app.
     }
 
     fn user_event(&mut self, ctx: &MarspotAppCtx) {
-        if self.session.pump() > 0 {
+        if self.pane.pump() > 0 {
             ctx.request_redraw();
         }
-        if self.session.is_exited() {
-            self.session.pump(); // commit final bytes
+        if self.pane.is_exited() {
+            self.pane.pump(); // commit final bytes
             ctx.exit();
         }
     }
 
     fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, modifiers: Modifiers) {
-        if let Some(bytes) = key_event_to_bytes(&event, modifiers) {
-            if self.view_offset != 0 {
-                self.view_offset = 0;
-                ctx.request_redraw();
-            }
-            let _ = self.session.write(&bytes);
+        if self.pane.handle_key(&event, modifiers) {
+            ctx.request_redraw();
         }
     }
 
@@ -76,21 +74,15 @@ impl MarspotApp for Mcli {
             .as_ref()
             .map(|r| r.cell_dims().1)
             .unwrap_or(15.0);
-        // See main.rs comment on the negation: NSEvent positive Y =
-        // scroll up; view_offset increases as we look back in
-        // scrollback, so negate.
-        let lines_f = if precise {
-            -dy_phys / cell_h
-        } else {
-            -dy_phys * 3.0
-        };
+        // Natural-scroll-on macOS sends positive dy_phys when the
+        // user wants to look UP into scrollback → view_offset should
+        // INCREASE in the same direction. No negation. Matches
+        // marspot's scroll mapping.
+        let lines_f = if precise { dy_phys / cell_h } else { dy_phys * 3.0 };
         if lines_f.abs() < 0.5 {
             return;
         }
-        let max = self.session.terminal.grid().scrollback_len() as i32;
-        let new = (self.view_offset as i32 + lines_f as i32).clamp(0, max) as u16;
-        if new != self.view_offset {
-            self.view_offset = new;
+        if self.pane.apply_scroll_lines(lines_f as i32) {
             ctx.request_redraw();
         }
     }
@@ -99,25 +91,13 @@ impl MarspotApp for Mcli {
         let Some(r) = self.renderer.as_mut() else { return };
         r.resize(phys_w, phys_h);
         let (cell_w, cell_h) = r.cell_dims();
+        // Subtract the chrome strip so the session doesn't request rows
+        // that would render under the traffic lights.
+        let usable_h = (phys_h - r.top_inset_phys()).max(0.0);
         let cols = ((phys_w / cell_w).floor() as u16).max(1);
-        let rows = ((phys_h / cell_h).floor() as u16).max(1);
-        if (cols, rows)
-            != (
-                self.session.terminal.grid().cols(),
-                self.session.terminal.grid().rows(),
-            )
-        {
-            self.session.resize(cols, rows);
-        }
-        let view = SessionView {
-            grid: self.session.terminal.grid(),
-            view_offset: self.view_offset,
-            cursor_visible: self.session.terminal.cursor_visible(),
-            focused: true,
-            title: "",
-            selection: None,
-        };
-        r.render(view);
+        let rows = ((usable_h / cell_h).floor() as u16).max(1);
+        self.pane.resize(cols, rows);
+        r.render(self.pane.view(true, ""));
     }
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
@@ -133,15 +113,7 @@ impl MarspotApp for Mcli {
 
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
         let Some(r) = self.renderer.as_mut() else { return };
-        let view = SessionView {
-            grid: self.session.terminal.grid(),
-            view_offset: self.view_offset,
-            cursor_visible: self.session.terminal.cursor_visible(),
-            focused: true,
-            title: "",
-            selection: None,
-        };
-        r.render(view);
+        r.render(self.pane.view(true, ""));
     }
 }
 
@@ -157,8 +129,7 @@ fn main() {
 
     let app = Mcli {
         renderer: None,
-        session,
-        view_offset: 0,
+        pane: Pane::new(session),
     };
 
     let attrs = WindowAttrs {
