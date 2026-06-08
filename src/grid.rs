@@ -225,6 +225,68 @@ impl Grid {
         }
     }
 
+    /// Region-bounded scroll up: shift rows in `top..=bot` upward by
+    /// `lines`; new rows at the bottom of the region are blanked with
+    /// `fill`. Unlike `scroll_up` this does NOT push scrollback —
+    /// region scrolls are window-internal (think TUI footer / status
+    /// bar). Caller is responsible for keeping `top <= bot < rows`.
+    pub fn scroll_up_region(&mut self, top: u16, bot: u16, lines: u16, fill: Cell) {
+        if lines == 0 || top > bot || bot >= self.rows {
+            return;
+        }
+        let region_h = bot - top + 1;
+        let lines = lines.min(region_h);
+        let cols = self.cols as usize;
+        for _ in 0..lines {
+            // Shift rows [top+1..=bot] up by one logical row.
+            for r in top..bot {
+                // Copy cells[phys_row(r+1)] → cells[phys_row(r)].
+                let src = self.phys_row(r + 1);
+                let dst = self.phys_row(r);
+                let src_start = src * cols;
+                let dst_start = dst * cols;
+                // Avoid `&mut` aliasing: copy via an intermediate Vec
+                // when src/dst overlap (they don't in this layout, but
+                // be defensive).
+                let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
+                self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+            }
+            // Blank the new bottom-of-region row.
+            let bot_phys = self.phys_row(bot);
+            for c in &mut self.cells[bot_phys * cols..bot_phys * cols + cols] {
+                *c = fill;
+            }
+        }
+    }
+
+    /// Region-bounded scroll down: shift rows in `top..=bot` downward
+    /// by `lines`; new rows at the top of the region are blanked with
+    /// `fill`. Used by IL (insert line) and CSI T (scroll down).
+    pub fn scroll_down_region(&mut self, top: u16, bot: u16, lines: u16, fill: Cell) {
+        if lines == 0 || top > bot || bot >= self.rows {
+            return;
+        }
+        let region_h = bot - top + 1;
+        let lines = lines.min(region_h);
+        let cols = self.cols as usize;
+        for _ in 0..lines {
+            // Shift rows [top..bot] down by one logical row.
+            for r in (top..bot).rev() {
+                let src = self.phys_row(r);
+                let dst = self.phys_row(r + 1);
+                let src_start = src * cols;
+                let dst_start = dst * cols;
+                let row_data: Vec<Cell> = self.cells[src_start..src_start + cols].to_vec();
+                self.cells[dst_start..dst_start + cols].copy_from_slice(&row_data);
+            }
+            // Blank the new top-of-region row.
+            let top_phys = self.phys_row(top);
+            for c in &mut self.cells[top_phys * cols..top_phys * cols + cols] {
+                *c = fill;
+            }
+        }
+    }
+
     /// Return the cell at the given viewport position, honouring
     /// `view_offset` (lines scrolled up from live, 0 = live view).
     /// Pulls from the live grid for visible rows and from

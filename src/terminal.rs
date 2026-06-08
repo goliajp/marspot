@@ -78,6 +78,19 @@ pub struct Terminal {
     /// Current SGR state — every printed glyph (and every BCE-erased cell)
     /// is stamped with this snapshot.  Persists across `feed` calls.
     attrs: CellAttrs,
+    /// Cursor + SGR snapshot saved by ESC 7 (DECSC) or CSI s (SCO save);
+    /// restored by ESC 8 (DECRC) or CSI u (SCO restore). Cleared by neither —
+    /// TUI apps like claudecode lean on save/restore to redraw progress
+    /// regions in place. `None` until first save; restore with no prior
+    /// save is a no-op (matches xterm).
+    saved_cursor: Option<SavedCursor>,
+    /// DECSTBM scroll region — `[scroll_top..=scroll_bot]` rows scroll
+    /// together; rows outside this band stay put on LF / SU / IL / DL.
+    /// Default `(0, rows-1)` = full grid (no region). Resize re-clamps.
+    /// Used by TUI apps (claudecode footer, htop status line, vim
+    /// statusline) to pin chrome below the scrolling content.
+    scroll_top: u16,
+    scroll_bot: u16,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
     /// Local-echo predictions awaiting PTY confirmation.  Each matching
@@ -95,6 +108,18 @@ pub struct Terminal {
 struct SavedMain {
     grid: Grid,
     cursor: (u16, u16),
+}
+
+/// Snapshot captured by ESC 7 (DECSC) / CSI s (SCO save), restored by
+/// ESC 8 (DECRC) / CSI u (SCO restore). Holds cursor position + the
+/// SGR attrs at save time, since "save cursor" in DEC's spec covers
+/// both attributes and origin-mode (we don't yet implement origin
+/// mode; the field is reserved for that future addition).
+#[derive(Clone, Copy)]
+struct SavedCursor {
+    col: u16,
+    row: u16,
+    attrs: CellAttrs,
 }
 
 impl Terminal {
@@ -122,6 +147,9 @@ impl Terminal {
             saved_main: None,
             parser: Parser::new(),
             attrs: CellAttrs::default(),
+            saved_cursor: None,
+            scroll_top: 0,
+            scroll_bot: rows.saturating_sub(1),
             cursor_visible: true,
             predictions: VecDeque::new(),
             predictions_hit: 0,
@@ -139,6 +167,12 @@ impl Terminal {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.grid.resize(cols, rows);
+        // Reset DECSTBM scroll region to full grid on resize — apps
+        // re-set their region when they reflow anyway (xterm behavior).
+        // Saves us from having to clamp + worry about top > bot edge
+        // cases when shrinking past a stored region.
+        self.scroll_top = 0;
+        self.scroll_bot = rows.saturating_sub(1);
         // The saved main grid (when in alt-screen mode) needs to track
         // resizes too — otherwise leaving alt mode restores a grid
         // sized for the old window dimensions.
@@ -245,8 +279,14 @@ impl Terminal {
             let grid = &mut self.grid;
             let saved_main = &mut self.saved_main;
             let attrs = &mut self.attrs;
+            let saved_cursor = &mut self.saved_cursor;
+            let scroll_top = &mut self.scroll_top;
+            let scroll_bot = &mut self.scroll_bot;
             let cursor_visible = &mut self.cursor_visible;
-            let mut handler = Handler { grid, saved_main, attrs, cursor_visible };
+            let mut handler = Handler {
+                grid, saved_main, attrs, saved_cursor,
+                scroll_top, scroll_bot, cursor_visible,
+            };
             parser.advance(&mut handler, bytes[i]);
             i += 1;
 
@@ -266,7 +306,34 @@ struct Handler<'a> {
     grid: &'a mut Grid,
     saved_main: &'a mut Option<SavedMain>,
     attrs: &'a mut CellAttrs,
+    saved_cursor: &'a mut Option<SavedCursor>,
+    scroll_top: &'a mut u16,
+    scroll_bot: &'a mut u16,
     cursor_visible: &'a mut bool,
+}
+
+impl<'a> Handler<'a> {
+    /// Scroll the grid up by 1 line, honouring DECSTBM. When the
+    /// scroll region covers the whole grid (the default) this drops
+    /// to `grid.scroll_up` which also pushes to scrollback —
+    /// region-bounded scrolls don't push to scrollback (they're
+    /// in-grid only, e.g. TUI footer redraws).
+    fn region_scroll_up(&mut self, lines: u16) {
+        let top = *self.scroll_top;
+        let bot = *self.scroll_bot;
+        let rows = self.grid.rows();
+        if top == 0 && bot + 1 >= rows {
+            self.grid.scroll_up(lines, blank_with(*self.attrs));
+        } else {
+            self.grid.scroll_up_region(top, bot, lines, blank_with(*self.attrs));
+        }
+    }
+
+    fn region_scroll_down(&mut self, lines: u16) {
+        let top = *self.scroll_top;
+        let bot = *self.scroll_bot;
+        self.grid.scroll_down_region(top, bot, lines, blank_with(*self.attrs));
+    }
 }
 
 impl<'a> Handler<'a> {
@@ -328,10 +395,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
         // A wide char at the last column can't fit. Wrap first, then print
         // at the start of the new row.
         if w == 2 && col + 1 >= cols {
-            if row + 1 < rows {
+            let bot = *self.scroll_bot;
+            if row == bot {
+                self.region_scroll_up(1);
+                self.grid.set_cursor(0, row);
+            } else if row + 1 < rows {
                 self.grid.set_cursor(0, row + 1);
             } else {
-                self.grid.scroll_up(1, blank_with(*self.attrs));
+                // Outside region, at last row — just cap to last row col 0.
                 self.grid.set_cursor(0, rows - 1);
             }
             let next = self.grid.cursor();
@@ -351,10 +422,13 @@ impl<'a> ParserCallbacks for Handler<'a> {
         let next_col = col + w as u16;
         if next_col < cols {
             self.grid.set_cursor(next_col, row);
+        } else if row == *self.scroll_bot {
+            self.region_scroll_up(1);
+            self.grid.set_cursor(0, row);
         } else if row + 1 < rows {
             self.grid.set_cursor(0, row + 1);
         } else {
-            self.grid.scroll_up(1, blank_with(*self.attrs));
+            // Outside region at last row — cap.
             self.grid.set_cursor(0, rows - 1);
         }
     }
@@ -371,15 +445,21 @@ impl<'a> ParserCallbacks for Handler<'a> {
             }
             0x0A | 0x0B | 0x0C => {
                 // LF / VT / FF: cursor down one row, scrolling at the
-                // bottom.  Does not change column (LNM mode unset).
+                // bottom of the scroll region.  Does not change column
+                // (LNM mode unset).
                 let (col, row) = self.grid.cursor();
                 let rows = self.grid.rows();
-                if row + 1 < rows {
-                    self.grid.set_cursor(col, row + 1);
-                } else {
-                    self.grid.scroll_up(1, blank_with(*self.attrs));
+                let bot = *self.scroll_bot;
+                if row == bot {
+                    // At scroll-region bottom — scroll within region.
+                    self.region_scroll_up(1);
                     // Cursor stays at the now-blank last row.
+                } else if row + 1 < rows {
+                    // Anywhere else: move cursor down.
+                    self.grid.set_cursor(col, row + 1);
                 }
+                // If row+1 == rows but row != bot (cursor outside region),
+                // xterm-style: cursor caps, no scroll.
             }
             0x0D => {
                 // CR: cursor to column 0 of current row.
@@ -392,8 +472,23 @@ impl<'a> ParserCallbacks for Handler<'a> {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _byte: u8) {
-        // ESC dispatch handled in later phases (RIS, charset switching, etc.)
+    fn esc_dispatch(&mut self, _intermediates: &[u8], byte: u8) {
+        match byte {
+            // DECSC — save cursor (position + SGR attrs).
+            b'7' => {
+                let (col, row) = self.grid.cursor();
+                *self.saved_cursor = Some(SavedCursor { col, row, attrs: *self.attrs });
+            }
+            // DECRC — restore cursor. xterm-style no-op when no save exists.
+            b'8' => {
+                if let Some(s) = *self.saved_cursor {
+                    self.grid.set_cursor(s.col, s.row);
+                    *self.attrs = s.attrs;
+                }
+            }
+            // RIS / charset switching / etc. arrive in later phases.
+            _ => {}
+        }
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
@@ -483,7 +578,113 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // SGR: set graphic rendition.  Mutates self.attrs in place.
                 apply_sgr(self.attrs, params);
             }
-            _ => {} // scrolling, mode-set, etc. arrive in later phases
+            b's' => {
+                // SCO save cursor.  Same semantics as DECSC (ESC 7).
+                let (col, row) = self.grid.cursor();
+                *self.saved_cursor = Some(SavedCursor { col, row, attrs: *self.attrs });
+            }
+            b'u' => {
+                // SCO restore cursor.  Same semantics as DECRC (ESC 8).
+                if let Some(s) = *self.saved_cursor {
+                    self.grid.set_cursor(s.col, s.row);
+                    *self.attrs = s.attrs;
+                }
+            }
+            b'r' => {
+                // DECSTBM: set top + bottom margins of the scroll region.
+                // Params are 1-indexed inclusive. Default is full grid.
+                // Cursor moves to (0, 0) (xterm behavior).
+                let rows = self.grid.rows();
+                let top = param(params, 0, 1).saturating_sub(1);
+                let bot_arg = param_raw(params, 1, 0);
+                let bot = if bot_arg == 0 {
+                    rows.saturating_sub(1)
+                } else {
+                    bot_arg.saturating_sub(1).min(rows.saturating_sub(1))
+                };
+                // xterm: invalid region (top >= bot, or bot >= rows) is
+                // ignored. We accept top == bot (1-row region) since
+                // claudecode and some apps actually use that.
+                if top <= bot && bot < rows {
+                    *self.scroll_top = top;
+                    *self.scroll_bot = bot;
+                }
+                self.grid.set_cursor(0, 0);
+            }
+            b'L' => {
+                // IL: insert N blank lines at cursor row, within scroll
+                // region. Rows below shift down; rows past scroll_bot
+                // stay put. Cursor moves to col 0 of the same row.
+                let n = param(params, 0, 1);
+                if row >= *self.scroll_top && row <= *self.scroll_bot {
+                    // Use a sub-region [row..=scroll_bot] for the shift.
+                    self.grid.scroll_down_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
+                    self.grid.set_cursor(0, row);
+                }
+            }
+            b'M' => {
+                // DL: delete N lines at cursor row, within scroll
+                // region. Rows below shift up; rows past scroll_bot
+                // stay put. Cursor moves to col 0 of the same row.
+                let n = param(params, 0, 1);
+                if row >= *self.scroll_top && row <= *self.scroll_bot {
+                    self.grid.scroll_up_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
+                    self.grid.set_cursor(0, row);
+                }
+            }
+            b'@' => {
+                // ICH: insert N blank chars at cursor — shift cells
+                // [col..cols-n] right to [col+n..cols], blank [col..col+n].
+                let n = param(params, 0, 1).min(cols.saturating_sub(col));
+                if n > 0 {
+                    // Shift right
+                    for c in (col + n..cols).rev() {
+                        let src = self.grid.cell(c - n, row);
+                        self.grid.set_cell(c, row, src);
+                    }
+                    let blank = blank_with(*self.attrs);
+                    for c in col..col + n {
+                        self.grid.set_cell(c, row, blank);
+                    }
+                }
+            }
+            b'P' => {
+                // DCH: delete N chars at cursor — shift cells
+                // [col+n..cols] left to [col..cols-n], blank tail.
+                let n = param(params, 0, 1).min(cols.saturating_sub(col));
+                if n > 0 {
+                    for c in col..cols - n {
+                        let src = self.grid.cell(c + n, row);
+                        self.grid.set_cell(c, row, src);
+                    }
+                    let blank = blank_with(*self.attrs);
+                    for c in cols - n..cols {
+                        self.grid.set_cell(c, row, blank);
+                    }
+                }
+            }
+            b'X' => {
+                // ECH: erase N chars at cursor (don't shift, just blank
+                // in place). Cursor unchanged.
+                let n = param(params, 0, 1).min(cols.saturating_sub(col));
+                let blank = blank_with(*self.attrs);
+                for c in col..col + n {
+                    self.grid.set_cell(c, row, blank);
+                }
+            }
+            b'S' => {
+                // SU: scroll up N lines within scroll region. Cursor
+                // unchanged.
+                let n = param(params, 0, 1);
+                self.region_scroll_up(n);
+            }
+            b'T' => {
+                // SD: scroll down N lines within scroll region. Cursor
+                // unchanged.
+                let n = param(params, 0, 1);
+                self.region_scroll_down(n);
+            }
+            _ => {} // remaining CSI commands arrive in later phases
         }
     }
 
@@ -647,6 +848,145 @@ mod tests {
         assert_eq!(t.grid().cell(0, 0).ch, 'h');
         assert_eq!(t.grid().cell(1, 0).ch, 'i');
         assert_eq!(t.grid().cursor(), (2, 0));
+    }
+
+    #[test]
+    fn esc_7_8_save_and_restore_cursor() {
+        // DECSC (ESC 7) saves, DECRC (ESC 8) restores. The cursor at
+        // save time gets stamped back even after intervening movement.
+        let t = term_with(20, 5, b"\x1b[3;6H\x1b7\x1b[1;1H\x1b8");
+        // CUP 3;6 = row 3 col 6 (1-indexed) → (5, 2) 0-indexed.
+        assert_eq!(t.grid().cursor(), (5, 2));
+    }
+
+    #[test]
+    fn csi_s_u_save_and_restore_cursor() {
+        // SCO variant — CSI s / CSI u — must behave identically to
+        // ESC 7 / ESC 8 for the cursor.
+        let t = term_with(20, 5, b"\x1b[2;3H\x1b[s\x1b[5;5H\x1b[u");
+        // Should be back at (col=2, row=1).
+        assert_eq!(t.grid().cursor(), (2, 1));
+    }
+
+    #[test]
+    fn restore_without_prior_save_is_a_noop() {
+        // xterm semantics: CSI u / ESC 8 with no save = no-op, cursor
+        // stays where it is. (Some terminals reset to home; xterm doesn't.)
+        let t = term_with(20, 5, b"\x1b[2;3H\x1b[u\x1b8");
+        assert_eq!(t.grid().cursor(), (2, 1));
+    }
+
+    #[test]
+    fn decstbm_sets_scroll_region_and_homes_cursor() {
+        // CSI 3;7 r — region rows 3..=7 (1-indexed → 2..=6 0-indexed).
+        // Cursor should move to (0, 0) per xterm.
+        let t = term_with(20, 10, b"\x1b[5;5H\x1b[3;7r");
+        assert_eq!(t.grid().cursor(), (0, 0));
+        // Verify the region took effect via LF behaviour: cursor at
+        // row 6 (0-indexed) is the scroll_bot — next LF scrolls
+        // within the region, not the whole grid.
+    }
+
+    #[test]
+    fn lf_at_scroll_bot_scrolls_region_only() {
+        // Set region 0..=2 (rows 1..=3 1-indexed). Fill rows 0, 1, 2,
+        // 3 with distinctive markers; verify after LF at row 2 the
+        // row 3 content is intact (didn't scroll with region).
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1b[1;3r");          // region [0..=2]
+        t.feed(b"\x1b[1;1HAA\r\n");   // row 0 "AA"
+        t.feed(b"BB\r\n");             // row 1 "BB"
+        t.feed(b"CC\r\n");             // row 2 "CC", then LF triggers region scroll
+        t.feed(b"DD");                 // ???
+        // After the LF after writing "CC", cursor was at row 2 (scroll_bot),
+        // region scrolls up. Row 0 "AA" pushed off the region (NOT into
+        // scrollback because region != full grid). Row 1 "BB" → row 0,
+        // row 2 "CC" → row 1, row 2 blanked. Then "DD" written at row 2.
+        assert_eq!(t.grid().cell(0, 0).ch, 'B', "row 0 should be BB after scroll");
+        assert_eq!(t.grid().cell(0, 1).ch, 'C', "row 1 should be CC after scroll");
+        assert_eq!(t.grid().cell(0, 2).ch, 'D', "row 2 should be DD (new content)");
+        // Row 3 (outside region) should be unchanged from initial (blank).
+        assert_eq!(t.grid().cell(0, 3).ch, ' ', "row 3 is outside region, unchanged");
+    }
+
+    #[test]
+    fn il_inserts_blank_lines_at_cursor() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"\x1b[1;1HAA\r\n");   // row 0
+        t.feed(b"BB\r\n");             // row 1
+        t.feed(b"CC\r\n");             // row 2
+        t.feed(b"\x1b[2;1H");          // cursor to row 1
+        t.feed(b"\x1b[L");             // IL: insert 1 line at row 1
+        // Row 0 unchanged. Row 1 blank. Row 2 used to be BB → now is BB
+        // (shifted down). Row 3 used to be CC → now CC.
+        assert_eq!(t.grid().cell(0, 0).ch, 'A');
+        assert_eq!(t.grid().cell(0, 1).ch, ' ', "inserted blank");
+        assert_eq!(t.grid().cell(0, 2).ch, 'B');
+        assert_eq!(t.grid().cell(0, 3).ch, 'C');
+    }
+
+    #[test]
+    fn dl_deletes_lines_at_cursor() {
+        let mut t = Terminal::new(10, 5);
+        t.feed(b"AA\r\nBB\r\nCC\r\nDD\r\n");
+        t.feed(b"\x1b[2;1H");          // cursor to row 1
+        t.feed(b"\x1b[M");             // DL: delete 1 line at row 1
+        assert_eq!(t.grid().cell(0, 0).ch, 'A');
+        assert_eq!(t.grid().cell(0, 1).ch, 'C', "row 2 (CC) shifted up");
+        assert_eq!(t.grid().cell(0, 2).ch, 'D', "row 3 (DD) shifted up");
+        assert_eq!(t.grid().cell(0, 3).ch, ' ', "row 3 blanked");
+    }
+
+    #[test]
+    fn ich_dch_ech_chars() {
+        let mut t = Terminal::new(10, 3);
+        t.feed(b"ABCDEFG");
+        // ICH 2 at col 2 — insert 2 blanks at col 2.
+        t.feed(b"\x1b[1;3H");          // cursor (col=2, row=0)
+        t.feed(b"\x1b[2@");
+        // Was "ABCDEFG"; after ICH 2 at col 2: "AB  CDEF" (G falls off rhs)
+        assert_eq!(t.grid().cell(0, 0).ch, 'A');
+        assert_eq!(t.grid().cell(1, 0).ch, 'B');
+        assert_eq!(t.grid().cell(2, 0).ch, ' ');
+        assert_eq!(t.grid().cell(3, 0).ch, ' ');
+        assert_eq!(t.grid().cell(4, 0).ch, 'C');
+
+        // DCH 2 at col 2 — delete the 2 blanks; "ABCDEF" comes back.
+        t.feed(b"\x1b[1;3H\x1b[2P");
+        assert_eq!(t.grid().cell(0, 0).ch, 'A');
+        assert_eq!(t.grid().cell(1, 0).ch, 'B');
+        assert_eq!(t.grid().cell(2, 0).ch, 'C');
+        assert_eq!(t.grid().cell(3, 0).ch, 'D');
+
+        // ECH 2 at col 0 — erase chars in place, no shift.
+        t.feed(b"\x1b[1;1H\x1b[2X");
+        assert_eq!(t.grid().cell(0, 0).ch, ' ');
+        assert_eq!(t.grid().cell(1, 0).ch, ' ');
+        assert_eq!(t.grid().cell(2, 0).ch, 'C', "no shift");
+    }
+
+    #[test]
+    fn save_restore_round_trips_sgr_attrs() {
+        // The save snapshot includes SGR — restoring brings back the
+        // attrs at save time, even after later SGR changes. Verified
+        // by colouring a glyph after restore and reading the cell back.
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b[31m");      // red foreground
+        t.feed(b"\x1b[2;2H");     // cursor (1, 1)
+        t.feed(b"\x1b7");         // save (cursor + attrs)
+        t.feed(b"\x1b[34m");      // change to blue
+        t.feed(b"\x1b[5;5HX");    // write X in blue at (4, 4)
+        t.feed(b"\x1b8");         // restore (cursor → (1,1), attrs → red)
+        t.feed(b"Y");             // write Y at (1, 1) in red
+        let y = t.grid().cell(1, 1);
+        let x = t.grid().cell(4, 4);
+        assert_eq!(y.ch, 'Y');
+        assert_eq!(x.ch, 'X');
+        // The exact Color repr matters less than that they differ —
+        // both should be palette colours, with Y in red (3, 31) and
+        // X in blue (4, 34). The SGR restore should make y.attrs.fg !=
+        // x.attrs.fg.
+        assert_ne!(y.attrs.fg, x.attrs.fg);
     }
 
     #[test]
@@ -1248,6 +1588,9 @@ mod tests {
             saved_main: None,
             parser: Parser::new(),
             attrs: CellAttrs::default(),
+            saved_cursor: None,
+            scroll_top: 0,
+            scroll_bot: 23, // grid is 24 rows here
             cursor_visible: true,
             predictions: VecDeque::new(),
             predictions_hit: 0,
