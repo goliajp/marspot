@@ -38,6 +38,10 @@ pub struct CellAttrs {
     pub italic: bool,
     pub underline: bool,
     pub reverse: bool,
+    /// SGR 2 — half-intensity / faint. Renderer dims the resolved fg
+    /// (typical: multiply RGB by ~0.55). TUIs (claudecode tips column
+    /// divider, dimmed help text) use this for "secondary" content.
+    pub dim: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

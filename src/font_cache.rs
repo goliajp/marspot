@@ -103,7 +103,7 @@ pub fn resolve_color(
     }
 }
 
-/// Resolve a cell's attrs to (fg, bg) RGB, honouring SGR reverse.
+/// Resolve a cell's attrs to (fg, bg) RGB, honouring SGR reverse + dim.
 pub fn resolve_attrs(
     attrs: CellAttrs,
 ) -> (
@@ -114,6 +114,14 @@ pub fn resolve_attrs(
     let mut bg = resolve_color(attrs.bg, BG);
     if attrs.reverse {
         std::mem::swap(&mut fg, &mut bg);
+    }
+    if attrs.dim {
+        // SGR 2 — half-intensity. xterm-style multiply by ~0.55 in
+        // sRGB; close enough to "secondary text" weight without
+        // tinting hues. Applied AFTER reverse so a reversed-dim cell
+        // still reads correctly (rare combo but spec-clean).
+        const DIM: CGFloat = 0.55;
+        fg = (fg.0 * DIM, fg.1 * DIM, fg.2 * DIM);
     }
     (fg, bg)
 }

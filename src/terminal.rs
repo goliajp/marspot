@@ -91,8 +91,28 @@ pub struct Terminal {
     /// statusline) to pin chrome below the scrolling content.
     scroll_top: u16,
     scroll_bot: u16,
+    /// Bytes the terminal wants to send back to the PTY in response to
+    /// a query (CSI c primary DA, CSI > 0 q XTQVERSION, etc.). Drained
+    /// by `Session::pump` after each feed cycle and written to the PTY.
+    /// Without this, TUI apps that query terminal capabilities at
+    /// startup hang waiting for a response and fall back to degraded
+    /// rendering (extra blank rows, misaligned chrome).
+    pending_response: Vec<u8>,
+    /// DEC mode `?1` (DECCKM): when set, cursor keys send the
+    /// "application" sequence `ESC O X` instead of the normal
+    /// `ESC [ X`. Some TUI apps toggle this to bind cursor keys
+    /// distinctly from navigation. Read by the input layer when
+    /// encoding arrow keys.
+    cursor_key_application_mode: bool,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
+    /// DECAWM "deferred wrap" — set after printing a glyph in the last
+    /// column. The cursor visually stays put; the next print first wraps
+    /// to a new row, the next non-print op (CR/LF/cursor move) clears
+    /// the flag. Without this, drawing a box's right border followed by
+    /// `\r\n` advances TWO rows instead of one — visible as extra blank
+    /// rows between every row of TUI content (claudecode welcome box).
+    pending_wrap: bool,
     /// Local-echo predictions awaiting PTY confirmation.  Each matching
     /// byte from `feed()` pops the front; the first mismatching byte
     /// rolls back the whole queue (restores cells + cursor in reverse
@@ -150,7 +170,10 @@ impl Terminal {
             saved_cursor: None,
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
+            pending_response: Vec::new(),
+            cursor_key_application_mode: false,
             cursor_visible: true,
+            pending_wrap: false,
             predictions: VecDeque::new(),
             predictions_hit: 0,
             predictions_miss: 0,
@@ -165,6 +188,22 @@ impl Terminal {
         self.cursor_visible
     }
 
+    /// True when the terminal is in DECCKM application cursor key mode.
+    /// Read by the input layer to encode arrow keys as `ESC O X`
+    /// instead of `ESC [ X`. Required by TUI apps that bind cursor
+    /// keys distinctly from PgUp/PgDn navigation.
+    pub fn cursor_key_application_mode(&self) -> bool {
+        self.cursor_key_application_mode
+    }
+
+    /// Drain any bytes the terminal wants to send back to the PTY in
+    /// response to capability / version queries (CSI c, CSI > 0 c,
+    /// CSI > 0 q, …). Caller (Session::pump) writes them to the PTY
+    /// after the feed cycle so the app's `read()` returns them.
+    pub fn take_response(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_response)
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.grid.resize(cols, rows);
         // Reset DECSTBM scroll region to full grid on resize — apps
@@ -173,6 +212,9 @@ impl Terminal {
         // cases when shrinking past a stored region.
         self.scroll_top = 0;
         self.scroll_bot = rows.saturating_sub(1);
+        // The cursor may have been at the old last column; the new grid
+        // width invalidates any pending wrap targeting that position.
+        self.pending_wrap = false;
         // The saved main grid (when in alt-screen mode) needs to track
         // resizes too — otherwise leaving alt mode restores a grid
         // sized for the old window dimensions.
@@ -282,10 +324,17 @@ impl Terminal {
             let saved_cursor = &mut self.saved_cursor;
             let scroll_top = &mut self.scroll_top;
             let scroll_bot = &mut self.scroll_bot;
+            let pending_response = &mut self.pending_response;
+            let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let cursor_visible = &mut self.cursor_visible;
+            let pending_wrap = &mut self.pending_wrap;
             let mut handler = Handler {
                 grid, saved_main, attrs, saved_cursor,
-                scroll_top, scroll_bot, cursor_visible,
+                scroll_top, scroll_bot,
+                pending_response,
+                cursor_key_app_mode,
+                cursor_visible,
+                pending_wrap,
             };
             parser.advance(&mut handler, bytes[i]);
             i += 1;
@@ -309,7 +358,10 @@ struct Handler<'a> {
     saved_cursor: &'a mut Option<SavedCursor>,
     scroll_top: &'a mut u16,
     scroll_bot: &'a mut u16,
+    pending_response: &'a mut Vec<u8>,
+    cursor_key_app_mode: &'a mut bool,
     cursor_visible: &'a mut bool,
+    pending_wrap: &'a mut bool,
 }
 
 impl<'a> Handler<'a> {
@@ -333,6 +385,29 @@ impl<'a> Handler<'a> {
         let top = *self.scroll_top;
         let bot = *self.scroll_bot;
         self.grid.scroll_down_region(top, bot, lines, blank_with(*self.attrs));
+    }
+
+    /// Consume the DECAWM "deferred wrap" flag (set by print at the
+    /// last column). When set, advance the cursor to the start of the
+    /// next row, scrolling within the region if at the bottom — same
+    /// path the immediate-wrap branch used to take. Called at the top
+    /// of `print` before drawing the next glyph; cleared without
+    /// advancing by any non-print operation.
+    fn take_pending_wrap(&mut self) {
+        if !*self.pending_wrap {
+            return;
+        }
+        *self.pending_wrap = false;
+        let (_col, row) = self.grid.cursor();
+        let rows = self.grid.rows();
+        if row == *self.scroll_bot {
+            self.region_scroll_up(1);
+            self.grid.set_cursor(0, row);
+        } else if row + 1 < rows {
+            self.grid.set_cursor(0, row + 1);
+        } else {
+            self.grid.set_cursor(0, rows - 1);
+        }
     }
 }
 
@@ -364,6 +439,9 @@ impl<'a> Handler<'a> {
 
     fn dec_mode(&mut self, mode: u16, set: bool) {
         match mode {
+            // DECCKM — cursor keys send `ESC O X` in app mode, `ESC [ X`
+            // otherwise. Read by the input layer for arrow encoding.
+            1 => *self.cursor_key_app_mode = set,
             // DECTCEM — cursor visibility.
             25 => *self.cursor_visible = set,
             // smcup/rmcup — alt screen + save/restore cursor.  ?1047
@@ -375,6 +453,16 @@ impl<'a> Handler<'a> {
                     self.exit_alt_screen();
                 }
             }
+            // Accept silently — these modes have no rendering side
+            // effect we model, but apps want them to "succeed" rather
+            // than no-op silently. Listed explicitly so future audits
+            // see them.
+            //   1000 / 1002 / 1003 / 1006 / 1015 — mouse reporting modes
+            //   1004                — focus reporting in/out events
+            //   2004                — bracketed paste mode
+            //   2026                — synchronized output (begin/end batch)
+            //   2031                — color scheme update notifications
+            1000 | 1002 | 1003 | 1006 | 1015 | 1004 | 2004 | 2026 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip
         }
     }
@@ -388,6 +476,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
             // C0 controls separately.  Nothing to draw or advance.
             return;
         }
+        // DECAWM deferred wrap: the previous print landed in the last
+        // column and set `pending_wrap`. The wrap was deliberately
+        // deferred so that a trailing `\r\n` (or any cursor move)
+        // wouldn't compound with the wrap into a two-row advance —
+        // the classic "every row has a blank row after it" symptom
+        // when TUIs draw box borders flush against the right edge.
+        self.take_pending_wrap();
+
         let cols = self.grid.cols();
         let rows = self.grid.rows();
         let (mut col, mut row) = self.grid.cursor();
@@ -422,18 +518,24 @@ impl<'a> ParserCallbacks for Handler<'a> {
         let next_col = col + w as u16;
         if next_col < cols {
             self.grid.set_cursor(next_col, row);
-        } else if row == *self.scroll_bot {
-            self.region_scroll_up(1);
-            self.grid.set_cursor(0, row);
-        } else if row + 1 < rows {
-            self.grid.set_cursor(0, row + 1);
         } else {
-            // Outside region at last row — cap.
-            self.grid.set_cursor(0, rows - 1);
+            // Hit the right edge — defer the wrap. Cursor visually stays
+            // at the last column; the next print will consume the flag
+            // and wrap, any non-print op clears it without advancing.
+            self.grid.set_cursor(cols - 1, row);
+            *self.pending_wrap = true;
         }
     }
 
     fn execute(&mut self, byte: u8) {
+        // Trace C0 row-advancers (LF/CR/BS/Tab) so we can see how the
+        // app actually moves between rows — `CSI 1 B` shows up in the
+        // CSI trace but plain `\n` / `\r` only show here.
+        if matches!(byte, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D) {
+            trace_seq("C0", &[], &[], byte);
+        }
+        // Any C0 control cancels DECAWM deferred wrap without advancing.
+        *self.pending_wrap = false;
         match byte {
             0x08 => {
                 // BS: cursor left one column, clamped at column 0.  Does
@@ -472,7 +574,9 @@ impl<'a> ParserCallbacks for Handler<'a> {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], byte: u8) {
+        trace_seq("ESC", intermediates, &[], byte);
+        *self.pending_wrap = false;
         match byte {
             // DECSC — save cursor (position + SGR attrs).
             b'7' => {
@@ -486,12 +590,22 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     *self.attrs = s.attrs;
                 }
             }
+            // DECKPAM (=) / DECKPNM (>) — application / normal keypad
+            // mode. Same input-encoding category as DECCKM; accept
+            // silently for now (the keypad-specific keys we encode
+            // don't yet distinguish modes).
+            b'=' | b'>' => {}
+            // ESC ( <c> — designate G0 charset. We're always ASCII so
+            // every variant is a no-op.
+            _ if intermediates == b"(" => {}
             // RIS / charset switching / etc. arrive in later phases.
             _ => {}
         }
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+        trace_seq("CSI", intermediates, params, byte);
+        *self.pending_wrap = false;
         if intermediates == b"?" {
             // DEC private mode set/reset.  Each param is a separate mode.
             match byte {
@@ -684,6 +798,31 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let n = param(params, 0, 1);
                 self.region_scroll_down(n);
             }
+            b'c' if intermediates.is_empty() => {
+                // DA — Primary Device Attributes. App is asking "who
+                // are you?". We report VT220-class with selective
+                // attributes: ?62 = VT220-class, 1 = 132-column mode,
+                // 2 = printer port (we lie, harmless), 6 = selective
+                // erase, 9 = national replacement charset, 22 = colour
+                // text — picks up the same shape xterm reports.
+                // Without this response apps stall on capability probe
+                // and fall back to degraded rendering paths.
+                self.pending_response.extend_from_slice(b"\x1b[?62;1;6;22c");
+            }
+            b'c' if intermediates == b">" => {
+                // DA2 (Secondary DA) — `CSI > 0 c`. App wants firmware
+                // version. xterm responds `CSI > 41;330;0 c` (terminal
+                // type 41 = VT420, version 330, ROM 0). We mimic.
+                self.pending_response.extend_from_slice(b"\x1b[>41;330;0c");
+            }
+            b'q' if intermediates == b">" => {
+                // XTQVERSION — `CSI > 0 q`. App wants the terminal's
+                // name+version string. Respond with a DCS reply:
+                //   DCS > | marspot ESC \
+                // Apps that recognise this fingerprint can tune their
+                // behaviour; apps that don't ignore it.
+                self.pending_response.extend_from_slice(b"\x1bP>|marspot\x1b\\");
+            }
             _ => {} // remaining CSI commands arrive in later phases
         }
     }
@@ -714,6 +853,46 @@ fn param_raw(params: &[u16], idx: usize, default: u16) -> u16 {
 /// appear (BCE for erase, scroll-fill for the new bottom row).  Apps like
 /// vim and tmux rely on this — clearing or scrolling under a non-default
 /// background must produce colored cells, not transparent ones.
+/// One-shot init: open the trace file path from MARSPOT_TRACE_ESC env.
+/// Set to None when env isn't present so the per-byte dispatch path
+/// pays only the OnceLock load (~1 ns) when tracing is off.
+fn trace_seq(kind: &str, intermediates: &[u8], params: &[u16], byte: u8) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let file = FILE.get_or_init(|| {
+        std::env::var("MARSPOT_TRACE_ESC")
+            .ok()
+            .and_then(|p| std::fs::OpenOptions::new()
+                .create(true).append(true).open(&p)
+                .ok()
+                .map(Mutex::new))
+    });
+    let Some(file) = file.as_ref() else { return };
+    let mut s = String::with_capacity(64);
+    s.push_str(kind);
+    if !intermediates.is_empty() {
+        s.push(' ');
+        for &b in intermediates {
+            s.push(b as char);
+        }
+    }
+    for (i, p) in params.iter().enumerate() {
+        s.push(if i == 0 { ' ' } else { ';' });
+        s.push_str(&p.to_string());
+    }
+    s.push(' ');
+    if (0x20..=0x7e).contains(&byte) {
+        s.push(byte as char);
+    } else {
+        s.push_str(&format!("0x{:02x}", byte));
+    }
+    s.push('\n');
+    if let Ok(mut f) = file.lock() {
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
 fn blank_with(attrs: CellAttrs) -> Cell {
     Cell { ch: ' ', attrs }
 }
@@ -775,10 +954,14 @@ fn apply_sgr(attrs: &mut CellAttrs, params: &[u16]) {
         match params[i] {
             0 => *attrs = CellAttrs::default(),
             1 => attrs.bold = true,
+            2 => attrs.dim = true,
             3 => attrs.italic = true,
             4 => attrs.underline = true,
             7 => attrs.reverse = true,
-            22 => attrs.bold = false,
+            // SGR 22 is "normal intensity" — clears BOTH bold and dim
+            // per ECMA-48, not just bold. TUIs (claudecode dim spans)
+            // emit `2 ... 22` pairs and expect 22 to fully restore.
+            22 => { attrs.bold = false; attrs.dim = false; }
             23 => attrs.italic = false,
             24 => attrs.underline = false,
             27 => attrs.reverse = false,
@@ -935,6 +1118,34 @@ mod tests {
         assert_eq!(t.grid().cell(0, 1).ch, 'C', "row 2 (CC) shifted up");
         assert_eq!(t.grid().cell(0, 2).ch, 'D', "row 3 (DD) shifted up");
         assert_eq!(t.grid().cell(0, 3).ch, ' ', "row 3 blanked");
+    }
+
+    #[test]
+    fn da_csi_c_queues_xterm_compatible_response() {
+        // CSI c — Primary Device Attributes. App is asking "what
+        // terminal class are you?". We respond with a VT220-compatible
+        // attr string so apps that probe capabilities at startup get
+        // an answer and don't fall back to degraded rendering.
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"\x1b[c");
+        let resp = t.take_response();
+        assert_eq!(resp, b"\x1b[?62;1;6;22c");
+        // Second take should return empty (state was consumed).
+        let resp2 = t.take_response();
+        assert!(resp2.is_empty());
+    }
+
+    #[test]
+    fn deccm_cursor_key_app_mode_toggle() {
+        // CSI ?1 h sets DECCKM (cursor key application mode); CSI ?1 l
+        // clears it. The input layer reads this to decide arrow-key
+        // encoding (ESC O X vs ESC [ X).
+        let mut t = Terminal::new(20, 5);
+        assert!(!t.cursor_key_application_mode());
+        t.feed(b"\x1b[?1h");
+        assert!(t.cursor_key_application_mode());
+        t.feed(b"\x1b[?1l");
+        assert!(!t.cursor_key_application_mode());
     }
 
     #[test]
@@ -1420,8 +1631,8 @@ mod tests {
     #[test]
     fn lf_at_bottom_row_scrolls_up_and_pushes_to_scrollback() {
         let mut t = Terminal::new(3, 2);
-        t.feed(b"abc"); // row 0 full, cursor at (3 wraps to row 1)
-        assert_eq!(t.grid().cursor(), (0, 1));
+        t.feed(b"abc"); // row 0 full; DECAWM defers the wrap → cursor parks at last col.
+        assert_eq!(t.grid().cursor(), (2, 0));
         // Manually park cursor at last row, last col, then LF.
         t.feed(b"\x1B[2;3H"); // CUP row 2 col 3 (1-indexed) → (col 2, row 1)
         t.feed(b"\n");
@@ -1591,7 +1802,10 @@ mod tests {
             saved_cursor: None,
             scroll_top: 0,
             scroll_bot: 23, // grid is 24 rows here
+            pending_response: Vec::new(),
+            cursor_key_application_mode: false,
             cursor_visible: true,
+            pending_wrap: false,
             predictions: VecDeque::new(),
             predictions_hit: 0,
             predictions_miss: 0,

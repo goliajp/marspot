@@ -235,6 +235,15 @@ impl Session {
         if total > 0 {
             self.last_output = Some(Instant::now());
         }
+        // Forward any capability-query responses (DA, XTQVERSION, etc.)
+        // the terminal queued during this feed cycle back to the PTY so
+        // the app's read() returns them. Apps that stall waiting for a
+        // DA response otherwise fall back to degraded rendering paths
+        // (extra blank rows, misaligned chrome).
+        let response = self.terminal.take_response();
+        if !response.is_empty() {
+            let _ = self.write(&response);
+        }
         total
     }
 
