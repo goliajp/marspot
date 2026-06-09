@@ -29,13 +29,15 @@ struct Mcli {
 
 impl MarspotApp for Mcli {
     fn resumed(&mut self, ctx: &MarspotAppCtx) {
+        // objc2_foundation 0.2.2's NSArray bindings mis-encode NSScreen
+        // array's count selector ('q' vs 'Q'), so iterating `screens()`
+        // panics at runtime in some launch contexts. main.rs sidesteps
+        // it by using the single-screen mainScreen API; do the same
+        // here — for default scale derivation the main screen is fine.
         let mt = MainThreadMarker::new().expect("main thread");
-        let screens = NSScreen::screens(mt);
-        let mut max_scale = 1.0_f32;
-        for i in 0..screens.len() {
-            let s = unsafe { screens.objectAtIndex(i) };
-            max_scale = max_scale.max(s.backingScaleFactor() as f32);
-        }
+        let max_scale = NSScreen::mainScreen(mt)
+            .map(|s| s.backingScaleFactor() as f32)
+            .unwrap_or(1.0);
         let scale: f32 = std::env::var("MARSPOT_SCALE")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -118,6 +120,15 @@ impl MarspotApp for Mcli {
 }
 
 fn main() {
+    // Build identity stamp — print to stderr so a quick log check
+    // confirms "yes this is the binary I just built".
+    eprintln!(
+        "[mcli] version={} git={} built={}",
+        env!("CARGO_PKG_VERSION"),
+        env!("MARSPOT_GIT_SHA"),
+        env!("MARSPOT_BUILD_TS"),
+    );
+
     let proxy = EventProxy::new();
     let proxy_clone = proxy.clone();
     let wake = move || {
@@ -134,9 +145,10 @@ fn main() {
 
     let attrs = WindowAttrs {
         title: format!(
-            "mcli — {} {}",
+            "mcli — {} {} ({})",
             env!("CARGO_PKG_VERSION"),
             env!("MARSPOT_GIT_SHA"),
+            env!("MARSPOT_BUILD_TS"),
         ),
         width_logical: 960.0,
         height_logical: 600.0,
