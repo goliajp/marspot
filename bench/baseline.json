@@ -22,53 +22,53 @@
     {
       "id": "cat-ascii",
       "bytes": 33554570,
-      "mars_parse_MBps_min": 160,
-      "mars_live_MBps_min": 64,
-      "mars_vs_best_other_min": 1.14
+      "mars_parse_MBps_min": 177,
+      "mars_live_MBps_min": 137,
+      "mars_vs_best_other_min": 1.76
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
-      "mars_parse_MBps_min": 159,
-      "mars_live_MBps_min": 46,
-      "mars_vs_best_other_min": 1.19
+      "mars_parse_MBps_min": 176,
+      "mars_live_MBps_min": 131,
+      "mars_vs_best_other_min": 3.27
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
-      "mars_parse_MBps_min": 200,
-      "mars_live_MBps_min": 33,
-      "mars_vs_best_other_min": 0.7
+      "mars_parse_MBps_min": 216,
+      "mars_live_MBps_min": 144,
+      "mars_vs_best_other_min": 2.7
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 183,
-      "mars_live_MBps_min": 38,
-      "mars_vs_best_other_min": 0.85
+      "mars_parse_MBps_min": 200,
+      "mars_live_MBps_min": 144,
+      "mars_vs_best_other_min": 3.06
     }
   ],
   "render_full_repaint": {
     "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs \u2014 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
-    "p99_us_max": 1800
+    "p99_us_max": 1197
   },
   "scroll_repaint": {
     "_comment": "p99 ns/repaint while walking view_offset from 5000 \u2192 0 in 3-line steps over 100K-line scroll-history.bin (--bench scroll).  Picks up MARS_DISK_SCROLLBACK so the gate tracks whichever variant is current default.  Median of 5 trials with run-to-run noise ~30 % (scroll p99 hovers in the low-microsecond regime where one fault or cache eviction skews the result).  --update-baseline applies the default 10 % margin which is too tight for this metric; manually widen to ~2x current median so the gate doesn't flap.",
-    "p99_us_max": 4
+    "p99_us_max": 3
   },
   "scroll_cold_repaint": {
     "_comment": "Sister gate to scroll_repaint, forced to disk-backed (MARS_DISK_SCROLLBACK=1) and with pages evicted via madvise(DONTNEED) before the walk.  Catches disk-path regressions that the default-env scroll bench misses when memory is the default.  Cold-cache p99 measured ~3-5 \u00b5s; same 30 % run-to-run noise as the warm gate, manually widened to ~2x current median.",
-    "p99_us_max": 8
+    "p99_us_max": 4
   },
   "binary_size_bytes_max": {
     "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).",
-    "mcli": 504328,
-    "marspot": 741611
+    "mcli": 485830,
+    "marspot": 778008
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
-    "mcli": 116525,
-    "marspot": 112493
+    "mcli": 99130,
+    "marspot": 95712
   },
   "competitors_snapshot": {
     "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).",
