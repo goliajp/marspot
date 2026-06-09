@@ -15,7 +15,7 @@ use objc2_foundation::MainThreadMarker;
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::pane::Pane;
-use marspot::render::Renderer;
+use marspot::render_metal::MetalRenderer;
 use marspot::session::Session;
 use marspot::HEADER_PT;
 
@@ -23,7 +23,7 @@ const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;
 
 struct Mcli {
-    renderer: Option<Renderer>,
+    renderer: Option<MetalRenderer>,
     pane: Pane,
 }
 
@@ -43,7 +43,7 @@ impl MarspotApp for Mcli {
             .and_then(|s| s.parse().ok())
             .unwrap_or(max_scale);
 
-        let mut renderer = Renderer::new(ctx.ns_view(), scale).expect("renderer init");
+        let mut renderer = MetalRenderer::new(ctx.ns_view(), scale).expect("metal renderer init");
         // Reserve the same top chrome strip marspot does so the macOS
         // traffic-light buttons don't paint over the grid's first row.
         renderer.set_top_inset(HEADER_PT * scale as f64);

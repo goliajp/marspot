@@ -4,72 +4,11 @@ use objc2_foundation::MainThreadMarker;
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers as MarspotModifiers};
 use marspot::layout::Layout;
-use marspot::render::{Renderer, SessionView, SidebarEntry};
+use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::{make_target_texture, MetalRenderer};
 use marspot::session::{Session, SessionState};
 use marspot::terminal::Terminal;
 use marspot::tmux;
-
-/// Renderer dispatch: Metal-on-CAMetalLayer (default — 7× faster
-/// typing latency per docs/perf.md) or AppKit-on-CGImage (set
-/// `MARSPOT_APPKIT=1`, kept as a fallback for regression bisects /
-/// troubleshooting).  Both implement the same surface — keep this
-/// enum in lock-step with their public API.
-enum RendererImpl {
-    Appkit(Renderer),
-    Metal(MetalRenderer),
-}
-
-impl RendererImpl {
-    fn cell_dims(&self) -> (f64, f64) {
-        match self {
-            Self::Appkit(r) => r.cell_dims(),
-            Self::Metal(r) => r.cell_dims(),
-        }
-    }
-    fn resize(&mut self, w: f64, h: f64) {
-        match self {
-            Self::Appkit(r) => r.resize(w, h),
-            Self::Metal(r) => r.resize(w, h),
-        }
-    }
-    fn set_window_focused(&mut self, focused: bool) {
-        match self {
-            Self::Appkit(r) => r.set_window_focused(focused),
-            Self::Metal(r) => r.set_window_focused(focused),
-        }
-    }
-    fn render_layout(
-        &mut self,
-        layout: &Layout,
-        views: &[SessionView],
-        sidebar: &[SidebarEntry],
-        focused_idx: usize,
-    ) {
-        match self {
-            Self::Appkit(r) => r.render_layout(layout, views, sidebar, focused_idx),
-            Self::Metal(r) => r.render_layout(layout, views, sidebar, focused_idx),
-        }
-    }
-    fn atlas_approx_bytes(&self) -> usize {
-        match self {
-            Self::Appkit(r) => r.atlas_approx_bytes(),
-            Self::Metal(r) => r.atlas_approx_bytes(),
-        }
-    }
-    fn fontcache_approx_bytes(&self) -> usize {
-        match self {
-            Self::Appkit(r) => r.fontcache_approx_bytes(),
-            Self::Metal(r) => r.fontcache_approx_bytes(),
-        }
-    }
-    fn metal_buffers_approx_bytes(&self) -> usize {
-        match self {
-            Self::Appkit(r) => r.metal_buffers_approx_bytes(),
-            Self::Metal(r) => r.metal_buffers_approx_bytes(),
-        }
-    }
-}
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARSPOT_GIT_SHA");
@@ -226,7 +165,7 @@ impl TmuxState {
 }
 
 struct Marspot {
-    renderer: Option<RendererImpl>,
+    renderer: Option<MetalRenderer>,
     /// Cached layout from the last Resized.  Drives both rendering and
     /// mouse-click hit-testing.
     layout: Option<Layout>,
@@ -354,18 +293,7 @@ impl MarspotApp for Marspot {
             .unwrap_or(max_scale);
 
         let nsview = ctx.ns_view();
-        // Metal is the default; MARSPOT_APPKIT=1 falls back to the
-        // AppKit/CGImage path (kept for regression bisects).
-        let renderer = if std::env::var("MARSPOT_APPKIT").as_deref() == Ok("1") {
-            eprintln!("[marspot] MARSPOT_APPKIT=1 → using AppKit Renderer");
-            RendererImpl::Appkit(
-                Renderer::new(nsview, scale).expect("renderer init"),
-            )
-        } else {
-            RendererImpl::Metal(
-                MetalRenderer::new(nsview, scale).expect("metal renderer init"),
-            )
-        };
+        let renderer = MetalRenderer::new(nsview, scale).expect("metal renderer init");
         self.renderer = Some(renderer);
         // run_app delivers an explicit Resized after resumed; that does
         // the renderer.resize + layout build + initial render.
@@ -1654,46 +1582,17 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
 /// pre-loaded with a demo banner so the snapshot has visible content
 /// without needing a live PTY.
 fn run_snapshot(path: &str) {
-    let scale: f32 = std::env::var("MARSPOT_SNAPSHOT_SCALE")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .or_else(|| {
-            MainThreadMarker::new()
-                .and_then(NSScreen::mainScreen)
-                .map(|s| s.backingScaleFactor() as f32)
-        })
-        .unwrap_or(1.0);
-    let logical_w: u32 = 960;
-    let logical_h: u32 = 600;
-    let phys_w = (logical_w as f32 * scale) as u32;
-    let phys_h = (logical_h as f32 * scale) as u32;
-
-    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
-    feed_demo_content(&mut terminal);
-
-    let mut renderer = Renderer::new_offscreen(scale).expect("offscreen renderer");
-    renderer.resize(phys_w as f64, phys_h as f64);
-    let bgra = renderer
-        .snapshot(phys_w, phys_h, terminal.grid())
-        .expect("snapshot");
-
-    let mut rgba = bgra.clone();
-    for px in rgba.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
-
-    let file = std::fs::File::create(path).expect("create snapshot file");
-    let buf_writer = std::io::BufWriter::new(file);
-    let mut encoder = png::Encoder::new(buf_writer, phys_w, phys_h);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().expect("png header");
-    writer.write_image_data(&rgba).expect("png write");
-
+    // The AppKit Renderer (and its CGBitmapContext-based `snapshot`
+    // method) was removed when mcli switched to Metal. A Metal-based
+    // snapshot path needs Managed-storage MTLTexture + getBytes
+    // readback + BGRA → RGBA conversion; not implemented yet.
+    let _ = path;
     eprintln!(
-        "wrote snapshot: {} ({}x{} physical, scale={})",
-        path, phys_w, phys_h, scale
+        "--snapshot is temporarily disabled — the AppKit offscreen \
+         renderer was removed; a Metal-based snapshot path will be \
+         added if/when needed (raise an issue)."
     );
+    std::process::exit(2);
 }
 
 /// Headless benchmark dispatcher.  Spec is `<mode>:<arg>`.
@@ -1757,8 +1656,9 @@ fn run_bench(spec: &str) {
     };
     match mode {
         "parse" => bench_parse(arg),
-        "render" => bench_render(arg),
-        "metal-render" => bench_metal_render(arg),
+        // `render` and `metal-render` are now aliases — the AppKit
+        // CGImage renderer was removed, Metal is the only live path.
+        "render" | "metal-render" => bench_metal_render(arg),
         "scroll" => bench_scroll(arg, /* cold */ false),
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
         "rss-format-dump" => bench_rss_format_dump(arg),
@@ -1846,68 +1746,6 @@ fn bench_parse(path: &str) {
         bytes.len(),
         elapsed_ns,
         bytes_per_sec
-    );
-}
-
-fn bench_render(arg: &str) {
-    let n: u32 = arg.parse().unwrap_or_else(|_| {
-        eprintln!("bench: render needs an integer iteration count");
-        std::process::exit(2);
-    });
-
-    // Build a worst-case grid: every cell carries a non-default fg colour
-    // (forces a SetRGBFillColor per glyph run), every cell is non-blank
-    // (no skipping), and the content alternates printable ASCII so glyph
-    // run-length compression has to stop frequently.  This is the upper
-    // bound on per-frame cost given the current architecture.
-    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
-    // Fill with rotating SGR colours + printable ASCII.
-    let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
-    for r in 0..GRID_ROWS {
-        for c in 0..GRID_COLS {
-            // SGR 30..=37 cycling foreground.
-            let colour = 30 + ((r as u32 + c as u32) % 8) as u8;
-            payload.extend_from_slice(format!("\x1b[{}m", colour).as_bytes());
-            let ch = ((c % 95) as u8) + 32; // printable ASCII 32..127
-            payload.push(ch);
-        }
-        if r + 1 < GRID_ROWS {
-            payload.extend_from_slice(b"\r\n");
-        }
-    }
-    terminal.feed(&payload);
-
-    // Render headlessly into an offscreen Renderer.  Use scale=1 to
-    // match the user's display so numbers transfer to the live path.
-    let mut renderer = Renderer::new_offscreen(1.0).expect("offscreen renderer");
-    // Default 960×600 logical → physical at scale 1.
-    let phys_w = 960.0_f64;
-    let phys_h = 600.0_f64;
-
-    // Warm-up: 5 iterations to fill char_cache and prime CGContext alloc.
-    for _ in 0..5 {
-        let _ = renderer.snapshot(phys_w as u32, phys_h as u32, terminal.grid());
-    }
-
-    let mut samples: Vec<u64> = Vec::with_capacity(n as usize);
-    for _ in 0..n {
-        let t0 = std::time::Instant::now();
-        let _ = renderer.snapshot(phys_w as u32, phys_h as u32, terminal.grid());
-        samples.push(t0.elapsed().as_nanos() as u64);
-    }
-    samples.sort_unstable();
-    let p = |q: f64| -> u64 {
-        let idx = ((samples.len() as f64) * q) as usize;
-        samples[idx.min(samples.len() - 1)]
-    };
-    println!(
-        r#"{{"mode":"render","iterations":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
-        n,
-        p(0.50),
-        p(0.95),
-        p(0.99),
-        samples[0],
-        samples[samples.len() - 1],
     );
 }
 
@@ -2102,16 +1940,3 @@ fn bench_scroll(arg: &str, cold: bool) {
     );
 }
 
-fn feed_demo_content(terminal: &mut Terminal) {
-    let banner = format!("marspot v{} ({})\r\n", VERSION, GIT_SHA);
-    terminal.feed(banner.as_bytes());
-    terminal.feed(b"\r\n");
-    terminal.feed(b"hello marspot\r\n");
-    terminal.feed(b"the engine is alive\r\n");
-    terminal.feed(b"\r\n");
-    terminal.feed(b"  pty + parser + grid + render (CoreText)\r\n");
-    terminal.feed(b"\r\n");
-    terminal.feed(b"  ascii printable: !\"#$%&'()*+,-./0123456789:;<=>?@\r\n");
-    terminal.feed(b"                   ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_\r\n");
-    terminal.feed(b"                   `abcdefghijklmnopqrstuvwxyz{|}~\r\n");
-}

@@ -48,10 +48,60 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
-use crate::glyph_atlas::{GlyphAtlas, GlyphKey, SlotMetrics};
+use crate::glyph_atlas::{AtlasEntry, GlyphAtlas, GlyphKey, SlotMetrics, BOX_DRAWING_FONT_ID};
 use crate::layout::{CellRect, Layout, Rect};
-use crate::render::{SessionView, SidebarEntry};
+use crate::render::{
+    box_drawing_arms, block_element_rects, rasterize_arms_into_buf, rasterize_block_into_buf,
+    SessionView, SidebarEntry,
+};
 use crate::session::SessionState;
+
+use core_graphics::font::CGGlyph;
+
+/// Resolve an arbitrary cell character to an atlas entry, routing
+/// box-drawing (U+2500-U+257F + ╭╮╯╰) and block elements
+/// (U+2580-U+259F) through our own pixel-perfect mask rasteriser
+/// instead of CT's font glyph.  CT glyphs for these chars typically
+/// don't span the cell advance, producing visible seams when
+/// claudecode / vim / htop draw box borders or progress bars; our
+/// masks fill the cell exactly so adjacent cells join with zero
+/// drift.  Pure Rust path, no extra deps, atlas + GPU pipeline
+/// downstream is unchanged.
+fn resolve_cell_glyph(
+    atlas: &mut GlyphAtlas,
+    font: &mut FontCache,
+    ch: char,
+    bold: bool,
+    italic: bool,
+    metrics: SlotMetrics,
+) -> Option<AtlasEntry> {
+    if let Some(arms) = box_drawing_arms(ch) {
+        let w = metrics.cell_w;
+        let h = metrics.cell_h;
+        let key = GlyphKey { font_id: BOX_DRAWING_FONT_ID, glyph: ch as u32 as CGGlyph };
+        return atlas.get_or_insert_custom_raster(key, w, h, 1, |buf| {
+            rasterize_arms_into_buf(buf, w as usize, h as usize, arms);
+        });
+    }
+    if let Some(shape) = block_element_rects(ch) {
+        let w = metrics.cell_w;
+        let h = metrics.cell_h;
+        let key = GlyphKey { font_id: BOX_DRAWING_FONT_ID, glyph: ch as u32 as CGGlyph };
+        return atlas.get_or_insert_custom_raster(key, w, h, 1, |buf| {
+            rasterize_block_into_buf(buf, w as usize, h as usize, shape);
+        });
+    }
+    let (font_idx, glyph) = font.resolve_char(ch, bold, italic);
+    if glyph == 0 {
+        return None;
+    }
+    let ct_font = font.font(font_idx).clone();
+    atlas.get_or_rasterize(
+        GlyphKey { font_id: font_idx as u32, glyph },
+        &ct_font,
+        metrics,
+    )
+}
 
 /// One cell's draw data, layout-compatible with `Cell` in
 /// `src/shaders/cells.metal`.  Repr-C; no padding shenanigans.
@@ -137,6 +187,12 @@ pub struct MetalRenderer {
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
+    /// Top inset in physical pixels — reserved for window chrome
+    /// (macOS traffic-light buttons). Single-session callers (mcli)
+    /// set this once at `resumed`; the convenience `render(view)`
+    /// path forwards it into Layout::build's `top_inset` parameter.
+    /// Multi-session callers build their own Layout and ignore this.
+    top_inset_phys: f64,
 }
 
 impl MetalRenderer {
@@ -217,6 +273,7 @@ impl MetalRenderer {
             dots_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
             window_focused: true,
+            top_inset_phys: 0.0,
         })
     }
 
@@ -260,11 +317,52 @@ impl MetalRenderer {
             dots_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
             window_focused: true,
+            top_inset_phys: 0.0,
         })
     }
 
     pub fn set_window_focused(&mut self, focused: bool) {
         self.window_focused = focused;
+    }
+
+    /// Reserve a top strip (physical pixels) above the grid so window
+    /// chrome (traffic lights, focused-session status) doesn't paint
+    /// over terminal content. Single-session callers (mcli) set this
+    /// once at `resumed` from `HEADER_PT * scale`. Multi-session
+    /// callers build their own Layout with `top_inset` baked in and
+    /// don't touch this field.
+    pub fn set_top_inset(&mut self, phys: f64) {
+        self.top_inset_phys = phys;
+    }
+
+    /// Top inset in physical pixels currently in effect.
+    pub fn top_inset_phys(&self) -> f64 {
+        self.top_inset_phys
+    }
+
+    /// Single-session convenience render — builds a 1×1 Layout with
+    /// the current viewport + top inset, then dispatches to
+    /// `render_layout`. mcli uses this so it doesn't have to know
+    /// about Layout / sidebars.
+    pub fn render(&mut self, view: SessionView) {
+        if self.layer.is_none() {
+            return;
+        }
+        if self.width_px < 1.0 || self.height_px < 1.0 {
+            return;
+        }
+        let layout = Layout::build(
+            self.width_px,
+            self.height_px,
+            0.0,                 // sidebar_w
+            self.top_inset_phys, // top_inset
+            0.0,                 // gutter
+            1,                   // cols
+            1,                   // rows
+            self.font.cell_w,
+            self.font.cell_h,
+        );
+        self.render_layout(&layout, std::slice::from_ref(&view), &[], 0);
     }
 
     pub fn cell_dims(&self) -> (f64, f64) {
@@ -1544,9 +1642,17 @@ fn push_session(
     let grid = view.grid;
     let cols = grid.cols() as usize;
     // Origin of the terminal content area — inside cell, below
-    // the title strip, then padded.
-    let inner_x = rect.x as f32 + padding;
-    let inner_y = rect.y_top as f32 + title_h + padding;
+    // the title strip, then padded.  Round both origin and cell_w
+    // to integer pixels here ONCE so every `c * cell_w` advance is
+    // an exact integer multiple. Without this, fractional cell_w
+    // makes adjacent cells round to different stride lengths
+    // (col 1 advances by 8, col 2 by 9) while the atlas slot is
+    // a fixed width, leaving 1-px seam gaps every few columns in
+    // horizontal box-drawing runs.
+    let cell_w = cell_w.round();
+    let cell_h = cell_h.round();
+    let inner_x = (rect.x as f32 + padding).round();
+    let inner_y = (rect.y_top as f32 + title_h + padding).round();
 
     // Selection BG — paint a single quad per selected row, BEFORE
     // the per-cell run-length BG fills so coloured cells (e.g.
@@ -1629,23 +1735,17 @@ fn push_session(
             if cell.ch == ' ' || cell.ch == '\0' {
                 continue;
             }
-            let (font_idx, glyph) =
-                font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
-            if glyph == 0 {
-                continue;
-            }
-            let ct_font = font.font(font_idx).clone();
             let metrics = SlotMetrics {
                 cell_w: cell_w.round() as u32,
                 cell_h: cell_h.round() as u32,
                 baseline_from_top: ascent.round() as u32,
             };
-            let entry = match atlas.get_or_rasterize(
-                GlyphKey {
-                    font_id: font_idx as u32,
-                    glyph,
-                },
-                &ct_font,
+            let entry = match resolve_cell_glyph(
+                atlas,
+                font,
+                cell.ch,
+                cell.attrs.bold,
+                cell.attrs.italic,
                 metrics,
             ) {
                 Some(e) => e,
@@ -1719,36 +1819,31 @@ fn push_session(
         let (col, row) = grid.cursor();
         let cell = grid.cell_at_view(0, col, row);
         if cell.ch != ' ' && cell.ch != '\0' {
-            let (font_idx, glyph) =
-                font.resolve_char(cell.ch, cell.attrs.bold, cell.attrs.italic);
-            if glyph != 0 {
-                let ct_font = font.font(font_idx).clone();
-                let metrics = SlotMetrics {
-                    cell_w: cell_w.round() as u32,
-                    cell_h: cell_h.round() as u32,
-                    baseline_from_top: ascent.round() as u32,
-                };
-                if let Some(entry) = atlas.get_or_rasterize(
-                    GlyphKey {
-                        font_id: font_idx as u32,
-                        glyph,
-                    },
-                    &ct_font,
-                    metrics,
-                ) {
-                    // Cell-sized slot — place at cell origin (see
-                    // comment in main glyph push).
-                    let dest_x = (inner_x + col as f32 * cell_w).round();
-                    let dest_y = (inner_y + (row as f32) * cell_h).round();
-                    let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
-                    glyphs.push(GlyphInstance {
-                        origin: [dest_x, dest_y],
-                        size: [slot_w, metrics.cell_h as f32],
-                        uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
-                        uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                        color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
-                    });
-                }
+            let metrics = SlotMetrics {
+                cell_w: cell_w.round() as u32,
+                cell_h: cell_h.round() as u32,
+                baseline_from_top: ascent.round() as u32,
+            };
+            if let Some(entry) = resolve_cell_glyph(
+                atlas,
+                font,
+                cell.ch,
+                cell.attrs.bold,
+                cell.attrs.italic,
+                metrics,
+            ) {
+                // Cell-sized slot — place at cell origin (see
+                // comment in main glyph push).
+                let dest_x = (inner_x + col as f32 * cell_w).round();
+                let dest_y = (inner_y + (row as f32) * cell_h).round();
+                let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+                glyphs.push(GlyphInstance {
+                    origin: [dest_x, dest_y],
+                    size: [slot_w, metrics.cell_h as f32],
+                    uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+                    uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+                    color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
+                });
             }
         }
     }

@@ -94,6 +94,12 @@ extern "C" {
 
 pub type FontId = u32;
 
+/// Reserved synthetic font_id for box-drawing / block-element glyphs
+/// rasterised by our own code (not the CT font cache).  Chosen high
+/// enough that real FontCache indices won't collide — FontCache grows
+/// linearly from 0 as fallback fonts are discovered.
+pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct GlyphKey {
     pub font_id: FontId,
@@ -230,6 +236,57 @@ impl GlyphAtlas {
             px_w: raster.px_w as u16,
             px_h: raster.px_h as u16,
             n_cells: raster.n_cells,
+        };
+        self.cache.insert(key, entry);
+        Some(entry)
+    }
+
+    /// Insert a caller-rastered 8-bit alpha mask under `key`.  Used
+    /// for box-drawing / block-element characters: the font's CT-
+    /// rasterised glyph for `─`/`│`/`╭` etc. is shorter than the cell
+    /// advance, so blitting it as-is leaves visible gaps at borders.
+    /// Callers (render_metal) detect those chars before this method
+    /// and pass a rasteriser closure that fills a zero-initialised
+    /// w×h byte buffer; the rest of the pipeline treats the entry
+    /// like any other glyph — same shelf packer, same upload path,
+    /// same textured-quad blit on the GPU.  Synthetic `key.font_id`
+    /// should be chosen to avoid collision with real font ids (use
+    /// `BOX_DRAWING_FONT_ID`).
+    ///
+    /// The closure form keeps the cache-hit path zero-alloc; only on
+    /// miss do we allocate the rasterisation buffer.
+    pub fn get_or_insert_custom_raster<F>(
+        &mut self,
+        key: GlyphKey,
+        w: u32,
+        h: u32,
+        n_cells: u16,
+        rasterise: F,
+    ) -> Option<AtlasEntry>
+    where
+        F: FnOnce(&mut [u8]),
+    {
+        if let Some(&entry) = self.cache.get(&key) {
+            return Some(entry);
+        }
+        let mut buf = vec![0u8; (w as usize) * (h as usize)];
+        rasterise(&mut buf);
+        let placed = match self.place(w, h) {
+            Some(p) => p,
+            None => {
+                self.rebuild();
+                self.place(w, h)?
+            }
+        };
+        self.upload(&buf, w, h, placed.0, placed.1);
+        let entry = AtlasEntry {
+            u0: placed.0 as u16,
+            v0: placed.1 as u16,
+            u1: (placed.0 + w) as u16,
+            v1: (placed.1 + h) as u16,
+            px_w: w as u16,
+            px_h: h as u16,
+            n_cells,
         };
         self.cache.insert(key, entry);
         Some(entry)
