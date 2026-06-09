@@ -80,7 +80,10 @@ impl Pane {
     /// (only when the view offset changed; the byte write triggers a
     /// PTY wake → `pump` → redraw on its own).
     pub fn handle_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
-        let Some(bytes) = key_event_to_bytes(event, mods) else {
+        // Forward the terminal's DECCKM state so arrow keys encode
+        // correctly for TUI apps in application cursor key mode.
+        let app_mode = self.session.terminal.cursor_key_application_mode();
+        let Some(bytes) = key_event_to_bytes(event, mods, app_mode) else {
             return false;
         };
         let mut need_redraw = false;

@@ -89,9 +89,15 @@ impl Modifiers {
 /// Map a key press to the byte sequence we send the PTY.  Returns
 /// `None` for events we don't translate (releases, modifier-only, Cmd
 /// combos that the OS handles, etc.).
+///
+/// `cursor_key_app_mode` is the terminal's DECCKM state: when true,
+/// arrow keys encode as `ESC O X` (application sequence) instead of
+/// `ESC [ X`. TUI apps that bind cursor keys distinctly from
+/// PgUp/PgDn navigation depend on this.
 pub fn key_event_to_bytes(
     event: &MarspotKeyEvent,
     modifiers: Modifiers,
+    cursor_key_app_mode: bool,
 ) -> Option<Cow<'static, [u8]>> {
     if event.state != KeyState::Pressed {
         return None;
@@ -142,10 +148,26 @@ pub fn key_event_to_bytes(
         LogicalKey::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
         LogicalKey::Named(NamedKey::Tab) => Some(Cow::Borrowed(b"\t")),
         LogicalKey::Named(NamedKey::Escape) => Some(Cow::Borrowed(b"\x1b")),
-        LogicalKey::Named(NamedKey::ArrowUp) => Some(Cow::Borrowed(b"\x1b[A")),
-        LogicalKey::Named(NamedKey::ArrowDown) => Some(Cow::Borrowed(b"\x1b[B")),
-        LogicalKey::Named(NamedKey::ArrowRight) => Some(Cow::Borrowed(b"\x1b[C")),
-        LogicalKey::Named(NamedKey::ArrowLeft) => Some(Cow::Borrowed(b"\x1b[D")),
+        LogicalKey::Named(NamedKey::ArrowUp) => Some(if cursor_key_app_mode {
+            Cow::Borrowed(b"\x1bOA")
+        } else {
+            Cow::Borrowed(b"\x1b[A")
+        }),
+        LogicalKey::Named(NamedKey::ArrowDown) => Some(if cursor_key_app_mode {
+            Cow::Borrowed(b"\x1bOB")
+        } else {
+            Cow::Borrowed(b"\x1b[B")
+        }),
+        LogicalKey::Named(NamedKey::ArrowRight) => Some(if cursor_key_app_mode {
+            Cow::Borrowed(b"\x1bOC")
+        } else {
+            Cow::Borrowed(b"\x1b[C")
+        }),
+        LogicalKey::Named(NamedKey::ArrowLeft) => Some(if cursor_key_app_mode {
+            Cow::Borrowed(b"\x1bOD")
+        } else {
+            Cow::Borrowed(b"\x1b[D")
+        }),
         _ => event
             .text
             .as_ref()
@@ -197,13 +219,13 @@ mod tests {
             logical: LogicalKey::Char('a'),
             text: Some("a".into()),
         };
-        assert!(key_event_to_bytes(&ev, Modifiers::default()).is_none());
+        assert!(key_event_to_bytes(&ev, Modifiers::default(), false).is_none());
     }
 
     #[test]
     fn plain_char_falls_through_to_text() {
         let ev = pressed(LogicalKey::Char('a'), Some("a"));
-        let out = key_event_to_bytes(&ev, Modifiers::default()).unwrap();
+        let out = key_event_to_bytes(&ev, Modifiers::default(), false).unwrap();
         assert_eq!(&*out, b"a");
     }
 
@@ -214,7 +236,7 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        let out = key_event_to_bytes(&ev, mods).unwrap();
+        let out = key_event_to_bytes(&ev, mods, false).unwrap();
         assert_eq!(&*out, &[0x03]);
     }
 
@@ -225,7 +247,7 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        let out = key_event_to_bytes(&ev, mods).unwrap();
+        let out = key_event_to_bytes(&ev, mods, false).unwrap();
         assert_eq!(&*out, &[0x1b]);
     }
 
@@ -235,16 +257,16 @@ mod tests {
         let down = pressed(LogicalKey::Named(NamedKey::ArrowDown), None);
         let left = pressed(LogicalKey::Named(NamedKey::ArrowLeft), None);
         let right = pressed(LogicalKey::Named(NamedKey::ArrowRight), None);
-        assert_eq!(&*key_event_to_bytes(&up, Modifiers::default()).unwrap(), b"\x1b[A");
-        assert_eq!(&*key_event_to_bytes(&down, Modifiers::default()).unwrap(), b"\x1b[B");
-        assert_eq!(&*key_event_to_bytes(&left, Modifiers::default()).unwrap(), b"\x1b[D");
-        assert_eq!(&*key_event_to_bytes(&right, Modifiers::default()).unwrap(), b"\x1b[C");
+        assert_eq!(&*key_event_to_bytes(&up, Modifiers::default(), false).unwrap(), b"\x1b[A");
+        assert_eq!(&*key_event_to_bytes(&down, Modifiers::default(), false).unwrap(), b"\x1b[B");
+        assert_eq!(&*key_event_to_bytes(&left, Modifiers::default(), false).unwrap(), b"\x1b[D");
+        assert_eq!(&*key_event_to_bytes(&right, Modifiers::default(), false).unwrap(), b"\x1b[C");
     }
 
     #[test]
     fn enter_returns_cr() {
         let ev = pressed(LogicalKey::Named(NamedKey::Enter), None);
-        assert_eq!(&*key_event_to_bytes(&ev, Modifiers::default()).unwrap(), b"\r");
+        assert_eq!(&*key_event_to_bytes(&ev, Modifiers::default(), false).unwrap(), b"\r");
     }
 
     #[test]
@@ -254,6 +276,6 @@ mod tests {
             super_: true,
             ..Default::default()
         };
-        assert!(key_event_to_bytes(&ev, mods).is_none());
+        assert!(key_event_to_bytes(&ev, mods, false).is_none());
     }
 }

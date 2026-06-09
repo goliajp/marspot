@@ -475,7 +475,11 @@ impl MarspotApp for Marspot {
             return;
         }
 
-        if let Some(bytes) = key_event_to_bytes(&event, modifiers) {
+        let app_mode = self.panes[self.focused_idx]
+            .session()
+            .terminal
+            .cursor_key_application_mode();
+        if let Some(bytes) = key_event_to_bytes(&event, modifiers, app_mode) {
             if self.record_latency && self.pending_keystroke_t0.is_none() {
                 self.pending_keystroke_t0 = Some(std::time::Instant::now());
             }
