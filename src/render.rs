@@ -15,12 +15,13 @@ use crate::grid::{Cell, Grid};
 use crate::layout::{CellRect, Layout};
 use crate::session::SessionState;
 use core_graphics::base::{
-    kCGBitmapByteOrder32Big, kCGImageAlphaPremultipliedLast, CGFloat,
+    kCGBitmapByteOrder32Big, kCGImageAlphaNone, kCGImageAlphaPremultipliedLast, CGFloat,
 };
 use core_graphics::color_space::CGColorSpace;
-use core_graphics::context::{CGContext, CGTextDrawingMode};
+use core_graphics::context::{CGContext, CGInterpolationQuality, CGTextDrawingMode};
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+use core_graphics::image::CGImage;
 use foreign_types::ForeignType;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -127,6 +128,18 @@ pub struct Renderer {
     /// in one struct so `mem::take` cleanly borrow-swaps it past the
     /// `&mut self` we hold for `resolve_char` etc.
     scratch: Scratch,
+    /// Per-cell rasterised masks for box-drawing (U+2500..U+257F) and
+    /// block elements (U+2580..U+259F). Key is (char codepoint, cell-w
+    /// in px, cell-h in px). Value is an 8-bit grayscale CGImage used
+    /// as a clip mask — fg colour is set per blit so the same mask
+    /// covers every colour the TUI uses.  Caching matters because
+    /// `CGBitmapContextCreate` is ~50 µs each — without it, drawing 50+
+    /// box chars per frame becomes the dominant cost.  alacritty/kitty
+    /// take the same approach (per-glyph rasterisation into a sprite
+    /// atlas) — it's the only path that guarantees corners join with
+    /// no sub-pixel drift, because arms are composed in cell-local
+    /// coords that don't depend on the cell's absolute screen origin.
+    box_mask_cache: std::collections::HashMap<(u32, u16, u16), CGImage>,
 }
 
 type RgbF = (CGFloat, CGFloat, CGFloat);
@@ -202,6 +215,7 @@ impl Renderer {
             window_focused: true,
             bitmap_ctx: None,
             scratch: Scratch::default(),
+            box_mask_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -545,11 +559,59 @@ impl Renderer {
 
             // 2) Foreground pass — group consecutive non-blank cells that
             //    share both font and fg color; one draw_glyphs call per run.
+            //    Box-drawing chars (U+2500..) break runs and are painted
+            //    by `draw_box_drawing` as cell-sized rect arms — most
+            //    monospace fonts ship short `─`/`│` glyphs that don't
+            //    span the cell, leaving visible gaps where TUIs draw
+            //    box borders (claudecode welcome panel).
             let baseline_y = rect_top_y_up - (r as f64 * self.font.cell_h + self.font.ascent);
             let mut i = 0usize;
             while i < cols {
                 let cell = scratch.row_cells[i];
                 if cell.ch == ' ' || cell.ch == '\0' {
+                    i += 1;
+                    continue;
+                }
+                if box_drawing_arms(cell.ch).is_some() || block_element_rects(cell.ch).is_some() {
+                    // Per-glyph mask path: rasterise the box/block
+                    // character into a cell-sized grayscale mask once
+                    // (cached), then blit at the integer cell rect with
+                    // the current fg colour. Composing arms in
+                    // cell-local coords removes every dependency on
+                    // the cell's absolute screen origin, so corners
+                    // join pixel-perfectly regardless of cumulative
+                    // float drift in `i * cell_w`.
+                    let fg = scratch.row_attrs[i].0;
+                    let xl_unsnap = rect.x + i as f64 * self.font.cell_w;
+                    let xr_int = (xl_unsnap + self.font.cell_w).round();
+                    let xl_int = xl_unsnap.round();
+                    let yb_int = row_bottom_y.round();
+                    let yt_int = (row_bottom_y + self.font.cell_h).round();
+                    let w_int = (xr_int - xl_int).max(1.0) as u16;
+                    let h_int = (yt_int - yb_int).max(1.0) as u16;
+                    let mask = get_or_rasterize_box_mask(
+                        &mut self.box_mask_cache,
+                        cell.ch,
+                        w_int,
+                        h_int,
+                    );
+                    let cell_rect = CGRect::new(
+                        &CGPoint::new(xl_int, yb_int),
+                        &CGSize::new(w_int as f64, h_int as f64),
+                    );
+                    ctx.save();
+                    // CRITICAL: blit-time AA and interpolation must BOTH
+                    // be off. Without these, CG resamples the mask edges
+                    // and the corners go soft — the exact "拐角对不齐"
+                    // symptom. Geometry-perfect masks blitted through
+                    // the default (AA on, interpolation default) state
+                    // come out as if drawn with sub-pixel arms.
+                    ctx.set_should_antialias(false);
+                    ctx.set_interpolation_quality(CGInterpolationQuality::CGInterpolationQualityNone);
+                    ctx.clip_to_mask(cell_rect, mask);
+                    ctx.set_rgb_fill_color(fg.0, fg.1, fg.2, 1.0);
+                    ctx.fill_rect(cell_rect);
+                    ctx.restore();
                     i += 1;
                     continue;
                 }
@@ -566,6 +628,11 @@ impl Renderer {
                 while i < cols {
                     let cur = scratch.row_cells[i];
                     if cur.ch == ' ' || cur.ch == '\0' {
+                        break;
+                    }
+                    if box_drawing_arms(cur.ch).is_some()
+                        || block_element_rects(cur.ch).is_some()
+                    {
                         break;
                     }
                     let (cur_font, cur_glyph) =
@@ -756,3 +823,265 @@ impl Renderer {
     }
 }
 
+/// Box-drawing arms encoded as N|S|W|E bits (4 LSBs).
+const ARM_N: u8 = 0b0001;
+const ARM_S: u8 = 0b0010;
+const ARM_W: u8 = 0b0100;
+const ARM_E: u8 = 0b1000;
+
+/// If `ch` is a box-drawing character we paint programmatically, return
+/// its arm composition.  Covers the common subset of U+2500..U+257F
+/// that TUIs (claudecode welcome panel, htop, ncurses dialogs) use to
+/// draw frames — single-line corners, tees, crosses.  Heavy / double
+/// variants intentionally fall back to the font for now.
+///
+/// The font's `─`, `│` glyphs are usually shorter than the cell advance,
+/// so painting them via `draw_glyphs` leaves visible gaps between
+/// adjacent box cells; this table lets the renderer composite arms that
+/// extend slightly past the cell midline so neighbours always join.
+fn box_drawing_arms(ch: char) -> Option<u8> {
+    Some(match ch {
+        '\u{2500}' | '\u{2501}' => ARM_W | ARM_E,         // ─ ━
+        '\u{2502}' | '\u{2503}' => ARM_N | ARM_S,         // │ ┃
+        '\u{250C}' | '\u{250D}' | '\u{250E}' | '\u{250F}' => ARM_E | ARM_S, // ┌ variants
+        '\u{2510}' | '\u{2511}' | '\u{2512}' | '\u{2513}' => ARM_W | ARM_S, // ┐ variants
+        '\u{2514}' | '\u{2515}' | '\u{2516}' | '\u{2517}' => ARM_E | ARM_N, // └ variants
+        '\u{2518}' | '\u{2519}' | '\u{251A}' | '\u{251B}' => ARM_W | ARM_N, // ┘ variants
+        '\u{251C}'..='\u{2523}' => ARM_N | ARM_S | ARM_E, // ├ variants
+        '\u{2524}'..='\u{252B}' => ARM_N | ARM_S | ARM_W, // ┤ variants
+        '\u{252C}'..='\u{2533}' => ARM_W | ARM_E | ARM_S, // ┬ variants
+        '\u{2534}'..='\u{253B}' => ARM_W | ARM_E | ARM_N, // ┴ variants
+        '\u{253C}'..='\u{254B}' => ARM_W | ARM_E | ARM_N | ARM_S, // ┼ variants
+        // Rounded corners — visually identical join behaviour to ┌┐└┘,
+        // just with the corner pixel filled (our integer-pixel rect
+        // fill IS a square corner; "rounded" font glyphs would only
+        // differ at sub-pixel scale, which we don't have). Adding
+        // them here was the load-bearing fix for claudecode's welcome
+        // box, which uses U+256D-U+2570 not U+250C-U+2518.
+        '\u{256D}' => ARM_E | ARM_S, // ╭ rounded top-left  ≡ ┌
+        '\u{256E}' => ARM_W | ARM_S, // ╮ rounded top-right ≡ ┐
+        '\u{256F}' => ARM_W | ARM_N, // ╯ rounded bot-right ≡ ┘
+        '\u{2570}' => ARM_E | ARM_N, // ╰ rounded bot-left  ≡ └
+        _ => return None,
+    })
+}
+
+/// Block-element layout: a pair of fractions describing the filled
+/// region inside the cell.  Eighths are encoded as eighths-of-cell
+/// (0..=8) so we round per-cell once and avoid drift across columns.
+///
+/// `BlockRect::Eighths { x_left_8, y_bot_8, x_right_8, y_top_8 }` —
+/// the rect spans `x_left_8/8 .. x_right_8/8` of the cell width and
+/// `y_bot_8/8 .. y_top_8/8` of the cell height. Two rects allow
+/// quadrant glyphs (U+2596..U+259F) where the filled area is L-shaped.
+#[derive(Clone, Copy)]
+struct BlockRect {
+    x_left_8: u8,
+    y_bot_8: u8,
+    x_right_8: u8,
+    y_top_8: u8,
+}
+
+#[derive(Clone, Copy)]
+struct BlockShape {
+    rects: [Option<BlockRect>; 2],
+    /// Alpha for shaded variants ░ ▒ ▓; opaque for the rest.
+    alpha: f64,
+}
+
+const fn r(x_left_8: u8, y_bot_8: u8, x_right_8: u8, y_top_8: u8) -> Option<BlockRect> {
+    Some(BlockRect { x_left_8, y_bot_8, x_right_8, y_top_8 })
+}
+
+const fn one(rect: Option<BlockRect>) -> BlockShape {
+    BlockShape { rects: [rect, None], alpha: 1.0 }
+}
+
+const fn two(a: Option<BlockRect>, b: Option<BlockRect>) -> BlockShape {
+    BlockShape { rects: [a, b], alpha: 1.0 }
+}
+
+const fn shaded(alpha: f64) -> BlockShape {
+    BlockShape { rects: [r(0, 0, 8, 8), None], alpha }
+}
+
+/// U+2580..U+259F block elements (lower/upper N/8, side N/8, quadrants,
+/// shaded). Used by claudecode for the pixel-art welcome icon and by
+/// progress bars, sparklines, etc. The font's glyphs for these don't
+/// span the cell so we paint them directly like box-drawing chars.
+fn block_element_rects(ch: char) -> Option<BlockShape> {
+    Some(match ch {
+        '\u{2580}' => one(r(0, 4, 8, 8)),    // ▀ upper half
+        '\u{2581}' => one(r(0, 0, 8, 1)),    // ▁ lower 1/8
+        '\u{2582}' => one(r(0, 0, 8, 2)),    // ▂ lower 2/8
+        '\u{2583}' => one(r(0, 0, 8, 3)),    // ▃
+        '\u{2584}' => one(r(0, 0, 8, 4)),    // ▄ lower half
+        '\u{2585}' => one(r(0, 0, 8, 5)),    // ▅
+        '\u{2586}' => one(r(0, 0, 8, 6)),    // ▆
+        '\u{2587}' => one(r(0, 0, 8, 7)),    // ▇
+        '\u{2588}' => one(r(0, 0, 8, 8)),    // █ full
+        '\u{2589}' => one(r(0, 0, 7, 8)),    // ▉ left 7/8
+        '\u{258A}' => one(r(0, 0, 6, 8)),    // ▊
+        '\u{258B}' => one(r(0, 0, 5, 8)),    // ▋
+        '\u{258C}' => one(r(0, 0, 4, 8)),    // ▌ left half
+        '\u{258D}' => one(r(0, 0, 3, 8)),    // ▍
+        '\u{258E}' => one(r(0, 0, 2, 8)),    // ▎
+        '\u{258F}' => one(r(0, 0, 1, 8)),    // ▏
+        '\u{2590}' => one(r(4, 0, 8, 8)),    // ▐ right half
+        '\u{2591}' => shaded(0.25),          // ░ light shade
+        '\u{2592}' => shaded(0.50),          // ▒ medium shade
+        '\u{2593}' => shaded(0.75),          // ▓ dark shade
+        '\u{2594}' => one(r(0, 7, 8, 8)),    // ▔ upper 1/8
+        '\u{2595}' => one(r(7, 0, 8, 8)),    // ▕ right 1/8
+        '\u{2596}' => one(r(0, 0, 4, 4)),    // ▖ lower-left quadrant
+        '\u{2597}' => one(r(4, 0, 8, 4)),    // ▗ lower-right
+        '\u{2598}' => one(r(0, 4, 4, 8)),    // ▘ upper-left
+        '\u{2599}' => two(r(0, 4, 4, 8), r(0, 0, 8, 4)), // ▙ UL + lower half
+        '\u{259A}' => two(r(0, 4, 4, 8), r(4, 0, 8, 4)), // ▚ UL + LR
+        '\u{259B}' => two(r(0, 4, 8, 8), r(0, 0, 4, 4)), // ▛ upper half + LL
+        '\u{259C}' => two(r(0, 4, 8, 8), r(4, 0, 8, 4)), // ▜ upper half + LR
+        '\u{259D}' => one(r(4, 4, 8, 8)),    // ▝ upper-right
+        '\u{259E}' => two(r(4, 4, 8, 8), r(0, 0, 4, 4)), // ▞ UR + LL
+        '\u{259F}' => two(r(4, 4, 8, 8), r(0, 0, 8, 4)), // ▟ UR + lower half
+        _ => return None,
+    })
+}
+
+
+/// Look up (or rasterise on miss) the grayscale mask for one box/block
+/// character at the given cell pixel size. The cache key intentionally
+/// excludes colour — colour comes from the destination context's fill
+/// state at blit time, applied via `clip_to_mask`. Variable cell widths
+/// (8 vs 9 px on common monospace × 2× scale) get separate entries so
+/// neighbouring columns of different physical width still produce
+/// identical-looking arms.
+fn get_or_rasterize_box_mask<'a>(
+    cache: &'a mut std::collections::HashMap<(u32, u16, u16), CGImage>,
+    ch: char,
+    w: u16,
+    h: u16,
+) -> &'a CGImage {
+    let key = (ch as u32, w, h);
+    cache
+        .entry(key)
+        .or_insert_with(|| rasterize_box_mask(ch, w, h))
+}
+
+/// Build a `w × h` grayscale CGImage whose white pixels are the
+/// character's arms and black pixels are the empty cell area. The
+/// arms compose in cell-local coords starting from (0, 0); this is
+/// the load-bearing property — without absolute screen origin in the
+/// math, two adjacent cells produce arms that fit together with zero
+/// drift regardless of their absolute grid position.
+fn rasterize_box_mask(ch: char, w: u16, h: u16) -> CGImage {
+    // Direct byte-buffer rasterisation — kitty's approach. Bypassing
+    // CGContext drawing primitives is intentional: CG's fill_rect adds
+    // sub-pixel rounding even with AA off, and the round/floor mismatch
+    // between `xm = round(x_left + cell_w/2)` and `mid = w/2` (integer
+    // division) produced visible 1-px corner drift between cells of
+    // width 8 and 9.  Writing pixels directly uses kitty's exact
+    // formula: `mid = w/2`, `stroke run = [mid - t/2, mid - t/2 + t)`.
+    let w_u = w as usize;
+    let h_u = h as usize;
+    let mut buf = vec![0u8; w_u * h_u];
+
+    if let Some(arms) = box_drawing_arms(ch) {
+        rasterize_arms_into_buf(&mut buf, w_u, h_u, arms);
+    } else if let Some(shape) = block_element_rects(ch) {
+        rasterize_block_into_buf(&mut buf, w_u, h_u, shape);
+    }
+
+    let buf_arc = std::sync::Arc::new(buf);
+    let provider = core_graphics::data_provider::CGDataProvider::from_buffer(buf_arc);
+    let space = CGColorSpace::create_device_gray();
+    CGImage::new(
+        w_u,
+        h_u,
+        8,                 // bits per component
+        8,                 // bits per pixel
+        w_u,               // bytes per row (1 byte per pixel)
+        &space,
+        kCGImageAlphaNone, // grayscale, no alpha — pixel value IS the mask coverage
+        &provider,
+        false,             // no interpolation on this image
+        0,                 // CGColorRenderingIntent default (kCGRenderingIntentDefault)
+    )
+}
+
+/// Write box-drawing arms directly into a w×h grayscale byte buffer in
+/// y-down image-natural orientation (row 0 = top). Uses kitty's exact
+/// formula: integer midline + stroke run `[mid - t/2, mid - t/2 + t)`.
+/// Each arm extends past the centerline by `half_t_hi` into the
+/// perpendicular arm's column so the corner overlap region is fully
+/// covered with no notch.
+fn rasterize_arms_into_buf(buf: &mut [u8], w: usize, h: usize, arms: u8) {
+    // Stroke thickness — kitty/alacritty's `max(1, round(cell_w/8))`.
+    let t = (((w as f32) / 8.0).round() as i32).max(1) as usize;
+    let half_t_lo = t / 2;          // integer floor
+    let half_t_hi = t - half_t_lo;  // integer ceil — equals half_t_lo for even t, +1 for odd
+    let mid_x = w / 2;              // integer midline; consistent across cells of any width
+    let mid_y = h / 2;
+    // Stroke runs are exactly `t` rows / columns wide (kitty's
+    // `start + stroke`, never re-derived from `center ± t/2` → no
+    // off-by-one between even / odd `t` and even / odd cell dims).
+    let stroke_x0 = mid_x.saturating_sub(half_t_lo);
+    let stroke_y0 = mid_y.saturating_sub(half_t_lo);
+    let stroke_x1 = (stroke_x0 + t).min(w);
+    let stroke_y1 = (stroke_y0 + t).min(h);
+
+    let fill = |buf: &mut [u8], x0: usize, x1: usize, y0: usize, y1: usize| {
+        let x0 = x0.min(w);
+        let x1 = x1.min(w);
+        let y0 = y0.min(h);
+        let y1 = y1.min(h);
+        for y in y0..y1 {
+            let row_start = y * w;
+            buf[row_start + x0..row_start + x1].fill(0xff);
+        }
+    };
+
+    // In image y-down: ARM_N = top of cell (low y), ARM_S = bottom (high y).
+    // Each arm extends past midline by `half_t_hi` into the perpendicular
+    // arm's column — this is what fills the corner pocket.
+    if arms & ARM_W != 0 {
+        fill(buf, 0, mid_x + half_t_hi, stroke_y0, stroke_y1);
+    }
+    if arms & ARM_E != 0 {
+        fill(buf, stroke_x0, w, stroke_y0, stroke_y1);
+    }
+    if arms & ARM_N != 0 {
+        fill(buf, stroke_x0, stroke_x1, 0, mid_y + half_t_hi);
+    }
+    if arms & ARM_S != 0 {
+        fill(buf, stroke_x0, stroke_x1, stroke_y0, h);
+    }
+}
+
+/// Write block-element shape directly into a w×h grayscale byte buffer
+/// in y-down image orientation. BlockRect coords are in CG y-up eighths
+/// (the same units the `block_element_rects` table uses for the mask
+/// approach), so we flip the y component when computing image rows.
+fn rasterize_block_into_buf(buf: &mut [u8], w: usize, h: usize, shape: BlockShape) {
+    let fill_val = if shape.alpha < 1.0 {
+        (255.0 * shape.alpha) as u8
+    } else {
+        0xff
+    };
+    for opt_r in shape.rects.iter() {
+        let Some(r) = opt_r else { continue };
+        let x0 = (w * r.x_left_8 as usize) / 8;
+        let x1 = (w * r.x_right_8 as usize) / 8;
+        // BlockRect is in CG y-up eighths: y_bot_8 = bottom in CG = SCREEN bottom
+        // = HIGH image y. y_top_8 = top in CG = SCREEN top = LOW image y.
+        let y0_img = (h * (8 - r.y_top_8 as usize)) / 8;
+        let y1_img = (h * (8 - r.y_bot_8 as usize)) / 8;
+        let x0 = x0.min(w);
+        let x1 = x1.min(w);
+        let y0 = y0_img.min(h);
+        let y1 = y1_img.min(h);
+        for y in y0..y1 {
+            let row_start = y * w;
+            buf[row_start + x0..row_start + x1].fill(fill_val);
+        }
+    }
+}
