@@ -502,6 +502,29 @@ impl Layout {
         None
     }
 
+    /// Inverse of `hit_test_cell_pos`: given a cell index + `(col,
+    /// row)` inside that cell's terminal grid, return the physical-pixel
+    /// rect that one character cell occupies in view-local top-left
+    /// coordinates (y-down — same space the renderer paints in).
+    /// Returns `None` when `cell_idx` is out of range.  Both
+    /// `MarspotApp` and `mcli` use this to publish the focused caret
+    /// to the IME (`MarspotAppCtx::set_caret_rect_phys`).
+    pub fn caret_view_phys_rect(
+        &self,
+        cell_idx: usize,
+        col: u16,
+        row: u16,
+        cell_w: f64,
+        cell_h: f64,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let c = self.cells.get(cell_idx)?;
+        let inner_x = c.x + self.padding;
+        let inner_y = c.y_top + self.cell_title_h + self.padding;
+        let x = inner_x + col as f64 * cell_w;
+        let y = inner_y + row as f64 * cell_h;
+        Some((x, y, cell_w, cell_h))
+    }
+
     /// Hit-test the per-cell title strip — the band at the top of
     /// each cell where `cell_title_h` reserves space for the
     /// session label.  Returns `Some(i)` if the click landed in

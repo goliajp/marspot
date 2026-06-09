@@ -80,10 +80,13 @@ impl Pane {
     /// (only when the view offset changed; the byte write triggers a
     /// PTY wake → `pump` → redraw on its own).
     pub fn handle_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
-        // Forward the terminal's DECCKM state so arrow keys encode
-        // correctly for TUI apps in application cursor key mode.
+        // Forward the terminal's DECCKM + bracketed-paste state so
+        // arrow keys encode correctly for TUI apps in application
+        // cursor key mode, and Cmd-V paste is wrapped in `\e[200~ /
+        // \e[201~` when the app has opted in.
         let app_mode = self.session.terminal.cursor_key_application_mode();
-        let Some(bytes) = key_event_to_bytes(event, mods, app_mode) else {
+        let bracketed = self.session.terminal.bracketed_paste_mode();
+        let Some(bytes) = key_event_to_bytes(event, mods, app_mode, bracketed) else {
             return false;
         };
         let mut need_redraw = false;

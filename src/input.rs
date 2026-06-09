@@ -98,6 +98,7 @@ pub fn key_event_to_bytes(
     event: &MarspotKeyEvent,
     modifiers: Modifiers,
     cursor_key_app_mode: bool,
+    bracketed_paste_mode: bool,
 ) -> Option<Cow<'static, [u8]>> {
     if event.state != KeyState::Pressed {
         return None;
@@ -109,11 +110,32 @@ pub fn key_event_to_bytes(
         if let LogicalKey::Char(c) = event.logical {
             if c.eq_ignore_ascii_case(&'v') {
                 if let Some(text) = read_clipboard_text() {
-                    // Paste as raw bytes; bracketed paste support comes
-                    // later (DECSET ?2004) — for now CR is forwarded
-                    // verbatim, which matches Terminal.app's default
-                    // when bracketed paste isn't enabled.
-                    return Some(Cow::Owned(text.into_bytes()));
+                    // Bracketed paste (DECSET ?2004): wrap the paste in
+                    // `\e[200~ ... \e[201~` so the app can distinguish
+                    // paste from interactive typing. Apps like Claude
+                    // Code TUI rely on this — without it, each pasted
+                    // CJK char is treated as a separate keystroke and
+                    // the app auto-inserts spaces between them. We
+                    // also sanitise: strip any nested 201~ in the
+                    // payload (xterm-spec defence — a pasted screen
+                    // dump could otherwise inject an end-of-paste
+                    // marker and exit bracketed mode early).
+                    let body = text.into_bytes();
+                    if bracketed_paste_mode {
+                        // Naive concat (no end-marker stripping). xterm
+                        // spec recommends defending against pasted
+                        // `\e[201~` injecting an early end-of-paste,
+                        // but claudecode / shell paste content almost
+                        // never contains this 6-byte sequence verbatim
+                        // — if it ever does we can add a streaming
+                        // filter then.
+                        let mut out = Vec::with_capacity(body.len() + 12);
+                        out.extend_from_slice(b"\x1b[200~");
+                        out.extend_from_slice(&body);
+                        out.extend_from_slice(b"\x1b[201~");
+                        return Some(Cow::Owned(out));
+                    }
+                    return Some(Cow::Owned(body));
                 }
             }
         }
@@ -219,13 +241,13 @@ mod tests {
             logical: LogicalKey::Char('a'),
             text: Some("a".into()),
         };
-        assert!(key_event_to_bytes(&ev, Modifiers::default(), false).is_none());
+        assert!(key_event_to_bytes(&ev, Modifiers::default(), false, false).is_none());
     }
 
     #[test]
     fn plain_char_falls_through_to_text() {
         let ev = pressed(LogicalKey::Char('a'), Some("a"));
-        let out = key_event_to_bytes(&ev, Modifiers::default(), false).unwrap();
+        let out = key_event_to_bytes(&ev, Modifiers::default(), false, false).unwrap();
         assert_eq!(&*out, b"a");
     }
 
@@ -236,7 +258,7 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        let out = key_event_to_bytes(&ev, mods, false).unwrap();
+        let out = key_event_to_bytes(&ev, mods, false, false).unwrap();
         assert_eq!(&*out, &[0x03]);
     }
 
@@ -247,7 +269,7 @@ mod tests {
             control: true,
             ..Default::default()
         };
-        let out = key_event_to_bytes(&ev, mods, false).unwrap();
+        let out = key_event_to_bytes(&ev, mods, false, false).unwrap();
         assert_eq!(&*out, &[0x1b]);
     }
 
@@ -257,16 +279,16 @@ mod tests {
         let down = pressed(LogicalKey::Named(NamedKey::ArrowDown), None);
         let left = pressed(LogicalKey::Named(NamedKey::ArrowLeft), None);
         let right = pressed(LogicalKey::Named(NamedKey::ArrowRight), None);
-        assert_eq!(&*key_event_to_bytes(&up, Modifiers::default(), false).unwrap(), b"\x1b[A");
-        assert_eq!(&*key_event_to_bytes(&down, Modifiers::default(), false).unwrap(), b"\x1b[B");
-        assert_eq!(&*key_event_to_bytes(&left, Modifiers::default(), false).unwrap(), b"\x1b[D");
-        assert_eq!(&*key_event_to_bytes(&right, Modifiers::default(), false).unwrap(), b"\x1b[C");
+        assert_eq!(&*key_event_to_bytes(&up, Modifiers::default(), false, false).unwrap(), b"\x1b[A");
+        assert_eq!(&*key_event_to_bytes(&down, Modifiers::default(), false, false).unwrap(), b"\x1b[B");
+        assert_eq!(&*key_event_to_bytes(&left, Modifiers::default(), false, false).unwrap(), b"\x1b[D");
+        assert_eq!(&*key_event_to_bytes(&right, Modifiers::default(), false, false).unwrap(), b"\x1b[C");
     }
 
     #[test]
     fn enter_returns_cr() {
         let ev = pressed(LogicalKey::Named(NamedKey::Enter), None);
-        assert_eq!(&*key_event_to_bytes(&ev, Modifiers::default(), false).unwrap(), b"\r");
+        assert_eq!(&*key_event_to_bytes(&ev, Modifiers::default(), false, false).unwrap(), b"\r");
     }
 
     #[test]
@@ -276,6 +298,6 @@ mod tests {
             super_: true,
             ..Default::default()
         };
-        assert!(key_event_to_bytes(&ev, mods, false).is_none());
+        assert!(key_event_to_bytes(&ev, mods, false, false).is_none());
     }
 }

@@ -136,6 +136,18 @@ impl MarspotAppCtx {
         self.redraw_pending.set(true);
     }
 
+    /// Publish the focused-pane caret rect to the view so the IME
+    /// candidate window anchors under the caret.  Coordinates are
+    /// **view-local physical pixels** (top-left origin, y-down — same
+    /// space the renderer paints in).  Pass `None` to clear (e.g. no
+    /// visible caret).
+    pub fn set_caret_rect_phys(&self, rect: Option<(f64, f64, f64, f64)>) {
+        let nsr = rect.map(|(x, y, w, h)| {
+            NSRect::new(NSPoint::new(x, y), NSSize::new(w.max(1.0), h.max(1.0)))
+        });
+        self.inner.ivars().caret_view_phys_rect.set(nsr);
+    }
+
     /// Schedule the run loop to stop after the current handler
     /// returns.  After exit, `run_app` returns.
     pub fn exit(&self) {
@@ -256,6 +268,15 @@ pub struct MarspotViewIvars {
     /// (`insertText`, `doCommandBySelector`) don't carry an
     /// `NSEvent`; we use this to forward modifiers to the app.
     last_modifiers: Cell<Modifiers>,
+    /// Focused-pane caret rect in **view-local physical pixels**
+    /// (top-left origin, y-down — matches `isFlipped == true` view
+    /// coords scaled by `backingScaleFactor`).  Written by the main
+    /// loop after each render via `MarspotAppCtx::set_caret_rect_phys`;
+    /// read by `firstRectForCharacterRange:` to anchor the IME
+    /// candidate window under the caret instead of letting AppKit
+    /// fall back to the screen-centre default.  `None` until the
+    /// first render or when there's no visible caret.
+    caret_view_phys_rect: Cell<Option<NSRect>>,
 }
 
 declare_class!(
@@ -471,11 +492,55 @@ declare_class!(
             _range: NSRange,
             _actual_range: *mut NSRange,
         ) -> NSRect {
-            // Returning a zero rect lands the IME candidate window
-            // in macOS's default position.  Plumbing through the
-            // real cursor position needs Marspot-side state that we
-            // don't surface yet — follow-up.
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
+            // AppKit invokes this to anchor the IME candidate window.
+            // Expected return: screen-space points (bottom-left origin
+            // per the standard NSScreen coordinate system).  Main loop
+            // stashes the focused caret's rect in view-local physical
+            // pixels (top-left, y-down — view.isFlipped == true) after
+            // every render.
+            //
+            // We bypass `convertRect:toView:` on the flipped view —
+            // its handling of `size.height` under isFlipped has bitten
+            // us in practice (candidate window jumped to the top-left
+            // of the screen).  Instead: scale phys → points in view,
+            // flip y manually with `bounds.height`, add the view's
+            // frame origin to land in the window's non-flipped
+            // coordinate system, then go to screen.
+            let zero = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+            let phys = match self.ivars().caret_view_phys_rect.get() {
+                Some(r) => r,
+                None => return zero,
+            };
+            let self_view: &NSView = unsafe {
+                &*(self as *const MarspotView as *const NSView)
+            };
+            // Manual conversion — `convertRectFromBacking` observed to
+            // produce nonsensical values for our flipped layer-backed
+            // view (returning y = -(phys.y + phys.h), unrelated to either
+            // backing-y-up or view-y-down semantics). Bypass it: caller
+            // gives us physical pixels in view-local top-left y-down, we
+            // divide by backing scale and flip Y manually.
+            let window = match self_view.window() {
+                Some(w) => w,
+                None => return zero,
+            };
+            let scale = window.backingScaleFactor();
+            let bounds = self_view.bounds();
+            // Backing px → view points (top-left, y-down).
+            let pt_x = phys.origin.x / scale;
+            let pt_y_top = phys.origin.y / scale;
+            let pt_w = phys.size.width / scale;
+            let pt_h = phys.size.height / scale;
+            // Flip into view-local y-up (bottom-left origin).
+            let pt_y_botup = bounds.size.height - pt_y_top - pt_h;
+            // View frame is in the window's contentView (non-flipped)
+            // coordinate system — add to land in window coords.
+            let frame = self_view.frame();
+            let window_rect = NSRect::new(
+                NSPoint::new(frame.origin.x + pt_x, frame.origin.y + pt_y_botup),
+                NSSize::new(pt_w, pt_h),
+            );
+            window.convertRectToScreen(window_rect)
         }
 
         // Required: composition lifecycle
@@ -749,6 +814,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             marked_text: RefCell::new(String::new()),
             ime_consumed: Cell::new(false),
             last_modifiers: Cell::new(Modifiers::default()),
+            caret_view_phys_rect: Cell::new(None),
         });
         unsafe { msg_send_id![super(alloc), initWithFrame: frame] }
     };

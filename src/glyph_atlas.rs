@@ -215,11 +215,12 @@ impl GlyphAtlas {
         key: GlyphKey,
         font: &CTFont,
         metrics: SlotMetrics,
+        n_cells: u16,
     ) -> Option<AtlasEntry> {
         if let Some(&entry) = self.cache.get(&key) {
             return Some(entry);
         }
-        let raster = rasterise_glyph(font, key.glyph, metrics)?;
+        let raster = rasterise_glyph(font, key.glyph, metrics, n_cells)?;
         let placed = match self.place(raster.px_w, raster.px_h) {
             Some(p) => p,
             None => {
@@ -425,8 +426,13 @@ struct Raster {
 /// every cell-sized slot at the cell origin and every baseline lines
 /// up exactly.
 ///
-/// Wide glyphs (advance > cell_w) get a 2-cell-wide slot.  Glyphs
-/// that don't fit even in 2 cells are clipped to fit.
+/// Slot width is `n_cells` × `metrics.cell_w` — caller's responsibility
+/// to pass the correct cell count (1 for ASCII, 2 for East Asian wide /
+/// emoji per `grid::char_width`).  We deliberately do NOT infer from
+/// the glyph's ink bbox: many CJK ideographs (e.g. 比/占/只) have
+/// centred strokes whose bbox is narrower than 1.5× cell_w, which
+/// would mis-classify them as 1-cell and render at half width while
+/// the grid layer still reserves 2 cells.
 ///
 /// Returns `None` only if the glyph has no ink (control char,
 /// .notdef-with-degenerate-bbox).
@@ -434,6 +440,7 @@ fn rasterise_glyph(
     font: &CTFont,
     glyph: CGGlyph,
     metrics: SlotMetrics,
+    n_cells: u16,
 ) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
@@ -443,12 +450,7 @@ fn rasterise_glyph(
         return None;
     }
 
-    // Decide slot width: 2 cells if the glyph's advance is closer to
-    // 2× cell_w (CJK / emoji), else 1 cell.  Most fonts already align
-    // fullwidth glyphs to a 2-cell advance.
-    let advance_w = bbox.size.width;
-    let cell_w_f = metrics.cell_w as f64;
-    let n_cells: u16 = if advance_w > cell_w_f * 1.5 { 2 } else { 1 };
+    let n_cells = n_cells.max(1);
     let px_w = metrics.cell_w * n_cells as u32;
     let px_h = metrics.cell_h;
 
@@ -545,11 +547,11 @@ mod tests {
         assert!(glyph != 0, "Menlo should have a glyph for 'A'");
 
         let key = GlyphKey { font_id: 0, glyph };
-        let entry1 = atlas.get_or_rasterize(key, &font, test_metrics()).expect("first call rasterises");
+        let entry1 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("first call rasterises");
         assert!(entry1.px_w > 0 && entry1.px_h > 0);
         assert_eq!(atlas.cache_len(), 1);
 
-        let entry2 = atlas.get_or_rasterize(key, &font, test_metrics()).expect("second call from cache");
+        let entry2 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("second call from cache");
         assert_eq!(entry1.u0, entry2.u0, "second call must return the same UV");
         assert_eq!(atlas.cache_len(), 1, "cache must not grow on hit");
     }
@@ -581,7 +583,7 @@ mod tests {
                 font.get_glyphs_for_characters(&cu, &mut glyph, 1);
             }
             let key = GlyphKey { font_id: 0, glyph };
-            if atlas.get_or_rasterize(key, &font, test_metrics()).is_some() {
+            if atlas.get_or_rasterize(key, &font, test_metrics(), 1).is_some() {
                 placed += 1;
             }
         }

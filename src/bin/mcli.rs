@@ -113,9 +113,12 @@ impl MarspotApp for Mcli {
         ctx.exit();
     }
 
-    fn redraw(&mut self, _ctx: &MarspotAppCtx) {
+    fn redraw(&mut self, ctx: &MarspotAppCtx) {
         let Some(r) = self.renderer.as_mut() else { return };
-        r.render(self.pane.view(true, ""));
+        let view = self.pane.view(true, "");
+        let caret = r.focused_caret_view_phys_rect(&view);
+        r.render(view);
+        ctx.set_caret_rect_phys(caret);
     }
 }
 

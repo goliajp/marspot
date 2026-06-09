@@ -96,10 +96,12 @@ fn resolve_cell_glyph(
         return None;
     }
     let ct_font = font.font(font_idx).clone();
+    let n_cells = crate::grid::char_width(ch).max(1) as u16;
     atlas.get_or_rasterize(
         GlyphKey { font_id: font_idx as u32, glyph },
         &ct_font,
         metrics,
+        n_cells,
     )
 }
 
@@ -367,6 +369,39 @@ impl MetalRenderer {
 
     pub fn cell_dims(&self) -> (f64, f64) {
         self.font.cell_dims()
+    }
+
+    /// Caret rect for a single-session render (mcli's path).  Builds
+    /// the same 1×1 Layout `render()` uses, then asks the layout where
+    /// the focused session's `(col, row)` maps in view-local physical
+    /// pixels (top-left, y-down).  Marspot's main loop has a real
+    /// multi-cell `Layout` and calls `Layout::caret_view_phys_rect`
+    /// directly; the geometry is shared in `Layout` so both binaries
+    /// stay in sync.  Returns `None` when the cursor is hidden or the
+    /// viewport hasn't been sized yet.
+    pub fn focused_caret_view_phys_rect(
+        &self,
+        view: &SessionView,
+    ) -> Option<(f64, f64, f64, f64)> {
+        if !view.cursor_visible {
+            return None;
+        }
+        if self.width_px < 1.0 || self.height_px < 1.0 {
+            return None;
+        }
+        let layout = Layout::build(
+            self.width_px,
+            self.height_px,
+            0.0,
+            self.top_inset_phys,
+            0.0,
+            1,
+            1,
+            self.font.cell_w,
+            self.font.cell_h,
+        );
+        let (col, row) = view.grid.cursor();
+        layout.caret_view_phys_rect(0, col, row, self.font.cell_w, self.font.cell_h)
     }
 
     pub fn atlas_approx_bytes(&self) -> usize {
@@ -1101,6 +1136,7 @@ fn push_empty_cell_glyphs(
         },
         &ct_font,
         metrics,
+        1,
     ) {
         Some(e) => e,
         None => return,
@@ -1159,6 +1195,7 @@ fn push_add_button_glyph(
         },
         &ct_font,
         metrics,
+        1,
     ) {
         Some(e) => e,
         None => return,
@@ -1407,6 +1444,7 @@ fn push_close_glyphs(
         },
         &ct_font,
         metrics,
+        1,
     ) {
         Some(e) => e,
         None => return,
@@ -1509,6 +1547,7 @@ fn push_sidebar(
             let (font_idx, glyph) = font.resolve_char(ch, false, false);
             if glyph != 0 {
                 let ct_font = font.font(font_idx).clone();
+                let n_cells = crate::grid::char_width(ch).max(1) as u16;
                 if let Some(e) = atlas.get_or_rasterize(
                     GlyphKey {
                         font_id: font_idx as u32,
@@ -1516,6 +1555,7 @@ fn push_sidebar(
                     },
                     &ct_font,
                     metrics,
+                    n_cells,
                 ) {
                     let slot_w = (metrics.cell_w * e.n_cells as u32) as f32;
                     glyphs.push(GlyphInstance {
@@ -1604,6 +1644,7 @@ fn push_session(
             let (font_idx, glyph) = font.resolve_char(ch, false, false);
             if glyph != 0 {
                 let ct_font = font.font(font_idx).clone();
+                let n_cells = crate::grid::char_width(ch).max(1) as u16;
                 if let Some(entry) = atlas.get_or_rasterize(
                     GlyphKey {
                         font_id: font_idx as u32,
@@ -1611,6 +1652,7 @@ fn push_session(
                     },
                     &ct_font,
                     metrics,
+                    n_cells,
                 ) {
                     let dest_y = (label_baseline_y - ascent).round();
                     let slot_w =
@@ -2402,6 +2444,7 @@ mod tests {
                 GlyphKey { font_id: 0, glyph: cg_glyph },
                 &font,
                 SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 },
+                1,
             )
             .expect("rasterise A");
         let (atlas_w, atlas_h) = atlas.dims();

@@ -403,11 +403,10 @@ impl MarspotApp for Marspot {
             return;
         }
 
-        let app_mode = self.panes[self.focused_idx]
-            .session()
-            .terminal
-            .cursor_key_application_mode();
-        if let Some(bytes) = key_event_to_bytes(&event, modifiers, app_mode) {
+        let term = &self.panes[self.focused_idx].session().terminal;
+        let app_mode = term.cursor_key_application_mode();
+        let bracketed = term.bracketed_paste_mode();
+        if let Some(bytes) = key_event_to_bytes(&event, modifiers, app_mode, bracketed) {
             if self.record_latency && self.pending_keystroke_t0.is_none() {
                 self.pending_keystroke_t0 = Some(std::time::Instant::now());
             }
@@ -747,7 +746,7 @@ impl MarspotApp for Marspot {
         self.rebuild_layout_at(ctx, phys_w, phys_h);
         // Sync render so the next CA commit lands a fresh frame at
         // the new size — avoids the live-resize flicker.
-        self.render_now();
+        self.render_now(ctx);
     }
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
@@ -761,10 +760,10 @@ impl MarspotApp for Marspot {
         ctx.exit();
     }
 
-    fn redraw(&mut self, _ctx: &MarspotAppCtx) {
+    fn redraw(&mut self, ctx: &MarspotAppCtx) {
         self.prof.redraw_requested_calls += 1;
         let render_t0 = std::time::Instant::now();
-        self.render_now();
+        self.render_now(ctx);
         self.prof.render_total_ns += render_t0.elapsed().as_nanos() as u64;
         self.prof.render_calls += 1;
         if self.prof.started_at.is_none() {
@@ -1261,7 +1260,7 @@ impl Marspot {
     /// Build a SessionView for each session and hand them all to the
     /// renderer.  Used by both RedrawRequested and the synchronous
     /// path in WindowEvent::Resized.
-    fn render_now(&mut self) {
+    fn render_now(&mut self, ctx: &MarspotAppCtx) {
         if self.layout.is_none() || self.renderer.is_none() {
             return;
         }
@@ -1406,7 +1405,23 @@ impl Marspot {
             .collect();
         let layout = self.layout.as_ref().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
+        let (cell_w, cell_h) = renderer.cell_dims();
         renderer.render_layout(layout, &views, &entries, sidebar_focus);
+
+        // Publish the focused-pane caret rect (view-local physical
+        // pixels, top-left origin) so the IME candidate window
+        // anchors under the caret.  Shared geometry lives in
+        // `Layout::caret_view_phys_rect`; mcli routes through the
+        // renderer equivalent so both binaries stay in sync.
+        let caret = self.panes.get(focused).and_then(|pane| {
+            let term = pane.session().terminal();
+            if !term.cursor_visible() {
+                return None;
+            }
+            let (col, row) = term.grid().cursor();
+            layout.caret_view_phys_rect(focused, col, row, cell_w, cell_h)
+        });
+        ctx.set_caret_rect_phys(caret);
     }
 }
 

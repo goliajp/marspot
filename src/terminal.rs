@@ -104,6 +104,14 @@ pub struct Terminal {
     /// distinctly from navigation. Read by the input layer when
     /// encoding arrow keys.
     cursor_key_application_mode: bool,
+    /// DEC mode `?2004` (bracketed paste). When set, the input layer
+    /// wraps Cmd-V paste content in `\e[200~ ... \e[201~` so the app
+    /// (Claude Code TUI, vim, etc.) can distinguish pasted bytes from
+    /// interactive typing. Without this, Claude Code's input handler
+    /// treats each Chinese char in a paste as a separate keystroke and
+    /// auto-inserts spaces between CJK characters — the "粘贴中文都
+    /// 多了空格" symptom.
+    bracketed_paste_mode: bool,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
     /// DECAWM "deferred wrap" — set after printing a glyph in the last
@@ -172,6 +180,7 @@ impl Terminal {
             scroll_bot: rows.saturating_sub(1),
             pending_response: Vec::new(),
             cursor_key_application_mode: false,
+            bracketed_paste_mode: false,
             cursor_visible: true,
             pending_wrap: false,
             predictions: VecDeque::new(),
@@ -194,6 +203,14 @@ impl Terminal {
     /// keys distinctly from PgUp/PgDn navigation.
     pub fn cursor_key_application_mode(&self) -> bool {
         self.cursor_key_application_mode
+    }
+
+    /// True when DECSET ?2004 is active — the app (Claude Code, vim,
+    /// neovim, fish, zsh-bracketed-paste etc.) has asked the terminal
+    /// to wrap pasted content in `\e[200~ ... \e[201~`. Read by the
+    /// input layer when handling Cmd-V.
+    pub fn bracketed_paste_mode(&self) -> bool {
+        self.bracketed_paste_mode
     }
 
     /// Drain any bytes the terminal wants to send back to the PTY in
@@ -326,6 +343,7 @@ impl Terminal {
             let scroll_bot = &mut self.scroll_bot;
             let pending_response = &mut self.pending_response;
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
+            let bracketed_paste = &mut self.bracketed_paste_mode;
             let cursor_visible = &mut self.cursor_visible;
             let pending_wrap = &mut self.pending_wrap;
             let mut handler = Handler {
@@ -333,6 +351,7 @@ impl Terminal {
                 scroll_top, scroll_bot,
                 pending_response,
                 cursor_key_app_mode,
+                bracketed_paste,
                 cursor_visible,
                 pending_wrap,
             };
@@ -360,6 +379,7 @@ struct Handler<'a> {
     scroll_bot: &'a mut u16,
     pending_response: &'a mut Vec<u8>,
     cursor_key_app_mode: &'a mut bool,
+    bracketed_paste: &'a mut bool,
     cursor_visible: &'a mut bool,
     pending_wrap: &'a mut bool,
 }
@@ -453,16 +473,20 @@ impl<'a> Handler<'a> {
                     self.exit_alt_screen();
                 }
             }
+            // DECSET ?2004 — bracketed paste. When set, the input
+            // layer wraps Cmd-V paste in `\e[200~ ... \e[201~` so apps
+            // can distinguish paste from interactive typing. Read via
+            // `Terminal::bracketed_paste_mode()`.
+            2004 => *self.bracketed_paste = set,
             // Accept silently — these modes have no rendering side
             // effect we model, but apps want them to "succeed" rather
             // than no-op silently. Listed explicitly so future audits
             // see them.
             //   1000 / 1002 / 1003 / 1006 / 1015 — mouse reporting modes
             //   1004                — focus reporting in/out events
-            //   2004                — bracketed paste mode
             //   2026                — synchronized output (begin/end batch)
             //   2031                — color scheme update notifications
-            1000 | 1002 | 1003 | 1006 | 1015 | 1004 | 2004 | 2026 | 2031 => {}
+            1000 | 1002 | 1003 | 1006 | 1015 | 1004 | 2026 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip
         }
     }
@@ -1804,6 +1828,7 @@ mod tests {
             scroll_bot: 23, // grid is 24 rows here
             pending_response: Vec::new(),
             cursor_key_application_mode: false,
+            bracketed_paste_mode: false,
             cursor_visible: true,
             pending_wrap: false,
             predictions: VecDeque::new(),
