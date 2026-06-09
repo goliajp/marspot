@@ -29,13 +29,13 @@ use std::collections::HashMap;
 // retained as the fallback chain target inside FontCache::build for
 // the rare case where Monaco isn't installed (it ships with macOS,
 // so this should never fire in practice).
-// Font choice: JetBrains Mono is lighter than Monaco at the same
-// point size — Monaco at 12pt on a 1x display reads as visually
-// "heavy" (chunky strokes). JetBrains Mono ships a Light style and
-// has thinner default strokes, so glyphs land lighter without
-// changing point size.  We fall back to Menlo (system) if JetBrains
-// Mono isn't installed, and finally to Monaco.
-pub const FONT_NAME: &str = "JetBrainsMono-Regular";
+// Font choice: Monaco — macOS-native, what every old-school terminal
+// app reaches for.  Was briefly switched to JetBrains Mono when the
+// CT font-smoothing thickening + sRGB-encoded Metal target were
+// double-bolding glyphs, but with both fixed (atlas no longer asks
+// for smoothing, target is `BGRA8Unorm`) Monaco reads at the
+// designed weight again — the comparison-to-iTerm2 sweet spot.
+pub const FONT_NAME: &str = "Monaco";
 pub const FONT_POINT: f64 = 12.0;
 
 /// Background color for the terminal.  Near-pure-black with a
@@ -214,9 +214,7 @@ const CHAR_CACHE_CAP: usize = 8192;
 impl FontCache {
     pub fn build() -> Result<Self, String> {
         let font = new_from_name(FONT_NAME, FONT_POINT)
-            .or_else(|_| new_from_name("JetBrains Mono", FONT_POINT))
             .or_else(|_| new_from_name("Menlo", FONT_POINT))
-            .or_else(|_| new_from_name("Monaco", FONT_POINT))
             .map_err(|_| "could not load font".to_string())?;
 
         let cell_w = compute_cell_width(&font);

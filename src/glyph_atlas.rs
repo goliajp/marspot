@@ -476,16 +476,16 @@ fn rasterise_glyph(
 
     ctx.set_should_antialias(true);
     ctx.set_allows_antialiasing(true);
-    // Font smoothing OFF: in a layer-backed pipeline that composites
-    // 8-bit alpha masks (no subpixel/LCD AA), `should_smooth_fonts(true)`
-    // applies CoreText's "stroke widening" that was designed to
-    // compensate for subpixel positioning — without subpixel actually
-    // running, the widening just makes every glyph render ~0.5px
-    // thicker than its design. The user-visible symptom is "text looks
-    // like bold even when it isn't" vs iTerm2 / Terminal.app, which
-    // turn this off on layer-backed views for the same reason.
-    ctx.set_should_smooth_fonts(false);
-    ctx.set_allows_font_smoothing(false);
+    // Font smoothing ON: applies CoreText's stroke-widening for
+    // gamma-correct AA.  We had this OFF briefly when the Metal
+    // target was `BGRA8Unorm_sRGB`, because that did linear-space
+    // blending which COMPOUNDED with smoothing's compensation and
+    // made text read as "always bold".  With the target switched to
+    // `BGRA8Unorm` (sRGB-space blending, the iTerm2 / Terminal.app
+    // path), smoothing now lands at the designed weight — without it
+    // glyphs feel ~0.5 px too thin / fragile.
+    ctx.set_should_smooth_fonts(true);
+    ctx.set_allows_font_smoothing(true);
     ctx.set_should_subpixel_position_fonts(true);
     ctx.set_allows_font_subpixel_positioning(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);

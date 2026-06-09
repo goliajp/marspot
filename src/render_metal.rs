@@ -133,12 +133,22 @@ pub struct GlyphInstance {
     pub color: [f32; 4],
 }
 
-/// Pixel format the Metal pipeline + the CAMetalLayer agree on.  sRGB
-/// because the AppKit renderer paints in normalised-sRGB-like values
-/// (`render.rs` BG/FG constants); matching the colour space here means
-/// the same triple drawn through either renderer comes out the same
-/// pixel on screen.
-const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm_sRGB;
+/// Pixel format the Metal pipeline + the CAMetalLayer agree on.
+///
+/// We use plain `BGRA8Unorm` (NOT `_sRGB`).  The sRGB-encoded variant
+/// asks the GPU to treat shader outputs as linear and convert to
+/// sRGB on store — which is mathematically clean but means we'd have
+/// to feed it linear values.  Our colour constants and the SGR
+/// 38;2;R;G;B values claudecode / shells emit are sRGB-space (the
+/// CSS / web convention), so passing them to an sRGB-encoded target
+/// double-gamma-corrects: a coral `rgb(215,119,87)` comes out brighter
+/// and shifted towards red.  iTerm2 / Terminal.app dodge this the
+/// same way — non-sRGB format, sRGB values written directly, display
+/// reads bytes as sRGB.  Bonus: text AA blends in sRGB space, which
+/// designers tune fonts for; linear-space blending makes small text
+/// look "thin" and harder to read even though it's mathematically
+/// "more correct".
+const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
 const SHADER_SRC: &str = include_str!("shaders/cells.metal");
 
