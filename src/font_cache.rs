@@ -29,7 +29,13 @@ use std::collections::HashMap;
 // retained as the fallback chain target inside FontCache::build for
 // the rare case where Monaco isn't installed (it ships with macOS,
 // so this should never fire in practice).
-pub const FONT_NAME: &str = "Monaco";
+// Font choice: JetBrains Mono is lighter than Monaco at the same
+// point size — Monaco at 12pt on a 1x display reads as visually
+// "heavy" (chunky strokes). JetBrains Mono ships a Light style and
+// has thinner default strokes, so glyphs land lighter without
+// changing point size.  We fall back to Menlo (system) if JetBrains
+// Mono isn't installed, and finally to Monaco.
+pub const FONT_NAME: &str = "JetBrainsMono-Regular";
 pub const FONT_POINT: f64 = 12.0;
 
 /// Background color for the terminal.  Near-pure-black with a
@@ -43,27 +49,29 @@ pub const BG: (CGFloat, CGFloat, CGFloat) = (0.006, 0.008, 0.014);
 /// the eyes for long-running sessions.
 pub const FG: (CGFloat, CGFloat, CGFloat) = (0.8620, 0.8620, 0.8620);
 
-/// ANSI 16-colour palette — copied from iTerm2's default (Dark)
-/// profile so SGR 30..37 / 90..97 colours render identically to
-/// what the user is used to seeing in iTerm2.  Values via
-/// `defaults read com.googlecode.iterm2 "New Bookmarks"`,
-/// "Ansi N Color (Dark)" entries.
+/// ANSI 16-colour palette — punchier than iTerm2's stock Dark.  iTerm2
+/// Dark's bright-red (#dc7974) and bright-magenta (#e07de0) lean
+/// pink-salmon, and bright-blue (#a6aaf1) is lavender; the user
+/// flagged these as "red looks pink, everything looks grey".  This
+/// table keeps the dark variants similar (they're already grounded)
+/// but bumps the bright row to saturated values — closer to macOS
+/// Terminal.app's defaults and the One Dark / Tomorrow Night family.
 pub const ANSI_16: [(CGFloat, CGFloat, CGFloat); 16] = [
     (0.0784, 0.0980, 0.1176), //  0 black           #14191e
-    (0.7074, 0.2366, 0.1630), //  1 red             #b43c29
-    (0.0000, 0.7608, 0.0000), //  2 green           #00c200
-    (0.7806, 0.7696, 0.0000), //  3 yellow          #c7c400
-    (0.1540, 0.2647, 0.7822), //  4 blue            #2743c7
-    (0.7522, 0.2493, 0.7449), //  5 magenta         #bf3fbd
-    (0.0000, 0.7743, 0.7817), //  6 cyan            #00c5c7
+    (0.7726, 0.2354, 0.1568), //  1 red             #c53c28
+    (0.1875, 0.7813, 0.3398), //  2 green           #30c757
+    (0.8125, 0.6172, 0.1602), //  3 yellow          #cf9e29
+    (0.3320, 0.5391, 0.9023), //  4 blue            #5489e6
+    (0.7344, 0.3672, 0.8125), //  5 magenta         #bb5ecf
+    (0.1602, 0.7188, 0.7461), //  6 cyan            #29b7be
     (0.7810, 0.7811, 0.7810), //  7 white           #c7c7c7
     (0.4078, 0.4078, 0.4078), //  8 bright black    #676767
-    (0.8660, 0.4752, 0.4583), //  9 bright red      #dc7974
-    (0.3450, 0.9043, 0.5654), // 10 bright green    #57e690
-    (0.9259, 0.8834, 0.0000), // 11 bright yellow   #ece100
-    (0.6535, 0.6704, 0.9485), // 12 bright blue     #a6aaf1
-    (0.8822, 0.4927, 0.8822), // 13 bright magenta  #e07de0
-    (0.3760, 0.9926, 1.0000), // 14 bright cyan     #5ffdff
+    (1.0000, 0.3711, 0.3398), //  9 bright red      #ff5f57 (was pink)
+    (0.3203, 0.8633, 0.4297), // 10 bright green    #51dc6e
+    (1.0000, 0.7656, 0.2148), // 11 bright yellow   #ffc337
+    (0.3984, 0.6328, 1.0000), // 12 bright blue     #66a1ff
+    (1.0000, 0.4453, 0.7813), // 13 bright magenta  #ff72c8 (was lavender)
+    (0.3984, 0.9219, 0.9492), // 14 bright cyan     #66ebf2
     (1.0000, 1.0000, 1.0000), // 15 bright white    #feffff
 ];
 
@@ -206,7 +214,9 @@ const CHAR_CACHE_CAP: usize = 8192;
 impl FontCache {
     pub fn build() -> Result<Self, String> {
         let font = new_from_name(FONT_NAME, FONT_POINT)
+            .or_else(|_| new_from_name("JetBrains Mono", FONT_POINT))
             .or_else(|_| new_from_name("Menlo", FONT_POINT))
+            .or_else(|_| new_from_name("Monaco", FONT_POINT))
             .map_err(|_| "could not load font".to_string())?;
 
         let cell_w = compute_cell_width(&font);
