@@ -38,6 +38,11 @@ pub struct PtyConfig {
     /// zsh's PROMPT_EOL_MARK doesn't fire on a fresh prompt because the
     /// non-login startup path leaves the cursor mid-line.
     pub argv0: Option<String>,
+    /// Working directory for the child.  `None` → inherit marspot's
+    /// cwd (which is `/` when launched via LaunchServices and would
+    /// drop the user in the root directory).  Set to `$HOME` so a
+    /// freshly-spawned shell opens where the user expects.
+    pub cwd: Option<String>,
 }
 
 /// Owned handle to a spawned child process attached to a pseudo-terminal.
@@ -68,6 +73,14 @@ impl Pty {
             .map(|a| CString::new(a.as_bytes()))
             .collect::<Result<_, _>>()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "argument contains NUL"))?;
+        let cwd_cstring: Option<CString> = match config.cwd.as_ref() {
+            Some(p) => Some(
+                CString::new(p.as_bytes()).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "cwd contains NUL")
+                })?,
+            ),
+            None => None,
+        };
 
         // argv[0] = override-or-program, argv[1..] = args, argv[last] = NULL
         let mut argv: Vec<*const c_char> = Vec::with_capacity(arg_cstrings.len() + 2);
@@ -102,7 +115,14 @@ impl Pty {
         }
         if pid == 0 {
             // Child.  Only async-signal-safe calls allowed here.
+            // `chdir` is on the AS-safe list (POSIX-2008); falling
+            // through to execvp on chdir failure rather than crashing
+            // means a stale cwd path just leaves the shell wherever
+            // forkpty put us.
             unsafe {
+                if let Some(ref c) = cwd_cstring {
+                    libc::chdir(c.as_ptr());
+                }
                 // execvp does PATH search for relative names (e.g. "tmux")
                 // while still matching execv's behaviour for absolute
                 // paths.  Strict execv would refuse "tmux" outright.
@@ -320,6 +340,7 @@ mod tests {
             args: vec!["hello marspot".into()],
             size: TerminalSize::default(),
             argv0: None,
+            cwd: None,
         })
         .expect("spawn /bin/echo");
 
@@ -335,6 +356,7 @@ mod tests {
             args: vec!["60".into()],
             size: TerminalSize::default(),
             argv0: None,
+            cwd: None,
         })
         .expect("spawn /bin/sleep");
 
@@ -372,6 +394,7 @@ mod tests {
             args: vec!["60".into()],
             size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
             argv0: None,
+            cwd: None,
         })
         .expect("spawn /bin/sleep");
 
@@ -407,6 +430,7 @@ mod tests {
             args: vec![],
             size: TerminalSize::default(),
             argv0: None,
+            cwd: None,
         })
         .expect("spawn /bin/cat");
 
@@ -458,6 +482,7 @@ mod tests {
             args: vec![],
             size: TerminalSize::default(),
             argv0: None,
+            cwd: None,
         })
         .expect("spawn /usr/bin/true")
     }
@@ -548,6 +573,7 @@ mod tests {
                 args: vec!["60".into()],
                 size: TerminalSize::default(),
             argv0: None,
+            cwd: None,
             })
             .expect("spawn /bin/sleep");
 
@@ -593,6 +619,7 @@ mod tests {
             args: vec![],
             size: TerminalSize::default(),
             argv0: None,
+            cwd: None,
         })
         .expect("spawn /usr/bin/true");
 

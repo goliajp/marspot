@@ -60,8 +60,23 @@ PROMPT_EOL_MARK=""
 # at top-level can race with plugins that mutate zle_highlight later.
 () { zle_highlight=(paste:none) } 2>/dev/null
 "#;
-    let path = dir.join(".zshrc");
-    let _ = std::fs::write(&path, shim);
+    let _ = std::fs::write(dir.join(".zshrc"), shim);
+    // Setting ZDOTDIR also reroutes .zshenv / .zprofile / .zlogin to
+    // ZDOTDIR/* — without these shims the user's per-user env (PATH
+    // additions, NVM init, asdf, etc.) would silently fail to load.
+    // Each forwarder is a no-op when the upstream file is absent.
+    let _ = std::fs::write(
+        dir.join(".zshenv"),
+        "[[ -f \"$HOME/.zshenv\" ]] && source \"$HOME/.zshenv\"\n",
+    );
+    let _ = std::fs::write(
+        dir.join(".zprofile"),
+        "[[ -f \"$HOME/.zprofile\" ]] && source \"$HOME/.zprofile\"\n",
+    );
+    let _ = std::fs::write(
+        dir.join(".zlogin"),
+        "[[ -f \"$HOME/.zlogin\" ]] && source \"$HOME/.zlogin\"\n",
+    );
     // SAFETY: called from `ensure_shell_zdot_shim_installed` which
     // gates this through OnceLock; only fires the first time any
     // binary calls Session::spawn, before that binary spawns reader
@@ -230,6 +245,12 @@ impl Session {
         // sanitisation automatically).
         ensure_shell_zdot_shim_installed();
 
+        // Default cwd to $HOME so a freshly-spawned shell opens where
+        // the user expects.  LaunchServices-launched marspot inherits
+        // cwd = `/`, which would otherwise leave every new shell in
+        // the root directory.  Falls back to the inherited cwd (None)
+        // when HOME is unset.
+        let cwd = std::env::var("HOME").ok();
         let pty = Pty::spawn(PtyConfig {
             program: program.into(),
             args: args.iter().map(|s| (*s).to_string()).collect(),
@@ -240,6 +261,7 @@ impl Session {
                 pixel_height: 0,
             },
             argv0,
+            cwd,
         })?;
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CAPACITY);
         let exited = Arc::new(AtomicBool::new(false));
