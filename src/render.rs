@@ -40,12 +40,22 @@ pub struct SessionView<'a> {
     /// cell.  Empty string skips the strip entirely (useful for
     /// snapshot / mcli single-session rendering).
     pub title: &'a str,
-    /// Optional text selection for this session in the LIVE grid
-    /// (`(anchor_col, anchor_row, focus_col, focus_row)` in cell
-    /// coordinates).  `None` means no selection.  When set, the
-    /// renderer paints a SELECTION_BG highlight over the cells
-    /// in [start..=end] (row-major) inside the terminal area.
-    pub selection: Option<((u16, u16), (u16, u16))>,
+    /// Optional text selection for this session.  Coords are
+    /// viewport-local (caller has already projected absolute rows
+    /// through the current `view_offset` and clipped to the visible
+    /// band).  When `blockwise` is true the renderer fills a
+    /// rectangle `[min(anchor.col, focus.col)..=max(...)]` on each
+    /// row from anchor to focus; otherwise it paints a row-band:
+    /// first row from anchor.col to end, middle rows entirely, last
+    /// row from start to focus.col — the iTerm2 default.
+    pub selection: Option<SelectionView>,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct SelectionView {
+    pub anchor: (u16, u16),
+    pub focus: (u16, u16),
+    pub blockwise: bool,
 }
 
 /// One row of the sidebar — what the user sees on the left.  Length

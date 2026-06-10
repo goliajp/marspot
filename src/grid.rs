@@ -118,6 +118,16 @@ pub struct Grid {
     /// `scroll_up`; reset to 0 by `resize`.
     top_row: u16,
     scrollback: Scrollback,
+    /// Monotonically-increasing count of lines pushed into scrollback
+    /// over this grid's lifetime.  Increments once per row inside
+    /// `scroll_up`, so callers can observe "how many new lines have
+    /// rolled into history since I last checked" without polling
+    /// `scrollback_len` (which goes flat once the ring is full).
+    /// Drives the selection-follows-content invariant in main.rs:
+    /// after each pump, Marspot bumps the selection's abs coords by
+    /// this delta so the highlight stays on the same content as it
+    /// shifts up into scrollback.
+    scroll_push_count: u64,
 }
 
 impl Grid {
@@ -148,6 +158,7 @@ impl Grid {
             cursor_row: 0,
             top_row: 0,
             scrollback,
+            scroll_push_count: 0,
         }
     }
 
@@ -226,8 +237,13 @@ impl Grid {
             if self.top_row >= self.rows {
                 self.top_row = 0;
             }
+            self.scroll_push_count = self.scroll_push_count.saturating_add(1);
         }
     }
+
+    /// Monotonic count of lines pushed into scrollback over this
+    /// grid's lifetime.  See the field comment for the contract.
+    pub fn scroll_push_count(&self) -> u64 { self.scroll_push_count }
 
     /// Region-bounded scroll up: shift rows in `top..=bot` upward by
     /// `lines`; new rows at the bottom of the region are blanked with

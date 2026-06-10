@@ -73,7 +73,7 @@ pub trait MarspotApp: 'static {
     fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, modifiers: Modifiers);
 
     /// Mouse-down with location in physical pixels, origin top-left.
-    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64);
+    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, modifiers: Modifiers);
 
     /// Mouse-dragged (button still pressed) at physical-pixel `(x, y)`.
     /// Default implementation is a no-op — apps that want drag/select
@@ -388,7 +388,13 @@ declare_class!(
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
-            dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys });
+            // Modifier flags carry on the NSEvent — read them here so
+            // mouse_down callers can branch on Option (alt) for
+            // block-wise selection, Cmd for chord shortcuts, etc.,
+            // without round-tripping through last_modifiers (which
+            // only updates on keyDown).
+            let mods = nsevent_modifiers(event);
+            dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys, mods });
         }
 
         #[method(mouseDragged:)]
@@ -714,7 +720,7 @@ declare_class!(
 enum EventKind {
     UserEvent,
     Key(MarspotKeyEvent, Modifiers),
-    MouseDown { x: f64, y: f64 },
+    MouseDown { x: f64, y: f64, mods: Modifiers },
     MouseDrag { x: f64, y: f64 },
     MouseUp { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
@@ -743,7 +749,7 @@ fn dispatch_event(kind: EventKind) {
         match kind {
             EventKind::UserEvent => app.user_event(ctx),
             EventKind::Key(ev, mods) => app.key_event(ctx, ev, mods),
-            EventKind::MouseDown { x, y } => app.mouse_down(ctx, x, y),
+            EventKind::MouseDown { x, y, mods } => app.mouse_down(ctx, x, y, mods),
             EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
             EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),

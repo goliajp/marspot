@@ -1333,6 +1333,56 @@ fn push_grid_icon(
     }
 }
 
+/// Draw a sidebar-silhouette icon inside `container`: a thin outer
+/// rect (the "window") with a small bar on the left (the "sidebar
+/// strip").  When `collapsed`, the bar dims so the icon doubles as a
+/// state indicator — bright bar = currently shown, dim bar = hidden.
+fn push_sidebar_icon(
+    cells: &mut Vec<CellInstance>,
+    container: Rect,
+    collapsed: bool,
+) {
+    let pad = (container.w.min(container.h) * 0.22).max(2.0);
+    let inner_x = container.x + pad;
+    let inner_y = container.y_top + pad;
+    let inner_w = (container.w - 2.0 * pad).max(1.0);
+    let inner_h = (container.h - 2.0 * pad).max(1.0);
+    let frame = Rect {
+        x: inner_x,
+        y_top: inner_y,
+        w: inner_w,
+        h: inner_h,
+    };
+    push_border(cells, frame, 1.0, CHROME_ICON_FG);
+    // Sidebar strip — roughly 1/3 of the inner width, sits flush
+    // against the frame's left edge.  Painted as a filled rect (over
+    // the frame border so it reads as a solid panel).
+    let strip_w = (inner_w * 0.33).max(2.0);
+    let strip_color = if collapsed {
+        // Match the dim border tone — the strip drops to the same
+        // weight as the frame so "no sidebar visible right now" reads
+        // at a glance.
+        [
+            CHROME_ICON_FG[0] * 0.55,
+            CHROME_ICON_FG[1] * 0.55,
+            CHROME_ICON_FG[2] * 0.55,
+            CHROME_ICON_FG[3],
+        ]
+    } else {
+        CHROME_ICON_FG
+    };
+    push_rect(
+        cells,
+        Rect {
+            x: inner_x,
+            y_top: inner_y,
+            w: strip_w,
+            h: inner_h,
+        },
+        strip_color,
+    );
+}
+
 // Close-[×] button colours.  Subtle red-tinted BG so the user
 // reads "destructive action zone" without it screaming; the
 // actual `×` glyph is rasterised via the FG pass so it's a
@@ -1357,6 +1407,20 @@ const ADD_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
 const SESSION_COUNT_HARD_CAP: usize = 9;
 
 fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
+    // Sidebar toggle button — sits left of the layout button so the
+    // user always has a way back when the sidebar is collapsed.  The
+    // icon's "sidebar bar" dims when collapsed (state derived from
+    // sidebar_w, kept in sync by `rebuild_layout_at`) so the
+    // affordance doubles as a state indicator.
+    let sidebar_collapsed = layout.sidebar_w == 0.0;
+    push_rect(cells, layout.sidebar_button_rect, CHROME_BTN_BG);
+    push_border(cells, layout.sidebar_button_rect, 1.0, CHROME_BTN_BORDER);
+    push_sidebar_icon(
+        cells,
+        layout.sidebar_button_rect,
+        sidebar_collapsed,
+    );
+
     // Layout button is always present (even at 1×1); shows the
     // current grid shape so the user can tell at a glance.
     push_rect(cells, layout.layout_button_rect, CHROME_BTN_BG);
@@ -1711,34 +1775,61 @@ fn push_session(
     // ANSI-bg text) overdraw correctly.  Selection coordinates
     // come from the caller in cell coords; we normalise to a
     // top-left → bottom-right pair inline.
-    if let Some((anchor, focus)) = view.selection {
-        let (start, end) = if (anchor.1, anchor.0) <= (focus.1, focus.0) {
-            (anchor, focus)
-        } else {
-            (focus, anchor)
-        };
-        let (s_col, s_row) = start;
-        let (e_col, e_row) = end;
+    if let Some(sel) = view.selection {
+        let (anchor, focus) = (sel.anchor, sel.focus);
         let max_row = grid.rows().saturating_sub(1);
         let max_col = grid.cols().saturating_sub(1);
-        let s_row = s_row.min(max_row);
-        let e_row = e_row.min(max_row);
-        for r in s_row..=e_row {
-            let col_lo = if r == s_row { s_col } else { 0 };
-            let col_hi = if r == e_row { e_col } else { max_col };
-            let col_lo = col_lo.min(max_col);
-            let col_hi = col_hi.min(max_col);
-            if col_hi < col_lo {
-                continue;
+        if sel.blockwise {
+            // Rectangle: each row from min..=max col, independent
+            // of row position.  Lets the user carve out a column
+            // from multi-column output (ls, top) without dragging
+            // the column-aligned padding along.
+            let r_lo = anchor.1.min(focus.1).min(max_row);
+            let r_hi = anchor.1.max(focus.1).min(max_row);
+            let c_lo = anchor.0.min(focus.0).min(max_col);
+            let c_hi = anchor.0.max(focus.0).min(max_col);
+            if c_hi >= c_lo {
+                let w = (c_hi - c_lo + 1) as f32 * cell_w;
+                for r in r_lo..=r_hi {
+                    cells.push(CellInstance {
+                        origin: [
+                            inner_x + c_lo as f32 * cell_w,
+                            inner_y + r as f32 * cell_h,
+                        ],
+                        size: [w, cell_h],
+                        color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+                    });
+                }
             }
-            let x = inner_x + col_lo as f32 * cell_w;
-            let y = inner_y + r as f32 * cell_h;
-            let w = (col_hi - col_lo + 1) as f32 * cell_w;
-            cells.push(CellInstance {
-                origin: [x, y],
-                size: [w, cell_h],
-                color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
-            });
+        } else {
+            // Row-band: top row from anchor.col to end, middle rows
+            // full width, bottom row from start to focus.col.
+            let (start, end) = if (anchor.1, anchor.0) <= (focus.1, focus.0) {
+                (anchor, focus)
+            } else {
+                (focus, anchor)
+            };
+            let (s_col, s_row) = start;
+            let (e_col, e_row) = end;
+            let s_row = s_row.min(max_row);
+            let e_row = e_row.min(max_row);
+            for r in s_row..=e_row {
+                let col_lo = if r == s_row { s_col } else { 0 };
+                let col_hi = if r == e_row { e_col } else { max_col };
+                let col_lo = col_lo.min(max_col);
+                let col_hi = col_hi.min(max_col);
+                if col_hi < col_lo {
+                    continue;
+                }
+                let x = inner_x + col_lo as f32 * cell_w;
+                let y = inner_y + r as f32 * cell_h;
+                let w = (col_hi - col_lo + 1) as f32 * cell_w;
+                cells.push(CellInstance {
+                    origin: [x, y],
+                    size: [w, cell_h],
+                    color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+                });
+            }
         }
     }
 

@@ -28,6 +28,13 @@ pub struct Pane {
     /// = looking back into history. A keystroke resets to 0 so the
     /// user's keypress always lands in a visible prompt.
     view_offset: u16,
+    /// Last-seen value of `grid.scroll_push_count()`, captured by
+    /// `drain_scroll_push_delta`.  The container (marspot's
+    /// `user_event`) polls the delta after each pump so it can shift
+    /// any live selection's abs coords by the number of lines that
+    /// just rolled into scrollback — keeping the highlight pinned to
+    /// the original content instead of the original screen position.
+    last_seen_scroll_push: u64,
 }
 
 impl Pane {
@@ -39,7 +46,21 @@ impl Pane {
         Self {
             session,
             view_offset: 0,
+            last_seen_scroll_push: 0,
         }
+    }
+
+    /// Returns the number of lines pushed into scrollback since the
+    /// last call (then updates the bookmark).  Marspot calls this
+    /// after each `pump` to keep live selections aligned with the
+    /// content they were originally anchored to — every push moves
+    /// the same content one row further from live bottom, so the
+    /// selection's abs coords must rise by the same amount.
+    pub fn drain_scroll_push_delta(&mut self) -> u64 {
+        let now = self.session.terminal().grid().scroll_push_count();
+        let delta = now.saturating_sub(self.last_seen_scroll_push);
+        self.last_seen_scroll_push = now;
+        delta
     }
 
     /// Read-only access to the underlying session. Multi-session

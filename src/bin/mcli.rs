@@ -66,7 +66,7 @@ impl MarspotApp for Mcli {
         }
     }
 
-    fn mouse_down(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {
+    fn mouse_down(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _modifiers: marspot::input::Modifiers) {
         // mcli has no sidebar / no layout — clicks are no-ops for now.
     }
 

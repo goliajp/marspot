@@ -227,6 +227,12 @@ struct Marspot {
     /// floats over the main area; while open, mouse_down hits hit-test
     /// the picker first and swallow background clicks.
     layout_picker_open: bool,
+    /// `true` when the user has collapsed the sidebar (Cmd-B).  The
+    /// next `rebuild_layout_at` zeroes `sidebar_phys`, handing the
+    /// reclaimed width to the cell grid.  `Layout::build` already
+    /// supports `sidebar_w == 0` (headless / snapshot path), so the
+    /// rest of the render + hit-test code follows for free.
+    sidebar_collapsed: bool,
     /// MARSPOT_PROFILE_RSS instrumentation — when set, every ~1 s the
     /// main loop appends one TSV row of per-subsystem RSS to this
     /// path.  Off-path entirely when the env var is unset.  See
@@ -245,16 +251,37 @@ struct Marspot {
     event_proxy: EventProxy,
 }
 
-/// Live text selection inside one session's grid.  Coords are
-/// terminal cells (column, row), 0-indexed from the cell's inner
-/// origin.  `anchor` is where the drag started, `focus` is the
-/// current cursor position; serialise/render normalise so the
-/// pair always reads top-left → bottom-right.
+/// Live text selection inside one session's grid.  Column is the
+/// grid column index; `abs` is "rows up from the current live grid's
+/// bottom" — 0 = live bottom row, `rows-1` = live top row, then
+/// `rows..=rows+scrollback_len-1` walks scrollback from newest to
+/// oldest.  This anchors the selection to *content* (modulo PTY churn,
+/// which shifts content into scrollback as new lines come in) instead
+/// of to the *viewport*, so scrolling preserves the selection and the
+/// user can extend it across the viewport edge into scrollback.
+/// `anchor` is where the drag started, `focus` is the current cursor
+/// position; serialise/render normalise so the pair always reads
+/// top-left → bottom-right.  `mode` is sticky for the duration of one
+/// drag (locked at mouse_down based on the Option modifier).
 #[derive(Clone, Copy, Debug)]
 struct Selection {
     session_idx: usize,
-    anchor: (u16, u16),
-    focus: (u16, u16),
+    anchor: (u16, u32),
+    focus: (u16, u32),
+    mode: SelectionMode,
+}
+
+/// Linewise: cross-row drags take the first row from `anchor.col` to
+/// the end, middle rows entirely, the last row from start to
+/// `focus.col` — the iTerm2 / Terminal.app default, ideal for prose.
+/// Blockwise: each row is sliced to `[min(anchor.col, focus.col),
+/// max(...)]`, so the user can carve out a rectangle inside multi-
+/// column output (ls, top, htop) without dragging the column-aligned
+/// padding along with it.  Triggered by Option+drag at mouse_down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionMode {
+    Linewise,
+    Blockwise,
 }
 
 #[derive(Default)]
@@ -306,11 +333,51 @@ impl MarspotApp for Marspot {
             self.pump_tmux_session()
         } else {
             let mut total = 0;
-            for p in &mut self.panes {
+            for (i, p) in self.panes.iter_mut().enumerate() {
                 let feed_t0 = std::time::Instant::now();
                 let n = p.pump();
                 self.prof.feed_total_ns += feed_t0.elapsed().as_nanos() as u64;
                 total += n;
+                // PTY just touched this pane's grid.  Two distinct
+                // failure modes can desynchronise the selection from
+                // what's actually on screen, so we handle them in
+                // tandem:
+                //
+                //  1. `scroll_up` rolled N rows into scrollback —
+                //     bump selection.abs by N so the highlight stays
+                //     pinned to the original content as it migrates
+                //     up out of the live grid.
+                //  2. The pane's contents changed (TUIs like
+                //     Claude Code repaint in place via CUP/EL — no
+                //     scroll, so the bump above isn't enough), and
+                //     the dragging session isn't the one being
+                //     edited.  Drop the selection so we don't leave
+                //     a stale highlight on top of rewritten cells.
+                //     The user can re-select if they wanted it; this
+                //     is the same contract typing already enforces
+                //     in `key_event`.
+                let pushed = p.drain_scroll_push_delta();
+                let has_bytes = n > 0;
+                if let Some(sel) = self.selection.as_mut() {
+                    if sel.session_idx == i {
+                        if pushed > 0 {
+                            let bump = pushed as u32;
+                            sel.anchor.1 = sel.anchor.1.saturating_add(bump);
+                            sel.focus.1 = sel.focus.1.saturating_add(bump);
+                        }
+                        // After the abs bump: if there were any
+                        // non-scroll byte writes (push_count alone
+                        // can't cover in-place repaint), and the
+                        // user isn't actively dragging out the
+                        // selection, drop it.  `pushed` rows already
+                        // moved the highlight out of the way of new
+                        // appended lines; what's left to defend
+                        // against is the in-place case.
+                        if has_bytes && !self.selection_dragging {
+                            self.selection = None;
+                        }
+                    }
+                }
             }
             total
         };
@@ -353,6 +420,23 @@ impl MarspotApp for Marspot {
             if self.copy_selection_to_clipboard() {
                 return;
             }
+        }
+
+        // Cmd-B: toggle the sidebar.  Collapsed sidebar reclaims its
+        // width for the cell grid (VSCode / Cursor convention).  Cmd-*
+        // is swallowed by the app layer here — it never reaches the
+        // PTY mapper — so there's no risk of conflicting with a shell
+        // binding.  Sidebar-only buttons ([+] add-session, [×] close)
+        // are unreachable while collapsed; the user re-opens with the
+        // same Cmd-B before using them.
+        if event.state == KeyState::Pressed
+            && modifiers.super_key()
+            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'b'))
+        {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            self.rebuild_layout(ctx);
+            ctx.request_redraw();
+            return;
         }
 
         // Title-edit mode intercepts the keyboard before the PTY
@@ -441,13 +525,14 @@ impl MarspotApp for Marspot {
         }
     }
 
-    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64) {
+    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, modifiers: marspot::input::Modifiers) {
         // Layout-button + picker-overlay + close-[×] dispatch: a top-
         // level intercept that fires before any cell/sidebar handling.
         // Done in a tight borrow scope so the immutable borrow on
         // `self.layout` ends before we mutate `self`.
         let (
             layout_btn_hit,
+            sidebar_btn_hit,
             picker_option_hit,
             picker_panel_hit,
             close_session_hit,
@@ -455,11 +540,21 @@ impl MarspotApp for Marspot {
             let Some(layout) = &self.layout else { return };
             (
                 layout.hit_test_layout_button(x_phys, y_phys),
+                layout.hit_test_sidebar_button(x_phys, y_phys),
                 layout.hit_test_picker_option(x_phys, y_phys),
                 layout.hit_test_picker_panel(x_phys, y_phys),
                 layout.hit_test_close_session(x_phys, y_phys),
             )
         };
+        // Sidebar toggle: highest-priority chrome action so a click
+        // on the chip never falls through to the cell underneath.
+        // Mirrors the Cmd-B keyboard path.
+        if sidebar_btn_hit {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            self.rebuild_layout(ctx);
+            ctx.request_redraw();
+            return;
+        }
         if self.layout_picker_open {
             if let Some(opt_idx) = picker_option_hit {
                 self.layout_mode = PICKER_LAYOUTS[opt_idx];
@@ -612,15 +707,30 @@ impl MarspotApp for Marspot {
         self.selection = None;
         self.selection_dragging = false;
         if let Some((idx, col, row)) = cell_pos_hit {
+            // Convert viewport-local row to abs (rows up from the
+            // pane's current live bottom), so the selection holds its
+            // grip on content even after scrolling.  Note: clicking a
+            // cell does NOT snap-to-live here — when the user clicks
+            // inside scrolled-back content they're explicitly
+            // choosing to act on that content, and snapping would
+            // shift the visible area out from under their cursor.
+            let pane = &self.panes[idx];
+            let rows = pane.session().terminal.grid().rows() as u32;
+            let vo = pane.view_offset() as u32;
+            let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
             self.selection = Some(Selection {
                 session_idx: idx,
-                anchor: (col, row),
-                focus: (col, row),
+                anchor: (col, abs),
+                focus: (col, abs),
+                mode: if modifiers.alt_key() {
+                    SelectionMode::Blockwise
+                } else {
+                    SelectionMode::Linewise
+                },
             });
             self.selection_dragging = true;
             if idx != self.focused_idx {
                 self.focused_idx = idx;
-                let _ = self.panes[self.focused_idx].snap_to_live();
             }
             ctx.request_redraw();
             return;
@@ -646,20 +756,33 @@ impl MarspotApp for Marspot {
         let Some(layout) = &self.layout else { return };
         let cell_dims = self.renderer.as_ref().map(|r| r.cell_dims());
         let Some((cw, ch)) = cell_dims else { return };
-        // While the user holds the mouse, the live focus end of the
-        // selection follows the cursor.  Hits outside the
-        // selection's owning cell are clamped to that cell's last
-        // valid (col, row), so a drag past the cell edge keeps
-        // extending to the bottom-right corner instead of
-        // jump-jumping into a neighbouring cell.
-        let Some(sel) = self.selection.as_mut() else { return };
-        let target_idx = sel.session_idx;
+        let target_idx = match self.selection.as_ref() {
+            Some(s) => s.session_idx,
+            None => return,
+        };
         let cell = match layout.cells.get(target_idx) {
-            Some(c) => c,
+            Some(c) => c.clone(),
             None => return,
         };
         let inner_x = cell.x + layout.padding;
         let inner_y = cell.y_top + layout.cell_title_h + layout.padding;
+
+        // Past-edge auto-scroll, NSTextView-style: dragging above the
+        // cell's top reveals older scrollback (one row per drag
+        // event), dragging below the cell's bottom advances toward
+        // live (when there's slack to give back).  Without a separate
+        // timer this only fires while the mouse is moving — holding
+        // still off-edge won't keep scrolling.  Good enough for v1;
+        // matches the rate-limit behaviour macOS uses for
+        // pre-timer-autoscroll views.
+        let max_row = cell.rows.saturating_sub(1) as i64;
+        let raw_row = ((y_phys - inner_y) / ch).floor() as i64;
+        if raw_row < 0 {
+            self.panes[target_idx].apply_scroll_lines(1);
+        } else if raw_row > max_row {
+            self.panes[target_idx].apply_scroll_lines(-1);
+        }
+
         let dx = (x_phys - inner_x).max(0.0);
         let dy = (y_phys - inner_y).max(0.0);
         let mut col = (dx / cw).floor() as i64;
@@ -671,14 +794,22 @@ impl MarspotApp for Marspot {
             row = 0;
         }
         let max_col = cell.cols.saturating_sub(1) as i64;
-        let max_row = cell.rows.saturating_sub(1) as i64;
         if col > max_col {
             col = max_col;
         }
         if row > max_row {
             row = max_row;
         }
-        sel.focus = (col as u16, row as u16);
+
+        // Re-read view_offset AFTER any auto-scroll above so the abs
+        // we record reflects the post-scroll viewport.
+        let pane = &self.panes[target_idx];
+        let rows = pane.session().terminal.grid().rows() as u32;
+        let vo = pane.view_offset() as u32;
+        let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
+
+        let Some(sel) = self.selection.as_mut() else { return };
+        sel.focus = (col as u16, abs);
         ctx.request_redraw();
     }
 
@@ -812,7 +943,11 @@ impl Marspot {
         let Some(r) = self.renderer.as_ref() else { return };
         let (cell_w, cell_h) = r.cell_dims();
         let scale = ctx.scale();
-        let sidebar_phys = SIDEBAR_W_LOGICAL * scale;
+        let sidebar_phys = if self.sidebar_collapsed {
+            0.0
+        } else {
+            SIDEBAR_W_LOGICAL * scale
+        };
         let (lc, lr) = self.layout_mode.dims();
         let header_phys = HEADER_PT * scale;
         let title_phys = CELL_TITLE_PT * scale;
@@ -1023,41 +1158,80 @@ impl Marspot {
         if cols == 0 || rows == 0 {
             return false;
         }
-        // Normalise anchor / focus into row-major (start, end).
-        let (a_col, a_row) = sel.anchor;
-        let (f_col, f_row) = sel.focus;
-        let (start, end) = if (a_row, a_col) <= (f_row, f_col) {
-            ((a_col, a_row), (f_col, f_row))
+        // Anchor/focus carry abs (rows up from live bottom).  Bigger
+        // abs = older = top of the visual selection; smaller abs =
+        // newer = bottom.  Normalise so `top_*` has the bigger abs
+        // (or equal abs with smaller col when single-row).
+        let (a_col, a_abs) = sel.anchor;
+        let (f_col, f_abs) = sel.focus;
+        let (top_col, top_abs, bot_col, bot_abs) = if (a_abs, a_col) >= (f_abs, f_col) {
+            (a_col, a_abs, f_col, f_abs)
         } else {
-            ((f_col, f_row), (a_col, a_row))
+            (f_col, f_abs, a_col, a_abs)
         };
-        let (start_col, start_row) = start;
-        let (end_col, end_row) = end;
+        // Blockwise carves out a rectangle: every row uses the same
+        // col_lo / col_hi (min..=max of anchor.col, focus.col),
+        // ignoring top/bot.  Linewise uses the iTerm2 row-band rule:
+        // top row from top_col to end, middle rows entirely, bot row
+        // from start to bot_col.
+        let blockwise = sel.mode == SelectionMode::Blockwise;
+        let block_lo = a_col.min(f_col);
+        let block_hi = a_col.max(f_col);
+        // Walk visible rows from top to bottom — i.e. abs descending
+        // from `top_abs` down to `bot_abs`.  `cell_at_view(abs, c,
+        // rows-1)` resolves correctly because the bottom of an
+        // arbitrary view sitting at `view_offset = abs` IS the row
+        // labelled by abs (see `grid::cell_at_view` derivation).
+        let last_view_row = rows.saturating_sub(1);
         let mut out = String::new();
-        for r in start_row..=end_row {
-            if r >= rows {
-                break;
+        let mut abs = top_abs;
+        let mut first = true;
+        loop {
+            if abs as u32 > u16::MAX as u32 {
+                // Beyond what cell_at_view can address (scrollback
+                // capped at u16::MAX in this codepath).  Treat as
+                // unreachable history.
+                if abs == bot_abs { break; } else { abs -= 1; continue; }
             }
-            let col_lo = if r == start_row { start_col } else { 0 };
-            let col_hi = if r == end_row { end_col } else { cols.saturating_sub(1) };
+            let (col_lo, col_hi) = if blockwise {
+                (block_lo, block_hi)
+            } else {
+                let lo = if abs == top_abs { top_col } else { 0 };
+                let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
+                (lo, hi)
+            };
             let mut row_text = String::new();
             for c in col_lo..=col_hi {
                 if c >= cols {
                     break;
                 }
-                let cell = grid.cell_at_view(0, c, r);
-                let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
-                row_text.push(ch);
+                let cell = grid.cell_at_view(abs as u16, c, last_view_row);
+                // NUL is the trail-half sentinel for wide chars
+                // (`grid::char_width` returns 0 for `'\0'`).  The
+                // lead cell already carries the visible glyph; the
+                // trail cell must NOT emit another character, else
+                // CJK pastes come out as `你 好 ` (an extra space
+                // per wide char).  Plain blanks use `' '` not NUL,
+                // so they still serialise correctly.
+                if cell.ch == '\0' {
+                    continue;
+                }
+                row_text.push(cell.ch);
             }
             // Drop trailing spaces — terminal rows pad to full
             // width with `' '`, so a 5-char "hello" plus 80-col
             // grid leaves 75 spaces we don't want in the
             // clipboard.
             let trimmed = row_text.trim_end();
-            out.push_str(trimmed);
-            if r < end_row {
+            if !first {
                 out.push('\n');
             }
+            out.push_str(trimmed);
+            first = false;
+            if abs == bot_abs {
+                break;
+            }
+            abs -= 1;
         }
         if out.is_empty() {
             return false;
@@ -1265,13 +1439,8 @@ impl Marspot {
             return;
         }
         let focused = self.focused_idx;
-        // view_offset is now per-Pane (panes[focused_idx].view_offset()),
-        // looked up at view-construction time below.
-        let view_offset = self
-            .panes
-            .get(focused)
-            .map(|p| p.view_offset())
-            .unwrap_or(0);
+        // view_offset is now per-Pane (read at SessionView construction
+        // below) — there's no longer a single window-wide offset.
 
         // Sidebar source-of-truth depends on mode: in tmux mode, list
         // tmux windows; otherwise list sessions by ordinal number.
@@ -1382,15 +1551,60 @@ impl Marspot {
             .enumerate()
             .map(|(i, p)| {
                 let mut v = p.view(i == focused, titles.get(i).map(|s| s.as_str()).unwrap_or(""));
-                // Selection only renders for the live (offset 0)
-                // view of its owning session — scrolled-back text
-                // isn't selectable in this first cut.
+                // Selection coords are abs (rows up from this pane's
+                // current live bottom).  Project to viewport rows
+                // using this pane's view_offset, clip to the visible
+                // band, and only forward to the renderer when at
+                // least one row lands on screen.  This is what makes
+                // scrolling preserve the selection visual: as
+                // view_offset changes the painted rows shift in
+                // lockstep with the content under them.
                 v.selection = self.selection.as_ref().and_then(|sel| {
-                    if sel.session_idx == i && view_offset == 0 {
-                        Some((sel.anchor, sel.focus))
-                    } else {
-                        None
+                    if sel.session_idx != i {
+                        return None;
                     }
+                    let pane_vo = p.view_offset() as i64;
+                    let g_rows = p.session().terminal.grid().rows() as i64;
+                    let last = g_rows - 1;
+                    let abs_to_vp = |abs: u32| -> i64 {
+                        // vp = (rows-1) + vo - abs
+                        last + pane_vo - abs as i64
+                    };
+                    let a_vp = abs_to_vp(sel.anchor.1);
+                    let f_vp = abs_to_vp(sel.focus.1);
+                    // Both ends above viewport (vp < 0) or both
+                    // below (vp > last) → nothing on screen.
+                    if (a_vp < 0 && f_vp < 0) || (a_vp > last && f_vp > last) {
+                        return None;
+                    }
+                    // Clip each end to the visible band.  For
+                    // linewise selections, a vp clamped past the top
+                    // also forces col to the left edge (and past
+                    // bottom to the right edge), so the painted band
+                    // extends visually to "the rest of the visible
+                    // area".  Blockwise must keep the col unchanged —
+                    // the rectangle's width is defined by the
+                    // anchor/focus cols regardless of which rows are
+                    // currently on-screen.
+                    let blockwise = sel.mode == SelectionMode::Blockwise;
+                    let max_col_clamp = p.session().terminal.grid().cols().saturating_sub(1);
+                    let clip = |col: u16, vp: i64| -> (u16, u16) {
+                        if vp < 0 {
+                            (if blockwise { col } else { 0 }, 0)
+                        } else if vp > last {
+                            (
+                                if blockwise { col } else { max_col_clamp },
+                                last as u16,
+                            )
+                        } else {
+                            (col, vp as u16)
+                        }
+                    };
+                    Some(marspot::render::SelectionView {
+                        anchor: clip(sel.anchor.0, a_vp),
+                        focus: clip(sel.focus.0, f_vp),
+                        blockwise,
+                    })
                 });
                 v
             })
@@ -1504,6 +1718,7 @@ fn main() {
         selection_dragging: false,
         layout_mode: initial_layout,
         layout_picker_open: false,
+        sidebar_collapsed: true,
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
@@ -1725,6 +1940,7 @@ fn bench_rss_format_dump(arg: &str) {
         selection_dragging: false,
         layout_mode: LayoutMode::Nine,
         layout_picker_open: false,
+        sidebar_collapsed: true,
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,

@@ -99,6 +99,11 @@ pub struct Layout {
     /// current grid shape; clicking toggles the picker.  Always
     /// present (even at 1×1) so the user can switch layouts.
     pub layout_button_rect: Rect,
+    /// Floating [sidebar] button — sits immediately left of the
+    /// layout button.  Clicking toggles the sidebar collapsed state.
+    /// Always present (even when the sidebar is currently collapsed)
+    /// so the user can re-open it.
+    pub sidebar_button_rect: Rect,
     /// Layout-picker overlay panel — `Some` while the picker is
     /// showing, `None` otherwise.  Renderer paints the panel BG
     /// behind the option icons; mouse_down hits inside this rect
@@ -155,6 +160,11 @@ const PICKER_LAYOUT_DIMS: [(usize, usize); 7] = [
 const LAYOUT_BUTTON_LOGICAL_W: f64 = 36.0;
 const LAYOUT_BUTTON_LOGICAL_H: f64 = 22.0;
 const LAYOUT_BUTTON_LOGICAL_MARGIN: f64 = 8.0;
+/// Sidebar toggle button — same height as the layout button so the
+/// two chips line up; width is square-ish since the icon (a sidebar
+/// silhouette) reads cleanly in less width than a 3×3 grid icon.
+const SIDEBAR_BUTTON_LOGICAL_W: f64 = 26.0;
+const SIDEBAR_BUTTON_GAP_LOGICAL: f64 = 6.0;
 
 /// Picker option icon size + spacing.  7 options × 28 + 6 × 4 + 2 × 8 = 220 logical pt wide.
 const PICKER_OPTION_LOGICAL_SIZE: f64 = 28.0;
@@ -280,6 +290,7 @@ impl Layout {
             // call sites that don't render the picker leave them
             // zeroed; marspot's main path always layers on the chrome.
             layout_button_rect: Rect::ZERO,
+            sidebar_button_rect: Rect::ZERO,
             picker_panel_rect: None,
             picker_option_rects: Vec::new(),
             picker_option_dims: Vec::new(),
@@ -307,15 +318,26 @@ impl Layout {
         let btn_w = LAYOUT_BUTTON_LOGICAL_W * scale;
         let btn_h = LAYOUT_BUTTON_LOGICAL_H * scale;
         let btn_margin = LAYOUT_BUTTON_LOGICAL_MARGIN * scale;
+        let btn_gap = SIDEBAR_BUTTON_GAP_LOGICAL * scale;
+        let sb_btn_w = SIDEBAR_BUTTON_LOGICAL_W * scale;
         let main_right = self.window_w;
         let main_top = self.top_inset;
-        // Anchored to top-right of the main grid area.
+        // Layout button anchored to top-right of the main grid area;
+        // sidebar button sits immediately to its left so both chrome
+        // affordances live in the same row and stay visible when the
+        // sidebar is collapsed.
         let btn_x = main_right - btn_margin - btn_w;
         let btn_y = main_top + btn_margin;
         self.layout_button_rect = Rect {
             x: btn_x,
             y_top: btn_y,
             w: btn_w,
+            h: btn_h,
+        };
+        self.sidebar_button_rect = Rect {
+            x: btn_x - btn_gap - sb_btn_w,
+            y_top: btn_y,
+            w: sb_btn_w,
             h: btn_h,
         };
 
@@ -402,6 +424,13 @@ impl Layout {
     /// True when `(px, py)` falls inside the floating layout button.
     pub fn hit_test_layout_button(&self, px: f64, py: f64) -> bool {
         self.layout_button_rect.contains(px, py)
+    }
+
+    /// True when `(px, py)` falls inside the floating sidebar toggle
+    /// button.  Always live (the button stays visible even when the
+    /// sidebar is collapsed, since it's the only way back).
+    pub fn hit_test_sidebar_button(&self, px: f64, py: f64) -> bool {
+        self.sidebar_button_rect.contains(px, py)
     }
 
     /// Returns the picker option index (0..7) the click landed in,
