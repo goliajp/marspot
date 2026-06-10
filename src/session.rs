@@ -50,6 +50,15 @@ fn install_shell_zdot_shim() {
 [[ -f "$HOME/.zshrc" ]] && source "$HOME/.zshrc"
 unsetopt PROMPT_SP 2>/dev/null
 PROMPT_EOL_MARK=""
+# zsh 5.9 defaults zle_highlight to include paste:standout, which wraps
+# bracketed-paste content in `\e[7m ... \e[27m`.  When the user later
+# recalls a pasted entry (Up arrow) or pastes the same content twice,
+# ZLE re-emits the standout wrappers and some redraw paths fail to
+# emit a final reset — leaving reverse-video stuck on the grid.  Drop
+# the visual marker (self-use shells already know what they pasted).
+# Done in a function so it runs AFTER zle is initialized; assigning
+# at top-level can race with plugins that mutate zle_highlight later.
+() { zle_highlight=(paste:none) } 2>/dev/null
 "#;
     let path = dir.join(".zshrc");
     let _ = std::fs::write(&path, shim);
@@ -59,6 +68,27 @@ PROMPT_EOL_MARK=""
     // threads or PTY children. Env-var change is inherited by every
     // subsequent forkpty child.
     unsafe { std::env::set_var("ZDOTDIR", &dir) };
+    // When marspot is launched by LaunchServices (Dock / Spotlight /
+    // double-click .app) it inherits TERM from launchd's session,
+    // which on macOS resolves to "network" — a non-terminal value
+    // that powerlevel10k, oh-my-zsh themes, and most TUIs interpret
+    // as "no terminal" and refuse to render fancy prompts.  When
+    // launched from another terminal (iTerm2, Terminal.app, a
+    // parent shell, etc.) TERM is already a sensible terminfo entry
+    // and we shouldn't clobber it.  Override only when the inherited
+    // value is missing or obviously wrong; standard terminfo names
+    // (xterm-*, screen-*, tmux-*, vt100, etc.) pass through.
+    let term_ok = std::env::var("TERM")
+        .map(|t| {
+            !t.is_empty()
+                && t != "network"
+                && t != "dumb"
+                && t != "unknown"
+        })
+        .unwrap_or(false);
+    if !term_ok {
+        unsafe { std::env::set_var("TERM", "xterm-256color") };
+    }
 }
 
 /// Idempotent gate around `install_shell_zdot_shim`. `Session::spawn`
