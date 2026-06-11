@@ -10,17 +10,22 @@
 //! GUI; SIGHUP on GUI exit doesn't propagate.  Reattach is a
 //! one-frame state replay through `bytelog`.
 //!
-//! Phase 1 scope: socket bind + accept loop + idle handler.  No
-//! protocol yet; just verifies the daemon can be launchd-managed and
-//! a client can connect.
+//! Phase 2 scope: protocol HELLO + LIST_SESSIONS.  No sessions
+//! actually exist yet — LIST returns the empty set.  NEW/ATTACH and
+//! the data path land in Phase 3.
 
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
+
+use marspot::shelld_proto::{
+    decode_hello, encode_error, encode_hello_ack, encode_list_sessions_reply, Frame, MsgType,
+    SessionInfo, PROTO_VERSION,
+};
 
 /// Process-wide shutdown flag.  Set by SIGTERM/SIGINT handler;
 /// observed by per-client handlers (the accept loop is woken
@@ -121,26 +126,95 @@ fn main() {
     let _ = std::fs::remove_file(&sock);
 }
 
-/// Phase 1 client handler: echoes back whatever the client sends.
-/// Replaced wholesale in Phase 2 with the real protocol parser.
+/// Per-client handler.  Expects HELLO first, then services LIST_SESSIONS
+/// / Phase-3-and-later messages.  Any protocol violation or version
+/// mismatch closes the connection (caller's responsibility to retry).
 fn handle_client(mut stream: UnixStream) {
-    let _ = stream.write_all(b"shelld ready\n");
-    let mut buf = [0u8; 1024];
+    // Phase 2 sessions live nowhere yet — Phase 3 introduces the
+    // global session table.  Stubbed empty here.
+    let sessions: Vec<SessionInfo> = Vec::new();
+
+    let mut handshook = false;
     loop {
         if SHUTDOWN.load(Ordering::Acquire) {
             break;
         }
-        match stream.read(&mut buf) {
-            Ok(0) => break, // client closed
-            Ok(n) => {
-                if stream.write_all(&buf[..n]).is_err() {
+        let frame = match Frame::read_from(&mut stream) {
+            Ok(Some(f)) => f,
+            Ok(None) => break, // clean EOF
+            Err(e) => {
+                eprintln!("[shelld] read error: {}", e);
+                let _ = send_error(&mut stream, 1, &format!("read: {}", e));
+                break;
+            }
+        };
+        if !handshook && frame.msg_type != MsgType::Hello {
+            let _ = send_error(
+                &mut stream,
+                2,
+                "first frame must be HELLO",
+            );
+            break;
+        }
+        match frame.msg_type {
+            MsgType::Hello => {
+                let client_version = match decode_hello(&frame.payload) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let _ = send_error(&mut stream, 3, &format!("bad HELLO: {}", e));
+                        break;
+                    }
+                };
+                if client_version != PROTO_VERSION {
+                    let _ = send_error(
+                        &mut stream,
+                        4,
+                        &format!(
+                            "proto version mismatch: client={} server={}",
+                            client_version, PROTO_VERSION
+                        ),
+                    );
+                    break;
+                }
+                // Phase 2 leaves git sha as zeros; Phase 7 will plumb
+                // it through from build.rs so the client can show "you
+                // are running shelld @ <sha>" in diagnostics.
+                let ack = Frame::new(
+                    MsgType::HelloAck,
+                    encode_hello_ack(PROTO_VERSION, [0u8; 8]),
+                );
+                if ack.write_to(&mut stream).is_err() {
+                    break;
+                }
+                handshook = true;
+            }
+            MsgType::ListSessions => {
+                let reply = Frame::new(
+                    MsgType::ListSessionsReply,
+                    encode_list_sessions_reply(&sessions),
+                );
+                if reply.write_to(&mut stream).is_err() {
                     break;
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            other => {
+                let _ = send_error(
+                    &mut stream,
+                    5,
+                    &format!("unimplemented msg_type {:?}", other),
+                );
+                // Phase 3+ adds the rest; until then, drop the
+                // connection so the client knows to retry against
+                // a newer shelld.
+                break;
+            }
         }
     }
+}
+
+fn send_error(stream: &mut UnixStream, code: u32, msg: &str) -> io::Result<()> {
+    let f = Frame::new(MsgType::Error, encode_error(code, msg));
+    f.write_to(stream).map(|_| ())
 }
 
 extern "C" fn signal_handler(sig: libc::c_int) {
