@@ -1,22 +1,28 @@
-//! marspot-core — Step 2 of the silent-update split.
+//! marspot-core — the renderer + input-dispatch half of the
+//! silent-update split.
 //!
-//! The renderer-and-logic half of the silent-update architecture.
 //! Spawned by `marspot-shell` as a child; renders the marspot UI into
-//! the shared IOSurface the shell created, then sleeps until the next
-//! frame.  The shell composites that IOSurface to its NSWindow.
+//! the shared IOSurface the shell created, attaches to one shelld
+//! session, and processes input forwarded over the control socket.
 //!
-//! Step 2 scope: minimum-viable real renderer — attach to one shelld
-//! session, draw a 1×1 grid with that session's terminal output, run
-//! at ~60 fps.  No input forwarding (Step 3), no resize negotiation
-//! (Step 4), no sidebar / 9-grid / focus juggling (Step 2+).
+//! Step 3 scope (this file):
+//!   - 1×1 grid + one shelld session (same as Step 2)
+//!   - reads `KeyEvent` / `MouseDown` / `Drag` / `Up` / `Scroll` /
+//!     `Focus` / `Resize` / `Preedit` frames from fd 3
+//!   - dispatches `KeyEvent` into `Pane::handle_key` so typing works
+//!   - other events are accepted but not yet applied to layout/state
+//!     beyond what's needed for Step 3 typing to feel right
 //!
-//! Input forwarding still routes through the marspot main binary
-//! until Step 3 wires the control socket — for now this binary can
-//! only *display* a session, not type into it.  Useful for verifying
-//! the IOSurface render path works against the real pipeline before
-//! the rest of the architecture lands on top.
+//! Not in scope yet:
+//!   - resize → relayout (Step 4)
+//!   - 9-grid / sidebar / focus juggling
+//!   - selection / IME preedit rendering (mouse events received but
+//!     selection logic not wired through)
 
+use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,6 +30,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLTexture;
 
 use marspot::font_cache::FontCache;
+use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::layout::Layout;
 use marspot::pane::Pane;
@@ -31,6 +38,8 @@ use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
 use marspot::shell_proto::{
+    decode_focus, decode_key_event, decode_mouse, decode_preedit, decode_resize, decode_scroll,
+    mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
     ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
 };
 use marspot::shelld_client::{default_socket_path, ShelldClient};
@@ -46,6 +55,80 @@ fn env_required<T: std::str::FromStr>(name: &str) -> T {
     raw.parse::<T>()
         .ok()
         .unwrap_or_else(|| panic!("[core] env {name} = {raw:?} failed to parse"))
+}
+
+/// Input event the reader thread converts each control-socket frame
+/// into.  The main loop drains a channel of these once per render
+/// frame and dispatches them into the focused pane.
+#[derive(Debug)]
+enum CoreEvent {
+    Key(MarspotKeyEvent, Modifiers),
+    MouseDown(f64, f64, Modifiers),
+    MouseDrag(f64, f64),
+    MouseUp(f64, f64),
+    Scroll(f64, f64, bool),
+    Focus(bool),
+    Resize(f64, f64, f64),
+    Preedit(String),
+    /// Shell closed the control socket — supervisor will tear us down.
+    Closed,
+}
+
+fn decode_frame(f: &Frame) -> Option<CoreEvent> {
+    match f.msg_type {
+        MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|w| {
+            let (e, m) = wire_to_event(w);
+            CoreEvent::Key(e, m)
+        }),
+        MsgType::MouseDown => decode_mouse(&f.payload)
+            .ok()
+            .map(|(x, y, m)| CoreEvent::MouseDown(x, y, mods_to_struct(m))),
+        MsgType::MouseDrag => decode_mouse(&f.payload)
+            .ok()
+            .map(|(x, y, _)| CoreEvent::MouseDrag(x, y)),
+        MsgType::MouseUp => decode_mouse(&f.payload)
+            .ok()
+            .map(|(x, y, _)| CoreEvent::MouseUp(x, y)),
+        MsgType::Scroll => decode_scroll(&f.payload)
+            .ok()
+            .map(|(dx, dy, p)| CoreEvent::Scroll(dx, dy, p)),
+        MsgType::Focus => decode_focus(&f.payload).ok().map(CoreEvent::Focus),
+        MsgType::Resize => decode_resize(&f.payload)
+            .ok()
+            .map(|(w, h, s)| CoreEvent::Resize(w, h, s)),
+        MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
+        // Lifecycle frames don't surface as input events; ignore for
+        // now (HELLO/HELLO_ACK get handled inline once we add the
+        // handshake in Step 5).
+        _ => None,
+    }
+}
+
+/// Background reader: reads framed messages off the control socket
+/// until EOF / error, dispatches each into `tx`, and bumps `dirty`
+/// so the render loop wakes up the next tick.
+fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>, dirty: Arc<AtomicBool>) {
+    loop {
+        match Frame::read_from(&mut stream) {
+            Ok(None) => {
+                let _ = tx.send(CoreEvent::Closed);
+                return;
+            }
+            Ok(Some(frame)) => {
+                if let Some(ev) = decode_frame(&frame) {
+                    dirty.store(true, Ordering::Release);
+                    if tx.send(ev).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[core] control read error: {e}");
+                let _ = tx.send(CoreEvent::Closed);
+                return;
+            }
+        }
+    }
 }
 
 fn main() {
@@ -161,13 +244,54 @@ fn main() {
     // with the rendered cell — output wraps at the wrong column.
     pane.resize(layout.cells[0].cols, layout.cells[0].rows);
 
+    // Bring up the shell ↔ core control socket inherited as fd 3.
+    // Frames sent by the shell arrive on the reader thread; the
+    // render loop drains the channel once per tick.
+    let control_fd: RawFd = std::env::var(ENV_CONTROL_FD)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CONTROL_FD);
+    eprintln!("[core] taking control socket from fd {control_fd}");
+    let control_stream = unsafe { UnixStream::from_raw_fd(control_fd) };
+    let reader_stream = control_stream
+        .try_clone()
+        .expect("[core] try_clone control_stream");
+    let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = mpsc::channel();
+    let dirty_for_reader = Arc::clone(&dirty);
+    std::thread::spawn(move || reader_loop(reader_stream, event_tx, dirty_for_reader));
+
     eprintln!("[core] entering render loop @ ~{} fps", 1000 / FRAME_MS);
 
     let start = Instant::now();
     let mut frame: u64 = 0;
-    loop {
+    let mut key_count: u64 = 0;
+    'main: loop {
         let frame_start = Instant::now();
         let _was_dirty = dirty.swap(false, Ordering::AcqRel);
+        // Drain pending control-socket events first, then PTY bytes.
+        // Order matters: a key press should take effect before the
+        // PTY echo lands on the same frame.
+        while let Ok(ev) = event_rx.try_recv() {
+            match ev {
+                CoreEvent::Key(event, mods) => {
+                    pane.handle_key(&event, mods);
+                    key_count += 1;
+                }
+                CoreEvent::Closed => {
+                    eprintln!("[core] control socket closed by shell; exiting render loop");
+                    break 'main;
+                }
+                // Accepted but no-op for now — Step 4 wires resize,
+                // selection / IME come in later steps.
+                CoreEvent::MouseDown(_, _, _)
+                | CoreEvent::MouseDrag(_, _)
+                | CoreEvent::MouseUp(_, _)
+                | CoreEvent::Scroll(_, _, _)
+                | CoreEvent::Focus(_)
+                | CoreEvent::Resize(_, _, _)
+                | CoreEvent::Preedit(_) => {}
+            }
+        }
         // Drain any pending shelld DATA into the terminal grid.
         // Pump is cheap when there's nothing pending; called every
         // frame so we never miss bytes between two redraws.
@@ -181,7 +305,7 @@ fn main() {
         renderer.render_layout_to_texture(&target_tex, &layout, &views, &sidebar, 0);
 
         frame += 1;
-        if frame.is_multiple_of(120) {
+        if frame.is_multiple_of(300) {
             let t = start.elapsed().as_secs_f64();
             let state = match pane.session().state() {
                 SessionState::Active => "active",
@@ -189,7 +313,7 @@ fn main() {
                 SessionState::Exited => "exited",
             };
             eprintln!(
-                "[core] frame {frame} t={t:.1}s session={state} grid={}x{}",
+                "[core] frame {frame} t={t:.1}s session={state} grid={}x{} keys_dispatched={key_count}",
                 pane.session().terminal().grid().cols(),
                 pane.session().terminal().grid().rows(),
             );
