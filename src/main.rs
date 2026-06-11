@@ -257,6 +257,12 @@ struct Marspot {
     /// sidebar [+] button).  Same proxy main passed into `run_app`.
     #[allow(dead_code)]
     event_proxy: EventProxy,
+    /// Shared flag set by the background updater (Phase 7) when a
+    /// new binary has been staged in `pending/`.  Drives the
+    /// title-bar refresh affordance; the focus-loss path also checks
+    /// this so a freshly-staged binary applies without waiting for
+    /// the next launch.
+    update_pending_flag: marspot::updater::UpdateFlag,
     /// Connection to `marspot-shelld`.  Sessions are spawned and
     /// driven through this; marspot itself never forks shells, so
     /// a `marspot` process restart (silent update, manual relaunch)
@@ -906,8 +912,13 @@ impl MarspotApp for Marspot {
         // apply it — they're not watching us repaint.  By the time
         // they come back, marspot has been replaced and reattached
         // to the same shelld sessions, so the only change they see
-        // is the new version's UI.
-        if !focused && pending_update_exists() {
+        // is the new version's UI.  Cheap atomic check first, then
+        // the more expensive fs::metadata to defend against the
+        // flag-set-but-file-vanished race.
+        if !focused
+            && self.update_pending_flag.load(std::sync::atomic::Ordering::Acquire)
+            && pending_update_exists()
+        {
             apply_pending_update(ctx);
         }
     }
@@ -1795,6 +1806,12 @@ fn main() {
         Some(std::sync::Arc::new(client))
     };
 
+    // Kick off the background updater first thing so the network
+    // poll runs while the GUI is still settling.  Returns a shared
+    // flag the GUI reads to drive the "↻ vX.Y.Z" title-bar
+    // affordance.
+    let update_pending_flag = marspot::updater::spawn(VERSION.to_string());
+
     let panes: Vec<marspot::pane::Pane> = if tmux_mode {
         let proxy_clone = proxy.clone();
         let wake = move || {
@@ -1880,6 +1897,7 @@ fn main() {
         last_rss_dump: None,
         event_proxy: proxy.clone(),
         shelld: shelld_client,
+        update_pending_flag,
     };
 
     let attrs = WindowAttrs {
@@ -2104,6 +2122,7 @@ fn bench_rss_format_dump(arg: &str) {
         last_rss_dump: None,
         event_proxy: EventProxy::new(),
         shelld: None,
+        update_pending_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);
