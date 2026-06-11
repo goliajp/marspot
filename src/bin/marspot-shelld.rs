@@ -7,36 +7,57 @@
 //! Why split it out: the GUI process can die and respawn (silent
 //! update, crash, manual restart) without taking the user's shell
 //! processes with it.  The shell's `getppid()` is launchd, not the
-//! GUI; SIGHUP on GUI exit doesn't propagate.  Reattach is a
-//! one-frame state replay through `bytelog`.
+//! GUI; SIGHUP on GUI exit doesn't propagate.
 //!
-//! Phase 2 scope: protocol HELLO + LIST_SESSIONS.  No sessions
-//! actually exist yet — LIST returns the empty set.  NEW/ATTACH and
-//! the data path land in Phase 3.
+//! Phase 3 scope: real session management.  NewSession forks a zsh
+//! via the lib's `Pty`; Attach/Detach add/remove client subscribers;
+//! Data frames stream PTY output to every attached client; Input
+//! writes back to the master.  Bytelog (replay-on-attach) lands in
+//! Phase 5.
 
+use std::collections::HashMap;
 use std::io;
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
+use marspot::pty::{Pty, PtyConfig, TerminalSize};
 use marspot::shelld_proto::{
-    decode_hello, encode_error, encode_hello_ack, encode_list_sessions_reply, Frame, MsgType,
-    SessionInfo, PROTO_VERSION,
+    decode_data, decode_hello, decode_new_session, decode_resize, decode_session_id, encode_data,
+    encode_error, encode_hello_ack, encode_list_sessions_reply, encode_new_session_reply, Frame,
+    MsgType, SessionInfo, PROTO_VERSION,
 };
 
-/// Process-wide shutdown flag.  Set by SIGTERM/SIGINT handler;
-/// observed by per-client handlers (the accept loop is woken
-/// separately by closing `LISTENER_FD` below — `std`'s accept
-/// silently retries EINTR, so a signal alone wouldn't unstick it).
+/// Process-wide shutdown flag.  Set by SIGTERM/SIGINT handler; observed
+/// by per-client handlers (the accept loop is woken separately by
+/// closing `LISTENER_FD` below — `std`'s accept silently retries
+/// EINTR, so a signal alone wouldn't unstick it).
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// Raw fd of the listening socket, published after `bind` so the
 /// signal handler can `close(2)` it (AS-safe per POSIX) and force
 /// the in-flight `accept` to return EBADF.  Negative sentinel before
 /// init or after close.
 static LISTENER_FD: AtomicI32 = AtomicI32::new(-1);
+/// Monotonic session-id allocator.  Never reused (even after a
+/// session ends) so a stale client reference can't accidentally
+/// land on a brand-new session.
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+/// Monotonic subscriber-id allocator.  Each client connection that
+/// attaches gets a fresh id so the session's subscriber Vec can
+/// remove the exact entry on detach without relying on
+/// SyncSender identity (which isn't exposed in std).
+static NEXT_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
+/// Bounded per-subscriber send queue.  Backpressure: when a client
+/// can't keep up, shelld's writer thread blocks on `send`, which
+/// stalls the per-session broadcaster, which stalls the PTY reader
+/// — exactly mirroring how the kernel pipe would backpressure the
+/// child process today.
+const SUBSCRIBER_QUEUE_DEPTH: usize = 64;
 
 /// Always-on socket path under `$HOME/Library/Caches/marspot/`.
 /// Created on startup, removed on graceful shutdown.  Per-user; no
@@ -45,6 +66,102 @@ fn socket_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME unset; refusing to run");
     PathBuf::from(home).join("Library/Caches/marspot/shelld.sock")
 }
+
+/// One live shell session.  Owned by `Sessions` via `Arc`; subscribers
+/// hold a `Weak` so a session dropping out from under them is a
+/// recoverable error rather than a use-after-free.
+struct Subscriber {
+    id: u64,
+    tx: SyncSender<Frame>,
+}
+
+struct ShellSession {
+    id: u64,
+    pty: Arc<Pty>,
+    /// All attached clients' inbound queues.  PTY reader thread
+    /// fan-outs each chunk here.  Mutex hold is brief (clone of
+    /// senders + drop dead ones).
+    subscribers: Mutex<Vec<Subscriber>>,
+    /// `false` once the child has exited; LIST_SESSIONS exposes
+    /// this so the GUI can render an "exited" indicator.  Set by
+    /// the reader thread on EOF.
+    alive: AtomicBool,
+}
+
+impl ShellSession {
+    fn broadcast(&self, frame: Frame) {
+        // Snapshot (id, sender) pairs under lock so the broadcast
+        // loop itself doesn't hold the lock while individual sends
+        // block.
+        let snapshot: Vec<(u64, SyncSender<Frame>)> = {
+            let g = self.subscribers.lock().unwrap();
+            g.iter().map(|s| (s.id, s.tx.clone())).collect()
+        };
+        let mut dead: Vec<u64> = Vec::new();
+        for (id, sender) in &snapshot {
+            if sender.send(frame.clone()).is_err() {
+                dead.push(*id);
+            }
+        }
+        if !dead.is_empty() {
+            let mut g = self.subscribers.lock().unwrap();
+            g.retain(|s| !dead.contains(&s.id));
+        }
+    }
+
+    /// Add a subscriber.  Returns its id so the caller can detach
+    /// later.  The returned id is the only handle that addresses
+    /// this exact subscription.
+    fn attach(&self, tx: SyncSender<Frame>) -> u64 {
+        let id = NEXT_SUBSCRIBER_ID.fetch_add(1, Ordering::AcqRel);
+        self.subscribers.lock().unwrap().push(Subscriber { id, tx });
+        id
+    }
+
+    fn detach(&self, subscriber_id: u64) {
+        self.subscribers
+            .lock()
+            .unwrap()
+            .retain(|s| s.id != subscriber_id);
+    }
+}
+
+/// Per-session reader thread.  Reads PTY master, fans each chunk out
+/// as a DATA frame to all subscribers.  Exits on EOF; flips `alive`
+/// to false so LIST reports it.
+fn spawn_session_reader(session: Arc<ShellSession>) {
+    let id = session.id;
+    thread::Builder::new()
+        .name(format!("shelld-pty-reader/{}", id))
+        .spawn(move || {
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                if SHUTDOWN.load(Ordering::Acquire) {
+                    break;
+                }
+                match session.pty.read_shared(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let frame = Frame::new(
+                            MsgType::Data,
+                            encode_data(session.id, &buf[..n]),
+                        );
+                        session.broadcast(frame);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            session.alive.store(false, Ordering::Release);
+            eprintln!("[shelld] session {} reader exiting", id);
+        })
+        .expect("spawn session reader");
+}
+
+/// Global session table.  Sessions are looked up by id.  Drop of the
+/// last `Arc<ShellSession>` triggers `Pty::Drop` (SIGHUP + waitpid +
+/// close), so explicit Kill is just a `remove`.
+type Sessions = Arc<Mutex<HashMap<u64, Arc<ShellSession>>>>;
 
 fn main() {
     eprintln!("[shelld] starting (pid={})", std::process::id());
@@ -56,10 +173,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-    // Stale socket from a prior crashed instance — `bind` will refuse
-    // to attach onto a path that already exists, even if no one is
-    // listening.  Safe to nuke unconditionally because launchd
-    // guarantees no concurrent shelld (KeepAlive=true, single instance).
     let _ = std::fs::remove_file(&sock);
 
     let listener = match UnixListener::bind(&sock) {
@@ -69,25 +182,16 @@ fn main() {
             std::process::exit(1);
         }
     };
-    // 0600 — only this user can connect.
-    if let Err(e) = std::fs::set_permissions(
-        &sock,
-        std::fs::Permissions::from_mode(0o600),
-    ) {
+    if let Err(e) = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)) {
         eprintln!("[shelld] chmod {} failed: {}", sock.display(), e);
     }
     eprintln!("[shelld] listening on {}", sock.display());
 
-    // Hand the fd's ownership over to us (a raw integer in
-    // LISTENER_FD).  std's IO safety machinery would otherwise
-    // refuse to share the fd with our signal handler — a process
-    // abort fires if std notices the fd was closed externally.  We
-    // recreate the UnixListener around the same raw fd inside the
-    // loop just to use accept(); that wrapper is `forget`ed each
-    // iteration so std doesn't try to drop the fd.
     let raw = listener.into_raw_fd();
     LISTENER_FD.store(raw, Ordering::Release);
     install_signal_handlers();
+
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         if SHUTDOWN.load(Ordering::Acquire) {
@@ -96,17 +200,13 @@ fn main() {
         // SAFETY: raw is our owned fd; we don't drop the wrapper.
         let wrapper = unsafe { UnixListener::from_raw_fd(raw) };
         let accept_result = wrapper.accept();
-        // Don't let std close `raw` when wrapper drops.
         std::mem::forget(wrapper);
         match accept_result {
             Ok((s, _)) => {
-                thread::spawn(move || handle_client(s));
+                let sess = sessions.clone();
+                thread::spawn(move || handle_client(s, sess));
             }
             Err(_) => {
-                // EBADF from signal handler's close(2) is the
-                // intentional wake.  Any other error during normal
-                // operation is also fatal for now (we don't have
-                // anything productive to do without a listener).
                 if SHUTDOWN.load(Ordering::Acquire) {
                     break;
                 }
@@ -115,25 +215,67 @@ fn main() {
             }
         }
     }
-    // Listener may already be closed by signal handler; if not,
-    // close it now.  swap returns the previous value atomically.
     let fd = LISTENER_FD.swap(-1, Ordering::AcqRel);
     if fd >= 0 {
         unsafe { libc::close(fd) };
     }
-
     eprintln!("[shelld] shutting down");
     let _ = std::fs::remove_file(&sock);
+    // Sessions table drops here, which drops each Arc<ShellSession>,
+    // which drops Pty, which SIGHUPs + waits the children.
 }
 
-/// Per-client handler.  Expects HELLO first, then services LIST_SESSIONS
-/// / Phase-3-and-later messages.  Any protocol violation or version
-/// mismatch closes the connection (caller's responsibility to retry).
-fn handle_client(mut stream: UnixStream) {
-    // Phase 2 sessions live nowhere yet — Phase 3 introduces the
-    // global session table.  Stubbed empty here.
-    let sessions: Vec<SessionInfo> = Vec::new();
+/// Per-client handler.  Splits the socket into reader + writer halves
+/// (clone gives us a second fd via `dup`) so the reader can process
+/// commands and the writer can stream DATA frames concurrently.
+fn handle_client(stream: UnixStream, sessions: Sessions) {
+    let writer_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[shelld] try_clone failed: {}", e);
+            return;
+        }
+    };
+    let (out_tx, out_rx) = mpsc::sync_channel::<Frame>(SUBSCRIBER_QUEUE_DEPTH);
+    let writer_handle = thread::Builder::new()
+        .name("shelld-client-writer".into())
+        .spawn(move || writer_loop(writer_stream, out_rx))
+        .expect("spawn writer");
 
+    // Track which sessions THIS client is attached to so we detach
+    // them on disconnect (otherwise a dead sender accumulates in
+    // session.subscribers until the next broadcast prunes it).
+    // Pair is (session, this-client's subscriber id on that session).
+    let mut attached: Vec<(Weak<ShellSession>, u64)> = Vec::new();
+    let attached_tx = out_tx.clone();
+
+    reader_loop(stream, &out_tx, &sessions, &mut attached, &attached_tx);
+
+    // Detach from any sessions this client was on.
+    for (w, sub_id) in attached {
+        if let Some(s) = w.upgrade() {
+            s.detach(sub_id);
+        }
+    }
+    drop(out_tx);
+    let _ = writer_handle.join();
+}
+
+fn writer_loop(mut stream: UnixStream, rx: Receiver<Frame>) {
+    while let Ok(frame) = rx.recv() {
+        if frame.write_to(&mut stream).is_err() {
+            break;
+        }
+    }
+}
+
+fn reader_loop(
+    mut stream: UnixStream,
+    out_tx: &SyncSender<Frame>,
+    sessions: &Sessions,
+    attached: &mut Vec<(Weak<ShellSession>, u64)>,
+    attached_tx: &SyncSender<Frame>,
+) {
     let mut handshook = false;
     loop {
         if SHUTDOWN.load(Ordering::Acquire) {
@@ -141,88 +283,233 @@ fn handle_client(mut stream: UnixStream) {
         }
         let frame = match Frame::read_from(&mut stream) {
             Ok(Some(f)) => f,
-            Ok(None) => break, // clean EOF
+            Ok(None) => break,
             Err(e) => {
                 eprintln!("[shelld] read error: {}", e);
-                let _ = send_error(&mut stream, 1, &format!("read: {}", e));
+                let _ = out_tx.send(err_frame(1, &format!("read: {}", e)));
                 break;
             }
         };
         if !handshook && frame.msg_type != MsgType::Hello {
-            let _ = send_error(
-                &mut stream,
-                2,
-                "first frame must be HELLO",
-            );
+            let _ = out_tx.send(err_frame(2, "first frame must be HELLO"));
             break;
         }
         match frame.msg_type {
             MsgType::Hello => {
-                let client_version = match decode_hello(&frame.payload) {
+                let v = match decode_hello(&frame.payload) {
                     Ok(v) => v,
                     Err(e) => {
-                        let _ = send_error(&mut stream, 3, &format!("bad HELLO: {}", e));
+                        let _ = out_tx.send(err_frame(3, &format!("bad HELLO: {}", e)));
                         break;
                     }
                 };
-                if client_version != PROTO_VERSION {
-                    let _ = send_error(
-                        &mut stream,
+                if v != PROTO_VERSION {
+                    let _ = out_tx.send(err_frame(
                         4,
                         &format!(
                             "proto version mismatch: client={} server={}",
-                            client_version, PROTO_VERSION
+                            v, PROTO_VERSION
                         ),
-                    );
+                    ));
                     break;
                 }
-                // Phase 2 leaves git sha as zeros; Phase 7 will plumb
-                // it through from build.rs so the client can show "you
-                // are running shelld @ <sha>" in diagnostics.
-                let ack = Frame::new(
+                let _ = out_tx.send(Frame::new(
                     MsgType::HelloAck,
                     encode_hello_ack(PROTO_VERSION, [0u8; 8]),
-                );
-                if ack.write_to(&mut stream).is_err() {
-                    break;
-                }
+                ));
                 handshook = true;
             }
             MsgType::ListSessions => {
-                let reply = Frame::new(
+                let snapshot: Vec<SessionInfo> = {
+                    let g = sessions.lock().unwrap();
+                    g.values()
+                        .map(|s| SessionInfo {
+                            session_id: s.id,
+                            child_pid: s.pty.child_pid(),
+                            alive: s.alive.load(Ordering::Acquire),
+                            title: String::new(),
+                        })
+                        .collect()
+                };
+                let _ = out_tx.send(Frame::new(
                     MsgType::ListSessionsReply,
-                    encode_list_sessions_reply(&sessions),
-                );
-                if reply.write_to(&mut stream).is_err() {
-                    break;
+                    encode_list_sessions_reply(&snapshot),
+                ));
+            }
+            MsgType::NewSession => {
+                let (cols, rows, cwd) = match decode_new_session(&frame.payload) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(6, &format!("bad NEW_SESSION: {}", e)));
+                        continue;
+                    }
+                };
+                match spawn_shell(cols, rows, &cwd) {
+                    Ok(pty) => {
+                        let id = NEXT_SESSION_ID.fetch_add(1, Ordering::AcqRel);
+                        let child_pid = pty.child_pid();
+                        let session = Arc::new(ShellSession {
+                            id,
+                            pty: Arc::new(pty),
+                            subscribers: Mutex::new(Vec::new()),
+                            alive: AtomicBool::new(true),
+                        });
+                        // Auto-attach the creator before publishing —
+                        // any DATA the reader thread emits before
+                        // NEW_SESSION_REPLY lands at the client must
+                        // not be dropped.
+                        let sub_id = session.attach(attached_tx.clone());
+                        attached.push((Arc::downgrade(&session), sub_id));
+                        sessions.lock().unwrap().insert(id, session.clone());
+                        spawn_session_reader(session);
+                        let _ = out_tx.send(Frame::new(
+                            MsgType::NewSessionReply,
+                            encode_new_session_reply(id, child_pid),
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(7, &format!("spawn failed: {}", e)));
+                    }
+                }
+            }
+            MsgType::Attach => {
+                let id = match decode_session_id(&frame.payload) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(8, &format!("bad ATTACH: {}", e)));
+                        continue;
+                    }
+                };
+                let session = sessions.lock().unwrap().get(&id).cloned();
+                match session {
+                    Some(s) => {
+                        let sub_id = s.attach(attached_tx.clone());
+                        attached.push((Arc::downgrade(&s), sub_id));
+                        // Phase 5 replays the bytelog here as a
+                        // sequence of DATA frames.  For now ATTACH
+                        // just hooks up the live stream.
+                    }
+                    None => {
+                        let _ =
+                            out_tx.send(err_frame(9, &format!("session {} not found", id)));
+                    }
+                }
+            }
+            MsgType::Detach => {
+                let id = match decode_session_id(&frame.payload) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(10, &format!("bad DETACH: {}", e)));
+                        continue;
+                    }
+                };
+                if let Some(s) = sessions.lock().unwrap().get(&id).cloned() {
+                    // Find this client's subscriber id on that session,
+                    // detach it, and forget the entry.
+                    if let Some(pos) = attached.iter().position(|(w, _)| {
+                        w.upgrade().map(|a| a.id == id).unwrap_or(false)
+                    }) {
+                        let (_, sub_id) = attached.remove(pos);
+                        s.detach(sub_id);
+                    }
+                }
+            }
+            MsgType::Kill => {
+                let id = match decode_session_id(&frame.payload) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(11, &format!("bad KILL: {}", e)));
+                        continue;
+                    }
+                };
+                sessions.lock().unwrap().remove(&id);
+                // Drop on the removed Arc cascades into Pty::Drop —
+                // SIGHUP + waitpid + close.  Subscribers' next
+                // broadcast attempt finds nothing (we just removed),
+                // and their reader thread observed EOF on the closed
+                // PTY master.
+                attached.retain(|(w, _)| {
+                    w.upgrade().map(|a| a.id != id).unwrap_or(false)
+                });
+            }
+            MsgType::Resize => {
+                let (id, cols, rows) = match decode_resize(&frame.payload) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(12, &format!("bad RESIZE: {}", e)));
+                        continue;
+                    }
+                };
+                if let Some(s) = sessions.lock().unwrap().get(&id).cloned() {
+                    // Pty::resize takes &mut self; we have Arc<Pty>.
+                    // TIOCSWINSZ is a single ioctl and the kernel
+                    // serialises ioctl on a single fd, so doing it
+                    // directly with libc is fine.  Avoids needing to
+                    // duplicate the Pty::resize body just for &self.
+                    let ws = libc::winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    unsafe { libc::ioctl(s.pty.raw_master(), libc::TIOCSWINSZ, &ws) };
+                }
+            }
+            MsgType::Input => {
+                let (id, bytes) = match decode_data(&frame.payload) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(13, &format!("bad INPUT: {}", e)));
+                        continue;
+                    }
+                };
+                if let Some(s) = sessions.lock().unwrap().get(&id).cloned() {
+                    let _ = s.pty.write_shared(bytes);
                 }
             }
             other => {
-                let _ = send_error(
-                    &mut stream,
+                let _ = out_tx.send(err_frame(
                     5,
                     &format!("unimplemented msg_type {:?}", other),
-                );
-                // Phase 3+ adds the rest; until then, drop the
-                // connection so the client knows to retry against
-                // a newer shelld.
+                ));
                 break;
             }
         }
     }
 }
 
-fn send_error(stream: &mut UnixStream, code: u32, msg: &str) -> io::Result<()> {
-    let f = Frame::new(MsgType::Error, encode_error(code, msg));
-    f.write_to(stream).map(|_| ())
+fn err_frame(code: u32, msg: &str) -> Frame {
+    Frame::new(MsgType::Error, encode_error(code, msg))
+}
+
+/// Same shell selection logic as `Session::spawn` (login wrapper +
+/// $HOME cwd default), but stripped of the marspot-side reader-thread
+/// scaffolding: shelld owns the reader directly.
+fn spawn_shell(cols: u16, rows: u16, cwd_override: &str) -> io::Result<Pty> {
+    let cwd = if cwd_override.is_empty() {
+        std::env::var("HOME").ok()
+    } else {
+        Some(cwd_override.to_string())
+    };
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "nobody".into());
+    Pty::spawn(PtyConfig {
+        program: "/usr/bin/login".into(),
+        args: vec!["-fpl".into(), user, shell],
+        size: TerminalSize {
+            cols,
+            rows,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+        argv0: None,
+        cwd,
+    })
 }
 
 extern "C" fn signal_handler(sig: libc::c_int) {
-    // Async-signal-safe: only an atomic store and a write(2) of a
-    // pre-allocated literal.  No allocation, no locks.  The accept
-    // loop sees SHUTDOWN on its next iteration (signal delivery
-    // interrupts a blocking accept with EINTR, std turns that into
-    // io::Error of kind Interrupted, our Err arm checks SHUTDOWN).
     SHUTDOWN.store(true, Ordering::Release);
     let msg: &[u8] = match sig {
         libc::SIGTERM => b"[shelld] SIGTERM\n",
@@ -232,12 +519,6 @@ extern "C" fn signal_handler(sig: libc::c_int) {
     unsafe {
         libc::write(libc::STDERR_FILENO, msg.as_ptr() as _, msg.len());
     }
-    // std::os::unix::net::UnixListener::accept silently retries on
-    // EINTR, so the SHUTDOWN flag alone wouldn't get us out of a
-    // blocked accept().  Close the listener fd here — close(2) is
-    // on POSIX-1.2008's AS-safe list — to force the in-flight
-    // accept to return EBADF; the loop in main then observes
-    // SHUTDOWN and exits.
     let fd = LISTENER_FD.swap(-1, Ordering::AcqRel);
     if fd >= 0 {
         unsafe { libc::close(fd) };
@@ -245,16 +526,10 @@ extern "C" fn signal_handler(sig: libc::c_int) {
 }
 
 fn install_signal_handlers() {
-    // SAFETY: sigaction is the standard POSIX install path; the
-    // handler function is `extern "C"` with the right signature, and
-    // we only touch a `static` AtomicBool inside it.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = signal_handler as *const () as usize;
         libc::sigemptyset(&mut sa.sa_mask);
-        // No SA_RESTART — we WANT syscalls to return EINTR so the
-        // accept loop can observe SHUTDOWN promptly instead of
-        // restarting the accept().
         sa.sa_flags = 0;
         let r1 = libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         let r2 = libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());

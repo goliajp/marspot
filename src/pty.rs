@@ -136,6 +136,21 @@ impl Pty {
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_shared(buf)
+    }
+
+    pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write_shared(buf)
+    }
+
+    /// Shared-reference variants of read/write — the kernel already
+    /// serialises concurrent fd ops at its end, so Rust's `&mut`
+    /// exclusivity isn't load-bearing here.  These let an `Arc<Pty>`
+    /// be split between a reader thread (loop on `read_shared`) and
+    /// a writer thread (loop on `write_shared`) without any extra
+    /// Mutex.  Used by `marspot-shelld` where one PTY is shared
+    /// between multiple subscriber threads.
+    pub fn read_shared(&self, buf: &mut [u8]) -> io::Result<usize> {
         // SAFETY: master is a valid fd as long as `self` is alive (Drop closes it).
         let n = unsafe {
             libc::read(self.master, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
@@ -146,7 +161,7 @@ impl Pty {
         Ok(n as usize)
     }
 
-    pub fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    pub fn write_shared(&self, buf: &[u8]) -> io::Result<usize> {
         // SAFETY: master is a valid fd as long as `self` is alive.
         let n = unsafe {
             libc::write(self.master, buf.as_ptr() as *const libc::c_void, buf.len())

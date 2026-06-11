@@ -60,8 +60,16 @@ pub enum MsgType {
     HelloAck = 2,
     ListSessions = 3,
     ListSessionsReply = 4,
-    // Phase 3 will add NewSession / Attach / Detach / Data / Input
-    // / Resize / Kill at codes 5..=12.
+    NewSession = 5,
+    NewSessionReply = 6,
+    Attach = 7,
+    Detach = 8,
+    Kill = 9,
+    Resize = 10,
+    // 100..=199 reserved for high-volume data flow so a future
+    // dispatcher can branch on `type >= 100` cheaply.
+    Data = 100,
+    Input = 101,
     Error = 200,
 }
 
@@ -72,6 +80,14 @@ impl MsgType {
             2 => MsgType::HelloAck,
             3 => MsgType::ListSessions,
             4 => MsgType::ListSessionsReply,
+            5 => MsgType::NewSession,
+            6 => MsgType::NewSessionReply,
+            7 => MsgType::Attach,
+            8 => MsgType::Detach,
+            9 => MsgType::Kill,
+            10 => MsgType::Resize,
+            100 => MsgType::Data,
+            101 => MsgType::Input,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -300,6 +316,133 @@ pub fn decode_list_sessions_reply(payload: &[u8]) -> io::Result<Vec<SessionInfo>
     Ok(out)
 }
 
+/// NEW_SESSION payload (c→s):
+/// `[cols u16 LE] [rows u16 LE] [cwd_len u16 LE] [cwd bytes UTF-8]`
+/// Empty cwd ("" with cwd_len=0) means "use shelld's default" (which
+/// today is `$HOME`).  Env / argv overrides intentionally omitted —
+/// shelld decides the shell program from `$SHELL` / `/bin/zsh` like
+/// `Session::spawn` already does; the client can't override that
+/// surface in v1.  Future versions extend with optional trailing
+/// fields, gated on the protocol version.
+pub fn encode_new_session(cols: u16, rows: u16, cwd: &str) -> Vec<u8> {
+    let cwd_bytes = cwd.as_bytes();
+    let cwd_len = cwd_bytes.len().min(u16::MAX as usize) as u16;
+    let mut v = Vec::with_capacity(6 + cwd_len as usize);
+    v.extend_from_slice(&cols.to_le_bytes());
+    v.extend_from_slice(&rows.to_le_bytes());
+    v.extend_from_slice(&cwd_len.to_le_bytes());
+    v.extend_from_slice(&cwd_bytes[..cwd_len as usize]);
+    v
+}
+
+pub fn decode_new_session(payload: &[u8]) -> io::Result<(u16, u16, String)> {
+    if payload.len() < 6 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NEW_SESSION too short",
+        ));
+    }
+    let cols = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+    let rows = u16::from_le_bytes(payload[2..4].try_into().unwrap());
+    let cwd_len = u16::from_le_bytes(payload[4..6].try_into().unwrap()) as usize;
+    if payload.len() < 6 + cwd_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NEW_SESSION cwd truncated",
+        ));
+    }
+    let cwd = String::from_utf8_lossy(&payload[6..6 + cwd_len]).into_owned();
+    Ok((cols, rows, cwd))
+}
+
+/// NEW_SESSION_REPLY payload (s→c):
+/// `[session_id u64 LE] [child_pid i32 LE]`
+/// Failure paths come back as an ERROR frame instead.
+pub fn encode_new_session_reply(session_id: u64, child_pid: i32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&child_pid.to_le_bytes());
+    v
+}
+
+pub fn decode_new_session_reply(payload: &[u8]) -> io::Result<(u64, i32)> {
+    if payload.len() != 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "NEW_SESSION_REPLY expected 12 bytes, got {}",
+                payload.len()
+            ),
+        ));
+    }
+    Ok((
+        u64::from_le_bytes(payload[0..8].try_into().unwrap()),
+        i32::from_le_bytes(payload[8..12].try_into().unwrap()),
+    ))
+}
+
+/// ATTACH / DETACH / KILL payload: `[session_id u64 LE]`.  Same
+/// three-byte layout, separate function names to make call sites
+/// self-documenting.
+pub fn encode_session_id(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_session_id(payload: &[u8]) -> io::Result<u64> {
+    if payload.len() != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected 8-byte session_id payload",
+        ));
+    }
+    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+/// RESIZE payload: `[session_id u64 LE] [cols u16 LE] [rows u16 LE]`
+pub fn encode_resize(session_id: u64, cols: u16, rows: u16) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&cols.to_le_bytes());
+    v.extend_from_slice(&rows.to_le_bytes());
+    v
+}
+
+pub fn decode_resize(payload: &[u8]) -> io::Result<(u64, u16, u16)> {
+    if payload.len() != 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("RESIZE expected 12 bytes, got {}", payload.len()),
+        ));
+    }
+    Ok((
+        u64::from_le_bytes(payload[0..8].try_into().unwrap()),
+        u16::from_le_bytes(payload[8..10].try_into().unwrap()),
+        u16::from_le_bytes(payload[10..12].try_into().unwrap()),
+    ))
+}
+
+/// DATA payload (s→c, PTY bytes):
+/// `[session_id u64 LE] [bytes ...]`
+/// INPUT payload (c→s, PTY input bytes) uses the same layout.  Both
+/// emit one frame per chunk so backpressure works frame-by-frame.
+pub fn encode_data(session_id: u64, bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + bytes.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(bytes);
+    v
+}
+
+pub fn decode_data(payload: &[u8]) -> io::Result<(u64, &[u8])> {
+    if payload.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DATA/INPUT missing session_id",
+        ));
+    }
+    let id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    Ok((id, &payload[8..]))
+}
+
 /// ERROR payload:
 /// `[code u32 LE]  [message bytes (UTF-8) until end-of-payload]`
 pub fn encode_error(code: u32, message: &str) -> Vec<u8> {
@@ -433,6 +576,59 @@ mod tests {
         let p = encode_list_sessions_reply(&inp);
         let out = decode_list_sessions_reply(&p).unwrap();
         assert_eq!(out, inp);
+    }
+
+    #[test]
+    fn new_session_roundtrip() {
+        let p = encode_new_session(80, 24, "/Users/d/foo");
+        let (c, r, w) = decode_new_session(&p).unwrap();
+        assert_eq!((c, r), (80, 24));
+        assert_eq!(w, "/Users/d/foo");
+    }
+
+    #[test]
+    fn new_session_empty_cwd() {
+        let p = encode_new_session(120, 40, "");
+        let (c, r, w) = decode_new_session(&p).unwrap();
+        assert_eq!((c, r), (120, 40));
+        assert_eq!(w, "");
+    }
+
+    #[test]
+    fn new_session_reply_roundtrip() {
+        let p = encode_new_session_reply(0xDEAD_BEEF_CAFE_F00D, 1234);
+        let (id, pid) = decode_new_session_reply(&p).unwrap();
+        assert_eq!(id, 0xDEAD_BEEF_CAFE_F00D);
+        assert_eq!(pid, 1234);
+    }
+
+    #[test]
+    fn session_id_roundtrip() {
+        let p = encode_session_id(42);
+        assert_eq!(decode_session_id(&p).unwrap(), 42);
+    }
+
+    #[test]
+    fn resize_roundtrip() {
+        let p = encode_resize(7, 100, 30);
+        assert_eq!(decode_resize(&p).unwrap(), (7, 100, 30));
+    }
+
+    #[test]
+    fn data_roundtrip() {
+        let p = encode_data(99, b"hello\x1b[31m world");
+        let (id, bytes) = decode_data(&p).unwrap();
+        assert_eq!(id, 99);
+        assert_eq!(bytes, b"hello\x1b[31m world");
+    }
+
+    #[test]
+    fn data_zero_length() {
+        // Zero-byte chunks are legal — keepalive, attach-with-empty-log.
+        let p = encode_data(5, b"");
+        let (id, bytes) = decode_data(&p).unwrap();
+        assert_eq!(id, 5);
+        assert!(bytes.is_empty());
     }
 
     #[test]
