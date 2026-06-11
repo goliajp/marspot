@@ -14,12 +14,13 @@
 //! and `mcli` (single-terminal standalone app).
 
 use std::io;
+use std::os::raw::c_int;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// Once-per-process: write the ZDOTDIR shim that disables zsh's
@@ -155,6 +156,19 @@ pub struct Session {
     /// Wall-clock instant of the most recent byte fed to the terminal.
     /// Drives "recently active" indicators in any UI built on top.
     pub last_output: Option<Instant>,
+    /// JoinHandle for the PTY reader thread.  `Drop` takes it,
+    /// signals shutdown via `shutdown_pipe_w`, and joins before
+    /// letting `Pty` close `master_fd` — without this, a fast
+    /// "close pane → open pane" sequence can land the new pty's
+    /// master fd on the same integer the dying reader is still
+    /// blocked in `read()` on, leaking a few bytes from the new
+    /// session into the dead one's channel.
+    reader_handle: Option<JoinHandle<()>>,
+    /// Write end of an internal pipe whose read end the reader
+    /// thread polls alongside `master_fd`.  Writing a single byte
+    /// wakes the reader out of `poll()` so it can observe `exited`
+    /// and return.  Closed by `Drop` after the reader joins.
+    shutdown_pipe_w: RawFd,
 }
 
 impl Session {
@@ -265,13 +279,37 @@ impl Session {
         })?;
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CAPACITY);
         let exited = Arc::new(AtomicBool::new(false));
-        spawn_reader(pty.raw_master(), tx, exited.clone(), wake);
+        // Self-pipe so Drop can wake the reader without using a
+        // process-wide signal handler.  `pipe2` isn't on macOS, use
+        // `pipe` + `fcntl(FD_CLOEXEC)`.  The read end is owned by
+        // the reader thread (closed when it exits); the write end is
+        // owned by `Session` and closed in `Drop` after `join`.
+        let mut pipe_fds: [c_int; 2] = [-1, -1];
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let (shutdown_r, shutdown_w) = (pipe_fds[0], pipe_fds[1]);
+        // FD_CLOEXEC so a forked child doesn't accidentally inherit
+        // these and keep them alive past Drop's close().
+        unsafe {
+            libc::fcntl(shutdown_r, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(shutdown_w, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        let reader_handle = spawn_reader(
+            pty.raw_master(),
+            shutdown_r,
+            tx,
+            exited.clone(),
+            wake,
+        );
         Ok(Self {
             terminal: Terminal::new(cols, rows),
             pty,
             rx,
             exited,
             last_output: None,
+            reader_handle: Some(reader_handle),
+            shutdown_pipe_w: shutdown_w,
         })
     }
 
@@ -365,7 +403,13 @@ impl Session {
     }
 }
 
-fn spawn_reader<W>(master_fd: RawFd, tx: SyncSender<Vec<u8>>, exited: Arc<AtomicBool>, wake: W)
+fn spawn_reader<W>(
+    master_fd: RawFd,
+    shutdown_fd: RawFd,
+    tx: SyncSender<Vec<u8>>,
+    exited: Arc<AtomicBool>,
+    wake: W,
+) -> JoinHandle<()>
 where
     W: Fn() + Send + Sync + 'static,
 {
@@ -374,6 +418,51 @@ where
         .spawn(move || {
             let mut buf = [0u8; READ_BUF];
             loop {
+                // Block on either fd via poll() so we can be woken
+                // out of an idle wait without anyone closing
+                // master_fd — `Session::drop` writes one byte to
+                // `shutdown_fd` to break us out and lets us join
+                // before the master fd closes.
+                let mut pfds = [
+                    libc::pollfd {
+                        fd: master_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: shutdown_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, -1) };
+                if exited.load(Ordering::Acquire) {
+                    break;
+                }
+                if r < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                if pfds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                    // Shutdown signaled; exit before touching
+                    // master_fd in case it's already on its way to
+                    // being closed.
+                    break;
+                }
+                let master_re = pfds[0].revents;
+                if master_re & libc::POLLIN == 0 {
+                    // POLLHUP / POLLERR / POLLNVAL without data —
+                    // child exited or fd closed externally.
+                    if master_re & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                        exited.store(true, Ordering::Release);
+                        wake();
+                    }
+                    break;
+                }
+
                 let n = unsafe {
                     libc::read(
                         master_fd,
@@ -422,8 +511,34 @@ where
                 }
                 wake();
             }
+            // Reader owns the read end of the shutdown pipe; close on
+            // exit so the kernel can reclaim it.
+            unsafe { libc::close(shutdown_fd) };
         })
-        .expect("spawn pty reader thread");
+        .expect("spawn pty reader thread")
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Wake the reader.  exited=true is observed after poll
+        // unblocks; the pipe write is what makes poll unblock without
+        // touching master_fd.
+        self.exited.store(true, Ordering::Release);
+        let _ = unsafe {
+            libc::write(self.shutdown_pipe_w, b"x".as_ptr() as *const _, 1)
+        };
+        if let Some(handle) = self.reader_handle.take() {
+            // join() blocks until the reader's thread function
+            // returns.  Rust drops fields in declaration order AFTER
+            // this Drop body returns, so Pty (which closes master_fd)
+            // drops only after we've already joined — the reader is
+            // guaranteed to be off the fd before close, eliminating
+            // the fd-reuse race.
+            let _ = handle.join();
+        }
+        // Reader has closed its read end; close our write end.
+        unsafe { libc::close(self.shutdown_pipe_w) };
+    }
 }
 
 #[cfg(test)]

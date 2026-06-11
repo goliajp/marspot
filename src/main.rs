@@ -1293,6 +1293,11 @@ impl Marspot {
                     if let Some(w) = tmux.windows.iter_mut().find(|w| w.id == window_id) {
                         w.closed = true;
                     }
+                    // Force a reconcile so closed windows actually
+                    // drop out of `tmux.windows` instead of
+                    // accumulating until something else (focus
+                    // change, new-window) triggers a list-windows.
+                    self.queue_list_windows();
                 }
                 tmux::Event::WindowRenamed { window_id, name } => {
                     let tmux = self.tmux.as_mut().unwrap();

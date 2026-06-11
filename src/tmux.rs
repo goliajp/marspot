@@ -60,16 +60,22 @@ pub enum Event {
     Unknown(String),
 }
 
+/// Hard cap on per-line + per-block buffering.  Real tmux control-mode
+/// lines top out at a few KB even with very long output captures, so
+/// 1 MiB is comfortable headroom.  Past this cap we reset the
+/// offending buffer and emit `Event::Unknown` so the consumer learns
+/// something dropped — losing one runaway line is better than
+/// growing memory without bound on a hostile / buggy stream.
+const PARSE_BUF_MAX: usize = 1 << 20; // 1 MiB
+
 #[derive(Debug, Default)]
 pub struct Parser {
     /// Bytes accumulated since the last `\n`; processed when LF
-    /// arrives.  Bounded by line length, so we don't grow unbounded
-    /// on a hostile input stream (the protocol has no multi-MB
-    /// single lines in practice).
+    /// arrives.  Capped at `PARSE_BUF_MAX`.
     line_buf: Vec<u8>,
     /// When inside a `%begin ... %end` block, output between the
     /// markers accumulates here.  Set to `Some(cmd_number)` while
-    /// inside the block, `None` outside.
+    /// inside the block, `None` outside.  Also capped at `PARSE_BUF_MAX`.
     block: Option<u32>,
     block_buf: Vec<u8>,
 }
@@ -93,7 +99,32 @@ impl Parser {
                 // tmux uses LF terminators; some platforms send CRLF.
                 // Drop CR bytes so they don't end up in event data.
                 self.line_buf.push(b);
+                // Guard against unbounded growth on a no-LF stream
+                // (hostile input, tmux bug, hung output capture).
+                // Drop the buffer, surface the truncation, leave the
+                // block-state untouched so we can keep parsing once
+                // the wedge clears.
+                if self.line_buf.len() > PARSE_BUF_MAX {
+                    out.push(Event::Unknown(
+                        format!("line dropped: exceeded {} bytes without LF", PARSE_BUF_MAX),
+                    ));
+                    self.line_buf.clear();
+                }
             }
+        }
+        // Same guard for block_buf — a runaway `%begin` without `%end`
+        // would otherwise accumulate forever in process_line.
+        if self.block_buf.len() > PARSE_BUF_MAX {
+            let cmd = self.block.unwrap_or(0);
+            let dropped = std::mem::take(&mut self.block_buf);
+            out.push(Event::CommandError {
+                cmd_number: cmd,
+                output: format!(
+                    "block dropped: exceeded {} bytes without %end ({} bytes captured)",
+                    PARSE_BUF_MAX, dropped.len()
+                ).into_bytes(),
+            });
+            self.block = None;
         }
         out
     }
