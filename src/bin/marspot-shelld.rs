@@ -61,8 +61,13 @@ const SUBSCRIBER_QUEUE_DEPTH: usize = 64;
 
 /// Always-on socket path under `$HOME/Library/Caches/marspot/`.
 /// Created on startup, removed on graceful shutdown.  Per-user; no
-/// cross-user contention.
+/// cross-user contention.  Tests / dev-mode can override via
+/// `MARSPOT_SHELLD_SOCKET` so they don't collide with the running
+/// LaunchAgent instance.
 fn socket_path() -> PathBuf {
+    if let Ok(p) = std::env::var("MARSPOT_SHELLD_SOCKET") {
+        return PathBuf::from(p);
+    }
     let home = std::env::var("HOME").expect("HOME unset; refusing to run");
     PathBuf::from(home).join("Library/Caches/marspot/shelld.sock")
 }
