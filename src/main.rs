@@ -6,7 +6,7 @@ use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers as MarspotMo
 use marspot::layout::Layout;
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::{make_target_texture, MetalRenderer};
-use marspot::session::{Session, SessionState};
+use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
 
@@ -255,7 +255,15 @@ struct Marspot {
     /// Cross-thread wake handle, cloned on demand to power
     /// per-session reader threads spawned at runtime (e.g. via the
     /// sidebar [+] button).  Same proxy main passed into `run_app`.
+    #[allow(dead_code)]
     event_proxy: EventProxy,
+    /// Connection to `marspot-shelld`.  Sessions are spawned and
+    /// driven through this; marspot itself never forks shells, so
+    /// a `marspot` process restart (silent update, manual relaunch)
+    /// doesn't take any user shells with it.  `None` in tmux-CC
+    /// mode, where the lone session goes through `Session::spawn_with`
+    /// directly (shelld doesn't speak the tmux control protocol yet).
+    shelld: Option<std::sync::Arc<marspot::shelld_client::ShelldClient>>,
 }
 
 /// Live text selection inside one session's grid.  Column is the
@@ -494,7 +502,7 @@ impl MarspotApp for Marspot {
             return;
         }
 
-        let term = &self.panes[self.focused_idx].session().terminal;
+        let term = self.panes[self.focused_idx].session().terminal();
         let app_mode = term.cursor_key_application_mode();
         let bracketed = term.bracketed_paste_mode();
         if let Some(bytes) = key_event_to_bytes(&event, modifiers, app_mode, bracketed) {
@@ -522,7 +530,7 @@ impl MarspotApp for Marspot {
             // full, etc.).
             let mut predicted = false;
             for &b in bytes.as_ref() {
-                if session.terminal.predict_byte(b) {
+                if session.terminal_mut().predict_byte(b) {
                     predicted = true;
                 }
             }
@@ -722,7 +730,7 @@ impl MarspotApp for Marspot {
             // choosing to act on that content, and snapping would
             // shift the visible area out from under their cursor.
             let pane = &self.panes[idx];
-            let rows = pane.session().terminal.grid().rows() as u32;
+            let rows = pane.session().terminal().grid().rows() as u32;
             let vo = pane.view_offset() as u32;
             let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
             self.selection = Some(Selection {
@@ -811,7 +819,7 @@ impl MarspotApp for Marspot {
         // Re-read view_offset AFTER any auto-scroll above so the abs
         // we record reflects the post-scroll viewport.
         let pane = &self.panes[target_idx];
-        let rows = pane.session().terminal.grid().rows() as u32;
+        let rows = pane.session().terminal().grid().rows() as u32;
         let vo = pane.view_offset() as u32;
         let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
 
@@ -1008,17 +1016,17 @@ impl Marspot {
         if self.panes.len() >= SESSION_COUNT_HARD_CAP {
             return;
         }
-        let proxy_clone = self.event_proxy.clone();
-        let wake = move || {
-            proxy_clone.wake();
+        let Some(client) = self.shelld.as_ref() else {
+            eprintln!("marspot: shelld client missing, cannot spawn");
+            return;
         };
-        match Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake) {
+        match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
             Ok(s) => {
-                self.panes.push(marspot::pane::Pane::new(s));
+                self.panes.push(marspot::pane::Pane::new_shelld(s));
                 self.custom_titles.push(None);
             }
             Err(e) => {
-                eprintln!("marspot: failed to spawn session: {e}");
+                eprintln!("marspot: failed to spawn session via shelld: {e}");
             }
         }
     }
@@ -1111,7 +1119,7 @@ impl Marspot {
         let mut grid_b: usize = 0;
         let mut scrollback_b: usize = 0;
         for p in &self.panes {
-            let g = p.session().terminal.grid();
+            let g = p.session().terminal().grid();
             grid_b += g.approx_bytes();
             scrollback_b += g.scrollback_approx_bytes();
         }
@@ -1169,7 +1177,7 @@ impl Marspot {
         let Some(pane) = self.panes.get(sel.session_idx) else {
             return false;
         };
-        let grid = pane.session().terminal.grid();
+        let grid = pane.session().terminal().grid();
         let cols = grid.cols();
         let rows = grid.rows();
         if cols == 0 || rows == 0 {
@@ -1592,7 +1600,7 @@ impl Marspot {
                         return None;
                     }
                     let pane_vo = p.view_offset() as i64;
-                    let g_rows = p.session().terminal.grid().rows() as i64;
+                    let g_rows = p.session().terminal().grid().rows() as i64;
                     let last = g_rows - 1;
                     let abs_to_vp = |abs: u32| -> i64 {
                         // vp = (rows-1) + vo - abs
@@ -1615,7 +1623,7 @@ impl Marspot {
                     // anchor/focus cols regardless of which rows are
                     // currently on-screen.
                     let blockwise = sel.mode == SelectionMode::Blockwise;
-                    let max_col_clamp = p.session().terminal.grid().cols().saturating_sub(1);
+                    let max_col_clamp = p.session().terminal().grid().cols().saturating_sub(1);
                     let clip = |col: u16, vp: i64| -> (u16, u16) {
                         if vp < 0 {
                             (if blockwise { col } else { 0 }, 0)
@@ -1693,29 +1701,57 @@ fn main() {
     };
     let n_sessions = initial_layout.cells();
 
-    let mut sessions = Vec::with_capacity(n_sessions);
-    for _ in 0..n_sessions {
+    // Bring up the shelld connection up front for non-tmux mode.
+    // marspot doesn't fork shells itself any more; shelld owns them
+    // so a marspot restart never SIGHUPs a running session.  tmux-CC
+    // mode keeps the local Session::spawn_with path because shelld
+    // doesn't speak the tmux control protocol yet.
+    let shelld_client: Option<std::sync::Arc<marspot::shelld_client::ShelldClient>> = if tmux_mode {
+        None
+    } else {
         let proxy_clone = proxy.clone();
         let wake = move || {
             proxy_clone.wake();
         };
-        let s = if tmux_mode {
-            // tmux -CC: attach to "marspot" session (creating it if absent).
-            // -A is "attach if exists, else new" — handy for re-launches.
-            Session::spawn_with(
-                "tmux",
-                &["-CC", "new-session", "-A", "-s", "marspot"],
-                INITIAL_COLS,
-                INITIAL_ROWS,
-                wake,
-            )
-            .expect("spawn tmux -CC session")
-        } else {
-            Session::spawn(INITIAL_COLS, INITIAL_ROWS, wake)
-                .expect("spawn initial session")
+        let socket = marspot::shelld_client::default_socket_path();
+        let client = marspot::shelld_client::ShelldClient::connect(&socket, wake)
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "marspot: failed to connect to shelld at {}: {}\n\
+                     hint: run `bin/install-shelld.sh` once to launchctl-load it",
+                    socket.display(),
+                    e
+                );
+                std::process::exit(1);
+            });
+        Some(std::sync::Arc::new(client))
+    };
+
+    let panes: Vec<marspot::pane::Pane> = if tmux_mode {
+        let proxy_clone = proxy.clone();
+        let wake = move || {
+            proxy_clone.wake();
         };
-        sessions.push(s);
-    }
+        let s = marspot::session::Session::spawn_with(
+            "tmux",
+            &["-CC", "new-session", "-A", "-s", "marspot"],
+            INITIAL_COLS,
+            INITIAL_ROWS,
+            wake,
+        )
+        .expect("spawn tmux -CC session");
+        vec![marspot::pane::Pane::new(s)]
+    } else {
+        let client = shelld_client.as_ref().unwrap();
+        (0..n_sessions)
+            .map(|_| {
+                let s = client
+                    .new_session(INITIAL_COLS, INITIAL_ROWS, "")
+                    .expect("spawn initial session via shelld");
+                marspot::pane::Pane::new_shelld(s)
+            })
+            .collect()
+    };
 
     let latency_out_path = std::env::var("MARSPOT_LATENCY").ok();
     let record_latency = latency_out_path.is_some();
@@ -1724,8 +1760,6 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
 
-    let panes: Vec<marspot::pane::Pane> =
-        sessions.into_iter().map(marspot::pane::Pane::new).collect();
     let n_sessions = panes.len();
     let app = Marspot {
         renderer: None,
@@ -1752,6 +1786,7 @@ fn main() {
         rss_dump_started_at: None,
         last_rss_dump: None,
         event_proxy: proxy.clone(),
+        shelld: shelld_client,
     };
 
     let attrs = WindowAttrs {
@@ -1975,6 +2010,7 @@ fn bench_rss_format_dump(arg: &str) {
         rss_dump_started_at: None,
         last_rss_dump: None,
         event_proxy: EventProxy::new(),
+        shelld: None,
     };
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);
