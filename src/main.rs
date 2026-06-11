@@ -567,6 +567,18 @@ impl MarspotApp for Marspot {
                 layout.hit_test_close_session(x_phys, y_phys),
             )
         };
+        // Refresh button: only fires when an update is staged
+        // (paint + hit-test both gated on the same condition).
+        // Click is equivalent to the focus-loss trigger — exec
+        // bootstrap, swap binary, attach back.
+        if let Some(layout) = &self.layout {
+            if layout.update_pending
+                && layout.hit_test_refresh_button(x_phys, y_phys)
+            {
+                apply_pending_update(ctx);
+                return;
+            }
+        }
         // Sidebar toggle: highest-priority chrome action so a click
         // on the chip never falls through to the cell underneath.
         // Mirrors the Cmd-B keyboard path.
@@ -912,13 +924,16 @@ impl MarspotApp for Marspot {
         // apply it — they're not watching us repaint.  By the time
         // they come back, marspot has been replaced and reattached
         // to the same shelld sessions, so the only change they see
-        // is the new version's UI.  Cheap atomic check first, then
-        // the more expensive fs::metadata to defend against the
-        // flag-set-but-file-vanished race.
-        if !focused
-            && self.update_pending_flag.load(std::sync::atomic::Ordering::Acquire)
-            && pending_update_exists()
-        {
+        // is the new version's UI.
+        //
+        // `MARSPOT_MANUAL_UPDATE_ONLY=1` short-circuits the
+        // auto-trigger so you can verify the title-bar refresh
+        // button without it being consumed mid-test (every
+        // terminal-side `cp pending` flicks marspot off-focus and
+        // would otherwise apply immediately).  Production use leaves
+        // it unset.
+        let manual_only = std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_some();
+        if !focused && !manual_only && pending_update_exists() {
             apply_pending_update(ctx);
         }
     }
@@ -997,7 +1012,7 @@ impl Marspot {
         let (lc, lr) = self.layout_mode.dims();
         let header_phys = HEADER_PT * scale;
         let title_phys = CELL_TITLE_PT * scale;
-        let layout = Layout::build(
+        let mut layout = Layout::build(
             phys_w, phys_h, sidebar_phys, header_phys, title_phys,
             lc, lr, cell_w, cell_h,
         )
@@ -1006,6 +1021,14 @@ impl Marspot {
             self.layout_picker_open,
             self.panes.len(),
         );
+        // Surface the updater's pending-binary signal into the
+        // layout so the renderer can paint a refresh button and the
+        // hit-tester can react.  Cheap atomic read; safe to run
+        // every rebuild.
+        layout.update_pending = self
+            .update_pending_flag
+            .load(std::sync::atomic::Ordering::Acquire)
+            || pending_update_exists();
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);
@@ -1488,6 +1511,19 @@ impl Marspot {
     fn render_now(&mut self, ctx: &MarspotAppCtx) {
         if self.layout.is_none() || self.renderer.is_none() {
             return;
+        }
+        // Refresh the update-pending flag on each redraw so the
+        // refresh button appears as soon as a binary lands in
+        // pending/ (whether via the background updater or a manual
+        // stage), without needing a window resize / layout change to
+        // re-derive `Layout::update_pending`.  Cheap: one atomic
+        // load + at most one fs::metadata stat.
+        let now_pending = self
+            .update_pending_flag
+            .load(std::sync::atomic::Ordering::Acquire)
+            || pending_update_exists();
+        if let Some(layout) = self.layout.as_mut() {
+            layout.update_pending = now_pending;
         }
         let focused = self.focused_idx;
         // view_offset is now per-Pane (read at SessionView construction

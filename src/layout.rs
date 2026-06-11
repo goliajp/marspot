@@ -104,6 +104,18 @@ pub struct Layout {
     /// Always present (even when the sidebar is currently collapsed)
     /// so the user can re-open it.
     pub sidebar_button_rect: Rect,
+    /// Floating refresh button — left of the sidebar button, sized
+    /// the same as it.  Only painted when the GUI has been told a
+    /// pending update is staged; clicking it triggers the same
+    /// `apply_pending_update` path that focus-loss takes.  Rect is
+    /// always computed (so hit-testing is cheap), but the renderer
+    /// skips drawing it unless the caller signals an update is
+    /// available.
+    pub refresh_button_rect: Rect,
+    /// True when an update has been staged in `pending/`.  Renderer
+    /// uses this to gate drawing the refresh button; click handler
+    /// uses it to decide whether the refresh-rect hit should fire.
+    pub update_pending: bool,
     /// Layout-picker overlay panel — `Some` while the picker is
     /// showing, `None` otherwise.  Renderer paints the panel BG
     /// behind the option icons; mouse_down hits inside this rect
@@ -291,6 +303,8 @@ impl Layout {
             // zeroed; marspot's main path always layers on the chrome.
             layout_button_rect: Rect::ZERO,
             sidebar_button_rect: Rect::ZERO,
+            refresh_button_rect: Rect::ZERO,
+            update_pending: false,
             picker_panel_rect: None,
             picker_option_rects: Vec::new(),
             picker_option_dims: Vec::new(),
@@ -336,6 +350,12 @@ impl Layout {
         };
         self.sidebar_button_rect = Rect {
             x: btn_x - btn_gap - sb_btn_w,
+            y_top: btn_y,
+            w: sb_btn_w,
+            h: btn_h,
+        };
+        self.refresh_button_rect = Rect {
+            x: self.sidebar_button_rect.x - btn_gap - sb_btn_w,
             y_top: btn_y,
             w: sb_btn_w,
             h: btn_h,
@@ -431,6 +451,14 @@ impl Layout {
     /// sidebar is collapsed, since it's the only way back).
     pub fn hit_test_sidebar_button(&self, px: f64, py: f64) -> bool {
         self.sidebar_button_rect.contains(px, py)
+    }
+
+    /// True when `(px, py)` falls inside the refresh button rect.
+    /// The button is only visible (and so really clickable) when an
+    /// update is staged; callers should gate the action on the same
+    /// signal that gated the visual.
+    pub fn hit_test_refresh_button(&self, px: f64, py: f64) -> bool {
+        self.refresh_button_rect.contains(px, py)
     }
 
     /// Returns the picker option index (0..7) the click landed in,

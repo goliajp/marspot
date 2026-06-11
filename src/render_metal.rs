@@ -1340,6 +1340,94 @@ fn push_grid_icon(
     }
 }
 
+/// Draw a refresh icon — a circular arrow approximated by four
+/// short stroke segments forming an open ring + a small arrow head.
+/// Vector-imagey precision isn't needed; the goal is "user reads
+/// this as 'reload'" at chrome scale.
+fn push_refresh_icon(cells: &mut Vec<CellInstance>, container: Rect) {
+    let pad = (container.w.min(container.h) * 0.25).max(2.0);
+    let inner_x = container.x + pad;
+    let inner_y = container.y_top + pad;
+    let inner_w = (container.w - 2.0 * pad).max(1.0);
+    let inner_h = (container.h - 2.0 * pad).max(1.0);
+    let stroke = (inner_h * 0.15).max(1.0).round();
+    let color = [
+        REFRESH_BTN_ARROW.0,
+        REFRESH_BTN_ARROW.1,
+        REFRESH_BTN_ARROW.2,
+        1.0,
+    ];
+    // Top edge — full width except small gap on the right (so the
+    // ring has an opening for the arrow head).
+    push_rect(
+        cells,
+        Rect {
+            x: inner_x,
+            y_top: inner_y,
+            w: inner_w * 0.65,
+            h: stroke,
+        },
+        color,
+    );
+    // Left edge — full height
+    push_rect(
+        cells,
+        Rect {
+            x: inner_x,
+            y_top: inner_y,
+            w: stroke,
+            h: inner_h,
+        },
+        color,
+    );
+    // Bottom edge — full width
+    push_rect(
+        cells,
+        Rect {
+            x: inner_x,
+            y_top: inner_y + inner_h - stroke,
+            w: inner_w,
+            h: stroke,
+        },
+        color,
+    );
+    // Right edge — bottom half
+    push_rect(
+        cells,
+        Rect {
+            x: inner_x + inner_w - stroke,
+            y_top: inner_y + inner_h * 0.45,
+            w: stroke,
+            h: inner_h * 0.55,
+        },
+        color,
+    );
+    // Arrow head at top-right opening — small triangle approximated
+    // by two short rects making a right-pointing wedge.
+    let head_x = inner_x + inner_w * 0.55;
+    let head_y = inner_y;
+    push_rect(
+        cells,
+        Rect {
+            x: head_x,
+            y_top: head_y,
+            w: inner_w * 0.18,
+            h: stroke,
+        },
+        color,
+    );
+    push_rect(
+        cells,
+        Rect {
+            x: head_x + inner_w * 0.13,
+            y_top: head_y,
+            w: stroke,
+            h: inner_h * 0.30,
+        },
+        color,
+    );
+}
+
 /// Draw a sidebar-silhouette icon inside `container`: a thin outer
 /// rect (the "window") with a small bar on the left (the "sidebar
 /// strip").  When `collapsed`, the bar dims so the icon doubles as a
@@ -1413,7 +1501,50 @@ const ADD_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
 
 const SESSION_COUNT_HARD_CAP: usize = 9;
 
+// Refresh button colours.  Saturated orange so the user actually
+// notices "↻ a new version is ready" against the dark chrome —
+// drawn only when update_pending is true.
+const REFRESH_BTN_BG: (f32, f32, f32) = (0.85, 0.45, 0.10);
+const REFRESH_BTN_ARROW: (f32, f32, f32) = (1.0, 1.0, 1.0);
+
 fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
+    // DIAG — write the live state of the refresh-button gate each
+    // frame so a "no button visible" report can be diagnosed
+    // without rebuilding.  Truncating write so the file shows the
+    // most recent frame only.  Removed once Phase 8 lands.
+    let _ = std::fs::write(
+        "/tmp/marspot-chrome-trace.log",
+        format!(
+            "update_pending={}  refresh_rect=(x={:.0},y={:.0},w={:.0},h={:.0})  sidebar_rect=(x={:.0},y={:.0},w={:.0},h={:.0})  layout_rect=(x={:.0},y={:.0},w={:.0},h={:.0})\n",
+            layout.update_pending,
+            layout.refresh_button_rect.x,
+            layout.refresh_button_rect.y_top,
+            layout.refresh_button_rect.w,
+            layout.refresh_button_rect.h,
+            layout.sidebar_button_rect.x,
+            layout.sidebar_button_rect.y_top,
+            layout.sidebar_button_rect.w,
+            layout.sidebar_button_rect.h,
+            layout.layout_button_rect.x,
+            layout.layout_button_rect.y_top,
+            layout.layout_button_rect.w,
+            layout.layout_button_rect.h,
+        ),
+    );
+
+    // Refresh button — only when an update is staged.  Placed left
+    // of the sidebar toggle so the existing chrome row reads as
+    // "[ refresh? ] [ sidebar ] [ layout ]" from left to right.
+    if layout.update_pending {
+        push_rect(
+            cells,
+            layout.refresh_button_rect,
+            [REFRESH_BTN_BG.0, REFRESH_BTN_BG.1, REFRESH_BTN_BG.2, 1.0],
+        );
+        push_border(cells, layout.refresh_button_rect, 1.0, CHROME_BTN_BORDER);
+        push_refresh_icon(cells, layout.refresh_button_rect);
+    }
+
     // Sidebar toggle button — sits left of the layout button so the
     // user always has a way back when the sidebar is collapsed.  The
     // icon's "sidebar bar" dims when collapsed (state derived from
