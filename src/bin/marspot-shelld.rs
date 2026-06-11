@@ -16,7 +16,8 @@
 //! Phase 5.
 
 use std::collections::HashMap;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write as IoWrite};
 use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -32,6 +33,18 @@ use marspot::shelld_proto::{
     encode_error, encode_hello_ack, encode_list_sessions_reply, encode_new_session_reply, Frame,
     MsgType, SessionInfo, PROTO_VERSION,
 };
+
+/// Per-session byte log cap.  When the log file grows past this we
+/// compact: keep the most recent `BYTELOG_RETAIN_BYTES` of bytes,
+/// drop the rest.  100 MiB is generous — even a `cat /dev/urandom`
+/// run for several seconds doesn't fill it.
+const BYTELOG_CAP_BYTES: u64 = 100 * 1024 * 1024;
+const BYTELOG_RETAIN_BYTES: u64 = 50 * 1024 * 1024;
+/// Send replay in chunks so a multi-MB log doesn't land as one
+/// gigantic frame.  Each chunk fits comfortably inside
+/// `MAX_PAYLOAD_LEN` (8 MiB) and below the OS socket buffer so the
+/// writer thread can serialise the frame fast.
+const REPLAY_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Process-wide shutdown flag.  Set by SIGTERM/SIGINT handler; observed
 /// by per-client handlers (the accept loop is woken separately by
@@ -80,6 +93,130 @@ struct Subscriber {
     tx: SyncSender<Frame>,
 }
 
+/// Disk-backed append log of raw PTY bytes per session.  Used to
+/// replay state when a client (re)attaches: the entire current log
+/// is streamed as DATA frames before the live stream resumes.
+///
+/// On disk: one file per session at
+/// `~/Library/Caches/marspot/sessions/<id>/bytelog`.  Capped at
+/// `BYTELOG_CAP_BYTES`; on overflow we copy the last
+/// `BYTELOG_RETAIN_BYTES` to a fresh file and replace the old one
+/// (a few-ms compaction triggered at most once per ~50 MiB write
+/// burst).  Survives shelld restarts so reattach from a fresh
+/// daemon also gets prior history.
+struct ByteLog {
+    path: PathBuf,
+    file: File,
+    bytes_written: u64,
+}
+
+impl ByteLog {
+    fn open(session_id: u64) -> io::Result<Self> {
+        let home = std::env::var("HOME")
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "HOME unset"))?;
+        let dir = PathBuf::from(home)
+            .join("Library/Caches/marspot/sessions")
+            .join(session_id.to_string());
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("bytelog");
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)?;
+        let bytes_written = file.metadata()?.len();
+        Ok(Self {
+            path,
+            file,
+            bytes_written,
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.write_all(bytes)?;
+        self.bytes_written += bytes.len() as u64;
+        if self.bytes_written > BYTELOG_CAP_BYTES {
+            // Best-effort compaction: failure here just leaves the
+            // log oversized until the next append tries again.
+            let _ = self.compact();
+        }
+        Ok(())
+    }
+
+    fn compact(&mut self) -> io::Result<()> {
+        let tmp_path = self.path.with_extension("tmp");
+        {
+            let mut src = OpenOptions::new().read(true).open(&self.path)?;
+            let len = src.metadata()?.len();
+            let keep_from = len.saturating_sub(BYTELOG_RETAIN_BYTES);
+            src.seek(SeekFrom::Start(keep_from))?;
+            let mut dst = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&tmp_path)?;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = src.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                dst.write_all(&buf[..n])?;
+            }
+        }
+        std::fs::rename(&tmp_path, &self.path)?;
+        // Reopen the file handle so append picks up the truncated
+        // state (the previous fd points at the old inode).
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&self.path)?;
+        self.bytes_written = self.file.metadata()?.len();
+        Ok(())
+    }
+
+    /// Stream current contents to `out` in REPLAY_CHUNK_BYTES-sized
+    /// DATA frames.  Called on ATTACH so the client can rebuild the
+    /// terminal state.  Reads from the start of the file; the file
+    /// is open in append mode so the read fd's position is
+    /// independent of where writes append.
+    fn replay(&self, session_id: u64, out: &SyncSender<Frame>) -> io::Result<()> {
+        let mut f = OpenOptions::new().read(true).open(&self.path)?;
+        f.seek(SeekFrom::Start(0))?;
+        let mut buf = vec![0u8; REPLAY_CHUNK_BYTES];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let frame = Frame::new(MsgType::Data, encode_data(session_id, &buf[..n]));
+            if out.send(frame).is_err() {
+                // Client gone — abort replay quietly.
+                return Ok(());
+            }
+        }
+        // Sentinel: a zero-length DATA frame tells the client
+        // "replay done, next DATA is live".  The client ignores
+        // empty DATA for normal flow so this is benign even when
+        // attach didn't request a replay.
+        let _ = out.send(Frame::new(MsgType::Data, encode_data(session_id, &[])));
+        Ok(())
+    }
+
+}
+
+/// Helper for KILL_SESSION cleanup — removes the bytelog file and
+/// its session directory.  Called from the Kill arm so a session
+/// killed by the GUI doesn't leave gigabytes of log behind.
+fn delete_bytelog(session_id: u64) {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let dir = PathBuf::from(home)
+        .join("Library/Caches/marspot/sessions")
+        .join(session_id.to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 struct ShellSession {
     id: u64,
     pty: Arc<Pty>,
@@ -91,6 +228,11 @@ struct ShellSession {
     /// this so the GUI can render an "exited" indicator.  Set by
     /// the reader thread on EOF.
     alive: AtomicBool,
+    /// Append log of every byte read from the PTY.  Mutex-guarded
+    /// because the reader thread is sole writer but `replay()` from
+    /// ATTACH may run concurrently and needs the path to match what
+    /// it was when the reader last appended.
+    bytelog: Mutex<Option<ByteLog>>,
 }
 
 impl ShellSession {
@@ -131,7 +273,8 @@ impl ShellSession {
     }
 }
 
-/// Per-session reader thread.  Reads PTY master, fans each chunk out
+/// Per-session reader thread.  Reads PTY master, appends the chunk
+/// to the disk bytelog (for reattach replay), fans each chunk out
 /// as a DATA frame to all subscribers.  Exits on EOF; flips `alive`
 /// to false so LIST reports it.
 fn spawn_session_reader(session: Arc<ShellSession>) {
@@ -147,6 +290,12 @@ fn spawn_session_reader(session: Arc<ShellSession>) {
                 match session.pty.read_shared(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        // Append to disk log FIRST so a crash between
+                        // append + broadcast doesn't leave the GUI
+                        // with state shelld can't replay.
+                        if let Some(log) = session.bytelog.lock().unwrap().as_mut() {
+                            let _ = log.append(&buf[..n]);
+                        }
                         let frame = Frame::new(
                             MsgType::Data,
                             encode_data(session.id, &buf[..n]),
@@ -353,11 +502,22 @@ fn reader_loop(
                     Ok(pty) => {
                         let id = NEXT_SESSION_ID.fetch_add(1, Ordering::AcqRel);
                         let child_pid = pty.child_pid();
+                        let bytelog = match ByteLog::open(id) {
+                            Ok(b) => Some(b),
+                            Err(e) => {
+                                eprintln!(
+                                    "[shelld] open bytelog for session {} failed: {} (running without replay)",
+                                    id, e
+                                );
+                                None
+                            }
+                        };
                         let session = Arc::new(ShellSession {
                             id,
                             pty: Arc::new(pty),
                             subscribers: Mutex::new(Vec::new()),
                             alive: AtomicBool::new(true),
+                            bytelog: Mutex::new(bytelog),
                         });
                         // Auto-attach the creator before publishing —
                         // any DATA the reader thread emits before
@@ -388,11 +548,26 @@ fn reader_loop(
                 let session = sessions.lock().unwrap().get(&id).cloned();
                 match session {
                     Some(s) => {
+                        // Critical ordering: hold the bytelog mutex
+                        // across attach + replay so the per-session
+                        // reader thread (which takes the same lock
+                        // before each append+broadcast) can't slip
+                        // a live broadcast in between us subscribing
+                        // and finishing the historical replay.
+                        // Subscriber gets historical bytes first,
+                        // then live; no overlap, no gap.
+                        let log_guard = s.bytelog.lock().unwrap();
                         let sub_id = s.attach(attached_tx.clone());
                         attached.push((Arc::downgrade(&s), sub_id));
-                        // Phase 5 replays the bytelog here as a
-                        // sequence of DATA frames.  For now ATTACH
-                        // just hooks up the live stream.
+                        if let Some(log) = log_guard.as_ref() {
+                            if let Err(e) = log.replay(id, attached_tx) {
+                                eprintln!(
+                                    "[shelld] replay session {} failed: {}",
+                                    id, e
+                                );
+                            }
+                        }
+                        drop(log_guard);
                     }
                     None => {
                         let _ =
@@ -436,6 +611,11 @@ fn reader_loop(
                 attached.retain(|(w, _)| {
                     w.upgrade().map(|a| a.id != id).unwrap_or(false)
                 });
+                // The bytelog file lives on disk; KILL means the
+                // GUI is done with this session, so drop the
+                // history with it.  Detach-without-kill keeps the
+                // log alive for future reattach.
+                delete_bytelog(id);
             }
             MsgType::Resize => {
                 let (id, cols, rows) = match decode_resize(&frame.payload) {

@@ -1743,14 +1743,39 @@ fn main() {
         vec![marspot::pane::Pane::new(s)]
     } else {
         let client = shelld_client.as_ref().unwrap();
-        (0..n_sessions)
-            .map(|_| {
-                let s = client
-                    .new_session(INITIAL_COLS, INITIAL_ROWS, "")
-                    .expect("spawn initial session via shelld");
-                marspot::pane::Pane::new_shelld(s)
+        // List existing sessions and reattach if shelld already has
+        // some (this is what makes "marspot restart preserves shells"
+        // work — surviving sessions show their full bytelog history
+        // on attach via shelld's REPLAY).  Fill any remaining slots
+        // with brand-new sessions to reach the layout's cell count.
+        let existing: Vec<marspot::shelld_proto::SessionInfo> = client
+            .list_sessions()
+            .unwrap_or_else(|e| {
+                eprintln!("marspot: list_sessions failed: {} (starting fresh)", e);
+                Vec::new()
             })
-            .collect()
+            .into_iter()
+            .filter(|s| s.alive)
+            .collect();
+        let mut panes = Vec::with_capacity(n_sessions);
+        for info in existing.iter().take(n_sessions) {
+            match client.attach(info.session_id, INITIAL_COLS, INITIAL_ROWS) {
+                Ok(s) => panes.push(marspot::pane::Pane::new_shelld(s)),
+                Err(e) => {
+                    eprintln!("marspot: attach {} failed: {}", info.session_id, e);
+                }
+            }
+        }
+        while panes.len() < n_sessions {
+            match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
+                Ok(s) => panes.push(marspot::pane::Pane::new_shelld(s)),
+                Err(e) => {
+                    eprintln!("marspot: new_session failed: {}", e);
+                    break;
+                }
+            }
+        }
+        panes
     };
 
     let latency_out_path = std::env::var("MARSPOT_LATENCY").ok();
