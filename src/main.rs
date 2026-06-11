@@ -900,6 +900,16 @@ impl MarspotApp for Marspot {
             r.set_window_focused(focused);
             ctx.request_redraw();
         }
+        // Silent update trigger: the user just left marspot's window
+        // (cmd-tab, click on another app, minimise).  If a pending
+        // binary has been staged, this is the cheapest moment to
+        // apply it — they're not watching us repaint.  By the time
+        // they come back, marspot has been replaced and reattached
+        // to the same shelld sessions, so the only change they see
+        // is the new version's UI.
+        if !focused && pending_update_exists() {
+            apply_pending_update(ctx);
+        }
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
@@ -1673,6 +1683,64 @@ impl Marspot {
         });
         ctx.set_caret_rect_phys(caret);
     }
+}
+
+/// Silent-update helpers.  Kept inline in main.rs so the boundary
+/// between "marspot trigger" and "trampoline binary" stays in one
+/// place; marspot-bootstrap holds the symmetric install / rollback
+/// path.
+fn cache_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    std::path::PathBuf::from(home).join("Library/Caches/marspot")
+}
+
+fn pending_binary_path() -> std::path::PathBuf {
+    cache_dir().join("pending/marspot")
+}
+
+fn bootstrap_binary_path() -> std::path::PathBuf {
+    // Sits next to us inside the .app.  Resolve via current_exe so a
+    // dev-mode binary outside an .app also finds it (target/release).
+    let me = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/marspot"));
+    let mut b = me.clone();
+    b.set_file_name("marspot-bootstrap");
+    b
+}
+
+/// True when a downloaded-but-not-yet-installed binary is sitting in
+/// `pending/marspot`.  Cheap fs::metadata check; called from the
+/// focused(false) hook, so it runs at most once per resign-active
+/// transition.
+fn pending_update_exists() -> bool {
+    pending_binary_path().exists()
+}
+
+/// Re-exec the bootstrap binary, which will (a) swap pending into
+/// place over the current marspot binary and (b) exec the new
+/// marspot — all in a single process slot so the user sees one
+/// continuous app.  Sessions persist in shelld; the new marspot
+/// reattaches on launch.
+///
+/// `_ctx` is unused but stays so future versions can flush UI state
+/// (focused pane, layout mode) before the exec.
+fn apply_pending_update(_ctx: &MarspotAppCtx) {
+    let bootstrap = bootstrap_binary_path();
+    if !bootstrap.exists() {
+        eprintln!(
+            "marspot: pending update staged but bootstrap shim missing at {} — skipping",
+            bootstrap.display()
+        );
+        return;
+    }
+    // Drop shelld sockets etc. via Rust's own teardown isn't
+    // guaranteed across execv; rely on CLOEXEC (set by std on
+    // UnixStream::connect by default).  Same for the GUI: NSApp
+    // teardown isn't load-bearing for shelld-owned state.
+    use std::os::unix::process::CommandExt;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let err = std::process::Command::new(&bootstrap).args(args).exec();
+    eprintln!("marspot: exec bootstrap failed: {}", err);
 }
 
 fn main() {
