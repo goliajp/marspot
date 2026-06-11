@@ -104,6 +104,13 @@ impl ShelldSession {
         self.inner.exited.load(Ordering::Acquire)
     }
 
+    /// Method-style accessor mirroring `session::Session::terminal`
+    /// so call sites that read `pane.session().terminal()` keep
+    /// working unchanged when Pane swaps to a shelld backend.
+    pub fn terminal(&self) -> &crate::terminal::Terminal {
+        &self.terminal
+    }
+
     /// Drain whatever the reader thread has queued, feed it through
     /// the terminal parser, return total bytes drained.  Caller
     /// requests a redraw on non-zero return.
@@ -134,6 +141,33 @@ impl ShelldSession {
     /// (not the kernel pipe), matching `Session::write`'s contract
     /// (kernel-level backpressure is shelld's problem).
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        // Diagnostic: when ~/.marspot-trace exists, append every
+        // INPUT chunk's bytes (hex) to /tmp/marspot-keys-trace.log.
+        // Used to debug "key X produced wrong PTY bytes" reports
+        // without rebuilding.  No effect when the flag file is absent.
+        if let Ok(home) = std::env::var("HOME") {
+            if std::path::Path::new(&format!("{}/.marspot-trace", home)).exists() {
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/marspot-keys-trace.log")
+                {
+                    let hex: String = bytes
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = writeln!(
+                        f,
+                        "session={} bytes={} [{}]",
+                        self.inner.id,
+                        bytes.len(),
+                        hex
+                    );
+                }
+            }
+        }
         let frame = Frame::new(MsgType::Input, encode_data(self.inner.id, bytes));
         let mut stream = self.writer.lock().unwrap();
         frame.write_to(&mut *stream)?;

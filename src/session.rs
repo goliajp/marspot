@@ -107,6 +107,15 @@ PROMPT_EOL_MARK=""
     }
 }
 
+/// Public entry point so binaries that spawn shells outside the
+/// `Session::spawn` path (notably `marspot-shelld`) can still drop
+/// the ZDOTDIR shim + TERM override into their environment before
+/// the first fork.  Internally just delegates to the same idempotent
+/// once-per-process installer.
+pub fn ensure_zdot_shim_for_external_shells() {
+    ensure_shell_zdot_shim_installed();
+}
+
 /// Idempotent gate around `install_shell_zdot_shim`. `Session::spawn`
 /// calls this so every binary in the workspace (mcli, marspot, future
 /// binaries) gets identical shell-init behavior without each having

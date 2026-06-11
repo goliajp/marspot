@@ -320,6 +320,26 @@ type Sessions = Arc<Mutex<HashMap<u64, Arc<ShellSession>>>>;
 fn main() {
     eprintln!("[shelld] starting (pid={})", std::process::id());
 
+    // launchd-launched daemons inherit a minimal env — TERM is
+    // commonly `network` (macOS launchd default) or unset, which
+    // makes zsh + terminfo derive bogus terminal capabilities.
+    // Concrete symptom: `backward-delete-char` widget emits only a
+    // space instead of `\b \b`, so backspace looks like it "writes
+    // spaces" in marspot.  Override before any child spawn so every
+    // forked zsh sees a sane TERM.  Same heuristic as the marspot-
+    // side shell shim: leave alone if already a usable value.
+    let term_ok = std::env::var("TERM")
+        .map(|t| !t.is_empty() && t != "network" && t != "dumb" && t != "unknown")
+        .unwrap_or(false);
+    if !term_ok {
+        unsafe { std::env::set_var("TERM", "xterm-256color") };
+    }
+    // Same for ZDOTDIR: marspot's lib installs a shim under
+    // `~/.cache/marspot/zdot` (PROMPT_SP, EOL_MARK).  shelld is a
+    // separate process so we re-run the install once on startup.
+    // `install_shell_zdot_shim` is idempotent and cheap.
+    marspot::session::ensure_zdot_shim_for_external_shells();
+
     let sock = socket_path();
     if let Some(parent) = sock.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -649,7 +669,23 @@ fn reader_loop(
                     }
                 };
                 if let Some(s) = sessions.lock().unwrap().get(&id).cloned() {
-                    let _ = s.pty.write_shared(bytes);
+                    let n = s.pty.write_shared(bytes).unwrap_or(0);
+                    if let Ok(home) = std::env::var("HOME") {
+                        if std::path::Path::new(&format!("{}/.marspot-trace", home)).exists() {
+                            use std::io::Write as _;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("/tmp/marspot-shelld-input-trace.log")
+                            {
+                                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                                let _ = writeln!(
+                                    f,
+                                    "session={} requested={} wrote={} [{}]",
+                                    id, bytes.len(), n, hex
+                                );
+                            }
+                        }
+                    }
                 }
             }
             other => {
@@ -667,9 +703,14 @@ fn err_frame(code: u32, msg: &str) -> Frame {
     Frame::new(MsgType::Error, encode_error(code, msg))
 }
 
-/// Same shell selection logic as `Session::spawn` (login wrapper +
-/// $HOME cwd default), but stripped of the marspot-side reader-thread
-/// scaffolding: shelld owns the reader directly.
+/// Shell spawn from inside shelld.  Unlike `Session::spawn` we
+/// deliberately skip the `/usr/bin/login -fpl` wrapper: under
+/// launchd's per-user session, `login(1)` doesn't fully reset the
+/// controlling terminal in the way an interactive child shell
+/// expects (manifests as backspace / arrow keys not reaching
+/// readline).  Direct exec of `$SHELL` with a leading `-` in argv[0]
+/// tells the shell to behave as a login shell, which is all the
+/// behaviour we actually wanted login(1) for.
 fn spawn_shell(cols: u16, rows: u16, cwd_override: &str) -> io::Result<Pty> {
     let cwd = if cwd_override.is_empty() {
         std::env::var("HOME").ok()
@@ -677,19 +718,23 @@ fn spawn_shell(cols: u16, rows: u16, cwd_override: &str) -> io::Result<Pty> {
         Some(cwd_override.to_string())
     };
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "nobody".into());
+    let argv0 = format!(
+        "-{}",
+        std::path::Path::new(&shell)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("sh")
+    );
     Pty::spawn(PtyConfig {
-        program: "/usr/bin/login".into(),
-        args: vec!["-fpl".into(), user, shell],
+        program: shell,
+        args: Vec::new(),
         size: TerminalSize {
             cols,
             rows,
             pixel_width: 0,
             pixel_height: 0,
         },
-        argv0: None,
+        argv0: Some(argv0),
         cwd,
     })
 }
