@@ -53,10 +53,12 @@ impl ShellApp {
     }
 
     fn spawn_core(&mut self, surface_id: u32, w_phys: usize, h_phys: usize, scale: f64) {
-        // Look for the core binary next to ourselves.  Step 1 uses the
-        // coreshim stub; Step 2 will switch to `marspot-core`.
+        // Look for the core binary next to ourselves.  Default is the
+        // real `marspot-core` (Step 2+); override with MARSPOT_CORE_BIN
+        // to point at `marspot-coreshim` for IOSurface-link bring-up
+        // tests.
         let core_name =
-            std::env::var("MARSPOT_CORE_BIN").unwrap_or_else(|_| "marspot-coreshim".to_string());
+            std::env::var("MARSPOT_CORE_BIN").unwrap_or_else(|_| "marspot-core".to_string());
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
