@@ -96,6 +96,12 @@ pub trait MarspotApp: 'static {
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx);
 
+    /// IME preedit ("marked text") changed.  Empty string means the
+    /// composition was committed or cancelled.  Apps that render an
+    /// inline preview override this; default is a no-op so mcli /
+    /// snapshot paths don't have to care.
+    fn ime_preedit_changed(&mut self, _ctx: &MarspotAppCtx, _text: &str) {}
+
     /// Fired when a previous `ctx.request_redraw()` is being honoured.
     /// Repaint the window here.
     fn redraw(&mut self, ctx: &MarspotAppCtx);
@@ -560,15 +566,19 @@ declare_class!(
         ) {
             self.ivars().ime_consumed.set(true);
             let s = nsobject_string_to_string(string);
-            *self.ivars().marked_text.borrow_mut() = s;
-            // Marspot doesn't render preedit inline yet — the IME's own
-            // candidate window covers UX.  When we add inline preview
-            // (Phase E?), this is where we'd notify the app.
+            *self.ivars().marked_text.borrow_mut() = s.clone();
+            // Forward to the app so it can paint an inline preedit
+            // overlay (pinyin candidates, hiragana composition, etc.).
+            // The IME also shows its own candidate window — the inline
+            // preview is what tells the user "this is where the
+            // committed text will land".
+            dispatch_event(EventKind::ImePreedit(s));
         }
 
         #[method(unmarkText)]
         fn unmark_text(&self) {
             self.ivars().marked_text.borrow_mut().clear();
+            dispatch_event(EventKind::ImePreedit(String::new()));
         }
 
         #[method(insertText:replacementRange:)]
@@ -576,6 +586,10 @@ declare_class!(
             self.ivars().ime_consumed.set(true);
             let s = nsobject_string_to_string(string);
             self.ivars().marked_text.borrow_mut().clear();
+            // Commit ends the composition — clear any preedit overlay
+            // before we send the committed text so the app doesn't
+            // briefly render both.
+            dispatch_event(EventKind::ImePreedit(String::new()));
             if s.is_empty() {
                 return;
             }
@@ -721,6 +735,7 @@ enum EventKind {
     UserEvent,
     Key(MarspotKeyEvent, Modifiers),
     MouseDown { x: f64, y: f64, mods: Modifiers },
+    ImePreedit(String),
     MouseDrag { x: f64, y: f64 },
     MouseUp { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
@@ -750,6 +765,7 @@ fn dispatch_event(kind: EventKind) {
             EventKind::UserEvent => app.user_event(ctx),
             EventKind::Key(ev, mods) => app.key_event(ctx, ev, mods),
             EventKind::MouseDown { x, y, mods } => app.mouse_down(ctx, x, y, mods),
+            EventKind::ImePreedit(text) => app.ime_preedit_changed(ctx, &text),
             EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
             EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),

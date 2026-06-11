@@ -190,6 +190,7 @@ impl Pane {
             focused,
             title,
             selection: None,
+            ime_preedit: "",
         }
     }
 }

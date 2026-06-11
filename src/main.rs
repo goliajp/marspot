@@ -233,6 +233,13 @@ struct Marspot {
     /// supports `sidebar_w == 0` (headless / snapshot path), so the
     /// rest of the render + hit-test code follows for free.
     sidebar_collapsed: bool,
+    /// Active IME preedit string for the focused pane.  Updated by
+    /// `ime_preedit_changed`; cleared when the composition commits
+    /// or is cancelled.  Empty string == no composition in flight.
+    /// The renderer paints this inline at the cursor position with
+    /// a hairline underline so the user can see what the IME will
+    /// eventually send.
+    ime_preedit: String,
     /// MARSPOT_PROFILE_RSS instrumentation — when set, every ~1 s the
     /// main loop appends one TSV row of per-subsystem RSS to this
     /// path.  Off-path entirely when the env var is unset.  See
@@ -889,6 +896,16 @@ impl MarspotApp for Marspot {
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         ctx.exit();
+    }
+
+    fn ime_preedit_changed(&mut self, ctx: &MarspotAppCtx, text: &str) {
+        // Only redraw when the string actually changed so a long
+        // composition doesn't churn redraws on every IME tick.
+        if self.ime_preedit != text {
+            self.ime_preedit.clear();
+            self.ime_preedit.push_str(text);
+            ctx.request_redraw();
+        }
     }
 
     fn redraw(&mut self, ctx: &MarspotAppCtx) {
@@ -1556,6 +1573,12 @@ impl Marspot {
             .enumerate()
             .map(|(i, p)| {
                 let mut v = p.view(i == focused, titles.get(i).map(|s| s.as_str()).unwrap_or(""));
+                // Preedit only applies to the focused, live pane —
+                // scrolled-back views don't have a live cursor to
+                // anchor it to.  Empty string skips the overlay.
+                if i == focused && p.view_offset() == 0 {
+                    v.ime_preedit = self.ime_preedit.as_str();
+                }
                 // Selection coords are abs (rows up from this pane's
                 // current live bottom).  Project to viewport rows
                 // using this pane's view_offset, clip to the visible
@@ -1724,6 +1747,7 @@ fn main() {
         layout_mode: initial_layout,
         layout_picker_open: false,
         sidebar_collapsed: true,
+        ime_preedit: String::new(),
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
@@ -1946,6 +1970,7 @@ fn bench_rss_format_dump(arg: &str) {
         layout_mode: LayoutMode::Nine,
         layout_picker_open: false,
         sidebar_collapsed: true,
+        ime_preedit: String::new(),
         profile_rss_path,
         rss_dump_started_at: None,
         last_rss_dump: None,
@@ -2043,7 +2068,8 @@ fn bench_metal_render(arg: &str) {
         cursor_visible: true,
         focused: true,
         title: "",
-            selection: None,
+        selection: None,
+        ime_preedit: "",
     };
     let views = std::slice::from_ref(&view);
 

@@ -49,6 +49,14 @@ pub struct SessionView<'a> {
     /// first row from anchor.col to end, middle rows entirely, last
     /// row from start to focus.col — the iTerm2 default.
     pub selection: Option<SelectionView>,
+    /// Active IME preedit ("marked text") at the cursor — empty when
+    /// nothing is being composed.  Renderer draws each character at
+    /// successive cell positions starting at the cursor, with a
+    /// hairline underline so the user can see what the IME hasn't
+    /// committed yet.  Only meaningful when this is the focused
+    /// session AND view_offset == 0 (preedit is anchored to the live
+    /// cursor; scrolled-back views don't show one).
+    pub ime_preedit: &'a str,
 }
 
 #[derive(Copy, Clone, Debug)]

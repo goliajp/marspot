@@ -873,6 +873,13 @@ const SEAM: (f32, f32, f32) = (0.055, 0.062, 0.075);
 /// drag-to-select machinery; FG glyphs draw on top so selected
 /// content stays legible.
 const SELECTION_BG: (f32, f32, f32) = (0.16, 0.22, 0.34);
+// IME preedit colours.  BG a touch above the focused-cell BG so the
+// preview stands out without screaming; FG slightly muted vs the
+// committed-text FG so the user reads "in flight, not yet".  The
+// hairline underline below the glyph is what most editors use to
+// flag composition state.
+const IME_PREEDIT_BG: (f32, f32, f32) = (0.10, 0.13, 0.18);
+const IME_PREEDIT_FG: (f32, f32, f32) = (0.80, 0.86, 0.92);
 // Old name retained for the existing sidebar BG drawing path
 // (kept flush with the panel surface).
 const SIDEBAR_BG_F: (f32, f32, f32) = BG_PANEL;
@@ -2014,6 +2021,88 @@ fn push_session(
         }
     }
 
+    // IME preedit overlay — paint the in-flight composition at the
+    // cursor position so the user sees pinyin / hiragana before the
+    // IME commits.  Only when the pane is focused, live, and the
+    // host window has focus; otherwise the cursor anchor isn't
+    // visible / interactive.
+    if view.view_offset == 0
+        && view.focused
+        && window_focused
+        && !view.ime_preedit.is_empty()
+    {
+        let (col, row) = grid.cursor();
+        let cells_per_row = grid.cols();
+        let mut c = col as u32;
+        let y = inner_y + row as f32 * cell_h;
+        let metrics = SlotMetrics {
+            cell_w: cell_w.round() as u32,
+            cell_h: cell_h.round() as u32,
+            baseline_from_top: ascent.round() as u32,
+        };
+        for ch in view.ime_preedit.chars() {
+            if ch == '\n' || ch == '\r' {
+                // Some IMEs send composition with embedded newlines;
+                // wrap to the next row at col=0 rather than draw a
+                // glyph.
+                c = 0;
+                continue;
+            }
+            let n_cells = crate::grid::char_width(ch).max(1) as u32;
+            if c + n_cells > cells_per_row as u32 {
+                // Out of room on this row — drop the rest of the
+                // preedit silently rather than spill into the next
+                // line.  The IME candidate window still shows the
+                // full string; the inline preview is a hint, not
+                // the source of truth.
+                break;
+            }
+            let dest_x = (inner_x + c as f32 * cell_w).round();
+            let dest_y = y.round();
+            let slot_w = n_cells as f32 * cell_w;
+            // BG quad — covers whatever was at this cell (zsh
+            // autosuggestion, prior cursor block) so the preedit
+            // reads cleanly.  IME_PREEDIT_BG sits a touch above the
+            // panel BG so it's visible against both the focused
+            // pane's lifted BG and the default cell BG.
+            cells.push(CellInstance {
+                origin: [dest_x, dest_y],
+                size: [slot_w, cell_h],
+                color: [IME_PREEDIT_BG.0, IME_PREEDIT_BG.1, IME_PREEDIT_BG.2, 1.0],
+            });
+            // Glyph
+            if let Some(entry) = resolve_cell_glyph(
+                atlas,
+                font,
+                ch,
+                false,
+                false,
+                metrics,
+            ) {
+                glyphs.push(GlyphInstance {
+                    origin: [dest_x, dest_y],
+                    size: [
+                        (metrics.cell_w * entry.n_cells as u32) as f32,
+                        metrics.cell_h as f32,
+                    ],
+                    uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+                    uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+                    color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
+                });
+            }
+            // Underline — hairline at the cell's bottom edge,
+            // signals "this hasn't been committed yet" the same way
+            // every other terminal + text editor does.
+            let underline_h = (cell_h * 0.06).max(1.0).round();
+            cells.push(CellInstance {
+                origin: [dest_x, dest_y + cell_h - underline_h],
+                size: [slot_w, underline_h],
+                color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
+            });
+            c += n_cells;
+        }
+    }
+
     // No darken overlay.  No FOCUS_OUTLINE blue frame.  The focus
     // affordance is the BG_FOCUSED tint applied to the cell rect at
     // the top of this fn, plus the solid-vs-hollow cursor — both
@@ -2641,6 +2730,7 @@ mod tests {
             focused: true,
             title: "",
             selection: None,
+            ime_preedit: "",
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
