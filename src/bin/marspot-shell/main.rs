@@ -35,6 +35,7 @@ use marspot::shell_proto::{
 
 mod banner;
 mod present;
+mod sup_log;
 mod supervisor;
 use banner::BannerKind;
 use present::ShellPresenter;
@@ -242,7 +243,12 @@ impl ShellApp {
         }
         match cmd.spawn() {
             Ok(child) => {
-                eprintln!("[shell] core pid={}", child.id());
+                let pid = child.id();
+                eprintln!("[shell] core pid={}", pid);
+                sup_log::log(
+                    "CORE_SPAWN",
+                    &format!("pid={pid} bin={}", core_bin.display()),
+                );
                 self.core_child = Some(child);
                 // Parent no longer needs the child end.
                 unsafe { libc::close(child_fd) };
@@ -307,8 +313,10 @@ impl ShellApp {
             return false;
         }
         eprintln!("[shell] applying pending update …");
+        sup_log::log("UPDATE_APPLY", "promoting pending → current");
         if let Err(e) = self.binaries.promote_pending() {
             eprintln!("[shell] promote_pending failed: {e} — leaving core untouched");
+            sup_log::log("UPDATE_FAIL", &format!("promote_pending: {e}"));
             return false;
         }
         // Tear down the current core so it gets a clean EOF on the
@@ -382,12 +390,20 @@ impl ShellApp {
                 break;
             }
         }
+        sup_log::log(
+            "CRASH",
+            &format!("count={}/{}", self.crashes.len(), MAX_CRASHES_IN_WINDOW),
+        );
         if self.crashes.len() > MAX_CRASHES_IN_WINDOW {
             self.auto_restart_disabled = true;
             eprintln!(
                 "[shell] crash budget exceeded ({} in {} s) → auto-restart disabled until manual intervention",
                 self.crashes.len(),
                 CRASH_WINDOW.as_secs()
+            );
+            sup_log::log(
+                "BUDGET_EXCEEDED",
+                &format!("count={} window_s={}", self.crashes.len(), CRASH_WINDOW.as_secs()),
             );
         }
     }
@@ -440,12 +456,20 @@ impl ShellApp {
             self.record_crash();
             if was_probation {
                 eprintln!("[shell] core died during probation → rolling back");
+                sup_log::log("PROBATION_FAIL", "core exited; rolling back");
                 match self.binaries.rollback_to_prev() {
-                    Ok(true) => eprintln!("[shell] rolled back to prev/"),
+                    Ok(true) => {
+                        eprintln!("[shell] rolled back to prev/");
+                        sup_log::log("ROLLBACK", "prev/ → current/");
+                    }
                     Ok(false) => {
                         eprintln!("[shell] no prev to roll back to (fresh install?)");
+                        sup_log::log("ROLLBACK_NOOP", "no prev/ to restore");
                     }
-                    Err(e) => eprintln!("[shell] rollback_to_prev failed: {e}"),
+                    Err(e) => {
+                        eprintln!("[shell] rollback_to_prev failed: {e}");
+                        sup_log::log("ROLLBACK_FAIL", &format!("{e}"));
+                    }
                 }
                 self.sup_state = SupervisorState::Failed {
                     reason: "core exited during probation".to_string(),
@@ -464,8 +488,14 @@ impl ShellApp {
         // 2. Probation graduation.
         if self.sup_state.probation_elapsed() {
             match self.binaries.finalize_stable() {
-                Ok(()) => eprintln!("[shell] probation passed → stable"),
-                Err(e) => eprintln!("[shell] finalize_stable failed: {e}"),
+                Ok(()) => {
+                    eprintln!("[shell] probation passed → stable");
+                    sup_log::log("UPDATE_STABLE", "probation passed; prev/ deleted");
+                }
+                Err(e) => {
+                    eprintln!("[shell] finalize_stable failed: {e}");
+                    sup_log::log("FINALIZE_FAIL", &format!("{e}"));
+                }
             }
             self.sup_state = SupervisorState::Idle;
         }
@@ -610,9 +640,14 @@ impl MarspotApp for ShellApp {
                     if v == PROTO_VERSION {
                         self.hello_acked = true;
                         eprintln!("[shell] HelloAck v={v} — core handshake OK");
+                        sup_log::log("HELLO_ACK", &format!("v={v}"));
                     } else {
                         eprintln!(
                             "[shell] HelloAck v={v} disagrees with our v={PROTO_VERSION}; killing core"
+                        );
+                        sup_log::log(
+                            "HELLO_MISMATCH",
+                            &format!("core_v={v} shell_v={PROTO_VERSION}"),
                         );
                         if let Some(mut c) = self.core_child.take() {
                             let _ = c.kill();
@@ -793,6 +828,15 @@ fn main() {
         env!("CARGO_PKG_VERSION"),
         option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
         option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown")
+    );
+    sup_log::log(
+        "STARTUP",
+        &format!(
+            "version={} git={} pid={}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
+            std::process::id()
+        ),
     );
     // Spawn the silent-update poller.  It runs forever in the
     // background, downloads new `marspot-core` releases, drops them
