@@ -257,12 +257,6 @@ struct Marspot {
     /// sidebar [+] button).  Same proxy main passed into `run_app`.
     #[allow(dead_code)]
     event_proxy: EventProxy,
-    /// Shared flag set by the background updater (Phase 7) when a
-    /// new binary has been staged in `pending/`.  Drives the
-    /// title-bar refresh affordance; the focus-loss path also checks
-    /// this so a freshly-staged binary applies without waiting for
-    /// the next launch.
-    update_pending_flag: marspot::updater::UpdateFlag,
     /// Connection to `marspot-shelld`.  Sessions are spawned and
     /// driven through this; marspot itself never forks shells, so
     /// a `marspot` process restart (silent update, manual relaunch)
@@ -567,18 +561,6 @@ impl MarspotApp for Marspot {
                 layout.hit_test_close_session(x_phys, y_phys),
             )
         };
-        // Refresh button: only fires when an update is staged
-        // (paint + hit-test both gated on the same condition).
-        // Click is equivalent to the focus-loss trigger — exec
-        // bootstrap, swap binary, attach back.
-        if let Some(layout) = &self.layout {
-            if layout.update_pending
-                && layout.hit_test_refresh_button(x_phys, y_phys)
-            {
-                apply_pending_update(ctx);
-                return;
-            }
-        }
         // Sidebar toggle: highest-priority chrome action so a click
         // on the chip never falls through to the cell underneath.
         // Mirrors the Cmd-B keyboard path.
@@ -918,24 +900,6 @@ impl MarspotApp for Marspot {
             r.set_window_focused(focused);
             ctx.request_redraw();
         }
-        // Silent update trigger: the user just left marspot's window
-        // (cmd-tab, click on another app, minimise).  If a pending
-        // binary has been staged, this is the cheapest moment to
-        // apply it — they're not watching us repaint.  By the time
-        // they come back, marspot has been replaced and reattached
-        // to the same shelld sessions, so the only change they see
-        // is the new version's UI.
-        //
-        // `MARSPOT_MANUAL_UPDATE_ONLY=1` short-circuits the
-        // auto-trigger so you can verify the title-bar refresh
-        // button without it being consumed mid-test (every
-        // terminal-side `cp pending` flicks marspot off-focus and
-        // would otherwise apply immediately).  Production use leaves
-        // it unset.
-        let manual_only = std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_some();
-        if !focused && !manual_only && pending_update_exists() {
-            apply_pending_update(ctx);
-        }
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
@@ -1012,7 +976,7 @@ impl Marspot {
         let (lc, lr) = self.layout_mode.dims();
         let header_phys = HEADER_PT * scale;
         let title_phys = CELL_TITLE_PT * scale;
-        let mut layout = Layout::build(
+        let layout = Layout::build(
             phys_w, phys_h, sidebar_phys, header_phys, title_phys,
             lc, lr, cell_w, cell_h,
         )
@@ -1021,14 +985,6 @@ impl Marspot {
             self.layout_picker_open,
             self.panes.len(),
         );
-        // Surface the updater's pending-binary signal into the
-        // layout so the renderer can paint a refresh button and the
-        // hit-tester can react.  Cheap atomic read; safe to run
-        // every rebuild.
-        layout.update_pending = self
-            .update_pending_flag
-            .load(std::sync::atomic::Ordering::Acquire)
-            || pending_update_exists();
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);
@@ -1512,19 +1468,6 @@ impl Marspot {
         if self.layout.is_none() || self.renderer.is_none() {
             return;
         }
-        // Refresh the update-pending flag on each redraw so the
-        // refresh button appears as soon as a binary lands in
-        // pending/ (whether via the background updater or a manual
-        // stage), without needing a window resize / layout change to
-        // re-derive `Layout::update_pending`.  Cheap: one atomic
-        // load + at most one fs::metadata stat.
-        let now_pending = self
-            .update_pending_flag
-            .load(std::sync::atomic::Ordering::Acquire)
-            || pending_update_exists();
-        if let Some(layout) = self.layout.as_mut() {
-            layout.update_pending = now_pending;
-        }
         let focused = self.focused_idx;
         // view_offset is now per-Pane (read at SessionView construction
         // below) — there's no longer a single window-wide offset.
@@ -1732,64 +1675,6 @@ impl Marspot {
     }
 }
 
-/// Silent-update helpers.  Kept inline in main.rs so the boundary
-/// between "marspot trigger" and "trampoline binary" stays in one
-/// place; marspot-bootstrap holds the symmetric install / rollback
-/// path.
-fn cache_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(home).join("Library/Caches/marspot")
-}
-
-fn pending_binary_path() -> std::path::PathBuf {
-    cache_dir().join("pending/marspot")
-}
-
-fn bootstrap_binary_path() -> std::path::PathBuf {
-    // Sits next to us inside the .app.  Resolve via current_exe so a
-    // dev-mode binary outside an .app also finds it (target/release).
-    let me = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/marspot"));
-    let mut b = me.clone();
-    b.set_file_name("marspot-bootstrap");
-    b
-}
-
-/// True when a downloaded-but-not-yet-installed binary is sitting in
-/// `pending/marspot`.  Cheap fs::metadata check; called from the
-/// focused(false) hook, so it runs at most once per resign-active
-/// transition.
-fn pending_update_exists() -> bool {
-    pending_binary_path().exists()
-}
-
-/// Re-exec the bootstrap binary, which will (a) swap pending into
-/// place over the current marspot binary and (b) exec the new
-/// marspot — all in a single process slot so the user sees one
-/// continuous app.  Sessions persist in shelld; the new marspot
-/// reattaches on launch.
-///
-/// `_ctx` is unused but stays so future versions can flush UI state
-/// (focused pane, layout mode) before the exec.
-fn apply_pending_update(_ctx: &MarspotAppCtx) {
-    let bootstrap = bootstrap_binary_path();
-    if !bootstrap.exists() {
-        eprintln!(
-            "marspot: pending update staged but bootstrap shim missing at {} — skipping",
-            bootstrap.display()
-        );
-        return;
-    }
-    // Drop shelld sockets etc. via Rust's own teardown isn't
-    // guaranteed across execv; rely on CLOEXEC (set by std on
-    // UnixStream::connect by default).  Same for the GUI: NSApp
-    // teardown isn't load-bearing for shelld-owned state.
-    use std::os::unix::process::CommandExt;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let err = std::process::Command::new(&bootstrap).args(args).exec();
-    eprintln!("marspot: exec bootstrap failed: {}", err);
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {
@@ -1841,12 +1726,6 @@ fn main() {
             });
         Some(std::sync::Arc::new(client))
     };
-
-    // Kick off the background updater first thing so the network
-    // poll runs while the GUI is still settling.  Returns a shared
-    // flag the GUI reads to drive the "↻ vX.Y.Z" title-bar
-    // affordance.
-    let update_pending_flag = marspot::updater::spawn(VERSION.to_string());
 
     let panes: Vec<marspot::pane::Pane> = if tmux_mode {
         let proxy_clone = proxy.clone();
@@ -1933,7 +1812,6 @@ fn main() {
         last_rss_dump: None,
         event_proxy: proxy.clone(),
         shelld: shelld_client,
-        update_pending_flag,
     };
 
     let attrs = WindowAttrs {
@@ -2158,7 +2036,6 @@ fn bench_rss_format_dump(arg: &str) {
         last_rss_dump: None,
         event_proxy: EventProxy::new(),
         shelld: None,
-        update_pending_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);
