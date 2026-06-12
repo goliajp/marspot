@@ -794,6 +794,14 @@ fn main() {
         option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
         option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown")
     );
+    // Spawn the silent-update poller.  It runs forever in the
+    // background, downloads new `marspot-core` releases, drops them
+    // into `binaries/pending/`.  The supervisor here picks them up on
+    // the next focus-loss trigger.  Returns a flag we don't currently
+    // consult (Step 5's `BinaryTree::has_pending` is the source of
+    // truth); kept alive for the eventual UI affordance.
+    let _update_flag = marspot::updater::spawn(env!("CARGO_PKG_VERSION").to_string());
+
     let attrs = WindowAttrs {
         title: DEFAULT_TITLE.to_string(),
         width_logical: DEFAULT_W_PT,

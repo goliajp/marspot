@@ -4,11 +4,14 @@
 //! GitHub Releases API for the project's latest tag.  If newer than
 //! `CARGO_PKG_VERSION`, downloads the matching asset, verifies it
 //! against the `digest` field GitHub publishes alongside each asset
-//! (SHA-256), and stages the binary into
-//! `~/Library/Caches/marspot/pending/marspot`.
+//! (SHA-256), and stages the **core** binary into the supervisor's
+//! pending slot: `~/Library/Caches/marspot/binaries/pending/marspot-core`.
 //!
-//! Bootstrap (Phase 6) picks it up on the next focus-loss trigger
-//! and atomically swaps it in.
+//! `marspot-shell` is the supervisor — it reads that slot, atomic-swaps
+//! `current ← pending`, kills the running core, exec's the new one,
+//! and watches probation.  See `bin/marspot-shell/supervisor.rs` for
+//! the swap state machine.  The updater here only owns the
+//! "download + verify + stage" half.
 //!
 //! Self-build constraints: HTTP via `/usr/bin/curl`, JSON parsed with
 //! a minimal hand-written scanner (only two fields from a known
@@ -89,7 +92,11 @@ fn cache_dir() -> PathBuf {
 }
 
 fn pending_binary_path() -> PathBuf {
-    cache_dir().join("pending/marspot")
+    // Step 5+: lives under `binaries/pending/` so the supervisor
+    // (marspot-shell) finds it via `BinaryTree::pending()` and atomic-
+    // swaps it in.  The shell's `apply_pending_update` is the only
+    // consumer.
+    cache_dir().join("binaries/pending/marspot-core")
 }
 
 fn feed_url() -> String {
@@ -136,7 +143,11 @@ fn check_and_stage(running_version: &str) -> Result<bool, String> {
             ));
         }
     }
-    // Extract `marspot` binary out of the tarball into pending/.
+    // Extract `marspot-core` out of the tarball into the supervisor's
+    // pending slot.  The shell will pick it up on the next
+    // focus-loss trigger (apply_pending_update) — atomic rename
+    // current → prev, pending → current, kill+respawn core, enter
+    // 30 s probation.  See `supervisor.rs`.
     let pending = pending_binary_path();
     if let Some(parent) = pending.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir pending: {}", e))?;
@@ -369,8 +380,8 @@ fn extract_binary(archive: &Path, dst: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let bin = find_named_file(&extract_dir, "marspot")
-        .ok_or_else(|| "extracted tar contained no 'marspot' binary".to_string())?;
+    let bin = find_named_file(&extract_dir, "marspot-core")
+        .ok_or_else(|| "extracted tar contained no 'marspot-core' binary".to_string())?;
     std::fs::rename(&bin, dst)
         .or_else(|_| std::fs::copy(&bin, dst).map(|_| ()))
         .map_err(|e| format!("stage extracted binary: {}", e))?;
