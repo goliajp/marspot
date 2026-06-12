@@ -41,6 +41,49 @@ use marspot::iosurface::IOSurface;
 
 const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
+/// Source for the banner overlay quad: a centered, alpha-blended
+/// textured quad whose size in NDC is set by the CPU from the
+/// banner texture's pixel dims divided by the current drawable.
+const BANNER_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct BannerVertexOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+struct BannerParams {
+    float hw; // half-width in NDC
+    float hh; // half-height in NDC
+};
+
+vertex BannerVertexOut shell_banner_vs(uint vid [[vertex_id]],
+                                       constant BannerParams& bp [[buffer(0)]]) {
+    // Same vertex order as the IOSurface quad — two triangles
+    // covering [(-hw, +hh) .. (+hw, -hh)].
+    const float2 corners[6] = {
+        float2(-1.0,  1.0), float2( 1.0,  1.0), float2(-1.0, -1.0),
+        float2(-1.0, -1.0), float2( 1.0,  1.0), float2( 1.0, -1.0),
+    };
+    const float2 uvs[6] = {
+        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0),
+        float2(0.0, 1.0), float2(1.0, 0.0), float2(1.0, 1.0),
+    };
+    float2 c = corners[vid];
+    BannerVertexOut out;
+    out.position = float4(c.x * bp.hw, c.y * bp.hh, 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+fragment float4 shell_banner_fs(BannerVertexOut in [[stage_in]],
+                                texture2d<float> tex [[texture(0)]],
+                                sampler smp [[sampler(0)]]) {
+    return tex.sample(smp, in.uv);
+}
+"#;
+
 const SHADER_SRC: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -97,7 +140,6 @@ const BG_B: f64 = 0.014;
 pub struct ShellPresenter {
     /// Retained so `swap_surface` (Step 4 + 5) can rebuild the
     /// IOSurface-backed texture without re-discovering the device.
-    #[allow(dead_code)]
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     layer: Retained<CAMetalLayer>,
@@ -107,6 +149,12 @@ pub struct ShellPresenter {
     /// across many `present()` calls until the shell rebuilds the
     /// surface (Step 4 resize, Step 5 supervisor swap).
     iosurface_tex: Retained<ProtocolObject<dyn MTLTexture>>,
+    /// Step 7: banner overlay pipeline + sampler.  Sampler is shared
+    /// with the IOSurface path because both want linear filtering.
+    banner_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// Currently-set banner (rasterised text), or `None` for no
+    /// overlay.  Updated via `set_banner` / `clear_banner`.
+    banner: Option<crate::banner::BannerTexture>,
 }
 
 impl ShellPresenter {
@@ -119,6 +167,8 @@ impl ShellPresenter {
         let library = build_library(&device)?;
         let pipeline = build_pipeline(&device, &library)?;
         let sampler = build_sampler(&device)?;
+        let banner_library = build_banner_library(&device)?;
+        let banner_pipeline = build_banner_pipeline(&device, &banner_library)?;
 
         let layer = unsafe { CAMetalLayer::new() };
         unsafe {
@@ -216,7 +266,30 @@ impl ShellPresenter {
             pipeline,
             sampler,
             iosurface_tex,
+            banner_pipeline,
+            banner: None,
         })
+    }
+
+    /// Replace the active banner (or clear it with `None`).  The
+    /// raster runs on the calling thread; expected to be the main
+    /// thread.  Returns `Err` if rasterisation fails, in which case
+    /// the previous banner is preserved.
+    pub fn set_banner(
+        &mut self,
+        kind: Option<crate::banner::BannerKind>,
+        scale: f64,
+    ) -> Result<(), String> {
+        match kind {
+            Some(k) => {
+                let tex = crate::banner::rasterise(&self.device, k.text(), 14.0, scale)?;
+                self.banner = Some(tex);
+            }
+            None => {
+                self.banner = None;
+            }
+        }
+        Ok(())
     }
 
     /// Swap the IOSurface backing the presenter.  Used during resize
@@ -300,6 +373,36 @@ impl ShellPresenter {
             encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
         }
+
+        // Banner overlay: centered, alpha-blended.  Drawn after the
+        // IOSurface quad so it lands on top.  `banner_pipeline` has
+        // blending pre-configured (premultiplied source-over).
+        if let Some(banner) = &self.banner {
+            let bw = banner.width_px as f32;
+            let bh = banner.height_px as f32;
+            let hw = if draw_w > 0.0 { bw / draw_w } else { 0.5 };
+            let hh = if draw_h > 0.0 { bh / draw_h } else { 0.1 };
+            let banner_params: [f32; 2] = [hw, hh];
+            encoder.setRenderPipelineState(&self.banner_pipeline);
+            unsafe {
+                let bp_nn = std::ptr::NonNull::new(
+                    banner_params.as_ptr() as *mut std::ffi::c_void,
+                )
+                .expect("banner_params stack ptr non-null");
+                encoder.setVertexBytes_length_atIndex(
+                    bp_nn,
+                    std::mem::size_of_val(&banner_params),
+                    0,
+                );
+                encoder.setFragmentTexture_atIndex(Some(&banner.texture), 0);
+                encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
+                encoder.drawPrimitives_vertexStart_vertexCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                );
+            }
+        }
         encoder.endEncoding();
 
         // `presentsWithTransaction = true` path:
@@ -337,6 +440,47 @@ fn build_library(
     device
         .newLibraryWithSource_options_error(&src, None)
         .map_err(|e| format!("newLibraryWithSource error: {e:?}"))
+}
+
+fn build_banner_library(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, String> {
+    let src = NSString::from_str(BANNER_SHADER_SRC);
+    device
+        .newLibraryWithSource_options_error(&src, None)
+        .map_err(|e| format!("banner newLibraryWithSource error: {e:?}"))
+}
+
+fn build_banner_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    let vfn = library
+        .newFunctionWithName(&NSString::from_str("shell_banner_vs"))
+        .ok_or_else(|| "shell_banner_vs not found".to_string())?;
+    let ffn = library
+        .newFunctionWithName(&NSString::from_str("shell_banner_fs"))
+        .ok_or_else(|| "shell_banner_fs not found".to_string())?;
+
+    let desc = MTLRenderPipelineDescriptor::new();
+    desc.setVertexFunction(Some(&vfn));
+    desc.setFragmentFunction(Some(&ffn));
+    let color0 = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+    color0.setPixelFormat(TARGET_FORMAT);
+    // Premultiplied-alpha source-over blending so the banner texture
+    // (which we rasterise with premultiplied alpha) drops onto the
+    // IOSurface quad smoothly.
+    color0.setBlendingEnabled(true);
+    color0.setRgbBlendOperation(objc2_metal::MTLBlendOperation::Add);
+    color0.setAlphaBlendOperation(objc2_metal::MTLBlendOperation::Add);
+    color0.setSourceRGBBlendFactor(objc2_metal::MTLBlendFactor::One);
+    color0.setSourceAlphaBlendFactor(objc2_metal::MTLBlendFactor::One);
+    color0.setDestinationRGBBlendFactor(objc2_metal::MTLBlendFactor::OneMinusSourceAlpha);
+    color0.setDestinationAlphaBlendFactor(objc2_metal::MTLBlendFactor::OneMinusSourceAlpha);
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&desc)
+        .map_err(|e| format!("banner newRenderPipelineState error: {e:?}"))
 }
 
 fn build_pipeline(

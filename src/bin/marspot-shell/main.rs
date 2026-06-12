@@ -33,8 +33,10 @@ use marspot::shell_proto::{
     ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 
+mod banner;
 mod present;
 mod supervisor;
+use banner::BannerKind;
 use present::ShellPresenter;
 use supervisor::{BinaryTree, SupervisorState};
 
@@ -119,6 +121,11 @@ struct ShellApp {
     /// restart until something external changes (manual update,
     /// shell relaunch).
     auto_restart_disabled: bool,
+    /// Currently-displayed banner, or `None` for clear.  Kept on
+    /// the shell so `poll_supervisor` can recompute it from state
+    /// transitions and call `presenter.set_banner` only when it
+    /// actually changes.
+    banner_kind: Option<BannerKind>,
 }
 
 impl ShellApp {
@@ -144,6 +151,7 @@ impl ShellApp {
             last_pong_at: None,
             crashes: std::collections::VecDeque::new(),
             auto_restart_disabled: false,
+            banner_kind: None,
         }
     }
 
@@ -332,6 +340,36 @@ impl ShellApp {
         true
     }
 
+    /// Resolve which banner (if any) the current shell state wants
+    /// to show, and push it into the presenter if it changed.
+    fn refresh_banner(&mut self, ctx: &MarspotAppCtx) {
+        let want = if self.auto_restart_disabled {
+            Some(BannerKind::UpdateFailed)
+        } else if matches!(self.sup_state, SupervisorState::Probation { .. })
+            && self.core_child.is_some()
+        {
+            Some(BannerKind::Updating)
+        } else if self.core_child.is_none() && self.surface.is_some() {
+            // Core process is gone (either we just SIGKILL'd it or it
+            // died and we haven't spawned a replacement yet).  Show
+            // the recovering banner while the gap lasts.
+            Some(BannerKind::Recovering)
+        } else {
+            None
+        };
+        if want == self.banner_kind {
+            return;
+        }
+        if let Some(p) = self.presenter.as_mut() {
+            let scale = ctx.scale();
+            if let Err(e) = p.set_banner(want, scale) {
+                eprintln!("[shell] set_banner failed: {e}");
+                return;
+            }
+        }
+        self.banner_kind = want;
+    }
+
     /// Record a crash event in the rolling window.  Trips
     /// `auto_restart_disabled` if too many have happened recently.
     fn record_crash(&mut self) {
@@ -470,6 +508,11 @@ impl ShellApp {
                 self.restart_core(ctx);
             }
         }
+
+        // 6. Recompute the banner once per tick — whatever
+        // transition happened above, the visible banner should
+        // reflect it.
+        self.refresh_banner(ctx);
     }
 
     fn start_redraw_pump(&mut self) {
