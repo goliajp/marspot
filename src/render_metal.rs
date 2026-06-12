@@ -32,7 +32,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_app_kit::NSView;
+use objc2_app_kit::{NSView, NSViewLayerContentsPlacement};
 use objc2_foundation::{CGSize, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer,
@@ -242,18 +242,47 @@ impl MetalRenderer {
             // to read pixels back during compositing.
             layer.setFramebufferOnly(true);
             layer.setContentsScale(scale as f64);
-            // Live-resize flicker fix — same as render.rs's CALayer
-            // setup.  Default `contentsGravity = resize` would stretch
-            // the previous frame's drawable to the new bounds before
-            // our redraw lands; pin to top-left so the BG shows through
-            // the gap until the next frame.  setOpaque(true) lets CA
-            // skip compositing anything underneath us.
+            // Glitchless live-resize recipe (from
+            // `metal-live-resize` / Tristan Hume's 2019 post +
+            // empirical work in the shell/core split that drove
+            // marspot to Sublime-grade resize smoothness):
+            //
+            //   1. contentsGravity = topLeft — pin stale frames at
+            //      top-left of the layer; default `resize` would
+            //      stretch the previous drawable into the new
+            //      bounds as a smeary wobble until our next present
+            //      lands.
+            //   2. setGeometryFlipped(true) — `MarspotView` is
+            //      isFlipped=true (top-left origin); without this
+            //      the layer's coord system is bottom-left and
+            //      `topLeft` gravity actually pins to the *bottom*
+            //      of the layer for those few frames, which reads
+            //      as content jumping up/down when dragging the
+            //      bottom edge of the window.
+            //   3. setPresentsWithTransaction(true) — drawable is
+            //      handed to the next CATransaction (same one
+            //      AppKit uses for bounds changes during a live
+            //      resize), so window bounds and pixels land in the
+            //      same frame.  Caller must do
+            //      cmd.commit() + waitUntilScheduled() +
+            //      drawable.present() instead of
+            //      cmd.presentDrawable() — the live `render_layout`
+            //      path below honours this.
             layer.setContentsGravity(kCAGravityTopLeft);
+            layer.setGeometryFlipped(true);
+            layer.setPresentsWithTransaction(true);
             layer.setOpaque(true);
         }
 
         view.setWantsLayer(true);
         unsafe {
+            // NSView's own resize-time content placement.  AppKit's
+            // path takes over for the brief moment between the
+            // window-bounds change and our next present; default
+            // `ScaleAxesIndependently` stretches old contents into
+            // the new bounds, `TopLeft` mirrors the layer-side
+            // gravity so the two compositing paths agree.
+            view.setLayerContentsPlacement(NSViewLayerContentsPlacement::TopLeft);
             view.setLayer(Some(&layer));
             // Window BG = terminal BG so the gap between resize +
             // first repaint reads as the same colour, not the system
@@ -491,11 +520,15 @@ impl MetalRenderer {
             .renderCommandEncoderWithDescriptor(&pass)
             .expect("renderCommandEncoderWithDescriptor returned nil");
         encoder.endEncoding();
-        // Cast Retained<dyn CAMetalDrawable> down to MTLDrawable for present.
+        // `presentsWithTransaction = true` path: see comment in
+        // `render_layout` below.  Cast Retained<dyn CAMetalDrawable>
+        // down to MTLDrawable for `present`.
+        cmd.commit();
+        cmd.waitUntilScheduled();
+        use objc2_metal::MTLDrawable;
         let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
             ProtocolObject::from_ref(&*drawable);
-        cmd.presentDrawable(mtl_drawable);
-        cmd.commit();
+        mtl_drawable.present();
         true
     }
 
@@ -583,10 +616,16 @@ impl MetalRenderer {
             height_px as f32,
         );
 
+        // `presentsWithTransaction = true` path (set up in `new`):
+        // commit + waitUntilScheduled + drawable.present() so the
+        // drawable lands in the next CATransaction alongside any
+        // pending window-bounds change.
+        cmd.commit();
+        cmd.waitUntilScheduled();
+        use objc2_metal::MTLDrawable;
         let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
             ProtocolObject::from_ref(&*drawable);
-        cmd.presentDrawable(mtl_drawable);
-        cmd.commit();
+        mtl_drawable.present();
     }
 
     /// Bench / test variant of `render_layout`.  Encodes the BG + FG
