@@ -35,6 +35,84 @@ unsafe extern "C" fn sigusr1_handler(_signum: libc::c_int) {
     SIGUSR1_FLAG.store(true, Ordering::Release);
 }
 
+/// Launch journal for shell crash-loop detection: one
+/// `ts \t current_mtime` TSV row per bundle-binary launch that is
+/// about to redirect into `binaries/current/marspot-shell`.  Lives
+/// next to the binaries tree so a `rm -rf Caches/marspot` resets
+/// both together.
+fn shell_launch_log_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    std::path::PathBuf::from(home).join("Library/Caches/marspot/shell_launches.tsv")
+}
+
+/// ≥ this many launches of the same `current/` binary …
+const LAUNCH_LOOP_THRESHOLD: usize = 3;
+/// … within this window ⇒ crash loop (the redirected shell is dying
+/// before the user can even interact with it).
+const LAUNCH_LOOP_WINDOW_SECS: f64 = 60.0;
+/// Journal stays bounded: once it crosses this many lines we rewrite
+/// it down to the trailing half.  One row per launch, so this is
+/// generous.
+const LAUNCH_LOG_MAX_LINES: usize = 64;
+
+/// Append this launch to the journal, then report whether the last
+/// `LAUNCH_LOOP_THRESHOLD` rows (including this one) all point at the
+/// same `current/` binary (by mtime) inside `LAUNCH_LOOP_WINDOW_SECS`.
+/// That signature means the binary we keep redirecting into never
+/// lives long enough to matter — a broken self-update would otherwise
+/// wedge the app in an exec → crash → relaunch loop forever.
+fn record_launch_and_detect_loop(current: &std::path::Path) -> bool {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mtime = match std::fs::metadata(current).and_then(|m| m.modified()) {
+        Ok(t) => t
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        Err(_) => return false,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let path = shell_launch_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{now}\t{mtime}");
+    }
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    if lines.len() > LAUNCH_LOG_MAX_LINES {
+        let tail = lines[lines.len() - LAUNCH_LOG_MAX_LINES / 2..].join("\n");
+        let _ = std::fs::write(&path, tail + "\n");
+    }
+    // Newest-first; rows that fail to parse (hand-edited file) just
+    // don't count toward the threshold.
+    let recent: Vec<(f64, u64)> = lines
+        .iter()
+        .rev()
+        .take(LAUNCH_LOOP_THRESHOLD)
+        .filter_map(|l| {
+            let mut it = l.split('\t');
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        })
+        .collect();
+    if recent.len() < LAUNCH_LOOP_THRESHOLD {
+        return false;
+    }
+    let span = recent[0].0 - recent[recent.len() - 1].0;
+    recent.iter().all(|r| r.1 == mtime) && span >= 0.0 && span <= LAUNCH_LOOP_WINDOW_SECS
+}
+
 /// Re-exec into `binaries/current/marspot-shell` if it exists and
 /// is a different file from us.  Guarded against infinite recursion
 /// by `MARSPOT_NO_REDIRECT=1` (set on the env we pass to the new
@@ -44,7 +122,8 @@ unsafe extern "C" fn sigusr1_handler(_signum: libc::c_int) {
 /// Only returns on:
 ///   - guard env set,
 ///   - no current/marspot-shell,
-///   - current is the same file we already are, or
+///   - current is the same file we already are,
+///   - crash-loop rollback left current/ empty (run as ourselves), or
 ///   - exec failed (logged, then we proceed as ourselves).
 fn maybe_redirect_to_current_shell() {
     use std::os::unix::process::CommandExt;
@@ -69,6 +148,30 @@ fn maybe_redirect_to_current_shell() {
     let cur_c = current.canonicalize().unwrap_or_else(|_| current.clone());
     if me_c == cur_c {
         return;
+    }
+    // Crash-loop guard: if this same current/ binary keeps getting
+    // launched and (evidently) dying, stop redirecting into it.
+    // Quarantine it and restore prev/ — or, with no prev/, leave
+    // current/ empty so this launch (and future ones) run the
+    // bundle binary that's known to at least start.
+    if record_launch_and_detect_loop(&current) {
+        match tree.rollback_to_prev() {
+            Ok(true) => sup_log::log(
+                "SHELL_AUTO_ROLLBACK",
+                "crash loop on current/ — quarantined, restored prev/",
+            ),
+            Ok(false) => sup_log::log(
+                "SHELL_AUTO_ROLLBACK",
+                "crash loop on current/ — quarantined, no prev/, running bundle binary",
+            ),
+            Err(e) => sup_log::log(
+                "SHELL_AUTO_ROLLBACK",
+                &format!("crash loop on current/ — rollback failed: {e}"),
+            ),
+        }
+        if !current.exists() {
+            return;
+        }
     }
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let arg0 = args.first().cloned().unwrap_or_else(|| current.clone().into());

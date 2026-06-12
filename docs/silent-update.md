@@ -75,7 +75,7 @@ binaries/
 | New core dies inside 30 s probation | `PROBATION_FAIL` → `rollback_to_prev`: quarantine current, restore prev → current; respawn from rolled-back binary | Brief "Marspot is recovering…" banner; same content as before |
 | New core dies + no prev to restore | `ROLLBACK_NOOP`; current is quarantined, `resolve_runnable` falls back to bundle sibling | Same as above; banner may flicker through a recovery cycle |
 | 4 crashes in 5 min (rolling window) | `BUDGET_EXCEEDED`; `auto_restart_disabled=true`; no further respawns | Persistent "Marspot stopped — please restart the app" banner |
-| New shell crashes immediately after exec | shell process dies, window closes | User re-opens Marspot.app; bundle binary launches; bundle redirects to `binaries/current/marspot-shell` (still broken) → relaunch loop. Mitigation: `marspot-shell --rollback-shell` (TODO) or manually `rm -rf binaries/current` to force sibling fallback |
+| New shell crashes immediately after exec | shell process dies, window closes | User re-opens Marspot.app; bundle binary journals each redirect into `shell_launches.tsv` and, on the 3rd launch of the same `current/` binary within 60 s, declares a crash loop: quarantines it, restores `prev/` (`SHELL_AUTO_ROLLBACK`), or runs as the bundle binary when no prev exists. Regression test: `bin/test-shell-rollback-loop.sh` |
 | New shelld fails to bootstrap | `SHELLD_UPDATE_FAIL` in supervisor.log; user must manually rollback via `mv binaries/prev/marspot-shelld binaries/current/marspot-shelld` and re-bootstrap | sessions stay dead until manual recovery |
 
 ## Diagnostics

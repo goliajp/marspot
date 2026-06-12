@@ -62,6 +62,7 @@ declare -a FAILED=()
 reset_state; run test-shell-core.sh    "smoke: boot + crash recovery + budget"
 reset_state; run test-update-flow.sh   "silent update happy path"
 reset_state; run test-rollback.sh      "silent update rollback (broken binary)"
+reset_state; run test-shell-rollback-loop.sh "shell crash-loop auto-rollback"
 
 if [[ "${1:-}" == "--soak" ]]; then
   reset_state
