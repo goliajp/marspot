@@ -34,7 +34,9 @@ use marspot::shell_proto::{
 };
 
 mod present;
+mod supervisor;
 use present::ShellPresenter;
+use supervisor::{BinaryTree, SupervisorState};
 
 const DEFAULT_TITLE: &str = "Marspot";
 const DEFAULT_W_PT: f64 = 1200.0;
@@ -74,10 +76,19 @@ struct ShellApp {
     /// black IOSurface — kills the cold-start flash.
     first_frame_ready: bool,
     redraw_thread_started: bool,
+    /// Binary slot manager: current / prev / pending.  Used to find
+    /// the core binary at spawn time and to atomic-swap when a
+    /// silent update fires.
+    binaries: BinaryTree,
+    /// Where in the silent-update lifecycle we are.  `Idle` most of
+    /// the time; flips to `Probation` after we promote a new core.
+    sup_state: SupervisorState,
 }
 
 impl ShellApp {
     fn new(proxy: EventProxy) -> Self {
+        let binaries = BinaryTree::default_for("marspot-core")
+            .expect("HOME must be set to manage binary slots");
         Self {
             proxy,
             surface: None,
@@ -88,6 +99,8 @@ impl ShellApp {
             control_rx: None,
             first_frame_ready: false,
             redraw_thread_started: false,
+            binaries,
+            sup_state: SupervisorState::Idle,
         }
     }
 
@@ -109,12 +122,12 @@ impl ShellApp {
     }
 
     fn spawn_core(&mut self, surface_id: u32, w_phys: usize, h_phys: usize, scale: f64) {
-        // Look for the core binary next to ourselves.  Default is the
-        // real `marspot-core` (Step 2+); override with MARSPOT_CORE_BIN
-        // to point at `marspot-coreshim` for IOSurface-link bring-up
-        // tests.
-        let core_name =
-            std::env::var("MARSPOT_CORE_BIN").unwrap_or_else(|_| "marspot-core".to_string());
+        // Resolve via the supervisor binary tree:
+        //   1. MARSPOT_CORE_BIN env override (full path or sibling
+        //      name — useful in dev / when pointing at coreshim).
+        //   2. `~/Library/Caches/marspot/binaries/current/marspot-core`
+        //      if a prior silent update has staged one.
+        //   3. Sibling of `marspot-shell` (dev / first-run install).
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
@@ -122,10 +135,7 @@ impl ShellApp {
                 return;
             }
         };
-        let core_bin = exe
-            .parent()
-            .map(|p| p.join(&core_name))
-            .unwrap_or_else(|| std::path::PathBuf::from(&core_name));
+        let core_bin = self.binaries.resolve_runnable(&exe);
 
         // Create the bidirectional control socket BEFORE spawn so the
         // child can inherit one end as fd 3.  socketpair(AF_UNIX,
@@ -212,6 +222,118 @@ impl ShellApp {
                     libc::close(child_fd);
                 }
             }
+        }
+    }
+
+    /// Promote `pending/marspot-core` to `current/`, kill the running
+    /// core, re-spawn from the new binary.  Existing IOSurface stays
+    /// alive in the shell — the new core looks it up via the env-var
+    /// handshake and continues rendering into it, so the visible
+    /// content survives the swap (modulo a brief ~100 ms freeze
+    /// while the new core attaches to shelld + replays bytelog).
+    ///
+    /// Returns `true` if a swap actually happened; `false` (no-op)
+    /// when there's no pending binary or we're already mid-swap.
+    fn apply_pending_update(&mut self, ctx: &MarspotAppCtx) -> bool {
+        if !matches!(self.sup_state, SupervisorState::Idle) {
+            return false;
+        }
+        if !self.binaries.has_pending() {
+            return false;
+        }
+        eprintln!("[shell] applying pending update …");
+        if let Err(e) = self.binaries.promote_pending() {
+            eprintln!("[shell] promote_pending failed: {e} — leaving core untouched");
+            return false;
+        }
+        // Tear down the current core so it gets a clean EOF on the
+        // control socket; its Drop / supervisor will see Closed.
+        self.control_tx = None;
+        self.control_rx = None;
+        if let Some(mut child) = self.core_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        // Re-spawn using the (now-current) binary.  Same IOSurface
+        // ID + dims so the new core attaches to the surface the user
+        // is already looking at.
+        let surface = match self.surface.as_ref() {
+            Some(s) => s,
+            None => {
+                eprintln!("[shell] apply_pending_update: no surface to hand to new core");
+                return false;
+            }
+        };
+        let id = surface.id();
+        let w_px = surface.width();
+        let h_px = surface.height();
+        let scale = ctx.scale();
+        self.spawn_core(id, w_px, h_px, scale);
+        self.sup_state = SupervisorState::Probation {
+            started_at: std::time::Instant::now(),
+        };
+        true
+    }
+
+    /// Periodic check.  Fired from `user_event` (which runs every
+    /// 16 ms via the redraw pump).  Two responsibilities:
+    ///   1. If the core child died, react based on supervisor state
+    ///      (Probation → rollback; Idle → restart by re-spawning).
+    ///   2. If we've been in Probation for `PROBATION` seconds and the
+    ///      core is still alive, declare stable.
+    fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
+        // 1. Did the child exit?
+        let exited = match self.core_child.as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+            None => false,
+        };
+        if exited {
+            let was_probation = matches!(self.sup_state, SupervisorState::Probation { .. });
+            // Reap.
+            self.core_child.take();
+            if was_probation {
+                eprintln!("[shell] core died during probation → rolling back");
+                match self.binaries.rollback_to_prev() {
+                    Ok(true) => eprintln!("[shell] rolled back to prev/"),
+                    Ok(false) => {
+                        eprintln!("[shell] no prev to roll back to (fresh install?)");
+                    }
+                    Err(e) => eprintln!("[shell] rollback_to_prev failed: {e}"),
+                }
+                self.sup_state = SupervisorState::Failed {
+                    reason: "core exited during probation".to_string(),
+                };
+                // Re-spawn with whatever current/ now holds.
+                if let Some(s) = self.surface.as_ref() {
+                    let id = s.id();
+                    let w_px = s.width();
+                    let h_px = s.height();
+                    let scale = ctx.scale();
+                    self.spawn_core(id, w_px, h_px, scale);
+                    self.sup_state = SupervisorState::Idle;
+                }
+            } else {
+                // Unsupervised crash.  Step 6 will get smarter; for
+                // now just re-spawn so the window isn't black.
+                eprintln!("[shell] core exited unexpectedly → restarting");
+                if let Some(s) = self.surface.as_ref() {
+                    let id = s.id();
+                    let w_px = s.width();
+                    let h_px = s.height();
+                    let scale = ctx.scale();
+                    self.spawn_core(id, w_px, h_px, scale);
+                }
+            }
+            return;
+        }
+
+        // 2. Probation graduation.
+        if self.sup_state.probation_elapsed() {
+            match self.binaries.finalize_stable() {
+                Ok(()) => eprintln!("[shell] probation passed → stable"),
+                Err(e) => eprintln!("[shell] finalize_stable failed: {e}"),
+            }
+            self.sup_state = SupervisorState::Idle;
         }
     }
 
@@ -308,6 +430,7 @@ impl MarspotApp for ShellApp {
                 ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
             }
         }
+        self.poll_supervisor(ctx);
         ctx.request_redraw();
     }
 
@@ -378,8 +501,24 @@ impl MarspotApp for ShellApp {
         ctx.request_redraw();
     }
 
-    fn focused(&mut self, _ctx: &MarspotAppCtx, focused: bool) {
+    fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
         self.send(MsgType::Focus, encode_focus(focused));
+        // Silent-update trigger: the user just left marspot's window
+        // (cmd-tab, click on another app, minimise).  If a pending
+        // binary is staged in `binaries/pending/`, this is the
+        // cheapest moment to swap — they're not watching us repaint.
+        // The shell window stays put through the swap, the new core
+        // attaches to the same IOSurface and shelld session, so when
+        // they come back they see the same content rendered by the
+        // new version's renderer.
+        //
+        // Skipped during probation: we don't want to chain updates
+        // before knowing if the last one was healthy.
+        if !focused && matches!(self.sup_state, SupervisorState::Idle) {
+            if std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_none() {
+                self.apply_pending_update(ctx);
+            }
+        }
     }
 
     fn ime_preedit_changed(&mut self, _ctx: &MarspotAppCtx, text: &str) {
