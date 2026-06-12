@@ -5,12 +5,15 @@
 # and exits cleanly on failure, but they share state (binary tree,
 # supervisor.log, shelld daemon) so we reset between runs.
 #
-# Optional soak test runs only when `--soak` is passed; off by
-# default since the default cadence is 10 min.
+# Optional slow tests are off by default:
+#   --soak  60 s RSS soak (default cadence is 10 min)
+#   --real  full network pipeline via bin/test-real-update.sh
+#           (~90 s; needs the local signing key keys/marspot-update.sec)
 #
 # Usage:
 #   bin/test-all.sh          # boot + crash + budget + update + rollback
 #   bin/test-all.sh --soak   # …plus 60 s soak smoke
+#   bin/test-all.sh --real   # …plus real release-pipeline e2e
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -64,10 +67,18 @@ reset_state; run test-update-flow.sh   "silent update happy path"
 reset_state; run test-rollback.sh      "silent update rollback (broken binary)"
 reset_state; run test-shell-rollback-loop.sh "shell crash-loop auto-rollback"
 
-if [[ "${1:-}" == "--soak" ]]; then
-  reset_state
-  run "soak-shell-core.sh DURATION_S=60 SAMPLE_S=15" "soak: 60 s RSS check"
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --soak)
+      reset_state
+      run "soak-shell-core.sh DURATION_S=60 SAMPLE_S=15" "soak: 60 s RSS check"
+      ;;
+    --real)
+      reset_state
+      run test-real-update.sh "real release pipeline (signed feed e2e)"
+      ;;
+  esac
+done
 
 echo
 echo "================================================================"
