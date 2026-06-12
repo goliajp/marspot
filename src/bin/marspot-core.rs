@@ -317,7 +317,7 @@ fn main() {
         // the shell sees a Pong within microseconds of its Ping.
         let mut to_ack: Vec<(MsgType, Vec<u8>)> = Vec::new();
         let mut closed = false;
-        let mut process = |ev: CoreEvent,
+        let process = |ev: CoreEvent,
                            pane: &mut Pane,
                            pending_resize: &mut Option<(u32, f64, f64, f64)>,
                            key_count: &mut u64,

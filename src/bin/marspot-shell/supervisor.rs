@@ -86,7 +86,6 @@ impl BinaryTree {
     /// Convenience: tree for the shell supervisor itself.  Used by
     /// the shell self-update path (Task C) — promote pending →
     /// current, then exec the new shell over ourselves.
-    #[allow(dead_code)]
     pub fn for_shell() -> io::Result<Self> {
         Self::default_for("marspot-shell")
     }
@@ -96,14 +95,6 @@ impl BinaryTree {
     #[allow(dead_code)]
     pub fn for_shelld() -> io::Result<Self> {
         Self::default_for("marspot-shelld")
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn bin_name(&self) -> &str {
-        &self.bin_name
     }
 
     pub fn current(&self) -> PathBuf {
