@@ -139,22 +139,36 @@ impl BinaryTree {
     }
 
     /// Move `prev → current`, overwriting whatever is currently there.
-    /// Used when probation declares the new binary failed.  No-op if
-    /// `prev/` is empty (nothing to roll back to).
+    /// Used when probation declares the new binary failed.
+    ///
+    /// Always quarantines the existing `current/marspot-core` (so the
+    /// failed binary stays available for a crash report) and:
+    ///
+    ///   - If `prev/` has a binary, moves it into `current/` and
+    ///     returns `Ok(true)` (rolled back to a known-good).
+    ///   - If `prev/` is empty (the rolled-back binary was the *first*
+    ///     ever promoted — shell had been running from its dev sibling
+    ///     before), there's nothing to restore.  `current/` is left
+    ///     empty; the next `resolve_runnable()` falls back to the
+    ///     sibling path, which is the binary the shell started under.
+    ///     Returns `Ok(false)` so the caller can log appropriately
+    ///     without treating the empty-prev case as a hard error.
     pub fn rollback_to_prev(&self) -> io::Result<bool> {
-        if !self.prev().exists() {
-            return Ok(false);
-        }
         let cur = self.current();
-        // The failed binary is renamed aside so a crash report can
-        // still inspect it later.  Best-effort; we don't fail the
-        // rollback if quarantine fails.
+        // Quarantine whatever's currently there (the failed binary).
+        // Best-effort: we don't fail rollback if quarantine fails.
         let quar = self.root.join("quarantine").join(&self.core_name);
         if cur.exists() {
             if let Some(parent) = quar.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::rename(&cur, &quar);
+        }
+        if !self.prev().exists() {
+            // No prev to restore; current is now empty so
+            // `resolve_runnable` will fall back to the sibling
+            // (whatever marspot-shell was originally exec'd next to).
+            return Ok(false);
         }
         std::fs::rename(self.prev(), &cur)?;
         Ok(true)
@@ -274,11 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn rollback_noop_without_prev() {
+    fn rollback_without_prev_quarantines_current() {
         let (_d, tree) = temp_tree();
         touch(&tree.current());
+        std::fs::write(tree.current(), b"new-but-broken").unwrap();
+        // No prev/ → rollback returns false …
         assert_eq!(tree.rollback_to_prev().unwrap(), false);
-        assert!(tree.current().exists());
+        // … and quarantines the broken current so it doesn't keep
+        // crashing the shell on respawn.
+        assert!(!tree.current().exists());
+        let quar = tree.root.join("quarantine").join("marspot-core");
+        assert!(quar.exists());
+        assert_eq!(std::fs::read(quar).unwrap(), b"new-but-broken");
     }
 
     #[test]
