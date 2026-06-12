@@ -19,9 +19,32 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Set by the SIGUSR1 handler.  The main-thread `poll_supervisor`
+/// drains it and triggers `apply_pending_update`.  Atomic + flag
+/// pattern is the only safe way to interact with the main thread
+/// from a signal context (no NSApp / Metal / mutex calls allowed
+/// inside `sigusr1_handler`).
+static SIGUSR1_FLAG: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn sigusr1_handler(_signum: libc::c_int) {
+    SIGUSR1_FLAG.store(true, Ordering::Release);
+}
+
+fn install_sigusr1_handler() {
+    // SAFETY: registering a handler is signal-safe; the handler we
+    // register only touches an AtomicBool.
+    unsafe {
+        libc::signal(
+            libc::SIGUSR1,
+            sigusr1_handler as *const () as libc::sighandler_t,
+        );
+    }
+}
 
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
@@ -539,6 +562,18 @@ impl ShellApp {
             }
         }
 
+        // 7. Manual update trigger via SIGUSR1.  Lets a CLI invoke
+        // `kill -USR1 $(pgrep marspot-shell)` to apply a staged
+        // update on demand instead of waiting for focus-loss.
+        if SIGUSR1_FLAG.swap(false, Ordering::AcqRel) {
+            sup_log::log("SIGUSR1", "manual update trigger");
+            if matches!(self.sup_state, SupervisorState::Idle) {
+                self.apply_pending_update(ctx);
+            } else {
+                eprintln!("[shell] SIGUSR1 ignored — supervisor not idle");
+            }
+        }
+
         // 6. Recompute the banner once per tick — whatever
         // transition happened above, the visible banner should
         // reflect it.
@@ -838,6 +873,7 @@ fn main() {
             std::process::id()
         ),
     );
+    install_sigusr1_handler();
     // Spawn the silent-update poller.  It runs forever in the
     // background, downloads new `marspot-core` releases, drops them
     // into `binaries/pending/`.  The supervisor here picks them up on
