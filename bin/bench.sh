@@ -275,6 +275,27 @@ def load_live(scenario):
     if bps <= 0: return None
     return bps / 1024 / 1024
 
+def best_other_mbps(baseline, sid):
+    # Best competitor throughput for a scenario, across every recorded
+    # competitor (iterm2, warp, ghostty, …).  Single source of truth
+    # for BOTH the gate check and --update-baseline floor relocking —
+    # they diverged once before (update used max(iterm2, warp) while
+    # the gate included ghostty), which locks floors the very next
+    # gate run fails.  Excluded by design:
+    #   - terminal: OS-vendor reference floor, not a competitor.
+    #   - marspot:  the subject; it lives in this dict only because
+    #               the refresh script measures it in the same
+    #               sequential cycle as the competitors (fair load
+    #               conditions), but it can't compete with itself.
+    cs = baseline["competitors_snapshot"]
+    key = f"{sid}_MBps"
+    excluded = {"terminal", "marspot"}
+    vals = [
+        v[key] for name, v in cs.items()
+        if isinstance(v, dict) and name not in excluded and key in v
+    ]
+    return max(vals) if vals else 0
+
 def check(label, current, floor, lower_better=False):
     if current is None:
         results["pass"].append(("skip", label, "no measurement", None))
@@ -298,23 +319,7 @@ for entry in baseline["scenarios"]:
     if mode == "full":
         cur_live = load_live(sid)
         check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"])
-        # vs best other — across every recorded competitor (iterm2, warp,
-        # ghostty, …). Pulled from competitors_snapshot so adding a new
-        # terminal is a baseline.json edit only, no bench.sh churn.
-        # Excluded by design:
-        #   - terminal: OS-vendor reference floor, not a competitor.
-        #   - marspot:  the subject; it lives in this dict only because
-        #               the refresh script measures it in the same
-        #               sequential cycle as the competitors (fair load
-        #               conditions), but it can't compete with itself.
-        cs = baseline["competitors_snapshot"]
-        key = f"{sid}_MBps"
-        excluded = {"terminal", "marspot"}
-        competitor_mbps = [
-            v[key] for name, v in cs.items()
-            if isinstance(v, dict) and name not in excluded and key in v
-        ]
-        best_other = max(competitor_mbps) if competitor_mbps else 0
+        best_other = best_other_mbps(baseline, sid)
         if cur_live is not None and best_other > 0:
             ratio = cur_live / best_other
             check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"])
@@ -462,10 +467,7 @@ if do_update:
             cl = load_live(sid)
             if cl is not None:
                 entry["mars_live_MBps_min"] = round(cl * 0.90)
-                best_other = max(
-                    baseline["competitors_snapshot"]["iterm2"][f"{sid}_MBps"],
-                    baseline["competitors_snapshot"]["warp"][f"{sid}_MBps"],
-                )
+                best_other = best_other_mbps(baseline, sid)
                 if best_other > 0:
                     entry["mars_vs_best_other_min"] = round(cl / best_other * 0.90, 2)
     # Lower-better ceilings: use math.ceil so the noise margin actually
