@@ -9,6 +9,10 @@
 /references/*
 !/references/README.md
 
+# Update-signing PRIVATE key — never commit.  The public half
+# (keys/marspot-update.pub) IS committed and embedded in the updater.
+/keys/marspot-update.sec
+
 # macOS
 .DS_Store
 *.swp

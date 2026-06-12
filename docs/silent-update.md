@@ -29,7 +29,8 @@ binaries/
                 │  Release   │   via updater::spawn
                 └─────┬──────┘
                       ↓ download tarball (curl)
-                      ↓ sha-256 verify
+                      ↓ download <asset>.sig
+                      ↓ openssl dgst -verify (P-256, embedded pubkey)
                       ↓ tar -xzf → extract by name
                       ↓ strip Gatekeeper xattrs
                 ┌─────┴────────────────────────────┐
@@ -102,10 +103,28 @@ script.
 
 ## Trust model
 
-- v1: HTTPS + SHA-256 digest published in GitHub's release asset
-  metadata.
-- v1.1 (planned): Ed25519 / minisign signature chain.  Verification
-  is a swap of `digest_matches`; rest of the pipeline doesn't change.
+v1.1 (current): minisign-style detached-signature chain.
+
+- Every release tarball ships with `<asset>.sig` — ECDSA P-256 over
+  SHA-256, made by `bin/build-release-tarball.sh --sign` with
+  `keys/marspot-update.sec` (gitignored; lives offline / in a GH
+  secret).
+- The public half is checked in at `keys/marspot-update.pub` and
+  embedded in the updater at compile time (`include_str!`), so the
+  trust anchor travels with the binary.  Verification:
+  `/usr/bin/openssl dgst -sha256 -verify`.
+- Releases with no `.sig` asset, or whose signature doesn't verify,
+  are rejected before anything is staged.
+- Why P-256 and not the originally-planned Ed25519: macOS's stock
+  `/usr/bin/openssl` is LibreSSL 3.3 — no Ed25519 in
+  `genpkey`/`pkeyutl`.  P-256 + `dgst` is the strongest scheme every
+  supported macOS verifies with system tools alone (no new crates,
+  per the self-build principle).
+- Key rotation = new keypair + new release of the updater carrying
+  the new pubkey; old updaters keep verifying old-key releases until
+  upgraded through a release signed by the key they trust.
+
+(v1 was HTTPS + GitHub's SHA-256 asset digest; superseded.)
 
 ## Operations
 

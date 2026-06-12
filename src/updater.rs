@@ -2,10 +2,11 @@
 //!
 //! Once per launch + every `POLL_INTERVAL` afterward, polls the
 //! GitHub Releases API for the project's latest tag.  If newer than
-//! `CARGO_PKG_VERSION`, downloads the matching asset, verifies it
-//! against the `digest` field GitHub publishes alongside each asset
-//! (SHA-256), and stages the **core** binary into the supervisor's
-//! pending slot: `~/Library/Caches/marspot/binaries/pending/marspot-core`.
+//! `CARGO_PKG_VERSION`, downloads the matching asset plus its
+//! detached `.sig`, verifies the signature against the public key
+//! compiled into this binary, and stages each binary into the
+//! supervisor's pending slot under
+//! `~/Library/Caches/marspot/binaries/pending/`.
 //!
 //! `marspot-shell` is the supervisor — it reads that slot, atomic-swaps
 //! `current ← pending`, kills the running core, exec's the new one,
@@ -15,14 +16,21 @@
 //!
 //! Self-build constraints: HTTP via `/usr/bin/curl`, JSON parsed with
 //! a minimal hand-written scanner (only two fields from a known
-//! endpoint), SHA-256 verification via `/usr/bin/shasum`.  No new
-//! Rust crates; we depend on system tools that ship with every
+//! endpoint), signatures verified via `/usr/bin/openssl dgst`.  No
+//! new Rust crates; we depend on system tools that ship with every
 //! macOS since well before our minimum target.
 //!
-//! Trust model: HTTPS + GitHub's manifest-published digest is the
-//! v1 anchor.  A proper Ed25519 signing chain (minisign-style) is
-//! Phase 8 — the architecture here makes it a swap of the verify
-//! function, not a rewrite.
+//! Trust model (v1.1): a release tarball must carry a detached
+//! signature made with `keys/marspot-update.sec` (offline / GH
+//! secret); the public half is checked in at
+//! `keys/marspot-update.pub` and embedded here at compile time, so
+//! a compromised GitHub account or CDN can't push runnable binaries.
+//! The algorithm is ECDSA P-256 over SHA-256 rather than the
+//! Ed25519 originally sketched: macOS's stock `/usr/bin/openssl` is
+//! LibreSSL 3.3, which has no Ed25519 in `genpkey`/`pkeyutl` —
+//! P-256 + `dgst` is the strongest scheme every supported macOS can
+//! verify with system tools alone.  Releases missing a `.sig` asset
+//! are rejected outright.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -134,26 +142,30 @@ fn check_and_stage(running_version: &str) -> Result<bool, String> {
             asset_name, tag
         )
     })?;
-    let asset_digest = scrape_asset_digest(body, &asset_name);
+    let sig_name = format!("{}.sig", asset_name);
+    let sig_url = scrape_asset_url(body, &sig_name).ok_or_else(|| {
+        format!(
+            "feed has no signature asset {} for tag {} — unsigned releases are rejected",
+            sig_name, tag
+        )
+    })?;
 
-    // Download to a temp file, then verify, then stage.  If verify
-    // fails the staged path never gets written, so the bootstrap
+    // Download to temp files, then verify, then stage.  If verify
+    // fails the staged path never gets written, so the supervisor
     // never sees a bad binary.
     let tmp = cache_dir().join("download/marspot.tar.gz");
+    let tmp_sig = cache_dir().join("download/marspot.tar.gz.sig");
     if let Some(parent) = tmp.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir tmp: {}", e))?;
     }
     download_to(&asset_url, &tmp)?;
-    if let Some(expected) = asset_digest {
-        let got = sha256_of(&tmp)?;
-        if !digest_matches(&expected, &got) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "SHA-256 mismatch: expected {} got {}",
-                expected, got
-            ));
-        }
+    download_to(&sig_url, &tmp_sig)?;
+    if let Err(e) = verify_signature(&tmp, &tmp_sig) {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&tmp_sig);
+        return Err(format!("signature verification failed: {}", e));
     }
+    let _ = std::fs::remove_file(&tmp_sig);
     // Extract each layer's binary out of the tarball into its own
     // pending slot.  `extract_binary` is named-lookup, so a tarball
     // with only `marspot-core` (legacy single-binary releases) still
@@ -276,20 +288,47 @@ fn scrape_asset_url(body: &str, asset_name: &str) -> Option<String> {
     scrape_string(slice, "\"browser_download_url\"")
 }
 
-/// Same approach but for the `digest` field GitHub introduced for
-/// release assets in 2024.  Format is `sha256:<hex>`.  Returns None
-/// when the feed doesn't carry one (older API responses, or assets
-/// uploaded before the change).
-fn scrape_asset_digest(body: &str, asset_name: &str) -> Option<String> {
-    let i = body.find(asset_name)?;
-    let slice = &body[i..];
-    scrape_string(slice, "\"digest\"")
+/// The release-signing public key, checked in at
+/// `keys/marspot-update.pub` and baked into the binary so the trust
+/// anchor travels with the code instead of the filesystem.
+const UPDATE_PUBKEY_PEM: &str = include_str!("../keys/marspot-update.pub");
+
+/// Verify `file` against its detached `sig` using the embedded
+/// public key.  ECDSA P-256 / SHA-256 via `/usr/bin/openssl dgst`
+/// (LibreSSL — see the module doc for why not Ed25519).
+fn verify_signature(file: &Path, sig: &Path) -> Result<(), String> {
+    let pubkey = cache_dir().join("download/marspot-update.pub");
+    if let Some(parent) = pubkey.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir pubkey dir: {}", e))?;
+    }
+    std::fs::write(&pubkey, UPDATE_PUBKEY_PEM)
+        .map_err(|e| format!("write pubkey: {}", e))?;
+    verify_signature_with(&pubkey, file, sig)
 }
 
-fn digest_matches(expected: &str, got: &str) -> bool {
-    // Expected format: "sha256:<hex>".  Compare hex part, lowercase.
-    let exp_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
-    exp_hex.eq_ignore_ascii_case(got)
+/// Inner verify, parameterised on the public-key path so tests can
+/// run against a throwaway keypair.
+fn verify_signature_with(pubkey: &Path, file: &Path, sig: &Path) -> Result<(), String> {
+    let out = Command::new("/usr/bin/openssl")
+        .arg("dgst")
+        .arg("-sha256")
+        .arg("-verify")
+        .arg(pubkey)
+        .arg("-signature")
+        .arg(sig)
+        .arg(file)
+        .output()
+        .map_err(|e| format!("spawn openssl: {}", e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "openssl dgst -verify exited {}: {}{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim(),
+        ))
+    }
 }
 
 /// Compare semver-shaped strings.  Returns true when `candidate`
@@ -382,23 +421,6 @@ fn download_to(url: &str, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_of(path: &Path) -> Result<String, String> {
-    let out = Command::new("/usr/bin/shasum")
-        .args(["-a", "256"])
-        .arg(path)
-        .output()
-        .map_err(|e| format!("spawn shasum: {}", e))?;
-    if !out.status.success() {
-        return Err(format!("shasum failed: {}", out.status));
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    let hex = s.split_whitespace().next().unwrap_or("").to_string();
-    if hex.is_empty() {
-        return Err("shasum returned empty hash".into());
-    }
-    Ok(hex)
-}
-
 /// Extract a named binary out of the downloaded tarball into `dst`.
 /// We don't care where in the archive it lives — `find_named_file`
 /// recurses.  A v1-style tarball (only `marspot-core`) returns an
@@ -477,10 +499,62 @@ mod tests {
     }
 
     #[test]
-    fn digest_matches_with_or_without_prefix() {
-        let h = "deadbeef".to_string();
-        assert!(digest_matches("sha256:DEADBEEF", &h));
-        assert!(digest_matches("deadbeef", &h));
-        assert!(!digest_matches("sha256:cafe", &h));
+    fn embedded_pubkey_is_pem() {
+        assert!(UPDATE_PUBKEY_PEM.starts_with("-----BEGIN PUBLIC KEY-----"));
+        assert!(UPDATE_PUBKEY_PEM.trim_end().ends_with("-----END PUBLIC KEY-----"));
+    }
+
+    /// Round-trip against a throwaway P-256 keypair: a good
+    /// signature verifies, a tampered file does not.  Exercises the
+    /// exact openssl invocation production uses.
+    #[test]
+    fn signature_verify_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-sigtest-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sec = dir.join("test.sec");
+        let pubk = dir.join("test.pub");
+        let file = dir.join("payload.bin");
+        let sig = dir.join("payload.bin.sig");
+
+        let gen = Command::new("/usr/bin/openssl")
+            .args(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out"])
+            .arg(&sec)
+            .output()
+            .unwrap();
+        assert!(gen.status.success(), "genkey failed");
+        let pubout = Command::new("/usr/bin/openssl")
+            .arg("ec")
+            .arg("-in")
+            .arg(&sec)
+            .arg("-pubout")
+            .arg("-out")
+            .arg(&pubk)
+            .output()
+            .unwrap();
+        assert!(pubout.status.success(), "pubout failed");
+
+        std::fs::write(&file, b"release payload bytes").unwrap();
+        let sign = Command::new("/usr/bin/openssl")
+            .arg("dgst")
+            .arg("-sha256")
+            .arg("-sign")
+            .arg(&sec)
+            .arg("-out")
+            .arg(&sig)
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(sign.status.success(), "sign failed");
+
+        assert!(verify_signature_with(&pubk, &file, &sig).is_ok());
+
+        // Tamper → must fail.
+        std::fs::write(&file, b"release payload bytes, but evil").unwrap();
+        assert!(verify_signature_with(&pubk, &file, &sig).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
