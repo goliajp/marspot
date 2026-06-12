@@ -6,9 +6,12 @@
 # launchctl so it starts now and on every login.
 #
 # Usage:
-#   bin/install-shelld.sh                 # install + start
-#   bin/install-shelld.sh --uninstall     # stop + remove plist
-#   bin/install-shelld.sh --status        # print runtime status
+#   bin/install-shelld.sh                  # install + start
+#   bin/install-shelld.sh --uninstall      # stop + remove plist
+#   bin/install-shelld.sh --status         # print runtime status
+#   bin/install-shelld.sh --apply-pending  # silently-update shelld
+#                                          # from binaries/pending/
+#                                          # WARNING: kills sessions
 #
 # Idempotent: re-running is a no-op apart from refreshing the plist
 # content (so a binary path change propagates next time).
@@ -21,6 +24,17 @@ BIN="$HOME/.local/Marspot.app/Contents/MacOS/marspot-shelld"
 LOG_DIR="$HOME/Library/Logs/marspot"
 LOG_OUT="$LOG_DIR/shelld.log"
 LOG_ERR="$LOG_DIR/shelld.err"
+BIN_TREE="$HOME/Library/Caches/marspot/binaries"
+SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
+
+# Append one event to the supervisor log so daemon updates appear
+# in the same diagnostic timeline as core / shell ones.
+sup_log() {
+  local tag="$1"; shift
+  local detail="$*"
+  mkdir -p "$(dirname "$SUP_LOG")"
+  printf '%s\t%s\t%s\n' "$(date +%s.%N)" "$tag" "$detail" >> "$SUP_LOG"
+}
 
 case "${1:-}" in
   --uninstall)
@@ -38,7 +52,70 @@ case "${1:-}" in
     launchctl print "gui/$(id -u)/$LABEL" 2>&1 | head -20 || true
     echo "socket:"
     ls -la "$HOME/Library/Caches/marspot/shelld.sock" 2>&1 || true
+    echo "pending shelld:"
+    if [[ -f "$BIN_TREE/pending/marspot-shelld" ]]; then
+      ls -la "$BIN_TREE/pending/marspot-shelld"
+      echo "  (apply with: bin/install-shelld.sh --apply-pending)"
+    else
+      echo "  (none)"
+    fi
     exit 0
+    ;;
+  --apply-pending)
+    pending="$BIN_TREE/pending/marspot-shelld"
+    if [[ ! -f "$pending" ]]; then
+      echo "no $pending — nothing to apply"
+      exit 1
+    fi
+    cat <<MSG
+shelld update available at $pending.
+
+Applying it will:
+  - bootout the running daemon
+  - move pending → current → bundle binary
+  - bootstrap the new daemon
+
+All currently-open shelld sessions WILL DIE (every shell child gets
+SIGHUP when shelld's PTY parent fds close).  Save anything you care
+about first.
+
+MSG
+    if [[ "${2:-}" != "--yes" ]]; then
+      read -rp "Continue? (yes/no) " resp
+      [[ "$resp" == "yes" ]] || { echo "aborted."; exit 1; }
+    fi
+    sup_log "SHELLD_UPDATE_APPLY" "promote + bundle install"
+
+    # Promote pending → current.  Match BinaryTree::promote_pending.
+    mkdir -p "$BIN_TREE/current" "$BIN_TREE/prev"
+    [[ -f "$BIN_TREE/current/marspot-shelld" ]] && \
+      mv -f "$BIN_TREE/current/marspot-shelld" "$BIN_TREE/prev/marspot-shelld"
+    mv "$pending" "$BIN_TREE/current/marspot-shelld"
+    # Strip Gatekeeper xattrs so the new daemon doesn't stall in
+    # _dyld_start.
+    xattr -d com.apple.quarantine  "$BIN_TREE/current/marspot-shelld" 2>/dev/null || true
+    xattr -d com.apple.provenance  "$BIN_TREE/current/marspot-shelld" 2>/dev/null || true
+
+    # Copy into the bundle so the LaunchAgent plist (which points at
+    # the bundle path) picks it up on next bootstrap.
+    cp "$BIN_TREE/current/marspot-shelld" "$BIN"
+
+    # Restart the daemon.
+    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>&1 || true
+      sleep 0.5
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    sleep 1
+    if launchctl print "gui/$(id -u)/$LABEL" 2>&1 | grep -q "state = running"; then
+      sup_log "SHELLD_UPDATE_STABLE" "daemon restarted from current/"
+      echo "shelld updated and running."
+      exit 0
+    else
+      sup_log "SHELLD_UPDATE_FAIL" "daemon failed to restart"
+      echo "warning: shelld didn't come back up — check $LOG_ERR" >&2
+      exit 1
+    fi
     ;;
   ""|--install)
     ;;
