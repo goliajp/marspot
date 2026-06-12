@@ -35,6 +35,131 @@ unsafe extern "C" fn sigusr1_handler(_signum: libc::c_int) {
     SIGUSR1_FLAG.store(true, Ordering::Release);
 }
 
+fn print_version() {
+    println!(
+        "marspot-shell {} (git {} built {})",
+        env!("CARGO_PKG_VERSION"),
+        option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
+        option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown")
+    );
+}
+
+/// Find the live shell PID via `/proc`-less ps lookup.  Returns the
+/// first matching PID (there should normally only be one); returns
+/// `None` if no shell is running.  Excludes our own PID so the
+/// `--status` invocation never sees itself.
+fn find_running_shell_pid() -> Option<u32> {
+    let mine = std::process::id();
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-axo", "pid,comm"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines().skip(1) {
+        let mut it = line.split_whitespace();
+        let pid: u32 = it.next()?.parse().ok()?;
+        if pid == mine {
+            continue;
+        }
+        let rest: String = it.collect::<Vec<_>>().join(" ");
+        // `comm` may carry the full path; match the basename.
+        if rest
+            .rsplit('/')
+            .next()
+            .map(|n| n == "marspot-shell")
+            .unwrap_or(false)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn print_status() {
+    print_version();
+    println!();
+
+    // Live processes.
+    match find_running_shell_pid() {
+        Some(pid) => println!("Running supervisor: pid {pid}"),
+        None => println!("Running supervisor: (none)"),
+    }
+    let core_pids: Vec<String> = match std::process::Command::new("/usr/bin/pgrep")
+        .args(["-f", "marspot-core"])
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(String::from)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    println!("Running core(s): {}", core_pids.join(", "));
+    println!();
+
+    // Latest events from supervisor.log.
+    let log = sup_log_path();
+    println!("Recent supervisor events (tail of {}):", log.display());
+    match std::fs::read_to_string(&log) {
+        Ok(s) => {
+            let lines: Vec<&str> = s.lines().collect();
+            let n = lines.len();
+            let take = 12.min(n);
+            for line in &lines[n - take..] {
+                let mut it = line.splitn(3, '\t');
+                let ts: f64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let tag = it.next().unwrap_or("?");
+                let detail = it.next().unwrap_or("");
+                // Format the unix-seconds-f64 as a local datetime via `date`.
+                let ts_s = std::process::Command::new("/bin/date")
+                    .args(["-r", &format!("{:.0}", ts), "+%Y-%m-%d %H:%M:%S"])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                println!("  {ts_s}  {:<18}  {detail}", tag);
+            }
+        }
+        Err(e) => println!("  (could not read: {e})"),
+    }
+}
+
+fn sup_log_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    home.join("Library/Logs/Marspot/supervisor.log")
+}
+
+/// `--trigger` — send SIGUSR1 to the running shell so it applies any
+/// staged pending update.  Returns the process exit code:
+///   0 = signal sent successfully
+///   1 = no running shell found
+///   2 = signal call errored
+fn cmd_trigger() -> i32 {
+    match find_running_shell_pid() {
+        Some(pid) => {
+            // SAFETY: libc::kill is a syscall wrapper; no Rust invariants.
+            let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) };
+            if r == 0 {
+                println!("sent SIGUSR1 to marspot-shell pid {pid}");
+                0
+            } else {
+                eprintln!(
+                    "kill failed: {}",
+                    std::io::Error::last_os_error()
+                );
+                2
+            }
+        }
+        None => {
+            eprintln!("no running marspot-shell to trigger");
+            1
+        }
+    }
+}
+
 fn install_sigusr1_handler() {
     // SAFETY: registering a handler is signal-safe; the handler we
     // register only touches an AtomicBool.
@@ -858,6 +983,47 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
 }
 
 fn main() {
+    // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
+    // head`) exit cleanly with the standard EPIPE convention instead
+    // of panicking with a Rust backtrace.  SIG_DFL on macOS for SIGPIPE
+    // terminates the process — that's exactly the Unix contract.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
+    // Dispatch CLI subcommands before we touch AppKit / start a
+    // window.  --status / --trigger run against an already-running
+    // shell, so they must not themselves take over the run loop.
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("--version") => {
+            print_version();
+            return;
+        }
+        Some("--status") => {
+            print_status();
+            return;
+        }
+        Some("--trigger") => {
+            let code = cmd_trigger();
+            std::process::exit(code);
+        }
+        Some("--help") | Some("-h") => {
+            println!(
+"marspot-shell — supervisor for the marspot terminal.\n\
+\n\
+Usage:\n\
+  marspot-shell                Start the supervisor (window + core).\n\
+  marspot-shell --version      Print version / git / build info.\n\
+  marspot-shell --status       Summarise state from supervisor.log + live PIDs.\n\
+  marspot-shell --trigger      Apply a staged pending update on a running shell\n\
+                               (sends SIGUSR1 to the supervisor process).\n"
+            );
+            return;
+        }
+        _ => {}
+    }
+
     eprintln!(
         "marspot-shell {} (git {} built {})",
         env!("CARGO_PKG_VERSION"),
