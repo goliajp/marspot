@@ -106,16 +106,58 @@ MSG
       sleep 0.5
     fi
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    sleep 1
-    if launchctl print "gui/$(id -u)/$LABEL" 2>&1 | grep -q "state = running"; then
-      sup_log "SHELLD_UPDATE_STABLE" "daemon restarted from current/"
+
+    # Probation: poll every 5 s for 30 s.  KeepAlive +
+    # ThrottleInterval=5 make a crashing daemon flap through
+    # "running", so a single early check proves nothing — only
+    # still-running at the END of the window counts as stable.
+    PROBATION_S="${MARSPOT_SHELLD_PROBATION_S:-30}"
+    POLL_S=5
+    elapsed=0
+    running=no
+    while (( elapsed < PROBATION_S )); do
+      sleep "$POLL_S"; elapsed=$(( elapsed + POLL_S ))
+      if launchctl print "gui/$(id -u)/$LABEL" 2>&1 | grep -q "state = running"; then
+        running=yes
+      else
+        running=no
+      fi
+      echo "  probation ${elapsed}/${PROBATION_S}s — state: $running"
+    done
+    if [[ "$running" == yes ]]; then
+      sup_log "SHELLD_UPDATE_STABLE" "daemon survived ${PROBATION_S}s probation"
       echo "shelld updated and running."
       exit 0
-    else
-      sup_log "SHELLD_UPDATE_FAIL" "daemon failed to restart"
-      echo "warning: shelld didn't come back up — check $LOG_ERR" >&2
+    fi
+
+    # Probation failed — quarantine the broken binary and restore
+    # prev/ into current/ + the bundle path, then re-bootstrap.
+    sup_log "SHELLD_PROBATION_FAIL" "daemon not running after ${PROBATION_S}s"
+    echo "shelld didn't survive probation — rolling back." >&2
+    if [[ ! -f "$BIN_TREE/prev/marspot-shelld" ]]; then
+      sup_log "SHELLD_ROLLBACK" "no prev/ to restore — manual recovery required"
+      echo "error: no $BIN_TREE/prev/marspot-shelld to roll back to." >&2
+      echo "       check $LOG_ERR, then reinstall a known-good shelld." >&2
       exit 1
     fi
+    mkdir -p "$BIN_TREE/quarantine"
+    mv -f "$BIN_TREE/current/marspot-shelld" "$BIN_TREE/quarantine/marspot-shelld"
+    mv "$BIN_TREE/prev/marspot-shelld" "$BIN_TREE/current/marspot-shelld"
+    cp "$BIN_TREE/current/marspot-shelld" "$BIN"
+    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>&1 || true
+      sleep 0.5
+    fi
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    sleep 1
+    if launchctl print "gui/$(id -u)/$LABEL" 2>&1 | grep -q "state = running"; then
+      sup_log "SHELLD_ROLLBACK" "prev/ restored, daemon re-bootstrapped and running"
+      echo "rolled back to previous shelld — daemon running again." >&2
+    else
+      sup_log "SHELLD_ROLLBACK" "prev/ restored but daemon still not running"
+      echo "rolled back, but daemon still not running — check $LOG_ERR" >&2
+    fi
+    exit 1
     ;;
   ""|--install)
     ;;
