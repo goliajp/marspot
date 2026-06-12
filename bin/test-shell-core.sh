@@ -33,8 +33,10 @@ fail() {
 }
 
 cleanup() {
-  pkill -9 -f marspot-shell  >/dev/null 2>&1 || true
-  pkill -9 -f marspot-core   >/dev/null 2>&1 || true
+  # Match `marspot-shell` not `marspot-shelld` (the daemon) — see
+  # test-update-flow.sh for the gory details.
+  pkill -9 -f '/marspot-shell( |$)'  >/dev/null 2>&1 || true
+  pkill -9 -f '/marspot-core( |$)'   >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
