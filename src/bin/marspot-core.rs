@@ -21,8 +21,8 @@
 
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,15 +39,12 @@ use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
 use marspot::shell_proto::{
     decode_focus, decode_key_event, decode_mouse, decode_preedit, decode_resize, decode_scroll,
-    mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
-    ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
+    encode_surface_ready, mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD,
+    ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
 };
 use marspot::shelld_client::{default_socket_path, ShelldClient};
 use marspot::HEADER_PT;
 
-const INITIAL_COLS: u16 = 80;
-const INITIAL_ROWS: u16 = 24;
-const FRAME_MS: u64 = 16;
 
 fn env_required<T: std::str::FromStr>(name: &str) -> T {
     let raw = std::env::var(name)
@@ -61,6 +58,10 @@ fn env_required<T: std::str::FromStr>(name: &str) -> T {
 /// into.  The main loop drains a channel of these once per render
 /// frame and dispatches them into the focused pane.
 #[derive(Debug)]
+// Tuple fields on Mouse/Scroll/Focus/Preedit are wired (decoded from
+// the wire) but not yet consumed by `Pane` — Step 4 lands resize +
+// pump path; selection/IME/scroll/focus follow in later steps.
+#[allow(dead_code)]
 enum CoreEvent {
     Key(MarspotKeyEvent, Modifiers),
     MouseDown(f64, f64, Modifiers),
@@ -68,8 +69,12 @@ enum CoreEvent {
     MouseUp(f64, f64),
     Scroll(f64, f64, bool),
     Focus(bool),
-    Resize(f64, f64, f64),
+    Resize(u32, f64, f64, f64),
     Preedit(String),
+    /// Shelld wake — pane has new bytes to pump (PTY → bytelog →
+    /// broadcast).  Sent by the shelld client's wake callback so the
+    /// main loop is event-driven instead of polling at FRAME_MS.
+    PumpShelld,
     /// Shell closed the control socket — supervisor will tear us down.
     Closed,
 }
@@ -95,7 +100,7 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::Focus => decode_focus(&f.payload).ok().map(CoreEvent::Focus),
         MsgType::Resize => decode_resize(&f.payload)
             .ok()
-            .map(|(w, h, s)| CoreEvent::Resize(w, h, s)),
+            .map(|(id, w, h, s)| CoreEvent::Resize(id, w, h, s)),
         MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
         // Lifecycle frames don't surface as input events; ignore for
         // now (HELLO/HELLO_ACK get handled inline once we add the
@@ -105,9 +110,11 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
 }
 
 /// Background reader: reads framed messages off the control socket
-/// until EOF / error, dispatches each into `tx`, and bumps `dirty`
-/// so the render loop wakes up the next tick.
-fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>, dirty: Arc<AtomicBool>) {
+/// until EOF / error, dispatches each into `tx`.  `dirty` is kept for
+/// signal-symmetry with the shelld wake closure but unused in the
+/// new event-driven loop — sending into `tx` is enough to wake the
+/// main thread.
+fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>, _dirty: Arc<AtomicBool>) {
     loop {
         match Frame::read_from(&mut stream) {
             Ok(None) => {
@@ -116,7 +123,6 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>, dirty: Arc<AtomicB
             }
             Ok(Some(frame)) => {
                 if let Some(ev) = decode_frame(&frame) {
-                    dirty.store(true, Ordering::Release);
                     if tx.send(ev).is_err() {
                         return;
                     }
@@ -141,31 +147,66 @@ fn main() {
     );
 
     let surface_id: u32 = env_required(ENV_SURFACE_ID);
-    let w_phys: f64 = env_required(ENV_SURFACE_WIDTH);
-    let h_phys: f64 = env_required(ENV_SURFACE_HEIGHT);
-    let scale: f64 = env_required(ENV_SURFACE_SCALE);
+    let mut w_phys: f64 = env_required(ENV_SURFACE_WIDTH);
+    let mut h_phys: f64 = env_required(ENV_SURFACE_HEIGHT);
+    let mut scale: f64 = env_required(ENV_SURFACE_SCALE);
 
     eprintln!("[core] attaching surface {surface_id} ({w_phys}×{h_phys} @ {scale}x)");
 
-    let surface = IOSurface::lookup(surface_id)
+    let mut surface = IOSurface::lookup(surface_id)
         .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({surface_id}) returned nil"));
     surface.increment_use();
 
     let mut renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
-    let target_tex: objc2::rc::Retained<ProtocolObject<dyn MTLTexture>> = surface
+    let mut target_tex: objc2::rc::Retained<ProtocolObject<dyn MTLTexture>> = surface
         .make_metal_texture(renderer.device())
         .expect("[core] make_metal_texture");
 
-    // Dirty flag: shelld DATA frames wake us; the render loop polls
-    // it as a hint to "render right now" instead of waiting for the
-    // next frame tick.  Always render at the frame cadence regardless
-    // — DATA bursts arriving during a frame still get composited at
-    // the next tick, no extra latency.
-    let dirty = Arc::new(AtomicBool::new(true));
-    let dirty_for_wake = Arc::clone(&dirty);
+    // Unified event channel: the control-socket reader pushes
+    // CoreEvents; the shelld wake callback pushes `PumpShelld`.
+    // Main loop blocks on `recv_timeout` so it sleeps until *any*
+    // event arrives — no polling-cadence latency.  Idle CPU = 0;
+    // a key press / shelld frame / window resize wakes us within
+    // microseconds rather than waiting for the next frame tick.
+    let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = mpsc::channel();
+    let dirty = Arc::new(AtomicBool::new(true)); // kept for reader_loop signature
+    let event_tx_for_wake = event_tx.clone();
     let wake = move || {
-        dirty_for_wake.store(true, Ordering::Release);
+        // Best-effort send; if receiver is gone, the loop is shutting
+        // down and we don't care.
+        let _ = event_tx_for_wake.send(CoreEvent::PumpShelld);
     };
+
+    // Compute the layout BEFORE we touch shelld, so we can hand
+    // the right cols/rows to `new_session` / `attach` from the start.
+    // If we created the session at INITIAL_COLS×INITIAL_ROWS and
+    // resized it after, the shell would have already printed its
+    // welcome message + prompt into the smaller grid; after the
+    // resize the leftover content sits at the wrong columns and
+    // reads as "phantom indentation" in the rendered view.
+    let font = FontCache::build().expect("[core] FontCache::build");
+    let (cell_w, cell_h) = font.cell_dims();
+    let cell_title_h = 0.0; // single-pane: no per-cell title strip
+    let build_layout = |w: f64, h: f64, scale: f64| -> Layout {
+        Layout::build(
+            w,
+            h,
+            0.0, // no sidebar in step-4 minimum
+            HEADER_PT * scale,
+            cell_title_h,
+            1,
+            1,
+            cell_w,
+            cell_h,
+        )
+    };
+    let mut layout = build_layout(w_phys, h_phys, scale);
+    eprintln!(
+        "[core] layout 1×1 cell={cell_w:.1}×{cell_h:.1} → {} cols × {} rows",
+        layout.cells[0].cols, layout.cells[0].rows
+    );
+    let init_cols = layout.cells[0].cols;
+    let init_rows = layout.cells[0].rows;
 
     let shelld_sock = default_socket_path();
     eprintln!("[core] connecting to shelld at {}", shelld_sock.display());
@@ -192,7 +233,7 @@ fn main() {
 
     let mut pane: Pane = if let Some(info) = existing.first() {
         eprintln!("[core] attaching existing session id={}", info.session_id);
-        match client.attach(info.session_id, INITIAL_COLS, INITIAL_ROWS) {
+        match client.attach(info.session_id, init_cols, init_rows) {
             Ok(s) => Pane::new_shelld(s),
             Err(e) => {
                 eprintln!(
@@ -200,7 +241,7 @@ fn main() {
                     info.session_id
                 );
                 let s = client
-                    .new_session(INITIAL_COLS, INITIAL_ROWS, "")
+                    .new_session(init_cols, init_rows, "")
                     .expect("[core] new_session");
                 Pane::new_shelld(s)
             }
@@ -208,45 +249,16 @@ fn main() {
     } else {
         eprintln!("[core] no surviving sessions — creating fresh");
         let s = client
-            .new_session(INITIAL_COLS, INITIAL_ROWS, "")
+            .new_session(init_cols, init_rows, "")
             .expect("[core] new_session");
         Pane::new_shelld(s)
     };
 
-    // FontCache lives in the renderer, but Layout::build wants
-    // (cell_w, cell_h) up front to compute per-cell cols/rows.  Build
-    // an independent FontCache here to ask for those dims; cheap
-    // (small CoreText cache) and the renderer has its own copy.
-    let font = FontCache::build().expect("[core] FontCache::build");
-    let (cell_w, cell_h) = font.cell_dims();
-    let top_inset = HEADER_PT * scale;
-    let cell_title_h = 0.0; // single-pane: no per-cell title strip
-    let layout = Layout::build(
-        w_phys,
-        h_phys,
-        0.0, // no sidebar in step-2 minimum
-        top_inset,
-        cell_title_h,
-        1,
-        1,
-        cell_w,
-        cell_h,
-    );
-
-    eprintln!(
-        "[core] layout 1×1 cell={cell_w:.1}×{cell_h:.1} → {} cols × {} rows",
-        layout.cells[0].cols, layout.cells[0].rows
-    );
-
-    // Now that we know the cell size, resize the pane's terminal so
-    // its grid matches what the layout expects.  Without this, the
-    // session keeps echoing into an 80×24 grid that doesn't line up
-    // with the rendered cell — output wraps at the wrong column.
-    pane.resize(layout.cells[0].cols, layout.cells[0].rows);
-
     // Bring up the shell ↔ core control socket inherited as fd 3.
     // Frames sent by the shell arrive on the reader thread; the
-    // render loop drains the channel once per tick.
+    // render loop drains the channel once per tick.  The writer half
+    // lives in `control_writer` and is shared back to the main loop
+    // so we can send `SurfaceReady` after a successful resize.
     let control_fd: RawFd = std::env::var(ENV_CONTROL_FD)
         .ok()
         .and_then(|s| s.parse().ok())
@@ -256,53 +268,166 @@ fn main() {
     let reader_stream = control_stream
         .try_clone()
         .expect("[core] try_clone control_stream");
-    let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = mpsc::channel();
+    let mut control_writer = control_stream;
+    let reader_tx = event_tx.clone();
     let dirty_for_reader = Arc::clone(&dirty);
-    std::thread::spawn(move || reader_loop(reader_stream, event_tx, dirty_for_reader));
+    std::thread::spawn(move || reader_loop(reader_stream, reader_tx, dirty_for_reader));
 
-    eprintln!("[core] entering render loop @ ~{} fps", 1000 / FRAME_MS);
+    eprintln!("[core] entering event loop (event-driven, no fixed cadence)");
 
     let start = Instant::now();
     let mut frame: u64 = 0;
     let mut key_count: u64 = 0;
+    let mut needs_render = true; // force the first frame so the IOSurface isn't black
+    // The first iteration draws immediately even if no event arrives.
+    let mut first_tick = true;
     'main: loop {
-        let frame_start = Instant::now();
-        let _was_dirty = dirty.swap(false, Ordering::AcqRel);
-        // Drain pending control-socket events first, then PTY bytes.
-        // Order matters: a key press should take effect before the
-        // PTY echo lands on the same frame.
-        while let Ok(ev) = event_rx.try_recv() {
+        // Block until at least one event arrives.  Generous timeout
+        // so the loop ticks at most once a second when totally idle
+        // — lets the stats line print and lets us notice a stuck
+        // state without burning CPU.
+        let first = if first_tick {
+            first_tick = false;
+            // Skip blocking on the very first iteration so the
+            // initial render fires immediately.
+            event_rx.try_recv().ok()
+        } else {
+            match event_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(ev) => Some(ev),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break 'main,
+            }
+        };
+        // Drain pending control-socket events.  Resize coalescing:
+        // during a live window drag the shell fires a Resize per
+        // AppKit tick (~60/s), each carrying a fresh IOSurface.
+        // Processing every one would queue ~60 SIGWINCHes into the
+        // PTY and zsh repaints would lag by a second.  We walk the
+        // queue, keep only the *latest* Resize, and skip the older
+        // ones — the shell ignores SurfaceReady whose ID doesn't
+        // match its current pending surface, so the dropped ones are
+        // a no-op for it too.
+        let mut pending_resize: Option<(u32, f64, f64, f64)> = None;
+        let process = |ev: CoreEvent,
+                           pane: &mut Pane,
+                           pending_resize: &mut Option<(u32, f64, f64, f64)>,
+                           key_count: &mut u64,
+                           needs_render: &mut bool|
+         -> Option<bool> {
+            // Returns Some(false) = closed, Some(true) = continue.
             match ev {
                 CoreEvent::Key(event, mods) => {
                     pane.handle_key(&event, mods);
-                    key_count += 1;
+                    *key_count += 1;
+                    *needs_render = true;
                 }
-                CoreEvent::Closed => {
-                    eprintln!("[core] control socket closed by shell; exiting render loop");
-                    break 'main;
+                CoreEvent::Closed => return Some(false),
+                CoreEvent::Resize(new_id, new_w, new_h, new_scale) => {
+                    *pending_resize = Some((new_id, new_w, new_h, new_scale));
                 }
-                // Accepted but no-op for now — Step 4 wires resize,
-                // selection / IME come in later steps.
+                CoreEvent::PumpShelld => {
+                    // Bytes available; the pump call after the drain
+                    // loop will pick them up.
+                    *needs_render = true;
+                }
                 CoreEvent::MouseDown(_, _, _)
                 | CoreEvent::MouseDrag(_, _)
                 | CoreEvent::MouseUp(_, _)
                 | CoreEvent::Scroll(_, _, _)
                 | CoreEvent::Focus(_)
-                | CoreEvent::Resize(_, _, _)
                 | CoreEvent::Preedit(_) => {}
+            }
+            Some(true)
+        };
+        if let Some(ev) = first {
+            match process(ev, &mut pane, &mut pending_resize, &mut key_count, &mut needs_render) {
+                Some(false) => {
+                    eprintln!("[core] control socket closed by shell; exiting event loop");
+                    break 'main;
+                }
+                _ => {}
+            }
+        }
+        while let Ok(ev) = event_rx.try_recv() {
+            match process(ev, &mut pane, &mut pending_resize, &mut key_count, &mut needs_render) {
+                Some(false) => {
+                    eprintln!("[core] control socket closed by shell; exiting event loop");
+                    break 'main;
+                }
+                _ => {}
+            }
+        }
+        if let Some((new_id, new_w, new_h, new_scale)) = pending_resize {
+            // Shell hands us a freshly-created IOSurface at the new
+            // size; rebuild the render target, layout, and pane size,
+            // then ack with SurfaceReady so the shell can swap its
+            // presenter.
+            let new_surface = match IOSurface::lookup(new_id) {
+                Some(s) => {
+                    s.increment_use();
+                    Some(s)
+                }
+                None => {
+                    eprintln!(
+                        "[core] Resize: IOSurfaceLookup({new_id}) returned nil; dropping"
+                    );
+                    None
+                }
+            };
+            if let Some(new_surface) = new_surface {
+                match new_surface.make_metal_texture(renderer.device()) {
+                    Ok(new_tex) => {
+                        target_tex = new_tex;
+                        surface.decrement_use();
+                        surface = new_surface;
+                        w_phys = new_w;
+                        h_phys = new_h;
+                        scale = new_scale;
+                        layout = build_layout(w_phys, h_phys, scale);
+                        pane.resize(layout.cells[0].cols, layout.cells[0].rows);
+                        // Render the latest content into the new surface
+                        // so the SurfaceReady ack is honest.
+                        pane.pump();
+                        let title_now = "marspot".to_string();
+                        let view: SessionView = pane.view(true, &title_now);
+                        renderer.render_layout_to_texture(
+                            &target_tex,
+                            &layout,
+                            &[view],
+                            &[],
+                            0,
+                        );
+                        let ack = Frame::new(
+                            MsgType::SurfaceReady,
+                            encode_surface_ready(new_id),
+                        );
+                        if let Err(e) = ack.write_to(&mut control_writer) {
+                            eprintln!("[core] SurfaceReady write failed: {e}");
+                        }
+                        needs_render = false;
+                    }
+                    Err(e) => {
+                        eprintln!("[core] Resize: make_metal_texture failed: {e}");
+                    }
+                }
             }
         }
         // Drain any pending shelld DATA into the terminal grid.
         // Pump is cheap when there's nothing pending; called every
         // frame so we never miss bytes between two redraws.
-        pane.pump();
+        let pumped = pane.pump();
+        if pumped > 0 {
+            needs_render = true;
+        }
 
-        let title_buf = "marspot".to_string();
-        let view: SessionView = pane.view(true, &title_buf);
-        let views = [view];
-        let sidebar: [SidebarEntry; 0] = [];
-
-        renderer.render_layout_to_texture(&target_tex, &layout, &views, &sidebar, 0);
+        if needs_render {
+            let title_buf = "marspot".to_string();
+            let view: SessionView = pane.view(true, &title_buf);
+            let views = [view];
+            let sidebar: [SidebarEntry; 0] = [];
+            renderer.render_layout_to_texture(&target_tex, &layout, &views, &sidebar, 0);
+            needs_render = false;
+        }
 
         frame += 1;
         if frame.is_multiple_of(300) {
@@ -319,10 +444,8 @@ fn main() {
             );
         }
 
-        let elapsed = frame_start.elapsed();
-        let target = Duration::from_millis(FRAME_MS);
-        if elapsed < target {
-            std::thread::sleep(target - elapsed);
-        }
+        // No sleep — event-driven.  Top of loop blocks on
+        // `event_rx.recv_timeout` until the next event arrives or
+        // the 1 s idle timeout expires.
     }
 }

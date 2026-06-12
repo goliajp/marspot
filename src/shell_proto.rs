@@ -86,6 +86,12 @@ pub enum MsgType {
     // ── window state (30..=49) ──
     Focus = 30,
     Resize = 31,
+    /// core → shell: "I have rendered the first frame to the new
+    /// IOSurface; you may swap the presenter now."  Payload is the
+    /// surface ID the core just confirmed (u32 LE).  The shell
+    /// ignores frames whose ID doesn't match its currently-pending
+    /// surface — see Step 4's resize state machine.
+    SurfaceReady = 32,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -103,6 +109,7 @@ impl MsgType {
             15 => MsgType::Preedit,
             30 => MsgType::Focus,
             31 => MsgType::Resize,
+            32 => MsgType::SurfaceReady,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -414,24 +421,56 @@ pub fn decode_focus(payload: &[u8]) -> io::Result<bool> {
     Ok(payload[0] != 0)
 }
 
-pub fn encode_resize(w_phys: f64, h_phys: f64, scale: f64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(24);
+/// Resize payload layout:
+///
+/// ```text
+/// [new_surface_id : u32 LE]
+/// [w_phys         : f64 LE]
+/// [h_phys         : f64 LE]
+/// [scale          : f64 LE]
+/// ```
+///
+/// The shell creates a fresh IOSurface at the new dimensions, then
+/// sends this frame.  The core looks the surface up, rebuilds its
+/// render target and layout, and acks with `SurfaceReady(id)`.
+pub fn encode_resize(new_surface_id: u32, w_phys: f64, h_phys: f64, scale: f64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(28);
+    out.extend_from_slice(&new_surface_id.to_le_bytes());
     out.extend_from_slice(&w_phys.to_le_bytes());
     out.extend_from_slice(&h_phys.to_le_bytes());
     out.extend_from_slice(&scale.to_le_bytes());
     out
 }
-pub fn decode_resize(payload: &[u8]) -> io::Result<(f64, f64, f64)> {
-    if payload.len() < 24 {
+
+pub fn decode_resize(payload: &[u8]) -> io::Result<(u32, f64, f64, f64)> {
+    if payload.len() < 28 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "resize payload < 24 bytes",
+            "resize payload < 28 bytes",
         ));
     }
-    let w = f64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let h = f64::from_le_bytes(payload[8..16].try_into().unwrap());
-    let s = f64::from_le_bytes(payload[16..24].try_into().unwrap());
-    Ok((w, h, s))
+    let id = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+    let w = f64::from_le_bytes(payload[4..12].try_into().unwrap());
+    let h = f64::from_le_bytes(payload[12..20].try_into().unwrap());
+    let s = f64::from_le_bytes(payload[20..28].try_into().unwrap());
+    Ok((id, w, h, s))
+}
+
+/// SurfaceReady payload: the IOSurface ID the core has just rendered
+/// to (u32 LE).  The shell uses this to switch its presenter from the
+/// previous (stretched) surface to the new (crisp) one.
+pub fn encode_surface_ready(surface_id: u32) -> Vec<u8> {
+    surface_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_surface_ready(payload: &[u8]) -> io::Result<u32> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "surface_ready payload < 4 bytes",
+        ));
+    }
+    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
 }
 
 pub fn encode_preedit(text: &str) -> Vec<u8> {
@@ -668,11 +707,18 @@ mod tests {
 
     #[test]
     fn resize_roundtrip() {
-        let p = encode_resize(1200.0, 800.0, 2.0);
-        let (w, h, s) = decode_resize(&p).unwrap();
+        let p = encode_resize(0xDEAD_BEEF, 1200.0, 800.0, 2.0);
+        let (id, w, h, s) = decode_resize(&p).unwrap();
+        assert_eq!(id, 0xDEAD_BEEF);
         assert_eq!(w, 1200.0);
         assert_eq!(h, 800.0);
         assert_eq!(s, 2.0);
+    }
+
+    #[test]
+    fn surface_ready_roundtrip() {
+        let p = encode_surface_ready(0xCAFE_BABE);
+        assert_eq!(decode_surface_ready(&p).unwrap(), 0xCAFE_BABE);
     }
 
     #[test]

@@ -102,7 +102,16 @@ impl IOSurface {
                 "IOSurface::create: zero dimension w={width} h={height}"
             ));
         }
-        let bytes_per_row = width.saturating_mul(4);
+        // Metal's IOSurface-texture validation requires `bytesPerRow`
+        // to be a multiple of 16 (Apple Silicon GPU page granularity).
+        // At BGRA8 = 4 bytes/pixel, any width that isn't a multiple of
+        // 4 produces a non-aligned stride — e.g. width=1187 → 4748
+        // bytes/row, fails with
+        // `_mtlValidateStrideTextureParameters … must be aligned to 16
+        // bytes` and *aborts* the process.  Pad up the row stride; the
+        // logical width stays width, Metal samples through the stride.
+        let raw_bpr = width.saturating_mul(4);
+        let bytes_per_row = (raw_bpr + 15) & !15;
         // 'BGRA' fourCC = 0x42475241 = kCVPixelFormatType_32BGRA.
         let pixel_format = i32::from_be_bytes(*b"BGRA");
 

@@ -19,6 +19,7 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -26,9 +27,10 @@ use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
-    encode_focus, encode_key_event, encode_mouse, encode_preedit, encode_resize, encode_scroll,
-    event_to_wire, struct_to_mods_byte, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
-    ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
+    decode_surface_ready, encode_focus, encode_key_event, encode_mouse, encode_preedit,
+    encode_resize, encode_scroll, event_to_wire, struct_to_mods_byte, Frame, MsgType,
+    DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE,
+    ENV_SURFACE_WIDTH,
 };
 
 mod present;
@@ -39,9 +41,23 @@ const DEFAULT_W_PT: f64 = 1200.0;
 const DEFAULT_H_PT: f64 = 800.0;
 const REDRAW_INTERVAL_MS: u64 = 16; // ~60 fps
 
+/// Frames the reader thread parses off the control socket and hands
+/// to the main thread.  Step 4 only acts on `SurfaceReady`; future
+/// steps add more (`HelloAck` once we ship the handshake, etc.).
+enum ShellInbox {
+    SurfaceReady(u32),
+}
+
 struct ShellApp {
     proxy: EventProxy,
+    /// Currently-displayed IOSurface — the one the presenter samples.
     surface: Option<IOSurface>,
+    /// Created in `resized` and not yet promoted.  Once the core
+    /// confirms via `SurfaceReady(id)` matching this entry's ID, we
+    /// move it into `surface` and swap the presenter texture.  A
+    /// later resize replaces the pending entry; the dropped one is
+    /// abandoned (`decrement_use` + release).
+    pending_surface: Option<IOSurface>,
     presenter: Option<ShellPresenter>,
     core_child: Option<Child>,
     /// Parent end of the AF_UNIX socketpair we share with the core.
@@ -50,6 +66,13 @@ struct ShellApp {
     /// it without splitting the struct.  Frames written here arrive
     /// at the core's stdin-side fd 3 / `MARSPOT_SHELL_CONTROL_FD`.
     control_tx: Option<Mutex<UnixStream>>,
+    /// Receives parsed inbound frames from the reader thread.
+    control_rx: Option<Receiver<ShellInbox>>,
+    /// True after the core has confirmed at least one SurfaceReady.
+    /// Until then `redraw` skips `present()` so the user sees the
+    /// NSWindow's BG colour (font_cache::BG) instead of an unfilled
+    /// black IOSurface — kills the cold-start flash.
+    first_frame_ready: bool,
     redraw_thread_started: bool,
 }
 
@@ -58,9 +81,12 @@ impl ShellApp {
         Self {
             proxy,
             surface: None,
+            pending_surface: None,
             presenter: None,
             core_child: None,
             control_tx: None,
+            control_rx: None,
+            first_frame_ready: false,
             redraw_thread_started: false,
         }
     }
@@ -162,7 +188,22 @@ impl ShellApp {
                 // Wrap the parent end as a UnixStream we can write
                 // frames to from any callback.
                 let stream = unsafe { UnixStream::from_raw_fd(parent_fd) };
+                let reader_stream = match stream.try_clone() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[shell] try_clone control stream failed: {e}");
+                        return;
+                    }
+                };
                 self.control_tx = Some(Mutex::new(stream));
+
+                // Spawn the reader thread.  Decodes frames into
+                // ShellInbox messages, hands them to the main thread
+                // via mpsc + `EventProxy::wake`.
+                let (tx, rx): (Sender<ShellInbox>, Receiver<ShellInbox>) = mpsc::channel();
+                self.control_rx = Some(rx);
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || control_reader_loop(reader_stream, tx, proxy));
             }
             Err(e) => {
                 eprintln!("[shell] spawn core failed: {e}");
@@ -184,6 +225,38 @@ impl ShellApp {
             proxy.wake();
         });
         self.redraw_thread_started = true;
+    }
+
+    /// Honour a `SurfaceReady(id)` ack from the core: if it matches
+    /// the *current* pending surface, promote it to live and swap the
+    /// presenter texture.  Older pending IDs (replaced by a newer
+    /// resize before the core got to them) are silently dropped.
+    fn on_surface_ready(&mut self, id: u32) {
+        let pending_id = self.pending_surface.as_ref().map(|s| s.id());
+        let matches = pending_id == Some(id);
+        if !matches {
+            eprintln!(
+                "[shell] SurfaceReady(id={id}) ignored — pending_id={pending_id:?}"
+            );
+            return;
+        }
+        let new_surface = match self.pending_surface.take() {
+            Some(s) => s,
+            None => return,
+        };
+        if let Some(p) = self.presenter.as_mut() {
+            if let Err(e) = p.swap_surface(&new_surface) {
+                eprintln!("[shell] swap_surface failed: {e}");
+                new_surface.decrement_use();
+                return;
+            }
+        }
+        if let Some(old) = self.surface.take() {
+            old.decrement_use();
+        }
+        eprintln!("[shell] presenter now displaying surface id={id}");
+        self.surface = Some(new_surface);
+        self.first_frame_ready = true;
     }
 }
 
@@ -223,6 +296,18 @@ impl MarspotApp for ShellApp {
     }
 
     fn user_event(&mut self, ctx: &MarspotAppCtx) {
+        // Drain anything the reader thread left in the inbox.  The
+        // reader calls `proxy.wake()` after each push, so by the time
+        // we're here at least one message is ready.
+        let inbox: Vec<ShellInbox> = match self.control_rx.as_ref() {
+            Some(rx) => rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        for msg in inbox {
+            match msg {
+                ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
+            }
+        }
         ctx.request_redraw();
     }
 
@@ -253,16 +338,43 @@ impl MarspotApp for ShellApp {
     }
 
     fn resized(&mut self, ctx: &MarspotAppCtx, w_phys: f64, h_phys: f64) {
-        // Step 4 (resize negotiation) will rebuild the IOSurface and
-        // hand the new ID to the core.  For now we tell the core the
-        // new dimensions over the control socket — it can update its
-        // layout math — and rebuild the layer drawable size.  The
-        // surface itself doesn't grow until the full handoff lands.
         if let Some(p) = self.presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
+            // Present *synchronously* inside the resize callback so
+            // our drawable lands in the SAME CATransaction AppKit is
+            // about to commit for the window-bounds change.  Coupled
+            // with `setPresentsWithTransaction(true)` on the layer
+            // this gives Sublime-style frame-perfect resize — the
+            // window edge and the drawable contents move together,
+            // no inter-frame drift.
+            if self.first_frame_ready {
+                p.present();
+            }
         }
+        // Fire the IOSurface handoff *immediately* (no debounce).
+        // With presents-with-transaction the swap between old and new
+        // IOSurface lands in the same CATransaction as the window
+        // resize, so the visual stays stable while the terminal grid
+        // actually reflows.  Without this, the pane grid never gets
+        // SIGWINCH during a drag and lines wrap at the old column
+        // count — what the user observed as "换行没跟上".
         let scale = ctx.scale();
-        self.send(MsgType::Resize, encode_resize(w_phys, h_phys, scale));
+        let w_px = w_phys.max(64.0) as usize;
+        let h_px = h_phys.max(64.0) as usize;
+        match IOSurface::create(w_px, h_px) {
+            Ok(surf) => {
+                surf.increment_use();
+                if let Some(stale) = self.pending_surface.take() {
+                    stale.decrement_use();
+                }
+                let new_id = surf.id();
+                self.pending_surface = Some(surf);
+                self.send(MsgType::Resize, encode_resize(new_id, w_phys, h_phys, scale));
+            }
+            Err(e) => {
+                eprintln!("[shell] resize IOSurface::create failed: {e}");
+            }
+        }
         ctx.request_redraw();
     }
 
@@ -278,6 +390,7 @@ impl MarspotApp for ShellApp {
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
         self.control_tx = None;
+        self.control_rx = None;
         if let Some(mut child) = self.core_child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -285,12 +398,47 @@ impl MarspotApp for ShellApp {
         if let Some(surface) = self.surface.take() {
             surface.decrement_use();
         }
+        if let Some(stale) = self.pending_surface.take() {
+            stale.decrement_use();
+        }
         ctx.exit();
     }
 
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
+        // Hold off until the core has written real content.  Without
+        // this gate the user sees an uninitialised IOSurface for
+        // ~50-100 ms at startup, then a hard snap to content — reads
+        // as a black-then-content flash.  Once `first_frame_ready`
+        // we present every redraw the way you'd expect.
+        if !self.first_frame_ready {
+            return;
+        }
         if let Some(p) = self.presenter.as_mut() {
             p.present();
+        }
+    }
+}
+
+fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: EventProxy) {
+    loop {
+        match Frame::read_from(&mut stream) {
+            Ok(None) => return,
+            Ok(Some(frame)) => {
+                if let MsgType::SurfaceReady = frame.msg_type {
+                    if let Ok(id) = decode_surface_ready(&frame.payload) {
+                        if tx.send(ShellInbox::SurfaceReady(id)).is_err() {
+                            return;
+                        }
+                        proxy.wake();
+                    }
+                }
+                // Unknown frames are ignored — keeps forward
+                // compatibility while the protocol grows.
+            }
+            Err(e) => {
+                eprintln!("[shell] control reader error: {e}");
+                return;
+            }
         }
     }
 }
