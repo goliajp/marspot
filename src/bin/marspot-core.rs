@@ -38,9 +38,10 @@ use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
 use marspot::shell_proto::{
-    decode_focus, decode_key_event, decode_mouse, decode_preedit, decode_resize, decode_scroll,
-    encode_surface_ready, mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD,
-    ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
+    decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping, decode_preedit,
+    decode_resize, decode_scroll, encode_hello_ack, encode_pong, encode_surface_ready,
+    mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 use marspot::shelld_client::{default_socket_path, ShelldClient};
 use marspot::HEADER_PT;
@@ -75,6 +76,11 @@ enum CoreEvent {
     /// broadcast).  Sent by the shelld client's wake callback so the
     /// main loop is event-driven instead of polling at FRAME_MS.
     PumpShelld,
+    /// Shell sent HELLO with its protocol version.  We reply with
+    /// HELLO_ACK echoing the version we agree on.
+    Hello(u32),
+    /// Shell sent a liveness probe.  We echo the nonce back via PONG.
+    Ping(u32),
     /// Shell closed the control socket — supervisor will tear us down.
     Closed,
 }
@@ -102,9 +108,8 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .ok()
             .map(|(id, w, h, s)| CoreEvent::Resize(id, w, h, s)),
         MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
-        // Lifecycle frames don't surface as input events; ignore for
-        // now (HELLO/HELLO_ACK get handled inline once we add the
-        // handshake in Step 5).
+        MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
+        MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
         _ => None,
     }
 }
@@ -308,27 +313,35 @@ fn main() {
         // match its current pending surface, so the dropped ones are
         // a no-op for it too.
         let mut pending_resize: Option<(u32, f64, f64, f64)> = None;
-        let process = |ev: CoreEvent,
+        // Liveness frames are echoed within the same drain pass so
+        // the shell sees a Pong within microseconds of its Ping.
+        let mut to_ack: Vec<(MsgType, Vec<u8>)> = Vec::new();
+        let mut closed = false;
+        let mut process = |ev: CoreEvent,
                            pane: &mut Pane,
                            pending_resize: &mut Option<(u32, f64, f64, f64)>,
                            key_count: &mut u64,
-                           needs_render: &mut bool|
-         -> Option<bool> {
-            // Returns Some(false) = closed, Some(true) = continue.
+                           needs_render: &mut bool,
+                           to_ack: &mut Vec<(MsgType, Vec<u8>)>,
+                           closed: &mut bool| {
             match ev {
                 CoreEvent::Key(event, mods) => {
                     pane.handle_key(&event, mods);
                     *key_count += 1;
                     *needs_render = true;
                 }
-                CoreEvent::Closed => return Some(false),
+                CoreEvent::Closed => *closed = true,
                 CoreEvent::Resize(new_id, new_w, new_h, new_scale) => {
                     *pending_resize = Some((new_id, new_w, new_h, new_scale));
                 }
                 CoreEvent::PumpShelld => {
-                    // Bytes available; the pump call after the drain
-                    // loop will pick them up.
                     *needs_render = true;
+                }
+                CoreEvent::Hello(v) => {
+                    to_ack.push((MsgType::HelloAck, encode_hello_ack(v.min(PROTO_VERSION))));
+                }
+                CoreEvent::Ping(nonce) => {
+                    to_ack.push((MsgType::Pong, encode_pong(nonce)));
                 }
                 CoreEvent::MouseDown(_, _, _)
                 | CoreEvent::MouseDrag(_, _)
@@ -337,24 +350,37 @@ fn main() {
                 | CoreEvent::Focus(_)
                 | CoreEvent::Preedit(_) => {}
             }
-            Some(true)
         };
         if let Some(ev) = first {
-            match process(ev, &mut pane, &mut pending_resize, &mut key_count, &mut needs_render) {
-                Some(false) => {
-                    eprintln!("[core] control socket closed by shell; exiting event loop");
-                    break 'main;
-                }
-                _ => {}
-            }
+            process(
+                ev,
+                &mut pane,
+                &mut pending_resize,
+                &mut key_count,
+                &mut needs_render,
+                &mut to_ack,
+                &mut closed,
+            );
         }
         while let Ok(ev) = event_rx.try_recv() {
-            match process(ev, &mut pane, &mut pending_resize, &mut key_count, &mut needs_render) {
-                Some(false) => {
-                    eprintln!("[core] control socket closed by shell; exiting event loop");
-                    break 'main;
-                }
-                _ => {}
+            process(
+                ev,
+                &mut pane,
+                &mut pending_resize,
+                &mut key_count,
+                &mut needs_render,
+                &mut to_ack,
+                &mut closed,
+            );
+        }
+        if closed {
+            eprintln!("[core] control socket closed by shell; exiting event loop");
+            break 'main;
+        }
+        for (ty, payload) in to_ack.drain(..) {
+            let frame = Frame::new(ty, payload);
+            if let Err(e) = frame.write_to(&mut control_writer) {
+                eprintln!("[core] liveness ack {:?} write failed: {e}", ty);
             }
         }
         if let Some((new_id, new_w, new_h, new_scale)) = pending_resize {

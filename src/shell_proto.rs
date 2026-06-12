@@ -76,6 +76,12 @@ pub enum MsgType {
     // ── lifecycle (1..=9) ──
     Hello = 1,
     HelloAck = 2,
+    /// shell → core: liveness probe.  Payload = u32 nonce; core
+    /// echoes it back in `Pong` so the shell can match request/reply
+    /// and ignore stale Pongs after a respawn.
+    Ping = 3,
+    /// core → shell: response to `Ping`.  Payload = u32 nonce.
+    Pong = 4,
     // ── input (10..=29) ──
     KeyEvent = 10,
     MouseDown = 11,
@@ -101,6 +107,8 @@ impl MsgType {
         Some(match v {
             1 => MsgType::Hello,
             2 => MsgType::HelloAck,
+            3 => MsgType::Ping,
+            4 => MsgType::Pong,
             10 => MsgType::KeyEvent,
             11 => MsgType::MouseDown,
             12 => MsgType::MouseDrag,
@@ -223,6 +231,27 @@ pub fn encode_hello_ack(version: u32) -> Vec<u8> {
 }
 pub fn decode_hello_ack(payload: &[u8]) -> io::Result<u32> {
     decode_hello(payload)
+}
+
+/// PING / PONG payload: u32 LE nonce.  Shell rotates the nonce so it
+/// can ignore Pongs from a previous Ping that arrived after a timeout.
+pub fn encode_ping(nonce: u32) -> Vec<u8> {
+    nonce.to_le_bytes().to_vec()
+}
+pub fn decode_ping(payload: &[u8]) -> io::Result<u32> {
+    if payload.len() != 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PING payload != 4 bytes",
+        ));
+    }
+    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
+}
+pub fn encode_pong(nonce: u32) -> Vec<u8> {
+    nonce.to_le_bytes().to_vec()
+}
+pub fn decode_pong(payload: &[u8]) -> io::Result<u32> {
+    decode_ping(payload)
 }
 
 // ── KeyEvent ──
@@ -634,6 +663,12 @@ mod tests {
     fn hello_roundtrip() {
         let p = encode_hello(7);
         assert_eq!(decode_hello(&p).unwrap(), 7);
+    }
+
+    #[test]
+    fn ping_pong_roundtrip() {
+        assert_eq!(decode_ping(&encode_ping(0xCAFE_BABE)).unwrap(), 0xCAFE_BABE);
+        assert_eq!(decode_pong(&encode_pong(42)).unwrap(), 42);
     }
 
     #[test]

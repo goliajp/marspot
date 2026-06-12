@@ -21,16 +21,16 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
-    decode_surface_ready, encode_focus, encode_key_event, encode_mouse, encode_preedit,
-    encode_resize, encode_scroll, event_to_wire, struct_to_mods_byte, Frame, MsgType,
-    DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE,
-    ENV_SURFACE_WIDTH,
+    decode_hello_ack, decode_pong, decode_surface_ready, encode_focus, encode_hello,
+    encode_key_event, encode_mouse, encode_ping, encode_preedit, encode_resize, encode_scroll,
+    event_to_wire, struct_to_mods_byte, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 
 mod present;
@@ -44,11 +44,27 @@ const DEFAULT_H_PT: f64 = 800.0;
 const REDRAW_INTERVAL_MS: u64 = 16; // ~60 fps
 
 /// Frames the reader thread parses off the control socket and hands
-/// to the main thread.  Step 4 only acts on `SurfaceReady`; future
-/// steps add more (`HelloAck` once we ship the handshake, etc.).
+/// to the main thread.
 enum ShellInbox {
     SurfaceReady(u32),
+    HelloAck(u32),
+    Pong(u32),
 }
+
+/// How long after spawn we expect HELLO_ACK before declaring the core
+/// hung at startup.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often we issue PING.
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// PONG must arrive within this many `PING_INTERVAL`s before we call
+/// the core hung.  3 = 15 s, which gives plenty of slack for a busy
+/// terminal session without making a real hang feel sticky.
+const PONG_DEADLINE: Duration = Duration::from_secs(15);
+/// Crash-budget window.  More than `MAX_CRASHES_IN_WINDOW` in this
+/// span and we stop auto-restarting (binary is broken; user needs
+/// to roll back or reinstall).
+const CRASH_WINDOW: Duration = Duration::from_secs(300); // 5 min
+const MAX_CRASHES_IN_WINDOW: usize = 3;
 
 struct ShellApp {
     proxy: EventProxy,
@@ -83,6 +99,26 @@ struct ShellApp {
     /// Where in the silent-update lifecycle we are.  `Idle` most of
     /// the time; flips to `Probation` after we promote a new core.
     sup_state: SupervisorState,
+    /// Liveness handshake state, reset on every `spawn_core` call.
+    hello_acked: bool,
+    /// When the most recent `spawn_core` ran — drives HELLO timeout.
+    spawned_at: Option<Instant>,
+    /// When to fire the next PING.
+    next_ping_at: Option<Instant>,
+    /// Nonce of the most recent PING we sent.  Pongs with a
+    /// different nonce are stale (a Pong from a previous core, or
+    /// from before a timeout) and we ignore them.
+    last_ping_nonce: u32,
+    /// When the most recent matching Pong arrived.
+    last_pong_at: Option<Instant>,
+    /// Recent crash timestamps inside the `CRASH_WINDOW` rolling
+    /// window.  Used to refuse auto-restart on a binary that's
+    /// flapping.
+    crashes: std::collections::VecDeque<Instant>,
+    /// True if the crash budget has been blown.  We stop trying to
+    /// restart until something external changes (manual update,
+    /// shell relaunch).
+    auto_restart_disabled: bool,
 }
 
 impl ShellApp {
@@ -101,6 +137,13 @@ impl ShellApp {
             redraw_thread_started: false,
             binaries,
             sup_state: SupervisorState::Idle,
+            hello_acked: false,
+            spawned_at: None,
+            next_ping_at: None,
+            last_ping_nonce: 0,
+            last_pong_at: None,
+            crashes: std::collections::VecDeque::new(),
+            auto_restart_disabled: false,
         }
     }
 
@@ -214,6 +257,20 @@ impl ShellApp {
                 self.control_rx = Some(rx);
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || control_reader_loop(reader_stream, tx, proxy));
+
+                // Liveness handshake bookkeeping.  Resets every
+                // spawn so a fresh core gets a fresh probe window.
+                self.hello_acked = false;
+                let now = Instant::now();
+                self.spawned_at = Some(now);
+                self.next_ping_at = Some(now + PING_INTERVAL);
+                self.last_pong_at = Some(now); // freebie until first ping
+                // Bump nonce so any stale Pong from a previous core
+                // can be distinguished from this round.
+                self.last_ping_nonce = self.last_ping_nonce.wrapping_add(1);
+
+                // Send HELLO immediately so the core can echo HelloAck.
+                self.send(MsgType::Hello, encode_hello(PROTO_VERSION));
             }
             Err(e) => {
                 eprintln!("[shell] spawn core failed: {e}");
@@ -275,12 +332,63 @@ impl ShellApp {
         true
     }
 
+    /// Record a crash event in the rolling window.  Trips
+    /// `auto_restart_disabled` if too many have happened recently.
+    fn record_crash(&mut self) {
+        let now = Instant::now();
+        self.crashes.push_back(now);
+        while let Some(t) = self.crashes.front() {
+            if now.duration_since(*t) > CRASH_WINDOW {
+                self.crashes.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.crashes.len() > MAX_CRASHES_IN_WINDOW {
+            self.auto_restart_disabled = true;
+            eprintln!(
+                "[shell] crash budget exceeded ({} in {} s) → auto-restart disabled until manual intervention",
+                self.crashes.len(),
+                CRASH_WINDOW.as_secs()
+            );
+        }
+    }
+
+    /// Kill the running core (best-effort) and re-spawn from
+    /// `current/`.  Used both after a clean detected crash and after
+    /// a hang.  Honours `auto_restart_disabled`.
+    fn restart_core(&mut self, ctx: &MarspotAppCtx) {
+        // Tear down whatever's left.
+        self.control_tx = None;
+        self.control_rx = None;
+        if let Some(mut c) = self.core_child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if self.auto_restart_disabled {
+            return;
+        }
+        if let Some(s) = self.surface.as_ref() {
+            let id = s.id();
+            let w_px = s.width();
+            let h_px = s.height();
+            let scale = ctx.scale();
+            self.spawn_core(id, w_px, h_px, scale);
+        }
+    }
+
     /// Periodic check.  Fired from `user_event` (which runs every
-    /// 16 ms via the redraw pump).  Two responsibilities:
+    /// 16 ms via the redraw pump).  Five responsibilities:
+    ///
     ///   1. If the core child died, react based on supervisor state
     ///      (Probation → rollback; Idle → restart by re-spawning).
-    ///   2. If we've been in Probation for `PROBATION` seconds and the
-    ///      core is still alive, declare stable.
+    ///   2. If we've been in Probation for `PROBATION` seconds and
+    ///      the core is still alive, declare stable.
+    ///   3. If HELLO hasn't been ack'd within `HELLO_TIMEOUT`, treat
+    ///      the core as broken (will likely die anyway; pre-empt).
+    ///   4. Time to send the next PING — bump nonce, fire.
+    ///   5. Last matching PONG older than `PONG_DEADLINE` ⇒ core
+    ///      hung; SIGKILL + restart.
     fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
         // 1. Did the child exit?
         let exited = match self.core_child.as_mut() {
@@ -291,6 +399,7 @@ impl ShellApp {
             let was_probation = matches!(self.sup_state, SupervisorState::Probation { .. });
             // Reap.
             self.core_child.take();
+            self.record_crash();
             if was_probation {
                 eprintln!("[shell] core died during probation → rolling back");
                 match self.binaries.rollback_to_prev() {
@@ -303,26 +412,13 @@ impl ShellApp {
                 self.sup_state = SupervisorState::Failed {
                     reason: "core exited during probation".to_string(),
                 };
-                // Re-spawn with whatever current/ now holds.
-                if let Some(s) = self.surface.as_ref() {
-                    let id = s.id();
-                    let w_px = s.width();
-                    let h_px = s.height();
-                    let scale = ctx.scale();
-                    self.spawn_core(id, w_px, h_px, scale);
+                self.restart_core(ctx);
+                if self.core_child.is_some() {
                     self.sup_state = SupervisorState::Idle;
                 }
             } else {
-                // Unsupervised crash.  Step 6 will get smarter; for
-                // now just re-spawn so the window isn't black.
                 eprintln!("[shell] core exited unexpectedly → restarting");
-                if let Some(s) = self.surface.as_ref() {
-                    let id = s.id();
-                    let w_px = s.width();
-                    let h_px = s.height();
-                    let scale = ctx.scale();
-                    self.spawn_core(id, w_px, h_px, scale);
-                }
+                self.restart_core(ctx);
             }
             return;
         }
@@ -334,6 +430,45 @@ impl ShellApp {
                 Err(e) => eprintln!("[shell] finalize_stable failed: {e}"),
             }
             self.sup_state = SupervisorState::Idle;
+        }
+
+        // 3. HELLO timeout.
+        if !self.hello_acked {
+            if let Some(t0) = self.spawned_at {
+                if t0.elapsed() > HELLO_TIMEOUT {
+                    eprintln!(
+                        "[shell] core failed to HelloAck within {} s → killing",
+                        HELLO_TIMEOUT.as_secs()
+                    );
+                    self.record_crash();
+                    self.restart_core(ctx);
+                    return;
+                }
+            }
+        }
+
+        // 4. Time to send the next ping?
+        let now = Instant::now();
+        if self.hello_acked {
+            if let Some(t) = self.next_ping_at {
+                if now >= t {
+                    self.last_ping_nonce = self.last_ping_nonce.wrapping_add(1);
+                    self.send(MsgType::Ping, encode_ping(self.last_ping_nonce));
+                    self.next_ping_at = Some(now + PING_INTERVAL);
+                }
+            }
+        }
+
+        // 5. Pong deadline → hung.
+        if let Some(last) = self.last_pong_at {
+            if self.hello_acked && now.duration_since(last) > PONG_DEADLINE {
+                eprintln!(
+                    "[shell] no PONG for {} s → core hung; SIGKILL + restart",
+                    PONG_DEADLINE.as_secs()
+                );
+                self.record_crash();
+                self.restart_core(ctx);
+            }
         }
     }
 
@@ -428,6 +563,25 @@ impl MarspotApp for ShellApp {
         for msg in inbox {
             match msg {
                 ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
+                ShellInbox::HelloAck(v) => {
+                    if v == PROTO_VERSION {
+                        self.hello_acked = true;
+                        eprintln!("[shell] HelloAck v={v} — core handshake OK");
+                    } else {
+                        eprintln!(
+                            "[shell] HelloAck v={v} disagrees with our v={PROTO_VERSION}; killing core"
+                        );
+                        if let Some(mut c) = self.core_child.take() {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
+                    }
+                }
+                ShellInbox::Pong(nonce) => {
+                    if nonce == self.last_ping_nonce {
+                        self.last_pong_at = Some(Instant::now());
+                    }
+                }
             }
         }
         self.poll_supervisor(ctx);
@@ -563,16 +717,24 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
         match Frame::read_from(&mut stream) {
             Ok(None) => return,
             Ok(Some(frame)) => {
-                if let MsgType::SurfaceReady = frame.msg_type {
-                    if let Ok(id) = decode_surface_ready(&frame.payload) {
-                        if tx.send(ShellInbox::SurfaceReady(id)).is_err() {
-                            return;
-                        }
-                        proxy.wake();
+                let msg = match frame.msg_type {
+                    MsgType::SurfaceReady => {
+                        decode_surface_ready(&frame.payload).ok().map(ShellInbox::SurfaceReady)
                     }
+                    MsgType::HelloAck => {
+                        decode_hello_ack(&frame.payload).ok().map(ShellInbox::HelloAck)
+                    }
+                    MsgType::Pong => decode_pong(&frame.payload).ok().map(ShellInbox::Pong),
+                    // Unknown frames are ignored — keeps forward
+                    // compatibility while the protocol grows.
+                    _ => None,
+                };
+                if let Some(m) = msg {
+                    if tx.send(m).is_err() {
+                        return;
+                    }
+                    proxy.wake();
                 }
-                // Unknown frames are ignored — keeps forward
-                // compatibility while the protocol grows.
             }
             Err(e) => {
                 eprintln!("[shell] control reader error: {e}");
