@@ -154,7 +154,13 @@ fn maybe_redirect_to_current_shell() {
     // Quarantine it and restore prev/ — or, with no prev/, leave
     // current/ empty so this launch (and future ones) run the
     // bundle binary that's known to at least start.
-    if record_launch_and_detect_loop(&current) {
+    //
+    // CLI invocations (`--status`, `--version`, …) also redirect but
+    // exit quickly by design — they are not crash evidence, so they
+    // stay out of the journal (three `--status` calls in a minute
+    // must not roll back a healthy shell).
+    let is_gui_launch = std::env::args_os().nth(1).is_none();
+    if is_gui_launch && record_launch_and_detect_loop(&current) {
         match tree.rollback_to_prev() {
             Ok(true) => sup_log::log(
                 "SHELL_AUTO_ROLLBACK",
@@ -192,6 +198,54 @@ fn maybe_redirect_to_current_shell() {
         "[shell] redirect into {} failed: {err} — running bundle binary instead",
         current.display()
     );
+}
+
+/// `--rollback-shell` / `--rollback-core`: quarantine `current/` and
+/// restore `prev/` for the named layer.  Dispatched BEFORE the
+/// current/ redirect — the whole point of the command is that
+/// current/ may be broken, so it must run in the bundle binary the
+/// user actually invoked, not be exec'd into the broken one.
+/// Doesn't touch a running shell; restart Marspot to pick up the
+/// restored binary.
+fn cmd_rollback(which: &str) -> i32 {
+    let tree = match which {
+        "shell" => supervisor::BinaryTree::for_shell(),
+        _ => supervisor::BinaryTree::for_core(),
+    };
+    let tree = match tree {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("marspot-shell: rollback {which}: {e}");
+            return 1;
+        }
+    };
+    match tree.rollback_to_prev() {
+        Ok(true) => {
+            sup_log::log(
+                "MANUAL_ROLLBACK",
+                &format!("{which}: quarantined current/, restored prev/"),
+            );
+            println!("{which}: rolled back — current/ quarantined, prev/ restored.");
+            println!("Restart Marspot to run the restored binary.");
+            0
+        }
+        Ok(false) => {
+            sup_log::log(
+                "MANUAL_ROLLBACK",
+                &format!("{which}: quarantined current/, no prev/ — bundle fallback"),
+            );
+            println!(
+                "{which}: current/ quarantined; no prev/ to restore — \
+                 next launch falls back to the bundle binary."
+            );
+            0
+        }
+        Err(e) => {
+            sup_log::log("MANUAL_ROLLBACK", &format!("{which}: failed: {e}"));
+            eprintln!("marspot-shell: rollback {which} failed: {e}");
+            1
+        }
+    }
 }
 
 fn print_version() {
@@ -1238,6 +1292,14 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // Rollback subcommands dispatch BEFORE the redirect: when
+    // current/ is broken, exec'ing into it would eat the command.
+    match std::env::args().nth(1).as_deref() {
+        Some("--rollback-shell") => std::process::exit(cmd_rollback("shell")),
+        Some("--rollback-core") => std::process::exit(cmd_rollback("core")),
+        _ => {}
+    }
+
     // Bundle binary check: if `binaries/current/marspot-shell` exists
     // and points at a different file than us, re-exec into it.  This
     // is what lets a silent shell update land — the bundle's
@@ -1273,7 +1335,10 @@ Usage:\n\
   marspot-shell --version      Print version / git / build info.\n\
   marspot-shell --status       Summarise state from supervisor.log + live PIDs.\n\
   marspot-shell --trigger      Apply a staged pending update on a running shell\n\
-                               (sends SIGUSR1 to the supervisor process).\n"
+                               (sends SIGUSR1 to the supervisor process).\n\
+  marspot-shell --rollback-shell   Quarantine current/marspot-shell, restore prev/.\n\
+  marspot-shell --rollback-core    Quarantine current/marspot-core, restore prev/.\n\
+                               Both run offline — restart Marspot afterwards.\n"
             );
             return;
         }
