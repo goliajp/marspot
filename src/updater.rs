@@ -83,7 +83,9 @@ fn updater_loop(version: String, flag: UpdateFlag) {
 }
 
 fn pending_already_staged() -> bool {
-    pending_binary_path().exists()
+    // Any one of the three binaries having a pending entry counts —
+    // the shell will pick them up next focus-loss / SIGUSR1.
+    STAGED_BINARIES.iter().any(|b| pending_binary_path(b).exists())
 }
 
 fn cache_dir() -> PathBuf {
@@ -91,13 +93,22 @@ fn cache_dir() -> PathBuf {
     PathBuf::from(home).join("Library/Caches/marspot")
 }
 
-fn pending_binary_path() -> PathBuf {
-    // Step 5+: lives under `binaries/pending/` so the supervisor
-    // (marspot-shell) finds it via `BinaryTree::pending()` and atomic-
-    // swaps it in.  The shell's `apply_pending_update` is the only
-    // consumer.
-    cache_dir().join("binaries/pending/marspot-core")
+fn pending_binary_path(bin_name: &str) -> PathBuf {
+    // Step 5+ / Task A: lives under `binaries/pending/<bin_name>` so
+    // the supervisor (marspot-shell) finds it via `BinaryTree::pending()`.
+    cache_dir().join("binaries/pending").join(bin_name)
 }
+
+/// All three binaries the release tarball is expected to ship.
+/// Order matters only for the log: core is the safest to apply (no
+/// session loss), shell is next (window flash), shelld last (kills
+/// sessions — gated behind explicit `bin/install-shelld.sh
+/// --apply-pending`).
+const STAGED_BINARIES: &[&str] = &[
+    "marspot-core",
+    "marspot-shell",
+    "marspot-shelld",
+];
 
 fn feed_url() -> String {
     std::env::var("MARSPOT_UPDATE_FEED").unwrap_or_else(|_| DEFAULT_FEED.into())
@@ -143,25 +154,54 @@ fn check_and_stage(running_version: &str) -> Result<bool, String> {
             ));
         }
     }
-    // Extract `marspot-core` out of the tarball into the supervisor's
-    // pending slot.  The shell will pick it up on the next
-    // focus-loss trigger (apply_pending_update) — atomic rename
-    // current → prev, pending → current, kill+respawn core, enter
-    // 30 s probation.  See `supervisor.rs`.
-    let pending = pending_binary_path();
-    if let Some(parent) = pending.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir pending: {}", e))?;
+    // Extract each layer's binary out of the tarball into its own
+    // pending slot.  `extract_binary` is named-lookup, so a tarball
+    // with only `marspot-core` (legacy single-binary releases) still
+    // works — the shell/shelld extracts will silently no-op when the
+    // binary isn't in the archive.
+    let mut staged_any = false;
+    for bin in STAGED_BINARIES {
+        let pending = pending_binary_path(bin);
+        if let Some(parent) = pending.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir pending: {}", e))?;
+        }
+        match extract_binary(&tmp, bin, &pending) {
+            Ok(()) => {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&pending)
+                    .map_err(|e| format!("stat pending {}: {}", bin, e))?
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&pending, perms)
+                    .map_err(|e| format!("chmod pending {}: {}", bin, e))?;
+                strip_quarantine_xattrs(&pending);
+                staged_any = true;
+            }
+            Err(e) => {
+                eprintln!("[updater] tarball had no {bin}: {e} — skipping");
+            }
+        }
     }
-    extract_binary(&tmp, &pending)?;
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&pending)
-        .map_err(|e| format!("stat pending: {}", e))?
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&pending, perms)
-        .map_err(|e| format!("chmod pending: {}", e))?;
     let _ = std::fs::remove_file(&tmp);
+    if !staged_any {
+        return Err("tarball contained none of the expected binaries".to_string());
+    }
     Ok(true)
+}
+
+/// Strip macOS Gatekeeper / quarantine extended attributes from a
+/// freshly-staged binary.  Without this, the first launch of a
+/// binary that didn't come from the App Store or a notarised DMG
+/// stalls in `_dyld_start` for ~30-60 s while LaunchServices
+/// runs a synchronous provenance check — fatal for a "silent"
+/// upgrade because the new core / shell appears hung.
+fn strip_quarantine_xattrs(path: &Path) {
+    for attr in &["com.apple.quarantine", "com.apple.provenance"] {
+        let _ = Command::new("/usr/bin/xattr")
+            .args(["-d", attr])
+            .arg(path)
+            .output();
+    }
 }
 
 fn asset_filename() -> String {
@@ -359,10 +399,12 @@ fn sha256_of(path: &Path) -> Result<String, String> {
     Ok(hex)
 }
 
-/// Extract the `marspot` binary out of the downloaded tarball into
-/// `dst`.  We don't care where in the archive it lives — a fresh
-/// release tarball ships exactly one such file at the root.
-fn extract_binary(archive: &Path, dst: &Path) -> Result<(), String> {
+/// Extract a named binary out of the downloaded tarball into `dst`.
+/// We don't care where in the archive it lives — `find_named_file`
+/// recurses.  A v1-style tarball (only `marspot-core`) returns an
+/// error for the shell + shelld lookups; callers treat that as a
+/// soft skip.
+fn extract_binary(archive: &Path, bin_name: &str, dst: &Path) -> Result<(), String> {
     // Extract to a sibling dir.
     let extract_dir = archive.with_extension("d");
     let _ = std::fs::remove_dir_all(&extract_dir);
@@ -380,8 +422,9 @@ fn extract_binary(archive: &Path, dst: &Path) -> Result<(), String> {
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let bin = find_named_file(&extract_dir, "marspot-core")
-        .ok_or_else(|| "extracted tar contained no 'marspot-core' binary".to_string())?;
+    let bin = find_named_file(&extract_dir, bin_name).ok_or_else(|| {
+        format!("extracted tar contained no '{}' binary", bin_name)
+    })?;
     std::fs::rename(&bin, dst)
         .or_else(|_| std::fs::copy(&bin, dst).map(|_| ()))
         .map_err(|e| format!("stage extracted binary: {}", e))?;

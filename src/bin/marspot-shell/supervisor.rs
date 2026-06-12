@@ -32,7 +32,21 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
+
+/// macOS-specific.  Strip `com.apple.quarantine` and
+/// `com.apple.provenance` so the binary is launchable without a
+/// synchronous Gatekeeper check stall.  Best-effort: silently
+/// ignores missing xattrs.
+fn strip_quarantine_xattrs(path: &Path) {
+    for attr in &["com.apple.quarantine", "com.apple.provenance"] {
+        let _ = Command::new("/usr/bin/xattr")
+            .args(["-d", attr])
+            .arg(path)
+            .output();
+    }
+}
 
 /// Sub-directory under the cache dir holding the binary slots.
 const BIN_SUBDIR: &str = "binaries";
@@ -42,15 +56,17 @@ const BIN_SUBDIR: &str = "binaries";
 /// committed.
 pub const PROBATION: Duration = Duration::from_secs(30);
 
-/// All three binary slots for one core artifact.
+/// All three binary slots (+ quarantine) for one artifact.  Generic
+/// over the binary name so the same machinery serves all three
+/// layers: `marspot-shelld`, `marspot-shell`, and `marspot-core`.
 pub struct BinaryTree {
     root: PathBuf,
-    core_name: String,
+    bin_name: String,
 }
 
 impl BinaryTree {
     /// Constructs a tree rooted at `$HOME/Library/Caches/marspot/binaries`.
-    pub fn default_for(core_name: impl Into<String>) -> io::Result<Self> {
+    pub fn default_for(bin_name: impl Into<String>) -> io::Result<Self> {
         let home = std::env::var_os("HOME").ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "HOME env var not set")
         })?;
@@ -59,22 +75,45 @@ impl BinaryTree {
             .join(BIN_SUBDIR);
         Ok(BinaryTree {
             root,
-            core_name: core_name.into(),
+            bin_name: bin_name.into(),
         })
+    }
+
+    /// Convenience: tree for the renderer (Step 2-7).
+    pub fn for_core() -> io::Result<Self> {
+        Self::default_for("marspot-core")
+    }
+    /// Convenience: tree for the shell supervisor itself.  Used by
+    /// the shell self-update path (Task C) — promote pending →
+    /// current, then exec the new shell over ourselves.
+    #[allow(dead_code)]
+    pub fn for_shell() -> io::Result<Self> {
+        Self::default_for("marspot-shell")
+    }
+    /// Convenience: tree for the daemon.  Promote happens via
+    /// `bin/install-shelld.sh --apply-pending` because daemon
+    /// restart kills all sessions and needs explicit consent.
+    #[allow(dead_code)]
+    pub fn for_shelld() -> io::Result<Self> {
+        Self::default_for("marspot-shelld")
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    pub fn bin_name(&self) -> &str {
+        &self.bin_name
+    }
+
     pub fn current(&self) -> PathBuf {
-        self.root.join("current").join(&self.core_name)
+        self.root.join("current").join(&self.bin_name)
     }
     pub fn prev(&self) -> PathBuf {
-        self.root.join("prev").join(&self.core_name)
+        self.root.join("prev").join(&self.bin_name)
     }
     pub fn pending(&self) -> PathBuf {
-        self.root.join("pending").join(&self.core_name)
+        self.root.join("pending").join(&self.bin_name)
     }
 
     /// True iff the updater has staged a new binary in `pending/`
@@ -103,7 +142,20 @@ impl BinaryTree {
         if cur.exists() {
             return cur;
         }
-        fallback_sibling.with_file_name(&self.core_name)
+        // Shell-self-update path: after exec into
+        // `binaries/current/marspot-shell`, the new shell's
+        // `current_exe()` lives in a directory that DOESN'T have a
+        // sibling marspot-core (unless the updater also staged
+        // core).  `MARSPOT_BUNDLE_DIR` is set by the *outgoing* shell
+        // pre-exec to its original sibling dir (the bundle's
+        // MacOS/), so the new shell can fall back to that.
+        if let Some(bundle) = std::env::var_os("MARSPOT_BUNDLE_DIR") {
+            let p = PathBuf::from(bundle).join(&self.bin_name);
+            if p.exists() {
+                return p;
+            }
+        }
+        fallback_sibling.with_file_name(&self.bin_name)
     }
 
     /// Move `current → prev` and `pending → current`, atomically per
@@ -135,6 +187,15 @@ impl BinaryTree {
         //    `current/` is now empty; caller must restore via
         //    `rollback_to_prev`.
         std::fs::rename(self.pending(), &cur)?;
+        // 3. Strip Gatekeeper / provenance xattrs.  Without this,
+        //    the first launch of the newly-promoted binary stalls
+        //    in `_dyld_start` for ~30-60 s while LaunchServices
+        //    runs a synchronous provenance check — fatal for a
+        //    "silent" upgrade because the new core/shell appears
+        //    hung. Defence-in-depth: the updater also strips at
+        //    stage time, but a manually-copied pending binary
+        //    won't have been.
+        strip_quarantine_xattrs(&cur);
         Ok(())
     }
 
@@ -157,7 +218,7 @@ impl BinaryTree {
         let cur = self.current();
         // Quarantine whatever's currently there (the failed binary).
         // Best-effort: we don't fail rollback if quarantine fails.
-        let quar = self.root.join("quarantine").join(&self.core_name);
+        let quar = self.root.join("quarantine").join(&self.bin_name);
         if cur.exists() {
             if let Some(parent) = quar.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -238,7 +299,7 @@ mod tests {
         let dir = tempdir_lite::Dir::new();
         let tree = BinaryTree {
             root: dir.path().to_path_buf(),
-            core_name: "marspot-core".to_string(),
+            bin_name: "marspot-core".to_string(),
         };
         (dir, tree)
     }

@@ -35,6 +35,62 @@ unsafe extern "C" fn sigusr1_handler(_signum: libc::c_int) {
     SIGUSR1_FLAG.store(true, Ordering::Release);
 }
 
+/// Re-exec into `binaries/current/marspot-shell` if it exists and
+/// is a different file from us.  Guarded against infinite recursion
+/// by `MARSPOT_NO_REDIRECT=1` (set on the env we pass to the new
+/// process, and also a user escape hatch for "run THIS bundle
+/// binary even if a current exists").
+///
+/// Only returns on:
+///   - guard env set,
+///   - no current/marspot-shell,
+///   - current is the same file we already are, or
+///   - exec failed (logged, then we proceed as ourselves).
+fn maybe_redirect_to_current_shell() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os("MARSPOT_NO_REDIRECT").is_some() {
+        return;
+    }
+    let tree = match supervisor::BinaryTree::for_shell() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let current = tree.current();
+    if !current.exists() {
+        return;
+    }
+    let me = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    // If we ARE current, no redirect needed.  canonicalize handles
+    // symlinks but is fine if either path doesn't symlink.
+    let me_c = me.canonicalize().unwrap_or_else(|_| me.clone());
+    let cur_c = current.canonicalize().unwrap_or_else(|_| current.clone());
+    if me_c == cur_c {
+        return;
+    }
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let arg0 = args.first().cloned().unwrap_or_else(|| current.clone().into());
+    // Stash our bundle dir (parent of the current_exe) so the new
+    // shell can fall back there when resolving marspot-core.
+    let bundle_dir = me
+        .parent()
+        .map(|d| d.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let err = std::process::Command::new(&current)
+        .arg0(arg0)
+        .args(args.iter().skip(1))
+        .env("MARSPOT_NO_REDIRECT", "1")
+        .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
+        .exec();
+    // exec only returns on failure.
+    eprintln!(
+        "[shell] redirect into {} failed: {err} — running bundle binary instead",
+        current.display()
+    );
+}
+
 fn print_version() {
     println!(
         "marspot-shell {} (git {} built {})",
@@ -457,6 +513,17 @@ impl ShellApp {
         if !matches!(self.sup_state, SupervisorState::Idle) {
             return false;
         }
+        // Task C: shell-self-update has precedence over core update —
+        // a pending shell binary means the supervisor itself wants to
+        // turn over, which implies the renderer probably wants
+        // turning over too (the shell + core release together).
+        // Detecting + promoting the shell's pending here means a
+        // single focus-loss handles both.
+        if self.try_apply_shell_self_update() {
+            // We exec'd; this function call's stack frame is gone.
+            // Returning here only happens if exec failed.
+            return false;
+        }
         if !self.binaries.has_pending() {
             return false;
         }
@@ -494,6 +561,83 @@ impl ShellApp {
             started_at: std::time::Instant::now(),
         };
         true
+    }
+
+    /// Task C — shell self-update.  Detect a pending shell binary,
+    /// promote it into `current/`, and `execv` over ourselves so the
+    /// new shell binary takes over the same process slot.  The window
+    /// flashes closed → open in ~100 ms; the new shell reconnects to
+    /// shelld and reattaches the user's existing sessions so terminal
+    /// content survives.
+    ///
+    /// Returns `true` if exec was attempted (caller's stack is gone
+    /// past that point, but Rust can't express it).  Returns `false`
+    /// if no pending shell was found *or* if any prep step failed.
+    fn try_apply_shell_self_update(&mut self) -> bool {
+        use std::os::unix::process::CommandExt;
+        let shell_tree = match supervisor::BinaryTree::for_shell() {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        if !shell_tree.has_pending() {
+            return false;
+        }
+        eprintln!("[shell] applying pending shell self-update …");
+        sup_log::log(
+            "SHELL_UPDATE_APPLY",
+            "promoting pending/marspot-shell → current/",
+        );
+        if let Err(e) = shell_tree.promote_pending() {
+            eprintln!("[shell] shell promote_pending failed: {e}");
+            sup_log::log("SHELL_UPDATE_FAIL", &format!("promote: {e}"));
+            return false;
+        }
+        // Tear down what we can pre-exec so the new shell starts
+        // fresh.  Core child gets killed; control socket is dropped;
+        // IOSurface is released.  Anything left would be inherited as
+        // dangling fds in the new process — clean now.
+        self.control_tx = None;
+        self.control_rx = None;
+        if let Some(mut child) = self.core_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(s) = self.surface.take() {
+            s.decrement_use();
+        }
+        if let Some(s) = self.pending_surface.take() {
+            s.decrement_use();
+        }
+        let target = shell_tree.current();
+        if !target.exists() {
+            eprintln!("[shell] post-promote current/marspot-shell missing — aborting exec");
+            sup_log::log("SHELL_UPDATE_FAIL", "post-promote current missing");
+            return false;
+        }
+        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        let arg0 = args.first().cloned().unwrap_or_else(|| target.clone().into());
+        // Pass the bundle directory so the new shell can fall back
+        // there when looking for marspot-core (the updater might
+        // have staged only shell, not core).  Computed from our own
+        // `current_exe()` parent.
+        let bundle_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        // Pass a marker so the new shell logs SHELL_SELF_UPDATE on
+        // startup and so the redirect-loop guard doesn't fire (the
+        // new binary IS the one we want to run).
+        let err = std::process::Command::new(&target)
+            .arg0(arg0)
+            .args(args.iter().skip(1))
+            .env("MARSPOT_NO_REDIRECT", "1")
+            .env("MARSPOT_SHELL_SELF_UPDATE", "1")
+            .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
+            .exec();
+        // exec only returns on failure.
+        eprintln!("[shell] exec {} failed: {err}", target.display());
+        sup_log::log("SHELL_UPDATE_FAIL", &format!("exec: {err}"));
+        false
     }
 
     /// Resolve which banner (if any) the current shell state wants
@@ -989,6 +1133,15 @@ fn main() {
     // terminates the process — that's exactly the Unix contract.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
+    // Bundle binary check: if `binaries/current/marspot-shell` exists
+    // and points at a different file than us, re-exec into it.  This
+    // is what lets a silent shell update land — the bundle's
+    // MacOS/marspot-shell hands off to the current/ slot.
+    maybe_redirect_to_current_shell();
+    if std::env::var_os("MARSPOT_SHELL_SELF_UPDATE").is_some() {
+        sup_log::log("SHELL_SELF_UPDATE", "new shell exec'd from current/");
     }
 
     // Dispatch CLI subcommands before we touch AppKit / start a
