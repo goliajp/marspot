@@ -44,6 +44,11 @@ use crate::grid::{Cell, Grid};
 const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
 const VERSION: u32 = 1;
 
+/// Env var carrying the inherited grid-shm fd from L2 (region creator)
+/// to the L3 child (the writer). Set by L2 when it spawns a session
+/// process; absent in the standalone path (L3 self-creates the region).
+pub const ENV_SHM_FD: &str = "MARSPOT_SHM_FD";
+
 /// Cursor is visible (DECTCEM).
 pub const FLAG_CURSOR_VISIBLE: u32 = 1 << 0;
 /// Application cursor-key mode (DECCKM) — L2 needs it to encode arrows.

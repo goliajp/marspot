@@ -111,6 +111,13 @@ impl ShelldSession {
         &self.terminal
     }
 
+    /// Mutable terminal accessor — used for local-echo `predict_byte`
+    /// on the L3 (`marspot-session`) input path, mirroring how the
+    /// in-process renderer predicts ahead of the PTY round trip.
+    pub fn terminal_mut(&mut self) -> &mut crate::terminal::Terminal {
+        &mut self.terminal
+    }
+
     /// Drain whatever the reader thread has queued, feed it through
     /// the terminal parser, return total bytes drained.  Caller
     /// requests a redraw on non-zero return.
