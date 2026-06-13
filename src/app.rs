@@ -159,6 +159,15 @@ impl MarspotAppCtx {
     pub fn exit(&self) {
         self.exit_requested.set(true);
     }
+
+    /// Current window frame in **screen points, AppKit native**
+    /// (bottom-left origin).  Round-trips losslessly through
+    /// `WindowAttrs::frame_pt` so a successor process (shell
+    /// self-update execv) can reopen at the exact same place.
+    pub fn window_frame_pt(&self) -> (f64, f64, f64, f64) {
+        let f = self.nswindow.frame();
+        (f.origin.x, f.origin.y, f.size.width, f.size.height)
+    }
 }
 
 /// Window-creation parameters.  Logical (point) coordinates.
@@ -167,6 +176,12 @@ pub struct WindowAttrs {
     pub title: String,
     pub width_logical: f64,
     pub height_logical: f64,
+    /// When `Some`, the window opens at exactly this frame (screen
+    /// points, bottom-left origin — `window_frame_pt`'s output)
+    /// instead of the default `width/height_logical` at the system-
+    /// chosen position.  Used by the shell self-update path so the
+    /// exec'd successor doesn't jump the window.
+    pub frame_pt: Option<(f64, f64, f64, f64)>,
 }
 
 /// Cross-thread wake signal.  Construct once before run_app starts;
@@ -917,6 +932,14 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         redraw_pending: Cell::new(false),
         exit_requested: Cell::new(false),
     };
+
+    // Restore an exact predecessor frame BEFORE first show, so the
+    // self-updated shell's window appears in place rather than
+    // opening at the default rect and visibly jumping.
+    if let Some((x, y, w, h)) = attrs.frame_pt {
+        let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        window.setFrame_display(rect, false);
+    }
 
     // Show + focus + activate.  `activate()` replaces the deprecated
     // `activateIgnoringOtherApps(true)`; macOS 14+ is our target floor.

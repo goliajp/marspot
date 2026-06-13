@@ -1552,6 +1552,7 @@ fn main() {
         title: format!("Marspot v{} ({})", VERSION, GIT_SHA),
         width_logical: DEFAULT_WIN_W,
         height_logical: DEFAULT_WIN_H,
+        frame_pt: None,
     };
     run_app(app, proxy, attrs);
 }

@@ -134,6 +134,11 @@ bin/install-shelld.sh           # daemon + LaunchAgent
 bin/install-shell.sh            # shell+core into ~/.local/Marspot.app
 open ~/.local/Marspot.app       # launch
 
+# Dev loop — push the local build into the RUNNING app (window +
+# sessions survive; only changed binaries swap; re-triggers through
+# probation windows automatically):
+bin/dev-push.sh
+
 # Check what's happening:
 marspot-shell --status
 

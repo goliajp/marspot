@@ -155,6 +155,7 @@ fn main() {
         ),
         width_logical: 960.0,
         height_logical: 600.0,
+        frame_pt: None,
     };
     run_app(app, proxy, attrs);
 }

@@ -681,7 +681,7 @@ impl ShellApp {
         // turning over too (the shell + core release together).
         // Detecting + promoting the shell's pending here means a
         // single focus-loss handles both.
-        if self.try_apply_shell_self_update() {
+        if self.try_apply_shell_self_update(ctx.window_frame_pt()) {
             // We exec'd; this function call's stack frame is gone.
             // Returning here only happens if exec failed.
             return false;
@@ -735,7 +735,7 @@ impl ShellApp {
     /// Returns `true` if exec was attempted (caller's stack is gone
     /// past that point, but Rust can't express it).  Returns `false`
     /// if no pending shell was found *or* if any prep step failed.
-    fn try_apply_shell_self_update(&mut self) -> bool {
+    fn try_apply_shell_self_update(&mut self, window_frame_pt: (f64, f64, f64, f64)) -> bool {
         use std::os::unix::process::CommandExt;
         let shell_tree = match supervisor::BinaryTree::for_shell() {
             Ok(t) => t,
@@ -789,12 +789,16 @@ impl ShellApp {
         // Pass a marker so the new shell logs SHELL_SELF_UPDATE on
         // startup and so the redirect-loop guard doesn't fire (the
         // new binary IS the one we want to run).
+        // Hand the live window frame to the successor so its window
+        // opens exactly in place (no jump back to the default rect).
+        let (fx, fy, fw, fh) = window_frame_pt;
         let err = std::process::Command::new(&target)
             .arg0(arg0)
             .args(args.iter().skip(1))
             .env("MARSPOT_NO_REDIRECT", "1")
             .env("MARSPOT_SHELL_SELF_UPDATE", "1")
             .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
+            .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"))
             .exec();
         // exec only returns on failure.
         eprintln!("[shell] exec {} failed: {err}", target.display());
@@ -1380,10 +1384,23 @@ Usage:\n\
     // truth); kept alive for the eventual UI affordance.
     let _update_flag = marspot::updater::spawn(env!("CARGO_PKG_VERSION").to_string());
 
+    // Frame restore: the predecessor shell (self-update execv) hands
+    // its exact window frame over via env so this process reopens in
+    // place instead of jumping to the default rect.  Consumed here —
+    // removed from our env so spawned children (core) don't carry it.
+    let restore_frame = std::env::var("MARSPOT_RESTORE_FRAME").ok().and_then(|s| {
+        std::env::remove_var("MARSPOT_RESTORE_FRAME");
+        let v: Vec<f64> = s.split(',').filter_map(|p| p.parse().ok()).collect();
+        match v[..] {
+            [x, y, w, h] if w > 0.0 && h > 0.0 => Some((x, y, w, h)),
+            _ => None,
+        }
+    });
     let attrs = WindowAttrs {
         title: DEFAULT_TITLE.to_string(),
         width_logical: DEFAULT_W_PT,
         height_logical: DEFAULT_H_PT,
+        frame_pt: restore_frame,
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());

@@ -82,6 +82,8 @@ Future planned bindings (`objc2-metal`, `libc` for PTY) will be FFI-only — kee
 
 After making changes that affect what the app does or how it builds, run `./bin/run.sh` to verify build + relaunch before reporting the task as done.
 
+When the user is living in the shell+core app (`~/.local/Marspot.app`), prefer `bin/dev-push.sh`: it builds, stages only the changed shell/core binaries into the supervisor's pending slots, and SIGUSR1-triggers the running app — the change lands in the window the user is looking at without losing sessions (and exercises the silent-update machinery every time). `run.sh` remains the path for the standalone `marspot` binary (tmux mode, bench work).
+
 What counts as "affects the app":
 - any change in `src/` (or any workspace crate when we add them)
 - `Cargo.toml` / `Cargo.lock` (deps, features, profiles)
