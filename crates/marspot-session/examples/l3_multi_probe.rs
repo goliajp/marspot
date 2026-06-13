@@ -62,6 +62,29 @@ fn wait_seq_past(reader: &GridShmReader, from: u64, what: &str) -> u64 {
     }
 }
 
+/// Block until the publish seq has been stable for `quiet`, i.e. the
+/// prompt has finished printing. Sampling a cursor before quiescence is
+/// the classic flake: under load the prompt is still drawing, so the
+/// recorded cursor is stale and the typed char echoes elsewhere.
+fn wait_quiescent(reader: &GridShmReader, quiet: Duration) {
+    let cap = Instant::now() + Duration::from_secs(8);
+    let mut last = reader.seq();
+    let mut stable_since = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(20));
+        let s = reader.seq();
+        if s != last {
+            last = s;
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= quiet {
+            return;
+        }
+        if Instant::now() >= cap {
+            return; // give up waiting for perfect quiet; sample anyway
+        }
+    }
+}
+
 /// One L3 child plus the L2-side handles needed to drive + observe it.
 struct L3 {
     id: u64,
@@ -132,12 +155,16 @@ fn main() {
         die(format!("create_session handed out duplicate ids: {:?}", l3s.iter().map(|l| l.id).collect::<Vec<_>>()));
     }
 
-    // Let every prompt settle, then record each one's pre-key cursor.
+    // Let every prompt settle (wait for the publish stream to go quiet,
+    // not a fixed sleep — under load the prompt may still be drawing), then
+    // record each one's pre-key cursor.
     let mut cursors = Vec::with_capacity(n);
     for l in &l3s {
         let _ = wait_seq_past(&l.reader, 0, "first publish");
     }
-    std::thread::sleep(Duration::from_millis(500));
+    for l in &l3s {
+        wait_quiescent(&l.reader, Duration::from_millis(250));
+    }
     let mut buf = Vec::new();
     for l in &l3s {
         let snap = l.reader.read(&mut buf).unwrap_or_else(|| die("no frame after settle"));

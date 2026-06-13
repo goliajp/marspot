@@ -29,6 +29,7 @@ RESIZE_PROBE_BIN="$ROOT/target/release/examples/l3_resize_probe"
 SCROLL_PROBE_BIN="$ROOT/target/release/examples/l3_scroll_probe"
 SELECTION_PROBE_BIN="$ROOT/target/release/examples/l3_selection_probe"
 LATENCY_PROBE_BIN="$ROOT/target/release/examples/l3_latency_probe"
+CRASH_PROBE_BIN="$ROOT/target/release/examples/l3_crash_probe"
 RUN_LOG=/tmp/marspot-soak-l3.log
 
 ITERATIONS="${ITERATIONS:-10}"
@@ -64,7 +65,7 @@ trap cleanup EXIT
 ( cd "$ROOT" && cargo build --release -p marspot-session \
     --example l3_echo_probe --example l3_multi_probe --example l3_resize_probe \
     --example l3_scroll_probe --example l3_selection_probe \
-    --example l3_latency_probe 2>&1 | tail -3 )
+    --example l3_latency_probe --example l3_crash_probe 2>&1 | tail -3 )
 [[ -x "$SESSION_BIN" ]]      || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]        || fail "probe not built at $PROBE_BIN"
 [[ -x "$MULTI_PROBE_BIN" ]]  || fail "multi probe not built at $MULTI_PROBE_BIN"
@@ -72,6 +73,7 @@ trap cleanup EXIT
 [[ -x "$SCROLL_PROBE_BIN" ]]    || fail "scroll probe not built at $SCROLL_PROBE_BIN"
 [[ -x "$SELECTION_PROBE_BIN" ]] || fail "selection probe not built at $SELECTION_PROBE_BIN"
 [[ -x "$LATENCY_PROBE_BIN" ]]   || fail "latency probe not built at $LATENCY_PROBE_BIN"
+[[ -x "$CRASH_PROBE_BIN" ]]     || fail "crash probe not built at $CRASH_PROBE_BIN"
 
 # Zero-GUI floor: the shipped L3 binary must link no GUI frameworks.
 if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
@@ -185,4 +187,17 @@ now=$(count_sandbox_sessions)
   || fail "latency: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
 echo "  latency OK — ${lat_line##*: }"
 
-echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection + latency, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
+# Crash isolation (5c): SIGKILL one of two L3s; the sibling must keep
+# echoing and the dead L3's shm must stay readable (an L2 reading it keeps
+# running). Proves the process boundary isolates a per-session crash.
+echo "--- crash-isolation ---" | tee -a "$RUN_LOG"
+"$CRASH_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
+crrc=$?
+(( crrc == 0 )) || fail "crash probe exited $crrc (a crashing L3 took down a sibling / its shm)"
+sleep 0.2
+now=$(count_sandbox_sessions)
+(( now <= base_sessions )) \
+  || fail "crash: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still readable, no orphans"
+
+echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection + latency + crash, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"

@@ -337,9 +337,19 @@ impl L3Conn {
     /// no-op (one atomic load) when the seq is unchanged.
     fn poll(&mut self) -> bool {
         // Observe exit here (the only `&mut` entry point); `is_exited`
-        // and `state` are `&self` and just read the flag.
-        if !self.exited && matches!(self.child.try_wait(), Ok(Some(_))) {
-            self.exited = true;
+        // and `state` are `&self` and just read the flag.  Crash isolation:
+        // an L3 dying (panic / kill / shell exit) is one session ending —
+        // log it once and leave the pane showing its last frame (state →
+        // Exited).  The process boundary means it can't take L2 or sibling
+        // L3s down; the container reaps the child via `L3Conn::Drop`.
+        if !self.exited {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                self.exited = true;
+                eprintln!(
+                    "[core] L3 session pid={} exited ({status}) — pane frozen at last frame, others unaffected",
+                    self.child.id()
+                );
+            }
         }
         let seq = self.reader.seq();
         if seq == self.last_seq {

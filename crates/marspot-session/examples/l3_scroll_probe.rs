@@ -181,12 +181,16 @@ fn main() {
         die(format!("scrolled to offset {off} but the top row is unchanged ({live_top:?}) — window did not move"));
     }
 
-    // Back to live.
+    // Back to live: assert we return to offset 0 AND leave the scrolled
+    // window (top row differs from the offset-8 view). We do NOT compare
+    // against the *original* live top row — the live tail legitimately
+    // moves as the shell keeps emitting (prompt redraw, etc.), so that
+    // would be a brittle check; returning to offset 0 is the real proof.
     send(&parent, Frame::new(MsgType::GridScroll, encode_grid_scroll(0)));
     let _ = wait_offset(&reader, 0, &mut buf, "snap-to-live publish");
     let back_top = top_row(&buf);
-    if back_top != live_top {
-        die(format!("snap-to-live top row {back_top:?} != original live {live_top:?}"));
+    if back_top == scrolled_top {
+        die(format!("snap-to-live still shows the scrolled window {scrolled_top:?}"));
     }
 
     let _ = session.kill();
