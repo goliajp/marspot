@@ -1553,6 +1553,7 @@ fn main() {
         width_logical: DEFAULT_WIN_W,
         height_logical: DEFAULT_WIN_H,
         frame_pt: None,
+        bg: (0.022, 0.028, 0.042), // chrome panel tone (BG_PANEL)
     };
     run_app(app, proxy, attrs);
 }

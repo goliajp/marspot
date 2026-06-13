@@ -176,6 +176,11 @@ pub struct WindowAttrs {
     pub title: String,
     pub width_logical: f64,
     pub height_logical: f64,
+    /// Window background (sRGB 0..1), painted from the first frame
+    /// before any renderer attaches.  Shell passes terminal-black so
+    /// a core swap never flashes a lighter band; standalone marspot /
+    /// mcli pass the chrome panel tone.
+    pub bg: (f64, f64, f64),
     /// When `Some`, the window opens at exactly this frame (screen
     /// points, bottom-left origin — `window_frame_pt`'s output)
     /// instead of the default `width/height_logical` at the system-
@@ -888,13 +893,13 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         // FullSizeContentView).  `NSTitlebarSeparatorStyleNone`
         // is the macOS 11+ knob for "no separator at all".
         window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
-        // Window BG matches the dominant chrome tone (BG_PANEL in
-        // render_metal.rs) — sidebar, header, unfocused cells all
-        // sit at this colour, so the resize-flicker zone reads as
-        // a smooth continuation of the chrome rather than a darker
-        // stripe.  The focused-pane drop is drawn explicitly on
-        // top, not through this window-level color.
-        let bg = NSColor::colorWithSRGBRed_green_blue_alpha(0.022, 0.028, 0.042, 1.0);
+        // Window BG is caller-chosen so the very first paint (before
+        // any renderer/presenter attaches) is already the right tone
+        // — no flash of a default colour.  The shell (L1) passes its
+        // terminal-black so a core (L2) swap that briefly uncovers
+        // the layer shows steady black, not a lighter chrome band.
+        let (r, g, b) = attrs.bg;
+        let bg = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
         window.setBackgroundColor(Some(&bg));
     }
     window.setContentView(Some(unsafe {

@@ -1431,6 +1431,10 @@ Usage:\n\
         width_logical: DEFAULT_W_PT,
         height_logical: DEFAULT_H_PT,
         frame_pt: restore_frame,
+        // Terminal-black from the first paint: a core (L2) swap that
+        // briefly uncovers the layer must show steady black, never a
+        // lighter chrome flash.
+        bg: marspot::font_cache::BG,
     };
     let proxy = EventProxy::new();
     let app = ShellApp::new(proxy.clone());

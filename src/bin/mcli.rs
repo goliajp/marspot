@@ -156,6 +156,7 @@ fn main() {
         width_logical: 960.0,
         height_logical: 600.0,
         frame_pt: None,
+        bg: (0.022, 0.028, 0.042), // chrome panel tone (BG_PANEL)
     };
     run_app(app, proxy, attrs);
 }

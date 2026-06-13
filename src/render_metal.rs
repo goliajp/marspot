@@ -933,6 +933,10 @@ const SIDEBAR_LEFT_PAD: f32 = 14.0;
 const SIDEBAR_ROW_H: f32 = 22.0;
 const SIDEBAR_DOT_LABEL_GAP: f32 = 10.0;
 const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
+/// Header version label — slightly brighter than sidebar metadata so
+/// the "current version" reads clearly when the user glances up to
+/// confirm an update landed.
+const HEADER_VERSION_FG: (f32, f32, f32) = (0.62, 0.68, 0.80);
 // Selected-row BG kept as an alias of the cell-focused tone so
 // sidebar selection and 9-grid focus read as the same affordance.
 const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
@@ -1122,6 +1126,39 @@ fn build_instances(
         atlas,
         glyphs,
     );
+
+    // Header version label — quiet metadata in the header strip,
+    // right-aligned just left of the chrome buttons (or the window
+    // edge when there are none).  The git sha is stamped per build,
+    // so this string changes on every silent update — the user sees
+    // the new core land here.
+    if layout.top_inset > 0.0 {
+        let label = version_label();
+        let text_w = label.chars().count() as f32 * cell_w;
+        let buttons_left = layout.sidebar_button_rect.x as f32;
+        let right_edge = if buttons_left > 0.0 {
+            buttons_left
+        } else {
+            layout.window_w as f32
+        };
+        let x = (right_edge - cell_w * 1.5 - text_w).max(cell_w);
+        let baseline_y =
+            ((layout.top_inset as f32 - cell_h) * 0.5).max(0.0) + ascent;
+        push_text_run(
+            &label,
+            x,
+            baseline_y,
+            [HEADER_VERSION_FG.0, HEADER_VERSION_FG.1, HEADER_VERSION_FG.2, 1.0],
+            cell_w,
+            cell_h,
+            ascent,
+            atlas_w_f,
+            atlas_h_f,
+            font,
+            atlas,
+            glyphs,
+        );
+    }
 }
 
 /// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`
@@ -1698,6 +1735,68 @@ fn push_sidebar(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The running binary's version label, e.g. `Marspot v0.2.0 (1a7b23c5)`.
+/// `MARSPOT_GIT_SHA` is stamped per build (build.rs), so this string
+/// changes on every silent update — the header renders it as visible
+/// proof the new core landed.
+pub fn version_label() -> String {
+    format!(
+        "Marspot v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("MARSPOT_GIT_SHA"),
+    )
+}
+
+/// Lay a run of text starting at baseline `(x, baseline_y)` in
+/// physical pixels, advancing one monospace cell per char.  Shared
+/// by the cell-title strip and the header version label.
+#[allow(clippy::too_many_arguments)]
+fn push_text_run(
+    text: &str,
+    x_start: f32,
+    baseline_y: f32,
+    color: [f32; 4],
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    let metrics = SlotMetrics {
+        cell_w: cell_w.round() as u32,
+        cell_h: cell_h.round() as u32,
+        baseline_from_top: ascent.round() as u32,
+    };
+    let mut x = x_start;
+    for ch in text.chars() {
+        let (font_idx, glyph) = font.resolve_char(ch, false, false);
+        if glyph != 0 {
+            let ct_font = font.font(font_idx).clone();
+            let n_cells = crate::grid::char_width(ch).max(1) as u16;
+            if let Some(entry) = atlas.get_or_rasterize(
+                GlyphKey { font_id: font_idx as u32, glyph },
+                &ct_font,
+                metrics,
+                n_cells,
+            ) {
+                let dest_y = (baseline_y - ascent).round();
+                let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+                glyphs.push(GlyphInstance {
+                    origin: [x.round(), dest_y],
+                    size: [slot_w, metrics.cell_h as f32],
+                    uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+                    uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+                    color,
+                });
+            }
+        }
+        x += cell_w;
+    }
+}
+
 fn push_session(
     rect: &CellRect,
     view: &SessionView,
@@ -1754,51 +1853,20 @@ fn push_session(
         let label_baseline_y = rect.y_top as f32
             + (title_h - cell_h) * 0.5
             + ascent;
-        let metrics = SlotMetrics {
-            cell_w: cell_w.round() as u32,
-            cell_h: cell_h.round() as u32,
-            baseline_from_top: ascent.round() as u32,
-        };
-        let mut x = label_x;
-        for ch in view.title.chars() {
-            let (font_idx, glyph) = font.resolve_char(ch, false, false);
-            if glyph != 0 {
-                let ct_font = font.font(font_idx).clone();
-                let n_cells = crate::grid::char_width(ch).max(1) as u16;
-                if let Some(entry) = atlas.get_or_rasterize(
-                    GlyphKey {
-                        font_id: font_idx as u32,
-                        glyph,
-                    },
-                    &ct_font,
-                    metrics,
-                    n_cells,
-                ) {
-                    let dest_y = (label_baseline_y - ascent).round();
-                    let slot_w =
-                        (metrics.cell_w * entry.n_cells as u32) as f32;
-                    glyphs.push(GlyphInstance {
-                        origin: [x.round(), dest_y],
-                        size: [slot_w, metrics.cell_h as f32],
-                        uv0: [
-                            entry.u0 as f32 / atlas_w,
-                            entry.v0 as f32 / atlas_h,
-                        ],
-                        uv1: [
-                            entry.u1 as f32 / atlas_w,
-                            entry.v1 as f32 / atlas_h,
-                        ],
-                        color: [
-                            SIDEBAR_TEXT_FG.0,
-                            SIDEBAR_TEXT_FG.1,
-                            SIDEBAR_TEXT_FG.2,
-                            1.0,
-                        ],
-                    });
-                }
-            }
-            x += cell_w;
-        }
+        push_text_run(
+            &view.title,
+            label_x,
+            label_baseline_y,
+            [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+            cell_w,
+            cell_h,
+            ascent,
+            atlas_w,
+            atlas_h,
+            font,
+            atlas,
+            glyphs,
+        );
     }
 
     let grid = view.grid;
