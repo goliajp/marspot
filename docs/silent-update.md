@@ -107,8 +107,9 @@ v1.1 (current): minisign-style detached-signature chain.
 
 - Every release tarball ships with `<asset>.sig` — ECDSA P-256 over
   SHA-256, made by `bin/build-release-tarball.sh --sign` with
-  `keys/marspot-update.sec` (gitignored; lives offline / in a GH
-  secret).
+  `keys/marspot-update.sec` (gitignored; also stored as the
+  `MARSPOT_UPDATE_SEC` GitHub Actions secret for the release
+  workflow to sign with).
 - The public half is checked in at `keys/marspot-update.pub` and
   embedded in the updater at compile time (`include_str!`), so the
   trust anchor travels with the binary.  Verification:
