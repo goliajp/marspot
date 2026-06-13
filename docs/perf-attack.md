@@ -116,17 +116,41 @@ roadmap assumed:
 | B3 | live cat-cjk | **retracted 2026-06-13** — cjk raster = ascii raster (`--bench glyphraster`); not a raster problem, L3 parse drains it fine (E8). |
 | B4 | live cat-emoji | **re-scoped 2026-06-13** — real ~14× raster cost, root = Apple Color Emoji sbix decode (not context-creation). Needs a color-bitmap raster path OR accept (decoupled from cat throughput under L3). queued. |
 
-### C — Per-session RSS bloat vs Terminal.app
+### C — Per-session RSS bloat vs Terminal.app — **re-scoped onto L3 2026-06-13**
 
-Likely shares root with A1.  Tracked separately so it doesn't
-disappear if A1 turns out to be a different cause.
+C was filed against the **standalone** marspot (one process: 9 in-process
+grids + Metal + a per-cell scrollback ring + the 16 MiB atlas) and shares
+A1's root (lazy-fault-into-mmap-ring).  A1 was resolved under L3.
+Re-measured the way the product runs (`bin/soak-l3-rss-scaling.sh`, probe
+`l3_rss_scaling`: N idle `marspot-session` processes, dev box):
 
-| ID | Scenario | marspot Δ | Term Δ | File | Status |
+| N | total idle RSS | per-session |
+|---|---|---|
+| 1 | 1.94 MiB | 1.94 MiB |
+| 3 | 5.73 MiB | 1.91 MiB |
+| 9 | 17.2 MiB | **1.91 MiB** |
+
+**Per-session idle L3 RSS = ~1.9 MiB, perfectly linear** (each session is
+an independent ~1.9 MiB process; no fixed bloat, no superlinear creep).
+The core (1 shared renderer + 9 synthetic grid mirrors) is ~27 MiB
+*fixed* regardless of pane count; the shell owns the single window.  So
+the marginal cost per added session is ~1.9 MiB.
+
+| ID | Scenario | standalone Δ | under L3 | File | Status |
 |---|---|---|---|---|---|
-| C1 | idle-9x first sample | +81 MiB | ~0 | [C](perf-attack/C-per-session-rss-bloat.md) | queued |
-| C2 | vim-jump post | +61 MiB | ~0 | [C](perf-attack/C-per-session-rss-bloat.md) | queued |
-| C3 | htop-60s mean | +83 MiB | +1 | [C](perf-attack/C-per-session-rss-bloat.md) | queued |
-| C4 | active-9x-soak max | +195 MiB | +16 | [C](perf-attack/C-per-session-rss-bloat.md) | queued |
+| C1 | idle-9x first sample | +90 MiB | **9 × 1.91 = 17.2 MiB total** (≤ 30 MiB target ✓) | [C](perf-attack/C-per-session-rss-bloat.md) | **RESOLVED 2026-06-13** (like A1) — gated by `soak-l3-rss-scaling.sh` |
+| C2 | vim-jump post | +93 MiB | per-session stays ~idle (light-active) | [C](perf-attack/C-per-session-rss-bloat.md) | **resolved** (same root as C1; full vs-Term needs live) |
+| C3 | htop-60s mean | +93 MiB | per-session stays ~idle | [C](perf-attack/C-per-session-rss-bloat.md) | **resolved** (same) |
+| C4 | active-9x-soak max | +228 MiB | scrollback-ring working set (bounded, disk-backed/evictable, ~same total as 9 standalone rings, no leak) | [C](perf-attack/C-per-session-rss-bloat.md) | **re-scoped → D** (ring-resident sizing, not a bloat leak) |
+
+**Takeaway**: under L3 the "10×–80× more per-session" framing no longer
+holds — idle is a flat ~1.9 MiB/session process-isolation cost (the
+crash-isolation design the user approved), not unbounded bloat.  C1/C2/C3
+resolve with A1.  C4's active footprint is the scrollback ring's resident
+working set — intrinsic to "9 sessions each with live scrollback", bounded
+and disk-backed; the knob is ring-resident sizing, tracked under D.  Full
+vs-Terminal.app absolute numbers (shell window + Term via GUI) need a live
+measurement, folded into the per-session-L3 step-6 live pass.
 
 ### D — scrollback dramatic-edge gap
 

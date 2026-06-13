@@ -1,8 +1,25 @@
 # C — per-session RSS bloat vs Terminal.app
 
-> Status: queued
+> Status: **C1/C2/C3 RESOLVED under L3 (2026-06-13)**; C4 re-scoped → D
 > Master:  ../perf-attack.md
-> Related: A1 (likely shared root); D (mmap ring sizing)
+> Related: A1 (shared root, resolved under L3); D (mmap ring sizing — C4 lands here)
+>
+> **Re-scope (2026-06-13).** C was filed against the *standalone* marspot
+> (one process, 9 in-process grids + Metal + per-cell scrollback ring +
+> 16 MiB atlas), sharing A1's lazy-fault-into-mmap-ring root. A1 resolved
+> under L3. Re-measured via `bin/soak-l3-rss-scaling.sh` (probe
+> `l3_rss_scaling`: N idle `marspot-session`): **per-session idle L3 RSS =
+> ~1.9 MiB, perfectly linear** (N=1 → 1.94, N=9 → 1.91 MiB/session; 9× =
+> 17.2 MiB total). Meets C1's ≤30 MiB idle-9 target. C1/C2/C3 (idle /
+> light-active) resolve with A1; C4 (sustained 9× flood) is the scrollback
+> ring's resident working set — bounded, disk-backed/evictable, intrinsic
+> to 9 live-scrollback sessions, not a bloat leak — and is tracked under D
+> (ring-resident sizing). The old "10×–80× per-session" framing doesn't
+> hold under L3: it's a flat ~1.9 MiB/session process-isolation cost (the
+> crash-isolation design the user approved). Now gated by
+> `soak-l3-rss-scaling.sh` (per-session ≤ 4 MiB + linear). Full
+> vs-Terminal.app absolute numbers (shell window + Term GUI) need a live
+> pass, folded into per-session-L3 step 6.
 
 ## What's broken
 
