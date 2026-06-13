@@ -59,6 +59,7 @@ reset_state; run test-shell-core.sh    "smoke: boot + crash recovery + budget"
 reset_state; run test-update-flow.sh   "silent update happy path"
 reset_state; run test-rollback.sh      "silent update rollback (broken binary)"
 reset_state; run test-shell-rollback-loop.sh "shell crash-loop auto-rollback"
+reset_state; run test-manual-rollback.sh "manual rollback CLI (--rollback-shell/-core)"
 
 for arg in "$@"; do
   case "$arg" in
