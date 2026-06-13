@@ -75,6 +75,8 @@ for arg in "$@"; do
       run test-real-update.sh "real release pipeline (signed feed e2e)"
       reset_state
       run test-negative-update.sh "release trust gate (rejects tampered/wrong-key/unsigned)"
+      reset_state
+      run test-adversarial-update.sh "adversarial (equal-version no-op + concurrent triggers)"
       ;;
     --shelld)
       # Self-contained (own state dir + throwaway LaunchAgent) — no
