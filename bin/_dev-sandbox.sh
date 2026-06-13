@@ -27,9 +27,9 @@ DEV_SOCK="$MARSPOT_STATE_DIR/shelld.sock"
 # never uses.  Leaves the sandbox shelld (shared across a suite) alone.
 #
 # The trailing `( |$)` anchor is load-bearing: `marspot-shell` is a
-# prefix of `marspot-shell`d and `marspot-core` of `marspot-core`shim,
-# so an un-anchored `pkill -f .../marspot-shell` would ALSO kill the
-# sandbox shelld (and `.../marspot-core` the coreshim). That stayed
+# prefix of `marspot-shell`d, so an un-anchored `pkill -f
+# .../marspot-shell` would ALSO kill the sandbox shelld (and any
+# future `marspot-core`-prefixed sibling). That stayed
 # invisible for as long as the clients hard-coded the production socket
 # — killing the sandbox daemon was harmless because nothing connected
 # to it — and surfaced the moment core started honouring

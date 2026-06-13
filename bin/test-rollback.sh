@@ -92,7 +92,7 @@ until grep -q UPDATE_STABLE "$SUP_LOG"; do
 done
 # Capture the live (active) core after the swap — this is the process
 # that must survive the next, failed update completely untouched.
-ACTIVE_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
+ACTIVE_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
 [[ -n "$ACTIVE_PID" ]] || fail "no active core after first update"
 echo "[2/4] first update OK — current/ holds real binary, active pid=$ACTIVE_PID"
 
@@ -122,7 +122,7 @@ fi
 # one.  Assert the active core from step 2 is still the same process —
 # the silent-rollback guarantee: the user saw nothing.
 sleep 1
-POST_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
+POST_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
 [[ -n "$POST_PID" ]] || fail "active core gone after rollback (should be untouched)"
 [[ "$POST_PID" == "$ACTIVE_PID" ]] \
   || fail "active core was disturbed by the failed update (pid $ACTIVE_PID → $POST_PID)"

@@ -1,9 +1,9 @@
 //! marspot-shell — the outer process.
 //!
 //! Owns the NSWindow + NSApp event loop and a CAMetalLayer that
-//! displays one IOSurface.  Spawns `marspot-coreshim` (Step 1) /
-//! `marspot-core` (Step 2+) as a child, hands it the IOSurface ID via
-//! environment variables, and presents whatever the child writes.
+//! displays one IOSurface.  Spawns `marspot-core` as a child, hands it
+//! the IOSurface ID via environment variables, and presents whatever
+//! the child writes.
 //!
 //! Designed to be *boring* — anything substantive (parser, renderer,
 //! input handling, layout) lives in the core process, behind a binary
@@ -296,8 +296,12 @@ fn print_status() {
         Some(pid) => println!("Running supervisor: pid {pid}"),
         None => println!("Running supervisor: (none)"),
     }
+    // Anchor `marspot-core($| )` rather than the bare name: a binary
+    // name can be a prefix of a sibling's (the way `marspot-shell`
+    // matches `marspot-shelld`), so an unanchored `-f` match risks
+    // catching the wrong process. Match at end-of-argv or before args.
     let core_pids: Vec<String> = match std::process::Command::new("/usr/bin/pgrep")
-        .args(["-f", "marspot-core"])
+        .args(["-f", "marspot-core($| )"])
         .output()
     {
         Ok(o) => String::from_utf8_lossy(&o.stdout)
@@ -655,7 +659,7 @@ impl ShellApp {
     ) -> Option<CoreConn> {
         // Resolve via the supervisor binary tree:
         //   1. MARSPOT_CORE_BIN env override (full path or sibling
-        //      name — useful in dev / when pointing at coreshim).
+        //      name — useful in dev / when pointing at an alt core).
         //   2. `~/Library/Caches/marspot/binaries/current/marspot-core`
         //      if a prior silent update has staged one.
         //   3. Sibling of `marspot-shell` (dev / first-run install).

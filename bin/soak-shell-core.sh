@@ -63,8 +63,8 @@ nohup "$SHELL_BIN" >"$LOG" 2>&1 < /dev/null &
 disown
 sleep 2
 
-SHELL_PID=$(pgrep -f "$SHELL_BIN" | head -1)
-CORE_PID=$(pgrep -f "$CORE_BIN"  | head -1)
+SHELL_PID=$(pgrep -f "$SHELL_BIN( |$)" | head -1)
+CORE_PID=$(pgrep -f "$CORE_BIN( |$)"  | head -1)
 [[ -n "$SHELL_PID" ]] || fail "shell not running after boot"
 [[ -n "$CORE_PID"  ]] || fail "core not running after boot"
 echo "soak start: shell=$SHELL_PID core=$CORE_PID for ${DURATION_S}s, sample every ${SAMPLE_S}s"
@@ -77,7 +77,7 @@ while (( elapsed < DURATION_S )); do
   elapsed=$(( $(date +%s) - start ))
   shell_rss=$(ps -p "$SHELL_PID" -o rss= 2>/dev/null | tr -d ' ' || true)
   core_rss=$(ps -p "$CORE_PID"  -o rss= 2>/dev/null | tr -d ' ' || true)
-  cur_core_pid=$(pgrep -f "$CORE_BIN" | head -1)
+  cur_core_pid=$(pgrep -f "$CORE_BIN( |$)" | head -1)
   echo -e "${elapsed}\t${shell_rss:-0}\t${core_rss:-0}\t${cur_core_pid:-0}" >> "$RSS_LOG"
 
   if [[ -z "$shell_rss" ]]; then

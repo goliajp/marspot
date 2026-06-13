@@ -58,7 +58,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
-PRE_CORE_PID=$(pgrep -f "$CORE_BIN" | head -1)
+PRE_CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
 [[ -n "$PRE_CORE_PID" ]] || fail "boot: no core pid"
 echo "[1/5] boot OK — core pid=$PRE_CORE_PID, HelloAck logged"
 
@@ -97,7 +97,7 @@ for _ in $(seq 1 50); do
 done
 grep -q PENDING_HELLO_ACK "$SUP_LOG" || fail "probation: pending core never HelloAck'd"
 grep -q PENDING_SURFACE_READY "$SUP_LOG" || fail "probation: pending core never SurfaceReady'd"
-NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
+NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
 [[ -n "$NEW_CORE_PID" ]] || fail "probation: pgrep didn't find the pending core process"
 echo "[4/5] probation OK — pending core pid=$NEW_CORE_PID, HelloAck'd + SurfaceReady'd"
 

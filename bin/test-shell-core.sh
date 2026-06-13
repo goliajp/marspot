@@ -74,14 +74,14 @@ fi
 echo "[1/3] boot OK — HelloAck v=1 received"
 
 # --- 2. Crash recovery ---------------------------------------------
-PRE_PID=$(pgrep -f "$CORE_BIN" | head -1)
+PRE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
 [[ -n "$PRE_PID" ]] || fail "no marspot-core running after boot"
 
 # Count HelloAcks before we kill; the restart should produce a fresh one.
 BEFORE_ACKS=$(grep -c "HelloAck v=1" "$LOG")
 kill -9 "$PRE_PID"
 for _ in $(seq 1 30); do
-  POST_PID=$(pgrep -f "$CORE_BIN" | head -1)
+  POST_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
   if [[ -n "$POST_PID" && "$POST_PID" != "$PRE_PID" ]]; then
     AFTER_ACKS=$(grep -c "HelloAck v=1" "$LOG")
     if (( AFTER_ACKS > BEFORE_ACKS )); then
@@ -102,7 +102,7 @@ echo "[2/3] crash recovery OK — core $PRE_PID → $POST_PID, fresh HelloAck"
 # We've already used 1 crash; 3 more in quick succession should
 # trip the budget (MAX_CRASHES_IN_WINDOW = 3).
 for _ in 1 2 3; do
-  P=$(pgrep -f "$CORE_BIN" | head -1)
+  P=$(pgrep -f "$CORE_BIN( |$)" | head -1)
   if [[ -n "$P" ]]; then
     kill -9 "$P"
     sleep 1
@@ -114,7 +114,7 @@ sleep 2
 if ! grep -q "crash budget exceeded" "$LOG"; then
   fail "crash budget did not trip after 4 SIGKILLs"
 fi
-if pgrep -f "$CORE_BIN" >/dev/null; then
+if pgrep -f "$CORE_BIN( |$)" >/dev/null; then
   fail "core still running after crash budget trip"
 fi
 echo "[3/3] crash budget OK — auto-restart disabled, no core respawn"

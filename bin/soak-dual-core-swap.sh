@@ -49,8 +49,8 @@ trap cleanup EXIT
 # Count sandbox cores only (sibling boot path + promoted current/
 # path) so a separately-installed Marspot.app can't pollute the count.
 count_cores() {
-  { pgrep -f "$CORE_BIN" 2>/dev/null
-    pgrep -f "$TREE/current/marspot-core" 2>/dev/null
+  { pgrep -f "$CORE_BIN( |$)" 2>/dev/null
+    pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null
   } | sort -u | grep -c . || true
 }
 
@@ -74,7 +74,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
-SHELL_PID=$(pgrep -f "$SHELL_BIN" | head -1)
+SHELL_PID=$(pgrep -f "$SHELL_BIN( |$)" | head -1)
 [[ -n "$SHELL_PID" ]] || fail "shell not running after boot"
 sleep 1
 BASE_RSS=$(ps -p "$SHELL_PID" -o rss= 2>/dev/null | tr -d ' ')
@@ -128,7 +128,7 @@ for i in $(seq 1 "$ITERATIONS"); do
     || fail "swap $i: expected 1 core after swap, saw ${cores_after} (old core leaked?)"
 
   # Shell PID must be unchanged (it owns the window).
-  now_shell=$(pgrep -f "$SHELL_BIN" | head -1)
+  now_shell=$(pgrep -f "$SHELL_BIN( |$)" | head -1)
   [[ "$now_shell" == "$SHELL_PID" ]] \
     || fail "swap $i: shell pid changed ($SHELL_PID → ${now_shell:-none})"
 
