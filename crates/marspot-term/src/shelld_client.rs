@@ -328,6 +328,14 @@ impl ShelldClient {
     /// session + bytelog alive with zero subscribers (GUI death must not
     /// kill shells); the L3 that L2 hands this id to attaches and
     /// replays the bytelog.
+    ///
+    /// shelld **auto-attaches the creating connection** on NEW_SESSION (so
+    /// a normal `new_session` caller doesn't miss early output).  We don't
+    /// want that here: L2 would then be subscribed to every session it
+    /// allocates and shelld would broadcast every DATA chunk to L2 too —
+    /// doubling shelld's broadcast load and flooding L2's reader with bytes
+    /// it never reads (no inbox installed → dropped).  So we immediately
+    /// DETACH; the L3's own attach + bytelog replay loses nothing.
     pub fn create_session(&self, cols: u16, rows: u16, cwd: &str) -> io::Result<u64> {
         let (tx, rx) = mpsc::sync_channel::<Result<(u64, i32), String>>(1);
         {
@@ -348,6 +356,8 @@ impl ShelldClient {
             .recv_timeout(Duration::from_secs(10))
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "NEW_SESSION reply timed out"))?
             .map_err(|m| io::Error::new(io::ErrorKind::Other, m))?;
+        // Drop the auto-attached subscription — L2 allocates, it doesn't read.
+        self.send_frame(Frame::new(MsgType::Detach, encode_session_id(id)))?;
         Ok(id)
     }
 
