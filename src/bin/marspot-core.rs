@@ -179,6 +179,7 @@ fn l3_reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
 fn spawn_l3_pane(
     cols: u16,
     rows: u16,
+    session_id: u64,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<Pane> {
     // L2 creates + stamps the region; both ends map the same fd.
@@ -212,7 +213,10 @@ fn spawn_l3_pane(
     );
     let mut cmd = Command::new(&session_bin);
     cmd.env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
-        .env(ENV_SHM_FD, SHM_TARGET_FD.to_string());
+        .env(ENV_SHM_FD, SHM_TARGET_FD.to_string())
+        // L2 owns session assignment: hand this L3 the exact session it
+        // must drive so N children never race for the same one.
+        .env("MARSPOT_SESSION_ID", session_id.to_string());
     // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
     // libc calls (dup2/close/fcntl) are used, mirroring the shell→core
     // spawn template.
@@ -288,6 +292,12 @@ struct CoreApp {
     /// Last caret rect sent to the shell — dedupe so an idle cursor
     /// doesn't stream identical CaretRect frames at render cadence.
     last_caret_sent: Option<Option<(f64, f64, f64, f64)>>,
+    /// `MARSPOT_L3=1`: panes are per-session L3 processes, so [+] spawns
+    /// a fresh L3 (with an L2-allocated session) instead of an in-process
+    /// shelld pane.  Clone of the event channel so a new L3's poke reader
+    /// can wake the loop, exactly like the boot spawns.
+    l3_mode: bool,
+    event_tx: Sender<CoreEvent>,
 }
 
 impl CoreApp {
@@ -335,6 +345,23 @@ impl CoreApp {
             .or_else(|| self.layout.cells.first())
             .map(|c| (c.cols, c.rows))
             .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
+        if self.l3_mode {
+            // L2-allocated fresh session → its own L3 process, same path
+            // as the boot spawns.  Keeps the L3 world pure: no shelld pane
+            // ever mixes into an L3-mode window.
+            match self
+                .client
+                .create_session(cols, rows, "")
+                .and_then(|id| spawn_l3_pane(cols, rows, id, &self.event_tx))
+            {
+                Ok(pane) => {
+                    self.panes.push(pane);
+                    self.custom_titles.push(None);
+                }
+                Err(e) => eprintln!("[core] failed to spawn L3 session: {e}"),
+            }
+            return;
+        }
         match self.client.new_session(cols, rows, "") {
             Ok(s) => {
                 self.panes.push(Pane::new_shelld(s));
@@ -952,15 +979,43 @@ fn main() {
     };
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
 
-    // Behind MARSPOT_L3=1: prove the per-session L3 pipeline with a
-    // single L3-backed pane (it owns its own session process + shm
-    // grid).  The in-process shelld 9-grid below stays the default and
-    // is also the fallback if the L3 spawn fails.
+    // Behind MARSPOT_L3=1: one per-session L3 process per cell (each owns
+    // its own session process + shm grid in its own address space).  L2
+    // owns session *assignment* so the N children never race for one
+    // session: reuse the live sessions first (bytelog replay on attach),
+    // then `create_session` for the rest, handing each L3 its exact id.
+    // The in-process shelld grid below stays the default and is the
+    // fallback if every L3 spawn fails.
     let l3_mode = std::env::var("MARSPOT_L3").as_deref() == Ok("1");
     if l3_mode {
-        match spawn_l3_pane(boot_cols, boot_rows, &event_tx) {
-            Ok(pane) => panes.push(pane),
-            Err(e) => eprintln!("[core] L3 spawn failed: {e} — falling back to shelld panes"),
+        let mut ids: Vec<u64> = client
+            .list_sessions()
+            .unwrap_or_else(|e| {
+                eprintln!("[core] list_sessions failed: {e} — starting fresh");
+                Vec::new()
+            })
+            .into_iter()
+            .filter(|s| s.alive)
+            .map(|s| s.session_id)
+            .take(n_sessions)
+            .collect();
+        while ids.len() < n_sessions {
+            match client.create_session(boot_cols, boot_rows, "") {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    eprintln!("[core] create_session failed: {e}");
+                    break;
+                }
+            }
+        }
+        for id in ids {
+            match spawn_l3_pane(boot_cols, boot_rows, id, &event_tx) {
+                Ok(pane) => panes.push(pane),
+                Err(e) => eprintln!("[core] L3 spawn failed for session {id}: {e}"),
+            }
+        }
+        if panes.is_empty() {
+            eprintln!("[core] no L3 panes spawned — falling back to shelld panes");
         }
     }
 
@@ -1034,6 +1089,8 @@ fn main() {
         needs_render: true,
         all_exited: false,
         last_caret_sent: None,
+        l3_mode,
+        event_tx: event_tx.clone(),
     };
     app.rebuild_layout();
     eprintln!(

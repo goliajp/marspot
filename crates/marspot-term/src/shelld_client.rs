@@ -319,6 +319,38 @@ impl ShelldClient {
         self.install_session(id, child_pid, cols, rows)
     }
 
+    /// Create a session in shelld and return only its id — **without**
+    /// installing a local subscription.  This is the L2-allocates /
+    /// L3-attaches split for the per-session L3 model (target #4): L2
+    /// owns session *assignment* (so N L3 children never race for the
+    /// same session) but never drives the byte stream itself, so it
+    /// holds no inbox/terminal for the session.  shelld keeps the
+    /// session + bytelog alive with zero subscribers (GUI death must not
+    /// kill shells); the L3 that L2 hands this id to attaches and
+    /// replays the bytelog.
+    pub fn create_session(&self, cols: u16, rows: u16, cwd: &str) -> io::Result<u64> {
+        let (tx, rx) = mpsc::sync_channel::<Result<(u64, i32), String>>(1);
+        {
+            let mut p = self.pending.lock().unwrap();
+            if p.new_session.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "another NEW_SESSION already in flight",
+                ));
+            }
+            p.new_session = Some(tx);
+        }
+        self.send_frame(Frame::new(
+            MsgType::NewSession,
+            encode_new_session(cols, rows, cwd),
+        ))?;
+        let (id, _child_pid) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "NEW_SESSION reply timed out"))?
+            .map_err(|m| io::Error::new(io::ErrorKind::Other, m))?;
+        Ok(id)
+    }
+
     fn install_session(
         &self,
         id: u64,

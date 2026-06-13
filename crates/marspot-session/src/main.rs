@@ -236,33 +236,44 @@ fn main() {
     // has to fit the region (a mismatch would overflow the mapping).
     let (mut shm, cols, rows) = setup_shm();
 
-    // Pick the session to drive: an explicit MARSPOT_SESSION_ID if it
-    // names a live one, else the first live session (reattach + bytelog
-    // replay), else a fresh session. Sized to the framebuffer.
+    // Pick the session to drive. Two regimes:
+    //
+    // * L2-managed (`MARSPOT_SESSION_ID` set): L2 owns assignment — it
+    //   pre-listed or freshly `create_session`'d this exact id and hands
+    //   it to us, guaranteeing no two L3 children race for one session.
+    //   Attach it directly; do NOT cross-check a `list_sessions`, which
+    //   could race a just-created id and wrongly fall through to grabbing
+    //   someone else's session.
+    // * Standalone (dev/test/soak, no id): reattach the first live
+    //   session (bytelog replay) if any, else create a fresh one.
     let want: Option<u64> = std::env::var("MARSPOT_SESSION_ID")
         .ok()
         .and_then(|s| s.parse().ok());
-    let existing: Vec<SessionInfo> = client
-        .list_sessions()
-        .unwrap_or_else(|e| {
-            eprintln!("[session] list_sessions failed: {e} — starting fresh");
-            Vec::new()
-        })
-        .into_iter()
-        .filter(|s| s.alive)
-        .collect();
-    let target = want
-        .filter(|id| existing.iter().any(|s| s.session_id == *id))
-        .or_else(|| existing.first().map(|s| s.session_id));
-
-    let session = match target {
+    let session = match want {
         Some(id) => {
-            eprintln!("[session] attaching existing session id={id}");
+            eprintln!("[session] attaching L2-assigned session id={id}");
             client.attach(id, cols, rows)
         }
         None => {
-            eprintln!("[session] no live session; creating a fresh one");
-            client.new_session(cols, rows, "")
+            let existing: Vec<SessionInfo> = client
+                .list_sessions()
+                .unwrap_or_else(|e| {
+                    eprintln!("[session] list_sessions failed: {e} — starting fresh");
+                    Vec::new()
+                })
+                .into_iter()
+                .filter(|s| s.alive)
+                .collect();
+            match existing.first() {
+                Some(s) => {
+                    eprintln!("[session] standalone: attaching first live session id={}", s.session_id);
+                    client.attach(s.session_id, cols, rows)
+                }
+                None => {
+                    eprintln!("[session] standalone: no live session; creating a fresh one");
+                    client.new_session(cols, rows, "")
+                }
+            }
         }
     };
     let mut session = session.unwrap_or_else(|e| {

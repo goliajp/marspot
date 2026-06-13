@@ -24,9 +24,12 @@ source "$ROOT/bin/_dev-sandbox.sh"
 
 SESSION_BIN="$ROOT/target/release/marspot-session"
 PROBE_BIN="$ROOT/target/release/examples/l3_echo_probe"
+MULTI_PROBE_BIN="$ROOT/target/release/examples/l3_multi_probe"
 RUN_LOG=/tmp/marspot-soak-l3.log
 
 ITERATIONS="${ITERATIONS:-10}"
+# N concurrent L3 sessions for the multi-session collision check (4a).
+MULTI_N="${MULTI_N:-4}"
 # The L3 floor is ~3–5 MB; cap well above to catch a real regression
 # (e.g. an accidental GUI link or unbounded buffer) without flapping.
 RSS_CAP_KIB="${RSS_CAP_KIB:-16384}"
@@ -50,11 +53,13 @@ count_sandbox_sessions() {
 cleanup() { kill_sandbox_sessions; }
 trap cleanup EXIT
 
-if [[ ! -x "$SESSION_BIN" || ! -x "$PROBE_BIN" ]]; then
-  ( cd "$ROOT" && cargo build --release -p marspot-session --example l3_echo_probe 2>&1 | tail -3 )
+if [[ ! -x "$SESSION_BIN" || ! -x "$PROBE_BIN" || ! -x "$MULTI_PROBE_BIN" ]]; then
+  ( cd "$ROOT" && cargo build --release -p marspot-session \
+      --example l3_echo_probe --example l3_multi_probe 2>&1 | tail -3 )
 fi
-[[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
-[[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
+[[ -x "$SESSION_BIN" ]]     || fail "marspot-session not built at $SESSION_BIN"
+[[ -x "$PROBE_BIN" ]]       || fail "probe not built at $PROBE_BIN"
+[[ -x "$MULTI_PROBE_BIN" ]] || fail "multi probe not built at $MULTI_PROBE_BIN"
 
 # Zero-GUI floor: the shipped L3 binary must link no GUI frameworks.
 if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
@@ -104,4 +109,18 @@ if (( peak_rss > RSS_CAP_KIB )); then
   fail "L3 peak RSS ${peak_rss} KiB exceeds cap ${RSS_CAP_KIB}"
 fi
 
-echo "PASS — ${ITERATIONS} rounds, echo verified each, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
+# N-session collision check (4a): allocate N distinct sessions via the
+# L2-allocates / L3-attaches split, spawn one L3 each, assert every one
+# echoes only its own char (a session collision would cross them) and
+# leaves no orphan.
+echo "--- multi-session (N=${MULTI_N}) ---" | tee -a "$RUN_LOG"
+"$MULTI_PROBE_BIN" "$SESSION_BIN" "$MULTI_N" >>"$RUN_LOG" 2>&1
+mrc=$?
+(( mrc == 0 )) || fail "multi-session probe exited $mrc (session collision or echo lost)"
+sleep 0.2
+now=$(count_sandbox_sessions)
+(( now <= base_sessions )) \
+  || fail "multi-session: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+echo "  multi-session OK — ${MULTI_N} distinct sessions, each echoed its own char, no orphans"
+
+echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session, echo verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
