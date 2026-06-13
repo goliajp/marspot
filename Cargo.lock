@@ -164,6 +164,7 @@ dependencies = [
 name = "marspot-session"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "marspot-term",
 ]
 

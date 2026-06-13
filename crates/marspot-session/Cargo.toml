@@ -16,3 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 marspot-term = { path = "../marspot-term" }
+
+# Dev-only: the L3 echo probe (examples/l3_echo_probe.rs) replicates
+# L2's spawn (clear CLOEXEC on the inherited shm + control fds) to drive
+# a real marspot-session headlessly. libc is the same FFI binding the
+# rest of the workspace already uses — not a runtime dep of the shipped
+# binary, which still links zero GUI frameworks.
+[dev-dependencies]
+libc = "0.2"
