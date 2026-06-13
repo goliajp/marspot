@@ -109,6 +109,72 @@ fn next_shm_name() -> std::ffi::CString {
     std::ffi::CString::new(format!("/msp-g-{}-{}", std::process::id(), n)).unwrap()
 }
 
+/// Create + size + stamp a fresh shared region for `cols × rows`, and
+/// return its fd.
+///
+/// The *creator* owns the region's lifecycle and stamps the immutable
+/// header identity (magic / version / cell-size / dims) here, so both
+/// the writer ([`GridShmWriter::from_fd`]) and any readers
+/// ([`GridShmReader::from_fd`]) can map and validate the same fd in
+/// either order — no "map before the first publish" race. This is the
+/// L2-owns-shm split: L2 calls `create_region`, inherits the fd into the
+/// L3 child (the writer), and maps a `dup` as the reader itself. The shm
+/// name is unlinked immediately, so only fd holders can map it.
+pub fn create_region(cols: u16, rows: u16) -> io::Result<OwnedFd> {
+    assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
+    let len = region_len(cols, rows);
+    let name = next_shm_name();
+
+    // O_EXCL so a stale name from a crashed peer can't be reused
+    // mid-flight; we unlink right after creating anyway.
+    let fd = unsafe {
+        libc::shm_open(
+            name.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // Free the name now; the fd + future mappings survive.
+    unsafe {
+        libc::shm_unlink(name.as_ptr());
+    }
+
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    // Temporarily map to stamp the immutable header, then unmap; the
+    // writer/readers re-map via `from_fd`. ftruncate zero-fills, so seq
+    // starts at 0 (even = stable, "never published") with no extra work.
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd.as_raw_fd(),
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        let h = base as *mut Header;
+        (*h).magic = MAGIC;
+        (*h).version = VERSION;
+        (*h).cell_size = std::mem::size_of::<Cell>() as u32;
+        (*h).cols = cols as u32;
+        (*h).rows = rows as u32;
+        libc::munmap(base, len);
+    }
+    Ok(fd)
+}
+
 /// Writer side (L3): owns the shm region and publishes grid snapshots.
 pub struct GridShmWriter {
     fd: OwnedFd,
@@ -124,34 +190,31 @@ pub struct GridShmWriter {
 unsafe impl Send for GridShmWriter {}
 
 impl GridShmWriter {
-    /// Create a fresh shared region sized for `cols × rows`. The name is
-    /// unlinked immediately, so only fd holders (this process + anyone
-    /// it passes `fd()` to) can map it.
+    /// Create a fresh shared region sized for `cols × rows` and take the
+    /// writer role on it. Convenience for the standalone path (no L2
+    /// owning the region) and the unit tests; equivalent to
+    /// `from_fd(create_region(cols, rows)?)`.
     pub fn create(cols: u16, rows: u16) -> io::Result<Self> {
-        assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
-        let len = region_len(cols, rows);
-        let name = next_shm_name();
+        Self::from_fd(create_region(cols, rows)?)
+    }
 
-        // O_EXCL so a stale name from a crashed peer can't be reused
-        // mid-flight; we unlink right after mapping anyway.
-        let fd = unsafe {
-            libc::shm_open(
-                name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-                0o600,
-            )
-        };
-        if fd < 0 {
+    /// Take the single-writer role on an existing region (created by
+    /// [`create_region`], possibly in another process and inherited as
+    /// `fd`). Dimensions come from the header the creator stamped; the
+    /// magic / version / cell-size are validated so a region from an
+    /// incompatible build is refused rather than written through a wrong
+    /// layout.
+    pub fn from_fd(fd: OwnedFd) -> io::Result<Self> {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        // Free the name now; the fd + future mapping survive.
-        unsafe {
-            libc::shm_unlink(name.as_ptr());
-        }
-
-        if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
-            return Err(io::Error::last_os_error());
+        let len = st.st_size as usize;
+        if len < HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "grid_shm: region smaller than header",
+            ));
         }
 
         let base = unsafe {
@@ -169,25 +232,37 @@ impl GridShmWriter {
         }
         let base = base as *mut u8;
 
-        // ftruncate zero-fills, so seq starts at 0 (even = stable) and
-        // the header magic is 0 until the first publish. Stamp the
-        // immutable header fields once up front.
-        let me = Self {
+        let h = base as *const Header;
+        let (magic, version, cell_size, cols, rows) = unsafe {
+            (
+                (*h).magic,
+                (*h).version,
+                (*h).cell_size,
+                (*h).cols,
+                (*h).rows,
+            )
+        };
+        let bad = magic != MAGIC
+            || version != VERSION
+            || cell_size != std::mem::size_of::<Cell>() as u32
+            || region_len(cols as u16, rows as u16) > len;
+        if bad {
+            unsafe {
+                libc::munmap(base as *mut libc::c_void, len);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "grid_shm: incompatible region (magic/version/cell-size/dims)",
+            ));
+        }
+
+        Ok(Self {
             fd,
             base,
             len,
-            cols,
-            rows,
-        };
-        unsafe {
-            let h = me.header();
-            (*h).magic = MAGIC;
-            (*h).version = VERSION;
-            (*h).cell_size = std::mem::size_of::<Cell>() as u32;
-            (*h).cols = cols as u32;
-            (*h).rows = rows as u32;
-        }
-        Ok(me)
+            cols: cols as u16,
+            rows: rows as u16,
+        })
     }
 
     /// The shm fd, for passing to a child (e.g. inherited by L2/L3).
@@ -483,6 +558,37 @@ mod tests {
             assert_eq!(snap.cursor_col, round as u16);
             assert!(!snap.cursor_visible());
         }
+    }
+
+    #[test]
+    fn create_region_then_split_writer_and_reader() {
+        // The L2-owns-shm path: a region is created standalone, the
+        // writer takes it via from_fd (dims read from the stamped
+        // header), and a reader maps a dup. A reader mapped *before* the
+        // first publish must validate fine (magic stamped at create) and
+        // read None until the writer publishes.
+        let cols = 12u16;
+        let rows = 3u16;
+        let region = create_region(cols, rows).expect("create_region");
+
+        // Reader on a dup, mapped before any writer exists.
+        let reader = GridShmReader::from_fd(dup_fd(region.as_raw_fd())).expect("reader");
+        assert_eq!((reader.cols(), reader.rows()), (cols, rows));
+        let mut buf = Vec::new();
+        assert!(reader.read(&mut buf).is_none(), "no frame before publish");
+
+        // Writer takes the region itself.
+        let mut writer = GridShmWriter::from_fd(region).expect("writer from_fd");
+        let mut grid = Grid::new(cols, rows);
+        grid.set_cell(0, 0, Cell::from('Z'));
+        grid.set_cursor(1, 2);
+        writer.publish(&grid, 0, FLAG_CURSOR_VISIBLE);
+
+        let snap = reader.read(&mut buf).expect("frame after publish");
+        assert_eq!((snap.cols, snap.rows), (cols, rows));
+        assert_eq!((snap.cursor_col, snap.cursor_row), (1, 2));
+        assert!(snap.cursor_visible());
+        assert_eq!(buf[0].ch, 'Z');
     }
 
     #[test]
