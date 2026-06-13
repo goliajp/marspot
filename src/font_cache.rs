@@ -20,7 +20,7 @@ use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGSize;
 use core_text::font::{new_from_name, CTFont, CTFontRef};
 use core_text::font_descriptor::{
-    kCTFontBoldTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
+    kCTFontBoldTrait, kCTFontColorGlyphsTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
 };
 use std::collections::HashMap;
 
@@ -151,6 +151,15 @@ extern "C" {
 struct FontRegistry {
     fonts: Vec<CTFont>,
     by_name: HashMap<String, usize>,
+    /// Parallel to `fonts`: whether the font carries colour glyphs
+    /// (Apple Color Emoji and friends — `kCTFontColorGlyphsTrait`).
+    /// Precomputed at intern time so the per-cell render path can route
+    /// to the colour atlas without a CoreText call per glyph.
+    color: Vec<bool>,
+}
+
+fn font_has_color_glyphs(font: &CTFont) -> bool {
+    font.symbolic_traits() & kCTFontColorGlyphsTrait != 0
 }
 
 impl FontRegistry {
@@ -158,9 +167,11 @@ impl FontRegistry {
         let name = base.postscript_name();
         let mut by_name = HashMap::new();
         by_name.insert(name, 0);
+        let color = vec![font_has_color_glyphs(&base)];
         Self {
             fonts: vec![base],
             by_name,
+            color,
         }
     }
 
@@ -171,6 +182,7 @@ impl FontRegistry {
         }
         let idx = self.fonts.len();
         self.by_name.insert(name, idx);
+        self.color.push(font_has_color_glyphs(&font));
         self.fonts.push(font);
         idx
     }
@@ -284,6 +296,12 @@ impl FontCache {
 
     pub fn font(&self, idx: usize) -> &CTFont {
         &self.fonts.fonts[idx]
+    }
+
+    /// Whether font `idx` carries colour glyphs (Apple Color Emoji).
+    /// Precomputed at intern time — cheap enough for the per-cell path.
+    pub fn is_color_font(&self, idx: usize) -> bool {
+        self.fonts.color.get(idx).copied().unwrap_or(false)
     }
 
     pub fn cell_dims(&self) -> (f64, f64) {

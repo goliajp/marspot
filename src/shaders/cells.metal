@@ -116,6 +116,21 @@ fragment float4 fg_fragment(
     return float4(in.color.rgb, in.color.a * coverage);
 }
 
+// Colour-glyph FG fragment — samples the BGRA colour atlas (full-colour
+// emoji) and outputs the texel directly.  The atlas stores PREMULTIPLIED
+// alpha (the rasteriser drew into a premultiplied context), so the colour
+// pipeline blends with source factor One; we scale by in.color.a so pane
+// dimming (the only thing the cell colour carries here) still applies —
+// scaling a premultiplied colour by a scalar keeps it premultiplied.
+fragment float4 fg_fragment_color(
+    GVOut in [[stage_in]],
+    texture2d<float> atlas [[texture(0)]],
+    sampler atlas_sampler [[sampler(0)]]
+) {
+    float4 texel = atlas.sample(atlas_sampler, in.uv);
+    return texel * in.color.a;
+}
+
 // ----------------------------------------------------------------------
 // Dot pass — circle-clipped coloured quad.  Reuses the BG vertex
 // shader for placement; the fragment discards pixels outside the

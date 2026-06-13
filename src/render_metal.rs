@@ -105,6 +105,41 @@ fn resolve_cell_glyph(
     )
 }
 
+/// Like `resolve_cell_glyph`, but routes colour glyphs (Apple Color Emoji)
+/// to the colour (`BGRA8`) atlas and everything else to the mono (`R8`)
+/// atlas.  Returns `(entry, is_color)` so the caller can pick the matching
+/// glyph buffer + atlas dims.  Box-drawing / block-element glyphs are always
+/// mono (we rasterise those ourselves).
+fn resolve_cell_glyph_routed(
+    atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
+    font: &mut FontCache,
+    ch: char,
+    bold: bool,
+    italic: bool,
+    metrics: SlotMetrics,
+) -> Option<(AtlasEntry, bool)> {
+    if box_drawing_arms(ch).is_some() || block_element_rects(ch).is_some() {
+        return resolve_cell_glyph(atlas, font, ch, bold, italic, metrics).map(|e| (e, false));
+    }
+    let (font_idx, glyph) = font.resolve_char(ch, bold, italic);
+    if glyph == 0 {
+        return None;
+    }
+    let key = GlyphKey { font_id: font_idx as u32, glyph };
+    let n_cells = crate::grid::char_width(ch).max(1) as u16;
+    let ct_font = font.font(font_idx).clone();
+    if font.is_color_font(font_idx) {
+        color_atlas
+            .get_or_rasterize(key, &ct_font, metrics, n_cells)
+            .map(|e| (e, true))
+    } else {
+        atlas
+            .get_or_rasterize(key, &ct_font, metrics, n_cells)
+            .map(|e| (e, false))
+    }
+}
+
 /// One cell's draw data, layout-compatible with `Cell` in
 /// `src/shaders/cells.metal`.  Repr-C; no padding shenanigans.
 ///
@@ -173,6 +208,10 @@ pub struct MetalRenderer {
     /// Pre-built pipeline state for the FG (textured glyph) pass.
     /// Has alpha blending enabled — composites onto the BG pass.
     fg_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// FG pipeline for colour glyphs: samples the BGRA colour atlas and
+    /// outputs the texel directly (premultiplied-alpha blend) instead of
+    /// tinting by the cell fg.  Same vertex shader as `fg_pipeline`.
+    fg_color_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Sampler used by the FG fragment shader.  Linear min/mag for
     /// smooth glyph edges, ClampToEdge so sampling outside the
     /// glyph's atlas slot reads padding (transparent) — not the
@@ -188,11 +227,18 @@ pub struct MetalRenderer {
     /// Glyph atlas backing the FG pass.  Constructed in `new` /
     /// `new_headless`; grows lazily as cells reference new glyphs.
     atlas: GlyphAtlas,
+    /// Colour (BGRA8) glyph atlas for full-colour emoji.  Separate from
+    /// `atlas` so the mono R8 path stays untouched; populated only when a
+    /// colour glyph is first seen.
+    color_atlas: GlyphAtlas,
     /// Per-frame instance scratch.  Reset at the start of each
     /// `render_layout` so per-frame allocations stay zero in the
     /// steady state.
     cells_scratch: Vec<CellInstance>,
     glyphs_scratch: Vec<GlyphInstance>,
+    /// Colour-glyph instances (emoji) — drawn in a second FG pass that
+    /// samples `color_atlas`.  Usually empty (most frames are plain text).
+    color_glyphs_scratch: Vec<GlyphInstance>,
     /// Sidebar status dots — same instance layout as cells, but the
     /// dot pipeline clips them to a circle.
     dots_scratch: Vec<CellInstance>,
@@ -220,6 +266,7 @@ impl MetalRenderer {
         let library = build_shader_library(&device)?;
         let bg_pipeline = build_bg_pipeline(&device, &library)?;
         let fg_pipeline = build_fg_pipeline(&device, &library)?;
+        let fg_color_pipeline = build_fg_color_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let font = FontCache::build()?;
@@ -232,6 +279,11 @@ impl MetalRenderer {
         // shelves + clears cache, next frame re-rasterises visible
         // glyphs) so the user never sees silently-blank cells.
         let atlas = GlyphAtlas::new(&device, 2048, 2048)?;
+        // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
+        // (~cell-sized slots) — a small working set, so 1024² is ample
+        // and keeps the colour path's footprint to 4 MiB.  Same shelf
+        // packer + atomic-rebuild-on-full bound as the mono atlas.
+        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024)?;
 
         let layer = unsafe { CAMetalLayer::new() };
         unsafe {
@@ -306,13 +358,16 @@ impl MetalRenderer {
             height_px: 0.0,
             bg_pipeline,
             fg_pipeline,
+            fg_color_pipeline,
             fg_sampler,
             dot_pipeline,
             font,
             atlas,
+            color_atlas,
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
+            color_glyphs_scratch: Vec::new(),
             window_focused: true,
             top_inset_phys: 0.0,
         })
@@ -330,6 +385,7 @@ impl MetalRenderer {
         let library = build_shader_library(&device)?;
         let bg_pipeline = build_bg_pipeline(&device, &library)?;
         let fg_pipeline = build_fg_pipeline(&device, &library)?;
+        let fg_color_pipeline = build_fg_color_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let font = FontCache::build()?;
@@ -342,6 +398,11 @@ impl MetalRenderer {
         // shelves + clears cache, next frame re-rasterises visible
         // glyphs) so the user never sees silently-blank cells.
         let atlas = GlyphAtlas::new(&device, 2048, 2048)?;
+        // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
+        // (~cell-sized slots) — a small working set, so 1024² is ample
+        // and keeps the colour path's footprint to 4 MiB.  Same shelf
+        // packer + atomic-rebuild-on-full bound as the mono atlas.
+        let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024)?;
         Ok(Self {
             device,
             queue,
@@ -350,13 +411,16 @@ impl MetalRenderer {
             height_px: 0.0,
             bg_pipeline,
             fg_pipeline,
+            fg_color_pipeline,
             fg_sampler,
             dot_pipeline,
             font,
             atlas,
+            color_atlas,
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
+            color_glyphs_scratch: Vec::new(),
             window_focused: true,
             top_inset_phys: 0.0,
         })
@@ -559,12 +623,15 @@ impl MetalRenderer {
             ref layer,
             ref bg_pipeline,
             ref fg_pipeline,
+            ref fg_color_pipeline,
             ref fg_sampler,
             ref dot_pipeline,
             ref mut font,
             ref mut atlas,
+            ref mut color_atlas,
             ref mut cells_scratch,
             ref mut glyphs_scratch,
+            ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             window_focused,
             width_px,
@@ -574,6 +641,7 @@ impl MetalRenderer {
 
         cells_scratch.clear();
         glyphs_scratch.clear();
+        color_glyphs_scratch.clear();
         dots_scratch.clear();
         build_instances(
             layout,
@@ -583,8 +651,10 @@ impl MetalRenderer {
             window_focused,
             font,
             atlas,
+            color_atlas,
             cells_scratch,
             glyphs_scratch,
+            color_glyphs_scratch,
             dots_scratch,
         );
 
@@ -606,12 +676,15 @@ impl MetalRenderer {
             bg_pipeline,
             dot_pipeline,
             fg_pipeline,
+            fg_color_pipeline,
             fg_sampler,
             atlas,
+            color_atlas,
             device,
             cells_scratch,
             dots_scratch,
             glyphs_scratch,
+            color_glyphs_scratch,
             width_px as f32,
             height_px as f32,
         );
@@ -660,12 +733,15 @@ impl MetalRenderer {
             ref queue,
             ref bg_pipeline,
             ref fg_pipeline,
+            ref fg_color_pipeline,
             ref fg_sampler,
             ref dot_pipeline,
             ref mut font,
             ref mut atlas,
+            ref mut color_atlas,
             ref mut cells_scratch,
             ref mut glyphs_scratch,
+            ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             window_focused,
             ..
@@ -673,6 +749,7 @@ impl MetalRenderer {
 
         cells_scratch.clear();
         glyphs_scratch.clear();
+        color_glyphs_scratch.clear();
         dots_scratch.clear();
         build_instances(
             layout,
@@ -682,8 +759,10 @@ impl MetalRenderer {
             window_focused,
             font,
             atlas,
+            color_atlas,
             cells_scratch,
             glyphs_scratch,
+            color_glyphs_scratch,
             dots_scratch,
         );
 
@@ -697,12 +776,15 @@ impl MetalRenderer {
             bg_pipeline,
             dot_pipeline,
             fg_pipeline,
+            fg_color_pipeline,
             fg_sampler,
             atlas,
+            color_atlas,
             device,
             cells_scratch,
             dots_scratch,
             glyphs_scratch,
+            color_glyphs_scratch,
             width_px as f32,
             height_px as f32,
         );
@@ -723,12 +805,15 @@ fn encode_passes(
     bg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     dot_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    fg_color_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
     atlas: &GlyphAtlas,
+    color_atlas: &GlyphAtlas,
     device: &ProtocolObject<dyn MTLDevice>,
     cells: &[CellInstance],
     dots: &[CellInstance],
     glyphs: &[GlyphInstance],
+    color_glyphs: &[GlyphInstance],
     viewport_w: f32,
     viewport_h: f32,
 ) {
@@ -840,6 +925,40 @@ fn encode_passes(
         }
     }
     fg_encoder.endEncoding();
+
+    // Colour FG pass — full-colour glyphs (emoji) sampled from the BGRA
+    // atlas, premultiplied-alpha blended on top.  Skipped entirely when
+    // nothing colour was queued (the common case — most frames have no
+    // emoji), so the extra encoder costs nothing for plain text.
+    if !color_glyphs.is_empty() {
+        let cfg_pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = cfg_pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let cfg_buffer = make_instance_buffer(device, glyphs_as_bytes(color_glyphs));
+        let cfg_encoder = cmd
+            .renderCommandEncoderWithDescriptor(&cfg_pass)
+            .expect("color fg encoder");
+        cfg_encoder.setRenderPipelineState(fg_color_pipeline);
+        if let Some(buf) = &cfg_buffer {
+            unsafe { cfg_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
+        }
+        unsafe {
+            cfg_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            cfg_encoder.setFragmentTexture_atIndex(Some(color_atlas.texture()), 0);
+            cfg_encoder.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+            cfg_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                color_glyphs.len(),
+            );
+        }
+        cfg_encoder.endEncoding();
+    }
 }
 
 /// Allocate a render-target MTLTexture.  Helper for tests + the
@@ -985,8 +1104,10 @@ fn build_instances(
     window_focused: bool,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
+    color_glyphs: &mut Vec<GlyphInstance>,
     dots: &mut Vec<CellInstance>,
 ) {
     let cell_w = font.cell_w as f32;
@@ -1076,8 +1197,10 @@ fn build_instances(
             atlas_h_f,
             font,
             atlas,
+            color_atlas,
             cells,
             glyphs,
+            color_glyphs,
             layout.gutter as f32,
             layout.padding as f32,
             layout.cell_title_h as f32,
@@ -1836,12 +1959,17 @@ fn push_session(
     atlas_h: f32,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
+    color_glyphs: &mut Vec<GlyphInstance>,
     gutter: f32,
     padding: f32,
     title_h: f32,
 ) {
+    let (color_atlas_w, color_atlas_h) = color_atlas.dims();
+    let color_atlas_w = color_atlas_w as f32;
+    let color_atlas_h = color_atlas_h as f32;
     // Cell-rect BG: BG_FOCUSED (deeper) for the active pane,
     // BG_PANEL for everyone else.  The DROP into deeper black is
     // the focus indicator — focused reads as "the canvas I'm
@@ -2047,8 +2175,9 @@ fn push_session(
                 cell_h: cell_h.round() as u32,
                 baseline_from_top: ascent.round() as u32,
             };
-            let entry = match resolve_cell_glyph(
+            let (entry, is_color) = match resolve_cell_glyph_routed(
                 atlas,
+                color_atlas,
                 font,
                 cell.ch,
                 cell.attrs.bold,
@@ -2069,17 +2198,20 @@ fn push_session(
             let dest_x = (inner_x + c as f32 * cell_w).round();
             let dest_y = row_y.round();
             let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
-            glyphs.push(GlyphInstance {
+            // Colour glyphs (emoji) go to the colour buffer + atlas; the
+            // colour shader samples their real pixels and ignores `color`
+            // (except its alpha, used for pane-dim).  Mono glyphs are
+            // tinted by `fg` as before.
+            let (aw, ah, sink) = if is_color {
+                (color_atlas_w, color_atlas_h, &mut *color_glyphs)
+            } else {
+                (atlas_w, atlas_h, &mut *glyphs)
+            };
+            sink.push(GlyphInstance {
                 origin: [dest_x, dest_y],
                 size: [slot_w, metrics.cell_h as f32],
-                uv0: [
-                    entry.u0 as f32 / atlas_w,
-                    entry.v0 as f32 / atlas_h,
-                ],
-                uv1: [
-                    entry.u1 as f32 / atlas_w,
-                    entry.v1 as f32 / atlas_h,
-                ],
+                uv0: [entry.u0 as f32 / aw, entry.v0 as f32 / ah],
+                uv1: [entry.u1 as f32 / aw, entry.v1 as f32 / ah],
                 color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
             });
         }
@@ -2368,6 +2500,39 @@ fn build_fg_pipeline(
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .map_err(|e| format!("newRenderPipelineState (FG) error: {:?}", e))
+}
+
+/// Colour-glyph FG pipeline.  Same `fg_vertex` as the mono path, but the
+/// `fg_fragment_color` fragment samples the BGRA colour atlas and outputs
+/// the texel directly (the emoji's own colours).  The texel is
+/// **premultiplied** (the rasteriser drew into a premultiplied-alpha
+/// context), so the blend uses source factor `One` rather than
+/// `SourceAlpha`:
+///
+///     final.rgb = src.rgb * 1 + dst.rgb * (1 - src.a)
+fn build_fg_color_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    let vfn = pipeline_function(library, "fg_vertex")?;
+    let ffn = pipeline_function(library, "fg_fragment_color")?;
+
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setVertexFunction(Some(&vfn));
+    descriptor.setFragmentFunction(Some(&ffn));
+    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    attachment.setPixelFormat(TARGET_FORMAT);
+    attachment.setBlendingEnabled(true);
+    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .map_err(|e| format!("newRenderPipelineState (FG colour) error: {:?}", e))
 }
 
 /// Dot-pass pipeline.  Same `CellInstance` input as BG, but the
@@ -2856,6 +3021,7 @@ mod tests {
         };
         let mut font = FontCache::build().expect("font");
         let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
 
         let mut grid = Grid::new(10, 4);
         let cell_a = Cell {
@@ -2893,6 +3059,7 @@ mod tests {
 
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut color_glyphs: Vec<GlyphInstance> = Vec::new();
         let mut dots: Vec<CellInstance> = Vec::new();
         build_instances(
             &layout,
@@ -2902,8 +3069,10 @@ mod tests {
             true,
             &mut font,
             &mut atlas,
+            &mut color_atlas,
             &mut cells,
             &mut glyphs,
+            &mut color_glyphs,
             &mut dots,
         );
 
@@ -2925,5 +3094,78 @@ mod tests {
             (dx - cw).abs() < 3.0,
             "glyphs should be ~one cell apart, got |dx|={dx} vs cell_w={cw}"
         );
+    }
+
+    /// A colour emoji must route to the COLOUR glyph buffer + colour atlas,
+    /// not the mono one — the whole point of the colour-emoji path.
+    #[test]
+    fn build_instances_routes_color_emoji() {
+        use crate::grid::{Cell, Grid};
+        use crate::layout::Layout;
+
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 512, 512).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 512, 512).expect("color atlas");
+
+        // Skip on the (macOS-impossible) chance there's no colour emoji
+        // font — the routing decision keys off the resolved font's
+        // colour-glyphs trait, so without one there's nothing to assert.
+        let (emoji_font_idx, emoji_glyph) = font.resolve_char('😀', false, false);
+        if emoji_glyph == 0 || !font.is_color_font(emoji_font_idx) {
+            return;
+        }
+
+        let mut grid = Grid::new(10, 4);
+        grid.set_cell(0, 0, Cell { ch: '😀', attrs: Default::default() });
+        grid.set_cell(2, 0, Cell { ch: 'A', attrs: Default::default() });
+
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            1,
+            font.cell_w,
+            font.cell_h,
+        );
+        let view = SessionView {
+            grid: &grid,
+            view_offset: 0,
+            cursor_visible: false, // render every cell, don't skip under cursor
+            focused: true,
+            title: "",
+            selection: None,
+            ime_preedit: "",
+            update_pending: false,
+        };
+
+        let mut cells: Vec<CellInstance> = Vec::new();
+        let mut glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut color_glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut dots: Vec<CellInstance> = Vec::new();
+        build_instances(
+            &layout,
+            std::slice::from_ref(&view),
+            &[],
+            0,
+            true,
+            &mut font,
+            &mut atlas,
+            &mut color_atlas,
+            &mut cells,
+            &mut glyphs,
+            &mut color_glyphs,
+            &mut dots,
+        );
+
+        assert_eq!(color_glyphs.len(), 1, "emoji should emit one colour glyph");
+        assert_eq!(glyphs.len(), 1, "the 'A' should be the only mono glyph");
+        assert!(color_atlas.cache_len() >= 1, "colour atlas should hold the emoji");
     }
 }

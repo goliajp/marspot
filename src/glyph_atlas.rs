@@ -53,6 +53,8 @@
 //! of the bugs that killed the previous Metal+atlas attempt
 //! (`render.rs`'s header note "atlas neighbor … issues").
 
+use core_graphics::base::{kCGBitmapByteOrder32Little, kCGImageAlphaPremultipliedFirst};
+use core_graphics::color_space::CGColorSpace;
 use core_graphics::context::{CGContext, CGTextDrawingMode};
 use core_graphics::font::CGGlyph;
 use core_graphics::geometry::CGPoint;
@@ -143,6 +145,11 @@ pub struct GlyphAtlas {
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
     width: u32,
     height: u32,
+    /// Bytes per pixel of the backing texture: 1 for the alpha-only
+    /// (`R8Unorm`) mono atlas, 4 for the colour (`BGRA8Unorm`) atlas that
+    /// holds full-colour emoji.  Drives the upload stride and which
+    /// rasteriser `get_or_rasterize` dispatches to.
+    bpp: u32,
     shelves: Vec<Shelf>,
     cache: HashMap<GlyphKey, AtlasEntry>,
     /// Number of times the atlas filled up and was rebuilt.  Each
@@ -158,14 +165,41 @@ pub struct GlyphAtlas {
 const PAD: u32 = 1;
 
 impl GlyphAtlas {
+    /// Alpha-only (`R8Unorm`) atlas — the mono path for all text glyphs,
+    /// tinted by the per-cell foreground colour in the FG shader.
     pub fn new(
         device: &ProtocolObject<dyn MTLDevice>,
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
+        Self::with_format(device, width, height, false)
+    }
+
+    /// Colour (`BGRA8Unorm`) atlas — holds full-colour glyphs (Apple Color
+    /// Emoji) sampled directly by the colour FG shader.  `color = true`
+    /// switches the texture format + the upload stride + the rasteriser.
+    pub fn new_color(
+        device: &ProtocolObject<dyn MTLDevice>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, String> {
+        Self::with_format(device, width, height, true)
+    }
+
+    fn with_format(
+        device: &ProtocolObject<dyn MTLDevice>,
+        width: u32,
+        height: u32,
+        color: bool,
+    ) -> Result<Self, String> {
+        let (format, bpp) = if color {
+            (MTLPixelFormat::BGRA8Unorm, 4u32)
+        } else {
+            (MTLPixelFormat::R8Unorm, 1u32)
+        };
         let descriptor = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::R8Unorm,
+                format,
                 width as usize,
                 height as usize,
                 false,
@@ -186,6 +220,7 @@ impl GlyphAtlas {
             texture,
             width,
             height,
+            bpp,
             shelves: Vec::new(),
             cache: HashMap::new(),
             rebuild_count: 0,
@@ -220,7 +255,11 @@ impl GlyphAtlas {
         if let Some(&entry) = self.cache.get(&key) {
             return Some(entry);
         }
-        let raster = rasterise_glyph(font, key.glyph, metrics, n_cells)?;
+        let raster = if self.bpp == 4 {
+            rasterise_glyph_color(font, key.glyph, metrics, n_cells)?
+        } else {
+            rasterise_glyph(font, key.glyph, metrics, n_cells)?
+        };
         let placed = match self.place(raster.px_w, raster.px_h) {
             Some(p) => p,
             None => {
@@ -365,7 +404,7 @@ impl GlyphAtlas {
                     region,
                     0,
                     ptr,
-                    w as usize,
+                    (w * self.bpp) as usize,
                 );
         }
     }
@@ -386,7 +425,7 @@ impl GlyphAtlas {
     /// in this subsystem without needing exact `std::collections`
     /// internals.
     pub fn approx_bytes(&self) -> usize {
-        let texture_bytes = self.width as usize * self.height as usize;
+        let texture_bytes = self.width as usize * self.height as usize * self.bpp as usize;
         let entry_bytes =
             std::mem::size_of::<GlyphKey>() + std::mem::size_of::<AtlasEntry>();
         let cache_bytes =
@@ -502,6 +541,74 @@ fn rasterise_glyph(
     // canvas x = 0 (left edge of the slot).  Side-bearing variations
     // (italic L overhang etc.) just shift the ink within the slot;
     // it's clipped to slot bounds.
+    let origin = CGPoint::new(-bbox.origin.x, baseline_canvas_y);
+    font.draw_glyphs(&[glyph], &[origin], ctx);
+
+    Some(Raster {
+        bytes,
+        px_w,
+        px_h,
+        n_cells,
+    })
+}
+
+/// Rasterise one COLOUR glyph (Apple Color Emoji etc.) into a cell-sized
+/// premultiplied-BGRA bitmap for the colour atlas.  Same slot geometry as
+/// `rasterise_glyph` (baseline at `cell_h - baseline_from_top`, slot width
+/// `n_cells × cell_w`), but the context is 4-channel BGRA with a device-RGB
+/// colour space, so `draw_glyphs` emits the glyph's real colours (decoding
+/// the embedded sbix bitmap) instead of an alpha mask.  Byte layout
+/// (premultiplied-first + little-endian 32) is B,G,R,A in memory, matching
+/// `MTLPixelFormat::BGRA8Unorm`; the colour FG shader samples it directly.
+fn rasterise_glyph_color(
+    font: &CTFont,
+    glyph: CGGlyph,
+    metrics: SlotMetrics,
+    n_cells: u16,
+) -> Option<Raster> {
+    let bbox = font.get_bounding_rects_for_glyphs(
+        core_text::font_descriptor::kCTFontOrientationDefault,
+        &[glyph],
+    );
+    if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
+        return None;
+    }
+
+    let n_cells = n_cells.max(1);
+    let px_w = metrics.cell_w * n_cells as u32;
+    let px_h = metrics.cell_h;
+
+    let bytes_per_row = (px_w * 4) as usize;
+    let buf_len = bytes_per_row * px_h as usize;
+    let mut bytes: Vec<u8> = vec![0u8; buf_len];
+
+    let cs = CGColorSpace::create_device_rgb();
+    let bitmap_info = kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little;
+    let ctx = unsafe {
+        let raw = CGBitmapContextCreate(
+            bytes.as_mut_ptr() as *mut c_void,
+            px_w as usize,
+            px_h as usize,
+            8,
+            bytes_per_row,
+            cs.as_ptr() as *mut c_void,
+            bitmap_info,
+        );
+        if raw.is_null() {
+            return None;
+        }
+        CGContext::from_ptr(raw)
+    };
+    // Keep the colour space alive until the context has retained it.
+    drop(cs);
+
+    ctx.set_should_antialias(true);
+    ctx.set_allows_antialiasing(true);
+    // No gray fill / smoothing knobs: a colour (sbix) glyph carries its own
+    // pixels; CGTextFill draws the bitmap as-is.
+    ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
+
+    let baseline_canvas_y = (metrics.cell_h as f64) - (metrics.baseline_from_top as f64);
     let origin = CGPoint::new(-bbox.origin.x, baseline_canvas_y);
     font.draw_glyphs(&[glyph], &[origin], ctx);
 
