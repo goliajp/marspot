@@ -204,17 +204,6 @@ impl CoreApp {
         .with_chrome(self.scale, self.layout_picker_open, self.panes.len());
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
-                let before = (
-                    p.session().terminal().grid().cols(),
-                    p.session().terminal().grid().rows(),
-                );
-                if before != (rect.cols, rect.rows) {
-                    eprintln!(
-                        "[core] pane {i} resize {}x{} -> {}x{} (win {:.0}x{:.0} @ {:.1}x, cell {:.1}x{:.1})",
-                        before.0, before.1, rect.cols, rect.rows,
-                        self.w_phys, self.h_phys, self.scale, cell_w, cell_h,
-                    );
-                }
                 p.resize(rect.cols, rect.rows);
             }
         }
