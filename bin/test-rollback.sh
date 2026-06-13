@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Probation-failure / rollback test.  Stages a binary that exits
-# immediately on spawn (so the new "core" dies inside probation)
+# Dual-core update rollback test.  Stages a binary that exits
+# immediately on spawn (so the *pending* core dies inside probation)
 # and verifies the supervisor:
 #
-#   - notices the death (`PROBATION_FAIL`),
+#   - notices the pending death and aborts (`UPDATE_ABORT`),
 #   - restores `prev/marspot-core` into `current/` (`ROLLBACK`),
 #   - quarantines the broken binary, and
-#   - respawns from the rolled-back binary (fresh HELLO_ACK).
+#   - leaves the live (active) core completely untouched — the whole
+#     point of dual-core: a failed update is invisible to the user.
 #
 # Run after `cargo build --release`.  Exits 0 on success.
 
@@ -89,7 +90,11 @@ until grep -q UPDATE_STABLE "$SUP_LOG"; do
   fi
   sleep 1
 done
-echo "[2/4] first update OK — current/ holds real binary"
+# Capture the live (active) core after the swap — this is the process
+# that must survive the next, failed update completely untouched.
+ACTIVE_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
+[[ -n "$ACTIVE_PID" ]] || fail "no active core after first update"
+echo "[2/4] first update OK — current/ holds real binary, active pid=$ACTIVE_PID"
 
 # --- 3. Stage broken + trigger rollback -----------------------------
 stage_broken "$TREE/pending/marspot-core"
@@ -101,11 +106,11 @@ until grep -q "ROLLBACK\b" "$SUP_LOG"; do
   fi
   sleep 0.5
 done
-grep -q PROBATION_FAIL "$SUP_LOG" || fail "PROBATION_FAIL not in log"
+grep -q UPDATE_ABORT "$SUP_LOG" || fail "UPDATE_ABORT not in log"
 grep -q "ROLLBACK\b.*prev/" "$SUP_LOG" || fail "ROLLBACK (prev/→current/) not in log"
-echo "[3/4] rollback OK — PROBATION_FAIL → ROLLBACK (prev/→current/)"
+echo "[3/4] rollback OK — UPDATE_ABORT → ROLLBACK (prev/→current/)"
 
-# --- 4. Verify filesystem + re-spawn --------------------------------
+# --- 4. Verify filesystem + silent rollback -------------------------
 [[ -f "$TREE/current/marspot-core" ]] \
   || fail "current/ has no marspot-core after rollback"
 [[ -f "$TREE/quarantine/marspot-core" ]] \
@@ -113,15 +118,15 @@ echo "[3/4] rollback OK — PROBATION_FAIL → ROLLBACK (prev/→current/)"
 if ! cmp -s "$CORE_BIN" "$TREE/current/marspot-core"; then
   fail "current/marspot-core != original CORE_BIN — rollback restored the wrong file"
 fi
-# Wait for post-rollback HelloAck.
-# Earlier handshakes: boot + first-update + post-rollback = 3.
-for _ in $(seq 1 50); do
-  acks=$(grep -c HELLO_ACK "$SUP_LOG")
-  if (( acks >= 3 )); then break; fi
-  sleep 0.1
-done
-(( acks >= 3 )) || fail "post-rollback core never HelloAck'd (acks=$acks)"
-echo "[4/4] respawn OK — rolled-back core spawned, HelloAck'd"
+# The broken update ran as a *pending* core and never touched the live
+# one.  Assert the active core from step 2 is still the same process —
+# the silent-rollback guarantee: the user saw nothing.
+sleep 1
+POST_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
+[[ -n "$POST_PID" ]] || fail "active core gone after rollback (should be untouched)"
+[[ "$POST_PID" == "$ACTIVE_PID" ]] \
+  || fail "active core was disturbed by the failed update (pid $ACTIVE_PID → $POST_PID)"
+echo "[4/4] silent rollback OK — active core pid=$ACTIVE_PID never disturbed"
 
 cleanup
 echo "ALL PASS"

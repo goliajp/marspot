@@ -43,9 +43,10 @@ pub enum BannerKind {
     UpdateFailed,
     /// Core died and we're spawning a fresh one.  Shown for the
     /// ~100 ms gap while the new process boots + attaches.
+    ///
+    /// Note: silent updates are *not* banner-worthy — the dual-core
+    /// swap is invisible, so there's no "Updating…" state.
     Recovering,
-    /// A pending update is being applied right now.
-    Updating,
 }
 
 impl BannerKind {
@@ -56,7 +57,6 @@ impl BannerKind {
         match self {
             BannerKind::UpdateFailed => "Marspot stopped — please restart the app",
             BannerKind::Recovering => "Marspot is recovering…",
-            BannerKind::Updating => "Updating Marspot…",
         }
     }
 }

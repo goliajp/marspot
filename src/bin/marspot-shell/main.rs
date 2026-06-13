@@ -498,6 +498,19 @@ struct CoreConn {
 }
 
 impl CoreConn {
+    /// Write a frame to this core.  Logs and drops on EPIPE; a core
+    /// dying mid-session is the supervisor's problem, not this path's.
+    fn send(&self, msg_type: MsgType, payload: Vec<u8>) {
+        let frame = Frame::new(msg_type, payload);
+        let mut stream = match self.control_tx.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(), // poisoned: still try
+        };
+        if let Err(e) = frame.write_to(&mut *stream) {
+            eprintln!("[shell] control frame {:?} write failed: {e}", msg_type);
+        }
+    }
+
     /// Drop the control socket (clean EOF for the core's read side),
     /// then SIGKILL + reap the child.  Order matters: the EOF gives a
     /// well-behaved core the chance to exit on its own before the kill.
@@ -510,6 +523,25 @@ impl CoreConn {
             let _ = child.wait();
         }
     }
+}
+
+/// A silent update in flight.  The shell promotes the new binary,
+/// spawns a `pending` core into a *fresh* IOSurface, and lets it
+/// rebuild the screen off-screen (from shelld's bytelog) while the
+/// `active` core keeps rendering the surface the user is looking at.
+/// Once the pending core has HelloAck'd, reported its surface ready,
+/// and survived probation, the shell atomic-swaps the presenter to the
+/// new surface and retires the old core — no flash, because both
+/// surfaces carry identical content.  On any failure the pending core
+/// is killed and the binary rolled back; the user never sees a glitch.
+struct PendingUpdate {
+    /// The probationary core, rendering into `surface`.
+    conn: CoreConn,
+    /// The fresh IOSurface the pending core draws into.  Becomes the
+    /// displayed surface on a successful swap; released on abort.
+    surface: IOSurface,
+    /// True once the pending core confirmed `SurfaceReady(surface.id())`.
+    surface_ready: bool,
 }
 
 struct ShellApp {
@@ -529,6 +561,10 @@ struct ShellApp {
     /// silent-update swap.  `None` before the first spawn and in the
     /// brief gap between a crash and the respawn.
     active: Option<CoreConn>,
+    /// A silent update on probation: a second core rendering the same
+    /// screen into its own surface, waiting to be swapped in.  `None`
+    /// outside an update.  Present iff `sup_state` is `Probation`.
+    pending: Option<PendingUpdate>,
     /// True after the core has confirmed at least one SurfaceReady.
     /// Until then `redraw` skips `present()` so the user sees the
     /// NSWindow's BG colour (font_cache::BG) instead of an unfilled
@@ -567,6 +603,7 @@ impl ShellApp {
             pending_surface: None,
             presenter: None,
             active: None,
+            pending: None,
             first_frame_ready: false,
             redraw_thread_started: false,
             binaries,
@@ -595,24 +632,27 @@ impl ShellApp {
             .is_some()
     }
 
-    /// Send a frame to the active core.  Logs and drops on EPIPE; the
-    /// core dying mid-session is handled by the supervisor (Step 5+),
-    /// so here we just don't crash the shell.
+    /// Send a frame to the active core.  Input, resize, ping, and
+    /// focus all target `active` only — a `pending` core on probation
+    /// receives none of them (it rebuilds independently from shelld).
     fn send(&self, msg_type: MsgType, payload: Vec<u8>) {
-        let Some(conn) = self.active.as_ref() else {
-            return;
-        };
-        let frame = Frame::new(msg_type, payload);
-        let mut stream = match conn.control_tx.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(), // poisoned: still try
-        };
-        if let Err(e) = frame.write_to(&mut *stream) {
-            eprintln!("[shell] control frame {:?} write failed: {e}", msg_type);
+        if let Some(conn) = self.active.as_ref() {
+            conn.send(msg_type, payload);
         }
     }
 
-    fn spawn_core(&mut self, surface_id: u32, w_phys: usize, h_phys: usize, scale: f64) {
+    /// Spawn a core process rendering into `surface_id` and return the
+    /// `CoreConn` (HELLO already sent on its own socket).  Returns
+    /// `None` on any spawn failure.  The caller decides whether the new
+    /// core becomes `active` (boot / restart) or `pending` (an update on
+    /// probation) — this fn touches neither slot.
+    fn spawn_core(
+        &self,
+        surface_id: u32,
+        w_phys: usize,
+        h_phys: usize,
+        scale: f64,
+    ) -> Option<CoreConn> {
         // Resolve via the supervisor binary tree:
         //   1. MARSPOT_CORE_BIN env override (full path or sibling
         //      name — useful in dev / when pointing at coreshim).
@@ -623,7 +663,7 @@ impl ShellApp {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("[shell] current_exe failed: {e}");
-                return;
+                return None;
             }
         };
         let core_bin = self.binaries.resolve_runnable(&exe);
@@ -642,7 +682,7 @@ impl ShellApp {
                 "[shell] socketpair failed: {}",
                 std::io::Error::last_os_error()
             );
-            return;
+            return None;
         }
         let parent_fd: RawFd = sp[0];
         let child_fd: RawFd = sp[1];
@@ -697,7 +737,10 @@ impl ShellApp {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("[shell] try_clone control stream failed: {e}");
-                        return;
+                        let mut child = child;
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
                     }
                 };
 
@@ -713,7 +756,7 @@ impl ShellApp {
                 // before the first ping); this conn's reader owns its
                 // own channel, so a previous core's Pong can't alias it.
                 let now = Instant::now();
-                self.active = Some(CoreConn {
+                let conn = CoreConn {
                     child: Some(child),
                     control_tx: Mutex::new(stream),
                     control_rx: rx,
@@ -722,10 +765,13 @@ impl ShellApp {
                     next_ping_at: now + PING_INTERVAL,
                     last_ping_nonce: 0,
                     last_pong_at: now, // freebie until first ping
-                });
+                };
 
-                // Send HELLO immediately so the core can echo HelloAck.
-                self.send(MsgType::Hello, encode_hello(PROTO_VERSION));
+                // Send HELLO on this core's own socket so it can echo
+                // HelloAck — this works whether the conn ends up active
+                // or pending.
+                conn.send(MsgType::Hello, encode_hello(PROTO_VERSION));
+                Some(conn)
             }
             Err(e) => {
                 eprintln!("[shell] spawn core failed: {e}");
@@ -733,21 +779,24 @@ impl ShellApp {
                     libc::close(parent_fd);
                     libc::close(child_fd);
                 }
+                None
             }
         }
     }
 
-    /// Promote `pending/marspot-core` to `current/`, kill the running
-    /// core, re-spawn from the new binary.  Existing IOSurface stays
-    /// alive in the shell — the new core looks it up via the env-var
-    /// handshake and continues rendering into it, so the visible
-    /// content survives the swap (modulo a brief ~100 ms freeze
-    /// while the new core attaches to shelld + replays bytelog).
+    /// Begin a flash-free silent update.  Promote `pending/marspot-core`
+    /// to `current/`, then spawn a **pending** core into a *fresh*
+    /// IOSurface — WITHOUT touching the active core.  The active core
+    /// keeps rendering the surface the user sees; the pending core
+    /// rebuilds the same screen off-screen from shelld's bytelog.  When
+    /// it proves out (HelloAck + SurfaceReady + probation) the presenter
+    /// atomic-swaps to the new surface (`promote_pending_to_active`); on
+    /// failure it's killed and the binary rolled back, all unseen.
     ///
-    /// Returns `true` if a swap actually happened; `false` (no-op)
-    /// when there's no pending binary or we're already mid-swap.
+    /// Returns `true` if a pending update was started; `false` (no-op)
+    /// when there's no pending binary or one is already in flight.
     fn apply_pending_update(&mut self, ctx: &MarspotAppCtx) -> bool {
-        if !matches!(self.sup_state, SupervisorState::Idle) {
+        if !matches!(self.sup_state, SupervisorState::Idle) || self.pending.is_some() {
             return false;
         }
         // Task C: shell-self-update has precedence over core update —
@@ -764,35 +813,158 @@ impl ShellApp {
         if !self.binaries.has_pending() {
             return false;
         }
-        eprintln!("[shell] applying pending update …");
-        sup_log::log("UPDATE_APPLY", "promoting pending → current");
-        if let Err(e) = self.binaries.promote_pending() {
-            eprintln!("[shell] promote_pending failed: {e} — leaving core untouched");
-            sup_log::log("UPDATE_FAIL", &format!("promote_pending: {e}"));
-            return false;
-        }
-        // Tear down the current core so it gets a clean EOF on the
-        // control socket; its Drop / supervisor will see Closed.
-        self.shutdown_active();
-        // Re-spawn using the (now-current) binary.  Same IOSurface
-        // ID + dims so the new core attaches to the surface the user
-        // is already looking at.
-        let surface = match self.surface.as_ref() {
-            Some(s) => s,
+        // Size the pending core's surface to the displayed one.
+        let (w_px, h_px) = match self.surface.as_ref() {
+            Some(s) => (s.width(), s.height()),
             None => {
-                eprintln!("[shell] apply_pending_update: no surface to hand to new core");
+                eprintln!("[shell] apply_pending_update: no displayed surface to match");
                 return false;
             }
         };
-        let id = surface.id();
-        let w_px = surface.width();
-        let h_px = surface.height();
+        eprintln!("[shell] starting dual-core update …");
+        sup_log::log("UPDATE_APPLY", "promoting pending → current (dual-core)");
+        if let Err(e) = self.binaries.promote_pending() {
+            eprintln!("[shell] promote_pending failed: {e} — leaving active core untouched");
+            sup_log::log("UPDATE_FAIL", &format!("promote_pending: {e}"));
+            return false;
+        }
+        // Fresh surface for the pending core — the active core's surface
+        // (self.surface) is left completely alone, so the user sees no
+        // change while the new core warms up.
+        let new_surface = match IOSurface::create(w_px, h_px) {
+            Ok(s) => {
+                s.increment_use();
+                s
+            }
+            Err(e) => {
+                eprintln!("[shell] apply_pending_update: IOSurface::create failed: {e}");
+                sup_log::log("UPDATE_FAIL", &format!("surface create: {e}"));
+                self.rollback_binary("surface create failed");
+                return false;
+            }
+        };
         let scale = ctx.scale();
-        self.spawn_core(id, w_px, h_px, scale);
+        let conn = match self.spawn_core(new_surface.id(), w_px, h_px, scale) {
+            Some(c) => c,
+            None => {
+                eprintln!("[shell] apply_pending_update: spawn pending core failed");
+                sup_log::log("UPDATE_FAIL", "spawn pending core");
+                new_surface.decrement_use();
+                self.rollback_binary("spawn pending core failed");
+                return false;
+            }
+        };
+        self.pending = Some(PendingUpdate {
+            conn,
+            surface: new_surface,
+            surface_ready: false,
+        });
+        // The core only emits SurfaceReady in response to a Resize
+        // frame — it doesn't announce its initial env-var surface.
+        // Send one now (same size) to drive the pending core to render
+        // into the new surface and ack SurfaceReady, the second
+        // promotion gate.  This is a surface handshake, not live input.
+        if let Some(p) = self.pending.as_ref() {
+            p.conn.send(
+                MsgType::Resize,
+                encode_resize(p.surface.id(), w_px as f64, h_px as f64, scale),
+            );
+        }
         self.sup_state = SupervisorState::Probation {
             started_at: std::time::Instant::now(),
         };
         true
+    }
+
+    /// Atomic-swap the presenter onto the pending core's surface, retire
+    /// the old active core, and promote pending → active.  Both surfaces
+    /// carry identical content (same shelld bytelog), so the swap is
+    /// invisible.  Called once the pending core has cleared probation.
+    fn promote_pending_to_active(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let PendingUpdate {
+            conn,
+            surface: new_surface,
+            ..
+        } = pending;
+        // Point the presenter at the new surface.  The next present()
+        // samples it; until then the old surface is still shown.
+        if let Some(p) = self.presenter.as_mut() {
+            if let Err(e) = p.swap_surface(&new_surface) {
+                // Swap failed — keep the active core + its surface, kill
+                // the pending core, and roll the binary back.  The user
+                // never saw anything change.
+                eprintln!("[shell] promote swap_surface failed: {e} — keeping active core");
+                sup_log::log("UPDATE_FAIL", &format!("swap_surface: {e}"));
+                new_surface.decrement_use();
+                conn.shutdown();
+                self.rollback_binary("swap_surface failed");
+                self.sup_state = SupervisorState::Idle;
+                return;
+            }
+        }
+        // Release the old displayed surface, install the new one.  Any
+        // in-flight resize surface is now stale (resize aborts pending
+        // updates, so this is belt-and-suspenders) — drop it too.
+        if let Some(old) = self.surface.take() {
+            old.decrement_use();
+        }
+        if let Some(stale) = self.pending_surface.take() {
+            stale.decrement_use();
+        }
+        self.surface = Some(new_surface);
+        self.first_frame_ready = true;
+        // Retire the old active core; the pending core becomes active.
+        self.shutdown_active();
+        self.active = Some(conn);
+        // The update is committed — drop the rollback target.
+        match self.binaries.finalize_stable() {
+            Ok(()) => sup_log::log("UPDATE_STABLE", "dual-core swap; prev/ deleted"),
+            Err(e) => {
+                eprintln!("[shell] finalize_stable failed: {e}");
+                sup_log::log("FINALIZE_FAIL", &format!("{e}"));
+            }
+        }
+        eprintln!("[shell] dual-core swap complete — pending promoted to active");
+        sup_log::log("UPDATE_SWAP", "presenter → new surface; pending → active");
+    }
+
+    /// Abort an in-flight pending update: kill the pending core, release
+    /// its surface, and roll the binary back.  The active core and its
+    /// surface are untouched — the user sees nothing.  No-op if there's
+    /// no pending update.
+    fn abort_pending_update(&mut self, reason: &str) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let PendingUpdate { conn, surface, .. } = pending;
+        conn.shutdown();
+        surface.decrement_use();
+        eprintln!("[shell] aborting pending update: {reason}");
+        sup_log::log("UPDATE_ABORT", reason);
+        self.rollback_binary(reason);
+    }
+
+    /// Roll `current/marspot-core` back to `prev/` after a failed
+    /// update attempt.  The active core is still running the old binary,
+    /// so this just realigns the binary tree with reality.
+    fn rollback_binary(&self, reason: &str) {
+        match self.binaries.rollback_to_prev() {
+            Ok(true) => {
+                eprintln!("[shell] rolled back to prev/ ({reason})");
+                sup_log::log("ROLLBACK", "prev/ → current/");
+            }
+            Ok(false) => {
+                eprintln!("[shell] no prev to roll back to ({reason})");
+                sup_log::log("ROLLBACK_NOOP", "no prev/ to restore");
+            }
+            Err(e) => {
+                eprintln!("[shell] rollback_to_prev failed: {e}");
+                sup_log::log("ROLLBACK_FAIL", &format!("{e}"));
+            }
+        }
     }
 
     /// Task C — shell self-update.  Detect a pending shell binary,
@@ -829,6 +1001,11 @@ impl ShellApp {
         // IOSurface is released.  Anything left would be inherited as
         // dangling fds in the new process — clean now.
         self.shutdown_active();
+        if let Some(pending) = self.pending.take() {
+            let PendingUpdate { conn, surface, .. } = pending;
+            conn.shutdown();
+            surface.decrement_use();
+        }
         if let Some(s) = self.surface.take() {
             s.decrement_use();
         }
@@ -873,17 +1050,17 @@ impl ShellApp {
 
     /// Resolve which banner (if any) the current shell state wants
     /// to show, and push it into the presenter if it changed.
+    ///
+    /// Note: a dual-core update on probation shows **no** banner — the
+    /// whole point is invisibility, the active core keeps rendering
+    /// normally while the pending core warms up off-screen.
     fn refresh_banner(&mut self, ctx: &MarspotAppCtx) {
         let want = if self.auto_restart_disabled {
             Some(BannerKind::UpdateFailed)
-        } else if matches!(self.sup_state, SupervisorState::Probation { .. })
-            && self.core_alive()
-        {
-            Some(BannerKind::Updating)
         } else if !self.core_alive() && self.surface.is_some() {
-            // Core process is gone (either we just SIGKILL'd it or it
-            // died and we haven't spawned a replacement yet).  Show
-            // the recovering banner while the gap lasts.
+            // Active core process is gone (just SIGKILL'd or died and we
+            // haven't respawned yet).  Show the recovering banner while
+            // the gap lasts.
             Some(BannerKind::Recovering)
         } else {
             None
@@ -945,82 +1122,53 @@ impl ShellApp {
             let w_px = s.width();
             let h_px = s.height();
             let scale = ctx.scale();
-            self.spawn_core(id, w_px, h_px, scale);
+            self.active = self.spawn_core(id, w_px, h_px, scale);
         }
     }
 
     /// Periodic check.  Fired from `user_event` (which runs every
-    /// 16 ms via the redraw pump).  Five responsibilities:
+    /// 16 ms via the redraw pump).  Responsibilities:
     ///
-    ///   1. If the core child died, react based on supervisor state
-    ///      (Probation → rollback; Idle → restart by re-spawning).
-    ///   2. If we've been in Probation for `PROBATION` seconds and
-    ///      the core is still alive, declare stable.
-    ///   3. If HELLO hasn't been ack'd within `HELLO_TIMEOUT`, treat
-    ///      the core as broken (will likely die anyway; pre-empt).
-    ///   4. Time to send the next PING — bump nonce, fire.
-    ///   5. Last matching PONG older than `PONG_DEADLINE` ⇒ core
-    ///      hung; SIGKILL + restart.
+    ///   1. If the *active* (visible) core died → restart it (and
+    ///      abandon any in-flight update).
+    ///   2. Drive any in-flight silent update via `poll_pending_update`
+    ///      (the probationary core's crash/timeout/ready handling).
+    ///   3-5. Active core healthcheck: HELLO timeout, PING, PONG
+    ///      deadline — unchanged, but scoped to `active` only.
+    ///   6. SIGUSR1 manual trigger; 7. banner refresh.
     fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
-        // 1. Did the child exit?
-        let exited = match self.active.as_mut().and_then(|c| c.child.as_mut()) {
+        // 1. Active core liveness — the core the user is looking at.
+        let active_exited = match self.active.as_mut().and_then(|c| c.child.as_mut()) {
             Some(c) => matches!(c.try_wait(), Ok(Some(_))),
             None => false,
         };
-        if exited {
-            let was_probation = matches!(self.sup_state, SupervisorState::Probation { .. });
-            // Reap the child; restart_core below drops the rest of the conn.
+        if active_exited {
+            // Reap; restart_core below drops the rest of the conn.
             if let Some(c) = self.active.as_mut() {
                 c.child.take();
             }
             self.record_crash();
-            if was_probation {
-                eprintln!("[shell] core died during probation → rolling back");
-                sup_log::log("PROBATION_FAIL", "core exited; rolling back");
-                match self.binaries.rollback_to_prev() {
-                    Ok(true) => {
-                        eprintln!("[shell] rolled back to prev/");
-                        sup_log::log("ROLLBACK", "prev/ → current/");
-                    }
-                    Ok(false) => {
-                        eprintln!("[shell] no prev to roll back to (fresh install?)");
-                        sup_log::log("ROLLBACK_NOOP", "no prev/ to restore");
-                    }
-                    Err(e) => {
-                        eprintln!("[shell] rollback_to_prev failed: {e}");
-                        sup_log::log("ROLLBACK_FAIL", &format!("{e}"));
-                    }
-                }
-                self.sup_state = SupervisorState::Failed {
-                    reason: "core exited during probation".to_string(),
-                };
-                self.restart_core(ctx);
-                if self.core_alive() {
-                    self.sup_state = SupervisorState::Idle;
-                }
+            // If an update was on probation, the *visible* core just
+            // died — abandon the unproven pending core and restore the
+            // user's core from current/.
+            if self.pending.is_some() {
+                eprintln!("[shell] active core died mid-update → aborting pending update");
+                self.abort_pending_update("active core exited during pending update");
+                self.sup_state = SupervisorState::Idle;
             } else {
-                eprintln!("[shell] core exited unexpectedly → restarting");
-                self.restart_core(ctx);
+                eprintln!("[shell] active core exited unexpectedly → restarting");
             }
+            self.restart_core(ctx);
             return;
         }
 
-        // 2. Probation graduation.
-        if self.sup_state.probation_elapsed() {
-            match self.binaries.finalize_stable() {
-                Ok(()) => {
-                    eprintln!("[shell] probation passed → stable");
-                    sup_log::log("UPDATE_STABLE", "probation passed; prev/ deleted");
-                }
-                Err(e) => {
-                    eprintln!("[shell] finalize_stable failed: {e}");
-                    sup_log::log("FINALIZE_FAIL", &format!("{e}"));
-                }
-            }
-            self.sup_state = SupervisorState::Idle;
-        }
+        // 2. Drive any in-flight silent update.  Crash / HELLO-timeout /
+        //    hang → abort + rollback (active untouched);  HelloAck +
+        //    SurfaceReady + probation elapsed → atomic swap.  Leaves
+        //    sup_state Idle when it resolves.
+        self.poll_pending_update();
 
-        // 3. HELLO timeout.
+        // 3. Active HELLO timeout.
         let hello_timed_out = self
             .active
             .as_ref()
@@ -1085,6 +1233,94 @@ impl ShellApp {
         self.refresh_banner(ctx);
     }
 
+    /// Drive an in-flight silent update (`self.pending`).  No-op when
+    /// there's no pending update.  Resolves to either an atomic swap
+    /// (`promote_pending_to_active`) or an abort + rollback, and in
+    /// both cases returns `sup_state` to `Idle`.
+    ///
+    /// The pending core gets the same liveness gauntlet as the active
+    /// one — child-exit, HELLO timeout, and PONG-deadline (we ping it
+    /// during probation) — so a binary that boots but is broken or
+    /// hangs is caught and rolled back *before* it's ever shown.
+    fn poll_pending_update(&mut self) {
+        if self.pending.is_none() {
+            return;
+        }
+        let now = Instant::now();
+
+        // a. Pending child exited, or was killed by a HELLO mismatch
+        //    (child taken → None) → abort.
+        let pending_dead = match self.pending.as_mut() {
+            Some(p) => match p.conn.child.as_mut() {
+                Some(c) => matches!(c.try_wait(), Ok(Some(_))),
+                None => true, // child already gone (mismatch kill)
+            },
+            None => false,
+        };
+        if pending_dead {
+            // Note: a pending-core death does NOT count toward the
+            // active core's crash budget — it never touched the user.
+            // It just fails this update; the rolled-back binary won't be
+            // retried until the updater re-stages pending/.
+            self.abort_pending_update("pending core exited during probation");
+            self.sup_state = SupervisorState::Idle;
+            return;
+        }
+
+        // b. Pending HELLO timeout.
+        let hello_timeout = self
+            .pending
+            .as_ref()
+            .map(|p| !p.conn.hello_acked && p.conn.spawned_at.elapsed() > HELLO_TIMEOUT)
+            .unwrap_or(false);
+        if hello_timeout {
+            self.abort_pending_update("pending core HELLO timeout");
+            self.sup_state = SupervisorState::Idle;
+            return;
+        }
+
+        // c. Pending hung after handshake (PONG deadline).
+        let pong_timeout = self
+            .pending
+            .as_ref()
+            .map(|p| p.conn.hello_acked && now.duration_since(p.conn.last_pong_at) > PONG_DEADLINE)
+            .unwrap_or(false);
+        if pong_timeout {
+            self.abort_pending_update("pending core PONG timeout (hung)");
+            self.sup_state = SupervisorState::Idle;
+            return;
+        }
+
+        // d. Ping the pending core so (c) can catch a hang.
+        let ping_nonce = self.pending.as_mut().and_then(|p| {
+            if p.conn.hello_acked && now >= p.conn.next_ping_at {
+                p.conn.last_ping_nonce = p.conn.last_ping_nonce.wrapping_add(1);
+                p.conn.next_ping_at = now + PING_INTERVAL;
+                Some(p.conn.last_ping_nonce)
+            } else {
+                None
+            }
+        });
+        if let Some(nonce) = ping_nonce {
+            if let Some(p) = self.pending.as_ref() {
+                p.conn.send(MsgType::Ping, encode_ping(nonce));
+            }
+        }
+
+        // e. Ready to promote?  HelloAck + SurfaceReady + probation
+        //    elapsed → atomic swap.
+        let ready = self
+            .pending
+            .as_ref()
+            .map(|p| p.conn.hello_acked && p.surface_ready)
+            .unwrap_or(false)
+            && self.sup_state.probation_elapsed();
+        if ready {
+            self.promote_pending_to_active();
+            self.sup_state = SupervisorState::Idle;
+        }
+    }
+
     fn start_redraw_pump(&mut self) {
         if self.redraw_thread_started {
             return;
@@ -1128,6 +1364,96 @@ impl ShellApp {
         self.surface = Some(new_surface);
         self.first_frame_ready = true;
     }
+
+    /// Route a frame from the **active** core — it drives what's on
+    /// screen.  `SurfaceReady` here is a resize handoff (same core, new
+    /// size); the dual-core update path uses `handle_pending_msg`.
+    fn handle_active_msg(&mut self, msg: ShellInbox, ctx: &MarspotAppCtx) {
+        match msg {
+            ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
+            ShellInbox::HelloAck(v) => {
+                if v == PROTO_VERSION {
+                    if let Some(c) = self.active.as_mut() {
+                        c.hello_acked = true;
+                    }
+                    eprintln!("[shell] HelloAck v={v} — core handshake OK");
+                    sup_log::log("HELLO_ACK", &format!("v={v}"));
+                } else {
+                    eprintln!(
+                        "[shell] HelloAck v={v} disagrees with our v={PROTO_VERSION}; killing core"
+                    );
+                    sup_log::log("HELLO_MISMATCH", &format!("core_v={v} shell_v={PROTO_VERSION}"));
+                    // Kill the child but keep the conn — `spawned_at` and
+                    // `hello_acked == false` stay, so the HELLO timeout in
+                    // poll_supervisor respawns it.
+                    if let Some(c) = self.active.as_mut() {
+                        if let Some(mut child) = c.child.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                }
+            }
+            ShellInbox::Pong(nonce) => {
+                if let Some(c) = self.active.as_mut() {
+                    if nonce == c.last_ping_nonce {
+                        c.last_pong_at = Instant::now();
+                    }
+                }
+            }
+            ShellInbox::CaretRect(rect) => {
+                ctx.set_caret_rect_phys(rect);
+            }
+        }
+    }
+
+    /// Route a frame from the **pending** (probationary) core.  It only
+    /// reports progress toward promotion — it isn't displayed, so it
+    /// receives no input and its caret/resize frames are irrelevant.
+    fn handle_pending_msg(&mut self, msg: ShellInbox) {
+        match msg {
+            ShellInbox::SurfaceReady(id) => {
+                // The pending core has painted its surface — one of the
+                // two promotion preconditions.
+                if let Some(p) = self.pending.as_mut() {
+                    if p.surface.id() == id {
+                        p.surface_ready = true;
+                        eprintln!("[shell] pending core SurfaceReady(id={id})");
+                        sup_log::log("PENDING_SURFACE_READY", &format!("id={id}"));
+                    }
+                }
+            }
+            ShellInbox::HelloAck(v) => {
+                if v == PROTO_VERSION {
+                    if let Some(p) = self.pending.as_mut() {
+                        p.conn.hello_acked = true;
+                    }
+                    eprintln!("[shell] pending core HelloAck v={v}");
+                    sup_log::log("PENDING_HELLO_ACK", &format!("v={v}"));
+                } else {
+                    // Version mismatch — kill the pending child; the next
+                    // poll_pending_update tick sees child==None and aborts.
+                    eprintln!("[shell] pending core HelloAck v={v} mismatches v={PROTO_VERSION}");
+                    sup_log::log("PENDING_HELLO_MISMATCH", &format!("core_v={v}"));
+                    if let Some(p) = self.pending.as_mut() {
+                        if let Some(mut child) = p.conn.child.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                    }
+                }
+            }
+            ShellInbox::Pong(nonce) => {
+                if let Some(p) = self.pending.as_mut() {
+                    if nonce == p.conn.last_ping_nonce {
+                        p.conn.last_pong_at = Instant::now();
+                    }
+                }
+            }
+            // Pending core isn't displayed — its caret is irrelevant.
+            ShellInbox::CaretRect(_) => {}
+        }
+    }
 }
 
 impl MarspotApp for ShellApp {
@@ -1160,59 +1486,30 @@ impl MarspotApp for ShellApp {
         self.surface = Some(surface);
         self.presenter = Some(presenter);
 
-        self.spawn_core(id, w_px, h_px, scale);
+        self.active = self.spawn_core(id, w_px, h_px, scale);
         self.start_redraw_pump();
         ctx.request_redraw();
     }
 
     fn user_event(&mut self, ctx: &MarspotAppCtx) {
-        // Drain anything the reader thread left in the inbox.  The
-        // reader calls `proxy.wake()` after each push, so by the time
-        // we're here at least one message is ready.
-        let inbox: Vec<ShellInbox> = match self.active.as_ref() {
+        // Drain both cores' inboxes — each reader thread calls
+        // `proxy.wake()` after a push, so at least one message is ready.
+        // Active and pending get separate routing: the active core
+        // drives what's on screen (resize swap, caret, healthcheck);
+        // the pending core only reports its probation progress.
+        let active_inbox: Vec<ShellInbox> = match self.active.as_ref() {
             Some(conn) => conn.control_rx.try_iter().collect(),
             None => Vec::new(),
         };
-        for msg in inbox {
-            match msg {
-                ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
-                ShellInbox::HelloAck(v) => {
-                    if v == PROTO_VERSION {
-                        if let Some(c) = self.active.as_mut() {
-                            c.hello_acked = true;
-                        }
-                        eprintln!("[shell] HelloAck v={v} — core handshake OK");
-                        sup_log::log("HELLO_ACK", &format!("v={v}"));
-                    } else {
-                        eprintln!(
-                            "[shell] HelloAck v={v} disagrees with our v={PROTO_VERSION}; killing core"
-                        );
-                        sup_log::log(
-                            "HELLO_MISMATCH",
-                            &format!("core_v={v} shell_v={PROTO_VERSION}"),
-                        );
-                        // Kill the child but keep the conn — `spawned_at`
-                        // and `hello_acked == false` stay, so the HELLO
-                        // timeout in poll_supervisor respawns it.
-                        if let Some(c) = self.active.as_mut() {
-                            if let Some(mut child) = c.child.take() {
-                                let _ = child.kill();
-                                let _ = child.wait();
-                            }
-                        }
-                    }
-                }
-                ShellInbox::Pong(nonce) => {
-                    if let Some(c) = self.active.as_mut() {
-                        if nonce == c.last_ping_nonce {
-                            c.last_pong_at = Instant::now();
-                        }
-                    }
-                }
-                ShellInbox::CaretRect(rect) => {
-                    ctx.set_caret_rect_phys(rect);
-                }
-            }
+        for msg in active_inbox {
+            self.handle_active_msg(msg, ctx);
+        }
+        let pending_inbox: Vec<ShellInbox> = match self.pending.as_ref() {
+            Some(p) => p.conn.control_rx.try_iter().collect(),
+            None => Vec::new(),
+        };
+        for msg in pending_inbox {
+            self.handle_pending_msg(msg);
         }
         self.poll_supervisor(ctx);
         ctx.request_redraw();
@@ -1245,6 +1542,15 @@ impl MarspotApp for ShellApp {
     }
 
     fn resized(&mut self, ctx: &MarspotAppCtx, w_phys: f64, h_phys: f64) {
+        // A pending update was sized to the old window; promoting it now
+        // would show a stale-sized surface.  Abort it (rolls the binary
+        // back) — the update retries on the next focus-loss at the new
+        // size.  Resize-during-a-30s-probation is rare, so this is the
+        // simple, correct choice over re-sizing the probationary core.
+        if self.pending.is_some() {
+            self.abort_pending_update("window resized during probation");
+            self.sup_state = SupervisorState::Idle;
+        }
         if let Some(p) = self.presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
             // Present *synchronously* inside the resize callback so
@@ -1313,6 +1619,13 @@ impl MarspotApp for ShellApp {
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
         self.shutdown_active();
+        // Tear down an in-flight update too (no rollback — we're
+        // exiting, not failing an update).
+        if let Some(pending) = self.pending.take() {
+            let PendingUpdate { conn, surface, .. } = pending;
+            conn.shutdown();
+            surface.decrement_use();
+        }
         if let Some(surface) = self.surface.take() {
             surface.decrement_use();
         }

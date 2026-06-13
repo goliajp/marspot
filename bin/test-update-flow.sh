@@ -81,26 +81,29 @@ grep -q UPDATE_APPLY "$SUP_LOG" || fail "trigger: no UPDATE_APPLY"
 echo "[3/5] trigger OK — SIGUSR1 → UPDATE_APPLY"
 
 # --- 4. Probation ---------------------------------------------------
-# Wait for a CORE_SPAWN from binaries/current/ (the new exec).
+# The pending core spawns from binaries/current/ (after promote) and
+# proves itself via PENDING_HELLO_ACK + PENDING_SURFACE_READY — the two
+# gates that, plus probation, authorise the swap.  The active core is
+# untouched throughout.
 for _ in $(seq 1 30); do
   if grep -q "CORE_SPAWN.*binaries/current/marspot-core" "$SUP_LOG"; then break; fi
   sleep 0.1
 done
 grep -q "CORE_SPAWN.*binaries/current/marspot-core" "$SUP_LOG" \
-  || fail "probation: new core never spawned from binaries/current"
-# Wait for the fresh HelloAck (count goes from 1 to 2).
+  || fail "probation: pending core never spawned from binaries/current"
 for _ in $(seq 1 50); do
-  ACKS_AFTER=$(grep -c HELLO_ACK "$SUP_LOG")
-  if (( ACKS_AFTER >= 2 )); then break; fi
+  if grep -q PENDING_SURFACE_READY "$SUP_LOG"; then break; fi
   sleep 0.1
 done
-(( ACKS_AFTER >= 2 )) || fail "probation: new core never HelloAck'd"
+grep -q PENDING_HELLO_ACK "$SUP_LOG" || fail "probation: pending core never HelloAck'd"
+grep -q PENDING_SURFACE_READY "$SUP_LOG" || fail "probation: pending core never SurfaceReady'd"
 NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
-[[ -n "$NEW_CORE_PID" ]] || fail "probation: pgrep didn't find the new core process"
-echo "[4/5] probation OK — new core pid=$NEW_CORE_PID, HelloAck'd"
+[[ -n "$NEW_CORE_PID" ]] || fail "probation: pgrep didn't find the pending core process"
+echo "[4/5] probation OK — pending core pid=$NEW_CORE_PID, HelloAck'd + SurfaceReady'd"
 
 # --- 5. Stable ------------------------------------------------------
-# Probation is 30 s; wait up to 45 with a hard upper bound.
+# Probation is 30 s; wait up to 45 with a hard upper bound.  Success is
+# the atomic swap (UPDATE_SWAP) + finalize (UPDATE_STABLE).
 START=$(date +%s)
 until grep -q UPDATE_STABLE "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 45 )); then
@@ -108,11 +111,12 @@ until grep -q UPDATE_STABLE "$SUP_LOG" 2>/dev/null; do
   fi
   sleep 1
 done
+grep -q UPDATE_SWAP "$SUP_LOG" || fail "stable: UPDATE_SWAP (presenter swap) not logged"
 [[ ! -f "$TREE/prev/marspot-core" ]] \
   || fail "stable: prev/ still has marspot-core (finalize_stable didn't run?)"
 [[ ! -f "$TREE/pending/marspot-core" ]] \
   || fail "stable: pending/ still has marspot-core (promote didn't consume?)"
-echo "[5/5] stable OK — UPDATE_STABLE logged, prev/ + pending/ empty"
+echo "[5/5] stable OK — UPDATE_SWAP + UPDATE_STABLE, prev/ + pending/ empty"
 
 cleanup
 echo "ALL PASS"
