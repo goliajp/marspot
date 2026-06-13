@@ -98,6 +98,13 @@ pub enum MsgType {
     /// ignores frames whose ID doesn't match its currently-pending
     /// surface — see Step 4's resize state machine.
     SurfaceReady = 32,
+    /// core → shell: focused-pane caret rect in view-local physical
+    /// pixels (top-left origin), or "no caret".  The shell feeds it
+    /// to `MarspotAppCtx::set_caret_rect_phys` so the IME candidate
+    /// window anchors under the caret even though the composition
+    /// state lives in the core process.  Payload: u8 present flag +
+    /// 4 × f64 LE (x, y, w, h) when present.
+    CaretRect = 33,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -118,6 +125,7 @@ impl MsgType {
             30 => MsgType::Focus,
             31 => MsgType::Resize,
             32 => MsgType::SurfaceReady,
+            33 => MsgType::CaretRect,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -500,6 +508,44 @@ pub fn decode_surface_ready(payload: &[u8]) -> io::Result<u32> {
         ));
     }
     Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
+}
+
+/// CaretRect payload: `[present: u8]` then, when present == 1,
+/// `4 × f64 LE` (x, y, w, h) in view-local physical pixels with a
+/// top-left origin — the exact tuple `set_caret_rect_phys` takes.
+pub fn encode_caret_rect(rect: Option<(f64, f64, f64, f64)>) -> Vec<u8> {
+    match rect {
+        None => vec![0],
+        Some((x, y, w, h)) => {
+            let mut out = Vec::with_capacity(33);
+            out.push(1);
+            out.extend_from_slice(&x.to_le_bytes());
+            out.extend_from_slice(&y.to_le_bytes());
+            out.extend_from_slice(&w.to_le_bytes());
+            out.extend_from_slice(&h.to_le_bytes());
+            out
+        }
+    }
+}
+
+pub fn decode_caret_rect(payload: &[u8]) -> io::Result<Option<(f64, f64, f64, f64)>> {
+    if payload.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "caret_rect payload empty",
+        ));
+    }
+    if payload[0] == 0 {
+        return Ok(None);
+    }
+    if payload.len() < 33 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "caret_rect payload < 33 bytes",
+        ));
+    }
+    let f = |i: usize| f64::from_le_bytes(payload[i..i + 8].try_into().unwrap());
+    Ok(Some((f(1), f(9), f(17), f(25))))
 }
 
 pub fn encode_preedit(text: &str) -> Vec<u8> {

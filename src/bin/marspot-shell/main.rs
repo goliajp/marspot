@@ -388,7 +388,8 @@ use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
-    decode_hello_ack, decode_pong, decode_surface_ready, encode_focus, encode_hello,
+    decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_focus,
+    encode_hello,
     encode_key_event, encode_mouse, encode_ping, encode_preedit, encode_resize, encode_scroll,
     event_to_wire, struct_to_mods_byte, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
     ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
@@ -413,6 +414,10 @@ enum ShellInbox {
     SurfaceReady(u32),
     HelloAck(u32),
     Pong(u32),
+    /// Focused-pane caret rect from the core (view-local physical
+    /// pixels), forwarded to AppKit so the IME candidate window
+    /// anchors under the caret.
+    CaretRect(Option<(f64, f64, f64, f64)>),
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -1121,6 +1126,9 @@ impl MarspotApp for ShellApp {
                         self.last_pong_at = Some(Instant::now());
                     }
                 }
+                ShellInbox::CaretRect(rect) => {
+                    ctx.set_caret_rect_phys(rect);
+                }
             }
         }
         self.poll_supervisor(ctx);
@@ -1264,6 +1272,9 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         decode_hello_ack(&frame.payload).ok().map(ShellInbox::HelloAck)
                     }
                     MsgType::Pong => decode_pong(&frame.payload).ok().map(ShellInbox::Pong),
+                    MsgType::CaretRect => decode_caret_rect(&frame.payload)
+                        .ok()
+                        .map(ShellInbox::CaretRect),
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.
                     _ => None,
