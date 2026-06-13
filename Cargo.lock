@@ -151,12 +151,20 @@ dependencies = [
  "core-text",
  "foreign-types",
  "libc",
+ "marspot-term",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
  "png",
+]
+
+[[package]]
+name = "marspot-term"
+version = "0.2.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

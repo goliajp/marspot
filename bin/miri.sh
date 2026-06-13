@@ -10,10 +10,14 @@
 # pthread, mmap, Metal). The default filter therefore covers only
 # the four modules that are pure Rust end-to-end:
 #
-#   parser   — VT/xterm escape-sequence state machine
-#   grid     — cell grid + scrollback ring
-#   tmux     — tmux control-mode protocol decoder
-#   input    — keyboard event → byte mapping
+#   parser      — VT/xterm escape-sequence state machine
+#   grid        — cell grid + scrollback ring
+#   tmux        — tmux control-mode protocol decoder
+#   input_core  — keyboard event → byte mapping
+#
+# These now live in the `marspot-term` crate (the zero-GUI terminal
+# engine, extracted for target #4); Miri runs against `-p marspot-term`
+# so it isn't blocked by the GUI crate's AppKit/Metal FFI.
 #
 # Override with MIRI_MODULES, e.g.:
 #   MIRI_MODULES="parser:: grid::" bin/miri.sh
@@ -32,7 +36,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-MIRI_MODULES="${MIRI_MODULES:-parser:: grid:: tmux:: input::}"
+MIRI_MODULES="${MIRI_MODULES:-parser:: grid:: tmux:: input_core::}"
 
 if ! rustup toolchain list | grep -q '^nightly-'; then
   echo "nightly toolchain missing: rustup toolchain install nightly --component miri" >&2
@@ -44,4 +48,4 @@ if ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -q
 fi
 
 # shellcheck disable=SC2086
-exec cargo +nightly miri test --lib -- $MIRI_MODULES
+exec cargo +nightly miri test -p marspot-term --lib -- $MIRI_MODULES

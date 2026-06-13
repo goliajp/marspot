@@ -290,7 +290,7 @@ fn scrape_asset_url(body: &str, asset_name: &str) -> Option<String> {
 /// The release-signing public key, checked in at
 /// `keys/marspot-update.pub` and baked into the binary so the trust
 /// anchor travels with the code instead of the filesystem.
-const UPDATE_PUBKEY_PEM: &str = include_str!("../keys/marspot-update.pub");
+const UPDATE_PUBKEY_PEM: &str = include_str!("../../../keys/marspot-update.pub");
 
 /// Verify `file` against its detached `sig` using the embedded
 /// public key.  ECDSA P-256 / SHA-256 via `/usr/bin/openssl dgst`

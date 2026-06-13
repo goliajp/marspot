@@ -13,4 +13,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-exec cargo nextest run --lib "$@"
+# --workspace so the marspot-term crate's tests (the terminal engine —
+# parser/grid/terminal/scrollback/… extracted for target #4) run too,
+# not just the GUI crate's handful of lib tests.
+exec cargo nextest run --workspace --lib "$@"

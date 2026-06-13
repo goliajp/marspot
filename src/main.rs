@@ -411,7 +411,13 @@ impl MarspotApp for Marspot {
         let term = self.panes[self.focused_idx].session().terminal();
         let app_mode = term.cursor_key_application_mode();
         let bracketed = term.bracketed_paste_mode();
-        if let Some(bytes) = key_event_to_bytes(&event, modifiers, app_mode, bracketed) {
+        if let Some(bytes) = key_event_to_bytes(
+            &event,
+            modifiers,
+            app_mode,
+            bracketed,
+            marspot::input::read_clipboard_text,
+        ) {
             if self.record_latency && self.pending_keystroke_t0.is_none() {
                 self.pending_keystroke_t0 = Some(std::time::Instant::now());
             }

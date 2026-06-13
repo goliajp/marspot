@@ -210,7 +210,9 @@ impl Pane {
         // \e[201~` when the app has opted in.
         let app_mode = self.session.terminal().cursor_key_application_mode();
         let bracketed = self.session.terminal().bracketed_paste_mode();
-        let Some(bytes) = key_event_to_bytes(event, mods, app_mode, bracketed) else {
+        let Some(bytes) =
+            key_event_to_bytes(event, mods, app_mode, bracketed, crate::input::read_clipboard_text)
+        else {
             return false;
         };
         let mut need_redraw = false;

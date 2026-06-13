@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build a release tarball the silent-update pipeline can consume.
-# Output layout (consumed by `src/updater.rs::extract_binary` via
+# Output layout (consumed by `marspot-term`'s `updater::extract_binary` via
 # `find_named_file`):
 #
 #   marspot-aarch64-apple-darwin.tar.gz

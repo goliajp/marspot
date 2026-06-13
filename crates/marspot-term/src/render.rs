@@ -98,7 +98,7 @@ pub(crate) const ARM_E: u8 = 0b1000;
 /// only differ at sub-pixel curvature we don't model, so visually they
 /// render identical and importantly join the adjacent `─` / `│` strokes
 /// without seams — which the font path would NOT do.
-pub(crate) fn box_drawing_arms(ch: char) -> Option<u8> {
+pub fn box_drawing_arms(ch: char) -> Option<u8> {
     Some(match ch {
         '\u{2500}' | '\u{2501}' => ARM_W | ARM_E, // ─ ━
         '\u{2502}' | '\u{2503}' => ARM_N | ARM_S, // │ ┃
@@ -125,7 +125,7 @@ pub(crate) fn box_drawing_arms(ch: char) -> Option<u8> {
 /// Each arm extends past the centerline by `half_t_hi` into the
 /// perpendicular arm's column so the corner overlap region is fully
 /// covered with no notch.
-pub(crate) fn rasterize_arms_into_buf(buf: &mut [u8], w: usize, h: usize, arms: u8) {
+pub fn rasterize_arms_into_buf(buf: &mut [u8], w: usize, h: usize, arms: u8) {
     // Stroke thickness — kitty/alacritty's `max(1, round(cell_w/8))`.
     let t = (((w as f32) / 8.0).round() as i32).max(1) as usize;
     let half_t_lo = t / 2; // integer floor
@@ -175,7 +175,7 @@ pub(crate) fn rasterize_arms_into_buf(buf: &mut [u8], w: usize, h: usize, arms: 
 /// cell (SCREEN bottom), `y_top_8` is at the top. The rasteriser flips
 /// to y-down image orientation when writing to the mask buffer.
 #[derive(Clone, Copy)]
-pub(crate) struct BlockRect {
+pub struct BlockRect {
     pub x_left_8: u8,
     pub y_bot_8: u8,
     pub x_right_8: u8,
@@ -183,7 +183,7 @@ pub(crate) struct BlockRect {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct BlockShape {
+pub struct BlockShape {
     /// Up to 2 filled rectangles per shape — quadrant chars like
     /// `▙` need two rects to form an L; `█` and friends need just one.
     pub rects: [Option<BlockRect>; 2],
@@ -225,7 +225,7 @@ const fn shaded(alpha: f64) -> BlockShape {
 /// shaded). Used by claudecode for the pixel-art welcome icon and by
 /// progress bars, sparklines, etc. The font's glyphs for these don't
 /// span the cell so we paint them directly like box-drawing chars.
-pub(crate) fn block_element_rects(ch: char) -> Option<BlockShape> {
+pub fn block_element_rects(ch: char) -> Option<BlockShape> {
     Some(match ch {
         '\u{2580}' => one(r(0, 4, 8, 8)),                 // ▀ upper half
         '\u{2581}' => one(r(0, 0, 8, 1)),                 // ▁ lower 1/8
@@ -267,7 +267,7 @@ pub(crate) fn block_element_rects(ch: char) -> Option<BlockShape> {
 /// in y-down image orientation. BlockRect coords are in CG y-up eighths
 /// (the same units `block_element_rects` produces), so we flip the y
 /// component when computing image rows.
-pub(crate) fn rasterize_block_into_buf(buf: &mut [u8], w: usize, h: usize, shape: BlockShape) {
+pub fn rasterize_block_into_buf(buf: &mut [u8], w: usize, h: usize, shape: BlockShape) {
     let fill_val = if shape.alpha < 1.0 {
         (255.0 * shape.alpha) as u8
     } else {

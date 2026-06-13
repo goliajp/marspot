@@ -1,0 +1,14 @@
+[package]
+name = "marspot-term"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+# The zero-GUI terminal engine: VT/xterm parser, cell grid, bounded
+# scrollback, terminal emulator, PTY, shelld client/protocol, and the
+# pure key→bytes input mapping. Deliberately depends on NOTHING that
+# links AppKit/Metal/CoreText, so a light per-session process (target
+# #4's L3) can link it at a ~3–5 MB resident floor. See
+# docs/per-session-l3.md.
+[dependencies]
+libc = "0.2"

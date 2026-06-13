@@ -582,7 +582,7 @@ pub fn decode_preedit(payload: &[u8]) -> io::Result<String> {
 // half without redefining it.
 // ───────────────────────────────────────────────────────────────────
 
-use crate::input::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
+use crate::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
 
 pub fn mods_to_struct(b: u8) -> Modifiers {
     let (shift, ctrl, alt, super_) = mods_from_byte(b);
