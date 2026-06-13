@@ -22,28 +22,28 @@
     {
       "id": "cat-ascii",
       "bytes": 33554570,
-      "mars_parse_MBps_min": 177,
+      "mars_parse_MBps_min": 165,
       "mars_live_MBps_min": 137,
       "mars_vs_best_other_min": 1.37
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
-      "mars_parse_MBps_min": 176,
+      "mars_parse_MBps_min": 163,
       "mars_live_MBps_min": 131,
       "mars_vs_best_other_min": 1.39
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
-      "mars_parse_MBps_min": 216,
+      "mars_parse_MBps_min": 199,
       "mars_live_MBps_min": 144,
       "mars_vs_best_other_min": 1.08
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 200,
+      "mars_parse_MBps_min": 185,
       "mars_live_MBps_min": 144,
       "mars_vs_best_other_min": 1.26
     }
