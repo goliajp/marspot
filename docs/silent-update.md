@@ -129,15 +129,18 @@ v1.1 (current): minisign-style detached-signature chain.
 ## Operations
 
 ```bash
-# Cold install:
-bin/install-shelld.sh           # daemon + LaunchAgent
-bin/install-shell.sh            # shell+core into ~/.local/Marspot.app
-open ~/.local/Marspot.app       # launch
+# Install / update the terminal you actually use — builds, installs
+# real bundle copies, then silent-updates the running app in place
+# (window + sessions survive; only changed shell/core swap; re-triggers
+# through probation windows automatically):
+bin/install-local.sh
+bin/install-local.sh --with-shelld   # also bump the daemon (kills sessions)
+bin/install-local.sh --status        # what's installed + running
 
-# Dev loop — push the local build into the RUNNING app (window +
-# sessions survive; only changed binaries swap; re-triggers through
-# probation windows automatically):
-bin/dev-push.sh
+# Iterate without touching the installed app — these run in a
+# MARSPOT_STATE_DIR sandbox with their own shelld (see bin/_dev-sandbox.sh):
+bin/run.sh                      # standalone marspot (tmux / bench / dev)
+bin/test-all.sh                 # full shell+core regression suite
 
 # Check what's happening:
 marspot-shell --status

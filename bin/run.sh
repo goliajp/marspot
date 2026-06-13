@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Dev sandbox: run.sh's standalone marspot connects to a sandbox
+# shelld on its own MARSPOT_STATE_DIR, never the installed app's
+# daemon — so iterating here can't disturb the terminal you use.
+source "$ROOT/bin/_dev-sandbox.sh"
+
 PROFILE=debug
 CARGO_FLAGS=()
 for arg in "$@"; do
@@ -53,6 +58,11 @@ if [ ! -x "$BIN" ]; then
   echo "error: binary not found at $BIN" >&2
   exit 1
 fi
+# Standalone marspot connects to shelld; make sure the sandbox daemon
+# is up (on MARSPOT_STATE_DIR) so it doesn't fall back to / collide
+# with the installed app's daemon.
+dev_ensure_shelld || { echo "error: could not start sandbox shelld" >&2; exit 1; }
+
 echo "==> launching $BIN"
 # Fully detach stdio so the child outlives this script.  Without redirecting,
 # closing the script's stdin/out/err can take marspot down with it on macOS.

@@ -14,9 +14,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-rollback.log
 
 fail() {
@@ -27,8 +29,7 @@ fail() {
 }
 
 cleanup() {
-  pkill -9 -f '/marspot-shell( |$)' >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'  >/dev/null 2>&1 || true
+  dev_kill_shell_core
 }
 trap cleanup EXIT
 
@@ -50,8 +51,10 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
+dev_ensure_shelld || fail "sandbox shelld"
 cleanup
-rm -rf "$HOME/Library/Caches/marspot/binaries"
+dev_wipe_state
+mkdir -p "$(dirname "$SUP_LOG")"
 > "$SUP_LOG" 2>/dev/null
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
@@ -72,8 +75,8 @@ echo "[1/4] boot OK — HelloAck logged"
 # so the second promote has something to fall back to.
 
 # --- 2. First update (populate prev/ via successful promote) -------
-mkdir -p "$HOME/Library/Caches/marspot/binaries/pending"
-cp "$CORE_BIN" "$HOME/Library/Caches/marspot/binaries/pending/marspot-core"
+mkdir -p "$TREE/pending"
+cp "$CORE_BIN" "$TREE/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null
 # Wait for UPDATE_STABLE — this is the moment current/ is the new
 # binary and prev/ has just been deleted by finalize_stable.  We
@@ -89,7 +92,7 @@ done
 echo "[2/4] first update OK — current/ holds real binary"
 
 # --- 3. Stage broken + trigger rollback -----------------------------
-stage_broken "$HOME/Library/Caches/marspot/binaries/pending/marspot-core"
+stage_broken "$TREE/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null
 START=$(date +%s)
 until grep -q "ROLLBACK\b" "$SUP_LOG"; do
@@ -103,11 +106,11 @@ grep -q "ROLLBACK\b.*prev/" "$SUP_LOG" || fail "ROLLBACK (prev/→current/) not 
 echo "[3/4] rollback OK — PROBATION_FAIL → ROLLBACK (prev/→current/)"
 
 # --- 4. Verify filesystem + re-spawn --------------------------------
-[[ -f "$HOME/Library/Caches/marspot/binaries/current/marspot-core" ]] \
+[[ -f "$TREE/current/marspot-core" ]] \
   || fail "current/ has no marspot-core after rollback"
-[[ -f "$HOME/Library/Caches/marspot/binaries/quarantine/marspot-core" ]] \
+[[ -f "$TREE/quarantine/marspot-core" ]] \
   || fail "quarantine/marspot-core missing — broken binary not preserved"
-if ! cmp -s "$CORE_BIN" "$HOME/Library/Caches/marspot/binaries/current/marspot-core"; then
+if ! cmp -s "$CORE_BIN" "$TREE/current/marspot-core"; then
   fail "current/marspot-core != original CORE_BIN — rollback restored the wrong file"
 fi
 # Wait for post-rollback HelloAck.

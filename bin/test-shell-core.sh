@@ -21,6 +21,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 LOG=/tmp/marspot-test-shell-core.log
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
@@ -33,10 +34,7 @@ fail() {
 }
 
 cleanup() {
-  # Match `marspot-shell` not `marspot-shelld` (the daemon) — see
-  # test-update-flow.sh for the gory details.
-  pkill -9 -f '/marspot-shell( |$)'  >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'   >/dev/null 2>&1 || true
+  dev_kill_shell_core
 }
 trap cleanup EXIT
 
@@ -45,8 +43,9 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
-# Wipe stale binary tree so the supervisor starts from a clean slate.
-rm -rf "$HOME/Library/Caches/marspot/binaries"
+# Sandbox daemon + clean slate (sandbox tree only — never production).
+dev_ensure_shelld || fail "could not start sandbox shelld"
+dev_wipe_state
 
 # A previously-tripped crash budget poisons the test: each SIGKILL
 # pushes a new entry into the rolling window, so re-running within

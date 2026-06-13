@@ -21,9 +21,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-update-flow.log
 
 fail() {
@@ -34,13 +36,7 @@ fail() {
 }
 
 cleanup() {
-  # IMPORTANT: matches must be specific to avoid clobbering
-  # `marspot-shelld` (the daemon — `marspot-shelld` contains the
-  # substring `marspot-shell`).  Match on the trailing space /
-  # whitespace boundary using `-x` doesn't quite work for `-f`
-  # patterns, so we use a regex that requires not-`d` at end.
-  pkill -9 -f '/marspot-shell( |$)'  >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'   >/dev/null 2>&1 || true
+  dev_kill_shell_core
 }
 trap cleanup EXIT
 
@@ -48,8 +44,10 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
+dev_ensure_shelld || { echo "FAIL: sandbox shelld"; exit 1; }
 cleanup
-rm -rf "$HOME/Library/Caches/marspot/binaries"
+dev_wipe_state
+mkdir -p "$(dirname "$SUP_LOG")"
 > "$SUP_LOG" 2>/dev/null
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
@@ -65,9 +63,9 @@ PRE_CORE_PID=$(pgrep -f "$CORE_BIN" | head -1)
 echo "[1/5] boot OK — core pid=$PRE_CORE_PID, HelloAck logged"
 
 # --- 2. Stage -------------------------------------------------------
-mkdir -p "$HOME/Library/Caches/marspot/binaries/pending"
-cp "$CORE_BIN" "$HOME/Library/Caches/marspot/binaries/pending/marspot-core"
-[[ -f "$HOME/Library/Caches/marspot/binaries/pending/marspot-core" ]] \
+mkdir -p "$TREE/pending"
+cp "$CORE_BIN" "$TREE/pending/marspot-core"
+[[ -f "$TREE/pending/marspot-core" ]] \
   || fail "staging: pending/marspot-core didn't land"
 echo "[2/5] stage OK — pending/marspot-core in place"
 
@@ -97,7 +95,7 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 (( ACKS_AFTER >= 2 )) || fail "probation: new core never HelloAck'd"
-NEW_CORE_PID=$(pgrep -f "$HOME/Library/Caches/marspot/binaries/current/marspot-core" | head -1)
+NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core" | head -1)
 [[ -n "$NEW_CORE_PID" ]] || fail "probation: pgrep didn't find the new core process"
 echo "[4/5] probation OK — new core pid=$NEW_CORE_PID, HelloAck'd"
 
@@ -110,9 +108,9 @@ until grep -q UPDATE_STABLE "$SUP_LOG" 2>/dev/null; do
   fi
   sleep 1
 done
-[[ ! -f "$HOME/Library/Caches/marspot/binaries/prev/marspot-core" ]] \
+[[ ! -f "$TREE/prev/marspot-core" ]] \
   || fail "stable: prev/ still has marspot-core (finalize_stable didn't run?)"
-[[ ! -f "$HOME/Library/Caches/marspot/binaries/pending/marspot-core" ]] \
+[[ ! -f "$TREE/pending/marspot-core" ]] \
   || fail "stable: pending/ still has marspot-core (promote didn't consume?)"
 echo "[5/5] stable OK — UPDATE_STABLE logged, prev/ + pending/ empty"
 

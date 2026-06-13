@@ -21,9 +21,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
-TREE="$HOME/Library/Caches/marspot/binaries"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-real-update.log
 PORT=6024
 ASSET=marspot-aarch64-apple-darwin.tar.gz
@@ -41,8 +42,7 @@ fail() {
 
 cleanup() {
   [[ -n "$HTTP_PID" ]] && kill "$HTTP_PID" >/dev/null 2>&1
-  pkill -9 -f '/marspot-shell( |$)' >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'  >/dev/null 2>&1 || true
+  dev_kill_shell_core
   rm -rf "$SERVE_DIR"
 }
 trap cleanup EXIT
@@ -83,9 +83,10 @@ curl -sf "http://127.0.0.1:$PORT/feed.json" >/dev/null \
 echo "[1/5] feed OK — signed tarball + feed.json served on :$PORT"
 
 # --- 1. Boot with the fake feed --------------------------------------
-pkill -9 -f '/marspot-shell( |$)' >/dev/null 2>&1 || true
-pkill -9 -f '/marspot-core( |$)'  >/dev/null 2>&1 || true
-rm -rf "$TREE"
+dev_ensure_shelld || fail "sandbox shelld"
+dev_kill_shell_core
+dev_wipe_state
+mkdir -p "$(dirname "$SUP_LOG")"
 : > "$SUP_LOG" 2>/dev/null || true
 MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/feed.json" \
   nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &

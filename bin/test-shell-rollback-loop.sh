@@ -16,10 +16,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
-TREE="$HOME/Library/Caches/marspot/binaries"
-LAUNCH_LOG="$HOME/Library/Caches/marspot/shell_launches.tsv"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+TREE="$MARSPOT_STATE_DIR/binaries"
+LAUNCH_LOG="$MARSPOT_STATE_DIR/shell_launches.tsv"
 MARKER=/tmp/marspot-rollback-loop-marker
 
 fail() {
@@ -32,8 +33,7 @@ fail() {
 }
 
 cleanup() {
-  pkill -9 -f '/marspot-shell( |$)' >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'  >/dev/null 2>&1 || true
+  dev_kill_shell_core
 }
 trap cleanup EXIT
 
@@ -62,6 +62,7 @@ PREV
 reset() {
   cleanup
   rm -rf "$TREE" "$LAUNCH_LOG" "$MARKER"
+  mkdir -p "$(dirname "$SUP_LOG")"
   : > "$SUP_LOG" 2>/dev/null || true
 }
 
@@ -69,6 +70,7 @@ if [[ ! -x "$SHELL_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell 2>&1 | tail -3 )
 fi
 [[ -x "$SHELL_BIN" ]] || fail "no $SHELL_BIN after build"
+dev_ensure_shelld || fail "sandbox shelld"
 
 # --- Case A: crash loop with a prev/ to fall back to ----------------
 reset

@@ -17,33 +17,24 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 
-# Ensure shelld is alive — every test boots a shell+core pair that
-# needs a daemon to attach to.  If the LaunchAgent isn't bootstrapped
-# (fresh dev box), bootstrap it now.
+# All tests run in the MARSPOT_STATE_DIR sandbox with their OWN
+# shelld — never the installed LaunchAgent.  Building / killing /
+# wiping here can't reach the terminal you actually use.
 ensure_shelld() {
-  if pgrep -fl marspot-shelld >/dev/null 2>&1; then
-    return 0
-  fi
-  local plist="$HOME/Library/LaunchAgents/com.marspot.shelld.plist"
-  if [[ -f "$plist" ]]; then
-    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || true
-    sleep 1
-  fi
-  pgrep -fl marspot-shelld >/dev/null 2>&1 || {
-    echo "shelld not running.  Run \`bin/install-shelld.sh\` first."
-    exit 1
-  }
+  dev_ensure_shelld || { echo "could not start sandbox shelld"; exit 1; }
 }
 
-# Wipe state shared across tests so the next one starts clean.
+# Wipe sandbox state between tests (sandbox tree only).
 reset_state() {
-  rm -rf "$HOME/Library/Caches/marspot/binaries"
-  : > "$HOME/Library/Logs/Marspot/supervisor.log" 2>/dev/null || true
-  pkill -9 -f '/marspot-shell( |$)' >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'  >/dev/null 2>&1 || true
+  dev_kill_shell_core
+  dev_wipe_state
   sleep 0.5
 }
+
+# Stop the sandbox shelld when the whole suite finishes.
+trap dev_stop_shelld EXIT
 
 run() {
   local script="$1"

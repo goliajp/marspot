@@ -19,6 +19,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$ROOT/bin/_dev-sandbox.sh"
 LOG=/tmp/marspot-soak-shell-core.log
 RSS_LOG=/tmp/marspot-soak-shell-core.rss.tsv
 SHELL_BIN="$ROOT/target/release/marspot-shell"
@@ -44,9 +45,7 @@ fail() {
 }
 
 cleanup() {
-  # Match `marspot-shell` not `marspot-shelld` (the daemon).
-  pkill -9 -f '/marspot-shell( |$)'  >/dev/null 2>&1 || true
-  pkill -9 -f '/marspot-core( |$)'   >/dev/null 2>&1 || true
+  dev_kill_shell_core
 }
 trap cleanup EXIT
 
@@ -54,7 +53,8 @@ if [[ ! -x "$SHELL_BIN" || ! -x "$CORE_BIN" ]]; then
   ( cd "$ROOT" && cargo build --release --bin marspot-shell --bin marspot-core 2>&1 | tail -3 )
 fi
 
-rm -rf "$HOME/Library/Caches/marspot/binaries"
+dev_ensure_shelld || fail "sandbox shelld"
+dev_wipe_state
 cleanup
 > "$LOG"
 echo -e "t_s\tshell_rss_kib\tcore_rss_kib\tcore_pid" > "$RSS_LOG"
