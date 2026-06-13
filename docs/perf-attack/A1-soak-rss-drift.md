@@ -1,8 +1,55 @@
 # A1 — active-9x-soak RSS drift FAIL
 
-> Status: queued
+> Status: **per-session half resolved under the L3 architecture (2026-06-13)** — core-side drift under sustained load is the one remaining check
 > Master:  ../perf-attack.md
 > Related: C (per-session RSS bloat — likely shared root)
+
+## ⚠️ Re-scope (2026-06-13): A1 was measured on the now-non-default architecture
+
+A1 was filed against the **standalone in-process `marspot`** (src/main.rs:
+9 grids + parser + scrollback + PTY all in one address space). As of
+target #4 (commits through `004fa21`, L3 now the default) the product is
+**shell→core→L3**: the parser/terminal/grid/scrollback/PTY half — i.e.
+*every surviving A1 leak candidate* (4 PTY-chunk heap fragmentation, 5
+Session/Terminal accumulation; 1–3 already ruled out) — runs in N separate
+`marspot-session` (L3) processes. So A1 splits in two under the real product:
+
+- **per-session engine** (PTY/terminal/grid/scrollback) → now in the L3 process.
+- **renderer/core** (render scratch, MTLBuffer/autorelease, atlas, font_cache) → now in marspot-core, which renders from shm mirrors.
+
+### Result — per-session engine is BOUNDED (the 9×-multiplied factor)
+
+`bin/soak-l3-drift.sh` (probe `crates/marspot-session/examples/l3_drift_probe.rs`)
+floods ONE L3 with `while :; do seq 1 200; done` and samples its RSS over a
+sustained window:
+
+| window | drift q4/q1 | abs growth | rate |
+|---|---|---|---|
+| 60 s  | 1.004 | +256 KiB | — |
+| 300 s | **1.003** | **+272 KiB** | **~70 KiB/min** |
+
+vs A1's standalone leak of **~10 MiB/min** — this is **~150× lower**, flat
+post-plateau (the scrollback ring fills to ~44 MiB resident and stops). The
+"cannot get slower the longer it runs" commitment **holds for the
+per-session engine** — the standalone leak's surviving candidates (PTY
+chunk fragmentation, Session/Terminal accumulation) do NOT reproduce when
+the engine runs as its own process. This is the factor the real 9-grid
+product multiplies, so it's the load-bearing half.
+
+> NB: ~44 MiB/session resident under heavy use is the *bounded scrollback
+> ring* (26 624 slots), not a leak. Whether to shrink that default is the
+> separate D-scrollback / "opportunistic smaller ring" tuning question.
+
+### Remaining: core-side drift under sustained 9-session load
+
+The renderer half (render_metal.rs scratch high-water-mark, Metal
+command-buffer / autorelease-pool drain timing) now lives in marspot-core
+and re-renders on every L3 `GridReady`. It shares code with standalone
+marspot's render path, so a *pure-render* leak would also have shown in the
+standalone soak; the surviving evidence points at the per-session half
+(now cleared). Still, the honest close-out is a full-tree sustained soak
+(shell→core→9 L3, flood all 9 via shelld writes, sample **core's** RSS over
+5–30 min). Tracked as the one remaining A1-under-L3 check.
 
 ## What's broken
 
