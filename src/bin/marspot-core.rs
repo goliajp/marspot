@@ -18,8 +18,10 @@
 //! Out of scope (standalone-only): tmux -CC mode, latency / RSS
 //! profiling instrumentation, --snapshot / --bench.
 
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,10 +29,11 @@ use std::time::{Duration, Instant};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLTexture;
 
+use marspot::grid_shm::{self, ENV_SHM_FD, GridShmReader};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::layout::Layout;
-use marspot::pane::Pane;
+use marspot::pane::{L3Conn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
@@ -91,6 +94,11 @@ enum CoreEvent {
     Ping(u32),
     /// Shell closed the control socket — supervisor will tear us down.
     Closed,
+    /// An L3 session process (`MARSPOT_L3`) published a new grid into
+    /// shared memory.  A pure wake: it unblocks the loop so `pump_all`
+    /// re-reads the shm mirror promptly instead of waiting on the 1 s
+    /// heartbeat.  Carries no data (the mirror is read from shm).
+    L3Ready,
 }
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
@@ -143,6 +151,107 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
             }
         }
     }
+}
+
+/// Background reader on the L2↔L3 control socket: an L3 session pokes
+/// `GridReady` whenever it republishes its grid; we turn each into an
+/// `L3Ready` wake so the main loop re-reads the shm mirror promptly.
+/// EOF / error just ends the thread — the pane's own `try_wait` detects
+/// the child's exit.
+fn l3_reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
+    loop {
+        match Frame::read_from(&mut stream) {
+            Ok(Some(f)) => {
+                if f.msg_type == MsgType::GridReady && tx.send(CoreEvent::L3Ready).is_err() {
+                    return;
+                }
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+/// Spawn one per-session L3 process and assemble it into an L3-backed
+/// pane.  L2 owns the shm region's lifecycle: it creates + sizes the
+/// region, inherits the fd (4) and the control socket (3) into the
+/// child, maps the region as a reader, and starts a thread turning L3's
+/// `GridReady` pokes into `L3Ready` wakes.  Behind `MARSPOT_L3=1`.
+fn spawn_l3_pane(
+    cols: u16,
+    rows: u16,
+    event_tx: &Sender<CoreEvent>,
+) -> std::io::Result<Pane> {
+    // L2 creates + stamps the region; both ends map the same fd.
+    let region = grid_shm::create_region(cols, rows)?;
+    let region_raw = region.as_raw_fd();
+
+    // Bidirectional control socket; the child inherits one end as fd 3.
+    let mut sp = [0i32; 2];
+    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sp.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let parent_fd: RawFd = sp[0];
+    let child_fd: RawFd = sp[1];
+
+    // marspot-session lives next to marspot-core; an explicit override
+    // (dev / tests) wins.
+    let session_bin = match std::env::var_os("MARSPOT_SESSION_BIN") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_exe()?
+            .parent()
+            .map(|d| d.join("marspot-session"))
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no current_exe parent")
+            })?,
+    };
+
+    const SHM_TARGET_FD: RawFd = 4;
+    eprintln!(
+        "[core] spawning L3: {} ({cols}x{rows}) control_fd={DEFAULT_CONTROL_FD} shm_fd={SHM_TARGET_FD}",
+        session_bin.display()
+    );
+    let mut cmd = Command::new(&session_bin);
+    cmd.env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
+        .env(ENV_SHM_FD, SHM_TARGET_FD.to_string());
+    // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
+    // libc calls (dup2/close/fcntl) are used, mirroring the shell→core
+    // spawn template.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Move the inherited ends onto the well-known fds, then strip
+            // CLOEXEC so they survive exec.
+            for (src, dst) in [(child_fd, DEFAULT_CONTROL_FD), (region_raw, SHM_TARGET_FD)] {
+                if src != dst {
+                    if libc::dup2(src, dst) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                let flags = libc::fcntl(dst, libc::F_GETFD);
+                if flags >= 0 {
+                    libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
+    let child = cmd.spawn()?;
+    eprintln!("[core] L3 pid={}", child.id());
+
+    // Parent no longer needs the child's socket end.
+    unsafe { libc::close(child_fd) };
+
+    // Map the region as a reader (mmap survives the fd closing, so the
+    // owned `region` can drop after).
+    let reader = GridShmReader::from_fd(region_raw)?;
+    drop(region);
+
+    // Control: write half → L3Conn (forward keys); read half → poke thread.
+    let control = unsafe { UnixStream::from_raw_fd(parent_fd) };
+    let reader_stream = control.try_clone()?;
+    let tx = event_tx.clone();
+    std::thread::spawn(move || l3_reader_loop(reader_stream, tx));
+
+    Ok(Pane::new_l3(L3Conn::new(child, control, reader)))
 }
 
 /// The full multi-pane UI state machine — `Marspot` (src/main.rs)
@@ -367,9 +476,28 @@ impl CoreApp {
         }
 
         let Some(pane) = self.panes.get(self.focused_idx) else { return };
-        let term = pane.session().terminal();
-        let app_mode = term.cursor_key_application_mode();
-        let bracketed = term.bracketed_paste_mode();
+
+        // L3-backed pane: forward the key *event* to the session process,
+        // which encodes with its own modes + local-echoes, then republishes
+        // the grid (we re-read it on the GridReady wake).  No local write /
+        // predict here.
+        if pane.is_l3() {
+            if self.panes[self.focused_idx].snap_to_live() {
+                self.needs_render = true;
+            }
+            if self.selection.is_some() {
+                self.selection = None;
+                self.selection_dragging = false;
+                self.needs_render = true;
+            }
+            self.panes[self.focused_idx]
+                .session_mut()
+                .forward_key(&event, modifiers);
+            return;
+        }
+
+        let app_mode = pane.session().cursor_key_application_mode();
+        let bracketed = pane.session().bracketed_paste_mode();
         if let Some(bytes) = key_event_to_bytes(
             &event,
             modifiers,
@@ -507,7 +635,7 @@ impl CoreApp {
         if let Some((idx, col, row)) = cell_pos_hit {
             let pane = &self.panes.get(idx);
             if let Some(pane) = pane {
-                let rows = pane.session().terminal().grid().rows() as u32;
+                let rows = pane.session().grid().rows() as u32;
                 let vo = pane.view_offset() as u32;
                 let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
                 self.selection = Some(Selection {
@@ -588,7 +716,7 @@ impl CoreApp {
 
         // Re-read view_offset AFTER any auto-scroll above.
         let pane = &self.panes[target_idx];
-        let rows = pane.session().terminal().grid().rows() as u32;
+        let rows = pane.session().grid().rows() as u32;
         let vo = pane.view_offset() as u32;
         let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
 
@@ -739,11 +867,10 @@ impl CoreApp {
         self.needs_render = false;
 
         self.panes.get(focused).and_then(|pane| {
-            let term = pane.session().terminal();
-            if !term.cursor_visible() {
+            if !pane.session().cursor_visible() {
                 return None;
             }
-            let (col, row) = term.grid().cursor();
+            let (col, row) = pane.session().grid().cursor();
             self.layout
                 .caret_view_phys_rect(focused, col, row, cell_w, cell_h)
         })
@@ -823,30 +950,48 @@ fn main() {
         );
         (boot.cells[0].cols, boot.cells[0].rows)
     };
-    let existing: Vec<marspot::shelld_proto::SessionInfo> = client
-        .list_sessions()
-        .unwrap_or_else(|e| {
-            eprintln!("[core] list_sessions failed: {e} — starting fresh");
-            Vec::new()
-        })
-        .into_iter()
-        .filter(|s| s.alive)
-        .collect();
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
-    for info in existing.iter().take(n_sessions) {
-        match client.attach(info.session_id, boot_cols, boot_rows) {
-            Ok(s) => panes.push(Pane::new_shelld(s)),
-            Err(e) => {
-                eprintln!("[core] attach {} failed: {e}", info.session_id);
-            }
+
+    // Behind MARSPOT_L3=1: prove the per-session L3 pipeline with a
+    // single L3-backed pane (it owns its own session process + shm
+    // grid).  The in-process shelld 9-grid below stays the default and
+    // is also the fallback if the L3 spawn fails.
+    let l3_mode = std::env::var("MARSPOT_L3").as_deref() == Ok("1");
+    if l3_mode {
+        match spawn_l3_pane(boot_cols, boot_rows, &event_tx) {
+            Ok(pane) => panes.push(pane),
+            Err(e) => eprintln!("[core] L3 spawn failed: {e} — falling back to shelld panes"),
         }
     }
-    while panes.len() < n_sessions {
-        match client.new_session(boot_cols, boot_rows, "") {
-            Ok(s) => panes.push(Pane::new_shelld(s)),
-            Err(e) => {
-                eprintln!("[core] new_session failed: {e}");
-                break;
+
+    // Normal boot (also the L3 fallback): reattach every surviving
+    // shelld session, then fill the rest with fresh ones.  Skipped once
+    // an L3 pane is up — step 3 renders exactly that one pane.
+    if panes.is_empty() {
+        let existing: Vec<marspot::shelld_proto::SessionInfo> = client
+            .list_sessions()
+            .unwrap_or_else(|e| {
+                eprintln!("[core] list_sessions failed: {e} — starting fresh");
+                Vec::new()
+            })
+            .into_iter()
+            .filter(|s| s.alive)
+            .collect();
+        for info in existing.iter().take(n_sessions) {
+            match client.attach(info.session_id, boot_cols, boot_rows) {
+                Ok(s) => panes.push(Pane::new_shelld(s)),
+                Err(e) => {
+                    eprintln!("[core] attach {} failed: {e}", info.session_id);
+                }
+            }
+        }
+        while panes.len() < n_sessions {
+            match client.new_session(boot_cols, boot_rows, "") {
+                Ok(s) => panes.push(Pane::new_shelld(s)),
+                Err(e) => {
+                    eprintln!("[core] new_session failed: {e}");
+                    break;
+                }
             }
         }
     }
@@ -958,6 +1103,11 @@ fn main() {
                 CoreEvent::PumpShelld => {
                     app.needs_render = true;
                 }
+                CoreEvent::L3Ready => {
+                    // Just needs to wake the loop; `pump_all` re-reads
+                    // the L3 mirror and flips needs_render if it changed.
+                    app.needs_render = true;
+                }
                 CoreEvent::Hello(v) => {
                     to_ack.push((MsgType::HelloAck, encode_hello_ack(v.min(PROTO_VERSION))));
                 }
@@ -1055,8 +1205,8 @@ fn main() {
                 "[core] frame {frame} t={t:.1}s panes={} focused={} ({state}) grid={}x{}",
                 app.panes.len(),
                 app.focused_idx,
-                p.session().terminal().grid().cols(),
-                p.session().terminal().grid().rows(),
+                p.session().grid().cols(),
+                p.session().grid().rows(),
             );
         }
     }

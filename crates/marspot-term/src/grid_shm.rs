@@ -275,6 +275,17 @@ impl GridShmWriter {
         self.fd.as_raw_fd()
     }
 
+    /// Region dimensions (stamped by the creator).  When L2 owns the
+    /// region it sizes it to the on-screen cell rect; L3 must drive its
+    /// session at exactly these dims so the grid it publishes fits the
+    /// region (a mismatch would overflow the mapping on `publish`).
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
     #[inline]
     unsafe fn header(&self) -> *mut Header {
         self.base as *mut Header

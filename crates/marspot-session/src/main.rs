@@ -168,6 +168,41 @@ fn publish_and_poke(
     }
 }
 
+/// Bring up the grid framebuffer and report its geometry. When L2 owns
+/// the region (`MARSPOT_SHM_FD` set) we take the writer role on the
+/// inherited fd and adopt the region's dims; standalone we self-create
+/// at the placeholder geometry. The returned `(cols, rows)` is what the
+/// session must be sized to so its published grid fits the region.
+fn setup_shm() -> (GridShmWriter, u16, u16) {
+    match std::env::var(ENV_SHM_FD) {
+        Ok(s) => {
+            let fd: RawFd = s.parse().unwrap_or_else(|_| {
+                eprintln!("[session] bad {ENV_SHM_FD}={s:?}");
+                std::process::exit(1);
+            });
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            let w = GridShmWriter::from_fd(owned).unwrap_or_else(|e| {
+                eprintln!("[session] grid_shm from_fd({fd}) failed: {e}");
+                std::process::exit(1);
+            });
+            let (c, r) = (w.cols(), w.rows());
+            eprintln!("[session] grid framebuffer from inherited fd {fd} ({c}x{r})");
+            (w, c, r)
+        }
+        Err(_) => {
+            let w = GridShmWriter::create(INITIAL_COLS, INITIAL_ROWS).unwrap_or_else(|e| {
+                eprintln!("[session] grid_shm create failed: {e}");
+                std::process::exit(1);
+            });
+            eprintln!(
+                "[session] grid framebuffer self-created (shm fd {}) ({INITIAL_COLS}x{INITIAL_ROWS})",
+                w.fd()
+            );
+            (w, INITIAL_COLS, INITIAL_ROWS)
+        }
+    }
+}
+
 fn main() {
     eprintln!(
         "marspot-session {} (git {}) pid={}",
@@ -195,9 +230,15 @@ fn main() {
         }
     };
 
+    // Shared grid framebuffer first — it defines the geometry. When L2
+    // owns the region it sized it to the on-screen cell rect; we must
+    // drive the session at exactly those dims, since the grid we publish
+    // has to fit the region (a mismatch would overflow the mapping).
+    let (mut shm, cols, rows) = setup_shm();
+
     // Pick the session to drive: an explicit MARSPOT_SESSION_ID if it
     // names a live one, else the first live session (reattach + bytelog
-    // replay), else a fresh session.
+    // replay), else a fresh session. Sized to the framebuffer.
     let want: Option<u64> = std::env::var("MARSPOT_SESSION_ID")
         .ok()
         .and_then(|s| s.parse().ok());
@@ -214,67 +255,26 @@ fn main() {
         .filter(|id| existing.iter().any(|s| s.session_id == *id))
         .or_else(|| existing.first().map(|s| s.session_id));
 
-    let mut session = match target {
+    let session = match target {
         Some(id) => {
             eprintln!("[session] attaching existing session id={id}");
-            match client.attach(id, INITIAL_COLS, INITIAL_ROWS) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[session] attach {id} failed: {e}");
-                    std::process::exit(1);
-                }
-            }
+            client.attach(id, cols, rows)
         }
         None => {
             eprintln!("[session] no live session; creating a fresh one");
-            match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[session] new_session failed: {e}");
-                    std::process::exit(1);
-                }
-            }
+            client.new_session(cols, rows, "")
         }
     };
+    let mut session = session.unwrap_or_else(|e| {
+        eprintln!("[session] session setup failed: {e}");
+        std::process::exit(1);
+    });
     eprintln!(
-        "[session] driving session id={} pid={} ({INITIAL_COLS}x{INITIAL_ROWS})",
+        "[session] driving session id={} pid={} ({cols}x{rows})",
         session.id(),
         session.child_pid()
     );
 
-    // Shared grid framebuffer L2 reads. When L2 spawned us it created
-    // the region and passed the fd via `MARSPOT_SHM_FD` (it owns the
-    // lifecycle); we take the writer role on that fd. Standalone, we
-    // self-create.
-    let mut shm = match std::env::var(ENV_SHM_FD) {
-        Ok(s) => {
-            let fd: RawFd = s.parse().unwrap_or_else(|_| {
-                eprintln!("[session] bad {ENV_SHM_FD}={s:?}");
-                std::process::exit(1);
-            });
-            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-            match GridShmWriter::from_fd(owned) {
-                Ok(w) => {
-                    eprintln!("[session] grid framebuffer from inherited fd {fd}");
-                    w
-                }
-                Err(e) => {
-                    eprintln!("[session] grid_shm from_fd({fd}) failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        Err(_) => match GridShmWriter::create(INITIAL_COLS, INITIAL_ROWS) {
-            Ok(w) => {
-                eprintln!("[session] grid framebuffer self-created (shm fd {})", w.fd());
-                w
-            }
-            Err(e) => {
-                eprintln!("[session] grid_shm create failed: {e}");
-                std::process::exit(1);
-            }
-        },
-    };
     // Input source + L2 wake channel: L2 forwards keystrokes over the
     // control socket; we poke it back with GridReady after each publish.
     let mut poke = setup_control_socket(ev_tx.clone());
