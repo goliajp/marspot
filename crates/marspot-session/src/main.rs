@@ -104,27 +104,37 @@ fn handle_key(session: &mut ShelldSession, event: MarspotKeyEvent, mods: Modifie
 
 /// If L2 handed us a control socket (fd `MARSPOT_SHELL_CONTROL_FD`,
 /// default 3), spawn a reader thread that decodes forwarded `KeyEvent`
-/// frames and feeds them to the main loop. EOF / error means L2 is gone,
-/// so the thread just exits (the loop's heartbeat + shelld wake keep the
-/// session alive regardless). No env var → standalone, no input source.
-fn spawn_control_reader(tx: Sender<SessionEvent>) {
+/// frames and feeds them to the main loop, and return a write half so
+/// the loop can poke L2 with `GridReady` after each publish. EOF / error
+/// on the read side means L2 is gone, so the thread just exits (the
+/// loop's heartbeat + shelld wake keep the session alive regardless).
+/// No env var → standalone, no input source, no writer.
+fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
     let fd: RawFd = match std::env::var(ENV_CONTROL_FD) {
         Ok(s) => match s.parse() {
             Ok(fd) => fd,
             Err(_) => {
                 eprintln!("[session] bad {ENV_CONTROL_FD}={s:?}; ignoring control socket");
-                return;
+                return None;
             }
         },
         Err(_) => {
             let _ = DEFAULT_CONTROL_FD; // standalone: no control socket
-            return;
+            return None;
         }
     };
-    let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let writer = match stream.try_clone() {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[session] control socket try_clone failed: {e}");
+            return None;
+        }
+    };
     eprintln!("[session] control socket on fd {fd}");
+    let mut reader = stream;
     std::thread::spawn(move || loop {
-        match Frame::read_from(&mut stream) {
+        match Frame::read_from(&mut reader) {
             Ok(Some(f)) => {
                 // KeyEvent is all L3 acts on for now; resize/paste/etc.
                 // arrive in later steps.
@@ -140,6 +150,22 @@ fn spawn_control_reader(tx: Sender<SessionEvent>) {
             Ok(None) | Err(_) => break, // L2 closed the socket
         }
     });
+    Some(writer)
+}
+
+/// Publish the grid and, if connected to L2, poke it so it re-reads the
+/// shm — keeps L2 event-driven instead of polling per frame.
+fn publish_and_poke(
+    shm: &mut GridShmWriter,
+    session: &marspot_term::shelld_client::ShelldSession,
+    poke: Option<&mut UnixStream>,
+) {
+    publish(shm, session);
+    if let Some(w) = poke {
+        // Best-effort: a dead socket just means L2 went away; the next
+        // read EOF tears the reader down and the session keeps running.
+        let _ = Frame::new(MsgType::GridReady, Vec::new()).write_to(w);
+    }
 }
 
 fn main() {
@@ -249,10 +275,10 @@ fn main() {
             }
         },
     };
-    publish(&mut shm, &session);
-
-    // Input source: L2 forwards keystrokes over the control socket.
-    spawn_control_reader(ev_tx.clone());
+    // Input source + L2 wake channel: L2 forwards keystrokes over the
+    // control socket; we poke it back with GridReady after each publish.
+    let mut poke = setup_control_socket(ev_tx.clone());
+    publish_and_poke(&mut shm, &session, poke.as_mut());
 
     let start = Instant::now();
     let mut frame: u64 = 0;
@@ -277,14 +303,14 @@ fn main() {
         let n = session.pump();
         if session.is_exited() {
             session.pump();
-            publish(&mut shm, &session);
+            publish_and_poke(&mut shm, &session, poke.as_mut());
             eprintln!("[session] session exited; exiting cleanly");
             break;
         }
         // Republish on PTY output or on a local echo that painted ahead
         // of it.
         if n > 0 || predicted {
-            publish(&mut shm, &session);
+            publish_and_poke(&mut shm, &session, poke.as_mut());
         }
 
         frame += 1;

@@ -105,6 +105,12 @@ pub enum MsgType {
     /// state lives in the core process.  Payload: u8 present flag +
     /// 4 × f64 LE (x, y, w, h) when present.
     CaretRect = 33,
+    /// L3 (`marspot-session`) → L2 (`marspot-core`): "I published a new
+    /// grid snapshot into shared memory; come read it."  Empty payload —
+    /// a pure wake so L2 stays event-driven (idle CPU ~0) instead of
+    /// polling the shm seq every frame.  L2 coalesces a burst of these
+    /// into a single re-read + render.  See `docs/per-session-l3.md`.
+    GridReady = 34,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -126,6 +132,7 @@ impl MsgType {
             31 => MsgType::Resize,
             32 => MsgType::SurfaceReady,
             33 => MsgType::CaretRect,
+            34 => MsgType::GridReady,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -807,5 +814,20 @@ mod tests {
         let p = encode_preedit("你好");
         let back = decode_preedit(&p).unwrap();
         assert_eq!(back, "你好");
+    }
+
+    #[test]
+    fn grid_ready_is_an_empty_poke() {
+        // GridReady carries no payload — it's a pure L3→L2 wake. A
+        // frame round-trips through the wire with type preserved and a
+        // zero-length body.
+        assert_eq!(MsgType::from_u32(34), Some(MsgType::GridReady));
+        let f = Frame::new(MsgType::GridReady, Vec::new());
+        let mut buf = Vec::new();
+        f.write_to(&mut buf).unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        let back = Frame::read_from(&mut cur).unwrap().unwrap();
+        assert_eq!(back.msg_type, MsgType::GridReady);
+        assert!(back.payload.is_empty());
     }
 }
