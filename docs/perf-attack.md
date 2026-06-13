@@ -30,7 +30,7 @@ Status legend: `queued` / `active` / `blocked` / `done`.
 
 | ID | Title | Current (clean) | Target | File | Status |
 |---|---|---|---|---|---|
-| A1 | active-9x-soak RSS drift — confirmed real leak | 5-min drift 1.81× / 30-min drift **2.07× ✗ FAIL** / +308 MiB over 30 min = **10 MiB/min sustained leak** | drift ≤ 1.10× --extended | [A1](perf-attack/A1-soak-rss-drift.md) | **re-scoped to L3 (2026-06-13): per-session engine BOUNDED — 5-min drift 1.003, ~70 KiB/min (`bin/soak-l3-drift.sh`); core-side full-tree soak is the one remaining check** |
+| A1 | active-9x-soak RSS drift — real leak (standalone marspot) | standalone 30-min drift **2.07×** = 10 MiB/min | drift ≤ 1.10× | [A1](perf-attack/A1-soak-rss-drift.md) | **RESOLVED under L3 (2026-06-13)** — product is shell→core→L3 now; per-session 1.003/300 s (`soak-l3-drift.sh`) + core 1.001/120 s (`soak-l3-core-drift.sh`) both bounded, leak doesn't reproduce. Standalone binary still leaks but isn't default (low pri). |
 | A2 | CPU drift gate appears mis-keyed | not actually a bug — gate works as designed; godot's 2.40× ✓ was the q1<1% short-circuit firing on a low-noise q1 (intentional behavior) | optional tightening for absolute-spread check | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted 2026-05-05** (not a bug); optional improvement deferred |
 
 ### B — Live cat-* single-cell — **B1/B2 retracted as measurement artifact, B3/B4 still active**

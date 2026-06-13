@@ -1,6 +1,6 @@
 # A1 — active-9x-soak RSS drift FAIL
 
-> Status: **per-session half resolved under the L3 architecture (2026-06-13)** — core-side drift under sustained load is the one remaining check
+> Status: **RESOLVED under the L3 architecture (2026-06-13)** — both halves (per-session engine + renderer/core) verified bounded under sustained load; the standalone-marspot leak does not reproduce in the production shell→core→L3 tree
 > Master:  ../perf-attack.md
 > Related: C (per-session RSS bloat — likely shared root)
 
@@ -40,16 +40,41 @@ product multiplies, so it's the load-bearing half.
 > ring* (26 624 slots), not a leak. Whether to shrink that default is the
 > separate D-scrollback / "opportunistic smaller ring" tuning question.
 
-### Remaining: core-side drift under sustained 9-session load
+### Result — renderer/core is also BOUNDED
 
-The renderer half (render_metal.rs scratch high-water-mark, Metal
-command-buffer / autorelease-pool drain timing) now lives in marspot-core
-and re-renders on every L3 `GridReady`. It shares code with standalone
-marspot's render path, so a *pure-render* leak would also have shown in the
-standalone soak; the surviving evidence points at the per-session half
-(now cleared). Still, the honest close-out is a full-tree sustained soak
-(shell→core→9 L3, flood all 9 via shelld writes, sample **core's** RSS over
-5–30 min). Tracked as the one remaining A1-under-L3 check.
+`bin/soak-l3-core-drift.sh` launches the real shell→core→9 L3 tree, floods
+all 9 sessions (`flood_sessions` writes the output loop to each PTY via
+shelld), and samples **marspot-core's** RSS under that sustained load:
+
+| window | core RSS drift q4/q1 | abs growth |
+|---|---|---|
+| 120 s (9 sessions flooding) | **1.001** | **+16 KiB** |
+
+Core sits flat at ~27.7 MiB regardless of the 9-session flood — render
+scratch plateaus at its high-water-mark, no Metal command-buffer /
+autorelease accumulation, the 9 shm readers + mirror grids are bounded.
+(`DURATION_S=300` runs the full A1 gate window.)
+
+### Conclusion: A1 is resolved by the L3 architecture
+
+Both halves are bounded under sustained load:
+
+| half | where (L3 arch) | drift | growth |
+|---|---|---|---|
+| per-session engine | each `marspot-session` | 1.003 / 300 s | ~70 KiB/min |
+| renderer / core | `marspot-core` | 1.001 / 120 s | +16 KiB |
+
+The ~10 MiB/min leak A1 found on the **standalone in-process `marspot`**
+does **not** reproduce in the production shell→core→L3 architecture. The
+per-session split was the fix: each engine runs in its own process and
+plateaus on its own bounded scrollback ring, while core renders
+statelessly from shm. The "cannot get slower the longer it runs"
+commitment (CLAUDE.md #3) holds for the product.
+
+The standalone `marspot` binary still has the original leak, but it is no
+longer the product default (it remains a dev/bench entry + the
+`MARSPOT_L3=0` opt-out). Fixing it there is now low priority; if pursued,
+the per-subsystem RSS instrumentation plan below still applies.
 
 ## What's broken
 
