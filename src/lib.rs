@@ -28,6 +28,7 @@ pub mod shelld_client;
 pub mod shelld_proto;
 pub mod terminal;
 pub mod tmux;
+pub mod ui;
 pub mod updater;
 
 /// Top chrome strip in **logical points** that every Marspot-style

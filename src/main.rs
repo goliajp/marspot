@@ -9,49 +9,14 @@ use marspot::render_metal::{make_target_texture, MetalRenderer};
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
+use marspot::ui::{
+    scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
+    Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
+    SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL,
+};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GIT_SHA: &str = env!("MARSPOT_GIT_SHA");
-
-/// Switchable session-grid layouts (mouse-driven via the [layout]
-/// button in the main area).  Cell counts ∈ {1, 2, 4, 6, 9}; 2 and 6
-/// have horizontal / vertical orientation variants.  Sessions live
-/// independently — the layout decides how many cells get rendered in
-/// the main area, not how many sessions exist.  When N sessions <
-/// cells, extra cells render as empty placeholders; when N > cells,
-/// extra sessions stay in the sidebar but don't get a main-area cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LayoutMode {
-    Single,
-    SplitH,
-    SplitV,
-    Quad,
-    SixH,
-    SixV,
-    Nine,
-}
-
-impl LayoutMode {
-    /// `(grid_cols, grid_rows)` — the shape passed straight to
-    /// `Layout::build`.  Names follow the orientation of the *split*:
-    /// `SplitH` is a horizontal split = 2 cells side by side = (2,1).
-    fn dims(self) -> (usize, usize) {
-        match self {
-            Self::Single => (1, 1),
-            Self::SplitH => (2, 1),
-            Self::SplitV => (1, 2),
-            Self::Quad => (2, 2),
-            Self::SixH => (3, 2),
-            Self::SixV => (2, 3),
-            Self::Nine => (3, 3),
-        }
-    }
-    fn cells(self) -> usize {
-        let (c, r) = self.dims();
-        c * r
-    }
-}
-const SIDEBAR_W_LOGICAL: f64 = 200.0;
 /// Default window in logical points; physical pixels = logical × scale.
 /// 2100×1300 means a 3×3 grid fits ~75 cols × 30 rows per cell with
 /// Monaco 12 — usable for real shell work, not just a "9 dots in a
@@ -81,32 +46,6 @@ const HEADER_PT: f64 = 32.0;
 // values that didn't actually match the renderer (40 logical-pt at
 // 2x = 80 phys vs renderer's 14 phys), causing click hit-tests to
 // drift below the visually painted rows.
-
-/// Per-cell title strip height in **logical points** — the band at
-/// the top of every 9-grid cell that shows the session label and a
-/// SEAM hairline below.  Layout reserves it inside the cell rect;
-/// the renderer paints title text + bottom seam.  Tuned to fit one
-/// 12-pt monospace line plus 6 pt of breathing room.
-const CELL_TITLE_PT: f64 = 22.0;
-
-/// Sidebar label cap — at the default 200-pt sidebar with Monaco
-/// 12-pt metrics, ~22 ASCII glyphs fit between the dot+gap and the
-/// right edge.  Anything longer is truncated with `...` (three
-/// ASCII dots — same monospace cell width as the rest of the
-/// label, plays nicer with the user's preference than `…`).
-const MAX_SIDEBAR_LABEL_CHARS: usize = 22;
-
-/// Truncate a sidebar label to at most `max_chars` total characters,
-/// replacing the dropped tail with three ASCII dots.  Counts
-/// Unicode scalars, not bytes, so multi-byte characters survive
-/// uniformly.  Reserves three trailing slots for `...`.
-fn truncate_for_sidebar(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(max_chars - 3).collect();
-    format!("{head}...")
-}
 
 /// Headless modes (snapshot / bench parse / bench render) use a fixed
 /// terminal grid so numbers are reproducible across runs.
@@ -264,39 +203,6 @@ struct Marspot {
     /// mode, where the lone session goes through `Session::spawn_with`
     /// directly (shelld doesn't speak the tmux control protocol yet).
     shelld: Option<std::sync::Arc<marspot::shelld_client::ShelldClient>>,
-}
-
-/// Live text selection inside one session's grid.  Column is the
-/// grid column index; `abs` is "rows up from the current live grid's
-/// bottom" — 0 = live bottom row, `rows-1` = live top row, then
-/// `rows..=rows+scrollback_len-1` walks scrollback from newest to
-/// oldest.  This anchors the selection to *content* (modulo PTY churn,
-/// which shifts content into scrollback as new lines come in) instead
-/// of to the *viewport*, so scrolling preserves the selection and the
-/// user can extend it across the viewport edge into scrollback.
-/// `anchor` is where the drag started, `focus` is the current cursor
-/// position; serialise/render normalise so the pair always reads
-/// top-left → bottom-right.  `mode` is sticky for the duration of one
-/// drag (locked at mouse_down based on the Option modifier).
-#[derive(Clone, Copy, Debug)]
-struct Selection {
-    session_idx: usize,
-    anchor: (u16, u32),
-    focus: (u16, u32),
-    mode: SelectionMode,
-}
-
-/// Linewise: cross-row drags take the first row from `anchor.col` to
-/// the end, middle rows entirely, the last row from start to
-/// `focus.col` — the iTerm2 / Terminal.app default, ideal for prose.
-/// Blockwise: each row is sliced to `[min(anchor.col, focus.col),
-/// max(...)]`, so the user can carve out a rectangle inside multi-
-/// column output (ls, top, htop) without dragging the column-aligned
-/// padding along with it.  Triggered by Option+drag at mouse_down.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SelectionMode {
-    Linewise,
-    Blockwise,
 }
 
 #[derive(Default)]
@@ -848,39 +754,14 @@ impl MarspotApp for Marspot {
             .as_ref()
             .map(|r| r.cell_dims().1)
             .unwrap_or(15.0);
-        // Match iTerm2 / native macOS scrolling: with the OS-level
-        // natural-scrolling preference on (the default), swiping
-        // FINGER DOWN on the trackpad reveals earlier content (look
-        // back into scrollback).  The OS already gives the right
-        // sign in scrollingDeltaY for that mapping; no negation
-        // needed (the previous negation inverted the gesture and
-        // felt wrong to users coming from iTerm2).
-        //
-        // Configurable via env (read once on first scroll):
-        //   MARSPOT_SCROLL_INVERT=1     flip direction (for users who
-        //                            keep "natural scroll" off in
-        //                            System Settings or just prefer
-        //                            it that way).
-        //   MARSPOT_SCROLL_FACTOR=<f>   multiplier; default 1.0.  Use
-        //                            0.5 for slower, 2.0 for faster.
-        //                            Trackpad path divides by cell_h
-        //                            so the factor scales line count
-        //                            proportionally.
-        let (invert, factor) = scroll_config();
-        let sign: f64 = if invert { -1.0 } else { 1.0 };
-        let lines_f = if precise {
-            sign * factor * dy_phys / cell_h
-        } else {
-            sign * factor * dy_phys * 3.0
-        };
-        if lines_f.abs() < 0.5 {
+        // Direction / factor semantics live in `ui::scroll_lines`
+        // (shared with marspot-core so both front-ends feel
+        // identical).  Pane handles the clamp + view_offset mutation.
+        let lines = scroll_lines(dy_phys, precise, cell_h);
+        if lines == 0 {
             return;
         }
-        // Pane handles the clamp + view_offset mutation. Sign /
-        // invert / factor are container-level prefs (the focused
-        // pane shouldn't know about marspot's env-var config), so
-        // we compute the final row delta here.
-        if self.panes[self.focused_idx].apply_scroll_lines(lines_f as i32) {
+        if self.panes[self.focused_idx].apply_scroll_lines(lines) {
             ctx.request_redraw();
         }
     }
@@ -938,24 +819,6 @@ impl MarspotApp for Marspot {
         self.maybe_dump_rss();
     }
 }
-
-/// Hard cap on how many sessions marspot permits at once.  The
-/// sidebar [+] button is disabled past this count; the layout
-/// picker only offers shapes whose cells ≤ cap (== 9).
-const SESSION_COUNT_HARD_CAP: usize = 9;
-
-/// Picker option index → LayoutMode.  Order must match
-/// `layout::PICKER_LAYOUT_DIMS` (private to layout.rs but the
-/// dims line up): Single, SplitH, SplitV, Quad, SixH, SixV, Nine.
-const PICKER_LAYOUTS: [LayoutMode; 7] = [
-    LayoutMode::Single,
-    LayoutMode::SplitH,
-    LayoutMode::SplitV,
-    LayoutMode::Quad,
-    LayoutMode::SixH,
-    LayoutMode::SixV,
-    LayoutMode::Nine,
-];
 
 impl Marspot {
     /// Rebuild the cached `Layout` at the given window physical
@@ -1177,91 +1040,10 @@ impl Marspot {
         let Some(pane) = self.panes.get(sel.session_idx) else {
             return false;
         };
-        let grid = pane.session().terminal().grid();
-        let cols = grid.cols();
-        let rows = grid.rows();
-        if cols == 0 || rows == 0 {
-            return false;
+        match selection_text(pane, &sel) {
+            Some(text) => marspot::input::write_clipboard_text(&text),
+            None => false,
         }
-        // Anchor/focus carry abs (rows up from live bottom).  Bigger
-        // abs = older = top of the visual selection; smaller abs =
-        // newer = bottom.  Normalise so `top_*` has the bigger abs
-        // (or equal abs with smaller col when single-row).
-        let (a_col, a_abs) = sel.anchor;
-        let (f_col, f_abs) = sel.focus;
-        let (top_col, top_abs, bot_col, bot_abs) = if (a_abs, a_col) >= (f_abs, f_col) {
-            (a_col, a_abs, f_col, f_abs)
-        } else {
-            (f_col, f_abs, a_col, a_abs)
-        };
-        // Blockwise carves out a rectangle: every row uses the same
-        // col_lo / col_hi (min..=max of anchor.col, focus.col),
-        // ignoring top/bot.  Linewise uses the iTerm2 row-band rule:
-        // top row from top_col to end, middle rows entirely, bot row
-        // from start to bot_col.
-        let blockwise = sel.mode == SelectionMode::Blockwise;
-        let block_lo = a_col.min(f_col);
-        let block_hi = a_col.max(f_col);
-        // Walk visible rows from top to bottom — i.e. abs descending
-        // from `top_abs` down to `bot_abs`.  `cell_at_view(abs, c,
-        // rows-1)` resolves correctly because the bottom of an
-        // arbitrary view sitting at `view_offset = abs` IS the row
-        // labelled by abs (see `grid::cell_at_view` derivation).
-        let last_view_row = rows.saturating_sub(1);
-        let mut out = String::new();
-        let mut abs = top_abs;
-        let mut first = true;
-        loop {
-            if abs as u32 > u16::MAX as u32 {
-                // Beyond what cell_at_view can address (scrollback
-                // capped at u16::MAX in this codepath).  Treat as
-                // unreachable history.
-                if abs == bot_abs { break; } else { abs -= 1; continue; }
-            }
-            let (col_lo, col_hi) = if blockwise {
-                (block_lo, block_hi)
-            } else {
-                let lo = if abs == top_abs { top_col } else { 0 };
-                let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
-                (lo, hi)
-            };
-            let mut row_text = String::new();
-            for c in col_lo..=col_hi {
-                if c >= cols {
-                    break;
-                }
-                let cell = grid.cell_at_view(abs as u16, c, last_view_row);
-                // NUL is the trail-half sentinel for wide chars
-                // (`grid::char_width` returns 0 for `'\0'`).  The
-                // lead cell already carries the visible glyph; the
-                // trail cell must NOT emit another character, else
-                // CJK pastes come out as `你 好 ` (an extra space
-                // per wide char).  Plain blanks use `' '` not NUL,
-                // so they still serialise correctly.
-                if cell.ch == '\0' {
-                    continue;
-                }
-                row_text.push(cell.ch);
-            }
-            // Drop trailing spaces — terminal rows pad to full
-            // width with `' '`, so a 5-char "hello" plus 80-col
-            // grid leaves 75 spaces we don't want in the
-            // clipboard.
-            let trimmed = row_text.trim_end();
-            if !first {
-                out.push('\n');
-            }
-            out.push_str(trimmed);
-            first = false;
-            if abs == bot_abs {
-                break;
-            }
-            abs -= 1;
-        }
-        if out.is_empty() {
-            return false;
-        }
-        marspot::input::write_clipboard_text(&out)
     }
 
     /// In tmux mode: drain the single session's raw bytes, run them
@@ -1587,61 +1369,13 @@ impl Marspot {
                 if i == focused && p.view_offset() == 0 {
                     v.ime_preedit = self.ime_preedit.as_str();
                 }
-                // Selection coords are abs (rows up from this pane's
-                // current live bottom).  Project to viewport rows
-                // using this pane's view_offset, clip to the visible
-                // band, and only forward to the renderer when at
-                // least one row lands on screen.  This is what makes
-                // scrolling preserve the selection visual: as
-                // view_offset changes the painted rows shift in
-                // lockstep with the content under them.
-                v.selection = self.selection.as_ref().and_then(|sel| {
-                    if sel.session_idx != i {
-                        return None;
-                    }
-                    let pane_vo = p.view_offset() as i64;
-                    let g_rows = p.session().terminal().grid().rows() as i64;
-                    let last = g_rows - 1;
-                    let abs_to_vp = |abs: u32| -> i64 {
-                        // vp = (rows-1) + vo - abs
-                        last + pane_vo - abs as i64
-                    };
-                    let a_vp = abs_to_vp(sel.anchor.1);
-                    let f_vp = abs_to_vp(sel.focus.1);
-                    // Both ends above viewport (vp < 0) or both
-                    // below (vp > last) → nothing on screen.
-                    if (a_vp < 0 && f_vp < 0) || (a_vp > last && f_vp > last) {
-                        return None;
-                    }
-                    // Clip each end to the visible band.  For
-                    // linewise selections, a vp clamped past the top
-                    // also forces col to the left edge (and past
-                    // bottom to the right edge), so the painted band
-                    // extends visually to "the rest of the visible
-                    // area".  Blockwise must keep the col unchanged —
-                    // the rectangle's width is defined by the
-                    // anchor/focus cols regardless of which rows are
-                    // currently on-screen.
-                    let blockwise = sel.mode == SelectionMode::Blockwise;
-                    let max_col_clamp = p.session().terminal().grid().cols().saturating_sub(1);
-                    let clip = |col: u16, vp: i64| -> (u16, u16) {
-                        if vp < 0 {
-                            (if blockwise { col } else { 0 }, 0)
-                        } else if vp > last {
-                            (
-                                if blockwise { col } else { max_col_clamp },
-                                last as u16,
-                            )
-                        } else {
-                            (col, vp as u16)
-                        }
-                    };
-                    Some(marspot::render::SelectionView {
-                        anchor: clip(sel.anchor.0, a_vp),
-                        focus: clip(sel.focus.0, f_vp),
-                        blockwise,
-                    })
-                });
+                // Selection projection (abs → viewport, clip to the
+                // visible band) is shared with marspot-core via
+                // `ui::selection_view_for_pane`.
+                v.selection = self
+                    .selection
+                    .as_ref()
+                    .and_then(|sel| selection_view_for_pane(p, sel, i));
                 v
             })
             .collect();
@@ -1866,22 +1600,6 @@ impl Drop for Marspot {
 
 /// Read scroll behaviour overrides from env once.  See `MarspotApp::scroll`
 /// for the default mapping.  Returns `(invert, factor)`.
-fn scroll_config() -> (bool, f64) {
-    use std::sync::OnceLock;
-    static CFG: OnceLock<(bool, f64)> = OnceLock::new();
-    *CFG.get_or_init(|| {
-        let invert = std::env::var("MARSPOT_SCROLL_INVERT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let factor = std::env::var("MARSPOT_SCROLL_FACTOR")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|f| *f > 0.0 && *f < 100.0)
-            .unwrap_or(1.0);
-        (invert, factor)
-    })
-}
-
 fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
     let mut iter = args.iter().skip(1);
     let prefix = format!("{}=", name);
