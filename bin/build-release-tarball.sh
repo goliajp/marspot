@@ -7,7 +7,10 @@
 #   marspot-aarch64-apple-darwin.tar.gz
 #   ├── marspot-shelld
 #   ├── marspot-shell
-#   └── marspot-core
+#   ├── marspot-core
+#   └── marspot-session   (per-pane L3 engine — staged + promoted by
+#                          core so silent updates carry the session
+#                          binary in lockstep with core)
 #
 # Optional: `--marspot` also includes the legacy single-binary
 # `marspot` for backward compat with v1 single-binary tarballs.
@@ -50,7 +53,7 @@ while (( $# )); do
   esac
 done
 
-bins=(marspot-shelld marspot-shell marspot-core)
+bins=(marspot-shelld marspot-shell marspot-core marspot-session)
 (( INCLUDE_MARSPOT )) && bins+=(marspot)
 
 echo "==> building release binaries"

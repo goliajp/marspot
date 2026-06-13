@@ -106,12 +106,16 @@ fn pending_binary_path(bin_name: &str) -> PathBuf {
     cache_dir().join("binaries/pending").join(bin_name)
 }
 
-/// All three binaries the release tarball is expected to ship.
-/// Order matters only for the log: core is the safest to apply (no
-/// session loss), shell is next (window flash), shelld last (kills
-/// sessions — gated behind explicit `bin/install-shelld.sh
-/// --apply-pending`).
+/// The binaries the release tarball is expected to ship.  Order
+/// matters only for the log, safest-first: marspot-session swaps
+/// per-pane with replay (no session loss, no core restart), core is
+/// next (no session loss), shell after (window flash), shelld last
+/// (kills sessions — gated behind explicit `bin/install-shelld.sh
+/// --apply-pending`).  A tarball missing any of these still stages the
+/// rest — `extract_binary` is a named lookup that soft-skips absentees,
+/// so legacy single-binary releases keep working.
 const STAGED_BINARIES: &[&str] = &[
+    "marspot-session",
     "marspot-core",
     "marspot-shell",
     "marspot-shelld",
@@ -213,6 +217,34 @@ fn strip_quarantine_xattrs(path: &Path) {
             .arg(path)
             .output();
     }
+}
+
+/// Consume a staged `pending/marspot-session` by promoting it into
+/// `current/`.  marspot-core (the only spawner of session engines)
+/// calls this at boot and on a session-only live swap (SIGUSR2), so the
+/// session binary tracks core in lockstep without the supervisor having
+/// to know about it.  No probation: the per-pane swap is self-guarding
+/// (`L3Conn::try_promote` adopts the replacement only once it has
+/// replayed and published a frame, so a session binary that can't boot
+/// leaves the old child serving), and the binary was signature-verified
+/// before it ever reached `pending/`.  Returns `Ok(true)` when a
+/// promotion happened, `Ok(false)` when nothing was staged.
+pub fn promote_pending_session() -> std::io::Result<bool> {
+    promote_pending_session_in(&cache_dir())
+}
+
+fn promote_pending_session_in(root: &Path) -> std::io::Result<bool> {
+    let pending = root.join("binaries/pending/marspot-session");
+    if !pending.exists() {
+        return Ok(false);
+    }
+    let current = root.join("binaries/current/marspot-session");
+    if let Some(parent) = current.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&pending, &current)?;
+    strip_quarantine_xattrs(&current);
+    Ok(true)
 }
 
 fn asset_filename() -> String {
@@ -486,6 +518,33 @@ mod tests {
             scrape_string(body, "\"name\""),
             Some("with \"quotes\" inside".into())
         );
+    }
+
+    #[test]
+    fn promote_pending_session_moves_into_current_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-promote-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pend = dir.join("binaries/pending");
+        std::fs::create_dir_all(&pend).unwrap();
+        std::fs::write(pend.join("marspot-session"), b"NEW-ENGINE").unwrap();
+
+        // First call promotes pending → current.
+        assert_eq!(promote_pending_session_in(&dir).unwrap(), true);
+        assert!(!dir.join("binaries/pending/marspot-session").exists());
+        assert_eq!(
+            std::fs::read(dir.join("binaries/current/marspot-session")).unwrap(),
+            b"NEW-ENGINE"
+        );
+        // Second call is a no-op (nothing staged) — never clobbers current.
+        assert_eq!(promote_pending_session_in(&dir).unwrap(), false);
+        assert_eq!(
+            std::fs::read(dir.join("binaries/current/marspot-session")).unwrap(),
+            b"NEW-ENGINE"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

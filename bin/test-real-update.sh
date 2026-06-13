@@ -100,16 +100,18 @@ grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
 echo "[2/5] boot OK"
 
 # --- 2. Updater downloads, verifies, stages ---------------------------
-# 30 s startup stagger + download; allow 75 s total.
+# 30 s startup stagger + download; allow 75 s total.  All FOUR binaries
+# ship + stage now — marspot-session rides along so silent updates carry
+# the per-pane L3 engine in lockstep with core.
 START=$(date +%s)
 until [[ -f "$TREE/pending/marspot-core" && -f "$TREE/pending/marspot-shell" \
-         && -f "$TREE/pending/marspot-shelld" ]]; do
+         && -f "$TREE/pending/marspot-shelld" && -f "$TREE/pending/marspot-session" ]]; do
   if (( $(date +%s) - START > 75 )); then
-    fail "updater never staged all three binaries (download/verify failed?)"
+    fail "updater never staged all four binaries (download/verify failed?)"
   fi
   sleep 1
 done
-echo "[3/5] stage OK — updater downloaded, verified signature, staged 3 binaries"
+echo "[3/5] stage OK — updater downloaded, verified signature, staged 4 binaries (incl. marspot-session)"
 
 # --- 3. First trigger: shell self-update ------------------------------
 "$SHELL_BIN" --trigger >/dev/null
@@ -136,7 +138,17 @@ until grep -q "CORE_SPAWN.*binaries/current/marspot-core" "$SUP_LOG" 2>/dev/null
 done
 [[ -f "$TREE/pending/marspot-shelld" ]] \
   || fail "pending/marspot-shelld consumed — daemon updates must stay explicit"
-echo "[5/5] core apply OK — new core from current/, shelld still pending (explicit layer)"
+
+# The freshly-spawned core promotes the staged session engine at boot
+# (pending/marspot-session → current/) so L3 panes run it in lockstep.
+START=$(date +%s)
+until [[ -f "$TREE/current/marspot-session" && ! -f "$TREE/pending/marspot-session" ]]; do
+  if (( $(date +%s) - START > 15 )); then
+    fail "new core never promoted pending/marspot-session → current/ at boot"
+  fi
+  sleep 0.5
+done
+echo "[5/5] core apply OK — new core from current/, session promoted to current/, shelld still pending"
 
 cleanup
 trap - EXIT

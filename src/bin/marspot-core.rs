@@ -468,6 +468,16 @@ impl CoreApp {
     /// click-to-swap affordance for it.  Skips panes already swapping or
     /// exited.  Behind `MARSPOT_L3=1` (no L3 panes otherwise → no-op).
     fn swap_idle_l3(&mut self) {
+        // A session-only live update (SIGUSR2) staged a new engine in
+        // pending/; promote it into current/ first so each replacement L3
+        // (spawned from core's sibling = current/marspot-session) boots the
+        // new binary.  A no-op if nothing's staged — then this is a plain
+        // re-spawn of the same engine (still useful as a manual refresh).
+        match marspot::updater::promote_pending_session() {
+            Ok(true) => eprintln!("[core] promoted staged marspot-session → current/ for swap"),
+            Ok(false) => {}
+            Err(e) => eprintln!("[core] promote staged session for swap failed: {e}"),
+        }
         for i in 0..self.panes.len() {
             let pane = &self.panes[i];
             if !pane.is_l3() || pane.is_exited() || pane.session().is_l3_swapping() {
@@ -1164,6 +1174,15 @@ fn main() {
     // (kept as the escape hatch + the fallback if every L3 spawn fails).
     let l3_mode = std::env::var("MARSPOT_L3").as_deref() != Ok("0");
     if l3_mode {
+        // A core update lands the new session engine in pending/; promote
+        // it into current/ before spawning so each L3 (resolved as core's
+        // sibling = current/marspot-session in an installed app) boots the
+        // new binary in lockstep with this core.
+        match marspot::updater::promote_pending_session() {
+            Ok(true) => eprintln!("[core] promoted staged marspot-session → current/ at boot"),
+            Ok(false) => {}
+            Err(e) => eprintln!("[core] promote staged session at boot failed: {e}"),
+        }
         let mut ids: Vec<u64> = client
             .list_sessions()
             .unwrap_or_else(|e| {
