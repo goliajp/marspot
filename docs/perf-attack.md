@@ -99,22 +99,43 @@ roadmap assumed:
   slowest stage) and/or the byte-throughput optics of multibyte content;
   under L3 the parse path drains cjk at ~106 MiB/s (E8, `measure-l3.sh`),
   ahead of ascii by bytes.  No raster fix is warranted.
-- **B4 (emoji) is real (~14× ascii)** but the cost is **Apple Color Emoji
-  sbix bitmap decode/scale inside `draw_glyphs`**, NOT the per-glyph
-  `CGBitmapContextCreate` the roadmap targeted (that overhead is the
-  shared ~15 µs baseline).  Pooling the context would shave the baseline
-  for *all* glyphs but barely dent emoji's 193 µs sbix tail.  Optimisation
-  direction therefore shifts: a color-bitmap-specific cache/scale path, or
-  accept it (emoji are rare in throughput workloads and, under L3, raster
-  is decoupled from cat drain — it shows as frame latency under churn, not
-  cat MiB/s).
+- **B4 (emoji) is real (~14× ascii)** — the cost is **Apple Color Emoji
+  sbix bitmap decode/scale inside `draw_glyphs`**.  Per-phase breakdown
+  (2026-06-14, `MARSPOT_GLYPH_PROFILE` timing inside `rasterise_glyph`):
+
+  | phase | ascii/cjk | emoji |
+  |---|---|---|
+  | `get_bounding_rects` | ~0 µs | ~19 µs |
+  | `CGBitmapContextCreate` + buffer | ~0 µs | ~2 µs |
+  | `set_*` properties | ~0 µs | ~0 µs |
+  | **`draw_glyphs`** | **~9 µs** | **~146 µs** |
+
+  This **definitively kills the roadmap's pooling tactic**: context
+  creation + properties + alloc are ~0 µs for every class — there is
+  nothing to pool.  Even the shared baseline is `draw_glyphs` (9 µs), not
+  setup.  Emoji's 146 µs is CoreText decoding + scaling the embedded sbix
+  PNG — inherent to drawing Apple Color Emoji; the only way around it is
+  reimplementing sbix decode (huge, wrong self-build/perf tradeoff vs the
+  CoreText FFI we already depend on).  It's paid **once per unique emoji,
+  then cached**; emoji churn is rare; under L3 raster is decoupled from cat
+  drain (frame latency under churn, not cat MiB/s).  **Verdict: accept the
+  perf cost — no sound optimisation exists.**
+
+  The investigation surfaced the *actual* emoji gap, which is correctness
+  not perf: **marspot renders emoji MONOCHROME.**  The atlas is `R8Unorm`
+  (alpha-only) and the FG shader outputs `float4(fg.rgb, fg.a * coverage)`
+  — so an emoji is the cell's text colour tinted by the emoji's alpha
+  silhouette, never its real colours.  Colour emoji would need a separate
+  RGBA atlas + a second FG shader path (sample RGBA directly).  That's a
+  feature with real scope, and a product decision (is colour emoji a v1
+  goal?) — not tracked as a B4 perf item.
 
 | ID | Metric | Status |
 |---|---|---|
 | B1 | live cat-ascii | **resolved 2026-05-05** (was godot artifact) |
 | B2 | live cat-mixed | **resolved 2026-05-05** (was godot artifact) |
 | B3 | live cat-cjk | **retracted 2026-06-13** — cjk raster = ascii raster (`--bench glyphraster`); not a raster problem, L3 parse drains it fine (E8). |
-| B4 | live cat-emoji | **re-scoped 2026-06-13** — real ~14× raster cost, root = Apple Color Emoji sbix decode (not context-creation). Needs a color-bitmap raster path OR accept (decoupled from cat throughput under L3). queued. |
+| B4 | live cat-emoji | **accepted (perf) 2026-06-14** — 146 µs of the 169 µs is CoreText sbix decode in `draw_glyphs` (ctx/props/alloc ≈ 0 → pooling tactic dead); inherent, once-per-unique-emoji + cached + rare + decoupled under L3. No sound perf win. Surfaced the real gap: **emoji render monochrome** (R8 atlas) — a colour-emoji *feature* (RGBA atlas + shader), product decision, not B4-perf. |
 
 ### C — Per-session RSS bloat vs Terminal.app — **re-scoped onto L3 2026-06-13**
 
@@ -273,12 +294,13 @@ Remaining queue:
    `CGBitmapContextCreate` overhead) was wrong: cjk raster cost = ascii
    (~15 µs/glyph), so B3 is not a raster problem at all; emoji is the
    only real loss (~14× ascii) and its cost is Apple Color Emoji **sbix
-   bitmap decode**, which context-pooling doesn't touch.  Remaining glyph
-   work is B4-only and OPTIONAL: a color-bitmap-specific cache/scale path.
-   Under L3 it's frame latency under emoji churn, not cat MiB/s (raster
-   is decoupled — see L3-throughput section).  The context-pooling
-   micro-opt would shave the shared ~15 µs baseline for all glyphs but is
-   low-value (most glyphs are cached after first sight).
+   bitmap decode** in `draw_glyphs` (~146 of 169 µs; ctx/props/alloc ≈ 0,
+   so the pooling micro-opt is dead — nothing to pool).  **B4-perf
+   accepted, no sound win** (inherent CoreText decode, once-per-unique +
+   cached + rare + decoupled under L3).  No remaining glyph *perf* work.
+   The real emoji gap is correctness: **monochrome rendering** (R8 atlas) —
+   colour emoji is an RGBA-atlas *feature*, a product decision, not a
+   perf-attack item.
 3. **C** (few days, probably folded into A1 fix) — per-session RSS
    bloat is largely the same lazy-fault footprint as A1
 4. **D-rescope** (1 week) — D-target reframed: scrollback ACCESS at
