@@ -15,6 +15,7 @@ pub mod input;
 pub mod layout;
 pub mod pane;
 pub mod parser;
+pub mod paths;
 pub mod pty;
 pub mod font_cache;
 pub mod glyph_atlas;

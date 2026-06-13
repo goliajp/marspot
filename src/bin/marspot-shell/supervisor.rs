@@ -48,8 +48,6 @@ fn strip_quarantine_xattrs(path: &Path) {
     }
 }
 
-/// Sub-directory under the cache dir holding the binary slots.
-const BIN_SUBDIR: &str = "binaries";
 /// How long the supervisor watches a freshly-promoted binary before
 /// declaring it stable.  30 s = enough for a flat-out broken binary
 /// to abort during startup, short enough that an upgrade feels
@@ -65,16 +63,12 @@ pub struct BinaryTree {
 }
 
 impl BinaryTree {
-    /// Constructs a tree rooted at `$HOME/Library/Caches/marspot/binaries`.
+    /// Constructs a tree rooted at the active state dir's `binaries/`
+    /// (`marspot::paths::binaries_root` — honours `MARSPOT_STATE_DIR`
+    /// so a dev / test sandbox swaps binaries in its own tree).
     pub fn default_for(bin_name: impl Into<String>) -> io::Result<Self> {
-        let home = std::env::var_os("HOME").ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "HOME env var not set")
-        })?;
-        let root = PathBuf::from(home)
-            .join("Library/Caches/marspot")
-            .join(BIN_SUBDIR);
         Ok(BinaryTree {
-            root,
+            root: marspot::paths::binaries_root(),
             bin_name: bin_name.into(),
         })
     }

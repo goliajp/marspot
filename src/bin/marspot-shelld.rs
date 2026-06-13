@@ -72,17 +72,13 @@ static NEXT_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
 /// child process today.
 const SUBSCRIBER_QUEUE_DEPTH: usize = 64;
 
-/// Always-on socket path under `$HOME/Library/Caches/marspot/`.
-/// Created on startup, removed on graceful shutdown.  Per-user; no
-/// cross-user contention.  Tests / dev-mode can override via
-/// `MARSPOT_SHELLD_SOCKET` so they don't collide with the running
-/// LaunchAgent instance.
+/// Always-on socket path.  Created on startup, removed on graceful
+/// shutdown.  Resolved through `marspot::paths` so a dev / test
+/// sandbox (`MARSPOT_STATE_DIR=…`) gets its own daemon on its own
+/// socket and never collides with the installed LaunchAgent
+/// instance.
 fn socket_path() -> PathBuf {
-    if let Ok(p) = std::env::var("MARSPOT_SHELLD_SOCKET") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var("HOME").expect("HOME unset; refusing to run");
-    PathBuf::from(home).join("Library/Caches/marspot/shelld.sock")
+    marspot::paths::shelld_socket()
 }
 
 /// One live shell session.  Owned by `Sessions` via `Arc`; subscribers
@@ -112,11 +108,7 @@ struct ByteLog {
 
 impl ByteLog {
     fn open(session_id: u64) -> io::Result<Self> {
-        let home = std::env::var("HOME")
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "HOME unset"))?;
-        let dir = PathBuf::from(home)
-            .join("Library/Caches/marspot/sessions")
-            .join(session_id.to_string());
+        let dir = marspot::paths::sessions_dir().join(session_id.to_string());
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("bytelog");
         let file = OpenOptions::new()
@@ -210,10 +202,7 @@ impl ByteLog {
 /// its session directory.  Called from the Kill arm so a session
 /// killed by the GUI doesn't leave gigabytes of log behind.
 fn delete_bytelog(session_id: u64) {
-    let Ok(home) = std::env::var("HOME") else { return };
-    let dir = PathBuf::from(home)
-        .join("Library/Caches/marspot/sessions")
-        .join(session_id.to_string());
+    let dir = marspot::paths::sessions_dir().join(session_id.to_string());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

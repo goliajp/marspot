@@ -41,8 +41,7 @@ unsafe extern "C" fn sigusr1_handler(_signum: libc::c_int) {
 /// next to the binaries tree so a `rm -rf Caches/marspot` resets
 /// both together.
 fn shell_launch_log_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(home).join("Library/Caches/marspot/shell_launches.tsv")
+    marspot::paths::shell_launch_journal()
 }
 
 /// ≥ this many launches of the same `current/` binary …
@@ -292,8 +291,8 @@ fn print_status() {
     print_version();
     println!();
 
-    // Live processes.
-    match find_running_shell_pid() {
+    // Live processes (pid file for this state dir, else ps scan).
+    match running_shell_pid() {
         Some(pid) => println!("Running supervisor: pid {pid}"),
         None => println!("Running supervisor: (none)"),
     }
@@ -339,10 +338,7 @@ fn print_status() {
 }
 
 fn sup_log_path() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-    home.join("Library/Logs/Marspot/supervisor.log")
+    marspot::paths::supervisor_log()
 }
 
 /// `--trigger` — send SIGUSR1 to the running shell so it applies any
@@ -350,8 +346,37 @@ fn sup_log_path() -> std::path::PathBuf {
 ///   0 = signal sent successfully
 ///   1 = no running shell found
 ///   2 = signal call errored
+/// Record this GUI shell's pid under the state dir.  Best-effort —
+/// `--trigger` falls back to a `ps` scan if the file is missing.
+fn write_shell_pid() {
+    let path = marspot::paths::shell_pid_file();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, std::process::id().to_string());
+}
+
+/// Pid of the running GUI shell for THIS state dir.  Prefers the pid
+/// file (state-dir-scoped, so a sandbox shell and the installed
+/// shell never cross-fire); falls back to a `ps` basename scan when
+/// the file is absent or its pid is dead.
+fn running_shell_pid() -> Option<u32> {
+    let path = marspot::paths::shell_pid_file();
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(pid) = s.trim().parse::<u32>() {
+            // kill(pid, 0): 0 = alive and ours to signal.
+            if pid != std::process::id()
+                && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+            {
+                return Some(pid);
+            }
+        }
+    }
+    find_running_shell_pid()
+}
+
 fn cmd_trigger() -> i32 {
-    match find_running_shell_pid() {
+    match running_shell_pid() {
         Some(pid) => {
             // SAFETY: libc::kill is a syscall wrapper; no Rust invariants.
             let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) };
@@ -1376,6 +1401,11 @@ Usage:\n\
         ),
     );
     install_sigusr1_handler();
+    // Record our pid for this state dir so `--trigger` / dev-push /
+    // install-local signal THIS shell, not whichever marspot-shell
+    // `ps` lists first.  execv on self-update keeps the same pid, so
+    // the file stays valid across a shell swap.
+    write_shell_pid();
     // Spawn the silent-update poller.  It runs forever in the
     // background, downloads new `marspot-core` releases, drops them
     // into `binaries/pending/`.  The supervisor here picks them up on

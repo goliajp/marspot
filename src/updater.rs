@@ -97,8 +97,7 @@ fn pending_already_staged() -> bool {
 }
 
 fn cache_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join("Library/Caches/marspot")
+    crate::paths::state_root()
 }
 
 fn pending_binary_path(bin_name: &str) -> PathBuf {

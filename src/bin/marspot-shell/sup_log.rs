@@ -27,14 +27,11 @@ const MAX_BYTES: u64 = 2 * 1024 * 1024;
 static WRITER: Mutex<Option<File>> = Mutex::new(None);
 
 fn log_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join("Library/Logs/Marspot")
+    marspot::paths::log_dir()
 }
 
 fn log_path() -> PathBuf {
-    log_dir().join("supervisor.log")
+    marspot::paths::supervisor_log()
 }
 
 fn ensure_open() -> Option<std::sync::MutexGuard<'static, Option<File>>> {
