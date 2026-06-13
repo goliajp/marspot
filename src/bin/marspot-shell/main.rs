@@ -460,6 +460,58 @@ const PONG_DEADLINE: Duration = Duration::from_secs(15);
 const CRASH_WINDOW: Duration = Duration::from_secs(300); // 5 min
 const MAX_CRASHES_IN_WINDOW: usize = 3;
 
+/// Everything tied to one live core process: its child handle, the
+/// control socket (both directions), and the liveness-handshake
+/// bookkeeping.  Aggregating these is what makes a flash-free silent
+/// update possible — the shell can hold an `active` and a `pending`
+/// CoreConn at once, let a fresh core prove itself, and only then
+/// atomic-swap the presenter and tear the old one down.
+///
+/// `child` is `Option` because the child can legitimately be gone
+/// while the rest of the conn lives: after a HELLO mismatch we kill
+/// the child but keep `spawned_at` so the HELLO-timeout path in
+/// `poll_supervisor` respawns; and `poll_supervisor` reaps the child
+/// (`child.take()`) before `restart_core` drops the whole conn.
+struct CoreConn {
+    /// The core child process, or `None` once killed/reaped.
+    child: Option<Child>,
+    /// Parent end of the AF_UNIX socketpair we share with the core.
+    /// Wrapped in `Mutex` so the `MarspotApp` callbacks (all on the
+    /// main thread, but the type system doesn't know that) can mutate
+    /// it without splitting the struct.  Frames written here arrive
+    /// at the core's stdin-side fd 3 / `MARSPOT_SHELL_CONTROL_FD`.
+    control_tx: Mutex<UnixStream>,
+    /// Receives parsed inbound frames from this core's reader thread.
+    control_rx: Receiver<ShellInbox>,
+    /// True after this core has confirmed at least one HelloAck.
+    hello_acked: bool,
+    /// When this core was spawned — drives the HELLO timeout.
+    spawned_at: Instant,
+    /// When to fire the next PING to this core.
+    next_ping_at: Instant,
+    /// Nonce of the most recent PING we sent this core.  Pongs with a
+    /// different nonce are stale and ignored.  Per-conn: a fresh core
+    /// gets its own channel, so a previous core's Pong can't reach it.
+    last_ping_nonce: u32,
+    /// When the most recent matching Pong arrived.
+    last_pong_at: Instant,
+}
+
+impl CoreConn {
+    /// Drop the control socket (clean EOF for the core's read side),
+    /// then SIGKILL + reap the child.  Order matters: the EOF gives a
+    /// well-behaved core the chance to exit on its own before the kill.
+    fn shutdown(self) {
+        let CoreConn { child, control_tx, control_rx, .. } = self;
+        drop(control_tx);
+        drop(control_rx);
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 struct ShellApp {
     proxy: EventProxy,
     /// Currently-displayed IOSurface — the one the presenter samples.
@@ -471,15 +523,12 @@ struct ShellApp {
     /// abandoned (`decrement_use` + release).
     pending_surface: Option<IOSurface>,
     presenter: Option<ShellPresenter>,
-    core_child: Option<Child>,
-    /// Parent end of the AF_UNIX socketpair we share with the core.
-    /// Wrapped in `Mutex` so the `MarspotApp` callbacks (all on the
-    /// main thread, but the type system doesn't know that) can mutate
-    /// it without splitting the struct.  Frames written here arrive
-    /// at the core's stdin-side fd 3 / `MARSPOT_SHELL_CONTROL_FD`.
-    control_tx: Option<Mutex<UnixStream>>,
-    /// Receives parsed inbound frames from the reader thread.
-    control_rx: Option<Receiver<ShellInbox>>,
+    /// The live core: child process, control socket (both directions),
+    /// and liveness-handshake state, aggregated into `CoreConn` so a
+    /// second one (`pending`) can be held during a flash-free
+    /// silent-update swap.  `None` before the first spawn and in the
+    /// brief gap between a crash and the respawn.
+    active: Option<CoreConn>,
     /// True after the core has confirmed at least one SurfaceReady.
     /// Until then `redraw` skips `present()` so the user sees the
     /// NSWindow's BG colour (font_cache::BG) instead of an unfilled
@@ -493,18 +542,6 @@ struct ShellApp {
     /// Where in the silent-update lifecycle we are.  `Idle` most of
     /// the time; flips to `Probation` after we promote a new core.
     sup_state: SupervisorState,
-    /// Liveness handshake state, reset on every `spawn_core` call.
-    hello_acked: bool,
-    /// When the most recent `spawn_core` ran — drives HELLO timeout.
-    spawned_at: Option<Instant>,
-    /// When to fire the next PING.
-    next_ping_at: Option<Instant>,
-    /// Nonce of the most recent PING we sent.  Pongs with a
-    /// different nonce are stale (a Pong from a previous core, or
-    /// from before a timeout) and we ignore them.
-    last_ping_nonce: u32,
-    /// When the most recent matching Pong arrived.
-    last_pong_at: Option<Instant>,
     /// Recent crash timestamps inside the `CRASH_WINDOW` rolling
     /// window.  Used to refuse auto-restart on a binary that's
     /// flapping.
@@ -529,33 +566,44 @@ impl ShellApp {
             surface: None,
             pending_surface: None,
             presenter: None,
-            core_child: None,
-            control_tx: None,
-            control_rx: None,
+            active: None,
             first_frame_ready: false,
             redraw_thread_started: false,
             binaries,
             sup_state: SupervisorState::Idle,
-            hello_acked: false,
-            spawned_at: None,
-            next_ping_at: None,
-            last_ping_nonce: 0,
-            last_pong_at: None,
             crashes: std::collections::VecDeque::new(),
             auto_restart_disabled: false,
             banner_kind: None,
         }
     }
 
-    /// Send a frame to the core.  Logs and drops on EPIPE; the core
-    /// dying mid-session is handled by the supervisor (Step 5+), so
-    /// here we just don't crash the shell.
+    /// Tear down the active core (clean EOF then SIGKILL + reap) and
+    /// clear the slot.  No-op when there's no active core.
+    fn shutdown_active(&mut self) {
+        if let Some(conn) = self.active.take() {
+            conn.shutdown();
+        }
+    }
+
+    /// True when the active core has a live child process.  False
+    /// before the first spawn, in the crash→respawn gap, and after a
+    /// HELLO mismatch kill (where the conn lingers but `child` is gone).
+    fn core_alive(&self) -> bool {
+        self.active
+            .as_ref()
+            .and_then(|c| c.child.as_ref())
+            .is_some()
+    }
+
+    /// Send a frame to the active core.  Logs and drops on EPIPE; the
+    /// core dying mid-session is handled by the supervisor (Step 5+),
+    /// so here we just don't crash the shell.
     fn send(&self, msg_type: MsgType, payload: Vec<u8>) {
-        let Some(tx) = self.control_tx.as_ref() else {
+        let Some(conn) = self.active.as_ref() else {
             return;
         };
         let frame = Frame::new(msg_type, payload);
-        let mut stream = match tx.lock() {
+        let mut stream = match conn.control_tx.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(), // poisoned: still try
         };
@@ -640,7 +688,6 @@ impl ShellApp {
                     "CORE_SPAWN",
                     &format!("pid={pid} bin={}", core_bin.display()),
                 );
-                self.core_child = Some(child);
                 // Parent no longer needs the child end.
                 unsafe { libc::close(child_fd) };
                 // Wrap the parent end as a UnixStream we can write
@@ -653,26 +700,29 @@ impl ShellApp {
                         return;
                     }
                 };
-                self.control_tx = Some(Mutex::new(stream));
 
                 // Spawn the reader thread.  Decodes frames into
                 // ShellInbox messages, hands them to the main thread
                 // via mpsc + `EventProxy::wake`.
                 let (tx, rx): (Sender<ShellInbox>, Receiver<ShellInbox>) = mpsc::channel();
-                self.control_rx = Some(rx);
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || control_reader_loop(reader_stream, tx, proxy));
 
-                // Liveness handshake bookkeeping.  Resets every
-                // spawn so a fresh core gets a fresh probe window.
-                self.hello_acked = false;
+                // Liveness handshake bookkeeping — a fresh core gets a
+                // fresh probe window.  Nonce starts at 0 (bumped to 1
+                // before the first ping); this conn's reader owns its
+                // own channel, so a previous core's Pong can't alias it.
                 let now = Instant::now();
-                self.spawned_at = Some(now);
-                self.next_ping_at = Some(now + PING_INTERVAL);
-                self.last_pong_at = Some(now); // freebie until first ping
-                // Bump nonce so any stale Pong from a previous core
-                // can be distinguished from this round.
-                self.last_ping_nonce = self.last_ping_nonce.wrapping_add(1);
+                self.active = Some(CoreConn {
+                    child: Some(child),
+                    control_tx: Mutex::new(stream),
+                    control_rx: rx,
+                    hello_acked: false,
+                    spawned_at: now,
+                    next_ping_at: now + PING_INTERVAL,
+                    last_ping_nonce: 0,
+                    last_pong_at: now, // freebie until first ping
+                });
 
                 // Send HELLO immediately so the core can echo HelloAck.
                 self.send(MsgType::Hello, encode_hello(PROTO_VERSION));
@@ -723,12 +773,7 @@ impl ShellApp {
         }
         // Tear down the current core so it gets a clean EOF on the
         // control socket; its Drop / supervisor will see Closed.
-        self.control_tx = None;
-        self.control_rx = None;
-        if let Some(mut child) = self.core_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.shutdown_active();
         // Re-spawn using the (now-current) binary.  Same IOSurface
         // ID + dims so the new core attaches to the surface the user
         // is already looking at.
@@ -783,12 +828,7 @@ impl ShellApp {
         // fresh.  Core child gets killed; control socket is dropped;
         // IOSurface is released.  Anything left would be inherited as
         // dangling fds in the new process — clean now.
-        self.control_tx = None;
-        self.control_rx = None;
-        if let Some(mut child) = self.core_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.shutdown_active();
         if let Some(s) = self.surface.take() {
             s.decrement_use();
         }
@@ -837,10 +877,10 @@ impl ShellApp {
         let want = if self.auto_restart_disabled {
             Some(BannerKind::UpdateFailed)
         } else if matches!(self.sup_state, SupervisorState::Probation { .. })
-            && self.core_child.is_some()
+            && self.core_alive()
         {
             Some(BannerKind::Updating)
-        } else if self.core_child.is_none() && self.surface.is_some() {
+        } else if !self.core_alive() && self.surface.is_some() {
             // Core process is gone (either we just SIGKILL'd it or it
             // died and we haven't spawned a replacement yet).  Show
             // the recovering banner while the gap lasts.
@@ -896,12 +936,7 @@ impl ShellApp {
     /// a hang.  Honours `auto_restart_disabled`.
     fn restart_core(&mut self, ctx: &MarspotAppCtx) {
         // Tear down whatever's left.
-        self.control_tx = None;
-        self.control_rx = None;
-        if let Some(mut c) = self.core_child.take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+        self.shutdown_active();
         if self.auto_restart_disabled {
             return;
         }
@@ -928,14 +963,16 @@ impl ShellApp {
     ///      hung; SIGKILL + restart.
     fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
         // 1. Did the child exit?
-        let exited = match self.core_child.as_mut() {
+        let exited = match self.active.as_mut().and_then(|c| c.child.as_mut()) {
             Some(c) => matches!(c.try_wait(), Ok(Some(_))),
             None => false,
         };
         if exited {
             let was_probation = matches!(self.sup_state, SupervisorState::Probation { .. });
-            // Reap.
-            self.core_child.take();
+            // Reap the child; restart_core below drops the rest of the conn.
+            if let Some(c) = self.active.as_mut() {
+                c.child.take();
+            }
             self.record_crash();
             if was_probation {
                 eprintln!("[shell] core died during probation → rolling back");
@@ -958,7 +995,7 @@ impl ShellApp {
                     reason: "core exited during probation".to_string(),
                 };
                 self.restart_core(ctx);
-                if self.core_child.is_some() {
+                if self.core_alive() {
                     self.sup_state = SupervisorState::Idle;
                 }
             } else {
@@ -984,42 +1021,50 @@ impl ShellApp {
         }
 
         // 3. HELLO timeout.
-        if !self.hello_acked {
-            if let Some(t0) = self.spawned_at {
-                if t0.elapsed() > HELLO_TIMEOUT {
-                    eprintln!(
-                        "[shell] core failed to HelloAck within {} s → killing",
-                        HELLO_TIMEOUT.as_secs()
-                    );
-                    self.record_crash();
-                    self.restart_core(ctx);
-                    return;
-                }
-            }
+        let hello_timed_out = self
+            .active
+            .as_ref()
+            .map(|c| !c.hello_acked && c.spawned_at.elapsed() > HELLO_TIMEOUT)
+            .unwrap_or(false);
+        if hello_timed_out {
+            eprintln!(
+                "[shell] core failed to HelloAck within {} s → killing",
+                HELLO_TIMEOUT.as_secs()
+            );
+            self.record_crash();
+            self.restart_core(ctx);
+            return;
         }
 
-        // 4. Time to send the next ping?
+        // 4. Time to send the next ping?  Mutate the conn first, then
+        // send (which borrows `self` immutably) with the new nonce.
         let now = Instant::now();
-        if self.hello_acked {
-            if let Some(t) = self.next_ping_at {
-                if now >= t {
-                    self.last_ping_nonce = self.last_ping_nonce.wrapping_add(1);
-                    self.send(MsgType::Ping, encode_ping(self.last_ping_nonce));
-                    self.next_ping_at = Some(now + PING_INTERVAL);
-                }
+        let ping_nonce = self.active.as_mut().and_then(|c| {
+            if c.hello_acked && now >= c.next_ping_at {
+                c.last_ping_nonce = c.last_ping_nonce.wrapping_add(1);
+                c.next_ping_at = now + PING_INTERVAL;
+                Some(c.last_ping_nonce)
+            } else {
+                None
             }
+        });
+        if let Some(nonce) = ping_nonce {
+            self.send(MsgType::Ping, encode_ping(nonce));
         }
 
         // 5. Pong deadline → hung.
-        if let Some(last) = self.last_pong_at {
-            if self.hello_acked && now.duration_since(last) > PONG_DEADLINE {
-                eprintln!(
-                    "[shell] no PONG for {} s → core hung; SIGKILL + restart",
-                    PONG_DEADLINE.as_secs()
-                );
-                self.record_crash();
-                self.restart_core(ctx);
-            }
+        let pong_timed_out = self
+            .active
+            .as_ref()
+            .map(|c| c.hello_acked && now.duration_since(c.last_pong_at) > PONG_DEADLINE)
+            .unwrap_or(false);
+        if pong_timed_out {
+            eprintln!(
+                "[shell] no PONG for {} s → core hung; SIGKILL + restart",
+                PONG_DEADLINE.as_secs()
+            );
+            self.record_crash();
+            self.restart_core(ctx);
         }
 
         // 7. Manual update trigger via SIGUSR1.  Lets a CLI invoke
@@ -1124,8 +1169,8 @@ impl MarspotApp for ShellApp {
         // Drain anything the reader thread left in the inbox.  The
         // reader calls `proxy.wake()` after each push, so by the time
         // we're here at least one message is ready.
-        let inbox: Vec<ShellInbox> = match self.control_rx.as_ref() {
-            Some(rx) => rx.try_iter().collect(),
+        let inbox: Vec<ShellInbox> = match self.active.as_ref() {
+            Some(conn) => conn.control_rx.try_iter().collect(),
             None => Vec::new(),
         };
         for msg in inbox {
@@ -1133,7 +1178,9 @@ impl MarspotApp for ShellApp {
                 ShellInbox::SurfaceReady(id) => self.on_surface_ready(id),
                 ShellInbox::HelloAck(v) => {
                     if v == PROTO_VERSION {
-                        self.hello_acked = true;
+                        if let Some(c) = self.active.as_mut() {
+                            c.hello_acked = true;
+                        }
                         eprintln!("[shell] HelloAck v={v} — core handshake OK");
                         sup_log::log("HELLO_ACK", &format!("v={v}"));
                     } else {
@@ -1144,15 +1191,22 @@ impl MarspotApp for ShellApp {
                             "HELLO_MISMATCH",
                             &format!("core_v={v} shell_v={PROTO_VERSION}"),
                         );
-                        if let Some(mut c) = self.core_child.take() {
-                            let _ = c.kill();
-                            let _ = c.wait();
+                        // Kill the child but keep the conn — `spawned_at`
+                        // and `hello_acked == false` stay, so the HELLO
+                        // timeout in poll_supervisor respawns it.
+                        if let Some(c) = self.active.as_mut() {
+                            if let Some(mut child) = c.child.take() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
                         }
                     }
                 }
                 ShellInbox::Pong(nonce) => {
-                    if nonce == self.last_ping_nonce {
-                        self.last_pong_at = Some(Instant::now());
+                    if let Some(c) = self.active.as_mut() {
+                        if nonce == c.last_ping_nonce {
+                            c.last_pong_at = Instant::now();
+                        }
                     }
                 }
                 ShellInbox::CaretRect(rect) => {
@@ -1258,12 +1312,7 @@ impl MarspotApp for ShellApp {
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
-        self.control_tx = None;
-        self.control_rx = None;
-        if let Some(mut child) = self.core_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.shutdown_active();
         if let Some(surface) = self.surface.take() {
             surface.decrement_use();
         }
