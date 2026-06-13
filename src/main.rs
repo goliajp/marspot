@@ -1706,12 +1706,71 @@ fn run_bench(spec: &str) {
         "render" | "metal-render" => bench_metal_render(arg),
         "scroll" => bench_scroll(arg, /* cold */ false),
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
+        "glyphraster" => bench_glyphraster(arg),
         "rss-format-dump" => bench_rss_format_dump(arg),
         other => {
             eprintln!("unknown bench mode: {other}");
             std::process::exit(2);
         }
     }
+}
+
+/// `--bench glyphraster:<N>` — headless glyph-rasterisation throughput
+/// (perf-attack B3/B4 root-cause confirmation).  For each script class
+/// (ascii / cjk / emoji) it rasterises up to N DISTINCT glyphs through
+/// the real cache-miss path on a fresh (cold-atlas) renderer and reports
+/// ns/glyph + glyphs/s.  This is the cost the core's render thread pays
+/// when a CJK/emoji firehose first shows each glyph — the hypothesised
+/// hot spot is the per-glyph `CGBitmapContextCreate` + buffer alloc +
+/// context-property setup in `glyph_atlas::rasterise_glyph`.  No GPU
+/// draw, no parse: the number isolates rasterisation alone.  Headless
+/// (Metal device only needed for the atlas texture), so it runs in the
+/// gate.  NOTE: this measures the *render* half; in the L3 architecture
+/// glyph render is decoupled from cat throughput (the core reads the
+/// latest shm snapshot and never back-pressures L3 unless pokes pile
+/// up), so a slow number here shows as frame latency under churn, not as
+/// lower cat MiB/s.
+fn bench_glyphraster(arg: &str) {
+    let n: usize = arg.parse().unwrap_or(1000).max(1);
+
+    // Distinct chars per class. ascii printable is only 94 wide; cjk
+    // walks the Unified Ideographs block; emoji chains the common emoji
+    // blocks (unassigned codepoints resolve to glyph 0 and are skipped
+    // by resolve_cell_glyph — a cheap lookup, negligible over N).
+    let ascii: Vec<char> = (0x21u32..=0x7E).filter_map(char::from_u32).collect();
+    let cjk: Vec<char> = (0x4E00u32..)
+        .filter_map(char::from_u32)
+        .take(n)
+        .collect();
+    let emoji: Vec<char> = (0x1F300u32..=0x1FAFF)
+        .filter_map(char::from_u32)
+        .take(n)
+        .collect();
+
+    let classes: [(&str, &[char]); 3] = [
+        ("ascii", &ascii),
+        ("cjk", &cjk),
+        ("emoji", &emoji),
+    ];
+
+    let mut parts: Vec<String> = Vec::new();
+    for (name, chars) in classes {
+        // Fresh renderer per class → cold atlas, so every char is a miss.
+        let mut renderer = MetalRenderer::new_headless().expect("headless metal renderer");
+        let total_ns = renderer.bench_rasterize(chars);
+        let count = chars.len();
+        let ns_per = if count > 0 { total_ns / count as u64 } else { 0 };
+        let per_sec = if total_ns > 0 {
+            (count as f64) * 1e9 / (total_ns as f64)
+        } else {
+            0.0
+        };
+        parts.push(format!(
+            r#""{}":{{"glyphs":{},"total_ns":{},"ns_per_glyph":{},"glyphs_per_sec":{:.0}}}"#,
+            name, count, total_ns, ns_per, per_sec
+        ));
+    }
+    println!(r#"{{"mode":"glyphraster",{}}}"#, parts.join(","));
 }
 
 /// `--bench rss-format-dump:<seconds>` — headless driver for the

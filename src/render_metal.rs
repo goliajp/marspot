@@ -875,6 +875,30 @@ impl MetalRenderer {
     pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
         &self.device
     }
+
+    /// Bench helper (perf-attack B3/B4): rasterise each char into the
+    /// atlas via the real cache-miss path (`resolve_char` +
+    /// `get_or_rasterize`), returning total nanoseconds.  Distinct chars
+    /// force misses, so this isolates exactly the per-glyph cost a
+    /// CJK/emoji firehose pays on first sight of each glyph — the
+    /// `get_bounding_rects` CT call, the per-glyph `Vec` alloc +
+    /// `CGBitmapContextCreate` + ~8 `set_*` context-property calls, and
+    /// `draw_glyphs` — with no GPU draw and no parse in the number.  Call
+    /// on a fresh renderer for a cold atlas.  Returns 0 if `chars` is
+    /// empty.  Keep the distinct-char count under the atlas capacity
+    /// (~20k cell-sized slots) to avoid a rebuild skewing the average.
+    pub fn bench_rasterize(&mut self, chars: &[char]) -> u64 {
+        let metrics = SlotMetrics {
+            cell_w: self.font.cell_w.round() as u32,
+            cell_h: self.font.cell_h.round() as u32,
+            baseline_from_top: self.font.ascent.round() as u32,
+        };
+        let t0 = std::time::Instant::now();
+        for &ch in chars {
+            let _ = resolve_cell_glyph(&mut self.atlas, &mut self.font, ch, false, false, metrics);
+        }
+        t0.elapsed().as_nanos() as u64
+    }
 }
 
 /// Chrome / cursor / focus-outline constants, kept in sync with

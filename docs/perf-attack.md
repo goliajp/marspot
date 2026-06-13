@@ -79,15 +79,42 @@ contention.  B1 and B2 originally read 51.6 / 39.0 (vs Term 1.21× /
 1.23×**) — comfortably above the original floors and ahead of all
 competitors.  No regression.
 
-B3 (cat-cjk) and B4 (cat-emoji) are smaller losses than first read but
-still real: marspot vs Apple's CoreText/CJK and Apple Color Emoji paths.
+B3 (cat-cjk) and B4 (cat-emoji) were first read as marspot losing on
+Apple's CoreText/CJK and Apple Color Emoji paths.  **Root-cause measured
+2026-06-13** (`marspot --bench glyphraster:N`, cache-miss rasterisation
+isolated from GPU draw + parse, dev box, 3-run stable):
 
-| ID | Metric | Clean current | Target | File | Status |
-|---|---|---|---|---|---|
-| B1 | live cat-ascii (MB/s) | 71.1 (vs Term 1.49×, iTerm 1.27×) | ≥ 70 ✓ already | [B](perf-attack/B-live-cat-regression.md) | **resolved 2026-05-05** (was godot artifact) |
-| B2 | live cat-mixed | 51.6 (vs Term 1.23×, iTerm 1.84×) | ≥ 50 ✓ already | [B](perf-attack/B-live-cat-regression.md) | **resolved 2026-05-05** (was godot artifact) |
-| B3 | live cat-cjk | 36.4 (vs Term 0.86×, **vs Warp 0.77× — losing**) | ≥ 42 (1.0× Term) AND ≥ 47 (1.0× Warp) | [B](perf-attack/B-live-cat-regression.md) | queued |
-| B4 | live cat-emoji | 42.1 (vs Term 0.84× — losing, vs Warp 0.95×) | ≥ 50 (1.0× Term) | [B](perf-attack/B-live-cat-regression.md) | queued |
+| script | ns/glyph | glyphs/s |
+|---|---|---|
+| ascii | ~15,600 | ~64k |
+| **cjk** | **~14,800** | **~68k** |
+| **emoji** | **~208,000** | **~4.7k** |
+
+This **refutes the shared "glyph-atlas context-creation" root cause** the
+roadmap assumed:
+
+- **B3 (cjk) is NOT a rasterisation problem** — CJK per-glyph raster cost
+  equals ascii (~15 µs).  The old "cat-cjk losing" was the standalone
+  *coupled* measurement (parse+render in one process, cat blocks on the
+  slowest stage) and/or the byte-throughput optics of multibyte content;
+  under L3 the parse path drains cjk at ~106 MiB/s (E8, `measure-l3.sh`),
+  ahead of ascii by bytes.  No raster fix is warranted.
+- **B4 (emoji) is real (~14× ascii)** but the cost is **Apple Color Emoji
+  sbix bitmap decode/scale inside `draw_glyphs`**, NOT the per-glyph
+  `CGBitmapContextCreate` the roadmap targeted (that overhead is the
+  shared ~15 µs baseline).  Pooling the context would shave the baseline
+  for *all* glyphs but barely dent emoji's 193 µs sbix tail.  Optimisation
+  direction therefore shifts: a color-bitmap-specific cache/scale path, or
+  accept it (emoji are rare in throughput workloads and, under L3, raster
+  is decoupled from cat drain — it shows as frame latency under churn, not
+  cat MiB/s).
+
+| ID | Metric | Status |
+|---|---|---|
+| B1 | live cat-ascii | **resolved 2026-05-05** (was godot artifact) |
+| B2 | live cat-mixed | **resolved 2026-05-05** (was godot artifact) |
+| B3 | live cat-cjk | **retracted 2026-06-13** — cjk raster = ascii raster (`--bench glyphraster`); not a raster problem, L3 parse drains it fine (E8). |
+| B4 | live cat-emoji | **re-scoped 2026-06-13** — real ~14× raster cost, root = Apple Color Emoji sbix decode (not context-creation). Needs a color-bitmap raster path OR accept (decoupled from cat throughput under L3). queued. |
 
 ### C — Per-session RSS bloat vs Terminal.app
 
@@ -193,14 +220,17 @@ Remaining queue:
      gate or add fill-rate check
    - if drift > 1.10× → real leak; Instruments allocations + per-
      subsystem RSS slicing
-2. **B3 + B4 + G1/G2/G3** (1-2 weeks) — CJK/emoji vs Apple's
-   CoreText/SBIX paths, and vs Ghostty's hot glyph atlas. Same root
-   cause; G-series exposed when Ghostty entered the snapshot and the
-   gate stopped masking it. Specific tactic: pool CGBitmapContext +
-   reuse bitmap buffer in `glyph_atlas::rasterise_glyph` (per-glyph
-   context creation + property setting is ~10-30% of CJK/emoji
-   raster cost). Exit when `bench-remote --full` passes 21/21 with
-   Ghostty in the snapshot (current: fails 3/21 on G1/G2/G3).
+2. **B3 retracted, B4 re-scoped, G retracted** (2026-06-13, via
+   `--bench glyphraster`).  The assumed shared root cause (per-glyph
+   `CGBitmapContextCreate` overhead) was wrong: cjk raster cost = ascii
+   (~15 µs/glyph), so B3 is not a raster problem at all; emoji is the
+   only real loss (~14× ascii) and its cost is Apple Color Emoji **sbix
+   bitmap decode**, which context-pooling doesn't touch.  Remaining glyph
+   work is B4-only and OPTIONAL: a color-bitmap-specific cache/scale path.
+   Under L3 it's frame latency under emoji churn, not cat MiB/s (raster
+   is decoupled — see L3-throughput section).  The context-pooling
+   micro-opt would shave the shared ~15 µs baseline for all glyphs but is
+   low-value (most glyphs are cached after first sight).
 3. **C** (few days, probably folded into A1 fix) — per-session RSS
    bloat is largely the same lazy-fault footprint as A1
 4. **D-rescope** (1 week) — D-target reframed: scrollback ACCESS at
