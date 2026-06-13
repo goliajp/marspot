@@ -496,10 +496,3 @@ fn reader_loop(
     }
 }
 
-/// Default socket path: `$HOME/Library/Caches/marspot/shelld.sock`.
-/// Shared with `marspot-shelld` so they agree by convention.
-pub fn default_socket_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(home).join("Library/Caches/marspot/shelld.sock")
-}
-

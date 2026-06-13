@@ -1453,7 +1453,7 @@ fn main() {
         let wake = move || {
             proxy_clone.wake();
         };
-        let socket = marspot::shelld_client::default_socket_path();
+        let socket = marspot::paths::shelld_socket();
         let client = marspot::shelld_client::ShelldClient::connect(&socket, wake)
             .unwrap_or_else(|e| {
                 eprintln!(

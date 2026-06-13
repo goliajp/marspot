@@ -41,7 +41,7 @@ use marspot::shell_proto::{
     ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
     PROTO_VERSION,
 };
-use marspot::shelld_client::{default_socket_path, ShelldClient};
+use marspot::shelld_client::ShelldClient;
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
@@ -785,7 +785,7 @@ fn main() {
         let _ = event_tx_for_wake.send(CoreEvent::PumpShelld);
     };
 
-    let shelld_sock = default_socket_path();
+    let shelld_sock = marspot::paths::shelld_socket();
     eprintln!("[core] connecting to shelld at {}", shelld_sock.display());
     let client = match ShelldClient::connect(&shelld_sock, wake) {
         Ok(c) => Arc::new(c),

@@ -25,11 +25,21 @@ DEV_SOCK="$MARSPOT_STATE_DIR/shelld.sock"
 
 # Kill only sandbox / dev-build shell+core — paths the installed app
 # never uses.  Leaves the sandbox shelld (shared across a suite) alone.
+#
+# The trailing `( |$)` anchor is load-bearing: `marspot-shell` is a
+# prefix of `marspot-shell`d and `marspot-core` of `marspot-core`shim,
+# so an un-anchored `pkill -f .../marspot-shell` would ALSO kill the
+# sandbox shelld (and `.../marspot-core` the coreshim). That stayed
+# invisible for as long as the clients hard-coded the production socket
+# — killing the sandbox daemon was harmless because nothing connected
+# to it — and surfaced the moment core started honouring
+# MARSPOT_STATE_DIR. The anchor matches the binary at end-of-argv or
+# followed by a space (its CLI args), never the `d`/`shim` suffix.
 dev_kill_shell_core() {
-  pkill -9 -f "$DEV_TARGET/marspot-shell" >/dev/null 2>&1 || true
-  pkill -9 -f "$DEV_TARGET/marspot-core"  >/dev/null 2>&1 || true
-  pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-shell" >/dev/null 2>&1 || true
-  pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core"  >/dev/null 2>&1 || true
+  pkill -9 -f "$DEV_TARGET/marspot-shell( |\$)" >/dev/null 2>&1 || true
+  pkill -9 -f "$DEV_TARGET/marspot-core( |\$)"  >/dev/null 2>&1 || true
+  pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-shell( |\$)" >/dev/null 2>&1 || true
+  pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |\$)"  >/dev/null 2>&1 || true
 }
 
 # Wipe the sandbox binary tree + supervisor log (NOT sessions — a
