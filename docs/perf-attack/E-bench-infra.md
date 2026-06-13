@@ -137,9 +137,21 @@ Same pattern for render (3 trials) and scroll (5 trials).
 
 ---
 
-## E3 — vim-jump cross-term wall-time capture
+## E3 — vim-jump cross-term wall-time capture · **SATISFIED 2026-06-14** (Warp gap noted)
 
-### What's broken
+The filed description below is **stale**: `bin/scenarios/vim-jump.sh` was
+rewritten since to share one `WORKER` script across terminals that wraps
+vim with `/usr/bin/time -p … 2> timing.txt`; the aggregator parses `real`
+into `wall_ns`/`wall_s` for **any** terminal.  marspot / iTerm2 /
+Terminal.app all produce cross-term wall-time today (`docs/bench.md`
+matrix already marks vim-jump "yes (manual)").  **Remaining gap:** Warp is
+not in vim-jump.sh's `case` — `bin/drivers/warp.sh` is paste-mode only
+(no window-id return / no programmatic close), so a wired-in Warp run
+would leak windows and can't be verified headless; left out deliberately
+rather than shipped half-working.  Closing it needs a real Warp driver
+(window enumeration + close), tracked there if Warp-vs ever matters.
+
+### What's broken (stale — see above)
 
 `bin/scenarios/vim-jump.sh` for marspot captures wall-time (marspot
 1.23s on 50K lines).  For iTerm2 / Terminal.app / Warp the same

@@ -186,7 +186,7 @@ noise / stale data / missing metrics.
 |---|---|---|---|
 | E1 | competitors_snapshot staleness guard | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E1-staleness-guard`) |
 | E2 | fast-gate warm-up trial | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E2-warmup`) |
-| E3 | vim-jump cross-term wall-time capture | [E](perf-attack/E-bench-infra.md) | queued |
+| E3 | vim-jump cross-term wall-time capture | [E](perf-attack/E-bench-infra.md) | **satisfied 2026-06-14** — vim-jump.sh rewrite already captures wall-time for marspot/iterm/terminal (shared `time -p` worker); only Warp left out (paste-mode driver can't close windows / verify). |
 | E4 | measure-other.sh stale-marker cleanup | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted** (not a bug — q1<1% short-circuit by design) |
