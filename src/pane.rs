@@ -16,9 +16,17 @@
 //! but not multi-session-aware). `Mcli` and `Marspot` are the cement
 //! that wires panes into a window.
 
+use std::os::unix::net::UnixStream;
+use std::process::Child;
+
+use crate::grid::{Cell, Grid};
+use crate::grid_shm::{
+    GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
+};
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
 use crate::session::{Session, SessionState};
+use crate::shell_proto::{encode_key_event, event_to_wire, Frame, MsgType};
 use crate::shelld_client::{SessionState as ShelldState, ShelldSession};
 use crate::terminal::Terminal;
 
@@ -30,13 +38,27 @@ use crate::terminal::Terminal;
 pub enum PaneBackend {
     Local(Session),
     Shelld(ShelldSession),
+    /// A per-session L3 process (`marspot-session`, target #4) that owns
+    /// the PTY parser/terminal in its own address space and publishes
+    /// its visible grid into shared memory.  This process (L2) holds only
+    /// a synthetic mirror grid filled from the shm snapshot, plus the
+    /// control socket to forward keystrokes.  Behind `MARSPOT_L3=1`;
+    /// the in-process backends above stay the default.
+    L3(L3Conn),
 }
 
 impl PaneBackend {
+    /// In-process terminal — **only** the local/shelld backends.  An L3
+    /// pane has no `Terminal` in this address space (it lives in the
+    /// session process); read its grid + modes via `grid()` /
+    /// `cursor_visible()` / `cursor_key_application_mode()` /
+    /// `bracketed_paste_mode()` instead.  Calling this on an L3 backend
+    /// is a bug and panics.
     pub fn terminal(&self) -> &Terminal {
         match self {
             PaneBackend::Local(s) => s.terminal(),
             PaneBackend::Shelld(s) => s.terminal(),
+            PaneBackend::L3(_) => unreachable!("L3 pane has no in-process Terminal"),
         }
     }
 
@@ -44,6 +66,56 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => &mut s.terminal,
             PaneBackend::Shelld(s) => &mut s.terminal,
+            PaneBackend::L3(_) => unreachable!("L3 pane has no in-process Terminal"),
+        }
+    }
+
+    /// Visible grid for the renderer.  Local/shelld read their own
+    /// terminal; L3 reads the synthetic mirror last filled from shm.
+    pub fn grid(&self) -> &Grid {
+        match self {
+            PaneBackend::Local(s) => s.terminal().grid(),
+            PaneBackend::Shelld(s) => s.terminal().grid(),
+            PaneBackend::L3(c) => &c.grid,
+        }
+    }
+
+    pub fn cursor_visible(&self) -> bool {
+        match self {
+            PaneBackend::Local(s) => s.terminal().cursor_visible(),
+            PaneBackend::Shelld(s) => s.terminal().cursor_visible(),
+            PaneBackend::L3(c) => c.cursor_visible,
+        }
+    }
+
+    pub fn cursor_key_application_mode(&self) -> bool {
+        match self {
+            PaneBackend::Local(s) => s.terminal().cursor_key_application_mode(),
+            PaneBackend::Shelld(s) => s.terminal().cursor_key_application_mode(),
+            PaneBackend::L3(c) => c.app_cursor_keys,
+        }
+    }
+
+    pub fn bracketed_paste_mode(&self) -> bool {
+        match self {
+            PaneBackend::Local(s) => s.terminal().bracketed_paste_mode(),
+            PaneBackend::Shelld(s) => s.terminal().bracketed_paste_mode(),
+            PaneBackend::L3(c) => c.bracketed_paste,
+        }
+    }
+
+    /// L3-backed?  Container input routing branches on this: an L3 pane
+    /// forwards the key *event* to its session process (which encodes +
+    /// local-echoes), rather than encoding to PTY bytes here.
+    pub fn is_l3(&self) -> bool {
+        matches!(self, PaneBackend::L3(_))
+    }
+
+    /// Forward a keystroke to an L3 session over the control socket.
+    /// No-op for the in-process backends (they go through `write`).
+    pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_key(event, mods);
         }
     }
 
@@ -51,6 +123,11 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.pump(),
             PaneBackend::Shelld(s) => s.pump(),
+            // For L3 there are no PTY bytes here — "pump" means re-read
+            // the shm mirror.  Return 1 on a fresh frame so the container
+            // requests a redraw, 0 when nothing changed (so the 1 s
+            // heartbeat doesn't force a spurious render).
+            PaneBackend::L3(c) => usize::from(c.poll()),
         }
     }
 
@@ -58,6 +135,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.is_exited(),
             PaneBackend::Shelld(s) => s.is_exited(),
+            PaneBackend::L3(c) => c.is_exited(),
         }
     }
 
@@ -65,6 +143,9 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.write(bytes),
             PaneBackend::Shelld(s) => s.write(bytes),
+            // L3 input is forwarded as key events, not raw bytes; the
+            // session process owns its own PTY write + response path.
+            PaneBackend::L3(_) => Ok(0),
         }
     }
 
@@ -74,6 +155,10 @@ impl PaneBackend {
             PaneBackend::Shelld(s) => {
                 let _ = s.resize(cols, rows);
             }
+            // Keep the mirror's shape consistent with the layout; the
+            // matching SIGWINCH to the L3 PTY is wired in the resize
+            // step (sizes are fixed in step 3).
+            PaneBackend::L3(c) => c.grid.resize(cols, rows),
         }
     }
 
@@ -85,6 +170,13 @@ impl PaneBackend {
                 ShelldState::Idle => SessionState::Idle,
                 ShelldState::Exited => SessionState::Exited,
             },
+            PaneBackend::L3(c) => {
+                if c.is_exited() {
+                    SessionState::Exited
+                } else {
+                    SessionState::Active
+                }
+            }
         }
     }
 
@@ -97,9 +189,9 @@ impl PaneBackend {
     pub fn feed_terminal(&mut self, bytes: &[u8]) {
         match self {
             PaneBackend::Local(s) => s.feed_terminal(bytes),
-            PaneBackend::Shelld(_) => {
+            PaneBackend::Shelld(_) | PaneBackend::L3(_) => {
                 // Phase 4: tmux-CC mode still runs through a local
-                // Session; shelld panes ignore this entry point.
+                // Session; shelld / L3 panes ignore this entry point.
             }
         }
     }
@@ -110,8 +202,128 @@ impl PaneBackend {
     pub fn drain_raw(&mut self) -> Vec<u8> {
         match self {
             PaneBackend::Local(s) => s.drain_raw(),
-            PaneBackend::Shelld(_) => Vec::new(),
+            PaneBackend::Shelld(_) | PaneBackend::L3(_) => Vec::new(),
         }
+    }
+}
+
+/// L2's handle on a per-session L3 process (`marspot-session`).
+///
+/// The session process owns the PTY + VT parser + the authoritative
+/// `Grid` (with scrollback) in its own address space; here we hold only
+/// a synthetic *mirror* of its visible window, filled from the shared-
+/// memory snapshot on each `poll()`, plus the control socket to forward
+/// keystrokes.  The child is killed + reaped on drop (bounded teardown).
+///
+/// Step 3 keeps this minimal — fixed geometry, no scrollback mirror, a
+/// full re-fill per changed frame.  Efficiency (incremental fill, dirty
+/// rows) and resize/scroll forwarding land in later steps; see
+/// `docs/per-session-l3.md`.
+pub struct L3Conn {
+    child: Child,
+    /// Write half of the L2↔L3 control socket — forwards key events.
+    /// (A reader thread on the matching half lives in the container,
+    /// turning L3's `GridReady` pokes into redraw wakes.)
+    control: UnixStream,
+    reader: GridShmReader,
+    /// Mirror of L3's visible grid, rebuilt from the shm snapshot.
+    grid: Grid,
+    /// Mode flags from the last snapshot, surfaced to the renderer /
+    /// input encoder via `PaneBackend`'s accessors.
+    cursor_visible: bool,
+    app_cursor_keys: bool,
+    bracketed_paste: bool,
+    /// Last shm publish seq we mirrored; lets `poll()` skip a re-fill
+    /// when nothing changed (so L2's heartbeat doesn't force a render).
+    last_seq: u64,
+    /// Set once the child process has exited (observed by `poll`'s
+    /// `try_wait`).  Read by `is_exited`/`state`, which are `&self`.
+    exited: bool,
+    /// Scratch buffer for the snapshot cell copy — reused across polls
+    /// so the per-frame read allocates zero.
+    scratch: Vec<Cell>,
+}
+
+impl L3Conn {
+    /// Assemble from already-spawned pieces.  The container does the
+    /// spawn (socketpair + shm region + `Command`); this is pure
+    /// assembly so `Pane`/`PaneBackend` stay free of process-launch glue.
+    pub fn new(child: Child, control: UnixStream, reader: GridShmReader) -> Self {
+        let grid = Grid::new(reader.cols(), reader.rows());
+        Self {
+            child,
+            control,
+            grid,
+            cursor_visible: true,
+            app_cursor_keys: false,
+            bracketed_paste: false,
+            last_seq: 0,
+            exited: false,
+            scratch: Vec::new(),
+            reader,
+        }
+    }
+
+    /// Re-read the shm mirror if L3 published a new frame.  Returns
+    /// `true` when the mirror changed (caller should redraw).  Cheap
+    /// no-op (one atomic load) when the seq is unchanged.
+    fn poll(&mut self) -> bool {
+        // Observe exit here (the only `&mut` entry point); `is_exited`
+        // and `state` are `&self` and just read the flag.
+        if !self.exited && matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.exited = true;
+        }
+        let seq = self.reader.seq();
+        if seq == self.last_seq {
+            return false;
+        }
+        let Some(snap) = self.reader.read(&mut self.scratch) else {
+            return false; // never published yet (seq 0)
+        };
+        // Reshape the mirror if L3's geometry changed under us.
+        if self.grid.cols() != snap.cols || self.grid.rows() != snap.rows {
+            self.grid = Grid::new(snap.cols, snap.rows);
+        }
+        for row in 0..snap.rows {
+            let base = row as usize * snap.cols as usize;
+            for col in 0..snap.cols {
+                self.grid
+                    .set_cell(col, row, self.scratch[base + col as usize]);
+            }
+        }
+        self.grid.set_cursor(snap.cursor_col, snap.cursor_row);
+        self.cursor_visible = snap.flags & FLAG_CURSOR_VISIBLE != 0;
+        self.app_cursor_keys = snap.flags & FLAG_APP_CURSOR_KEYS != 0;
+        self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
+        // Re-read the seq after the copy: if L3 republished mid-fill,
+        // leave it stale so the next poll re-reads rather than missing a
+        // frame.
+        self.last_seq = seq;
+        true
+    }
+
+    /// Forward a keystroke to the session process, which encodes it with
+    /// its own terminal modes and local-echoes.  Best-effort: a dead
+    /// socket means L3 went away and the container will reap it.
+    fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
+        let wire = event_to_wire(event, mods);
+        let frame = Frame::new(MsgType::KeyEvent, encode_key_event(&wire));
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    fn is_exited(&self) -> bool {
+        self.exited
+    }
+}
+
+impl Drop for L3Conn {
+    fn drop(&mut self) {
+        // Bounded teardown: closing the pane kills + reaps the session
+        // process so no L3 is orphaned.  (The shelld session it was
+        // driving lives on in shelld — that's the whole point — but this
+        // L2-side process must not leak.)
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -153,6 +365,34 @@ impl Pane {
         }
     }
 
+    /// Wrap a per-session L3 process (target #4, behind `MARSPOT_L3=1`).
+    /// The container assembles the `L3Conn` (spawn + shm + socket) and
+    /// hands it here; the pane then behaves like any other — same render
+    /// / scroll / focus path — reading its grid from the shm mirror.
+    pub fn new_l3(conn: L3Conn) -> Self {
+        Self {
+            session: PaneBackend::L3(conn),
+            view_offset: 0,
+            last_seen_scroll_push: 0,
+        }
+    }
+
+    /// L3-backed?  Container input routing forwards key *events* to L3
+    /// instead of encoding PTY bytes locally.
+    pub fn is_l3(&self) -> bool {
+        self.session.is_l3()
+    }
+
+    /// Forward a keystroke to an L3 session (no-op otherwise).  Snaps the
+    /// view back to live like `handle_key` does, since the keystroke's
+    /// echo will land at the live tail.
+    pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
+        let need_redraw = self.view_offset != 0;
+        self.view_offset = 0;
+        self.session.forward_key(event, mods);
+        need_redraw
+    }
+
     /// Returns the number of lines pushed into scrollback since the
     /// last call (then updates the bookmark).  Marspot calls this
     /// after each `pump` to keep live selections aligned with the
@@ -160,7 +400,7 @@ impl Pane {
     /// the same content one row further from live bottom, so the
     /// selection's abs coords must rise by the same amount.
     pub fn drain_scroll_push_delta(&mut self) -> u64 {
-        let now = self.session.terminal().grid().scroll_push_count();
+        let now = self.session.grid().scroll_push_count();
         let delta = now.saturating_sub(self.last_seen_scroll_push);
         self.last_seen_scroll_push = now;
         delta
@@ -204,12 +444,16 @@ impl Pane {
     /// (only when the view offset changed; the byte write triggers a
     /// PTY wake → `pump` → redraw on its own).
     pub fn handle_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
+        // L3 panes encode in the session process; forward the event.
+        if self.session.is_l3() {
+            return self.forward_key(event, mods);
+        }
         // Forward the terminal's DECCKM + bracketed-paste state so
         // arrow keys encode correctly for TUI apps in application
         // cursor key mode, and Cmd-V paste is wrapped in `\e[200~ /
         // \e[201~` when the app has opted in.
-        let app_mode = self.session.terminal().cursor_key_application_mode();
-        let bracketed = self.session.terminal().bracketed_paste_mode();
+        let app_mode = self.session.cursor_key_application_mode();
+        let bracketed = self.session.bracketed_paste_mode();
         let Some(bytes) =
             key_event_to_bytes(event, mods, app_mode, bracketed, crate::input::read_clipboard_text)
         else {
@@ -239,7 +483,7 @@ impl Pane {
         if delta == 0 {
             return false;
         }
-        let max = self.session.terminal().grid().scrollback_len() as i32;
+        let max = self.session.grid().scrollback_len() as i32;
         let new = (self.view_offset as i32 + delta).clamp(0, max) as u16;
         if new == self.view_offset {
             return false;
@@ -265,12 +509,7 @@ impl Pane {
     /// react to (clear-screen redraws, reflow); avoiding spurious
     /// resize keeps user experience quiet.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        if (cols, rows)
-            != (
-                self.session.terminal().grid().cols(),
-                self.session.terminal().grid().rows(),
-            )
-        {
+        if (cols, rows) != (self.session.grid().cols(), self.session.grid().rows()) {
             self.session.resize(cols, rows);
         }
     }
@@ -289,9 +528,9 @@ impl Pane {
     /// off.
     pub fn view<'a>(&'a self, focused: bool, title: &'a str) -> SessionView<'a> {
         SessionView {
-            grid: self.session.terminal().grid(),
+            grid: self.session.grid(),
             view_offset: if focused { self.view_offset } else { 0 },
-            cursor_visible: self.session.terminal().cursor_visible(),
+            cursor_visible: self.session.cursor_visible(),
             focused,
             title,
             selection: None,

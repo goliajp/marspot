@@ -425,6 +425,17 @@ impl GridShmReader {
         self.rows
     }
 
+    /// Current publish sequence, read once (Acquire). Strictly increases
+    /// by 2 per published frame, so a reader can cheaply skip a full
+    /// re-read when the seq is unchanged since its last snapshot — used
+    /// by L2 to avoid a spurious re-render when its 1 s heartbeat wakes
+    /// it but L3 published nothing new. An odd value means a write is in
+    /// flight; the caller treats that as "changed" and re-reads (`read`
+    /// then spins to a tear-free frame).
+    pub fn seq(&self) -> u64 {
+        unsafe { (*self.header()).seq.load(Ordering::Acquire) }
+    }
+
     #[inline]
     unsafe fn header(&self) -> *const Header {
         self.base as *const Header
