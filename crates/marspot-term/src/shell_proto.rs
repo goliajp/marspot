@@ -118,6 +118,12 @@ pub enum MsgType {
     /// `Resize` (31), which carries an IOSurface id + pixel dims — this
     /// one is the pure cell-grid resize the L3 framebuffer needs.
     GridResize = 35,
+    /// L2 (`marspot-core`) → L3 (`marspot-session`): "publish the window at
+    /// this scrollback view offset (rows up from the live tail)."  Payload:
+    /// `view_offset: u16 LE`.  L3 owns the scrollback, so L2 can't scroll
+    /// its own mirror (which holds only the visible window) — it asks L3
+    /// which window to publish.  See `docs/per-session-l3.md`.
+    GridScroll = 36,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -141,6 +147,7 @@ impl MsgType {
             33 => MsgType::CaretRect,
             34 => MsgType::GridReady,
             35 => MsgType::GridResize,
+            36 => MsgType::GridScroll,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -530,6 +537,22 @@ pub fn decode_grid_resize(payload: &[u8]) -> io::Result<(u16, u16)> {
     Ok((cols, rows))
 }
 
+/// GridScroll payload: `view_offset: u16 LE` — rows up from the live
+/// tail that L3 should publish into the framebuffer (0 = live).
+pub fn encode_grid_scroll(view_offset: u16) -> Vec<u8> {
+    view_offset.to_le_bytes().to_vec()
+}
+
+pub fn decode_grid_scroll(payload: &[u8]) -> io::Result<u16> {
+    if payload.len() < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "grid_scroll payload < 2 bytes",
+        ));
+    }
+    Ok(u16::from_le_bytes(payload[0..2].try_into().unwrap()))
+}
+
 /// SurfaceReady payload: the IOSurface ID the core has just rendered
 /// to (u32 LE).  The shell uses this to switch its presenter from the
 /// previous (stretched) surface to the new (crisp) one.
@@ -838,6 +861,12 @@ mod tests {
         let (c, r) = decode_grid_resize(&encode_grid_resize(203, 61)).unwrap();
         assert_eq!((c, r), (203, 61));
         assert_eq!(MsgType::from_u32(35), Some(MsgType::GridResize));
+    }
+
+    #[test]
+    fn grid_scroll_roundtrip() {
+        assert_eq!(decode_grid_scroll(&encode_grid_scroll(4096)).unwrap(), 4096);
+        assert_eq!(MsgType::from_u32(36), Some(MsgType::GridScroll));
     }
 
     #[test]

@@ -31,8 +31,8 @@ use marspot_term::grid_shm::{
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::paths::shelld_socket;
 use marspot_term::shell_proto::{
-    decode_grid_resize, decode_key_event, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD,
-    ENV_CONTROL_FD,
+    decode_grid_resize, decode_grid_scroll, decode_key_event, wire_to_event, Frame, MsgType,
+    DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::shelld_client::{SessionState, ShelldClient, ShelldSession};
 use marspot_term::shelld_proto::SessionInfo;
@@ -48,6 +48,10 @@ enum SessionEvent {
     /// its Terminal + ioctl's the PTY (via shelld) + reflows, then
     /// republishes at the new dims into the same (capacity-mapped) region.
     Resize(u16, u16),
+    /// L2 forwarded a scrollback view offset (rows up from live). L3 owns
+    /// the scrollback, so it publishes that window; L2 renders the mirror
+    /// as-is (it can't scroll its window-only mirror itself).
+    Scroll(u16),
 }
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -62,9 +66,14 @@ fn state_str(s: SessionState) -> &'static str {
     }
 }
 
-/// Publish the session's current grid (live view) + cursor/mode flags
+/// Publish the session's grid window at `view_offset` (rows up from the
+/// live tail, clamped to the available scrollback) + cursor/mode flags
 /// into the shared framebuffer for L2 to render.
-fn publish(shm: &mut GridShmWriter, session: &marspot_term::shelld_client::ShelldSession) {
+fn publish(
+    shm: &mut GridShmWriter,
+    session: &marspot_term::shelld_client::ShelldSession,
+    view_offset: u16,
+) {
     let term = session.terminal();
     let mut flags = 0u32;
     if term.cursor_visible() {
@@ -76,7 +85,11 @@ fn publish(shm: &mut GridShmWriter, session: &marspot_term::shelld_client::Shell
     if term.bracketed_paste_mode() {
         flags |= FLAG_BRACKETED_PASTE;
     }
-    shm.publish(term.grid(), 0, flags);
+    // Clamp here too: L2 clamps against the scrollback_len it last saw, but
+    // scrollback can shrink (alt-screen enter / reset) between L2's request
+    // and this publish, so never hand the writer an out-of-range offset.
+    let off = view_offset.min(term.grid().scrollback_len() as u16);
+    shm.publish(term.grid(), off, flags);
 }
 
 /// Encode one forwarded keystroke with L3's own terminal mode flags,
@@ -156,8 +169,15 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                         }
                     }
                 }
-                // Other frame types (paste/scroll/selection) arrive in
-                // later steps; ignore unknown-to-us types for now.
+                MsgType::GridScroll => {
+                    if let Ok(off) = decode_grid_scroll(&f.payload) {
+                        if tx.send(SessionEvent::Scroll(off)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                // Other frame types (paste/selection) arrive in later
+                // steps; ignore unknown-to-us types for now.
                 _ => {}
             },
             Ok(None) | Err(_) => break, // L2 closed the socket
@@ -171,9 +191,10 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
 fn publish_and_poke(
     shm: &mut GridShmWriter,
     session: &marspot_term::shelld_client::ShelldSession,
+    view_offset: u16,
     poke: Option<&mut UnixStream>,
 ) {
-    publish(shm, session);
+    publish(shm, session, view_offset);
     if let Some(w) = poke {
         // Best-effort: a dead socket just means L2 went away; the next
         // read EOF tears the reader down and the session keeps running.
@@ -302,7 +323,9 @@ fn main() {
     // Input source + L2 wake channel: L2 forwards keystrokes over the
     // control socket; we poke it back with GridReady after each publish.
     let mut poke = setup_control_socket(ev_tx.clone());
-    publish_and_poke(&mut shm, &session, poke.as_mut());
+    // Scrollback view offset L2 last asked us to publish (0 = live tail).
+    let mut view_offset: u16 = 0;
+    publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
 
     let start = Instant::now();
     let mut frame: u64 = 0;
@@ -320,10 +343,12 @@ fn main() {
         // the final dims (intermediate sizes never need a reflow).
         let mut predicted = false;
         let mut pending_resize: Option<(u16, u16)> = None;
+        let mut pending_scroll: Option<u16> = None;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
                 SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
+                SessionEvent::Scroll(off) => pending_scroll = Some(off),
                 SessionEvent::Wake => {}
             }
         }
@@ -336,18 +361,27 @@ fn main() {
                 eprintln!("[session] resize to {cols}x{rows} failed: {e}");
             }
         }
+        // A scroll changes which window we publish even with no new output.
+        let scrolled = match pending_scroll {
+            Some(off) if off != view_offset => {
+                view_offset = off;
+                true
+            }
+            _ => false,
+        };
 
         let n = session.pump();
         if session.is_exited() {
             session.pump();
-            publish_and_poke(&mut shm, &session, poke.as_mut());
+            publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
             eprintln!("[session] session exited; exiting cleanly");
             break;
         }
         // Republish on PTY output, a local echo that painted ahead of it,
-        // or a resize (the grid shape changed even if no bytes pumped).
-        if n > 0 || predicted || resized {
-            publish_and_poke(&mut shm, &session, poke.as_mut());
+        // a resize (grid shape changed), or a scroll (window changed) —
+        // even when no bytes pumped this tick.
+        if n > 0 || predicted || resized || scrolled {
+            publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
         }
 
         frame += 1;

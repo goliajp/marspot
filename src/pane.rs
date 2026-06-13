@@ -26,7 +26,9 @@ use crate::grid_shm::{
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
 use crate::session::{Session, SessionState};
-use crate::shell_proto::{encode_grid_resize, encode_key_event, event_to_wire, Frame, MsgType};
+use crate::shell_proto::{
+    encode_grid_resize, encode_grid_scroll, encode_key_event, event_to_wire, Frame, MsgType,
+};
 use crate::shelld_client::{SessionState as ShelldState, ShelldSession};
 use crate::terminal::Terminal;
 
@@ -116,6 +118,24 @@ impl PaneBackend {
     pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         if let PaneBackend::L3(c) = self {
             c.forward_key(event, mods);
+        }
+    }
+
+    /// Ask an L3 session to publish its window at `view_offset`.  No-op for
+    /// in-process backends, which scroll their own grid at render time.
+    pub fn forward_scroll(&mut self, view_offset: u16) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_scroll(view_offset);
+        }
+    }
+
+    /// Scrollback depth for an L3 pane (from its last snapshot) — the clamp
+    /// bound L2 uses when scrolling it.  `0` for in-process backends, which
+    /// clamp against their own grid instead.
+    pub fn l3_scrollback_len(&self) -> u16 {
+        match self {
+            PaneBackend::L3(c) => c.scrollback_len(),
+            _ => 0,
         }
     }
 
@@ -243,6 +263,13 @@ pub struct L3Conn {
     /// caught up.
     req_cols: u16,
     req_rows: u16,
+    /// Last scrollback view offset we *requested* L3 publish at (dedup, as
+    /// with the dims).  L2 can't scroll the mirror itself — it holds only
+    /// the visible window — so it asks L3 which window to publish.
+    req_view_offset: u16,
+    /// Scrollback depth from the last snapshot — L2 has no scrollback of
+    /// its own, so this is what `apply_scroll_lines` clamps against.
+    snap_scrollback_len: u32,
     /// Set once the child process has exited (observed by `poll`'s
     /// `try_wait`).  Read by `is_exited`/`state`, which are `&self`.
     exited: bool,
@@ -268,6 +295,8 @@ impl L3Conn {
             last_seq: 0,
             req_cols: cols,
             req_rows: rows,
+            req_view_offset: 0,
+            snap_scrollback_len: 0,
             exited: false,
             scratch: Vec::new(),
             reader,
@@ -305,6 +334,7 @@ impl L3Conn {
         self.cursor_visible = snap.flags & FLAG_CURSOR_VISIBLE != 0;
         self.app_cursor_keys = snap.flags & FLAG_APP_CURSOR_KEYS != 0;
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
+        self.snap_scrollback_len = snap.scrollback_len;
         // Re-read the seq after the copy: if L3 republished mid-fill,
         // leave it stale so the next poll re-reads rather than missing a
         // frame.
@@ -333,6 +363,24 @@ impl L3Conn {
         self.req_rows = rows;
         let frame = Frame::new(MsgType::GridResize, encode_grid_resize(cols, rows));
         let _ = frame.write_to(&mut self.control);
+    }
+
+    /// Ask L3 to publish the window at `view_offset` rows up from live
+    /// (dedup'd against the last requested offset).  Best-effort over the
+    /// control socket; the new window arrives on the next `poll`.
+    fn forward_scroll(&mut self, view_offset: u16) {
+        if view_offset == self.req_view_offset {
+            return;
+        }
+        self.req_view_offset = view_offset;
+        let frame = Frame::new(MsgType::GridScroll, encode_grid_scroll(view_offset));
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    /// Scrollback depth reported by the last snapshot — L2's clamp bound
+    /// for scrolling an L3 pane (it has no scrollback of its own).
+    fn scrollback_len(&self) -> u16 {
+        self.snap_scrollback_len.min(u16::MAX as u32) as u16
     }
 
     fn is_exited(&self) -> bool {
@@ -413,6 +461,9 @@ impl Pane {
     pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) -> bool {
         let need_redraw = self.view_offset != 0;
         self.view_offset = 0;
+        // Snap L3 back to the live tail too: its echo lands there, and the
+        // forward dedups so this is free when already live.
+        self.session.forward_scroll(0);
         self.session.forward_key(event, mods);
         need_redraw
     }
@@ -507,12 +558,20 @@ impl Pane {
         if delta == 0 {
             return false;
         }
-        let max = self.session.grid().scrollback_len() as i32;
+        // L3 owns its scrollback; L2 has only the visible-window mirror, so
+        // it clamps against the depth the snapshot reported and asks L3 to
+        // publish the new window. In-process backends scroll their own grid.
+        let max = if self.session.is_l3() {
+            self.session.l3_scrollback_len() as i32
+        } else {
+            self.session.grid().scrollback_len() as i32
+        };
         let new = (self.view_offset as i32 + delta).clamp(0, max) as u16;
         if new == self.view_offset {
             return false;
         }
         self.view_offset = new;
+        self.session.forward_scroll(new); // no-op for in-process backends
         true
     }
 
@@ -524,6 +583,7 @@ impl Pane {
             return false;
         }
         self.view_offset = 0;
+        self.session.forward_scroll(0); // no-op for in-process backends
         true
     }
 
@@ -559,9 +619,20 @@ impl Pane {
     /// in pane A, switch to B, come back to A: you're where you left
     /// off.
     pub fn view<'a>(&'a self, focused: bool, title: &'a str) -> SessionView<'a> {
+        // An L3 mirror is *already* the window L3 published at the requested
+        // scroll offset (and holds no scrollback to offset into), so it
+        // always renders at 0. In-process panes offset into their own grid:
+        // the focused pane shows its scrollback, others stay live.
+        let view_offset = if self.session.is_l3() {
+            0
+        } else if focused {
+            self.view_offset
+        } else {
+            0
+        };
         SessionView {
             grid: self.session.grid(),
-            view_offset: if focused { self.view_offset } else { 0 },
+            view_offset,
             cursor_visible: self.session.cursor_visible(),
             focused,
             title,

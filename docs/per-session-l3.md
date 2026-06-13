@@ -172,8 +172,12 @@ L2 → L3:
   encodes via `key_event_to_bytes` (it has the terminal modes locally),
   writes the PTY, runs local-echo prediction, republishes. Keeps all
   terminal-coupled logic in L3; L2 stays terminal-agnostic.
-- `Scroll(view_offset)` — L2 computes the target offset from wheel
-  deltas; L3 publishes that window (live or scrollback rows).
+- `GridScroll(view_offset)` — L2 computes the target offset from wheel
+  deltas (clamped against the snapshot's `scrollback_len`, since L2 has
+  no scrollback of its own) and asks L3 to publish that window (live or
+  scrollback rows). L2 renders the mirror as-is — it can't scroll a
+  window-only mirror itself. A keystroke or non-key wake snaps the
+  focused pane back to live (`GridScroll(0)`).
 - `GridResize(cols, rows)` — L2 computes per-cell dims from layout; L3
   resizes Terminal + ioctl PTY (via shelld) + reflows + republishes.
   **Resize is in-place, no fd hand-off:** the shm region is mapped once
