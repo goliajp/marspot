@@ -127,9 +127,44 @@ fi
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable marspot-shell' "$PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c 'Add :CFBundleExecutable string marspot-shell' "$PLIST"
 
-# ── 3. Install the bundle binaries (always real copies) ───────────
-# These are the FALLBACK binaries the supervisor runs from on a cold
-# launch; the live silent-update below overlays them via binaries/.
+# ── 3. Decide the silent update BEFORE overwriting the bundle ─────
+# Order matters: step 4 overwrites the bundle binaries, so any
+# "did this change?" comparison MUST happen first — otherwise the
+# bundle would compare equal to the build we just copied over it and
+# nothing would ever look changed.
+running_equiv() {
+  # What the running supervisor came from: current/ slot if a prior
+  # update populated it, else the (still-old) bundle binary.
+  local bin="$1"
+  if [[ -f "$TREE/current/$bin" ]]; then echo "$TREE/current/$bin"; else echo "$MACOS/$bin"; fi
+}
+changed() {
+  local bin="$1" ref
+  ref="$(running_equiv "$bin")"
+  [[ ! -f "$ref" ]] || ! cmp -s "$TARGET/$bin" "$ref"
+}
+stage() {
+  local bin="$1"
+  mkdir -p "$TREE/pending"
+  cp "$TARGET/$bin" "$TREE/pending/$bin"
+  xattr -d com.apple.quarantine "$TREE/pending/$bin" 2>/dev/null || true
+  xattr -d com.apple.provenance "$TREE/pending/$bin" 2>/dev/null || true
+  echo "    $bin: staged → pending/"
+}
+
+RUNNING=0; prod_shell_running && RUNNING=1
+SHELL_CHANGED=0; changed marspot-shell  && SHELL_CHANGED=1
+CORE_CHANGED=0;  changed marspot-core   && CORE_CHANGED=1
+SHELLD_CHANGED=0; changed marspot-shelld && SHELLD_CHANGED=1
+
+STAGED=0
+if (( RUNNING )); then
+  echo "==> staging changed binaries into the running app"
+  (( SHELL_CHANGED )) && { stage marspot-shell; STAGED=1; } || echo "    marspot-shell: unchanged"
+  (( CORE_CHANGED ))  && { stage marspot-core;  STAGED=1; } || echo "    marspot-core: unchanged"
+fi
+
+# ── 4. Install the bundle binaries (cold-launch fallback) ─────────
 echo "==> installing bundle binaries"
 install -m 0755 "$TARGET/marspot-shell"  "$MACOS/marspot-shell"
 install -m 0755 "$TARGET/marspot-core"   "$MACOS/marspot-core"
@@ -141,45 +176,19 @@ done
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
 
-# ── 4. shelld LaunchAgent (production daemon, default socket) ──────
+# ── 5. shelld LaunchAgent (production daemon, default socket) ──────
 if ! pgrep -f "$MACOS/marspot-shelld" >/dev/null 2>&1; then
   echo "==> shelld not running — installing LaunchAgent"
   "$ROOT/bin/install-shelld.sh" >/dev/null
 fi
 
-# ── 5. Live silent update of the running supervisor ───────────────
-running_equiv() {
-  # What the running supervisor came from: current/ slot if a prior
-  # update populated it, else the bundle binary.
-  local bin="$1"
-  if [[ -f "$TREE/current/$bin" ]]; then echo "$TREE/current/$bin"; else echo "$MACOS/$bin"; fi
-}
-stage_if_changed() {
-  local bin="$1" src="$TARGET/$1" ref
-  ref="$(running_equiv "$bin")"
-  if [[ -f "$ref" ]] && cmp -s "$src" "$ref"; then
-    echo "    $bin: unchanged"
-    return 1
-  fi
-  mkdir -p "$TREE/pending"
-  cp "$src" "$TREE/pending/$bin"
-  xattr -d com.apple.quarantine "$TREE/pending/$bin" 2>/dev/null || true
-  xattr -d com.apple.provenance "$TREE/pending/$bin" 2>/dev/null || true
-  echo "    $bin: staged → pending/"
-  return 0
-}
-
-if ! prod_shell_running; then
+# ── 6. Apply the silent update ────────────────────────────────────
+if (( ! RUNNING )); then
   echo "==> no running app — launching"
   open "$APP"
   echo "==> done.  Marspot started from $APP"
   exit 0
 fi
-
-echo "==> staging changed binaries into the running app"
-STAGED=0
-stage_if_changed marspot-shell && STAGED=1 || true
-stage_if_changed marspot-core  && STAGED=1 || true
 
 if (( STAGED )); then
   echo "==> triggering silent update (window + sessions survive)"
@@ -199,19 +208,17 @@ else
   echo "==> running app already matches this build"
 fi
 
-# ── 6. shelld update (opt-in; kills sessions) ─────────────────────
-if (( WITH_SHELLD )); then
-  if cmp -s "$TARGET/marspot-shelld" "$(running_equiv marspot-shelld)"; then
-    echo "==> shelld unchanged"
-  else
+# ── 7. shelld update (opt-in; kills sessions) ─────────────────────
+if (( SHELLD_CHANGED )); then
+  if (( WITH_SHELLD )); then
     echo "==> updating shelld (this restarts the daemon — sessions will die)"
     mkdir -p "$TREE/pending"
     cp "$TARGET/marspot-shelld" "$TREE/pending/marspot-shelld"
     "$ROOT/bin/install-shelld.sh" --apply-pending
+  else
+    echo "==> note: marspot-shelld differs but was NOT updated (would kill sessions)."
+    echo "    run 'bin/install-local.sh --with-shelld' when you can drop sessions."
   fi
-elif ! cmp -s "$TARGET/marspot-shelld" "$(running_equiv marspot-shelld)"; then
-  echo "==> note: marspot-shelld differs but was NOT updated (would kill sessions)."
-  echo "    run 'bin/install-local.sh --with-shelld' when you can drop sessions."
 fi
 
 echo "==> done."
