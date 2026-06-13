@@ -30,9 +30,10 @@ use marspot_term::grid_shm::{
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::paths::shelld_socket;
+use marspot_term::render::grid_selection_text;
 use marspot_term::shell_proto::{
-    decode_grid_resize, decode_grid_scroll, decode_key_event, wire_to_event, Frame, MsgType,
-    DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
+    encode_selection_text, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::shelld_client::{SessionState, ShelldClient, ShelldSession};
 use marspot_term::shelld_proto::SessionInfo;
@@ -52,6 +53,10 @@ enum SessionEvent {
     /// the scrollback, so it publishes that window; L2 renders the mirror
     /// as-is (it can't scroll its window-only mirror itself).
     Scroll(u16),
+    /// L2 wants the clipboard text under a selection (Cmd-C). L3 owns the
+    /// grid + scrollback, so it serialises the text and replies with a
+    /// `SelectionText` frame. `(anchor, focus, blockwise)`.
+    GetSelection((u16, u32), (u16, u32), bool),
 }
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -176,8 +181,15 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                         }
                     }
                 }
-                // Other frame types (paste/selection) arrive in later
-                // steps; ignore unknown-to-us types for now.
+                MsgType::GetSelectionText => {
+                    if let Ok((a, fo, bw)) = decode_get_selection_text(&f.payload) {
+                        if tx.send(SessionEvent::GetSelection(a, fo, bw)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                // Other frame types (paste) arrive in later steps; ignore
+                // unknown-to-us types for now.
                 _ => {}
             },
             Ok(None) | Err(_) => break, // L2 closed the socket
@@ -344,11 +356,15 @@ fn main() {
         let mut predicted = false;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
+        let mut selection_reqs: Vec<((u16, u32), (u16, u32), bool)> = Vec::new();
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
                 SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
                 SessionEvent::Scroll(off) => pending_scroll = Some(off),
+                // Each request gets its own reply (don't coalesce — L2 is
+                // blocking on a reply per request).
+                SessionEvent::GetSelection(a, f, bw) => selection_reqs.push((a, f, bw)),
                 SessionEvent::Wake => {}
             }
         }
@@ -382,6 +398,21 @@ fn main() {
         // even when no bytes pumped this tick.
         if n > 0 || predicted || resized || scrolled {
             publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
+        }
+
+        // Answer any Cmd-C selection requests against the post-pump grid.
+        if !selection_reqs.is_empty() {
+            if let Some(w) = poke.as_mut() {
+                for (anchor, focus, blockwise) in selection_reqs {
+                    let text = grid_selection_text(session.terminal().grid(), anchor, focus, blockwise)
+                        .unwrap_or_default();
+                    let frame = Frame::new(MsgType::SelectionText, encode_selection_text(&text));
+                    if let Err(e) = frame.write_to(w) {
+                        eprintln!("[session] selection reply write failed: {e}");
+                        break;
+                    }
+                }
+            }
         }
 
         frame += 1;

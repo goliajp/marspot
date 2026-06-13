@@ -182,7 +182,10 @@ pub fn selection_view_for_pane(
         return None;
     }
     let pane_vo = pane.view_offset() as i64;
-    let g_rows = pane.session().terminal().grid().rows() as i64;
+    // `grid()` (not `terminal().grid()`) so this works for L3 panes too:
+    // their mirror is the window L3 published at `view_offset()`, so the
+    // abs→viewport mapping below lines up with what's on screen.
+    let g_rows = pane.session().grid().rows() as i64;
     let last = g_rows - 1;
     let abs_to_vp = |abs: u32| -> i64 {
         // vp = (rows-1) + vo - abs
@@ -203,12 +206,7 @@ pub fn selection_view_for_pane(
     // the anchor/focus cols regardless of which rows are currently
     // on-screen.
     let blockwise = sel.mode == SelectionMode::Blockwise;
-    let max_col_clamp = pane
-        .session()
-        .terminal()
-        .grid()
-        .cols()
-        .saturating_sub(1);
+    let max_col_clamp = pane.session().grid().cols().saturating_sub(1);
     let clip = |col: u16, vp: i64| -> (u16, u16) {
         if vp < 0 {
             (if blockwise { col } else { 0 }, 0)
@@ -233,91 +231,21 @@ pub fn selection_view_for_pane(
 /// all-blank rows).  Trailing whitespace on each row is dropped so a
 /// selection that overshoots the line's text doesn't carry a run of
 /// spaces; multi-row selections join with `\n`.
+/// Serialise an in-process pane's selection to clipboard text.  Delegates
+/// to the pure `grid_selection_text` (shared with the L3 session process,
+/// which answers L2's `GetSelectionText` over the wire with the same
+/// logic).  L3-backed panes have no in-process scrollback to read here —
+/// the container requests their text from the session process instead, so
+/// this must not be called for them.
 pub fn selection_text(pane: &Pane, sel: &Selection) -> Option<String> {
-    let grid = pane.session().terminal().grid();
-    let cols = grid.cols();
-    let rows = grid.rows();
-    if cols == 0 || rows == 0 {
-        return None;
-    }
-    // Anchor/focus carry abs (rows up from live bottom).  Bigger
-    // abs = older = top of the visual selection; smaller abs =
-    // newer = bottom.  Normalise so `top_*` has the bigger abs
-    // (or equal abs with smaller col when single-row).
-    let (a_col, a_abs) = sel.anchor;
-    let (f_col, f_abs) = sel.focus;
-    let (top_col, top_abs, bot_col, bot_abs) = if (a_abs, a_col) >= (f_abs, f_col) {
-        (a_col, a_abs, f_col, f_abs)
-    } else {
-        (f_col, f_abs, a_col, a_abs)
-    };
-    // Blockwise carves out a rectangle: every row uses the same
-    // col_lo / col_hi (min..=max of anchor.col, focus.col),
-    // ignoring top/bot.  Linewise uses the iTerm2 row-band rule:
-    // top row from top_col to end, middle rows entirely, bot row
-    // from start to bot_col.
-    let blockwise = sel.mode == SelectionMode::Blockwise;
-    let block_lo = a_col.min(f_col);
-    let block_hi = a_col.max(f_col);
-    // Walk visible rows from top to bottom — i.e. abs descending
-    // from `top_abs` down to `bot_abs`.  `cell_at_view(abs, c,
-    // rows-1)` resolves correctly because the bottom of an
-    // arbitrary view sitting at `view_offset = abs` IS the row
-    // labelled by abs (see `grid::cell_at_view` derivation).
-    let last_view_row = rows.saturating_sub(1);
-    let mut out = String::new();
-    let mut abs = top_abs;
-    let mut first = true;
-    loop {
-        if abs as u32 > u16::MAX as u32 {
-            // Beyond what cell_at_view can address (scrollback
-            // capped at u16::MAX in this codepath).  Treat as
-            // unreachable history.
-            if abs == bot_abs { break; } else { abs -= 1; continue; }
-        }
-        let (col_lo, col_hi) = if blockwise {
-            (block_lo, block_hi)
-        } else {
-            let lo = if abs == top_abs { top_col } else { 0 };
-            let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
-            (lo, hi)
-        };
-        let mut row_text = String::new();
-        for c in col_lo..=col_hi {
-            if c >= cols {
-                break;
-            }
-            let cell = grid.cell_at_view(abs as u16, c, last_view_row);
-            // NUL is the trail-half sentinel for wide chars
-            // (`grid::char_width` returns 0 for `'\0'`).  The
-            // lead cell already carries the visible glyph; the
-            // trail cell must NOT emit another character, else
-            // CJK pastes come out as `你 好 ` (an extra space
-            // per wide char).  Plain blanks use `' '` not NUL,
-            // so they still serialise correctly.
-            if cell.ch == '\0' {
-                continue;
-            }
-            row_text.push(cell.ch);
-        }
-        // Drop trailing spaces — terminal rows pad to full
-        // width with `' '`, so a 5-char "hello" plus 80-col
-        // grid leaves 75 spaces we don't want in the
-        // clipboard.
-        let trimmed = row_text.trim_end();
-        if !first {
-            out.push('\n');
-        }
-        out.push_str(trimmed);
-        first = false;
-        if abs == bot_abs {
-            break;
-        }
-        abs -= 1;
-    }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    debug_assert!(
+        !pane.is_l3(),
+        "selection_text on an L3 pane — request from the session process instead"
+    );
+    crate::render::grid_selection_text(
+        pane.session().grid(),
+        sel.anchor,
+        sel.focus,
+        sel.mode == SelectionMode::Blockwise,
+    )
 }

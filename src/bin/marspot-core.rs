@@ -39,7 +39,8 @@ use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
 use marspot::shell_proto::{
     decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping, decode_preedit,
-    decode_resize, decode_scroll, encode_caret_rect, encode_hello_ack, encode_pong,
+    decode_resize, decode_scroll, decode_selection_text, encode_caret_rect, encode_hello_ack,
+    encode_pong,
     encode_surface_ready, mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD,
     ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
     PROTO_VERSION,
@@ -158,14 +159,29 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
 /// `L3Ready` wake so the main loop re-reads the shm mirror promptly.
 /// EOF / error just ends the thread — the pane's own `try_wait` detects
 /// the child's exit.
-fn l3_reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
+fn l3_reader_loop(
+    mut stream: UnixStream,
+    tx: Sender<CoreEvent>,
+    selection_tx: Sender<String>,
+) {
     loop {
         match Frame::read_from(&mut stream) {
-            Ok(Some(f)) => {
-                if f.msg_type == MsgType::GridReady && tx.send(CoreEvent::L3Ready).is_err() {
-                    return;
+            Ok(Some(f)) => match f.msg_type {
+                MsgType::GridReady => {
+                    if tx.send(CoreEvent::L3Ready).is_err() {
+                        return;
+                    }
                 }
-            }
+                // Reply to a Cmd-C `GetSelectionText`: hand it to whoever is
+                // blocked in `L3Conn::request_selection_text`.  A dropped
+                // receiver (request already timed out) is fine — ignore.
+                MsgType::SelectionText => {
+                    if let Ok(text) = decode_selection_text(&f.payload) {
+                        let _ = selection_tx.send(text);
+                    }
+                }
+                _ => {}
+            },
             Ok(None) | Err(_) => return,
         }
     }
@@ -250,12 +266,15 @@ fn spawn_l3_pane(
     drop(region);
 
     // Control: write half → L3Conn (forward keys); read half → poke thread.
+    // The poke thread also routes Cmd-C `SelectionText` replies into a
+    // channel the L3Conn blocks on.
     let control = unsafe { UnixStream::from_raw_fd(parent_fd) };
     let reader_stream = control.try_clone()?;
     let tx = event_tx.clone();
-    std::thread::spawn(move || l3_reader_loop(reader_stream, tx));
+    let (selection_tx, selection_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || l3_reader_loop(reader_stream, tx, selection_tx));
 
-    Ok(Pane::new_l3(L3Conn::new(child, control, reader)))
+    Ok(Pane::new_l3(L3Conn::new(child, control, reader, selection_rx)))
 }
 
 /// The full multi-pane UI state machine — `Marspot` (src/main.rs)
@@ -431,12 +450,22 @@ impl CoreApp {
         self.title_edit_buffer.clear();
     }
 
-    fn copy_selection_to_clipboard(&self) -> bool {
+    fn copy_selection_to_clipboard(&mut self) -> bool {
         let Some(sel) = self.selection else { return false };
-        let Some(pane) = self.panes.get(sel.session_idx) else {
-            return false;
+        let idx = sel.session_idx;
+        // L3 owns its grid + scrollback; L2's mirror is window-only, so the
+        // text round-trips through the session process.  In-process panes
+        // read it locally.
+        let is_l3 = self.panes.get(idx).is_some_and(|p| p.is_l3());
+        let text = if is_l3 {
+            let blockwise = sel.mode == marspot::ui::SelectionMode::Blockwise;
+            self.panes
+                .get_mut(idx)
+                .and_then(|p| p.session_mut().request_selection_text(sel.anchor, sel.focus, blockwise))
+        } else {
+            self.panes.get(idx).and_then(|pane| selection_text(pane, &sel))
         };
-        match selection_text(pane, &sel) {
+        match text {
             Some(text) => marspot::input::write_clipboard_text(&text),
             None => false,
         }

@@ -66,6 +66,93 @@ pub struct SelectionView {
     pub blockwise: bool,
 }
 
+/// Serialise the text under a selection on `grid` to a clipboard string.
+///
+/// `anchor`/`focus` are `(col, abs)` where `abs` is rows up from the live
+/// bottom (0 = live bottom row, `rows-1` = live top, then `rows..` walk
+/// scrollback newest→oldest), matching `Grid::cell_at_view`. The pair is
+/// normalised internally so order doesn't matter. `blockwise` carves a
+/// rectangle `[min(col)..=max(col)]` on every row; otherwise the iTerm2
+/// row-band rule applies (first row from its col to end, middle rows
+/// whole, last row from start to its col). Trailing spaces are trimmed
+/// per row. Returns `None` when the selection is empty.
+///
+/// Lives here (not in the GUI `ui` module) so an L3 session process —
+/// which owns the real grid + scrollback but no GUI — can answer L2's
+/// `GetSelectionText` request with the same logic the in-process panes
+/// use. `blockwise: bool` keeps it decoupled from the GUI `SelectionMode`.
+pub fn grid_selection_text(
+    grid: &Grid,
+    anchor: (u16, u32),
+    focus: (u16, u32),
+    blockwise: bool,
+) -> Option<String> {
+    let cols = grid.cols();
+    let rows = grid.rows();
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    let (a_col, a_abs) = anchor;
+    let (f_col, f_abs) = focus;
+    // Bigger abs = older = top of the visual selection.
+    let (top_col, top_abs, bot_col, bot_abs) = if (a_abs, a_col) >= (f_abs, f_col) {
+        (a_col, a_abs, f_col, f_abs)
+    } else {
+        (f_col, f_abs, a_col, a_abs)
+    };
+    let block_lo = a_col.min(f_col);
+    let block_hi = a_col.max(f_col);
+    let last_view_row = rows.saturating_sub(1);
+    let mut out = String::new();
+    let mut abs = top_abs;
+    let mut first = true;
+    loop {
+        if abs > u16::MAX as u32 {
+            // Beyond what cell_at_view can address; treat as unreachable.
+            if abs == bot_abs {
+                break;
+            } else {
+                abs -= 1;
+                continue;
+            }
+        }
+        let (col_lo, col_hi) = if blockwise {
+            (block_lo, block_hi)
+        } else {
+            let lo = if abs == top_abs { top_col } else { 0 };
+            let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
+            (lo, hi)
+        };
+        let mut row_text = String::new();
+        for c in col_lo..=col_hi {
+            if c >= cols {
+                break;
+            }
+            let cell = grid.cell_at_view(abs as u16, c, last_view_row);
+            // NUL is the wide-char trail-half sentinel — skip it so CJK
+            // doesn't paste with an extra space per wide glyph.
+            if cell.ch == '\0' {
+                continue;
+            }
+            row_text.push(cell.ch);
+        }
+        if !first {
+            out.push('\n');
+        }
+        out.push_str(row_text.trim_end());
+        first = false;
+        if abs == bot_abs {
+            break;
+        }
+        abs -= 1;
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 /// One row of the sidebar — what the user sees on the left.  Length
 /// of the slice passed to `MetalRenderer::render_layout` should match
 /// `views.len()`; entry `i` describes session `i`.

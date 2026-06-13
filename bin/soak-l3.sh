@@ -27,6 +27,7 @@ PROBE_BIN="$ROOT/target/release/examples/l3_echo_probe"
 MULTI_PROBE_BIN="$ROOT/target/release/examples/l3_multi_probe"
 RESIZE_PROBE_BIN="$ROOT/target/release/examples/l3_resize_probe"
 SCROLL_PROBE_BIN="$ROOT/target/release/examples/l3_scroll_probe"
+SELECTION_PROBE_BIN="$ROOT/target/release/examples/l3_selection_probe"
 RUN_LOG=/tmp/marspot-soak-l3.log
 
 ITERATIONS="${ITERATIONS:-10}"
@@ -60,13 +61,14 @@ trap cleanup EXIT
 # version-skew trap where a stale probe creates a grid_shm region an
 # updated marspot-session refuses (or vice-versa).
 ( cd "$ROOT" && cargo build --release -p marspot-session \
-    --example l3_echo_probe --example l3_multi_probe \
-    --example l3_resize_probe --example l3_scroll_probe 2>&1 | tail -3 )
+    --example l3_echo_probe --example l3_multi_probe --example l3_resize_probe \
+    --example l3_scroll_probe --example l3_selection_probe 2>&1 | tail -3 )
 [[ -x "$SESSION_BIN" ]]      || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]        || fail "probe not built at $PROBE_BIN"
 [[ -x "$MULTI_PROBE_BIN" ]]  || fail "multi probe not built at $MULTI_PROBE_BIN"
 [[ -x "$RESIZE_PROBE_BIN" ]] || fail "resize probe not built at $RESIZE_PROBE_BIN"
-[[ -x "$SCROLL_PROBE_BIN" ]] || fail "scroll probe not built at $SCROLL_PROBE_BIN"
+[[ -x "$SCROLL_PROBE_BIN" ]]    || fail "scroll probe not built at $SCROLL_PROBE_BIN"
+[[ -x "$SELECTION_PROBE_BIN" ]] || fail "selection probe not built at $SELECTION_PROBE_BIN"
 
 # Zero-GUI floor: the shipped L3 binary must link no GUI frameworks.
 if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
@@ -154,4 +156,17 @@ now=$(count_sandbox_sessions)
   || fail "scroll: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
 echo "  scroll OK — scrolled into history (window moved) and back to live, no orphans"
 
-echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
+# Selection-text check (4c): Cmd-C round-trip — request the text under a
+# selection from L3 (L2's mirror is window-only) and assert it carries the
+# on-screen marker.
+echo "--- selection ---" | tee -a "$RUN_LOG"
+"$SELECTION_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
+selrc=$?
+(( selrc == 0 )) || fail "selection probe exited $selrc (GetSelectionText round-trip broken)"
+sleep 0.2
+now=$(count_sandbox_sessions)
+(( now <= base_sessions )) \
+  || fail "selection: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+echo "  selection OK — GetSelectionText returned the on-screen text from L3, no orphans"
+
+echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"

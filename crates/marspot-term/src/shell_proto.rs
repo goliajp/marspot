@@ -124,6 +124,15 @@ pub enum MsgType {
     /// its own mirror (which holds only the visible window) — it asks L3
     /// which window to publish.  See `docs/per-session-l3.md`.
     GridScroll = 36,
+    /// L2 → L3: "give me the clipboard text under this selection."  L3
+    /// owns the grid + scrollback (L2's mirror is window-only), so Cmd-C
+    /// on an L3 pane round-trips through here.  Payload: `anchor(col u16,
+    /// abs u32), focus(col u16, abs u32), blockwise u8` — the abs coords
+    /// match `Grid::cell_at_view`.  L3 replies with `SelectionText`.
+    GetSelectionText = 37,
+    /// L3 → L2: reply to `GetSelectionText`.  Payload: `len u32 LE` + UTF-8
+    /// bytes (empty len = empty selection).
+    SelectionText = 38,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -148,6 +157,8 @@ impl MsgType {
             34 => MsgType::GridReady,
             35 => MsgType::GridResize,
             36 => MsgType::GridScroll,
+            37 => MsgType::GetSelectionText,
+            38 => MsgType::SelectionText,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -553,6 +564,65 @@ pub fn decode_grid_scroll(payload: &[u8]) -> io::Result<u16> {
     Ok(u16::from_le_bytes(payload[0..2].try_into().unwrap()))
 }
 
+/// GetSelectionText payload: `anchor(col u16, abs u32), focus(col u16,
+/// abs u32), blockwise u8`.
+pub fn encode_get_selection_text(
+    anchor: (u16, u32),
+    focus: (u16, u32),
+    blockwise: bool,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(13);
+    out.extend_from_slice(&anchor.0.to_le_bytes());
+    out.extend_from_slice(&anchor.1.to_le_bytes());
+    out.extend_from_slice(&focus.0.to_le_bytes());
+    out.extend_from_slice(&focus.1.to_le_bytes());
+    out.push(blockwise as u8);
+    out
+}
+
+pub fn decode_get_selection_text(payload: &[u8]) -> io::Result<((u16, u32), (u16, u32), bool)> {
+    if payload.len() < 13 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "get_selection_text payload < 13 bytes",
+        ));
+    }
+    let a_col = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+    let a_abs = u32::from_le_bytes(payload[2..6].try_into().unwrap());
+    let f_col = u16::from_le_bytes(payload[6..8].try_into().unwrap());
+    let f_abs = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    let blockwise = payload[12] != 0;
+    Ok(((a_col, a_abs), (f_col, f_abs), blockwise))
+}
+
+/// SelectionText payload: `len u32 LE` + UTF-8 bytes.
+pub fn encode_selection_text(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(4 + bytes.len());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
+pub fn decode_selection_text(payload: &[u8]) -> io::Result<String> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "selection_text payload < 4 bytes",
+        ));
+    }
+    let len = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 4 + len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "selection_text payload truncated",
+        ));
+    }
+    std::str::from_utf8(&payload[4..4 + len])
+        .map(|s| s.to_string())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
 /// SurfaceReady payload: the IOSurface ID the core has just rendered
 /// to (u32 LE).  The shell uses this to switch its presenter from the
 /// previous (stretched) surface to the new (crisp) one.
@@ -867,6 +937,19 @@ mod tests {
     fn grid_scroll_roundtrip() {
         assert_eq!(decode_grid_scroll(&encode_grid_scroll(4096)).unwrap(), 4096);
         assert_eq!(MsgType::from_u32(36), Some(MsgType::GridScroll));
+    }
+
+    #[test]
+    fn selection_text_frames_roundtrip() {
+        let p = encode_get_selection_text((3, 100), (40, 7), true);
+        let (a, f, b) = decode_get_selection_text(&p).unwrap();
+        assert_eq!((a, f, b), ((3, 100), (40, 7), true));
+        assert_eq!(MsgType::from_u32(37), Some(MsgType::GetSelectionText));
+
+        let r = encode_selection_text("hello\n世界");
+        assert_eq!(decode_selection_text(&r).unwrap(), "hello\n世界");
+        assert_eq!(decode_selection_text(&encode_selection_text("")).unwrap(), "");
+        assert_eq!(MsgType::from_u32(38), Some(MsgType::SelectionText));
     }
 
     #[test]

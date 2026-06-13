@@ -18,6 +18,8 @@
 
 use std::os::unix::net::UnixStream;
 use std::process::Child;
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
@@ -27,7 +29,8 @@ use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
-    encode_grid_resize, encode_grid_scroll, encode_key_event, event_to_wire, Frame, MsgType,
+    encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_key_event,
+    event_to_wire, Frame, MsgType,
 };
 use crate::shelld_client::{SessionState as ShelldState, ShelldSession};
 use crate::terminal::Terminal;
@@ -136,6 +139,21 @@ impl PaneBackend {
         match self {
             PaneBackend::L3(c) => c.scrollback_len(),
             _ => 0,
+        }
+    }
+
+    /// Cmd-C on an L3 pane: ask the session process for the selection text
+    /// (it owns the grid + scrollback).  `None` for in-process backends —
+    /// the container reads their text locally via `ui::selection_text`.
+    pub fn request_selection_text(
+        &mut self,
+        anchor: (u16, u32),
+        focus: (u16, u32),
+        blockwise: bool,
+    ) -> Option<String> {
+        match self {
+            PaneBackend::L3(c) => c.request_selection_text(anchor, focus, blockwise),
+            _ => None,
         }
     }
 
@@ -276,13 +294,23 @@ pub struct L3Conn {
     /// Scratch buffer for the snapshot cell copy — reused across polls
     /// so the per-frame read allocates zero.
     scratch: Vec<Cell>,
+    /// Reply channel for `GetSelectionText`: the control-socket reader
+    /// thread routes each `SelectionText` frame here, and
+    /// `request_selection_text` blocks on it (Cmd-C round-trip).  L3 owns
+    /// the grid + scrollback; L2's mirror is window-only.
+    selection_rx: Receiver<String>,
 }
 
 impl L3Conn {
     /// Assemble from already-spawned pieces.  The container does the
     /// spawn (socketpair + shm region + `Command`); this is pure
     /// assembly so `Pane`/`PaneBackend` stay free of process-launch glue.
-    pub fn new(child: Child, control: UnixStream, reader: GridShmReader) -> Self {
+    pub fn new(
+        child: Child,
+        control: UnixStream,
+        reader: GridShmReader,
+        selection_rx: Receiver<String>,
+    ) -> Self {
         let (cols, rows) = (reader.cols(), reader.rows());
         let grid = Grid::new(cols, rows);
         Self {
@@ -299,6 +327,7 @@ impl L3Conn {
             snap_scrollback_len: 0,
             exited: false,
             scratch: Vec::new(),
+            selection_rx,
             reader,
         }
     }
@@ -381,6 +410,32 @@ impl L3Conn {
     /// for scrolling an L3 pane (it has no scrollback of its own).
     fn scrollback_len(&self) -> u16 {
         self.snap_scrollback_len.min(u16::MAX as u32) as u16
+    }
+
+    /// Cmd-C round-trip: ask L3 for the text under a selection and block
+    /// for the reply (the reader thread routes `SelectionText` into
+    /// `selection_rx`).  `None` on a write error, a dead/slow L3 (1 s
+    /// timeout), or an empty selection.  Synchronous because the clipboard
+    /// write needs the string now; the request is rare (a keystroke), so a
+    /// brief block is fine.
+    fn request_selection_text(
+        &mut self,
+        anchor: (u16, u32),
+        focus: (u16, u32),
+        blockwise: bool,
+    ) -> Option<String> {
+        // Drain any stale reply (from a prior request that timed out) so we
+        // don't return it for this one.
+        while self.selection_rx.try_recv().is_ok() {}
+        let frame = Frame::new(
+            MsgType::GetSelectionText,
+            encode_get_selection_text(anchor, focus, blockwise),
+        );
+        frame.write_to(&mut self.control).ok()?;
+        match self.selection_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(text) if !text.is_empty() => Some(text),
+            _ => None,
+        }
     }
 
     fn is_exited(&self) -> bool {
