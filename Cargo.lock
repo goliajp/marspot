@@ -161,6 +161,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "marspot-session"
+version = "0.2.0"
+dependencies = [
+ "marspot-term",
+]
+
+[[package]]
 name = "marspot-term"
 version = "0.2.0"
 dependencies = [

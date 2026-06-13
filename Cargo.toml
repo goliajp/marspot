@@ -6,7 +6,7 @@ build = "build.rs"
 license = "Apache-2.0 OR MIT"
 
 [workspace]
-members = ["crates/marspot-term"]
+members = ["crates/marspot-term", "crates/marspot-session"]
 
 [dependencies]
 # The zero-GUI terminal engine (parser/grid/terminal/pty/shelld/...).

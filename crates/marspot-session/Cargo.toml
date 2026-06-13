@@ -1,0 +1,18 @@
+[package]
+name = "marspot-session"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+# The per-session L3 process (target #4): parser/terminal only, NO
+# Metal/AppKit/CoreText. Depends ONLY on the zero-GUI marspot-term
+# engine so it links no GUI frameworks and floors at ~3–5 MB resident.
+# Skeleton today (boot + attach shelld + pump → grid); shm grid publish
+# + L2↔L3 control channel land in later steps. See docs/per-session-l3.md.
+
+[[bin]]
+name = "marspot-session"
+path = "src/main.rs"
+
+[dependencies]
+marspot-term = { path = "../marspot-term" }
