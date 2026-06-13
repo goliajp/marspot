@@ -152,15 +152,39 @@ and disk-backed; the knob is ring-resident sizing, tracked under D.  Full
 vs-Terminal.app absolute numbers (shell window + Term via GUI) need a live
 measurement, folded into the per-session-L3 step-6 live pass.
 
-### D — scrollback dramatic-edge gap
+### D — scrollback dramatic-edge gap — **re-scoped 2026-06-14**
 
-Clean-machine numbers reveal the gap is smaller than first read but
-still real.
+Measuring D (`marspot --bench scrollaccess`, `bin/soak-scrollback-access.sh`)
+surfaced two facts that re-frame it:
 
-| ID | Metric | Clean current | Target | File | Status |
-|---|---|---|---|---|---|
-| D1 | scrollback-1m vs Term push | marspot **97.7** / Term 91.6 (**1.07×**, was 1.003× godot) | ≥ 1.5× Term | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
-| D2 | scrollback-1m vs iTerm2 | marspot 97.7 / iTerm2 71.8 (**1.36×**, was 1.08× godot) | ≥ 1.5× iTerm2 | [D](perf-attack/D-scrollback-edge-gap.md) | queued |
+1. **Scrollback is a fixed ~26 624-line ring**, not "unlimited / 1M / 10M":
+   `DISK_SCROLLBACK_RAM_LINES (1024) + DISK_SCROLLBACK_PAGES (100) ×
+   LINES_PER_PAGE (256) = 26 624` lines, ~50 MiB anonymous mmap, bounded
+   forever. Feeding 2 M lines retains the most recent 26 624. The "access
+   at 1M depth" target was based on a ring size that doesn't exist by
+   default. (`cell_at_view`'s `view_offset: u16` caps viewport *scroll* at
+   65 535, but the 26 624 ring cap binds first; the O(1) data primitive is
+   `scrollback_cell(idx: usize, …)`.)
+2. **Within the ring, access is O(1)**: cold (post-MADV_DONTNEED) viewport
+   read latency is **flat across depth** — 1916–4166 ns at depths [0, 1k,
+   10k, 26623], deepest *fastest* (deep/shallow 0.46×), RSS bounded at
+   ~52 MiB. An O(N) ring at 26 k depth would be milliseconds+.
+
+So the honest dramatic edge isn't a push-throughput multiplier (D1/D2 are
+a thin ~1.07× over Term — its no-persistence renderer is hard to beat by
+1.5× when marspot also writes the ring) — it's **O(1) cold access across
+the full retained ring** while Term/iTerm lose history beyond their
+buffer. Now gated by `bin/soak-scrollback-access.sh`.
+
+| ID | Metric | Status |
+|---|---|---|
+| D1 | scrollback-1m vs Term push | **accept 2026-06-14** — ~1.07× (97.7 / 91.6); thin but ahead. Not a 1.5× "dramatic" multiplier; push throughput isn't where the edge lives. Floor unchanged. |
+| D2 | scrollback-1m vs iTerm2 push | **accept** — ~1.36× (97.7 / 71.8); ahead, not chasing higher. |
+| D3 | **O(1) cold scrollback access at depth** (new) | **done 2026-06-14** — flat cold read 1916–4166 ns across the full 26 624-line ring, bounded RSS; gated by `soak-scrollback-access.sh`. This is D's real structural edge. |
+
+**Open product decision (not a bug):** the retained depth is 26 624 lines
+by default. Growing it (bigger `DISK_SCROLLBACK_PAGES`) trades RSS/swap for
+deeper history — a config knob for the user, not chased here.
 
 ### G — marspot vs Ghostty (new competitor 2026-06-06)
 

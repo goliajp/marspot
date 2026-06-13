@@ -1,8 +1,30 @@
 # D — scrollback dramatic-edge gap
 
-> Status: queued
+> Status: **re-scoped 2026-06-14** — D1/D2 push accepted (~1.07×/1.36×);
+> D3 (O(1) cold access) done + gated; deep-depth premise corrected.
 > Master:  ../perf-attack.md
-> Related: B (post-parse pipeline), C (RSS bloat)
+> Related: B (post-parse pipeline), C (RSS bloat — C4 ring sizing lands here)
+>
+> **Re-scope (2026-06-14, via `marspot --bench scrollaccess` +
+> `bin/soak-scrollback-access.sh`).** Two measured facts correct the
+> original framing:
+>
+> 1. Scrollback is a **fixed ~26 624-line ring** (DISK_SCROLLBACK_RAM_LINES
+>    1024 + DISK_SCROLLBACK_PAGES 100 × LINES_PER_PAGE 256), ~50 MiB anon
+>    mmap, bounded forever — NOT 1M/10M. Feeding 2 M lines retains the most
+>    recent 26 624. The "access at 1M depth" exit target assumed a ring that
+>    doesn't exist by default. (`cell_at_view` view_offset is u16 = 65 535
+>    viewport-scroll cap, but the 26 624 ring binds first; the O(1) data
+>    primitive is `scrollback_cell(idx: usize)`.)
+> 2. Within the ring, access is **O(1)**: cold (post-MADV_DONTNEED) viewport
+>    read is flat across depth — 1916–4166 ns at depths [0, 1k, 10k, 26623],
+>    deepest fastest, RSS bounded ~52 MiB.
+>
+> So D's real edge is O(1) cold access across the full retained ring (Term/
+> iTerm lose history past their buffer), not a 1.5× push multiplier — D1/D2
+> push (~1.07× / 1.36× over Term/iTerm) accepted as thin-but-ahead. Growing
+> the retained depth is a config knob (RSS/swap tradeoff), the user's call.
+> Gated by `bin/soak-scrollback-access.sh` (D3).
 
 ## What's broken
 

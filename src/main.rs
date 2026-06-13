@@ -1706,6 +1706,7 @@ fn run_bench(spec: &str) {
         "render" | "metal-render" => bench_metal_render(arg),
         "scroll" => bench_scroll(arg, /* cold */ false),
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
+        "scrollaccess" => bench_scrollaccess(arg),
         "glyphraster" => bench_glyphraster(arg),
         "rss-format-dump" => bench_rss_format_dump(arg),
         other => {
@@ -1713,6 +1714,94 @@ fn run_bench(spec: &str) {
             std::process::exit(2);
         }
     }
+}
+
+/// `--bench scrollaccess:<lines>` — scrollback ACCESS latency at depth
+/// (perf-attack D re-scope).  Builds a `<lines>`-deep disk-backed
+/// scrollback, then measures the **cold** (post-MADV_DONTNEED) latency to
+/// read one viewport-worth of cells at depths spanning orders of magnitude
+/// (0, 1k, 10k, 100k, 1M, near-max).  This is the structural edge over
+/// Terminal.app / iTerm2 (bounded history — they can't access deep at
+/// all): marspot's anon-mmap ring + line index makes a deep read an O(1)
+/// page-fault at the target line regardless of depth.  Reads via
+/// `scrollback_cell(idx: usize, …)` — the O(1) ring primitive — NOT
+/// `cell_at_view`, whose `view_offset: u16` caps the *viewport scroll* at
+/// 65 535 lines (a UI-scroll limit; the data underneath is addressable to
+/// the full `scrollback_len()`).  Requires `MARSPOT_DISK_SCROLLBACK=1` to
+/// exceed the in-memory ring cap.  Reports per-depth cold ns + resident
+/// RSS so the gate can assert flatness (max/min small) + bounded memory.
+fn bench_scrollaccess(arg: &str) {
+    let target_lines: usize = arg.parse().unwrap_or(2_000_000).max(GRID_ROWS as usize + 1);
+
+    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+    // Feed target_lines short (~64 B) lines in batches — avoids a giant
+    // single Vec while still exercising wrap / index logic per line.
+    let batch_lines = 20_000usize;
+    let mut buf: Vec<u8> = Vec::with_capacity(batch_lines * 70);
+    let mut written = 0usize;
+    while written < target_lines {
+        let n = batch_lines.min(target_lines - written);
+        buf.clear();
+        for i in 0..n {
+            let idx = written + i;
+            buf.extend_from_slice(
+                format!("line {idx:08}: lorem ipsum dolor sit amet consectetur adipi\r\n").as_bytes(),
+            );
+        }
+        terminal.feed(&buf);
+        written += n;
+    }
+
+    let sb_len = terminal.grid().scrollback_len();
+    let max_idx = sb_len.saturating_sub(1);
+    // Depths (lines back from the newest scrollback line) to probe.
+    let mut depths: Vec<usize> = [0usize, 1_000, 10_000, 100_000, 1_000_000, max_idx]
+        .iter()
+        .copied()
+        .filter(|&d| d <= max_idx)
+        .collect();
+    depths.sort_unstable();
+    depths.dedup();
+
+    let rss_kib = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok())
+        .unwrap_or(-1);
+
+    let cols = GRID_COLS;
+    let rows = GRID_ROWS as usize;
+    let mut sink: u64 = 0;
+    let mut parts: Vec<String> = Vec::new();
+    for &d in &depths {
+        // Newest scrollback line is index sb_len-1; depth d sits d lines
+        // older. Read a viewport-worth of lines going older from there.
+        let top = max_idx.saturating_sub(d);
+        // Cold: drop the ring's resident pages so the read faults from disk
+        // — the realistic "scroll back hours later" case.
+        terminal.grid().evict_disk_scrollback_pages_for_bench();
+        let t0 = std::time::Instant::now();
+        for r in 0..rows {
+            let idx = top.saturating_sub(r);
+            for c in 0..cols {
+                if let Some(cell) = terminal.grid().scrollback_cell(idx, c) {
+                    sink = sink.wrapping_add(cell.ch as u64);
+                }
+            }
+        }
+        let ns = t0.elapsed().as_nanos() as u64;
+        parts.push(format!(r#"{{"depth":{d},"cold_ns":{ns}}}"#));
+    }
+    std::hint::black_box(sink);
+
+    println!(
+        r#"{{"mode":"scrollaccess","target_lines":{},"sb_len":{},"rss_kib":{},"depths":[{}]}}"#,
+        target_lines,
+        sb_len,
+        rss_kib,
+        parts.join(",")
+    );
 }
 
 /// `--bench glyphraster:<N>` — headless glyph-rasterisation throughput
