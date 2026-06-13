@@ -22,6 +22,7 @@ use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,7 +34,7 @@ use marspot::grid_shm::{self, ENV_SHM_FD, GridShmReader};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::layout::Layout;
-use marspot::pane::{L3Conn, Pane};
+use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
@@ -100,6 +101,11 @@ enum CoreEvent {
     /// re-reads the shm mirror promptly instead of waiting on the 1 s
     /// heartbeat.  Carries no data (the mirror is read from shm).
     L3Ready,
+    /// SIGUSR2 (per-session silent-update trigger): bring up replacement
+    /// L3s on every idle pane's session and swap when they're ready.  The
+    /// manual hook the updater will drive once a new `marspot-session` is
+    /// staged (mirrors the shell's SIGUSR1 manual update trigger).
+    SwapIdleL3,
 }
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
@@ -187,17 +193,62 @@ fn l3_reader_loop(
     }
 }
 
-/// Spawn one per-session L3 process and assemble it into an L3-backed
-/// pane.  L2 owns the shm region's lifecycle: it creates + sizes the
-/// region, inherits the fd (4) and the control socket (3) into the
-/// child, maps the region as a reader, and starts a thread turning L3's
-/// `GridReady` pokes into `L3Ready` wakes.  Behind `MARSPOT_L3=1`.
-fn spawn_l3_pane(
+/// Write end of the SIGUSR2 self-pipe.  The signal handler writes one byte
+/// here (the only async-signal-safe way to hand a signal to the event
+/// loop); a reader thread turns each byte into a `SwapIdleL3` event.
+static SIGUSR2_PIPE_W: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn sigusr2_handler(_: libc::c_int) {
+    let fd = SIGUSR2_PIPE_W.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = [1u8];
+        // libc::write is async-signal-safe; ignore the result (best-effort).
+        unsafe { libc::write(fd, byte.as_ptr() as *const libc::c_void, 1) };
+    }
+}
+
+/// Install a SIGUSR2 handler that posts `CoreEvent::SwapIdleL3` to the main
+/// loop via a self-pipe — the per-session silent-update trigger (the
+/// updater will `kill -USR2` core once a new `marspot-session` is staged;
+/// manually exercisable meanwhile, like the shell's SIGUSR1).
+fn install_swap_trigger(tx: Sender<CoreEvent>) {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        eprintln!("[core] SIGUSR2 self-pipe failed: {}", std::io::Error::last_os_error());
+        return;
+    }
+    let (read_fd, write_fd) = (fds[0], fds[1]);
+    SIGUSR2_PIPE_W.store(write_fd, Ordering::Relaxed);
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sigusr2_handler as *const () as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut());
+    }
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        loop {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 || tx.send(CoreEvent::SwapIdleL3).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Spawn one per-session L3 process and return its assembled pieces.  L2
+/// owns the shm region's lifecycle: it creates + sizes the region, inherits
+/// the fd (4) and the control socket (3) into the child, maps the region as
+/// a reader, and starts a thread turning L3's `GridReady` pokes into
+/// `L3Ready` wakes (and routing `SelectionText` replies).  Behind
+/// `MARSPOT_L3=1`.  Used both at boot ([`spawn_l3_pane`]) and to bring up a
+/// silent-update replacement on the same session ([`CoreApp::swap_idle_l3`]).
+fn spawn_l3(
     cols: u16,
     rows: u16,
     session_id: u64,
     event_tx: &Sender<CoreEvent>,
-) -> std::io::Result<Pane> {
+) -> std::io::Result<L3Spawn> {
     // L2 creates + stamps the region; both ends map the same fd.
     let region = grid_shm::create_region(cols, rows)?;
     let region_raw = region.as_raw_fd();
@@ -274,7 +325,23 @@ fn spawn_l3_pane(
     let (selection_tx, selection_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || l3_reader_loop(reader_stream, tx, selection_tx));
 
-    Ok(Pane::new_l3(L3Conn::new(child, control, reader, selection_rx)))
+    Ok(L3Spawn {
+        child,
+        control,
+        reader,
+        selection_rx,
+    })
+}
+
+/// Boot/`[+]` helper: spawn an L3 and wrap it in a fresh L3-backed `Pane`.
+fn spawn_l3_pane(
+    cols: u16,
+    rows: u16,
+    session_id: u64,
+    event_tx: &Sender<CoreEvent>,
+) -> std::io::Result<Pane> {
+    let spawn = spawn_l3(cols, rows, session_id, event_tx)?;
+    Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
 }
 
 /// The full multi-pane UI state machine — `Marspot` (src/main.rs)
@@ -388,6 +455,37 @@ impl CoreApp {
             }
             Err(e) => {
                 eprintln!("[core] failed to spawn session via shelld: {e}");
+            }
+        }
+    }
+
+    /// Per-session silent update (target #4 step 5a): bring up a
+    /// replacement L3 (the current `marspot-session` binary) on each *idle*
+    /// (non-focused) pane's session and let `L3Conn::poll` swap to it once
+    /// it has replayed the bytelog + published — invisible, since the
+    /// replayed screen matches.  The focused pane is left alone (a replay
+    /// could blip an interactive TUI mid-keystroke); step 5b adds a
+    /// click-to-swap affordance for it.  Skips panes already swapping or
+    /// exited.  Behind `MARSPOT_L3=1` (no L3 panes otherwise → no-op).
+    fn swap_idle_l3(&mut self) {
+        for i in 0..self.panes.len() {
+            if i == self.focused_idx {
+                continue;
+            }
+            let pane = &self.panes[i];
+            if !pane.is_l3() || pane.is_exited() || pane.session().is_l3_swapping() {
+                continue;
+            }
+            let Some(sid) = pane.session().l3_session_id() else {
+                continue;
+            };
+            let (cols, rows) = (pane.session().grid().cols(), pane.session().grid().rows());
+            match spawn_l3(cols, rows, sid, &self.event_tx) {
+                Ok(spawn) => {
+                    self.panes[i].session_mut().begin_l3_swap(spawn);
+                    eprintln!("[core] staged silent swap for L3 session {sid} (pane {i})");
+                }
+                Err(e) => eprintln!("[core] swap spawn for session {sid} failed: {e}"),
             }
         }
     }
@@ -1144,6 +1242,10 @@ fn main() {
     let reader_tx = event_tx.clone();
     std::thread::spawn(move || reader_loop(reader_stream, reader_tx));
 
+    // SIGUSR2 → per-session silent-update trigger (behind MARSPOT_L3=1 it
+    // swaps idle L3 panes; a no-op otherwise).
+    install_swap_trigger(event_tx.clone());
+
     eprintln!("[core] entering event loop (event-driven, no fixed cadence)");
 
     let start = Instant::now();
@@ -1194,6 +1296,7 @@ fn main() {
                     // the L3 mirror and flips needs_render if it changed.
                     app.needs_render = true;
                 }
+                CoreEvent::SwapIdleL3 => app.swap_idle_l3(),
                 CoreEvent::Hello(v) => {
                     to_ack.push((MsgType::HelloAck, encode_hello_ack(v.min(PROTO_VERSION))));
                 }

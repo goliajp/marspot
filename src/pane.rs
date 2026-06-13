@@ -142,6 +142,30 @@ impl PaneBackend {
         }
     }
 
+    /// shelld session id for an L3 pane (so the container can spawn a
+    /// replacement on the same session for a silent update).  `None` for
+    /// in-process backends.
+    pub fn l3_session_id(&self) -> Option<u64> {
+        match self {
+            PaneBackend::L3(c) => Some(c.session_id()),
+            _ => None,
+        }
+    }
+
+    /// A silent-update replacement is staged but not yet promoted.
+    pub fn is_l3_swapping(&self) -> bool {
+        matches!(self, PaneBackend::L3(c) if c.is_swapping())
+    }
+
+    /// Stage a silent-update replacement (new binary, same session).  No-op
+    /// for in-process backends.  Container spawns the `L3Spawn` and hands
+    /// it here; `poll` promotes once it has replayed + published.
+    pub fn begin_l3_swap(&mut self, spawn: L3Spawn) {
+        if let PaneBackend::L3(c) = self {
+            c.begin_swap(spawn);
+        }
+    }
+
     /// Cmd-C on an L3 pane: ask the session process for the selection text
     /// (it owns the grid + scrollback).  `None` for in-process backends —
     /// the container reads their text locally via `ui::selection_text`.
@@ -257,6 +281,18 @@ impl PaneBackend {
 /// full re-fill per changed frame.  Efficiency (incremental fill, dirty
 /// rows) and resize/scroll forwarding land in later steps; see
 /// `docs/per-session-l3.md`.
+/// The freshly-spawned pieces of one L3 process, assembled by the
+/// container (it owns the process-launch + reader-thread glue) and handed
+/// to `L3Conn` either at birth ([`L3Conn::new`]) or as a silent-update
+/// replacement ([`L3Conn::begin_swap`]).  Keeping this a plain bundle lets
+/// `pane.rs` stay free of `Command`/`socketpair`/thread spawning.
+pub struct L3Spawn {
+    pub child: Child,
+    pub control: UnixStream,
+    pub reader: GridShmReader,
+    pub selection_rx: Receiver<String>,
+}
+
 pub struct L3Conn {
     child: Child,
     /// Write half of the L2↔L3 control socket — forwards key events.
@@ -264,6 +300,14 @@ pub struct L3Conn {
     /// turning L3's `GridReady` pokes into redraw wakes.)
     control: UnixStream,
     reader: GridShmReader,
+    /// shelld session this L3 drives — needed to spawn a replacement on the
+    /// *same* session for a per-session silent update (target #4 step 5a).
+    session_id: u64,
+    /// A replacement L3 (new binary, same session) brought up behind the
+    /// scenes; once it has replayed the bytelog + published a frame, `poll`
+    /// atomically promotes it (kills the old child, points us at the new
+    /// pieces).  Invisible because the replayed screen matches.
+    pending: Option<L3Spawn>,
     /// Mirror of L3's visible grid, rebuilt from the shm snapshot.
     grid: Grid,
     /// Mode flags from the last snapshot, surfaced to the renderer /
@@ -305,17 +349,15 @@ impl L3Conn {
     /// Assemble from already-spawned pieces.  The container does the
     /// spawn (socketpair + shm region + `Command`); this is pure
     /// assembly so `Pane`/`PaneBackend` stay free of process-launch glue.
-    pub fn new(
-        child: Child,
-        control: UnixStream,
-        reader: GridShmReader,
-        selection_rx: Receiver<String>,
-    ) -> Self {
-        let (cols, rows) = (reader.cols(), reader.rows());
+    pub fn new(spawn: L3Spawn, session_id: u64) -> Self {
+        let (cols, rows) = (spawn.reader.cols(), spawn.reader.rows());
         let grid = Grid::new(cols, rows);
         Self {
-            child,
-            control,
+            child: spawn.child,
+            control: spawn.control,
+            reader: spawn.reader,
+            session_id,
+            pending: None,
             grid,
             cursor_visible: true,
             app_cursor_keys: false,
@@ -327,15 +369,77 @@ impl L3Conn {
             snap_scrollback_len: 0,
             exited: false,
             scratch: Vec::new(),
-            selection_rx,
-            reader,
+            selection_rx: spawn.selection_rx,
         }
+    }
+
+    /// shelld session this L3 drives (so the container can spawn a
+    /// replacement on the same session for a silent update).
+    fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    /// True while a replacement L3 is being brought up but not yet
+    /// promoted — the container avoids stacking a second swap.
+    fn is_swapping(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Stage a replacement L3 (new binary, same session) for a per-session
+    /// silent update.  It replays the bytelog into its own region in the
+    /// background; `poll` promotes it once it has published a frame.
+    fn begin_swap(&mut self, spawn: L3Spawn) {
+        self.pending = Some(spawn);
+    }
+
+    /// Promote a staged replacement once it has published its first
+    /// (replayed) frame: kill the old child and point ourselves at the new
+    /// pieces.  Returns true if a promotion happened (mirror must re-fill).
+    fn try_promote(&mut self) -> bool {
+        let ready = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.reader.seq() > 0);
+        if !ready {
+            return false;
+        }
+        let next = self.pending.take().unwrap();
+        // Kill + reap the old L3 (its reader thread ends on the resulting
+        // EOF; shelld keeps the session alive for the replacement).
+        let old_pid = self.child.id();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.child = next.child;
+        self.control = next.control;
+        self.reader = next.reader;
+        self.selection_rx = next.selection_rx;
+        // The new L3 booted fresh: reset the mirror bookkeeping so the next
+        // poll re-fills from its region, and drop any stale scroll request
+        // (it republishes at live).
+        self.last_seq = 0;
+        self.req_view_offset = 0;
+        self.req_cols = self.reader.cols();
+        self.req_rows = self.reader.rows();
+        eprintln!(
+            "[core] L3 session {} silent-swapped: old pid={old_pid} → new pid={}",
+            self.session_id,
+            self.child.id()
+        );
+        true
     }
 
     /// Re-read the shm mirror if L3 published a new frame.  Returns
     /// `true` when the mirror changed (caller should redraw).  Cheap
     /// no-op (one atomic load) when the seq is unchanged.
     fn poll(&mut self) -> bool {
+        // Promote a staged silent-update replacement the moment it has
+        // replayed + published — kills the old child and repoints us at the
+        // new one. `force_fill` so we re-read the new region even if its
+        // first seq coincides with our last.
+        let mut force_fill = false;
+        if self.pending.is_some() {
+            force_fill = self.try_promote();
+        }
         // Observe exit here (the only `&mut` entry point); `is_exited`
         // and `state` are `&self` and just read the flag.  Crash isolation:
         // an L3 dying (panic / kill / shell exit) is one session ending —
@@ -352,7 +456,7 @@ impl L3Conn {
             }
         }
         let seq = self.reader.seq();
-        if seq == self.last_seq {
+        if seq == self.last_seq && !force_fill {
             return false;
         }
         let Some(snap) = self.reader.read(&mut self.scratch) else {

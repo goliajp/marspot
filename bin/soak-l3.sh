@@ -30,6 +30,7 @@ SCROLL_PROBE_BIN="$ROOT/target/release/examples/l3_scroll_probe"
 SELECTION_PROBE_BIN="$ROOT/target/release/examples/l3_selection_probe"
 LATENCY_PROBE_BIN="$ROOT/target/release/examples/l3_latency_probe"
 CRASH_PROBE_BIN="$ROOT/target/release/examples/l3_crash_probe"
+SWAP_PROBE_BIN="$ROOT/target/release/examples/l3_swap_probe"
 RUN_LOG=/tmp/marspot-soak-l3.log
 
 ITERATIONS="${ITERATIONS:-10}"
@@ -65,7 +66,8 @@ trap cleanup EXIT
 ( cd "$ROOT" && cargo build --release -p marspot-session \
     --example l3_echo_probe --example l3_multi_probe --example l3_resize_probe \
     --example l3_scroll_probe --example l3_selection_probe \
-    --example l3_latency_probe --example l3_crash_probe 2>&1 | tail -3 )
+    --example l3_latency_probe --example l3_crash_probe \
+    --example l3_swap_probe 2>&1 | tail -3 )
 [[ -x "$SESSION_BIN" ]]      || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]        || fail "probe not built at $PROBE_BIN"
 [[ -x "$MULTI_PROBE_BIN" ]]  || fail "multi probe not built at $MULTI_PROBE_BIN"
@@ -74,6 +76,7 @@ trap cleanup EXIT
 [[ -x "$SELECTION_PROBE_BIN" ]] || fail "selection probe not built at $SELECTION_PROBE_BIN"
 [[ -x "$LATENCY_PROBE_BIN" ]]   || fail "latency probe not built at $LATENCY_PROBE_BIN"
 [[ -x "$CRASH_PROBE_BIN" ]]     || fail "crash probe not built at $CRASH_PROBE_BIN"
+[[ -x "$SWAP_PROBE_BIN" ]]      || fail "swap probe not built at $SWAP_PROBE_BIN"
 
 # Zero-GUI floor: the shipped L3 binary must link no GUI frameworks.
 if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
@@ -200,4 +203,17 @@ now=$(count_sandbox_sessions)
   || fail "crash: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
 echo "  crash-isolation OK — one L3 killed, sibling unaffected, dead shm still readable, no orphans"
 
-echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection + latency + crash, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
+# Silent swap (5a): the load-bearing mechanism — a replacement L3 on the
+# same session replays the bytelog (continuity), takes over after the old
+# is killed, no zombie. This is what L3Conn::begin_swap/try_promote drive.
+echo "--- silent-swap ---" | tee -a "$RUN_LOG"
+"$SWAP_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
+swrc=$?
+(( swrc == 0 )) || fail "swap probe exited $swrc (silent-swap mechanism broken)"
+sleep 0.2
+now=$(count_sandbox_sessions)
+(( now <= base_sessions )) \
+  || fail "swap: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+echo "  silent-swap OK — replacement replayed + took over on the same session, no orphans"
+
+echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize + scroll + selection + latency + crash + swap, all verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
