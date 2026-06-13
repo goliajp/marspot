@@ -7,6 +7,12 @@ license = "Apache-2.0 OR MIT"
 
 [workspace]
 members = ["crates/marspot-term", "crates/marspot-session"]
+# Without this, a bare `cargo build` builds only the root `marspot`
+# package (+ its marspot-term dep) and silently SKIPS marspot-session
+# (nothing depends on it) — so iterating on L3 with `cargo build` runs a
+# stale session binary. List every member + the root so bare cargo
+# commands cover the whole workspace; scripts still pass --workspace.
+default-members = [".", "crates/marspot-term", "crates/marspot-session"]
 
 [dependencies]
 # The zero-GUI terminal engine (parser/grid/terminal/pty/shelld/...).
