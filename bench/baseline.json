@@ -61,7 +61,7 @@
     "p99_us_max": 4
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).",
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).  NB: measure on the canonical bench host (idle mini) — a dev box with a different toolchain can report a fatter mcli (~557 KiB) that is a local artefact, not real growth; on the mini mcli stays ~442 KiB even after the target #4 marspot-term split (lto strips the unused engine paths).",
     "mcli": 485830,
     "marspot": 778008
   },
