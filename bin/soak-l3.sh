@@ -25,6 +25,7 @@ source "$ROOT/bin/_dev-sandbox.sh"
 SESSION_BIN="$ROOT/target/release/marspot-session"
 PROBE_BIN="$ROOT/target/release/examples/l3_echo_probe"
 MULTI_PROBE_BIN="$ROOT/target/release/examples/l3_multi_probe"
+RESIZE_PROBE_BIN="$ROOT/target/release/examples/l3_resize_probe"
 RUN_LOG=/tmp/marspot-soak-l3.log
 
 ITERATIONS="${ITERATIONS:-10}"
@@ -53,13 +54,16 @@ count_sandbox_sessions() {
 cleanup() { kill_sandbox_sessions; }
 trap cleanup EXIT
 
-if [[ ! -x "$SESSION_BIN" || ! -x "$PROBE_BIN" || ! -x "$MULTI_PROBE_BIN" ]]; then
-  ( cd "$ROOT" && cargo build --release -p marspot-session \
-      --example l3_echo_probe --example l3_multi_probe 2>&1 | tail -3 )
-fi
-[[ -x "$SESSION_BIN" ]]     || fail "marspot-session not built at $SESSION_BIN"
-[[ -x "$PROBE_BIN" ]]       || fail "probe not built at $PROBE_BIN"
-[[ -x "$MULTI_PROBE_BIN" ]] || fail "multi probe not built at $MULTI_PROBE_BIN"
+# Always (re)build the bin + probes together: an incremental build is
+# ~instant when current, and rebuilding unconditionally rules out the
+# version-skew trap where a stale probe creates a grid_shm region an
+# updated marspot-session refuses (or vice-versa).
+( cd "$ROOT" && cargo build --release -p marspot-session \
+    --example l3_echo_probe --example l3_multi_probe --example l3_resize_probe 2>&1 | tail -3 )
+[[ -x "$SESSION_BIN" ]]      || fail "marspot-session not built at $SESSION_BIN"
+[[ -x "$PROBE_BIN" ]]        || fail "probe not built at $PROBE_BIN"
+[[ -x "$MULTI_PROBE_BIN" ]]  || fail "multi probe not built at $MULTI_PROBE_BIN"
+[[ -x "$RESIZE_PROBE_BIN" ]] || fail "resize probe not built at $RESIZE_PROBE_BIN"
 
 # Zero-GUI floor: the shipped L3 binary must link no GUI frameworks.
 if otool -L "$SESSION_BIN" | grep -qiE 'Metal|AppKit|CoreText'; then
@@ -123,4 +127,16 @@ now=$(count_sandbox_sessions)
   || fail "multi-session: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
 echo "  multi-session OK — ${MULTI_N} distinct sessions, each echoed its own char, no orphans"
 
-echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session, echo verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"
+# Resize check (4b): grow + shrink an L3 in place; the published snapshot
+# dims must track each resize with no remap (region is capacity-mapped).
+echo "--- resize ---" | tee -a "$RUN_LOG"
+"$RESIZE_PROBE_BIN" "$SESSION_BIN" >>"$RUN_LOG" 2>&1
+rrc=$?
+(( rrc == 0 )) || fail "resize probe exited $rrc (resize not tracked in shm)"
+sleep 0.2
+now=$(count_sandbox_sessions)
+(( now <= base_sessions )) \
+  || fail "resize: ${now} sandbox session procs (orphan leak; baseline ${base_sessions})"
+echo "  resize OK — 80x24 → 100x40 → 40x12 → 80x24 tracked in place, no orphans"
+
+echo "PASS — ${ITERATIONS} rounds + N=${MULTI_N} multi-session + resize, echo/resize verified, L3 peak RSS=${peak_rss} KiB (cap ${RSS_CAP_KIB}), no orphans"

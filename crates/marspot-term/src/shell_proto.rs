@@ -111,6 +111,13 @@ pub enum MsgType {
     /// polling the shm seq every frame.  L2 coalesces a burst of these
     /// into a single re-read + render.  See `docs/per-session-l3.md`.
     GridReady = 34,
+    /// L2 (`marspot-core`) → L3 (`marspot-session`): "resize your session
+    /// to these cell dims."  Payload: `cols: u16 LE, rows: u16 LE`.  L3
+    /// resizes its Terminal + ioctl's the PTY (via shelld) + reflows, then
+    /// republishes at the new dims.  Distinct from the shell↔core
+    /// `Resize` (31), which carries an IOSurface id + pixel dims — this
+    /// one is the pure cell-grid resize the L3 framebuffer needs.
+    GridResize = 35,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -133,6 +140,7 @@ impl MsgType {
             32 => MsgType::SurfaceReady,
             33 => MsgType::CaretRect,
             34 => MsgType::GridReady,
+            35 => MsgType::GridResize,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -500,6 +508,28 @@ pub fn decode_resize(payload: &[u8]) -> io::Result<(u32, f64, f64, f64)> {
     Ok((id, w, h, s))
 }
 
+/// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
+/// dims L2 wants this L3 session resized to (the in-view window L3
+/// publishes into the shm framebuffer follows these dims).
+pub fn encode_grid_resize(cols: u16, rows: u16) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4);
+    out.extend_from_slice(&cols.to_le_bytes());
+    out.extend_from_slice(&rows.to_le_bytes());
+    out
+}
+
+pub fn decode_grid_resize(payload: &[u8]) -> io::Result<(u16, u16)> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "grid_resize payload < 4 bytes",
+        ));
+    }
+    let cols = u16::from_le_bytes(payload[0..2].try_into().unwrap());
+    let rows = u16::from_le_bytes(payload[2..4].try_into().unwrap());
+    Ok((cols, rows))
+}
+
 /// SurfaceReady payload: the IOSurface ID the core has just rendered
 /// to (u32 LE).  The shell uses this to switch its presenter from the
 /// previous (stretched) surface to the new (crisp) one.
@@ -801,6 +831,13 @@ mod tests {
         assert_eq!(w, 1200.0);
         assert_eq!(h, 800.0);
         assert_eq!(s, 2.0);
+    }
+
+    #[test]
+    fn grid_resize_roundtrip() {
+        let (c, r) = decode_grid_resize(&encode_grid_resize(203, 61)).unwrap();
+        assert_eq!((c, r), (203, 61));
+        assert_eq!(MsgType::from_u32(35), Some(MsgType::GridResize));
     }
 
     #[test]

@@ -42,7 +42,18 @@ use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use crate::grid::{Cell, Grid};
 
 const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// Capacity bound for a region's cell area, in cells.  A region is
+/// *mapped* to hold up to this many cells so a live resize (target #4
+/// step 4b) is a pure header-metadata change — the writer publishes the
+/// new dims + cells in place, no remap and no fd hand-off across the
+/// L2↔L3 socket.  The mapping is lazily faulted, so only the in-use
+/// `cols × rows` cells are ever resident (≈40 KiB at 80×24); this cap
+/// bounds *virtual* size (≈5 MiB) and is the documented growth bound for
+/// the shm framebuffer.  256 Ki cells covers any realistic single pane
+/// (e.g. a full 6K display at a tiny font ≈ 600 × 282 ≈ 170 Ki).
+pub const MAX_CELLS: usize = 256 * 1024;
 
 /// Env var carrying the inherited grid-shm fd from L2 (region creator)
 /// to the L3 child (the writer). Set by L2 when it spawns a session
@@ -102,8 +113,21 @@ impl GridSnapshot {
     }
 }
 
+/// Byte length of the cell area for `cols × rows` (used for bounds
+/// checks — the actual mapping is always [`CAPACITY_BYTES`]).
 fn region_len(cols: u16, rows: u16) -> usize {
     HEADER_BYTES + cols as usize * rows as usize * std::mem::size_of::<Cell>()
+}
+
+/// Total mapped bytes for every region: header + the [`MAX_CELLS`] cap.
+/// Fixed so a resize within the cap never remaps.
+const fn capacity_bytes() -> usize {
+    HEADER_BYTES + MAX_CELLS * std::mem::size_of::<Cell>()
+}
+
+/// True when a `cols × rows` grid fits the capacity cap.
+fn fits_capacity(cols: u16, rows: u16) -> bool {
+    cols as usize * rows as usize <= MAX_CELLS
 }
 
 /// Unique-per-process shm name. macOS caps shm names at ~31 bytes
@@ -127,7 +151,14 @@ fn next_shm_name() -> std::ffi::CString {
 /// name is unlinked immediately, so only fd holders can map it.
 pub fn create_region(cols: u16, rows: u16) -> io::Result<OwnedFd> {
     assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
-    let len = region_len(cols, rows);
+    assert!(
+        fits_capacity(cols, rows),
+        "grid_shm: {cols}x{rows} exceeds capacity cap {MAX_CELLS} cells"
+    );
+    // Always map the full capacity so a later resize within the cap is a
+    // header change, not a remap; lazily faulted so only the live dims
+    // are resident.
+    let len = capacity_bytes();
     let name = next_shm_name();
 
     // O_EXCL so a stale name from a crashed peer can't be reused
@@ -304,8 +335,18 @@ impl GridShmWriter {
         view_offset: u16,
         flags: u32,
     ) {
-        debug_assert_eq!(grid.cols(), self.cols);
-        debug_assert_eq!(grid.rows(), self.rows);
+        let cols = grid.cols();
+        let rows = grid.rows();
+        // Hard assert (not debug): writing more cells than the mapping
+        // holds is out-of-bounds memory unsafety, never tolerable. The
+        // grid's dims are the published frame's dims — they ride in the
+        // header so a resize needs no remap.
+        assert!(
+            fits_capacity(cols, rows),
+            "grid_shm: publish {cols}x{rows} exceeds capacity {MAX_CELLS} cells"
+        );
+        self.cols = cols;
+        self.rows = rows;
         let (cur_c, cur_r) = grid.cursor();
 
         unsafe {
@@ -315,7 +356,10 @@ impl GridShmWriter {
             (*h).seq.store(s.wrapping_add(1), Ordering::Relaxed);
             fence(Ordering::Release);
 
-            // Plain header fields.
+            // Plain header fields — including the live dims, so a reader
+            // always pairs the cell block with the dims it was written at.
+            (*h).cols = cols as u32;
+            (*h).rows = rows as u32;
             (*h).cursor_col = cur_c as u32;
             (*h).cursor_row = cur_r as u32;
             (*h).flags = flags;
@@ -326,8 +370,7 @@ impl GridShmWriter {
             // Cells: read the visible window straight into the region,
             // no intermediate allocation.
             let cells = self.cells_ptr();
-            let cols = self.cols;
-            for row in 0..self.rows {
+            for row in 0..rows {
                 let row_base = row as usize * cols as usize;
                 for col in 0..cols {
                     let cell = grid.cell_at_view(view_offset, col, row);
@@ -457,13 +500,13 @@ impl GridShmReader {
         self.base.add(HEADER_BYTES) as *const Cell
     }
 
-    /// Read the latest published frame into `out` (resized to
-    /// `cols*rows`), retrying until a tear-free snapshot lands. Returns
-    /// `None` only if the writer has never published (seq still 0).
+    /// Read the latest published frame into `out` (resized to the
+    /// frame's `cols*rows`), retrying until a tear-free snapshot lands.
+    /// The dims come from the header *per read*, so the snapshot tracks a
+    /// live resize without any remap. Returns `None` only if the writer
+    /// has never published (seq still 0).
     pub fn read(&self, out: &mut Vec<Cell>) -> Option<GridSnapshot> {
-        let n = self.cols as usize * self.rows as usize;
         out.clear();
-        out.reserve(n);
         // Bounded spin: a single writer holds the odd window for the
         // duration of one ~40 KiB copy, so a handful of retries always
         // suffices in practice; cap to avoid an unbounded loop if a
@@ -479,6 +522,19 @@ impl GridShmReader {
                     std::hint::spin_loop();
                     continue; // writer mid-publish
                 }
+                // Dims ride in the header with the cells. Read them first
+                // and bound the copy by them: a torn read (writer resized
+                // between our seq check and here) could yield mismatched
+                // dims, so reject anything past the capacity cap *before*
+                // the copy — never read out of the mapping. The s1==s2
+                // recheck below then discards the torn frame entirely.
+                let cols = (*h).cols as u16;
+                let rows = (*h).rows as u16;
+                if cols == 0 || rows == 0 || !fits_capacity(cols, rows) {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                let n = cols as usize * rows as usize;
                 let cursor_col = (*h).cursor_col as u16;
                 let cursor_row = (*h).cursor_row as u16;
                 let flags = (*h).flags;
@@ -487,6 +543,7 @@ impl GridShmReader {
                 let view_offset = (*h).view_offset as u16;
 
                 out.set_len(0);
+                out.reserve(n);
                 let cells = self.cells_ptr();
                 std::ptr::copy_nonoverlapping(cells, out.as_mut_ptr(), n);
                 out.set_len(n);
@@ -495,8 +552,8 @@ impl GridShmReader {
                 let s2 = (*h).seq.load(Ordering::Relaxed);
                 if s1 == s2 {
                     return Some(GridSnapshot {
-                        cols: self.cols,
-                        rows: self.rows,
+                        cols,
+                        rows,
                         cursor_col,
                         cursor_row,
                         flags,
@@ -585,6 +642,83 @@ mod tests {
             assert_eq!(snap.cursor_col, round as u16);
             assert!(!snap.cursor_visible());
         }
+    }
+
+    #[test]
+    fn resize_in_place_grows_and_shrinks_without_remap() {
+        // The 4b path: one region, published at several dims in place. The
+        // reader tracks each frame's dims from the header — no remap, no
+        // re-create. Covers grow (more cells) and shrink (fewer).
+        let mut writer = GridShmWriter::create(20, 5).expect("create");
+        let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
+        let mut buf = Vec::new();
+
+        for &(cols, rows) in &[(20u16, 5u16), (100, 40), (8, 2), (80, 24)] {
+            let mut grid = Grid::new(cols, rows);
+            // Mark the far corner so we can confirm the full frame copied.
+            grid.set_cell(cols - 1, rows - 1, Cell::from('X'));
+            grid.set_cursor(cols - 1, rows - 1);
+            writer.publish(&grid, 0, 0);
+
+            let snap = reader.read(&mut buf).expect("frame");
+            assert_eq!((snap.cols, snap.rows), (cols, rows), "dims track resize");
+            assert_eq!(buf.len(), cols as usize * rows as usize);
+            assert_eq!(buf[buf.len() - 1].ch, 'X', "far corner copied at {cols}x{rows}");
+            assert_eq!((snap.cursor_col, snap.cursor_row), (cols - 1, rows - 1));
+        }
+    }
+
+    #[test]
+    fn concurrent_resize_never_yields_torn_or_oob_frame() {
+        // Like the torn-frame test, but the writer also *resizes* between
+        // publishes. Every stable read must have all cells == the round's
+        // char and a cell count matching its own reported dims — a torn
+        // dims/cells pairing (or an OOB copy from garbage dims) would trip
+        // one of these.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dims = [(64u16, 24u16), (120, 50), (16, 8), (200, 60)];
+        let mut writer = GridShmWriter::create(dims[0].0, dims[0].1).expect("create");
+        let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stop_w = stop.clone();
+        let writer_thread = std::thread::spawn(move || {
+            let mut round = 0u32;
+            while !stop_w.load(Ordering::Relaxed) {
+                let (cols, rows) = dims[round as usize % dims.len()];
+                let ch = char::from_u32(0x21 + (round % 90)).unwrap();
+                let mut grid = Grid::new(cols, rows);
+                for r in 0..rows {
+                    for c in 0..cols {
+                        grid.set_cell(c, r, Cell::from(ch));
+                    }
+                }
+                writer.publish(&grid, 0, 0);
+                round = round.wrapping_add(1);
+            }
+        });
+
+        let mut buf = Vec::new();
+        let mut reads = 0;
+        while reads < 50_000 {
+            if let Some(snap) = reader.read(&mut buf) {
+                assert_eq!(
+                    buf.len(),
+                    snap.cols as usize * snap.rows as usize,
+                    "cell count must match reported dims"
+                );
+                let first = buf[0].ch;
+                assert!(
+                    buf.iter().all(|c| c.ch == first),
+                    "torn frame: cell mix across a resize"
+                );
+                reads += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer_thread.join().unwrap();
     }
 
     #[test]

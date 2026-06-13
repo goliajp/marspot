@@ -26,7 +26,7 @@ use crate::grid_shm::{
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
 use crate::session::{Session, SessionState};
-use crate::shell_proto::{encode_key_event, event_to_wire, Frame, MsgType};
+use crate::shell_proto::{encode_grid_resize, encode_key_event, event_to_wire, Frame, MsgType};
 use crate::shelld_client::{SessionState as ShelldState, ShelldSession};
 use crate::terminal::Terminal;
 
@@ -155,10 +155,10 @@ impl PaneBackend {
             PaneBackend::Shelld(s) => {
                 let _ = s.resize(cols, rows);
             }
-            // Keep the mirror's shape consistent with the layout; the
-            // matching SIGWINCH to the L3 PTY is wired in the resize
-            // step (sizes are fixed in step 3).
-            PaneBackend::L3(c) => c.grid.resize(cols, rows),
+            // Forward the cell-grid resize to the session process; it
+            // resizes its Terminal + PTY + reflows and republishes at the
+            // new dims, which the mirror picks up on the next `poll`.
+            PaneBackend::L3(c) => c.forward_resize(cols, rows),
         }
     }
 
@@ -236,6 +236,13 @@ pub struct L3Conn {
     /// Last shm publish seq we mirrored; lets `poll()` skip a re-fill
     /// when nothing changed (so L2's heartbeat doesn't force a render).
     last_seq: u64,
+    /// Last cell dims we *requested* L3 resize to.  The mirror grid lags a
+    /// frame behind a request (L3 has to reflow + republish first), so
+    /// `forward_resize` dedups against this rather than the mirror — else
+    /// every layout rebuild would re-send the same resize until the mirror
+    /// caught up.
+    req_cols: u16,
+    req_rows: u16,
     /// Set once the child process has exited (observed by `poll`'s
     /// `try_wait`).  Read by `is_exited`/`state`, which are `&self`.
     exited: bool,
@@ -249,7 +256,8 @@ impl L3Conn {
     /// spawn (socketpair + shm region + `Command`); this is pure
     /// assembly so `Pane`/`PaneBackend` stay free of process-launch glue.
     pub fn new(child: Child, control: UnixStream, reader: GridShmReader) -> Self {
-        let grid = Grid::new(reader.cols(), reader.rows());
+        let (cols, rows) = (reader.cols(), reader.rows());
+        let grid = Grid::new(cols, rows);
         Self {
             child,
             control,
@@ -258,6 +266,8 @@ impl L3Conn {
             app_cursor_keys: false,
             bracketed_paste: false,
             last_seq: 0,
+            req_cols: cols,
+            req_rows: rows,
             exited: false,
             scratch: Vec::new(),
             reader,
@@ -308,6 +318,20 @@ impl L3Conn {
     fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         let wire = event_to_wire(event, mods);
         let frame = Frame::new(MsgType::KeyEvent, encode_key_event(&wire));
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    /// Forward a cell-grid resize to the session process (dedup'd against
+    /// the last requested dims).  L3 resizes its Terminal + PTY, reflows,
+    /// and republishes at the new dims; the mirror reshapes on the next
+    /// `poll`.  Best-effort over the control socket.
+    fn forward_resize(&mut self, cols: u16, rows: u16) {
+        if (cols, rows) == (self.req_cols, self.req_rows) {
+            return;
+        }
+        self.req_cols = cols;
+        self.req_rows = rows;
+        let frame = Frame::new(MsgType::GridResize, encode_grid_resize(cols, rows));
         let _ = frame.write_to(&mut self.control);
     }
 
@@ -509,6 +533,14 @@ impl Pane {
     /// react to (clear-screen redraws, reflow); avoiding spurious
     /// resize keeps user experience quiet.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        // L3 dedups inside the backend against its last *requested* dims
+        // (the mirror grid lags a frame behind a resize request, so
+        // guarding on it here would re-send every layout rebuild until the
+        // mirror caught up).  In-process backends guard on the live grid.
+        if self.session.is_l3() {
+            self.session.resize(cols, rows);
+            return;
+        }
         if (cols, rows) != (self.session.grid().cols(), self.session.grid().rows()) {
             self.session.resize(cols, rows);
         }

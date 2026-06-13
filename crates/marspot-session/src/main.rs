@@ -31,7 +31,8 @@ use marspot_term::grid_shm::{
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::paths::shelld_socket;
 use marspot_term::shell_proto::{
-    decode_key_event, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    decode_grid_resize, decode_key_event, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD,
+    ENV_CONTROL_FD,
 };
 use marspot_term::shelld_client::{SessionState, ShelldClient, ShelldSession};
 use marspot_term::shelld_proto::SessionInfo;
@@ -43,6 +44,10 @@ use marspot_term::shelld_proto::SessionInfo;
 enum SessionEvent {
     Wake,
     Key(MarspotKeyEvent, Modifiers),
+    /// L2 forwarded a cell-grid resize (window/layout changed). L3 resizes
+    /// its Terminal + ioctl's the PTY (via shelld) + reflows, then
+    /// republishes at the new dims into the same (capacity-mapped) region.
+    Resize(u16, u16),
 }
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -135,10 +140,8 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
     let mut reader = stream;
     std::thread::spawn(move || loop {
         match Frame::read_from(&mut reader) {
-            Ok(Some(f)) => {
-                // KeyEvent is all L3 acts on for now; resize/paste/etc.
-                // arrive in later steps.
-                if f.msg_type == MsgType::KeyEvent {
+            Ok(Some(f)) => match f.msg_type {
+                MsgType::KeyEvent => {
                     if let Ok(w) = decode_key_event(&f.payload) {
                         let (e, m) = wire_to_event(w);
                         if tx.send(SessionEvent::Key(e, m)).is_err() {
@@ -146,7 +149,17 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                         }
                     }
                 }
-            }
+                MsgType::GridResize => {
+                    if let Ok((cols, rows)) = decode_grid_resize(&f.payload) {
+                        if tx.send(SessionEvent::Resize(cols, rows)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                // Other frame types (paste/scroll/selection) arrive in
+                // later steps; ignore unknown-to-us types for now.
+                _ => {}
+            },
             Ok(None) | Err(_) => break, // L2 closed the socket
         }
     });
@@ -303,11 +316,24 @@ fn main() {
             }
         };
         // Drain the burst: handle every queued key now, coalesce wakes
-        // into the single pump below.
+        // into the single pump below, and collapse a flurry of resizes to
+        // the final dims (intermediate sizes never need a reflow).
         let mut predicted = false;
+        let mut pending_resize: Option<(u16, u16)> = None;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
-            if let SessionEvent::Key(e, m) = ev {
-                predicted |= handle_key(&mut session, e, m);
+            match ev {
+                SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
+                SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
+                SessionEvent::Wake => {}
+            }
+        }
+        let resized = pending_resize.is_some();
+        if let Some((cols, rows)) = pending_resize {
+            // shelld ioctl's the PTY (SIGWINCH to the child) and the local
+            // Terminal reflows; the next publish carries the new dims, and
+            // L2's reader picks them up from the header with no remap.
+            if let Err(e) = session.resize(cols, rows) {
+                eprintln!("[session] resize to {cols}x{rows} failed: {e}");
             }
         }
 
@@ -318,9 +344,9 @@ fn main() {
             eprintln!("[session] session exited; exiting cleanly");
             break;
         }
-        // Republish on PTY output or on a local echo that painted ahead
-        // of it.
-        if n > 0 || predicted {
+        // Republish on PTY output, a local echo that painted ahead of it,
+        // or a resize (the grid shape changed even if no bytes pumped).
+        if n > 0 || predicted || resized {
             publish_and_poke(&mut shm, &session, poke.as_mut());
         }
 

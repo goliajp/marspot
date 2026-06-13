@@ -174,8 +174,18 @@ L2 → L3:
   terminal-coupled logic in L3; L2 stays terminal-agnostic.
 - `Scroll(view_offset)` — L2 computes the target offset from wheel
   deltas; L3 publishes that window (live or scrollback rows).
-- `Resize(cols, rows)` — L2 computes per-cell dims from layout; L3
-  resizes Terminal + ioctl PTY + reflows + republishes.
+- `GridResize(cols, rows)` — L2 computes per-cell dims from layout; L3
+  resizes Terminal + ioctl PTY (via shelld) + reflows + republishes.
+  **Resize is in-place, no fd hand-off:** the shm region is mapped once
+  at create to a capacity cap (`grid_shm::MAX_CELLS`, ≈5 MiB virtual,
+  lazily faulted so only the live dims are resident). The published dims
+  ride in the header with every frame; the writer publishes the new
+  `cols × rows` in place and the reader reads the dims per-frame, so a
+  resize within the cap needs neither a remap nor passing a new fd over
+  the control socket. A resize *past* the cap would be the only case
+  needing a re-create — it can't happen for a single on-screen pane.
+  (This resolves the handoff's in-place-vs-respawn fork toward in-place,
+  via a documented growth bound — the project's standard discipline.)
 - `GetSelectionText(anchor, focus, blockwise)` — rare (Cmd-C); L3
   walks its grid+scrollback and returns the string. Keeps scrollback
   out of L2.
