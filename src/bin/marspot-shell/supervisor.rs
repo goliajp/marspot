@@ -51,8 +51,14 @@ fn strip_quarantine_xattrs(path: &Path) {
 /// How long the supervisor watches a freshly-promoted binary before
 /// declaring it stable.  30 s = enough for a flat-out broken binary
 /// to abort during startup, short enough that an upgrade feels
-/// committed.
-pub const PROBATION: Duration = Duration::from_secs(30);
+/// committed.  Overridable via `MARSPOT_PROBATION_S` so update-cycle
+/// soaks can iterate fast; unset → 30 s, the production default.
+pub fn probation() -> Duration {
+    match std::env::var("MARSPOT_PROBATION_S").ok().and_then(|s| s.parse::<u64>().ok()) {
+        Some(s) => Duration::from_secs(s),
+        None => Duration::from_secs(30),
+    }
+}
 
 /// All three binary slots (+ quarantine) for one artifact.  Generic
 /// over the binary name so the same machinery serves all three
@@ -243,7 +249,7 @@ pub enum SupervisorState {
     /// true the shell can move to `PreSwap`.
     Idle,
     /// New core has been exec'd; we're watching it for the first
-    /// `PROBATION` seconds.  `started_at` is wall-clock at the swap.
+    /// `probation()` seconds.  `started_at` is wall-clock at the swap.
     Probation { started_at: Instant },
     /// Probation passed without the core dying.  We finalize and
     /// fall back to `Idle`.
@@ -260,7 +266,7 @@ impl SupervisorState {
     pub fn probation_elapsed(&self) -> bool {
         match self {
             SupervisorState::Probation { started_at } => {
-                started_at.elapsed() >= PROBATION
+                started_at.elapsed() >= probation()
             }
             _ => false,
         }
