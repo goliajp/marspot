@@ -18,14 +18,35 @@
 
 set -euo pipefail
 
-LABEL="com.marspot.shelld"
-PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
-BIN="$HOME/.local/Marspot.app/Contents/MacOS/marspot-shelld"
-LOG_DIR="$HOME/Library/Logs/marspot"
+# Production defaults.  Every value is overridable so a sandbox test
+# can drive the real promote/probation/rollback logic against a
+# throwaway LaunchAgent without ever touching the installed daemon.
+# With none of these env vars set, the resolved paths are byte-for-byte
+# what they always were — the production install path is unchanged.
+#
+#   MARSPOT_SHELLD_LABEL  LaunchAgent label (default com.marspot.shelld)
+#   MARSPOT_SHELLD_BIN    bundle binary the plist points at
+#   MARSPOT_SHELLD_PLIST  plist path
+#   MARSPOT_STATE_DIR     state root — when set, BIN_TREE / SUP_LOG /
+#                         daemon logs all move into the sandbox,
+#                         mirroring marspot::paths.
+LABEL="${MARSPOT_SHELLD_LABEL:-com.marspot.shelld}"
+PLIST="${MARSPOT_SHELLD_PLIST:-$HOME/Library/LaunchAgents/${LABEL}.plist}"
+BIN="${MARSPOT_SHELLD_BIN:-$HOME/.local/Marspot.app/Contents/MacOS/marspot-shelld}"
+# State-dir-aware roots, matching marspot::paths {state_root,log_dir}:
+# a set MARSPOT_STATE_DIR keeps everything in the sandbox so one
+# `rm -rf` cleans up; unset → the installed app's conventional dirs.
+if [[ -n "${MARSPOT_STATE_DIR:-}" ]]; then
+  BIN_TREE="$MARSPOT_STATE_DIR/binaries"
+  SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+  LOG_DIR="$MARSPOT_STATE_DIR/logs"
+else
+  BIN_TREE="$HOME/Library/Caches/marspot/binaries"
+  SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
+  LOG_DIR="$HOME/Library/Logs/marspot"
+fi
 LOG_OUT="$LOG_DIR/shelld.log"
 LOG_ERR="$LOG_DIR/shelld.err"
-BIN_TREE="$HOME/Library/Caches/marspot/binaries"
-SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
 
 # Append one event to the supervisor log so daemon updates appear
 # in the same diagnostic timeline as core / shell ones.

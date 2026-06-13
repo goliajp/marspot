@@ -7,10 +7,13 @@
 #
 # Optional slow tests are off by default:
 #   --soak  60 s RSS soak (default cadence is 10 min)
-#   --real  full network pipeline: bin/test-real-update.sh (happy
-#           path) + bin/test-negative-update.sh (rejects tampered /
-#           wrong-key / unsigned releases).  ~4 min total; needs the
-#           local signing key keys/marspot-update.sec
+#   --real   full network pipeline: bin/test-real-update.sh (happy
+#            path) + bin/test-negative-update.sh (rejects tampered /
+#            wrong-key / unsigned releases).  ~4 min total; needs the
+#            local signing key keys/marspot-update.sec
+#   --shelld shelld update probation + auto-rollback via a throwaway
+#            LaunchAgent (bin/test-shelld-probation.sh).  ~40 s;
+#            never touches the installed com.marspot.shelld daemon.
 #
 # Usage:
 #   bin/test-all.sh          # boot + crash + budget + update + rollback
@@ -72,6 +75,11 @@ for arg in "$@"; do
       run test-real-update.sh "real release pipeline (signed feed e2e)"
       reset_state
       run test-negative-update.sh "release trust gate (rejects tampered/wrong-key/unsigned)"
+      ;;
+    --shelld)
+      # Self-contained (own state dir + throwaway LaunchAgent) — no
+      # reset_state needed, and it must NOT share the sandbox tree.
+      run test-shelld-probation.sh "shelld probation + auto-rollback"
       ;;
   esac
 done
