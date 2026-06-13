@@ -16,6 +16,9 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use marspot_term::grid_shm::{
+    GridShmWriter, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
+};
 use marspot_term::paths::shelld_socket;
 use marspot_term::shelld_client::{SessionState, ShelldClient};
 use marspot_term::shelld_proto::SessionInfo;
@@ -30,6 +33,23 @@ fn state_str(s: SessionState) -> &'static str {
         SessionState::Idle => "idle",
         SessionState::Exited => "exited",
     }
+}
+
+/// Publish the session's current grid (live view) + cursor/mode flags
+/// into the shared framebuffer for L2 to render.
+fn publish(shm: &mut GridShmWriter, session: &marspot_term::shelld_client::ShelldSession) {
+    let term = session.terminal();
+    let mut flags = 0u32;
+    if term.cursor_visible() {
+        flags |= FLAG_CURSOR_VISIBLE;
+    }
+    if term.cursor_key_application_mode() {
+        flags |= FLAG_APP_CURSOR_KEYS;
+    }
+    if term.bracketed_paste_mode() {
+        flags |= FLAG_BRACKETED_PASTE;
+    }
+    shm.publish(term.grid(), 0, flags);
 }
 
 fn main() {
@@ -105,6 +125,19 @@ fn main() {
         session.child_pid()
     );
 
+    // Shared grid framebuffer L2 will read. For now we just create and
+    // publish into it; spawning by L2 (fd inheritance) is a later step,
+    // so the fd is only logged.
+    let mut shm = match GridShmWriter::create(INITIAL_COLS, INITIAL_ROWS) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("[session] grid_shm create failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("[session] grid framebuffer ready (shm fd {})", shm.fd());
+    publish(&mut shm, &session);
+
     let start = Instant::now();
     let mut frame: u64 = 0;
     loop {
@@ -122,8 +155,12 @@ fn main() {
         let n = session.pump();
         if session.is_exited() {
             session.pump();
+            publish(&mut shm, &session);
             eprintln!("[session] session exited; exiting cleanly");
             break;
+        }
+        if n > 0 {
+            publish(&mut shm, &session);
         }
 
         frame += 1;

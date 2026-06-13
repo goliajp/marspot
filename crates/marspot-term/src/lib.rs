@@ -13,6 +13,7 @@
 //! paths keep resolving.  See `docs/per-session-l3.md`.
 
 pub mod grid;
+pub mod grid_shm;
 pub mod input_core;
 pub mod layout;
 pub mod parser;
