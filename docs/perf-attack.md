@@ -20,6 +20,29 @@ under the locked methodology, not when it "looks better."
   88 commits + 5238 LoC behind HEAD; absolute-floor comparisons are
   cross-architecture.  vs-best-other ratios remain meaningful.
 
+## L3 architecture throughput (2026-06-13, post per-session-L3 default)
+
+Per-session L3 (shell→core→L3, now default) was characterised vs the old
+in-process path with an apples-to-apples probe
+(`crates/marspot-session/examples/pipeline_throughput.rs`: same shelld /
+parser / payload / machine; measures `inproc` = attach a ShelldSession +
+pump, vs `l3` = spawn marspot-session + read shm; the ratio isolates L3's
+added cost). On the mini (cat 64 MiB): **L3 ≈ 0.90× the in-process bulk-cat
+throughput** — a ~10 % cost from the per-pump shm-window memcpy + the IPC
+hop, the accepted price of crash isolation / per-session update / bounded
+memory. Latency, idle CPU, and memory (A1) are all verified fine under L3.
+
+While measuring, found + fixed a real bug: `shelld` auto-attaches the
+NEW_SESSION creator, so L2's `create_session` left L2 subscribed to every
+session it allocated → shelld broadcast each DATA chunk to L2 too (dropped,
+no inbox) on top of L3, doubling broadcast fan-out under load. Fixed by
+detaching right after create (commit `18ee8b9`). The earlier "3× regression"
+scare was pure measurement error (sentinel-in-command-echo; zsh-loop-bound
+generation) — not real.
+
+If the ~10 % ever matters: dirty-row-only publish, or skip publish when L2
+is behind on reads. Not urgent.
+
 ## Items
 
 Each row is **one independent attack project**.  Open the linked file
