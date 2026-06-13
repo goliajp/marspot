@@ -254,15 +254,49 @@ def load_scroll_cold():
     if not samples: return None
     return {"p99_ns": samples[len(samples) // 2]}
 
+_L3_THROUGHPUT = None
+_L3_LOADED = False
+
+def _l3_throughput():
+    # bench/results/l3-throughput.json — the PRODUCTION path number
+    # (shell→core→L3, default since 2026-06-13), produced by
+    # bin/measure-l3.sh. This is what the user actually experiences: the
+    # standalone mcli number measure.sh records, and the Screen-Sharing
+    # snapshot, both predate / sidestep the per-session engine's ~10 %
+    # IPC+shm cost. Prefer it whenever present and fresh. Stale guard (7
+    # days) so an old per-machine artifact can't silently feed the gate;
+    # the file is gitignored / transient, so absence just means "fall
+    # back" rather than "error". perf-attack E-bench-infra/L3.
+    global _L3_THROUGHPUT, _L3_LOADED
+    if _L3_LOADED:
+        return _L3_THROUGHPUT
+    _L3_LOADED = True
+    p = os.path.normpath(os.path.join(os.path.dirname(baseline_path), "results", "l3-throughput.json"))
+    if os.path.exists(p):
+        import time
+        age_days = (time.time() - os.path.getmtime(p)) / 86400.0
+        if age_days <= 7:
+            try:
+                _L3_THROUGHPUT = json.load(open(p))
+            except Exception:
+                _L3_THROUGHPUT = None
+    return _L3_THROUGHPUT
+
 def load_live(scenario):
-    # Source of truth for marspot live throughput: the co-measured value
-    # in competitors_snapshot.marspot. That number was captured in the
-    # SAME sequential cycle as iterm/warp/ghostty/terminal — every cell
-    # under identical idle conditions — which is what makes the
-    # vs-best-other ratio honest. Falls back to bench-remote's separate
-    # live.json only if marspot wasn't in the latest co-measure (e.g. a
-    # bench-remote --full run that ran without first triggering the
-    # LaunchAgent refresh).
+    # Preference order:
+    #   1. l3-throughput.json — the production shell→core→L3 path, the
+    #      architecture the product ships. Measured headlessly + repeatably
+    #      by bin/measure-l3.sh (no Screen Sharing, no standalone mcli).
+    #   2. competitors_snapshot.marspot — co-measured with the competitors
+    #      in one idle cycle (fair vs-best ratio), but hand-captured on the
+    #      pre-L3 app; kept as the fallback when L3 wasn't measured on this
+    #      host.
+    #   3. measure.sh's live.json — standalone mcli, in-process, no L3 hop.
+    l3 = _l3_throughput()
+    if l3 is not None:
+        bps = l3.get(scenario, {}).get("bytes_per_sec", 0)
+        if bps > 0:
+            return bps / 1024 / 1024
     marspot_snap = baseline.get("competitors_snapshot", {}).get("marspot", {})
     co = marspot_snap.get(f"{scenario}_MBps")
     if isinstance(co, (int, float)) and co > 0:
@@ -309,6 +343,15 @@ def fmt_num(n):
     if n is None: return "-"
     if isinstance(n, str): return n
     return f"{n:.1f}"
+
+# Announce the live-throughput source so the verdict isn't ambiguous about
+# which marspot number it gated (production L3 vs pre-L3 snapshot vs mcli).
+if mode == "full":
+    if _l3_throughput() is not None:
+        print("live source: l3-throughput.json (production shell→core→L3 path)")
+    elif baseline.get("competitors_snapshot", {}).get("marspot", {}):
+        print("live source: competitors_snapshot.marspot (pre-L3 snapshot) — "
+              "run bin/measure-l3.sh to gate the production path")
 
 # Parse + ratio per scenario
 for entry in baseline["scenarios"]:

@@ -302,6 +302,78 @@ Without E7, every concurrent invocation invalidates whatever soak
 was running.  Fixing this unblocks parallel bench work and removes
 a phantom-failure source from soak diagnostics.
 
+---
+
+## E8 — gate measures production shell→core→L3, not standalone mcli · **DONE (measurement) 2026-06-13**
+
+### What's broken
+
+Per-session L3 became the default architecture on 2026-06-13: every
+pane's bytes flow shelld → `marspot-session` (parser → grid → shm
+publish), measured at ~0.90× the in-process bulk-cat rate (the per-pump
+~40 KiB shm-window memcpy + the process hop).  But the gate's "marspot
+live" number came from one of two non-production sources:
+
+- `bin/measure.sh` drives the standalone `mcli` binary — one in-process
+  session, no IPC/shm hop (intentionally, so the per-session number isn't
+  diluted 1/9 by `marspot`'s 9 cells).  That's ~10 % faster than the
+  product ships.
+- `competitors_snapshot.marspot` (152–160 MiB/s) was hand-captured via
+  Screen Sharing on the **pre-L3** app — not reproducible in an automated
+  gate and now architecturally stale.
+
+So `vs-best-other` overstated marspot by the L3 hop's cost, and B3/B4/C/D
+would be diagnosed against an architecture the product no longer runs.
+This had to land before A/B/C/D (the whole point of bucket E).
+
+### TDD failing test
+
+```sh
+# Before: no headless, reproducible production-path throughput exists.
+bin/measure-l3.sh
+# Expect: bench/results/l3-throughput.json with bytes_per_sec per cat-*
+#         scenario, measured through a real marspot-session.
+# Then bin/bench.sh --full announces "live source: l3-throughput.json"
+# and gates that number (not the mcli/Screen-Sharing one).
+```
+
+### Implementation
+
+- `crates/marspot-session/examples/l3_throughput.rs` — spawns a real
+  `marspot-session` attached to a fresh shelld session (inherited shm
+  region + control socket, exactly as `marspot-core::spawn_l3_pane`),
+  types `cat <scenario> <scenario> …` over the control socket, and times
+  the drain window from command-issue to the scroll_push_count plateau.
+  Key correctness detail: the window is anchored at **t_issue** and ends
+  at the **last count change**, not at "first advance" — the session
+  parses in coarse pumps (a cached cat can land tens of MiB in one pump,
+  publishing the shm only at pump boundaries), so a first-advance anchor
+  read near-zero windows under burst.  Payload is the scenario file
+  repeated to ~128 MiB so the window clears the 10 ms poll / 1000 ms
+  plateau resolution (a 32 MiB file drains in ~0.2 s — unmeasurable).
+- `bin/measure-l3.sh` — dev-sandbox wrapper (own shelld, never touches the
+  installed app), loops cat-ascii/mixed/cjk/emoji × 3 trials, aggregates
+  the median into `bench/results/l3-throughput.json`.  CARGO_TARGET_DIR-
+  aware (re-points the sandbox shelld at the resolved target dir for the
+  mini's dedicated tree).  Median-of-3 absorbs the occasional cached-burst
+  outlier.
+- `bin/bench.sh --full` — `load_live` now prefers `l3-throughput.json`
+  (fresh ≤ 7 days) over `competitors_snapshot.marspot` over `live.json`,
+  and announces which source it gated.  Non-disruptive: when L3 wasn't
+  measured on a host the chain falls back to the existing snapshot.
+
+### Exit criteria
+
+- `bin/measure-l3.sh` produces reproducible production-path MiB/s
+  (verified dev box: ascii ~95, mixed ~84, cjk ~106, emoji ~101 MiB/s,
+  per-scenario trial spread ≤ 1 % after the median).  **DONE.**
+- `bin/bench.sh --full` gates the L3 number and says so.  **DONE.**
+- **Pending:** floors re-locked against L3 on the idle mini
+  (`bin/measure-l3.sh` on the mini → `bench-remote.sh --full
+  --update-baseline`).  Until then `--full` shows `live`/`vs-best` FAILs
+  by design — the dev box is too noisy to lock floors on (perf-attack F
+  lesson), and the floors still reflect the pre-L3 in-process numbers.
+
 ## Combined exit criteria for E
 
 E1, E2, E3, E4, E5 all closed.  After E lands:

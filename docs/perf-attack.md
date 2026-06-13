@@ -43,6 +43,20 @@ generation) — not real.
 If the ~10 % ever matters: dirty-row-only publish, or skip publish when L2
 is behind on reads. Not urgent.
 
+**The gate now measures this path** (2026-06-13, E8 below). `bin/measure-l3.sh`
+drives a real `marspot-session` per cat-* scenario headlessly (the
+`l3_throughput` probe: spawn session → cat the scenario over the control
+socket → time the drain via the shm scroll_push_count) and writes
+`bench/results/l3-throughput.json`. `bin/bench.sh --full`'s `load_live` now
+prefers that production number over the standalone-mcli `live.json` and the
+hand-captured `competitors_snapshot.marspot`. **Floors are still calibrated to
+the pre-L3 in-process numbers** (152–160 MiB/s); they must be re-locked
+against the L3 path on the idle mini (`bin/measure-l3.sh` on the mini →
+`bin/bench-remote.sh --full --update-baseline`) — until then `--full` shows
+`live` / `vs-best` FAILs by design (the old gate passed only because it gated
+a number ~10 % higher than the product ships). This folds into the per-
+session-L3 step-6 bench re-lock.
+
 ## Items
 
 Each row is **one independent attack project**.  Open the linked file
@@ -126,6 +140,7 @@ noise / stale data / missing metrics.
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted** (not a bug — q1<1% short-circuit by design) |
 | E7 | bench scripts kill marspot/mcli by name (friendly-fire) | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-F-recalibrate-clean`) |
+| E8 | gate measures production shell→core→L3, not standalone mcli | [E](perf-attack/E-bench-infra.md) | **done (measurement) 2026-06-13** — `l3_throughput` probe + `bin/measure-l3.sh` + `bench.sh --full` `load_live` prefers `l3-throughput.json`. **Floor re-lock pending on idle mini** (see L3-throughput section). |
 
 ## F — Locked floors / ceilings · **recalibrated to clean-machine 2026-05-05**
 

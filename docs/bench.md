@@ -309,6 +309,29 @@ dispatches it to `ssh mini` (clean idle M4 / 64 GB).  Running
 on multi-session; the warning is `bench-remote.sh` exists for a
 reason.
 
+### `live-MBps` source: production shell→core→L3 (perf-attack E8)
+
+`live cat-*` gates the throughput a real pane drains at.  Since
+per-session L3 became the default (2026-06-13), the bytes flow
+shelld → `marspot-session` (parse → grid → shm publish) — ~0.90× the
+in-process bulk-cat rate.  `load_live` resolves the marspot number in
+this order:
+
+1. `bench/results/l3-throughput.json` (fresh ≤ 7 days) — the production
+   path, produced by **`bin/measure-l3.sh`** (its own sandbox shelld +
+   the `l3_throughput` probe driving a real `marspot-session`; never
+   touches the installed app).  Headless and reproducible, unlike the
+   pre-L3 Screen-Sharing capture.
+2. `competitors_snapshot.marspot` — co-measured with competitors in one
+   idle cycle; the fallback when L3 wasn't measured on this host.
+3. `live.json` from `bin/measure.sh` — standalone `mcli`, in-process, no
+   L3 hop.
+
+`--full` prints which source it gated.  To gate the production path on
+the mini: run `bin/measure-l3.sh` there, then `bin/bench-remote.sh
+--full` (re-lock floors with `--update-baseline`, since the current
+floors still reflect the pre-L3 in-process numbers).
+
 ---
 
 ## 6. How to extend
