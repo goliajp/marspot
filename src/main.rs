@@ -1857,6 +1857,7 @@ fn bench_metal_render(arg: &str) {
         title: "",
         selection: None,
         ime_preedit: "",
+        update_pending: false,
     };
     let views = std::slice::from_ref(&view);
 

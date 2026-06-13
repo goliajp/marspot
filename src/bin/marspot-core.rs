@@ -469,24 +469,57 @@ impl CoreApp {
     /// exited.  Behind `MARSPOT_L3=1` (no L3 panes otherwise → no-op).
     fn swap_idle_l3(&mut self) {
         for i in 0..self.panes.len() {
-            if i == self.focused_idx {
-                continue;
-            }
             let pane = &self.panes[i];
             if !pane.is_l3() || pane.is_exited() || pane.session().is_l3_swapping() {
                 continue;
             }
-            let Some(sid) = pane.session().l3_session_id() else {
-                continue;
-            };
-            let (cols, rows) = (pane.session().grid().cols(), pane.session().grid().rows());
-            match spawn_l3(cols, rows, sid, &self.event_tx) {
-                Ok(spawn) => {
-                    self.panes[i].session_mut().begin_l3_swap(spawn);
-                    eprintln!("[core] staged silent swap for L3 session {sid} (pane {i})");
+            // The focused pane defers: a replay could blip an interactive
+            // TUI under the user's hands. Flag it so the renderer shows the
+            // refresh affordance; a click (or losing focus) triggers it.
+            if i == self.focused_idx {
+                if !self.panes[i].update_pending() {
+                    self.panes[i].set_update_pending(true);
+                    self.needs_render = true;
+                    eprintln!("[core] L3 session (pane {i}) focused — deferred update, showing refresh");
                 }
-                Err(e) => eprintln!("[core] swap spawn for session {sid} failed: {e}"),
+                continue;
             }
+            self.begin_pane_swap(i);
+        }
+    }
+
+    /// Call right before moving focus to `new_idx`: if the currently-
+    /// focused pane has a deferred update, it's about to become idle, so
+    /// trigger its swap now (a replay is safe once it's not under the
+    /// user's hands).  No-op if focus isn't actually changing.
+    fn resolve_pending_on_defocus(&mut self, new_idx: usize) {
+        if new_idx != self.focused_idx
+            && self
+                .panes
+                .get(self.focused_idx)
+                .is_some_and(|p| p.update_pending())
+        {
+            self.begin_pane_swap(self.focused_idx);
+        }
+    }
+
+    /// Bring up a replacement L3 on pane `i`'s session and stage the swap
+    /// (clearing any deferred-update flag).  Caller has checked it's a live,
+    /// not-already-swapping L3 pane.
+    fn begin_pane_swap(&mut self, i: usize) {
+        let pane = &self.panes[i];
+        let Some(sid) = pane.session().l3_session_id() else {
+            return;
+        };
+        let (cols, rows) = (pane.session().grid().cols(), pane.session().grid().rows());
+        match spawn_l3(cols, rows, sid, &self.event_tx) {
+            Ok(spawn) => {
+                self.panes[i].session_mut().begin_l3_swap(spawn);
+                self.panes[i].set_update_pending(false);
+                self.needs_render = true;
+                eprintln!("[core] staged silent swap for L3 session {sid} (pane {i})");
+            }
+            Err(e) => eprintln!("[core] swap spawn for session {sid} failed: {e}"),
         }
     }
 
@@ -693,6 +726,7 @@ impl CoreApp {
         let picker_panel_hit = layout.hit_test_picker_panel(x_phys, y_phys);
         let close_session_hit = layout.hit_test_close_session(x_phys, y_phys);
         let add_session_hit = layout.hit_test_add_session_button(x_phys, y_phys);
+        let refresh_hit = layout.hit_test_cell_refresh(x_phys, y_phys);
 
         // Sidebar toggle: highest-priority chrome action so a click
         // on the chip never falls through to the cell underneath.
@@ -741,6 +775,18 @@ impl CoreApp {
             return;
         }
 
+        // Refresh affordance: click the deferred-update glyph on a pending
+        // pane to trigger its silent swap now.  Sits inside the title strip,
+        // so it must take priority over the title-edit hit below — but only
+        // when that pane actually has an update staged (else fall through to
+        // normal title behaviour).
+        if let Some(i) = refresh_hit {
+            if self.panes.get(i).is_some_and(|p| p.update_pending()) {
+                self.begin_pane_swap(i);
+                return;
+            }
+        }
+
         let layout = &self.layout;
         let row_phys = marspot::layout::SIDEBAR_ROW_H_PHYS;
         let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
@@ -760,6 +806,7 @@ impl CoreApp {
         if let Some(idx) = title_hit {
             if idx < self.panes.len() {
                 self.commit_title_edit();
+                self.resolve_pending_on_defocus(idx);
                 self.focused_idx = idx;
                 self.editing_title = Some(idx);
                 self.title_edit_buffer = self
@@ -804,6 +851,7 @@ impl CoreApp {
                 });
                 self.selection_dragging = true;
                 if idx != self.focused_idx {
+                    self.resolve_pending_on_defocus(idx);
                     self.focused_idx = idx;
                 }
                 self.needs_render = true;
@@ -817,6 +865,7 @@ impl CoreApp {
         let new_focus = sidebar_hit.or(cell_hit);
         if let Some(idx) = new_focus {
             if idx < self.panes.len() && idx != self.focused_idx {
+                self.resolve_pending_on_defocus(idx);
                 self.focused_idx = idx;
                 let _ = self.panes[self.focused_idx].snap_to_live();
                 self.needs_render = true;

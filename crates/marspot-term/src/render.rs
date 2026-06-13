@@ -57,6 +57,12 @@ pub struct SessionView<'a> {
     /// session AND view_offset == 0 (preedit is anchored to the live
     /// cursor; scrolled-back views don't show one).
     pub ime_preedit: &'a str,
+    /// A deferred per-session silent update is staged for this pane
+    /// (target #4 step 5b).  When set on the focused pane, the renderer
+    /// draws a refresh affordance at the right edge of the title strip;
+    /// clicking it triggers the swap.  Only the focused pane ever carries
+    /// it (idle panes swap immediately).
+    pub update_pending: bool,
 }
 
 #[derive(Copy, Clone, Debug)]

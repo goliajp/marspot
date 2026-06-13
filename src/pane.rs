@@ -583,6 +583,13 @@ pub struct Pane {
     /// just rolled into scrollback — keeping the highlight pinned to
     /// the original content instead of the original screen position.
     last_seen_scroll_push: u64,
+    /// A per-session silent update is staged for this pane but deferred
+    /// because it's the *focused* pane (an idle pane swaps immediately; a
+    /// replay would blip an interactive TUI under the user's hands).  The
+    /// renderer draws a refresh affordance in the focused pane's title
+    /// strip while this is set; clicking it triggers the swap.  Target #4
+    /// step 5b.  Only ever set on an L3 pane.
+    update_pending: bool,
 }
 
 impl Pane {
@@ -593,6 +600,7 @@ impl Pane {
             session: PaneBackend::Local(session),
             view_offset: 0,
             last_seen_scroll_push: 0,
+            update_pending: false,
         }
     }
 
@@ -603,6 +611,7 @@ impl Pane {
             session: PaneBackend::Shelld(session),
             view_offset: 0,
             last_seen_scroll_push: 0,
+            update_pending: false,
         }
     }
 
@@ -615,6 +624,7 @@ impl Pane {
             session: PaneBackend::L3(conn),
             view_offset: 0,
             last_seen_scroll_push: 0,
+            update_pending: false,
         }
     }
 
@@ -666,6 +676,17 @@ impl Pane {
     /// Current view offset (rows into scrollback, 0 = live tail).
     pub fn view_offset(&self) -> u16 {
         self.view_offset
+    }
+
+    /// A deferred silent update is staged for this (focused) pane — the
+    /// renderer shows a refresh affordance; a click triggers the swap.
+    pub fn update_pending(&self) -> bool {
+        self.update_pending
+    }
+
+    /// Mark/clear the deferred-update affordance (target #4 step 5b).
+    pub fn set_update_pending(&mut self, v: bool) {
+        self.update_pending = v;
     }
 
     /// Drain the PTY reader into the terminal parser. Returns the
@@ -807,6 +828,7 @@ impl Pane {
             title,
             selection: None,
             ime_preedit: "",
+            update_pending: self.update_pending,
         }
     }
 }

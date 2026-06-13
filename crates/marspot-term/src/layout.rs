@@ -574,6 +574,28 @@ impl Layout {
         None
     }
 
+    /// Hit-test the per-cell refresh affordance — a square at the right
+    /// edge of cell `i`'s title strip (`cell_title_h` wide, the full strip
+    /// height), where the renderer draws the deferred-update glyph (target
+    /// #4 step 5b).  Returns `Some(i)` if the click landed there.  The
+    /// caller only acts on it when that pane actually has an update staged;
+    /// the generous square (vs. the exact glyph advance the renderer uses)
+    /// keeps it a comfortable click target.
+    pub fn hit_test_cell_refresh(&self, px: f64, py: f64) -> Option<usize> {
+        if self.cell_title_h <= 0.0 || px < self.sidebar_w {
+            return None;
+        }
+        let icon_w = self.cell_title_h;
+        for (i, c) in self.cells.iter().enumerate() {
+            let right = c.x + c.w - self.padding;
+            let left = right - icon_w;
+            if px >= left && px < right && py >= c.y_top && py < c.y_top + self.cell_title_h {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     /// Map a click in the sidebar to the session-list row index.
     /// Returns `None` if the click was outside the sidebar or above /
     /// below the entry list.  `row_height_phys` is the per-entry
@@ -639,6 +661,29 @@ mod tests {
         let inner_h = cell_h - 2.0 * l.padding;
         assert_eq!(l.cells[0].cols, (inner_w / 8.0).floor() as u16);
         assert_eq!(l.cells[0].rows, (inner_h / 16.0).floor() as u16);
+    }
+
+    #[test]
+    fn hit_test_cell_refresh_only_at_title_right_edge() {
+        // 2×2 with a 20 px title strip, no sidebar.
+        let l = Layout::build(1000.0, 600.0, 0.0, 0.0, 20.0, 2, 2, 8.0, 16.0);
+        let c = &l.cells[1]; // top-right cell
+        let icon_w = l.cell_title_h;
+        let right = c.x + c.w - l.padding;
+        // A point in the icon square (right edge of the title strip).
+        let px = right - icon_w / 2.0;
+        let py = c.y_top + l.cell_title_h / 2.0;
+        assert_eq!(l.hit_test_cell_refresh(px, py), Some(1));
+        // Left side of the same title strip → not the icon.
+        assert_eq!(l.hit_test_cell_refresh(c.x + 2.0, py), None);
+        // Below the title strip (terminal body) → None even at the right.
+        assert_eq!(
+            l.hit_test_cell_refresh(px, c.y_top + l.cell_title_h + 5.0),
+            None
+        );
+        // No title strip → never hits.
+        let l0 = Layout::build(1000.0, 600.0, 0.0, 0.0, 0.0, 2, 2, 8.0, 16.0);
+        assert_eq!(l0.hit_test_cell_refresh(px, py), None);
     }
 
     #[test]

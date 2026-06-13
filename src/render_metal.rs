@@ -937,6 +937,10 @@ const SIDEBAR_TEXT_FG: (f32, f32, f32) = (0.78, 0.82, 0.88);
 /// the "current version" reads clearly when the user glances up to
 /// confirm an update landed.
 const HEADER_VERSION_FG: (f32, f32, f32) = (0.62, 0.68, 0.80);
+/// Deferred-update refresh glyph in the focused pane's title strip — a
+/// warm amber so it reads as an actionable "update ready" control against
+/// the dim title text (target #4 step 5b).
+const REFRESH_ICON_FG: (f32, f32, f32) = (0.95, 0.74, 0.30);
 // Selected-row BG kept as an alias of the cell-focused tone so
 // sidebar selection and 9-grid focus read as the same affordance.
 const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
@@ -1867,6 +1871,28 @@ fn push_session(
             atlas,
             glyphs,
         );
+        // Deferred-update affordance (target #4 step 5b): a refresh glyph
+        // at the right edge of the *focused* pane's title strip when a
+        // silent swap is staged for it.  Clicking it (hit-tested via
+        // `Layout::hit_test_cell_refresh`) triggers the swap.  Brighter
+        // than the dim title text so it reads as an actionable control.
+        if view.update_pending && pane_focused {
+            let icon_x = rect.x as f32 + rect.w as f32 - padding - cell_w;
+            push_text_run(
+                "\u{27F3}", // ⟳ CLOCKWISE GONG WITH CIRCLE ARROW
+                icon_x,
+                label_baseline_y,
+                [REFRESH_ICON_FG.0, REFRESH_ICON_FG.1, REFRESH_ICON_FG.2, 1.0],
+                cell_w,
+                cell_h,
+                ascent,
+                atlas_w,
+                atlas_h,
+                font,
+                atlas,
+                glyphs,
+            );
+        }
     }
 
     let grid = view.grid;
@@ -2838,6 +2864,7 @@ mod tests {
             title: "",
             selection: None,
             ime_preedit: "",
+            update_pending: false,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
