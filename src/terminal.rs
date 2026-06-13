@@ -428,6 +428,13 @@ impl<'a> Handler<'a> {
         } else {
             self.grid.set_cursor(0, rows - 1);
         }
+        // The row the cursor just flowed onto continues the logical
+        // line above — record it so resize can re-wrap instead of
+        // truncating.  (For the region-scroll branch the cursor row
+        // index is unchanged but the content shifted up; the flag
+        // still describes "this row continues the one above it".)
+        let (_c, new_row) = self.grid.cursor();
+        self.grid.set_row_wrapped(new_row, true);
     }
 }
 
@@ -515,6 +522,16 @@ impl<'a> ParserCallbacks for Handler<'a> {
         // A wide char at the last column can't fit. Wrap first, then print
         // at the start of the new row.
         if w == 2 && col + 1 >= cols {
+            // The abandoned last column gets a NUL pad sentinel (when
+            // it isn't carrying real content) so resize reflow knows
+            // it's wide-wrap padding, not a space the user typed.
+            if self.grid.cell(cols - 1, row) == Cell::default() {
+                self.grid.set_cell(
+                    cols - 1,
+                    row,
+                    Cell { ch: '\0', attrs: *self.attrs },
+                );
+            }
             let bot = *self.scroll_bot;
             if row == bot {
                 self.region_scroll_up(1);
@@ -528,6 +545,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
             let next = self.grid.cursor();
             col = next.0;
             row = next.1;
+            // Same continuation semantics as the deferred-wrap path.
+            self.grid.set_row_wrapped(row, true);
         }
 
         // Lead cell carries the printable char.  For wide chars, the trail
@@ -702,6 +721,13 @@ impl<'a> ParserCallbacks for Handler<'a> {
                     self.grid.clear_scrollback();
                 } else {
                     erase_in_display(self.grid, col, row, cols, rows, mode, *self.attrs);
+                    if mode == 2 {
+                        // Whole screen wiped — continuation flags no
+                        // longer describe anything; without this a
+                        // post-clear redraw would reflow-glue onto
+                        // pre-clear history.
+                        self.grid.clear_all_wrapped();
+                    }
                 }
             }
             b'K' => {
@@ -2023,5 +2049,195 @@ mod tests {
         t.feed(b"\x1b[?1049h");
         assert!(t.predictions.is_empty());
         assert_eq!(t.predictions_miss, 1);
+    }
+
+    // ── Resize reflow gate ─────────────────────────────────────────
+    //
+    // Regression wall for the "resize 截断" class of bug: shrinking
+    // the window used to truncate every row at the narrow width and
+    // wipe scrollback, so a shrink → grow round trip (window drag,
+    // shell self-update reopening at the default rect, attach-then-
+    // resize bootstrap) permanently mangled content.  These tests pin
+    // the reflow contract: ANY resize sequence is lossless for
+    // logical content.
+
+    /// One visible row as a trimmed string ('\0' wide-trail cells
+    /// skipped, same as the clipboard serialiser).
+    fn row_text(t: &Terminal, r: u16) -> String {
+        let g = t.grid();
+        let mut s: String = (0..g.cols())
+            .map(|c| g.cell(c, r).ch)
+            .filter(|&ch| ch != '\0')
+            .collect();
+        while s.ends_with(' ') {
+            s.pop();
+        }
+        s
+    }
+
+    /// All logical content — scrollback then live rows, glued by the
+    /// continuation flags, trailing blank lines dropped.  This is the
+    /// width-independent invariant: it must survive any resize chain.
+    fn logical_text(t: &Terminal) -> String {
+        let g = t.grid();
+        let mut lines: Vec<String> = Vec::new();
+        let absorb = |row: String, wrapped: bool, lines: &mut Vec<String>| {
+            let row = row.trim_end().to_string();
+            if wrapped && !lines.is_empty() {
+                lines.last_mut().unwrap().push_str(&row);
+            } else {
+                lines.push(row);
+            }
+        };
+        for i in 0..g.scrollback_len() {
+            let row: String = g
+                .scrollback_line(i)
+                .unwrap()
+                .iter()
+                .map(|c| c.ch)
+                .filter(|&ch| ch != '\0')
+                .collect();
+            absorb(row, g.scrollback_wrapped(i), &mut lines);
+        }
+        for r in 0..g.rows() {
+            let row: String = (0..g.cols())
+                .map(|c| g.cell(c, r).ch)
+                .filter(|&ch| ch != '\0')
+                .collect();
+            absorb(row, g.row_wrapped(r), &mut lines);
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn autowrap_sets_continuation_flag() {
+        let t = term_with(10, 5, b"0123456789ABCDE");
+        assert!(!t.grid().row_wrapped(0));
+        assert!(t.grid().row_wrapped(1), "autowrapped row must be flagged");
+        assert_eq!(row_text(&t, 0), "0123456789");
+        assert_eq!(row_text(&t, 1), "ABCDE");
+        // Explicit newline does NOT flag.
+        let t2 = term_with(10, 5, b"abc\r\ndef");
+        assert!(!t2.grid().row_wrapped(1));
+    }
+
+    #[test]
+    fn reflow_shrink_rewraps_instead_of_truncating() {
+        let mut t = term_with(10, 5, b"0123456789ABCDE");
+        t.resize(5, 5);
+        assert_eq!(row_text(&t, 0), "01234");
+        assert_eq!(row_text(&t, 1), "56789");
+        assert_eq!(row_text(&t, 2), "ABCDE");
+        assert!(t.grid().row_wrapped(1) && t.grid().row_wrapped(2));
+        assert_eq!(logical_text(&t), "0123456789ABCDE");
+    }
+
+    #[test]
+    fn reflow_grow_unwraps_back_to_one_row() {
+        let mut t = term_with(10, 5, b"0123456789ABCDE");
+        t.resize(5, 5);
+        t.resize(20, 5);
+        assert_eq!(row_text(&t, 0), "0123456789ABCDE");
+        assert_eq!(row_text(&t, 1), "");
+        assert!(!t.grid().row_wrapped(1));
+        assert_eq!(logical_text(&t), "0123456789ABCDE");
+    }
+
+    #[test]
+    fn reflow_roundtrip_with_scrollback_is_lossless() {
+        // 40 numbered lines through a 24-row grid → 16+ lines live in
+        // scrollback.  Mix of short lines and >80-char lines so both
+        // the wrap and no-wrap paths are exercised.
+        let mut t = Terminal::new(80, 24);
+        for i in 0..40 {
+            let line = if i % 7 == 0 {
+                format!("line{:02}-{}\r\n", i, "x".repeat(100))
+            } else {
+                format!("line{:02}\r\n", i)
+            };
+            t.feed(line.as_bytes());
+        }
+        let before = logical_text(&t);
+        assert!(t.grid().scrollback_len() > 0, "test needs scrollback");
+        t.resize(37, 24);
+        assert_eq!(logical_text(&t), before, "shrink must be lossless");
+        t.resize(80, 24);
+        assert_eq!(logical_text(&t), before, "grow back must be lossless");
+        t.resize(13, 24);
+        t.resize(200, 50);
+        t.resize(80, 24);
+        assert_eq!(logical_text(&t), before, "wild resize chain must be lossless");
+    }
+
+    #[test]
+    fn rows_only_resize_preserves_scrollback_and_content() {
+        let mut t = Terminal::new(20, 5);
+        for i in 0..12 {
+            t.feed(format!("l{:02}\r\n", i).as_bytes());
+        }
+        let before = logical_text(&t);
+        t.resize(20, 3);
+        assert_eq!(logical_text(&t), before, "rows shrink must be lossless");
+        t.resize(20, 10);
+        assert_eq!(logical_text(&t), before, "rows grow must be lossless");
+    }
+
+    #[test]
+    fn reflow_never_splits_wide_pairs() {
+        // 2 ASCII + 5 CJK (10 cols) + 2 ASCII = 14 columns at width 20.
+        let mut t = term_with(20, 4, "AA你好世界啊BB".as_bytes());
+        for w in [5u16, 7, 4, 20] {
+            t.resize(w, 4);
+            let g = t.grid();
+            for r in 0..g.rows() {
+                assert_ne!(
+                    g.cell(0, r).ch,
+                    '\0',
+                    "row {r} at width {w} starts with a wide-trail cell"
+                );
+            }
+            for i in 0..g.scrollback_len() {
+                assert_ne!(g.scrollback_line(i).unwrap()[0].ch, '\0');
+            }
+            assert_eq!(logical_text(&t), "AA你好世界啊BB");
+        }
+    }
+
+    #[test]
+    fn reflow_keeps_cursor_on_its_logical_position() {
+        // Prompt-like: short line, cursor right after it.
+        let mut t = term_with(40, 10, b"$ echo hello");
+        assert_eq!(t.grid().cursor(), (12, 0));
+        t.resize(8, 10);
+        // "$ echo hello" (12 chars) at width 8 → "$ echo h" / "ello";
+        // cursor lands at the end of the continuation row.
+        let (col, row) = t.grid().cursor();
+        assert_eq!(row, 1);
+        assert_eq!(col, 4);
+        t.resize(40, 10);
+        assert_eq!(t.grid().cursor(), (12, 0));
+    }
+
+    #[test]
+    fn ed2_clear_screen_resets_continuation_flags() {
+        let mut t = term_with(10, 5, b"0123456789ABCDE");
+        assert!(t.grid().row_wrapped(1));
+        t.feed(b"\x1b[2J");
+        for r in 0..5 {
+            assert!(!t.grid().row_wrapped(r), "row {r} flag survived ED2");
+        }
+    }
+
+    #[test]
+    fn reflow_preserves_blank_lines_between_content() {
+        let mut t = term_with(20, 8, b"top\r\n\r\n\r\nbottom");
+        let before = logical_text(&t);
+        assert_eq!(before, "top\n\n\nbottom");
+        t.resize(9, 8);
+        t.resize(20, 8);
+        assert_eq!(logical_text(&t), before);
     }
 }

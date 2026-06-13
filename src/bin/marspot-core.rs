@@ -204,6 +204,17 @@ impl CoreApp {
         .with_chrome(self.scale, self.layout_picker_open, self.panes.len());
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
+                let before = (
+                    p.session().terminal().grid().cols(),
+                    p.session().terminal().grid().rows(),
+                );
+                if before != (rect.cols, rect.rows) {
+                    eprintln!(
+                        "[core] pane {i} resize {}x{} -> {}x{} (win {:.0}x{:.0} @ {:.1}x, cell {:.1}x{:.1})",
+                        before.0, before.1, rect.cols, rect.rows,
+                        self.w_phys, self.h_phys, self.scale, cell_w, cell_h,
+                    );
+                }
                 p.resize(rect.cols, rect.rows);
             }
         }
@@ -212,12 +223,21 @@ impl CoreApp {
     }
 
     /// Spawn a fresh session and append it.  Refuses past
-    /// `SESSION_COUNT_HARD_CAP`.
+    /// `SESSION_COUNT_HARD_CAP`.  Sized to the cell it will land in
+    /// (falling back to the first cell's shape) so the shell prompt
+    /// prints at the right width from its very first byte.
     fn spawn_session(&mut self) {
         if self.panes.len() >= SESSION_COUNT_HARD_CAP {
             return;
         }
-        match self.client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
+        let (cols, rows) = self
+            .layout
+            .cells
+            .get(self.panes.len())
+            .or_else(|| self.layout.cells.first())
+            .map(|c| (c.cols, c.rows))
+            .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
+        match self.client.new_session(cols, rows, "") {
             Ok(s) => {
                 self.panes.push(Pane::new_shelld(s));
                 self.custom_titles.push(None);
@@ -784,8 +804,30 @@ fn main() {
     // session (full bytelog history replays on attach), then fill the
     // remaining slots with fresh sessions — same contract as the
     // standalone marspot's startup (src/main.rs).
+    //
+    // Compute the layout BEFORE touching shelld so attach/new_session
+    // get the real cell dimensions from the start.  Attaching at a
+    // placeholder size and resizing afterwards would replay the whole
+    // bytelog into the wrong grid and then churn it through a reflow
+    // for nothing (and, pre-reflow, used to destroy it outright).
     let layout_mode = LayoutMode::Nine;
     let n_sessions = layout_mode.cells();
+    let (boot_cols, boot_rows) = {
+        let (cell_w, cell_h) = renderer.cell_dims();
+        let (lc, lr) = layout_mode.dims();
+        let boot = Layout::build(
+            w_phys,
+            h_phys,
+            0.0, // sidebar starts collapsed
+            HEADER_PT * scale,
+            CELL_TITLE_PT * scale,
+            lc,
+            lr,
+            cell_w,
+            cell_h,
+        );
+        (boot.cells[0].cols, boot.cells[0].rows)
+    };
     let existing: Vec<marspot::shelld_proto::SessionInfo> = client
         .list_sessions()
         .unwrap_or_else(|e| {
@@ -797,7 +839,7 @@ fn main() {
         .collect();
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
     for info in existing.iter().take(n_sessions) {
-        match client.attach(info.session_id, INITIAL_COLS, INITIAL_ROWS) {
+        match client.attach(info.session_id, boot_cols, boot_rows) {
             Ok(s) => panes.push(Pane::new_shelld(s)),
             Err(e) => {
                 eprintln!("[core] attach {} failed: {e}", info.session_id);
@@ -805,7 +847,7 @@ fn main() {
         }
     }
     while panes.len() < n_sessions {
-        match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
+        match client.new_session(boot_cols, boot_rows, "") {
             Ok(s) => panes.push(Pane::new_shelld(s)),
             Err(e) => {
                 eprintln!("[core] new_session failed: {e}");

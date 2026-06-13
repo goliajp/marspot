@@ -128,6 +128,20 @@ pub struct Grid {
     /// this delta so the highlight stays on the same content as it
     /// shifts up into scrollback.
     scroll_push_count: u64,
+    /// Per-row "this row is a soft continuation of the previous row"
+    /// flags — set by the emulator when DECAWM autowrap flows a
+    /// logical line across rows, cleared on scroll-fill / region
+    /// scrolls / explicit reset.  Indexed by **physical** row and
+    /// rotated with `top_row` exactly like `cells`.  This is what
+    /// lets `resize` re-wrap content instead of truncating it.
+    wrapped: Vec<bool>,
+    /// Continuation flags for scrollback lines, parallel to the
+    /// `Scrollback` ring (front = oldest).  Lives here rather than in
+    /// `Scrollback` so the disk variant's record format stays pure
+    /// cells; the flags don't need to outlive the process any more
+    /// than the anon-mmap ring does.  Kept in lockstep with ring
+    /// eviction by trimming to `scrollback.len()` after each push.
+    sb_wrapped: std::collections::VecDeque<bool>,
 }
 
 impl Grid {
@@ -150,6 +164,11 @@ impl Grid {
     pub fn with_scrollback_kind(cols: u16, rows: u16, scrollback: Scrollback) -> Self {
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
         let cells = vec![Cell::default(); cols as usize * rows as usize];
+        // Pre-size the flag mirror to the ring's capacity so the
+        // per-scrolled-line push in `scroll_up` (per-byte-path hot
+        // for `cat`) never reallocates.  1 byte per line — 10 KB at
+        // the default 10 000-line scrollback.
+        let sb_capacity = scrollback.capacity();
         Self {
             cols,
             rows,
@@ -159,6 +178,8 @@ impl Grid {
             top_row: 0,
             scrollback,
             scroll_push_count: 0,
+            wrapped: vec![false; rows as usize],
+            sb_wrapped: std::collections::VecDeque::with_capacity(sb_capacity + 1),
         }
     }
 
@@ -212,6 +233,36 @@ impl Grid {
         self.cells[pr * self.cols as usize + col as usize] = cell;
     }
 
+    /// Mark / unmark logical `row` as a soft continuation of the row
+    /// above (DECAWM autowrap flowed a logical line across them).
+    /// The emulator calls this from the deferred-wrap path; `resize`
+    /// uses the flags to re-wrap instead of truncate.
+    pub fn set_row_wrapped(&mut self, row: u16, wrapped: bool) {
+        let pr = self.phys_row(row.min(self.rows - 1));
+        self.wrapped[pr] = wrapped;
+    }
+
+    pub fn row_wrapped(&self, row: u16) -> bool {
+        let pr = self.phys_row(row.min(self.rows - 1));
+        self.wrapped[pr]
+    }
+
+    /// Continuation flag for scrollback line `idx` (same indexing as
+    /// `scrollback_line`: 0 = oldest).
+    pub fn scrollback_wrapped(&self, idx: usize) -> bool {
+        self.sb_wrapped.get(idx).copied().unwrap_or(false)
+    }
+
+    /// Drop every continuation flag (live + scrollback).  Used by
+    /// full-screen erase — once the screen is wiped, gluing the new
+    /// content to pre-wipe history would corrupt reflow.
+    pub fn clear_all_wrapped(&mut self) {
+        self.wrapped.iter_mut().for_each(|w| *w = false);
+        for w in self.sb_wrapped.iter_mut() {
+            *w = false;
+        }
+    }
+
     /// Scroll the visible region up by `lines`.  The displaced top rows are
     /// pushed into scrollback (in order, oldest first) and the bottom
     /// `lines` rows are filled with `fill` — pass a Cell carrying the
@@ -230,6 +281,11 @@ impl Grid {
             let pr = self.top_row as usize;
             let start = pr * cols;
             self.scrollback.push_line(&self.cells[start..start + cols]);
+            // The pushed row's continuation flag follows it into the
+            // scrollback mirror; the physical row is about to become
+            // the new (blank) bottom row, so its live flag resets.
+            self.sb_wrapped.push_back(self.wrapped[pr]);
+            self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
                 *c = fill;
             }
@@ -238,6 +294,11 @@ impl Grid {
                 self.top_row = 0;
             }
             self.scroll_push_count = self.scroll_push_count.saturating_add(1);
+        }
+        // Mirror ring eviction (and the capacity-0 alt-screen case):
+        // the flags deque must never outgrow what the ring retains.
+        while self.sb_wrapped.len() > self.scrollback.len() {
+            self.sb_wrapped.pop_front();
         }
     }
 
@@ -257,6 +318,12 @@ impl Grid {
         let region_h = bot - top + 1;
         let lines = lines.min(region_h);
         let cols = self.cols as usize;
+        // Region scrolls are TUI-internal row shuffles — continuation
+        // flags stop being meaningful for the affected band.
+        for r in top..=bot {
+            let pr = self.phys_row(r);
+            self.wrapped[pr] = false;
+        }
         for _ in 0..lines {
             // Shift rows [top+1..=bot] up by one logical row.
             for r in top..bot {
@@ -289,6 +356,11 @@ impl Grid {
         let region_h = bot - top + 1;
         let lines = lines.min(region_h);
         let cols = self.cols as usize;
+        // Same flag invalidation as scroll_up_region.
+        for r in top..=bot {
+            let pr = self.phys_row(r);
+            self.wrapped[pr] = false;
+        }
         for _ in 0..lines {
             // Shift rows [top..bot] down by one logical row.
             for r in (top..bot).rev() {
@@ -344,48 +416,270 @@ impl Grid {
     pub fn scrollback_line(&self, idx: usize) -> Option<Vec<Cell>> {
         self.scrollback.line_to_vec(idx)
     }
-    pub fn clear_scrollback(&mut self) { self.scrollback.clear(); }
+    pub fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.sb_wrapped.clear();
+    }
 
     /// Bench-harness escape hatch — see `Scrollback::evict_disk_pages_for_bench`.
     pub fn evict_disk_scrollback_pages_for_bench(&self) {
         self.scrollback.evict_disk_pages_for_bench();
     }
 
-    /// Resize the visible grid. Cells in the overlap region are preserved
-    /// (top-left anchored); new area is filled with default cells; rows or
-    /// columns that fall outside the new size are dropped.  Cursor clamps
-    /// into bounds.  Scrollback is reset because its rows are stored at the
-    /// old column width — proper reflow is a later refinement.
+    /// Resize the visible grid **without losing content**.
+    ///
+    /// Rows-only change: cells and scrollback are preserved verbatim.
+    /// Growing adds blank rows at the bottom; shrinking first drops
+    /// blank rows from the bottom (below the cursor), then pushes
+    /// rows from the top into scrollback — same as every mainstream
+    /// terminal.
+    ///
+    /// Column change: full reflow.  Scrollback + live rows are
+    /// gathered into logical lines using the autowrap continuation
+    /// flags, re-wrapped at the new width (wide CJK/emoji pairs are
+    /// never split), and redistributed across scrollback + the live
+    /// grid.  The cursor follows its logical position.  This is what
+    /// keeps a shrink → grow round trip lossless instead of leaving
+    /// every line truncated at the narrowest width it ever saw.
     pub fn resize(&mut self, cols: u16, rows: u16) {
         if cols == self.cols && rows == self.rows {
             return;
         }
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
-        let new_total = cols as usize * rows as usize;
-        let mut new_cells = vec![Cell::default(); new_total];
-        let copy_rows = self.rows.min(rows) as usize;
-        let copy_cols = self.cols.min(cols) as usize;
-        let old_cols = self.cols as usize;
-        let new_cols = cols as usize;
-        for r in 0..copy_rows {
-            // Read from logical row r in the old (rotated) grid.
-            let old_off = self.phys_row(r as u16) * old_cols;
-            let new_off = r * new_cols;
-            new_cells[new_off..new_off + copy_cols]
-                .copy_from_slice(&self.cells[old_off..old_off + copy_cols]);
+        if cols == self.cols {
+            self.resize_rows_only(rows);
+            return;
+        }
+        self.reflow(cols, rows);
+    }
+
+    /// Height-only resize: lossless by construction.
+    fn resize_rows_only(&mut self, rows: u16) {
+        let cols = self.cols as usize;
+        if rows > self.rows {
+            // Grow: append blank rows at the bottom.  De-rotate into a
+            // fresh buffer so indexing stays simple.
+            let mut new_cells = vec![Cell::default(); cols * rows as usize];
+            let mut new_wrapped = vec![false; rows as usize];
+            for r in 0..self.rows {
+                let src = self.phys_row(r) * cols;
+                let dst = r as usize * cols;
+                new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
+                new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
+            }
+            self.cells = new_cells;
+            self.wrapped = new_wrapped;
+            self.rows = rows;
+            self.top_row = 0;
+            return;
+        }
+        // Shrink: prefer dropping blank rows below the cursor; push
+        // the remainder from the top into scrollback so nothing is
+        // lost and the cursor stays on screen.
+        let mut need = (self.rows - rows) as usize;
+        let mut last_keep = self.rows - 1; // drop blank rows from the bottom
+        while need > 0
+            && last_keep > self.cursor_row
+            && self.row_is_blank(last_keep)
+        {
+            last_keep -= 1;
+            need -= 1;
+        }
+        if need > 0 {
+            let push = need as u16;
+            self.scroll_up(push, Cell::default());
+            self.cursor_row = self.cursor_row.saturating_sub(push);
+        }
+        let mut new_cells = vec![Cell::default(); cols * rows as usize];
+        let mut new_wrapped = vec![false; rows as usize];
+        for r in 0..rows {
+            let src = self.phys_row(r) * cols;
+            let dst = r as usize * cols;
+            new_cells[dst..dst + cols].copy_from_slice(&self.cells[src..src + cols]);
+            new_wrapped[r as usize] = self.wrapped[self.phys_row(r)];
         }
         self.cells = new_cells;
+        self.wrapped = new_wrapped;
+        self.rows = rows;
+        self.top_row = 0;
+        self.cursor_row = self.cursor_row.min(rows - 1);
+    }
+
+    fn row_is_blank(&self, row: u16) -> bool {
+        let start = self.phys_row(row) * self.cols as usize;
+        self.cells[start..start + self.cols as usize]
+            .iter()
+            .all(|c| *c == Cell::default())
+    }
+
+    /// Column-changing resize: gather → re-wrap → redistribute.
+    fn reflow(&mut self, cols: u16, rows: u16) {
+        let old_cols = self.cols as usize;
+        let new_cols = cols as usize;
+
+        // 1. Gather logical lines (oldest first): scrollback, then
+        //    live rows.  A row whose continuation flag is set glues
+        //    onto the previous row.  Only the final fragment of each
+        //    logical line gets its trailing default-blank cells
+        //    trimmed — interior fragments were full-width by
+        //    definition of autowrap.
+        let mut lines: Vec<Vec<Cell>> = Vec::new();
+        let sb_len = self.scrollback.len();
+        // (line_idx, char_offset) of the cursor within `lines`.
+        let mut cursor_line = 0usize;
+        let mut cursor_off = 0usize;
+        {
+            let absorb = |row: Vec<Cell>, wrapped: bool, lines: &mut Vec<Vec<Cell>>| {
+                if wrapped && !lines.is_empty() {
+                    let prev = lines.last_mut().unwrap();
+                    // Drop wide-bump pad sentinels at the glue seam:
+                    // trailing NULs that are NOT the trail half of a
+                    // wide lead.  (A legit trail NUL always directly
+                    // follows a width-2 char.)
+                    while prev.last().is_some_and(|c| c.ch == '\0')
+                        && !(prev.len() >= 2
+                            && char_width(prev[prev.len() - 2].ch) == 2)
+                    {
+                        prev.pop();
+                    }
+                    prev.extend(row);
+                } else {
+                    lines.push(row);
+                }
+            };
+            for i in 0..sb_len {
+                let row = self.scrollback.line_to_vec(i).unwrap_or_default();
+                absorb(row, self.scrollback_wrapped(i), &mut lines);
+            }
+            for r in 0..self.rows {
+                let start = self.phys_row(r) * old_cols;
+                let row = self.cells[start..start + old_cols].to_vec();
+                let wrapped = self.wrapped[self.phys_row(r)];
+                absorb(row, wrapped, &mut lines);
+                if r == self.cursor_row {
+                    cursor_line = lines.len() - 1;
+                    cursor_off = lines.last().unwrap().len() - old_cols
+                        + self.cursor_col as usize;
+                }
+            }
+        }
+        // Trim trailing pure-default cells per logical line, then drop
+        // trailing all-blank logical lines that sit BELOW the cursor —
+        // they're the unused bottom of the screen, not content.
+        for l in lines.iter_mut() {
+            while l.last().is_some_and(|c| *c == Cell::default()) {
+                l.pop();
+            }
+        }
+        while lines.len() > cursor_line + 1
+            && lines.last().is_some_and(|l| l.is_empty())
+        {
+            lines.pop();
+        }
+        cursor_off = cursor_off.min(lines.get(cursor_line).map_or(0, |l| l.len()));
+
+        // 2. Re-wrap into segments of `new_cols`, never splitting a
+        //    wide-cell pair (lead + NUL trail) across the boundary.
+        //    Track where the cursor's (line, offset) lands.
+        let mut segs: Vec<(Vec<Cell>, bool)> = Vec::new(); // (cells, continuation)
+        let mut cursor_seg = 0usize;
+        let mut cursor_col_new = 0usize;
+        for (li, line) in lines.iter().enumerate() {
+            let mut start = 0usize;
+            let mut first = true;
+            loop {
+                let remaining = line.len() - start;
+                let mut take = remaining.min(new_cols);
+                // Wide pair straddling the boundary: the trail NUL
+                // would land at the start of the next segment.  Pull
+                // the lead over instead (its column renders blank,
+                // exactly like the emulator's deferred-wrap print).
+                if take > 0
+                    && take < remaining
+                    && line[start + take].ch == '\0'
+                {
+                    take -= 1;
+                }
+                // Degenerate 1-column grid with a wide pair: splitting
+                // is the only way to make progress.
+                if take == 0 && remaining > 0 {
+                    take = 1;
+                }
+                let end = start + take;
+                if li == cursor_line && cursor_off >= start && (cursor_off < end
+                    || (cursor_off == end && remaining <= new_cols))
+                {
+                    cursor_seg = segs.len();
+                    cursor_col_new = cursor_off - start;
+                }
+                segs.push((line[start..end].to_vec(), !first));
+                first = false;
+                start = end;
+                if start >= line.len() {
+                    break;
+                }
+            }
+        }
+        if segs.is_empty() {
+            segs.push((Vec::new(), false));
+        }
+
+        // 3. Redistribute: the last `rows` segments become the live
+        //    grid (top-anchored when everything fits); older segments
+        //    refill the scrollback ring at the new width.
+        let total = segs.len();
+        let live_start = total.saturating_sub(rows as usize);
+        // A fragment that underfills its row because the next wide
+        // char was bumped to the following segment pads its tail with
+        // NUL sentinels — the next gather drops them at the seam
+        // instead of treating them as spaces.
+        let pad_cell = |i: usize, segs: &[(Vec<Cell>, bool)]| -> Cell {
+            if i + 1 < segs.len() && segs[i + 1].1 {
+                Cell { ch: '\0', attrs: CellAttrs::default() }
+            } else {
+                Cell::default()
+            }
+        };
+        self.scrollback.restart(new_cols);
+        self.sb_wrapped.clear();
+        for (i, (cells, cont)) in segs[..live_start].iter().enumerate() {
+            let mut row = cells.clone();
+            row.resize(new_cols, pad_cell(i, &segs));
+            self.scrollback.push_line(&row);
+            self.sb_wrapped.push_back(*cont);
+        }
+        while self.sb_wrapped.len() > self.scrollback.len() {
+            self.sb_wrapped.pop_front();
+        }
+        let mut new_cells = vec![Cell::default(); new_cols * rows as usize];
+        let mut new_wrapped = vec![false; rows as usize];
+        for (r, (cells, cont)) in segs[live_start..].iter().enumerate() {
+            let dst = r * new_cols;
+            new_cells[dst..dst + cells.len()].copy_from_slice(cells);
+            let pad = pad_cell(live_start + r, &segs);
+            if pad.ch == '\0' {
+                for c in &mut new_cells[dst + cells.len()..dst + new_cols] {
+                    *c = pad;
+                }
+            }
+            new_wrapped[r] = *cont;
+        }
+        self.cells = new_cells;
+        self.wrapped = new_wrapped;
         self.cols = cols;
         self.rows = rows;
-        // Reset rotation — new grid is laid out logically.
         self.top_row = 0;
-        if self.cursor_col >= cols {
-            self.cursor_col = cols - 1;
+
+        // 4. Cursor follows its logical position; if its segment got
+        //    pushed into scrollback (screen shrank under it), clamp to
+        //    the top-left of the live grid.
+        if cursor_seg >= live_start {
+            self.cursor_row = (cursor_seg - live_start).min(rows as usize - 1) as u16;
+            self.cursor_col = (cursor_col_new as u16).min(cols - 1);
+        } else {
+            self.cursor_row = 0;
+            self.cursor_col = 0;
         }
-        if self.cursor_row >= rows {
-            self.cursor_row = rows - 1;
-        }
-        self.scrollback.restart(cols as usize);
     }
 }
 
