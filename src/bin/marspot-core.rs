@@ -1155,14 +1155,14 @@ fn main() {
     };
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
 
-    // Behind MARSPOT_L3=1: one per-session L3 process per cell (each owns
-    // its own session process + shm grid in its own address space).  L2
-    // owns session *assignment* so the N children never race for one
-    // session: reuse the live sessions first (bytelog replay on attach),
-    // then `create_session` for the rest, handing each L3 its exact id.
-    // The in-process shelld grid below stays the default and is the
-    // fallback if every L3 spawn fails.
-    let l3_mode = std::env::var("MARSPOT_L3").as_deref() == Ok("1");
+    // Per-session L3 is now the DEFAULT (target #4 step 6): one L3 process
+    // per cell, each owning its own session process + shm grid in its own
+    // address space.  L2 owns session *assignment* so the N children never
+    // race for one session: reuse the live sessions first (bytelog replay
+    // on attach), then `create_session` for the rest, handing each L3 its
+    // exact id.  `MARSPOT_L3=0` opts back out to the in-process shelld grid
+    // (kept as the escape hatch + the fallback if every L3 spawn fails).
+    let l3_mode = std::env::var("MARSPOT_L3").as_deref() != Ok("0");
     if l3_mode {
         let mut ids: Vec<u64> = client
             .list_sessions()
