@@ -43,19 +43,34 @@ generation) — not real.
 If the ~10 % ever matters: dirty-row-only publish, or skip publish when L2
 is behind on reads. Not urgent.
 
-**The gate now measures this path** (2026-06-13, E8 below). `bin/measure-l3.sh`
-drives a real `marspot-session` per cat-* scenario headlessly (the
-`l3_throughput` probe: spawn session → cat the scenario over the control
-socket → time the drain via the shm scroll_push_count) and writes
-`bench/results/l3-throughput.json`. `bin/bench.sh --full`'s `load_live` now
-prefers that production number over the standalone-mcli `live.json` and the
-hand-captured `competitors_snapshot.marspot`. **Floors are still calibrated to
-the pre-L3 in-process numbers** (152–160 MiB/s); they must be re-locked
-against the L3 path on the idle mini (`bin/measure-l3.sh` on the mini →
-`bin/bench-remote.sh --full --update-baseline`) — until then `--full` shows
-`live` / `vs-best` FAILs by design (the old gate passed only because it gated
-a number ~10 % higher than the product ships). This folds into the per-
-session-L3 step-6 bench re-lock.
+**Two distinct throughput metrics — don't conflate them** (settled on the
+idle mini 2026-06-14):
+
+- **Parse rate** — how fast the grid actually ingests bytes. Measured by
+  `bin/measure-l3.sh` (`l3_throughput` probe: scroll_push_count plateau)
+  and by `pipeline_throughput`. On the mini: in-process ~70 MiB/s, **L3
+  ~63 MiB/s = 0.87–0.90× in-process** (the per-session-L3 cost — confirmed,
+  matches the original characterisation). dev box runs ~95/106 (faster
+  single-thread). This is an honest internal-health number.
+- **Absorption rate** — how fast `cat` itself finishes writing to the PTY,
+  i.e. the `time cat` wall-time the cross-terminal scenarios use. Cat
+  doesn't fully block (the pipeline buffers; parse catches up async), so
+  this runs ~2.4× the parse rate (snapshot marspot ~152 MiB/s). It is
+  **architecture-independent** (cat dumps into buffers either way) and is
+  the metric every competitor cat-* number is measured in.
+
+**Gate consequence:** the `live` / `vs-best` cat-* gate compares marspot to
+competitors, so marspot's number there MUST be the **absorption rate**
+(`competitors_snapshot.marspot`) — apples-to-apples. An earlier E8 revision
+wrongly fed the L3 **parse** rate into that gate (parse-vs-absorption,
+~0.4×, made it red); reverted 2026-06-14. `load_live` uses the absorption
+snapshot again; the L3 parse rate rides along as a separate informational
+line (`bin/bench.sh --full` prints it, ungated). No floor re-lock is needed
+— the absorption floors were always correct and the gate passes
+(`live`/`vs-best` green: 152/145/160/160 vs floors 137/131/144/144,
+ratios 1.2–1.5×). Re-measuring the absorption number on the *L3 app*
+(vs the pre-L3 snapshot) is a refinement for the step-6 live pass, but
+absorption being architecture-independent, it won't move much.
 
 ## Items
 
@@ -236,7 +251,7 @@ noise / stale data / missing metrics.
 | E5 | measure-other.sh 3-trial median | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-E4-E5-measure-other-hardening`) |
 | E6 | active-9x-soak CPU drift gate direction (= A2) | [A2](perf-attack/A2-cpu-drift-gate-bug.md) | **retracted** (not a bug — q1<1% short-circuit by design) |
 | E7 | bench scripts kill marspot/mcli by name (friendly-fire) | [E](perf-attack/E-bench-infra.md) | **done** (2026-05-05, `feature/perf-F-recalibrate-clean`) |
-| E8 | gate measures production shell→core→L3, not standalone mcli | [E](perf-attack/E-bench-infra.md) | **done (measurement) 2026-06-13** — `l3_throughput` probe + `bin/measure-l3.sh` + `bench.sh --full` `load_live` prefers `l3-throughput.json`. **Floor re-lock pending on idle mini** (see L3-throughput section). |
+| E8 | L3 production-path throughput, measured + correctly classified | [E](perf-attack/E-bench-infra.md) | **done 2026-06-14** — `l3_throughput` probe + `bin/measure-l3.sh` measure the L3 **parse** rate (0.90× in-process, confirmed on mini). Kept as an ungated informational signal; the live/vs-best gate uses the **absorption**-rate snapshot (parse ≠ absorption — see L3-throughput section). No floor re-lock needed (gate green). |
 
 ## F — Locked floors / ceilings · **recalibrated to clean-machine 2026-05-05**
 

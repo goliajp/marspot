@@ -309,28 +309,25 @@ dispatches it to `ssh mini` (clean idle M4 / 64 GB).  Running
 on multi-session; the warning is `bench-remote.sh` exists for a
 reason.
 
-### `live-MBps` source: production shell→core→L3 (perf-attack E8)
+### `live-MBps` source: absorption rate, not parse rate (perf-attack E8)
 
-`live cat-*` gates the throughput a real pane drains at.  Since
-per-session L3 became the default (2026-06-13), the bytes flow
-shelld → `marspot-session` (parse → grid → shm publish) — ~0.90× the
-in-process bulk-cat rate.  `load_live` resolves the marspot number in
-this order:
+`live cat-*` compares marspot to competitors, so it MUST use the same
+metric they're measured in: the `time cat` **absorption rate** (how fast
+`cat` finishes writing to the PTY — fast, because the pipeline buffers and
+cat doesn't fully block; the grid parses async behind it).  `load_live`
+uses `competitors_snapshot.marspot` (the absorption rate, co-measured with
+competitors), falling back to `bin/measure.sh`'s standalone-mcli `live.json`.
 
-1. `bench/results/l3-throughput.json` (fresh ≤ 7 days) — the production
-   path, produced by **`bin/measure-l3.sh`** (its own sandbox shelld +
-   the `l3_throughput` probe driving a real `marspot-session`; never
-   touches the installed app).  Headless and reproducible, unlike the
-   pre-L3 Screen-Sharing capture.
-2. `competitors_snapshot.marspot` — co-measured with competitors in one
-   idle cycle; the fallback when L3 wasn't measured on this host.
-3. `live.json` from `bin/measure.sh` — standalone `mcli`, in-process, no
-   L3 hop.
-
-`--full` prints which source it gated.  To gate the production path on
-the mini: run `bin/measure-l3.sh` there, then `bin/bench-remote.sh
---full` (re-lock floors with `--update-baseline`, since the current
-floors still reflect the pre-L3 in-process numbers).
+Do **not** confuse this with the L3 **parse** rate (`bin/measure-l3.sh` /
+`l3_throughput` probe — when the grid actually finishes ingesting, ~0.90×
+the in-process parse rate, ~0.4× the absorption rate).  That's a real
+internal-health number — `--full` prints it as an ungated informational
+line — but it is NOT the cat-* gate metric (gating absorption-rate
+competitors against marspot's parse rate is apples-to-oranges; that
+mistake was made + reverted 2026-06-14).  Absorption is architecture-
+independent, so the snapshot floors hold across the L3 flip; re-capturing
+the absorption number on the L3 app (vs the pre-L3 snapshot) is a step-6
+refinement.
 
 ---
 

@@ -376,15 +376,33 @@ bin/measure-l3.sh
 
 ### Exit criteria
 
-- `bin/measure-l3.sh` produces reproducible production-path MiB/s
-  (verified dev box: ascii ~95, mixed ~84, cjk ~106, emoji ~101 MiB/s,
-  per-scenario trial spread ≤ 1 % after the median).  **DONE.**
-- `bin/bench.sh --full` gates the L3 number and says so.  **DONE.**
-- **Pending:** floors re-locked against L3 on the idle mini
-  (`bin/measure-l3.sh` on the mini → `bench-remote.sh --full
-  --update-baseline`).  Until then `--full` shows `live`/`vs-best` FAILs
-  by design — the dev box is too noisy to lock floors on (perf-attack F
-  lesson), and the floors still reflect the pre-L3 in-process numbers.
+- `bin/measure-l3.sh` produces reproducible production-path MiB/s.  **DONE.**
+- L3 throughput correctly classified + surfaced (ungated info line).  **DONE.**
+
+### Correction (2026-06-14, settled on the idle mini)
+
+The 2026-06-13 revision "made `load_live` prefer `l3-throughput.json` and
+gate it" was **wrong** and is reverted.  Running `pipeline_throughput` on
+the idle mini reconciled three numbers that had looked contradictory:
+
+- `l3_throughput` (my probe) and `pipeline_throughput`'s l3 arm **agree**:
+  L3 **parse** rate ~63 MiB/s on the mini, = 0.87–0.90× the in-process
+  ~70 (the 0.90× characterisation holds).
+- `competitors_snapshot.marspot` ~152 is the `time cat` **absorption**
+  rate, ~2.4× the parse rate — a *different metric* (cat dumps into buffers
+  without fully blocking; parse catches up async), and architecture-
+  independent.
+
+So feeding the L3 parse rate into the cat-* `live`/`vs-best` gate (whose
+competitor numbers are all absorption rates) was apples-to-oranges and
+turned the gate red for the wrong reason.  Fix: `load_live` uses the
+absorption snapshot again (gate green: 152/145/160/160 vs 137/131/144/144,
+ratios 1.2–1.5×); the L3 parse rate prints as an ungated informational
+line.  **No floor re-lock needed** — the absorption floors were always
+correct.  Re-measuring absorption on the L3 *app* (vs the pre-L3 snapshot)
+is a step-6 refinement, but absorption is architecture-independent so it
+won't move much.  Lesson: classify the metric (parse vs absorption) before
+wiring it into a comparison.
 
 ## Combined exit criteria for E
 

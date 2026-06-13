@@ -258,15 +258,21 @@ _L3_THROUGHPUT = None
 _L3_LOADED = False
 
 def _l3_throughput():
-    # bench/results/l3-throughput.json — the PRODUCTION path number
-    # (shell→core→L3, default since 2026-06-13), produced by
-    # bin/measure-l3.sh. This is what the user actually experiences: the
-    # standalone mcli number measure.sh records, and the Screen-Sharing
-    # snapshot, both predate / sidestep the per-session engine's ~10 %
-    # IPC+shm cost. Prefer it whenever present and fresh. Stale guard (7
-    # days) so an old per-machine artifact can't silently feed the gate;
-    # the file is gitignored / transient, so absence just means "fall
-    # back" rather than "error". perf-attack E-bench-infra/L3.
+    # bench/results/l3-throughput.json — the L3 PARSE rate (shell→core→L3
+    # scroll_push throughput), produced by bin/measure-l3.sh. INFORMATIONAL
+    # ONLY — printed by --full, NOT fed into the live / vs-best gate.
+    #
+    # Why not the gate: the cross-terminal cat-* numbers (competitors AND
+    # competitors_snapshot.marspot) are `time cat` ABSORPTION rates — how
+    # fast cat dumps into the terminal's buffers, which it does fast (cat
+    # doesn't fully block; parse catches up async).  l3-throughput.json is
+    # the PARSE rate (when the grid actually finishes ingesting), ~0.4× the
+    # absorption rate (mini: L3 parse ~63 vs snapshot absorption ~152).
+    # Gating the absorption-rate competitor comparison against marspot's
+    # parse rate is apples-to-oranges.  So load_live keeps using the
+    # absorption-comparable snapshot; this number rides along as a separate
+    # internal-health signal (catch an L3 parse regression). Stale guard 7
+    # days; gitignored/transient so absence just means "don't print".
     global _L3_THROUGHPUT, _L3_LOADED
     if _L3_LOADED:
         return _L3_THROUGHPUT
@@ -283,20 +289,12 @@ def _l3_throughput():
     return _L3_THROUGHPUT
 
 def load_live(scenario):
-    # Preference order:
-    #   1. l3-throughput.json — the production shell→core→L3 path, the
-    #      architecture the product ships. Measured headlessly + repeatably
-    #      by bin/measure-l3.sh (no Screen Sharing, no standalone mcli).
-    #   2. competitors_snapshot.marspot — co-measured with the competitors
-    #      in one idle cycle (fair vs-best ratio), but hand-captured on the
-    #      pre-L3 app; kept as the fallback when L3 wasn't measured on this
-    #      host.
-    #   3. measure.sh's live.json — standalone mcli, in-process, no L3 hop.
-    l3 = _l3_throughput()
-    if l3 is not None:
-        bps = l3.get(scenario, {}).get("bytes_per_sec", 0)
-        if bps > 0:
-            return bps / 1024 / 1024
+    # marspot's live cat-* number for the vs-best-other comparison.  MUST
+    # be the same metric as the competitors it's compared against — the
+    # `time cat` ABSORPTION rate co-measured in competitors_snapshot. (The
+    # L3 parse rate in l3-throughput.json is a different, slower metric;
+    # see _l3_throughput — it is NOT used here.)  Falls back to measure.sh's
+    # standalone-mcli live.json only when the snapshot lacks marspot.
     marspot_snap = baseline.get("competitors_snapshot", {}).get("marspot", {})
     co = marspot_snap.get(f"{scenario}_MBps")
     if isinstance(co, (int, float)) and co > 0:
@@ -344,14 +342,21 @@ def fmt_num(n):
     if isinstance(n, str): return n
     return f"{n:.1f}"
 
-# Announce the live-throughput source so the verdict isn't ambiguous about
-# which marspot number it gated (production L3 vs pre-L3 snapshot vs mcli).
+# Live gate uses the absorption-rate snapshot (see load_live).  If a fresh
+# l3-throughput.json is present, print the L3 PARSE rates alongside — an
+# informational internal-health signal, NOT gated (different metric).
 if mode == "full":
-    if _l3_throughput() is not None:
-        print("live source: l3-throughput.json (production shell→core→L3 path)")
-    elif baseline.get("competitors_snapshot", {}).get("marspot", {}):
-        print("live source: competitors_snapshot.marspot (pre-L3 snapshot) — "
-              "run bin/measure-l3.sh to gate the production path")
+    l3 = _l3_throughput()
+    if l3 is not None:
+        parts = []
+        for sid in ("cat-ascii", "cat-mixed", "cat-cjk", "cat-emoji"):
+            bps = l3.get(sid, {}).get("bytes_per_sec", 0)
+            if bps > 0:
+                parts.append(f"{sid.removeprefix('cat-')} {bps/1024/1024:.0f}")
+        if parts:
+            print("L3 parse rate (MiB/s, informational, not gated): " + ", ".join(parts))
+    print("live gate source: competitors_snapshot.marspot (`time cat` absorption rate, "
+          "competitor-comparable)")
 
 # Parse + ratio per scenario
 for entry in baseline["scenarios"]:
