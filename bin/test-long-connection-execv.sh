@@ -22,10 +22,11 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SHELLD="$ROOT/target/debug/marspot-shelld"
-PROBE="$ROOT/target/debug/examples/long_connection_execv_probe"
+PROFILE="${MARSPOT_TEST_PROFILE:-debug}"
+SHELLD="$ROOT/target/$PROFILE/marspot-shelld"
+PROBE="$ROOT/target/$PROFILE/examples/long_connection_execv_probe"
 [[ -x "$SHELLD" && -x "$PROBE" ]] || {
-  echo "FAIL: build first — cargo build && cargo build -p marspot-session --example long_connection_execv_probe"
+  echo "FAIL: build first — cargo build${PROFILE:+ --$PROFILE} && cargo build${PROFILE:+ --$PROFILE} -p marspot-session --example long_connection_execv_probe"
   exit 1
 }
 

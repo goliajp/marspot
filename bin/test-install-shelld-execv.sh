@@ -21,8 +21,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UID_NUM="$(id -u)"
 INSTALL="$ROOT/bin/install-shelld.sh"
-SHELLD="$ROOT/target/debug/marspot-shelld"
-SESSION_PROBE="$ROOT/target/debug/examples/shelld_session_probe"
+PROFILE="${MARSPOT_TEST_PROFILE:-debug}"
+SHELLD="$ROOT/target/$PROFILE/marspot-shelld"
+SESSION_PROBE="$ROOT/target/$PROFILE/examples/shelld_session_probe"
 [[ -x "$SHELLD" ]] || { echo "FAIL: build first — cargo build"; exit 1; }
 [[ -x "$SESSION_PROBE" ]] \
   || { echo "FAIL: build first — cargo build -p marspot-session --example shelld_session_probe"; exit 1; }

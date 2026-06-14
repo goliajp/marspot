@@ -25,8 +25,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SHELLD="$ROOT/target/debug/marspot-shelld"
-PROBE="$ROOT/target/debug/examples/shelld_session_probe"
+PROFILE="${MARSPOT_TEST_PROFILE:-debug}"
+SHELLD="$ROOT/target/$PROFILE/marspot-shelld"
+PROBE="$ROOT/target/$PROFILE/examples/shelld_session_probe"
 if [[ ! -x "$SHELLD" || ! -x "$PROBE" ]]; then
   echo "FAIL: build first — cargo build && cargo build -p marspot-session --example shelld_session_probe"
   exit 1

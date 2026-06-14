@@ -20,11 +20,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SHELLD="$ROOT/target/debug/marspot-shelld"
-if [[ ! -x "$SHELLD" ]]; then
-  SHELLD="$ROOT/target/release/marspot-shelld"
-fi
-[[ -x "$SHELLD" ]] || { echo "FAIL: build marspot-shelld first (cargo build)"; exit 1; }
+PROFILE="${MARSPOT_TEST_PROFILE:-debug}"
+SHELLD="$ROOT/target/$PROFILE/marspot-shelld"
+[[ -x "$SHELLD" ]] || { echo "FAIL: build marspot-shelld first (cargo build${PROFILE:+ --$PROFILE})"; exit 1; }
 
 STATE_DIR="/tmp/marspot-log-concurrent.$$"
 export MARSPOT_STATE_DIR="$STATE_DIR"
