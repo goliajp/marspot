@@ -144,7 +144,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "marspot"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "core-foundation",
  "core-graphics",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "marspot-session"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "libc",
  "marspot-term",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "marspot-term"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "flate2",
  "libc",
