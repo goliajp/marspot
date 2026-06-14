@@ -47,6 +47,7 @@ use marspot::shell_proto::{
     PROTO_VERSION,
 };
 use marspot::shelld_client::ShelldClient;
+use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
@@ -152,7 +153,7 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
                 }
             }
             Err(e) => {
-                eprintln!("[core] control read error: {e}");
+                lx_error!("core.control.read_failed", &format!("{e}"));
                 let _ = tx.send(CoreEvent::Closed);
                 return;
             }
@@ -216,7 +217,10 @@ extern "C" fn sigusr2_handler(_: libc::c_int) {
 fn install_swap_trigger(tx: Sender<CoreEvent>) {
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        eprintln!("[core] SIGUSR2 self-pipe failed: {}", std::io::Error::last_os_error());
+        lx_error!(
+            "core.sigusr2.self_pipe_failed",
+            &format!("{}", std::io::Error::last_os_error())
+        );
         return;
     }
     let (read_fd, write_fd) = (fds[0], fds[1]);
@@ -292,9 +296,14 @@ fn spawn_l3(
     };
 
     const SHM_TARGET_FD: RawFd = 4;
-    eprintln!(
-        "[core] spawning L3: {} ({cols}x{rows}) control_fd={DEFAULT_CONTROL_FD} shm_fd={SHM_TARGET_FD}",
-        session_bin.display()
+    lx_event!(
+        "L3_SPAWN",
+        "spawning L3 session",
+        bin = session_bin.display(),
+        cols = cols,
+        rows = rows,
+        control_fd = DEFAULT_CONTROL_FD,
+        shm_fd = SHM_TARGET_FD
     );
     let mut cmd = Command::new(&session_bin);
     cmd.env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
@@ -324,7 +333,7 @@ fn spawn_l3(
         });
     }
     let child = cmd.spawn()?;
-    eprintln!("[core] L3 pid={}", child.id());
+    lx_event!("L3_SPAWNED", "L3 child running", pid = child.id());
 
     // Parent no longer needs the child's socket end.
     unsafe { libc::close(child_fd) };
@@ -462,7 +471,7 @@ impl CoreApp {
                     self.panes.push(pane);
                     self.custom_titles.push(None);
                 }
-                Err(e) => eprintln!("[core] failed to spawn L3 session: {e}"),
+                Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
             }
             return;
         }
@@ -472,7 +481,7 @@ impl CoreApp {
                 self.custom_titles.push(None);
             }
             Err(e) => {
-                eprintln!("[core] failed to spawn session via shelld: {e}");
+                lx_error!("core.spawn.shelld_failed", &format!("{e}"));
             }
         }
     }
@@ -492,9 +501,12 @@ impl CoreApp {
         // new binary.  A no-op if nothing's staged — then this is a plain
         // re-spawn of the same engine (still useful as a manual refresh).
         match marspot::updater::promote_pending_session() {
-            Ok(true) => eprintln!("[core] promoted staged marspot-session → current/ for swap"),
+            Ok(true) => lx_event!(
+                "SESSION_PROMOTE",
+                "promoted staged marspot-session → current/ for swap"
+            ),
             Ok(false) => {}
-            Err(e) => eprintln!("[core] promote staged session for swap failed: {e}"),
+            Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
         for i in 0..self.panes.len() {
             let pane = &self.panes[i];
@@ -508,7 +520,11 @@ impl CoreApp {
                 if !self.panes[i].update_pending() {
                     self.panes[i].set_update_pending(true);
                     self.needs_render = true;
-                    eprintln!("[core] L3 session (pane {i}) focused — deferred update, showing refresh");
+                    lx_info!(
+                        "core.swap.deferred",
+                        "focused pane deferred — showing refresh",
+                        pane = i
+                    );
                 }
                 continue;
             }
@@ -545,9 +561,19 @@ impl CoreApp {
                 self.panes[i].session_mut().begin_l3_swap(spawn);
                 self.panes[i].set_update_pending(false);
                 self.needs_render = true;
-                eprintln!("[core] staged silent swap for L3 session {sid} (pane {i})");
+                lx_event!(
+                    "L3_SWAP_STAGED",
+                    "staged silent swap for L3 session",
+                    session = sid,
+                    pane = i
+                );
             }
-            Err(e) => eprintln!("[core] swap spawn for session {sid} failed: {e}"),
+            Err(e) => lx_error!(
+                "core.swap.spawn_failed",
+                &format!("{e}"),
+                session = sid,
+                pane = i
+            ),
         }
     }
 
@@ -1129,12 +1155,14 @@ impl CoreApp {
 }
 
 fn main() {
-    eprintln!(
-        "marspot-core {} (git {} built {})  pid={}",
-        env!("CARGO_PKG_VERSION"),
-        option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
-        option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown"),
-        std::process::id()
+    marspot::logx::init("core");
+    lx_event!(
+        "CORE_BOOT",
+        "marspot-core started",
+        version = env!("CARGO_PKG_VERSION"),
+        git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
+        built = option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown"),
+        pid = std::process::id()
     );
 
     let surface_id: u32 = env_required(ENV_SURFACE_ID);
@@ -1142,7 +1170,14 @@ fn main() {
     let h_phys: f64 = env_required(ENV_SURFACE_HEIGHT);
     let scale: f64 = env_required(ENV_SURFACE_SCALE);
 
-    eprintln!("[core] attaching surface {surface_id} ({w_phys}×{h_phys} @ {scale}x)");
+    lx_event!(
+        "SURFACE_ATTACH",
+        "attaching IOSurface",
+        surface_id = surface_id,
+        w_phys = w_phys,
+        h_phys = h_phys,
+        scale = scale
+    );
 
     let mut surface = IOSurface::lookup(surface_id)
         .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({surface_id}) returned nil"));
@@ -1164,11 +1199,19 @@ fn main() {
     };
 
     let shelld_sock = marspot::paths::shelld_socket();
-    eprintln!("[core] connecting to shelld at {}", shelld_sock.display());
+    lx_info!(
+        "core.shelld.connect",
+        "connecting to shelld",
+        sock = shelld_sock.display()
+    );
     let client = match ShelldClient::connect(&shelld_sock, wake) {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            eprintln!("[core] shelld connect failed: {e}");
+            lx_error!(
+                "core.shelld.connect_failed",
+                &format!("{e}"),
+                sock = shelld_sock.display()
+            );
             return;
         }
     };
@@ -1217,14 +1260,21 @@ fn main() {
         // sibling = current/marspot-session in an installed app) boots the
         // new binary in lockstep with this core.
         match marspot::updater::promote_pending_session() {
-            Ok(true) => eprintln!("[core] promoted staged marspot-session → current/ at boot"),
+            Ok(true) => lx_event!(
+                "SESSION_PROMOTE",
+                "promoted staged marspot-session → current/ at boot"
+            ),
             Ok(false) => {}
-            Err(e) => eprintln!("[core] promote staged session at boot failed: {e}"),
+            Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
         }
         let mut ids: Vec<u64> = client
             .list_sessions()
             .unwrap_or_else(|e| {
-                eprintln!("[core] list_sessions failed: {e} — starting fresh");
+                lx_warn!(
+                    "core.shelld.list_sessions_failed",
+                    "starting fresh",
+                    err = format!("{e}")
+                );
                 Vec::new()
             })
             .into_iter()
@@ -1236,7 +1286,7 @@ fn main() {
             match client.create_session(boot_cols, boot_rows, "") {
                 Ok(id) => ids.push(id),
                 Err(e) => {
-                    eprintln!("[core] create_session failed: {e}");
+                    lx_error!("core.shelld.create_session_failed", &format!("{e}"));
                     break;
                 }
             }
@@ -1244,11 +1294,18 @@ fn main() {
         for id in ids {
             match spawn_l3_pane(boot_cols, boot_rows, id, &event_tx) {
                 Ok(pane) => panes.push(pane),
-                Err(e) => eprintln!("[core] L3 spawn failed for session {id}: {e}"),
+                Err(e) => lx_error!(
+                    "core.spawn.l3_boot_failed",
+                    &format!("{e}"),
+                    session = id
+                ),
             }
         }
         if panes.is_empty() {
-            eprintln!("[core] no L3 panes spawned — falling back to shelld panes");
+            lx_warn!(
+                "core.boot.l3_empty",
+                "no L3 panes spawned — falling back to shelld panes"
+            );
         }
     }
 
@@ -1259,7 +1316,11 @@ fn main() {
         let existing: Vec<marspot::shelld_proto::SessionInfo> = client
             .list_sessions()
             .unwrap_or_else(|e| {
-                eprintln!("[core] list_sessions failed: {e} — starting fresh");
+                lx_warn!(
+                    "core.shelld.list_sessions_failed",
+                    "starting fresh",
+                    err = format!("{e}")
+                );
                 Vec::new()
             })
             .into_iter()
@@ -1269,7 +1330,11 @@ fn main() {
             match client.attach(info.session_id, boot_cols, boot_rows) {
                 Ok(s) => panes.push(Pane::new_shelld(s)),
                 Err(e) => {
-                    eprintln!("[core] attach {} failed: {e}", info.session_id);
+                    lx_error!(
+                        "core.shelld.attach_failed",
+                        &format!("{e}"),
+                        session = info.session_id
+                    );
                 }
             }
         }
@@ -1277,14 +1342,14 @@ fn main() {
             match client.new_session(boot_cols, boot_rows, "") {
                 Ok(s) => panes.push(Pane::new_shelld(s)),
                 Err(e) => {
-                    eprintln!("[core] new_session failed: {e}");
+                    lx_error!("core.shelld.new_session_failed", &format!("{e}"));
                     break;
                 }
             }
         }
     }
     if panes.is_empty() {
-        eprintln!("[core] no sessions could be created — exiting");
+        lx_error!("core.boot.no_sessions", "no sessions could be created — exiting");
         return;
     }
 
@@ -1326,12 +1391,13 @@ fn main() {
         event_tx: event_tx.clone(),
     };
     app.rebuild_layout();
-    eprintln!(
-        "[core] layout {:?} ({} panes) cell0 = {} cols × {} rows",
-        app.layout_mode,
-        app.panes.len(),
-        app.layout.cells[0].cols,
-        app.layout.cells[0].rows
+    lx_info!(
+        "core.layout.ready",
+        "initial layout built",
+        mode = format!("{:?}", app.layout_mode),
+        panes = app.panes.len(),
+        cols = app.layout.cells[0].cols,
+        rows = app.layout.cells[0].rows
     );
 
     // Bring up the shell ↔ core control socket inherited as fd 3.
@@ -1339,7 +1405,11 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_CONTROL_FD);
-    eprintln!("[core] taking control socket from fd {control_fd}");
+    lx_info!(
+        "core.control.take_fd",
+        "taking control socket",
+        fd = control_fd
+    );
     let control_stream = unsafe { UnixStream::from_raw_fd(control_fd) };
     let reader_stream = control_stream
         .try_clone()
@@ -1352,7 +1422,10 @@ fn main() {
     // swaps idle L3 panes; a no-op otherwise).
     install_swap_trigger(event_tx.clone());
 
-    eprintln!("[core] entering event loop (event-driven, no fixed cadence)");
+    lx_event!(
+        "CORE_LOOP",
+        "entering event loop (event-driven, no fixed cadence)"
+    );
 
     let start = Instant::now();
     let mut frame: u64 = 0;
@@ -1418,13 +1491,20 @@ fn main() {
             process(&mut app, ev, &mut pending_resize, &mut to_ack, &mut closed);
         }
         if closed {
-            eprintln!("[core] control socket closed by shell; exiting event loop");
+            lx_event!(
+                "CORE_EXIT",
+                "control socket closed by shell; exiting event loop"
+            );
             break 'main;
         }
         for (ty, payload) in to_ack.drain(..) {
             let f = Frame::new(ty, payload);
             if let Err(e) = f.write_to(&mut control_writer) {
-                eprintln!("[core] liveness ack {:?} write failed: {e}", ty);
+                lx_error!(
+                    "core.liveness.write_failed",
+                    &format!("{e}"),
+                    msg_type = format!("{:?}", ty)
+                );
             }
         }
         if let Some((new_id, new_w, new_h, new_scale)) = pending_resize {
@@ -1437,7 +1517,11 @@ fn main() {
                     Some(s)
                 }
                 None => {
-                    eprintln!("[core] Resize: IOSurfaceLookup({new_id}) returned nil; dropping");
+                    lx_warn!(
+                        "core.resize.surface_lookup_nil",
+                        "IOSurfaceLookup returned nil; dropping",
+                        surface_id = new_id
+                    );
                     None
                 }
             };
@@ -1458,18 +1542,18 @@ fn main() {
                         let ack =
                             Frame::new(MsgType::SurfaceReady, encode_surface_ready(new_id));
                         if let Err(e) = ack.write_to(&mut control_writer) {
-                            eprintln!("[core] SurfaceReady write failed: {e}");
+                            lx_error!("core.surface_ready.write_failed", &format!("{e}"));
                         }
                     }
                     Err(e) => {
-                        eprintln!("[core] Resize: make_metal_texture failed: {e}");
+                        lx_error!("core.resize.metal_texture_failed", &format!("{e}"));
                     }
                 }
             }
         }
         app.pump_all();
         if app.all_exited {
-            eprintln!("[core] all sessions exited; exiting cleanly");
+            lx_event!("CORE_EXIT", "all sessions exited; exiting cleanly");
             break 'main;
         }
 
@@ -1484,7 +1568,7 @@ fn main() {
             // settled surface.
             let fr = Frame::new(MsgType::FrameRendered, Vec::new());
             if let Err(e) = fr.write_to(&mut control_writer) {
-                eprintln!("[core] FrameRendered write failed: {e}");
+                lx_error!("core.frame_rendered.write_failed", &format!("{e}"));
             }
             // Publish the focused-pane caret so the shell can anchor
             // the IME candidate window.  Dedupe — an idle cursor must
@@ -1493,7 +1577,7 @@ fn main() {
                 app.last_caret_sent = Some(caret);
                 let f = Frame::new(MsgType::CaretRect, encode_caret_rect(caret));
                 if let Err(e) = f.write_to(&mut control_writer) {
-                    eprintln!("[core] CaretRect write failed: {e}");
+                    lx_error!("core.caret_rect.write_failed", &format!("{e}"));
                 }
             }
         }
@@ -1507,12 +1591,16 @@ fn main() {
                 SessionState::Idle => "idle",
                 SessionState::Exited => "exited",
             };
-            eprintln!(
-                "[core] frame {frame} t={t:.1}s panes={} focused={} ({state}) grid={}x{}",
-                app.panes.len(),
-                app.focused_idx,
-                p.session().grid().cols(),
-                p.session().grid().rows(),
+            lx_debug!(
+                "core.heartbeat",
+                "periodic heartbeat",
+                frame = frame,
+                t_s = format!("{t:.1}"),
+                panes = app.panes.len(),
+                focused = app.focused_idx,
+                state = state,
+                cols = p.session().grid().cols(),
+                rows = p.session().grid().rows()
             );
         }
     }

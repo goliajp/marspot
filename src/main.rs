@@ -9,6 +9,7 @@ use marspot::render_metal::{make_target_texture, MetalRenderer};
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
+use marspot::{lx_debug, lx_error, lx_warn};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
@@ -886,7 +887,7 @@ impl Marspot {
             return;
         }
         let Some(client) = self.shelld.as_ref() else {
-            eprintln!("marspot: shelld client missing, cannot spawn");
+            lx_error!("gui.spawn.no_shelld_client", "shelld client missing, cannot spawn");
             return;
         };
         match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
@@ -895,7 +896,7 @@ impl Marspot {
                 self.custom_titles.push(None);
             }
             Err(e) => {
-                eprintln!("marspot: failed to spawn session via shelld: {e}");
+                lx_error!("gui.spawn.shelld_failed", &format!("{e}"));
             }
         }
     }
@@ -1068,7 +1069,7 @@ impl Marspot {
         for ev in events {
             got_signal_from_tmux = true;
             if std::env::var("MARSPOT_TMUX_DEBUG").is_ok() {
-                eprintln!("[tmux] {:?}", ev);
+                lx_debug!("gui.tmux.event", "tmux parser event", ev = format!("{:?}", ev));
             }
             match ev {
                 tmux::Event::Output { bytes, .. } => {
@@ -1265,7 +1266,11 @@ impl Marspot {
         const PER_WINDOW_ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
         if let Some(t) = &self.tmux {
             if std::env::var("MARSPOT_TMUX_DEBUG").is_ok() {
-                eprintln!("[render] tmux.windows.len()={}", t.windows.len());
+                lx_debug!(
+                    "gui.render.tmux_windows",
+                    "tmux windows count",
+                    len = t.windows.len()
+                );
             }
         }
         let (labels, states, sidebar_focus) = if let Some(t) = &self.tmux {
@@ -1416,6 +1421,7 @@ impl Marspot {
 }
 
 fn main() {
+    marspot::logx::init("gui");
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {
         run_snapshot(&path);
@@ -1456,11 +1462,11 @@ fn main() {
         let socket = marspot::paths::shelld_socket();
         let client = marspot::shelld_client::ShelldClient::connect(&socket, wake)
             .unwrap_or_else(|e| {
-                eprintln!(
-                    "marspot: failed to connect to shelld at {}: {}\n\
-                     hint: run `bin/install-shelld.sh` once to launchctl-load it",
-                    socket.display(),
-                    e
+                lx_error!(
+                    "gui.shelld.connect_failed",
+                    &format!("{e}"),
+                    sock = socket.display(),
+                    hint = "run `bin/install-shelld.sh` once to launchctl-load it"
                 );
                 std::process::exit(1);
             });
@@ -1491,7 +1497,11 @@ fn main() {
         let existing: Vec<marspot::shelld_proto::SessionInfo> = client
             .list_sessions()
             .unwrap_or_else(|e| {
-                eprintln!("marspot: list_sessions failed: {} (starting fresh)", e);
+                lx_warn!(
+                    "gui.shelld.list_sessions_failed",
+                    "starting fresh",
+                    err = format!("{e}")
+                );
                 Vec::new()
             })
             .into_iter()
@@ -1502,7 +1512,11 @@ fn main() {
             match client.attach(info.session_id, INITIAL_COLS, INITIAL_ROWS) {
                 Ok(s) => panes.push(marspot::pane::Pane::new_shelld(s)),
                 Err(e) => {
-                    eprintln!("marspot: attach {} failed: {}", info.session_id, e);
+                    lx_error!(
+                        "gui.shelld.attach_failed",
+                        &format!("{e}"),
+                        session = info.session_id
+                    );
                 }
             }
         }
@@ -1510,7 +1524,7 @@ fn main() {
             match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
                 Ok(s) => panes.push(marspot::pane::Pane::new_shelld(s)),
                 Err(e) => {
-                    eprintln!("marspot: new_session failed: {}", e);
+                    lx_error!("gui.shelld.new_session_failed", &format!("{e}"));
                     break;
                 }
             }
@@ -1577,7 +1591,11 @@ impl Drop for Marspot {
             }
             s.push(']');
             if let Err(e) = std::fs::write(&path, s) {
-                eprintln!("marspot: failed to write latency log to {path}: {e}");
+                lx_error!(
+                    "gui.bench.latency_write_failed",
+                    &format!("{e}"),
+                    path = path
+                );
             }
         }
         if let Some(path) = self.profile_out_path.take() {
@@ -1595,7 +1613,11 @@ impl Drop for Marspot {
                 dtn = p.drain_total_ns,
             );
             if let Err(e) = std::fs::write(&path, json) {
-                eprintln!("marspot: failed to write profile log to {path}: {e}");
+                lx_error!(
+                    "gui.bench.profile_write_failed",
+                    &format!("{e}"),
+                    path = path
+                );
             }
         }
     }
