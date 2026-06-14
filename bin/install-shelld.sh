@@ -6,12 +6,15 @@
 # launchctl so it starts now and on every login.
 #
 # Usage:
-#   bin/install-shelld.sh                  # install + start
-#   bin/install-shelld.sh --uninstall      # stop + remove plist
-#   bin/install-shelld.sh --status         # print runtime status
-#   bin/install-shelld.sh --apply-pending  # silently-update shelld
-#                                          # from binaries/pending/
-#                                          # WARNING: kills sessions
+#   bin/install-shelld.sh                       # install + start
+#   bin/install-shelld.sh --uninstall           # stop + remove plist
+#   bin/install-shelld.sh --status              # print runtime status
+#   bin/install-shelld.sh --apply-pending       # silently-update shelld
+#                                               # from binaries/pending/
+#                                               # WARNING: kills sessions
+#   bin/install-shelld.sh --apply-pending-execv # in-place silent update
+#                                               # via SIGUSR1; PRESERVES
+#                                               # every open session
 #
 # Idempotent: re-running is a no-op apart from refreshing the plist
 # content (so a binary path change propagates next time).
@@ -200,6 +203,74 @@ MSG
       echo "rolled back, but daemon still not running — check $LOG_ERR" >&2
     fi
     exit 1
+    ;;
+  --apply-pending-execv)
+    # In-place silent update: SIGUSR1 the running daemon, which does
+    # its own promote_pending() + execv self-update preserving the
+    # listen socket + every PTY master fd. Sessions survive across the
+    # swap; clients drop and reattach via bytelog replay. Use this on
+    # a healthy running shelld; if shelld isn't running, fall back to
+    # --apply-pending (the bootout/bootstrap path).
+    pending="$BIN_TREE/pending/marspot-shelld"
+    if [[ ! -f "$pending" ]]; then
+      echo "no $pending — nothing to apply"
+      exit 1
+    fi
+
+    pid="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null \
+      | awk -F'=' '/^\tpid =/{gsub(/[ \t]/,"",$2); print $2; exit}')"
+    if [[ -z "$pid" || "$pid" -le 0 ]]; then
+      echo "shelld not running for $LABEL — use --apply-pending (cold-restart path)" >&2
+      exit 1
+    fi
+
+    sup_log "SHELLD_UPDATE_APPLY_EXECV" "pid=$pid → SIGUSR1"
+
+    # Update the bundle with the new bytes FIRST, so a future cold
+    # restart (launchd KeepAlive after an unrelated death) picks up
+    # the new image rather than reverting to whatever's still in the
+    # bundle path. cp not mv: leave pending intact so shelld can
+    # consume it via promote_pending() inside do_execv_swap.
+    cp "$pending" "$BIN"
+    xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
+    xattr -d com.apple.provenance "$BIN" 2>/dev/null || true
+
+    if ! kill -USR1 "$pid"; then
+      sup_log "SHELLD_PROBATION_FAIL" "kill -USR1 $pid failed"
+      echo "kill -USR1 $pid failed" >&2
+      exit 1
+    fi
+
+    # Probation: shelld's PID must NOT change (= execv preserved
+    # identity) AND must stay alive throughout the window. PID change
+    # implies launchd respawned us = the in-place swap died and the
+    # old image's children were SIGHUP'd; that's the bootout-equivalent
+    # failure mode. The execv-fail path inside shelld self-rolls back
+    # and keeps running on the old image, so a same-pid survival means
+    # either the swap succeeded or shelld declined gracefully.
+    PROBATION_S="${MARSPOT_SHELLD_PROBATION_S:-30}"
+    POLL_S=2
+    elapsed=0
+    while (( elapsed < PROBATION_S )); do
+      sleep "$POLL_S"; elapsed=$(( elapsed + POLL_S ))
+      cur_pid="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null \
+        | awk -F'=' '/^\tpid =/{gsub(/[ \t]/,"",$2); print $2; exit}')"
+      if [[ -z "$cur_pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        sup_log "SHELLD_PROBATION_FAIL" "execv path: shelld pid $pid not alive at ${elapsed}s"
+        echo "shelld died after SIGUSR1 — sessions LOST" >&2
+        echo "       check $LOG_ERR for the new image's startup logs" >&2
+        exit 1
+      fi
+      if [[ "$cur_pid" != "$pid" ]]; then
+        sup_log "SHELLD_PROBATION_FAIL" "execv path: pid changed $pid → $cur_pid (launchd respawn)"
+        echo "shelld pid changed $pid → $cur_pid — execv failed, launchd respawned" >&2
+        echo "       sessions LOST; check $LOG_ERR" >&2
+        exit 1
+      fi
+    done
+    sup_log "SHELLD_UPDATE_STABLE" "execv path: pid=$pid survived ${PROBATION_S}s probation"
+    echo "shelld updated via execv — sessions preserved, pid $pid"
+    exit 0
     ;;
   ""|--install)
     ;;
