@@ -237,16 +237,28 @@ else
   echo "==> running app already matches this build"
 fi
 
-# ── 7. shelld update (opt-in; kills sessions) ─────────────────────
+# ── 7. shelld update (opt-in; in-place execv preserves sessions) ───
+# Default now: --apply-pending-execv. The shelld supervisor receives
+# SIGUSR1, promotes pending → current internally, and execv's over its
+# own image while preserving the listen fd + every PTY master fd, so
+# the running zsh children at the other end of every session keep
+# living. GUI clients see a sub-second read pause; the ShelldClient
+# supervisor loop reconnects + re-attaches each session via bytelog
+# replay (no "exited" blink, no GUI quit). Falls back to the legacy
+# bootout/bootstrap path (--apply-pending) only when the running
+# shelld is older than the SIGUSR1 handler — install-shelld.sh checks.
 if (( SHELLD_CHANGED )); then
   if (( WITH_SHELLD )); then
-    echo "==> updating shelld (this restarts the daemon — sessions will die)"
+    echo "==> updating shelld via execv (sessions preserved)"
     mkdir -p "$TREE/pending"
     cp "$TARGET/marspot-shelld" "$TREE/pending/marspot-shelld"
-    "$ROOT/bin/install-shelld.sh" --apply-pending
+    if ! "$ROOT/bin/install-shelld.sh" --apply-pending-execv; then
+      echo "==> execv path declined — falling back to --apply-pending (KILLS sessions)"
+      "$ROOT/bin/install-shelld.sh" --apply-pending
+    fi
   else
-    echo "==> note: marspot-shelld differs but was NOT updated (would kill sessions)."
-    echo "    run 'bin/install-local.sh --with-shelld' when you can drop sessions."
+    echo "==> note: marspot-shelld differs but was NOT updated"
+    echo "    run 'bin/install-local.sh --with-shelld' to apply via execv (session-preserving)"
   fi
 fi
 
