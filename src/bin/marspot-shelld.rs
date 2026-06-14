@@ -732,6 +732,24 @@ fn main() {
         );
         return;
     }
+    // Test hook: `marspot-shelld --log-soak <count>` emits `<count>`
+    // structured events from a single long-lived process so the
+    // rotation code path (which triggers every 256 writes or on
+    // size-cap hit) is actually exercised. Used by bin/soak-log-rotate.sh
+    // to stress the flock-coordinated cross-process rotate + compress.
+    if argv.len() >= 3 && argv[1] == "--log-soak" {
+        let count: u64 = argv[2].parse().unwrap_or(0);
+        marspot::logx::init("shelld");
+        for i in 0..count {
+            lx_info!(
+                "log_soak.tick",
+                "soak event filler",
+                seq = i,
+                payload = "----------xxxxxxxxxx----------xxxxxxxxxx----------"
+            );
+        }
+        return;
+    }
 
     marspot::logx::init("shelld");
     lx_event!("SHELLD_START", "daemon main started", pid = std::process::id());
