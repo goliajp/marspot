@@ -138,6 +138,11 @@ pub enum MsgType {
     /// L3 → L2: reply to `GetSelectionText`.  Payload: `len u32 LE` + UTF-8
     /// bytes (empty len = empty selection).
     SelectionText = 38,
+    /// core → shell: "I just rendered a complete frame into the IOSurface;
+    /// present it now."  Empty payload — a pure wake so the shell presents
+    /// on real frame events instead of a blind ~60 fps timer (which burned
+    /// idle CPU and occasionally sampled the surface mid-render → a flicker).
+    FrameRendered = 39,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -165,6 +170,7 @@ impl MsgType {
             36 => MsgType::GridScroll,
             37 => MsgType::GetSelectionText,
             38 => MsgType::SelectionText,
+            39 => MsgType::FrameRendered,
             200 => MsgType::Error,
             _ => return None,
         })

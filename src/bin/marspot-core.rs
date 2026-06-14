@@ -1470,6 +1470,17 @@ fn main() {
 
         if app.needs_render {
             let caret = app.render(&target_tex);
+            // Tell the shell a complete frame is in the IOSurface so it
+            // presents now — replaces its blind ~60 fps present timer (idle
+            // CPU + occasional torn read from sampling mid-render).  Sent
+            // after render() returns; the cross-process + thread-wake
+            // latency before the shell actually samples comfortably exceeds
+            // the GPU's sub-ms write completion, so the present sees a
+            // settled surface.
+            let fr = Frame::new(MsgType::FrameRendered, Vec::new());
+            if let Err(e) = fr.write_to(&mut control_writer) {
+                eprintln!("[core] FrameRendered write failed: {e}");
+            }
             // Publish the focused-pane caret so the shell can anchor
             // the IME candidate window.  Dedupe — an idle cursor must
             // not stream identical frames at render cadence.

@@ -435,7 +435,12 @@ use supervisor::{BinaryTree, SupervisorState};
 const DEFAULT_TITLE: &str = "Marspot";
 const DEFAULT_W_PT: f64 = 1200.0;
 const DEFAULT_H_PT: f64 = 800.0;
-const REDRAW_INTERVAL_MS: u64 = 16; // ~60 fps
+// Safety-net only: the shell presents on the core's per-frame
+// `FrameRendered` poke, so this timer just guarantees forward progress if a
+// poke is ever missed (it never freezes).  Was 16 ms (~60 fps blind
+// present) — that burned idle CPU and occasionally sampled the IOSurface
+// mid-render (a flicker).  250 ms = 4 Hz idle floor, negligible CPU.
+const REDRAW_INTERVAL_MS: u64 = 250;
 
 /// Frames the reader thread parses off the control socket and hands
 /// to the main thread.
@@ -447,6 +452,10 @@ enum ShellInbox {
     /// pixels), forwarded to AppKit so the IME candidate window
     /// anchors under the caret.
     CaretRect(Option<(f64, f64, f64, f64)>),
+    /// Core rendered a fresh frame into the IOSurface — present it.  Carries
+    /// nothing; its arrival (via the reader's `proxy.wake()`) drives the
+    /// per-frame present, replacing the blind ~60 fps redraw timer.
+    FrameRendered,
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -1455,6 +1464,10 @@ impl ShellApp {
             ShellInbox::CaretRect(rect) => {
                 ctx.set_caret_rect_phys(rect);
             }
+            // No-op: arriving here already woke the event loop, and
+            // `user_event` calls `request_redraw()` → `redraw()` → present.
+            // The message exists so the reader wakes us per real frame.
+            ShellInbox::FrameRendered => {}
         }
     }
 
@@ -1501,8 +1514,9 @@ impl ShellApp {
                     }
                 }
             }
-            // Pending core isn't displayed — its caret is irrelevant.
-            ShellInbox::CaretRect(_) => {}
+            // Pending core isn't displayed — its caret + frame pokes are
+            // irrelevant (it renders to its own off-screen surface).
+            ShellInbox::CaretRect(_) | ShellInbox::FrameRendered => {}
         }
     }
 }
@@ -1717,6 +1731,10 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                     MsgType::CaretRect => decode_caret_rect(&frame.payload)
                         .ok()
                         .map(ShellInbox::CaretRect),
+                    // Empty-payload wake: a fresh frame is in the IOSurface.
+                    // Mapping it to Some(..) is what makes `proxy.wake()`
+                    // fire below → user_event → present.
+                    MsgType::FrameRendered => Some(ShellInbox::FrameRendered),
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.
                     _ => None,
