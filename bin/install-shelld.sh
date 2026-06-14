@@ -63,14 +63,16 @@ LOG_ERR="$LOG_DIR/shelld.err"
 sup_log() {
   local tag="$1"; shift
   local detail="$*"
+  # New stream — structured marspot.log via shelld CLI. Best-effort.
   if [[ -x "$BIN" ]]; then
-    "$BIN" --log-event "$tag" "$detail" >/dev/null 2>&1 && return
+    "$BIN" --log-event "$tag" "$detail" >/dev/null 2>&1 || true
+  elif [[ -x "$BIN_TREE/current/marspot-shelld" ]]; then
+    "$BIN_TREE/current/marspot-shelld" --log-event "$tag" "$detail" >/dev/null 2>&1 || true
   fi
-  if [[ -x "$BIN_TREE/current/marspot-shelld" ]]; then
-    "$BIN_TREE/current/marspot-shelld" --log-event "$tag" "$detail" >/dev/null 2>&1 && return
-  fi
-  mkdir -p "$(dirname "$SUP_LOG")"
-  printf '%s\t%s\t%s\n' "$(date +%s.%N)" "$tag" "$detail" >> "$SUP_LOG"
+  # Legacy stream — supervisor.log TSV, until every soak/integration
+  # script grepping it has been migrated to marspot.log. Best-effort.
+  mkdir -p "$(dirname "$SUP_LOG")" 2>/dev/null
+  printf '%s\t%s\t%s\n' "$(date +%s.%N)" "$tag" "$detail" >> "$SUP_LOG" 2>/dev/null
 }
 
 # Reload the LaunchAgent so a swapped binary / changed plist takes effect.
