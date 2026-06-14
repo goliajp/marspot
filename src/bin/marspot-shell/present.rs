@@ -174,11 +174,10 @@ impl ShellPresenter {
         unsafe {
             layer.setDevice(Some(&device));
             layer.setPixelFormat(TARGET_FORMAT);
-            // Pin to sRGB via the SAME shared helper the standalone
-            // renderer uses.  Omitting it here was the colour regression:
-            // on wide-gamut displays our sRGB terminal colours rendered
-            // in the display's native gamut and shifted (red too light).
-            marspot::render_metal::pin_layer_srgb(&layer);
+            // Tag the layer's colour space via the SAME shared helper the
+            // standalone renderer uses (Display P3 — matches iTerm2's deeper
+            // reds on wide-gamut panels; sRGB-tagging read washed/pink).
+            marspot::render_metal::pin_layer_colorspace(&layer);
             layer.setFramebufferOnly(true);
             layer.setContentsScale(scale as f64);
             // Glitchless live-resize recipe (matches the metal-live-resize

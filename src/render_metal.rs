@@ -42,7 +42,7 @@ use objc2_metal::{
     MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
     MTLSamplerState, MTLStoreAction, MTLTexture,
 };
-use core_graphics::color_space::{kCGColorSpaceSRGB, CGColorSpace};
+use core_graphics::color_space::{kCGColorSpaceDisplayP3, CGColorSpace};
 use foreign_types::ForeignType;
 use objc2::msg_send;
 use objc2_app_kit::NSColor;
@@ -188,26 +188,30 @@ pub struct GlyphInstance {
 /// "more correct".
 const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
-/// Pin a `CAMetalLayer`'s colour space to sRGB.  Default (`nil`) on
-/// wide-gamut displays (P3 / Studio Display) makes ColorSync treat our
-/// 8-bit BGRA bytes as native display primaries — so the sRGB-encoded
-/// terminal colours render in the wider gamut and shift (reds read too
-/// light / off-hue).  iTerm2 and Terminal.app pin sRGB too.
+/// Tag a `CAMetalLayer`'s colour space as **Display P3** so the terminal's
+/// 8-bit colours look the way users expect on wide-gamut displays — i.e.
+/// the way iTerm2 / Terminal.app render them.
+///
+/// We write conventionally-sRGB colour bytes into the IOSurface, but
+/// terminals have always drawn them "punchy" on wide-gamut panels rather
+/// than colorimetrically-correct-but-washed.  Measured on an LG UltraGear
+/// (native readout of input 255,0,0): tagging the layer **sRGB** gave
+/// (208,74,34) — desaturated/pink; tagging **Display P3** gives ~(225,60,0)
+/// — matching iTerm2's deeper red.  So we tag P3, not sRGB.
 ///
 /// **Every CAMetalLayer that reaches the screen MUST call this** — the
 /// standalone renderer's layer (below) AND the shell presenter's layer
-/// (`bin/marspot-shell/present.rs`).  They diverged once — the presenter
-/// was created without the pin, so the installed app rendered washed-out
-/// reds while standalone looked right — which is exactly the regression
-/// this single shared helper exists to prevent.  Route every on-screen
-/// CAMetalLayer through here; never inline the `setColorspace` again.
-pub fn pin_layer_srgb(layer: &CAMetalLayer) {
-    // SAFETY: `kCGColorSpaceSRGB` is an extern static (reading it is
+/// (`bin/marspot-shell/present.rs`).  They diverged once (presenter created
+/// without any tag → washed reds in the installed app); routing both
+/// through this one helper keeps them from drifting again.  Default (`nil`)
+/// behaves like an sRGB tag here, so it must be set explicitly.
+pub fn pin_layer_colorspace(layer: &CAMetalLayer) {
+    // SAFETY: `kCGColorSpaceDisplayP3` is an extern static (reading it is
     // `unsafe`); `setColorspace` is reached via msg_send because the
     // `colorspace` property isn't in the objc2-quartz-core binding yet.
     unsafe {
-        let cs = CGColorSpace::create_with_name(kCGColorSpaceSRGB).expect(
-            "CGColorSpaceCreateWithName(kCGColorSpaceSRGB) cannot fail on supported macOS",
+        let cs = CGColorSpace::create_with_name(kCGColorSpaceDisplayP3).expect(
+            "CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3) cannot fail on supported macOS",
         );
         let cs_ptr = cs.as_ptr() as *mut c_void;
         let _: () = msg_send![layer, setColorspace: cs_ptr];
@@ -353,9 +357,9 @@ impl MetalRenderer {
             layer.setGeometryFlipped(true);
             layer.setPresentsWithTransaction(true);
             layer.setOpaque(true);
-            // Pin layer colour space to sRGB (shared helper — see
-            // pin_layer_srgb; the shell presenter MUST call the same one).
-            pin_layer_srgb(&layer);
+            // Tag layer colour space (Display P3, shared helper — see
+            // pin_layer_colorspace; the shell presenter calls the same one).
+            pin_layer_colorspace(&layer);
         }
 
         view.setWantsLayer(true);
