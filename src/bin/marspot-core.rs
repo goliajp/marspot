@@ -508,24 +508,18 @@ impl CoreApp {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
+        // L2/L3 updates are user-invisible by design: idle panes promote
+        // silently when the replacement's grid mirror matches; focused
+        // panes used to defer behind a ↻ refresh affordance, but the
+        // swap is structurally atomic — both old and new L3 subscribe to
+        // the same shelld session, the bytelog replay reconstructs an
+        // identical grid, and the visible mirror only flips on the next
+        // `try_promote` call (one render frame). So we begin the swap
+        // for every pane unconditionally and let `try_promote` make the
+        // switch when the new L3's grid is steady.
         for i in 0..self.panes.len() {
             let pane = &self.panes[i];
             if !pane.is_l3() || pane.is_exited() || pane.session().is_l3_swapping() {
-                continue;
-            }
-            // The focused pane defers: a replay could blip an interactive
-            // TUI under the user's hands. Flag it so the renderer shows the
-            // refresh affordance; a click (or losing focus) triggers it.
-            if i == self.focused_idx {
-                if !self.panes[i].update_pending() {
-                    self.panes[i].set_update_pending(true);
-                    self.needs_render = true;
-                    lx_info!(
-                        "core.swap.deferred",
-                        "focused pane deferred — showing refresh",
-                        pane = i
-                    );
-                }
                 continue;
             }
             self.begin_pane_swap(i);
