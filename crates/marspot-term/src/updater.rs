@@ -39,11 +39,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-/// How long to wait between background polls of the releases API
-/// after the initial startup check.  24h matches Chrome's cadence —
-/// enough to land hotfixes within a day, slow enough that the user's
-/// network isn't constantly bothered.
-const POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long to wait between background polls of the releases API after
+/// the initial startup check.  5 min: a self-used terminal wants fresh
+/// builds to land promptly, and one unauthenticated GitHub API call every
+/// 5 min is 12/hour — far under the 60/hour anonymous limit — with
+/// negligible CPU (a sleeping thread that wakes briefly).
+const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// Default GitHub Releases endpoint.  Overridable via
 /// `MARSPOT_UPDATE_FEED` for dev / staging — the env var should
