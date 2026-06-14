@@ -239,7 +239,9 @@ print_version_vector() {
   local sh co se shd
   while IFS='=' read -r key value; do
     key="$(echo "$key" | tr -d ' ')"
-    value="$(echo "$value" | tr -d ' \"')"
+    # Strip trailing inline comment (`# L1` etc) and surrounding
+    # quotes / whitespace from the value before storing it.
+    value="$(echo "$value" | sed -E 's/[[:space:]]*#.*$//' | tr -d ' \"')"
     [[ -z "$key" || "$key" == \#* ]] && continue
     case "$key" in
       shell)   sh="$value"  ;;
