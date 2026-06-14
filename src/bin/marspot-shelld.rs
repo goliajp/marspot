@@ -323,6 +323,14 @@ fn main() {
     if !term_ok {
         unsafe { std::env::set_var("TERM", "xterm-256color") };
     }
+    // Advertise 24-bit colour.  Without COLORTERM, apps (Claude Code, vim,
+    // bat, …) downgrade truecolor to the 256-colour cube, whose
+    // approximations visibly shift hues — Claude's coral orange lands on
+    // cube index 174 = (215,135,135), a rose/pink ("水红").  marspot's
+    // parser renders 38;2;r;g;b truecolor, so claim it.
+    if std::env::var_os("COLORTERM").is_none() {
+        unsafe { std::env::set_var("COLORTERM", "truecolor") };
+    }
     // Same for ZDOTDIR: marspot's lib installs a shim under
     // `~/.cache/marspot/zdot` (PROMPT_SP, EOL_MARK).  shelld is a
     // separate process so we re-run the install once on startup.

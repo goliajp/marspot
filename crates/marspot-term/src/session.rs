@@ -105,6 +105,14 @@ PROMPT_EOL_MARK=""
     if !term_ok {
         unsafe { std::env::set_var("TERM", "xterm-256color") };
     }
+    // Advertise 24-bit colour so apps emit truecolor (38;2;r;g;b) instead
+    // of downgrading to the 256-colour cube (whose approximations shift
+    // hues — e.g. Claude Code's coral orange → rose/pink at cube index
+    // 174).  marspot renders truecolor, so claim it.  Leave a pre-set
+    // value alone (a parent terminal may know better).
+    if std::env::var_os("COLORTERM").is_none() {
+        unsafe { std::env::set_var("COLORTERM", "truecolor") };
+    }
 }
 
 /// Public entry point so binaries that spawn shells outside the
