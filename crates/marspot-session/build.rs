@@ -42,7 +42,9 @@ fn main() {
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .filter_map(|l| l.split_once('='))
             .find(|(k, _)| k.trim() == layer)
-            .map(|(_, v)| v.trim().trim_matches('"').to_string())
+            .map(|(_, v)| {
+                v.split('#').next().unwrap_or("").trim().trim_matches('"').to_string()
+            })
             .unwrap_or_else(|| "unknown".to_string());
         println!(
             "cargo:rustc-env=MARSPOT_VERSION_{}={}",
