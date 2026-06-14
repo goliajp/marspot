@@ -461,8 +461,17 @@ enum ShellInbox {
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
-/// hung at startup.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// hung at startup. Generous enough to cover a cold-cache first-run
+/// of a freshly-built binary: macOS Gatekeeper provenance check on
+/// the just-promoted current/marspot-core (~400 ms when warm, more
+/// on cold cache) PLUS 9 cold L3 spawns (each another fresh-exec
+/// provenance check) PLUS ShelldClient handshake PLUS list_sessions/
+/// attach RPC roundtrips. 5 s used to be enough, but install-local's
+/// silent update on a fresh release build occasionally tripped past
+/// it (observed on 0.2.10 → 0.2.11), so bump to 15 s. A *real* hang
+/// is still caught — the PONG_DEADLINE (15 s × 3 PING_INTERVALs) is
+/// the steady-state liveness check.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often we issue PING.
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 /// PONG must arrive within this many `PING_INTERVAL`s before we call
