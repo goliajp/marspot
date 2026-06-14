@@ -16,10 +16,11 @@
 //! Phase 5.
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write as IoWrite};
-use std::os::fd::{FromRawFd, IntoRawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -56,6 +57,21 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// the in-flight `accept` to return EBADF.  Negative sentinel before
 /// init or after close.
 static LISTENER_FD: AtomicI32 = AtomicI32::new(-1);
+/// Set by the SIGUSR1 handler.  Polled by the accept loop, which —
+/// when it sees the flag set — runs `do_execv_swap` to promote
+/// `binaries/pending/marspot-shelld` into `current/`, serialise every
+/// session's (master fd, child pid) into a handoff manifest, clear
+/// CLOEXEC on the listen + master fds, and `execv` over its own image.
+/// PID is preserved across `execv`, so the children are still our
+/// children in the new image and the master fds (kernel-side) outlive
+/// the swap.  Sessions survive; only the GUI/L2 client connections
+/// drop and reattach + bytelog-replay on the next tick.
+static EXEC_TRIGGER: AtomicBool = AtomicBool::new(false);
+/// Write end of a self-pipe.  The SIGUSR1 handler scribbles a byte
+/// here to wake the accept loop out of its `poll`; the read end is
+/// part of the poll set.  Marked CLOEXEC so it doesn't leak across
+/// the eventual execv (new image creates its own pair).
+static EXEC_WAKE_FD: AtomicI32 = AtomicI32::new(-1);
 /// Monotonic session-id allocator.  Never reused (even after a
 /// session ends) so a stale client reference can't accidentally
 /// land on a brand-new session.
@@ -337,23 +353,326 @@ fn boot_promote_pending() {
     }
 }
 
+/// Set / clear `FD_CLOEXEC` on a fd. Used pre-execv to mark the listen
+/// fd + every PTY master fd as "survive the exec image swap"; used post-
+/// fail to put them back the way they were so the running image can
+/// keep operating.
+fn clear_cloexec(fd: RawFd) -> io::Result<()> {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// Snapshot the post-execv image needs to rebuild Sessions + listener
+/// without re-binding or losing the running shells.
+struct Handoff {
+    listen_fd: RawFd,
+    next_session_id: u64,
+    /// Per-session (id, master_fd, child_pid). Bytelog path is derived
+    /// from `session_id` (same `marspot::paths::sessions_dir()` layout
+    /// either side of the swap).
+    sessions: Vec<(u64, RawFd, i32)>,
+    /// Where the manifest file lived. New image deletes it after
+    /// consuming so a future re-exec doesn't read stale state.
+    manifest_path: PathBuf,
+}
+
+/// Detect "I was just exec'd by the previous shelld image as part of a
+/// silent self-update" by looking for the three env vars the outgoing
+/// image set before `execv`. None of them set → cold start (the
+/// boot_promote_pending / bind path runs). All three set → resume.
+///
+/// On any parse failure we treat the handoff as missing and fall back
+/// to cold start; the LaunchAgent's KeepAlive will keep us upright,
+/// at the cost of dropped sessions.
+fn try_resume_handoff() -> Option<Handoff> {
+    let path = std::env::var_os("MARSPOT_SHELLD_HANDOFF")?;
+    let manifest_path = PathBuf::from(path);
+    let listen_fd: RawFd = std::env::var("MARSPOT_SHELLD_LISTEN_FD")
+        .ok()?
+        .parse()
+        .ok()?;
+    let next_session_id: u64 = std::env::var("MARSPOT_SHELLD_NEXT_SESSION_ID")
+        .ok()?
+        .parse()
+        .ok()?;
+    // Clear so a future cold-start (e.g. launchd KeepAlive after an
+    // unrelated crash that happens to inherit our env) doesn't pick up
+    // a stale handoff with already-closed fds.
+    unsafe {
+        std::env::remove_var("MARSPOT_SHELLD_HANDOFF");
+        std::env::remove_var("MARSPOT_SHELLD_LISTEN_FD");
+        std::env::remove_var("MARSPOT_SHELLD_NEXT_SESSION_ID");
+    }
+
+    let contents = match std::fs::read_to_string(&manifest_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[shelld] handoff manifest {} read failed: {e}; falling back to cold start",
+                manifest_path.display()
+            );
+            return None;
+        }
+    };
+    let mut sessions: Vec<(u64, RawFd, i32)> = Vec::new();
+    for line in contents.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let id: u64 = match parts.next().and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => {
+                eprintln!("[shelld] handoff manifest: bad id in line {:?}", line);
+                return None;
+            }
+        };
+        let fd: RawFd = match parts.next().and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => {
+                eprintln!("[shelld] handoff manifest: bad fd in line {:?}", line);
+                return None;
+            }
+        };
+        let pid: i32 = match parts.next().and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => {
+                eprintln!("[shelld] handoff manifest: bad pid in line {:?}", line);
+                return None;
+            }
+        };
+        sessions.push((id, fd, pid));
+    }
+    Some(Handoff {
+        listen_fd,
+        next_session_id,
+        sessions,
+        manifest_path,
+    })
+}
+
+/// Per-pid handoff manifest path. PID is preserved across execv, so the
+/// new image can derive the same path without it being passed in env.
+/// (It IS also passed in env — that's the source of truth — but using
+/// pid keeps the temp file unique across parallel shelld instances in
+/// a dev sandbox.)
+fn handoff_manifest_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "marspot-shelld-handoff.{}.tsv",
+        std::process::id()
+    ))
+}
+
+/// Promote pending → current, write the handoff manifest, clear CLOEXEC
+/// on listen + master fds, and `execv` over our own image. On success
+/// this function does not return; on any failure it rolls back the
+/// binary tree (prev → current), restores CLOEXEC, and returns the
+/// error so the caller can keep running on the current image.
+fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
+    let tree = marspot::binary_tree::BinaryTree::for_shelld()?;
+    if !tree.has_pending() {
+        eprintln!("[shelld] execv: SIGUSR1 received but no pending; ignoring");
+        return Ok(());
+    }
+
+    // Snapshot sessions BEFORE we touch the tree, so a failure
+    // promoting doesn't leave us with a half-written manifest.
+    let snapshot: Vec<(u64, RawFd, i32)> = {
+        let g = sessions.lock().unwrap();
+        let mut v: Vec<(u64, RawFd, i32)> = g
+            .values()
+            .map(|s| (s.id, s.pty.raw_master(), s.pty.child_pid()))
+            .collect();
+        v.sort_by_key(|t| t.0);
+        v
+    };
+    let next_session_id = NEXT_SESSION_ID.load(Ordering::Acquire);
+    eprintln!(
+        "[shelld] execv: handoff with {} session(s); next_id={}",
+        snapshot.len(),
+        next_session_id
+    );
+
+    // Write manifest. 0o600 so other users can't peek at fd numbers.
+    let manifest_path = handoff_manifest_path();
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&manifest_path)?;
+        for (id, fd, pid) in &snapshot {
+            writeln!(f, "{}\t{}\t{}", id, fd, pid)?;
+        }
+        f.sync_all().ok();
+    }
+
+    // Promote: pending/<bin> → current/<bin> (and current → prev if it
+    // existed). This is the only filesystem-changing step that runs
+    // before execv; everything else above is in /tmp.
+    tree.promote_pending()?;
+    let target = tree.current();
+    eprintln!("[shelld] execv: target = {}", target.display());
+
+    // Mark every fd the new image needs to inherit as "survive exec".
+    // Listen fd: kernel-side socket stays bound to the same socket
+    // path, so clients reconnecting hit the new image transparently.
+    // Master fds: the running zsh children at the other end keep their
+    // PTY pair alive — they have no idea anything happened.
+    clear_cloexec(listen_fd)?;
+    for (_, fd, _) in &snapshot {
+        if let Err(e) = clear_cloexec(*fd) {
+            // Best-effort: if we can't clear CLOEXEC on a master fd,
+            // the session won't survive the swap. Log and continue —
+            // an offline session is better than a panicked daemon.
+            eprintln!("[shelld] execv: clear_cloexec(master={}) failed: {e}", fd);
+        }
+    }
+
+    // Hand env to the new image. `MARSPOT_SHELLD_HANDOFF` is the
+    // detection sentinel; the other two are payload.
+    unsafe {
+        std::env::set_var("MARSPOT_SHELLD_HANDOFF", &manifest_path);
+        std::env::set_var("MARSPOT_SHELLD_LISTEN_FD", listen_fd.to_string());
+        std::env::set_var(
+            "MARSPOT_SHELLD_NEXT_SESSION_ID",
+            next_session_id.to_string(),
+        );
+    }
+
+    let target_c =
+        CString::new(target.to_string_lossy().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "target path contains NUL")
+        })?;
+    let argv: [*const libc::c_char; 2] = [target_c.as_ptr(), std::ptr::null()];
+
+    eprintln!("[shelld] execv: invoking execv");
+    // SAFETY: target_c outlives the call; on success execv does not
+    // return so the borrow is irrelevant. On failure we surface the
+    // errno and let the caller restore state.
+    unsafe {
+        libc::execv(target_c.as_ptr(), argv.as_ptr());
+    }
+    let err = io::Error::last_os_error();
+    eprintln!("[shelld] execv failed: {err}; rolling back");
+
+    // Rollback EVERYTHING so the running image stays usable. Reverse
+    // order matches the forward path:
+    //   1. clear env vars (so a manual restart doesn't see them stale)
+    //   2. restore CLOEXEC on listen + master fds
+    //   3. delete manifest
+    //   4. roll the binary tree back: prev → current, current → quarantine
+    unsafe {
+        std::env::remove_var("MARSPOT_SHELLD_HANDOFF");
+        std::env::remove_var("MARSPOT_SHELLD_LISTEN_FD");
+        std::env::remove_var("MARSPOT_SHELLD_NEXT_SESSION_ID");
+    }
+    let _ = set_cloexec(listen_fd);
+    for (_, fd, _) in &snapshot {
+        let _ = set_cloexec(*fd);
+    }
+    let _ = std::fs::remove_file(&manifest_path);
+    if let Err(rollback_err) = tree.rollback_to_prev() {
+        eprintln!("[shelld] execv: rollback also failed: {rollback_err}");
+    }
+    Err(err)
+}
+
+/// Construct the read+write fds of a self-pipe, mark both CLOEXEC.
+/// The write end goes into `EXEC_WAKE_FD` so the signal handler can
+/// wake the accept loop; the read end is part of the loop's poll set.
+fn make_self_pipe() -> io::Result<(RawFd, RawFd)> {
+    let mut fds = [0i32; 2];
+    let r = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (r_fd, w_fd) = (fds[0], fds[1]);
+    set_cloexec(r_fd).ok();
+    set_cloexec(w_fd).ok();
+    Ok((r_fd, w_fd))
+}
+
+/// Rebuild every session from a handoff manifest: wrap each inherited
+/// master fd into a `Pty`, open the on-disk bytelog (append mode), and
+/// spawn the reader thread. Subscribers start empty; GUI / L2 clients
+/// reattach via the still-bound socket and `replay()` rebuilds their
+/// terminal state from the bytelog. Best-effort per session — a session
+/// that fails to rehydrate (bytelog open error, etc.) is logged and
+/// skipped rather than aborting the whole daemon.
+fn rehydrate_sessions(
+    sessions: &Sessions,
+    snapshot: &[(u64, RawFd, i32)],
+) -> usize {
+    let mut count = 0usize;
+    for (id, fd, pid) in snapshot {
+        let pty = Arc::new(Pty::from_raw_master(*fd, *pid));
+        let bytelog = match ByteLog::open(*id) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("[shelld] handoff: bytelog open for session {id} failed: {e}");
+                None
+            }
+        };
+        let session = Arc::new(ShellSession {
+            id: *id,
+            pty,
+            subscribers: Mutex::new(Vec::new()),
+            alive: AtomicBool::new(true),
+            bytelog: Mutex::new(bytelog),
+        });
+        sessions.lock().unwrap().insert(*id, session.clone());
+        spawn_session_reader(session);
+        count += 1;
+    }
+    count
+}
+
 fn main() {
     eprintln!("[shelld] starting (pid={})", std::process::id());
 
-    // Cold-start boot-promote. If the updater (or install-shelld.sh) staged
-    // a new binary in binaries/pending/marspot-shelld, slide it into
-    // current/ before we do anything else. The LaunchAgent plist is
-    // expected to point at current/marspot-shelld (install-shelld.sh sets
-    // this up); this means a manually-dropped pending followed by
-    // `launchctl kickstart -k com.marspot.shelld` lands on the new image
-    // automatically, without anyone running --apply-pending.
-    //
-    // Hot path (SIGUSR1 execv self-update) does its own in-process
-    // promote_pending() so the running image swaps without restart; see
-    // step 4. This boot path is the cold-start safety net for cases where
-    // we DID restart (manual or crash recovery) and a pending was sitting
-    // around.
-    boot_promote_pending();
+    // Detect "we were just exec'd by the previous shelld image as part
+    // of an in-place self-update". If yes, we skip bind + boot-promote
+    // and rehydrate every session from the inherited fds. If no, this
+    // is a normal cold start; we promote any pending binary then bind.
+    let handoff = try_resume_handoff();
+
+    if handoff.is_none() {
+        // Cold-start boot-promote. If the updater (or install-shelld.sh)
+        // staged a new binary in binaries/pending/marspot-shelld, slide it
+        // into current/ before we do anything else. The LaunchAgent plist
+        // is expected to point at current/marspot-shelld (install-shelld.sh
+        // sets this up); this means a manually-dropped pending followed by
+        // `launchctl kickstart -k com.marspot.shelld` lands on the new
+        // image automatically, without anyone running --apply-pending.
+        //
+        // Hot path (SIGUSR1 execv self-update) does its own in-process
+        // promote_pending(); we skip this branch in the handoff resume
+        // case because that promote already ran on the outgoing image.
+        boot_promote_pending();
+    }
 
     // launchd-launched daemons inherit a minimal env — TERM is
     // commonly `network` (macOS launchd default) or unset, which
@@ -384,51 +703,143 @@ fn main() {
     marspot::session::ensure_zdot_shim_for_external_shells();
 
     let sock = socket_path();
-    if let Some(parent) = sock.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("[shelld] failed to create cache dir {}: {}", parent.display(), e);
-            std::process::exit(1);
-        }
-    }
-    let _ = std::fs::remove_file(&sock);
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
-    let listener = match UnixListener::bind(&sock) {
-        Ok(l) => l,
+    // Cold start → bind a fresh listening socket. Handoff resume →
+    // inherit the listen fd from the outgoing image (kernel-side socket
+    // is unchanged; clients reconnecting hit us transparently).
+    let raw: RawFd = match handoff.as_ref() {
+        Some(h) => {
+            eprintln!(
+                "[shelld] handoff: inheriting listen fd {} and {} session(s)",
+                h.listen_fd,
+                h.sessions.len()
+            );
+            h.listen_fd
+        }
+        None => {
+            if let Some(parent) = sock.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "[shelld] failed to create cache dir {}: {}",
+                        parent.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let _ = std::fs::remove_file(&sock);
+            let listener = match UnixListener::bind(&sock) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("[shelld] bind {} failed: {}", sock.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) =
+                std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))
+            {
+                eprintln!("[shelld] chmod {} failed: {}", sock.display(), e);
+            }
+            eprintln!("[shelld] listening on {}", sock.display());
+            listener.into_raw_fd()
+        }
+    };
+    LISTENER_FD.store(raw, Ordering::Release);
+
+    // Rehydrate sessions from the inherited fds BEFORE we install signal
+    // handlers — a stray SIGUSR1 during rehydrate would otherwise see an
+    // empty sessions table and re-execv with no manifest.
+    if let Some(h) = handoff {
+        NEXT_SESSION_ID.store(h.next_session_id, Ordering::Release);
+        let count = rehydrate_sessions(&sessions, &h.sessions);
+        // Manifest no longer needed; delete so a future spurious env
+        // re-trigger doesn't try to read the same fd numbers (which by
+        // then point at different files in the kernel fd table).
+        let _ = std::fs::remove_file(&h.manifest_path);
+        eprintln!(
+            "[shelld] handoff: rehydrated {}/{} session(s)",
+            count,
+            h.sessions.len()
+        );
+    }
+
+    // Self-pipe to wake the accept loop on SIGUSR1. CLOEXEC on both
+    // ends so the kernel drops them on the next execv (new image
+    // creates its own pair).
+    let (wake_r, wake_w) = match make_self_pipe() {
+        Ok(pair) => pair,
         Err(e) => {
-            eprintln!("[shelld] bind {} failed: {}", sock.display(), e);
+            eprintln!("[shelld] self-pipe create failed: {e}");
             std::process::exit(1);
         }
     };
-    if let Err(e) = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)) {
-        eprintln!("[shelld] chmod {} failed: {}", sock.display(), e);
-    }
-    eprintln!("[shelld] listening on {}", sock.display());
+    EXEC_WAKE_FD.store(wake_w, Ordering::Release);
 
-    let raw = listener.into_raw_fd();
-    LISTENER_FD.store(raw, Ordering::Release);
     install_signal_handlers();
-
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         if SHUTDOWN.load(Ordering::Acquire) {
             break;
         }
-        // SAFETY: raw is our owned fd; we don't drop the wrapper.
-        let wrapper = unsafe { UnixListener::from_raw_fd(raw) };
-        let accept_result = wrapper.accept();
-        std::mem::forget(wrapper);
-        match accept_result {
-            Ok((s, _)) => {
-                let sess = sessions.clone();
-                thread::spawn(move || handle_client(s, sess));
+        if EXEC_TRIGGER.swap(false, Ordering::AcqRel) {
+            // do_execv_swap on success replaces this image; on failure
+            // returns Err and rolls back so we keep serving.
+            if let Err(e) = do_execv_swap(&sessions, raw) {
+                eprintln!("[shelld] execv self-update aborted: {e}");
             }
-            Err(_) => {
-                if SHUTDOWN.load(Ordering::Acquire) {
+            continue;
+        }
+
+        // poll on (listen, wake) so a signal-driven wake doesn't sit
+        // behind a blocking accept. std's accept silently retries
+        // EINTR, so a signal alone wouldn't unstick it — the wake
+        // byte is what we rely on.
+        let mut pfds = [
+            libc::pollfd {
+                fd: raw,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake_r,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let r = unsafe { libc::poll(pfds.as_mut_ptr(), 2, -1) };
+        if r < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            eprintln!("[shelld] poll failed: {err}");
+            break;
+        }
+        if pfds[1].revents != 0 {
+            let mut drain = [0u8; 16];
+            unsafe {
+                libc::read(wake_r, drain.as_mut_ptr() as _, drain.len());
+            }
+            continue;
+        }
+        if pfds[0].revents & (libc::POLLIN as i16) != 0 {
+            // SAFETY: raw is our owned fd; we don't drop the wrapper.
+            let wrapper = unsafe { UnixListener::from_raw_fd(raw) };
+            let accept_result = wrapper.accept();
+            std::mem::forget(wrapper);
+            match accept_result {
+                Ok((s, _)) => {
+                    let sess = sessions.clone();
+                    thread::spawn(move || handle_client(s, sess));
+                }
+                Err(_) => {
+                    if SHUTDOWN.load(Ordering::Acquire) {
+                        break;
+                    }
+                    eprintln!("[shelld] accept error (unexpected)");
                     break;
                 }
-                eprintln!("[shelld] accept error (unexpected)");
-                break;
             }
         }
     }
@@ -436,6 +847,11 @@ fn main() {
     if fd >= 0 {
         unsafe { libc::close(fd) };
     }
+    let wake_fd = EXEC_WAKE_FD.swap(-1, Ordering::AcqRel);
+    if wake_fd >= 0 {
+        unsafe { libc::close(wake_fd) };
+    }
+    unsafe { libc::close(wake_r) };
     eprintln!("[shelld] shutting down");
     let _ = std::fs::remove_file(&sock);
     // Sessions table drops here, which drops each Arc<ShellSession>,
@@ -798,6 +1214,21 @@ extern "C" fn signal_handler(sig: libc::c_int) {
     }
 }
 
+/// SIGUSR1 = "apply pending shelld via execv self-update". Set the
+/// trigger flag and wake the accept loop via the self-pipe. All work
+/// (promote, manifest, execv) happens in main-thread context — handler
+/// only touches async-signal-safe state.
+extern "C" fn sigusr1_handler(_sig: libc::c_int) {
+    EXEC_TRIGGER.store(true, Ordering::Release);
+    let fd = EXEC_WAKE_FD.load(Ordering::Acquire);
+    if fd >= 0 {
+        let b: [u8; 1] = [b'!'];
+        unsafe {
+            libc::write(fd, b.as_ptr() as _, 1);
+        }
+    }
+}
+
 fn install_signal_handlers() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -811,6 +1242,20 @@ fn install_signal_handlers() {
                 "[shelld] sigaction failed: TERM={} INT={} errno={}",
                 r1,
                 r2,
+                io::Error::last_os_error()
+            );
+        }
+        let mut sa_usr1: libc::sigaction = std::mem::zeroed();
+        sa_usr1.sa_sigaction = sigusr1_handler as *const () as usize;
+        libc::sigemptyset(&mut sa_usr1.sa_mask);
+        // SA_RESTART so the in-flight write/read in reader threads
+        // doesn't bubble EINTR up the bytelog path — only the
+        // explicit poll in main reacts to the wake byte.
+        sa_usr1.sa_flags = libc::SA_RESTART;
+        let r3 = libc::sigaction(libc::SIGUSR1, &sa_usr1, std::ptr::null_mut());
+        if r3 != 0 {
+            eprintln!(
+                "[shelld] sigaction(SIGUSR1) failed: errno={}",
                 io::Error::last_os_error()
             );
         }
