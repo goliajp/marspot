@@ -610,21 +610,22 @@ impl CoreApp {
     fn copy_selection_to_clipboard(&mut self) -> bool {
         let Some(sel) = self.selection else { return false };
         let idx = sel.session_idx;
-        // L3 owns its grid + scrollback; L2's mirror is window-only, so the
-        // text round-trips through the session process.  In-process panes
-        // read it locally.
-        let is_l3 = self.panes.get(idx).is_some_and(|p| p.is_l3());
-        let text = if is_l3 {
-            let blockwise = sel.mode == marspot::ui::SelectionMode::Blockwise;
-            self.panes
-                .get_mut(idx)
-                .and_then(|p| p.session_mut().request_selection_text(sel.anchor, sel.focus, blockwise))
-        } else {
-            self.panes.get(idx).and_then(|pane| selection_text(pane, &sel))
-        };
+        // Serialise from L2's OWN grid (for an L3 pane, the shm mirror of
+        // the visible window) — same local path as in-process panes.  The
+        // old L2↔L3 `request_selection_text` round-trip was racy: a reply
+        // from a timed-out request aliased the next copy (you'd paste the
+        // *previous* selection, length and all) and heavy output could
+        // stall the reply past its 1 s timeout (copy nothing).  The mirror
+        // already holds exactly what's on screen — the selection's own
+        // coordinate space — so reading it locally is reliable and
+        // race-free.  Limitation: a selection dragged beyond the visible
+        // window into scrollback isn't fully in the mirror; acceptable
+        // versus the previous chaos, and the common case (copy what you
+        // see) is now correct.
+        let text = self.panes.get(idx).and_then(|pane| selection_text(pane, &sel));
         match text {
-            Some(text) => marspot::input::write_clipboard_text(&text),
-            None => false,
+            Some(text) if !text.is_empty() => marspot::input::write_clipboard_text(&text),
+            _ => false,
         }
     }
 
