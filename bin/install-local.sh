@@ -158,30 +158,52 @@ binary_git_sha() {
     | sed -E 's/^MARSPOT_FP=//;s/\|$//'
 }
 
-# A binary "changed" iff the bundle's embedded git sha differs from
-# the fresh build's, OR either side carries the -dirty marker (which
-# means an uncommitted edit — we can't know whether it's load-bearing,
-# so we err on the side of staging). If both sides are at the SAME
-# clean commit, the binary's behaviour is identical even though
-# `cmp -s` would disagree (the build timestamp embedded by build.rs
-# guarantees byte-level divergence on every recompile). Avoiding that
-# false positive is what keeps `install-local.sh` from triggering a
-# shell self-update (and the visible NSWindow flash that comes with
-# the execv) on no-op bumps.
+# L2 (marspot-core) is the canonical version carrier. L1 (marspot-shell)
+# is a thin stable wrapper; L3 (marspot-session) is a per-pane child of
+# L2. They all ride on the same git commit, so we decide "is this
+# install-local a no-op or a real update?" by looking at L2's fingerprint
+# alone:
 #
-# Fallback for binaries where strings can't locate the sha: plain
-# `cmp -s` byte-compare, preserving the old behaviour.
+#   bundle L2 sha == target L2 sha, no `-dirty` suffix on either side
+#   ⇒ same commit, nothing to do. Skip stage for ALL four binaries so
+#     no SIGUSR1 fires, no shell self-update execv runs, no window
+#     flashes.
+#
+# Any other state ⇒ fall back to the historical per-binary `cmp -s`
+# byte compare, which keeps dirty-workspace dev iteration honest (every
+# touched recompile re-stages and re-execs).
+#
+# The cache is computed once on first `changed()` call and reused for
+# all four binaries within one install-local run.
+_L2_NOOP=""  # "yes" / "no" once decided
+_l2_decision() {
+  if [[ -z "$_L2_NOOP" ]]; then
+    local ref tgt ref_sha tgt_sha
+    ref="$(running_equiv marspot-core)"
+    tgt="$TARGET/marspot-core"
+    if [[ -f "$ref" && -f "$tgt" ]]; then
+      ref_sha="$(binary_git_sha "$ref")"
+      tgt_sha="$(binary_git_sha "$tgt")"
+      if [[ -n "$ref_sha" && -n "$tgt_sha" \
+            && "$ref_sha" == "$tgt_sha" \
+            && "$ref_sha" != *-dirty ]]; then
+        _L2_NOOP=yes
+      else
+        _L2_NOOP=no
+      fi
+    else
+      _L2_NOOP=no
+    fi
+  fi
+  [[ "$_L2_NOOP" == yes ]]
+}
+
 changed() {
   local bin="$1" ref
   ref="$(running_equiv "$bin")"
   [[ -f "$ref" ]] || return 0
-  local ref_sha tgt_sha
-  ref_sha="$(binary_git_sha "$ref")"
-  tgt_sha="$(binary_git_sha "$TARGET/$bin")"
-  if [[ -n "$ref_sha" && -n "$tgt_sha" \
-        && "$ref_sha" == "$tgt_sha" \
-        && "$ref_sha" != *-dirty ]]; then
-    return 1  # same clean commit — no update needed, no shell flash
+  if _l2_decision; then
+    return 1  # L2 says same clean commit — whole tree is no-op
   fi
   ! cmp -s "$TARGET/$bin" "$ref"
 }
