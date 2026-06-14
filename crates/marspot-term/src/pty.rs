@@ -197,6 +197,30 @@ impl Pty {
     pub fn child_pid(&self) -> i32 {
         self.child
     }
+
+    /// Re-wrap an already-running child process whose master fd we still hold.
+    ///
+    /// Used by the shelld execv self-update path: the pre-exec image hands its
+    /// (master_fd, child_pid) pairs across `execv` via an inherited fd table +
+    /// a handoff manifest; the post-exec image reconstructs the `Pty` so Drop
+    /// still owns SIGHUP-on-shutdown and master-fd close-on-shutdown for it.
+    ///
+    /// Caller guarantees `master` is a live PTY master fd (CLOEXEC cleared
+    /// before `execv` so it survived) and `child` is a process that is still
+    /// our direct child (`waitpid()`-reapable). PID is preserved across
+    /// `execv` so the parent/child relationship spans the image swap.
+    pub fn from_raw_master(master: RawFd, child: i32) -> Self {
+        Pty { master, child }
+    }
+
+    /// Disassemble without firing `Drop`: take ownership of the (fd, pid)
+    /// pair, skip the SIGHUP-and-close path. Used by the pre-exec image to
+    /// extract every session's PTY before `execv` — once Drop runs we have
+    /// killed the children, which is exactly what we are trying to avoid.
+    pub fn into_raw_parts(self) -> (RawFd, i32) {
+        let me = std::mem::ManuallyDrop::new(self);
+        (me.master, me.child)
+    }
 }
 
 impl Drop for Pty {
@@ -624,6 +648,57 @@ mod tests {
             Some(libc::EBADF),
             "expected EBADF on closed fd, got {:?}",
             fd_err
+        );
+    }
+
+    #[test]
+    fn into_raw_parts_skips_drop_then_from_raw_master_reassumes_ownership() {
+        // Models the shelld execv handoff: pre-exec image takes the (fd, pid)
+        // out without firing Drop; post-exec image rebuilds a Pty around them
+        // and Drop still kills the child + closes the fd at shutdown.
+        let pty = Pty::spawn(PtyConfig {
+            program: "/bin/sleep".into(),
+            args: vec!["60".into()],
+            size: TerminalSize::default(),
+            argv0: None,
+            cwd: None,
+        })
+        .expect("spawn /bin/sleep");
+
+        let (master_fd, child_pid) = pty.into_raw_parts();
+
+        // Skipping Drop must leave both the child and the fd live — this is
+        // the load-bearing invariant for execv handoff.
+        assert!(child_pid > 0);
+        assert_eq!(
+            unsafe { libc::kill(child_pid, 0) },
+            0,
+            "child {} should still be alive after into_raw_parts",
+            child_pid
+        );
+        assert_ne!(
+            unsafe { libc::fcntl(master_fd, libc::F_GETFD) },
+            -1,
+            "master fd should still be open after into_raw_parts"
+        );
+
+        // Re-wrap and drop. Drop must clean up just like a Pty from spawn().
+        let reborn = Pty::from_raw_master(master_fd, child_pid);
+        assert_eq!(reborn.raw_master(), master_fd);
+        assert_eq!(reborn.child_pid(), child_pid);
+        drop(reborn);
+
+        std::thread::sleep(Duration::from_millis(50));
+        let probe = unsafe { libc::kill(child_pid, 0) };
+        assert_eq!(probe, -1, "child {} should be reaped after reborn Drop", child_pid);
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(
+            unsafe { libc::fcntl(master_fd, libc::F_GETFD) },
+            -1,
+            "master fd should be closed after reborn Drop"
         );
     }
 
