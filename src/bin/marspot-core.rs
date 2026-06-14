@@ -583,6 +583,23 @@ impl CoreApp {
         if idx >= self.panes.len() {
             return;
         }
+        // Ask shelld to terminate the session AND delete its bytelog
+        // before we drop the pane locally. Without this, shelld keeps
+        // the session in its `Sessions` map (with bytelog on disk), and
+        // the next time the GUI calls `list_sessions` to refill a slot
+        // it sees this id as alive and re-attaches — replaying the
+        // entire bytelog into the new pane, so the user sees the
+        // content they just clicked × to discard.
+        if let Some(id) = self.panes[idx].shelld_session_id() {
+            if let Err(e) = self.client.kill_session(id) {
+                lx_warn!(
+                    "core.close_session.kill_failed",
+                    &format!("{e}"),
+                    id = id,
+                    pane_idx = idx
+                );
+            }
+        }
         self.panes.remove(idx);
         if idx < self.custom_titles.len() {
             self.custom_titles.remove(idx);

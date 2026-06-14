@@ -85,6 +85,22 @@ impl PaneBackend {
         }
     }
 
+    /// The shelld session id behind this backend, when one exists.
+    /// `None` for the in-process `Local` backend (which has its own PTY
+    /// and no shelld concept). Used by the close-pane handler to ask
+    /// shelld to terminate the session + delete its bytelog — without
+    /// that, the bytelog persists on disk and shelld keeps the session
+    /// alive, so the next `list_sessions` call attaches a fresh pane
+    /// onto it and replays the buffer (the "I clicked × and my old
+    /// content came back" bug).
+    pub fn shelld_session_id(&self) -> Option<u64> {
+        match self {
+            PaneBackend::Local(_) => None,
+            PaneBackend::Shelld(s) => Some(s.id()),
+            PaneBackend::L3(c) => Some(c.shelld_session_id()),
+        }
+    }
+
     pub fn cursor_visible(&self) -> bool {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_visible(),
@@ -392,6 +408,14 @@ impl L3Conn {
     /// shelld session this L3 drives (so the container can spawn a
     /// replacement on the same session for a silent update).
     fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    /// shelld session this L3 drives. Public so the GUI can ask shelld
+    /// to terminate it when the user clicks [×] on the sidebar — the
+    /// L3 child gets reaped on its own; this just keeps shelld from
+    /// resurrecting the bytelog when a fresh pane opens later.
+    pub(crate) fn shelld_session_id(&self) -> u64 {
         self.session_id
     }
 
@@ -741,6 +765,12 @@ impl Pane {
     /// been pumped through the parser.
     pub fn is_exited(&self) -> bool {
         self.session.is_exited()
+    }
+
+    /// The shelld session id behind this pane, when it has one. `None`
+    /// for the in-process `Local` backend.
+    pub fn shelld_session_id(&self) -> Option<u64> {
+        self.session.shelld_session_id()
     }
 
     /// Handle a key event. Writes the encoded bytes to the PTY and

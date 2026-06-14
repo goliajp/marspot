@@ -910,6 +910,25 @@ impl Marspot {
         if idx >= self.panes.len() {
             return;
         }
+        // shelld-backed pane: ask shelld to terminate the session +
+        // delete its bytelog BEFORE we drop the local pane. Otherwise
+        // shelld keeps the session alive (the GUI closing the local
+        // handle just detaches a subscriber) and the next time the
+        // user opens a new pane, list_sessions sees this id as still
+        // alive and re-attaches it — the entire bytelog replays into
+        // the new pane and the "closed" content comes back.
+        // Local in-process panes are handled entirely by `panes.remove`
+        // below (their PTY torn down by Session/Pty Drop).
+        if let (Some(id), Some(client)) = (self.panes[idx].shelld_session_id(), self.shelld.as_ref()) {
+            if let Err(e) = client.kill_session(id) {
+                lx_warn!(
+                    "gui.close_session.kill_failed",
+                    &format!("{e}"),
+                    id = id,
+                    pane_idx = idx
+                );
+            }
+        }
         // Drop the session — this fires Session/Pty teardown.
         self.panes.remove(idx);
         // Parallel-array state must shrink in lockstep so the
