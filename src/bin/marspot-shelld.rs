@@ -306,8 +306,54 @@ fn spawn_session_reader(session: Arc<ShellSession>) {
 /// close), so explicit Kill is just a `remove`.
 type Sessions = Arc<Mutex<HashMap<u64, Arc<ShellSession>>>>;
 
+/// On cold start, slide any staged binary in
+/// `binaries/pending/marspot-shelld` into `current/`. No-op when nothing
+/// is pending. Best-effort: never aborts the daemon — if anything goes
+/// wrong (permission denied, rename failure, …) we log to stderr and
+/// keep running the binary we were exec'd as, exactly as before. The
+/// plist still points at the *path*, so the running image stays whatever
+/// launchd loaded; the promote affects the *next* launch.
+fn boot_promote_pending() {
+    let tree = match marspot::binary_tree::BinaryTree::for_shelld() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[shelld] boot-promote: tree init failed: {e}");
+            return;
+        }
+    };
+    if !tree.has_pending() {
+        return;
+    }
+    eprintln!(
+        "[shelld] boot-promote: pending found at {}, promoting",
+        tree.pending().display()
+    );
+    match tree.promote_pending() {
+        Ok(()) => eprintln!(
+            "[shelld] boot-promote: pending → current ({}). next launchd start will load it.",
+            tree.current().display()
+        ),
+        Err(e) => eprintln!("[shelld] boot-promote: promote_pending failed: {e}"),
+    }
+}
+
 fn main() {
     eprintln!("[shelld] starting (pid={})", std::process::id());
+
+    // Cold-start boot-promote. If the updater (or install-shelld.sh) staged
+    // a new binary in binaries/pending/marspot-shelld, slide it into
+    // current/ before we do anything else. The LaunchAgent plist is
+    // expected to point at current/marspot-shelld (install-shelld.sh sets
+    // this up); this means a manually-dropped pending followed by
+    // `launchctl kickstart -k com.marspot.shelld` lands on the new image
+    // automatically, without anyone running --apply-pending.
+    //
+    // Hot path (SIGUSR1 execv self-update) does its own in-process
+    // promote_pending() so the running image swaps without restart; see
+    // step 4. This boot path is the cold-start safety net for cases where
+    // we DID restart (manual or crash recovery) and a pending was sitting
+    // around.
+    boot_promote_pending();
 
     // launchd-launched daemons inherit a minimal env — TERM is
     // commonly `network` (macOS launchd default) or unset, which
