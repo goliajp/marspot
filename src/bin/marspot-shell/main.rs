@@ -1127,6 +1127,37 @@ impl ShellApp {
             let h_px = s.height();
             let scale = ctx.scale();
             self.active = self.spawn_core(id, w_px, h_px, scale);
+            // A freshly spawned core attaches its env surface but never
+            // announces it — SurfaceReady is only emitted in response to
+            // a Resize.  The *initial* boot gets that drive for free from
+            // the framework's post-`resumed` `resized` callback; a
+            // *restart* (crash / hang / boot-race recovery) does not.
+            // Without an explicit drive the new core renders into the
+            // surface but the presenter's `first_frame_ready` gate never
+            // flips, so `redraw`/`present` stay gated and the window is
+            // black until the user manually resizes.  Drive the same
+            // handshake the resize and pending-update paths use; the old
+            // surface keeps showing its last frame until SurfaceReady
+            // swaps the new one in (no black flash on a live crash).
+            if self.active.is_some() {
+                match IOSurface::create(w_px, h_px) {
+                    Ok(surf) => {
+                        surf.increment_use();
+                        if let Some(stale) = self.pending_surface.take() {
+                            stale.decrement_use();
+                        }
+                        let new_id = surf.id();
+                        self.pending_surface = Some(surf);
+                        self.send(
+                            MsgType::Resize,
+                            encode_resize(new_id, w_px as f64, h_px as f64, scale),
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[shell] restart handshake IOSurface::create failed: {e}");
+                    }
+                }
+            }
         }
     }
 
