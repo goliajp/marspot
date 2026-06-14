@@ -179,8 +179,7 @@ install -m 0755 "$TARGET/marspot-core"    "$MACOS/marspot-core"
 install -m 0755 "$TARGET/marspot-shelld"  "$MACOS/marspot-shelld"
 install -m 0755 "$TARGET/marspot-session" "$MACOS/marspot-session"
 for b in marspot-shell marspot-core marspot-shelld marspot-session; do
-  xattr -d com.apple.quarantine "$MACOS/$b" 2>/dev/null || true
-  xattr -d com.apple.provenance "$MACOS/$b" 2>/dev/null || true
+  xattr -c "$MACOS/$b" 2>/dev/null || true   # clear ALL provenance/quarantine
 done
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
@@ -201,9 +200,16 @@ if (( ! RUNNING )); then
   if [[ -d "$TREE/current" ]]; then
     echo "==> refreshing binaries/current/ to match new bundle (was shadowing)"
     for b in marspot-shell marspot-core marspot-shelld marspot-session; do
-      cp "$TARGET/$b" "$TREE/current/$b"
-      xattr -d com.apple.quarantine "$TREE/current/$b" 2>/dev/null || true
-      xattr -d com.apple.provenance "$TREE/current/$b" 2>/dev/null || true
+      # MUST be `install` (write-temp + atomic rename = fresh inode), not
+      # `cp` (in-place overwrite = same inode).  macOS caches a binary's
+      # code-signature cdhash per vnode; overwriting in place leaves the
+      # kernel with the OLD core's cached signature, so when the shell
+      # spawns the new core at the same path AMFI/taskgated rejects it
+      # ("Invalid Signature") and kills it — a fresh inode forces a
+      # re-validate.  `xattr -c` clears ALL provenance/quarantine xattrs
+      # (a stray com.apple.provenance can also stall a spawned child).
+      install -m 0755 "$TARGET/$b" "$TREE/current/$b"
+      xattr -c "$TREE/current/$b" 2>/dev/null || true
     done
   fi
   echo "==> no running app — launching"
