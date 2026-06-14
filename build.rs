@@ -41,9 +41,19 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=MARSPOT_BUILD_TS={}", build_ts);
 
-    // Always re-run so build time stays fresh.
+    // Re-run when the commit changes.  `.git/HEAD` only changes on a
+    // branch *switch* — a commit on the current branch leaves HEAD
+    // (`ref: refs/heads/<branch>`) byte-identical and just moves the ref
+    // it points at, so watching HEAD alone bakes a stale sha after every
+    // commit.  Resolve HEAD's ref and watch that loose-ref file too, plus
+    // packed-refs (post-`git gc`) and the index (staging).
     println!("cargo:rerun-if-changed=build.rs");
-    // Re-run when HEAD moves (branch switch, checkout) or staged changes change.
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     println!("cargo:rerun-if-changed=.git/index");
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(refname) = head.strip_prefix("ref: ").map(str::trim) {
+            println!("cargo:rerun-if-changed=.git/{refname}");
+        }
+    }
 }
