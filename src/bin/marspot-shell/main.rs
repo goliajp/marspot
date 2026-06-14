@@ -691,6 +691,22 @@ impl ShellApp {
         let parent_fd: RawFd = sp[0];
         let child_fd: RawFd = sp[1];
 
+        // CLOEXEC both ends so the core child never inherits the shell
+        // (parent) end of its own control socket: without this the core
+        // holds both ends, so fd 3 never sees EOF when the shell dies and
+        // the core — plus its whole L3 tree — orphans instead of exiting
+        // (a 1 core + N session leak per shell crash/restart). The
+        // pre_exec dup2 re-clears CLOEXEC on the child's fd 3 below, so
+        // the core still gets its control socket. A pending core spawned
+        // during a dual-core update likewise won't inherit the active
+        // core's control end.
+        for fd in [parent_fd, child_fd] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags >= 0 {
+                unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            }
+        }
+
         eprintln!(
             "[shell] spawning core: {} surface_id={surface_id} w={w_phys} h={h_phys} scale={scale} control_fd={DEFAULT_CONTROL_FD}",
             core_bin.display()
