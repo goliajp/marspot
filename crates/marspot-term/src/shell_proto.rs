@@ -578,12 +578,17 @@ pub fn decode_grid_scroll(payload: &[u8]) -> io::Result<u16> {
 
 /// GetSelectionText payload: `anchor(col u16, abs u32), focus(col u16,
 /// abs u32), blockwise u8`.
+/// GetSelectionText payload: `seq u32 LE` (request id, echoed back in the
+/// reply so a late reply from a timed-out request can't alias the next
+/// copy) + anchor/focus coords + blockwise flag.
 pub fn encode_get_selection_text(
+    seq: u32,
     anchor: (u16, u32),
     focus: (u16, u32),
     blockwise: bool,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(13);
+    let mut out = Vec::with_capacity(17);
+    out.extend_from_slice(&seq.to_le_bytes());
     out.extend_from_slice(&anchor.0.to_le_bytes());
     out.extend_from_slice(&anchor.1.to_le_bytes());
     out.extend_from_slice(&focus.0.to_le_bytes());
@@ -592,46 +597,52 @@ pub fn encode_get_selection_text(
     out
 }
 
-pub fn decode_get_selection_text(payload: &[u8]) -> io::Result<((u16, u32), (u16, u32), bool)> {
-    if payload.len() < 13 {
+pub fn decode_get_selection_text(
+    payload: &[u8],
+) -> io::Result<(u32, (u16, u32), (u16, u32), bool)> {
+    if payload.len() < 17 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "get_selection_text payload < 13 bytes",
+            "get_selection_text payload < 17 bytes",
         ));
     }
-    let a_col = u16::from_le_bytes(payload[0..2].try_into().unwrap());
-    let a_abs = u32::from_le_bytes(payload[2..6].try_into().unwrap());
-    let f_col = u16::from_le_bytes(payload[6..8].try_into().unwrap());
-    let f_abs = u32::from_le_bytes(payload[8..12].try_into().unwrap());
-    let blockwise = payload[12] != 0;
-    Ok(((a_col, a_abs), (f_col, f_abs), blockwise))
+    let seq = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+    let a_col = u16::from_le_bytes(payload[4..6].try_into().unwrap());
+    let a_abs = u32::from_le_bytes(payload[6..10].try_into().unwrap());
+    let f_col = u16::from_le_bytes(payload[10..12].try_into().unwrap());
+    let f_abs = u32::from_le_bytes(payload[12..16].try_into().unwrap());
+    let blockwise = payload[16] != 0;
+    Ok((seq, (a_col, a_abs), (f_col, f_abs), blockwise))
 }
 
-/// SelectionText payload: `len u32 LE` + UTF-8 bytes.
-pub fn encode_selection_text(text: &str) -> Vec<u8> {
+/// SelectionText payload: `seq u32 LE` (echo of the request) + `len u32 LE`
+/// + UTF-8 bytes.
+pub fn encode_selection_text(seq: u32, text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(4 + bytes.len());
+    let mut out = Vec::with_capacity(8 + bytes.len());
+    out.extend_from_slice(&seq.to_le_bytes());
     out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(bytes);
     out
 }
 
-pub fn decode_selection_text(payload: &[u8]) -> io::Result<String> {
-    if payload.len() < 4 {
+pub fn decode_selection_text(payload: &[u8]) -> io::Result<(u32, String)> {
+    if payload.len() < 8 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "selection_text payload < 4 bytes",
+            "selection_text payload < 8 bytes",
         ));
     }
-    let len = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
-    if payload.len() < 4 + len {
+    let seq = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+    let len = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+    if payload.len() < 8 + len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "selection_text payload truncated",
         ));
     }
-    std::str::from_utf8(&payload[4..4 + len])
-        .map(|s| s.to_string())
+    std::str::from_utf8(&payload[8..8 + len])
+        .map(|s| (seq, s.to_string()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
@@ -981,14 +992,17 @@ mod tests {
 
     #[test]
     fn selection_text_frames_roundtrip() {
-        let p = encode_get_selection_text((3, 100), (40, 7), true);
-        let (a, f, b) = decode_get_selection_text(&p).unwrap();
-        assert_eq!((a, f, b), ((3, 100), (40, 7), true));
+        let p = encode_get_selection_text(7, (3, 100), (40, 7), true);
+        let (seq, a, f, b) = decode_get_selection_text(&p).unwrap();
+        assert_eq!((seq, a, f, b), (7, (3, 100), (40, 7), true));
         assert_eq!(MsgType::from_u32(37), Some(MsgType::GetSelectionText));
 
-        let r = encode_selection_text("hello\n世界");
-        assert_eq!(decode_selection_text(&r).unwrap(), "hello\n世界");
-        assert_eq!(decode_selection_text(&encode_selection_text("")).unwrap(), "");
+        let r = encode_selection_text(7, "hello\n世界");
+        assert_eq!(decode_selection_text(&r).unwrap(), (7, "hello\n世界".to_string()));
+        assert_eq!(
+            decode_selection_text(&encode_selection_text(9, "")).unwrap(),
+            (9, String::new())
+        );
         assert_eq!(MsgType::from_u32(38), Some(MsgType::SelectionText));
     }
 

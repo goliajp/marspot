@@ -56,8 +56,9 @@ enum SessionEvent {
     Scroll(u16),
     /// L2 wants the clipboard text under a selection (Cmd-C). L3 owns the
     /// grid + scrollback, so it serialises the text and replies with a
-    /// `SelectionText` frame. `(anchor, focus, blockwise)`.
-    GetSelection((u16, u32), (u16, u32), bool),
+    /// `SelectionText` frame. `(seq, anchor, focus, blockwise)`; `seq` is
+    /// echoed back so a late reply can't alias a newer request.
+    GetSelection(u32, (u16, u32), (u16, u32), bool),
     /// L2 resolved the macOS pasteboard (Cmd-V) and forwarded the text —
     /// the GUI-free L3 can't read the pasteboard itself. We bracketed-wrap
     /// it (per our terminal's mode) and write it to the PTY.
@@ -216,8 +217,8 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                     }
                 }
                 MsgType::GetSelectionText => {
-                    if let Ok((a, fo, bw)) = decode_get_selection_text(&f.payload) {
-                        if tx.send(SessionEvent::GetSelection(a, fo, bw)).is_err() {
+                    if let Ok((seq, a, fo, bw)) = decode_get_selection_text(&f.payload) {
+                        if tx.send(SessionEvent::GetSelection(seq, a, fo, bw)).is_err() {
                             break;
                         }
                     }
@@ -403,7 +404,7 @@ fn main() {
         let mut predicted = false;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
-        let mut selection_reqs: Vec<((u16, u32), (u16, u32), bool)> = Vec::new();
+        let mut selection_reqs: Vec<(u32, (u16, u32), (u16, u32), bool)> = Vec::new();
         let mut core_gone = false;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
@@ -412,7 +413,7 @@ fn main() {
                 SessionEvent::Scroll(off) => pending_scroll = Some(off),
                 // Each request gets its own reply (don't coalesce — L2 is
                 // blocking on a reply per request).
-                SessionEvent::GetSelection(a, f, bw) => selection_reqs.push((a, f, bw)),
+                SessionEvent::GetSelection(seq, a, f, bw) => selection_reqs.push((seq, a, f, bw)),
                 // Paste writes straight to the PTY; the echo round-trips
                 // back through the normal pump → republish (no local
                 // predict — bulk text isn't latency-sensitive like typing).
@@ -462,10 +463,10 @@ fn main() {
         // Answer any Cmd-C selection requests against the post-pump grid.
         if !selection_reqs.is_empty() {
             if let Some(w) = poke.as_mut() {
-                for (anchor, focus, blockwise) in selection_reqs {
+                for (seq, anchor, focus, blockwise) in selection_reqs {
                     let text = grid_selection_text(session.terminal().grid(), anchor, focus, blockwise)
                         .unwrap_or_default();
-                    let frame = Frame::new(MsgType::SelectionText, encode_selection_text(&text));
+                    let frame = Frame::new(MsgType::SelectionText, encode_selection_text(seq, &text));
                     if let Err(e) = frame.write_to(w) {
                         eprintln!("[session] selection reply write failed: {e}");
                         break;

@@ -19,7 +19,7 @@
 use std::os::unix::net::UnixStream;
 use std::process::Child;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
@@ -300,7 +300,7 @@ pub struct L3Spawn {
     pub child: Child,
     pub control: UnixStream,
     pub reader: GridShmReader,
-    pub selection_rx: Receiver<String>,
+    pub selection_rx: Receiver<(u32, String)>,
 }
 
 pub struct L3Conn {
@@ -351,8 +351,13 @@ pub struct L3Conn {
     /// Reply channel for `GetSelectionText`: the control-socket reader
     /// thread routes each `SelectionText` frame here, and
     /// `request_selection_text` blocks on it (Cmd-C round-trip).  L3 owns
-    /// the grid + scrollback; L2's mirror is window-only.
-    selection_rx: Receiver<String>,
+    /// the grid + scrollback; L2's mirror is window-only.  Each reply
+    /// carries the request `seq` it answers, so a late reply from a
+    /// timed-out request can't be returned for a newer one.
+    selection_rx: Receiver<(u32, String)>,
+    /// Monotonic request id stamped on each `GetSelectionText` and echoed
+    /// in the `SelectionText` reply (see `request_selection_text`).
+    selection_seq: u32,
 }
 
 impl L3Conn {
@@ -380,6 +385,7 @@ impl L3Conn {
             exited: false,
             scratch: Vec::new(),
             selection_rx: spawn.selection_rx,
+            selection_seq: 0,
         }
     }
 
@@ -550,23 +556,39 @@ impl L3Conn {
     /// timeout), or an empty selection.  Synchronous because the clipboard
     /// write needs the string now; the request is rare (a keystroke), so a
     /// brief block is fine.
+    ///
+    /// Each request carries a fresh `seq` echoed in the reply.  Under heavy
+    /// output the reader can fall behind, so a request occasionally times
+    /// out; its reply then arrives late.  Matching on `seq` (and skipping
+    /// any reply older than the one we're waiting for) guarantees we never
+    /// hand back a stale reply for the current copy — the bug where a copy
+    /// pasted the *previous* selection.
     fn request_selection_text(
         &mut self,
         anchor: (u16, u32),
         focus: (u16, u32),
         blockwise: bool,
     ) -> Option<String> {
-        // Drain any stale reply (from a prior request that timed out) so we
-        // don't return it for this one.
+        // Drain any stale replies left from earlier timed-out requests.
         while self.selection_rx.try_recv().is_ok() {}
+        self.selection_seq = self.selection_seq.wrapping_add(1);
+        let want = self.selection_seq;
         let frame = Frame::new(
             MsgType::GetSelectionText,
-            encode_get_selection_text(anchor, focus, blockwise),
+            encode_get_selection_text(want, anchor, focus, blockwise),
         );
         frame.write_to(&mut self.control).ok()?;
-        match self.selection_rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(text) if !text.is_empty() => Some(text),
-            _ => None,
+        // Wait up to ~1 s total for the reply tagged `want`, discarding any
+        // earlier-seq reply that races in ahead of it.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let (seq, text) = self.selection_rx.recv_timeout(remaining).ok()?;
+            if seq == want {
+                return if text.is_empty() { None } else { Some(text) };
+            }
+            // Older reply (a prior request's late answer) — drop and keep
+            // waiting.  A future seq can't happen (we send synchronously).
         }
     }
 

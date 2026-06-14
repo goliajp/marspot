@@ -168,7 +168,7 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
 fn l3_reader_loop(
     mut stream: UnixStream,
     tx: Sender<CoreEvent>,
-    selection_tx: Sender<String>,
+    selection_tx: Sender<(u32, String)>,
 ) {
     loop {
         match Frame::read_from(&mut stream) {
@@ -182,8 +182,10 @@ fn l3_reader_loop(
                 // blocked in `L3Conn::request_selection_text`.  A dropped
                 // receiver (request already timed out) is fine — ignore.
                 MsgType::SelectionText => {
-                    if let Ok(text) = decode_selection_text(&f.payload) {
-                        let _ = selection_tx.send(text);
+                    // `(seq, text)` — the seq lets the waiter discard a late
+                    // reply from an earlier, timed-out request.
+                    if let Ok(reply) = decode_selection_text(&f.payload) {
+                        let _ = selection_tx.send(reply);
                     }
                 }
                 _ => {}
@@ -338,7 +340,7 @@ fn spawn_l3(
     let control = unsafe { UnixStream::from_raw_fd(parent_fd) };
     let reader_stream = control.try_clone()?;
     let tx = event_tx.clone();
-    let (selection_tx, selection_rx) = std::sync::mpsc::channel::<String>();
+    let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
     std::thread::spawn(move || l3_reader_loop(reader_stream, tx, selection_tx));
 
     Ok(L3Spawn {
@@ -610,22 +612,24 @@ impl CoreApp {
     fn copy_selection_to_clipboard(&mut self) -> bool {
         let Some(sel) = self.selection else { return false };
         let idx = sel.session_idx;
-        // Serialise from L2's OWN grid (for an L3 pane, the shm mirror of
-        // the visible window) — same local path as in-process panes.  The
-        // old L2↔L3 `request_selection_text` round-trip was racy: a reply
-        // from a timed-out request aliased the next copy (you'd paste the
-        // *previous* selection, length and all) and heavy output could
-        // stall the reply past its 1 s timeout (copy nothing).  The mirror
-        // already holds exactly what's on screen — the selection's own
-        // coordinate space — so reading it locally is reliable and
-        // race-free.  Limitation: a selection dragged beyond the visible
-        // window into scrollback isn't fully in the mirror; acceptable
-        // versus the previous chaos, and the common case (copy what you
-        // see) is now correct.
-        let text = self.panes.get(idx).and_then(|pane| selection_text(pane, &sel));
+        // L3 owns the real grid + scrollback; L2's mirror is a window-only
+        // synthetic grid that `grid_selection_text` can't read back, so the
+        // text round-trips through the session process.  In-process panes
+        // read it locally.  The round-trip is made reliable by a per-request
+        // sequence id (see `request_selection_text`) so a late reply from a
+        // timed-out request can't alias the next copy.
+        let is_l3 = self.panes.get(idx).is_some_and(|p| p.is_l3());
+        let text = if is_l3 {
+            let blockwise = sel.mode == marspot::ui::SelectionMode::Blockwise;
+            self.panes
+                .get_mut(idx)
+                .and_then(|p| p.session_mut().request_selection_text(sel.anchor, sel.focus, blockwise))
+        } else {
+            self.panes.get(idx).and_then(|pane| selection_text(pane, &sel))
+        };
         match text {
-            Some(text) if !text.is_empty() => marspot::input::write_clipboard_text(&text),
-            _ => false,
+            Some(text) => marspot::input::write_clipboard_text(&text),
+            None => false,
         }
     }
 

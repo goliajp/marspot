@@ -154,7 +154,7 @@ fn main() {
         &parent,
         Frame::new(
             MsgType::GetSelectionText,
-            encode_get_selection_text((0, (ROWS - 1) as u32), (COLS - 1, 0), false),
+            encode_get_selection_text(1, (0, (ROWS - 1) as u32), (COLS - 1, 0), false),
         ),
     );
 
@@ -169,7 +169,7 @@ fn main() {
         loop {
             match Frame::read_from(&mut rdr) {
                 Ok(Some(f)) if f.msg_type == MsgType::SelectionText => {
-                    if let Ok(t) = decode_selection_text(&f.payload) {
+                    if let Ok((_seq, t)) = decode_selection_text(&f.payload) {
                         let _ = tx.send(t);
                     }
                     return;
