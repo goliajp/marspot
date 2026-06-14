@@ -86,8 +86,8 @@ fi
 if ! grep -q "FAKE_PENDING_BINARY_BYTES" "$TREE/current/marspot-shelld"; then
   fail "current/ does not contain the pending bytes"
 fi
-if ! grep -q "boot-promote: pending → current" "$STATE_DIR/stderr.log"; then
-  fail "boot-promote log line missing from stderr"
+if ! grep -q $'\tBOOT_PROMOTE_OK\t' "$STATE_DIR/logs/marspot.log" 2>/dev/null; then
+  fail "BOOT_PROMOTE_OK event missing from marspot.log"
 fi
 echo "PASS: pending → current"
 

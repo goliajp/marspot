@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
 use marspot::pty::{Pty, PtyConfig, TerminalSize};
+use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::shelld_proto::{
     decode_data, decode_hello, decode_new_session, decode_resize, decode_session_id, encode_data,
     encode_error, encode_hello_ack, encode_list_sessions_reply, encode_new_session_reply, Frame,
@@ -312,7 +313,7 @@ fn spawn_session_reader(session: Arc<ShellSession>) {
                 }
             }
             session.alive.store(false, Ordering::Release);
-            eprintln!("[shelld] session {} reader exiting", id);
+            lx_info!("session.reader.exit", "EOF on PTY master", id = id);
         })
         .expect("spawn session reader");
 }
@@ -333,23 +334,29 @@ fn boot_promote_pending() {
     let tree = match marspot::binary_tree::BinaryTree::for_shelld() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[shelld] boot-promote: tree init failed: {e}");
+            lx_warn!("boot.promote.tree_init_failed", &format!("{e}"));
             return;
         }
     };
     if !tree.has_pending() {
         return;
     }
-    eprintln!(
-        "[shelld] boot-promote: pending found at {}, promoting",
-        tree.pending().display()
+    lx_event!(
+        "BOOT_PROMOTE_BEGIN",
+        "pending found, promoting on cold start",
+        pending = tree.pending().display()
     );
     match tree.promote_pending() {
-        Ok(()) => eprintln!(
-            "[shelld] boot-promote: pending → current ({}). next launchd start will load it.",
-            tree.current().display()
+        Ok(()) => lx_event!(
+            "BOOT_PROMOTE_OK",
+            "pending → current; next launchd start loads it",
+            current = tree.current().display()
         ),
-        Err(e) => eprintln!("[shelld] boot-promote: promote_pending failed: {e}"),
+        Err(e) => lx_error!(
+            "boot.promote.failed",
+            &format!("{e}"),
+            current = tree.current().display()
+        ),
     }
 }
 
@@ -428,9 +435,10 @@ fn try_resume_handoff() -> Option<Handoff> {
     let contents = match std::fs::read_to_string(&manifest_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "[shelld] handoff manifest {} read failed: {e}; falling back to cold start",
-                manifest_path.display()
+            lx_error!(
+                "execv.handoff.manifest_read_failed",
+                &format!("falling back to cold start: {e}"),
+                manifest = manifest_path.display()
             );
             return None;
         }
@@ -444,21 +452,21 @@ fn try_resume_handoff() -> Option<Handoff> {
         let id: u64 = match parts.next().and_then(|s| s.parse().ok()) {
             Some(v) => v,
             None => {
-                eprintln!("[shelld] handoff manifest: bad id in line {:?}", line);
+                lx_error!("execv.handoff.bad_id", line);
                 return None;
             }
         };
         let fd: RawFd = match parts.next().and_then(|s| s.parse().ok()) {
             Some(v) => v,
             None => {
-                eprintln!("[shelld] handoff manifest: bad fd in line {:?}", line);
+                lx_error!("execv.handoff.bad_fd", line, id = id);
                 return None;
             }
         };
         let pid: i32 = match parts.next().and_then(|s| s.parse().ok()) {
             Some(v) => v,
             None => {
-                eprintln!("[shelld] handoff manifest: bad pid in line {:?}", line);
+                lx_error!("execv.handoff.bad_pid", line, id = id, fd = fd);
                 return None;
             }
         };
@@ -490,9 +498,13 @@ fn handoff_manifest_path() -> PathBuf {
 /// binary tree (prev → current), restores CLOEXEC, and returns the
 /// error so the caller can keep running on the current image.
 fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
+    let started = std::time::Instant::now();
     let tree = marspot::binary_tree::BinaryTree::for_shelld()?;
     if !tree.has_pending() {
-        eprintln!("[shelld] execv: SIGUSR1 received but no pending; ignoring");
+        lx_info!(
+            "execv.skip",
+            "SIGUSR1 received but no pending binary; ignoring"
+        );
         return Ok(());
     }
 
@@ -508,11 +520,23 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         v
     };
     let next_session_id = NEXT_SESSION_ID.load(Ordering::Acquire);
-    eprintln!(
-        "[shelld] execv: handoff with {} session(s); next_id={}",
-        snapshot.len(),
-        next_session_id
+    lx_event!(
+        "EXECV_HANDOFF_BEGIN",
+        "snapshotted sessions for handoff manifest",
+        pid = std::process::id(),
+        listen_fd = listen_fd,
+        n_sessions = snapshot.len(),
+        next_id = next_session_id
     );
+    for (id, fd, child_pid) in &snapshot {
+        lx_debug!(
+            "execv.handoff.session",
+            "session in manifest",
+            id = id,
+            master_fd = fd,
+            child_pid = child_pid
+        );
+    }
 
     // Write manifest. 0o600 so other users can't peek at fd numbers.
     let manifest_path = handoff_manifest_path();
@@ -534,7 +558,11 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
     // before execv; everything else above is in /tmp.
     tree.promote_pending()?;
     let target = tree.current();
-    eprintln!("[shelld] execv: target = {}", target.display());
+    lx_event!(
+        "EXECV_PROMOTE_OK",
+        "promoted pending → current",
+        target = target.display()
+    );
 
     // Mark every fd the new image needs to inherit as "survive exec".
     // Listen fd: kernel-side socket stays bound to the same socket
@@ -542,12 +570,18 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
     // Master fds: the running zsh children at the other end keep their
     // PTY pair alive — they have no idea anything happened.
     clear_cloexec(listen_fd)?;
+    let mut cloexec_master_fail = 0usize;
     for (_, fd, _) in &snapshot {
         if let Err(e) = clear_cloexec(*fd) {
             // Best-effort: if we can't clear CLOEXEC on a master fd,
             // the session won't survive the swap. Log and continue —
             // an offline session is better than a panicked daemon.
-            eprintln!("[shelld] execv: clear_cloexec(master={}) failed: {e}", fd);
+            cloexec_master_fail += 1;
+            lx_warn!(
+                "execv.clear_cloexec_failed",
+                &format!("{e}"),
+                master_fd = fd
+            );
         }
     }
 
@@ -568,7 +602,15 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         })?;
     let argv: [*const libc::c_char; 2] = [target_c.as_ptr(), std::ptr::null()];
 
-    eprintln!("[shelld] execv: invoking execv");
+    lx_event!(
+        "EXECV_INVOKE",
+        "calling libc::execv — outgoing image yields here",
+        target = target.display(),
+        listen_fd = listen_fd,
+        n_sessions = snapshot.len(),
+        cloexec_master_fail = cloexec_master_fail,
+        elapsed_us = started.elapsed().as_micros()
+    );
     // SAFETY: target_c outlives the call; on success execv does not
     // return so the borrow is irrelevant. On failure we surface the
     // errno and let the caller restore state.
@@ -576,7 +618,14 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         libc::execv(target_c.as_ptr(), argv.as_ptr());
     }
     let err = io::Error::last_os_error();
-    eprintln!("[shelld] execv failed: {err}; rolling back");
+    let errno = err.raw_os_error().unwrap_or(0);
+    lx_error!(
+        "execv.failed",
+        &format!("{err}"),
+        errno = errno,
+        target = target.display(),
+        elapsed_us = started.elapsed().as_micros()
+    );
 
     // Rollback EVERYTHING so the running image stays usable. Reverse
     // order matches the forward path:
@@ -594,9 +643,20 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         let _ = set_cloexec(*fd);
     }
     let _ = std::fs::remove_file(&manifest_path);
-    if let Err(rollback_err) = tree.rollback_to_prev() {
-        eprintln!("[shelld] execv: rollback also failed: {rollback_err}");
+    let rollback_result = tree.rollback_to_prev();
+    if let Err(rollback_err) = &rollback_result {
+        lx_error!(
+            "execv.rollback_failed",
+            &format!("{rollback_err}"),
+            errno = errno
+        );
     }
+    lx_event!(
+        "EXECV_ROLLBACK_DONE",
+        "stayed on outgoing image",
+        errno = errno,
+        rolled_back = rollback_result.is_ok()
+    );
     Err(err)
 }
 
@@ -632,7 +692,12 @@ fn rehydrate_sessions(
         let bytelog = match ByteLog::open(*id) {
             Ok(b) => Some(b),
             Err(e) => {
-                eprintln!("[shelld] handoff: bytelog open for session {id} failed: {e}");
+                lx_warn!(
+                    "execv.rehydrate.bytelog_open_failed",
+                    &format!("{e}"),
+                    id = id,
+                    master_fd = fd
+                );
                 None
             }
         };
@@ -651,7 +716,25 @@ fn rehydrate_sessions(
 }
 
 fn main() {
-    eprintln!("[shelld] starting (pid={})", std::process::id());
+    // --log-event TAG DETAIL: tiny CLI shim used by bash callers
+    // (install-shelld.sh's sup_log) so structured supervisor events
+    // emitted from shell scripts land in the same TSV stream as the
+    // daemon's own events. Initialise logx then emit one Info event
+    // and exit.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.len() >= 4 && argv[1] == "--log-event" {
+        marspot::logx::init("shelld");
+        marspot::logx::event(
+            marspot::logx::Level::Info,
+            &argv[2],
+            &argv[3],
+            &[],
+        );
+        return;
+    }
+
+    marspot::logx::init("shelld");
+    lx_event!("SHELLD_START", "daemon main started", pid = std::process::id());
 
     // Detect "we were just exec'd by the previous shelld image as part
     // of an in-place self-update". If yes, we skip bind + boot-promote
@@ -710,20 +793,23 @@ fn main() {
     // is unchanged; clients reconnecting hit us transparently).
     let raw: RawFd = match handoff.as_ref() {
         Some(h) => {
-            eprintln!(
-                "[shelld] handoff: inheriting listen fd {} and {} session(s)",
-                h.listen_fd,
-                h.sessions.len()
+            lx_event!(
+                "EXECV_RESUME_BEGIN",
+                "handoff env detected; inheriting listen fd",
+                pid = std::process::id(),
+                listen_fd = h.listen_fd,
+                n_sessions = h.sessions.len(),
+                next_id = h.next_session_id
             );
             h.listen_fd
         }
         None => {
             if let Some(parent) = sock.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!(
-                        "[shelld] failed to create cache dir {}: {}",
-                        parent.display(),
-                        e
+                    lx_error!(
+                        "bind.mkdir_failed",
+                        &format!("{e}"),
+                        dir = parent.display()
                     );
                     std::process::exit(1);
                 }
@@ -732,16 +818,16 @@ fn main() {
             let listener = match UnixListener::bind(&sock) {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("[shelld] bind {} failed: {}", sock.display(), e);
+                    lx_error!("bind.failed", &format!("{e}"), sock = sock.display());
                     std::process::exit(1);
                 }
             };
             if let Err(e) =
                 std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))
             {
-                eprintln!("[shelld] chmod {} failed: {}", sock.display(), e);
+                lx_warn!("bind.chmod_failed", &format!("{e}"), sock = sock.display());
             }
-            eprintln!("[shelld] listening on {}", sock.display());
+            lx_info!("bind.ok", "listening on socket", sock = sock.display());
             listener.into_raw_fd()
         }
     };
@@ -757,10 +843,11 @@ fn main() {
         // re-trigger doesn't try to read the same fd numbers (which by
         // then point at different files in the kernel fd table).
         let _ = std::fs::remove_file(&h.manifest_path);
-        eprintln!(
-            "[shelld] handoff: rehydrated {}/{} session(s)",
-            count,
-            h.sessions.len()
+        lx_event!(
+            "EXECV_RESUME_DONE",
+            "session rehydrate complete",
+            rehydrated = count,
+            total = h.sessions.len()
         );
     }
 
@@ -770,13 +857,27 @@ fn main() {
     let (wake_r, wake_w) = match make_self_pipe() {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("[shelld] self-pipe create failed: {e}");
+            lx_error!("self_pipe.create_failed", &format!("{e}"));
             std::process::exit(1);
         }
     };
     EXEC_WAKE_FD.store(wake_w, Ordering::Release);
 
     install_signal_handlers();
+
+    // Schedule periodic GC of cold data (rotated logs > 7d, orphan
+    // bytelogs > 1h grace, binaries/{prev>7d, quarantine>30d}, launchd
+    // shelld.{log,err} tail-trim > 16 MiB). Run one sweep right at boot
+    // so freshly-rebooted daemons don't accumulate, then every 6 h from
+    // the event loop.
+    let mut last_gc = std::time::Instant::now();
+    {
+        let live = marspot::logx::gc::LiveSet {
+            session_ids: sessions.lock().unwrap().keys().copied().collect(),
+        };
+        std::thread::spawn(move || marspot::logx::gc::sweep_full(&live));
+    }
+    let gc_interval = std::time::Duration::from_secs(6 * 3600);
 
     loop {
         if SHUTDOWN.load(Ordering::Acquire) {
@@ -786,9 +887,18 @@ fn main() {
             // do_execv_swap on success replaces this image; on failure
             // returns Err and rolls back so we keep serving.
             if let Err(e) = do_execv_swap(&sessions, raw) {
-                eprintln!("[shelld] execv self-update aborted: {e}");
+                lx_warn!("execv.aborted", &format!("{e}"));
             }
             continue;
+        }
+        // 6-hour cold-data sweep. Detached thread so the accept loop
+        // doesn't block on readdir/unlink syscalls.
+        if last_gc.elapsed() > gc_interval {
+            let live = marspot::logx::gc::LiveSet {
+                session_ids: sessions.lock().unwrap().keys().copied().collect(),
+            };
+            std::thread::spawn(move || marspot::logx::gc::sweep_full(&live));
+            last_gc = std::time::Instant::now();
         }
 
         // poll on (listen, wake) so a signal-driven wake doesn't sit
@@ -813,7 +923,7 @@ fn main() {
             if err.kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            eprintln!("[shelld] poll failed: {err}");
+            lx_error!("poll.failed", &format!("{err}"));
             break;
         }
         if pfds[1].revents != 0 {
@@ -837,7 +947,7 @@ fn main() {
                     if SHUTDOWN.load(Ordering::Acquire) {
                         break;
                     }
-                    eprintln!("[shelld] accept error (unexpected)");
+                    lx_warn!("accept.unexpected_error", "ending accept loop");
                     break;
                 }
             }
@@ -852,7 +962,7 @@ fn main() {
         unsafe { libc::close(wake_fd) };
     }
     unsafe { libc::close(wake_r) };
-    eprintln!("[shelld] shutting down");
+    lx_event!("SHELLD_STOP", "daemon shutting down");
     let _ = std::fs::remove_file(&sock);
     // Sessions table drops here, which drops each Arc<ShellSession>,
     // which drops Pty, which SIGHUPs + waits the children.
@@ -865,7 +975,7 @@ fn handle_client(stream: UnixStream, sessions: Sessions) {
     let writer_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[shelld] try_clone failed: {}", e);
+            lx_error!("client.try_clone_failed", &format!("{e}"));
             return;
         }
     };
@@ -918,7 +1028,7 @@ fn reader_loop(
             Ok(Some(f)) => f,
             Ok(None) => break,
             Err(e) => {
-                eprintln!("[shelld] read error: {}", e);
+                lx_warn!("client.read_error", &format!("{e}"));
                 let _ = out_tx.send(err_frame(1, &format!("read: {}", e)));
                 break;
             }
@@ -984,9 +1094,10 @@ fn reader_loop(
                         let bytelog = match ByteLog::open(id) {
                             Ok(b) => Some(b),
                             Err(e) => {
-                                eprintln!(
-                                    "[shelld] open bytelog for session {} failed: {} (running without replay)",
-                                    id, e
+                                lx_warn!(
+                                    "session.bytelog_open_failed",
+                                    &format!("running without replay: {e}"),
+                                    id = id
                                 );
                                 None
                             }
@@ -1040,9 +1151,10 @@ fn reader_loop(
                         attached.push((Arc::downgrade(&s), sub_id));
                         if let Some(log) = log_guard.as_ref() {
                             if let Err(e) = log.replay(id, attached_tx) {
-                                eprintln!(
-                                    "[shelld] replay session {} failed: {}",
-                                    id, e
+                                lx_warn!(
+                                    "session.replay_failed",
+                                    &format!("{e}"),
+                                    id = id
                                 );
                             }
                         }
@@ -1238,11 +1350,12 @@ fn install_signal_handlers() {
         let r1 = libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         let r2 = libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
         if r1 != 0 || r2 != 0 {
-            eprintln!(
-                "[shelld] sigaction failed: TERM={} INT={} errno={}",
-                r1,
-                r2,
-                io::Error::last_os_error()
+            lx_error!(
+                "sigaction.failed",
+                "could not install TERM/INT handlers",
+                term = r1,
+                int = r2,
+                errno = io::Error::last_os_error().raw_os_error().unwrap_or(0)
             );
         }
         let mut sa_usr1: libc::sigaction = std::mem::zeroed();
@@ -1254,9 +1367,10 @@ fn install_signal_handlers() {
         sa_usr1.sa_flags = libc::SA_RESTART;
         let r3 = libc::sigaction(libc::SIGUSR1, &sa_usr1, std::ptr::null_mut());
         if r3 != 0 {
-            eprintln!(
-                "[shelld] sigaction(SIGUSR1) failed: errno={}",
-                io::Error::last_os_error()
+            lx_error!(
+                "sigaction.usr1_failed",
+                "could not install SIGUSR1 handler",
+                errno = io::Error::last_os_error().raw_os_error().unwrap_or(0)
             );
         }
     }

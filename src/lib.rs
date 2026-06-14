@@ -12,6 +12,12 @@
 
 pub use marspot_term::*;
 
+// Macros are a separate namespace; `pub use marspot_term::*` doesn't
+// carry them across crates. Re-export each one explicitly so call sites
+// in this crate's binaries (marspot-shelld, marspot-core, marspot-shell)
+// can `use marspot::lx_info` without reaching past the facade.
+pub use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_trace, lx_warn};
+
 // GUI-coupled modules (AppKit / Metal / CoreText) — these stay here.
 pub mod app;
 pub mod font_cache;

@@ -105,12 +105,13 @@ NEW_INODE="$(stat -f '%i' "$SOCK")"
 [[ "$NEW_INODE" == "$INITIAL_INODE" ]] \
   || fail "socket inode changed ($INITIAL_INODE → $NEW_INODE); listen fd was not inherited"
 
-# Stderr trail: outgoing image must have logged the handoff; new image
-# must have logged the resume.
-grep -q "execv: invoking execv" "$STATE_DIR/stderr.log" \
-  || fail "outgoing image didn't log execv attempt"
-grep -q "handoff: inheriting listen fd" "$STATE_DIR/stderr.log" \
-  || fail "new image didn't log handoff resume"
+# Structured log must show both the outgoing image's EXECV_INVOKE and
+# the new image's EXECV_RESUME_BEGIN events on the same TSV stream.
+LOGFILE="$STATE_DIR/logs/marspot.log"
+grep -q $'\tEXECV_INVOKE\t' "$LOGFILE" 2>/dev/null \
+  || fail "outgoing image didn't emit EXECV_INVOKE"
+grep -q $'\tEXECV_RESUME_BEGIN\t' "$LOGFILE" 2>/dev/null \
+  || fail "new image didn't emit EXECV_RESUME_BEGIN"
 
 echo "PASS: SIGUSR1 → execv → new image up on same listen fd, pending consumed"
 echo "ALL PASSED"
