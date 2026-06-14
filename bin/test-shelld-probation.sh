@@ -34,13 +34,22 @@ STATE_DIR="/tmp/marspot-shelld-probtest.$$"
 PLIST="$STATE_DIR/test.plist"
 BUNDLE="$STATE_DIR/fake-bundle/marspot-shelld"
 TREE="$STATE_DIR/binaries"
-SUP_LOG="$STATE_DIR/logs/supervisor.log"
+SUP_LOG="$STATE_DIR/logs/marspot.log"
 
 export MARSPOT_STATE_DIR="$STATE_DIR"
 export MARSPOT_SHELLD_LABEL="$LABEL"
 export MARSPOT_SHELLD_PLIST="$PLIST"
 export MARSPOT_SHELLD_BIN="$BUNDLE"
 export MARSPOT_SHELLD_PROBATION_S=10
+
+# The plist's MARSPOT_SHELLD_BIN is a fake `sleep 100000` script — the
+# real shelld would refuse to install under a throwaway label. But
+# install-shelld.sh's sup_log() needs a real marspot-shelld to write
+# structured events into marspot.log. MARSPOT_LOG_BIN points at the
+# release-built one for logging only; launchctl still drives the fake.
+export MARSPOT_LOG_BIN="$ROOT/target/release/marspot-shelld"
+[[ -x "$MARSPOT_LOG_BIN" ]] \
+  || { echo "FAIL: need cargo build --release --bin marspot-shelld first" >&2; exit 1; }
 
 fail() {
   echo "FAIL: $*"
@@ -94,7 +103,7 @@ mk_daemon "$TREE/pending/marspot-shelld" good
 "$INSTALL" --apply-pending --yes >/tmp/marspot-probtest-good.out 2>&1
 rc=$?
 [[ $rc -eq 0 ]] || fail "[good] --apply-pending exited $rc (expected 0)"
-grep -q "SHELLD_UPDATE_STABLE" "$SUP_LOG" 2>/dev/null \
+grep -q $'\tSHELLD_UPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null \
   || fail "[good] no SHELLD_UPDATE_STABLE logged"
 is_running || fail "[good] daemon not running after stable update"
 [[ ! -e "$TREE/pending/marspot-shelld" ]] || fail "[good] pending/ not consumed"
@@ -112,9 +121,9 @@ mk_daemon "$TREE/pending/marspot-shelld" bad
 "$INSTALL" --apply-pending --yes >/tmp/marspot-probtest-bad.out 2>&1
 rc=$?
 [[ $rc -eq 1 ]] || fail "[bad] --apply-pending exited $rc (expected 1 on rollback)"
-grep -q "SHELLD_PROBATION_FAIL" "$SUP_LOG" 2>/dev/null \
+grep -q $'\tSHELLD_PROBATION_FAIL\t' "$SUP_LOG" 2>/dev/null \
   || fail "[bad] no SHELLD_PROBATION_FAIL logged"
-grep -q "SHELLD_ROLLBACK.*re-bootstrapped and running" "$SUP_LOG" 2>/dev/null \
+grep -q $'\tSHELLD_ROLLBACK\t.*re-bootstrapped and running' "$SUP_LOG" 2>/dev/null \
   || fail "[bad] no successful SHELLD_ROLLBACK logged"
 # The bad binary was quarantined; current/ holds the restored GOOD-OLD.
 grep -q "GOOD-OLD" "$TREE/current/marspot-shelld" 2>/dev/null \

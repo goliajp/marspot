@@ -23,7 +23,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-soak-dual-core.log
 RSS_LOG=/tmp/marspot-soak-dual-core.rss.tsv
@@ -62,7 +62,7 @@ dev_ensure_shelld || fail "sandbox shelld"
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
-> "$SUP_LOG" 2>/dev/null
+rm -f "$SUP_LOG" 2>/dev/null || true
 echo -e "phase\tt_s\tshell_rss_kib\tcores" > "$RSS_LOG"
 
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
@@ -70,10 +70,10 @@ disown
 
 # --- Boot -----------------------------------------------------------
 for _ in $(seq 1 50); do
-  grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null && break
+  grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break
   sleep 0.1
 done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
 SHELL_PID=$(pgrep -f "$SHELL_BIN( |$)" | head -1)
 [[ -n "$SHELL_PID" ]] || fail "shell not running after boot"
 sleep 1
@@ -85,7 +85,7 @@ echo "boot OK — shell pid=$SHELL_PID baseline RSS=${BASE_RSS} KiB, cores=$(cou
 start=$(date +%s)
 for i in $(seq 1 "$ITERATIONS"); do
   echo "--- swap $i/$ITERATIONS ---"
-  prev_stable=$(grep -c UPDATE_STABLE "$SUP_LOG")
+  prev_stable=$(grep -c $'\tUPDATE_STABLE\t' "$SUP_LOG")
 
   # Stage an identical "new" binary + trigger.
   mkdir -p "$TREE/pending"
@@ -107,13 +107,13 @@ for i in $(seq 1 "$ITERATIONS"); do
 
   # Wait for the swap to finalise (UPDATE_STABLE count increments).
   sw_start=$(date +%s)
-  until (( $(grep -c UPDATE_STABLE "$SUP_LOG") > prev_stable )); do
+  until (( $(grep -c $'\tUPDATE_STABLE\t' "$SUP_LOG") > prev_stable )); do
     if (( $(date +%s) - sw_start > 45 )); then
       fail "swap $i: UPDATE_STABLE never incremented within 45 s"
     fi
     sleep 1
   done
-  grep -q UPDATE_SWAP "$SUP_LOG" || fail "swap $i: UPDATE_SWAP not logged"
+  grep -q $'\tUPDATE_SWAP\t' "$SUP_LOG" || fail "swap $i: UPDATE_SWAP not logged"
 
   # Old core must be fully reaped — back to exactly one.
   for _ in $(seq 1 30); do

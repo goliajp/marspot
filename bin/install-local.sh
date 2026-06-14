@@ -34,7 +34,7 @@ MACOS="$APP/Contents/MacOS"
 PLIST="$APP/Contents/Info.plist"
 # Production state dir — the default; never set MARSPOT_STATE_DIR here.
 TREE="$HOME/Library/Caches/marspot/binaries"
-SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
+SUP_LOG="$HOME/Library/Logs/Marspot/marspot.log"
 PROD_PID_FILE="$HOME/Library/Caches/marspot/shell.pid"
 
 # Is the installed GUI shell actually running?  Uses its pid file

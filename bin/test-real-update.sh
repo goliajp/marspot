@@ -23,7 +23,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-real-update.log
 PORT=6024
@@ -87,16 +87,16 @@ dev_ensure_shelld || fail "sandbox shelld"
 dev_kill_shell_core
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
-: > "$SUP_LOG" 2>/dev/null || true
+rm -f "$SUP_LOG" 2>/dev/null || true
 MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/feed.json" \
   nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
 
 for _ in $(seq 1 50); do
-  grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null && break
+  grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break
   sleep 0.1
 done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
 echo "[2/5] boot OK"
 
 # --- 2. Updater downloads, verifies, stages ---------------------------
@@ -116,7 +116,7 @@ echo "[3/5] stage OK — updater downloaded, verified signature, staged 4 binari
 # --- 3. First trigger: shell self-update ------------------------------
 "$SHELL_BIN" --trigger >/dev/null
 START=$(date +%s)
-until grep -q SHELL_SELF_UPDATE "$SUP_LOG" 2>/dev/null; do
+until grep -q $'\tSHELL_SELF_UPDATE\t' "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 20 )); then
     fail "no SHELL_SELF_UPDATE after first trigger"
   fi
@@ -130,7 +130,7 @@ echo "[4/5] shell self-update OK — exec'd into current/marspot-shell"
 sleep 2
 "$SHELL_BIN" --trigger >/dev/null
 START=$(date +%s)
-until grep -q "CORE_SPAWN.*binaries/current/marspot-core" "$SUP_LOG" 2>/dev/null; do
+until grep -q $'\tCORE_SPAWN\t.*binaries/current/marspot-core' "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 20 )); then
     fail "core never spawned from binaries/current after second trigger"
   fi

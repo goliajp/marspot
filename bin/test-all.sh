@@ -3,7 +3,7 @@
 # Run every shell/core regression test in sequence.  Reports a
 # unified pass/fail summary at the end.  Each script is independent
 # and exits cleanly on failure, but they share state (binary tree,
-# supervisor.log, shelld daemon) so we reset between runs.
+# marspot.log, shelld daemon) so we reset between runs.
 #
 # Optional slow tests are off by default:
 #   --soak  60 s RSS soak (default cadence is 10 min)

@@ -41,11 +41,11 @@ BIN="${MARSPOT_SHELLD_BIN:-$HOME/.local/Marspot.app/Contents/MacOS/marspot-shell
 # `rm -rf` cleans up; unset → the installed app's conventional dirs.
 if [[ -n "${MARSPOT_STATE_DIR:-}" ]]; then
   BIN_TREE="$MARSPOT_STATE_DIR/binaries"
-  SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+  SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
   LOG_DIR="$MARSPOT_STATE_DIR/logs"
 else
   BIN_TREE="$HOME/Library/Caches/marspot/binaries"
-  SUP_LOG="$HOME/Library/Logs/Marspot/supervisor.log"
+  SUP_LOG="$HOME/Library/Logs/Marspot/marspot.log"
   LOG_DIR="$HOME/Library/Logs/marspot"
 fi
 LOG_OUT="$LOG_DIR/shelld.log"
@@ -57,22 +57,25 @@ LOG_ERR="$LOG_DIR/shelld.err"
 # event picks up component=shelld, pid, tid, ms timestamps, AND the
 # rotation + GC pipeline — bash can't drift away from the Rust format.
 #
-# Fall-back: if no marspot-shelld binary is reachable yet (very first
-# install before any binary exists), write the legacy supervisor.log
-# directly so we don't lose the early-install event.
+# Best-effort: if no marspot-shelld binary is reachable yet (very first
+# install before any binary exists), the event is silently dropped.
+# Every soak/integration script that used to grep the legacy
+# supervisor.log has migrated to marspot.log, so the dual-write is gone.
+#
+# $MARSPOT_LOG_BIN, when set, is a real marspot-shelld binary used
+# exclusively for event-logging — the test-shelld-probation harness sets
+# this so its fake daemon scripts at $BIN / $BIN_TREE/current/ keep
+# driving launchctl while structured events still land in marspot.log.
 sup_log() {
   local tag="$1"; shift
   local detail="$*"
-  # New stream — structured marspot.log via shelld CLI. Best-effort.
-  if [[ -x "$BIN" ]]; then
+  if [[ -n "${MARSPOT_LOG_BIN:-}" && -x "$MARSPOT_LOG_BIN" ]]; then
+    "$MARSPOT_LOG_BIN" --log-event "$tag" "$detail" >/dev/null 2>&1 || true
+  elif [[ -x "$BIN" ]]; then
     "$BIN" --log-event "$tag" "$detail" >/dev/null 2>&1 || true
   elif [[ -x "$BIN_TREE/current/marspot-shelld" ]]; then
     "$BIN_TREE/current/marspot-shelld" --log-event "$tag" "$detail" >/dev/null 2>&1 || true
   fi
-  # Legacy stream — supervisor.log TSV, until every soak/integration
-  # script grepping it has been migrated to marspot.log. Best-effort.
-  mkdir -p "$(dirname "$SUP_LOG")" 2>/dev/null
-  printf '%s\t%s\t%s\n' "$(date +%s.%N)" "$tag" "$detail" >> "$SUP_LOG" 2>/dev/null
 }
 
 # Reload the LaunchAgent so a swapped binary / changed plist takes effect.

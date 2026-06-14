@@ -24,7 +24,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-update-flow.log
 
@@ -48,16 +48,16 @@ dev_ensure_shelld || { echo "FAIL: sandbox shelld"; exit 1; }
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
-> "$SUP_LOG" 2>/dev/null
+rm -f "$SUP_LOG" 2>/dev/null || true
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
 
 # --- 1. Boot --------------------------------------------------------
 for _ in $(seq 1 50); do
-  if grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null; then break; fi
+  if grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null; then break; fi
   sleep 0.1
 done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
 PRE_CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
 [[ -n "$PRE_CORE_PID" ]] || fail "boot: no core pid"
 echo "[1/5] boot OK — core pid=$PRE_CORE_PID, HelloAck logged"
@@ -73,11 +73,11 @@ echo "[2/5] stage OK — pending/marspot-core in place"
 "$SHELL_BIN" --trigger >/dev/null
 # Wait for the SIGUSR1 entry to log.
 for _ in $(seq 1 50); do
-  if grep -q SIGUSR1 "$SUP_LOG"; then break; fi
+  if grep -q $'\tSIGUSR1\t' "$SUP_LOG"; then break; fi
   sleep 0.1
 done
-grep -q SIGUSR1 "$SUP_LOG" || fail "trigger: no SIGUSR1 entry"
-grep -q UPDATE_APPLY "$SUP_LOG" || fail "trigger: no UPDATE_APPLY"
+grep -q $'\tSIGUSR1\t' "$SUP_LOG" || fail "trigger: no SIGUSR1 entry"
+grep -q $'\tUPDATE_APPLY\t' "$SUP_LOG" || fail "trigger: no UPDATE_APPLY"
 echo "[3/5] trigger OK — SIGUSR1 → UPDATE_APPLY"
 
 # --- 4. Probation ---------------------------------------------------
@@ -86,17 +86,17 @@ echo "[3/5] trigger OK — SIGUSR1 → UPDATE_APPLY"
 # gates that, plus probation, authorise the swap.  The active core is
 # untouched throughout.
 for _ in $(seq 1 30); do
-  if grep -q "CORE_SPAWN.*binaries/current/marspot-core" "$SUP_LOG"; then break; fi
+  if grep -q $'\tCORE_SPAWN\t.*binaries/current/marspot-core' "$SUP_LOG"; then break; fi
   sleep 0.1
 done
-grep -q "CORE_SPAWN.*binaries/current/marspot-core" "$SUP_LOG" \
+grep -q $'\tCORE_SPAWN\t.*binaries/current/marspot-core' "$SUP_LOG" \
   || fail "probation: pending core never spawned from binaries/current"
 for _ in $(seq 1 50); do
-  if grep -q PENDING_SURFACE_READY "$SUP_LOG"; then break; fi
+  if grep -q $'\tPENDING_SURFACE_READY\t' "$SUP_LOG"; then break; fi
   sleep 0.1
 done
-grep -q PENDING_HELLO_ACK "$SUP_LOG" || fail "probation: pending core never HelloAck'd"
-grep -q PENDING_SURFACE_READY "$SUP_LOG" || fail "probation: pending core never SurfaceReady'd"
+grep -q $'\tPENDING_HELLO_ACK\t' "$SUP_LOG" || fail "probation: pending core never HelloAck'd"
+grep -q $'\tPENDING_SURFACE_READY\t' "$SUP_LOG" || fail "probation: pending core never SurfaceReady'd"
 NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
 [[ -n "$NEW_CORE_PID" ]] || fail "probation: pgrep didn't find the pending core process"
 echo "[4/5] probation OK — pending core pid=$NEW_CORE_PID, HelloAck'd + SurfaceReady'd"
@@ -105,13 +105,13 @@ echo "[4/5] probation OK — pending core pid=$NEW_CORE_PID, HelloAck'd + Surfac
 # Probation is 30 s; wait up to 45 with a hard upper bound.  Success is
 # the atomic swap (UPDATE_SWAP) + finalize (UPDATE_STABLE).
 START=$(date +%s)
-until grep -q UPDATE_STABLE "$SUP_LOG" 2>/dev/null; do
+until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 45 )); then
     fail "stable: UPDATE_STABLE never logged within 45 s"
   fi
   sleep 1
 done
-grep -q UPDATE_SWAP "$SUP_LOG" || fail "stable: UPDATE_SWAP (presenter swap) not logged"
+grep -q $'\tUPDATE_SWAP\t' "$SUP_LOG" || fail "stable: UPDATE_SWAP (presenter swap) not logged"
 [[ ! -f "$TREE/prev/marspot-core" ]] \
   || fail "stable: prev/ still has marspot-core (finalize_stable didn't run?)"
 [[ ! -f "$TREE/pending/marspot-core" ]] \

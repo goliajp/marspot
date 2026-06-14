@@ -18,7 +18,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 LAUNCH_LOG="$MARSPOT_STATE_DIR/shell_launches.tsv"
 MARKER=/tmp/marspot-rollback-loop-marker
@@ -63,7 +63,7 @@ reset() {
   cleanup
   rm -rf "$TREE" "$LAUNCH_LOG" "$MARKER"
   mkdir -p "$(dirname "$SUP_LOG")"
-  : > "$SUP_LOG" 2>/dev/null || true
+  rm -f "$SUP_LOG" 2>/dev/null || true
 }
 
 if [[ ! -x "$SHELL_BIN" ]]; then
@@ -85,7 +85,7 @@ stage_good_prev
 # Launch 3: threshold hit — rollback, then exec into restored prev/.
 "$SHELL_BIN" >/dev/null 2>&1
 
-grep -q 'SHELL_AUTO_ROLLBACK.*restored prev/' "$SUP_LOG" \
+grep -q $'\tSHELL_AUTO_ROLLBACK\t.*restored prev/' "$SUP_LOG" \
   || fail "case A: SHELL_AUTO_ROLLBACK (restored prev/) not logged"
 [[ -f "$TREE/quarantine/marspot-shell" ]] \
   || fail "case A: broken shell not quarantined"
@@ -110,7 +110,7 @@ nohup "$SHELL_BIN" >/dev/null 2>&1 < /dev/null &
 disown
 
 START=$(date +%s)
-until grep -q 'SHELL_AUTO_ROLLBACK.*no prev/' "$SUP_LOG" 2>/dev/null; do
+until grep -q $'\tSHELL_AUTO_ROLLBACK\t.*no prev/' "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 10 )); then
     fail "case B: SHELL_AUTO_ROLLBACK (no prev/) not logged within 10 s"
   fi

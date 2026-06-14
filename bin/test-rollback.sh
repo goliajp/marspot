@@ -18,7 +18,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-rollback.log
 
@@ -56,16 +56,16 @@ dev_ensure_shelld || fail "sandbox shelld"
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
-> "$SUP_LOG" 2>/dev/null
+rm -f "$SUP_LOG" 2>/dev/null || true
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
 
 # --- 1. Boot --------------------------------------------------------
 for _ in $(seq 1 50); do
-  if grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null; then break; fi
+  if grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null; then break; fi
   sleep 0.1
 done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
 echo "[1/4] boot OK — HelloAck logged"
 
 # Rollback only restores a previous binary if `prev/` is populated.
@@ -84,7 +84,7 @@ cp "$CORE_BIN" "$TREE/pending/marspot-core"
 # need to actually let probation expire so we have a known-good in
 # current/, ready to become prev/ on the next promote.
 START=$(date +%s)
-until grep -q UPDATE_STABLE "$SUP_LOG"; do
+until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG"; do
   if (( $(date +%s) - START > 45 )); then
     fail "first update never reached UPDATE_STABLE"
   fi
@@ -100,14 +100,14 @@ echo "[2/4] first update OK — current/ holds real binary, active pid=$ACTIVE_P
 stage_broken "$TREE/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null
 START=$(date +%s)
-until grep -q "ROLLBACK\b" "$SUP_LOG"; do
+until grep -q $'\tROLLBACK\t' "$SUP_LOG"; do
   if (( $(date +%s) - START > 20 )); then
     fail "rollback never logged within 20 s"
   fi
   sleep 0.5
 done
-grep -q UPDATE_ABORT "$SUP_LOG" || fail "UPDATE_ABORT not in log"
-grep -q "ROLLBACK\b.*prev/" "$SUP_LOG" || fail "ROLLBACK (prev/→current/) not in log"
+grep -q $'\tUPDATE_ABORT\t' "$SUP_LOG" || fail "UPDATE_ABORT not in log"
+grep -q $'\tROLLBACK\t.*prev/' "$SUP_LOG" || fail "ROLLBACK (prev/→current/) not in log"
 echo "[3/4] rollback OK — UPDATE_ABORT → ROLLBACK (prev/→current/)"
 
 # --- 4. Verify filesystem + silent rollback -------------------------

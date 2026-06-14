@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-adversarial.log
 PORT=6026
@@ -81,12 +81,12 @@ dev_ensure_shelld || fail "sandbox shelld"
 dev_kill_shell_core
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
-: > "$SUP_LOG"; : > "$RUN_LOG"
+rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
 MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/feed.json" \
   nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
-for _ in $(seq 1 50); do grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "[equal] boot HelloAck never landed"
+for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[equal] boot HelloAck never landed"
 echo "[equal] booted at v$RUNNING_VER against an equal-version feed"
 
 # The updater's first poll fires ~30 s after launch.  Wait for the
@@ -119,11 +119,11 @@ dev_kill_shell_core
 export MARSPOT_PROBATION_S=3
 dev_ensure_shelld || fail "sandbox shelld"
 dev_wipe_state
-: > "$SUP_LOG"; : > "$RUN_LOG"
+rm -f "$SUP_LOG" 2>/dev/null || true; : > "$RUN_LOG"
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
-for _ in $(seq 1 50); do grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "[concurrent] boot HelloAck never landed"
+for _ in $(seq 1 50); do grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break; sleep 0.1; done
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[concurrent] boot HelloAck never landed"
 
 mkdir -p "$TREE/pending"
 cp "$CORE_BIN" "$TREE/pending/marspot-core"
@@ -135,13 +135,13 @@ cp "$CORE_BIN" "$TREE/pending/marspot-core"
 
 # Wait for the swap to stabilise.
 START=$(date +%s)
-until grep -q UPDATE_STABLE "$SUP_LOG" 2>/dev/null; do
+until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 30 )); then fail "[concurrent] no UPDATE_STABLE"; fi
   sleep 0.3
 done
 # Let any duplicate apply attempts settle.
 sleep 2
-swaps=$(grep -c UPDATE_SWAP "$SUP_LOG" 2>/dev/null)
+swaps=$(grep -c $'\tUPDATE_SWAP\t' "$SUP_LOG" 2>/dev/null)
 [[ "$swaps" == "1" ]] || fail "[concurrent] $swaps swaps from one pending (expected exactly 1 — double-apply)"
 cores=$(pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null | wc -l | tr -d ' ')
 [[ "$cores" == "1" ]] || fail "[concurrent] $cores live cores (expected 1)"

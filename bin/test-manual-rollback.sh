@@ -18,7 +18,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 
 fail() {
@@ -52,7 +52,7 @@ for layer in shell core; do
   bin="marspot-$layer"
   good="PREV-GOOD-$layer"
   seed_layer "$layer" "$good"
-  : > "$SUP_LOG" 2>/dev/null || true
+  rm -f "$SUP_LOG" 2>/dev/null || true
 
   "$SHELL_BIN" "--rollback-$layer" >/tmp/marspot-rollback-$layer.out 2>&1
   rc=$?
@@ -68,8 +68,8 @@ for layer in shell core; do
   [[ ! -e "$TREE/prev/$bin" ]] \
     || fail "[$layer] prev/$bin still present after rollback"
   # MANUAL_ROLLBACK logged.
-  grep -q "MANUAL_ROLLBACK.*$layer" "$SUP_LOG" 2>/dev/null \
-    || fail "[$layer] no MANUAL_ROLLBACK in supervisor.log"
+  grep -q $'\tMANUAL_ROLLBACK\t'".*$layer" "$SUP_LOG" 2>/dev/null \
+    || fail "[$layer] no MANUAL_ROLLBACK in marspot.log"
   echo "[ok] --rollback-$layer: prev/ restored, bad quarantined, logged"
 done
 
@@ -85,7 +85,7 @@ rc=$?
   || fail "[no-prev] current/marspot-shell still present (should be quarantined away)"
 [[ "$(content "$TREE/quarantine/marspot-shell")" == "CURRENT-BAD-shell" ]] \
   || fail "[no-prev] bad binary not quarantined"
-grep -q "MANUAL_ROLLBACK.*bundle fallback" "$SUP_LOG" 2>/dev/null \
+grep -q $'\tMANUAL_ROLLBACK\t.*bundle fallback' "$SUP_LOG" 2>/dev/null \
   || fail "[no-prev] no bundle-fallback MANUAL_ROLLBACK logged"
 echo "[ok] --rollback-shell (no prev): quarantined, current/ empty, bundle fallback logged"
 

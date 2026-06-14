@@ -42,12 +42,16 @@ dev_kill_shell_core() {
   pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |\$)"  >/dev/null 2>&1 || true
 }
 
-# Wipe the sandbox binary tree + supervisor log (NOT sessions — a
-# running sandbox shelld owns those).  Sandbox-scoped: the production
+# Wipe the sandbox binary tree + structured marspot.log (NOT sessions —
+# a running sandbox shelld owns those).  Sandbox-scoped: the production
 # tree under ~/Library/Caches/marspot is never named here.
+#
+# `rm -f` (not `: > …`) because long-running processes hold marspot.log
+# open via logx Sinks — truncating under them races the next write and
+# can leave a sparse hole.  rm + next-open-recreates is the safe path.
 dev_wipe_state() {
   rm -rf "$MARSPOT_STATE_DIR/binaries" "$MARSPOT_STATE_DIR/shell_launches.tsv"
-  : > "$MARSPOT_STATE_DIR/logs/supervisor.log" 2>/dev/null || true
+  rm -f "$MARSPOT_STATE_DIR/logs/marspot.log" 2>/dev/null || true
 }
 
 # Bring up a sandbox shelld if one isn't already listening.  Idempotent

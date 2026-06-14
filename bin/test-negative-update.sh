@@ -32,7 +32,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-test-negative-update.log
 PORT=6025
@@ -142,7 +142,7 @@ run_case() {
   dev_kill_shell_core
   dev_wipe_state
   mkdir -p "$(dirname "$SUP_LOG")"
-  : > "$SUP_LOG" 2>/dev/null || true
+  rm -f "$SUP_LOG" 2>/dev/null || true
   : > "$RUN_LOG"
 
   MARSPOT_UPDATE_FEED="http://127.0.0.1:$PORT/$label/feed.json" \
@@ -151,10 +151,10 @@ run_case() {
 
   local i
   for i in $(seq 1 50); do
-    grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null && break
+    grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break
     sleep 0.1
   done
-  grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "[$label] boot HelloAck never landed"
+  grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "[$label] boot HelloAck never landed"
 
   # Snapshot current/ once the bootstrap has settled, BEFORE the poll
   # fires (~30 s stagger gives ample margin).
@@ -188,7 +188,7 @@ run_case() {
     || fail "[$label] binaries/current changed across a rejected poll"
 
   # Assert 4: no swap / self-update event.
-  grep -qE "UPDATE_SWAP|SHELL_SELF_UPDATE|UPDATE_STABLE" "$SUP_LOG" 2>/dev/null \
+  grep -qE $'\t(UPDATE_SWAP|SHELL_SELF_UPDATE|UPDATE_STABLE)\t' "$SUP_LOG" 2>/dev/null \
     && fail "[$label] supervisor applied an update from a rejected release"
 
   echo "    OK — rejected, nothing staged, current/ untouched"

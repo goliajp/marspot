@@ -29,7 +29,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
-SUP_LOG="$MARSPOT_STATE_DIR/logs/supervisor.log"
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 TREE="$MARSPOT_STATE_DIR/binaries"
 RUN_LOG=/tmp/marspot-soak-update-cycle.log
 CYCLES="${CYCLES:-20}"
@@ -53,16 +53,16 @@ dev_ensure_shelld || { echo "FAIL: sandbox shelld"; exit 1; }
 cleanup
 dev_wipe_state
 mkdir -p "$(dirname "$SUP_LOG")"
-: > "$SUP_LOG" 2>/dev/null
+rm -f "$SUP_LOG" 2>/dev/null || true
 nohup "$SHELL_BIN" >"$RUN_LOG" 2>&1 < /dev/null &
 disown
 
 # --- boot ------------------------------------------------------------
 for _ in $(seq 1 80); do
-  grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null && break
+  grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null && break
   sleep 0.1
 done
-grep -q HELLO_ACK "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
+grep -q $'\tHELLO_ACK\t' "$SUP_LOG" 2>/dev/null || fail "boot HelloAck never landed"
 SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null \
             || pgrep -f "$SHELL_BIN( |$)" | head -1)
 [[ -n "$SHELL_PID" ]] || fail "no shell pid"
@@ -71,7 +71,7 @@ rss_of() { ps -o rss= -p "$1" 2>/dev/null | tr -d ' '; }
 core_count() { pgrep -f "$TREE/current/marspot-core( |$)" 2>/dev/null | wc -l | tr -d ' '; }
 # grep -c already prints 0 on no match (and exits 1, which the command
 # substitution swallows) — an `|| echo 0` would double the output.
-stable_count() { grep -c UPDATE_STABLE "$SUP_LOG" 2>/dev/null; }
+stable_count() { grep -c $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; }
 quarantine_count() { ls "$TREE/quarantine" 2>/dev/null | wc -l | tr -d ' '; }
 
 RSS_START=$(rss_of "$SHELL_PID")
@@ -115,7 +115,7 @@ echo "[done] $CYCLES cycles — shell RSS ${RSS_START} → ${RSS_END} KiB"
 
 # Session never lost: the shell logged a fresh PENDING_HELLO_ACK every
 # cycle (each promoted core reattached), and the shell is still up.
-acks=$(grep -c PENDING_HELLO_ACK "$SUP_LOG" 2>/dev/null)
+acks=$(grep -c $'\tPENDING_HELLO_ACK\t' "$SUP_LOG" 2>/dev/null)
 (( acks >= CYCLES )) || fail "only $acks PENDING_HELLO_ACK for $CYCLES cycles — a swap lost its session?"
 
 # RSS growth bounded.  Allow RSS_GROWTH_PCT% end-to-end (steady-state
