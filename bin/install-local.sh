@@ -148,10 +148,15 @@ running_equiv() {
 binary_git_sha() {
   local bin="$1"
   [[ -f "$bin" ]] || { echo ""; return; }
+  # build.rs writes the sha and build ts into rodata, where the linker
+  # may store them adjacently OR separated by other field name literals
+  # ("git", "built", or the iso-8601 date) depending on the binary's
+  # particular layout. Match a leading 8-hex sha + optional `-dirty`
+  # followed by ANY of those anchors, then strip the anchor.
   strings "$bin" 2>/dev/null \
-    | grep -oE '^[0-9a-f]{8}(-dirty)?2[0-9]{3}-[0-9]{2}-[0-9]{2}T' \
+    | grep -oE '[0-9a-f]{8}(-dirty)?(git|built|2[0-9]{3}-[0-9]{2}-[0-9]{2}T)' \
     | head -1 \
-    | sed -E 's/2[0-9]{3}-.*//'
+    | sed -E 's/(git|built|2[0-9]{3}-[0-9]{2}-[0-9]{2}T)$//'
 }
 
 # A binary "changed" iff the bundle's embedded git sha differs from
