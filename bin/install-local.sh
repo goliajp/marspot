@@ -148,15 +148,14 @@ running_equiv() {
 binary_git_sha() {
   local bin="$1"
   [[ -f "$bin" ]] || { echo ""; return; }
-  # build.rs writes the sha and build ts into rodata, where the linker
-  # may store them adjacently OR separated by other field name literals
-  # ("git", "built", or the iso-8601 date) depending on the binary's
-  # particular layout. Match a leading 8-hex sha + optional `-dirty`
-  # followed by ANY of those anchors, then strip the anchor.
+  # The marspot + marspot-term crates embed a literal `MARSPOT_FP=<sha>|
+  # <ts>|END` static into the binary's rodata so this extractor is
+  # robust to linker ordering — no regex guessing where the sha lives
+  # next to. Returns just the sha portion (with optional `-dirty`).
   strings "$bin" 2>/dev/null \
-    | grep -oE '[0-9a-f]{8}(-dirty)?(git|built|2[0-9]{3}-[0-9]{2}-[0-9]{2}T)' \
+    | grep -oE 'MARSPOT_FP=[0-9a-f]{8}(-dirty)?\|' \
     | head -1 \
-    | sed -E 's/(git|built|2[0-9]{3}-[0-9]{2}-[0-9]{2}T)$//'
+    | sed -E 's/^MARSPOT_FP=//;s/\|$//'
 }
 
 # A binary "changed" iff the bundle's embedded git sha differs from

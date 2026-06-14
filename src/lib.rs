@@ -18,6 +18,23 @@ pub use marspot_term::*;
 // can `use marspot::lx_info` without reaching past the facade.
 pub use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_trace, lx_warn};
 
+/// Fingerprint string embedded into the binary's rodata so external
+/// tools can extract the git sha + build timestamp without running the
+/// binary. The unique `MARSPOT_FP=` prefix makes `strings BIN | grep`
+/// reliable regardless of how the linker arranges other strings in
+/// rodata. `#[used]` keeps the compiler / linker from stripping this
+/// even though no code reads it at runtime — `install-local.sh`
+/// extracts the value via `strings BIN | grep -oE 'MARSPOT_FP=[^|]*'`.
+#[used]
+#[unsafe(no_mangle)]
+pub static MARSPOT_FP: &str = concat!(
+    "MARSPOT_FP=",
+    env!("MARSPOT_GIT_SHA"),
+    "|",
+    env!("MARSPOT_BUILD_TS"),
+    "|END"
+);
+
 // GUI-coupled modules (AppKit / Metal / CoreText) — these stay here.
 pub mod app;
 pub mod font_cache;

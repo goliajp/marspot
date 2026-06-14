@@ -15,6 +15,22 @@
 pub mod binary_tree;
 pub mod grid;
 pub mod logx;
+
+/// Fingerprint embedded into the binary's rodata so `install-local.sh`
+/// can extract the git sha + build timestamp via `strings BIN | grep
+/// MARSPOT_FP=` without running the binary. `#[used]` keeps the linker
+/// from stripping it. Mirrors the equivalent constant in the root
+/// `marspot` crate (`src/lib.rs::MARSPOT_FP`) so binaries that link
+/// only marspot-term (notably `marspot-session`) also carry it.
+#[used]
+#[unsafe(no_mangle)]
+pub static MARSPOT_FP_TERM: &str = concat!(
+    "MARSPOT_FP=",
+    env!("MARSPOT_GIT_SHA"),
+    "|",
+    env!("MARSPOT_BUILD_TS"),
+    "|END"
+);
 pub mod grid_shm;
 pub mod input_core;
 pub mod layout;
