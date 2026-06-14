@@ -160,6 +160,7 @@ fn compress_to_gz(_src: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "compress")]
 fn path_with_suffix(p: &Path, suffix: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
     s.push(suffix);

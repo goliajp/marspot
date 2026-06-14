@@ -247,7 +247,6 @@ impl ShelldClient {
         W: Fn() + Send + Sync + 'static,
     {
         let stream = UnixStream::connect(&socket_path)?;
-        let reader_stream = stream.try_clone()?;
         let writer = Arc::new(Mutex::new(stream));
         let inboxes: Arc<Mutex<HashMap<u64, SyncSender<Chunk>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -255,17 +254,38 @@ impl ShelldClient {
         let sessions: Arc<Mutex<HashMap<u64, Arc<SessionInner>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
+        let writer_s = writer.clone();
         let inboxes_r = inboxes.clone();
         let pending_r = pending.clone();
         let sessions_r = sessions.clone();
         let wake = Arc::new(wake);
         let wake_r = wake.clone();
+        let socket_path_buf: std::path::PathBuf = socket_path.as_ref().to_path_buf();
         let reader = thread::Builder::new()
             .name("shelld-client-reader".into())
             .spawn(move || {
-                reader_loop(reader_stream, inboxes_r, pending_r, sessions_r, wake_r);
+                // The supervisor owns the read-fd lifecycle: it runs
+                // `reader_loop` until EOF / error and on disconnect
+                // attempts to reconnect to the same socket path with
+                // exponential backoff (up to ~10 s total). On a
+                // successful reconnect it re-handshakes and re-issues
+                // ATTACH for every session id still in the client's
+                // map — execv-driven shelld restarts preserve session
+                // ids + PTYs, so the bytelog replay rebuilds terminal
+                // state and the GUI never sees an "exited" blink.
+                //
+                // Only when the reconnect loop exhausts the backoff
+                // budget do we fall through to marking sessions exited.
+                supervisor_loop(
+                    socket_path_buf,
+                    writer_s,
+                    inboxes_r,
+                    pending_r,
+                    sessions_r,
+                    wake_r,
+                );
             })
-            .expect("spawn shelld-client reader");
+            .expect("spawn shelld-client supervisor");
 
         let me = Self {
             writer,
@@ -426,6 +446,109 @@ impl ShelldClient {
     }
 }
 
+/// Drives reconnect-on-EOF over the same socket path so an execv-style
+/// daemon swap doesn't observable as "all sessions exited" to the GUI.
+///
+/// Lifecycle:
+///   1. Clone a reader fd from the current writer, run `reader_loop`.
+///   2. On reader_loop return (EOF / read error) acquire the writer mutex
+///      and try to reconnect with exponential backoff (50 ms → 2 s,
+///      capped, ~10 s total budget).
+///   3. On success: swap the new stream into the writer, re-send HELLO,
+///      re-send ATTACH for every session id the client currently knows
+///      about. shelld's ATTACH path replays the bytelog, restoring
+///      terminal state. Then loop back to step 1 with the new fd.
+///   4. On exhaustion: mark every session as exited and exit the
+///      supervisor — at that point the daemon is truly gone, not just
+///      swapping images.
+fn supervisor_loop(
+    socket_path: std::path::PathBuf,
+    writer: Arc<Mutex<UnixStream>>,
+    inboxes: Arc<Mutex<HashMap<u64, SyncSender<Chunk>>>>,
+    pending: Arc<Mutex<PendingReplies>>,
+    sessions: Arc<Mutex<HashMap<u64, Arc<SessionInner>>>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+) {
+    loop {
+        let reader_stream = match writer.lock().unwrap_or_else(|e| e.into_inner()).try_clone() {
+            Ok(s) => s,
+            Err(_) => {
+                // Catastrophic — we can't even dup the stream. Give up.
+                mark_all_exited(&sessions, &wake);
+                return;
+            }
+        };
+        reader_loop(
+            reader_stream,
+            inboxes.clone(),
+            pending.clone(),
+            sessions.clone(),
+            wake.clone(),
+        );
+
+        // Reader returned → EOF or read error. Hold the writer lock for
+        // the full reconnect+rehandshake window so any in-flight
+        // `send_frame` blocks until we're back on a live stream rather
+        // than writing into a closed fd.
+        let mut w_guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+        let new_stream = match reconnect_with_backoff(&socket_path) {
+            Some(s) => s,
+            None => {
+                drop(w_guard);
+                mark_all_exited(&sessions, &wake);
+                return;
+            }
+        };
+        *w_guard = new_stream;
+        // Re-handshake. A write failure here is treated like a fresh
+        // disconnect — drop back into the reader_loop call at the top,
+        // see EOF, and re-enter reconnect.
+        let hello = Frame::new(MsgType::Hello, encode_hello(PROTO_VERSION));
+        if hello.write_to(&mut *w_guard).is_err() {
+            continue;
+        }
+        // Re-attach each session id the client thinks it still owns.
+        // shelld's ATTACH replays the bytelog over the new stream.
+        let ids: Vec<u64> = sessions.lock().unwrap().keys().copied().collect();
+        for id in &ids {
+            let f = Frame::new(MsgType::Attach, encode_session_id(*id));
+            if f.write_to(&mut *w_guard).is_err() {
+                break;
+            }
+        }
+        // Release the writer mutex so user-side send_frame calls can
+        // resume.
+        drop(w_guard);
+        // Wake the GUI so its event loop comes around and pumps the
+        // bytelog replay frames as soon as the reader thread starts
+        // forwarding them.
+        wake();
+    }
+}
+
+fn reconnect_with_backoff(path: &std::path::Path) -> Option<UnixStream> {
+    let mut backoff = Duration::from_millis(50);
+    // Total budget: 50 + 100 + 200 + 400 + 800 + 1600 + 2000 + 2000 + 2000 ≈ 9.2 s.
+    for _ in 0..9 {
+        thread::sleep(backoff);
+        if let Ok(s) = UnixStream::connect(path) {
+            return Some(s);
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(2));
+    }
+    None
+}
+
+fn mark_all_exited(
+    sessions: &Arc<Mutex<HashMap<u64, Arc<SessionInner>>>>,
+    wake: &Arc<dyn Fn() + Send + Sync>,
+) {
+    for inner in sessions.lock().unwrap().values() {
+        inner.exited.store(true, Ordering::Release);
+    }
+    wake();
+}
+
 fn reader_loop(
     mut stream: UnixStream,
     inboxes: Arc<Mutex<HashMap<u64, SyncSender<Chunk>>>>,
@@ -437,20 +560,12 @@ fn reader_loop(
         let frame = match Frame::read_from(&mut stream) {
             Ok(Some(f)) => f,
             Ok(None) => {
-                // shelld closed.  Mark every session as exited so
-                // the GUI sees them go red instead of hanging.
-                for inner in sessions.lock().unwrap().values() {
-                    inner.exited.store(true, Ordering::Release);
-                }
-                wake();
+                // EOF — supervisor decides whether to reconnect or to
+                // give up + mark sessions exited.
+                let _ = (&sessions, &wake);
                 return;
             }
-            Err(e) => {
-                eprintln!("[shelld-client] read error: {}", e);
-                for inner in sessions.lock().unwrap().values() {
-                    inner.exited.store(true, Ordering::Release);
-                }
-                wake();
+            Err(_) => {
                 return;
             }
         };
