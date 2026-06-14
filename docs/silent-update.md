@@ -1,27 +1,35 @@
 # Silent update — architecture & operations
 
-The marspot runtime ships as **three** independently-updatable
-binaries plus the per-pane L3 process.  Each has its own slot under
-`~/Library/Caches/marspot/binaries/`:
+## The four-layer split
+
+The marspot runtime is split across **four** independently-updatable
+binaries. The layer numbers (L1–L4) are the canonical names used
+throughout code, logs, docs, and operator output:
+
+| Layer | Binary | What it owns | Update policy |
+|---|---|---|---|
+| **L1** | `marspot-shell` | NSWindow, IOSurface, supervisor state machine, banner overlay, control socket | **Silent (opt-in)** — `install-local.sh --with-shell` triggers SIGUSR1 → promote + `execv` into new shell, same PID; window flashes closed→open ~100 ms; sessions survive (shelld preserves bytelogs, new shell re-attaches). Default `install-local.sh` skips L1 so no flash. |
+| **L2** | `marspot-core` | Renderer, UI dispatch, layout, session bootstrap, control-socket protocol driving — **the marspot version** (title bar shows L2's version) | **Silent (default)** — dual-core swap; new core spawns alongside, presenter switches IOSurfaces, old core exits; ~50 ms freeze, no window flash |
+| **L3** | `marspot-session` | Per-pane terminal engine: parser, grid, scrollback, shm publish, control reply | **Silent** — staged alongside core; new core boot-promotes `pending/marspot-session → current/` so the next L3 spawn picks up new bytes. `kill -USR2 <core-pid>` triggers in-place per-pane swap (idle panes silent, focused panes show a ↻ refresh affordance) |
+| **L4** | `marspot-shelld` | PTY daemon, bytelogs, session lifetime | **Silent (opt-in)** — `install-local.sh --with-shelld` → `bin/install-shelld.sh --apply-pending-execv` → SIGUSR1; shelld promotes pending + `execv` over its own image in place, **preserving the listen socket fd + every PTY master fd + every session**. PID unchanged. Bootout/bootstrap fallback (`--apply-pending`) exists for daemons that predate the SIGUSR1 handler. |
+
+Each layer carries its own semver in [`version-vector.toml`](../version-vector.toml).
+L2 is the headline marspot version; the others bump only when their
+own code surface changes (which is rare for L1/L4, periodic for L3).
+
+The on-disk slot layout is shared across all four:
 
 ```
 binaries/
 ├── current/    ← active version
-│   ├── marspot-shelld
-│   ├── marspot-shell
-│   ├── marspot-core
-│   └── marspot-session
+│   ├── marspot-shell    (L1)
+│   ├── marspot-core     (L2)
+│   ├── marspot-session  (L3)
+│   └── marspot-shelld   (L4)
 ├── prev/       ← rollback target (probation only)
 ├── pending/    ← updater drops new versions here
 └── quarantine/ ← failed promotions (kept for diagnostics)
 ```
-
-| Binary | What it owns | Update policy |
-|---|---|---|
-| `marspot-shelld` | PTY daemon, bytelogs, session lifetime | **Silent (default)** — `bin/install-shelld.sh --apply-pending-execv` sends SIGUSR1; shelld promotes pending + `execv` over its own image in place, **preserving the listen socket fd + every PTY master fd + every session**. PID is unchanged. Bootout/bootstrap fallback (`--apply-pending`) still exists for when a daemon predates the SIGUSR1 handler. |
-| `marspot-shell` | NSWindow, IOSurface, supervisor state machine, banner overlay, control socket | **Silent** — promote + `execv` into new shell, same PID; window flashes closed→open in ~100 ms; sessions survive (shelld preserves bytelogs, new shell re-attaches) |
-| `marspot-core` | Parser, terminal grid, render pipeline, input dispatch | **Silent** — dual-core swap; new core spawns alongside, presenter switches IOSurfaces, old core exits; ~50 ms freeze, no window flash |
-| `marspot-session` | Per-pane L3 (parser → grid → shm publish) | **Silent** — staged alongside core; new core boot-promotes `pending/marspot-session → current/` so the next L3 spawn picks up new bytes. `kill -USR2 <core-pid>` triggers in-place per-pane swap (idle panes silent, focused panes show a ↻ refresh affordance) |
 
 ## shelld execv self-update — what makes sessions survive
 
@@ -238,19 +246,22 @@ MARSPOT_TEST_PROFILE=release bin/test-shelld-execv-swap.sh
 
 ## Why the four-layer split
 
-- **shelld** updates in place via execv → `claude-code`,
+- **L1 marspot-shell** updates rarely (only when supervisor logic /
+  window policy / probation timing changes) → opt-in via
+  `install-local.sh --with-shell`; momentary NSWindow flash is
+  acceptable for that explicit ask, sessions resume.
+- **L2 marspot-core** updates frequently (every renderer / UI /
+  protocol change) → silent dual-core swap is the dominant path; no
+  visible flash. L2's version is THE marspot version.
+- **L3 marspot-session** is per-pane → swapped per-pane via
+  `kill -USR2 <core-pid>` on idle panes (silent); focused panes show
+  a ↻ refresh affordance for explicit user action.
+- **L4 marspot-shelld** updates in place via execv → `claude-code`,
   `tail -f`, watch loops survive every routine upgrade (the legacy
   bootout path stays as the fallback when execv isn't available).
-- **shell** updates rarely (only when supervisor logic / window
-  policy changes) → momentary window flash is acceptable; user
-  sees a one-frame transition, sessions resume.
-- **core** updates frequently (every renderer / parser change) →
-  silent dual-core swap is the dominant path; no visible flash.
-- **session** is L3 per-pane → swapped per-pane via `kill -USR2`
-  on idle panes (silent); focused panes show a ↻ refresh
-  affordance for explicit user action.
 
 The split is the load-bearing payoff of all the architecture work
-in Steps 1-8: by isolating "what owns the window" from "what
-renders into the window" from "what runs the user's shell," each
-layer's update cost reflects what it actually does.
+in Steps 1-8: by isolating "what owns the window" (L1) from "what
+renders into the window" (L2) from "what runs the user's shell" (L3)
+from "what owns the PTYs" (L4), each layer's update cost reflects
+what it actually does.

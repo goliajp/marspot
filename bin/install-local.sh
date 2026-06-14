@@ -233,14 +233,25 @@ SESSION_CHANGED=0; changed marspot-session && SESSION_CHANGED=1
 # (core) is the headline marspot version.
 print_version_vector() {
   echo "==> version vector (this build):"
+  # L1=shell, L2=core, L3=session, L4=shelld is the canonical ordering
+  # everywhere in the codebase. L2 (core) is the headline marspot
+  # version — what the title bar shows.
+  local sh co se shd
   while IFS='=' read -r key value; do
     key="$(echo "$key" | tr -d ' ')"
     value="$(echo "$value" | tr -d ' \"')"
     [[ -z "$key" || "$key" == \#* ]] && continue
     case "$key" in
-      shell|core|session|shelld) printf "      %-7s %s\n" "$key" "$value" ;;
+      shell)   sh="$value"  ;;
+      core)    co="$value"  ;;
+      session) se="$value"  ;;
+      shelld)  shd="$value" ;;
     esac
   done < "$ROOT/version-vector.toml"
+  printf "      L1 shell   %s\n" "${sh:-?}"
+  printf "      L2 core    %s   ← marspot version (title bar)\n" "${co:-?}"
+  printf "      L3 session %s\n" "${se:-?}"
+  printf "      L4 shelld  %s\n" "${shd:-?}"
 }
 print_version_vector
 
