@@ -57,6 +57,16 @@ enum SessionEvent {
     /// grid + scrollback, so it serialises the text and replies with a
     /// `SelectionText` frame. `(anchor, focus, blockwise)`.
     GetSelection((u16, u32), (u16, u32), bool),
+    /// The control socket to L2/core hit EOF — our core is gone (crash,
+    /// hang-kill, or clean exit). A freshly-booted core re-attaches the
+    /// shelld session (PTY + bytelog survive *in shelld*, kept alive with
+    /// zero subscribers) and spawns a brand-new L3 for it, so this
+    /// orphaned engine has no reader left: it must exit, not linger.
+    /// Lingering leaks one process + shm region per core restart, which
+    /// violates the "cannot get slower the longer it runs" invariant.
+    /// Standalone sessions have no control socket, so this never fires
+    /// there.
+    CoreGone,
 }
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -129,8 +139,9 @@ fn handle_key(session: &mut ShelldSession, event: MarspotKeyEvent, mods: Modifie
 /// default 3), spawn a reader thread that decodes forwarded `KeyEvent`
 /// frames and feeds them to the main loop, and return a write half so
 /// the loop can poke L2 with `GridReady` after each publish. EOF / error
-/// on the read side means L2 is gone, so the thread just exits (the
-/// loop's heartbeat + shelld wake keep the session alive regardless).
+/// on the read side means L2/core is gone, so we signal the main loop to
+/// exit (`CoreGone`): the surviving shelld session is re-attached by the
+/// next core, so an orphaned engine would only leak (see `CoreGone`).
 /// No env var → standalone, no input source, no writer.
 fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
     let fd: RawFd = match std::env::var(ENV_CONTROL_FD) {
@@ -192,7 +203,13 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                 // unknown-to-us types for now.
                 _ => {}
             },
-            Ok(None) | Err(_) => break, // L2 closed the socket
+            Ok(None) | Err(_) => {
+                // L2/core closed the socket — tell the main loop to exit
+                // so this engine doesn't outlive its core (best-effort:
+                // if the loop already went away, the send just fails).
+                let _ = tx.send(SessionEvent::CoreGone);
+                break;
+            }
         }
     });
     Some(writer)
@@ -357,6 +374,7 @@ fn main() {
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
         let mut selection_reqs: Vec<((u16, u32), (u16, u32), bool)> = Vec::new();
+        let mut core_gone = false;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
                 SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
@@ -366,7 +384,14 @@ fn main() {
                 // blocking on a reply per request).
                 SessionEvent::GetSelection(a, f, bw) => selection_reqs.push((a, f, bw)),
                 SessionEvent::Wake => {}
+                SessionEvent::CoreGone => core_gone = true,
             }
+        }
+        // Our core vanished: the shelld session lives on (re-attached by
+        // the next core), so exit rather than linger as an orphan.
+        if core_gone {
+            eprintln!("[session] L2/core gone (control EOF); exiting cleanly");
+            break;
         }
         let resized = pending_resize.is_some();
         if let Some((cols, rows)) = pending_resize {

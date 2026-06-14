@@ -261,6 +261,22 @@ fn spawn_l3(
     let parent_fd: RawFd = sp[0];
     let child_fd: RawFd = sp[1];
 
+    // CLOEXEC every fd we hold here so a *sibling* L3 spawned later (and
+    // this L3 itself, except via the dup'd well-known fds) never inherits
+    // the core end of a control socket or the shm region.  Without this,
+    // each L3 holds the core end of its own (and prior siblings')
+    // control sockets, so the socket never sees EOF when core dies — the
+    // orphaned engine can't tell its core is gone and lingers forever (a
+    // process + shm leak per core restart).  The pre_exec dup2 below
+    // re-clears CLOEXEC on the target fds 3/4, so the child still gets
+    // its control socket + region.
+    for fd in [parent_fd, child_fd, region_raw] {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        }
+    }
+
     // marspot-session lives next to marspot-core; an explicit override
     // (dev / tests) wins.
     let session_bin = match std::env::var_os("MARSPOT_SESSION_BIN") {
