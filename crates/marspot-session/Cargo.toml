@@ -15,7 +15,11 @@ name = "marspot-session"
 path = "src/main.rs"
 
 [dependencies]
-marspot-term = { path = "../marspot-term" }
+# Disable marspot-term's `compress` feature so the L3 process doesn't
+# link flate2 + miniz_oxide — those are dead weight at ~3-5 MB target
+# resident, and the per-pid session log files are bounded by rotate
+# count + age regardless of whether the rotated files are gzipped.
+marspot-term = { path = "../marspot-term", default-features = false }
 
 # Dev-only: the L3 echo probe (examples/l3_echo_probe.rs) replicates
 # L2's spawn (clear CLOEXEC on the inherited shm + control fds) to drive

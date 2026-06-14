@@ -172,6 +172,7 @@ dependencies = [
 name = "marspot-term"
 version = "0.2.3"
 dependencies = [
+ "flate2",
  "libc",
 ]
 

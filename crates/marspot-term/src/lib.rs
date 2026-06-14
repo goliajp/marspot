@@ -14,6 +14,7 @@
 
 pub mod binary_tree;
 pub mod grid;
+pub mod logx;
 pub mod grid_shm;
 pub mod input_core;
 pub mod layout;
