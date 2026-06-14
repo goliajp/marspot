@@ -51,11 +51,24 @@ fi
 LOG_OUT="$LOG_DIR/shelld.log"
 LOG_ERR="$LOG_DIR/shelld.err"
 
-# Append one event to the supervisor log so daemon updates appear
-# in the same diagnostic timeline as core / shell ones.
+# Append one event to the structured marspot.log stream so daemon-
+# install events appear on the same TSV timeline as core / shell /
+# shelld events. Routes through `marspot-shelld --log-event` so the
+# event picks up component=shelld, pid, tid, ms timestamps, AND the
+# rotation + GC pipeline — bash can't drift away from the Rust format.
+#
+# Fall-back: if no marspot-shelld binary is reachable yet (very first
+# install before any binary exists), write the legacy supervisor.log
+# directly so we don't lose the early-install event.
 sup_log() {
   local tag="$1"; shift
   local detail="$*"
+  if [[ -x "$BIN" ]]; then
+    "$BIN" --log-event "$tag" "$detail" >/dev/null 2>&1 && return
+  fi
+  if [[ -x "$BIN_TREE/current/marspot-shelld" ]]; then
+    "$BIN_TREE/current/marspot-shelld" --log-event "$tag" "$detail" >/dev/null 2>&1 && return
+  fi
   mkdir -p "$(dirname "$SUP_LOG")"
   printf '%s\t%s\t%s\n' "$(date +%s.%N)" "$tag" "$detail" >> "$SUP_LOG"
 }
