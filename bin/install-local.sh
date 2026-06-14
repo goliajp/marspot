@@ -141,10 +141,45 @@ running_equiv() {
   local bin="$1"
   if [[ -f "$TREE/current/$bin" ]]; then echo "$TREE/current/$bin"; else echo "$MACOS/$bin"; fi
 }
+# Extract the git sha embedded by build.rs into a marspot binary. The
+# rodata holds the sha and the build timestamp adjacently — pull just
+# the sha + optional -dirty marker. Empty output = unable to find one
+# (caller falls back to byte-compare).
+binary_git_sha() {
+  local bin="$1"
+  [[ -f "$bin" ]] || { echo ""; return; }
+  strings "$bin" 2>/dev/null \
+    | grep -oE '^[0-9a-f]{8}(-dirty)?2[0-9]{3}-[0-9]{2}-[0-9]{2}T' \
+    | head -1 \
+    | sed -E 's/2[0-9]{3}-.*//'
+}
+
+# A binary "changed" iff the bundle's embedded git sha differs from
+# the fresh build's, OR either side carries the -dirty marker (which
+# means an uncommitted edit — we can't know whether it's load-bearing,
+# so we err on the side of staging). If both sides are at the SAME
+# clean commit, the binary's behaviour is identical even though
+# `cmp -s` would disagree (the build timestamp embedded by build.rs
+# guarantees byte-level divergence on every recompile). Avoiding that
+# false positive is what keeps `install-local.sh` from triggering a
+# shell self-update (and the visible NSWindow flash that comes with
+# the execv) on no-op bumps.
+#
+# Fallback for binaries where strings can't locate the sha: plain
+# `cmp -s` byte-compare, preserving the old behaviour.
 changed() {
   local bin="$1" ref
   ref="$(running_equiv "$bin")"
-  [[ ! -f "$ref" ]] || ! cmp -s "$TARGET/$bin" "$ref"
+  [[ -f "$ref" ]] || return 0
+  local ref_sha tgt_sha
+  ref_sha="$(binary_git_sha "$ref")"
+  tgt_sha="$(binary_git_sha "$TARGET/$bin")"
+  if [[ -n "$ref_sha" && -n "$tgt_sha" \
+        && "$ref_sha" == "$tgt_sha" \
+        && "$ref_sha" != *-dirty ]]; then
+    return 1  # same clean commit — no update needed, no shell flash
+  fi
+  ! cmp -s "$TARGET/$bin" "$ref"
 }
 stage() {
   local bin="$1"
