@@ -57,6 +57,35 @@ sup_log() {
   printf '%s\t%s\t%s\n' "$(date +%s.%N)" "$tag" "$detail" >> "$SUP_LOG"
 }
 
+# Reload the LaunchAgent so a swapped binary / changed plist takes effect.
+# `launchctl bootout` is ASYNC: a fixed `sleep` after it races the next
+# `bootstrap`, which then fails ("service already loaded" / I/O error).
+# Under `set -e` that aborted the script with shelld booted-OUT and dead —
+# and KeepAlive can't resurrect an UNregistered agent, so the daemon
+# (and every session) stayed down until a manual re-bootstrap. (This is
+# exactly how a `--with-shelld` update bricked the live app once.)
+# Fix: bootout, POLL until the service is truly gone, then bootstrap with
+# retries. Never returns leaving the agent booted-out.
+reload_agent() {
+  local domain="gui/$(id -u)" svc="gui/$(id -u)/$LABEL" i
+  if launchctl print "$svc" >/dev/null 2>&1; then
+    launchctl bootout "$svc" 2>/dev/null || true
+    for i in $(seq 1 50); do                      # up to ~5s for it to vanish
+      launchctl print "$svc" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+  fi
+  for i in $(seq 1 30); do                        # retry bootstrap ~6s
+    if launchctl bootstrap "$domain" "$PLIST" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "error: launchctl bootstrap $LABEL failed after retries:" >&2
+  launchctl bootstrap "$domain" "$PLIST" 2>&1 | head -3 >&2
+  return 1
+}
+
 case "${1:-}" in
   --uninstall)
     if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
@@ -122,11 +151,7 @@ MSG
     cp "$BIN_TREE/current/marspot-shelld" "$BIN"
 
     # Restart the daemon.
-    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-      launchctl bootout "gui/$(id -u)/$LABEL" 2>&1 || true
-      sleep 0.5
-    fi
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    reload_agent
 
     # Probation: poll every 5 s for 30 s.  KeepAlive +
     # ThrottleInterval=5 make a crashing daemon flap through
@@ -165,11 +190,7 @@ MSG
     mv -f "$BIN_TREE/current/marspot-shelld" "$BIN_TREE/quarantine/marspot-shelld"
     mv "$BIN_TREE/prev/marspot-shelld" "$BIN_TREE/current/marspot-shelld"
     cp "$BIN_TREE/current/marspot-shelld" "$BIN"
-    if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-      launchctl bootout "gui/$(id -u)/$LABEL" 2>&1 || true
-      sleep 0.5
-    fi
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    reload_agent
     sleep 1
     if launchctl print "gui/$(id -u)/$LABEL" 2>&1 | grep -q "state = running"; then
       sup_log "SHELLD_ROLLBACK" "prev/ restored, daemon re-bootstrapped and running"
@@ -223,15 +244,10 @@ cat > "$PLIST" <<EOF
 </plist>
 EOF
 
-# Bootout first (idempotent) so a content change to the plist
-# actually takes effect.  Then bootstrap.
-if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
-  launchctl bootout "gui/$(id -u)/$LABEL" 2>&1 || true
-  # Give launchd a moment to fully tear the previous instance down
-  # before we start a new one.
-  sleep 0.5
-fi
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+# Reload so a content change to the plist (or a swapped binary) takes
+# effect — race-safe (see reload_agent: poll-until-gone + retry, never
+# leaves shelld booted-out).
+reload_agent
 
 # Verify
 sleep 1
