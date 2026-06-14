@@ -124,6 +124,13 @@ pub fn grid_selection_text(
         }
         let (col_lo, col_hi) = if blockwise {
             (block_lo, block_hi)
+        } else if top_abs == bot_abs {
+            // Single-row selection: anchor and focus sit on the same row, so
+            // `top_col`/`bot_col` are just its two ends (ordered by column,
+            // not row).  Span min..=max — using the row-spanning rule below
+            // would set col_lo=top_col(max)..col_hi=bot_col(min), an empty
+            // range, so a one-line copy silently produced nothing.
+            (top_col.min(bot_col), top_col.max(bot_col))
         } else {
             let lo = if abs == top_abs { top_col } else { 0 };
             let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
@@ -156,6 +163,50 @@ pub fn grid_selection_text(
         None
     } else {
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::grid_selection_text;
+    use crate::grid::{Cell, Grid};
+
+    fn write_row(grid: &mut Grid, row: u16, s: &str) {
+        for (c, ch) in s.chars().enumerate() {
+            grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+        }
+    }
+
+    // cell_at_view maps abs 0 → bottom grid row (rows-1).  grid_selection_text
+    // calls it with viewport_row = rows-1, so a selection abs N reads grid row
+    // rows-1-N.  Put text on the bottom row → abs 0.
+    #[test]
+    fn single_row_selection_spans_columns() {
+        let mut grid = Grid::new(10, 3);
+        write_row(&mut grid, 2, "hello");
+        // anchor/focus on the same row (abs 0), columns 0..=4.  Either order
+        // of the two ends must yield the same span — this is the case that
+        // used to collapse to an empty range and copy nothing.
+        assert_eq!(
+            grid_selection_text(&grid, (0, 0), (4, 0), false).as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            grid_selection_text(&grid, (4, 0), (0, 0), false).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn multi_row_selection_joins_with_newline() {
+        let mut grid = Grid::new(10, 3);
+        write_row(&mut grid, 1, "foo");
+        write_row(&mut grid, 2, "bar");
+        // Top row (abs 1) from its start, bottom row (abs 0) through col 2.
+        assert_eq!(
+            grid_selection_text(&grid, (0, 1), (2, 0), false).as_deref(),
+            Some("foo\nbar")
+        );
     }
 }
 
