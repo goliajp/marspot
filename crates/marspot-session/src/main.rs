@@ -25,7 +25,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use marspot_term::{lx_error, lx_event, lx_info, lx_warn};
+use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::grid_shm::{
     GridShmWriter, ENV_SHM_FD, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
 };
@@ -532,12 +532,18 @@ fn main() {
         }
 
         frame += 1;
-        // Log on any byte activity, plus a heartbeat every ~minute of
-        // idle 5 s ticks so a wedged session is visible in the log.
-        if n > 0 || frame.is_multiple_of(12) {
+        // Heartbeat is for proof-of-life on idle sessions, not for
+        // tracking byte activity — emitting on `n > 0` floods the
+        // shared marspot.log at PTY-chunk rate (thousands per second
+        // when a session is producing output), and the resulting
+        // SINK mutex pressure across all live L3 processes was the
+        // root cause of new-core HELLO timeouts during dual-core
+        // swaps. Keep heartbeat purely time-based + lx_debug so it
+        // only surfaces with MARSPOT_LOG_SESSION=debug.
+        if frame.is_multiple_of(12) {
             let g = session.terminal().grid();
             let (cc, cr) = g.cursor();
-            lx_info!(
+            lx_debug!(
                 "session.heartbeat",
                 "pump tick",
                 t_s = format!("{:.1}", start.elapsed().as_secs_f64()),
