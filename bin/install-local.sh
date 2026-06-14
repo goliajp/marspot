@@ -89,11 +89,14 @@ fi
 
 # ── 1. Build ──────────────────────────────────────────────────────
 if (( BUILD )); then
-  echo "==> building release (shell + core + shelld)"
+  echo "==> building release (shell + core + shelld + session)"
   ( cd "$ROOT" && cargo build --release \
-      --bin marspot-shell --bin marspot-core --bin marspot-shelld 2>&1 | tail -3 )
+      --bin marspot-shell --bin marspot-core --bin marspot-shelld --bin marspot-session 2>&1 | tail -3 )
 fi
-for b in marspot-shell marspot-core marspot-shelld; do
+# marspot-session is the per-pane L3 engine: core spawns it as its
+# sibling, so it must ship in the bundle (and ride updates) or L3 silently
+# falls back to the in-process grid.  Omitting it here was a real bug.
+for b in marspot-shell marspot-core marspot-shelld marspot-session; do
   [[ -x "$TARGET/$b" ]] || { echo "ERROR: $TARGET/$b missing after build" >&2; exit 1; }
 done
 
@@ -156,20 +159,26 @@ RUNNING=0; prod_shell_running && RUNNING=1
 SHELL_CHANGED=0; changed marspot-shell  && SHELL_CHANGED=1
 CORE_CHANGED=0;  changed marspot-core   && CORE_CHANGED=1
 SHELLD_CHANGED=0; changed marspot-shelld && SHELLD_CHANGED=1
+SESSION_CHANGED=0; changed marspot-session && SESSION_CHANGED=1
 
 STAGED=0
 if (( RUNNING )); then
   echo "==> staging changed binaries into the running app"
   (( SHELL_CHANGED )) && { stage marspot-shell; STAGED=1; } || echo "    marspot-shell: unchanged"
   (( CORE_CHANGED ))  && { stage marspot-core;  STAGED=1; } || echo "    marspot-core: unchanged"
+  # Session rides with the core: the freshly-spawned core boot-promotes
+  # pending/marspot-session → current/ (updater::promote_pending_session),
+  # so a changed session must be staged whenever we restart the core.
+  (( SESSION_CHANGED )) && { stage marspot-session; STAGED=1; } || echo "    marspot-session: unchanged"
 fi
 
 # ── 4. Install the bundle binaries (cold-launch fallback) ─────────
 echo "==> installing bundle binaries"
-install -m 0755 "$TARGET/marspot-shell"  "$MACOS/marspot-shell"
-install -m 0755 "$TARGET/marspot-core"   "$MACOS/marspot-core"
-install -m 0755 "$TARGET/marspot-shelld" "$MACOS/marspot-shelld"
-for b in marspot-shell marspot-core marspot-shelld; do
+install -m 0755 "$TARGET/marspot-shell"   "$MACOS/marspot-shell"
+install -m 0755 "$TARGET/marspot-core"    "$MACOS/marspot-core"
+install -m 0755 "$TARGET/marspot-shelld"  "$MACOS/marspot-shelld"
+install -m 0755 "$TARGET/marspot-session" "$MACOS/marspot-session"
+for b in marspot-shell marspot-core marspot-shelld marspot-session; do
   xattr -d com.apple.quarantine "$MACOS/$b" 2>/dev/null || true
   xattr -d com.apple.provenance "$MACOS/$b" 2>/dev/null || true
 done
@@ -184,6 +193,19 @@ fi
 
 # ── 6. Apply the silent update ────────────────────────────────────
 if (( ! RUNNING )); then
+  # `resolve_runnable` prefers binaries/current/ over the bundle, so a
+  # stale current/ from a prior update would shadow the fresh bundle we
+  # just installed and the cold-launched app would run the OLD code.
+  # Refresh current/ to the new build (all four) so the launch runs this
+  # build regardless of resolve order.
+  if [[ -d "$TREE/current" ]]; then
+    echo "==> refreshing binaries/current/ to match new bundle (was shadowing)"
+    for b in marspot-shell marspot-core marspot-shelld marspot-session; do
+      cp "$TARGET/$b" "$TREE/current/$b"
+      xattr -d com.apple.quarantine "$TREE/current/$b" 2>/dev/null || true
+      xattr -d com.apple.provenance "$TREE/current/$b" 2>/dev/null || true
+    done
+  fi
   echo "==> no running app — launching"
   open "$APP"
   echo "==> done.  Marspot started from $APP"
@@ -195,8 +217,9 @@ if (( STAGED )); then
   DEADLINE=$(( $(date +%s) + 60 )); NEXT=0
   while :; do
     left=0
-    [[ -f "$TREE/pending/marspot-shell" ]] && left=1
-    [[ -f "$TREE/pending/marspot-core"  ]] && left=1
+    [[ -f "$TREE/pending/marspot-shell"   ]] && left=1
+    [[ -f "$TREE/pending/marspot-core"    ]] && left=1
+    [[ -f "$TREE/pending/marspot-session" ]] && left=1
     (( left == 0 )) && break
     now=$(date +%s)
     (( now >= DEADLINE )) && { echo "WARN: pending/ not consumed in 60s — see marspot-shell --status" >&2; exit 1; }
