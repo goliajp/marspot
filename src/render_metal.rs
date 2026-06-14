@@ -42,6 +42,9 @@ use objc2_metal::{
     MTLResourceOptions, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
     MTLSamplerState, MTLStoreAction, MTLTexture,
 };
+use core_graphics::color_space::{kCGColorSpaceSRGB, CGColorSpace};
+use foreign_types::ForeignType;
+use objc2::msg_send;
 use objc2_app_kit::NSColor;
 use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
@@ -185,6 +188,32 @@ pub struct GlyphInstance {
 /// "more correct".
 const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
+/// Pin a `CAMetalLayer`'s colour space to sRGB.  Default (`nil`) on
+/// wide-gamut displays (P3 / Studio Display) makes ColorSync treat our
+/// 8-bit BGRA bytes as native display primaries — so the sRGB-encoded
+/// terminal colours render in the wider gamut and shift (reds read too
+/// light / off-hue).  iTerm2 and Terminal.app pin sRGB too.
+///
+/// **Every CAMetalLayer that reaches the screen MUST call this** — the
+/// standalone renderer's layer (below) AND the shell presenter's layer
+/// (`bin/marspot-shell/present.rs`).  They diverged once — the presenter
+/// was created without the pin, so the installed app rendered washed-out
+/// reds while standalone looked right — which is exactly the regression
+/// this single shared helper exists to prevent.  Route every on-screen
+/// CAMetalLayer through here; never inline the `setColorspace` again.
+pub fn pin_layer_srgb(layer: &CAMetalLayer) {
+    // SAFETY: `kCGColorSpaceSRGB` is an extern static (reading it is
+    // `unsafe`); `setColorspace` is reached via msg_send because the
+    // `colorspace` property isn't in the objc2-quartz-core binding yet.
+    unsafe {
+        let cs = CGColorSpace::create_with_name(kCGColorSpaceSRGB).expect(
+            "CGColorSpaceCreateWithName(kCGColorSpaceSRGB) cannot fail on supported macOS",
+        );
+        let cs_ptr = cs.as_ptr() as *mut c_void;
+        let _: () = msg_send![layer, setColorspace: cs_ptr];
+    }
+}
+
 const SHADER_SRC: &str = include_str!("shaders/cells.metal");
 
 /// Metal-backed renderer.  Has the pipeline state for the BG pass
@@ -324,6 +353,9 @@ impl MetalRenderer {
             layer.setGeometryFlipped(true);
             layer.setPresentsWithTransaction(true);
             layer.setOpaque(true);
+            // Pin layer colour space to sRGB (shared helper — see
+            // pin_layer_srgb; the shell presenter MUST call the same one).
+            pin_layer_srgb(&layer);
         }
 
         view.setWantsLayer(true);
