@@ -89,6 +89,11 @@ pub enum MsgType {
     MouseUp = 13,
     Scroll = 14,
     Preedit = 15,
+    /// L2 → L3: clipboard text the user pasted (Cmd-V).  The GUI-free L3
+    /// can't read the macOS pasteboard, so L2 resolves it and forwards the
+    /// already-decoded text; L3 wraps it in bracketed-paste markers (if its
+    /// terminal enabled the mode) and writes it to the PTY.
+    Paste = 16,
     // ── window state (30..=49) ──
     Focus = 30,
     Resize = 31,
@@ -150,6 +155,7 @@ impl MsgType {
             13 => MsgType::MouseUp,
             14 => MsgType::Scroll,
             15 => MsgType::Preedit,
+            16 => MsgType::Paste,
             30 => MsgType::Focus,
             31 => MsgType::Resize,
             32 => MsgType::SurfaceReady,
@@ -698,6 +704,34 @@ pub fn decode_preedit(payload: &[u8]) -> io::Result<String> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "preedit payload truncated",
+        ));
+    }
+    std::str::from_utf8(&payload[2..2 + len])
+        .map(|s| s.to_string())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// `Paste` payload: `[len u16 LE][utf8 text]` — same wire shape as Preedit.
+pub fn encode_paste(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(2 + bytes.len());
+    out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
+pub fn decode_paste(payload: &[u8]) -> io::Result<String> {
+    if payload.len() < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "paste payload < 2 bytes",
+        ));
+    }
+    let len = u16::from_le_bytes(payload[0..2].try_into().unwrap()) as usize;
+    if payload.len() < 2 + len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "paste payload truncated",
         ));
     }
     std::str::from_utf8(&payload[2..2 + len])

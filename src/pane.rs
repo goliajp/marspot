@@ -30,7 +30,7 @@ use crate::render::SessionView;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
     encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_key_event,
-    event_to_wire, Frame, MsgType,
+    encode_paste, event_to_wire, Frame, MsgType,
 };
 use crate::shelld_client::{SessionState as ShelldState, ShelldSession};
 use crate::terminal::Terminal;
@@ -121,6 +121,16 @@ impl PaneBackend {
     pub fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         if let PaneBackend::L3(c) = self {
             c.forward_key(event, mods);
+        }
+    }
+
+    /// Forward pasted clipboard text to an L3 session.  L2 resolves the
+    /// macOS pasteboard (L3 is GUI-free) and forwards the text; L3 wraps it
+    /// in bracketed-paste markers per its own terminal mode and writes the
+    /// PTY.  No-op for in-process backends — they paste via `write`.
+    pub fn forward_paste(&mut self, text: &str) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_paste(text);
         }
     }
 
@@ -491,6 +501,14 @@ impl L3Conn {
     fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         let wire = event_to_wire(event, mods);
         let frame = Frame::new(MsgType::KeyEvent, encode_key_event(&wire));
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    /// Forward pasted clipboard text; L3 bracketed-wraps it (per its own
+    /// terminal mode) and writes the PTY.  Best-effort over the control
+    /// socket.
+    fn forward_paste(&mut self, text: &str) {
+        let frame = Frame::new(MsgType::Paste, encode_paste(text));
         let _ = frame.write_to(&mut self.control);
     }
 

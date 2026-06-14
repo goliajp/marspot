@@ -33,6 +33,7 @@ use marspot_term::paths::shelld_socket;
 use marspot_term::render::grid_selection_text;
 use marspot_term::shell_proto::{
     decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
+    decode_paste,
     encode_selection_text, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::shelld_client::{SessionState, ShelldClient, ShelldSession};
@@ -57,6 +58,10 @@ enum SessionEvent {
     /// grid + scrollback, so it serialises the text and replies with a
     /// `SelectionText` frame. `(anchor, focus, blockwise)`.
     GetSelection((u16, u32), (u16, u32), bool),
+    /// L2 resolved the macOS pasteboard (Cmd-V) and forwarded the text —
+    /// the GUI-free L3 can't read the pasteboard itself. We bracketed-wrap
+    /// it (per our terminal's mode) and write it to the PTY.
+    Paste(String),
     /// The control socket to L2/core hit EOF — our core is gone (crash,
     /// hang-kill, or clean exit). A freshly-booted core re-attaches the
     /// shelld session (PTY + bytelog survive *in shelld*, kept alive with
@@ -135,6 +140,24 @@ fn handle_key(session: &mut ShelldSession, event: MarspotKeyEvent, mods: Modifie
     predicted
 }
 
+/// Write pasted text (already resolved from the macOS pasteboard by L2) to
+/// the PTY.  Wrap in bracketed-paste markers iff this terminal turned the
+/// mode on (DECSET 2004) so the receiving app treats it as a single paste
+/// rather than typed input.  No local predict — the PTY echo round-trips
+/// back through the normal pump.
+fn handle_paste(session: &mut ShelldSession, text: &str) {
+    let bracketed = session.terminal().bracketed_paste_mode();
+    let mut bytes: Vec<u8> = Vec::with_capacity(text.len() + 12);
+    if bracketed {
+        bytes.extend_from_slice(b"\x1b[200~");
+    }
+    bytes.extend_from_slice(text.as_bytes());
+    if bracketed {
+        bytes.extend_from_slice(b"\x1b[201~");
+    }
+    let _ = session.write(&bytes);
+}
+
 /// If L2 handed us a control socket (fd `MARSPOT_SHELL_CONTROL_FD`,
 /// default 3), spawn a reader thread that decodes forwarded `KeyEvent`
 /// frames and feeds them to the main loop, and return a write half so
@@ -195,6 +218,13 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                 MsgType::GetSelectionText => {
                     if let Ok((a, fo, bw)) = decode_get_selection_text(&f.payload) {
                         if tx.send(SessionEvent::GetSelection(a, fo, bw)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                MsgType::Paste => {
+                    if let Ok(text) = decode_paste(&f.payload) {
+                        if tx.send(SessionEvent::Paste(text)).is_err() {
                             break;
                         }
                     }
@@ -383,6 +413,10 @@ fn main() {
                 // Each request gets its own reply (don't coalesce — L2 is
                 // blocking on a reply per request).
                 SessionEvent::GetSelection(a, f, bw) => selection_reqs.push((a, f, bw)),
+                // Paste writes straight to the PTY; the echo round-trips
+                // back through the normal pump → republish (no local
+                // predict — bulk text isn't latency-sensitive like typing).
+                SessionEvent::Paste(text) => handle_paste(&mut session, &text),
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone => core_gone = true,
             }

@@ -695,6 +695,23 @@ impl CoreApp {
         // the grid (we re-read it on the GridReady wake).  No local write /
         // predict here.
         if pane.is_l3() {
+            // Cmd-V: L3 is GUI-free and can't read the macOS pasteboard, so
+            // L2 resolves it here and forwards the text; the session
+            // bracketed-wraps it and writes the PTY.  (Without this, Cmd-V
+            // was forwarded as a raw keystroke and silently did nothing —
+            // paste was broken the moment L3 became the default.)
+            if event.state == KeyState::Pressed
+                && modifiers.super_key()
+                && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'v'))
+            {
+                if let Some(text) = marspot::input::read_clipboard_text() {
+                    if self.panes[self.focused_idx].snap_to_live() {
+                        self.needs_render = true;
+                    }
+                    self.panes[self.focused_idx].session_mut().forward_paste(&text);
+                }
+                return;
+            }
             if self.panes[self.focused_idx].snap_to_live() {
                 self.needs_render = true;
             }
