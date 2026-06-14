@@ -193,9 +193,10 @@ fn maybe_redirect_to_current_shell() {
         .env("MARSPOT_BUNDLE_DIR", &bundle_dir)
         .exec();
     // exec only returns on failure.
-    eprintln!(
-        "[shell] redirect into {} failed: {err} — running bundle binary instead",
-        current.display()
+    lx_error!(
+        "shell.redirect_failed",
+        &format!("{err} — running bundle binary instead"),
+        target = current.display()
     );
 }
 
@@ -413,6 +414,7 @@ fn install_sigusr1_handler() {
     }
 }
 
+use marspot::{lx_error, lx_event, lx_info, lx_warn};
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
@@ -520,7 +522,11 @@ impl CoreConn {
             Err(p) => p.into_inner(), // poisoned: still try
         };
         if let Err(e) = frame.write_to(&mut *stream) {
-            eprintln!("[shell] control frame {:?} write failed: {e}", msg_type);
+            lx_warn!(
+                "shell.control_frame_write_failed",
+                &format!("{e}"),
+                msg_type = format!("{:?}", msg_type)
+            );
         }
     }
 
@@ -675,7 +681,7 @@ impl ShellApp {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[shell] current_exe failed: {e}");
+                lx_error!("shell.current_exe_failed", &format!("{e}"));
                 return None;
             }
         };
@@ -691,9 +697,9 @@ impl ShellApp {
             libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sp.as_mut_ptr())
         };
         if r != 0 {
-            eprintln!(
-                "[shell] socketpair failed: {}",
-                std::io::Error::last_os_error()
+            lx_error!(
+                "shell.socketpair_failed",
+                &format!("{}", std::io::Error::last_os_error())
             );
             return None;
         }
@@ -716,9 +722,15 @@ impl ShellApp {
             }
         }
 
-        eprintln!(
-            "[shell] spawning core: {} surface_id={surface_id} w={w_phys} h={h_phys} scale={scale} control_fd={DEFAULT_CONTROL_FD}",
-            core_bin.display()
+        lx_info!(
+            "shell.core.spawning",
+            "spawning marspot-core",
+            bin = core_bin.display(),
+            surface_id = surface_id,
+            w = w_phys,
+            h = h_phys,
+            scale = scale,
+            control_fd = DEFAULT_CONTROL_FD
         );
         let mut cmd = Command::new(&core_bin);
         cmd.env(ENV_SURFACE_ID, surface_id.to_string())
@@ -752,7 +764,12 @@ impl ShellApp {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                eprintln!("[shell] core pid={}", pid);
+                lx_event!(
+                    "CORE_SPAWN",
+                    "spawned marspot-core",
+                    pid = pid,
+                    bin = core_bin.display()
+                );
                 sup_log::log(
                     "CORE_SPAWN",
                     &format!("pid={pid} bin={}", core_bin.display()),
@@ -765,7 +782,10 @@ impl ShellApp {
                 let reader_stream = match stream.try_clone() {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("[shell] try_clone control stream failed: {e}");
+                        lx_error!(
+                            "shell.control_stream.try_clone_failed",
+                            &format!("{e}")
+                        );
                         let mut child = child;
                         let _ = child.kill();
                         let _ = child.wait();
@@ -803,7 +823,7 @@ impl ShellApp {
                 Some(conn)
             }
             Err(e) => {
-                eprintln!("[shell] spawn core failed: {e}");
+                lx_error!("shell.core.spawn_failed", &format!("{e}"));
                 unsafe {
                     libc::close(parent_fd);
                     libc::close(child_fd);
@@ -846,14 +866,21 @@ impl ShellApp {
         let (w_px, h_px) = match self.surface.as_ref() {
             Some(s) => (s.width(), s.height()),
             None => {
-                eprintln!("[shell] apply_pending_update: no displayed surface to match");
+                lx_warn!(
+                    "shell.apply_update.no_surface",
+                    "no displayed surface to match"
+                );
                 return false;
             }
         };
-        eprintln!("[shell] starting dual-core update …");
+        lx_event!("UPDATE_APPLY", "starting dual-core update");
         sup_log::log("UPDATE_APPLY", "promoting pending → current (dual-core)");
         if let Err(e) = self.binaries.promote_pending() {
-            eprintln!("[shell] promote_pending failed: {e} — leaving active core untouched");
+            lx_event!(
+                "UPDATE_FAIL",
+                "promote_pending failed; leaving active core untouched",
+                error = format!("{e}")
+            );
             sup_log::log("UPDATE_FAIL", &format!("promote_pending: {e}"));
             return false;
         }
@@ -866,7 +893,11 @@ impl ShellApp {
                 s
             }
             Err(e) => {
-                eprintln!("[shell] apply_pending_update: IOSurface::create failed: {e}");
+                lx_event!(
+                    "UPDATE_FAIL",
+                    "pending IOSurface::create failed",
+                    error = format!("{e}")
+                );
                 sup_log::log("UPDATE_FAIL", &format!("surface create: {e}"));
                 self.rollback_binary("surface create failed");
                 return false;
@@ -876,7 +907,7 @@ impl ShellApp {
         let conn = match self.spawn_core(new_surface.id(), w_px, h_px, scale) {
             Some(c) => c,
             None => {
-                eprintln!("[shell] apply_pending_update: spawn pending core failed");
+                lx_event!("UPDATE_FAIL", "spawn pending core failed");
                 sup_log::log("UPDATE_FAIL", "spawn pending core");
                 new_surface.decrement_use();
                 self.rollback_binary("spawn pending core failed");
@@ -925,7 +956,11 @@ impl ShellApp {
                 // Swap failed — keep the active core + its surface, kill
                 // the pending core, and roll the binary back.  The user
                 // never saw anything change.
-                eprintln!("[shell] promote swap_surface failed: {e} — keeping active core");
+                lx_event!(
+                    "UPDATE_FAIL",
+                    "promote swap_surface failed; keeping active core",
+                    error = format!("{e}")
+                );
                 sup_log::log("UPDATE_FAIL", &format!("swap_surface: {e}"));
                 new_surface.decrement_use();
                 conn.shutdown();
@@ -952,11 +987,14 @@ impl ShellApp {
         match self.binaries.finalize_stable() {
             Ok(()) => sup_log::log("UPDATE_STABLE", "dual-core swap; prev/ deleted"),
             Err(e) => {
-                eprintln!("[shell] finalize_stable failed: {e}");
+                lx_event!("FINALIZE_FAIL", "finalize_stable failed", error = format!("{e}"));
                 sup_log::log("FINALIZE_FAIL", &format!("{e}"));
             }
         }
-        eprintln!("[shell] dual-core swap complete — pending promoted to active");
+        lx_event!(
+            "UPDATE_SWAP",
+            "dual-core swap complete — pending promoted to active"
+        );
         sup_log::log("UPDATE_SWAP", "presenter → new surface; pending → active");
     }
 
@@ -971,7 +1009,7 @@ impl ShellApp {
         let PendingUpdate { conn, surface, .. } = pending;
         conn.shutdown();
         surface.decrement_use();
-        eprintln!("[shell] aborting pending update: {reason}");
+        lx_event!("UPDATE_ABORT", "aborting pending update", reason = reason);
         sup_log::log("UPDATE_ABORT", reason);
         self.rollback_binary(reason);
     }
@@ -982,15 +1020,15 @@ impl ShellApp {
     fn rollback_binary(&self, reason: &str) {
         match self.binaries.rollback_to_prev() {
             Ok(true) => {
-                eprintln!("[shell] rolled back to prev/ ({reason})");
+                lx_event!("ROLLBACK", "rolled back to prev/", reason = reason);
                 sup_log::log("ROLLBACK", "prev/ → current/");
             }
             Ok(false) => {
-                eprintln!("[shell] no prev to roll back to ({reason})");
+                lx_event!("ROLLBACK_NOOP", "no prev/ to restore", reason = reason);
                 sup_log::log("ROLLBACK_NOOP", "no prev/ to restore");
             }
             Err(e) => {
-                eprintln!("[shell] rollback_to_prev failed: {e}");
+                lx_event!("ROLLBACK_FAIL", "rollback_to_prev failed", error = format!("{e}"));
                 sup_log::log("ROLLBACK_FAIL", &format!("{e}"));
             }
         }
@@ -1015,13 +1053,20 @@ impl ShellApp {
         if !shell_tree.has_pending() {
             return false;
         }
-        eprintln!("[shell] applying pending shell self-update …");
+        lx_event!(
+            "SHELL_UPDATE_APPLY",
+            "applying pending shell self-update"
+        );
         sup_log::log(
             "SHELL_UPDATE_APPLY",
             "promoting pending/marspot-shell → current/",
         );
         if let Err(e) = shell_tree.promote_pending() {
-            eprintln!("[shell] shell promote_pending failed: {e}");
+            lx_event!(
+                "SHELL_UPDATE_FAIL",
+                "shell promote_pending failed",
+                error = format!("{e}")
+            );
             sup_log::log("SHELL_UPDATE_FAIL", &format!("promote: {e}"));
             return false;
         }
@@ -1043,7 +1088,10 @@ impl ShellApp {
         }
         let target = shell_tree.current();
         if !target.exists() {
-            eprintln!("[shell] post-promote current/marspot-shell missing — aborting exec");
+            lx_event!(
+                "SHELL_UPDATE_FAIL",
+                "post-promote current/marspot-shell missing — aborting exec"
+            );
             sup_log::log("SHELL_UPDATE_FAIL", "post-promote current missing");
             return false;
         }
@@ -1072,7 +1120,12 @@ impl ShellApp {
             .env("MARSPOT_RESTORE_FRAME", format!("{fx},{fy},{fw},{fh}"))
             .exec();
         // exec only returns on failure.
-        eprintln!("[shell] exec {} failed: {err}", target.display());
+        lx_event!(
+            "SHELL_UPDATE_FAIL",
+            "exec into current/marspot-shell failed",
+            target = target.display(),
+            error = format!("{err}")
+        );
         sup_log::log("SHELL_UPDATE_FAIL", &format!("exec: {err}"));
         false
     }
@@ -1100,7 +1153,7 @@ impl ShellApp {
         if let Some(p) = self.presenter.as_mut() {
             let scale = ctx.scale();
             if let Err(e) = p.set_banner(want, scale) {
-                eprintln!("[shell] set_banner failed: {e}");
+                lx_warn!("shell.set_banner_failed", &format!("{e}"));
                 return;
             }
         }
@@ -1125,10 +1178,11 @@ impl ShellApp {
         );
         if self.crashes.len() > MAX_CRASHES_IN_WINDOW {
             self.auto_restart_disabled = true;
-            eprintln!(
-                "[shell] crash budget exceeded ({} in {} s) → auto-restart disabled until manual intervention",
-                self.crashes.len(),
-                CRASH_WINDOW.as_secs()
+            lx_event!(
+                "BUDGET_EXCEEDED",
+                "crash budget exceeded; auto-restart disabled until manual intervention",
+                count = self.crashes.len(),
+                window_s = CRASH_WINDOW.as_secs()
             );
             sup_log::log(
                 "BUDGET_EXCEEDED",
@@ -1179,7 +1233,10 @@ impl ShellApp {
                         );
                     }
                     Err(e) => {
-                        eprintln!("[shell] restart handshake IOSurface::create failed: {e}");
+                        lx_error!(
+                            "shell.restart_handshake.iosurface_create_failed",
+                            &format!("{e}")
+                        );
                     }
                 }
             }
@@ -1212,11 +1269,17 @@ impl ShellApp {
             // died — abandon the unproven pending core and restore the
             // user's core from current/.
             if self.pending.is_some() {
-                eprintln!("[shell] active core died mid-update → aborting pending update");
+                lx_event!(
+                    "CORE_GONE",
+                    "active core died mid-update → aborting pending update"
+                );
                 self.abort_pending_update("active core exited during pending update");
                 self.sup_state = SupervisorState::Idle;
             } else {
-                eprintln!("[shell] active core exited unexpectedly → restarting");
+                lx_event!(
+                    "CORE_GONE",
+                    "active core exited unexpectedly → restarting"
+                );
             }
             self.restart_core(ctx);
             return;
@@ -1235,9 +1298,10 @@ impl ShellApp {
             .map(|c| !c.hello_acked && c.spawned_at.elapsed() > HELLO_TIMEOUT)
             .unwrap_or(false);
         if hello_timed_out {
-            eprintln!(
-                "[shell] core failed to HelloAck within {} s → killing",
-                HELLO_TIMEOUT.as_secs()
+            lx_event!(
+                "HELLO_TIMEOUT",
+                "core failed to HelloAck → killing",
+                timeout_s = HELLO_TIMEOUT.as_secs()
             );
             self.record_crash();
             self.restart_core(ctx);
@@ -1267,9 +1331,10 @@ impl ShellApp {
             .map(|c| c.hello_acked && now.duration_since(c.last_pong_at) > PONG_DEADLINE)
             .unwrap_or(false);
         if pong_timed_out {
-            eprintln!(
-                "[shell] no PONG for {} s → core hung; SIGKILL + restart",
-                PONG_DEADLINE.as_secs()
+            lx_event!(
+                "PONG_TIMEOUT",
+                "no PONG → core hung; SIGKILL + restart",
+                deadline_s = PONG_DEADLINE.as_secs()
             );
             self.record_crash();
             self.restart_core(ctx);
@@ -1283,7 +1348,10 @@ impl ShellApp {
             if matches!(self.sup_state, SupervisorState::Idle) {
                 self.apply_pending_update(ctx);
             } else {
-                eprintln!("[shell] SIGUSR1 ignored — supervisor not idle");
+                lx_warn!(
+                    "shell.sigusr1.ignored_not_idle",
+                    "SIGUSR1 ignored — supervisor not idle"
+                );
             }
         }
 
@@ -1401,8 +1469,11 @@ impl ShellApp {
         let pending_id = self.pending_surface.as_ref().map(|s| s.id());
         let matches = pending_id == Some(id);
         if !matches {
-            eprintln!(
-                "[shell] SurfaceReady(id={id}) ignored — pending_id={pending_id:?}"
+            lx_warn!(
+                "shell.surface_ready.id_mismatch",
+                "SurfaceReady ignored — id does not match pending",
+                id = id,
+                pending_id = format!("{pending_id:?}")
             );
             return;
         }
@@ -1412,7 +1483,7 @@ impl ShellApp {
         };
         if let Some(p) = self.presenter.as_mut() {
             if let Err(e) = p.swap_surface(&new_surface) {
-                eprintln!("[shell] swap_surface failed: {e}");
+                lx_error!("shell.swap_surface_failed", &format!("{e}"));
                 new_surface.decrement_use();
                 return;
             }
@@ -1420,7 +1491,11 @@ impl ShellApp {
         if let Some(old) = self.surface.take() {
             old.decrement_use();
         }
-        eprintln!("[shell] presenter now displaying surface id={id}");
+        lx_info!(
+            "shell.presenter.surface_swapped",
+            "presenter now displaying new surface",
+            id = id
+        );
         self.surface = Some(new_surface);
         self.first_frame_ready = true;
     }
@@ -1436,11 +1511,14 @@ impl ShellApp {
                     if let Some(c) = self.active.as_mut() {
                         c.hello_acked = true;
                     }
-                    eprintln!("[shell] HelloAck v={v} — core handshake OK");
+                    lx_event!("HELLO_ACK", "core handshake OK", v = v);
                     sup_log::log("HELLO_ACK", &format!("v={v}"));
                 } else {
-                    eprintln!(
-                        "[shell] HelloAck v={v} disagrees with our v={PROTO_VERSION}; killing core"
+                    lx_event!(
+                        "HELLO_MISMATCH",
+                        "HelloAck disagrees with shell version; killing core",
+                        core_v = v,
+                        shell_v = PROTO_VERSION
                     );
                     sup_log::log("HELLO_MISMATCH", &format!("core_v={v} shell_v={PROTO_VERSION}"));
                     // Kill the child but keep the conn — `spawned_at` and
@@ -1482,7 +1560,11 @@ impl ShellApp {
                 if let Some(p) = self.pending.as_mut() {
                     if p.surface.id() == id {
                         p.surface_ready = true;
-                        eprintln!("[shell] pending core SurfaceReady(id={id})");
+                        lx_event!(
+                            "PENDING_SURFACE_READY",
+                            "pending core SurfaceReady",
+                            id = id
+                        );
                         sup_log::log("PENDING_SURFACE_READY", &format!("id={id}"));
                     }
                 }
@@ -1492,12 +1574,17 @@ impl ShellApp {
                     if let Some(p) = self.pending.as_mut() {
                         p.conn.hello_acked = true;
                     }
-                    eprintln!("[shell] pending core HelloAck v={v}");
+                    lx_event!("PENDING_HELLO_ACK", "pending core HelloAck", v = v);
                     sup_log::log("PENDING_HELLO_ACK", &format!("v={v}"));
                 } else {
                     // Version mismatch — kill the pending child; the next
                     // poll_pending_update tick sees child==None and aborts.
-                    eprintln!("[shell] pending core HelloAck v={v} mismatches v={PROTO_VERSION}");
+                    lx_event!(
+                        "PENDING_HELLO_MISMATCH",
+                        "pending core HelloAck version mismatch",
+                        core_v = v,
+                        shell_v = PROTO_VERSION
+                    );
                     sup_log::log("PENDING_HELLO_MISMATCH", &format!("core_v={v}"));
                     if let Some(p) = self.pending.as_mut() {
                         if let Some(mut child) = p.conn.child.take() {
@@ -1531,7 +1618,12 @@ impl MarspotApp for ShellApp {
         let surface = match IOSurface::create(w_px, h_px) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[shell] IOSurface::create({w_px}, {h_px}) failed: {e}");
+                lx_error!(
+                    "shell.resumed.iosurface_create_failed",
+                    &format!("{e}"),
+                    w = w_px,
+                    h = h_px
+                );
                 ctx.exit();
                 return;
             }
@@ -1541,7 +1633,7 @@ impl MarspotApp for ShellApp {
         let presenter = match ShellPresenter::new(ctx.ns_view(), scale as f32, &surface) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[shell] ShellPresenter::new failed: {e}");
+                lx_error!("shell.resumed.presenter_new_failed", &format!("{e}"));
                 ctx.exit();
                 return;
             }
@@ -1650,7 +1742,7 @@ impl MarspotApp for ShellApp {
                 self.send(MsgType::Resize, encode_resize(new_id, w_phys, h_phys, scale));
             }
             Err(e) => {
-                eprintln!("[shell] resize IOSurface::create failed: {e}");
+                lx_error!("shell.resize.iosurface_create_failed", &format!("{e}"));
             }
         }
         ctx.request_redraw();
@@ -1747,7 +1839,7 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                 }
             }
             Err(e) => {
-                eprintln!("[shell] control reader error: {e}");
+                lx_error!("shell.control_reader.error", &format!("{e}"));
                 return;
             }
         }
@@ -1821,11 +1913,13 @@ Usage:\n\
         _ => {}
     }
 
-    eprintln!(
-        "marspot-shell {} (git {} built {})",
-        env!("CARGO_PKG_VERSION"),
-        option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
-        option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown")
+    lx_event!(
+        "STARTUP",
+        "marspot-shell starting",
+        version = env!("CARGO_PKG_VERSION"),
+        git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
+        build_ts = option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown"),
+        pid = std::process::id()
     );
     sup_log::log(
         "STARTUP",

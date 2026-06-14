@@ -25,6 +25,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use marspot_term::{lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::grid_shm::{
     GridShmWriter, ENV_SHM_FD, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
 };
@@ -172,7 +173,12 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
         Ok(s) => match s.parse() {
             Ok(fd) => fd,
             Err(_) => {
-                eprintln!("[session] bad {ENV_CONTROL_FD}={s:?}; ignoring control socket");
+                lx_warn!(
+                    "session.control_fd.parse_failed",
+                    "bad control fd env; ignoring",
+                    env_var = ENV_CONTROL_FD,
+                    value = s
+                );
                 return None;
             }
         },
@@ -185,11 +191,15 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
     let writer = match stream.try_clone() {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("[session] control socket try_clone failed: {e}");
+            lx_error!(
+                "session.control_socket.try_clone_failed",
+                &format!("{e}"),
+                fd = fd
+            );
             return None;
         }
     };
-    eprintln!("[session] control socket on fd {fd}");
+    lx_info!("session.control_socket.attached", "control socket fd inherited", fd = fd);
     let mut reader = stream;
     std::thread::spawn(move || loop {
         match Frame::read_from(&mut reader) {
@@ -271,26 +281,44 @@ fn setup_shm() -> (GridShmWriter, u16, u16) {
     match std::env::var(ENV_SHM_FD) {
         Ok(s) => {
             let fd: RawFd = s.parse().unwrap_or_else(|_| {
-                eprintln!("[session] bad {ENV_SHM_FD}={s:?}");
+                lx_error!(
+                    "session.shm_fd.parse_failed",
+                    "bad shm fd env",
+                    env_var = ENV_SHM_FD,
+                    value = s
+                );
                 std::process::exit(1);
             });
             let owned = unsafe { OwnedFd::from_raw_fd(fd) };
             let w = GridShmWriter::from_fd(owned).unwrap_or_else(|e| {
-                eprintln!("[session] grid_shm from_fd({fd}) failed: {e}");
+                lx_error!(
+                    "session.grid_shm.from_fd_failed",
+                    &format!("{e}"),
+                    fd = fd
+                );
                 std::process::exit(1);
             });
             let (c, r) = (w.cols(), w.rows());
-            eprintln!("[session] grid framebuffer from inherited fd {fd} ({c}x{r})");
+            lx_info!(
+                "session.grid_shm.attached",
+                "grid framebuffer from inherited fd",
+                fd = fd,
+                cols = c,
+                rows = r
+            );
             (w, c, r)
         }
         Err(_) => {
             let w = GridShmWriter::create(INITIAL_COLS, INITIAL_ROWS).unwrap_or_else(|e| {
-                eprintln!("[session] grid_shm create failed: {e}");
+                lx_error!("session.grid_shm.create_failed", &format!("{e}"));
                 std::process::exit(1);
             });
-            eprintln!(
-                "[session] grid framebuffer self-created (shm fd {}) ({INITIAL_COLS}x{INITIAL_ROWS})",
-                w.fd()
+            lx_info!(
+                "session.grid_shm.self_created",
+                "grid framebuffer self-created",
+                fd = w.fd(),
+                cols = INITIAL_COLS,
+                rows = INITIAL_ROWS
             );
             (w, INITIAL_COLS, INITIAL_ROWS)
         }
@@ -298,11 +326,13 @@ fn setup_shm() -> (GridShmWriter, u16, u16) {
 }
 
 fn main() {
-    eprintln!(
-        "marspot-session {} (git {}) pid={}",
-        env!("CARGO_PKG_VERSION"),
-        option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
-        std::process::id()
+    marspot_term::logx::init("session");
+    lx_event!(
+        "SESSION_BOOT",
+        "marspot-session starting",
+        version = env!("CARGO_PKG_VERSION"),
+        git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
+        pid = std::process::id()
     );
 
     // Event-driven wake: one channel carries both shelld byte/EOF wakes
@@ -315,11 +345,15 @@ fn main() {
     };
 
     let sock = shelld_socket();
-    eprintln!("[session] connecting to shelld at {}", sock.display());
+    lx_info!(
+        "session.shelld.connecting",
+        "connecting to shelld",
+        socket = sock.display()
+    );
     let client = match ShelldClient::connect(&sock, wake) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[session] shelld connect failed: {e}");
+            lx_error!("session.shelld.connect_failed", &format!("{e}"));
             std::process::exit(1);
         }
     };
@@ -345,14 +379,21 @@ fn main() {
         .and_then(|s| s.parse().ok());
     let session = match want {
         Some(id) => {
-            eprintln!("[session] attaching L2-assigned session id={id}");
+            lx_info!(
+                "session.attach.assigned",
+                "attaching L2-assigned session",
+                session_id = id
+            );
             client.attach(id, cols, rows)
         }
         None => {
             let existing: Vec<SessionInfo> = client
                 .list_sessions()
                 .unwrap_or_else(|e| {
-                    eprintln!("[session] list_sessions failed: {e} — starting fresh");
+                    lx_warn!(
+                        "session.list_sessions_failed",
+                        &format!("{e} — starting fresh")
+                    );
                     Vec::new()
                 })
                 .into_iter()
@@ -360,24 +401,34 @@ fn main() {
                 .collect();
             match existing.first() {
                 Some(s) => {
-                    eprintln!("[session] standalone: attaching first live session id={}", s.session_id);
+                    lx_info!(
+                        "session.attach.standalone_existing",
+                        "standalone: attaching first live session",
+                        session_id = s.session_id
+                    );
                     client.attach(s.session_id, cols, rows)
                 }
                 None => {
-                    eprintln!("[session] standalone: no live session; creating a fresh one");
+                    lx_info!(
+                        "session.attach.standalone_fresh",
+                        "standalone: no live session; creating fresh"
+                    );
                     client.new_session(cols, rows, "")
                 }
             }
         }
     };
     let mut session = session.unwrap_or_else(|e| {
-        eprintln!("[session] session setup failed: {e}");
+        lx_error!("session.setup_failed", &format!("{e}"));
         std::process::exit(1);
     });
-    eprintln!(
-        "[session] driving session id={} pid={} ({cols}x{rows})",
-        session.id(),
-        session.child_pid()
+    lx_event!(
+        "SESSION_DRIVING",
+        "driving session",
+        session_id = session.id(),
+        child_pid = session.child_pid(),
+        cols = cols,
+        rows = rows
     );
 
     // Input source + L2 wake channel: L2 forwards keystrokes over the
@@ -394,7 +445,7 @@ fn main() {
             Ok(ev) => Some(ev),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => {
-                eprintln!("[session] event channel closed; exiting");
+                lx_event!("SESSION_EXIT", "event channel closed; exiting");
                 break;
             }
         };
@@ -425,7 +476,7 @@ fn main() {
         // Our core vanished: the shelld session lives on (re-attached by
         // the next core), so exit rather than linger as an orphan.
         if core_gone {
-            eprintln!("[session] L2/core gone (control EOF); exiting cleanly");
+            lx_event!("CORE_GONE", "L2/core gone (control EOF); exiting cleanly");
             break;
         }
         let resized = pending_resize.is_some();
@@ -434,7 +485,12 @@ fn main() {
             // Terminal reflows; the next publish carries the new dims, and
             // L2's reader picks them up from the header with no remap.
             if let Err(e) = session.resize(cols, rows) {
-                eprintln!("[session] resize to {cols}x{rows} failed: {e}");
+                lx_warn!(
+                    "session.resize_failed",
+                    &format!("{e}"),
+                    cols = cols,
+                    rows = rows
+                );
             }
         }
         // A scroll changes which window we publish even with no new output.
@@ -450,7 +506,7 @@ fn main() {
         if session.is_exited() {
             session.pump();
             publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
-            eprintln!("[session] session exited; exiting cleanly");
+            lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
             break;
         }
         // Republish on PTY output, a local echo that painted ahead of it,
@@ -468,7 +524,7 @@ fn main() {
                         .unwrap_or_default();
                     let frame = Frame::new(MsgType::SelectionText, encode_selection_text(seq, &text));
                     if let Err(e) = frame.write_to(w) {
-                        eprintln!("[session] selection reply write failed: {e}");
+                        lx_warn!("session.selection_reply_failed", &format!("{e}"));
                         break;
                     }
                 }
@@ -481,12 +537,16 @@ fn main() {
         if n > 0 || frame.is_multiple_of(12) {
             let g = session.terminal().grid();
             let (cc, cr) = g.cursor();
-            eprintln!(
-                "[session] t={:.1}s pumped={n} grid={}x{} cursor=({cc},{cr}) state={}",
-                start.elapsed().as_secs_f64(),
-                g.cols(),
-                g.rows(),
-                state_str(session.state()),
+            lx_info!(
+                "session.heartbeat",
+                "pump tick",
+                t_s = format!("{:.1}", start.elapsed().as_secs_f64()),
+                pumped = n,
+                cols = g.cols(),
+                rows = g.rows(),
+                cursor_col = cc,
+                cursor_row = cr,
+                state = state_str(session.state())
             );
         }
     }
