@@ -1929,9 +1929,14 @@ fn push_sidebar(
 /// changes on every silent update — the header renders it as visible
 /// proof the new core landed.
 pub fn version_label() -> String {
+    // L2 (core) is the canonical marspot version — the title bar
+    // displays it, since the renderer is what users actually interact
+    // with. L1 (shell) and L3 (session) carry their own versions
+    // separately (see version-vector.toml) but those are operator-
+    // facing diagnostic info, not the headline.
     format!(
         "Marspot v{} ({})",
-        env!("CARGO_PKG_VERSION"),
+        env!("MARSPOT_VERSION_CORE"),
         env!("MARSPOT_GIT_SHA"),
     )
 }

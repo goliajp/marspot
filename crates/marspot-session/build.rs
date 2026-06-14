@@ -1,9 +1,8 @@
-// Mirror of the root crate's build.rs — emits MARSPOT_GIT_SHA and
-// MARSPOT_BUILD_TS so `crates/marspot-session` (which links
-// marspot-term but NOT the root marspot crate) can embed the same
-// fingerprint into its binary's rodata. install-local.sh then has a
-// reliable way to compare a fresh build against the running session
-// binary and skip-stage when both are at the same clean commit.
+// Mirror of marspot-term/build.rs: emits MARSPOT_GIT_SHA,
+// MARSPOT_BUILD_TS, and the four MARSPOT_VERSION_* env vars so the
+// session binary's `env!()` calls resolve. cargo's `rustc-env` is set
+// per-crate, so depending on marspot-term (which has its own build.rs)
+// doesn't propagate into this crate's compilation env.
 
 use std::process::Command;
 
@@ -35,8 +34,6 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=MARSPOT_BUILD_TS={}", build_ts);
 
-    // Per-layer version vector (read from workspace root). Each binary
-    // that links marspot-term embeds its own layer's version.
     let vv = std::fs::read_to_string("../../version-vector.toml").unwrap_or_default();
     for layer in ["shell", "core", "session", "shelld"] {
         let version = vv
@@ -53,9 +50,9 @@ fn main() {
             version
         );
     }
-    println!("cargo:rerun-if-changed=../../version-vector.toml");
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../version-vector.toml");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/packed-refs");
     println!("cargo:rerun-if-changed=../../.git/index");

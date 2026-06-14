@@ -16,7 +16,10 @@ use marspot::ui::{
     SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL,
 };
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+// Standalone marspot is essentially L2 (core) packaged with its own
+// NSWindow rather than going through the shell+core split — so its
+// user-visible version is the L2 / core version.
+pub const VERSION: &str = env!("MARSPOT_VERSION_CORE");
 pub const GIT_SHA: &str = env!("MARSPOT_GIT_SHA");
 /// Default window in logical points; physical pixels = logical × scale.
 /// 2100×1300 means a 3×3 grid fits ~75 cols × 30 rows per cell with

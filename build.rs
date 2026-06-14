@@ -41,6 +41,27 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=MARSPOT_BUILD_TS={}", build_ts);
 
+    // Per-layer version vector. Each binary embeds its own layer's
+    // version via `env!("MARSPOT_VERSION_<LAYER>")`; the title bar shows
+    // the L2 (core) version as THE marspot version.
+    let vv = std::fs::read_to_string("version-vector.toml").unwrap_or_default();
+    for layer in ["shell", "core", "session", "shelld"] {
+        let version = vv
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter_map(|l| l.split_once('='))
+            .find(|(k, _)| k.trim() == layer)
+            .map(|(_, v)| v.trim().trim_matches('"').to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        println!(
+            "cargo:rustc-env=MARSPOT_VERSION_{}={}",
+            layer.to_uppercase(),
+            version
+        );
+    }
+    println!("cargo:rerun-if-changed=version-vector.toml");
+
     // Re-run when the commit changes.  `.git/HEAD` only changes on a
     // branch *switch* — a commit on the current branch leaves HEAD
     // (`ref: refs/heads/<branch>`) byte-identical and just moves the ref

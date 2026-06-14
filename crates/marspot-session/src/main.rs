@@ -330,7 +330,8 @@ fn main() {
     lx_event!(
         "SESSION_BOOT",
         "marspot-session starting",
-        version = env!("CARGO_PKG_VERSION"),
+        version = env!("MARSPOT_VERSION_SESSION"),
+        marspot_version = env!("MARSPOT_VERSION_CORE"),
         git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
         pid = std::process::id()
     );

@@ -228,6 +228,22 @@ CORE_CHANGED=0;  changed marspot-core   && CORE_CHANGED=1
 SHELLD_CHANGED=0; changed marspot-shelld && SHELLD_CHANGED=1
 SESSION_CHANGED=0; changed marspot-session && SESSION_CHANGED=1
 
+# Print the version vector from version-vector.toml so the operator
+# can correlate this install with which layers actually moved. L2
+# (core) is the headline marspot version.
+print_version_vector() {
+  echo "==> version vector (this build):"
+  while IFS='=' read -r key value; do
+    key="$(echo "$key" | tr -d ' ')"
+    value="$(echo "$value" | tr -d ' \"')"
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    case "$key" in
+      shell|core|session|shelld) printf "      %-7s %s\n" "$key" "$value" ;;
+    esac
+  done < "$ROOT/version-vector.toml"
+}
+print_version_vector
+
 STAGED=0
 if (( RUNNING )); then
   echo "==> staging changed binaries into the running app"

@@ -249,11 +249,15 @@ fn cmd_rollback(which: &str) -> i32 {
 }
 
 fn print_version() {
+    // marspot-shell shows its own L1 version. Operators reading
+    // --version want to know "what supervisor / NSWindow owner am I
+    // running?" — distinct from "what marspot am I on?" (= L2 / core).
     println!(
-        "marspot-shell {} (git {} built {})",
-        env!("CARGO_PKG_VERSION"),
+        "marspot-shell {} (git {} built {})  — marspot {} (core)",
+        env!("MARSPOT_VERSION_SHELL"),
         option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
-        option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown")
+        option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown"),
+        env!("MARSPOT_VERSION_CORE")
     );
 }
 
@@ -1925,7 +1929,8 @@ Usage:\n\
     lx_event!(
         "STARTUP",
         "marspot-shell starting",
-        version = env!("CARGO_PKG_VERSION"),
+        version_shell = env!("MARSPOT_VERSION_SHELL"),
+        version_core = env!("MARSPOT_VERSION_CORE"),
         git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
         build_ts = option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown"),
         pid = std::process::id()
@@ -1933,8 +1938,9 @@ Usage:\n\
     sup_log::log(
         "STARTUP",
         &format!(
-            "version={} git={} pid={}",
-            env!("CARGO_PKG_VERSION"),
+            "shell={} core={} git={} pid={}",
+            env!("MARSPOT_VERSION_SHELL"),
+            env!("MARSPOT_VERSION_CORE"),
             option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
             std::process::id()
         ),
@@ -1951,7 +1957,7 @@ Usage:\n\
     // the next focus-loss trigger.  Returns a flag we don't currently
     // consult (Step 5's `BinaryTree::has_pending` is the source of
     // truth); kept alive for the eventual UI affordance.
-    let _update_flag = marspot::updater::spawn(env!("CARGO_PKG_VERSION").to_string());
+    let _update_flag = marspot::updater::spawn(env!("MARSPOT_VERSION_CORE").to_string());
 
     // Frame restore: the predecessor shell (self-update execv) hands
     // its exact window frame over via env so this process reopens in

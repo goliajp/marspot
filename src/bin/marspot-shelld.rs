@@ -752,7 +752,14 @@ fn main() {
     }
 
     marspot::logx::init("shelld");
-    lx_event!("SHELLD_START", "daemon main started", pid = std::process::id());
+    lx_event!(
+        "SHELLD_START",
+        "daemon main started",
+        version_shelld = env!("MARSPOT_VERSION_SHELLD"),
+        version_core = env!("MARSPOT_VERSION_CORE"),
+        git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
+        pid = std::process::id()
+    );
 
     // Detect "we were just exec'd by the previous shelld image as part
     // of an in-place self-update". If yes, we skip bind + boot-promote

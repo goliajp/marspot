@@ -1176,7 +1176,7 @@ fn main() {
     lx_event!(
         "CORE_BOOT",
         "marspot-core started",
-        version = env!("CARGO_PKG_VERSION"),
+        version = env!("MARSPOT_VERSION_CORE"),
         git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
         built = option_env!("MARSPOT_BUILD_TS").unwrap_or("unknown"),
         pid = std::process::id()
