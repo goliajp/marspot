@@ -1206,6 +1206,12 @@ const HEADER_VERSION_FG: (f32, f32, f32) = (0.62, 0.68, 0.80);
 /// warm amber so it reads as an actionable "update ready" control against
 /// the dim title text (target #4 step 5b).
 const REFRESH_ICON_FG: (f32, f32, f32) = (0.95, 0.74, 0.30);
+/// Claudecode brand coral — matches the orange the claude CLI uses
+/// for its own prompt + spinner glyphs.  Plugin badges currently
+/// hard-code this so the right-side decoration reads as "claudecode"
+/// at a glance; if more plugins land we'll move colour into the wire
+/// format alongside the text.
+const PLUGIN_BADGE_FG: (f32, f32, f32) = (0.85, 0.47, 0.34);
 // Selected-row BG kept as an alias of the cell-focused tone so
 // sidebar selection and 9-grid focus read as the same affordance.
 const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
@@ -2173,7 +2179,7 @@ fn push_session(
                     view.right_badge,
                     badge_x,
                     label_baseline_y,
-                    [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+                    [PLUGIN_BADGE_FG.0, PLUGIN_BADGE_FG.1, PLUGIN_BADGE_FG.2, 1.0],
                     cell_w,
                     cell_h,
                     ascent,
