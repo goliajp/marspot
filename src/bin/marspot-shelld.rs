@@ -421,10 +421,11 @@ fn set_cloexec(fd: RawFd) -> io::Result<()> {
 struct Handoff {
     listen_fd: RawFd,
     next_session_id: u64,
-    /// Per-session (id, master_fd, child_pid). Bytelog path is derived
-    /// from `session_id` (same `marspot::paths::sessions_dir()` layout
-    /// either side of the swap).
-    sessions: Vec<(u64, RawFd, i32)>,
+    /// Per-session (id, master_fd, child_pid, title).  Bytelog path is
+    /// derived from `session_id` (same `marspot::paths::sessions_dir()`
+    /// layout either side of the swap).  Title persists user-set
+    /// labels across the execv (v=2 SET_TITLE).
+    sessions: Vec<(u64, RawFd, i32, String)>,
     /// Where the manifest file lived. New image deletes it after
     /// consuming so a future re-exec doesn't read stale state.
     manifest_path: PathBuf,
@@ -469,7 +470,7 @@ fn try_resume_handoff() -> Option<Handoff> {
             return None;
         }
     };
-    let mut sessions: Vec<(u64, RawFd, i32)> = Vec::new();
+    let mut sessions: Vec<(u64, RawFd, i32, String)> = Vec::new();
     for line in contents.lines() {
         if line.is_empty() {
             continue;
@@ -496,7 +497,10 @@ fn try_resume_handoff() -> Option<Handoff> {
                 return None;
             }
         };
-        sessions.push((id, fd, pid));
+        // Title column added in v=2.  Older manifests (pre-2026-06-15)
+        // had no 4th column — treat missing as "no custom title".
+        let title = parts.next().unwrap_or("").to_string();
+        sessions.push((id, fd, pid, title));
     }
     Some(Handoff {
         listen_fd,
@@ -536,11 +540,17 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
 
     // Snapshot sessions BEFORE we touch the tree, so a failure
     // promoting doesn't leave us with a half-written manifest.
-    let snapshot: Vec<(u64, RawFd, i32)> = {
+    // Includes the user-set title so it survives the execv handoff
+    // — without this the v=2 SetTitle persistence is silently
+    // undone any time shelld self-updates.
+    let snapshot: Vec<(u64, RawFd, i32, String)> = {
         let g = sessions.lock().unwrap();
-        let mut v: Vec<(u64, RawFd, i32)> = g
+        let mut v: Vec<(u64, RawFd, i32, String)> = g
             .values()
-            .map(|s| (s.id, s.pty.raw_master(), s.pty.child_pid()))
+            .map(|s| {
+                let title = s.title.lock().unwrap().clone();
+                (s.id, s.pty.raw_master(), s.pty.child_pid(), title)
+            })
             .collect();
         v.sort_by_key(|t| t.0);
         v
@@ -554,17 +564,21 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         n_sessions = snapshot.len(),
         next_id = next_session_id
     );
-    for (id, fd, child_pid) in &snapshot {
+    for (id, fd, child_pid, title) in &snapshot {
         lx_debug!(
             "execv.handoff.session",
             "session in manifest",
             id = id,
             master_fd = fd,
-            child_pid = child_pid
+            child_pid = child_pid,
+            title_len = title.len()
         );
     }
 
     // Write manifest. 0o600 so other users can't peek at fd numbers.
+    // Tabs and newlines in title would collide with the line/column
+    // delimiters; commit_title_edit already trims whitespace but be
+    // defensive — replace any sneak-in with a space.
     let manifest_path = handoff_manifest_path();
     {
         let mut f = OpenOptions::new()
@@ -573,8 +587,12 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
             .write(true)
             .mode(0o600)
             .open(&manifest_path)?;
-        for (id, fd, pid) in &snapshot {
-            writeln!(f, "{}\t{}\t{}", id, fd, pid)?;
+        for (id, fd, pid, title) in &snapshot {
+            let safe_title: String = title
+                .chars()
+                .map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            writeln!(f, "{}\t{}\t{}\t{}", id, fd, pid, safe_title)?;
         }
         f.sync_all().ok();
     }
@@ -597,7 +615,7 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
     // PTY pair alive — they have no idea anything happened.
     clear_cloexec(listen_fd)?;
     let mut cloexec_master_fail = 0usize;
-    for (_, fd, _) in &snapshot {
+    for (_, fd, _, _) in &snapshot {
         if let Err(e) = clear_cloexec(*fd) {
             // Best-effort: if we can't clear CLOEXEC on a master fd,
             // the session won't survive the swap. Log and continue —
@@ -665,7 +683,7 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         std::env::remove_var("MARSPOT_SHELLD_NEXT_SESSION_ID");
     }
     let _ = set_cloexec(listen_fd);
-    for (_, fd, _) in &snapshot {
+    for (_, fd, _, _) in &snapshot {
         let _ = set_cloexec(*fd);
     }
     let _ = std::fs::remove_file(&manifest_path);
@@ -710,10 +728,10 @@ fn make_self_pipe() -> io::Result<(RawFd, RawFd)> {
 /// skipped rather than aborting the whole daemon.
 fn rehydrate_sessions(
     sessions: &Sessions,
-    snapshot: &[(u64, RawFd, i32)],
+    snapshot: &[(u64, RawFd, i32, String)],
 ) -> usize {
     let mut count = 0usize;
-    for (id, fd, pid) in snapshot {
+    for (id, fd, pid, title) in snapshot {
         let pty = Arc::new(Pty::from_raw_master(*fd, *pid));
         let bytelog = match ByteLog::open(*id) {
             Ok(b) => Some(b),
@@ -733,7 +751,7 @@ fn rehydrate_sessions(
             subscribers: Mutex::new(Vec::new()),
             alive: AtomicBool::new(true),
             bytelog: Mutex::new(bytelog),
-            title: Mutex::new(String::new()),
+            title: Mutex::new(title.clone()),
         });
         sessions.lock().unwrap().insert(*id, session.clone());
         spawn_session_reader(session);
