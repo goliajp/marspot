@@ -404,6 +404,11 @@ struct CoreApp {
     /// Per-shelld-session right-side badge, set by L1 plugins via
     /// `MsgType::PaneBadge`.  Empty string clears via removal.
     pane_badges: std::collections::HashMap<u64, String>,
+    /// Frames queued by event handlers (mouse_down etc.) to be
+    /// written to the control socket by the main loop.  Avoids
+    /// reaching the writer from inside the trait callbacks where
+    /// the borrow tree doesn't permit it.
+    pending_to_shell: Vec<(MsgType, Vec<u8>)>,
     selection: Option<Selection>,
     selection_dragging: bool,
     layout_mode: LayoutMode,
@@ -862,6 +867,62 @@ impl CoreApp {
         }
     }
 
+    /// Hit-test the right-side plugin badge's clickable prefix (text
+    /// before the first space).  Returns the pane index when a click
+    /// at (x_phys, y_phys) hits the underlined prefix; None
+    /// otherwise.  Mirrors the geometry the renderer uses in
+    /// `render_metal::build_instances` so a visual hit lines up with
+    /// the logical one.
+    fn hit_test_pane_badge_prefix(
+        &self,
+        x_phys: f64,
+        y_phys: f64,
+    ) -> Option<usize> {
+        let (cell_w, _) = self.renderer.cell_dims();
+        let cell_w = cell_w as f64;
+        let padding = self.layout.padding;
+        let title_h = self.layout.cell_title_h;
+        let cell_count = self.layout.cells.len();
+        for (i, p) in self.panes.iter().enumerate().take(cell_count) {
+            let sid = match p.shelld_session_id() {
+                Some(s) => s,
+                None => continue,
+            };
+            let badge = match self.pane_badges.get(&sid) {
+                Some(b) if !b.is_empty() => b,
+                _ => continue,
+            };
+            let prefix = match badge.split(' ').next() {
+                Some(p) if !p.is_empty() => p,
+                _ => continue,
+            };
+            let badge_chars = badge.chars().count() as f64;
+            let prefix_chars = prefix.chars().count() as f64;
+            let rect = &self.layout.cells[i];
+            // Match the renderer's `reserved` carve-out for the
+            // refresh affordance on the focused pane with a staged
+            // update.
+            let reserved = if p.update_pending() && i == self.focused_idx {
+                cell_w * 1.5
+            } else {
+                0.0
+            };
+            let badge_x = rect.x + rect.w - padding - reserved - badge_chars * cell_w;
+            let prefix_lo = badge_x;
+            let prefix_hi = prefix_lo + prefix_chars * cell_w;
+            let y_lo = rect.y_top;
+            let y_hi = y_lo + title_h;
+            if x_phys >= prefix_lo
+                && x_phys < prefix_hi
+                && y_phys >= y_lo
+                && y_phys < y_hi
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
     fn mouse_down(&mut self, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
         let layout = &self.layout;
         let layout_btn_hit = layout.hit_test_layout_button(x_phys, y_phys);
@@ -927,6 +988,21 @@ impl CoreApp {
         if let Some(i) = refresh_hit {
             if self.panes.get(i).is_some_and(|p| p.update_pending()) {
                 self.begin_pane_swap(i);
+                return;
+            }
+        }
+
+        // Plugin badge prefix click: route to L1 (the plugin owns
+        // what the prefix means and what cycling it does).  Sits in
+        // the same title strip as title-edit + refresh; check here
+        // before title-edit so a click on `P<n>` doesn't drop the
+        // pane into rename mode.
+        if let Some(i) = self.hit_test_pane_badge_prefix(x_phys, y_phys) {
+            if let Some(sid) = self.panes.get(i).and_then(|p| p.shelld_session_id())
+            {
+                let payload = marspot::shell_proto::encode_pane_badge_clicked(sid);
+                self.pending_to_shell
+                    .push((MsgType::PaneBadgeClicked, payload));
                 return;
             }
         }
@@ -1538,6 +1614,7 @@ fn main() {
         editing_title: None,
         title_edit_buffer: String::new(),
         pane_badges: std::collections::HashMap::new(),
+        pending_to_shell: Vec::new(),
         selection: None,
         selection_dragging: false,
         layout_mode,
@@ -1729,6 +1806,18 @@ fn main() {
             if let Err(e) = f.write_to(&mut control_writer) {
                 lx_error!(
                     "core.liveness.write_failed",
+                    &format!("{e}"),
+                    msg_type = format!("{:?}", ty)
+                );
+            }
+        }
+        // Drain frames queued from inside CoreApp event handlers
+        // (mouse_down → PaneBadgeClicked, future similar paths).
+        for (ty, payload) in app.pending_to_shell.drain(..) {
+            let f = Frame::new(ty, payload);
+            if let Err(e) = f.write_to(&mut control_writer) {
+                lx_error!(
+                    "core.pending_to_shell.write_failed",
                     &format!("{e}"),
                     msg_type = format!("{:?}", ty)
                 );
