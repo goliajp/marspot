@@ -39,8 +39,19 @@ use std::io::{self, Read, Write};
 // ───────────────────────────────────────────────────────────────────
 
 /// Globally-unique IOSurface ID the core should look up.  `u32`
-/// decimal.
+/// decimal.  PROTO_VERSION=2: this is the FRONT surface (the one
+/// shell starts out sampling).  Core renders to the BACK surface
+/// first, then acks `SurfaceReady(back_id)` so shell flips its
+/// front to that — and so on, ping-ponging each frame.
 pub const ENV_SURFACE_ID: &str = "MARSPOT_SHELL_SURFACE_ID";
+
+/// PROTO_VERSION=2: second of the dual-buffer IOSurface pair.
+/// `u32` decimal.  Core attaches both at boot, alternates writes
+/// between them, and acks SurfaceReady(id) per frame so shell
+/// knows which is currently safe to sample.  Closes the cross-
+/// process IOSurface read/write race that single-buffer hit at
+/// every Clear→Draw boundary on the writer side.
+pub const ENV_SURFACE_ID_BACK: &str = "MARSPOT_SHELL_SURFACE_ID_BACK";
 
 /// Surface width in **physical pixels** at attach time.  Decimal
 /// `usize`.
