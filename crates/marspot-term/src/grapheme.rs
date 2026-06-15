@@ -264,6 +264,74 @@ pub fn cluster_first_codepoint(cluster: &str) -> char {
         .expect("grapheme cluster is non-empty")
 }
 
+/// Visual width of a single codepoint in cells (0, 1, or 2), ignoring
+/// any surrounding cluster context.  This is the per-codepoint
+/// building block for [`cluster_width`].
+///
+/// - **0** for codepoints that contribute no visible advance:
+///   combining marks (`Extend`), zero-width joiner/non-joiner, format
+///   characters classified as Extend (incl. VS15/VS16), and
+///   control / line-terminator characters that are handled by the
+///   parser's escape path rather than written to a cell.
+/// - **2** for East Asian Wide / Fullwidth / Emoji_Presentation
+///   codepoints (delegates to [`crate::grid::char_width`]).
+/// - **1** for everything else, including visible `SpacingMark` and
+///   `Prepend` codepoints that the parser still treats as a normal
+///   1-cell glyph.
+fn cp_visual_width(ch: char) -> u8 {
+    let cp = ch as u32;
+    match gbp(cp) {
+        GBP::Control | GBP::CR | GBP::LF | GBP::Extend | GBP::ZWJ => 0,
+        // SpacingMark + Prepend render visibly in the same cluster as
+        // their base; per-codepoint they contribute 1 cell of advance
+        // — though `cluster_width`'s max-rule typically resolves to
+        // the base's width anyway.
+        GBP::SpacingMark | GBP::Prepend => 1,
+        _ => crate::grid::char_width(ch),
+    }
+}
+
+/// Total display width of a grapheme cluster in cells (0, 1, or 2).
+///
+/// The rule, per UTS #51 and conventional terminal practice:
+/// 1. **VS16 (U+FE0F)** anywhere in the cluster forces emoji
+///    presentation → width 2.  This is how text-default characters
+///    like ⚠ (U+26A0) become the emoji ⚠️ — without VS16 they're
+///    width 1, with it they're width 2.
+/// 2. **VS15 (U+FE0E)** forces text presentation → width 1.
+/// 3. Otherwise, take the maximum of [`cp_visual_width`] over every
+///    codepoint in the cluster.  Combining marks contribute 0, the
+///    base contributes 1 or 2.  Compound emoji built from ZWJ-glued
+///    Extended_Pictographics, regional-indicator pairs, and skin-tone
+///    sequences all bottom out at width 2 because their base is.
+///
+/// Empty input panics (clusters from [`graphemes`] are always
+/// non-empty; the empty case isn't a legal input).
+pub fn cluster_width(cluster: &str) -> u8 {
+    let mut max_w: u8 = 0;
+    let mut has_vs15 = false;
+    let mut has_vs16 = false;
+    for ch in cluster.chars() {
+        let cp = ch as u32;
+        if cp == 0xFE0F {
+            has_vs16 = true;
+        } else if cp == 0xFE0E {
+            has_vs15 = true;
+        }
+        let w = cp_visual_width(ch);
+        if w > max_w {
+            max_w = w;
+        }
+    }
+    if has_vs16 {
+        return 2;
+    }
+    if has_vs15 {
+        return 1;
+    }
+    max_w
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +415,87 @@ mod tests {
         // Explicit jamo: L V T form one cluster.
         let s = "\u{1100}\u{1161}\u{11A8}";
         assert_eq!(collect(s), vec![s]);
+    }
+
+    #[test]
+    fn cluster_width_ascii_is_1() {
+        assert_eq!(cluster_width("a"), 1);
+        assert_eq!(cluster_width(" "), 1);
+    }
+
+    #[test]
+    fn cluster_width_cjk_is_2() {
+        assert_eq!(cluster_width("中"), 2);
+        assert_eq!(cluster_width("漢"), 2);
+    }
+
+    #[test]
+    fn cluster_width_default_emoji_is_2() {
+        assert_eq!(cluster_width("\u{2705}"), 2); // ✅
+        assert_eq!(cluster_width("\u{2B50}"), 2); // ⭐
+        assert_eq!(cluster_width("\u{1F33F}"), 2); // 🌿
+    }
+
+    #[test]
+    fn cluster_width_text_default_no_vs_is_1() {
+        assert_eq!(cluster_width("\u{26A0}"), 1); // ⚠ without VS16
+    }
+
+    #[test]
+    fn cluster_width_vs16_forces_emoji_2() {
+        assert_eq!(cluster_width("\u{26A0}\u{FE0F}"), 2); // ⚠️
+        assert_eq!(cluster_width("\u{261D}\u{FE0F}"), 2); // ☝️
+    }
+
+    #[test]
+    fn cluster_width_vs15_forces_text_1() {
+        assert_eq!(cluster_width("\u{26A0}\u{FE0E}"), 1); // ⚠ text-presentation
+    }
+
+    #[test]
+    fn cluster_width_combining_mark_is_base() {
+        // é = e + combining acute — base 'e' width 1.
+        assert_eq!(cluster_width("e\u{0301}"), 1);
+    }
+
+    #[test]
+    fn cluster_width_zwj_emoji_compound_is_2() {
+        // 👨‍👩‍👧‍👦 — every cp is width 2 (Emoji_Presentation), ZWJ is 0.
+        let s = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_eq!(cluster_width(s), 2);
+        // 🏳️‍🌈 — base U+1F3F3 (width 2 via Emoji_Presentation), then
+        // VS16 (forces 2) + ZWJ + U+1F308.
+        assert_eq!(cluster_width("\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}"), 2);
+    }
+
+    #[test]
+    fn cluster_width_regional_indicator_flag_is_2() {
+        assert_eq!(cluster_width("\u{1F1EF}\u{1F1F5}"), 2); // 🇯🇵
+    }
+
+    #[test]
+    fn cluster_width_skin_tone_is_2() {
+        assert_eq!(cluster_width("\u{1F44B}\u{1F3FD}"), 2); // 👋🏽
+    }
+
+    #[test]
+    fn cluster_width_hangul_jamo_is_2() {
+        // L + V + T jamo cluster — each is EAW=W so width 2.
+        assert_eq!(cluster_width("\u{1100}\u{1161}\u{11A8}"), 2);
+        // Precomposed LVT is also 2.
+        assert_eq!(cluster_width("\u{AC01}"), 2);
+    }
+
+    #[test]
+    fn cluster_width_indic_conjunct_is_base() {
+        // क + virama + क — Devanagari ka are not EAW; width 1 per base.
+        assert_eq!(cluster_width("\u{0915}\u{094D}\u{0915}"), 1);
+    }
+
+    #[test]
+    fn cluster_width_stray_zwj_is_zero() {
+        // A lone ZWJ (somehow) — zero width.
+        assert_eq!(cluster_width("\u{200D}"), 0);
     }
 
     #[test]
