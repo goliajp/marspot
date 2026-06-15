@@ -441,6 +441,13 @@ impl CoreApp {
         }
         self.layout = layout;
         self.needs_render = true;
+        // The shape of the BG region just changed (sidebar / layout
+        // mode / pane count / window dims).  Force a hard Clear on
+        // the next IOSurface render so any newly-uncovered area
+        // shows SIDEBAR_BG, not the previous frame's stale pixels.
+        // (Steady-state frames use Load to dodge the cross-process
+        // race; see `MetalRenderer::clear_bg_required`.)
+        self.renderer.mark_bg_clear_required();
     }
 
     /// Spawn a fresh session and append it.  Refuses past

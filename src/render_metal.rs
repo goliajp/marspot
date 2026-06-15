@@ -286,6 +286,24 @@ pub struct MetalRenderer {
     /// path forwards it into Layout::build's `top_inset` parameter.
     /// Multi-session callers build their own Layout and ignore this.
     top_inset_phys: f64,
+    /// Should the next render to an IOSurface target start with a
+    /// hard Clear, or load the previous frame's pixels?  Clear is
+    /// only ever needed when the SHAPE of what gets painted changes
+    /// (layout mode switch, sidebar toggle, resize, first frame
+    /// after attach) — in steady state the BG region is identical
+    /// across frames, so loading preserves visually-identical
+    /// content.  Crucially, Clear opens a cross-process race window:
+    /// shell's presenter reads the IOSurface texture from a DIFFERENT
+    /// process / queue, with no MTLSharedEvent fence to gate the
+    /// read.  If presenter samples between the Clear and the cell
+    /// draws on the GPU, it sees a uniform-BG texture — exactly
+    /// what surfaces in the wild as "all 9 panes' contents momentarily
+    /// disappear to background and reappear, no clear trigger,
+    /// frequent" (the marspot flash bug, 2026-06-15).  Defaulting to
+    /// Load eliminates the bg-only intermediate state.  The same-
+    /// process CAMetalLayer path (`render_layout`, mcli/standalone)
+    /// always Clears — there's no cross-process race there.
+    clear_bg_required: bool,
 }
 
 impl MetalRenderer {
@@ -408,6 +426,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             top_inset_phys: 0.0,
+            clear_bg_required: true,
         })
     }
 
@@ -461,11 +480,21 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             top_inset_phys: 0.0,
+            clear_bg_required: true,
         })
     }
 
     pub fn set_window_focused(&mut self, focused: bool) {
         self.window_focused = focused;
+    }
+
+    /// Mark the next IOSurface-target render as needing a hard Clear.
+    /// Call from anywhere the visible BG region SHAPE is about to change
+    /// (layout mode switch, sidebar toggle, resize, surface reattach).
+    /// See `clear_bg_required` field doc for the race that motivates
+    /// the Load-default for steady-state frames.
+    pub fn mark_bg_clear_required(&mut self) {
+        self.clear_bg_required = true;
     }
 
     /// Reserve a top strip (physical pixels) above the grid so window
@@ -725,6 +754,9 @@ impl MetalRenderer {
             color_glyphs_scratch,
             width_px as f32,
             height_px as f32,
+            // CAMetalLayer drawable, same process — no cross-process
+            // race possible.  Always Clear for the full hard-fill.
+            true,
         );
 
         // `presentsWithTransaction = true` path (set up in `new`):
@@ -765,6 +797,12 @@ impl MetalRenderer {
         // dims after the call.
         self.width_px = width_px;
         self.height_px = height_px;
+        // Consume the clear-required flag BEFORE the disjoint borrow:
+        // after this frame, subsequent IOSurface renders can Load until
+        // something explicitly marks the flag again (resize, layout
+        // change, etc.).
+        let clear_bg = self.clear_bg_required;
+        self.clear_bg_required = false;
 
         let Self {
             ref device,
@@ -825,6 +863,10 @@ impl MetalRenderer {
             color_glyphs_scratch,
             width_px as f32,
             height_px as f32,
+            // IOSurface path — cross-process race-free only when Load
+            // is used in steady state.  Consume the flag set by
+            // `mark_bg_clear_required` (e.g. resize, layout change).
+            clear_bg,
         );
         cmd.commit();
         unsafe { cmd.waitUntilCompleted() };
@@ -854,32 +896,47 @@ fn encode_passes(
     color_glyphs: &[GlyphInstance],
     viewport_w: f32,
     viewport_h: f32,
+    // Clear-vs-Load for the BG pass.  `true` = hard Clear to SIDEBAR_BG
+    // (correct for first frame after attach, resize, layout-shape
+    // change, OR the same-process CAMetalLayer path that can never
+    // race a cross-process reader).  `false` = Load previous frame's
+    // pixels (used by the IOSurface path in steady state to eliminate
+    // the cross-process flash race documented on
+    // `MetalRenderer::clear_bg_required`).
+    clear_bg: bool,
 ) {
     let viewport: [f32; 2] = [viewport_w, viewport_h];
     let viewport_ptr = NonNull::new(viewport.as_ptr() as *mut c_void).unwrap();
     let viewport_len = std::mem::size_of::<[f32; 2]>();
 
-    // BG pass — clear to gutter, draw all opaque cells on top in
-    // submission order (chrome → sidebar → per-session bg → cursor →
-    // focus outline → underline).
+    // BG pass — paint all opaque cells (chrome → sidebar → per-session
+    // bg → cursor → focus outline → underline → inter-cell gutter seams)
+    // in submission order.  Load vs Clear is set by `clear_bg`:
+    // - true (CAMetalLayer path / first frame / layout-shape change):
+    //   start from a hard fill of SIDEBAR_BG so the chrome strip,
+    //   sidebar background, and rounded corners read as one continuous
+    //   surface even before any cells draw on top.
+    // - false (steady-state IOSurface path): keep the prior frame's
+    //   pixels — chrome/sidebar regions are constant across frames in
+    //   steady state, so the visual is identical, but there's no
+    //   intermediate uniform-BG state for a cross-process presenter
+    //   to sample (the flash race).
     let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
     unsafe {
         let color = bg_pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
-        color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
-        // Clear to cell BG so the entire window content rectangle —
-        // including the macOS rounded corners and the header strip
-        // above the 9-grid — reads as one continuous near-black
-        // surface.  Inter-cell GUTTER hairlines are now an internal
-        // detail painted as quads over the cleared BG, not a side-
-        // effect of letting the clear colour bleed through.
-        color.setClearColor(MTLClearColor {
-            red: SIDEBAR_BG_F.0 as f64,
-            green: SIDEBAR_BG_F.1 as f64,
-            blue: SIDEBAR_BG_F.2 as f64,
-            alpha: 1.0,
-        });
+        if clear_bg {
+            color.setLoadAction(MTLLoadAction::Clear);
+            color.setClearColor(MTLClearColor {
+                red: SIDEBAR_BG_F.0 as f64,
+                green: SIDEBAR_BG_F.1 as f64,
+                blue: SIDEBAR_BG_F.2 as f64,
+                alpha: 1.0,
+            });
+        } else {
+            color.setLoadAction(MTLLoadAction::Load);
+        }
     }
     let bg_buffer = make_instance_buffer(device, cells_as_bytes(cells));
     let bg_encoder = cmd
