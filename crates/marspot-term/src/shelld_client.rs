@@ -260,6 +260,25 @@ impl ShelldSession {
         Ok(bytes.len())
     }
 
+    /// RFC-002 step 6.  Push the current terminal snapshot up to
+    /// shelld as a `SaveSnapshot` frame.  Caller is the L3 snapshot
+    /// pump; it gates push frequency.  The serialized body is the
+    /// owned output of `Terminal::serialize_snapshot()` — ~95 KB for
+    /// 97×75.  Returns the body length actually shipped on success.
+    pub fn push_snapshot(&mut self) -> io::Result<usize> {
+        let body = self.terminal.serialize_snapshot();
+        let generation = self.terminal.generation();
+        let payload = crate::shelld_proto::encode_snapshot_payload(
+            self.inner.id,
+            generation,
+            &body,
+        );
+        let frame = Frame::new(MsgType::SaveSnapshot, payload);
+        let mut stream = self.writer.lock().unwrap();
+        frame.write_to(&mut *stream)?;
+        Ok(body.len())
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         let frame = Frame::new(MsgType::Resize, encode_resize(self.inner.id, cols, rows));
         let mut stream = self.writer.lock().unwrap();
