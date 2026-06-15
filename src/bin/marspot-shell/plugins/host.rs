@@ -55,18 +55,6 @@ impl ShellPluginHost {
         }
     }
 
-    /// Called by the registry just before invoking a plugin hook so
-    /// host method permission checks see the right plugin.  Cleared
-    /// in the matching `clear_active_plugin`.  RAII guard is the
-    /// idiomatic shape but adds lifetimes a `dyn PluginHost`'s
-    /// `&self` methods don't like — manual book-keeping is simpler.
-    pub fn set_active_plugin(&self, name: &'static str, permissions: PermissionSet) {
-        *self.active_plugin.lock().unwrap() = Some(ActivePlugin { name, permissions });
-    }
-    pub fn clear_active_plugin(&self) {
-        *self.active_plugin.lock().unwrap() = None;
-    }
-
     /// Refresh per-pane snapshots.  Called from the shell's tick
     /// prologue so plugins reading via `pane_pty_device` etc. see
     /// fresh data.  MVP: takes a closure that walks the actual
@@ -158,5 +146,20 @@ impl PluginHost for ShellPluginHost {
             LogLevel::Warn => lx_warn!(&*composed, msg),
             LogLevel::Error => lx_error!(&*composed, msg),
         }
+    }
+
+    /// Override the trait's default no-op.  Critical — the registry
+    /// calls this through `&dyn PluginHost` around every hook so that
+    /// `require()` permission checks see the right `ActivePlugin`.
+    /// When this lived as an inherent method instead of a trait
+    /// override, claudecode's init failed permission every install
+    /// because the trait default fired no-op and `active_plugin`
+    /// stayed None.
+    fn set_active_plugin(&self, name: &'static str, permissions: PermissionSet) {
+        *self.active_plugin.lock().unwrap() = Some(ActivePlugin { name, permissions });
+    }
+
+    fn clear_active_plugin(&self) {
+        *self.active_plugin.lock().unwrap() = None;
     }
 }
