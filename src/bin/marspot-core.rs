@@ -1292,16 +1292,25 @@ fn main() {
         // 2026-06-15 symptom — shelld got SIGTERM'd between cores,
         // every existing claudecode died via Pty::Drop, and this
         // boot is now creating a fresh 9-grid from scratch.
-        let alive_ids: Vec<u64> = raw_list
+        //
+        // SORT BY session_id ASCENDING — shelld's HashMap iteration
+        // order is unspecified, so on every dual-core swap the same
+        // 9 sessions would land at randomly shuffled pane positions
+        // (user-visible: "I was working in pane 5, now I'm in pane 8").
+        // Monotonic session_id means session 1 lands in pane 1
+        // forever, session 9 lands in pane 9 forever.
+        let mut alive_ids: Vec<u64> = raw_list
             .iter()
             .filter(|s| s.alive)
             .map(|s| s.session_id)
             .collect();
-        let dead_ids: Vec<u64> = raw_list
+        alive_ids.sort();
+        let mut dead_ids: Vec<u64> = raw_list
             .iter()
             .filter(|s| !s.alive)
             .map(|s| s.session_id)
             .collect();
+        dead_ids.sort();
         lx_event!(
             "core.shelld.session_inventory",
             "list_sessions returned at boot",
