@@ -1568,12 +1568,42 @@ fn main() {
     // distinguishing an early-aborted boot from a normal teardown.
     let mut bytes_pumped_total: u64 = 0;
     let mut first_tick = true;
+    // Frame-interval cap: don't render faster than ~120 Hz.  Without
+    // this, an app emitting bursty escape sequences (IME setMarkedText
+    // every keystroke, claudecode painting prompts at full tilt) makes
+    // the main loop spin into render-per-event mode, blowing through
+    // both CPU and GPU on a sequence of frames the display can't show.
+    // M-series GPUs draw the marspot grid in ~2-3 ms so a 120-Hz cap
+    // leaves headroom over a 60-Hz monitor's vsync without leaving
+    // perceptible input lag (one wasted frame = 8 ms ≈ key-to-photon
+    // floor anyway).  Capped frames are NOT dropped — `needs_render`
+    // stays true and the next loop iter renders as soon as the cap
+    // elapses.  Pairs with the recv_timeout below: when a render is
+    // gated, the loop wakes in ≤ FRAME_MIN_INTERVAL instead of the
+    // 1-second idle timeout, so the deferred frame lands within ~8 ms.
+    const FRAME_MIN_INTERVAL_MS: u64 = 8;
+    let frame_min_interval = Duration::from_millis(FRAME_MIN_INTERVAL_MS);
+    let mut last_render_at = Instant::now() - frame_min_interval;
     'main: loop {
         let first = if first_tick {
             first_tick = false;
             event_rx.try_recv().ok()
         } else {
-            match event_rx.recv_timeout(Duration::from_secs(1)) {
+            // When a render is gated by the frame-interval cap, wake
+            // the loop in ≤ FRAME_MIN_INTERVAL to flush the deferred
+            // frame; otherwise stay event-driven at the 1 s idle
+            // timeout so CPU at rest stays near zero.
+            let recv_timeout = if app.needs_render {
+                let since = last_render_at.elapsed();
+                if since < frame_min_interval {
+                    frame_min_interval - since
+                } else {
+                    Duration::from_millis(0)
+                }
+            } else {
+                Duration::from_secs(1)
+            };
+            match event_rx.recv_timeout(recv_timeout) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break 'main,
@@ -1757,7 +1787,14 @@ fn main() {
             break 'main;
         }
 
-        if app.needs_render {
+        // Frame-interval cap: defer this frame if we just rendered
+        // < FRAME_MIN_INTERVAL ago.  needs_render stays true so the
+        // next loop iteration tries again — and the loop's
+        // recv_timeout above is set to wake us inside the cap window,
+        // so the deferred frame lands within ~8 ms, not 1 s.
+        let render_gated_by_cap =
+            app.needs_render && last_render_at.elapsed() < frame_min_interval;
+        if app.needs_render && !render_gated_by_cap {
             // Double-buffer: render into the back slot
             // (`writing_idx`).  `render_layout_to_texture` calls
             // `waitUntilCompleted`, so the moment we return here the
@@ -1766,6 +1803,7 @@ fn main() {
             // buffer race fix: we only ever flip to a slot the GPU
             // has already finished.
             let render_t0 = Instant::now();
+            last_render_at = render_t0;
             let caret = app.render(&target_tex[writing_idx]);
             // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
             // a busy display (60 Hz cap) without flooding when the
