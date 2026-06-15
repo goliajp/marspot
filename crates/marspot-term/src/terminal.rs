@@ -689,6 +689,16 @@ impl Terminal {
         (line_count, out)
     }
 
+    /// RFC-002 §8 (step 8c): push a historic line (chronologically
+    /// older than every line already in scrollback) into the tail of
+    /// the scrollback ring.  Thin wrapper around
+    /// `Grid::push_historic_scrollback_line`; same ordering caveat —
+    /// caller must apply history in oldest-first order before any
+    /// live data has scrolled off the visible grid.
+    pub fn push_historic_line(&mut self, line: &[Cell]) {
+        self.grid.push_historic_scrollback_line(line);
+    }
+
     /// Inverse of `serialize_scrollback_page`.  Static — no `&self`
     /// because the decoder doesn't touch terminal state; callers
     /// (L3 publish-cache) decide what to do with the lines.
@@ -1952,6 +1962,31 @@ mod tests {
         assert_eq!(line_count, 4);
         let lines = Terminal::decode_scrollback_page_body(line_count, &body).unwrap();
         assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn push_historic_line_fills_scrollback_in_caller_order() {
+        // Empty scrollback → push 3 historic lines oldest-first →
+        // scrollback_line at idx 0..3 returns them in the same order,
+        // and a subsequent live-data scroll-up appends after them.
+        let mut t = Terminal::new(8, 2);
+        let attrs = CellAttrs::default();
+        let mkline = |ch: char| -> Vec<Cell> {
+            (0..8).map(|_| Cell { ch, attrs }).collect()
+        };
+        t.push_historic_line(&mkline('H'));
+        t.push_historic_line(&mkline('I'));
+        t.push_historic_line(&mkline('J'));
+        assert_eq!(t.grid().scrollback_len(), 3);
+        assert_eq!(t.grid().scrollback_line(0).unwrap()[0].ch, 'H');
+        assert_eq!(t.grid().scrollback_line(2).unwrap()[0].ch, 'J');
+        // Live data continues from where historic ended.
+        t.feed(b"K\r\nL\r\nM\r\nN");
+        // 4 new lines, grid rows=2, so 2 of them spill into scrollback
+        // (oldest-first append) → scrollback now [H, I, J, K, L].
+        assert_eq!(t.grid().scrollback_len(), 5);
+        assert_eq!(t.grid().scrollback_line(3).unwrap()[0].ch, 'K');
+        assert_eq!(t.grid().scrollback_line(4).unwrap()[0].ch, 'L');
     }
 
     #[test]

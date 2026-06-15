@@ -135,6 +135,13 @@ pub struct ShelldSession {
     /// them on its own cadence — pages don't disturb the terminal
     /// state, they belong upstream of the publish path.
     pending_scrollback_pages: Vec<PendingPage>,
+    /// RFC-002 §8 (step 8c): how many historic lines have been
+    /// appended to local scrollback via `push_historic_line`.
+    /// When `terminal.grid().scrollback_len()` exceeds this, live
+    /// data has scrolled rows in and further history can no longer
+    /// be appended (would land newer than live, breaking order) —
+    /// later pages are stashed in `pending_scrollback_pages` instead.
+    historic_applied: u32,
 }
 
 /// Decoded reply slot.  Body is left undecoded (raw cells) — the
@@ -236,15 +243,47 @@ impl ShelldSession {
                     total = total.max(1);
                 }
                 InboundMessage::ScrollbackPage { line_start, line_count, body } => {
-                    // RFC-002 §8: stash for the L3 caller — pages don't
-                    // change the live grid, so they don't contribute to
-                    // `total` (no redraw poke needed; caller decides
-                    // when to repaint after ingesting the page).
-                    self.pending_scrollback_pages.push(PendingPage {
-                        line_start,
-                        line_count,
-                        body,
-                    });
+                    // RFC-002 §8 (step 8c): try to append the page
+                    // directly into local scrollback (oldest-first
+                    // semantics line up with `push_historic_line`'s
+                    // tail-append because we're filling from oldest
+                    // history forward).  Safe iff scrollback hasn't
+                    // grown past what we've already pushed — once live
+                    // data evicts a row in, ordering can't be repaired.
+                    let scrollback_len =
+                        self.terminal.grid().scrollback_len() as u32;
+                    let can_append = scrollback_len == self.historic_applied;
+                    let mut applied = false;
+                    if can_append {
+                        match crate::terminal::Terminal::decode_scrollback_page_body(
+                            line_count,
+                            &body,
+                        ) {
+                            Ok(lines) => {
+                                for line in &lines {
+                                    self.terminal.push_historic_line(line);
+                                }
+                                self.historic_applied = self
+                                    .historic_applied
+                                    .saturating_add(line_count);
+                                applied = true;
+                                // Grid changed (scrollback grew) —
+                                // force a publish next tick.
+                                total = total.max(1);
+                            }
+                            Err(_) => {
+                                // Decode error: fall through to stash
+                                // so the L3 caller can log / decide.
+                            }
+                        }
+                    }
+                    if !applied {
+                        self.pending_scrollback_pages.push(PendingPage {
+                            line_start,
+                            line_count,
+                            body,
+                        });
+                    }
                 }
             }
         }
@@ -556,6 +595,7 @@ impl ShelldClient {
             writer: self.writer.clone(),
             terminal: Terminal::new(cols, rows),
             pending_scrollback_pages: Vec::new(),
+            historic_applied: 0,
         })
     }
 

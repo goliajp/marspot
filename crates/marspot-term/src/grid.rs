@@ -632,6 +632,19 @@ impl Grid {
     pub fn scrollback_read_page(&self, start: usize, count: usize) -> Vec<Vec<Cell>> {
         self.scrollback.read_lines(start, count)
     }
+
+    /// RFC-002 §8 (step 8c): push a historic line into the tail of
+    /// scrollback.  The line must be **older than any line currently
+    /// in scrollback** — callers append history in chronological
+    /// order before live data has had a chance to scroll anything
+    /// off the visible grid.  Once live data starts evicting rows
+    /// into scrollback, calling this would corrupt ordering (history
+    /// would appear to be newer than already-scrolled-off live
+    /// output).  Caller polices the invariant; this is a thin
+    /// pass-through.
+    pub fn push_historic_scrollback_line(&mut self, line: &[Cell]) {
+        self.scrollback.push_line(line);
+    }
     pub fn clear_scrollback(&mut self) {
         self.scrollback.clear();
         self.sb_wrapped.clear();
