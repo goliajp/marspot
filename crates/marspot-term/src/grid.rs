@@ -64,11 +64,27 @@ pub enum Color {
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
 /// East Asian Wide / Fullwidth / emoji cells occupy two grid columns.
-/// Anything else is one.  Coarse range-based — covers the common blocks
-/// of Unicode 15.x EastAsianWidth=W/F plus the main emoji ranges.  Edge
-/// cases (Variation Selectors, joining sequences, regional indicators)
-/// are not yet handled — they'd need ZWJ / cluster awareness in the
-/// parser, separate from raw width.
+/// Anything else is one.
+///
+/// Two sources of "wide":
+/// 1. **East Asian Wide / Fullwidth** ranges — coarse range list of the
+///    common Unicode blocks (CJK ideographs, Hangul, fullwidth forms…)
+///    that have EastAsianWidth=W or F per UAX #11.
+/// 2. **Emoji_Presentation=Yes** — every codepoint whose default
+///    presentation is emoji, per UTS #51 emoji-data.txt.  This is the
+///    authoritative answer for "is this an emoji" and resolves the
+///    2026-06-15 user complaint: characters like ✅ (U+2705), ⭐
+///    (U+2B50), ❌ (U+274C) sit in `0x2000..0x2FFF` and are NOT in any
+///    East Asian Wide block, so the old logic gave them width 1 and the
+///    emoji font drew them at em-box width — clipping half the glyph.
+///    See [`crate::emoji_presentation`] for the generated lookup.
+///
+/// Not yet handled:
+/// - **VS15 (U+FE0E) / VS16 (U+FE0F)** — a text-default codepoint like
+///   ⚠ (U+26A0) followed by VS16 should become emoji (width 2).  This
+///   requires the parser to look ahead one codepoint and adjust width
+///   on-the-fly — separate from per-char width.
+/// - ZWJ sequences, regional indicators (flag pairs), modifier bases.
 pub fn char_width(ch: char) -> u8 {
     let cp = ch as u32;
     if cp == 0 {
@@ -76,7 +92,7 @@ pub fn char_width(ch: char) -> u8 {
         // no inherent width of its own.
         return 0;
     }
-    let wide = matches!(
+    let east_asian_wide = matches!(
         cp,
         0x1100..=0x115F        // Hangul Jamo
         | 0x2E80..=0x303E      // CJK Radicals … CJK Symbols & Punctuation
@@ -89,11 +105,14 @@ pub fn char_width(ch: char) -> u8 {
         | 0xFE30..=0xFE4F      // CJK Compatibility Forms
         | 0xFF00..=0xFF60      // Halfwidth & Fullwidth Forms (fullwidth half)
         | 0xFFE0..=0xFFE6      // Fullwidth Sign Forms
-        | 0x1F300..=0x1FAFF    // Emoji + Symbols & Pictographs
         | 0x20000..=0x2FFFD    // CJK Extension B–F
         | 0x30000..=0x3FFFD    // CJK Extension G–H
     );
-    if wide { 2 } else { 1 }
+    if east_asian_wide || crate::emoji_presentation::has_emoji_presentation(cp) {
+        2
+    } else {
+        1
+    }
 }
 
 use crate::scrollback::Scrollback;

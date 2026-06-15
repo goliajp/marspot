@@ -13,6 +13,7 @@
 //! paths keep resolving.  See `docs/per-session-l3.md`.
 
 pub mod binary_tree;
+pub mod emoji_presentation;
 pub mod grid;
 pub mod logx;
 
