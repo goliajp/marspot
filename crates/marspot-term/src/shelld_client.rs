@@ -40,8 +40,9 @@ use std::time::{Duration, Instant};
 
 use crate::shelld_proto::{
     decode_data, decode_error, decode_hello_ack, decode_list_sessions_reply,
-    decode_new_session_reply, encode_data, encode_hello, encode_new_session, encode_resize,
-    encode_session_id, Frame, MsgType, SessionInfo, PROTO_VERSION,
+    decode_new_session_reply, decode_snapshot_payload, encode_data, encode_hello,
+    encode_new_session, encode_resize, encode_session_id, Frame, MsgType, SessionInfo,
+    PROTO_VERSION,
 };
 use crate::terminal::Terminal;
 
@@ -64,10 +65,33 @@ pub enum SessionState {
     Exited,
 }
 
-/// One inbound chunk waiting to be drained by `pump`.  Owned so the
-/// reader thread can release the slot back to the channel without
+/// One inbound message waiting to be drained by `pump`.  Owned so
+/// the reader thread can release the slot back to the channel without
 /// the GUI holding it.
-type Chunk = Vec<u8>;
+///
+/// RFC-002: this used to be a bare `Vec<u8>` (raw PTY bytes).  After
+/// the state-object-sync rewrite, ATTACH now responds with a
+/// `StateSnapshot` frame instead of streaming the bytelog; the
+/// reader routes that to the same per-session channel so `pump` can
+/// apply it in-order against any live data already queued.
+pub enum InboundMessage {
+    /// Raw PTY bytes that the terminal parser feeds incrementally.
+    /// Live-stream side after attach is complete.
+    Data(Vec<u8>),
+    /// Full terminal-state snapshot from shelld's per-session slot.
+    /// Carried on ATTACH and on a future explicit refresh path.
+    /// `pump` calls `terminal.apply_snapshot(&body)` and discards
+    /// any earlier same-frame chunks (the snapshot is the new
+    /// origin point).
+    Snapshot {
+        /// Echoed from shelld for forensic; the client doesn't need
+        /// it for correctness because LWW is handled inside Terminal.
+        generation: u64,
+        body: Vec<u8>,
+    },
+}
+
+type Chunk = InboundMessage;
 
 struct SessionInner {
     id: u64,
@@ -121,12 +145,67 @@ impl ShelldSession {
     /// Drain whatever the reader thread has queued, feed it through
     /// the terminal parser, return total bytes drained.  Caller
     /// requests a redraw on non-zero return.
+    ///
+    /// RFC-002: handles both raw `Data` chunks and full `Snapshot`
+    /// frames in arrival order.  A snapshot is the new origin point —
+    /// it replaces grid + cursor + modes wholesale and resets the
+    /// parser's transient state, so any queued same-frame `Data`
+    /// chunks that landed *before* it (rare race against the SyncSender
+    /// ordering) are still safe to apply afterward; the snapshot's
+    /// generation has already accounted for everything up through
+    /// its own bump.  Subsequent live `Data` chunks layer on top of
+    /// the snapshot via the parser as usual.
     pub fn pump(&mut self) -> usize {
         let mut total = 0;
         let rx = self.inner.rx.lock().unwrap();
-        while let Ok(chunk) = rx.try_recv() {
-            total += chunk.len();
-            self.terminal.feed(&chunk);
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                InboundMessage::Data(bytes) => {
+                    total += bytes.len();
+                    self.terminal.feed(&bytes);
+                }
+                InboundMessage::Snapshot { generation, body } => {
+                    if body.is_empty() {
+                        // Empty body = "first attach, no snapshot
+                        // exists yet".  Start from a fresh terminal —
+                        // already constructed that way at install_session.
+                        crate::lx_debug!(
+                            "shelld_client.snapshot.empty_initial",
+                            "no prior snapshot, start from empty terminal",
+                            generation = generation
+                        );
+                    } else {
+                        match self.terminal.apply_snapshot(&body) {
+                            Ok(()) => {
+                                crate::lx_event!(
+                                    "ATTACH_SNAPSHOT_APPLIED",
+                                    "RFC-002 client applied StateSnapshot",
+                                    generation = generation,
+                                    body_bytes = body.len()
+                                );
+                            }
+                            Err(e) => {
+                                crate::lx_error!(
+                                    "shelld_client.snapshot.apply_failed",
+                                    &format!("{e}"),
+                                    generation = generation,
+                                    body_bytes = body.len()
+                                );
+                                // Don't return — the terminal is
+                                // unchanged; subsequent live data still
+                                // flows.  User will see a stale grid
+                                // until next snapshot, but no corruption.
+                            }
+                        }
+                    }
+                    // Snapshot itself isn't "PTY bytes"; don't count it
+                    // toward `total`.  Caller uses `total > 0` as a
+                    // "did anything happen?" signal but apply_snapshot
+                    // changes the grid, so force a redraw poke by
+                    // claiming 1 byte of progress.
+                    total = total.max(1);
+                }
+            }
         }
         drop(rx);
         if total > 0 {
@@ -619,9 +698,13 @@ fn reader_loop(
             MsgType::Data => match decode_data(&frame.payload) {
                 Ok((id, bytes)) => {
                     if bytes.is_empty() {
-                        // Phase 5: shelld emits a zero-length DATA
-                        // as a sentinel after the bytelog replay is
-                        // drained.  Other phases ignore it.
+                        // RFC-002: zero-length DATA used to be the
+                        // bytelog-replay-done sentinel.  After step 4,
+                        // ATTACH no longer streams the bytelog at all,
+                        // so an empty DATA frame should never appear.
+                        // Wake conservatively (idempotent) and move on
+                        // — strict drop would be brittle against any
+                        // future server-side emitter.
                         wake();
                         continue;
                     }
@@ -631,12 +714,11 @@ fn reader_loop(
                     };
                     if let Some(tx) = drop_tx {
                         // Bounded send: if the GUI is slow, this
-                        // blocks the reader thread, which is exactly
-                        // the backpressure we want.  Frame ownership
-                        // is dropped here (Vec<u8> moved into the
-                        // channel).
+                        // blocks the reader thread — exactly the
+                        // backpressure we want, mirroring kernel
+                        // pipe pushback to the child.
                         let bytes = bytes.to_vec();
-                        if tx.send(bytes).is_err() {
+                        if tx.send(InboundMessage::Data(bytes)).is_err() {
                             // Inbox closed (session dropped) — quietly
                             // discard the chunk.  Reader thread stays
                             // alive for other sessions.
@@ -646,6 +728,33 @@ fn reader_loop(
                 }
                 Err(e) => {
                     eprintln!("[shelld-client] bad DATA: {}", e);
+                }
+            },
+            MsgType::StateSnapshot => match decode_snapshot_payload(&frame.payload) {
+                Ok((id, generation, body)) => {
+                    let drop_tx = {
+                        let inb = inboxes.lock().unwrap();
+                        inb.get(&id).cloned()
+                    };
+                    if let Some(tx) = drop_tx {
+                        // Snapshot replaces transient state — apply in
+                        // arrival order against any queued Data.  Owned
+                        // body so the channel doesn't borrow `frame`.
+                        if tx
+                            .send(InboundMessage::Snapshot {
+                                generation,
+                                body: body.to_vec(),
+                            })
+                            .is_err()
+                        {
+                            // Inbox closed.  Session caller will see
+                            // the channel drop on their next pump.
+                        }
+                    }
+                    wake();
+                }
+                Err(e) => {
+                    eprintln!("[shelld-client] bad StateSnapshot: {}", e);
                 }
             },
             MsgType::Error => match decode_error(&frame.payload) {
