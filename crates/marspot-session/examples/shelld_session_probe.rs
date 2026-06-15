@@ -86,6 +86,77 @@ fn cmd_write(id: u64) {
         .unwrap_or_else(|e| die(format!("write to session {id}: {e}")));
 }
 
+/// Attach, pump until the StateSnapshot is applied (≤ deadline), and
+/// print "<id>\t<sha256-of-grid-cells-hex>\t<generation>" so the soak
+/// script can diff fingerprints across an execv swap.
+///
+/// RFC-002 step 10: invariant being tested = the L4 Terminal serializes
+/// + persists + rehydrates verbatim across execv, so a snapshot
+/// captured from a re-attached client after a swap is bit-for-bit
+/// what a same-instant pre-swap attach would have returned.
+fn cmd_fingerprint(id: u64) {
+    let client = connect();
+    let mut session = client
+        .attach(id, COLS, ROWS)
+        .unwrap_or_else(|e| die(format!("attach {id}: {e}")));
+    // Drain StateSnapshot.  pump's first non-zero return after attach
+    // = snapshot applied.  We poll briefly to ride past any latency
+    // in the reader thread queueing the frame.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut applied = false;
+    while std::time::Instant::now() < deadline {
+        if session.pump() > 0 {
+            applied = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    if !applied {
+        die(format!("session {id} produced no snapshot within 2s"));
+    }
+    let term = session.terminal();
+    let grid = term.grid();
+    let (cols, rows) = (grid.cols(), grid.rows());
+    // FNV-1a 64-bit over (ch, attrs.fg, attrs.bg, attrs.flags-bits) per
+    // cell, row-major.  Tiny, dependency-free, plenty discriminative
+    // for "did the grid round-trip identically?".
+    let mut h: u64 = 0xcbf29ce484222325;
+    for r in 0..rows {
+        for c in 0..cols {
+            let cell = grid.cell(c, r);
+            for &b in (cell.ch as u32).to_le_bytes().iter() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x00000100000001B3);
+            }
+            for &b in serialize_attrs_flat(cell.attrs).iter() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x00000100000001B3);
+            }
+        }
+    }
+    println!("{}\t{:016x}\t{}", id, h, term.generation());
+}
+
+fn serialize_attrs_flat(a: marspot_term::grid::CellAttrs) -> [u8; 4] {
+    let mut flags: u8 = 0;
+    if a.bold { flags |= 1; }
+    if a.italic { flags |= 2; }
+    if a.underline { flags |= 4; }
+    if a.reverse { flags |= 8; }
+    if a.dim { flags |= 16; }
+    let (fg_k, fg_p) = color_kind_payload(a.fg);
+    let (bg_k, bg_p) = color_kind_payload(a.bg);
+    [flags, fg_k ^ fg_p, bg_k ^ bg_p, 0]
+}
+
+fn color_kind_payload(c: marspot_term::grid::Color) -> (u8, u8) {
+    match c {
+        marspot_term::grid::Color::Default => (0, 0),
+        marspot_term::grid::Color::Indexed(i) => (1, i),
+        marspot_term::grid::Color::Rgb(r, g, b) => (2, r ^ g ^ b),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
@@ -104,6 +175,15 @@ fn main() {
                 .unwrap_or_else(|| die("usage: shelld_session_probe write <id>"));
             cmd_write(id);
         }
-        _ => die("usage: shelld_session_probe (create N | list | write id)"),
+        Some("fingerprint") => {
+            let id: u64 = args
+                .get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| die("usage: shelld_session_probe fingerprint <id>"));
+            cmd_fingerprint(id);
+        }
+        _ => die(
+            "usage: shelld_session_probe (create N | list | write id | fingerprint id)",
+        ),
     }
 }
