@@ -1164,11 +1164,14 @@ const BG_FOCUSED: (f32, f32, f32) = (0.000, 0.000, 0.000);
 // reads as a translucent hairline.  Going through alpha blending
 // would need pipeline changes; this gets the same visual effect
 // at the BG-pipeline solid-fill cost.
-// Bumped 2026-06-15 to track the BG_PANEL lift: SEAM needs to stay
-// a measurable step above BG_PANEL or the inter-cell hairlines
-// disappear into the panel tone (user-visible: "session 间的 ui 线
-// 看不清").  Delta vs BG_PANEL is approximately preserved.
-const SEAM: (f32, f32, f32) = (0.073, 0.084, 0.108);
+// Bumped twice on 2026-06-15.  First bump tracked the BG_PANEL lift
+// to preserve the original luminance gap; user reported the seams
+// were still subtle ("可能本来就是有点淡"), so second bump pushes
+// the gap further — luminance diff vs BG_PANEL ≈ 0.08, comfortably
+// above the just-noticeable-difference threshold without bleeding
+// into chrome territory.  Same direction (brighter than panel),
+// gutter width unchanged so seams stay 1 hairline thick.
+const SEAM: (f32, f32, f32) = (0.115, 0.130, 0.155);
 /// Selected-cell highlight — a muted brand blue that lifts cleanly
 /// over BG_FOCUSED without bleaching foreground text.  Used by the
 /// drag-to-select machinery; FG glyphs draw on top so selected
