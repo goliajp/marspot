@@ -494,6 +494,11 @@ impl MetalRenderer {
     /// See `clear_bg_required` field doc for the race that motivates
     /// the Load-default for steady-state frames.
     pub fn mark_bg_clear_required(&mut self) {
+        // Dev-only — flash investigation 2026-06-15.  If this fires
+        // on every render, my Load-by-default fix isn't actually
+        // taking effect and the race window persists.  Demote to
+        // lx_debug! once the steady-state Load is confirmed.
+        crate::lx_event!("render.bg_clear_required", "flag set");
         self.clear_bg_required = true;
     }
 
@@ -803,6 +808,16 @@ impl MetalRenderer {
         // change, etc.).
         let clear_bg = self.clear_bg_required;
         self.clear_bg_required = false;
+        // Dev-only — flash investigation 2026-06-15.  At default Info
+        // level this is filtered out; flip MARSPOT_LOG=debug to see
+        // every IOSurface render's clear/load verdict.  Demote /
+        // remove once the C-path Load fix is confirmed working in
+        // the wild.
+        crate::lx_debug!(
+            "render.iosurf",
+            "encoding IOSurface frame",
+            clear_bg = clear_bg
+        );
 
         let Self {
             ref device,

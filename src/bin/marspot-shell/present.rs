@@ -321,7 +321,21 @@ impl ShellPresenter {
     pub fn present(&mut self) {
         let drawable = match unsafe { self.layer.nextDrawable() } {
             Some(d) => d,
-            None => return,
+            None => {
+                // Dev-only — flash investigation 2026-06-15.  If
+                // this fires bursty + frequently it may correlate
+                // with the visible flash (presenter drops a frame
+                // → prior drawable's content stays for one extra
+                // refresh interval, no flash on its own, but a
+                // cluster could indicate scheduling pressure that
+                // also produces the cross-process IOSurface race
+                // on neighboring frames).
+                marspot::lx_debug!(
+                    "shell.present.no_drawable",
+                    "nextDrawable returned None — frame skipped"
+                );
+                return;
+            }
         };
         let texture = unsafe { drawable.texture() };
 
