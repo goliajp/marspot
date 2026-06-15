@@ -924,34 +924,31 @@ fn encode_passes(
     let viewport_ptr = NonNull::new(viewport.as_ptr() as *mut c_void).unwrap();
     let viewport_len = std::mem::size_of::<[f32; 2]>();
 
-    // BG pass — paint all opaque cells (chrome → sidebar → per-session
-    // bg → cursor → focus outline → underline → inter-cell gutter seams)
-    // in submission order.  Load vs Clear is set by `clear_bg`:
-    // - true (CAMetalLayer path / first frame / layout-shape change):
-    //   start from a hard fill of SIDEBAR_BG so the chrome strip,
-    //   sidebar background, and rounded corners read as one continuous
-    //   surface even before any cells draw on top.
-    // - false (steady-state IOSurface path): keep the prior frame's
-    //   pixels — chrome/sidebar regions are constant across frames in
-    //   steady state, so the visual is identical, but there's no
-    //   intermediate uniform-BG state for a cross-process presenter
-    //   to sample (the flash race).
+    // BG pass — clear to SIDEBAR_BG, then draw all opaque cells in
+    // submission order (chrome → sidebar → per-session bg → cursor →
+    // focus outline → underline → inter-cell gutter seams).  Always
+    // Clear: the chrome strip above the grid is NOT covered by an
+    // opaque CellInstance, so it relies on the Clear to reset every
+    // frame.  Briefly attempted Load-by-default (2126cda) to dodge a
+    // suspected cross-process IOSurface race, but the real race-killer
+    // is the shell-side frame_pending gate in `redraw()` (a1d3930);
+    // Load was redundant AND it let the chrome strip's alpha-blended
+    // glyphs accumulate over their own anti-aliased edges, fuzzing the
+    // title-bar text after a few seconds.  The `clear_bg` parameter is
+    // retained as a hook for any future per-frame decision.
+    let _ = clear_bg;
     let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
     unsafe {
         let color = bg_pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
         color.setStoreAction(MTLStoreAction::Store);
-        if clear_bg {
-            color.setLoadAction(MTLLoadAction::Clear);
-            color.setClearColor(MTLClearColor {
-                red: SIDEBAR_BG_F.0 as f64,
-                green: SIDEBAR_BG_F.1 as f64,
-                blue: SIDEBAR_BG_F.2 as f64,
-                alpha: 1.0,
-            });
-        } else {
-            color.setLoadAction(MTLLoadAction::Load);
-        }
+        color.setLoadAction(MTLLoadAction::Clear);
+        color.setClearColor(MTLClearColor {
+            red: SIDEBAR_BG_F.0 as f64,
+            green: SIDEBAR_BG_F.1 as f64,
+            blue: SIDEBAR_BG_F.2 as f64,
+            alpha: 1.0,
+        });
     }
     let bg_buffer = make_instance_buffer(device, cells_as_bytes(cells));
     let bg_encoder = cmd
@@ -1153,14 +1150,16 @@ impl MetalRenderer {
 //   SEAM        a hair darker than BG_PANEL, reads as a quiet
 //               depression between adjacent panels — used for
 //               sidebar↔grid, header↔grid, and cell↔cell alike
-const BG_PANEL: (f32, f32, f32) = (0.022, 0.028, 0.042);
-// Push focused much closer to true black so the focused pane stands
-// out clearly against the unfocused BG_PANEL tone — user feedback
-// 2026-06-15: prior value (0.006, 0.008, 0.014) was hard to tell apart
-// from BG_PANEL = (0.022, 0.028, 0.042) at most viewing conditions.
-// Keep a tiny blue tint so the value doesn't snap to pure-black 0,0,0
-// (which can read flat next to coloured text).
-const BG_FOCUSED: (f32, f32, f32) = (0.000, 0.000, 0.003);
+// BG_PANEL lifted in a second pass (2026-06-15) to widen the
+// focused/unfocused contrast — the prior (0.022, 0.028, 0.042) was
+// too close to BG_FOCUSED even after pushing focused toward true
+// black.  Still a deep tone, just decisively above 0.
+const BG_PANEL: (f32, f32, f32) = (0.040, 0.050, 0.075);
+// Pure black for the focused pane.  User feedback: "focused 还得再
+// 黑一点".  Snapping all-zero is fine here — we never paint
+// foreground glyphs in pure white, so the BG-to-glyph contrast is
+// dominated by glyph color, not a few thousandths of BG tint.
+const BG_FOCUSED: (f32, f32, f32) = (0.000, 0.000, 0.000);
 // Pre-mixed against BG_PANEL ≈ 50%, so the 0.5-px sub-pixel quad
 // reads as a translucent hairline.  Going through alpha blending
 // would need pipeline changes; this gets the same visual effect
