@@ -48,10 +48,12 @@ pub const PLUGIN_API_VERSION: u32 = 0x0001_0001;
 
 /// Performance budget for any single plugin hook (init, start, tick,
 /// stop, event).  Three consecutive overshoots auto-disable the
-/// plugin.  1 ms is generous on M-series (a tick that reads 9 small
-/// JSONL tails + 9 pid trees is microseconds typical), but small
-/// enough that a runaway plugin can't visibly stall the shell.
-pub const HOOK_BUDGET: Duration = Duration::from_millis(1);
+/// plugin.  10 ms accommodates the claudecode tick's per-tick
+/// `proc_listpids` + per-session `proc_pidinfo` + cmdline reads on a
+/// busy machine (a few ms even on M-series), while still small enough
+/// that a runaway plugin can't visibly stall the shell — tick fires
+/// every 2 s minimum, so 10 ms = 0.5 % CPU upper bound per plugin.
+pub const HOOK_BUDGET: Duration = Duration::from_millis(10);
 const BUDGET_OVERSHOOT_LIMIT: u32 = 3;
 
 /// What a plugin is allowed to ask the host for.  Default = none.

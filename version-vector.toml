@@ -23,7 +23,7 @@
 #                         SIGUSR1 execv mechanics, or session table
 #                         semantics change.
 
-shell   = "0.2.1"    # L1
-core    = "0.2.17"   # L2 — marspot version
+shell   = "0.2.2"    # L1
+core    = "0.2.18"   # L2 — marspot version
 session = "0.2.6"    # L3
 shelld  = "0.2.4"    # L4

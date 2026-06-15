@@ -21,8 +21,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use marspot::paths;
+use marspot::shelld_client::ShelldClient;
+
+use crate::plugins::pidtree;
 use crate::plugins::{
     LogLevel, PermissionSet, Plugin, PluginError, PluginHost, PluginMetadata,
     PLUGIN_API_VERSION,
@@ -45,6 +51,14 @@ pub struct ClaudecodePlugin {
     seen: HashMap<PathBuf, SessionInfo>,
     /// Where ~/.claude/projects lives.  Cached at init.
     projects_root: Option<PathBuf>,
+    /// Lazy shelld client.  None until first successful connect.
+    /// Used to walk shelld's session table → per-session zsh.pid →
+    /// pidtree → cwd → encoded project dir → sessionId.
+    shelld: Option<ShelldClient>,
+    /// Previous-tick mapping of `(shelld_session_id → sessionId)` so
+    /// we only log on transitions (attach / detach / change), not
+    /// every tick.
+    last_mapping: HashMap<u64, String>,
 }
 
 impl ClaudecodePlugin {
@@ -53,7 +67,58 @@ impl ClaudecodePlugin {
             initialised: false,
             seen: HashMap::new(),
             projects_root: None,
+            shelld: None,
+            last_mapping: HashMap::new(),
         }
+    }
+
+    /// Reverse-lookup: given an encoded project dir (e.g.
+    /// `-Users-doracawl-workspace-foo`), return the latest sessionId
+    /// we've seen for it.  Walks the `seen` map; cheap when only a
+    /// dozen projects are active.
+    fn session_id_for_project(&self, encoded_dir: &str) -> Option<String> {
+        let mut newest: Option<(SystemTime, &SessionInfo)> = None;
+        for s in self.seen.values() {
+            if s.project_dir == encoded_dir {
+                match newest {
+                    Some((t, _)) if t >= s.last_mtime => {}
+                    _ => newest = Some((s.last_mtime, s)),
+                }
+            }
+        }
+        newest.map(|(_, s)| s.session_id.clone())
+    }
+}
+
+/// Encode a filesystem path into claude's project directory naming
+/// convention (`/Users/foo/bar` → `-Users-foo-bar`).
+fn encode_project_dir(cwd: &std::path::Path) -> String {
+    let mut s = String::with_capacity(cwd.as_os_str().len());
+    for c in cwd.to_string_lossy().chars() {
+        if c == '/' {
+            s.push('-');
+        } else {
+            s.push(c);
+        }
+    }
+    s
+}
+
+/// Heuristic: is this descendant the `claude` CLI?  Cheap two-step
+/// check — comm narrows the candidate set to ~1 per pane (the Node
+/// process running claude), then cmdline confirms it's actually
+/// claude vs. some other Node script.
+fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
+    // `claude` is launched via Node (the bundled `~/.claude/local/claude`
+    // shim is a Node entrypoint), so the process's comm shows up as
+    // "node".  Some claudecode installs may patch this; keep the
+    // alternative `claude` for the rare direct-binary case.
+    if d.comm != "node" && d.comm != "claude" {
+        return false;
+    }
+    match pidtree::proc_cmdline(d.pid) {
+        Some(line) => line.contains("claude"),
+        None => false,
     }
 }
 
@@ -92,6 +157,35 @@ impl Plugin for ClaudecodePlugin {
             PluginError::Other("HOME not set; claudecode plugin idle".into())
         })?;
         self.projects_root = Some(PathBuf::from(home).join(".claude").join("projects"));
+        // Connect to shelld so tick can map shelld_session_id →
+        // child_pid → claude descendant → sessionId.  Best-effort:
+        // if shelld is down, plugin still runs in global-scan-only
+        // mode, no per-session mapping.
+        let socket = paths::shelld_socket();
+        let wake = Arc::new(AtomicBool::new(false));
+        let wk = wake.clone();
+        match ShelldClient::connect(&socket, move || {
+            wk.store(true, Ordering::Release);
+        }) {
+            Ok(c) => {
+                self.shelld = Some(c);
+                host.log(
+                    LogLevel::Info,
+                    "init.shelld_connected",
+                    &format!("shelld client up ({})", socket.display()),
+                );
+            }
+            Err(e) => {
+                host.log(
+                    LogLevel::Warn,
+                    "init.shelld_unavailable",
+                    &format!(
+                        "shelld at {} unavailable ({e}); per-session mapping disabled",
+                        socket.display()
+                    ),
+                );
+            }
+        }
         host.log(
             LogLevel::Info,
             "init",
@@ -216,6 +310,71 @@ impl Plugin for ClaudecodePlugin {
                 &format!("new={} updated={}", newly_seen, updates),
             );
         }
+
+        // M3.2 — per-shelld-session mapping.  For each live shelld
+        // session, BFS its zsh.pid for a `claude` descendant; if
+        // found, encode its cwd and reverse-lookup the sessionId
+        // from `self.seen`.  Log only on transitions to keep the
+        // log file quiet for a steady-state session.
+        let Some(client) = self.shelld.as_ref() else {
+            return; // shelld unavailable; skip mapping silently
+        };
+        let sessions = match client.list_sessions() {
+            Ok(v) => v,
+            Err(e) => {
+                host.log(
+                    LogLevel::Debug,
+                    "tick.shelld_list_failed",
+                    &format!("{e}"),
+                );
+                return;
+            }
+        };
+        let procs = pidtree::list_all_procs();
+        let mut new_mapping: HashMap<u64, String> = HashMap::new();
+        for s in &sessions {
+            if !s.alive {
+                continue;
+            }
+            let descendants =
+                pidtree::descendants_of(s.child_pid, &procs);
+            let claude = descendants.iter().find(|d| looks_like_claudecode(d));
+            let Some(claude) = claude else { continue };
+            let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
+                continue;
+            };
+            let encoded = encode_project_dir(&cwd);
+            if let Some(sid_uuid) = self.session_id_for_project(&encoded) {
+                new_mapping.insert(s.session_id, sid_uuid);
+            }
+        }
+        // Log adds + drops vs. last tick.
+        for (sh_sid, cc_sid) in &new_mapping {
+            let prev = self.last_mapping.get(sh_sid);
+            if prev.map(|p| p != cc_sid).unwrap_or(true) {
+                host.log(
+                    LogLevel::Info,
+                    "session.bound",
+                    &format!(
+                        "shelld_session={} → claudecode sid={}",
+                        sh_sid, cc_sid
+                    ),
+                );
+            }
+        }
+        for (sh_sid, cc_sid) in &self.last_mapping {
+            if !new_mapping.contains_key(sh_sid) {
+                host.log(
+                    LogLevel::Info,
+                    "session.unbound",
+                    &format!(
+                        "shelld_session={} (was sid={})",
+                        sh_sid, cc_sid
+                    ),
+                );
+            }
+        }
+        self.last_mapping = new_mapping;
     }
 
     fn stop(&mut self, host: &dyn PluginHost) {
