@@ -375,7 +375,24 @@ fi
 
 if (( STAGED )); then
   echo "==> triggering silent update (window + sessions survive)"
-  DEADLINE=$(( $(date +%s) + 60 )); NEXT=0
+  # Trigger ONCE up front.  Previous behaviour was to fire SIGUSR1
+  # every 3s until pending/ drained, but supervisor enters probation
+  # on the first trigger and ignores subsequent ones with a
+  # `shell.sigusr1.ignored_not_idle` warn — a steady drumbeat that
+  # spammed the log every install and (worse) raced the supervisor
+  # state machine on the 2026-06-15 install-local that aborted with
+  # `pending_core_HELLO_timeout`.  The pending → current move
+  # happens at the spawned core's boot (SESSION_PROMOTE + the L2
+  # promote), which is well under a second on a healthy build, so
+  # this single trigger drains pending/ within the first few polls.
+  # Backstop: if pending/ is still there after FALLBACK_RETRIGGER_S,
+  # we assume the SIGUSR1 was genuinely lost (rare) and fire once
+  # more — not a 3-second drumbeat.
+  "$MACOS/marspot-shell" --trigger >/dev/null 2>&1 || true
+  TRIGGER_AT=$(date +%s)
+  RETRIGGERED=0
+  FALLBACK_RETRIGGER_S=8
+  DEADLINE=$(( $(date +%s) + 60 ))
   while :; do
     left=0
     [[ -f "$TREE/pending/marspot-shell"   ]] && left=1
@@ -384,7 +401,10 @@ if (( STAGED )); then
     (( left == 0 )) && break
     now=$(date +%s)
     (( now >= DEADLINE )) && { echo "WARN: pending/ not consumed in 60s — see marspot-shell --status" >&2; exit 1; }
-    if (( now >= NEXT )); then "$MACOS/marspot-shell" --trigger >/dev/null 2>&1 || true; NEXT=$(( now + 3 )); fi
+    if (( ! RETRIGGERED && now - TRIGGER_AT >= FALLBACK_RETRIGGER_S )); then
+      "$MACOS/marspot-shell" --trigger >/dev/null 2>&1 || true
+      RETRIGGERED=1
+    fi
     sleep 0.5
   done
   echo "    applied.  $(tail -1 "$SUP_LOG" 2>/dev/null)"
