@@ -14,6 +14,7 @@
 
 pub mod binary_tree;
 pub mod emoji_presentation;
+pub mod fast_hash;
 pub mod unicode_data;
 pub mod grapheme;
 pub mod grid;

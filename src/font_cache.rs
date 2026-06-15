@@ -22,6 +22,7 @@ use core_text::font::{new_from_name, CTFont, CTFontRef};
 use core_text::font_descriptor::{
     kCTFontBoldTrait, kCTFontColorGlyphsTrait, kCTFontItalicTrait, kCTFontOrientationDefault,
 };
+use marspot_term::fast_hash::FxHashMap;
 use std::collections::HashMap;
 
 // Match iTerm2's default profile (Normal Font = "Monaco 12") so a
@@ -200,7 +201,11 @@ pub struct FontCache {
     /// codepoints across the 4 styles, well under cap; the rebuild
     /// is the safety net for pathological "user types every
     /// codepoint of CJK + emoji" cases.
-    char_cache: HashMap<(u32, u8), (usize, CGGlyph)>,
+    /// Hot per-cell lookup during `build_instances`; SipHash on a
+    /// 5-byte (cp u32, style u8) key was visible in the 9-session
+    /// CPU profile.  Swap to FxHash — keys are derived from grid
+    /// contents, never adversarial.
+    char_cache: FxHashMap<(u32, u8), (usize, CGGlyph)>,
     /// Number of times the cache filled up and was rebuilt.
     /// Should be 0 in steady-state terminal use; non-zero after
     /// settling means we're hitting the cap (bump CHAR_CACHE_CAP
@@ -295,7 +300,7 @@ impl FontCache {
 
         Ok(Self {
             fonts,
-            char_cache: HashMap::new(),
+            char_cache: FxHashMap::default(),
             rebuild_count: 0,
             style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
             cell_w,

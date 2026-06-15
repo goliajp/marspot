@@ -41,4 +41,9 @@ png = "0.18"
 # render with `thin` after the split; `fat` recovers it.
 lto = "fat"
 codegen-units = 1
-strip = true
+# `strip = "debuginfo"` (was `true` = "symbols") keeps the symbol
+# table so `sample` / `samply` profiles produce function-level
+# frames.  DWARF debug info is still stripped so the binary stays
+# small; we only need the .symtab for stack walks.  Reverting to
+# `true` is a one-line change if binary size becomes a hard concern.
+strip = "debuginfo"

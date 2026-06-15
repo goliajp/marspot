@@ -66,7 +66,7 @@ use objc2_metal::{
     MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLStorageMode, MTLTexture,
     MTLTextureDescriptor, MTLTextureUsage,
 };
-use std::collections::HashMap;
+use marspot_term::fast_hash::FxHashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -151,7 +151,12 @@ pub struct GlyphAtlas {
     /// rasteriser `get_or_rasterize` dispatches to.
     bpp: u32,
     shelves: Vec<Shelf>,
-    cache: HashMap<GlyphKey, AtlasEntry>,
+    /// SipHash on a 6-byte (font_id u32, glyph u16) key was 1.7 % of
+    /// L2 core CPU under the 9-active workload (sampled 2026-06-15);
+    /// FxHash cuts that to a single mul+rotate per chunk.  Keys are
+    /// derived from grid contents — never adversarial — so no DoS
+    /// resistance is needed.
+    cache: FxHashMap<GlyphKey, AtlasEntry>,
     /// Number of times the atlas filled up and was rebuilt.  Each
     /// rebuild costs one stutter frame to re-rasterise visible glyphs.
     /// In steady-state terminal use this should stay at 0; non-zero
@@ -222,7 +227,7 @@ impl GlyphAtlas {
             height,
             bpp,
             shelves: Vec::new(),
-            cache: HashMap::new(),
+            cache: FxHashMap::default(),
             rebuild_count: 0,
         })
     }
