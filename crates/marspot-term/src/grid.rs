@@ -148,10 +148,17 @@ pub fn char_width(ch: char) -> u8 {
         | 0x2282..=0x2283 | 0x2286..=0x2287 | 0x2295 | 0x2299
         | 0x22A5 | 0x22BF | 0x2312
         | 0x2460..=0x24E9      // ← circled digits / letters (user report)
-        | 0x24EB..=0x254B
-        | 0x2550..=0x2573      // box drawing (lower half rendered by us anyway)
-        | 0x2580..=0x258F      // block elements (ditto)
-        | 0x2592..=0x2595
+        | 0x24EB..=0x24FF      // Enclosed Alphanumeric Supplement (tail)
+        // NB: 0x2500..0x259F (Box Drawing + Block Elements) intentionally
+        // OMITTED from the Ambiguous→Wide list.  UAX #11 categorises them
+        // as Ambiguous, but every terminal in the world (including iTerm2
+        // with "Ambiguous Characters are Double-Width" on) keeps them at
+        // width 1 — otherwise the horizontal char ─ (U+2500) can't tile
+        // edge-to-edge with the next ─ and tables / boxes / tmux dividers
+        // split apart.  marspot already self-rasterises this range
+        // (`box_drawing_arms`, `block_element_rects`) at exactly 1 cell;
+        // making it wide here would double-spend the slot and break the
+        // tiling.  User report 2026-06-15: "横线没连起来了".
         | 0x25A0..=0x25A1 | 0x25A3..=0x25A9 | 0x25B2..=0x25B3
         | 0x25B6..=0x25B7 | 0x25BC..=0x25BD | 0x25C0..=0x25C1
         | 0x25C6..=0x25C8 | 0x25CB | 0x25CE..=0x25D1 | 0x25E2..=0x25E5
@@ -232,6 +239,35 @@ mod char_width_tests {
         assert_eq!(char_width('中'), 2);
         assert_eq!(char_width('精'), 2);
         assert_eq!(char_width('神'), 2);
+    }
+
+    #[test]
+    fn box_drawing_stays_narrow() {
+        // Regression for the 09:10 install hotfix.  ─ │ ┌ ┐ └ ┘ ├ ┤
+        // ┬ ┴ ┼ all MUST be width 1 even though UAX #11 marks them
+        // Ambiguous, otherwise tables / tmux dividers / claudecode's
+        // own box chrome split apart.
+        for ch in '\u{2500}'..='\u{257F}' {
+            assert_eq!(
+                char_width(ch),
+                1,
+                "box-drawing U+{:04X} must stay narrow",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn block_elements_stay_narrow() {
+        // Same reason — ▀ ▄ █ ▌ ▐ etc. tile edge-to-edge at width 1.
+        for ch in '\u{2580}'..='\u{259F}' {
+            assert_eq!(
+                char_width(ch),
+                1,
+                "block-element U+{:04X} must stay narrow",
+                ch as u32
+            );
+        }
     }
 
     #[test]
