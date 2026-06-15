@@ -192,6 +192,65 @@ impl ByteLog {
 
 }
 
+/// RFC-002 step 7: persisted snapshot path on disk.  Lives alongside
+/// the bytelog under each session's dir.  Survives `execv` (we read
+/// it back in `rehydrate_sessions`) and a shelld crash (LaunchAgent
+/// brings us back; we read the file on cold boot too).
+fn snapshot_path(session_id: u64) -> PathBuf {
+    marspot::paths::sessions_dir()
+        .join(session_id.to_string())
+        .join("state.bin")
+}
+
+/// Atomic write of a session's snapshot to disk.  Layout:
+///
+/// ```text
+/// [generation u64 LE]
+/// [body       Vec<u8>]
+/// ```
+///
+/// Atomicity: write to `<path>.tmp` first, then rename.  POSIX
+/// guarantees rename within the same directory replaces atomically,
+/// so a crash mid-write leaves either the previous snapshot or no
+/// snapshot, never a torn intermediate.
+fn write_snapshot_to_disk(session_id: u64, slot: &SnapshotSlot) -> io::Result<()> {
+    let path = snapshot_path(session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("bin.tmp");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(&slot.generation.to_le_bytes())?;
+        f.write_all(&slot.body)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Inverse of `write_snapshot_to_disk`.  Returns `None` if the file
+/// doesn't exist (cold session with no prior snapshot) or is too
+/// short to contain even the generation header — falling through to
+/// "empty slot, client starts blank" is correct in both cases.
+fn read_snapshot_from_disk(session_id: u64) -> Option<SnapshotSlot> {
+    let path = snapshot_path(session_id);
+    let mut data = std::fs::read(&path).ok()?;
+    if data.len() < 8 {
+        return None;
+    }
+    let body = data.split_off(8);
+    let mut gen_bytes = [0u8; 8];
+    gen_bytes.copy_from_slice(&data);
+    let generation = u64::from_le_bytes(gen_bytes);
+    Some(SnapshotSlot { body, generation })
+}
+
 /// Helper for KILL_SESSION cleanup — removes the bytelog file and
 /// its session directory.  Called from the Kill arm so a session
 /// killed by the GUI doesn't leave gigabytes of log behind.
@@ -586,6 +645,41 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         f.sync_all().ok();
     }
 
+    // RFC-002 step 7: persist each session's snapshot to disk so the
+    // new image's rehydrate_sessions can repopulate the in-memory
+    // slots.  Without this, an execv would drop every snapshot and
+    // the next ATTACH would ship an empty StateSnapshot — the client
+    // sees a blank grid until the L3 snapshot pump produces a fresh
+    // one.  Best-effort per session: write failure is logged and
+    // skipped, the new image will discover no snapshot file and treat
+    // the slot as empty (correct fallback).
+    {
+        let session_map = sessions.lock().unwrap();
+        for (id, s) in session_map.iter() {
+            let slot_guard = s.snapshot.lock().unwrap();
+            if let Some(slot) = slot_guard.as_ref() {
+                match write_snapshot_to_disk(*id, slot) {
+                    Ok(()) => {
+                        lx_debug!(
+                            "execv.snapshot.persisted",
+                            "wrote state.bin",
+                            id = id,
+                            generation = slot.generation,
+                            body_bytes = slot.body.len()
+                        );
+                    }
+                    Err(e) => {
+                        lx_warn!(
+                            "execv.snapshot.persist_failed",
+                            &format!("{e}"),
+                            id = id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Promote: pending/<bin> → current/<bin> (and current → prev if it
     // existed). This is the only filesystem-changing step that runs
     // before execv; everything else above is in /tmp.
@@ -734,6 +828,12 @@ fn rehydrate_sessions(
                 None
             }
         };
+        // RFC-002 step 7: try to restore the persisted snapshot from
+        // disk.  None means "no prior snapshot, start blank" — the
+        // L3 pump will produce a fresh one soon.
+        let snapshot = read_snapshot_from_disk(*id);
+        let restored_gen = snapshot.as_ref().map(|s| s.generation).unwrap_or(0);
+        let restored_bytes = snapshot.as_ref().map(|s| s.body.len()).unwrap_or(0);
         let session = Arc::new(ShellSession {
             id: *id,
             pty,
@@ -741,8 +841,17 @@ fn rehydrate_sessions(
             alive: AtomicBool::new(true),
             bytelog: Mutex::new(bytelog),
             title: Mutex::new(title.clone()),
-            snapshot: Mutex::new(None),
+            snapshot: Mutex::new(snapshot),
         });
+        if restored_bytes > 0 {
+            lx_event!(
+                "EXECV_SNAPSHOT_RESTORED",
+                "RFC-002 snapshot loaded from state.bin",
+                id = id,
+                generation = restored_gen,
+                body_bytes = restored_bytes
+            );
+        }
         sessions.lock().unwrap().insert(*id, session.clone());
         spawn_session_reader(session);
         count += 1;
