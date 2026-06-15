@@ -444,6 +444,19 @@ impl ShelldClient {
         }
         Ok(())
     }
+
+    /// Persist a display title against the given session at shelld.
+    /// Fire-and-forget — shelld stores it and surfaces it on the
+    /// next `list_sessions`.  Empty `title` clears the custom title.
+    /// This is what makes user-set titles survive a dual-core
+    /// silent swap: shelld outlives every core image.
+    pub fn set_title(&self, id: u64, title: &str) -> io::Result<()> {
+        self.send_frame(Frame::new(
+            MsgType::SetTitle,
+            crate::shelld_proto::encode_set_title(id, title),
+        ))?;
+        Ok(())
+    }
 }
 
 /// Drives reconnect-on-EOF over the same socket path so an execv-style

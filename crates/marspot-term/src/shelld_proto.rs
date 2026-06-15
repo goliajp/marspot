@@ -66,6 +66,13 @@ pub enum MsgType {
     Detach = 8,
     Kill = 9,
     Resize = 10,
+    /// Set the display title for a session.  Title persists at
+    /// shelld for the lifetime of the session (survives core
+    /// restart / dual-core swap) so the user's custom titles aren't
+    /// lost when a fresh core boots and reattaches.  Mirrors how
+    /// mature terminals (iTerm2, etc.) keep title as session-level
+    /// metadata, not GUI-process-level.
+    SetTitle = 11,
     // 100..=199 reserved for high-volume data flow so a future
     // dispatcher can branch on `type >= 100` cheaply.
     Data = 100,
@@ -86,6 +93,7 @@ impl MsgType {
             8 => MsgType::Detach,
             9 => MsgType::Kill,
             10 => MsgType::Resize,
+            11 => MsgType::SetTitle,
             100 => MsgType::Data,
             101 => MsgType::Input,
             200 => MsgType::Error,
@@ -419,6 +427,34 @@ pub fn decode_resize(payload: &[u8]) -> io::Result<(u64, u16, u16)> {
         u16::from_le_bytes(payload[8..10].try_into().unwrap()),
         u16::from_le_bytes(payload[10..12].try_into().unwrap()),
     ))
+}
+
+/// SET_TITLE payload: `[session_id u64 LE] [title bytes (UTF-8)
+/// until end-of-payload]`.  Empty title clears the custom title.
+/// Title is stored at shelld and round-trips back to clients via
+/// `LIST_SESSIONS_REPLY.title`, so it survives core restarts.
+pub fn encode_set_title(session_id: u64, title: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + title.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(title.as_bytes());
+    v
+}
+
+pub fn decode_set_title(payload: &[u8]) -> io::Result<(u64, &str)> {
+    if payload.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SET_TITLE missing session_id",
+        ));
+    }
+    let id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let title = std::str::from_utf8(&payload[8..]).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("SET_TITLE title not valid UTF-8: {e}"),
+        )
+    })?;
+    Ok((id, title))
 }
 
 /// DATA payload (s→c, PTY bytes):

@@ -641,6 +641,20 @@ impl CoreApp {
         if let Some(idx) = self.editing_title.take() {
             if idx < self.custom_titles.len() {
                 let trimmed = self.title_edit_buffer.trim().to_string();
+                // Persist to shelld so the title survives a dual-core
+                // silent swap.  Per [[project-silent-update-gate]] the
+                // pre-2026-06-15 design kept titles in core memory only,
+                // so any swap reset them to None on the new core boot.
+                // shelld holds the title for the session's lifetime.
+                if let Some(sid) = self.panes[idx].shelld_session_id() {
+                    if let Err(e) = self.client.set_title(sid, &trimmed) {
+                        lx_warn!(
+                            "core.set_title.failed",
+                            &format!("{e}"),
+                            session = sid
+                        );
+                    }
+                }
                 self.custom_titles[idx] =
                     if trimmed.is_empty() { None } else { Some(trimmed) };
             }
@@ -1263,6 +1277,12 @@ fn main() {
         (boot.cells[0].cols, boot.cells[0].rows)
     };
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
+    // session_id → custom title, harvested from shelld so freshly-
+    // booted cores repopulate their per-pane title map.  Empty for a
+    // brand-new shelld; populated below from `list_sessions`
+    // responses on both the l3_mode and fallback paths.
+    let mut session_titles: std::collections::HashMap<u64, String> =
+        std::collections::HashMap::new();
 
     // Per-session L3 is now the DEFAULT (target #4 step 6): one L3 process
     // per cell, each owning its own session process + shm grid in its own
@@ -1306,6 +1326,11 @@ fn main() {
         // (user-visible: "I was working in pane 5, now I'm in pane 8").
         // Monotonic session_id means session 1 lands in pane 1
         // forever, session 9 lands in pane 9 forever.
+        for s in &raw_list {
+            if !s.title.is_empty() {
+                session_titles.insert(s.session_id, s.title.clone());
+            }
+        }
         let mut alive_ids: Vec<u64> = raw_list
             .iter()
             .filter(|s| s.alive)
@@ -1374,6 +1399,9 @@ fn main() {
             .filter(|s| s.alive)
             .collect();
         for info in existing.iter().take(n_sessions) {
+            if !info.title.is_empty() {
+                session_titles.insert(info.session_id, info.title.clone());
+            }
             match client.attach(info.session_id, boot_cols, boot_rows) {
                 Ok(s) => panes.push(Pane::new_shelld(s)),
                 Err(e) => {
@@ -1400,7 +1428,18 @@ fn main() {
         return;
     }
 
-    let n = panes.len();
+    // Repopulate per-pane custom titles from the shelld-side metadata
+    // collected during boot.  Without this, every silent update reset
+    // the user's custom labels back to None — see the SET_TITLE
+    // round-trip on shelld for the persistence path.
+    let custom_titles_init: Vec<Option<String>> = panes
+        .iter()
+        .map(|p| {
+            p.shelld_session_id()
+                .and_then(|sid| session_titles.get(&sid).cloned())
+                .filter(|t| !t.is_empty())
+        })
+        .collect();
     let mut app = CoreApp {
         renderer,
         // Placeholder; `rebuild_layout` below builds the real one
@@ -1418,7 +1457,7 @@ fn main() {
         ),
         panes,
         focused_idx: 0,
-        custom_titles: vec![None; n],
+        custom_titles: custom_titles_init,
         editing_title: None,
         title_edit_buffer: String::new(),
         selection: None,

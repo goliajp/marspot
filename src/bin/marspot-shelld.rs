@@ -248,6 +248,13 @@ struct ShellSession {
     /// ATTACH may run concurrently and needs the path to match what
     /// it was when the reader last appended.
     bytelog: Mutex<Option<ByteLog>>,
+    /// User-set display title.  Empty string means "no custom
+    /// title; show the default".  Persists across core restarts /
+    /// dual-core swaps because shelld outlives core.  Set via the
+    /// SET_TITLE control frame from core's `commit_title_edit`;
+    /// returned in LIST_SESSIONS_REPLY so a freshly-spawned core
+    /// repopulates its custom-title map on boot.
+    title: Mutex<String>,
 }
 
 impl ShellSession {
@@ -726,6 +733,7 @@ fn rehydrate_sessions(
             subscribers: Mutex::new(Vec::new()),
             alive: AtomicBool::new(true),
             bytelog: Mutex::new(bytelog),
+            title: Mutex::new(String::new()),
         });
         sessions.lock().unwrap().insert(*id, session.clone());
         spawn_session_reader(session);
@@ -1163,7 +1171,7 @@ fn reader_loop(
                             session_id: s.id,
                             child_pid: s.pty.child_pid(),
                             alive: s.alive.load(Ordering::Acquire),
-                            title: String::new(),
+                            title: s.title.lock().unwrap().clone(),
                         })
                         .collect()
                 };
@@ -1171,6 +1179,28 @@ fn reader_loop(
                     MsgType::ListSessionsReply,
                     encode_list_sessions_reply(&snapshot),
                 ));
+            }
+            MsgType::SetTitle => {
+                match marspot::shelld_proto::decode_set_title(&frame.payload) {
+                    Ok((id, title)) => {
+                        let g = sessions.lock().unwrap();
+                        if let Some(s) = g.get(&id) {
+                            *s.title.lock().unwrap() = title.to_string();
+                        } else {
+                            // Unknown session — drop silently; the client
+                            // will retry after attach completes if it
+                            // raced session creation.
+                            lx_warn!(
+                                "shelld.set_title.unknown_session",
+                                "SET_TITLE for unknown session_id",
+                                id = id
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(7, &format!("bad SET_TITLE: {e}")));
+                    }
+                }
             }
             MsgType::NewSession => {
                 let (cols, rows, cwd) = match decode_new_session(&frame.payload) {
@@ -1201,6 +1231,7 @@ fn reader_loop(
                             subscribers: Mutex::new(Vec::new()),
                             alive: AtomicBool::new(true),
                             bytelog: Mutex::new(bytelog),
+                            title: Mutex::new(String::new()),
                         });
                         // Auto-attach the creator before publishing —
                         // any DATA the reader thread emits before
