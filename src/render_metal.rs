@@ -1154,7 +1154,13 @@ impl MetalRenderer {
 //               depression between adjacent panels — used for
 //               sidebar↔grid, header↔grid, and cell↔cell alike
 const BG_PANEL: (f32, f32, f32) = (0.022, 0.028, 0.042);
-const BG_FOCUSED: (f32, f32, f32) = (0.006, 0.008, 0.014);
+// Push focused much closer to true black so the focused pane stands
+// out clearly against the unfocused BG_PANEL tone — user feedback
+// 2026-06-15: prior value (0.006, 0.008, 0.014) was hard to tell apart
+// from BG_PANEL = (0.022, 0.028, 0.042) at most viewing conditions.
+// Keep a tiny blue tint so the value doesn't snap to pure-black 0,0,0
+// (which can read flat next to coloured text).
+const BG_FOCUSED: (f32, f32, f32) = (0.000, 0.000, 0.003);
 // Pre-mixed against BG_PANEL ≈ 50%, so the 0.5-px sub-pixel quad
 // reads as a translucent hairline.  Going through alpha blending
 // would need pipeline changes; this gets the same visual effect
