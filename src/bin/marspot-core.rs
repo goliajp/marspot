@@ -46,7 +46,7 @@ use marspot::shell_proto::{
     ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 use marspot::shelld_client::ShelldClient;
-use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
+use marspot::{lx_debug, lx_debug_sampled, lx_error, lx_event, lx_info, lx_warn};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
@@ -1765,7 +1765,25 @@ fn main() {
             // sample — that's what makes `SurfaceReady` the dual-
             // buffer race fix: we only ever flip to a slot the GPU
             // has already finished.
+            let render_t0 = Instant::now();
             let caret = app.render(&target_tex[writing_idx]);
+            // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
+            // a busy display (60 Hz cap) without flooding when the
+            // user runs `MARSPOT_LOG_CORE=debug` to investigate latency
+            // / dropped frames.  surface_id ties it to the IOSurface
+            // lifecycle on the shell side; dur_us is the actual GPU
+            // wait, the dominant time cost in a frame.
+            lx_debug_sampled!(
+                "render.frame",
+                8,
+                "frame rendered",
+                frame = frame,
+                writing_idx = writing_idx,
+                surface_id = surfaces[writing_idx].id(),
+                dur_us = render_t0.elapsed().as_micros() as u64,
+                n_panes = app.panes.len(),
+                focused_idx = app.focused_idx
+            );
             // Per-frame ack — the just-completed surface ID.  In v=2
             // this replaces the empty-payload `FrameRendered` poke:
             // shell uses the id to flip its presenter's `current_idx`,

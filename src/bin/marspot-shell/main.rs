@@ -418,7 +418,7 @@ fn install_sigusr1_handler() {
     }
 }
 
-use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
+use marspot::{lx_debug, lx_debug_sampled, lx_error, lx_event, lx_info, lx_warn};
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
@@ -585,6 +585,19 @@ impl SurfacePair {
                 return Err(e);
             }
         };
+        // IOSurface lifecycle is the load-bearing fact in every flash
+        // / black-window incident — surface it explicitly at DEBUG.
+        // pair create / set_pair / release / swap together let a future
+        // incident reconstruct exactly which surfaces a given frame was
+        // sampling.
+        lx_debug!(
+            "shell.surface.create_pair",
+            "IOSurface pair created",
+            front_id = front.id(),
+            back_id = back.id(),
+            w_px = w_px,
+            h_px = h_px
+        );
         Ok(Self { front, back })
     }
 
@@ -603,6 +616,12 @@ impl SurfacePair {
     /// Drop reverse: decrement_use on both halves.  Pair is consumed
     /// because both surfaces become invalid for the shell after this.
     fn release(self) {
+        lx_debug!(
+            "shell.surface.release_pair",
+            "IOSurface pair released",
+            front_id = self.front.id(),
+            back_id = self.back.id()
+        );
         self.front.decrement_use();
         self.back.decrement_use();
     }
@@ -1660,7 +1679,16 @@ impl ShellApp {
             .unwrap_or(false);
         if in_live && !in_pending {
             // Per-frame ack: just point the presenter at the just-
-            // completed half.  No pair churn, no log spam.
+            // completed half.  Sampled (1/8 ≈ render.frame's cadence
+            // so the two streams sync at MARSPOT_LOG=debug) — the
+            // live-pair-swap path is the dominant rate on a busy
+            // display and would otherwise drown the log.
+            lx_debug_sampled!(
+                "shell.surface.swap",
+                8,
+                "per-frame SurfaceReady ack",
+                id = id
+            );
             if let Some(p) = self.presenter.as_mut() {
                 if !p.swap_to_id(id) {
                     // Presenter and shell pair-ids disagree — should
@@ -1911,6 +1939,21 @@ impl MarspotApp for ShellApp {
     }
 
     fn key_event(&mut self, _ctx: &MarspotAppCtx, event: MarspotKeyEvent, mods: Modifiers) {
+        // Forensic anchor for "key X did the wrong thing" reports.
+        // We log the LogicalKey and the modifier byte; the actual PTY
+        // bytes are encoded downstream in L3 (input_core::key_event_to_bytes)
+        // and the existing `~/.marspot-trace` hook keeps capturing them
+        // if it ever existed.  This line being at DEBUG means production
+        // (default INFO) pays nothing; `MARSPOT_LOG_SHELL=debug` opens
+        // the floodgate when investigating.  Mod byte format mirrors
+        // shell_proto::struct_to_mods_byte: shift=1 ctrl=2 alt=4 super=8.
+        lx_debug!(
+            "input.key",
+            "key event forwarded to core",
+            logical = format!("{:?}", event.logical),
+            mods_byte = struct_to_mods_byte(mods),
+            state = format!("{:?}", event.state)
+        );
         let wire = event_to_wire(&event, mods);
         self.send(MsgType::KeyEvent, encode_key_event(&wire));
     }

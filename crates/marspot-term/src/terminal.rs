@@ -15,7 +15,7 @@
 use crate::grid::{Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
-use crate::{lx_debug, lx_warn};
+use crate::{lx_debug, lx_debug_sampled, lx_warn};
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -843,26 +843,54 @@ impl<'a> ParserCallbacks for Handler<'a> {
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
         self.flush_cluster_for_break();
         trace_seq("CSI", intermediates, params, byte);
+        // Every CSI through the parser lands a sampled DEBUG line.
+        // 1/64 keeps cost flat under heavy apps (tmux paints ~hundreds
+        // of CSI/s), but bursts above that get truncated logarithmically
+        // — good enough to spot patterns ("this app drives ~50 CUP/s")
+        // without flooding when an SGR-heavy app like btop runs.  Set
+        // `MARSPOT_LOG_TERM=debug` to enable; default INFO is 0 ns.
+        lx_debug_sampled!(
+            "term.csi",
+            64,
+            "CSI dispatch",
+            final_byte = byte as char,
+            intermediates_len = intermediates.len(),
+            param0 = params.first().copied().unwrap_or(0)
+        );
         *self.pending_wrap = false;
         if intermediates == b"?" {
             // DEC private mode set/reset.  Each param is a separate mode.
             match byte {
                 b'h' => {
                     for &p in params {
+                        lx_debug!("term.mode.set", "DECSET", mode = p);
                         self.dec_mode(p, true);
                     }
                 }
                 b'l' => {
                     for &p in params {
+                        lx_debug!("term.mode.set", "DECRST", mode = p);
                         self.dec_mode(p, false);
                     }
                 }
-                _ => {}
+                other => {
+                    lx_debug!(
+                        "term.csi.unsupported",
+                        "DEC private CSI with unhandled final",
+                        final_byte = other as char
+                    );
+                }
             }
             return;
         }
         if !intermediates.is_empty() {
             // Other private-marker sequences not implemented yet.
+            lx_debug!(
+                "term.csi.unsupported",
+                "CSI with non-? intermediate",
+                final_byte = byte as char,
+                int_count = intermediates.len()
+            );
             return;
         }
         let (col, row) = self.grid.cursor();
@@ -1071,13 +1099,37 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.pending_response.extend_from_slice(b"\x1bP>|marspot\x1b\\");
                 self.record_response("XTQVERSION");
             }
-            _ => {} // remaining CSI commands arrive in later phases
+            _ => {
+                // remaining CSI commands arrive in later phases —
+                // surface them at DEBUG so we know what apps are
+                // sending that we drop on the floor.  Sampled because
+                // an unknown sequence in a loop would otherwise flood.
+                lx_debug_sampled!(
+                    "term.csi.unsupported",
+                    16,
+                    "unhandled CSI final",
+                    final_byte = byte as char,
+                    param0 = params.first().copied().unwrap_or(0)
+                );
+            }
         }
     }
 
-    fn osc_dispatch(&mut self, _data: &[u8]) {
+    fn osc_dispatch(&mut self, data: &[u8]) {
         self.flush_cluster_for_break();
         // OSC handlers (window title, hyperlinks, palette) — later phase.
+        // Surface what's coming through at DEBUG so the next round of
+        // OSC implementation has a "what do apps actually send" log.
+        lx_debug!(
+            "term.osc.dispatch",
+            "OSC payload (handler not implemented yet)",
+            bytes = data.len(),
+            head = data
+                .first()
+                .copied()
+                .map(|b| b as char)
+                .unwrap_or('?')
+        );
     }
 }
 

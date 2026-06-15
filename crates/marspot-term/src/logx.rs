@@ -21,7 +21,7 @@
 
 use std::cell::RefCell;
 use std::fmt;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -326,6 +326,26 @@ fn days_from_epoch_to_ymd(days: i32) -> (i32, u32, u32) {
     (y_final, m, d)
 }
 
+/// Sampled-counter primitive — the macros use this to keep a
+/// process-global counter per call site (via `static AtomicU64`) so a
+/// hot-path TRACE / DEBUG can land every Nth call without flooding
+/// the log.  Returns `true` iff the caller should emit.
+///
+/// `every_n`: emit on every Nth call (1 = every call).  `0` is treated
+/// as 1 (always emit) to avoid divide-by-zero footguns.
+#[inline]
+pub fn sample_tick(counter: &AtomicU64, every_n: u64) -> bool {
+    let n = every_n.max(1);
+    // `fetch_add` is single-instruction on x86 + ARM.  We don't need
+    // SeqCst — the increment ordering across threads doesn't matter,
+    // we just want each call to see a monotonically advancing value.
+    let prev = counter.fetch_add(1, Ordering::Relaxed);
+    prev % n == 0
+}
+
+/// Re-export for the sampled macros' expansion site.
+pub use std::sync::atomic::AtomicU64 as _AtomicU64ForMacros;
+
 // === Macros (`#[macro_export]` lifts them to the crate root) ===
 
 #[macro_export]
@@ -383,9 +403,75 @@ macro_rules! lx_event {
     };
 }
 
+/// Sampled DEBUG — `lx_debug_sampled!(tag, every_n, msg, k=v, …)` emits
+/// on every Nth call.  Use to cover hot-path events at DEBUG without
+/// flooding when the user runs `MARSPOT_LOG=debug`.  Each call site
+/// has its own counter (a local `static AtomicU64`) so two call sites
+/// don't share state.  Filter short-circuits when level is below
+/// DEBUG so even the counter increment is skipped.
+///
+/// Cost when filtered out: 1 ns (one atomic load + branch).
+/// Cost when emitting: ~5 µs (sink lock + format + write).
+/// Default `every_n` policy: 64 for ~10 kHz events, 256 for ~100 kHz.
+#[macro_export]
+macro_rules! lx_debug_sampled {
+    ($tag:expr, $every_n:expr, $msg:expr $(, $($t:tt)*)?) => {{
+        if $crate::logx::should_log($crate::logx::Level::Debug) {
+            static COUNTER: $crate::logx::_AtomicU64ForMacros =
+                $crate::logx::_AtomicU64ForMacros::new(0);
+            if $crate::logx::sample_tick(&COUNTER, $every_n as u64) {
+                $crate::__lx_internal!(
+                    $crate::logx::Level::Debug, $tag, $msg $(, $($t)*)?
+                );
+            }
+        }
+    }};
+}
+
+/// Sampled TRACE — same shape as `lx_debug_sampled!`.  Reserved for
+/// the truly per-byte / per-glyph paths where even DEBUG would burst.
+/// Default `every_n` policy: 4096 for ~100 kHz, 65536 for ~MHz events.
+#[macro_export]
+macro_rules! lx_trace_sampled {
+    ($tag:expr, $every_n:expr, $msg:expr $(, $($t:tt)*)?) => {{
+        if $crate::logx::should_log($crate::logx::Level::Trace) {
+            static COUNTER: $crate::logx::_AtomicU64ForMacros =
+                $crate::logx::_AtomicU64ForMacros::new(0);
+            if $crate::logx::sample_tick(&COUNTER, $every_n as u64) {
+                $crate::__lx_internal!(
+                    $crate::logx::Level::Trace, $tag, $msg $(, $($t)*)?
+                );
+            }
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_tick_emits_every_nth_starting_at_first() {
+        let counter = AtomicU64::new(0);
+        // every_n = 4 → emit on calls 0, 4, 8, 12, ...
+        let pattern: Vec<bool> = (0..10)
+            .map(|_| sample_tick(&counter, 4))
+            .collect();
+        assert_eq!(
+            pattern,
+            vec![true, false, false, false, true, false, false, false, true, false]
+        );
+    }
+
+    #[test]
+    fn sample_tick_zero_n_means_always() {
+        // Guard against divide-by-zero footgun.  every_n = 0 should
+        // behave like every_n = 1 (emit on every call).
+        let counter = AtomicU64::new(0);
+        assert!(sample_tick(&counter, 0));
+        assert!(sample_tick(&counter, 0));
+        assert!(sample_tick(&counter, 0));
+    }
 
     #[test]
     fn level_filter_blocks_lower() {
