@@ -64,7 +64,13 @@ pub const DEFAULT_CONTROL_FD: i32 = 3;
 // ───────────────────────────────────────────────────────────────────
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"MSPC");
-pub const PROTO_VERSION: u32 = 1;
+/// Wire protocol version.  Both sides Hello-handshake on this value;
+/// mismatch causes the shell to kill its core and respawn.  Bumped to
+/// 2 on 2026-06-15 with the double-IOSurface (front+back) handshake
+/// that closes the cross-process IOSurface read/write race
+/// (`SurfaceAttach` frame, plus `SurfaceReady` per frame).  v=1 used
+/// a single IOSurface and the `Resize` frame to attach it.
+pub const PROTO_VERSION: u32 = 2;
 pub const HEADER_LEN: usize = 12;
 /// Sanity ceiling.  Input frames are tiny (≤256 B); a generous cap
 /// rules out runaway allocations from corrupted lengths.
@@ -142,7 +148,26 @@ pub enum MsgType {
     /// present it now."  Empty payload — a pure wake so the shell presents
     /// on real frame events instead of a blind ~60 fps timer (which burned
     /// idle CPU and occasionally sampled the surface mid-render → a flicker).
+    /// Deprecated at PROTO_VERSION=2: `SurfaceReady` carries both the
+    /// "go present" wake AND the "this id is now safe to read" id, so
+    /// `FrameRendered` is redundant on the dual-IOSurface path.
     FrameRendered = 39,
+    /// shell → core: "I have allocated two IOSurfaces.  Render into
+    /// them alternately; after each `commit + waitUntilCompleted`,
+    /// ack with `SurfaceReady(id)` so I know that id is safe to
+    /// sample."  Payload (32 bytes LE):
+    ///   front_id u32
+    ///   back_id  u32
+    ///   w_phys   f64
+    ///   h_phys   f64
+    ///   scale    f64
+    /// `front_id` is the surface shell wants core to write FIRST
+    /// (becomes "front" after the first SurfaceReady ack); `back_id`
+    /// is the other one.  Sent at boot (replacing the v=1 single-
+    /// surface env-var-only handshake) and on every resize.
+    /// Introduced at PROTO_VERSION=2 — supersedes the single-surface
+    /// `Resize` frame on the v=2 path.
+    SurfaceAttach = 40,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -171,6 +196,7 @@ impl MsgType {
             37 => MsgType::GetSelectionText,
             38 => MsgType::SelectionText,
             39 => MsgType::FrameRendered,
+            40 => MsgType::SurfaceAttach,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -515,6 +541,43 @@ pub fn decode_focus(payload: &[u8]) -> io::Result<bool> {
 /// The shell creates a fresh IOSurface at the new dimensions, then
 /// sends this frame.  The core looks the surface up, rebuilds its
 /// render target and layout, and acks with `SurfaceReady(id)`.
+/// SURFACE_ATTACH payload (32 bytes LE):
+///   front_id u32, back_id u32, w_phys f64, h_phys f64, scale f64.
+/// Introduced at PROTO_VERSION=2 for double-buffer IOSurface.
+pub fn encode_surface_attach(
+    front_id: u32,
+    back_id: u32,
+    w_phys: f64,
+    h_phys: f64,
+    scale: f64,
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + 4 + 8 + 8 + 8);
+    v.extend_from_slice(&front_id.to_le_bytes());
+    v.extend_from_slice(&back_id.to_le_bytes());
+    v.extend_from_slice(&w_phys.to_le_bytes());
+    v.extend_from_slice(&h_phys.to_le_bytes());
+    v.extend_from_slice(&scale.to_le_bytes());
+    v
+}
+
+pub fn decode_surface_attach(
+    payload: &[u8],
+) -> io::Result<(u32, u32, f64, f64, f64)> {
+    if payload.len() != 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SURFACE_ATTACH payload != 32 bytes",
+        ));
+    }
+    Ok((
+        u32::from_le_bytes(payload[0..4].try_into().unwrap()),
+        u32::from_le_bytes(payload[4..8].try_into().unwrap()),
+        f64::from_le_bytes(payload[8..16].try_into().unwrap()),
+        f64::from_le_bytes(payload[16..24].try_into().unwrap()),
+        f64::from_le_bytes(payload[24..32].try_into().unwrap()),
+    ))
+}
+
 pub fn encode_resize(new_surface_id: u32, w_phys: f64, h_phys: f64, scale: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(28);
     out.extend_from_slice(&new_surface_id.to_le_bytes());
@@ -1010,6 +1073,18 @@ mod tests {
     fn surface_ready_roundtrip() {
         let p = encode_surface_ready(0xCAFE_BABE);
         assert_eq!(decode_surface_ready(&p).unwrap(), 0xCAFE_BABE);
+    }
+
+    #[test]
+    fn surface_attach_roundtrip() {
+        let p = encode_surface_attach(0xDEAD_BEEF, 0xFEED_FACE, 2160.0, 3753.0, 2.0);
+        let (front, back, w, h, scale) = decode_surface_attach(&p).unwrap();
+        assert_eq!(front, 0xDEAD_BEEF);
+        assert_eq!(back, 0xFEED_FACE);
+        assert_eq!(w, 2160.0);
+        assert_eq!(h, 3753.0);
+        assert_eq!(scale, 2.0);
+        assert_eq!(MsgType::from_u32(40), Some(MsgType::SurfaceAttach));
     }
 
     #[test]
