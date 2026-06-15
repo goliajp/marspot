@@ -998,6 +998,7 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
     let key_code = unsafe { event.keyCode() };
     let logical = match key_code {
         // Carbon HIToolbox keyCodes — stable across macOS versions.
+        // Reference: <HIToolbox/Events.h> kVK_* constants.
         0x24 => LogicalKey::Named(NamedKey::Enter),
         0x4C => LogicalKey::Named(NamedKey::Enter), // numeric-keypad Enter
         0x30 => LogicalKey::Named(NamedKey::Tab),
@@ -1007,6 +1008,32 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
         0x7D => LogicalKey::Named(NamedKey::ArrowDown),
         0x7B => LogicalKey::Named(NamedKey::ArrowLeft),
         0x7C => LogicalKey::Named(NamedKey::ArrowRight),
+        // Navigation cluster — VT220 / xterm contract.
+        0x74 => LogicalKey::Named(NamedKey::PageUp),
+        0x79 => LogicalKey::Named(NamedKey::PageDown),
+        0x73 => LogicalKey::Named(NamedKey::Home),
+        0x77 => LogicalKey::Named(NamedKey::End),
+        // Mac keyboards don't have a separate Insert; Help (kVK_Help =
+        // 0x72) sits in the Insert position on classic ANSI layouts
+        // and macOS apps that need Insert read it from there.
+        0x72 => LogicalKey::Named(NamedKey::Insert),
+        // ForwardDelete (kVK_ForwardDelete) — fn+Delete on laptops.
+        // The regular `Delete` key (top-right of letter cluster) is
+        // Backspace above (kVK_Delete = 0x33).
+        0x75 => LogicalKey::Named(NamedKey::Delete),
+        // F1-F12 — Apple's row is permuted, not sequential.
+        0x7A => LogicalKey::Named(NamedKey::F1),
+        0x78 => LogicalKey::Named(NamedKey::F2),
+        0x63 => LogicalKey::Named(NamedKey::F3),
+        0x76 => LogicalKey::Named(NamedKey::F4),
+        0x60 => LogicalKey::Named(NamedKey::F5),
+        0x61 => LogicalKey::Named(NamedKey::F6),
+        0x62 => LogicalKey::Named(NamedKey::F7),
+        0x64 => LogicalKey::Named(NamedKey::F8),
+        0x65 => LogicalKey::Named(NamedKey::F9),
+        0x6D => LogicalKey::Named(NamedKey::F10),
+        0x67 => LogicalKey::Named(NamedKey::F11),
+        0x6F => LogicalKey::Named(NamedKey::F12),
         _ => {
             // Modifier-independent character.  charactersIgnoringModifiers
             // gives "a" for both `a` and `shift+a`.

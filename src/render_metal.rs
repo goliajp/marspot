@@ -2442,6 +2442,15 @@ fn push_session(
     // IME commits.  Only when the pane is focused, live, and the
     // host window has focus; otherwise the cursor anchor isn't
     // visible / interactive.
+    //
+    // Walks the preedit as UAX #29 grapheme clusters (not raw chars),
+    // so a composed CJK char + tone mark or an emoji ZWJ sequence
+    // takes its real visual cell footprint.  Wraps to the next row
+    // when the cluster would spill past the right edge — matches
+    // iTerm2 / Alacritty behaviour rather than silently truncating
+    // long preedit strings.  Covers each cluster with a contiguous
+    // BG quad first so already-rendered text (e.g. zsh autosuggest,
+    // a prior CJK cell) doesn't bleed through.
     if view.view_offset == 0
         && view.focused
         && window_focused
@@ -2449,74 +2458,87 @@ fn push_session(
     {
         let (col, row) = grid.cursor();
         let cells_per_row = grid.cols();
+        let rows_total = grid.rows();
         let mut c = col as u32;
-        let y = inner_y + row as f32 * cell_h;
+        let mut r = row as u32;
         let metrics = SlotMetrics {
             cell_w: cell_w.round() as u32,
             cell_h: cell_h.round() as u32,
             baseline_from_top: ascent.round() as u32,
         };
-        for ch in view.ime_preedit.chars() {
-            if ch == '\n' || ch == '\r' {
-                // Some IMEs send composition with embedded newlines;
-                // wrap to the next row at col=0 rather than draw a
-                // glyph.
+        let mut clusters_drawn: usize = 0;
+        for cluster in crate::grapheme::graphemes(&view.ime_preedit) {
+            // Newlines from an IME's structured composition: advance
+            // to the next row at col=0, don't draw a glyph for them.
+            if cluster == "\n" || cluster == "\r" || cluster == "\r\n" {
                 c = 0;
+                r = r.saturating_add(1);
+                if r >= rows_total as u32 {
+                    break;
+                }
                 continue;
             }
-            let n_cells = crate::grid::char_width(ch).max(1) as u32;
+            let n_cells = crate::grapheme::cluster_width(cluster).max(1) as u32;
+            // Wrap when this cluster would overflow the current row.
             if c + n_cells > cells_per_row as u32 {
-                // Out of room on this row — drop the rest of the
-                // preedit silently rather than spill into the next
-                // line.  The IME candidate window still shows the
-                // full string; the inline preview is a hint, not
-                // the source of truth.
-                break;
+                c = 0;
+                r = r.saturating_add(1);
+                if r >= rows_total as u32 {
+                    // Out of vertical room — stop drawing further
+                    // clusters.  The IME candidate window still shows
+                    // the full string; this inline preview is a hint,
+                    // not the source of truth.
+                    break;
+                }
             }
             let dest_x = (inner_x + c as f32 * cell_w).round();
-            let dest_y = y.round();
+            let dest_y = (inner_y + r as f32 * cell_h).round();
             let slot_w = n_cells as f32 * cell_w;
-            // BG quad — covers whatever was at this cell (zsh
-            // autosuggestion, prior cursor block) so the preedit
-            // reads cleanly.  IME_PREEDIT_BG sits a touch above the
-            // panel BG so it's visible against both the focused
-            // pane's lifted BG and the default cell BG.
+            // BG quad — fully opaque cover so the in-cell text below
+            // (zsh autosuggestion, ghost completion, residual cursor
+            // block) is hidden.  Width spans the whole cluster.
             cells.push(CellInstance {
                 origin: [dest_x, dest_y],
                 size: [slot_w, cell_h],
                 color: [IME_PREEDIT_BG.0, IME_PREEDIT_BG.1, IME_PREEDIT_BG.2, 1.0],
             });
-            // Glyph
-            if let Some(entry) = resolve_cell_glyph(
-                atlas,
-                font,
-                ch,
-                false,
-                false,
-                metrics,
-            ) {
-                glyphs.push(GlyphInstance {
-                    origin: [dest_x, dest_y],
-                    size: [
-                        (metrics.cell_w * entry.n_cells as u32) as f32,
-                        metrics.cell_h as f32,
-                    ],
-                    uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
-                    uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
-                    color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
-                });
+            // Glyph — same atlas path the cell-render uses, so the
+            // preedit text is rendered at the EXACT same px size as
+            // a normal cell.  A grapheme cluster's lead codepoint
+            // drives the atlas lookup (the rest are combining marks
+            // / ZWJ joiners we don't render inline yet — acceptable
+            // first-cut, the candidate window is the source of truth
+            // anyway).
+            if let Some(lead) = cluster.chars().next() {
+                if let Some(entry) =
+                    resolve_cell_glyph(atlas, font, lead, false, false, metrics)
+                {
+                    glyphs.push(GlyphInstance {
+                        origin: [dest_x, dest_y],
+                        size: [
+                            (metrics.cell_w * entry.n_cells as u32) as f32,
+                            metrics.cell_h as f32,
+                        ],
+                        uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+                        uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+                        color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
+                    });
+                }
             }
-            // Underline — hairline at the cell's bottom edge,
-            // signals "this hasn't been committed yet" the same way
-            // every other terminal + text editor does.
-            let underline_h = (cell_h * 0.06).max(1.0).round();
+            // Underline — 2× the old hairline so it actually reads
+            // as "this is provisional text" against the BG quad.
+            // Hairline (cell_h * 0.06) was invisible at small font
+            // sizes (user feedback 2026-06-15 "好小好小").
+            let underline_h = (cell_h * 0.12).max(2.0).round();
             cells.push(CellInstance {
                 origin: [dest_x, dest_y + cell_h - underline_h],
                 size: [slot_w, underline_h],
                 color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],
             });
             c += n_cells;
+            clusters_drawn += 1;
         }
+        let _ = clusters_drawn; // reserved for future dev-only log
     }
 
     // No darken overlay.  No FOCUS_OUTLINE blue frame.  The focus
