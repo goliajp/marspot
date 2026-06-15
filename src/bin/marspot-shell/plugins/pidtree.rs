@@ -206,6 +206,98 @@ unsafe fn proc_cmdline_inner(pid: i32) -> Option<String> {
     Some(parts.join(" "))
 }
 
+/// Look up one environment variable on a running pid by walking
+/// KERN_PROCARGS2 past argv into envp.  Returns the value of the
+/// first match, or None when the var isn't set / the call is denied
+/// (sandbox / SIP).
+pub fn proc_env_value(pid: i32, key: &str) -> Option<String> {
+    unsafe { proc_env_value_inner(pid, key) }
+}
+
+unsafe fn proc_env_value_inner(pid: i32, key: &str) -> Option<String> {
+    // Same buffer-sizing dance as `proc_cmdline_inner`.
+    let mut argmax: libc::c_int = 0;
+    let mut sz: libc::size_t = std::mem::size_of::<libc::c_int>();
+    let mut mib_argmax: [libc::c_int; 2] = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    if libc::sysctl(
+        mib_argmax.as_mut_ptr(),
+        2,
+        &mut argmax as *mut _ as *mut libc::c_void,
+        &mut sz,
+        std::ptr::null_mut(),
+        0,
+    ) != 0
+    {
+        return None;
+    }
+    if argmax <= 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; argmax as usize];
+    const KERN_PROCARGS2: libc::c_int = 49;
+    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, KERN_PROCARGS2, pid];
+    let mut got: libc::size_t = buf.len();
+    if libc::sysctl(
+        mib.as_mut_ptr(),
+        3,
+        buf.as_mut_ptr() as *mut libc::c_void,
+        &mut got,
+        std::ptr::null_mut(),
+        0,
+    ) != 0
+    {
+        return None;
+    }
+    buf.truncate(got);
+    if buf.len() < 4 {
+        return None;
+    }
+    let argc = i32::from_ne_bytes(buf[0..4].try_into().ok()?);
+    if argc < 0 {
+        return None;
+    }
+    let mut cur = 4usize;
+    // Skip argv0_path (a single c-string).
+    while cur < buf.len() && buf[cur] != 0 {
+        cur += 1;
+    }
+    // Skip padding NULs to argv[0].
+    while cur < buf.len() && buf[cur] == 0 {
+        cur += 1;
+    }
+    // Step over `argc` argv strings.
+    for _ in 0..argc {
+        while cur < buf.len() && buf[cur] != 0 {
+            cur += 1;
+        }
+        if cur < buf.len() {
+            cur += 1; // skip NUL
+        }
+    }
+    // Now `cur` is at envp[0].  Walk NUL-separated KEY=VALUE entries
+    // until we either find our key or hit a zero-length entry (envp's
+    // terminator on some kernels).
+    let key_eq = format!("{}=", key);
+    while cur < buf.len() {
+        let start = cur;
+        while cur < buf.len() && buf[cur] != 0 {
+            cur += 1;
+        }
+        if start == cur {
+            break;
+        }
+        let entry = &buf[start..cur];
+        if entry.starts_with(key_eq.as_bytes()) {
+            let value = &entry[key_eq.len()..];
+            return Some(String::from_utf8_lossy(value).into_owned());
+        }
+        if cur < buf.len() {
+            cur += 1;
+        }
+    }
+    None
+}
+
 /// BFS the process tree rooted at `root_pid` using a pre-fetched
 /// `procs` table.  Returns every descendant in discovery order
 /// (root NOT included).  Useful for "what's running under this PTY's
@@ -262,6 +354,23 @@ mod tests {
         // Just check we got non-empty argv — the actual path will be
         // some cargo target/debug/deps/<hash> file.
         assert!(!line.is_empty(), "cmdline empty");
+    }
+
+    #[test]
+    fn proc_env_value_reads_self_path() {
+        // PATH is always set in a cargo-spawned test process.  We
+        // don't pin to a specific value — just that we got SOMETHING
+        // non-empty and matching what std::env reports.
+        let pid = std::process::id() as i32;
+        let path_via_proc = proc_env_value(pid, "PATH").expect("PATH None");
+        let path_via_env = std::env::var("PATH").expect("env var PATH");
+        assert_eq!(path_via_proc, path_via_env);
+    }
+
+    #[test]
+    fn proc_env_value_returns_none_for_missing_key() {
+        let pid = std::process::id() as i32;
+        assert!(proc_env_value(pid, "MARSPOT_TEST_NOT_A_REAL_VAR_XYZ").is_none());
     }
 
     #[test]

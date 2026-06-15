@@ -89,6 +89,26 @@ impl ClaudecodePlugin {
     }
 }
 
+/// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
+/// short profile tag.  Returns:
+///   * `Some("P1")` for `/Users/.../.claude-profile-1`
+///   * `Some("P0")` for the default `/Users/.../.claude` (no -profile-N)
+///   * `None`       when the env var isn't set / the read failed
+fn profile_tag_for(claude_pid: i32) -> Option<String> {
+    let dir = pidtree::proc_env_value(claude_pid, "CLAUDE_CONFIG_DIR")?;
+    // Trailing slash tolerant; basename only.
+    let base = std::path::Path::new(&dir).file_name()?.to_string_lossy().into_owned();
+    if let Some(num) = base.strip_prefix(".claude-profile-") {
+        return Some(format!("P{}", num));
+    }
+    if base == ".claude" {
+        return Some("P0".to_string());
+    }
+    // Unknown shape — fall back to "P?" so the user can still tell
+    // "the badge is missing" from "the badge is unrecognised".
+    Some("P?".to_string())
+}
+
 /// Encode a filesystem path into claude's project directory naming
 /// convention (`/Users/foo/bar` → `-Users-foo-bar`).
 fn encode_project_dir(cwd: &std::path::Path) -> String {
@@ -346,7 +366,11 @@ impl Plugin for ClaudecodePlugin {
             };
             let encoded = encode_project_dir(&cwd);
             if let Some(sid_uuid) = self.session_id_for_project(&encoded) {
-                new_mapping.insert(s.session_id, sid_uuid);
+                let badge = match profile_tag_for(claude.pid) {
+                    Some(tag) => format!("[{}] {}", tag, sid_uuid),
+                    None => sid_uuid,
+                };
+                new_mapping.insert(s.session_id, badge);
             }
         }
         // Log transitions (bound / unbound) vs. last tick.
