@@ -1498,6 +1498,8 @@ impl ShellApp {
                     ),
                 );
             }
+            // No active core → drop silently.  Plugin re-pushes every
+            // tick so the next valid core will pick it up.
         }
 
         // 1. Active core liveness — the core the user is looking at.

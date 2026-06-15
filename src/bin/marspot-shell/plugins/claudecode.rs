@@ -357,11 +357,7 @@ impl Plugin for ClaudecodePlugin {
                 new_mapping.insert(s.session_id, sid_uuid);
             }
         }
-        // Log adds + drops vs. last tick, and push pane-badge updates
-        // to L2 for the right side of the title strip.  Format the
-        // badge as the first 8 chars of the sessionId — long enough
-        // to disambiguate adjacent panes, short enough to fit cleanly
-        // next to the existing title text.
+        // Log transitions (bound / unbound) vs. last tick.
         for (sh_sid, cc_sid) in &new_mapping {
             let prev = self.last_mapping.get(sh_sid);
             if prev.map(|p| p != cc_sid).unwrap_or(true) {
@@ -373,14 +369,6 @@ impl Plugin for ClaudecodePlugin {
                         sh_sid, cc_sid
                     ),
                 );
-                let badge = format!("cc:{}", short_sid(cc_sid));
-                if let Err(e) = host.set_pane_badge(*sh_sid, &badge) {
-                    host.log(
-                        LogLevel::Warn,
-                        "pane_badge.set_failed",
-                        &format!("{e}"),
-                    );
-                }
             }
         }
         for (sh_sid, cc_sid) in &self.last_mapping {
@@ -393,9 +381,24 @@ impl Plugin for ClaudecodePlugin {
                         sh_sid, cc_sid
                     ),
                 );
-                // Empty badge text = clear.  Best-effort; failures
-                // already get logged inside set_pane_badge.
+                // Empty badge text = clear on L2 side.
                 let _ = host.set_pane_badge(*sh_sid, "");
+            }
+        }
+        // Re-push every active badge every tick (idempotent).  Why
+        // not transition-only: L2 core can spawn/crash/respawn between
+        // ticks (CORE_BOOT_LOOP, silent update, etc.); a transition-
+        // only push leaves the freshly-spawned core with no badges
+        // until something changes.  Per tick ≤ 9 small frames = a few
+        // hundred bytes; cheap compared to staying out-of-sync.
+        for (sh_sid, cc_sid) in &new_mapping {
+            let badge = format!("cc:{}", short_sid(cc_sid));
+            if let Err(e) = host.set_pane_badge(*sh_sid, &badge) {
+                host.log(
+                    LogLevel::Warn,
+                    "pane_badge.set_failed",
+                    &format!("{e}"),
+                );
             }
         }
         self.last_mapping = new_mapping;
