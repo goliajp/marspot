@@ -1248,8 +1248,55 @@ fn blank_with(attrs: CellAttrs) -> Cell {
 }
 
 fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32, attrs: CellAttrs) {
+    if start >= end_exclusive {
+        return;
+    }
     let cols = grid.cols() as u32;
     let blank = blank_with(attrs);
+    // ─── Wide-pair boundary repair ───────────────────────────────────
+    //
+    // A wide grapheme (CJK, emoji, our Ambiguous=Wide set: ① ★ ▲ etc.)
+    // occupies TWO adjacent grid cells: a `lead` carrying the glyph
+    // and a `trail` carrying `\0` as a sentinel.  If `fill_range`
+    // straddles a wide pair, leaving only one half intact creates a
+    // ghost: the renderer keeps painting the (still-present) lead's
+    // wide glyph over the (now-blank) trail slot, or a stale `\0`
+    // trail next to a blank lead reads as a phantom space.  This was
+    // the 2026-06-15 "横线残留" report — claudecode emitted EL on a
+    // row containing a box-drawing wide sequence and a fragment of
+    // the old line survived the wipe.
+    //
+    // Fix both edges:
+    //
+    //   left:  if `start` is a wide TRAIL (the cell just before on
+    //          the same row is a wide lead), pull `start` back by 1
+    //          so the orphan lead gets blanked too.
+    //
+    //   right: if `end-1` is a wide LEAD, its trail sits at `end`.
+    //          Extend `end` by 1 so the orphan trail is reset.
+    //
+    // Both checks skip when the boundary falls on a row break
+    // (col == 0) — wide pairs can't straddle rows (the parser breaks
+    // them at the last column).
+    let mut start = start;
+    let mut end_exclusive = end_exclusive;
+    if start > 0 && start % cols != 0 {
+        let prev_col = ((start - 1) % cols) as u16;
+        let row = ((start - 1) / cols) as u16;
+        let prev = grid.cell(prev_col, row);
+        if crate::grid::char_width(prev.ch) == 2 {
+            start -= 1;
+        }
+    }
+    let total = cols * grid.rows() as u32;
+    if end_exclusive < total && end_exclusive % cols != 0 {
+        let last_col = ((end_exclusive - 1) % cols) as u16;
+        let row = ((end_exclusive - 1) / cols) as u16;
+        let last = grid.cell(last_col, row);
+        if crate::grid::char_width(last.ch) == 2 {
+            end_exclusive += 1;
+        }
+    }
     for idx in start..end_exclusive {
         let col = (idx % cols) as u16;
         let row = (idx / cols) as u16;
@@ -1483,6 +1530,55 @@ mod tests {
         // Second take should return empty (state was consumed).
         let resp2 = t.take_response();
         assert!(resp2.is_empty());
+    }
+
+    #[test]
+    fn el_when_cursor_on_wide_trail_clears_lead() {
+        // 2026-06-15 "横线残留" repro.  Wide glyph at col 0-1 (★ as
+        // lead, '\0' trail).  Then CUP positions cursor onto col 1
+        // (the trail slot) — this happens whenever an app's
+        // wcwidth (claudecode's `string-width` default Ambiguous=
+        // Narrow) disagrees with marspot's Ambiguous=Wide:
+        // claudecode aims at "col 1" thinking the star is 1 cell,
+        // but the cursor lands inside the wide pair.  EL mode=0
+        // then fills [1..10) — without boundary repair the lead at
+        // col 0 stays as ★, rendering as a wide glyph spilling into
+        // the now-blank trail.  Boundary repair pulls start back
+        // to col 0 so the lead is wiped too.
+        let mut t = Terminal::new(10, 3);
+        t.feed("★".as_bytes());
+        // CUP row=1, col=2 (1-indexed) → cursor lands at col 1, on
+        // the trail slot.
+        t.feed(b"\x1b[1;2H");
+        assert_eq!(t.grid().cursor(), (1, 0));
+        // EL mode 0 — from cursor to end of line.
+        t.feed(b"\x1b[K");
+        // After fix: lead AND trail both blanked.
+        assert_eq!(t.grid().cell(0, 0).ch, ' ', "wide-lead orphan not cleared");
+        assert_eq!(t.grid().cell(1, 0).ch, ' ', "wide-trail not cleared");
+    }
+
+    #[test]
+    fn ed_partial_into_wide_lead_clears_trail() {
+        // Mirror case for the right edge of fill_range.  Place a
+        // wide glyph at col 4-5, cursor at col 6.  Then erase from
+        // BEGIN of line to col 4 inclusive — without repair the trail
+        // at col 5 would be left as a stale '\0' sentinel orphaned
+        // from its now-blank lead.
+        let mut t = Terminal::new(10, 3);
+        // Drop a star at col 4 (preceded by 4 spaces).
+        t.feed(b"    ");
+        t.feed("★".as_bytes());
+        // Cursor now at col 6.  Position cursor at col 4 (1-indexed
+        // = col 5 in CUP) and EL mode=1 (erase from begin to cursor
+        // INCLUSIVE).  Cursor cell is the wide LEAD at col 4.
+        t.feed(b"\x1b[1;5H");
+        t.feed(b"\x1b[1K");
+        // After fix: lead AT cursor was wiped; orphan trail at col 5
+        // is also wiped (else \0 sentinel would visually survive as
+        // a stale wide-glyph half).
+        assert_eq!(t.grid().cell(4, 0).ch, ' ', "wide-lead under cursor not cleared");
+        assert_eq!(t.grid().cell(5, 0).ch, ' ', "wide-trail orphan not cleared");
     }
 
     #[test]
