@@ -1593,6 +1593,17 @@ fn reader_loop(
                     }
                 }
             }
+            MsgType::SaveSnapshot => {
+                // RFC-002 step 8a: reserved opcode from the obsolete
+                // L3-push design.  A live v3 server never accepts it
+                // — reply Error so a stale client surfaces the
+                // mismatch immediately rather than mysteriously
+                // failing to save state.
+                let _ = out_tx.send(err_frame(
+                    15,
+                    "SaveSnapshot was removed in PROTO_VERSION 3; L4 owns Terminal SoT",
+                ));
+            }
             other => {
                 let _ = out_tx.send(err_frame(
                     5,

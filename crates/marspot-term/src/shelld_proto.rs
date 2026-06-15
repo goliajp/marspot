@@ -40,7 +40,21 @@ use std::io::{self, Read, Write};
 pub const MAGIC: u32 = u32::from_le_bytes(*b"MSPS");
 
 /// Current protocol version.  Bumped on any incompatible wire change.
-pub const PROTO_VERSION: u32 = 1;
+///
+/// History:
+/// - 1: initial (Hello/HelloAck/ListSessions/NewSession/Attach/Detach/
+///      Kill/Resize/SetTitle/Data/Input/Error).
+/// - 2: skipped — RFC-002 step 4 originally landed SaveSnapshot at v2
+///      under the L3-push design; that design was reverted in step 8a
+///      before ever shipping, so v2 was never released.  Keep the
+///      version number burned to avoid replaying anyone's local-build
+///      identifier.
+/// - 3: RFC-002 state-object-sync.  L4 owns the Terminal SoT; ATTACH
+///      reply is StateSnapshot (msg_type 13), not bytelog-replay DATA
+///      frames.  Adds GetScrollbackPage (14) + ScrollbackPage (15) for
+///      historic-line paging.  Msg_type 12 (SaveSnapshot) is reserved
+///      and a v3 server replies Error to it.
+pub const PROTO_VERSION: u32 = 3;
 
 /// Per-frame header length (magic + type + len, no payload).
 pub const HEADER_LEN: usize = 12;
