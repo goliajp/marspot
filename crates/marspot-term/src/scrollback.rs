@@ -364,6 +364,16 @@ pub struct DiskScrollback {
     init_max_pages_on_disk: usize,
 }
 
+// `mmap_ptr: *mut u8` makes the auto-derived Send/Sync no — Rust
+// can't see that the pointer is owned + exclusively governed by this
+// struct and that all access is serialised through `&self` / `&mut
+// self` methods.  Backing region is `MAP_PRIVATE`, owned for the
+// struct's lifetime, freed in `Drop`.  shelld holds `Terminal` (which
+// transitively owns this) inside a `Mutex` so cross-thread access is
+// already gated; promising Send + Sync is correct.
+unsafe impl Send for DiskScrollback {}
+unsafe impl Sync for DiskScrollback {}
+
 impl DiskScrollback {
     fn new(
         ram_capacity: usize,

@@ -439,29 +439,13 @@ fn main() {
     let mut view_offset: u16 = 0;
     publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
 
-    // RFC-002 step 6: snapshot push gating.
-    //
-    // Push a fresh snapshot to shelld iff:
-    //   - the terminal's generation moved past what we last pushed
-    //     (the only signal that grid / cursor / modes changed), AND
-    //   - at least SNAPSHOT_PUSH_INTERVAL has elapsed since the last
-    //     push (throttle: cap shelld's rx work at ~33 / s per session,
-    //     ≈ 300 / s total across 9 sessions).
-    //
-    // The generation check makes "32 KB cell delta" from the RFC
-    // redundant: a feed batch that touched zero cells doesn't bump
-    // generation, and a feed batch that touched any cell does — so
-    // we get the dirty-byte semantics for free without per-cell
-    // dirty tracking on the hot path.
-    //
-    // First push lands immediately (last_snapshot_push_at sentinel
-    // is well in the past, last_pushed_generation = 0 < whatever
-    // generation has reached by then).  Worst case at ATTACH: the
-    // very first SaveSnapshot makes the slot non-empty before any
-    // ATTACH races for it.
-    const SNAPSHOT_PUSH_INTERVAL: Duration = Duration::from_millis(30);
-    let mut last_snapshot_push_at = Instant::now() - SNAPSHOT_PUSH_INTERVAL;
-    let mut last_pushed_generation: u64 = 0;
+    // RFC-002 §4 (architectural correction over earlier step 6):
+    // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
+    // snapshots — the daemon parses every PTY byte itself, so on
+    // every ATTACH it ships a freshly serialized state direct from
+    // the master copy.  This eliminates the push throttle, the
+    // generation-vector chase, and the "stale snapshot at the
+    // server" failure mode entirely.
 
     let start = Instant::now();
     let mut frame: u64 = 0;
@@ -539,37 +523,6 @@ fn main() {
         // even when no bytes pumped this tick.
         if n > 0 || predicted || resized || scrolled {
             publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
-        }
-
-        // RFC-002 step 6: maybe push a snapshot to shelld.  This sits
-        // after publish so the L2 mirror is up first (latency-sensitive)
-        // and the shelld push (best-effort, recovery-time-sensitive)
-        // catches up.  A failed push is logged but doesn't disturb the
-        // session — the worst case is a slightly older snapshot at
-        // shelld, recovered by the next push.
-        let gen_now = session.terminal().generation();
-        if gen_now > last_pushed_generation
-            && last_snapshot_push_at.elapsed() >= SNAPSHOT_PUSH_INTERVAL
-        {
-            match session.push_snapshot() {
-                Ok(bytes_sent) => {
-                    last_pushed_generation = gen_now;
-                    last_snapshot_push_at = Instant::now();
-                    lx_debug!(
-                        "session.snapshot.pushed",
-                        "RFC-002 SaveSnapshot sent",
-                        generation = gen_now,
-                        body_bytes = bytes_sent
-                    );
-                }
-                Err(e) => {
-                    lx_warn!(
-                        "session.snapshot.push_failed",
-                        &format!("{e}"),
-                        generation = gen_now
-                    );
-                }
-            }
         }
 
         // Answer any Cmd-C selection requests against the post-pump grid.

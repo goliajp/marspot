@@ -32,9 +32,9 @@ use marspot::pty::{Pty, PtyConfig, TerminalSize};
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::shelld_proto::{
     decode_data, decode_hello, decode_new_session, decode_resize, decode_session_id,
-    decode_snapshot_payload, encode_data, encode_error, encode_hello_ack,
-    encode_list_sessions_reply, encode_new_session_reply, encode_snapshot_payload, Frame,
-    MsgType, SessionInfo, PROTO_VERSION,
+    encode_data, encode_error, encode_hello_ack, encode_list_sessions_reply,
+    encode_new_session_reply, encode_snapshot_payload, Frame, MsgType, SessionInfo,
+    PROTO_VERSION,
 };
 
 /// Per-session byte log cap.  When the log file grows past this we
@@ -202,18 +202,16 @@ fn snapshot_path(session_id: u64) -> PathBuf {
         .join("state.bin")
 }
 
-/// Atomic write of a session's snapshot to disk.  Layout:
-///
-/// ```text
-/// [generation u64 LE]
-/// [body       Vec<u8>]
-/// ```
+/// Atomic write of a serialized Terminal snapshot to disk.  Layout
+/// is the raw output of `Terminal::serialize_snapshot()` — the
+/// version + magic embedded in that blob is the durable format
+/// contract.
 ///
 /// Atomicity: write to `<path>.tmp` first, then rename.  POSIX
 /// guarantees rename within the same directory replaces atomically,
 /// so a crash mid-write leaves either the previous snapshot or no
 /// snapshot, never a torn intermediate.
-fn write_snapshot_to_disk(session_id: u64, slot: &SnapshotSlot) -> io::Result<()> {
+fn write_terminal_snapshot_to_disk(session_id: u64, body: &[u8]) -> io::Result<()> {
     let path = snapshot_path(session_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -226,29 +224,19 @@ fn write_snapshot_to_disk(session_id: u64, slot: &SnapshotSlot) -> io::Result<()
             .write(true)
             .mode(0o600)
             .open(&tmp)?;
-        f.write_all(&slot.generation.to_le_bytes())?;
-        f.write_all(&slot.body)?;
+        f.write_all(body)?;
         f.sync_all()?;
     }
     std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
-/// Inverse of `write_snapshot_to_disk`.  Returns `None` if the file
-/// doesn't exist (cold session with no prior snapshot) or is too
-/// short to contain even the generation header — falling through to
-/// "empty slot, client starts blank" is correct in both cases.
-fn read_snapshot_from_disk(session_id: u64) -> Option<SnapshotSlot> {
+/// Inverse of `write_terminal_snapshot_to_disk`.  Returns the raw
+/// serialized body (caller applies it to a fresh `Terminal`); `None`
+/// if the file doesn't exist (cold session with no prior snapshot).
+fn read_terminal_snapshot_from_disk(session_id: u64) -> Option<Vec<u8>> {
     let path = snapshot_path(session_id);
-    let mut data = std::fs::read(&path).ok()?;
-    if data.len() < 8 {
-        return None;
-    }
-    let body = data.split_off(8);
-    let mut gen_bytes = [0u8; 8];
-    gen_bytes.copy_from_slice(&data);
-    let generation = u64::from_le_bytes(gen_bytes);
-    Some(SnapshotSlot { body, generation })
+    std::fs::read(&path).ok()
 }
 
 /// Helper for KILL_SESSION cleanup — removes the bytelog file and
@@ -282,27 +270,25 @@ struct ShellSession {
     /// returned in LIST_SESSIONS_REPLY so a freshly-spawned core
     /// repopulates its custom-title map on boot.
     title: Mutex<String>,
-    /// RFC-002 per-session terminal-state snapshot.  L3 pushes via
-    /// `MsgType::SaveSnapshot` on a dirty + throttle trigger; ATTACH
-    /// reads it and ships back as `MsgType::StateSnapshot`.  None
-    /// until the first push lands.  Last-write-wins by `generation`
-    /// so a SaveSnapshot that arrives out of order against ATTACH
-    /// is discarded; the client uses the same generation vector to
-    /// reconcile live data layered on top.
-    snapshot: Mutex<Option<SnapshotSlot>>,
-}
-
-/// Owned terminal-state snapshot for one session.  Sized by the L3
-/// `Terminal::serialize_snapshot` output (~95 KB for a 97×75 grid);
-/// 9 sessions × 95 KB ≈ 850 KB of steady-state shelld RAM.
-struct SnapshotSlot {
-    /// Opaque body — `Terminal::apply_snapshot` is the only consumer.
-    body: Vec<u8>,
-    /// Monotonic from L3.  Higher wins when an out-of-order push
-    /// lands after a newer one.  Echoed back on ATTACH so the
-    /// client can verify nothing newer has been seen on this
-    /// connection.
-    generation: u64,
+    /// RFC-002 §4: shelld is the SoT for terminal state per
+    /// mosh-SSP-style design.  shelld parses every PTY byte it reads
+    /// (in `spawn_session_reader`) into this `Terminal`, then
+    /// broadcasts the raw bytes downstream so attached clients can
+    /// keep their own mirror in sync.  ATTACH serializes this
+    /// `Terminal` directly into a `StateSnapshot` frame — the new
+    /// client jumps straight to the current grid + cursor + modes,
+    /// then layers any subsequent live `Data` frames on top.
+    ///
+    /// Replaces an earlier client-push design (`SnapshotSlot`) that
+    /// kept shelld free of the parser; that design couldn't service
+    /// `GetScrollbackPage` cleanly without re-parsing the bytelog
+    /// per request.  Owning the parser here makes the SSP roles
+    /// unambiguous: shelld is server, clients are renderers.
+    ///
+    /// Steady-state memory: per session ≈ 100 KB grid + scrollback.
+    /// 9 sessions ≈ 1 MB RAM in shelld — acceptable for the daemon
+    /// that owns the user's sessions.
+    terminal: Mutex<marspot::terminal::Terminal>,
 }
 
 impl ShellSession {
@@ -360,12 +346,21 @@ fn spawn_session_reader(session: Arc<ShellSession>) {
                 match session.pty.read_shared(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        // Append to disk log FIRST so a crash between
-                        // append + broadcast doesn't leave the GUI
-                        // with state shelld can't replay.
+                        // RFC-002 §4: shelld is the SoT.  Order is
+                        // load-bearing:
+                        //   (1) bytelog append — forensic + deep-scrollback
+                        //       fallback never loses bytes.
+                        //   (2) terminal.feed — shelld's grid + scrollback
+                        //       advance before any subscriber can see the
+                        //       broadcast, so an ATTACH that races a Data
+                        //       broadcast cannot grab a snapshot older
+                        //       than the bytes it'll also receive live.
+                        //   (3) broadcast — subscribers get the raw bytes
+                        //       and update their own mirrors.
                         if let Some(log) = session.bytelog.lock().unwrap().as_mut() {
                             let _ = log.append(&buf[..n]);
                         }
+                        session.terminal.lock().unwrap().feed(&buf[..n]);
                         let frame = Frame::new(
                             MsgType::Data,
                             encode_data(session.id, &buf[..n]),
@@ -645,36 +640,37 @@ fn do_execv_swap(sessions: &Sessions, listen_fd: RawFd) -> io::Result<()> {
         f.sync_all().ok();
     }
 
-    // RFC-002 step 7: persist each session's snapshot to disk so the
-    // new image's rehydrate_sessions can repopulate the in-memory
-    // slots.  Without this, an execv would drop every snapshot and
-    // the next ATTACH would ship an empty StateSnapshot — the client
-    // sees a blank grid until the L3 snapshot pump produces a fresh
-    // one.  Best-effort per session: write failure is logged and
-    // skipped, the new image will discover no snapshot file and treat
-    // the slot as empty (correct fallback).
+    // RFC-002 §4: persist each session's Terminal (the L4 SoT) to
+    // disk so the new image's rehydrate_sessions can rebuild the
+    // grid.  Without this, an execv would drop every Terminal and
+    // the next ATTACH would ship a fresh Terminal::new(80, 24) —
+    // the client sees a blank grid until something repaints.
+    // Best-effort per session: a write failure is logged and the
+    // new image will discover no snapshot file and start that
+    // Terminal blank (correct fallback).
     {
         let session_map = sessions.lock().unwrap();
         for (id, s) in session_map.iter() {
-            let slot_guard = s.snapshot.lock().unwrap();
-            if let Some(slot) = slot_guard.as_ref() {
-                match write_snapshot_to_disk(*id, slot) {
-                    Ok(()) => {
-                        lx_debug!(
-                            "execv.snapshot.persisted",
-                            "wrote state.bin",
-                            id = id,
-                            generation = slot.generation,
-                            body_bytes = slot.body.len()
-                        );
-                    }
-                    Err(e) => {
-                        lx_warn!(
-                            "execv.snapshot.persist_failed",
-                            &format!("{e}"),
-                            id = id
-                        );
-                    }
+            let (body, generation) = {
+                let t = s.terminal.lock().unwrap();
+                (t.serialize_snapshot(), t.generation())
+            };
+            match write_terminal_snapshot_to_disk(*id, &body) {
+                Ok(()) => {
+                    lx_debug!(
+                        "execv.snapshot.persisted",
+                        "wrote state.bin",
+                        id = id,
+                        generation = generation,
+                        body_bytes = body.len()
+                    );
+                }
+                Err(e) => {
+                    lx_warn!(
+                        "execv.snapshot.persist_failed",
+                        &format!("{e}"),
+                        id = id
+                    );
                 }
             }
         }
@@ -828,12 +824,30 @@ fn rehydrate_sessions(
                 None
             }
         };
-        // RFC-002 step 7: try to restore the persisted snapshot from
-        // disk.  None means "no prior snapshot, start blank" — the
-        // L3 pump will produce a fresh one soon.
-        let snapshot = read_snapshot_from_disk(*id);
-        let restored_gen = snapshot.as_ref().map(|s| s.generation).unwrap_or(0);
-        let restored_bytes = snapshot.as_ref().map(|s| s.body.len()).unwrap_or(0);
+        // RFC-002 §4: rebuild the Terminal SoT.  Best-effort: if the
+        // persisted snapshot is missing or fails to decode, start blank
+        // — feed() will catch the grid up as soon as the bytelog or
+        // live PTY produces new bytes.  apply_snapshot installs the
+        // recorded cols/rows so a subsequent Resize round-trips
+        // through the same dimensions; we don't need to read them
+        // here.
+        let restored = read_terminal_snapshot_from_disk(*id);
+        let restored_bytes = restored.as_ref().map(|b| b.len()).unwrap_or(0);
+        let mut terminal = marspot::terminal::Terminal::new(80, 24);
+        let mut restored_gen: u64 = 0;
+        if let Some(body) = restored.as_ref() {
+            match terminal.apply_snapshot(body) {
+                Ok(()) => restored_gen = terminal.generation(),
+                Err(e) => {
+                    lx_warn!(
+                        "execv.rehydrate.apply_snapshot_failed",
+                        &format!("{e}"),
+                        id = id,
+                        body_bytes = body.len()
+                    );
+                }
+            }
+        }
         let session = Arc::new(ShellSession {
             id: *id,
             pty,
@@ -841,7 +855,7 @@ fn rehydrate_sessions(
             alive: AtomicBool::new(true),
             bytelog: Mutex::new(bytelog),
             title: Mutex::new(title.clone()),
-            snapshot: Mutex::new(snapshot),
+            terminal: Mutex::new(terminal),
         });
         if restored_bytes > 0 {
             lx_event!(
@@ -1342,6 +1356,10 @@ fn reader_loop(
                                 None
                             }
                         };
+                        // RFC-002 §4: L4 owns the Terminal SoT.  New
+                        // session starts with a blank grid at the
+                        // negotiated cols/rows; feed() in the reader
+                        // thread advances it as bytes arrive.
                         let session = Arc::new(ShellSession {
                             id,
                             pty: Arc::new(pty),
@@ -1349,7 +1367,9 @@ fn reader_loop(
                             alive: AtomicBool::new(true),
                             bytelog: Mutex::new(bytelog),
                             title: Mutex::new(String::new()),
-                            snapshot: Mutex::new(None),
+                            terminal: Mutex::new(
+                                marspot::terminal::Terminal::new(cols, rows),
+                            ),
                         });
                         // Auto-attach the creator before publishing —
                         // any DATA the reader thread emits before
@@ -1380,29 +1400,27 @@ fn reader_loop(
                 let session = sessions.lock().unwrap().get(&id).cloned();
                 match session {
                     Some(s) => {
-                        // RFC-002: ATTACH no longer replays the raw
-                        // bytelog stream.  Subscribe first under the
-                        // snapshot lock so any live DATA frames that
-                        // arrive while we're shipping the snapshot
-                        // are queued behind it (the subscriber's
-                        // SyncSender preserves arrival order from
-                        // this thread's perspective; broadcast hits
-                        // it after our send returns).  Client side:
-                        // applies snapshot, then continues with live
-                        // data — generation-vector LWW reconciles.
-                        let snap_guard = s.snapshot.lock().unwrap();
+                        // RFC-002 §4: ATTACH ships a freshly serialized
+                        // L4 Terminal snapshot.  Order is load-bearing:
+                        //   1. Take the terminal lock and serialize
+                        //      under it — `feed()` in the reader thread
+                        //      blocks on the same lock, so no bytes can
+                        //      be parsed-in between serialize and the
+                        //      `attach()` below.
+                        //   2. attach() registers the subscriber AFTER
+                        //      the snapshot is built.  Any subsequent
+                        //      Data broadcast lands in this subscriber's
+                        //      channel only after the StateSnapshot is
+                        //      queued in front of it.
+                        //   3. Drop the lock + send the snapshot frame
+                        //      AFTER both — the SyncSender preserves
+                        //      our send order on the receiver.
+                        let (body, generation) = {
+                            let t = s.terminal.lock().unwrap();
+                            (t.serialize_snapshot(), t.generation())
+                        };
                         let sub_id = s.attach(attached_tx.clone());
                         attached.push((Arc::downgrade(&s), sub_id));
-                        // Send StateSnapshot.  Empty body + gen=0
-                        // when nothing has been pushed yet (first
-                        // attach to a brand-new session) — client
-                        // recognises the empty body as "no snapshot
-                        // yet, start from empty grid" and waits for
-                        // live data.
-                        let (body, generation) = match snap_guard.as_ref() {
-                            Some(slot) => (slot.body.clone(), slot.generation),
-                            None => (Vec::new(), 0u64),
-                        };
                         let payload = encode_snapshot_payload(id, generation, &body);
                         if attached_tx
                             .send(Frame::new(MsgType::StateSnapshot, payload))
@@ -1422,65 +1440,12 @@ fn reader_loop(
                                 body_bytes = body.len()
                             );
                         }
-                        drop(snap_guard);
                     }
                     None => {
                         let _ =
                             out_tx.send(err_frame(9, &format!("session {} not found", id)));
                     }
                 }
-            }
-            MsgType::SaveSnapshot => {
-                // L3 pushed a fresh terminal-state snapshot.  LWW by
-                // generation: only replace the slot when the incoming
-                // generation is strictly newer than what we already
-                // hold.  Out-of-order pushes (rare; would need the
-                // L3-side pump to race against itself) are dropped
-                // without disturbing the live state.
-                let (sid, generation, body) = match decode_snapshot_payload(&frame.payload) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = out_tx.send(err_frame(
-                            12,
-                            &format!("bad SaveSnapshot: {}", e),
-                        ));
-                        continue;
-                    }
-                };
-                let session = sessions.lock().unwrap().get(&sid).cloned();
-                if let Some(s) = session {
-                    let mut slot_guard = s.snapshot.lock().unwrap();
-                    let take_it = slot_guard
-                        .as_ref()
-                        .map(|cur| generation > cur.generation)
-                        .unwrap_or(true);
-                    if take_it {
-                        *slot_guard = Some(SnapshotSlot {
-                            body: body.to_vec(),
-                            generation,
-                        });
-                        lx_debug!(
-                            "session.snapshot.saved",
-                            "RFC-002 SaveSnapshot stored",
-                            id = sid,
-                            generation = generation,
-                            body_bytes = body.len()
-                        );
-                    } else {
-                        lx_debug!(
-                            "session.snapshot.stale",
-                            "discarded older-generation push",
-                            id = sid,
-                            incoming = generation,
-                            current = slot_guard
-                                .as_ref()
-                                .map(|s| s.generation)
-                                .unwrap_or(0)
-                        );
-                    }
-                }
-                // Unknown session id: silently drop. L3 could push for
-                // a session shelld already KILL'd; not worth an error.
             }
             MsgType::Detach => {
                 let id = match decode_session_id(&frame.payload) {
