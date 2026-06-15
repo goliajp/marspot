@@ -73,6 +73,31 @@ pub enum MsgType {
     /// mature terminals (iTerm2, etc.) keep title as session-level
     /// metadata, not GUI-process-level.
     SetTitle = 11,
+    /// L3 → L4.  Push the L3-owned terminal snapshot (grid + cursor +
+    /// modes + generation) into shelld's per-session slot.  Sent on a
+    /// dirty-cell threshold + 30 ms throttle, so a busy session puts
+    /// ~30 / s and an idle session zero.  shelld replaces the slot
+    /// wholesale — last-write-wins by generation.  See RFC-002.
+    SaveSnapshot = 12,
+    /// L4 → client.  Sent in response to ATTACH (replaces the legacy
+    /// bytelog raw-replay).  Carries the most recent `SaveSnapshot`
+    /// shelld has for the session, framed identically.  Client
+    /// `terminal.apply_snapshot()` jumps the local Terminal straight
+    /// to that state; subsequent live `Data` frames are layered on
+    /// top with generation-vector last-write-wins.  ATTACH never
+    /// replays raw bytes again.
+    StateSnapshot = 13,
+    /// client → L4.  Ask for a contiguous range of scrollback lines
+    /// (start = lines back from live tail, count = how many).  shelld
+    /// services from its persisted scrollback (or, on a deep miss,
+    /// re-parses from bytelog — that's the *only* path bytelog raw
+    /// bytes are still used).  Replied with `ScrollbackPage`.
+    GetScrollbackPage = 14,
+    /// L4 → client.  Response to `GetScrollbackPage`: row-major Cell
+    /// payload at the requested offset.  An empty payload means
+    /// "asked for lines that don't exist anymore" (e.g. compaction
+    /// truncated the bytelog).
+    ScrollbackPage = 15,
     // 100..=199 reserved for high-volume data flow so a future
     // dispatcher can branch on `type >= 100` cheaply.
     Data = 100,
@@ -94,6 +119,10 @@ impl MsgType {
             9 => MsgType::Kill,
             10 => MsgType::Resize,
             11 => MsgType::SetTitle,
+            12 => MsgType::SaveSnapshot,
+            13 => MsgType::StateSnapshot,
+            14 => MsgType::GetScrollbackPage,
+            15 => MsgType::ScrollbackPage,
             100 => MsgType::Data,
             101 => MsgType::Input,
             200 => MsgType::Error,
@@ -500,10 +529,226 @@ pub fn decode_error(payload: &[u8]) -> io::Result<(u32, String)> {
     Ok((code, message))
 }
 
+// ─── RFC-002 snapshot / scrollback paging frames ──────────────────────────
+
+/// SaveSnapshot / StateSnapshot payload layout:
+///
+/// ```text
+/// [session_id u64 LE]
+/// [generation u64 LE]
+/// [body_len   u32 LE]
+/// [body       Vec<u8>]          ← serialized Terminal snapshot
+/// ```
+///
+/// `body` is whatever `Terminal::serialize_snapshot()` produces — this
+/// proto layer doesn't know its shape, so adding fields to the snapshot
+/// later doesn't need a wire bump.  Forensic: `generation` lets the
+/// L4 slot use last-write-wins and lets a client confirm a stale
+/// reply when SaveSnapshot races with ATTACH.
+///
+/// Shared encoder for both SaveSnapshot (L3 → L4) and StateSnapshot
+/// (L4 → client) because the payload shape is identical; only the
+/// `MsgType` tag distinguishes direction.
+pub fn encode_snapshot_payload(session_id: u64, generation: u64, body: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + 8 + 4 + body.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&generation.to_le_bytes());
+    v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    v.extend_from_slice(body);
+    v
+}
+
+pub fn decode_snapshot_payload(payload: &[u8]) -> io::Result<(u64, u64, &[u8])> {
+    if payload.len() < 20 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "snapshot payload header < 20 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let generation = u64::from_le_bytes(payload[8..16].try_into().unwrap());
+    let body_len = u32::from_le_bytes(payload[16..20].try_into().unwrap()) as usize;
+    if payload.len() < 20 + body_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "snapshot payload truncated before body",
+        ));
+    }
+    Ok((session_id, generation, &payload[20..20 + body_len]))
+}
+
+/// GetScrollbackPage payload:
+///
+/// ```text
+/// [session_id u64 LE]
+/// [line_start u32 LE]   — rows back from the live tail (0 = newest in scrollback)
+/// [count      u32 LE]   — how many rows requested
+/// ```
+pub fn encode_get_scrollback_page(session_id: u64, line_start: u32, count: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + 4 + 4);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&line_start.to_le_bytes());
+    v.extend_from_slice(&count.to_le_bytes());
+    v
+}
+
+pub fn decode_get_scrollback_page(payload: &[u8]) -> io::Result<(u64, u32, u32)> {
+    if payload.len() < 16 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "GetScrollbackPage payload < 16 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let line_start = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    let count = u32::from_le_bytes(payload[12..16].try_into().unwrap());
+    Ok((session_id, line_start, count))
+}
+
+/// ScrollbackPage payload:
+///
+/// ```text
+/// [session_id u64 LE]
+/// [line_start u32 LE]    — echoes the request
+/// [line_count u32 LE]    — number of rows in this payload (≤ requested count)
+/// [body_len   u32 LE]
+/// [body       Vec<u8>]   — row-major serialized cells (caller-decided format)
+/// ```
+///
+/// An empty body (line_count = 0) means "those lines don't exist anymore"
+/// (compaction / out-of-range).  Caller treats it as the scrollback floor.
+pub fn encode_scrollback_page(
+    session_id: u64,
+    line_start: u32,
+    line_count: u32,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + 4 + 4 + 4 + body.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&line_start.to_le_bytes());
+    v.extend_from_slice(&line_count.to_le_bytes());
+    v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    v.extend_from_slice(body);
+    v
+}
+
+pub fn decode_scrollback_page(payload: &[u8]) -> io::Result<(u64, u32, u32, &[u8])> {
+    if payload.len() < 20 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ScrollbackPage payload header < 20 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let line_start = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    let line_count = u32::from_le_bytes(payload[12..16].try_into().unwrap());
+    let body_len = u32::from_le_bytes(payload[16..20].try_into().unwrap()) as usize;
+    if payload.len() < 20 + body_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ScrollbackPage payload truncated before body",
+        ));
+    }
+    Ok((session_id, line_start, line_count, &payload[20..20 + body_len]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    // ─── RFC-002 snapshot + scrollback paging tests ──────────────────
+
+    #[test]
+    fn snapshot_payload_roundtrip_minimal() {
+        // Smallest valid snapshot: 0-byte body.  Generation can be 0
+        // (slot has never been pushed).
+        let bytes = encode_snapshot_payload(7, 0, &[]);
+        assert_eq!(bytes.len(), 20);
+        let (sid, gen, body) = decode_snapshot_payload(&bytes).unwrap();
+        assert_eq!(sid, 7);
+        assert_eq!(gen, 0);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn snapshot_payload_roundtrip_real_size() {
+        // ~24 KB body, characteristic of 80×24 cell snapshot.  Asserts
+        // the encoder doesn't truncate or mis-len longer payloads.
+        let body: Vec<u8> = (0..24 * 1024u32).map(|i| (i & 0xFF) as u8).collect();
+        let bytes = encode_snapshot_payload(42, 99_999, &body);
+        let (sid, gen, decoded) = decode_snapshot_payload(&bytes).unwrap();
+        assert_eq!(sid, 42);
+        assert_eq!(gen, 99_999);
+        assert_eq!(decoded.len(), body.len());
+        assert_eq!(decoded, &body[..]);
+    }
+
+    #[test]
+    fn snapshot_payload_rejects_truncated_header() {
+        // Less than the 20-byte header → InvalidData, not a panic.
+        let short = [0u8; 19];
+        let err = decode_snapshot_payload(&short).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn snapshot_payload_rejects_truncated_body() {
+        // Header says body is 100 bytes, only 10 follow → InvalidData.
+        let mut bytes = encode_snapshot_payload(1, 1, &vec![0u8; 100]);
+        bytes.truncate(20 + 10);
+        let err = decode_snapshot_payload(&bytes).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn get_scrollback_page_roundtrip() {
+        let bytes = encode_get_scrollback_page(7, 250, 64);
+        let (sid, start, count) = decode_get_scrollback_page(&bytes).unwrap();
+        assert_eq!((sid, start, count), (7, 250, 64));
+    }
+
+    #[test]
+    fn get_scrollback_page_rejects_short() {
+        let err = decode_get_scrollback_page(&[0u8; 15]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn scrollback_page_roundtrip_empty_means_no_history() {
+        // line_count = 0 with empty body = the "you're past the
+        // scrollback floor" reply.  Caller should treat it as a
+        // sentinel, not an error.
+        let bytes = encode_scrollback_page(3, 9_000, 0, &[]);
+        let (sid, start, count, body) = decode_scrollback_page(&bytes).unwrap();
+        assert_eq!((sid, start, count), (3, 9_000, 0));
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn scrollback_page_roundtrip_with_body() {
+        // 4 rows × 80 cols × 12 bytes = 3840 — realistic page.
+        let body: Vec<u8> = (0..3840u32).map(|i| (i ^ 0x55) as u8).collect();
+        let bytes = encode_scrollback_page(3, 100, 4, &body);
+        let (sid, start, count, decoded) = decode_scrollback_page(&bytes).unwrap();
+        assert_eq!((sid, start, count), (3, 100, 4));
+        assert_eq!(decoded, &body[..]);
+    }
+
+    #[test]
+    fn snapshot_msg_type_codes_stable() {
+        // Lock the on-the-wire u32 tags so a typo'd renumber breaks the
+        // build instead of silently corrupting cross-version handshakes.
+        assert_eq!(MsgType::SaveSnapshot as u32, 12);
+        assert_eq!(MsgType::StateSnapshot as u32, 13);
+        assert_eq!(MsgType::GetScrollbackPage as u32, 14);
+        assert_eq!(MsgType::ScrollbackPage as u32, 15);
+        // Round-trip through from_u32 too.
+        assert_eq!(MsgType::from_u32(12), Some(MsgType::SaveSnapshot));
+        assert_eq!(MsgType::from_u32(13), Some(MsgType::StateSnapshot));
+        assert_eq!(MsgType::from_u32(14), Some(MsgType::GetScrollbackPage));
+        assert_eq!(MsgType::from_u32(15), Some(MsgType::ScrollbackPage));
+    }
 
     #[test]
     fn frame_roundtrip_empty_payload() {
