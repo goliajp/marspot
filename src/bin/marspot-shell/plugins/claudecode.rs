@@ -104,22 +104,24 @@ fn encode_project_dir(cwd: &std::path::Path) -> String {
     s
 }
 
-/// Heuristic: is this descendant the `claude` CLI?  Cheap two-step
-/// check — comm narrows the candidate set to ~1 per pane (the Node
-/// process running claude), then cmdline confirms it's actually
-/// claude vs. some other Node script.
+/// Heuristic: is this descendant the `claude` CLI?  Walks argv —
+/// the comm fast-path was a dead end because recent claude builds
+/// mangle the process name to the version string ("2.1.177") via
+/// `exec -a`, so a `comm == "claude"` prefilter would miss every
+/// real claudecode process.  argv[0] survives the rename (it's the
+/// original exec path), so cmdline → split → check argv[0]'s
+/// basename equals "claude" is the reliable signal.
 fn looks_like_claudecode(d: &pidtree::ProcRow) -> bool {
-    // `claude` is launched via Node (the bundled `~/.claude/local/claude`
-    // shim is a Node entrypoint), so the process's comm shows up as
-    // "node".  Some claudecode installs may patch this; keep the
-    // alternative `claude` for the rare direct-binary case.
-    if d.comm != "node" && d.comm != "claude" {
-        return false;
-    }
-    match pidtree::proc_cmdline(d.pid) {
-        Some(line) => line.contains("claude"),
-        None => false,
-    }
+    let line = match pidtree::proc_cmdline(d.pid) {
+        Some(l) => l,
+        None => return false,
+    };
+    let argv0 = match line.split(' ').next() {
+        Some(s) => s,
+        None => return false,
+    };
+    let basename = argv0.rsplit('/').next().unwrap_or(argv0);
+    basename == "claude"
 }
 
 impl Default for ClaudecodePlugin {
@@ -299,7 +301,7 @@ impl Plugin for ClaudecodePlugin {
                         size
                     ),
                 );
-                // M3: when last_message_kind transitions to
+                // M4: when last_message_kind transitions to
                 // "assistant" → emit a NOTIFY for "claudecode done".
             }
         }
@@ -323,7 +325,7 @@ impl Plugin for ClaudecodePlugin {
             Ok(v) => v,
             Err(e) => {
                 host.log(
-                    LogLevel::Debug,
+                    LogLevel::Info,
                     "tick.shelld_list_failed",
                     &format!("{e}"),
                 );
@@ -338,8 +340,10 @@ impl Plugin for ClaudecodePlugin {
             }
             let descendants =
                 pidtree::descendants_of(s.child_pid, &procs);
-            let claude = descendants.iter().find(|d| looks_like_claudecode(d));
-            let Some(claude) = claude else { continue };
+            let Some(claude) = descendants.iter().find(|d| looks_like_claudecode(d))
+            else {
+                continue; // pane isn't running claudecode right now
+            };
             let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
                 continue;
             };
