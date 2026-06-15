@@ -603,6 +603,30 @@ struct ShellApp {
     /// black IOSurface — kills the cold-start flash.
     first_frame_ready: bool,
     redraw_thread_started: bool,
+    /// `redraw()` only calls `present()` when this is true.  Set by
+    /// every `FrameRendered` poke from the active core (its
+    /// per-frame ack that the IOSurface has been fully written +
+    /// waitUntilCompleted'd).  Cleared by `redraw` after `present()`.
+    ///
+    /// Why: the 250 ms safety-net timer in `start_redraw_pump`
+    /// wakes the AppKit redraw callback unconditionally — if the
+    /// callback then samples the IOSurface, it can land MID-RENDER
+    /// (between core's BG pass and FG glyph pass), producing the
+    /// frequent "all 9 panes' contents momentarily disappear and
+    /// reappear" flash documented in the 2026-06-15 debugging.
+    /// Gating presents on FrameRendered means the safety-net timer
+    /// only forces a present when a frame is actually new *and*
+    /// AppKit hasn't already picked it up via the poke fast-path.
+    /// `safety_present_after` below provides the real safety net
+    /// for genuinely-missed pokes.
+    frame_pending: bool,
+    /// Wall-clock time of the last `present()` call.  Combined with
+    /// `frame_pending`: when the redraw callback runs and no fresh
+    /// frame is pending, we ALSO force a present if too long has
+    /// elapsed since the last one — covers the pathological
+    /// "core froze mid-render and no future poke is coming" case
+    /// where waiting for FrameRendered would freeze the window.
+    last_present_at: Option<Instant>,
     /// Binary slot manager: current / prev / pending.  Used to find
     /// the core binary at spawn time and to atomic-swap when a
     /// silent update fires.
@@ -638,6 +662,8 @@ impl ShellApp {
             pending: None,
             first_frame_ready: false,
             redraw_thread_started: false,
+            frame_pending: false,
+            last_present_at: None,
             binaries,
             sup_state: SupervisorState::Idle,
             crashes: std::collections::VecDeque::new(),
@@ -1555,10 +1581,16 @@ impl ShellApp {
             ShellInbox::CaretRect(rect) => {
                 ctx.set_caret_rect_phys(rect);
             }
-            // No-op: arriving here already woke the event loop, and
-            // `user_event` calls `request_redraw()` → `redraw()` → present.
-            // The message exists so the reader wakes us per real frame.
-            ShellInbox::FrameRendered => {}
+            // Mark a fresh frame as pending so the next `redraw()`
+            // actually calls `present()`.  The reader already woke
+            // the event loop (proxy.wake) → `redraw` callback will
+            // run.  Without this flag the redraw callback ALSO runs
+            // on the 250 ms safety-net timer ticks, and presenting
+            // there can sample the IOSurface mid-render (the
+            // "frequent all-pane flash" diagnosed 2026-06-15).
+            ShellInbox::FrameRendered => {
+                self.frame_pending = true;
+            }
         }
     }
 
@@ -1809,13 +1841,30 @@ impl MarspotApp for ShellApp {
         // Hold off until the core has written real content.  Without
         // this gate the user sees an uninitialised IOSurface for
         // ~50-100 ms at startup, then a hard snap to content — reads
-        // as a black-then-content flash.  Once `first_frame_ready`
-        // we present every redraw the way you'd expect.
+        // as a black-then-content flash.
         if !self.first_frame_ready {
+            return;
+        }
+        // Gate the present on whether a fresh frame is actually
+        // pending.  See `frame_pending` field doc — the safety-net
+        // 250 ms timer wakes the redraw callback unconditionally,
+        // but sampling the IOSurface from here on every tick races
+        // against core's mid-render state and produces the flash.
+        // True safety net: if it's been >1 s since the last present
+        // (real "core died" case where no future poke is coming),
+        // force a present anyway so the window doesn't appear frozen.
+        let now = Instant::now();
+        let stale = self
+            .last_present_at
+            .map(|t| now.duration_since(t) > Duration::from_secs(1))
+            .unwrap_or(true);
+        if !self.frame_pending && !stale {
             return;
         }
         if let Some(p) = self.presenter.as_mut() {
             p.present();
+            self.frame_pending = false;
+            self.last_present_at = Some(now);
         }
     }
 }
