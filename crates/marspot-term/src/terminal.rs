@@ -15,8 +15,10 @@
 use crate::grid::{Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
+use crate::{lx_debug, lx_warn};
 use std::collections::VecDeque;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 /// Whether disk-backed scrollback is on for this process.  Resolved
 /// once on first call.  `MARSPOT_DISK_SCROLLBACK=0` opts out (RAM-only,
@@ -98,6 +100,21 @@ pub struct Terminal {
     /// startup hang waiting for a response and fall back to degraded
     /// rendering (extra blank rows, misaligned chrome).
     pending_response: Vec<u8>,
+    /// Rolling 100 ms window of capability-response timestamps so the
+    /// forensic log can flag burst loops.  The 2026-06-15 incident saw
+    /// every pane fill with literal `[?62;1;6;22c` text — DA1
+    /// responses fed back into the PTY input by a stuck shell loop —
+    /// and the surface symptom (cell content) couldn't point at a
+    /// driver.  With this we emit one `term.respond.burst` WARN per
+    /// session whenever the window crosses 5 responses, with the
+    /// burst rate-limited to 1 / s so a sustained loop doesn't drown
+    /// the log itself.  The window is intentionally per-Terminal —
+    /// nine panes loop in parallel show up as nine warnings, which is
+    /// what we want.
+    response_window: VecDeque<Instant>,
+    /// Last time we emitted a burst-warn, to rate-limit the WARNs.
+    /// `None` if we've never warned (cold path).
+    response_burst_last_warn: Option<Instant>,
     /// DEC mode `?1` (DECCKM): when set, cursor keys send the
     /// "application" sequence `ESC O X` instead of the normal
     /// `ESC [ X`. Some TUI apps toggle this to bind cursor keys
@@ -197,6 +214,8 @@ impl Terminal {
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
             pending_response: Vec::new(),
+            response_window: VecDeque::new(),
+            response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
             cursor_visible: true,
@@ -240,6 +259,7 @@ impl Terminal {
     pub fn take_response(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending_response)
     }
+
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.grid.resize(cols, rows);
@@ -362,6 +382,8 @@ impl Terminal {
             let scroll_top = &mut self.scroll_top;
             let scroll_bot = &mut self.scroll_bot;
             let pending_response = &mut self.pending_response;
+            let response_window = &mut self.response_window;
+            let response_burst_last_warn = &mut self.response_burst_last_warn;
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let cursor_visible = &mut self.cursor_visible;
@@ -372,6 +394,8 @@ impl Terminal {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
                 pending_response,
+                response_window,
+                response_burst_last_warn,
                 cursor_key_app_mode,
                 bracketed_paste,
                 cursor_visible,
@@ -409,6 +433,8 @@ impl Terminal {
             let scroll_top = &mut self.scroll_top;
             let scroll_bot = &mut self.scroll_bot;
             let pending_response = &mut self.pending_response;
+            let response_window = &mut self.response_window;
+            let response_burst_last_warn = &mut self.response_burst_last_warn;
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let cursor_visible = &mut self.cursor_visible;
@@ -419,6 +445,8 @@ impl Terminal {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
                 pending_response,
+                response_window,
+                response_burst_last_warn,
                 cursor_key_app_mode,
                 bracketed_paste,
                 cursor_visible,
@@ -439,12 +467,54 @@ struct Handler<'a> {
     scroll_top: &'a mut u16,
     scroll_bot: &'a mut u16,
     pending_response: &'a mut Vec<u8>,
+    response_window: &'a mut VecDeque<Instant>,
+    response_burst_last_warn: &'a mut Option<Instant>,
     cursor_key_app_mode: &'a mut bool,
     bracketed_paste: &'a mut bool,
     cursor_visible: &'a mut bool,
     pending_wrap: &'a mut bool,
     cluster_buf: &'a mut String,
     grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
+}
+
+impl<'a> Handler<'a> {
+    /// See `Terminal::record_response` — same logic, but borrowed
+    /// fields instead of `&mut self`.  Called from the three CSI
+    /// `c`/`>c`/`>q` dispatch arms where a capability response gets
+    /// queued.  Forensic: a burst of these in a 100 ms window means a
+    /// TUI is in a query-response loop (the 2026-06-15 incident
+    /// symptom), which we'd otherwise see only as cell content.
+    fn record_response(&mut self, kind: &'static str) {
+        lx_debug!("term.respond", kind);
+        let now = Instant::now();
+        let cutoff = now - std::time::Duration::from_millis(100);
+        while self
+            .response_window
+            .front()
+            .map(|t| *t < cutoff)
+            .unwrap_or(false)
+        {
+            self.response_window.pop_front();
+        }
+        self.response_window.push_back(now);
+        if self.response_window.len() >= 5 {
+            let warn_ok = self
+                .response_burst_last_warn
+                .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+                .unwrap_or(true);
+            if warn_ok {
+                let count = self.response_window.len();
+                lx_warn!(
+                    "term.respond.burst",
+                    "capability-response storm — likely echo loop",
+                    count = count,
+                    window_ms = 100,
+                    kind = kind
+                );
+                *self.response_burst_last_warn = Some(now);
+            }
+        }
+    }
 }
 
 impl<'a> Handler<'a> {
@@ -983,12 +1053,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // Without this response apps stall on capability probe
                 // and fall back to degraded rendering paths.
                 self.pending_response.extend_from_slice(b"\x1b[?62;1;6;22c");
+                self.record_response("DA1");
             }
             b'c' if intermediates == b">" => {
                 // DA2 (Secondary DA) — `CSI > 0 c`. App wants firmware
                 // version. xterm responds `CSI > 41;330;0 c` (terminal
                 // type 41 = VT420, version 330, ROM 0). We mimic.
                 self.pending_response.extend_from_slice(b"\x1b[>41;330;0c");
+                self.record_response("DA2");
             }
             b'q' if intermediates == b">" => {
                 // XTQVERSION — `CSI > 0 q`. App wants the terminal's
@@ -997,6 +1069,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // Apps that recognise this fingerprint can tune their
                 // behaviour; apps that don't ignore it.
                 self.pending_response.extend_from_slice(b"\x1bP>|marspot\x1b\\");
+                self.record_response("XTQVERSION");
             }
             _ => {} // remaining CSI commands arrive in later phases
         }
@@ -1309,6 +1382,26 @@ mod tests {
         // Second take should return empty (state was consumed).
         let resp2 = t.take_response();
         assert!(resp2.is_empty());
+    }
+
+    #[test]
+    fn da1_burst_tracking_records_per_response() {
+        // Five DA1 queries inside the parser's single feed call should
+        // surface five responses in pending_response (concatenated)
+        // and tick the burst window to five entries.  Exercises the
+        // record_response bookkeeping without depending on log sink
+        // state — the visible assert is just that the response bytes
+        // were queued the expected number of times.
+        let mut t = Terminal::new(20, 5);
+        // Five consecutive DA1 queries.  Each is a complete escape so
+        // the parser dispatches independently.
+        t.feed(b"\x1b[c\x1b[c\x1b[c\x1b[c\x1b[c");
+        let resp = t.take_response();
+        // Each response is `\e[?62;1;6;22c` = 13 bytes.  5 × 13 = 65.
+        assert_eq!(resp.len(), 65, "expected 5 concatenated DA1 responses");
+        // Sanity-check the start + end mark are present.
+        assert!(resp.starts_with(b"\x1b[?62;1;6;22c"));
+        assert!(resp.ends_with(b"\x1b[?62;1;6;22c"));
     }
 
     #[test]
@@ -1979,6 +2072,8 @@ mod tests {
             scroll_top: 0,
             scroll_bot: 23, // grid is 24 rows here
             pending_response: Vec::new(),
+            response_window: VecDeque::new(),
+            response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
             cursor_visible: true,

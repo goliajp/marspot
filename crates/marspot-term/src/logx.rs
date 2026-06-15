@@ -79,6 +79,16 @@ pub fn should_log(level: Level) -> bool {
 /// into the level filter, opens the sink, and spawns a detached startup
 /// GC sweep. Idempotent — a second call is a no-op so binaries that may
 /// re-init across an execv (shelld) don't double up.
+///
+/// **Also installs the panic hook** unconditionally — any subsequent
+/// panic anywhere in this process (main loop, any spawned thread)
+/// lands a `PANIC` event in `marspot.log` with thread name, source
+/// location, and a fully-captured backtrace split across `PANIC_BT`
+/// frames.  Without this, panics default-write to stderr — which is
+/// redirected to `/dev/null` for daemon-launched binaries and lost
+/// forever, leaving only the supervisor's `CORE_EXIT` line and no
+/// root cause.  This is THE forensic primitive marspot's debugging
+/// loop hinges on.
 pub fn init(component: &'static str) {
     if COMPONENT.set(component).is_err() {
         return;
@@ -96,6 +106,7 @@ pub fn init(component: &'static str) {
         .unwrap_or(Level::Info);
     GLOBAL_LEVEL.store(level as u8, Ordering::Relaxed);
     let _ = sink::ensure_open();
+    install_panic_hook();
     if std::env::var("MARSPOT_LOG_GC")
         .map(|v| v != "0")
         .unwrap_or(true)
@@ -105,6 +116,88 @@ pub fn init(component: &'static str) {
             .spawn(move || gc::sweep_startup(component))
             .ok();
     }
+}
+
+/// Capture every panic to the structured log before the process dies.
+///
+/// Stable Rust's default panic hook prints to stderr; daemon-launched
+/// marspot processes (shelld via LaunchAgent, the L2 core spawned with
+/// `Stdio::null()` stderr) have nowhere for that to land.  The
+/// supervisor only sees the child's exit and writes `CORE_EXIT`, which
+/// is useless without the panic's payload + location + backtrace.
+///
+/// Strategy:
+///   1.  One `PANIC` line with payload + thread + location, fields
+///       short enough to fit under MAX_LINE.
+///   2.  The full `Backtrace` split across multiple `PANIC_BT` lines
+///       (one frame per line, indexed by `frame=N`) so a 480 B line
+///       cap doesn't lose anything.  Reassemble with
+///       `grep $'\tPANIC_BT\t' | sort -k? frame=`.
+///   3.  After log lines land, fall through to the default hook so
+///       stderr / DiagnosticReports still get the standard output —
+///       belt-and-suspenders.
+///
+/// Idempotent — installed exactly once even if `init()` somehow
+/// re-runs across an execv.
+fn install_panic_hook() {
+    use std::sync::Once;
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        // Capture the existing hook so we can chain to it after logging.
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // Payload: panics built via `panic!("...")` carry &'static str;
+            // assertions and `panic!("{}", v)` may carry String; FFI
+            // panics can carry anything.  Try both common types first.
+            let payload = info.payload();
+            let msg: String = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let thread_name = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+            // force_capture: stable Rust gates `Backtrace::capture()`
+            // on RUST_BACKTRACE=1; force_capture ignores the env var
+            // so production builds always get frames.  The performance
+            // hit only matters in the panic path, by which point we're
+            // dying anyway.
+            let bt = std::backtrace::Backtrace::force_capture();
+            event(
+                Level::Error,
+                "PANIC",
+                &msg,
+                &[
+                    ("thread", &thread_name as &dyn fmt::Display),
+                    ("loc", &location as &dyn fmt::Display),
+                ],
+            );
+            // Split backtrace into one event per frame so MAX_LINE
+            // doesn't truncate the middle of a long trace.  Cap at
+            // 64 frames — deeper than any real marspot stack and
+            // bounded so a runaway recursion's panic doesn't blow
+            // the log up to GB.
+            for (i, line) in format!("{}", bt).lines().take(64).enumerate() {
+                event(
+                    Level::Error,
+                    "PANIC_BT",
+                    line.trim(),
+                    &[("frame", &i as &dyn fmt::Display)],
+                );
+            }
+            // Chain to the original hook so DiagnosticReports / stderr
+            // still get their standard output.
+            default(info);
+        }));
+    });
 }
 
 /// Append one event. Cheap; never panics; level-filtered.

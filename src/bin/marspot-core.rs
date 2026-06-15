@@ -1556,6 +1556,17 @@ fn main() {
 
     let start = Instant::now();
     let mut frame: u64 = 0;
+    // Track when we last saw forward progress (a pump that delivered
+    // bytes / a render).  `last_progress` only advances inside the
+    // hot path; CORE_EXIT logs how stale this is at exit, which is
+    // the missing forensic anchor from the 2026-06-15 incident — we
+    // could see `CORE_EXIT control socket closed by shell` but not
+    // "was the loop alive for the last 30 s or hung that whole time".
+    let mut last_progress = Instant::now();
+    // Bytes pumped through the L3 mirror / shelld since boot.  Surfaces
+    // at CORE_EXIT so a 0 here means "we never received anything",
+    // distinguishing an early-aborted boot from a normal teardown.
+    let mut bytes_pumped_total: u64 = 0;
     let mut first_tick = true;
     'main: loop {
         let first = if first_tick {
@@ -1625,9 +1636,21 @@ fn main() {
             process(&mut app, ev, &mut pending_attach, &mut to_ack, &mut closed);
         }
         if closed {
+            // The dominant CORE_EXIT path in real life — and the one
+            // whose context was missing in the 2026-06-15 incident:
+            // we'd see this line and nothing else.  Surface every
+            // forensic anchor we have so a future "why did core 35078
+            // die" question has answers without re-running.
             lx_event!(
                 "CORE_EXIT",
-                "control socket closed by shell; exiting event loop"
+                "control socket closed by shell; exiting event loop",
+                reason = "control_eof",
+                frames = frame,
+                uptime_s = start.elapsed().as_secs(),
+                bytes_pumped = bytes_pumped_total,
+                last_progress_age_ms = last_progress.elapsed().as_millis() as u64,
+                n_panes = app.panes.len(),
+                focused_idx = app.focused_idx
             );
             break 'main;
         }
@@ -1715,9 +1738,22 @@ fn main() {
                 }
             }
         }
-        app.pump_all();
+        let pumped = app.pump_all();
+        if pumped > 0 {
+            bytes_pumped_total = bytes_pumped_total.saturating_add(pumped as u64);
+            last_progress = Instant::now();
+        }
         if app.all_exited {
-            lx_event!("CORE_EXIT", "all sessions exited; exiting cleanly");
+            lx_event!(
+                "CORE_EXIT",
+                "all sessions exited; exiting cleanly",
+                frames = frame,
+                uptime_s = start.elapsed().as_secs(),
+                bytes_pumped = bytes_pumped_total,
+                last_progress_age_ms = last_progress.elapsed().as_millis() as u64,
+                n_panes = app.panes.len(),
+                focused_idx = app.focused_idx
+            );
             break 'main;
         }
 

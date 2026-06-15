@@ -418,7 +418,7 @@ fn install_sigusr1_handler() {
     }
 }
 
-use marspot::{lx_error, lx_event, lx_info, lx_warn};
+use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
@@ -700,6 +700,13 @@ struct ShellApp {
     /// transitions and call `presenter.set_banner` only when it
     /// actually changes.
     banner_kind: Option<BannerKind>,
+    /// Rolling 30 s ring of CORE_SPAWN timestamps.  When this fills
+    /// (≥3 entries inside the window) we emit a `CORE_BOOT_LOOP`
+    /// WARN — the alarm the 2026-06-15 incident lacked.  In that
+    /// case six cores booted in three minutes and the operator had
+    /// to manually count `grep CORE_BOOT` lines to spot the loop.
+    /// Bound at 16 so even a runaway respawn can't grow the ring.
+    core_boot_ring: std::collections::VecDeque<Instant>,
 }
 
 impl ShellApp {
@@ -722,14 +729,77 @@ impl ShellApp {
             crashes: std::collections::VecDeque::new(),
             auto_restart_disabled: false,
             banner_kind: None,
+            core_boot_ring: std::collections::VecDeque::with_capacity(16),
         }
     }
 
     /// Tear down the active core (clean EOF then SIGKILL + reap) and
     /// clear the slot.  No-op when there's no active core.
-    fn shutdown_active(&mut self) {
+    ///
+    /// `reason` is the forensic anchor — every caller passes a short
+    /// static string saying WHY we're closing the connection (crash
+    /// detected, manual update, window close, etc.).  Without this
+    /// the supervisor sees `CORE_EXIT control socket closed by shell`
+    /// in `marspot.log` and the only thing the user can say is "okay,
+    /// shell closed it — but why?".  The 2026-06-15 incident debugging
+    /// loop made this hole obvious: six core boots in three minutes
+    /// and no log entry telling us which path was firing them.
+    fn shutdown_active(&mut self, reason: &'static str) {
         if let Some(conn) = self.active.take() {
+            let pid = conn.child.as_ref().and_then(|c| Some(c.id())).unwrap_or(0);
+            lx_event!(
+                "ACTIVE_SHUTDOWN",
+                "tearing down active core",
+                reason = reason,
+                pid = pid
+            );
             conn.shutdown();
+        } else {
+            // No-op path is still worth logging — it tells us a
+            // shutdown was requested when no core was live (race
+            // between supervisor signals).
+            lx_debug!(
+                "shell.shutdown_active.noop",
+                "shutdown_active called but slot was empty",
+                reason = reason
+            );
+        }
+    }
+
+    /// Record a CORE_SPAWN into the rolling ring and flag a
+    /// boot-loop alarm if the ring's 30 s window now holds ≥3 boots.
+    /// Cheap O(N) on a VecDeque bounded at 16 — the loop check is
+    /// already paying VecDeque ops to maintain the ring; the
+    /// occasional WARN is dwarfed by everything else in `poll_supervisor`.
+    fn record_core_boot(&mut self) {
+        let now = Instant::now();
+        let window = std::time::Duration::from_secs(30);
+        let cutoff = now - window;
+        while self
+            .core_boot_ring
+            .front()
+            .map(|t| *t < cutoff)
+            .unwrap_or(false)
+        {
+            self.core_boot_ring.pop_front();
+        }
+        self.core_boot_ring.push_back(now);
+        // Cap the ring even if eviction lags (defensive).
+        while self.core_boot_ring.len() > 16 {
+            self.core_boot_ring.pop_front();
+        }
+        let count = self.core_boot_ring.len();
+        if count >= 3 {
+            lx_event!(
+                "CORE_BOOT_LOOP",
+                "core respawn loop detected — see CORE_SPAWN/CORE_EXIT timeline",
+                count = count,
+                window_s = 30
+            );
+            sup_log::log(
+                "CORE_BOOT_LOOP",
+                &format!("count={count} window_s=30"),
+            );
         }
     }
 
@@ -998,7 +1068,10 @@ impl ShellApp {
         let scale = ctx.scale();
         let (front_id, back_id) = new_pair.ids();
         let conn = match self.spawn_core(front_id, back_id, w_px, h_px, scale) {
-            Some(c) => c,
+            Some(c) => {
+                self.record_core_boot();
+                c
+            }
             None => {
                 lx_event!("UPDATE_FAIL", "spawn pending core failed");
                 sup_log::log("UPDATE_FAIL", "spawn pending core");
@@ -1075,7 +1148,7 @@ impl ShellApp {
         self.surfaces = Some(new_pair);
         self.first_frame_ready = true;
         // Retire the old active core; the pending core becomes active.
-        self.shutdown_active();
+        self.shutdown_active("retired by promoted pending core (UPDATE_SWAP)");
         self.active = Some(conn);
         // The update is committed — drop the rollback target.
         match self.binaries.finalize_stable() {
@@ -1168,7 +1241,7 @@ impl ShellApp {
         // fresh.  Core child gets killed; control socket is dropped;
         // IOSurface is released.  Anything left would be inherited as
         // dangling fds in the new process — clean now.
-        self.shutdown_active();
+        self.shutdown_active("shell self-update execv prep");
         if let Some(pending) = self.pending.take() {
             let PendingUpdate { conn, surfaces, .. } = pending;
             conn.shutdown();
@@ -1290,7 +1363,7 @@ impl ShellApp {
     /// a hang.  Honours `auto_restart_disabled`.
     fn restart_core(&mut self, ctx: &MarspotAppCtx) {
         // Tear down whatever's left.
-        self.shutdown_active();
+        self.shutdown_active("supervisor restart_core (crash/hang/respawn)");
         if self.auto_restart_disabled {
             return;
         }
@@ -1300,6 +1373,9 @@ impl ShellApp {
             let h_px = s.height();
             let scale = ctx.scale();
             self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
+            if self.active.is_some() {
+                self.record_core_boot();
+            }
             // A freshly spawned core attaches its env pair but never
             // emits SurfaceReady spontaneously — drive it.  Initial boot
             // gets the drive for free from the framework's post-`resumed`
@@ -1803,6 +1879,9 @@ impl MarspotApp for ShellApp {
         self.presenter = Some(presenter);
 
         self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
+        if self.active.is_some() {
+            self.record_core_boot();
+        }
         self.start_redraw_pump();
         ctx.request_redraw();
     }
@@ -1945,7 +2024,7 @@ impl MarspotApp for ShellApp {
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
-        self.shutdown_active();
+        self.shutdown_active("window close_requested");
         // Tear down an in-flight update too (no rollback — we're
         // exiting, not failing an update).
         if let Some(pending) = self.pending.take() {
