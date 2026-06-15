@@ -431,10 +431,13 @@ use marspot::shell_proto::{
 };
 
 mod banner;
+mod plugins;
 mod present;
 mod sup_log;
 mod supervisor;
 use banner::BannerKind;
+use plugins::host::ShellPluginHost;
+use plugins::PluginRegistry;
 use present::ShellPresenter;
 use supervisor::{BinaryTree, SupervisorState};
 
@@ -726,6 +729,17 @@ struct ShellApp {
     /// to manually count `grep CORE_BOOT` lines to spot the loop.
     /// Bound at 16 so even a runaway respawn can't grow the ring.
     core_boot_ring: std::collections::VecDeque<Instant>,
+    /// RFC-001 plugin host.  Plugins read pane / pty info through it.
+    /// Registry owns the loaded plugins + drives their lifecycle.
+    /// Both `None`-able so a misbuilt host (env-var disabled etc.)
+    /// gracefully degrades to plugin-less marspot.
+    plugin_host: ShellPluginHost,
+    plugin_registry: PluginRegistry,
+    /// When the supervisor last drove plugin ticks.  Coarse — the
+    /// supervisor itself runs at ~250 ms, plugins requesting < 250 ms
+    /// just see the supervisor cadence.  Their per-plugin interval
+    /// gating lives in the registry.
+    last_plugin_tick: Instant,
 }
 
 impl ShellApp {
@@ -749,6 +763,9 @@ impl ShellApp {
             auto_restart_disabled: false,
             banner_kind: None,
             core_boot_ring: std::collections::VecDeque::with_capacity(16),
+            plugin_host: ShellPluginHost::new(),
+            plugin_registry: PluginRegistry::new(),
+            last_plugin_tick: Instant::now() - Duration::from_secs(1),
         }
     }
 
@@ -1448,6 +1465,14 @@ impl ShellApp {
     ///      deadline — unchanged, but scoped to `active` only.
     ///   6. SIGUSR1 manual trigger; 7. banner refresh.
     fn poll_supervisor(&mut self, ctx: &MarspotAppCtx) {
+        // Plugin tick — runs at the supervisor cadence (~250 ms via
+        // start_redraw_pump), each plugin further gates by its own
+        // tick_interval_ms.  Cheap when no plugin needs to tick.
+        // last_plugin_tick is reserved for future "supervisor-level
+        // throttle" — MVP doesn't gate here, the registry handles it.
+        self.last_plugin_tick = Instant::now();
+        self.plugin_registry.tick_all_with(&self.plugin_host);
+
         // 1. Active core liveness — the core the user is looking at.
         let active_exited = match self.active.as_mut().and_then(|c| c.child.as_mut()) {
             Some(c) => matches!(c.try_wait(), Ok(Some(_))),
@@ -1874,6 +1899,17 @@ impl MarspotApp for ShellApp {
         let w_px = w_phys.max(64.0) as usize;
         let h_px = h_phys.max(64.0) as usize;
 
+        // RFC-001 plugin bootstrap: register first-party plugins,
+        // run init then start.  Plugins are passive until the core
+        // has booted + sessions attached, so start is fine right
+        // here — plugin tick is what drives per-pane work later.
+        if self.plugin_registry.is_empty() {
+            self.plugin_registry
+                .register(Box::new(plugins::claudecode::ClaudecodePlugin::new()));
+            self.plugin_registry.init_all_with(&self.plugin_host);
+            self.plugin_registry.start_all_with(&self.plugin_host);
+        }
+
         let pair = match SurfacePair::create(w_px, h_px) {
             Ok(p) => p,
             Err(e) => {
@@ -2065,6 +2101,11 @@ impl MarspotApp for ShellApp {
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
+        // RFC-001: clean plugin shutdown FIRST, so plugins releasing
+        // host resources (notifications, fs watchers) don't race
+        // against the rest of the teardown.
+        self.plugin_registry.stop_all_with(&self.plugin_host);
+
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
         self.shutdown_active("window close_requested");
