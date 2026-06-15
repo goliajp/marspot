@@ -38,6 +38,7 @@ use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 
 pub mod claudecode;
 pub mod host;
+pub mod pidtree;
 
 /// Packed `MAJOR:MINOR` u32.  v0.1.0 ⇒ `0x0001_0001` (MAJOR=1, MINOR=1).
 /// Bump MINOR for additive default-impl methods; bump MAJOR only for
