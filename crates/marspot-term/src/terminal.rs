@@ -17,6 +17,7 @@ use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
 use crate::{lx_debug, lx_debug_sampled, lx_info, lx_warn};
 use std::collections::VecDeque;
+use std::io;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -166,6 +167,12 @@ pub struct Terminal {
     /// Diagnostics — predictions rolled back on mismatch (or alt-screen
     /// invalidation).
     pub predictions_miss: u64,
+    /// RFC-002 snapshot version vector.  Bumped at the end of every
+    /// `feed()` that consumed bytes.  The shelld snapshot slot keeps
+    /// last-write-wins by this number; the client end uses it to
+    /// reject stale `StateSnapshot` frames that arrive after newer
+    /// live data has already landed.
+    generation: u64,
 }
 
 struct SavedMain {
@@ -225,6 +232,7 @@ impl Terminal {
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             predictions_hit: 0,
             predictions_miss: 0,
+            generation: 0,
         }
     }
 
@@ -360,6 +368,17 @@ impl Terminal {
     /// painted the result), a mismatch rolls back the whole prediction
     /// queue and feeds the byte normally through the parser.
     pub fn feed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        // RFC-002: bump the generation vector once per non-empty feed
+        // batch.  Coarse but sufficient — the snapshot pump (step 6)
+        // compares against `last_pushed_generation` to decide whether
+        // to push; a generation that hasn't moved means there's
+        // nothing new for shelld to mirror.  saturating_add is
+        // defensive against a u64 wrap that won't realistically
+        // happen (would need ~600 years at 1 GHz).
+        self.generation = self.generation.saturating_add(1);
         let mut i = 0;
         while i < bytes.len() {
             // Validate against pending predictions before the parser
@@ -457,6 +476,269 @@ impl Terminal {
             handler.flush_cluster_keep_cursor();
         }
     }
+
+    /// Current snapshot generation.  Bumped at the end of every non-
+    /// empty `feed()` call.  RFC-002 step 6 / step 8 compare it
+    /// against a `last_pushed_generation` to decide whether to push.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Serialize the full terminal state into a self-contained byte
+    /// blob.  RFC-002 §4.3: the snapshot pump (L3) ships this to
+    /// shelld in a `SaveSnapshot` frame; ATTACH (L4) ships it to the
+    /// client in `StateSnapshot`; the client's `apply_snapshot`
+    /// (inverse below) jumps a fresh `Terminal` straight to this
+    /// state without re-parsing any PTY bytes.
+    ///
+    /// Wire format (internal, versioned independently from
+    /// `shelld_proto::PROTO_VERSION`):
+    ///
+    /// ```text
+    /// [magic        u32 LE = 0xA557_5301]
+    /// [snapshot_v   u32 LE = 1]
+    /// [cols, rows   u16 LE × 2]
+    /// [cursor       u16 LE × 2  — col, row]
+    /// [scroll_top/bot u16 LE × 2]
+    /// [mode_flags   u32 LE  — bit 0 cursor_key_app, 1 bracketed_paste,
+    ///                          2 cursor_visible,    3 pending_wrap,
+    ///                          4 in_alt_screen]
+    /// [generation   u64 LE]
+    /// [attrs        9 bytes — current SGR state]
+    /// [saved_cursor_present u8]
+    /// [saved_cursor body if present: col u16 + row u16 + attrs 9]
+    /// [cells: rows × cols × 13 bytes, row-major]
+    ///   each cell:
+    ///     [ch  u32 LE]
+    ///     [flags u8]  - bold/italic/underline/reverse/dim packed bits
+    ///     [fg_kind u8][fg_payload 3 bytes]
+    ///     [bg_kind u8][bg_payload 3 bytes]
+    /// ```
+    ///
+    /// Cell width: 13 bytes/cell.  A 97×75 grid serializes to ~95 KB.
+    /// Alt-screen content (the `saved_main` shadow grid) is NOT
+    /// included — restoring to alt mode in the middle of a vim
+    /// session is a separate problem (UX-level: the user expects
+    /// to re-open vim, not have it half-resumed).
+    pub fn serialize_snapshot(&self) -> Vec<u8> {
+        let cols = self.grid.cols();
+        let rows = self.grid.rows();
+        // Pre-size: header (~50) + sc bookkeeping (~14) + cells.
+        let mut out = Vec::with_capacity(64 + (cols as usize * rows as usize * CELL_BYTES));
+        out.extend_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
+        out.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+        out.extend_from_slice(&cols.to_le_bytes());
+        out.extend_from_slice(&rows.to_le_bytes());
+        let (cc, cr) = self.grid.cursor();
+        out.extend_from_slice(&cc.to_le_bytes());
+        out.extend_from_slice(&cr.to_le_bytes());
+        out.extend_from_slice(&self.scroll_top.to_le_bytes());
+        out.extend_from_slice(&self.scroll_bot.to_le_bytes());
+        let mut modes: u32 = 0;
+        if self.cursor_key_application_mode { modes |= 1 << 0; }
+        if self.bracketed_paste_mode        { modes |= 1 << 1; }
+        if self.cursor_visible              { modes |= 1 << 2; }
+        if self.pending_wrap                { modes |= 1 << 3; }
+        if self.saved_main.is_some()        { modes |= 1 << 4; }
+        out.extend_from_slice(&modes.to_le_bytes());
+        out.extend_from_slice(&self.generation.to_le_bytes());
+        out.extend_from_slice(&serialize_attrs(self.attrs));
+        if let Some(sc) = self.saved_cursor {
+            out.push(1);
+            out.extend_from_slice(&sc.col.to_le_bytes());
+            out.extend_from_slice(&sc.row.to_le_bytes());
+            out.extend_from_slice(&serialize_attrs(sc.attrs));
+        } else {
+            out.push(0);
+        }
+        for r in 0..rows {
+            for c in 0..cols {
+                let cell = self.grid.cell(c, r);
+                out.extend_from_slice(&(cell.ch as u32).to_le_bytes());
+                out.extend_from_slice(&serialize_attrs(cell.attrs));
+            }
+        }
+        out
+    }
+
+    /// Inverse of `serialize_snapshot`.  Replaces the live grid +
+    /// cursor + modes wholesale.  Any in-flight parser state,
+    /// predictions, response queue, and cluster buffer are reset.
+    /// Scrollback is NOT touched here — scrollback paging lives in
+    /// step 8 via `GetScrollbackPage`.
+    ///
+    /// On format-version mismatch or any truncation: returns
+    /// `InvalidData` and leaves the terminal untouched (we copy into
+    /// the live state only after parsing succeeds).
+    pub fn apply_snapshot(&mut self, body: &[u8]) -> io::Result<()> {
+        let mut cur = Cursor::new(body);
+        let magic = read_u32(&mut cur)?;
+        if magic != SNAPSHOT_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("snapshot magic mismatch: 0x{:08x}", magic),
+            ));
+        }
+        let snapshot_v = read_u32(&mut cur)?;
+        if snapshot_v != SNAPSHOT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported snapshot version: {}", snapshot_v),
+            ));
+        }
+        let cols = read_u16(&mut cur)?;
+        let rows = read_u16(&mut cur)?;
+        let cursor_col = read_u16(&mut cur)?;
+        let cursor_row = read_u16(&mut cur)?;
+        let scroll_top = read_u16(&mut cur)?;
+        let scroll_bot = read_u16(&mut cur)?;
+        let modes = read_u32(&mut cur)?;
+        let generation = read_u64(&mut cur)?;
+        let attrs = read_attrs(&mut cur)?;
+        let sc_present = read_u8(&mut cur)?;
+        let saved_cursor = if sc_present == 1 {
+            let col = read_u16(&mut cur)?;
+            let row = read_u16(&mut cur)?;
+            let sc_attrs = read_attrs(&mut cur)?;
+            Some(SavedCursor { col, row, attrs: sc_attrs })
+        } else {
+            None
+        };
+        let want_cells = cols as usize * rows as usize;
+        let mut cells = Vec::with_capacity(want_cells);
+        for _ in 0..want_cells {
+            let ch_u = read_u32(&mut cur)?;
+            let cell_attrs = read_attrs(&mut cur)?;
+            let ch = char::from_u32(ch_u).unwrap_or(' ');
+            cells.push(Cell { ch, attrs: cell_attrs });
+        }
+        // All parsing OK — commit to live state.
+        self.grid.resize(cols, rows);
+        for r in 0..rows {
+            for c in 0..cols {
+                let idx = r as usize * cols as usize + c as usize;
+                self.grid.set_cell(c, r, cells[idx]);
+            }
+        }
+        self.grid.set_cursor(cursor_col, cursor_row);
+        self.scroll_top = scroll_top;
+        self.scroll_bot = scroll_bot;
+        self.cursor_key_application_mode = (modes & (1 << 0)) != 0;
+        self.bracketed_paste_mode        = (modes & (1 << 1)) != 0;
+        self.cursor_visible              = (modes & (1 << 2)) != 0;
+        self.pending_wrap                = (modes & (1 << 3)) != 0;
+        // Bit 4 (in_alt_screen) is informational for the wire format
+        // but not actionable here — apply_snapshot replaces the
+        // current grid; alt-mode save state is regenerated on the
+        // next `?1049h` toggle from the PTY stream.
+        self.attrs = attrs;
+        self.saved_cursor = saved_cursor;
+        self.generation = generation;
+        // Reset transient state so a half-feed cluster / prediction
+        // queue / response buffer doesn't bleed across the snapshot.
+        self.predictions.clear();
+        self.cluster_buf.clear();
+        self.grapheme_cursor = crate::grapheme::GraphemeCursor::new();
+        self.pending_response.clear();
+        Ok(())
+    }
+}
+
+// ─── Snapshot wire format helpers ─────────────────────────────────────
+
+use std::io::Cursor;
+
+const SNAPSHOT_MAGIC: u32 = 0xA557_5301;
+const SNAPSHOT_VERSION: u32 = 1;
+const ATTRS_BYTES: usize = 9;
+const CELL_BYTES: usize = 4 + ATTRS_BYTES;
+
+fn serialize_attrs(a: CellAttrs) -> [u8; ATTRS_BYTES] {
+    let mut flags = 0u8;
+    if a.bold      { flags |= 1 << 0; }
+    if a.italic    { flags |= 1 << 1; }
+    if a.underline { flags |= 1 << 2; }
+    if a.reverse   { flags |= 1 << 3; }
+    if a.dim       { flags |= 1 << 4; }
+    let (fg_kind, fg_payload) = encode_color(a.fg);
+    let (bg_kind, bg_payload) = encode_color(a.bg);
+    let mut out = [0u8; ATTRS_BYTES];
+    out[0] = flags;
+    out[1] = fg_kind;
+    out[2..5].copy_from_slice(&fg_payload);
+    out[5] = bg_kind;
+    out[6..9].copy_from_slice(&bg_payload);
+    out
+}
+
+fn encode_color(c: Color) -> (u8, [u8; 3]) {
+    match c {
+        Color::Default => (0, [0, 0, 0]),
+        Color::Indexed(i) => (1, [i, 0, 0]),
+        Color::Rgb(r, g, b) => (2, [r, g, b]),
+    }
+}
+
+fn decode_color(kind: u8, payload: [u8; 3]) -> io::Result<Color> {
+    Ok(match kind {
+        0 => Color::Default,
+        1 => Color::Indexed(payload[0]),
+        2 => Color::Rgb(payload[0], payload[1], payload[2]),
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown color kind {}", other),
+            ));
+        }
+    })
+}
+
+fn read_attrs(cur: &mut Cursor<&[u8]>) -> io::Result<CellAttrs> {
+    let mut buf = [0u8; ATTRS_BYTES];
+    use std::io::Read;
+    cur.read_exact(&mut buf)?;
+    let flags = buf[0];
+    let fg_kind = buf[1];
+    let fg_payload = [buf[2], buf[3], buf[4]];
+    let bg_kind = buf[5];
+    let bg_payload = [buf[6], buf[7], buf[8]];
+    Ok(CellAttrs {
+        bold:      (flags & (1 << 0)) != 0,
+        italic:    (flags & (1 << 1)) != 0,
+        underline: (flags & (1 << 2)) != 0,
+        reverse:   (flags & (1 << 3)) != 0,
+        dim:       (flags & (1 << 4)) != 0,
+        fg: decode_color(fg_kind, fg_payload)?,
+        bg: decode_color(bg_kind, bg_payload)?,
+    })
+}
+
+fn read_u8(cur: &mut Cursor<&[u8]>) -> io::Result<u8> {
+    let mut b = [0u8; 1];
+    use std::io::Read;
+    cur.read_exact(&mut b)?;
+    Ok(b[0])
+}
+
+fn read_u16(cur: &mut Cursor<&[u8]>) -> io::Result<u16> {
+    let mut b = [0u8; 2];
+    use std::io::Read;
+    cur.read_exact(&mut b)?;
+    Ok(u16::from_le_bytes(b))
+}
+
+fn read_u32(cur: &mut Cursor<&[u8]>) -> io::Result<u32> {
+    let mut b = [0u8; 4];
+    use std::io::Read;
+    cur.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
+}
+
+fn read_u64(cur: &mut Cursor<&[u8]>) -> io::Result<u64> {
+    let mut b = [0u8; 8];
+    use std::io::Read;
+    cur.read_exact(&mut b)?;
+    Ok(u64::from_le_bytes(b))
 }
 
 struct Handler<'a> {
@@ -1422,6 +1704,168 @@ mod tests {
         t
     }
 
+    // ─── RFC-002 step 2 snapshot tests ───────────────────────────────
+
+    /// Helper: deep-equal grid cells + cursor + the bits apply_snapshot
+    /// actually restores.  Lets snapshot tests assert "after apply, the
+    /// terminal is observationally indistinguishable from the source"
+    /// without manually comparing every field.
+    fn assert_terms_equivalent(a: &Terminal, b: &Terminal) {
+        let ga = a.grid();
+        let gb = b.grid();
+        assert_eq!(ga.cols(), gb.cols(), "cols mismatch");
+        assert_eq!(ga.rows(), gb.rows(), "rows mismatch");
+        assert_eq!(ga.cursor(), gb.cursor(), "cursor mismatch");
+        assert_eq!(a.scroll_top, b.scroll_top, "scroll_top");
+        assert_eq!(a.scroll_bot, b.scroll_bot, "scroll_bot");
+        assert_eq!(a.cursor_key_application_mode, b.cursor_key_application_mode, "DECCKM");
+        assert_eq!(a.bracketed_paste_mode, b.bracketed_paste_mode, "bracketed paste");
+        assert_eq!(a.cursor_visible, b.cursor_visible, "cursor visible");
+        assert_eq!(a.pending_wrap, b.pending_wrap, "pending_wrap");
+        assert_eq!(a.attrs, b.attrs, "current SGR attrs");
+        assert_eq!(a.saved_cursor.map(|s| (s.col, s.row, s.attrs)),
+                   b.saved_cursor.map(|s| (s.col, s.row, s.attrs)), "saved cursor");
+        assert_eq!(a.generation, b.generation, "generation");
+        for r in 0..ga.rows() {
+            for c in 0..ga.cols() {
+                let ca = ga.cell(c, r);
+                let cb = gb.cell(c, r);
+                assert_eq!(ca, cb, "cell mismatch at ({},{})", c, r);
+            }
+        }
+    }
+
+    #[test]
+    fn snapshot_roundtrip_empty_terminal() {
+        // Fresh terminal: no feed, generation 0, all defaults.
+        // Round-tripping a default state must produce a default state.
+        let src = Terminal::new(20, 5);
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(1, 1); // intentionally different dims
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_terms_equivalent(&src, &dst);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_with_text_and_cursor() {
+        // "Hello\nWorld" + a couple SGR runs: covers ascii cells,
+        // cursor advancement, and a newline that scroll-region-aware.
+        let src = term_with(20, 5, b"\x1b[31mHello\x1b[0m\r\nWorld");
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(20, 5);
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_terms_equivalent(&src, &dst);
+        // And the wire form is non-trivial — at least the header +
+        // 5 rows × 20 cols × 13 = 1300 cells + ~50 bytes header.
+        assert!(bytes.len() > 1000, "wire form suspiciously small: {}", bytes.len());
+    }
+
+    #[test]
+    fn snapshot_roundtrip_with_cjk_wide_cells() {
+        // 中文字符占 2 cells — wide pairing is a known fragile area.
+        // After roundtrip, the lead cell must still hold the CJK
+        // char + the trail must still hold the wide-sentinel.
+        let src = term_with(10, 3, "中文测试".as_bytes());
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(10, 3);
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_terms_equivalent(&src, &dst);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_rgb_and_indexed_colors() {
+        // SGR 38;2;r;g;b (RGB) + SGR 38;5;n (indexed) + default —
+        // exercises all three Color variants in the per-cell attrs.
+        let src = term_with(
+            30, 3,
+            b"\x1b[38;2;200;100;50mRGB\x1b[38;5;82mIDX\x1b[0mDEF",
+        );
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(30, 3);
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_terms_equivalent(&src, &dst);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_with_saved_cursor_and_modes() {
+        // DECSC (ESC 7) saves cursor + attrs; DECSET ?1, ?2004, ?25
+        // exercise the mode bitset path.  After roundtrip the
+        // SavedCursor option + modes must survive.
+        let src = term_with(
+            20, 5,
+            b"\x1b[31mAB\x1b 7\x1b[?1h\x1b[?2004h\x1b[?25l",
+        );
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(20, 5);
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_terms_equivalent(&src, &dst);
+        assert!(dst.cursor_key_application_mode);
+        assert!(dst.bracketed_paste_mode);
+        assert!(!dst.cursor_visible);
+        assert!(dst.saved_cursor.is_some());
+    }
+
+    #[test]
+    fn snapshot_apply_rejects_bad_magic() {
+        let mut t = Terminal::new(20, 5);
+        let bad = [0u8; 64]; // all zeros — magic is 0xA557_5301
+        let err = t.apply_snapshot(&bad).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn snapshot_apply_rejects_truncated_body() {
+        let src = term_with(20, 5, b"hello");
+        let bytes = src.serialize_snapshot();
+        // Truncate to header-only.
+        let truncated = &bytes[..30];
+        let mut dst = Terminal::new(20, 5);
+        let err = dst.apply_snapshot(truncated).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn feed_bumps_generation_only_on_non_empty_input() {
+        let mut t = Terminal::new(20, 5);
+        assert_eq!(t.generation(), 0);
+        t.feed(b""); // no-op
+        assert_eq!(t.generation(), 0, "empty feed must not bump");
+        t.feed(b"x");
+        assert_eq!(t.generation(), 1);
+        t.feed(b"yz");
+        assert_eq!(t.generation(), 2, "each non-empty feed bumps by 1");
+    }
+
+    #[test]
+    fn snapshot_then_more_input_advances_generation_past_loaded_value() {
+        // Generation is observational: after apply, additional feed
+        // bumps past the loaded value.  Critical for RFC-002 LWW
+        // convergence (the client must keep moving forward).
+        let src = term_with(20, 5, b"hello");
+        let loaded_gen = src.generation();
+        assert!(loaded_gen >= 1);
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(20, 5);
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_eq!(dst.generation(), loaded_gen);
+        dst.feed(b"world");
+        assert_eq!(dst.generation(), loaded_gen + 1);
+    }
+
+    #[test]
+    fn snapshot_size_is_proportional_to_grid_area() {
+        // 80×24 grid ≈ 80*24*13 = 24960 + ~50 header.
+        let src = Terminal::new(80, 24);
+        let bytes = src.serialize_snapshot();
+        let cells_part = 80 * 24 * CELL_BYTES;
+        assert!(
+            bytes.len() >= cells_part && bytes.len() <= cells_part + 256,
+            "wire size {} not within [cells={}, +256]",
+            bytes.len(),
+            cells_part
+        );
+    }
+
     #[test]
     fn plain_ascii_writes_cells_and_advances_cursor() {
         let t = term_with(80, 24, b"hi");
@@ -2266,6 +2710,7 @@ mod tests {
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             predictions_hit: 0,
             predictions_miss: 0,
+            generation: 0,
         };
 
         // Warm up: prime the ring + write a couple of disk pages.
