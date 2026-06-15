@@ -53,6 +53,15 @@ const REPLAY_CHUNK_BYTES: usize = 64 * 1024;
 /// closing `LISTENER_FD` below — `std`'s accept silently retries
 /// EINTR, so a signal alone wouldn't unstick it).
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// Last terminating signal observed.  Recorded by the SIGTERM/SIGINT
+/// handler so the main loop, on noticing SHUTDOWN, can log *which*
+/// signal triggered the exit — the signal handler itself is
+/// async-signal-safe (no allocation, no log infra), so this is the
+/// only sanctioned way to attribute a shelld shutdown to its cause.
+/// Without this, marspot.log shows `SHELLD_STOP` with no provenance
+/// (the cascade that killed 9 claudecode sessions on 2026-06-15 was
+/// only diagnosed by cross-referencing stderr).  `0` = not set.
+static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
 /// Raw fd of the listening socket, published after `bind` so the
 /// signal handler can `close(2)` it (AS-safe per POSIX) and force
 /// the in-flight `accept` to return EBADF.  Negative sentinel before
@@ -313,7 +322,17 @@ fn spawn_session_reader(session: Arc<ShellSession>) {
                 }
             }
             session.alive.store(false, Ordering::Release);
-            lx_info!("session.reader.exit", "EOF on PTY master", id = id);
+            // Distinguish "child genuinely exited (normal close)" from
+            // "shelld is going down and dragged the child with it"
+            // (Pty::Drop SIGHUP).  Same log tag both ways so existing
+            // greps still match; the new field disambiguates root cause.
+            let in_shutdown = SHUTDOWN.load(Ordering::Acquire);
+            lx_info!(
+                "session.reader.exit",
+                "EOF on PTY master",
+                id = id,
+                in_shutdown = in_shutdown
+            );
         })
         .expect("spawn session reader");
 }
@@ -906,6 +925,36 @@ fn main() {
 
     loop {
         if SHUTDOWN.load(Ordering::Acquire) {
+            // Attribute the shutdown to its trigger.  signal_handler
+            // wrote LAST_SIGNAL before flipping SHUTDOWN; reading it
+            // here lets the operator distinguish "SIGTERM from
+            // launchctl bootout" (the cascade we saw on 2026-06-15)
+            // from "SIGINT from terminal" from "shutdown raised
+            // internally" (LAST_SIGNAL == 0).
+            let sig = LAST_SIGNAL.load(Ordering::Acquire);
+            let alive_ids: Vec<u64> = {
+                let g = sessions.lock().unwrap();
+                g.iter()
+                    .filter(|(_, s)| s.alive.load(Ordering::Acquire))
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+            let alive_count = alive_ids.len();
+            let total_count = sessions.lock().unwrap().len();
+            lx_event!(
+                "SHELLD_SHUTDOWN_OBSERVED",
+                "main loop observed SHUTDOWN flag — preparing to teardown",
+                signal = sig,
+                signal_name = match sig {
+                    libc::SIGTERM => "SIGTERM",
+                    libc::SIGINT => "SIGINT",
+                    0 => "<internal>",
+                    _ => "<other>",
+                },
+                alive_sessions = alive_count,
+                total_sessions = total_count,
+                alive_ids = format!("{:?}", alive_ids)
+            );
             break;
         }
         if EXEC_TRIGGER.swap(false, Ordering::AcqRel) {
@@ -987,7 +1036,26 @@ fn main() {
         unsafe { libc::close(wake_fd) };
     }
     unsafe { libc::close(wake_r) };
-    lx_event!("SHELLD_STOP", "daemon shutting down");
+    // Snapshot what we're about to take down with us.  Every alive
+    // session entry below corresponds to a claudecode-or-equivalent
+    // child that is about to receive SIGHUP via `Pty::Drop` when
+    // the HashMap drops.  Capturing the list here makes a
+    // shelld-killed-N-active-sessions event reconstructable from
+    // marspot.log alone (no need to grep stderr or guess from
+    // child death signals upstream).
+    let about_to_die: Vec<u64> = {
+        let g = sessions.lock().unwrap();
+        g.iter()
+            .filter(|(_, s)| s.alive.load(Ordering::Acquire))
+            .map(|(id, _)| *id)
+            .collect()
+    };
+    lx_event!(
+        "SHELLD_STOP",
+        "daemon shutting down; alive sessions will be SIGHUP'd via Pty::Drop",
+        about_to_sighup = about_to_die.len(),
+        ids = format!("{:?}", about_to_die)
+    );
     let _ = std::fs::remove_file(&sock);
     // Sessions table drops here, which drops each Arc<ShellSession>,
     // which drops Pty, which SIGHUPs + waits the children.
@@ -1336,6 +1404,10 @@ fn spawn_shell(cols: u16, rows: u16, cwd_override: &str) -> io::Result<Pty> {
 }
 
 extern "C" fn signal_handler(sig: libc::c_int) {
+    // Record signal BEFORE flipping SHUTDOWN — the main loop checks
+    // SHUTDOWN first then reads LAST_SIGNAL; this ordering guarantees
+    // the read sees the signal that caused the flip.
+    LAST_SIGNAL.store(sig as i32, Ordering::Release);
     SHUTDOWN.store(true, Ordering::Release);
     let msg: &[u8] = match sig {
         libc::SIGTERM => b"[shelld] SIGTERM\n",

@@ -50,6 +50,22 @@ prod_shell_running() {
   [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null
 }
 
+# Structured log helper.  Mirrors install-shelld.sh's sup_log so install
+# steps land on the same marspot.log timeline as core / shell / shelld
+# events.  Best-effort: silently no-ops when no binary is reachable.
+# Added 2026-06-15 after install-local's pgrep-based shelld liveness
+# check returned a false negative, triggered launchctl bootout, and
+# took down 9 active claudecode sessions — without a single line in
+# marspot.log explaining why.  We won't be invisible like that again.
+sup_log() {
+  local tag="$1"; shift
+  local detail="$*"
+  for bin in "$MACOS/marspot-shelld" "$TREE/current/marspot-shelld" "$TARGET/marspot-shelld"; do
+    [[ -x "$bin" ]] || continue
+    "$bin" --log-event "$tag" "$detail" >/dev/null 2>&1 && return 0 || true
+  done
+}
+
 BUILD=1
 WITH_SHELLD=0
 WITH_SHELL=0
@@ -299,7 +315,24 @@ done
   -f "$APP" >/dev/null 2>&1 || true
 
 # ── 5. shelld LaunchAgent (production daemon, default socket) ──────
+# pgrep -f against the bundle path is the historical check.  It
+# returned a false negative on 2026-06-15 (Claude Code Bash tool
+# context), triggered install-shelld.sh → launchctl bootout → SIGTERM
+# → 9 claudecode children died.  Behavior is unchanged (still gated
+# on pgrep) but ALL three liveness signals are now logged so the
+# next disagreement is diagnosable from marspot.log alone.  Real
+# fix for the false-negative gate is a separate change.
+pgrep_says_alive=0
+ps_says_alive=0
+launchctl_says_alive=0
+pgrep -f "$MACOS/marspot-shelld" >/dev/null 2>&1 && pgrep_says_alive=1
+ps auxww 2>/dev/null | grep -F "$MACOS/marspot-shelld" | grep -vq grep && ps_says_alive=1
+launchctl print "gui/$(id -u)/com.marspot.shelld" 2>/dev/null | grep -q "state = running" && launchctl_says_alive=1
+sup_log "INSTALL_SHELLD_CHECK" \
+  "alive verdict pgrep=$pgrep_says_alive ps=$ps_says_alive launchctl=$launchctl_says_alive (gate uses pgrep only)"
 if ! pgrep -f "$MACOS/marspot-shelld" >/dev/null 2>&1; then
+  sup_log "INSTALL_SHELLD_BOOTSTRAP" \
+    "pgrep says shelld down; calling install-shelld.sh (note other checks: ps=$ps_says_alive launchctl=$launchctl_says_alive)"
   echo "==> shelld not running — installing LaunchAgent"
   "$ROOT/bin/install-shelld.sh" >/dev/null
 fi

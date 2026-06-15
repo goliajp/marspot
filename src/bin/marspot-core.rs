@@ -1278,21 +1278,41 @@ fn main() {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
         }
-        let mut ids: Vec<u64> = client
-            .list_sessions()
-            .unwrap_or_else(|e| {
-                lx_warn!(
-                    "core.shelld.list_sessions_failed",
-                    "starting fresh",
-                    err = format!("{e}")
-                );
-                Vec::new()
-            })
-            .into_iter()
+        let raw_list = client.list_sessions().unwrap_or_else(|e| {
+            lx_warn!(
+                "core.shelld.list_sessions_failed",
+                "starting fresh",
+                err = format!("{e}")
+            );
+            Vec::new()
+        });
+        // Dev fingerprint: a freshly-restarted shelld returns []; a
+        // surviving shelld returns the live session list.  If we see
+        // 0 sessions here right after a dual-core swap, that's the
+        // 2026-06-15 symptom — shelld got SIGTERM'd between cores,
+        // every existing claudecode died via Pty::Drop, and this
+        // boot is now creating a fresh 9-grid from scratch.
+        let alive_ids: Vec<u64> = raw_list
+            .iter()
             .filter(|s| s.alive)
             .map(|s| s.session_id)
-            .take(n_sessions)
             .collect();
+        let dead_ids: Vec<u64> = raw_list
+            .iter()
+            .filter(|s| !s.alive)
+            .map(|s| s.session_id)
+            .collect();
+        lx_event!(
+            "core.shelld.session_inventory",
+            "list_sessions returned at boot",
+            total = raw_list.len(),
+            alive = alive_ids.len(),
+            dead = dead_ids.len(),
+            alive_ids = format!("{:?}", alive_ids),
+            dead_ids = format!("{:?}", dead_ids),
+            want = n_sessions
+        );
+        let mut ids: Vec<u64> = alive_ids.into_iter().take(n_sessions).collect();
         while ids.len() < n_sessions {
             match client.create_session(boot_cols, boot_rows, "") {
                 Ok(id) => ids.push(id),

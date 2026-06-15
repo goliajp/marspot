@@ -89,19 +89,33 @@ sup_log() {
 # retries. Never returns leaving the agent booted-out.
 reload_agent() {
   local domain="gui/$(id -u)" svc="gui/$(id -u)/$LABEL" i
+  # Snapshot who we're about to evict.  `launchctl bootout` issues
+  # SIGTERM to the running daemon; on 2026-06-15 that cascaded into
+  # 9 claudecode sessions dying because shelld's SHELLD_STOP path
+  # SIGHUPs every child.  This log is the smoking-gun event linking
+  # the install-script step to the kill.
+  local pre_pid="<absent>"
   if launchctl print "$svc" >/dev/null 2>&1; then
+    pre_pid="$(launchctl print "$svc" 2>/dev/null | awk '/pid =/ {print $3; exit}')"
+    pre_pid="${pre_pid:-<unknown>}"
+    sup_log "SHELLD_BOOTOUT_BEGIN" "calling launchctl bootout (sends SIGTERM); pre_pid=$pre_pid svc=$svc invoker=${0##*/}"
     launchctl bootout "$svc" 2>/dev/null || true
     for i in $(seq 1 50); do                      # up to ~5s for it to vanish
       launchctl print "$svc" >/dev/null 2>&1 || break
       sleep 0.1
     done
+    sup_log "SHELLD_BOOTOUT_END" "bootout completed; service gone after waiting; pre_pid=$pre_pid"
+  else
+    sup_log "SHELLD_BOOTOUT_SKIP" "no $svc registered with launchctl; nothing to bootout"
   fi
   for i in $(seq 1 30); do                        # retry bootstrap ~6s
     if launchctl bootstrap "$domain" "$PLIST" 2>/dev/null; then
+      sup_log "SHELLD_BOOTSTRAP_OK" "launchctl bootstrap succeeded on attempt $i; svc=$svc"
       return 0
     fi
     sleep 0.2
   done
+  sup_log "SHELLD_BOOTSTRAP_FAIL" "launchctl bootstrap failed after 30 attempts; svc=$svc"
   echo "error: launchctl bootstrap $LABEL failed after retries:" >&2
   launchctl bootstrap "$domain" "$PLIST" 2>&1 | head -3 >&2
   return 1
