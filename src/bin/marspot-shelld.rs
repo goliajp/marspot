@@ -31,8 +31,9 @@ use std::thread;
 use marspot::pty::{Pty, PtyConfig, TerminalSize};
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::shelld_proto::{
-    decode_data, decode_hello, decode_new_session, decode_resize, decode_session_id, encode_data,
-    encode_error, encode_hello_ack, encode_list_sessions_reply, encode_new_session_reply, Frame,
+    decode_data, decode_hello, decode_new_session, decode_resize, decode_session_id,
+    decode_snapshot_payload, encode_data, encode_error, encode_hello_ack,
+    encode_list_sessions_reply, encode_new_session_reply, encode_snapshot_payload, Frame,
     MsgType, SessionInfo, PROTO_VERSION,
 };
 
@@ -42,11 +43,6 @@ use marspot::shelld_proto::{
 /// run for several seconds doesn't fill it.
 const BYTELOG_CAP_BYTES: u64 = 100 * 1024 * 1024;
 const BYTELOG_RETAIN_BYTES: u64 = 50 * 1024 * 1024;
-/// Send replay in chunks so a multi-MB log doesn't land as one
-/// gigantic frame.  Each chunk fits comfortably inside
-/// `MAX_PAYLOAD_LEN` (8 MiB) and below the OS socket buffer so the
-/// writer thread can serialise the frame fast.
-const REPLAY_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Process-wide shutdown flag.  Set by SIGTERM/SIGINT handler; observed
 /// by per-client handlers (the accept loop is woken separately by
@@ -194,34 +190,6 @@ impl ByteLog {
         Ok(())
     }
 
-    /// Stream current contents to `out` in REPLAY_CHUNK_BYTES-sized
-    /// DATA frames.  Called on ATTACH so the client can rebuild the
-    /// terminal state.  Reads from the start of the file; the file
-    /// is open in append mode so the read fd's position is
-    /// independent of where writes append.
-    fn replay(&self, session_id: u64, out: &SyncSender<Frame>) -> io::Result<()> {
-        let mut f = OpenOptions::new().read(true).open(&self.path)?;
-        f.seek(SeekFrom::Start(0))?;
-        let mut buf = vec![0u8; REPLAY_CHUNK_BYTES];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            let frame = Frame::new(MsgType::Data, encode_data(session_id, &buf[..n]));
-            if out.send(frame).is_err() {
-                // Client gone — abort replay quietly.
-                return Ok(());
-            }
-        }
-        // Sentinel: a zero-length DATA frame tells the client
-        // "replay done, next DATA is live".  The client ignores
-        // empty DATA for normal flow so this is benign even when
-        // attach didn't request a replay.
-        let _ = out.send(Frame::new(MsgType::Data, encode_data(session_id, &[])));
-        Ok(())
-    }
-
 }
 
 /// Helper for KILL_SESSION cleanup — removes the bytelog file and
@@ -255,6 +223,27 @@ struct ShellSession {
     /// returned in LIST_SESSIONS_REPLY so a freshly-spawned core
     /// repopulates its custom-title map on boot.
     title: Mutex<String>,
+    /// RFC-002 per-session terminal-state snapshot.  L3 pushes via
+    /// `MsgType::SaveSnapshot` on a dirty + throttle trigger; ATTACH
+    /// reads it and ships back as `MsgType::StateSnapshot`.  None
+    /// until the first push lands.  Last-write-wins by `generation`
+    /// so a SaveSnapshot that arrives out of order against ATTACH
+    /// is discarded; the client uses the same generation vector to
+    /// reconcile live data layered on top.
+    snapshot: Mutex<Option<SnapshotSlot>>,
+}
+
+/// Owned terminal-state snapshot for one session.  Sized by the L3
+/// `Terminal::serialize_snapshot` output (~95 KB for a 97×75 grid);
+/// 9 sessions × 95 KB ≈ 850 KB of steady-state shelld RAM.
+struct SnapshotSlot {
+    /// Opaque body — `Terminal::apply_snapshot` is the only consumer.
+    body: Vec<u8>,
+    /// Monotonic from L3.  Higher wins when an out-of-order push
+    /// lands after a newer one.  Echoed back on ATTACH so the
+    /// client can verify nothing newer has been seen on this
+    /// connection.
+    generation: u64,
 }
 
 impl ShellSession {
@@ -752,6 +741,7 @@ fn rehydrate_sessions(
             alive: AtomicBool::new(true),
             bytelog: Mutex::new(bytelog),
             title: Mutex::new(title.clone()),
+            snapshot: Mutex::new(None),
         });
         sessions.lock().unwrap().insert(*id, session.clone());
         spawn_session_reader(session);
@@ -1250,6 +1240,7 @@ fn reader_loop(
                             alive: AtomicBool::new(true),
                             bytelog: Mutex::new(bytelog),
                             title: Mutex::new(String::new()),
+                            snapshot: Mutex::new(None),
                         });
                         // Auto-attach the creator before publishing —
                         // any DATA the reader thread emits before
@@ -1280,33 +1271,107 @@ fn reader_loop(
                 let session = sessions.lock().unwrap().get(&id).cloned();
                 match session {
                     Some(s) => {
-                        // Critical ordering: hold the bytelog mutex
-                        // across attach + replay so the per-session
-                        // reader thread (which takes the same lock
-                        // before each append+broadcast) can't slip
-                        // a live broadcast in between us subscribing
-                        // and finishing the historical replay.
-                        // Subscriber gets historical bytes first,
-                        // then live; no overlap, no gap.
-                        let log_guard = s.bytelog.lock().unwrap();
+                        // RFC-002: ATTACH no longer replays the raw
+                        // bytelog stream.  Subscribe first under the
+                        // snapshot lock so any live DATA frames that
+                        // arrive while we're shipping the snapshot
+                        // are queued behind it (the subscriber's
+                        // SyncSender preserves arrival order from
+                        // this thread's perspective; broadcast hits
+                        // it after our send returns).  Client side:
+                        // applies snapshot, then continues with live
+                        // data — generation-vector LWW reconciles.
+                        let snap_guard = s.snapshot.lock().unwrap();
                         let sub_id = s.attach(attached_tx.clone());
                         attached.push((Arc::downgrade(&s), sub_id));
-                        if let Some(log) = log_guard.as_ref() {
-                            if let Err(e) = log.replay(id, attached_tx) {
-                                lx_warn!(
-                                    "session.replay_failed",
-                                    &format!("{e}"),
-                                    id = id
-                                );
-                            }
+                        // Send StateSnapshot.  Empty body + gen=0
+                        // when nothing has been pushed yet (first
+                        // attach to a brand-new session) — client
+                        // recognises the empty body as "no snapshot
+                        // yet, start from empty grid" and waits for
+                        // live data.
+                        let (body, generation) = match snap_guard.as_ref() {
+                            Some(slot) => (slot.body.clone(), slot.generation),
+                            None => (Vec::new(), 0u64),
+                        };
+                        let payload = encode_snapshot_payload(id, generation, &body);
+                        if attached_tx
+                            .send(Frame::new(MsgType::StateSnapshot, payload))
+                            .is_err()
+                        {
+                            lx_warn!(
+                                "session.attach.snapshot_send_failed",
+                                "client dropped before StateSnapshot delivered",
+                                id = id
+                            );
+                        } else {
+                            lx_event!(
+                                "ATTACH_SNAPSHOT_SENT",
+                                "RFC-002 ATTACH response",
+                                id = id,
+                                generation = generation,
+                                body_bytes = body.len()
+                            );
                         }
-                        drop(log_guard);
+                        drop(snap_guard);
                     }
                     None => {
                         let _ =
                             out_tx.send(err_frame(9, &format!("session {} not found", id)));
                     }
                 }
+            }
+            MsgType::SaveSnapshot => {
+                // L3 pushed a fresh terminal-state snapshot.  LWW by
+                // generation: only replace the slot when the incoming
+                // generation is strictly newer than what we already
+                // hold.  Out-of-order pushes (rare; would need the
+                // L3-side pump to race against itself) are dropped
+                // without disturbing the live state.
+                let (sid, generation, body) = match decode_snapshot_payload(&frame.payload) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = out_tx.send(err_frame(
+                            12,
+                            &format!("bad SaveSnapshot: {}", e),
+                        ));
+                        continue;
+                    }
+                };
+                let session = sessions.lock().unwrap().get(&sid).cloned();
+                if let Some(s) = session {
+                    let mut slot_guard = s.snapshot.lock().unwrap();
+                    let take_it = slot_guard
+                        .as_ref()
+                        .map(|cur| generation > cur.generation)
+                        .unwrap_or(true);
+                    if take_it {
+                        *slot_guard = Some(SnapshotSlot {
+                            body: body.to_vec(),
+                            generation,
+                        });
+                        lx_debug!(
+                            "session.snapshot.saved",
+                            "RFC-002 SaveSnapshot stored",
+                            id = sid,
+                            generation = generation,
+                            body_bytes = body.len()
+                        );
+                    } else {
+                        lx_debug!(
+                            "session.snapshot.stale",
+                            "discarded older-generation push",
+                            id = sid,
+                            incoming = generation,
+                            current = slot_guard
+                                .as_ref()
+                                .map(|s| s.generation)
+                                .unwrap_or(0)
+                        );
+                    }
+                }
+                // Unknown session id: silently drop. L3 could push for
+                // a session shelld already KILL'd; not worth an error.
             }
             MsgType::Detach => {
                 let id = match decode_session_id(&frame.payload) {
