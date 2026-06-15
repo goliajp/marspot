@@ -107,6 +107,11 @@ ACTUAL_N="$(wc -l < "$BASELINE" | tr -d ' ')"
 [[ "$ACTUAL_N" == "$SESSIONS" ]] \
   || fail "expected $SESSIONS sessions in baseline, got $ACTUAL_N"
 echo "baseline: $ACTUAL_N sessions"
+# Snapshot fds AFTER session creation but BEFORE any swap — per-cycle
+# leak check below compares against this so the per-session overhead
+# (master + bytelog ≈ 2 fds × SESSIONS) doesn't masquerade as a leak.
+POST_CREATE_FDS="$(shelld_fd_count_mac)"
+echo "post-create fds=$POST_CREATE_FDS (per-session overhead established)"
 cat "$BASELINE" | sed 's/^/  /'
 
 # --- N cycles
@@ -164,13 +169,17 @@ done
 
 # --- final invariants
 FINAL_FDS="$(shelld_fd_count_mac)"
-FD_DELTA=$((FINAL_FDS - INITIAL_FDS))
+PER_CYCLE_DELTA=$((FINAL_FDS - POST_CREATE_FDS))
 echo
-echo "final fd delta: $INITIAL_FDS → $FINAL_FDS (Δ=$FD_DELTA)"
-# Each cycle inherits the same listen fd + master fds; no new fd
-# should accumulate. Tolerance: 8 (room for libc/asl/lsof noise).
-if (( FD_DELTA > 8 )); then
-  fail "fd inventory drifted by $FD_DELTA across $CYCLES cycles — leak"
+echo "final fd: post-create=$POST_CREATE_FDS → final=$FINAL_FDS (per-cycle Δ=$PER_CYCLE_DELTA)"
+# Each cycle should hand fds back: listen + master fds inherit, every
+# other fd opened during rehydrate (bytelog reopen, state.bin read,
+# pending/promote ops) must close.  Tolerance: 8 (room for libc/asl/
+# lsof noise).  Compares against post-create, NOT initial, so the
+# per-session overhead added at create time (~2 fds × SESSIONS) is
+# not double-counted as a leak.
+if (( PER_CYCLE_DELTA > 8 )); then
+  fail "fd inventory drifted by $PER_CYCLE_DELTA across $CYCLES cycles — leak"
 fi
 
 # No zombies in child PID set.
