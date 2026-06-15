@@ -534,14 +534,39 @@ fn rasterise_glyph(
     // We want baseline at y-DOWN row `baseline_from_top` from top.
     // In y-up, that's canvas y = `cell_h - baseline_from_top`.
     let baseline_canvas_y = (metrics.cell_h as f64) - (metrics.baseline_from_top as f64);
-    // Horizontal: CT's pen position lands at the glyph's logical
-    // start; for a monospace font the ink left edge is at
-    // `bbox.origin.x` from the pen.  We anchor the pen at canvas
-    // x = -bbox.origin.x so the ink left edge falls exactly on
-    // canvas x = 0 (left edge of the slot).  Side-bearing variations
-    // (italic L overhang etc.) just shift the ink within the slot;
-    // it's clipped to slot bounds.
-    let origin = CGPoint::new(-bbox.origin.x, baseline_canvas_y);
+    // Safety net: if the resolved font hands us a glyph whose natural
+    // bbox is WIDER than the slot we allocated (1 cell wide for chars
+    // grid::char_width says are 1-cell, etc.), scale the CTM to fit.
+    // This catches the same "Apple-Color-Emoji-style em-box glyph in a
+    // 1-cell slot" case that the colour rasteriser handles — but also
+    // hits when the cascade lands on a TEXT font that happens to have
+    // an oversized glyph (Helvetica's ② et al.).  scale==1.0 is a
+    // no-op on the common path; only triggers when bbox > slot.
+    let glyph_w = bbox.size.width;
+    let glyph_h = bbox.size.height;
+    let scale = if glyph_w > 0.0 && glyph_h > 0.0 {
+        ((px_w as f64) / glyph_w)
+            .min((px_h as f64) / glyph_h)
+            .min(1.0)
+    } else {
+        1.0
+    };
+    let origin = if scale < 1.0 {
+        ctx.scale(scale, scale);
+        let user_w = (px_w as f64) / scale;
+        let user_h = (px_h as f64) / scale;
+        CGPoint::new(
+            (user_w - glyph_w) / 2.0 - bbox.origin.x,
+            (user_h - glyph_h) / 2.0 - bbox.origin.y,
+        )
+    } else {
+        // Horizontal: CT's pen position lands at the glyph's logical
+        // start; for a monospace font the ink left edge is at
+        // `bbox.origin.x` from the pen.  We anchor the pen at canvas
+        // x = -bbox.origin.x so the ink left edge falls exactly on
+        // canvas x = 0 (left edge of the slot).
+        CGPoint::new(-bbox.origin.x, baseline_canvas_y)
+    };
     font.draw_glyphs(&[glyph], &[origin], ctx);
 
     Some(Raster {
