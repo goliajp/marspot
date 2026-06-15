@@ -424,10 +424,10 @@ use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
     decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_focus,
-    encode_hello,
-    encode_key_event, encode_mouse, encode_ping, encode_preedit, encode_resize, encode_scroll,
-    event_to_wire, struct_to_mods_byte, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
-    ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
+    encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
+    encode_scroll, encode_surface_attach, event_to_wire, struct_to_mods_byte, Frame, MsgType,
+    DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID,
+    ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 
 mod banner;
@@ -557,35 +557,88 @@ impl CoreConn {
     }
 }
 
+/// PROTO_VERSION=2 double-buffer IOSurface pair.  The core alternates
+/// writing into `front` and `back`; after each render+wait it acks
+/// `SurfaceReady(id)`.  The shell never samples a surface the core is
+/// mid-writing — that race was the dominant flash source diagnosed
+/// 2026-06-15.  Owns IOSurface use-counts: dropping the pair via
+/// `release()` decrements both.
+struct SurfacePair {
+    front: IOSurface,
+    back: IOSurface,
+}
+
+impl SurfacePair {
+    /// Create both surfaces at the same dimensions and `increment_use`
+    /// on each so they survive past initial return.  `release()`
+    /// (drop-style helper) decrements them when the pair is retired.
+    fn create(w_px: usize, h_px: usize) -> Result<Self, String> {
+        let front = IOSurface::create(w_px, h_px)?;
+        front.increment_use();
+        let back = match IOSurface::create(w_px, h_px) {
+            Ok(s) => {
+                s.increment_use();
+                s
+            }
+            Err(e) => {
+                front.decrement_use();
+                return Err(e);
+            }
+        };
+        Ok(Self { front, back })
+    }
+
+    fn ids(&self) -> (u32, u32) {
+        (self.front.id(), self.back.id())
+    }
+
+    fn width(&self) -> usize {
+        self.front.width()
+    }
+
+    fn height(&self) -> usize {
+        self.front.height()
+    }
+
+    /// Drop reverse: decrement_use on both halves.  Pair is consumed
+    /// because both surfaces become invalid for the shell after this.
+    fn release(self) {
+        self.front.decrement_use();
+        self.back.decrement_use();
+    }
+}
+
 /// A silent update in flight.  The shell promotes the new binary,
-/// spawns a `pending` core into a *fresh* IOSurface, and lets it
+/// spawns a `pending` core into a *fresh* IOSurface pair, and lets it
 /// rebuild the screen off-screen (from shelld's bytelog) while the
 /// `active` core keeps rendering the surface the user is looking at.
 /// Once the pending core has HelloAck'd, reported its surface ready,
 /// and survived probation, the shell atomic-swaps the presenter to the
-/// new surface and retires the old core — no flash, because both
-/// surfaces carry identical content.  On any failure the pending core
-/// is killed and the binary rolled back; the user never sees a glitch.
+/// new pair and retires the old core — no flash, because both pairs
+/// carry identical content.  On any failure the pending core is killed
+/// and the binary rolled back; the user never sees a glitch.
 struct PendingUpdate {
-    /// The probationary core, rendering into `surface`.
+    /// The probationary core, rendering into `surfaces`.
     conn: CoreConn,
-    /// The fresh IOSurface the pending core draws into.  Becomes the
-    /// displayed surface on a successful swap; released on abort.
-    surface: IOSurface,
-    /// True once the pending core confirmed `SurfaceReady(surface.id())`.
+    /// The fresh IOSurface pair the pending core draws into.  Becomes
+    /// the displayed pair on a successful swap; released on abort.
+    surfaces: SurfacePair,
+    /// True once the pending core confirmed `SurfaceReady` for one of
+    /// the pair's ids — proof it can actually render.
     surface_ready: bool,
 }
 
 struct ShellApp {
     proxy: EventProxy,
-    /// Currently-displayed IOSurface — the one the presenter samples.
-    surface: Option<IOSurface>,
-    /// Created in `resized` and not yet promoted.  Once the core
-    /// confirms via `SurfaceReady(id)` matching this entry's ID, we
-    /// move it into `surface` and swap the presenter texture.  A
-    /// later resize replaces the pending entry; the dropped one is
-    /// abandoned (`decrement_use` + release).
-    pending_surface: Option<IOSurface>,
+    /// Currently-displayed IOSurface pair — the presenter samples
+    /// whichever half `current_idx` points at.
+    surfaces: Option<SurfacePair>,
+    /// Created in `resized` (or `restart_core`) and not yet promoted.
+    /// Once the core confirms via `SurfaceReady(id)` matching either
+    /// id of this pair, we install it as the live pair and let the
+    /// presenter swap to the ready id.  A later resize replaces the
+    /// pending entry; the dropped one is abandoned (`release`).
+    pending_surfaces: Option<SurfacePair>,
     presenter: Option<ShellPresenter>,
     /// The live core: child process, control socket (both directions),
     /// and liveness-handshake state, aggregated into `CoreConn` so a
@@ -655,8 +708,8 @@ impl ShellApp {
             .expect("HOME must be set to manage binary slots");
         Self {
             proxy,
-            surface: None,
-            pending_surface: None,
+            surfaces: None,
+            pending_surfaces: None,
             presenter: None,
             active: None,
             pending: None,
@@ -706,7 +759,8 @@ impl ShellApp {
     /// probation) — this fn touches neither slot.
     fn spawn_core(
         &self,
-        surface_id: u32,
+        front_id: u32,
+        back_id: u32,
         w_phys: usize,
         h_phys: usize,
         scale: f64,
@@ -765,14 +819,16 @@ impl ShellApp {
             "shell.core.spawning",
             "spawning marspot-core",
             bin = core_bin.display(),
-            surface_id = surface_id,
+            front_id = front_id,
+            back_id = back_id,
             w = w_phys,
             h = h_phys,
             scale = scale,
             control_fd = DEFAULT_CONTROL_FD
         );
         let mut cmd = Command::new(&core_bin);
-        cmd.env(ENV_SURFACE_ID, surface_id.to_string())
+        cmd.env(ENV_SURFACE_ID, front_id.to_string())
+            .env(ENV_SURFACE_ID_BACK, back_id.to_string())
             .env(ENV_SURFACE_WIDTH, w_phys.to_string())
             .env(ENV_SURFACE_HEIGHT, h_phys.to_string())
             .env(ENV_SURFACE_SCALE, scale.to_string())
@@ -901,8 +957,8 @@ impl ShellApp {
         if !self.binaries.has_pending() {
             return false;
         }
-        // Size the pending core's surface to the displayed one.
-        let (w_px, h_px) = match self.surface.as_ref() {
+        // Size the pending core's surface pair to the displayed one.
+        let (w_px, h_px) = match self.surfaces.as_ref() {
             Some(s) => (s.width(), s.height()),
             None => {
                 lx_warn!(
@@ -923,50 +979,49 @@ impl ShellApp {
             sup_log::log("UPDATE_FAIL", &format!("promote_pending: {e}"));
             return false;
         }
-        // Fresh surface for the pending core — the active core's surface
-        // (self.surface) is left completely alone, so the user sees no
+        // Fresh pair for the pending core — the active core's pair
+        // (self.surfaces) is left completely alone, so the user sees no
         // change while the new core warms up.
-        let new_surface = match IOSurface::create(w_px, h_px) {
-            Ok(s) => {
-                s.increment_use();
-                s
-            }
+        let new_pair = match SurfacePair::create(w_px, h_px) {
+            Ok(p) => p,
             Err(e) => {
                 lx_event!(
                     "UPDATE_FAIL",
-                    "pending IOSurface::create failed",
+                    "pending SurfacePair::create failed",
                     error = format!("{e}")
                 );
-                sup_log::log("UPDATE_FAIL", &format!("surface create: {e}"));
-                self.rollback_binary("surface create failed");
+                sup_log::log("UPDATE_FAIL", &format!("pair create: {e}"));
+                self.rollback_binary("pair create failed");
                 return false;
             }
         };
         let scale = ctx.scale();
-        let conn = match self.spawn_core(new_surface.id(), w_px, h_px, scale) {
+        let (front_id, back_id) = new_pair.ids();
+        let conn = match self.spawn_core(front_id, back_id, w_px, h_px, scale) {
             Some(c) => c,
             None => {
                 lx_event!("UPDATE_FAIL", "spawn pending core failed");
                 sup_log::log("UPDATE_FAIL", "spawn pending core");
-                new_surface.decrement_use();
+                new_pair.release();
                 self.rollback_binary("spawn pending core failed");
                 return false;
             }
         };
         self.pending = Some(PendingUpdate {
             conn,
-            surface: new_surface,
+            surfaces: new_pair,
             surface_ready: false,
         });
-        // The core only emits SurfaceReady in response to a Resize
-        // frame — it doesn't announce its initial env-var surface.
-        // Send one now (same size) to drive the pending core to render
-        // into the new surface and ack SurfaceReady, the second
-        // promotion gate.  This is a surface handshake, not live input.
+        // The core doesn't auto-emit SurfaceReady for its initial
+        // env-var pair — send a SurfaceAttach to drive it.  Same dims
+        // here (no resize); this is purely the handshake trigger that
+        // tells the pending core "go render, ack when ready", which is
+        // the second promotion gate.
         if let Some(p) = self.pending.as_ref() {
+            let (f, b) = p.surfaces.ids();
             p.conn.send(
-                MsgType::Resize,
-                encode_resize(p.surface.id(), w_px as f64, h_px as f64, scale),
+                MsgType::SurfaceAttach,
+                encode_surface_attach(f, b, w_px as f64, h_px as f64, scale),
             );
         }
         self.sup_state = SupervisorState::Probation {
@@ -985,39 +1040,39 @@ impl ShellApp {
         };
         let PendingUpdate {
             conn,
-            surface: new_surface,
+            surfaces: new_pair,
             ..
         } = pending;
-        // Point the presenter at the new surface.  The next present()
-        // samples it; until then the old surface is still shown.
+        // Point the presenter at the new pair.  The next present()
+        // samples it; until then the old pair is still shown.
         if let Some(p) = self.presenter.as_mut() {
-            if let Err(e) = p.swap_surface(&new_surface) {
-                // Swap failed — keep the active core + its surface, kill
+            if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
+                // Swap failed — keep the active core + its pair, kill
                 // the pending core, and roll the binary back.  The user
                 // never saw anything change.
                 lx_event!(
                     "UPDATE_FAIL",
-                    "promote swap_surface failed; keeping active core",
+                    "promote set_pair failed; keeping active core",
                     error = format!("{e}")
                 );
-                sup_log::log("UPDATE_FAIL", &format!("swap_surface: {e}"));
-                new_surface.decrement_use();
+                sup_log::log("UPDATE_FAIL", &format!("set_pair: {e}"));
+                new_pair.release();
                 conn.shutdown();
-                self.rollback_binary("swap_surface failed");
+                self.rollback_binary("set_pair failed");
                 self.sup_state = SupervisorState::Idle;
                 return;
             }
         }
-        // Release the old displayed surface, install the new one.  Any
-        // in-flight resize surface is now stale (resize aborts pending
+        // Release the old displayed pair, install the new one.  Any
+        // in-flight resize pair is now stale (resize aborts pending
         // updates, so this is belt-and-suspenders) — drop it too.
-        if let Some(old) = self.surface.take() {
-            old.decrement_use();
+        if let Some(old) = self.surfaces.take() {
+            old.release();
         }
-        if let Some(stale) = self.pending_surface.take() {
-            stale.decrement_use();
+        if let Some(stale) = self.pending_surfaces.take() {
+            stale.release();
         }
-        self.surface = Some(new_surface);
+        self.surfaces = Some(new_pair);
         self.first_frame_ready = true;
         // Retire the old active core; the pending core becomes active.
         self.shutdown_active();
@@ -1045,9 +1100,9 @@ impl ShellApp {
         let Some(pending) = self.pending.take() else {
             return;
         };
-        let PendingUpdate { conn, surface, .. } = pending;
+        let PendingUpdate { conn, surfaces, .. } = pending;
         conn.shutdown();
-        surface.decrement_use();
+        surfaces.release();
         lx_event!("UPDATE_ABORT", "aborting pending update", reason = reason);
         sup_log::log("UPDATE_ABORT", reason);
         self.rollback_binary(reason);
@@ -1115,15 +1170,15 @@ impl ShellApp {
         // dangling fds in the new process — clean now.
         self.shutdown_active();
         if let Some(pending) = self.pending.take() {
-            let PendingUpdate { conn, surface, .. } = pending;
+            let PendingUpdate { conn, surfaces, .. } = pending;
             conn.shutdown();
-            surface.decrement_use();
+            surfaces.release();
         }
-        if let Some(s) = self.surface.take() {
-            s.decrement_use();
+        if let Some(s) = self.surfaces.take() {
+            s.release();
         }
-        if let Some(s) = self.pending_surface.take() {
-            s.decrement_use();
+        if let Some(s) = self.pending_surfaces.take() {
+            s.release();
         }
         let target = shell_tree.current();
         if !target.exists() {
@@ -1178,7 +1233,7 @@ impl ShellApp {
     fn refresh_banner(&mut self, ctx: &MarspotAppCtx) {
         let want = if self.auto_restart_disabled {
             Some(BannerKind::UpdateFailed)
-        } else if !self.core_alive() && self.surface.is_some() {
+        } else if !self.core_alive() && self.surfaces.is_some() {
             // Active core process is gone (just SIGKILL'd or died and we
             // haven't respawned yet).  Show the recovering banner while
             // the gap lasts.
@@ -1239,41 +1294,46 @@ impl ShellApp {
         if self.auto_restart_disabled {
             return;
         }
-        if let Some(s) = self.surface.as_ref() {
-            let id = s.id();
+        if let Some(s) = self.surfaces.as_ref() {
+            let (front_id, back_id) = s.ids();
             let w_px = s.width();
             let h_px = s.height();
             let scale = ctx.scale();
-            self.active = self.spawn_core(id, w_px, h_px, scale);
-            // A freshly spawned core attaches its env surface but never
-            // announces it — SurfaceReady is only emitted in response to
-            // a Resize.  The *initial* boot gets that drive for free from
-            // the framework's post-`resumed` `resized` callback; a
-            // *restart* (crash / hang / boot-race recovery) does not.
-            // Without an explicit drive the new core renders into the
-            // surface but the presenter's `first_frame_ready` gate never
+            self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
+            // A freshly spawned core attaches its env pair but never
+            // emits SurfaceReady spontaneously — drive it.  Initial boot
+            // gets the drive for free from the framework's post-`resumed`
+            // `resized` callback; a *restart* (crash / hang / boot-race
+            // recovery) doesn't.  Without the explicit drive the new
+            // core renders into the pair but `first_frame_ready` never
             // flips, so `redraw`/`present` stay gated and the window is
-            // black until the user manually resizes.  Drive the same
-            // handshake the resize and pending-update paths use; the old
-            // surface keeps showing its last frame until SurfaceReady
-            // swaps the new one in (no black flash on a live crash).
+            // black until the user resizes.  We hand it a fresh pair via
+            // SurfaceAttach so the handshake mirrors the resize path; the
+            // old pair keeps showing its last frame until SurfaceReady
+            // for the new pair swaps it in (no black flash on a live
+            // crash).
             if self.active.is_some() {
-                match IOSurface::create(w_px, h_px) {
-                    Ok(surf) => {
-                        surf.increment_use();
-                        if let Some(stale) = self.pending_surface.take() {
-                            stale.decrement_use();
+                match SurfacePair::create(w_px, h_px) {
+                    Ok(pair) => {
+                        if let Some(stale) = self.pending_surfaces.take() {
+                            stale.release();
                         }
-                        let new_id = surf.id();
-                        self.pending_surface = Some(surf);
+                        let (f, b) = pair.ids();
+                        self.pending_surfaces = Some(pair);
                         self.send(
-                            MsgType::Resize,
-                            encode_resize(new_id, w_px as f64, h_px as f64, scale),
+                            MsgType::SurfaceAttach,
+                            encode_surface_attach(
+                                f,
+                                b,
+                                w_px as f64,
+                                h_px as f64,
+                                scale,
+                            ),
                         );
                     }
                     Err(e) => {
                         lx_error!(
-                            "shell.restart_handshake.iosurface_create_failed",
+                            "shell.restart_handshake.pair_create_failed",
                             &format!("{e}")
                         );
                     }
@@ -1500,43 +1560,88 @@ impl ShellApp {
         self.redraw_thread_started = true;
     }
 
-    /// Honour a `SurfaceReady(id)` ack from the core: if it matches
-    /// the *current* pending surface, promote it to live and swap the
-    /// presenter texture.  Older pending IDs (replaced by a newer
-    /// resize before the core got to them) are silently dropped.
+    /// Honour a `SurfaceReady(id)` ack from the core.  Two cases:
+    ///
+    /// 1. **Steady-state per-frame ack** — id belongs to the *live*
+    ///    pair: the core just finished writing that half, the other
+    ///    half is now the "back".  Flip `current_idx` and present.
+    /// 2. **Pair handshake** — id belongs to the *pending* pair
+    ///    (resize / restart created a new pair, sent SurfaceAttach,
+    ///    core acked).  Install pending as the live pair, point the
+    ///    presenter at it, and flip to the acked id.
+    ///
+    /// IDs that don't match either are late acks for a retired pair
+    /// (replaced by a newer resize before the core got there) —
+    /// silently dropped.
     fn on_surface_ready(&mut self, id: u32) {
-        let pending_id = self.pending_surface.as_ref().map(|s| s.id());
-        let matches = pending_id == Some(id);
-        if !matches {
+        let live_ids = self.surfaces.as_ref().map(|p| p.ids());
+        let pending_ids = self.pending_surfaces.as_ref().map(|p| p.ids());
+        let in_live = live_ids
+            .map(|(f, b)| f == id || b == id)
+            .unwrap_or(false);
+        let in_pending = pending_ids
+            .map(|(f, b)| f == id || b == id)
+            .unwrap_or(false);
+        if in_live && !in_pending {
+            // Per-frame ack: just point the presenter at the just-
+            // completed half.  No pair churn, no log spam.
+            if let Some(p) = self.presenter.as_mut() {
+                if !p.swap_to_id(id) {
+                    // Presenter and shell pair-ids disagree — should
+                    // not happen, but log if it ever does.
+                    lx_warn!(
+                        "shell.presenter.swap_to_id_unknown",
+                        "presenter rejected SurfaceReady id",
+                        id = id
+                    );
+                    return;
+                }
+            }
+            // First-ever SurfaceReady on the boot pair flips the
+            // first_frame_ready gate so `redraw()` finally presents.
+            // Without this the gate stays false for the entire run
+            // (it only flipped on the legacy v=1 handshake path).
+            self.first_frame_ready = true;
+            self.frame_pending = true;
+            return;
+        }
+        if !in_pending {
             lx_warn!(
-                "shell.surface_ready.id_mismatch",
-                "SurfaceReady ignored — id does not match pending",
+                "shell.surface_ready.id_unknown",
+                "SurfaceReady ignored — id does not match live or pending pair",
                 id = id,
-                pending_id = format!("{pending_id:?}")
+                live = format!("{live_ids:?}"),
+                pending = format!("{pending_ids:?}")
             );
             return;
         }
-        let new_surface = match self.pending_surface.take() {
-            Some(s) => s,
+        // Handshake ack: install pending as live.
+        let new_pair = match self.pending_surfaces.take() {
+            Some(p) => p,
             None => return,
         };
         if let Some(p) = self.presenter.as_mut() {
-            if let Err(e) = p.swap_surface(&new_surface) {
-                lx_error!("shell.swap_surface_failed", &format!("{e}"));
-                new_surface.decrement_use();
+            if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
+                lx_error!("shell.set_pair_failed", &format!("{e}"));
+                new_pair.release();
                 return;
             }
+            // The acked id is the one the core just wrote — point at it.
+            p.swap_to_id(id);
         }
-        if let Some(old) = self.surface.take() {
-            old.decrement_use();
+        if let Some(old) = self.surfaces.take() {
+            old.release();
         }
         lx_info!(
-            "shell.presenter.surface_swapped",
-            "presenter now displaying new surface",
-            id = id
+            "shell.presenter.pair_swapped",
+            "presenter now displaying new pair",
+            front = new_pair.front.id(),
+            back = new_pair.back.id(),
+            acked = id
         );
-        self.surface = Some(new_surface);
+        self.surfaces = Some(new_pair);
         self.first_frame_ready = true;
+        self.frame_pending = true;
     }
 
     /// Route a frame from the **active** core — it drives what's on
@@ -1600,10 +1705,11 @@ impl ShellApp {
     fn handle_pending_msg(&mut self, msg: ShellInbox) {
         match msg {
             ShellInbox::SurfaceReady(id) => {
-                // The pending core has painted its surface — one of the
-                // two promotion preconditions.
+                // The pending core has painted one half of its pair —
+                // one of the two promotion preconditions.
                 if let Some(p) = self.pending.as_mut() {
-                    if p.surface.id() == id {
+                    let (f, b) = p.surfaces.ids();
+                    if f == id || b == id {
                         p.surface_ready = true;
                         lx_event!(
                             "PENDING_SURFACE_READY",
@@ -1660,11 +1766,11 @@ impl MarspotApp for ShellApp {
         let w_px = w_phys.max(64.0) as usize;
         let h_px = h_phys.max(64.0) as usize;
 
-        let surface = match IOSurface::create(w_px, h_px) {
-            Ok(s) => s,
+        let pair = match SurfacePair::create(w_px, h_px) {
+            Ok(p) => p,
             Err(e) => {
                 lx_error!(
-                    "shell.resumed.iosurface_create_failed",
+                    "shell.resumed.pair_create_failed",
                     &format!("{e}"),
                     w = w_px,
                     h = h_px
@@ -1673,9 +1779,13 @@ impl MarspotApp for ShellApp {
                 return;
             }
         };
-        surface.increment_use();
 
-        let presenter = match ShellPresenter::new(ctx.ns_view(), scale as f32, &surface) {
+        let presenter = match ShellPresenter::new(
+            ctx.ns_view(),
+            scale as f32,
+            &pair.front,
+            &pair.back,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 lx_error!("shell.resumed.presenter_new_failed", &format!("{e}"));
@@ -1684,11 +1794,11 @@ impl MarspotApp for ShellApp {
             }
         };
 
-        let id = surface.id();
-        self.surface = Some(surface);
+        let (front_id, back_id) = pair.ids();
+        self.surfaces = Some(pair);
         self.presenter = Some(presenter);
 
-        self.active = self.spawn_core(id, w_px, h_px, scale);
+        self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
         self.start_redraw_pump();
         ctx.request_redraw();
     }
@@ -1776,18 +1886,20 @@ impl MarspotApp for ShellApp {
         let scale = ctx.scale();
         let w_px = w_phys.max(64.0) as usize;
         let h_px = h_phys.max(64.0) as usize;
-        match IOSurface::create(w_px, h_px) {
-            Ok(surf) => {
-                surf.increment_use();
-                if let Some(stale) = self.pending_surface.take() {
-                    stale.decrement_use();
+        match SurfacePair::create(w_px, h_px) {
+            Ok(pair) => {
+                if let Some(stale) = self.pending_surfaces.take() {
+                    stale.release();
                 }
-                let new_id = surf.id();
-                self.pending_surface = Some(surf);
-                self.send(MsgType::Resize, encode_resize(new_id, w_phys, h_phys, scale));
+                let (f, b) = pair.ids();
+                self.pending_surfaces = Some(pair);
+                self.send(
+                    MsgType::SurfaceAttach,
+                    encode_surface_attach(f, b, w_phys, h_phys, scale),
+                );
             }
             Err(e) => {
-                lx_error!("shell.resize.iosurface_create_failed", &format!("{e}"));
+                lx_error!("shell.resize.pair_create_failed", &format!("{e}"));
             }
         }
         ctx.request_redraw();
@@ -1824,15 +1936,15 @@ impl MarspotApp for ShellApp {
         // Tear down an in-flight update too (no rollback — we're
         // exiting, not failing an update).
         if let Some(pending) = self.pending.take() {
-            let PendingUpdate { conn, surface, .. } = pending;
+            let PendingUpdate { conn, surfaces, .. } = pending;
             conn.shutdown();
-            surface.decrement_use();
+            surfaces.release();
         }
-        if let Some(surface) = self.surface.take() {
-            surface.decrement_use();
+        if let Some(pair) = self.surfaces.take() {
+            pair.release();
         }
-        if let Some(stale) = self.pending_surface.take() {
-            stale.decrement_use();
+        if let Some(stale) = self.pending_surfaces.take() {
+            stale.release();
         }
         ctx.exit();
     }

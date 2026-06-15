@@ -40,11 +40,10 @@ use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
 use marspot::shell_proto::{
     decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping, decode_preedit,
-    decode_resize, decode_scroll, decode_selection_text, encode_caret_rect, encode_hello_ack,
-    encode_pong,
-    encode_surface_ready, mods_to_struct, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD,
-    ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH,
-    PROTO_VERSION,
+    decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
+    encode_caret_rect, encode_hello_ack, encode_pong, encode_surface_ready, mods_to_struct,
+    wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT,
+    ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
 use marspot::shelld_client::ShelldClient;
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
@@ -84,7 +83,14 @@ enum CoreEvent {
     /// decode (terminal scrollback is vertical-only).
     Scroll(f64, bool),
     Focus(bool),
+    /// PROTO_VERSION=1 single-surface resize.  Kept for tolerance; the
+    /// PROTO_VERSION=2 path uses `SurfaceAttach` (dual-buffer).
     Resize(u32, f64, f64, f64),
+    /// PROTO_VERSION=2 dual-buffer pair handshake: `(front_id, back_id,
+    /// w_phys, h_phys, scale)`.  Either announces a fresh pair (resize
+    /// / restart / pending-update spawn) or re-confirms the live pair
+    /// at the same dims after a restart.
+    SurfaceAttach(u32, u32, f64, f64, f64),
     Preedit(String),
     /// Shelld wake — some pane has new bytes to pump (PTY → bytelog
     /// → broadcast).  Sent by the shelld client's wake callback so
@@ -129,6 +135,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::Resize => decode_resize(&f.payload)
             .ok()
             .map(|(id, w, h, s)| CoreEvent::Resize(id, w, h, s)),
+        MsgType::SurfaceAttach => decode_surface_attach(&f.payload)
+            .ok()
+            .map(|(f_id, b_id, w, h, s)| CoreEvent::SurfaceAttach(f_id, b_id, w, h, s)),
         MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
@@ -1197,28 +1206,50 @@ fn main() {
         pid = std::process::id()
     );
 
-    let surface_id: u32 = env_required(ENV_SURFACE_ID);
+    let front_id: u32 = env_required(ENV_SURFACE_ID);
+    let back_id: u32 = env_required(ENV_SURFACE_ID_BACK);
     let w_phys: f64 = env_required(ENV_SURFACE_WIDTH);
     let h_phys: f64 = env_required(ENV_SURFACE_HEIGHT);
     let scale: f64 = env_required(ENV_SURFACE_SCALE);
 
     lx_event!(
         "SURFACE_ATTACH",
-        "attaching IOSurface",
-        surface_id = surface_id,
+        "attaching IOSurface pair (PROTO_VERSION=2 double-buffer)",
+        front_id = front_id,
+        back_id = back_id,
         w_phys = w_phys,
         h_phys = h_phys,
         scale = scale
     );
 
-    let mut surface = IOSurface::lookup(surface_id)
-        .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({surface_id}) returned nil"));
-    surface.increment_use();
+    let front = IOSurface::lookup(front_id)
+        .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({front_id}) returned nil"));
+    front.increment_use();
+    let back = IOSurface::lookup(back_id)
+        .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({back_id}) returned nil"));
+    back.increment_use();
 
     let renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
-    let mut target_tex: objc2::rc::Retained<ProtocolObject<dyn MTLTexture>> = surface
-        .make_metal_texture(renderer.device())
-        .expect("[core] make_metal_texture");
+    // Double-buffer: own a (surface, texture) pair.  Per-frame render
+    // alternates `writing_idx`; the shell's presenter listens for
+    // `SurfaceReady(id)` and points at whichever slot is freshly done.
+    // Eliminates the cross-process mid-render race that was the
+    // dominant flash source (handoff 2026-06-15).
+    let mut surfaces: [IOSurface; 2] = [front, back];
+    let mut target_tex: [objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>; 2] = [
+        surfaces[0]
+            .make_metal_texture(renderer.device())
+            .expect("[core] make_metal_texture front"),
+        surfaces[1]
+            .make_metal_texture(renderer.device())
+            .expect("[core] make_metal_texture back"),
+    ];
+    // Start writing into slot 0 — the shell's presenter starts at idx
+    // 0 too (`set_pair` resets `current_idx` to 0), so the first
+    // SurfaceReady(surfaces[0].id()) is a no-op flip but the
+    // accompanying `frame_pending=true` makes the shell actually
+    // present.
+    let mut writing_idx: usize = 0;
 
     // Unified event channel: the control-socket reader pushes
     // CoreEvents; the shelld wake callback pushes `PumpShelld`.
@@ -1527,15 +1558,17 @@ fn main() {
                 Err(RecvTimeoutError::Disconnected) => break 'main,
             }
         };
-        // Drain pending control-socket events.  Resize coalescing:
-        // keep only the latest Resize (see Step 4 notes); liveness
-        // frames are echoed within the same drain pass.
-        let mut pending_resize: Option<(u32, f64, f64, f64)> = None;
+        // Drain pending control-socket events.  Attach coalescing:
+        // keep only the latest SurfaceAttach (resize fires fast in a
+        // live drag — old attach payloads are stale by the time we
+        // get to render); liveness frames are echoed within the same
+        // drain pass.
+        let mut pending_attach: Option<(u32, u32, f64, f64, f64)> = None;
         let mut to_ack: Vec<(MsgType, Vec<u8>)> = Vec::new();
         let mut closed = false;
         let process = |app: &mut CoreApp,
                            ev: CoreEvent,
-                           pending_resize: &mut Option<(u32, f64, f64, f64)>,
+                           pending_attach: &mut Option<(u32, u32, f64, f64, f64)>,
                            to_ack: &mut Vec<(MsgType, Vec<u8>)>,
                            closed: &mut bool| {
             match ev {
@@ -1550,8 +1583,13 @@ fn main() {
                 }
                 CoreEvent::Preedit(text) => app.preedit(text),
                 CoreEvent::Closed => *closed = true,
-                CoreEvent::Resize(new_id, new_w, new_h, new_scale) => {
-                    *pending_resize = Some((new_id, new_w, new_h, new_scale));
+                CoreEvent::Resize(_new_id, _new_w, _new_h, _new_scale) => {
+                    // Legacy PROTO_VERSION=1 path — kept as a tolerance
+                    // hook but the dual-buffer shell only sends
+                    // SurfaceAttach now.  Silently drop.
+                }
+                CoreEvent::SurfaceAttach(f_id, b_id, new_w, new_h, new_scale) => {
+                    *pending_attach = Some((f_id, b_id, new_w, new_h, new_scale));
                 }
                 CoreEvent::PumpShelld => {
                     app.needs_render = true;
@@ -1571,10 +1609,10 @@ fn main() {
             }
         };
         if let Some(ev) = first {
-            process(&mut app, ev, &mut pending_resize, &mut to_ack, &mut closed);
+            process(&mut app, ev, &mut pending_attach, &mut to_ack, &mut closed);
         }
         while let Ok(ev) = event_rx.try_recv() {
-            process(&mut app, ev, &mut pending_resize, &mut to_ack, &mut closed);
+            process(&mut app, ev, &mut pending_attach, &mut to_ack, &mut closed);
         }
         if closed {
             lx_event!(
@@ -1593,47 +1631,77 @@ fn main() {
                 );
             }
         }
-        if let Some((new_id, new_w, new_h, new_scale)) = pending_resize {
-            // Shell hands us a freshly-created IOSurface at the new
-            // size; rebuild the render target + layout, then ack with
-            // SurfaceReady so the shell can swap its presenter.
-            let new_surface = match IOSurface::lookup(new_id) {
-                Some(s) => {
-                    s.increment_use();
-                    Some(s)
-                }
-                None => {
-                    lx_warn!(
-                        "core.resize.surface_lookup_nil",
-                        "IOSurfaceLookup returned nil; dropping",
-                        surface_id = new_id
-                    );
-                    None
-                }
-            };
-            if let Some(new_surface) = new_surface {
-                match new_surface.make_metal_texture(app.renderer.device()) {
-                    Ok(new_tex) => {
-                        target_tex = new_tex;
-                        surface.decrement_use();
-                        surface = new_surface;
-                        app.w_phys = new_w;
-                        app.h_phys = new_h;
-                        app.scale = new_scale;
-                        app.rebuild_layout();
-                        // Render the latest content into the new
-                        // surface so the SurfaceReady ack is honest.
-                        app.pump_all();
-                        let _ = app.render(&target_tex);
-                        let ack =
-                            Frame::new(MsgType::SurfaceReady, encode_surface_ready(new_id));
-                        if let Err(e) = ack.write_to(&mut control_writer) {
-                            lx_error!("core.surface_ready.write_failed", &format!("{e}"));
+        if let Some((new_front, new_back, new_w, new_h, new_scale)) = pending_attach {
+            // Shell handed us a freshly-created IOSurface pair at the
+            // new size (resize / restart / pending-update spawn).
+            // Look up both, rebuild both textures, rebuild the layout,
+            // and immediately render into slot 0 + ack
+            // SurfaceReady(new_front) so the shell can install + swap
+            // the presenter to the new pair.
+            let f_surf = IOSurface::lookup(new_front);
+            let b_surf = IOSurface::lookup(new_back);
+            match (f_surf, b_surf) {
+                (Some(fs), Some(bs)) => {
+                    fs.increment_use();
+                    bs.increment_use();
+                    let new_tex_f = fs.make_metal_texture(app.renderer.device());
+                    let new_tex_b = bs.make_metal_texture(app.renderer.device());
+                    match (new_tex_f, new_tex_b) {
+                        (Ok(tf), Ok(tb)) => {
+                            // Release the old pair (decrement_use balances
+                            // the two increments we did at boot or in the
+                            // previous attach).
+                            surfaces[0].decrement_use();
+                            surfaces[1].decrement_use();
+                            surfaces = [fs, bs];
+                            target_tex = [tf, tb];
+                            writing_idx = 0;
+                            app.w_phys = new_w;
+                            app.h_phys = new_h;
+                            app.scale = new_scale;
+                            app.rebuild_layout();
+                            // Render the latest content into slot 0 so
+                            // the SurfaceReady ack reflects a real frame.
+                            app.pump_all();
+                            let _ = app.render(&target_tex[writing_idx]);
+                            let ack = Frame::new(
+                                MsgType::SurfaceReady,
+                                encode_surface_ready(surfaces[writing_idx].id()),
+                            );
+                            if let Err(e) = ack.write_to(&mut control_writer) {
+                                lx_error!(
+                                    "core.surface_ready.write_failed",
+                                    &format!("{e}")
+                                );
+                            }
+                            // Next render writes the other half.
+                            writing_idx = 1 - writing_idx;
+                        }
+                        (tf, tb) => {
+                            if tf.is_err() {
+                                lx_error!(
+                                    "core.attach.metal_texture_front_failed",
+                                    &format!("{:?}", tf.err())
+                                );
+                            }
+                            if tb.is_err() {
+                                lx_error!(
+                                    "core.attach.metal_texture_back_failed",
+                                    &format!("{:?}", tb.err())
+                                );
+                            }
+                            fs.decrement_use();
+                            bs.decrement_use();
                         }
                     }
-                    Err(e) => {
-                        lx_error!("core.resize.metal_texture_failed", &format!("{e}"));
-                    }
+                }
+                _ => {
+                    lx_warn!(
+                        "core.attach.surface_lookup_nil",
+                        "IOSurfaceLookup returned nil; dropping",
+                        front_id = new_front,
+                        back_id = new_back
+                    );
                 }
             }
         }
@@ -1644,18 +1712,29 @@ fn main() {
         }
 
         if app.needs_render {
-            let caret = app.render(&target_tex);
-            // Tell the shell a complete frame is in the IOSurface so it
-            // presents now — replaces its blind ~60 fps present timer (idle
-            // CPU + occasional torn read from sampling mid-render).  Sent
-            // after render() returns; the cross-process + thread-wake
-            // latency before the shell actually samples comfortably exceeds
-            // the GPU's sub-ms write completion, so the present sees a
-            // settled surface.
-            let fr = Frame::new(MsgType::FrameRendered, Vec::new());
-            if let Err(e) = fr.write_to(&mut control_writer) {
-                lx_error!("core.frame_rendered.write_failed", &format!("{e}"));
+            // Double-buffer: render into the back slot
+            // (`writing_idx`).  `render_layout_to_texture` calls
+            // `waitUntilCompleted`, so the moment we return here the
+            // surface bytes are settled and safe for the shell to
+            // sample — that's what makes `SurfaceReady` the dual-
+            // buffer race fix: we only ever flip to a slot the GPU
+            // has already finished.
+            let caret = app.render(&target_tex[writing_idx]);
+            // Per-frame ack — the just-completed surface ID.  In v=2
+            // this replaces the empty-payload `FrameRendered` poke:
+            // shell uses the id to flip its presenter's `current_idx`,
+            // then presents.  Same one frame round-trip the old path
+            // had, but the present now samples a guaranteed-finished
+            // surface instead of racing the writing one.
+            let ack = Frame::new(
+                MsgType::SurfaceReady,
+                encode_surface_ready(surfaces[writing_idx].id()),
+            );
+            if let Err(e) = ack.write_to(&mut control_writer) {
+                lx_error!("core.surface_ready.write_failed", &format!("{e}"));
             }
+            // Flip: next render writes the other half.
+            writing_idx = 1 - writing_idx;
             // Publish the focused-pane caret so the shell can anchor
             // the IME candidate window.  Dedupe — an idle cursor must
             // not stream identical frames at render cadence.

@@ -138,17 +138,28 @@ const BG_G: f64 = 0.008;
 const BG_B: f64 = 0.014;
 
 pub struct ShellPresenter {
-    /// Retained so `swap_surface` (Step 4 + 5) can rebuild the
-    /// IOSurface-backed texture without re-discovering the device.
+    /// Retained so `set_pair` can rebuild the IOSurface-backed
+    /// textures (on resize / pending-update swap) without
+    /// re-discovering the device.
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     layer: Retained<CAMetalLayer>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
-    /// MTLTexture wrapping the current shared IOSurface.  Stays valid
-    /// across many `present()` calls until the shell rebuilds the
-    /// surface (Step 4 resize, Step 5 supervisor swap).
-    iosurface_tex: Retained<ProtocolObject<dyn MTLTexture>>,
+    /// PROTO_VERSION=2 double-buffer: two MTLTextures wrap a pair of
+    /// shared IOSurfaces (front + back).  Core writes the back surface;
+    /// when it acks `SurfaceReady(id)`, `swap_to_id` flips
+    /// `current_idx` so the next `present()` samples the just-completed
+    /// surface.  Eliminates the cross-process mid-render race that was
+    /// the dominant flash source.
+    iosurface_tex: [Retained<ProtocolObject<dyn MTLTexture>>; 2],
+    /// Surface IDs in the same slot order as `iosurface_tex`.  Used by
+    /// `swap_to_id` to resolve which slot just became renderable.
+    surface_ids: [u32; 2],
+    /// Slot currently being sampled by `present()`.  Flipped by
+    /// `swap_to_id` when the core acks a SurfaceReady whose ID matches
+    /// the OTHER slot — i.e. the back has become the new front.
+    current_idx: u8,
     /// Step 7: banner overlay pipeline + sampler.  Sampler is shared
     /// with the IOSurface path because both want linear filtering.
     banner_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
@@ -158,7 +169,12 @@ pub struct ShellPresenter {
 }
 
 impl ShellPresenter {
-    pub fn new(view: &NSView, scale: f32, surface: &IOSurface) -> Result<Self, String> {
+    pub fn new(
+        view: &NSView,
+        scale: f32,
+        front: &IOSurface,
+        back: &IOSurface,
+    ) -> Result<Self, String> {
         let device = system_default_device()?;
         let queue = device
             .newCommandQueue()
@@ -261,7 +277,10 @@ impl ShellPresenter {
             }
         }
 
-        let iosurface_tex = surface.make_metal_texture(&device)?;
+        let tex0 = front.make_metal_texture(&device)?;
+        let tex1 = back.make_metal_texture(&device)?;
+        let iosurface_tex = [tex0, tex1];
+        let surface_ids = [front.id(), back.id()];
 
         Ok(Self {
             device,
@@ -270,6 +289,8 @@ impl ShellPresenter {
             pipeline,
             sampler,
             iosurface_tex,
+            surface_ids,
+            current_idx: 0,
             banner_pipeline,
             banner: None,
         })
@@ -296,13 +317,49 @@ impl ShellPresenter {
         Ok(())
     }
 
-    /// Swap the IOSurface backing the presenter.  Used during resize
-    /// (new surface for new dimensions) and during supervisor swap
-    /// (new surface ID after core restart, if we ever do that).
-    #[allow(dead_code)]
-    pub fn swap_surface(&mut self, surface: &IOSurface) -> Result<(), String> {
-        self.iosurface_tex = surface.make_metal_texture(&self.device)?;
+    /// Rebuild both MTLTexture slots from a fresh IOSurface pair.
+    /// Used on resize (new pair at new dims) and on silent-update
+    /// promote (pending core's pair becomes live).  `current_idx`
+    /// resets to 0 — the next `SurfaceReady` from the core picks the
+    /// real front; until then `present()` samples slot 0 (which the
+    /// caller is expected to have rendered into at least once before
+    /// calling, or else it shows the IOSurface's default-init state).
+    pub fn set_pair(
+        &mut self,
+        front: &IOSurface,
+        back: &IOSurface,
+    ) -> Result<(), String> {
+        let tex0 = front.make_metal_texture(&self.device)?;
+        let tex1 = back.make_metal_texture(&self.device)?;
+        self.iosurface_tex = [tex0, tex1];
+        self.surface_ids = [front.id(), back.id()];
+        self.current_idx = 0;
         Ok(())
+    }
+
+    /// Honour a SurfaceReady(id) ack: if the id matches one of the
+    /// pair's slot ids, flip `current_idx` so the next present samples
+    /// it.  Returns `true` on a recognised id (caller can mark
+    /// `frame_pending` and request a redraw); `false` if the id
+    /// doesn't belong to the current pair (e.g. a late ack from a
+    /// retired pair after resize — the caller should ignore it).
+    pub fn swap_to_id(&mut self, id: u32) -> bool {
+        if self.surface_ids[0] == id {
+            self.current_idx = 0;
+            true
+        } else if self.surface_ids[1] == id {
+            self.current_idx = 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Current pair ids — used by the shell to attribute incoming
+    /// SurfaceReady acks to either the active pair or a pending one.
+    #[allow(dead_code)]
+    pub fn pair_ids(&self) -> (u32, u32) {
+        (self.surface_ids[0], self.surface_ids[1])
     }
 
     /// Update the CAMetalLayer drawable size after the window resizes.
@@ -361,8 +418,9 @@ impl ShellPresenter {
         // "the content stretched" or "there's a fill outline".
         let draw_w = texture.width() as f32;
         let draw_h = texture.height() as f32;
-        let tex_w = self.iosurface_tex.width() as f32;
-        let tex_h = self.iosurface_tex.height() as f32;
+        let front_tex = &self.iosurface_tex[self.current_idx as usize];
+        let tex_w = front_tex.width() as f32;
+        let tex_h = front_tex.height() as f32;
         let ratio_x = if draw_w > 0.0 { tex_w / draw_w } else { 1.0 };
         let ratio_y = if draw_h > 0.0 { tex_h / draw_h } else { 1.0 };
         let view_params: [f32; 2] = [ratio_x, ratio_y];
@@ -387,7 +445,7 @@ impl ShellPresenter {
                 std::mem::size_of_val(&view_params),
                 0,
             );
-            encoder.setFragmentTexture_atIndex(Some(&self.iosurface_tex), 0);
+            encoder.setFragmentTexture_atIndex(Some(front_tex), 0);
             encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0);
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
         }
