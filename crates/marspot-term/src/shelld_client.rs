@@ -503,6 +503,17 @@ impl ShelldClient {
         Ok(())
     }
 
+    /// Send `bytes` to `session_id`'s PTY as an INPUT frame, without
+    /// attaching to the session.  Used by L1 plugins that don't own a
+    /// ShelldSession handle but still need to drive the PTY (e.g.
+    /// claudecode profile cycle: send "exit\r" then the next claudeN
+    /// command).  No echo / no read-back; caller is responsible for
+    /// observing effects.
+    pub fn send_input_to(&self, session_id: u64, bytes: &[u8]) -> io::Result<()> {
+        let frame = Frame::new(MsgType::Input, encode_data(session_id, bytes));
+        self.send_frame(frame)
+    }
+
     /// Ask shelld to spawn a new shell.  Blocks the calling thread
     /// until shelld replies (NEW_SESSION_REPLY or ERROR).  Returns
     /// a ShelldSession the GUI can drive with `pump`/`write`/`resize`.

@@ -55,9 +55,46 @@ pub struct ClaudecodePlugin {
     /// Used to walk shelld's session table → per-session zsh.pid →
     /// pidtree → cwd → encoded project dir → sessionId.
     shelld: Option<ShelldClient>,
-    /// Previous-tick mapping of `(shelld_session_id → sessionId)`.
-    /// On transitions we both log + push a fresh pane badge to L2.
+    /// Previous-tick mapping of `shelld_session_id → badge string`
+    /// ("P<n> <uuid>").  Drives transition logs + per-tick re-push.
     last_mapping: HashMap<u64, String>,
+    /// Richer per-binding meta we need to act on a badge click:
+    /// profile number, sessionId, and the live claude pid.
+    last_meta: HashMap<u64, BindMeta>,
+    /// Profile-cycle jobs in flight, keyed by shelld_session_id.
+    /// Each tick advances the state machine.
+    pending_cycles: HashMap<u64, CycleJob>,
+}
+
+#[derive(Clone, Debug)]
+struct BindMeta {
+    /// 0 = default `.claude`, 1/2/3 = `.claude-profile-N`, 255 = unknown.
+    profile_num: u8,
+    uuid: String,
+    claude_pid: i32,
+}
+
+#[derive(Clone, Debug)]
+struct CycleJob {
+    /// Profile to land on after the claude restart (1/2/3).
+    next_profile: u8,
+    uuid: String,
+    /// The claude.pid that needs to die before we send the resume
+    /// command — we wait for it to drop from the process table.
+    old_claude_pid: i32,
+    stage: CycleStage,
+    started_at: SystemTime,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CycleStage {
+    /// `exit\r` has been written to the PTY; waiting for the old
+    /// claude pid to disappear from the process table.
+    ExitSent,
+    /// `claudeN --resume <uuid>\r` has been written; cycle done from
+    /// the plugin's POV — the next regular tick will re-discover the
+    /// new claude pid and update the badge naturally.
+    ResumeSent,
 }
 
 impl ClaudecodePlugin {
@@ -68,6 +105,156 @@ impl ClaudecodePlugin {
             projects_root: None,
             shelld: None,
             last_mapping: HashMap::new(),
+            last_meta: HashMap::new(),
+            pending_cycles: HashMap::new(),
+        }
+    }
+
+    /// Kick off the profile cycle for `shelld_session_id`.  Called
+    /// from `on_pane_badge_click`.  Plan:
+    ///   1. Find the bind (current profile + uuid + claude_pid).
+    ///   2. Compute the next profile (P1 → P2 → P3 → P1).
+    ///   3. Send `exit\r` to that session's PTY so claude shuts
+    ///      down cleanly (jsonl flushes its tail).
+    ///   4. Stash a CycleJob; next tick(s) wait for the pid to die,
+    ///      then send `claudeN --resume <uuid>\r`.
+    fn start_profile_cycle(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_sid: u64,
+    ) {
+        let Some(meta) = self.last_meta.get(&shelld_sid).cloned() else {
+            host.log(
+                LogLevel::Warn,
+                "cycle.no_bind",
+                &format!("badge click on unbound shelld_session={}", shelld_sid),
+            );
+            return;
+        };
+        if self.pending_cycles.contains_key(&shelld_sid) {
+            host.log(
+                LogLevel::Info,
+                "cycle.already_in_flight",
+                &format!("shelld_session={} cycle pending; ignoring click", shelld_sid),
+            );
+            return;
+        }
+        let next_profile = match meta.profile_num {
+            1 => 2,
+            2 => 3,
+            3 => 1,
+            // Default (.claude) or unknown — land on P1.
+            _ => 1,
+        };
+        let Some(client) = self.shelld.as_ref() else {
+            host.log(
+                LogLevel::Warn,
+                "cycle.no_shelld",
+                "no shelld client; cannot send exit",
+            );
+            return;
+        };
+        if let Err(e) = client.send_input_to(shelld_sid, b"exit\r") {
+            host.log(
+                LogLevel::Warn,
+                "cycle.exit_send_failed",
+                &format!("{e}"),
+            );
+            return;
+        }
+        host.log(
+            LogLevel::Info,
+            "cycle.exit_sent",
+            &format!(
+                "shelld_session={} P{} → P{} (uuid={}, claude_pid={})",
+                shelld_sid, meta.profile_num, next_profile, meta.uuid, meta.claude_pid
+            ),
+        );
+        self.pending_cycles.insert(
+            shelld_sid,
+            CycleJob {
+                next_profile,
+                uuid: meta.uuid,
+                old_claude_pid: meta.claude_pid,
+                stage: CycleStage::ExitSent,
+                started_at: SystemTime::now(),
+            },
+        );
+    }
+
+    /// Per-tick driver for the cycle jobs.  Each pending cycle:
+    ///   * In `ExitSent`: if the old claude pid is no longer in the
+    ///     proc table, send `claudeN --resume <uuid>\r` and move to
+    ///     ResumeSent.
+    ///   * In `ResumeSent`: drop the job; the next regular bind
+    ///     refresh will pick up the new claude pid.
+    ///   * Jobs older than `CYCLE_TIMEOUT` are dropped with a warn.
+    fn advance_pending_cycles(
+        &mut self,
+        host: &dyn PluginHost,
+        procs: &[pidtree::ProcRow],
+    ) {
+        const CYCLE_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(60);
+        if self.pending_cycles.is_empty() {
+            return;
+        }
+        let Some(client) = self.shelld.as_ref() else {
+            return; // no client; can't push the resume command
+        };
+        let now = SystemTime::now();
+        let mut to_drop: Vec<u64> = Vec::new();
+        let mut to_resume: Vec<(u64, CycleJob)> = Vec::new();
+        for (sid, job) in self.pending_cycles.iter() {
+            if now.duration_since(job.started_at).map(|d| d > CYCLE_TIMEOUT).unwrap_or(true)
+            {
+                host.log(
+                    LogLevel::Warn,
+                    "cycle.timed_out",
+                    &format!("shelld_session={} dropping stale cycle", sid),
+                );
+                to_drop.push(*sid);
+                continue;
+            }
+            match job.stage {
+                CycleStage::ExitSent => {
+                    let still_alive = procs.iter().any(|p| p.pid == job.old_claude_pid);
+                    if !still_alive {
+                        to_resume.push((*sid, job.clone()));
+                    }
+                }
+                CycleStage::ResumeSent => {
+                    to_drop.push(*sid);
+                }
+            }
+        }
+        for (sid, mut job) in to_resume {
+            let cmd = format!("claude{} --resume {}\r", job.next_profile, job.uuid);
+            match client.send_input_to(sid, cmd.as_bytes()) {
+                Ok(()) => {
+                    host.log(
+                        LogLevel::Info,
+                        "cycle.resume_sent",
+                        &format!(
+                            "shelld_session={} P{} resume sent (uuid={})",
+                            sid, job.next_profile, job.uuid
+                        ),
+                    );
+                    job.stage = CycleStage::ResumeSent;
+                    self.pending_cycles.insert(sid, job);
+                }
+                Err(e) => {
+                    host.log(
+                        LogLevel::Warn,
+                        "cycle.resume_send_failed",
+                        &format!("{e}"),
+                    );
+                    to_drop.push(sid);
+                }
+            }
+        }
+        for sid in to_drop {
+            self.pending_cycles.remove(&sid);
         }
     }
 
@@ -351,6 +538,7 @@ impl Plugin for ClaudecodePlugin {
         };
         let procs = pidtree::list_all_procs();
         let mut new_mapping: HashMap<u64, String> = HashMap::new();
+        let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
         for s in &sessions {
             if !s.alive {
                 continue;
@@ -366,16 +554,33 @@ impl Plugin for ClaudecodePlugin {
             };
             let encoded = encode_project_dir(&cwd);
             if let Some(sid_uuid) = self.session_id_for_project(&encoded) {
+                let (tag, profile_num) = match profile_tag_for(claude.pid) {
+                    Some(t) => {
+                        let n = t
+                            .strip_prefix('P')
+                            .and_then(|d| d.parse::<u8>().ok())
+                            .unwrap_or(u8::MAX);
+                        (Some(t), n)
+                    }
+                    None => (None, u8::MAX),
+                };
                 // Badge format: "<prefix> <uuid>".  The renderer
                 // treats the text before the first space as the
                 // clickable prefix and underlines it; everything
-                // after is plain.  We emit just the profile tag as
-                // the prefix when we have one.
-                let badge = match profile_tag_for(claude.pid) {
-                    Some(tag) => format!("{} {}", tag, sid_uuid),
-                    None => sid_uuid,
+                // after is plain.
+                let badge = match tag {
+                    Some(t) => format!("{} {}", t, sid_uuid),
+                    None => sid_uuid.clone(),
                 };
                 new_mapping.insert(s.session_id, badge);
+                new_meta.insert(
+                    s.session_id,
+                    BindMeta {
+                        profile_num,
+                        uuid: sid_uuid,
+                        claude_pid: claude.pid,
+                    },
+                );
             }
         }
         // Log transitions (bound / unbound) vs. last tick.
@@ -428,6 +633,17 @@ impl Plugin for ClaudecodePlugin {
             }
         }
         self.last_mapping = new_mapping;
+        self.last_meta = new_meta;
+        // Advance any pending profile-cycle jobs.
+        self.advance_pending_cycles(host, &procs);
+    }
+
+    fn on_pane_badge_click(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) {
+        self.start_profile_cycle(host, shelld_session_id);
     }
 
     fn stop(&mut self, host: &dyn PluginHost) {

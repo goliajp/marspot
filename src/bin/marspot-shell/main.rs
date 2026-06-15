@@ -465,6 +465,11 @@ enum ShellInbox {
     /// nothing; its arrival (via the reader's `proxy.wake()`) drives the
     /// per-frame present, replacing the blind ~60 fps redraw timer.
     FrameRendered,
+    /// L2 → L1: user clicked the active prefix of a pane badge on the
+    /// pane backing this shelld session.  Dispatched to every loaded
+    /// plugin so whichever set the badge can react (claudecode → cycle
+    /// the next profile and rerun `claudeN --resume <uuid>`).
+    PaneBadgeClicked(u64),
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -1858,6 +1863,10 @@ impl ShellApp {
                 self.first_frame_ready = true;
                 self.frame_pending = true;
             }
+            ShellInbox::PaneBadgeClicked(shelld_sid) => {
+                self.plugin_registry
+                    .dispatch_pane_badge_click_with(&self.plugin_host, shelld_sid);
+            }
         }
     }
 
@@ -1916,7 +1925,11 @@ impl ShellApp {
             }
             // Pending core isn't displayed — its caret + frame pokes are
             // irrelevant (it renders to its own off-screen surface).
-            ShellInbox::CaretRect(_) | ShellInbox::FrameRendered => {}
+            // Same for badge clicks: a probationary core never owns the
+            // user-facing pane the click came from.
+            ShellInbox::CaretRect(_)
+            | ShellInbox::FrameRendered
+            | ShellInbox::PaneBadgeClicked(_) => {}
         }
     }
 }
@@ -2206,6 +2219,11 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                     // Mapping it to Some(..) is what makes `proxy.wake()`
                     // fire below → user_event → present.
                     MsgType::FrameRendered => Some(ShellInbox::FrameRendered),
+                    MsgType::PaneBadgeClicked => {
+                        marspot::shell_proto::decode_pane_badge_clicked(&frame.payload)
+                            .ok()
+                            .map(ShellInbox::PaneBadgeClicked)
+                    }
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.
                     _ => None,

@@ -258,6 +258,19 @@ pub trait Plugin: Send + Sync {
     fn stop(&mut self, host: &dyn PluginHost) {
         let _ = host;
     }
+
+    /// L2 → L1 callback: the user clicked the active prefix of a
+    /// pane badge this plugin set.  `shelld_session_id` identifies
+    /// the pane.  Default no-op so plugins without a click-handle
+    /// don't need to override.  Same panic / budget rules as the
+    /// other hooks; called on the supervisor thread.
+    fn on_pane_badge_click(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) {
+        let _ = (host, shelld_session_id);
+    }
 }
 
 /// Per-plugin runtime state — wraps the user's `Box<dyn Plugin>` with
@@ -384,6 +397,35 @@ impl PluginRegistry {
             run_hook_void(slot, "tick", |p| p.tick(host));
             host.clear_active_plugin();
         }
+    }
+
+    /// Fan a PaneBadgeClicked event to every enabled plugin.  The L1
+    /// shell main loop calls this when it receives the frame from L2;
+    /// plugins that didn't set a badge ignore it via the default
+    /// no-op.
+    pub fn dispatch_pane_badge_click(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) {
+        for slot in self.slots.iter_mut() {
+            if !slot.enabled {
+                continue;
+            }
+            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            run_hook_void(slot, "on_pane_badge_click", |p| {
+                p.on_pane_badge_click(host, shelld_session_id)
+            });
+            host.clear_active_plugin();
+        }
+    }
+
+    pub fn dispatch_pane_badge_click_with<H: PluginHost + 'static>(
+        &mut self,
+        host: &H,
+        shelld_session_id: u64,
+    ) {
+        self.dispatch_pane_badge_click(host as &dyn PluginHost, shelld_session_id);
     }
 
     pub fn stop_all(&mut self, host: &dyn PluginHost) {
