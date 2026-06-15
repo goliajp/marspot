@@ -264,13 +264,24 @@ impl FontCache {
         // likely to land than a 2-cell-wide emoji bitmap.  Fonts
         // that aren't installed on this system just fail to load
         // and are skipped.
+        // Order matters: the FIRST font in this list whose `get_glyphs`
+        // returns a non-zero CGGlyph for the codepoint wins.  For CJK
+        // codepoints we want the Han-script font that matches the
+        // user's locale — PingFang SC (Chinese) before Hiragino
+        // (Japanese) before Apple SD Gothic Neo (Korean), because the
+        // user-visible "字变小了" complaint on 2026-06-15 came from
+        // routing Chinese chars to Apple SD Gothic Neo (Korean
+        // metrics: thinner, smaller-looking glyphs).  We don't have
+        // a runtime locale-aware ordering yet, so this is "best
+        // common-case" tuned for the user's predominantly-Chinese
+        // workload.
         const TEXT_FALLBACK_NAMES: &[&str] = &[
             "Menlo",
             "SFMono-Regular",
             "Monaco",
-            "AppleSDGothicNeo-Regular",
             "PingFangSC-Regular",
             "HiraginoSans-W3",
+            "AppleSDGothicNeo-Regular",
             "HelveticaNeue",
             "Helvetica",
         ];

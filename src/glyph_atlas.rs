@@ -608,8 +608,36 @@ fn rasterise_glyph_color(
     // pixels; CGTextFill draws the bitmap as-is.
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
 
+    // Scale-to-fit only when the glyph's natural bbox is LARGER than
+    // the canvas (`scale < 1.0`).  This handles the case where a
+    // non-Emoji_Presentation codepoint (① ②, certain Enclosed
+    // Alphanumerics, etc.) fell through the text-font cascade to
+    // CoreText's auto-discovery and landed on Apple Color Emoji,
+    // which rasterises at em-box width — without scaling, the
+    // 13.4pt-wide glyph clips into the 7pt-wide 1-cell canvas and
+    // the user sees half a glyph.  For TRUE emoji (Emoji_Presentation
+    // = Yes) `cluster_width` correctly assigns 2 cells, canvas is
+    // ~14pt wide, ratio ≥ 1.0 and we don't scale.  Same for any
+    // glyph that already fits — `scale == 1.0` is a no-op.
+    let scale = ((px_w as f64) / bbox.size.width)
+        .min((px_h as f64) / bbox.size.height)
+        .min(1.0);
     let baseline_canvas_y = (metrics.cell_h as f64) - (metrics.baseline_from_top as f64);
-    let origin = CGPoint::new(-bbox.origin.x, baseline_canvas_y);
+    let origin = if scale < 1.0 {
+        ctx.scale(scale, scale);
+        // After CTM scale, the canvas occupies (px_w/scale, px_h/scale)
+        // in user space.  Centre the glyph inside it so it reads as
+        // "a smaller version of the same character", not pinned to
+        // a corner.
+        let user_w = (px_w as f64) / scale;
+        let user_h = (px_h as f64) / scale;
+        CGPoint::new(
+            (user_w - bbox.size.width) / 2.0 - bbox.origin.x,
+            (user_h - bbox.size.height) / 2.0 - bbox.origin.y,
+        )
+    } else {
+        CGPoint::new(-bbox.origin.x, baseline_canvas_y)
+    };
     font.draw_glyphs(&[glyph], &[origin], ctx);
 
     Some(Raster {
