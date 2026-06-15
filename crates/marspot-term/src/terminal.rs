@@ -940,8 +940,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 2           — entire screen
                 // 3           — entire scrollback (xterm extension)
                 let mode = param_raw(params, 0, 0);
-                lx_info!(
-                    "term.edit.ED",
+                lx_debug_sampled!(
+                    "term.edit.ED", 4,
                     "erase in display",
                     mode = mode,
                     cur_col = col,
@@ -968,8 +968,8 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 1           — from start of line to cursor (inclusive)
                 // 2           — entire line
                 let mode = param_raw(params, 0, 0);
-                lx_info!(
-                    "term.edit.EL",
+                lx_debug_sampled!(
+                    "term.edit.EL", 4,
                     "erase in line",
                     mode = mode,
                     cur_col = col,
