@@ -366,8 +366,13 @@ impl Plugin for ClaudecodePlugin {
             };
             let encoded = encode_project_dir(&cwd);
             if let Some(sid_uuid) = self.session_id_for_project(&encoded) {
+                // Badge format: "<prefix> <uuid>".  The renderer
+                // treats the text before the first space as the
+                // clickable prefix and underlines it; everything
+                // after is plain.  We emit just the profile tag as
+                // the prefix when we have one.
                 let badge = match profile_tag_for(claude.pid) {
-                    Some(tag) => format!("[{}] {}", tag, sid_uuid),
+                    Some(tag) => format!("{} {}", tag, sid_uuid),
                     None => sid_uuid,
                 };
                 new_mapping.insert(s.session_id, badge);

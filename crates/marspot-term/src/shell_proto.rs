@@ -187,6 +187,12 @@ pub enum MsgType {
     /// Used by the L1 claudecode plugin to surface the bound
     /// claudecode sessionId next to the pane label.
     PaneBadge = 41,
+    /// core → shell: user clicked the active part of a pane badge
+    /// (e.g. the `P<n>` profile tag).  Payload: `session_id u64 LE`.
+    /// The shell hands this to the L1 plugin owning the badge so the
+    /// plugin can react (cycle profile, open menu, etc.) — L2 has no
+    /// idea what the badge means.
+    PaneBadgeClicked = 42,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -217,6 +223,7 @@ impl MsgType {
             39 => MsgType::FrameRendered,
             40 => MsgType::SurfaceAttach,
             41 => MsgType::PaneBadge,
+            42 => MsgType::PaneBadgeClicked,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -697,6 +704,24 @@ pub fn decode_pane_badge(payload: &[u8]) -> io::Result<(u64, String)> {
     }
     let badge = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
     Ok((session_id, badge))
+}
+
+/// PaneBadgeClicked payload: `session_id u64 LE`.  Carries which pane
+/// (identified by its shelld session_id) the user clicked the badge
+/// on; the badge text itself is L1 plugin state, so L2 only needs to
+/// say "here, your turn".
+pub fn encode_pane_badge_clicked(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_badge_clicked(payload: &[u8]) -> io::Result<u64> {
+    if payload.len() != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_badge_clicked payload != 8 bytes",
+        ));
+    }
+    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
 }
 
 /// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
@@ -1215,6 +1240,19 @@ mod tests {
     #[test]
     fn pane_badge_rejects_short_payload() {
         let err = decode_pane_badge(&[0u8; 9]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pane_badge_clicked_roundtrip() {
+        let p = encode_pane_badge_clicked(7);
+        assert_eq!(decode_pane_badge_clicked(&p).unwrap(), 7);
+        assert_eq!(MsgType::from_u32(42), Some(MsgType::PaneBadgeClicked));
+    }
+
+    #[test]
+    fn pane_badge_clicked_rejects_bad_len() {
+        let err = decode_pane_badge_clicked(&[0u8; 7]).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 

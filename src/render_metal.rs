@@ -2156,10 +2156,13 @@ fn push_session(
             atlas,
             glyphs,
         );
-        // Plugin badge (claudecode etc.): short tag drawn at the right
-        // edge of the title strip, just left of the optional refresh
-        // affordance.  Same SIDEBAR_TEXT_FG colour as the title to
-        // read as quiet metadata rather than competing with content.
+        // Plugin badge (claudecode etc.): right-edge decoration in
+        // claudecode coral.  Whatever the badge text is BEFORE the
+        // first ' ' is treated as the *clickable prefix* (today:
+        // "P1" / "P2" / "P3") and gets a hairline underline so the
+        // user reads it as actionable; whatever follows is rendered
+        // plain (the sessionId).  The plugin (L1) — not the renderer
+        // — owns the meaning of the prefix; this just decorates it.
         if !view.right_badge.is_empty() {
             let badge_chars = view.right_badge.chars().count() as f32;
             // Right anchor: leave room for the refresh affordance
@@ -2189,6 +2192,29 @@ fn push_session(
                     atlas,
                     glyphs,
                 );
+                // Hairline underline under the prefix (text before the
+                // first space).  Width = prefix_chars × cell_w; sits
+                // 1 phys-px below the baseline so it doesn't clip
+                // descenders that won't appear in `P<digit>` anyway.
+                let prefix_chars = view
+                    .right_badge
+                    .split(' ')
+                    .next()
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                if prefix_chars > 0 {
+                    let underline_y = label_baseline_y + gutter.max(1.0);
+                    cells.push(CellInstance {
+                        origin: [badge_x, underline_y],
+                        size: [prefix_chars as f32 * cell_w, gutter.max(1.0)],
+                        color: [
+                            PLUGIN_BADGE_FG.0,
+                            PLUGIN_BADGE_FG.1,
+                            PLUGIN_BADGE_FG.2,
+                            1.0,
+                        ],
+                    });
+                }
             }
         }
         // Deferred-update affordance (target #4 step 5b): a refresh glyph
