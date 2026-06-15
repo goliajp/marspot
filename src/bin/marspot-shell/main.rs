@@ -1861,11 +1861,20 @@ impl MarspotApp for ShellApp {
         // A pending update was sized to the old window; promoting it now
         // would show a stale-sized surface.  Abort it (rolls the binary
         // back) — the update retries on the next focus-loss at the new
-        // size.  Resize-during-a-30s-probation is rare, so this is the
-        // simple, correct choice over re-sizing the probationary core.
-        if self.pending.is_some() {
-            self.abort_pending_update("window resized during probation");
-            self.sup_state = SupervisorState::Idle;
+        // size.  Only when the dimensions REALLY change, though: AppKit
+        // fires `resized` on its own during the post-execv transition
+        // (same dims, no real change) and aborting there throws away a
+        // perfectly good in-flight update with no user-visible signal.
+        // 2026-06-15 production incident: a same-size resized() canned
+        // the dual-core swap, leaving NEW shell + OLD core paired.
+        if let Some(p) = self.pending.as_ref() {
+            let (pw, ph) = (p.surfaces.width(), p.surfaces.height());
+            let real_resize = (pw as f64 - w_phys).abs() > 0.5
+                || (ph as f64 - h_phys).abs() > 0.5;
+            if real_resize {
+                self.abort_pending_update("window resized during probation");
+                self.sup_state = SupervisorState::Idle;
+            }
         }
         if let Some(p) = self.presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
