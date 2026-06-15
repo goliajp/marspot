@@ -213,6 +213,17 @@ pub struct FontCache {
     pub cell_w: f64,
     pub cell_h: f64,
     pub ascent: f64,
+    /// Curated text-font cascade consulted BEFORE letting CoreText's
+    /// automatic discovery (`CTFontCreateForString`) pick a fallback
+    /// for codepoints the base font lacks.  Without this, CT happily
+    /// routes some non-emoji glyphs (notably the Enclosed
+    /// Alphanumerics ①②③ and some box-drawing auxiliary chars) to
+    /// Apple Color Emoji, which then rasterises them at em-box width
+    /// and clips into the 1-cell slot `cluster_width` correctly
+    /// assigns them.  Only consulted when the codepoint is NOT
+    /// Emoji_Presentation=Yes — actual emoji legitimately want the
+    /// colour cascade.  Indices into `self.fonts.fonts`.
+    text_fallback_idxs: Vec<usize>,
 }
 
 /// Hard cap on `char_cache` entries.  Realistic terminal use
@@ -248,6 +259,29 @@ impl FontCache {
         let italic_idx = fonts.intern(italic);
         let bold_italic_idx = fonts.intern(bold_italic);
 
+        // Curated text-font cascade.  We deliberately enumerate
+        // mono-leaning text fonts first so a 1-cell glyph is more
+        // likely to land than a 2-cell-wide emoji bitmap.  Fonts
+        // that aren't installed on this system just fail to load
+        // and are skipped.
+        const TEXT_FALLBACK_NAMES: &[&str] = &[
+            "Menlo",
+            "SFMono-Regular",
+            "Monaco",
+            "AppleSDGothicNeo-Regular",
+            "PingFangSC-Regular",
+            "HiraginoSans-W3",
+            "HelveticaNeue",
+            "Helvetica",
+        ];
+        let mut text_fallback_idxs: Vec<usize> = Vec::new();
+        for name in TEXT_FALLBACK_NAMES {
+            if let Ok(f) = new_from_name(name, FONT_POINT) {
+                let idx = fonts.intern(f);
+                text_fallback_idxs.push(idx);
+            }
+        }
+
         Ok(Self {
             fonts,
             char_cache: HashMap::new(),
@@ -256,6 +290,7 @@ impl FontCache {
             cell_w,
             cell_h,
             ascent,
+            text_fallback_idxs,
         })
     }
 
@@ -284,7 +319,38 @@ impl FontCache {
         let glyph = lookup_glyph(&base, ch);
         let entry = if glyph != 0 {
             (style_idx, glyph)
+        } else if !marspot_term::emoji_presentation::has_emoji_presentation(ch as u32) {
+            // Text-presentation codepoint that the base font lacks.
+            // Walk the curated text-font cascade BEFORE letting CT
+            // pick — without this, CT routes glyphs like ① ② ③ to
+            // Apple Color Emoji, which rasterises them at em-box
+            // width and clips into the 1-cell slot.  Iterate over a
+            // clone of the indices so we can mutate self.char_cache
+            // mid-loop without aliasing.
+            let cascade = self.text_fallback_idxs.clone();
+            let mut found: Option<(usize, CGGlyph)> = None;
+            for idx in cascade {
+                if idx == style_idx {
+                    continue;
+                }
+                let f = &self.fonts.fonts[idx];
+                let g = lookup_glyph(f, ch);
+                if g != 0 {
+                    found = Some((idx, g));
+                    break;
+                }
+            }
+            if let Some(hit) = found {
+                hit
+            } else {
+                let fallback = create_fallback_font(&base, ch);
+                let fb_glyph = lookup_glyph(&fallback, ch);
+                let idx = self.fonts.intern(fallback);
+                (idx, fb_glyph)
+            }
         } else {
+            // Emoji_Presentation=Yes — legitimate emoji, use the
+            // default cascade so we land on Apple Color Emoji.
             let fallback = create_fallback_font(&base, ch);
             let fb_glyph = lookup_glyph(&fallback, ch);
             let idx = self.fonts.intern(fallback);
