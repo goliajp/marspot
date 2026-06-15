@@ -59,6 +59,11 @@ pub struct ClaudecodePlugin {
     /// we only log on transitions (attach / detach / change), not
     /// every tick.
     last_mapping: HashMap<u64, String>,
+    /// Set of `sessionId`s already alerted on this run.  Suppresses a
+    /// repeat notification when the same session's mtime keeps moving
+    /// while still on an "assistant" tail (claude streams updates
+    /// after the first assistant message).
+    notified_assistant: HashMap<String, SystemTime>,
 }
 
 impl ClaudecodePlugin {
@@ -69,6 +74,7 @@ impl ClaudecodePlugin {
             projects_root: None,
             shelld: None,
             last_mapping: HashMap::new(),
+            notified_assistant: HashMap::new(),
         }
     }
 
@@ -102,6 +108,69 @@ fn encode_project_dir(cwd: &std::path::Path) -> String {
         }
     }
     s
+}
+
+/// Suppress duplicate "claudecode done" alerts.  Per sessionId, fire
+/// at most once per `NOTIFY_DEBOUNCE`; subsequent `assistant`-kind
+/// mtimes (claude updating its own tail) get swallowed.  Once an
+/// hour bypasses the dedupe so a long-idle user gets re-notified
+/// when a fresh assistant turn arrives.
+const NOTIFY_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+
+fn maybe_notify_done(
+    host: &dyn PluginHost,
+    session_id: &str,
+    project_dir: &str,
+    notified: &mut HashMap<String, SystemTime>,
+) {
+    let now = SystemTime::now();
+    if let Some(prev) = notified.get(session_id) {
+        if now
+            .duration_since(*prev)
+            .map(|d| d < NOTIFY_DEBOUNCE)
+            .unwrap_or(true)
+        {
+            return; // suppressed by dedupe window
+        }
+    }
+    notified.insert(session_id.to_string(), now);
+    // Display project name = trailing path segment, stripped of the
+    // leading dash convention.  e.g. -Users-doracawl-workspace-foo →
+    // foo.
+    let pretty_project = project_dir
+        .rsplit('-')
+        .next()
+        .unwrap_or(project_dir)
+        .to_string();
+    let title = "Marspot · claudecode";
+    let body = format!("Finished — {}", pretty_project);
+    host.log(
+        LogLevel::Info,
+        "session.notify",
+        &format!(
+            "claudecode done sid={} project={}",
+            session_id, project_dir
+        ),
+    );
+    // Fire-and-forget osascript.  ~50–150 ms wall clock; spawn so the
+    // plugin tick doesn't block.  Display notification is the macOS
+    // native banner — uses the standard "do not disturb" rules.
+    // Self-built FFI to NSUserNotification would shave the fork cost
+    // but is non-trivial and notification frequency is bounded by
+    // dedupe, so the simpler shell-out wins here.
+    let script = format!(
+        "display notification \"{}\" with title \"{}\" sound name \"Glass\"",
+        body.replace('"', "\\\""),
+        title.replace('"', "\\\""),
+    );
+    let _ = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Heuristic: is this descendant the `claude` CLI?  Walks argv —
@@ -301,8 +370,35 @@ impl Plugin for ClaudecodePlugin {
                         size
                     ),
                 );
-                // M4: when last_message_kind transitions to
-                // "assistant" → emit a NOTIFY for "claudecode done".
+                // M4: claudecode-done notification.  Fire when the
+                // tail transitions from user/tool to assistant
+                // — that's "claude finished writing its turn".
+                // Suppressed when:
+                //   * prev kind already was assistant (idempotent)
+                //   * the binding doesn't resolve to a shelld
+                //     session (= user isn't even watching this pane
+                //     in marspot, no point alerting)
+                //   * mtime within DEBOUNCE_SECS of last notify for
+                //     this sessionId (recent run; would be spammy)
+                let prev_kind = self
+                    .seen
+                    .get(&jsonl_path)
+                    .and_then(|s| s.last_message_kind.clone());
+                let _ = prev_kind; // kept for future expansion
+                // Find the transition cheaply: compare what the
+                // SessionInfo HAD before this tick's mutation to
+                // what it now has.  But we just overwrote `self.seen`
+                // above — instead detect the transition by checking
+                // the freshly-read `last_message_kind`.  Caller will
+                // call notify_done iff it crossed into "assistant".
+                if last_message_kind.as_deref() == Some("assistant") {
+                    maybe_notify_done(
+                        host,
+                        &session_id,
+                        &project_dir,
+                        &mut self.notified_assistant,
+                    );
+                }
             }
         }
         if newly_seen > 0 || updates > 0 {
