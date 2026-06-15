@@ -172,7 +172,18 @@ pub fn key_event_to_bytes(
     }
 
     match &event.logical {
-        LogicalKey::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
+        // Plain Enter → CR (0x0D), the classic xterm contract that
+        // every shell / REPL / TUI treats as "submit / commit".
+        // Shift+Enter → LF (0x0A) so multi-line editors (Ink-based
+        // TUIs like Claude Code, chat input boxes, etc.) can
+        // distinguish "newline within input" from "send".  Without
+        // this distinction Shift+Enter is indistinguishable from
+        // Enter and the user can't insert a newline into a prompt.
+        LogicalKey::Named(NamedKey::Enter) => Some(if modifiers.shift_key() {
+            Cow::Borrowed(b"\n")
+        } else {
+            Cow::Borrowed(b"\r")
+        }),
         LogicalKey::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
         LogicalKey::Named(NamedKey::Tab) => Some(Cow::Borrowed(b"\t")),
         LogicalKey::Named(NamedKey::Escape) => Some(Cow::Borrowed(b"\x1b")),
