@@ -104,6 +104,44 @@ impl Scrollback {
         }
     }
 
+    /// Read a contiguous run of scrollback lines counted **back from
+    /// the newest entry**, ordered oldest-first (natural top-to-
+    /// bottom render order).
+    ///
+    /// `line_start = 0`, `count = N` → the most recent `N` scrollback
+    /// lines (the ones just above the live grid).  `line_start = K`
+    /// asks for the run starting `K` lines back from newest, so
+    /// `(line_start, count) = (16, 8)` returns the 8 lines just
+    /// above what `(0, 16)` returned.
+    ///
+    /// Returns up to `count` lines.  A shorter result means the
+    /// request crossed the scrollback floor (oldest line in the
+    /// ring).  An empty `Vec` means `line_start >= len()` — caller
+    /// treats it as "no more history beyond here", which is the
+    /// `ScrollbackPage { line_count: 0 }` wire sentinel.
+    ///
+    /// RFC-002 step 8 (`GetScrollbackPage` handler) is the primary
+    /// caller.  Disk variant: O(count) RAM hit, or one page fault
+    /// per 256-line page crossed; line_to_vec already amortises the
+    /// per-line cost.
+    pub fn read_lines(&self, line_start: usize, count: usize) -> Vec<Vec<Cell>> {
+        let len = self.len();
+        if line_start >= len || count == 0 {
+            return Vec::new();
+        }
+        let avail = (len - line_start).min(count);
+        // Internal index 0 = oldest, len-1 = newest.
+        let newest = len - 1 - line_start;       // newest line in the window
+        let oldest = newest + 1 - avail;         // oldest line in the window
+        let mut out = Vec::with_capacity(avail);
+        for i in oldest..=newest {
+            if let Some(v) = self.line_to_vec(i) {
+                out.push(v);
+            }
+        }
+        out
+    }
+
     pub fn clear(&mut self) {
         match self {
             Self::Memory(m) => m.clear(),
@@ -526,6 +564,116 @@ mod tests {
             })
             .collect()
     }
+
+    // ─── RFC-002 step 3: read_lines paging ────────────────────────────
+
+    /// Build a memory-backed scrollback of `n` lines labelled `'a'..`,
+    /// so a 5-line ring contains `a,b,c,d,e` (a = oldest, e = newest).
+    fn alphabet_sb_memory(n: usize, cols: usize) -> Scrollback {
+        let mut sb = Scrollback::memory(n, cols);
+        for i in 0..n {
+            let ch = (b'a' + (i as u8)) as char;
+            let line: Vec<Cell> = (0..cols)
+                .map(|_| Cell { ch, ..Default::default() })
+                .collect();
+            sb.push_line(&line);
+        }
+        sb
+    }
+
+    /// Same shape for the disk variant, with explicit ram_cap +
+    /// max_pages so eviction behaviour is deterministic.
+    fn alphabet_sb_disk(n: usize, cols: usize) -> Scrollback {
+        let mut sb = Scrollback::disk(/*ram_cap*/ 32, /*max_pages*/ 4, cols)
+            .expect("disk scrollback init");
+        for i in 0..n {
+            let ch = (b'a' + (i as u8)) as char;
+            let line: Vec<Cell> = (0..cols)
+                .map(|_| Cell { ch, ..Default::default() })
+                .collect();
+            sb.push_line(&line);
+        }
+        sb
+    }
+
+    #[test]
+    fn read_lines_zero_count_or_past_floor_returns_empty() {
+        let sb = alphabet_sb_memory(5, 4);
+        assert!(sb.read_lines(0, 0).is_empty(), "count=0 → empty");
+        assert!(sb.read_lines(5, 1).is_empty(), "line_start == len → empty");
+        assert!(sb.read_lines(99, 1).is_empty(), "line_start > len → empty");
+    }
+
+    #[test]
+    fn read_lines_empty_scrollback_returns_empty() {
+        let sb = Scrollback::memory(10, 4);
+        assert!(sb.read_lines(0, 5).is_empty());
+    }
+
+    #[test]
+    fn read_lines_zero_start_returns_newest_oldest_first() {
+        // 5 lines: a,b,c,d,e (oldest .. newest).  read_lines(0, 3)
+        // wants "3 lines starting at newest, going back" =
+        // [c, d, e] presented oldest-first.
+        let sb = alphabet_sb_memory(5, 4);
+        let got = sb.read_lines(0, 3);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0][0].ch, 'c');
+        assert_eq!(got[1][0].ch, 'd');
+        assert_eq!(got[2][0].ch, 'e');
+    }
+
+    #[test]
+    fn read_lines_with_offset_skips_newest_lines() {
+        // (line_start=2, count=2) on a,b,c,d,e =
+        // skip the 2 newest (d, e), return next 2 newer-going-back =
+        // [b, c] oldest-first.
+        let sb = alphabet_sb_memory(5, 4);
+        let got = sb.read_lines(2, 2);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0][0].ch, 'b');
+        assert_eq!(got[1][0].ch, 'c');
+    }
+
+    #[test]
+    fn read_lines_clamped_when_count_crosses_floor() {
+        // 5 lines, (line_start=3, count=100): only 2 lines remain
+        // before the floor → return 2.
+        let sb = alphabet_sb_memory(5, 4);
+        let got = sb.read_lines(3, 100);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0][0].ch, 'a');
+        assert_eq!(got[1][0].ch, 'b');
+    }
+
+    #[test]
+    fn read_lines_disk_variant_matches_memory_semantics() {
+        // 16 lines on disk, same (line_start=4, count=6) request as
+        // the memory case would produce.  Asserts the disk path
+        // returns lines in the same orientation + clamping.
+        let sb = alphabet_sb_disk(16, 4);
+        let got = sb.read_lines(4, 6);
+        assert_eq!(got.len(), 6);
+        // Lines were a(0) .. p(15); newest = p; line_start=4 means
+        // window is [g, h, i, j, k, l] oldest-first.
+        let expected: Vec<char> = "ghijkl".chars().collect();
+        for (i, row) in got.iter().enumerate() {
+            assert_eq!(row[0].ch, expected[i], "row {} mismatch", i);
+        }
+    }
+
+    #[test]
+    fn read_lines_disk_variant_clamps_past_floor() {
+        // 8 lines on disk: a..h.  (line_start=6, count=10) →
+        // only 2 lines before floor → return [a, b] oldest-first.
+        let sb = alphabet_sb_disk(8, 4);
+        let got = sb.read_lines(6, 10);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0][0].ch, 'a');
+        assert_eq!(got[1][0].ch, 'b');
+    }
+
+    // ─── pre-existing tests follow ────────────────────────────────────
 
     #[test]
     fn push_grows_then_evicts() {
