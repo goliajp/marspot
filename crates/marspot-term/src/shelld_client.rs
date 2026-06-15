@@ -40,9 +40,9 @@ use std::time::{Duration, Instant};
 
 use crate::shelld_proto::{
     decode_data, decode_error, decode_hello_ack, decode_list_sessions_reply,
-    decode_new_session_reply, decode_scrollback_page, decode_snapshot_payload, encode_data,
-    encode_hello, encode_new_session, encode_resize, encode_session_id, Frame, MsgType,
-    SessionInfo, PROTO_VERSION,
+    decode_new_session_reply, decode_scrollback_page, decode_snapshot_payload, encode_attach,
+    encode_data, encode_hello, encode_new_session, encode_resize, encode_session_id, Frame,
+    MsgType, SessionInfo, PROTO_VERSION,
 };
 use crate::terminal::Terminal;
 
@@ -110,6 +110,12 @@ struct SessionInner {
     rx: Mutex<Receiver<Chunk>>,
     exited: AtomicBool,
     last_output: Mutex<Option<Instant>>,
+    /// Latest cols/rows the client believes its terminal mirror is
+    /// at.  Read by the reader_loop reconnect path so an auto-
+    /// reattach after a transient disconnect still tells L4 the
+    /// correct geometry to snapshot at.  Updated by
+    /// `ShelldSession::resize`.
+    last_dims: Mutex<(u16, u16)>,
 }
 
 /// Handle a Pane holds for one shelld-backed session.  Clone is
@@ -331,6 +337,9 @@ impl ShelldSession {
         // Local terminal grid follows; shelld already ioctl'd the
         // PTY so SIGWINCH lands in the child.
         self.terminal.resize(cols, rows);
+        // Stamp so the reader_loop auto-reattach uses the live dims
+        // instead of the NewSession-time ones.
+        *self.inner.last_dims.lock().unwrap() = (cols, rows);
         Ok(())
     }
 
@@ -539,6 +548,7 @@ impl ShelldClient {
             rx: Mutex::new(rx),
             exited: AtomicBool::new(false),
             last_output: Mutex::new(None),
+            last_dims: Mutex::new((cols, rows)),
         });
         self.sessions.lock().unwrap().insert(id, inner.clone());
         Ok(ShelldSession {
@@ -568,14 +578,25 @@ impl ShelldClient {
     }
 
     /// Re-attach to a previously-running session.  Builds a fresh
-    /// ShelldSession around the existing session_id; shelld
-    /// flushes its bytelog (Phase 5) before the live stream resumes.
+    /// ShelldSession around the existing session_id; shelld replies
+    /// with a StateSnapshot at the negotiated cols/rows.
+    ///
+    /// RFC-002 §4 (step 8d): `cols`/`rows` are shipped in the ATTACH
+    /// frame so L4 resizes its master Terminal to match before
+    /// serialising the snapshot.  Without this, an L3 spawned by a
+    /// fresh core (after install-local's UPDATE_SWAP) at a new
+    /// window size would receive a snapshot at L4's NewSession-time
+    /// dims and apply a grid that doesn't match what L2 expects to
+    /// render — the install-blank-grid regression.
     pub fn attach(&self, id: u64, cols: u16, rows: u16) -> io::Result<ShelldSession> {
         // Set up the inbox FIRST so any DATA the reader receives
         // between sending ATTACH and our session.pump() landing is
         // queued, not dropped.
         let session = self.install_session(id, 0, cols, rows)?;
-        self.send_frame(Frame::new(MsgType::Attach, encode_session_id(id)))?;
+        self.send_frame(Frame::new(
+            MsgType::Attach,
+            encode_attach(id, cols, rows),
+        ))?;
         Ok(session)
     }
 
@@ -664,11 +685,25 @@ fn supervisor_loop(
         if hello.write_to(&mut *w_guard).is_err() {
             continue;
         }
-        // Re-attach each session id the client thinks it still owns.
-        // shelld's ATTACH replays the bytelog over the new stream.
-        let ids: Vec<u64> = sessions.lock().unwrap().keys().copied().collect();
-        for id in &ids {
-            let f = Frame::new(MsgType::Attach, encode_session_id(*id));
+        // Re-attach each session id the client thinks it still owns,
+        // shipping the last-known cols/rows so L4 resizes its
+        // master Terminal before serialising the new StateSnapshot.
+        // Without this, an L3 that resized after attach would auto-
+        // reattach and silently snap back to NewSession dims.
+        let attach_set: Vec<(u64, u16, u16)> = {
+            let s = sessions.lock().unwrap();
+            s.iter()
+                .map(|(id, inner)| {
+                    let (c, r) = *inner.last_dims.lock().unwrap();
+                    (*id, c, r)
+                })
+                .collect()
+        };
+        for (id, cols, rows) in &attach_set {
+            let f = Frame::new(
+                MsgType::Attach,
+                encode_attach(*id, *cols, *rows),
+            );
             if f.write_to(&mut *w_guard).is_err() {
                 break;
             }

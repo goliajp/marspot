@@ -31,7 +31,7 @@ use std::thread;
 use marspot::pty::{Pty, PtyConfig, TerminalSize};
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::shelld_proto::{
-    decode_data, decode_get_scrollback_page, decode_hello, decode_new_session,
+    decode_attach, decode_data, decode_get_scrollback_page, decode_hello, decode_new_session,
     decode_resize, decode_session_id, encode_data, encode_error, encode_hello_ack,
     encode_list_sessions_reply, encode_new_session_reply, encode_scrollback_page,
     encode_snapshot_payload, Frame, MsgType, SessionInfo, PROTO_VERSION,
@@ -1390,8 +1390,8 @@ fn reader_loop(
                 }
             }
             MsgType::Attach => {
-                let id = match decode_session_id(&frame.payload) {
-                    Ok(id) => id,
+                let (id, cols, rows) = match decode_attach(&frame.payload) {
+                    Ok(t) => t,
                     Err(e) => {
                         let _ = out_tx.send(err_frame(8, &format!("bad ATTACH: {}", e)));
                         continue;
@@ -1400,25 +1400,47 @@ fn reader_loop(
                 let session = sessions.lock().unwrap().get(&id).cloned();
                 match session {
                     Some(s) => {
-                        // RFC-002 §4: ATTACH ships a freshly serialized
-                        // L4 Terminal snapshot.  Order is load-bearing:
-                        //   1. Take the terminal lock and serialize
-                        //      under it — `feed()` in the reader thread
-                        //      blocks on the same lock, so no bytes can
-                        //      be parsed-in between serialize and the
-                        //      `attach()` below.
+                        // RFC-002 §4 (step 8d): the client tells us
+                        // what cols/rows it expects.  Resize the master
+                        // Terminal under the same lock we'll serialise
+                        // under, so no other thread can feed bytes at
+                        // the old dims between resize and snapshot.
+                        // Order is load-bearing:
+                        //   1. terminal.resize + terminal.serialize
+                        //      under one held lock — feed() in the
+                        //      reader thread waits.
                         //   2. attach() registers the subscriber AFTER
-                        //      the snapshot is built.  Any subsequent
+                        //      the snapshot is built so any subsequent
                         //      Data broadcast lands in this subscriber's
-                        //      channel only after the StateSnapshot is
-                        //      queued in front of it.
+                        //      channel after the StateSnapshot.
                         //   3. Drop the lock + send the snapshot frame
-                        //      AFTER both — the SyncSender preserves
-                        //      our send order on the receiver.
-                        let (body, generation) = {
-                            let t = s.terminal.lock().unwrap();
-                            (t.serialize_snapshot(), t.generation())
+                        //      — the SyncSender preserves our send
+                        //      order on the receiver.
+                        let (body, generation, new_cols, new_rows) = {
+                            let mut t = s.terminal.lock().unwrap();
+                            let (cur_cols, cur_rows) = (t.grid().cols(), t.grid().rows());
+                            if cur_cols != cols || cur_rows != rows {
+                                t.resize(cols, rows);
+                                // Also push the new dims out to the
+                                // PTY so the child app's SIGWINCH
+                                // matches the snapshot we're shipping.
+                                let ws = libc::winsize {
+                                    ws_row: rows,
+                                    ws_col: cols,
+                                    ws_xpixel: 0,
+                                    ws_ypixel: 0,
+                                };
+                                unsafe {
+                                    libc::ioctl(
+                                        s.pty.raw_master(),
+                                        libc::TIOCSWINSZ,
+                                        &ws,
+                                    );
+                                }
+                            }
+                            (t.serialize_snapshot(), t.generation(), cols, rows)
                         };
+                        let _ = (new_cols, new_rows); // kept for log clarity below
                         let sub_id = s.attach(attached_tx.clone());
                         attached.push((Arc::downgrade(&s), sub_id));
                         let payload = encode_snapshot_payload(id, generation, &body);

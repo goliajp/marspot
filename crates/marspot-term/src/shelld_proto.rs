@@ -432,9 +432,7 @@ pub fn decode_new_session_reply(payload: &[u8]) -> io::Result<(u64, i32)> {
     ))
 }
 
-/// ATTACH / DETACH / KILL payload: `[session_id u64 LE]`.  Same
-/// three-byte layout, separate function names to make call sites
-/// self-documenting.
+/// DETACH / KILL payload: `[session_id u64 LE]`.
 pub fn encode_session_id(session_id: u64) -> Vec<u8> {
     session_id.to_le_bytes().to_vec()
 }
@@ -447,6 +445,36 @@ pub fn decode_session_id(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+/// ATTACH payload — `[session_id u64 LE][cols u16 LE][rows u16 LE]`.
+///
+/// RFC-002 §4 (step 8d correction): the client tells L4 what grid
+/// dimensions it expects so L4 can resize the master Terminal under
+/// the same lock that gates the snapshot serialization.  Without
+/// this, an L3 spawn after an UPDATE_SWAP (new core spawns new L3 +
+/// new window dims) would attach to a Terminal still at the original
+/// NewSession cols/rows and apply a snapshot that doesn't match the
+/// publish path — leading to the blank-grid regression after install.
+pub fn encode_attach(session_id: u64, cols: u16, rows: u16) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&cols.to_le_bytes());
+    v.extend_from_slice(&rows.to_le_bytes());
+    v
+}
+
+pub fn decode_attach(payload: &[u8]) -> io::Result<(u64, u16, u16)> {
+    if payload.len() != 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected 12-byte ATTACH payload, got {}", payload.len()),
+        ));
+    }
+    let id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let cols = u16::from_le_bytes(payload[8..10].try_into().unwrap());
+    let rows = u16::from_le_bytes(payload[10..12].try_into().unwrap());
+    Ok((id, cols, rows))
 }
 
 /// RESIZE payload: `[session_id u64 LE] [cols u16 LE] [rows u16 LE]`
@@ -901,6 +929,18 @@ mod tests {
     fn session_id_roundtrip() {
         let p = encode_session_id(42);
         assert_eq!(decode_session_id(&p).unwrap(), 42);
+    }
+
+    #[test]
+    fn attach_roundtrip_carries_cols_rows() {
+        let p = encode_attach(7, 97, 75);
+        assert_eq!(decode_attach(&p).unwrap(), (7, 97, 75));
+    }
+
+    #[test]
+    fn attach_rejects_short_payload() {
+        let err = decode_attach(&[0u8; 11]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
