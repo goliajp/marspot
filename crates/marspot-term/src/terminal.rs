@@ -15,7 +15,7 @@
 use crate::grid::{Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
-use crate::{lx_debug, lx_debug_sampled, lx_warn};
+use crate::{lx_debug, lx_debug_sampled, lx_info, lx_warn};
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -940,6 +940,15 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 2           — entire screen
                 // 3           — entire scrollback (xterm extension)
                 let mode = param_raw(params, 0, 0);
+                lx_info!(
+                    "term.edit.ED",
+                    "erase in display",
+                    mode = mode,
+                    cur_col = col,
+                    cur_row = row,
+                    cols = cols,
+                    rows = rows
+                );
                 if mode == 3 {
                     self.grid.clear_scrollback();
                 } else {
@@ -959,6 +968,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // 1           — from start of line to cursor (inclusive)
                 // 2           — entire line
                 let mode = param_raw(params, 0, 0);
+                lx_info!(
+                    "term.edit.EL",
+                    "erase in line",
+                    mode = mode,
+                    cur_col = col,
+                    cur_row = row,
+                    cols = cols
+                );
                 erase_in_line(self.grid, col, row, cols, mode, *self.attrs);
             }
             b'm' => {
@@ -1003,6 +1020,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // region. Rows below shift down; rows past scroll_bot
                 // stay put. Cursor moves to col 0 of the same row.
                 let n = param(params, 0, 1);
+                lx_info!(
+                    "term.edit.IL",
+                    "insert lines",
+                    n = n,
+                    cur_row = row,
+                    scroll_top = *self.scroll_top,
+                    scroll_bot = *self.scroll_bot
+                );
                 if row >= *self.scroll_top && row <= *self.scroll_bot {
                     // Use a sub-region [row..=scroll_bot] for the shift.
                     self.grid.scroll_down_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
@@ -1014,6 +1039,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // region. Rows below shift up; rows past scroll_bot
                 // stay put. Cursor moves to col 0 of the same row.
                 let n = param(params, 0, 1);
+                lx_info!(
+                    "term.edit.DL",
+                    "delete lines",
+                    n = n,
+                    cur_row = row,
+                    scroll_top = *self.scroll_top,
+                    scroll_bot = *self.scroll_bot
+                );
                 if row >= *self.scroll_top && row <= *self.scroll_bot {
                     self.grid.scroll_up_region(row, *self.scroll_bot, n, blank_with(*self.attrs));
                     self.grid.set_cursor(0, row);
@@ -1023,6 +1056,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // ICH: insert N blank chars at cursor — shift cells
                 // [col..cols-n] right to [col+n..cols], blank [col..col+n].
                 let n = param(params, 0, 1).min(cols.saturating_sub(col));
+                lx_info!(
+                    "term.edit.ICH",
+                    "insert chars",
+                    n = n,
+                    cur_col = col,
+                    cur_row = row,
+                    cols = cols
+                );
                 if n > 0 {
                     // Shift right
                     for c in (col + n..cols).rev() {
@@ -1039,6 +1080,14 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 // DCH: delete N chars at cursor — shift cells
                 // [col+n..cols] left to [col..cols-n], blank tail.
                 let n = param(params, 0, 1).min(cols.saturating_sub(col));
+                lx_info!(
+                    "term.edit.DCH",
+                    "delete chars",
+                    n = n,
+                    cur_col = col,
+                    cur_row = row,
+                    cols = cols
+                );
                 if n > 0 {
                     for c in col..cols - n {
                         let src = self.grid.cell(c + n, row);
