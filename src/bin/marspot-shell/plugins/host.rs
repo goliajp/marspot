@@ -11,12 +11,20 @@
 //! cross-process query latency on every plugin call.
 
 use std::path::PathBuf;
+use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use marspot::{lx_debug, lx_error, lx_info, lx_warn};
 
 use super::{LogLevel, PermissionSet, PluginError, PluginHost, PtyChild};
+
+/// Channel message the shell main loop drains and forwards to L2 core
+/// as a `PaneBadge` frame.  Empty `text` = clear.
+pub struct PaneBadgeUpdate {
+    pub shelld_session_id: u64,
+    pub text: String,
+}
 
 /// Snapshot taken once per tick by the host so plugins read O(1)
 /// instead of walking `/dev` + `/proc` (or its macOS equivalent)
@@ -38,6 +46,10 @@ pub struct ShellPluginHost {
     /// permission lookup.  Set/cleared by the registry around each
     /// hook.  See `with_active_plugin`.
     active_plugin: Arc<Mutex<Option<ActivePlugin>>>,
+    /// One-way pipe to the shell main loop for L2-bound side-effects.
+    /// Plugin → host → channel → main loop → CoreConn::send.  None
+    /// in tests / standalone hosts where no L2 is around.
+    pane_badge_tx: Mutex<Option<Sender<PaneBadgeUpdate>>>,
 }
 
 #[derive(Clone)]
@@ -52,7 +64,17 @@ impl ShellPluginHost {
             panes: Arc::new(Mutex::new(Vec::new())),
             focused: Arc::new(Mutex::new(None)),
             active_plugin: Arc::new(Mutex::new(None)),
+            pane_badge_tx: Mutex::new(None),
         }
+    }
+
+    /// Wire the channel the shell main loop will drain for badge
+    /// updates.  Called once during shell startup, after the main
+    /// loop has created its receiver half.  Subsequent
+    /// `set_pane_badge` calls through the trait push updates into
+    /// this channel.
+    pub fn attach_pane_badge_tx(&self, tx: Sender<PaneBadgeUpdate>) {
+        *self.pane_badge_tx.lock().unwrap() = Some(tx);
     }
 
     /// Refresh per-pane snapshots.  Called from the shell's tick
@@ -161,5 +183,22 @@ impl PluginHost for ShellPluginHost {
 
     fn clear_active_plugin(&self) {
         *self.active_plugin.lock().unwrap() = None;
+    }
+
+    fn set_pane_badge(
+        &self,
+        shelld_session_id: u64,
+        text: &str,
+    ) -> Result<(), PluginError> {
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        let Some(tx) = self.pane_badge_tx.lock().unwrap().clone() else {
+            // No L2 wired (standalone host); drop silently.
+            return Ok(());
+        };
+        let _ = tx.send(PaneBadgeUpdate {
+            shelld_session_id,
+            text: text.to_string(),
+        });
+        Ok(())
     }
 }

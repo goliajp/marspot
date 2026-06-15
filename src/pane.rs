@@ -878,7 +878,12 @@ impl Pane {
     /// `view_offset` is preserved across focus changes — scroll back
     /// in pane A, switch to B, come back to A: you're where you left
     /// off.
-    pub fn view<'a>(&'a self, focused: bool, title: &'a str) -> SessionView<'a> {
+    pub fn view<'a>(
+        &'a self,
+        focused: bool,
+        title: &'a str,
+        right_badge: &'a str,
+    ) -> SessionView<'a> {
         // An L3 mirror is *already* the window L3 published at the requested
         // scroll offset (and holds no scrollback to offset into), so it
         // always renders at 0. In-process panes offset into their own grid:
@@ -899,6 +904,7 @@ impl Pane {
             selection: None,
             ime_preedit: "",
             update_pending: self.update_pending,
+            right_badge,
         }
     }
 }

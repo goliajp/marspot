@@ -1395,7 +1395,11 @@ impl Marspot {
             .take(cell_count)
             .enumerate()
             .map(|(i, p)| {
-                let mut v = p.view(i == focused, titles.get(i).map(|s| s.as_str()).unwrap_or(""));
+                let mut v = p.view(
+                    i == focused,
+                    titles.get(i).map(|s| s.as_str()).unwrap_or(""),
+                    "",
+                );
                 // Preedit only applies to the focused, live pane —
                 // scrolled-back views don't have a live cursor to
                 // anchor it to.  Empty string skips the overlay.
@@ -2050,6 +2054,7 @@ fn bench_metal_render(arg: &str) {
         selection: None,
         ime_preedit: "",
         update_pending: false,
+        right_badge: "",
     };
     let views = std::slice::from_ref(&view);
 

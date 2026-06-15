@@ -63,6 +63,11 @@ pub struct SessionView<'a> {
     /// clicking it triggers the swap.  Only the focused pane ever carries
     /// it (idle panes swap immediately).
     pub update_pending: bool,
+    /// RFC-001 plugin badge — a short tag drawn at the right edge of
+    /// the title strip (left of the optional refresh affordance) so
+    /// plugins can surface per-pane metadata without overloading the
+    /// main title.  Empty = nothing drawn.  See `MsgType::PaneBadge`.
+    pub right_badge: &'a str,
 }
 
 #[derive(Copy, Clone, Debug)]

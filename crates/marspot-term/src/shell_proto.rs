@@ -179,6 +179,14 @@ pub enum MsgType {
     /// Introduced at PROTO_VERSION=2 — supersedes the single-surface
     /// `Resize` frame on the v=2 path.
     SurfaceAttach = 40,
+    /// shell → core: "decorate the pane backing this shelld session
+    /// with this badge text on the right side of its title strip."
+    /// Payload: `session_id u64 LE, badge_len u16 LE, badge_utf8`.
+    /// Empty badge = "clear it".  L2 stores per-shelld-session and
+    /// composes the title strip; gone when the pane is destroyed.
+    /// Used by the L1 claudecode plugin to surface the bound
+    /// claudecode sessionId next to the pane label.
+    PaneBadge = 41,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -208,6 +216,7 @@ impl MsgType {
             38 => MsgType::SelectionText,
             39 => MsgType::FrameRendered,
             40 => MsgType::SurfaceAttach,
+            41 => MsgType::PaneBadge,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -646,6 +655,48 @@ pub fn decode_resize(payload: &[u8]) -> io::Result<(u32, f64, f64, f64)> {
     let h = f64::from_le_bytes(payload[12..20].try_into().unwrap());
     let s = f64::from_le_bytes(payload[20..28].try_into().unwrap());
     Ok((id, w, h, s))
+}
+
+/// PaneBadge payload: `session_id u64 LE, badge_len u16 LE, badge_utf8`.
+/// Empty `badge_len` means "clear any badge currently set for this
+/// session".  Caps `badge_len` at 64 bytes — a sane upper bound for
+/// the right-edge decoration the title strip can fit; longer payloads
+/// are rejected as malformed rather than truncated.
+pub const PANE_BADGE_MAX_LEN: u16 = 64;
+
+pub fn encode_pane_badge(session_id: u64, badge: &str) -> Vec<u8> {
+    let bytes = badge.as_bytes();
+    let n = bytes.len().min(PANE_BADGE_MAX_LEN as usize);
+    let mut out = Vec::with_capacity(8 + 2 + n);
+    out.extend_from_slice(&session_id.to_le_bytes());
+    out.extend_from_slice(&(n as u16).to_le_bytes());
+    out.extend_from_slice(&bytes[..n]);
+    out
+}
+
+pub fn decode_pane_badge(payload: &[u8]) -> io::Result<(u64, String)> {
+    if payload.len() < 10 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_badge payload < 10 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let n = u16::from_le_bytes(payload[8..10].try_into().unwrap()) as usize;
+    if n > PANE_BADGE_MAX_LEN as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pane_badge len {} > cap {}", n, PANE_BADGE_MAX_LEN),
+        ));
+    }
+    if payload.len() < 10 + n {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_badge payload truncated before body",
+        ));
+    }
+    let badge = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
+    Ok((session_id, badge))
 }
 
 /// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
@@ -1134,6 +1185,37 @@ mod tests {
     fn grid_scroll_roundtrip() {
         assert_eq!(decode_grid_scroll(&encode_grid_scroll(4096)).unwrap(), 4096);
         assert_eq!(MsgType::from_u32(36), Some(MsgType::GridScroll));
+    }
+
+    #[test]
+    fn pane_badge_roundtrip_carries_text() {
+        let p = encode_pane_badge(7, "cc:3ad170c8");
+        let (sid, badge) = decode_pane_badge(&p).unwrap();
+        assert_eq!(sid, 7);
+        assert_eq!(badge, "cc:3ad170c8");
+        assert_eq!(MsgType::from_u32(41), Some(MsgType::PaneBadge));
+    }
+
+    #[test]
+    fn pane_badge_empty_means_clear() {
+        let p = encode_pane_badge(9, "");
+        let (sid, badge) = decode_pane_badge(&p).unwrap();
+        assert_eq!(sid, 9);
+        assert!(badge.is_empty());
+    }
+
+    #[test]
+    fn pane_badge_truncates_at_cap() {
+        let long = "x".repeat(PANE_BADGE_MAX_LEN as usize + 10);
+        let p = encode_pane_badge(1, &long);
+        let (_sid, badge) = decode_pane_badge(&p).unwrap();
+        assert_eq!(badge.len(), PANE_BADGE_MAX_LEN as usize);
+    }
+
+    #[test]
+    fn pane_badge_rejects_short_payload() {
+        let err = decode_pane_badge(&[0u8; 9]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

@@ -740,12 +740,17 @@ struct ShellApp {
     /// just see the supervisor cadence.  Their per-plugin interval
     /// gating lives in the registry.
     last_plugin_tick: Instant,
+    /// Receiver half of the channel `ShellPluginHost::set_pane_badge`
+    /// pushes into; drained each `poll_supervisor` tick and forwarded
+    /// to the active core as `MsgType::PaneBadge` frames.
+    pane_badge_rx: std::sync::mpsc::Receiver<plugins::host::PaneBadgeUpdate>,
 }
 
 impl ShellApp {
     fn new(proxy: EventProxy) -> Self {
         let binaries = BinaryTree::default_for("marspot-core")
             .expect("HOME must be set to manage binary slots");
+        let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
             surfaces: None,
@@ -763,9 +768,14 @@ impl ShellApp {
             auto_restart_disabled: false,
             banner_kind: None,
             core_boot_ring: std::collections::VecDeque::with_capacity(16),
-            plugin_host: ShellPluginHost::new(),
+            plugin_host: {
+                let h = ShellPluginHost::new();
+                h.attach_pane_badge_tx(pane_badge_tx);
+                h
+            },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
+            pane_badge_rx,
         }
     }
 
@@ -1472,6 +1482,23 @@ impl ShellApp {
         // throttle" — MVP doesn't gate here, the registry handles it.
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
+
+        // Drain any badge updates plugins queued during the tick and
+        // forward to L2 as PaneBadge frames.  No L2 (pre-boot or
+        // during a crash gap) → just drop the update; the next tick
+        // will push the current mapping again (plugins re-issue every
+        // transition, not just once).
+        while let Ok(upd) = self.pane_badge_rx.try_recv() {
+            if let Some(conn) = self.active.as_ref() {
+                conn.send(
+                    MsgType::PaneBadge,
+                    marspot::shell_proto::encode_pane_badge(
+                        upd.shelld_session_id,
+                        &upd.text,
+                    ),
+                );
+            }
+        }
 
         // 1. Active core liveness — the core the user is looking at.
         let active_exited = match self.active.as_mut().and_then(|c| c.child.as_mut()) {

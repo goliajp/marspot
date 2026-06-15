@@ -204,6 +204,18 @@ pub trait PluginHost: Send + Sync {
     fn set_active_plugin(&self, _name: &'static str, _permissions: PermissionSet) {}
     /// Pairs with `set_active_plugin`.
     fn clear_active_plugin(&self) {}
+
+    /// Decorate the right side of the pane title strip for the pane
+    /// backing this shelld session.  Empty `text` clears the badge.
+    /// Requires `SET_STATUS_LINE`.  Default impl is a no-op so test
+    /// hosts don't have to wire L2 control sockets.
+    fn set_pane_badge(
+        &self,
+        _shelld_session_id: u64,
+        _text: &str,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -2150,6 +2150,41 @@ fn push_session(
             atlas,
             glyphs,
         );
+        // Plugin badge (claudecode etc.): short tag drawn at the right
+        // edge of the title strip, just left of the optional refresh
+        // affordance.  Same SIDEBAR_TEXT_FG colour as the title to
+        // read as quiet metadata rather than competing with content.
+        if !view.right_badge.is_empty() {
+            let badge_chars = view.right_badge.chars().count() as f32;
+            // Right anchor: leave room for the refresh affordance
+            // (one cell + a half-cell gap) when both are present,
+            // otherwise hug the right edge with a single padding.
+            let reserved = if view.update_pending && pane_focused {
+                cell_w * 1.5
+            } else {
+                0.0
+            };
+            let badge_x = rect.x as f32 + rect.w as f32
+                - padding
+                - reserved
+                - badge_chars * cell_w;
+            if badge_x > label_x {
+                push_text_run(
+                    view.right_badge,
+                    badge_x,
+                    label_baseline_y,
+                    [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+                    cell_w,
+                    cell_h,
+                    ascent,
+                    atlas_w,
+                    atlas_h,
+                    font,
+                    atlas,
+                    glyphs,
+                );
+            }
+        }
         // Deferred-update affordance (target #4 step 5b): a refresh glyph
         // at the right edge of the *focused* pane's title strip when a
         // silent swap is staged for it.  Clicking it (hit-tested via
@@ -3204,6 +3239,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            right_badge: "",
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3292,6 +3328,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            right_badge: "",
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();

@@ -113,6 +113,11 @@ enum CoreEvent {
     /// manual hook the updater will drive once a new `marspot-session` is
     /// staged (mirrors the shell's SIGUSR1 manual update trigger).
     SwapIdleL3,
+    /// Shell → core: decorate the pane backing the given shelld session
+    /// with this right-side badge in its title strip.  Empty text clears
+    /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
+    /// shell → control socket → here.
+    PaneBadge(u64, String),
 }
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
@@ -138,6 +143,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::SurfaceAttach => decode_surface_attach(&f.payload)
             .ok()
             .map(|(f_id, b_id, w, h, s)| CoreEvent::SurfaceAttach(f_id, b_id, w, h, s)),
+        MsgType::PaneBadge => marspot::shell_proto::decode_pane_badge(&f.payload)
+            .ok()
+            .map(|(sid, text)| CoreEvent::PaneBadge(sid, text)),
         MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
@@ -393,6 +401,9 @@ struct CoreApp {
     custom_titles: Vec<Option<String>>,
     editing_title: Option<usize>,
     title_edit_buffer: String,
+    /// Per-shelld-session right-side badge, set by L1 plugins via
+    /// `MsgType::PaneBadge`.  Empty string clears via removal.
+    pane_badges: std::collections::HashMap<u64, String>,
     selection: Option<Selection>,
     selection_dragging: bool,
     layout_mode: LayoutMode,
@@ -423,6 +434,24 @@ struct CoreApp {
 }
 
 impl CoreApp {
+    /// L1 plugin → control socket → here: stash a per-shelld-session
+    /// right-side decoration for the title strip.  Empty `text` clears
+    /// any prior badge.  Forces a redraw on transition.
+    fn set_pane_badge(&mut self, shelld_session_id: u64, text: String) {
+        let prev = self.pane_badges.get(&shelld_session_id).cloned();
+        let changed = if text.is_empty() {
+            self.pane_badges.remove(&shelld_session_id).is_some()
+        } else if prev.as_deref() != Some(text.as_str()) {
+            self.pane_badges.insert(shelld_session_id, text);
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.needs_render = true;
+        }
+    }
+
     fn rebuild_layout(&mut self) {
         let (cell_w, cell_h) = self.renderer.cell_dims();
         let sidebar_phys = if self.sidebar_collapsed {
@@ -1159,8 +1188,15 @@ impl CoreApp {
             .take(cell_count)
             .enumerate()
             .map(|(i, p)| {
-                let mut v =
-                    p.view(i == focused, titles.get(i).map(|s| s.as_str()).unwrap_or(""));
+                let badge = p
+                    .shelld_session_id()
+                    .and_then(|sid| self.pane_badges.get(&sid).map(|s| s.as_str()))
+                    .unwrap_or("");
+                let mut v = p.view(
+                    i == focused,
+                    titles.get(i).map(|s| s.as_str()).unwrap_or(""),
+                    badge,
+                );
                 if i == focused && p.view_offset() == 0 {
                     v.ime_preedit = self.ime_preedit.as_str();
                 }
@@ -1501,6 +1537,7 @@ fn main() {
         custom_titles: custom_titles_init,
         editing_title: None,
         title_edit_buffer: String::new(),
+        pane_badges: std::collections::HashMap::new(),
         selection: None,
         selection_dragging: false,
         layout_mode,
@@ -1656,6 +1693,9 @@ fn main() {
                 }
                 CoreEvent::Ping(nonce) => {
                     to_ack.push((MsgType::Pong, encode_pong(nonce)));
+                }
+                CoreEvent::PaneBadge(sid, text) => {
+                    app.set_pane_badge(sid, text);
                 }
             }
         };
