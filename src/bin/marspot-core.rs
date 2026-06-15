@@ -1207,7 +1207,17 @@ fn main() {
     );
 
     let front_id: u32 = env_required(ENV_SURFACE_ID);
-    let back_id: u32 = env_required(ENV_SURFACE_ID_BACK);
+    // PROTO_VERSION=2 shell sets ENV_SURFACE_ID_BACK to the second
+    // surface in the pair.  Pre-A2-A4 (PROTO_VERSION=1) shells don't
+    // set it — fall back to front so back==front, collapsing the
+    // double-buffer to a single-surface render path.  Correctness is
+    // preserved (we just lose the race protection) and a mixed-version
+    // install (NEW core + OLD shell after a botched dual-core swap)
+    // doesn't crash on the missing env var.
+    let back_id: u32 = std::env::var(ENV_SURFACE_ID_BACK)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(front_id);
     let w_phys: f64 = env_required(ENV_SURFACE_WIDTH);
     let h_phys: f64 = env_required(ENV_SURFACE_HEIGHT);
     let scale: f64 = env_required(ENV_SURFACE_SCALE);
@@ -1732,6 +1742,17 @@ fn main() {
             );
             if let Err(e) = ack.write_to(&mut control_writer) {
                 lx_error!("core.surface_ready.write_failed", &format!("{e}"));
+            }
+            // FrameRendered is the legacy v=1 wake.  A v=2 shell
+            // already woke on SurfaceReady, so this is redundant for
+            // a same-version shell.  An OLD shell paired with this
+            // NEW core (rare — possible after a botched silent
+            // update) only listens for FrameRendered, though, so we
+            // keep emitting it for compatibility.  No-op on the v=2
+            // shell side (handler just sets frame_pending again).
+            let fr = Frame::new(MsgType::FrameRendered, Vec::new());
+            if let Err(e) = fr.write_to(&mut control_writer) {
+                lx_error!("core.frame_rendered.write_failed", &format!("{e}"));
             }
             // Flip: next render writes the other half.
             writing_idx = 1 - writing_idx;

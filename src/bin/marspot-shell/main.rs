@@ -1686,14 +1686,18 @@ impl ShellApp {
             ShellInbox::CaretRect(rect) => {
                 ctx.set_caret_rect_phys(rect);
             }
-            // Mark a fresh frame as pending so the next `redraw()`
-            // actually calls `present()`.  The reader already woke
-            // the event loop (proxy.wake) → `redraw` callback will
-            // run.  Without this flag the redraw callback ALSO runs
-            // on the 250 ms safety-net timer ticks, and presenting
-            // there can sample the IOSurface mid-render (the
-            // "frequent all-pane flash" diagnosed 2026-06-15).
+            // Legacy v=1 wake from the core's pre-A2-A4 single-
+            // surface path: the core renders into ENV_SURFACE_ID
+            // directly and pokes us with an empty FrameRendered.
+            // We never get a SurfaceReady from such a core (it only
+            // emits one on Resize), so we ALSO flip first_frame_ready
+            // here — otherwise a fresh shell paired with a rolled-back
+            // legacy core (`current/marspot-core` was reverted after
+            // a probation-abort while the shell self-update succeeded)
+            // would gate `redraw()` forever and paint black.
+            // A v=2 core never sends this, so it's pure tolerance.
             ShellInbox::FrameRendered => {
+                self.first_frame_ready = true;
                 self.frame_pending = true;
             }
         }
