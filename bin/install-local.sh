@@ -315,26 +315,34 @@ done
   -f "$APP" >/dev/null 2>&1 || true
 
 # ── 5. shelld LaunchAgent (production daemon, default socket) ──────
-# pgrep -f against the bundle path is the historical check.  It
-# returned a false negative on 2026-06-15 (Claude Code Bash tool
-# context), triggered install-shelld.sh → launchctl bootout → SIGTERM
-# → 9 claudecode children died.  Behavior is unchanged (still gated
-# on pgrep) but ALL three liveness signals are now logged so the
-# next disagreement is diagnosable from marspot.log alone.  Real
-# fix for the false-negative gate is a separate change.
+# Defence in depth.  Triggering install-shelld.sh is destructive
+# (`launchctl bootout` sends SIGTERM to a live shelld → Pty::Drop
+# SIGHUPs every claudecode child → 2026-06-15 we lost 9 in-flight
+# sessions).  Cost of a false "down" verdict (kills user work) >>
+# cost of a false "alive" verdict (skips installing the LaunchAgent
+# this round; user can re-run after manually starting shelld).
+# Therefore the gate is generous: only conclude "shelld is down"
+# when ALL THREE liveness signals agree.
 pgrep_says_alive=0
 ps_says_alive=0
 launchctl_says_alive=0
 pgrep -f "$MACOS/marspot-shelld" >/dev/null 2>&1 && pgrep_says_alive=1
 ps auxww 2>/dev/null | grep -F "$MACOS/marspot-shelld" | grep -vq grep && ps_says_alive=1
 launchctl print "gui/$(id -u)/com.marspot.shelld" 2>/dev/null | grep -q "state = running" && launchctl_says_alive=1
+verdict_sum=$(( pgrep_says_alive + ps_says_alive + launchctl_says_alive ))
 sup_log "INSTALL_SHELLD_CHECK" \
-  "alive verdict pgrep=$pgrep_says_alive ps=$ps_says_alive launchctl=$launchctl_says_alive (gate uses pgrep only)"
-if ! pgrep -f "$MACOS/marspot-shelld" >/dev/null 2>&1; then
-  sup_log "INSTALL_SHELLD_BOOTSTRAP" \
-    "pgrep says shelld down; calling install-shelld.sh (note other checks: ps=$ps_says_alive launchctl=$launchctl_says_alive)"
-  echo "==> shelld not running — installing LaunchAgent"
+  "alive verdict pgrep=$pgrep_says_alive ps=$ps_says_alive launchctl=$launchctl_says_alive sum=$verdict_sum/3"
+if (( verdict_sum == 0 )); then
+  sup_log "INSTALL_SHELLD_BOOTSTRAP" "all three checks agree shelld is down; calling install-shelld.sh (triggers SIGTERM via bootout)"
+  echo "==> shelld not running (3/3 checks agree) — installing LaunchAgent"
   "$ROOT/bin/install-shelld.sh" >/dev/null
+elif (( verdict_sum < 3 )); then
+  # Disagreement: trust the majority-alive signal and skip the
+  # destructive bootout path.  A real "stuck shelld" still gets
+  # surfaced via this log line so triage can find it.
+  sup_log "INSTALL_SHELLD_DISAGREE" \
+    "alive checks disagree but ≥1 says alive (sum=$verdict_sum/3); skipping bootstrap to avoid SIGTERM cascade"
+  echo "==> shelld liveness disagreement ($verdict_sum/3 say alive) — skipping LaunchAgent reinstall (won't risk SIGTERM)"
 fi
 
 # ── 6. Apply the silent update ────────────────────────────────────
