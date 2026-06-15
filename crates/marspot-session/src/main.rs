@@ -447,6 +447,22 @@ fn main() {
     // generation-vector chase, and the "stale snapshot at the
     // server" failure mode entirely.
 
+    // RFC-002 §8 (step 8b — fetch side): on attach, prefetch up to
+    // HISTORY_PREFETCH_LINES rows of historic scrollback from L4 so
+    // a user-initiated scroll-up has data to surface.  The reply is
+    // drained from `take_pending_scrollback_pages` each publish tick
+    // into `historic_pages`; integration into the publish window
+    // (rendering above local scrollback) lands in step 8c.
+    const HISTORY_PREFETCH_LINES: u32 = 1024;
+    if let Err(e) = session.request_scrollback_page(0, HISTORY_PREFETCH_LINES) {
+        lx_warn!(
+            "session.scrollback.prefetch_send_failed",
+            &format!("{e}"),
+            session_id = session.id()
+        );
+    }
+    let mut historic_pages: Vec<Vec<marspot_term::grid::Cell>> = Vec::new();
+
     let start = Instant::now();
     let mut frame: u64 = 0;
     loop {
@@ -523,6 +539,41 @@ fn main() {
         // even when no bytes pumped this tick.
         if n > 0 || predicted || resized || scrolled {
             publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
+        }
+
+        // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
+        // replies L4 sent.  Empty `line_count` means "no more history
+        // past this point" — record the wall and stop asking.  Cells
+        // accumulate in `historic_pages` (oldest-first per page, in
+        // arrival order across pages) for the publish-side read-through
+        // landing in step 8c.
+        for page in session.take_pending_scrollback_pages() {
+            match marspot_term::terminal::Terminal::decode_scrollback_page_body(
+                page.line_count,
+                &page.body,
+            ) {
+                Ok(mut lines) => {
+                    let received = lines.len();
+                    historic_pages.append(&mut lines);
+                    lx_debug!(
+                        "session.scrollback.page_received",
+                        "RFC-002 GetScrollbackPage reply ingested",
+                        line_start = page.line_start,
+                        line_count = page.line_count,
+                        received = received,
+                        cached_total = historic_pages.len()
+                    );
+                }
+                Err(e) => {
+                    lx_warn!(
+                        "session.scrollback.page_decode_failed",
+                        &format!("{e}"),
+                        line_start = page.line_start,
+                        line_count = page.line_count,
+                        body_bytes = page.body.len()
+                    );
+                }
+            }
         }
 
         // Answer any Cmd-C selection requests against the post-pump grid.

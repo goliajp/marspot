@@ -642,6 +642,75 @@ impl Terminal {
         self.pending_response.clear();
         Ok(())
     }
+
+    /// RFC-002 §8: serialize a contiguous slice of the scrollback into
+    /// the `ScrollbackPage` body format.
+    ///
+    /// `line_start` indexes the scrollback ring from the oldest live
+    /// line (0 = bottom of history, i.e. just above the visible grid
+    /// is the highest index — same convention as `Grid::scrollback_*`).
+    /// `count` is a request cap; the returned `line_count` is the
+    /// number of lines actually serialised (may be < count when the
+    /// request hits the end of scrollback).
+    ///
+    /// Wire format (per line — outer framing handled by
+    /// `shelld_proto::encode_scrollback_page`):
+    ///
+    /// ```text
+    /// repeat line_count times:
+    ///   [line_cols u32 LE]                — width of THIS line (lines
+    ///                                       may differ when the grid
+    ///                                       was resized)
+    ///   [cells: line_cols × 13 bytes]     — same Cell encoding as
+    ///                                       `serialize_snapshot`
+    /// ```
+    pub fn serialize_scrollback_page(
+        &self,
+        line_start: u32,
+        count: u32,
+    ) -> (u32, Vec<u8>) {
+        let lines = self.grid.scrollback_read_page(
+            line_start as usize,
+            count as usize,
+        );
+        let line_count = lines.len() as u32;
+        let body_bytes: usize = lines
+            .iter()
+            .map(|l| 4 + l.len() * CELL_BYTES)
+            .sum();
+        let mut out = Vec::with_capacity(body_bytes);
+        for line in &lines {
+            out.extend_from_slice(&(line.len() as u32).to_le_bytes());
+            for cell in line {
+                out.extend_from_slice(&(cell.ch as u32).to_le_bytes());
+                out.extend_from_slice(&serialize_attrs(cell.attrs));
+            }
+        }
+        (line_count, out)
+    }
+
+    /// Inverse of `serialize_scrollback_page`.  Static — no `&self`
+    /// because the decoder doesn't touch terminal state; callers
+    /// (L3 publish-cache) decide what to do with the lines.
+    pub fn decode_scrollback_page_body(
+        line_count: u32,
+        body: &[u8],
+    ) -> io::Result<Vec<Vec<Cell>>> {
+        let mut cur = Cursor::new(body);
+        let mut out = Vec::with_capacity(line_count as usize);
+        for _ in 0..line_count {
+            let line_cols = read_u32(&mut cur)? as usize;
+            let mut line = Vec::with_capacity(line_cols);
+            for _ in 0..line_cols {
+                let ch_u = read_u32(&mut cur)?;
+                let attrs = read_attrs(&mut cur)?;
+                let ch = char::from_u32(ch_u).unwrap_or(' ');
+                line.push(Cell { ch, attrs });
+            }
+            out.push(line);
+        }
+        Ok(out)
+    }
 }
 
 // ─── Snapshot wire format helpers ─────────────────────────────────────
@@ -1850,6 +1919,49 @@ mod tests {
         assert_eq!(dst.generation(), loaded_gen);
         dst.feed(b"world");
         assert_eq!(dst.generation(), loaded_gen + 1);
+    }
+
+    #[test]
+    fn scrollback_page_roundtrip_recovers_lines() {
+        // 8-col / 2-row grid + \r\n between single-char lines avoids
+        // wrap weirdness: each line is one cell + spaces, scroll pushes
+        // the top row into scrollback whole.  Feed A..F (6 lines) →
+        // grid keeps the last two (E, F), scrollback holds A,B,C,D.
+        let mut t = Terminal::new(8, 2);
+        t.feed(b"\x1b[31mA\r\nB\r\nC\r\nD\r\nE\r\nF");
+        let total = t.grid().scrollback_len();
+        assert_eq!(total, 4);
+        let (line_count, body) = t.serialize_scrollback_page(0, total as u32);
+        assert_eq!(line_count, 4);
+        let lines = Terminal::decode_scrollback_page_body(line_count, &body).unwrap();
+        assert_eq!(lines.len(), 4);
+        // Read_lines is oldest-first: A,B,C,D.
+        assert_eq!(lines[0][0].ch, 'A');
+        assert_eq!(lines[3][0].ch, 'D');
+        // Foreground colour survives the wire format.
+        assert!(matches!(lines[0][0].attrs.fg, Color::Indexed(1)));
+        // Each line padded to grid width.
+        assert_eq!(lines[0].len(), 8);
+    }
+
+    #[test]
+    fn scrollback_page_count_overrun_clamps_to_available() {
+        let mut t = Terminal::new(8, 2);
+        t.feed(b"A\r\nB\r\nC\r\nD\r\nE\r\nF");
+        let (line_count, body) = t.serialize_scrollback_page(0, 100);
+        assert_eq!(line_count, 4);
+        let lines = Terminal::decode_scrollback_page_body(line_count, &body).unwrap();
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn scrollback_page_empty_scrollback_returns_zero_count() {
+        let t = Terminal::new(80, 24);
+        let (line_count, body) = t.serialize_scrollback_page(0, 50);
+        assert_eq!(line_count, 0);
+        assert!(body.is_empty());
+        let lines = Terminal::decode_scrollback_page_body(line_count, &body).unwrap();
+        assert!(lines.is_empty());
     }
 
     #[test]

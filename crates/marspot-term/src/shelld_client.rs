@@ -40,9 +40,9 @@ use std::time::{Duration, Instant};
 
 use crate::shelld_proto::{
     decode_data, decode_error, decode_hello_ack, decode_list_sessions_reply,
-    decode_new_session_reply, decode_snapshot_payload, encode_data, encode_hello,
-    encode_new_session, encode_resize, encode_session_id, Frame, MsgType, SessionInfo,
-    PROTO_VERSION,
+    decode_new_session_reply, decode_scrollback_page, decode_snapshot_payload, encode_data,
+    encode_hello, encode_new_session, encode_resize, encode_session_id, Frame, MsgType,
+    SessionInfo, PROTO_VERSION,
 };
 use crate::terminal::Terminal;
 
@@ -89,6 +89,17 @@ pub enum InboundMessage {
         generation: u64,
         body: Vec<u8>,
     },
+    /// RFC-002 §8: reply to a `request_scrollback_page` call.  The
+    /// page covers `[line_start, line_start + line_count)` rows of
+    /// historic scrollback (oldest = `line_start = 0`).  Empty
+    /// `line_count` = "no more history past this point".  The body
+    /// is the encoded per-line cell payload; decode with
+    /// `Terminal::decode_scrollback_page_body`.
+    ScrollbackPage {
+        line_start: u32,
+        line_count: u32,
+        body: Vec<u8>,
+    },
 }
 
 type Chunk = InboundMessage;
@@ -113,6 +124,19 @@ pub struct ShelldSession {
     /// Terminal that consumes the bytes.  Same role as
     /// `Session::terminal` in the lib's local model.
     pub terminal: Terminal,
+    /// RFC-002 §8: `pump` drains `ScrollbackPage` frames out of the
+    /// per-session channel into here so the caller (L3) can pull
+    /// them on its own cadence — pages don't disturb the terminal
+    /// state, they belong upstream of the publish path.
+    pending_scrollback_pages: Vec<PendingPage>,
+}
+
+/// Decoded reply slot.  Body is left undecoded (raw cells) — the
+/// caller (L3 publish-cache) controls when / if to decode.
+pub struct PendingPage {
+    pub line_start: u32,
+    pub line_count: u32,
+    pub body: Vec<u8>,
 }
 
 impl ShelldSession {
@@ -205,6 +229,17 @@ impl ShelldSession {
                     // claiming 1 byte of progress.
                     total = total.max(1);
                 }
+                InboundMessage::ScrollbackPage { line_start, line_count, body } => {
+                    // RFC-002 §8: stash for the L3 caller — pages don't
+                    // change the live grid, so they don't contribute to
+                    // `total` (no redraw poke needed; caller decides
+                    // when to repaint after ingesting the page).
+                    self.pending_scrollback_pages.push(PendingPage {
+                        line_start,
+                        line_count,
+                        body,
+                    });
+                }
             }
         }
         drop(rx);
@@ -258,6 +293,35 @@ impl ShelldSession {
         let mut stream = self.writer.lock().unwrap();
         frame.write_to(&mut *stream)?;
         Ok(bytes.len())
+    }
+
+    /// RFC-002 §8: ask shelld for `count` lines of historic scrollback
+    /// starting at `line_start` (0 = oldest in L4's ring).  The reply
+    /// is asynchronous — the next `pump()` drains a `ScrollbackPage`
+    /// frame into `pending_scrollback_pages`; consumer reads via
+    /// `take_pending_scrollback_pages()`.
+    pub fn request_scrollback_page(
+        &self,
+        line_start: u32,
+        count: u32,
+    ) -> io::Result<()> {
+        let payload = crate::shelld_proto::encode_get_scrollback_page(
+            self.inner.id,
+            line_start,
+            count,
+        );
+        let frame = Frame::new(MsgType::GetScrollbackPage, payload);
+        let mut stream = self.writer.lock().unwrap();
+        frame.write_to(&mut *stream)?;
+        Ok(())
+    }
+
+    /// Drain any scrollback pages collected since the last call.
+    /// Empty Vec when none are pending.  Pages arrive out-of-band
+    /// from terminal state, so callers can poll on whatever cadence
+    /// fits (e.g. once per publish tick).
+    pub fn take_pending_scrollback_pages(&mut self) -> Vec<PendingPage> {
+        std::mem::take(&mut self.pending_scrollback_pages)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
@@ -481,6 +545,7 @@ impl ShelldClient {
             inner,
             writer: self.writer.clone(),
             terminal: Terminal::new(cols, rows),
+            pending_scrollback_pages: Vec::new(),
         })
     }
 
@@ -755,6 +820,30 @@ fn reader_loop(
                 }
                 Err(e) => {
                     eprintln!("[shelld-client] bad StateSnapshot: {}", e);
+                }
+            },
+            MsgType::ScrollbackPage => match decode_scrollback_page(&frame.payload) {
+                Ok((id, line_start, line_count, body)) => {
+                    let drop_tx = {
+                        let inb = inboxes.lock().unwrap();
+                        inb.get(&id).cloned()
+                    };
+                    if let Some(tx) = drop_tx {
+                        if tx
+                            .send(InboundMessage::ScrollbackPage {
+                                line_start,
+                                line_count,
+                                body: body.to_vec(),
+                            })
+                            .is_err()
+                        {
+                            // Inbox closed; drop silently.
+                        }
+                    }
+                    wake();
+                }
+                Err(e) => {
+                    eprintln!("[shelld-client] bad ScrollbackPage: {}", e);
                 }
             },
             MsgType::Error => match decode_error(&frame.payload) {

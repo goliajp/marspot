@@ -31,10 +31,10 @@ use std::thread;
 use marspot::pty::{Pty, PtyConfig, TerminalSize};
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::shelld_proto::{
-    decode_data, decode_hello, decode_new_session, decode_resize, decode_session_id,
-    encode_data, encode_error, encode_hello_ack, encode_list_sessions_reply,
-    encode_new_session_reply, encode_snapshot_payload, Frame, MsgType, SessionInfo,
-    PROTO_VERSION,
+    decode_data, decode_get_scrollback_page, decode_hello, decode_new_session,
+    decode_resize, decode_session_id, encode_data, encode_error, encode_hello_ack,
+    encode_list_sessions_reply, encode_new_session_reply, encode_scrollback_page,
+    encode_snapshot_payload, Frame, MsgType, SessionInfo, PROTO_VERSION,
 };
 
 /// Per-session byte log cap.  When the log file grows past this we
@@ -1447,6 +1447,53 @@ fn reader_loop(
                     }
                 }
             }
+            MsgType::GetScrollbackPage => {
+                // RFC-002 §8: L3 asks for a slice of historic
+                // scrollback that fell off its local mirror.  L4
+                // serves it from the master Terminal — same grid
+                // the bytes have been feeding all along, so the
+                // reply is always consistent with the StateSnapshot
+                // the client just applied.
+                let (sid, line_start, count) =
+                    match decode_get_scrollback_page(&frame.payload) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = out_tx.send(err_frame(
+                                14,
+                                &format!("bad GetScrollbackPage: {}", e),
+                            ));
+                            continue;
+                        }
+                    };
+                let session = sessions.lock().unwrap().get(&sid).cloned();
+                if let Some(s) = session {
+                    let (line_count, body) = {
+                        let t = s.terminal.lock().unwrap();
+                        t.serialize_scrollback_page(line_start, count)
+                    };
+                    let payload =
+                        encode_scrollback_page(sid, line_start, line_count, &body);
+                    if attached_tx
+                        .send(Frame::new(MsgType::ScrollbackPage, payload))
+                        .is_err()
+                    {
+                        lx_warn!(
+                            "session.scrollback_page.send_failed",
+                            "client dropped before ScrollbackPage delivered",
+                            id = sid,
+                            line_start = line_start,
+                            line_count = line_count
+                        );
+                    }
+                } else {
+                    // Unknown session id: reply with an empty page so
+                    // the requester doesn't hang.
+                    let payload =
+                        encode_scrollback_page(sid, line_start, 0, &[]);
+                    let _ = attached_tx
+                        .send(Frame::new(MsgType::ScrollbackPage, payload));
+                }
+            }
             MsgType::Detach => {
                 let id = match decode_session_id(&frame.payload) {
                     Ok(id) => id,
@@ -1510,6 +1557,12 @@ fn reader_loop(
                         ws_ypixel: 0,
                     };
                     unsafe { libc::ioctl(s.pty.raw_master(), libc::TIOCSWINSZ, &ws) };
+                    // RFC-002 §4: L4's Terminal must reflow alongside
+                    // the PTY so a subsequent ATTACH ships a snapshot
+                    // at the new dimensions.  Without this, the L4
+                    // mirror stays at the old size and clients re-
+                    // attaching after a resize get a mis-sized grid.
+                    s.terminal.lock().unwrap().resize(cols, rows);
                 }
             }
             MsgType::Input => {

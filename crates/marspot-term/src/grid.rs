@@ -625,6 +625,13 @@ impl Grid {
     pub fn scrollback_line(&self, idx: usize) -> Option<Vec<Cell>> {
         self.scrollback.line_to_vec(idx)
     }
+    /// RFC-002 §8: contiguous range from scrollback for shelld
+    /// `GetScrollbackPage` responses.  Thin pass-through to the
+    /// underlying ring (memory or disk-backed); see
+    /// `Scrollback::read_lines` for boundary semantics.
+    pub fn scrollback_read_page(&self, start: usize, count: usize) -> Vec<Vec<Cell>> {
+        self.scrollback.read_lines(start, count)
+    }
     pub fn clear_scrollback(&mut self) {
         self.scrollback.clear();
         self.sb_wrapped.clear();
