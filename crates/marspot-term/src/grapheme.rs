@@ -201,6 +201,72 @@ fn update_state_with(next: char, n: GBP, state: &mut ClusterState) {
     }
 }
 
+/// Stateful one-codepoint-at-a-time grapheme cluster cursor.  Used by
+/// streaming consumers (the VT/xterm parser) that receive codepoints
+/// one at a time and need to know "is there a cluster boundary
+/// **before** this codepoint?".  Returns `true` (= boundary, flush
+/// the buffer of preceding codepoints) the first time `step` is
+/// called and at every confirmed break thereafter.
+///
+/// Reset with [`GraphemeCursor::reset`] at every flush point that
+/// isn't a cluster boundary — e.g. cursor moves, escape sequences,
+/// end of input — so the next codepoint starts a fresh cluster.
+pub struct GraphemeCursor {
+    /// `None` at construction and immediately after a [`reset`] — the
+    /// next `step` always reports a boundary (GB1: sot ÷).
+    ///
+    /// [`reset`]: GraphemeCursor::reset
+    prev: Option<char>,
+    state: ClusterState,
+}
+
+impl GraphemeCursor {
+    pub fn new() -> Self {
+        Self {
+            prev: None,
+            state: ClusterState::default(),
+        }
+    }
+
+    /// Forget the run history.  The next [`step`] reports a boundary
+    /// and updates state from `ch` alone.  Use at every flush point
+    /// where the caller has committed (or discarded) the cluster
+    /// buffer.
+    ///
+    /// [`step`]: GraphemeCursor::step
+    pub fn reset(&mut self) {
+        self.prev = None;
+        self.state = ClusterState::default();
+    }
+
+    /// Advance through `ch`.  Returns `true` iff there is a cluster
+    /// boundary BEFORE `ch` — meaning the caller should flush any
+    /// buffered cluster, then start a new cluster with `ch` as its
+    /// first codepoint.  Returns `false` iff `ch` attaches to the
+    /// current cluster.
+    pub fn step(&mut self, ch: char) -> bool {
+        let break_here = match self.prev {
+            None => true, // GB1: sot ÷
+            Some(prev) => {
+                let decision = decide_break(prev, ch, gbp(prev as u32), gbp(ch as u32), &self.state);
+                if decision {
+                    self.state = ClusterState::default();
+                }
+                decision
+            }
+        };
+        update_state_with(ch, gbp(ch as u32), &mut self.state);
+        self.prev = Some(ch);
+        break_here
+    }
+}
+
+impl Default for GraphemeCursor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Iterator over UAX #29 extended grapheme cluster sub-strings.
 ///
 /// Each `next()` returns `Some(&str)` covering exactly one cluster,
@@ -415,6 +481,38 @@ mod tests {
         // Explicit jamo: L V T form one cluster.
         let s = "\u{1100}\u{1161}\u{11A8}";
         assert_eq!(collect(s), vec![s]);
+    }
+
+    #[test]
+    fn cursor_streams_match_iterator_segmentation() {
+        // Feed codepoints one-at-a-time through a GraphemeCursor and
+        // collect clusters; result must match the GraphemeIter output.
+        let cases: &[&str] = &[
+            "abc",
+            "a\r\nb",
+            "e\u{0301}",
+            "\u{26A0}\u{FE0F}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}",
+            "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}",
+            "\u{0915}\u{094D}\u{0915}",
+        ];
+        for s in cases {
+            let expected: Vec<&str> = graphemes(s).collect();
+            let mut cursor = GraphemeCursor::new();
+            let mut clusters: Vec<String> = Vec::new();
+            let mut current = String::new();
+            for ch in s.chars() {
+                if cursor.step(ch) && !current.is_empty() {
+                    clusters.push(std::mem::take(&mut current));
+                }
+                current.push(ch);
+            }
+            if !current.is_empty() {
+                clusters.push(current);
+            }
+            let actual: Vec<&str> = clusters.iter().map(String::as_str).collect();
+            assert_eq!(actual, expected, "input={:?}", s);
+        }
     }
 
     #[test]

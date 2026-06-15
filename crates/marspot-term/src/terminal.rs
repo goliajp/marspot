@@ -12,7 +12,7 @@
 //!
 //! Phase 1.1.3+ will layer in erase, SGR attributes, scrolling, and more.
 
-use crate::grid::{char_width, Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
+use crate::grid::{Cell, CellAttrs, Color, Grid, DEFAULT_SCROLLBACK_LINES};
 use crate::parser::{Parser, ParserCallbacks};
 use crate::scrollback::Scrollback;
 use std::collections::VecDeque;
@@ -126,6 +126,24 @@ pub struct Terminal {
     /// rolls back the whole queue (restores cells + cursor in reverse
     /// order) and falls through to the parser.
     predictions: VecDeque<Prediction>,
+    /// In-progress grapheme cluster (UAX #29).  The VT/xterm parser
+    /// emits one codepoint at a time, but a "character the user sees"
+    /// can span several — `é = e + ́`, `⚠️ = ⚠ + VS16`, `👨‍👩‍👧‍👦 = 4×
+    /// emoji + 3× ZWJ`, `🇯🇵 = 2× RI`, `क्क = क + virama + क`.  The
+    /// cluster_buf accumulates codepoints until the segmenter
+    /// (`grapheme_cursor`) reports a boundary; on boundary or any
+    /// non-print operation we compute cluster_width on the WHOLE
+    /// buffered string and commit a single cell (with the cluster's
+    /// base codepoint) at that width.  This is what makes ⭐ ✅ ❌
+    /// land in 2 cells (their cluster_width is 2) instead of being
+    /// half-clipped in a 1-cell slot.
+    ///
+    /// Phase 1 limitation (2026-06-15): only the cluster's base
+    /// codepoint is stored in the cell — combining-mark glyphs and
+    /// full compound-emoji glyphs are deferred to the cluster-pool
+    /// + renderer-shaping work tracked under task #5.
+    cluster_buf: String,
+    grapheme_cursor: crate::grapheme::GraphemeCursor,
     /// Diagnostics — predictions confirmed by an echo byte.
     pub predictions_hit: u64,
     /// Diagnostics — predictions rolled back on mismatch (or alt-screen
@@ -184,6 +202,8 @@ impl Terminal {
             cursor_visible: true,
             pending_wrap: false,
             predictions: VecDeque::new(),
+            cluster_buf: String::new(),
+            grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             predictions_hit: 0,
             predictions_miss: 0,
         }
@@ -346,6 +366,8 @@ impl Terminal {
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let cursor_visible = &mut self.cursor_visible;
             let pending_wrap = &mut self.pending_wrap;
+            let cluster_buf = &mut self.cluster_buf;
+            let grapheme_cursor = &mut self.grapheme_cursor;
             let mut handler = Handler {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
@@ -354,6 +376,8 @@ impl Terminal {
                 bracketed_paste,
                 cursor_visible,
                 pending_wrap,
+                cluster_buf,
+                grapheme_cursor,
             };
             parser.advance(&mut handler, bytes[i]);
             i += 1;
@@ -366,6 +390,43 @@ impl Terminal {
                 self.predictions.clear();
                 self.predictions_miss += n as u64;
             }
+        }
+        // End-of-feed flush: a trailing print(ch) leaves the cluster
+        // in the buffer pending the next codepoint's break decision.
+        // For interactive terminals each PTY write is its own feed
+        // and the user expects the keystroke to land NOW, not on the
+        // next read.  We don't reset the segmenter — a cluster split
+        // across feed boundaries (rare; would need a partial UTF-8
+        // run) still resolves via the segmenter's saved prev-state.
+        //
+        // Build a one-off handler so the flush method can do its work
+        // through the same borrows as the per-byte handler.
+        if !self.cluster_buf.is_empty() {
+            let grid = &mut self.grid;
+            let saved_main = &mut self.saved_main;
+            let attrs = &mut self.attrs;
+            let saved_cursor = &mut self.saved_cursor;
+            let scroll_top = &mut self.scroll_top;
+            let scroll_bot = &mut self.scroll_bot;
+            let pending_response = &mut self.pending_response;
+            let cursor_key_app_mode = &mut self.cursor_key_application_mode;
+            let bracketed_paste = &mut self.bracketed_paste_mode;
+            let cursor_visible = &mut self.cursor_visible;
+            let pending_wrap = &mut self.pending_wrap;
+            let cluster_buf = &mut self.cluster_buf;
+            let grapheme_cursor = &mut self.grapheme_cursor;
+            let mut handler = Handler {
+                grid, saved_main, attrs, saved_cursor,
+                scroll_top, scroll_bot,
+                pending_response,
+                cursor_key_app_mode,
+                bracketed_paste,
+                cursor_visible,
+                pending_wrap,
+                cluster_buf,
+                grapheme_cursor,
+            };
+            handler.flush_cluster_keep_cursor();
         }
     }
 }
@@ -382,9 +443,118 @@ struct Handler<'a> {
     bracketed_paste: &'a mut bool,
     cursor_visible: &'a mut bool,
     pending_wrap: &'a mut bool,
+    cluster_buf: &'a mut String,
+    grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
 }
 
 impl<'a> Handler<'a> {
+    /// Commit the buffered grapheme cluster to the grid: compute its
+    /// width over the WHOLE buffered string (so VS16, ZWJ glue, RI
+    /// pairs, and combining marks all factor in), write the cluster's
+    /// base codepoint to the cell at the cursor with that width, and
+    /// clear the buffer.  Does NOT touch the segmenter state — call
+    /// after a `step` returned `true` and you've already seeded the
+    /// state with the next cluster's first codepoint.
+    ///
+    /// Phase 1 limitation: only the base codepoint is committed to
+    /// the cell.  Full-cluster glyph rendering (compound emoji,
+    /// combining marks) lands when we move cluster storage into a
+    /// Grid-side pool (task #5 follow-up).
+    fn flush_cluster_keep_cursor(&mut self) {
+        if self.cluster_buf.is_empty() {
+            return;
+        }
+        let w = crate::grapheme::cluster_width(self.cluster_buf);
+        let base = self
+            .cluster_buf
+            .chars()
+            .next()
+            .expect("non-empty buffer");
+        self.cluster_buf.clear();
+        if w > 0 {
+            self.write_glyph(base, w);
+        }
+    }
+
+    /// Same as [`flush_cluster_keep_cursor`] but also resets the
+    /// segmenter — the next codepoint will be treated as a fresh
+    /// cluster start.  Use at every non-print event (control byte,
+    /// escape sequence, end-of-feed) so a cursor move or CSI doesn't
+    /// fuse two visually distinct clusters across the operation.
+    fn flush_cluster_for_break(&mut self) {
+        self.flush_cluster_keep_cursor();
+        self.grapheme_cursor.reset();
+    }
+
+    /// Commit one already-segmented glyph (codepoint + cell width) to
+    /// the grid at the cursor, handling the DECAWM deferred-wrap and
+    /// wide-char wrap edge cases.  Body extracted from the old
+    /// per-codepoint `print` so the cluster flush path and any future
+    /// non-parser writer can share the same cursor-advance logic.
+    fn write_glyph(&mut self, ch: char, w: u8) {
+        // DECAWM deferred wrap: the previous glyph landed in the last
+        // column and set `pending_wrap`. The wrap was deliberately
+        // deferred so that a trailing `\r\n` (or any cursor move)
+        // wouldn't compound with the wrap into a two-row advance —
+        // the classic "every row has a blank row after it" symptom
+        // when TUIs draw box borders flush against the right edge.
+        self.take_pending_wrap();
+
+        let cols = self.grid.cols();
+        let rows = self.grid.rows();
+        let (mut col, mut row) = self.grid.cursor();
+
+        // A wide glyph at the last column can't fit. Wrap first, then
+        // write at the start of the new row.
+        if w == 2 && col + 1 >= cols {
+            // The abandoned last column gets a NUL pad sentinel (when
+            // it isn't carrying real content) so resize reflow knows
+            // it's wide-wrap padding, not a space the user typed.
+            if self.grid.cell(cols - 1, row) == Cell::default() {
+                self.grid.set_cell(
+                    cols - 1,
+                    row,
+                    Cell { ch: '\0', attrs: *self.attrs },
+                );
+            }
+            let bot = *self.scroll_bot;
+            if row == bot {
+                self.region_scroll_up(1);
+                self.grid.set_cursor(0, row);
+            } else if row + 1 < rows {
+                self.grid.set_cursor(0, row + 1);
+            } else {
+                self.grid.set_cursor(0, rows - 1);
+            }
+            let next = self.grid.cursor();
+            col = next.0;
+            row = next.1;
+            self.grid.set_row_wrapped(row, true);
+        }
+
+        // Lead cell carries the printable char.  For wide glyphs, the
+        // trail cell stores NUL with the same attrs — the renderer
+        // skips drawing its glyph (NUL is treated as blank), and the
+        // lead glyph extends visually across both cells via its natural
+        // advance width.
+        self.grid.set_cell(col, row, Cell { ch, attrs: *self.attrs });
+        if w == 2 {
+            self.grid.set_cell(col + 1, row, Cell { ch: '\0', attrs: *self.attrs });
+        }
+
+        let next_col = col + w as u16;
+        if next_col < cols {
+            self.grid.set_cursor(next_col, row);
+        } else {
+            // Hit the right edge — defer the wrap. Cursor visually
+            // stays at the last column; the next write will consume
+            // the flag and wrap, any non-print op clears it without
+            // advancing.
+            self.grid.set_cursor(cols - 1, row);
+            *self.pending_wrap = true;
+        }
+    }
+
     /// Scroll the grid up by 1 line, honouring DECSTBM. When the
     /// scroll region covers the whole grid (the default) this drops
     /// to `grid.scroll_up` which also pushes to scrollback —
@@ -501,76 +671,29 @@ impl<'a> Handler<'a> {
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        let w = char_width(ch);
-        if w == 0 {
-            // Zero-width / control marker — terminal already executes
-            // C0 controls separately.  Nothing to draw or advance.
-            return;
+        // UAX #29 cluster aware: the VT parser feeds us one codepoint
+        // at a time, but a single user-perceived "character" can span
+        // several (é = e + ́, ⚠️ = ⚠ + VS16, 👨‍👩‍👧‍👦 = 4 emoji + 3
+        // ZWJ, क्क = क + virama + क …).  We buffer codepoints, ask
+        // the segmenter whether a boundary falls before each one, and
+        // commit a single cluster to the grid when the next codepoint
+        // starts a new one.  This is what makes ⭐ ✅ ❌ land in 2
+        // cells (cluster_width=2) instead of being half-clipped in a
+        // 1-cell slot when the EAW table alone gave them 1.
+        if self.grapheme_cursor.step(ch) {
+            // step has already advanced cursor state to track `ch` as
+            // the first codepoint of a new cluster — flush_cluster
+            // therefore must NOT reset the cursor, or the run state
+            // would lose its head.
+            self.flush_cluster_keep_cursor();
         }
-        // DECAWM deferred wrap: the previous print landed in the last
-        // column and set `pending_wrap`. The wrap was deliberately
-        // deferred so that a trailing `\r\n` (or any cursor move)
-        // wouldn't compound with the wrap into a two-row advance —
-        // the classic "every row has a blank row after it" symptom
-        // when TUIs draw box borders flush against the right edge.
-        self.take_pending_wrap();
-
-        let cols = self.grid.cols();
-        let rows = self.grid.rows();
-        let (mut col, mut row) = self.grid.cursor();
-
-        // A wide char at the last column can't fit. Wrap first, then print
-        // at the start of the new row.
-        if w == 2 && col + 1 >= cols {
-            // The abandoned last column gets a NUL pad sentinel (when
-            // it isn't carrying real content) so resize reflow knows
-            // it's wide-wrap padding, not a space the user typed.
-            if self.grid.cell(cols - 1, row) == Cell::default() {
-                self.grid.set_cell(
-                    cols - 1,
-                    row,
-                    Cell { ch: '\0', attrs: *self.attrs },
-                );
-            }
-            let bot = *self.scroll_bot;
-            if row == bot {
-                self.region_scroll_up(1);
-                self.grid.set_cursor(0, row);
-            } else if row + 1 < rows {
-                self.grid.set_cursor(0, row + 1);
-            } else {
-                // Outside region, at last row — just cap to last row col 0.
-                self.grid.set_cursor(0, rows - 1);
-            }
-            let next = self.grid.cursor();
-            col = next.0;
-            row = next.1;
-            // Same continuation semantics as the deferred-wrap path.
-            self.grid.set_row_wrapped(row, true);
-        }
-
-        // Lead cell carries the printable char.  For wide chars, the trail
-        // cell stores NUL with the same attrs — the renderer skips drawing
-        // its glyph (NUL is treated as blank), and the lead glyph extends
-        // visually across both cells via its natural advance width.
-        self.grid.set_cell(col, row, Cell { ch, attrs: *self.attrs });
-        if w == 2 {
-            self.grid.set_cell(col + 1, row, Cell { ch: '\0', attrs: *self.attrs });
-        }
-
-        let next_col = col + w as u16;
-        if next_col < cols {
-            self.grid.set_cursor(next_col, row);
-        } else {
-            // Hit the right edge — defer the wrap. Cursor visually stays
-            // at the last column; the next print will consume the flag
-            // and wrap, any non-print op clears it without advancing.
-            self.grid.set_cursor(cols - 1, row);
-            *self.pending_wrap = true;
-        }
+        self.cluster_buf.push(ch);
     }
 
     fn execute(&mut self, byte: u8) {
+        // Any pending grapheme cluster ends here: a C0 control byte
+        // can never extend a cluster, so commit it now.
+        self.flush_cluster_for_break();
         // Trace C0 row-advancers (LF/CR/BS/Tab) so we can see how the
         // app actually moves between rows — `CSI 1 B` shows up in the
         // CSI trace but plain `\n` / `\r` only show here.
@@ -618,6 +741,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], byte: u8) {
+        self.flush_cluster_for_break();
         trace_seq("ESC", intermediates, &[], byte);
         *self.pending_wrap = false;
         match byte {
@@ -647,6 +771,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn csi_dispatch(&mut self, params: &[u16], intermediates: &[u8], byte: u8) {
+        self.flush_cluster_for_break();
         trace_seq("CSI", intermediates, params, byte);
         *self.pending_wrap = false;
         if intermediates == b"?" {
@@ -878,6 +1003,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
     }
 
     fn osc_dispatch(&mut self, _data: &[u8]) {
+        self.flush_cluster_for_break();
         // OSC handlers (window title, hyperlinks, palette) — later phase.
     }
 }
@@ -1858,6 +1984,8 @@ mod tests {
             cursor_visible: true,
             pending_wrap: false,
             predictions: VecDeque::new(),
+            cluster_buf: String::new(),
+            grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             predictions_hit: 0,
             predictions_miss: 0,
         };
