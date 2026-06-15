@@ -1534,49 +1534,35 @@ mod tests {
 
     #[test]
     fn el_when_cursor_on_wide_trail_clears_lead() {
-        // 2026-06-15 "横线残留" repro.  Wide glyph at col 0-1 (★ as
-        // lead, '\0' trail).  Then CUP positions cursor onto col 1
-        // (the trail slot) — this happens whenever an app's
-        // wcwidth (claudecode's `string-width` default Ambiguous=
-        // Narrow) disagrees with marspot's Ambiguous=Wide:
-        // claudecode aims at "col 1" thinking the star is 1 cell,
-        // but the cursor lands inside the wide pair.  EL mode=0
-        // then fills [1..10) — without boundary repair the lead at
-        // col 0 stays as ★, rendering as a wide glyph spilling into
-        // the now-blank trail.  Boundary repair pulls start back
-        // to col 0 so the lead is wiped too.
+        // 2026-06-15 "横线残留" repro.  Wide glyph at col 0-1 (中
+        // as lead, '\0' trail — guaranteed wide via the EAW table,
+        // independent of MARSPOT_AMBIGUOUS_WIDE).  CUP then
+        // positions cursor onto col 1 (the trail slot) — happens
+        // when an app's wcwidth disagrees with marspot's stored
+        // width for that codepoint.  EL mode=0 then fills [1..10)
+        // — without boundary repair the lead at col 0 stays intact,
+        // rendering as a wide glyph spilling into the now-blank
+        // trail.  Boundary repair pulls start back to col 0.
         let mut t = Terminal::new(10, 3);
-        t.feed("★".as_bytes());
-        // CUP row=1, col=2 (1-indexed) → cursor lands at col 1, on
-        // the trail slot.
+        t.feed("中".as_bytes());
         t.feed(b"\x1b[1;2H");
         assert_eq!(t.grid().cursor(), (1, 0));
-        // EL mode 0 — from cursor to end of line.
         t.feed(b"\x1b[K");
-        // After fix: lead AND trail both blanked.
         assert_eq!(t.grid().cell(0, 0).ch, ' ', "wide-lead orphan not cleared");
         assert_eq!(t.grid().cell(1, 0).ch, ' ', "wide-trail not cleared");
     }
 
     #[test]
     fn ed_partial_into_wide_lead_clears_trail() {
-        // Mirror case for the right edge of fill_range.  Place a
-        // wide glyph at col 4-5, cursor at col 6.  Then erase from
-        // BEGIN of line to col 4 inclusive — without repair the trail
-        // at col 5 would be left as a stale '\0' sentinel orphaned
-        // from its now-blank lead.
+        // Mirror case for the right edge of fill_range.  Wide glyph
+        // at col 4-5 (中 — unconditionally wide), cursor at col 6.
+        // CUP to col 4 then EL mode=1 (erase from begin to cursor
+        // inclusive).  Cursor cell is the wide LEAD at col 4.
         let mut t = Terminal::new(10, 3);
-        // Drop a star at col 4 (preceded by 4 spaces).
         t.feed(b"    ");
-        t.feed("★".as_bytes());
-        // Cursor now at col 6.  Position cursor at col 4 (1-indexed
-        // = col 5 in CUP) and EL mode=1 (erase from begin to cursor
-        // INCLUSIVE).  Cursor cell is the wide LEAD at col 4.
+        t.feed("中".as_bytes());
         t.feed(b"\x1b[1;5H");
         t.feed(b"\x1b[1K");
-        // After fix: lead AT cursor was wiped; orphan trail at col 5
-        // is also wiped (else \0 sentinel would visually survive as
-        // a stale wide-glyph half).
         assert_eq!(t.grid().cell(4, 0).ch, ' ', "wide-lead under cursor not cleared");
         assert_eq!(t.grid().cell(5, 0).ch, ' ', "wide-trail orphan not cleared");
     }

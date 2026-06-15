@@ -85,6 +85,27 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 ///   requires the parser to look ahead one codepoint and adjust width
 ///   on-the-fly — separate from per-char width.
 /// - ZWJ sequences, regional indicators (flag pairs), modifier bases.
+/// Whether East-Asian Ambiguous codepoints should be rendered at
+/// width 2.  Off by default — every TUI app's wcwidth (zsh, less,
+/// claudecode's Node `string-width`, Python's `wcwidth`) treats
+/// Ambiguous as narrow, so making marspot Wide creates a cumulative
+/// CUP offset and the screen falls out of sync after a handful of
+/// edits.  Turn it on with `MARSPOT_AMBIGUOUS_WIDE=1` if you want
+/// the larger circled-digit / star / triangle glyphs and accept the
+/// drift trade-off in apps that don't agree.
+///
+/// One-shot OnceLock load: per-process env var read at first call,
+/// then a single relaxed-bool branch on the hot path.
+fn ambiguous_wide_enabled() -> bool {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("MARSPOT_AMBIGUOUS_WIDE")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 pub fn char_width(ch: char) -> u8 {
     let cp = ch as u32;
     if cp == 0 {
@@ -179,7 +200,7 @@ pub fn char_width(ch: char) -> u8 {
         | 0x1F19B..=0x1F1AC
     );
     if east_asian_wide
-        || east_asian_ambiguous
+        || (east_asian_ambiguous && ambiguous_wide_enabled())
         || crate::emoji_presentation::has_emoji_presentation(cp)
     {
         2
@@ -193,35 +214,41 @@ mod char_width_tests {
     use super::char_width;
 
     #[test]
-    fn circled_digits_are_wide() {
+    fn circled_digits_default_narrow() {
         // U+2460..U+2473 = ① ② ③ … ⑳ (Enclosed Alphanumerics).
-        // Default per UAX #11 is Ambiguous; marspot is CJK-first so
-        // they render at width 2.
-        assert_eq!(char_width('①'), 2);
-        assert_eq!(char_width('②'), 2);
-        assert_eq!(char_width('⑳'), 2);
+        // EAW=A per UAX #11 — narrow by default because every TUI
+        // app's wcwidth treats Ambiguous as narrow.  Opt in to Wide
+        // with MARSPOT_AMBIGUOUS_WIDE=1 (one-shot OnceLock — can't
+        // exercise here without process isolation).
+        assert_eq!(char_width('①'), 1);
+        assert_eq!(char_width('②'), 1);
+        assert_eq!(char_width('⑳'), 1);
     }
 
     #[test]
-    fn circled_letters_are_wide() {
-        assert_eq!(char_width('Ⓐ'), 2); // U+24B6
-        assert_eq!(char_width('ⓐ'), 2); // U+24D0
+    fn circled_letters_default_narrow() {
+        assert_eq!(char_width('Ⓐ'), 1); // U+24B6
+        assert_eq!(char_width('ⓐ'), 1); // U+24D0
     }
 
     #[test]
-    fn geometric_shapes_misc_are_wide() {
-        // ★ ☆ ● ▲ ▼ — common iTerm2/zsh prompt glyphs that look
-        // squashed at width 1 in a CJK font.
-        assert_eq!(char_width('★'), 2); // U+2605
-        assert_eq!(char_width('☆'), 2); // U+2606
-        assert_eq!(char_width('●'), 2); // U+25CF
-        assert_eq!(char_width('▲'), 2); // U+25B2
-        assert_eq!(char_width('▼'), 2); // U+25BC
+    fn geometric_shapes_misc_default_narrow() {
+        // ★ ☆ ● ▲ ▼ — Ambiguous, narrow by default.  Same trade-off
+        // as the circled digits: smaller glyph, but no CUP drift
+        // against every other app's wcwidth.
+        assert_eq!(char_width('★'), 1); // U+2605
+        assert_eq!(char_width('☆'), 1); // U+2606
+        assert_eq!(char_width('●'), 1); // U+25CF
+        assert_eq!(char_width('▲'), 1); // U+25B2
+        assert_eq!(char_width('▼'), 1); // U+25BC
     }
 
     #[test]
-    fn enclosed_cjk_letters_and_months_are_wide() {
-        // U+3248..U+324F — squared month / enclosed-letter range.
+    fn enclosed_cjk_letters_and_months_stay_wide() {
+        // U+3248..U+324F is inside the East Asian Wide range
+        // 0x3041..=0x33FF — the unconditional Wide check fires
+        // before the Ambiguous opt-in, so this stays width 2
+        // regardless of MARSPOT_AMBIGUOUS_WIDE.
         assert_eq!(char_width('㉈'), 2);
     }
 
