@@ -89,14 +89,6 @@ impl ClaudecodePlugin {
     }
 }
 
-/// Short form of a UUID sessionId for the title-strip badge: first 8
-/// characters (the hex segment before the first dash).  Long enough
-/// to disambiguate adjacent panes, short enough to fit beside the
-/// existing title text.
-fn short_sid(sid: &str) -> &str {
-    sid.split('-').next().unwrap_or(sid)
-}
-
 /// Encode a filesystem path into claude's project directory naming
 /// convention (`/Users/foo/bar` → `-Users-foo-bar`).
 fn encode_project_dir(cwd: &std::path::Path) -> String {
@@ -391,9 +383,14 @@ impl Plugin for ClaudecodePlugin {
         // only push leaves the freshly-spawned core with no badges
         // until something changes.  Per tick ≤ 9 small frames = a few
         // hundred bytes; cheap compared to staying out-of-sync.
+        //
+        // Badge text is the full UUID — same string the claudecode
+        // `/resume` picker shows, so the user can map a pane to a
+        // resume entry by eye.  Badge is its own variable (NOT a
+        // suffix of `title`): L2 stores them separately, render
+        // strip draws them as independent items on the same row.
         for (sh_sid, cc_sid) in &new_mapping {
-            let badge = format!("cc:{}", short_sid(cc_sid));
-            if let Err(e) = host.set_pane_badge(*sh_sid, &badge) {
+            if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
                 host.log(
                     LogLevel::Warn,
                     "pane_badge.set_failed",
