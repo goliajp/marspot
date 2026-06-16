@@ -32,7 +32,6 @@ use crate::shell_proto::{
     encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_key_event,
     encode_paste, event_to_wire, Frame, MsgType,
 };
-use crate::shelld_client::{SessionState as ShelldState, ShelldSession};
 use crate::terminal::Terminal;
 
 /// One pane's backend: a locally forked PTY (the legacy / mcli /
@@ -42,7 +41,6 @@ use crate::terminal::Terminal;
 /// (session id, reattach) come into play.
 pub enum PaneBackend {
     Local(Session),
-    Shelld(ShelldSession),
     /// A per-session L3 process (`marspot-session`, target #4) that owns
     /// the PTY parser/terminal in its own address space and publishes
     /// its visible grid into shared memory.  This process (L2) holds only
@@ -62,7 +60,6 @@ impl PaneBackend {
     pub fn terminal(&self) -> &Terminal {
         match self {
             PaneBackend::Local(s) => s.terminal(),
-            PaneBackend::Shelld(s) => s.terminal(),
             PaneBackend::L3(_) => unreachable!("L3 pane has no in-process Terminal"),
         }
     }
@@ -70,7 +67,6 @@ impl PaneBackend {
     pub fn terminal_mut(&mut self) -> &mut Terminal {
         match self {
             PaneBackend::Local(s) => &mut s.terminal,
-            PaneBackend::Shelld(s) => &mut s.terminal,
             PaneBackend::L3(_) => unreachable!("L3 pane has no in-process Terminal"),
         }
     }
@@ -80,7 +76,6 @@ impl PaneBackend {
     pub fn grid(&self) -> &Grid {
         match self {
             PaneBackend::Local(s) => s.terminal().grid(),
-            PaneBackend::Shelld(s) => s.terminal().grid(),
             PaneBackend::L3(c) => &c.grid,
         }
     }
@@ -96,7 +91,6 @@ impl PaneBackend {
     pub fn shelld_session_id(&self) -> Option<u64> {
         match self {
             PaneBackend::Local(_) => None,
-            PaneBackend::Shelld(s) => Some(s.id()),
             PaneBackend::L3(c) => Some(c.shelld_session_id()),
         }
     }
@@ -104,7 +98,6 @@ impl PaneBackend {
     pub fn cursor_visible(&self) -> bool {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_visible(),
-            PaneBackend::Shelld(s) => s.terminal().cursor_visible(),
             PaneBackend::L3(c) => c.cursor_visible,
         }
     }
@@ -112,7 +105,6 @@ impl PaneBackend {
     pub fn cursor_key_application_mode(&self) -> bool {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_key_application_mode(),
-            PaneBackend::Shelld(s) => s.terminal().cursor_key_application_mode(),
             PaneBackend::L3(c) => c.app_cursor_keys,
         }
     }
@@ -120,7 +112,6 @@ impl PaneBackend {
     pub fn bracketed_paste_mode(&self) -> bool {
         match self {
             PaneBackend::Local(s) => s.terminal().bracketed_paste_mode(),
-            PaneBackend::Shelld(s) => s.terminal().bracketed_paste_mode(),
             PaneBackend::L3(c) => c.bracketed_paste,
         }
     }
@@ -210,7 +201,6 @@ impl PaneBackend {
     pub fn pump(&mut self) -> usize {
         match self {
             PaneBackend::Local(s) => s.pump(),
-            PaneBackend::Shelld(s) => s.pump(),
             // For L3 there are no PTY bytes here — "pump" means re-read
             // the shm mirror.  Return 1 on a fresh frame so the container
             // requests a redraw, 0 when nothing changed (so the 1 s
@@ -222,7 +212,6 @@ impl PaneBackend {
     pub fn is_exited(&self) -> bool {
         match self {
             PaneBackend::Local(s) => s.is_exited(),
-            PaneBackend::Shelld(s) => s.is_exited(),
             PaneBackend::L3(c) => c.is_exited(),
         }
     }
@@ -230,7 +219,6 @@ impl PaneBackend {
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         match self {
             PaneBackend::Local(s) => s.write(bytes),
-            PaneBackend::Shelld(s) => s.write(bytes),
             // L3 input is forwarded as key events, not raw bytes; the
             // session process owns its own PTY write + response path.
             PaneBackend::L3(_) => Ok(0),
@@ -240,9 +228,6 @@ impl PaneBackend {
     pub fn resize(&mut self, cols: u16, rows: u16) {
         match self {
             PaneBackend::Local(s) => s.resize(cols, rows),
-            PaneBackend::Shelld(s) => {
-                let _ = s.resize(cols, rows);
-            }
             // Forward the cell-grid resize to the session process; it
             // resizes its Terminal + PTY + reflows and republishes at the
             // new dims, which the mirror picks up on the next `poll`.
@@ -253,11 +238,6 @@ impl PaneBackend {
     pub fn state(&self) -> SessionState {
         match self {
             PaneBackend::Local(s) => s.state(),
-            PaneBackend::Shelld(s) => match s.state() {
-                ShelldState::Active => SessionState::Active,
-                ShelldState::Idle => SessionState::Idle,
-                ShelldState::Exited => SessionState::Exited,
-            },
             PaneBackend::L3(c) => {
                 if c.is_exited() {
                     SessionState::Exited
@@ -277,10 +257,7 @@ impl PaneBackend {
     pub fn feed_terminal(&mut self, bytes: &[u8]) {
         match self {
             PaneBackend::Local(s) => s.feed_terminal(bytes),
-            PaneBackend::Shelld(_) | PaneBackend::L3(_) => {
-                // Phase 4: tmux-CC mode still runs through a local
-                // Session; shelld / L3 panes ignore this entry point.
-            }
+            PaneBackend::L3(_) => {}
         }
     }
 
@@ -290,7 +267,7 @@ impl PaneBackend {
     pub fn drain_raw(&mut self) -> Vec<u8> {
         match self {
             PaneBackend::Local(s) => s.drain_raw(),
-            PaneBackend::Shelld(_) | PaneBackend::L3(_) => Vec::new(),
+            PaneBackend::L3(_) => Vec::new(),
         }
     }
 }
@@ -772,17 +749,6 @@ impl Pane {
     pub fn new(session: Session) -> Self {
         Self {
             session: PaneBackend::Local(session),
-            view_offset: 0,
-            last_seen_scroll_push: 0,
-            update_pending: false,
-        }
-    }
-
-    /// Wrap a shelld-managed session.  marspot's main path uses
-    /// this so an in-process update doesn't take the shell with it.
-    pub fn new_shelld(session: ShelldSession) -> Self {
-        Self {
-            session: PaneBackend::Shelld(session),
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
