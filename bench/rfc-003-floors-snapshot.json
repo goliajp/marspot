@@ -1,0 +1,161 @@
+{
+  "_comment": [
+    "Baseline numbers for bin/bench.sh.  Each scenario gets two floors",
+    "(mars_parse_MBps and mars_live_MBps) plus a vs-best-other ratio.",
+    "If a current measurement falls below the floor, the gate fails.",
+    "Tolerances bake observed run-to-run noise (~5-8% headless, ~10% live)",
+    "into the floor so the gate doesn't flap on identical code.",
+    "",
+    "Re-baseline: run `bin/bench.sh --update-baseline` after a change",
+    "you actually want to lock in.  Re-run cross-terminal numbers via",
+    "`bin/measure-other.sh` (now 3-trial median per E5) if the iTerm2 /",
+    "Warp comparison drifts.",
+    "",
+    "F gate-lock 2026-05-05 (perf-attack F): clean-machine numbers from",
+    "bench-run + measure-other (3-trial), \u00d7 0.93 (parse) / 0.90 (live,",
+    "ratios) safety margin.  Earlier same-day floors were over-loose due",
+    "to godot CPU contention skewing measurements ~30% slower than truth.",
+    "These are the *minimum* marspot must hold while A/B/C/D attack work is",
+    "ongoing; targets to break above live in docs/perf-attack/."
+  ],
+  "scenarios": [
+    {
+      "id": "cat-ascii",
+      "bytes": 33554570,
+      "mars_parse_MBps_min": 165,
+      "mars_live_MBps_min": 137,
+      "mars_vs_best_other_min": 1.37
+    },
+    {
+      "id": "cat-mixed",
+      "bytes": 16777256,
+      "mars_parse_MBps_min": 163,
+      "mars_live_MBps_min": 131,
+      "mars_vs_best_other_min": 1.39
+    },
+    {
+      "id": "cat-cjk",
+      "bytes": 8388690,
+      "mars_parse_MBps_min": 199,
+      "mars_live_MBps_min": 144,
+      "mars_vs_best_other_min": 1.08
+    },
+    {
+      "id": "cat-emoji",
+      "bytes": 8388720,
+      "mars_parse_MBps_min": 185,
+      "mars_live_MBps_min": 144,
+      "mars_vs_best_other_min": 1.26
+    }
+  ],
+  "render_full_repaint": {
+    "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs \u2014 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
+    "p99_us_max": 1197
+  },
+  "scroll_repaint": {
+    "_comment": "p99 ns/repaint while walking view_offset from 5000 \u2192 0 in 3-line steps over 100K-line scroll-history.bin (--bench scroll).  Picks up MARS_DISK_SCROLLBACK so the gate tracks whichever variant is current default.  Median of 5 trials with run-to-run noise ~30 % (scroll p99 hovers in the low-microsecond regime where one fault or cache eviction skews the result).  --update-baseline applies the default 10 % margin which is too tight for this metric; manually widen to ~2x current median so the gate doesn't flap.",
+    "p99_us_max": 3
+  },
+  "scroll_cold_repaint": {
+    "_comment": "Sister gate to scroll_repaint, forced to disk-backed (MARS_DISK_SCROLLBACK=1) and with pages evicted via madvise(DONTNEED) before the walk.  Catches disk-path regressions that the default-env scroll bench misses when memory is the default.  Cold-cache p99 measured ~3-5 \u00b5s; same 30 % run-to-run noise as the warm gate, manually widened to ~2x current median.",
+    "p99_us_max": 4
+  },
+  "binary_size_bytes_max": {
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).  NB: measure on the canonical bench host (idle mini) — a dev box with a different toolchain can report a fatter mcli (~557 KiB) that is a local artefact, not real growth; on the mini mcli stays ~442 KiB even after the target #4 marspot-term split (lto strips the unused engine paths).",
+    "mcli": 485830,
+    "marspot": 778008
+  },
+  "memory_idle_kb_max": {
+    "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
+    "mcli": 99130,
+    "marspot": 95712
+  },
+  "competitors_snapshot": {
+    "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).",
+    "captured_at": "2026-06-07",
+    "host": {
+      "name": "mini",
+      "arch": "arm64 (Darwin 25.5.0)",
+      "os": "macOS 26.5.1 (build 25F80)"
+    },
+    "iterm2": {
+      "version": "3.6.11",
+      "bundle_id": "com.googlecode.iterm2",
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 78.0,
+      "cat-mixed_MBps": 27.1,
+      "cat-cjk_MBps": 6.2,
+      "cat-emoji_MBps": 2.7
+    },
+    "warp": {
+      "version": "0.2026.06.03.09.49.01",
+      "bundle_id": "dev.warp.Warp-Stable",
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 46.4,
+      "cat-mixed_MBps": 40.0,
+      "cat-cjk_MBps": 53.3,
+      "cat-emoji_MBps": 47.1
+    },
+    "ghostty": {
+      "version": "1.3.1 (build 15212)",
+      "bundle_id": "com.mitchellh.ghostty",
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 100.0,
+      "cat-mixed_MBps": 94.1,
+      "cat-cjk_MBps": 133.3,
+      "cat-emoji_MBps": 114.3
+    },
+    "terminal": {
+      "version": "2.15 (build 470.2)",
+      "bundle_id": "com.apple.Terminal",
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 65.3,
+      "cat-mixed_MBps": 51.6,
+      "cat-cjk_MBps": 57.1,
+      "cat-emoji_MBps": 66.7
+    },
+    "marspot": {
+      "bundle_id": "com.goliajp.marspot",
+      "captured_at": "2026-06-07",
+      "method": "console / Screen Sharing",
+      "cat-ascii_MBps": 152.4,
+      "cat-mixed_MBps": 145.5,
+      "cat-cjk_MBps": 160.0,
+      "cat-emoji_MBps": 160.0
+    }
+  },
+  "multi_session_thresholds": {
+    "_comment": [
+      "Floors for the bench-run.sh scenarios (cat-mixed.9x = multi-session-9x,",
+      "scrollback-1m).  Read from bench/results/cross-terminal.json (latest",
+      "bench-run.sh snapshot).  Two checks per scenario: marspot's own absolute",
+      "throughput floor, and the marspot-vs-best-other ratio floor.  The ratio",
+      "floor is the structural protection \u2014 without it, marspot and competitors",
+      "can both slow down and the gate stays green even though our relative",
+      "advantage shrunk.",
+      "",
+      "Locked 2026-05-05 against c43d26b (clean-machine, post-godot-cleanup):",
+      "  multi-session-9x: marspot 104.6 / iterm 18.2 / terminal 60.1 MiB/s",
+      "  scrollback-1m:    marspot 97.7  / iterm 71.8 / terminal 91.6 MiB/s",
+      "10% safety margin.  Re-lock via `bin/bench.sh --full --update-baseline`",
+      "after re-running `bin/bench-run.sh` \u22653\u00d7 to populate snapshots."
+    ],
+    "snapshot_max_age_hours": 168,
+    "scenarios": {
+      "cat-mixed.9x": {
+        "metric": "aggregate_throughput_MBps",
+        "mars_throughput_min": 94,
+        "mars_vs_best_other_min": 1.57
+      },
+      "scrollback-1m": {
+        "metric": "push_throughput_MBps",
+        "mars_throughput_min": 88,
+        "mars_vs_best_other_min": 0.96
+      }
+    }
+  }
+}

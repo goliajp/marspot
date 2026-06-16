@@ -1,0 +1,79 @@
+{
+  "_comment": [
+    "RFC-003 baseline snapshot \u2014 current marspot perf BEFORE the L3-owns-PTY",
+    "migration begins. This is the IMMUTABLE reference Phase 5 (mid) and",
+    "Phase 7 (final) bench gates diff against. Not used as a floor; used as",
+    "an A/B comparator.",
+    "",
+    "Captured on the dev box (NOT ssh mini). bench/baseline.json's floors are",
+    "calibrated for ssh mini's clean-machine numbers, so a parallel dev-box",
+    "run against those floors always fails (per perf-attack F gate-lock 2026-",
+    "05-05 calibration). For RFC-003 we care about same-machine deltas, not",
+    "the absolute floor pass/fail.",
+    "",
+    "captured_at_unix: SECONDS_SINCE_EPOCH (filled at capture time, then",
+    "frozen; do not edit).",
+    "",
+    "git_head: HEAD commit at capture (frozen)."
+  ],
+  "captured_at_unix": 1781616382,
+  "captured_at_iso": "2026-06-16T13:26:22Z",
+  "git_head": "eaa6de2dd66f4162e42c63a4de2590f117faa55f",
+  "host": "studio.local",
+  "machine": "dev-box (NOT ssh mini)",
+  "headless_parse_MBps": {
+    "_comment": "Median of 5 trials. dev-box numbers reflect contention; same-machine delta is what matters.",
+    "cat-ascii": 29.3,
+    "cat-mixed": 30.4,
+    "cat-cjk": 44.3,
+    "cat-emoji": 27.4
+  },
+  "live_pty_MBps_via_snapshot": {
+    "_comment": "From competitors_snapshot.marspot (`time cat` absorption). Already cached in baseline.json; recorded here for completeness.",
+    "cat-ascii": 152.4,
+    "cat-mixed": 145.5,
+    "cat-cjk": 160.0,
+    "cat-emoji": 160.0
+  },
+  "l3_parse_MBps": {
+    "_comment": "Informational L3 parse rate via measure-l3.sh. Not in the gate but a useful internal signal.",
+    "cat-ascii": 96,
+    "cat-mixed": 84,
+    "cat-cjk": 106,
+    "cat-emoji": 101
+  },
+  "render_p99_us": 641,
+  "scroll_p99_us": 3.1,
+  "scroll_cold_p99_us": 6.1,
+  "binary_size_bytes": {
+    "marspot": 1135184,
+    "mcli": 828208
+  },
+  "idle_rss_KiB": {
+    "_comment": "Median of 3 fresh-process spawns, 1.5s settle.",
+    "marspot": 99232,
+    "mcli": 81232
+  },
+  "l3_drift_1800s": {
+    "_comment": "1800s sustained-load drift. RSS bounded; q4/q1 = 0.984 (\u22641.10 gate). PASS.",
+    "result": "PASS",
+    "duration_s": 1800,
+    "interval_s": 30,
+    "first_KiB": 44384,
+    "max_KiB": 44560,
+    "q1_avg_KiB": 44506,
+    "q4_avg_KiB": 43799,
+    "drift_ratio": 0.984,
+    "abs_growth_KiB": 176,
+    "log_file": "bench/rfc-003-baseline-drift.txt"
+  },
+  "l3_rss_scaling": {
+    "_comment": "Per-session idle L3 RSS at N=1 and N=9. PASS \u2014 well under 4096 KiB cap and 1.30\u00d7 linearity.",
+    "result": "PASS",
+    "N1_per_session_KiB": 2320,
+    "N9_total_KiB": 20432,
+    "N9_per_session_KiB": 2270,
+    "scaling_ratio": 0.978,
+    "log_file": "bench/rfc-003-baseline-rss-scaling.txt"
+  }
+}

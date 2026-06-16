@@ -1,0 +1,69 @@
+   Compiling marspot-term v0.2.12 (/Users/doracawl/workspace/goliajp/marspot/crates/marspot-term)
+   Compiling marspot-session v0.2.12 (/Users/doracawl/workspace/goliajp/marspot/crates/marspot-session)
+    Finished `release` profile [optimized] target(s) in 5.39s
+==> L3 sustained-load drift: 1800s (sample 30s)
+[drift] L3 pid=17171, flooding for 1800s (sample every 30s)
+[drift] t=  30s  rss=44384 KiB
+[drift] t=  60s  rss=44480 KiB
+[drift] t=  90s  rss=44496 KiB
+[drift] t= 120s  rss=44496 KiB
+[drift] t= 150s  rss=44496 KiB
+[drift] t= 180s  rss=44512 KiB
+[drift] t= 210s  rss=44512 KiB
+[drift] t= 240s  rss=44512 KiB
+[drift] t= 270s  rss=44528 KiB
+[drift] t= 300s  rss=44528 KiB
+[drift] t= 330s  rss=44528 KiB
+[drift] t= 360s  rss=44528 KiB
+[drift] t= 390s  rss=44528 KiB
+[drift] t= 420s  rss=44528 KiB
+[drift] t= 450s  rss=44528 KiB
+[drift] t= 480s  rss=44528 KiB
+[drift] t= 510s  rss=44528 KiB
+[drift] t= 540s  rss=44528 KiB
+[drift] t= 570s  rss=44544 KiB
+[drift] t= 600s  rss=44560 KiB
+[drift] t= 630s  rss=43760 KiB
+[drift] t= 660s  rss=43792 KiB
+[drift] t= 690s  rss=43776 KiB
+[drift] t= 720s  rss=43760 KiB
+[drift] t= 750s  rss=43824 KiB
+[drift] t= 780s  rss=43824 KiB
+[drift] t= 810s  rss=43776 KiB
+[drift] t= 840s  rss=43792 KiB
+[drift] t= 870s  rss=41888 KiB
+[drift] t= 900s  rss=43792 KiB
+[drift] t= 930s  rss=43760 KiB
+[drift] t= 960s  rss=43792 KiB
+[drift] t= 990s  rss=43792 KiB
+[drift] t=1020s  rss=43792 KiB
+[drift] t=1050s  rss=43792 KiB
+[drift] t=1080s  rss=43792 KiB
+[drift] t=1110s  rss=43792 KiB
+[drift] t=1140s  rss=43792 KiB
+[drift] t=1170s  rss=43792 KiB
+[drift] t=1200s  rss=43792 KiB
+[drift] t=1230s  rss=43792 KiB
+[drift] t=1260s  rss=43792 KiB
+[drift] t=1290s  rss=43792 KiB
+[drift] t=1320s  rss=43792 KiB
+[drift] t=1350s  rss=43792 KiB
+[drift] t=1380s  rss=43792 KiB
+[drift] t=1410s  rss=43792 KiB
+[drift] t=1440s  rss=43792 KiB
+[drift] t=1470s  rss=43792 KiB
+[drift] t=1500s  rss=43792 KiB
+[drift] t=1530s  rss=43792 KiB
+[drift] t=1560s  rss=43792 KiB
+[drift] t=1590s  rss=43792 KiB
+[drift] t=1620s  rss=43808 KiB
+[drift] t=1650s  rss=43808 KiB
+[drift] t=1680s  rss=43808 KiB
+[drift] t=1710s  rss=43808 KiB
+[drift] t=1740s  rss=43808 KiB
+[drift] t=1770s  rss=43808 KiB
+[drift] t=1800s  rss=43808 KiB
+[drift] q1=44506 q4=43799 drift=0.984 first=44384 max=44560 abs_growth=176 KiB
+PASS: L3 RSS bounded under 1800s sustained output — drift 0.984 (≤1.1), abs growth 176 KiB (≤8192)
+PASS — L3 per-session engine holds the bounded-memory commitment under 1800s sustained load
+DRIFT_EXIT=0

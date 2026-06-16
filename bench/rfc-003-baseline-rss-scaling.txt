@@ -1,0 +1,8 @@
+   Compiling marspot-term v0.2.12 (/Users/doracawl/workspace/goliajp/marspot/crates/marspot-term)
+   Compiling marspot-session v0.2.12 (/Users/doracawl/workspace/goliajp/marspot/crates/marspot-session)
+    Finished `release` profile [optimized] target(s) in 14.40s
+==> per-session idle L3 RSS scaling (N=1, N=9)
+    N=1 per-session 2320 KiB
+    N=9 total 20432 KiB, per-session 2270 KiB
+PASS: per-session idle L3 RSS 2270 KiB ≤ 4096 KiB, linear (0.978× ≤ 1.30×), no orphans
+RSS_SCALING_EXIT=
