@@ -378,22 +378,17 @@ impl ClaudecodePlugin {
         }
     }
 
-    /// RFC-003 C7: drain raw PTY bytes for every active monitor, scan
-    /// for retryable error markers, and fire a `\r` back to claude
-    /// when one fires.  Throttled per session to avoid hot-looping on
-    /// a hard-blocking error.
+    /// RFC-003 C7 (observe-only): drain raw PTY bytes for every
+    /// active monitor and log any retryable error markers.  No
+    /// auto-action yet — user wants the wire proven without the
+    /// "press Enter for them" half landing as policy.  Action is
+    /// added later when there's a concrete decision to make per
+    /// `kind`; the throttle counter still ticks so we can see how
+    /// often patterns fire in practice.
     fn pump_monitors(&mut self, host: &dyn PluginHost) {
-        const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-        const MAX_RETRIES_PER_WINDOW: usize = 3;
-        /// Settle delay between detecting an error and pressing Enter
-        /// — claude usually finishes printing the error context (a few
-        /// lines) over ~200 ms, and a too-eager retry can race with
-        /// that final flush.
-        const RETRY_SETTLE: std::time::Duration =
-            std::time::Duration::from_millis(400);
+        const MATCH_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
         const MAX_LINE_BUF: usize = 16 * 1024;
 
-        let Some(client) = self.shelld.as_ref().cloned() else { return };
         let now = std::time::Instant::now();
         for (sid, mon) in self.monitors.iter_mut() {
             // Drain raw bytes; cheap when nothing new.
@@ -409,59 +404,23 @@ impl ClaudecodePlugin {
             }
             mon.line_buf.extend_from_slice(&pending);
             if mon.line_buf.len() > MAX_LINE_BUF {
-                // Trim the leading half; protects against a stream
-                // with no newlines or a marker that never resolves.
                 let keep = mon.line_buf.len() - MAX_LINE_BUF / 2;
                 mon.line_buf.drain(..keep);
             }
-            // Buffer-level scan: an error marker can straddle a
-            // newline because claude wraps long lines, so we look at
-            // the whole accumulated buffer.  On a match we clear
-            // the buffer to keep from firing again on the same
-            // marker next tick (the throttle below also caps).
-            let matched_kind = retryable_error_kind(&mon.line_buf);
-            let Some(kind) = matched_kind else { continue };
+            let Some(kind) = retryable_error_kind(&mon.line_buf) else { continue };
             mon.line_buf.clear();
-            // Throttle: evict old retries, count remaining, bail if
-            // we've already hit the cap for this window.
-            mon.retry_history.retain(|t| now.duration_since(*t) <= RETRY_WINDOW);
-            if mon.retry_history.len() >= MAX_RETRIES_PER_WINDOW {
-                host.log(
-                    LogLevel::Warn,
-                    "retry.throttled",
-                    &format!(
-                        "shelld_session={} kind={} cap_reached ({}/{}); skipping",
-                        sid,
-                        kind,
-                        mon.retry_history.len(),
-                        MAX_RETRIES_PER_WINDOW
-                    ),
-                );
-                continue;
-            }
-            // Fire-and-settle: log first, then sleep briefly so
-            // claude's error-context flush finishes, then \r.  The
-            // sleep is in the plugin tick which is policed by the
-            // host budget — small enough not to break it.
-            std::thread::sleep(RETRY_SETTLE);
-            if let Err(e) = client.send_input_to(*sid, b"\r") {
-                host.log(
-                    LogLevel::Warn,
-                    "retry.send_failed",
-                    &format!("shelld_session={} kind={} err={}", sid, kind, e),
-                );
-                continue;
-            }
+            // Update the rolling window so we can SEE rate even if
+            // we don't act on it.
+            mon.retry_history.retain(|t| now.duration_since(*t) <= MATCH_WINDOW);
             mon.retry_history.push(now);
             host.log(
                 LogLevel::Info,
-                "retry.sent",
+                "monitor.match",
                 &format!(
-                    "shelld_session={} kind={} retry={}/{}",
+                    "shelld_session={} kind={} count_in_window={}",
                     sid,
                     kind,
-                    mon.retry_history.len(),
-                    MAX_RETRIES_PER_WINDOW
+                    mon.retry_history.len()
                 ),
             );
         }
