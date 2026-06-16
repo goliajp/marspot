@@ -58,6 +58,19 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// (the cascade that killed 9 claudecode sessions on 2026-06-15 was
 /// only diagnosed by cross-referencing stderr).  `0` = not set.
 static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
+/// PID of the process that delivered the most recent terminating
+/// signal, captured via `sigaction(SA_SIGINFO)`'s `si_pid` field.
+/// `0` = handler hadn't fired yet (the BSD convention for kernel-
+/// generated signals is also `0`, so a real "I got SIGTERM from the
+/// kernel" looks the same as "no handler ran" — readers should
+/// disambiguate via `LAST_SIGNAL`).  The 2026-06-15 incident that
+/// killed 9 sessions had no forensics on which userland process
+/// pushed `bootout` or `kill -TERM`; this static is the patch.
+static LAST_SIGNAL_PID: AtomicI32 = AtomicI32::new(0);
+/// UID counterpart to LAST_SIGNAL_PID — same source field
+/// (`si_uid`).  Useful for telling root-cron timers apart from the
+/// session-bound user's own commands.
+static LAST_SIGNAL_UID: AtomicI32 = AtomicI32::new(-1);
 /// Raw fd of the listening socket, published after `bind` so the
 /// signal handler can `close(2)` it (AS-safe per POSIX) and force
 /// the in-flight `accept` to return EBADF.  Negative sentinel before
@@ -101,6 +114,78 @@ const SUBSCRIBER_QUEUE_DEPTH: usize = 64;
 /// instance.
 fn socket_path() -> PathBuf {
     marspot::paths::shelld_socket()
+}
+
+/// Best-effort `argv0 + " " + argv[1] + …` for a foreign pid via
+/// `sysctl(KERN_PROCARGS2)`.  Used by the signal handler's logging
+/// path to attribute SIGTERM/SIGHUP to whichever userland process
+/// sent it (launchctl bootout, `kill -TERM`, ssh-disconnect HUP, …).
+/// Returns the empty string on failure — the sender may have already
+/// exited by the time we read.
+fn proc_cmdline(pid: i32) -> Option<String> {
+    unsafe {
+        let mut argmax: libc::c_int = 0;
+        let mut sz: libc::size_t = std::mem::size_of::<libc::c_int>();
+        let mut mib_argmax: [libc::c_int; 2] = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        if libc::sysctl(
+            mib_argmax.as_mut_ptr(),
+            2,
+            &mut argmax as *mut _ as *mut libc::c_void,
+            &mut sz,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+            || argmax <= 0
+        {
+            return None;
+        }
+        let mut buf = vec![0u8; argmax as usize];
+        // KERN_PROCARGS2 = 49 (not exposed by the libc crate).
+        const KERN_PROCARGS2: libc::c_int = 49;
+        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, KERN_PROCARGS2, pid];
+        let mut got: libc::size_t = buf.len();
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut got,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
+            return None;
+        }
+        buf.truncate(got);
+        if buf.len() < 4 {
+            return None;
+        }
+        let argc = i32::from_ne_bytes(buf[0..4].try_into().ok()?);
+        if argc < 0 {
+            return None;
+        }
+        let mut cur = 4usize;
+        while cur < buf.len() && buf[cur] != 0 {
+            cur += 1;
+        }
+        while cur < buf.len() && buf[cur] == 0 {
+            cur += 1;
+        }
+        let mut parts: Vec<String> = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            let start = cur;
+            while cur < buf.len() && buf[cur] != 0 {
+                cur += 1;
+            }
+            if start == cur {
+                break;
+            }
+            parts.push(String::from_utf8_lossy(&buf[start..cur]).into_owned());
+            if cur < buf.len() {
+                cur += 1;
+            }
+        }
+        Some(parts.join(" "))
+    }
 }
 
 /// One live shell session.  Owned by `Sessions` via `Arc`; subscribers
@@ -1071,6 +1156,17 @@ fn main() {
             // from "SIGINT from terminal" from "shutdown raised
             // internally" (LAST_SIGNAL == 0).
             let sig = LAST_SIGNAL.load(Ordering::Acquire);
+            let sender_pid = LAST_SIGNAL_PID.load(Ordering::Acquire);
+            let sender_uid = LAST_SIGNAL_UID.load(Ordering::Acquire);
+            // Best-effort sender argv lookup — KERN_PROCARGS2 is
+            // racey (the process may already be gone by the time we
+            // get here) so we tolerate failure quietly.  Anything
+            // recovered lands in the log alongside pid+uid.
+            let sender_cmd = if sender_pid > 0 {
+                proc_cmdline(sender_pid).unwrap_or_default()
+            } else {
+                String::new()
+            };
             let alive_ids: Vec<u64> = {
                 let g = sessions.lock().unwrap();
                 g.iter()
@@ -1087,9 +1183,13 @@ fn main() {
                 signal_name = match sig {
                     libc::SIGTERM => "SIGTERM",
                     libc::SIGINT => "SIGINT",
+                    libc::SIGHUP => "SIGHUP",
                     0 => "<internal>",
                     _ => "<other>",
                 },
+                sender_pid = sender_pid,
+                sender_uid = sender_uid,
+                sender_cmd = sender_cmd,
                 alive_sessions = alive_count,
                 total_sessions = total_count,
                 alive_ids = format!("{:?}", alive_ids)
@@ -1692,15 +1792,32 @@ fn spawn_shell(cols: u16, rows: u16, cwd_override: &str) -> io::Result<Pty> {
     })
 }
 
-extern "C" fn signal_handler(sig: libc::c_int) {
-    // Record signal BEFORE flipping SHUTDOWN — the main loop checks
-    // SHUTDOWN first then reads LAST_SIGNAL; this ordering guarantees
-    // the read sees the signal that caused the flip.
+extern "C" fn signal_handler(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _ctx: *mut libc::c_void,
+) {
+    // Record signal + sender BEFORE flipping SHUTDOWN.  Main loop
+    // checks SHUTDOWN first, then reads LAST_SIGNAL{,_PID,_UID}; the
+    // ordering guarantees the read sees the signal that caused the
+    // flip.  All four stores are async-signal-safe (atomics on word-
+    // sized types are AS-safe per POSIX).
     LAST_SIGNAL.store(sig as i32, Ordering::Release);
+    if !info.is_null() {
+        // SAFETY: kernel hands us a valid siginfo_t for this
+        // delivery.  si_pid is 0 when the kernel itself sent the
+        // signal (e.g. SIGSEGV); userland kill / killpg / pthread_kill
+        // sets it to the sender's PID.
+        unsafe {
+            LAST_SIGNAL_PID.store((*info).si_pid as i32, Ordering::Release);
+            LAST_SIGNAL_UID.store((*info).si_uid as i32, Ordering::Release);
+        }
+    }
     SHUTDOWN.store(true, Ordering::Release);
     let msg: &[u8] = match sig {
         libc::SIGTERM => b"[shelld] SIGTERM\n",
         libc::SIGINT => b"[shelld] SIGINT\n",
+        libc::SIGHUP => b"[shelld] SIGHUP\n",
         _ => b"[shelld] signal\n",
     };
     unsafe {
@@ -1732,15 +1849,19 @@ fn install_signal_handlers() {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = signal_handler as *const () as usize;
         libc::sigemptyset(&mut sa.sa_mask);
-        sa.sa_flags = 0;
+        // SA_SIGINFO so the handler receives siginfo_t (carrying
+        // si_pid / si_uid) instead of just the bare signal number.
+        sa.sa_flags = libc::SA_SIGINFO;
         let r1 = libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
         let r2 = libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-        if r1 != 0 || r2 != 0 {
+        let r3 = libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        if r1 != 0 || r2 != 0 || r3 != 0 {
             lx_error!(
                 "sigaction.failed",
-                "could not install TERM/INT handlers",
+                "could not install TERM/INT/HUP handlers",
                 term = r1,
                 int = r2,
+                hup = r3,
                 errno = io::Error::last_os_error().raw_os_error().unwrap_or(0)
             );
         }

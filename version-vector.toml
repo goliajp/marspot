@@ -26,4 +26,4 @@
 shell   = "0.2.9"    # L1
 core    = "0.2.25"   # L2 — marspot version
 session = "0.2.6"    # L3
-shelld  = "0.2.5"    # L4
+shelld  = "0.2.6"    # L4
