@@ -60,6 +60,26 @@ use marspot::HEADER_PT;
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
 
+/// Hand `arg` off to macOS `open(1)` so the system routes it to the
+/// right helper: URL → default browser, directory → Finder, file →
+/// default app for the file's UTI.  Fire and forget; we don't wait
+/// on the child.  Stderr inherited so a malformed arg surfaces in
+/// marspot.log via the usual stderr pipe instead of vanishing.
+fn spawn_open(arg: &str) {
+    if let Err(e) = std::process::Command::new("/usr/bin/open")
+        .arg(arg)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+    {
+        lx_warn!(
+            "core.link_open_failed",
+            &format!("{e}"),
+            arg = arg
+        );
+    }
+}
+
 fn env_required<T: std::str::FromStr>(name: &str) -> T {
     let raw = std::env::var(name)
         .unwrap_or_else(|_| panic!("[core] missing required env var {name}"));
@@ -1027,6 +1047,25 @@ impl CoreApp {
         }
     }
 
+    /// Hit-test an auto-detected link span on pane `idx`.  Scans the
+    /// pane's visible grid (cheap — bounded by visible cells) and
+    /// returns the first span containing the clicked (col, row).
+    /// Returns None when the click missed every detected link.
+    fn hit_test_pane_link(
+        &self,
+        idx: usize,
+        col: u16,
+        row: u16,
+    ) -> Option<marspot::grid_links::LinkRange> {
+        let pane = self.panes.get(idx)?;
+        let view_offset = pane.view_offset();
+        let grid = pane.session().grid();
+        let links = marspot::grid_links::scan_visible_links(grid, view_offset);
+        links.into_iter().find(|link| {
+            link.row == row && col >= link.col_start && col <= link.col_end
+        })
+    }
+
     /// Hit-test the right-side plugin badge's clickable prefix (text
     /// before the first space).  Returns the pane index when a click
     /// at (x_phys, y_phys) hits the underlined prefix; None
@@ -1206,6 +1245,24 @@ impl CoreApp {
         if self.editing_title.is_some() {
             self.commit_title_edit();
             self.needs_render = true;
+        }
+
+        // Auto-link hit-test: a click that lands on an underlined
+        // URL / file span fires the open action.  Sits ahead of
+        // selection so the click doesn't simultaneously start a
+        // fresh selection on the link cells.  Email is recognised
+        // but inert (per user request).
+        if let Some((idx, col, row)) = cell_pos_hit {
+            if let Some(link) = self.hit_test_pane_link(idx, col, row) {
+                match link.kind {
+                    marspot::grid_links::LinkKind::Url
+                    | marspot::grid_links::LinkKind::File => {
+                        spawn_open(&link.text);
+                    }
+                    marspot::grid_links::LinkKind::Email => {}
+                }
+                return;
+            }
         }
 
         // Click in cell body → start a fresh selection there AND
