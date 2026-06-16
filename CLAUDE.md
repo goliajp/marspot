@@ -249,6 +249,33 @@ what's blocking and stop — don't dress it up as a menu.
 - git-flow (AVH) — production = `master`, integration = `develop`. New work goes on `feature/*`; finish via `git flow feature finish <name>` to fast-forward into `develop`.
 - Deployment target: macOS 14.0+ (we'll add proper `.app` bundling and signing later).
 
+### Commit scope policy (strict)
+
+Every commit MUST start with one of three scopes — chosen so the
+log makes the work area obvious without reading the diff:
+
+| scope   | covers                                                                                                                                                                                                                                                  |
+|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `infra` | the 4-layer architecture (shell / core / session / shelld), wire protocols, install-local + execv self-update, LaunchAgent + signal handling, storage (paths, bytelog, state.bin, scrollback disk), shelld daemon internals, logx, PluginHost / PluginRegistry framework |
+| `basic` | terminal emulator (parser / grid / scrollback / cursor / SGR), render (Metal, glyph atlas, layout, selection, IME), pane / window / focus / sidebar / title strip, key + mouse + clipboard handling, generic PaneSession mechanism (wire + dispatcher + renderer hooks for badge / overlay) |
+| `cc`    | claudecode-specific plugin code (`plugins/claudecode.rs`, `plugins/pidtree.rs`), profile-cycle state machine, API-error monitor, cc-specific badge text                                                                                                  |
+
+**Format** — `<scope>: <subject>` on the title line.  Examples that
+match this policy:
+
+- `infra: shelld log SIGTERM sender pid via SA_SIGINFO`
+- `basic: hit-test pane badge prefix on mouse_down, send PaneBadgeClicked`
+- `cc: profile cycle switches from exit\r to SIGTERM`
+
+**One commit, one scope.**  A change that touches more than one
+scope gets split into separate commits — otherwise the scope tag
+stops carrying signal.  When a boundary call is genuinely ambiguous,
+prefer the deeper layer: framework code goes `basic`, business
+glue goes `cc`.
+
+The `RFC-NNN` step tag stays optional and lives after the scope —
+`infra: RFC-002 step 8d — ATTACH carries cols/rows`.
+
 ## Architecture (planned, built incrementally)
 
 - `src/main.rs` — entry, event loop, window management
