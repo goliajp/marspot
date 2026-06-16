@@ -118,6 +118,12 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
+    /// Shell → core: a plugin took over the pane backing this shelld
+    /// session.  Capability bits say what L2 should change while the
+    /// session is active (lock keys, freeze grid, accept overlays).
+    PaneSessionBegin(u64, u32),
+    /// Shell → core: plugin released the pane back to live mode.
+    PaneSessionEnd(u64),
 }
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
@@ -146,6 +152,12 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneBadge => marspot::shell_proto::decode_pane_badge(&f.payload)
             .ok()
             .map(|(sid, text)| CoreEvent::PaneBadge(sid, text)),
+        MsgType::PaneSessionBegin => marspot::shell_proto::decode_pane_session_begin(&f.payload)
+            .ok()
+            .map(|(sid, caps)| CoreEvent::PaneSessionBegin(sid, caps)),
+        MsgType::PaneSessionEnd => marspot::shell_proto::decode_pane_session_end(&f.payload)
+            .ok()
+            .map(CoreEvent::PaneSessionEnd),
         MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
@@ -392,6 +404,19 @@ fn spawn_l3_pane(
 /// minus the AppKit window plumbing.  Mouse coordinates arrive in
 /// view-local physical pixels, exactly what the shell's NSView
 /// callbacks produce, so the `Layout` hit-test geometry is shared
+/// Live state for one in-flight RFC-003 PaneSession.  Bit-for-bit
+/// caps as carried on the wire.
+#[derive(Clone, Copy, Debug)]
+struct PaneSessionState {
+    caps: u32,
+}
+
+impl PaneSessionState {
+    fn has(&self, cap: u32) -> bool {
+        (self.caps & cap) == cap
+    }
+}
+
 /// verbatim.
 struct CoreApp {
     renderer: MetalRenderer,
@@ -409,6 +434,18 @@ struct CoreApp {
     /// reaching the writer from inside the trait callbacks where
     /// the borrow tree doesn't permit it.
     pending_to_shell: Vec<(MsgType, Vec<u8>)>,
+    /// RFC-003 pane sessions currently held by L1 plugins, keyed by
+    /// shelld_session_id.  Membership routes L2 behaviour:
+    ///   * LOCK_KEYS cap → key events forwarded as PaneSessionKey,
+    ///                     not the PTY
+    ///   * FREEZE_GRID cap → render keeps the last-painted instance
+    ///                       buffer for that pane (C6)
+    ///   * INPUT cap → informational; plugin writes via shelld
+    pane_sessions: std::collections::HashMap<u64, PaneSessionState>,
+    /// Rolling timestamps of recent Escape presses while a pane
+    /// session is active; 3 within 5 s force-ends the session
+    /// regardless of plugin opinion.  Bounded to the last 3 entries.
+    esc_history: std::collections::VecDeque<std::time::Instant>,
     selection: Option<Selection>,
     selection_dragging: bool,
     layout_mode: LayoutMode,
@@ -439,6 +476,76 @@ struct CoreApp {
 }
 
 impl CoreApp {
+    /// L1 plugin → control socket → here: enter a PaneSession for the
+    /// given shelld_session_id with `caps` capability bits.  Idempotent
+    /// on the same caps; bumps the entry on a caps change.
+    fn pane_session_begin(&mut self, shelld_session_id: u64, caps: u32) {
+        let changed = self
+            .pane_sessions
+            .insert(shelld_session_id, PaneSessionState { caps })
+            .map(|prev| prev.caps != caps)
+            .unwrap_or(true);
+        if changed {
+            // FREEZE_GRID may want a redraw to (eventually) freeze
+            // visibly; other caps don't change pixels right away.
+            self.needs_render = true;
+        }
+    }
+
+    /// L1 plugin released the pane back to live mode.
+    fn pane_session_end(&mut self, shelld_session_id: u64) {
+        if self.pane_sessions.remove(&shelld_session_id).is_some() {
+            self.needs_render = true;
+        }
+    }
+
+    /// Look up an active pane session by shelld_session_id; helper for
+    /// the key/render branches.
+    fn pane_session_for(&self, shelld_session_id: u64) -> Option<&PaneSessionState> {
+        self.pane_sessions.get(&shelld_session_id)
+    }
+
+    /// True iff the *focused* pane is currently held by a plugin with
+    /// the given capability.
+    fn focused_pane_has_cap(&self, cap: u32) -> bool {
+        let Some(p) = self.panes.get(self.focused_idx) else { return false; };
+        let Some(sid) = p.shelld_session_id() else { return false; };
+        self.pane_session_for(sid).is_some_and(|s| s.has(cap))
+    }
+
+    /// Returns the focused pane's shelld_session_id if it currently
+    /// has any PaneSession (regardless of caps) — used for the Esc
+    /// hatch + key routing.
+    fn focused_pane_active_session(&self) -> Option<u64> {
+        let p = self.panes.get(self.focused_idx)?;
+        let sid = p.shelld_session_id()?;
+        if self.pane_sessions.contains_key(&sid) {
+            Some(sid)
+        } else {
+            None
+        }
+    }
+
+    /// Record an Escape press at `now`.  Returns true if the rolling
+    /// window contains ≥ 3 escapes within 5 s — the caller then sends
+    /// PaneSessionUserEscape to force-end the session.
+    fn note_escape_for_pane_session(&mut self, now: std::time::Instant) -> bool {
+        const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+        const THRESHOLD: usize = 3;
+        while let Some(&front) = self.esc_history.front() {
+            if now.duration_since(front) > WINDOW {
+                self.esc_history.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.esc_history.push_back(now);
+        if self.esc_history.len() > THRESHOLD {
+            self.esc_history.pop_front();
+        }
+        self.esc_history.len() >= THRESHOLD
+    }
+
     /// L1 plugin → control socket → here: stash a per-shelld-session
     /// right-side decoration for the title strip.  Empty `text` clears
     /// any prior badge.  Forces a redraw on transition.
@@ -736,6 +843,51 @@ impl CoreApp {
 
     fn key(&mut self, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
+
+        // RFC-003 LOCK_KEYS: if the focused pane is in a plugin-held
+        // PaneSession that asked for the keyboard, route the event up
+        // to L1 instead of forwarding to the PTY.  Also count Esc
+        // presses against the force-end window; 3 in 5 s force-ends
+        // the session via PaneSessionUserEscape.
+        //
+        // Sits ahead of Cmd-C / Cmd-B / title-edit because the
+        // user might genuinely need Esc to force-end a stuck session,
+        // and we don't want any L2 shortcut to swallow it first.
+        if event.state == KeyState::Pressed {
+            if let Some(active_sid) = self.focused_pane_active_session() {
+                let has_lock = self
+                    .pane_session_for(active_sid)
+                    .is_some_and(|s| s.has(marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS));
+                let is_esc = matches!(
+                    event.logical,
+                    LogicalKey::Named(NamedKey::Escape)
+                );
+                if is_esc {
+                    let force_end =
+                        self.note_escape_for_pane_session(std::time::Instant::now());
+                    if force_end {
+                        let payload = marspot::shell_proto::encode_pane_session_user_escape(
+                            active_sid,
+                        );
+                        self.pending_to_shell
+                            .push((MsgType::PaneSessionUserEscape, payload));
+                        // Also drop the L2 mirror immediately so the
+                        // pane goes back to normal even if L1 lags.
+                        self.pane_session_end(active_sid);
+                        return;
+                    }
+                }
+                if has_lock {
+                    let wire = marspot::shell_proto::event_to_wire(&event, modifiers);
+                    let payload = marspot::shell_proto::encode_pane_session_key(
+                        active_sid, &wire,
+                    );
+                    self.pending_to_shell
+                        .push((MsgType::PaneSessionKey, payload));
+                    return;
+                }
+            }
+        }
 
         // Cmd-C: copy current text selection to the macOS clipboard.
         if event.state == KeyState::Pressed
@@ -1615,6 +1767,8 @@ fn main() {
         title_edit_buffer: String::new(),
         pane_badges: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
+        pane_sessions: std::collections::HashMap::new(),
+        esc_history: std::collections::VecDeque::with_capacity(3),
         selection: None,
         selection_dragging: false,
         layout_mode,
@@ -1773,6 +1927,12 @@ fn main() {
                 }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
+                }
+                CoreEvent::PaneSessionBegin(sid, caps) => {
+                    app.pane_session_begin(sid, caps);
+                }
+                CoreEvent::PaneSessionEnd(sid) => {
+                    app.pane_session_end(sid);
                 }
             }
         };
