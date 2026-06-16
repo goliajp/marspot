@@ -757,15 +757,18 @@ impl CoreApp {
         if idx >= self.panes.len() {
             return;
         }
-        // Ask shelld to terminate the session AND delete its bytelog
-        // before we drop the pane locally. Without this, shelld keeps
-        // the session in its `Sessions` map (with bytelog on disk), and
-        // the next time the GUI calls `list_sessions` to refill a slot
-        // it sees this id as alive and re-attaches — replaying the
-        // entire bytelog into the new pane, so the user sees the
-        // content they just clicked × to discard.
+        // RFC-003 step 3c: L3 (owns-pty) panes own their PTY in-process,
+        // so SIGTERM the L3 child via entry.toml's pid + delete the
+        // registry dir (also wipes bytelog so the slot can't replay if
+        // a later L3 picks the same id).  Legacy shelld panes still go
+        // through L4 kill_session — that path is deleted in Phase 6.
         if let Some(id) = self.panes[idx].shelld_session_id() {
-            if let Err(e) = self.client.kill_session(id) {
+            if self.panes[idx].is_l3() {
+                if let Ok(entry) = session_registry::read_session_entry(id) {
+                    unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+                }
+                let _ = session_registry::delete_session(id);
+            } else if let Err(e) = self.client.kill_session(id) {
                 lx_warn!(
                     "core.close_session.kill_failed",
                     &format!("{e}"),
