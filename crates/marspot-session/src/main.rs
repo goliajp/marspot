@@ -20,8 +20,6 @@
 //! CPU is ~0. With neither env var set it stays fully standalone
 //! (self-creates the region, no input source) for the dev/test path.
 
-// Phase 1b lands LocalSession; Phase 1c flips main() to dispatch to it.
-#[allow(dead_code)]
 mod local_session;
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -41,8 +39,110 @@ use marspot_term::shell_proto::{
     decode_paste,
     encode_selection_text, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
-use marspot_term::shelld_client::{SessionState, ShelldClient, ShelldSession};
+use marspot_term::shelld_client::{PendingPage, SessionState, ShelldClient, ShelldSession};
 use marspot_term::shelld_proto::SessionInfo;
+
+use local_session::LocalSession;
+
+/// RFC-003 step 1c. Two session backends coexist:
+///
+/// * `Shelld` — the L4-mediated path. PTY + bytelog live in the
+///   `marspot-shelld` daemon; this L3 talks to it over a unix socket
+///   and consumes a snapshot/byte stream.
+/// * `Local`  — the L3-owns-PTY path. PTY + bytelog live right here.
+///   No L4 dependency.
+///
+/// Both expose the same surface to the main loop so the only
+/// difference user-facing is the one env-var-gated dispatch in
+/// `main()`. Phase 6 of RFC-003 deletes the `Shelld` variant once
+/// L2 has fully switched over.
+enum SessionImpl {
+    Shelld(ShelldSession),
+    Local(LocalSession),
+}
+
+impl SessionImpl {
+    fn id(&self) -> u64 {
+        match self {
+            Self::Shelld(s) => s.id(),
+            Self::Local(s) => s.id(),
+        }
+    }
+
+    fn child_pid(&self) -> i32 {
+        match self {
+            Self::Shelld(s) => s.child_pid(),
+            Self::Local(s) => s.child_pid(),
+        }
+    }
+
+    fn is_exited(&self) -> bool {
+        match self {
+            Self::Shelld(s) => s.is_exited(),
+            Self::Local(s) => s.is_exited(),
+        }
+    }
+
+    fn state(&self) -> SessionState {
+        match self {
+            Self::Shelld(s) => s.state(),
+            Self::Local(s) => s.state(),
+        }
+    }
+
+    fn terminal(&self) -> &marspot_term::terminal::Terminal {
+        match self {
+            Self::Shelld(s) => s.terminal(),
+            Self::Local(s) => s.terminal(),
+        }
+    }
+
+    fn terminal_mut(&mut self) -> &mut marspot_term::terminal::Terminal {
+        match self {
+            Self::Shelld(s) => s.terminal_mut(),
+            Self::Local(s) => s.terminal_mut(),
+        }
+    }
+
+    fn pump(&mut self) -> usize {
+        match self {
+            Self::Shelld(s) => s.pump(),
+            Self::Local(s) => s.pump(),
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Shelld(s) => s.write(bytes),
+            Self::Local(s) => s.write(bytes),
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> {
+        match self {
+            Self::Shelld(s) => s.resize(cols, rows),
+            Self::Local(s) => s.resize(cols, rows),
+        }
+    }
+
+    fn request_scrollback_page(
+        &mut self,
+        line_start: u32,
+        line_count: u32,
+    ) -> std::io::Result<()> {
+        match self {
+            Self::Shelld(s) => s.request_scrollback_page(line_start, line_count),
+            Self::Local(s) => s.request_scrollback_page(line_start, line_count),
+        }
+    }
+
+    fn take_pending_scrollback_pages(&mut self) -> Vec<PendingPage> {
+        match self {
+            Self::Shelld(s) => s.take_pending_scrollback_pages(),
+            Self::Local(s) => s.take_pending_scrollback_pages(),
+        }
+    }
+}
 
 /// What wakes the L3 main loop. Both arms arrive on one channel so the
 /// loop blocks in a single place (idle CPU ~0): the shelld reader thread
@@ -95,11 +195,7 @@ fn state_str(s: SessionState) -> &'static str {
 /// Publish the session's grid window at `view_offset` (rows up from the
 /// live tail, clamped to the available scrollback) + cursor/mode flags
 /// into the shared framebuffer for L2 to render.
-fn publish(
-    shm: &mut GridShmWriter,
-    session: &marspot_term::shelld_client::ShelldSession,
-    view_offset: u16,
-) {
+fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) {
     let term = session.terminal();
     let mut flags = 0u32;
     if term.cursor_visible() {
@@ -126,7 +222,7 @@ fn publish(
 /// Clipboard reads resolve to `None` here: Cmd-V paste is forwarded by
 /// L2 as already-resolved text in a later step, not pulled from the
 /// pasteboard by the GUI-free L3.
-fn handle_key(session: &mut ShelldSession, event: MarspotKeyEvent, mods: Modifiers) -> bool {
+fn handle_key(session: &mut SessionImpl, event: MarspotKeyEvent, mods: Modifiers) -> bool {
     let (app_mode, bracketed) = {
         let t = session.terminal();
         (t.cursor_key_application_mode(), t.bracketed_paste_mode())
@@ -160,7 +256,7 @@ fn handle_key(session: &mut ShelldSession, event: MarspotKeyEvent, mods: Modifie
 /// mode on (DECSET 2004) so the receiving app treats it as a single paste
 /// rather than typed input.  No local predict — the PTY echo round-trips
 /// back through the normal pump.
-fn handle_paste(session: &mut ShelldSession, text: &str) {
+fn handle_paste(session: &mut SessionImpl, text: &str) {
     let bracketed = session.terminal().bracketed_paste_mode();
     let mut bytes: Vec<u8> = Vec::with_capacity(text.len() + 12);
     if bracketed {
@@ -273,7 +369,7 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
 /// shm — keeps L2 event-driven instead of polling per frame.
 fn publish_and_poke(
     shm: &mut GridShmWriter,
-    session: &marspot_term::shelld_client::ShelldSession,
+    session: &SessionImpl,
     view_offset: u16,
     poke: Option<&mut UnixStream>,
 ) {
@@ -349,28 +445,16 @@ fn main() {
         pid = std::process::id()
     );
 
-    // Event-driven wake: one channel carries both shelld byte/EOF wakes
-    // and L2-forwarded keystrokes, so the main loop sleeps in a single
+    // Event-driven wake: one channel carries both PTY byte/EOF wakes
+    // (from either ShelldClient or LocalSession's reader thread) and
+    // L2-forwarded keystrokes, so the main loop sleeps in a single
     // place until there's real work.
     let (ev_tx, ev_rx): (Sender<SessionEvent>, Receiver<SessionEvent>) = mpsc::channel();
-    let wake_tx = ev_tx.clone();
-    let wake = move || {
-        let _ = wake_tx.send(SessionEvent::Wake);
-    };
 
-    let sock = shelld_socket();
-    lx_info!(
-        "session.shelld.connecting",
-        "connecting to shelld",
-        socket = sock.display()
-    );
-    let client = match ShelldClient::connect(&sock, wake) {
-        Ok(c) => c,
-        Err(e) => {
-            lx_error!("session.shelld.connect_failed", &format!("{e}"));
-            std::process::exit(1);
-        }
-    };
+    // RFC-003 step 1c: MARSPOT_L3_OWNS_PTY=1 picks the LocalSession
+    // path. Default off; L4 shelld still owns PTY until L2 (Phase 3)
+    // and the shelld delete (Phase 6) land.
+    let owns_pty = std::env::var("MARSPOT_L3_OWNS_PTY").as_deref() == Ok("1");
 
     // Shared grid framebuffer first — it defines the geometry. When L2
     // owns the region it sized it to the on-screen cell rect; we must
@@ -378,64 +462,103 @@ fn main() {
     // has to fit the region (a mismatch would overflow the mapping).
     let (mut shm, cols, rows) = setup_shm();
 
-    // Pick the session to drive. Two regimes:
-    //
-    // * L2-managed (`MARSPOT_SESSION_ID` set): L2 owns assignment — it
-    //   pre-listed or freshly `create_session`'d this exact id and hands
-    //   it to us, guaranteeing no two L3 children race for one session.
-    //   Attach it directly; do NOT cross-check a `list_sessions`, which
-    //   could race a just-created id and wrongly fall through to grabbing
-    //   someone else's session.
-    // * Standalone (dev/test/soak, no id): reattach the first live
-    //   session (bytelog replay) if any, else create a fresh one.
-    let want: Option<u64> = std::env::var("MARSPOT_SESSION_ID")
-        .ok()
-        .and_then(|s| s.parse().ok());
-    let session = match want {
-        Some(id) => {
-            lx_info!(
-                "session.attach.assigned",
-                "attaching L2-assigned session",
-                session_id = id
-            );
-            client.attach(id, cols, rows)
-        }
-        None => {
-            let existing: Vec<SessionInfo> = client
-                .list_sessions()
-                .unwrap_or_else(|e| {
-                    lx_warn!(
-                        "session.list_sessions_failed",
-                        &format!("{e} — starting fresh")
-                    );
-                    Vec::new()
-                })
-                .into_iter()
-                .filter(|s| s.alive)
-                .collect();
-            match existing.first() {
-                Some(s) => {
-                    lx_info!(
-                        "session.attach.standalone_existing",
-                        "standalone: attaching first live session",
-                        session_id = s.session_id
-                    );
-                    client.attach(s.session_id, cols, rows)
-                }
-                None => {
-                    lx_info!(
-                        "session.attach.standalone_fresh",
-                        "standalone: no live session; creating fresh"
-                    );
-                    client.new_session(cols, rows, "")
+    let mut session: SessionImpl = if owns_pty {
+        let wake_tx = ev_tx.clone();
+        let wake = move || {
+            let _ = wake_tx.send(SessionEvent::Wake);
+        };
+        // Standalone L3-owns-PTY: spawn user shell directly. Session id
+        // is purely informational here (no shelld registry to coordinate
+        // with); default to whatever MARSPOT_SESSION_ID says or 1.
+        let id = std::env::var("MARSPOT_SESSION_ID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        lx_event!(
+            "L3_OWNS_PTY",
+            "spawning local PTY (no shelld)",
+            session_id = id,
+            cols = cols,
+            rows = rows
+        );
+        let local = LocalSession::spawn(id, cols, rows, "", wake).unwrap_or_else(|e| {
+            lx_error!("session.local.spawn_failed", &format!("{e}"));
+            std::process::exit(1);
+        });
+        SessionImpl::Local(local)
+    } else {
+        let wake_tx = ev_tx.clone();
+        let wake = move || {
+            let _ = wake_tx.send(SessionEvent::Wake);
+        };
+        let sock = shelld_socket();
+        lx_info!(
+            "session.shelld.connecting",
+            "connecting to shelld",
+            socket = sock.display()
+        );
+        let client = match ShelldClient::connect(&sock, wake) {
+            Ok(c) => c,
+            Err(e) => {
+                lx_error!("session.shelld.connect_failed", &format!("{e}"));
+                std::process::exit(1);
+            }
+        };
+
+        // Pick the session to drive. Two regimes:
+        //
+        // * L2-managed (`MARSPOT_SESSION_ID` set): L2 owns assignment.
+        // * Standalone (dev/test/soak, no id): reattach the first live
+        //   session (bytelog replay) if any, else create a fresh one.
+        let want: Option<u64> = std::env::var("MARSPOT_SESSION_ID")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        let attached = match want {
+            Some(id) => {
+                lx_info!(
+                    "session.attach.assigned",
+                    "attaching L2-assigned session",
+                    session_id = id
+                );
+                client.attach(id, cols, rows)
+            }
+            None => {
+                let existing: Vec<SessionInfo> = client
+                    .list_sessions()
+                    .unwrap_or_else(|e| {
+                        lx_warn!(
+                            "session.list_sessions_failed",
+                            &format!("{e} — starting fresh")
+                        );
+                        Vec::new()
+                    })
+                    .into_iter()
+                    .filter(|s| s.alive)
+                    .collect();
+                match existing.first() {
+                    Some(s) => {
+                        lx_info!(
+                            "session.attach.standalone_existing",
+                            "standalone: attaching first live session",
+                            session_id = s.session_id
+                        );
+                        client.attach(s.session_id, cols, rows)
+                    }
+                    None => {
+                        lx_info!(
+                            "session.attach.standalone_fresh",
+                            "standalone: no live session; creating fresh"
+                        );
+                        client.new_session(cols, rows, "")
+                    }
                 }
             }
-        }
+        };
+        SessionImpl::Shelld(attached.unwrap_or_else(|e| {
+            lx_error!("session.setup_failed", &format!("{e}"));
+            std::process::exit(1);
+        }))
     };
-    let mut session = session.unwrap_or_else(|e| {
-        lx_error!("session.setup_failed", &format!("{e}"));
-        std::process::exit(1);
-    });
     lx_event!(
         "SESSION_DRIVING",
         "driving session",
