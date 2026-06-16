@@ -712,26 +712,68 @@ impl Terminal {
     /// Inverse of `serialize_scrollback_page`.  Static — no `&self`
     /// because the decoder doesn't touch terminal state; callers
     /// (L3 publish-cache) decide what to do with the lines.
+    ///
+    /// Wire-compat: tries the current "with-wrapped" layout first
+    /// (each line = `[cols u32][wrapped u8][cells]`).  If it doesn't
+    /// consume exactly `body.len()` bytes, falls back to the legacy
+    /// layout (`[cols u32][cells]`, no wrapped byte) emitted by L4
+    /// shelld 0.2.6 and earlier — in that case every row is reported
+    /// `wrapped = false`, so resize-time reflow won't glue continuation
+    /// rows but the cell contents are correct.  Once every running
+    /// L4 has been upgraded past 0.2.7 the legacy branch can be
+    /// deleted.
     pub fn decode_scrollback_page_body(
         line_count: u32,
         body: &[u8],
     ) -> io::Result<Vec<(Vec<Cell>, bool)>> {
-        let mut cur = Cursor::new(body);
-        let mut out = Vec::with_capacity(line_count as usize);
-        for _ in 0..line_count {
-            let line_cols = read_u32(&mut cur)? as usize;
-            let wrapped = read_u8(&mut cur)? != 0;
-            let mut line = Vec::with_capacity(line_cols);
-            for _ in 0..line_cols {
-                let ch_u = read_u32(&mut cur)?;
-                let attrs = read_attrs(&mut cur)?;
-                let ch = char::from_u32(ch_u).unwrap_or(' ');
-                line.push(Cell { ch, attrs });
+        if let Ok((out, consumed)) = decode_with_wrapped(line_count, body) {
+            if consumed == body.len() {
+                return Ok(out);
             }
-            out.push((line, wrapped));
         }
-        Ok(out)
+        decode_legacy_no_wrapped(line_count, body)
     }
+}
+
+fn decode_with_wrapped(
+    line_count: u32,
+    body: &[u8],
+) -> io::Result<(Vec<(Vec<Cell>, bool)>, usize)> {
+    let mut cur = Cursor::new(body);
+    let mut out = Vec::with_capacity(line_count as usize);
+    for _ in 0..line_count {
+        let line_cols = read_u32(&mut cur)? as usize;
+        let wrapped = read_u8(&mut cur)? != 0;
+        let mut line = Vec::with_capacity(line_cols);
+        for _ in 0..line_cols {
+            let ch_u = read_u32(&mut cur)?;
+            let attrs = read_attrs(&mut cur)?;
+            let ch = char::from_u32(ch_u).unwrap_or(' ');
+            line.push(Cell { ch, attrs });
+        }
+        out.push((line, wrapped));
+    }
+    Ok((out, cur.position() as usize))
+}
+
+fn decode_legacy_no_wrapped(
+    line_count: u32,
+    body: &[u8],
+) -> io::Result<Vec<(Vec<Cell>, bool)>> {
+    let mut cur = Cursor::new(body);
+    let mut out = Vec::with_capacity(line_count as usize);
+    for _ in 0..line_count {
+        let line_cols = read_u32(&mut cur)? as usize;
+        let mut line = Vec::with_capacity(line_cols);
+        for _ in 0..line_cols {
+            let ch_u = read_u32(&mut cur)?;
+            let attrs = read_attrs(&mut cur)?;
+            let ch = char::from_u32(ch_u).unwrap_or(' ');
+            line.push(Cell { ch, attrs });
+        }
+        out.push((line, false));
+    }
+    Ok(out)
 }
 
 // ─── Snapshot wire format helpers ─────────────────────────────────────
@@ -1965,6 +2007,32 @@ mod tests {
         assert_eq!(lines[0].0.len(), 8);
         // Hard newlines, not autowrap continuations.
         assert!(!lines[0].1);
+    }
+
+    #[test]
+    fn decode_scrollback_page_legacy_no_wrapped_byte() {
+        // L4 shelld 0.2.6 and earlier emit each line as
+        // `[cols u32][cells]` with no wrapped byte — decoder must
+        // detect that and fall back, reporting wrapped=false for
+        // every row so cells line up correctly.
+        let attrs = CellAttrs::default();
+        let mkcell = |ch: char| Cell { ch, attrs };
+
+        // Hand-build a legacy 2-line, 3-col body.
+        let mut body = Vec::new();
+        for line_ch in ['X', 'Y'] {
+            body.extend_from_slice(&3u32.to_le_bytes());
+            for _ in 0..3 {
+                body.extend_from_slice(&(line_ch as u32).to_le_bytes());
+                body.extend_from_slice(&serialize_attrs(mkcell(line_ch).attrs));
+            }
+        }
+        let lines = Terminal::decode_scrollback_page_body(2, &body).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0[0].ch, 'X');
+        assert_eq!(lines[1].0[2].ch, 'Y');
+        assert!(!lines[0].1);
+        assert!(!lines[1].1);
     }
 
     #[test]
