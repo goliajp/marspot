@@ -513,7 +513,12 @@ fn main() {
         // session — without a registry handle L2 can't reach us, so
         // there's no point continuing.
         let cwd = std::env::var("HOME").unwrap_or_default();
-        match uds_server::SessionListener::bind(id, cols, rows, &cwd, ev_tx.clone()) {
+        // RFC-003 Amendment 7 step 2: record the L2-chosen shm name
+        // (env, defaults to a deterministic per-session string) into
+        // entry.toml so a post-swap L2 can shm_open it.  L2 picks the
+        // name when it creates the region; we just relay it via env.
+        let shm_name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
+        match uds_server::SessionListener::bind(id, cols, rows, &cwd, &shm_name, ev_tx.clone()) {
             Ok(l) => _listener = Some(l),
             Err(e) => {
                 lx_error!("session.local.uds_bind_failed", &format!("{e}"));

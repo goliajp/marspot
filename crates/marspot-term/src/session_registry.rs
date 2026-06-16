@@ -113,6 +113,12 @@ pub struct SessionEntry {
     pub cwd: String,
     pub proto_version: u32,
     pub created_at_unix: u64,
+    /// RFC-003 Amendment 7: shm region name the L3 publishes into.
+    /// A freshly-spawned L2 after a silent-update swap can shm_open
+    /// this name to reattach to a surviving L3's framebuffer (the fd
+    /// doesn't survive the swap; the name does).  Empty string =
+    /// legacy entry written before this field existed.
+    pub shm_name: String,
 }
 
 fn quote(s: &str) -> String {
@@ -148,6 +154,7 @@ pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
     writeln!(s, "cwd = {}", quote(&entry.cwd)).ok();
     writeln!(s, "proto_version = {}", entry.proto_version).ok();
     writeln!(s, "created_at_unix = {}", entry.created_at_unix).ok();
+    writeln!(s, "shm_name = {}", quote(&entry.shm_name)).ok();
     std::fs::write(&tmp, s)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
@@ -193,6 +200,14 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
         raw.parse::<u32>().map_err(|e| invalid(format!("bad {k}: {e}")))
     };
+    // Optional field for back-compat with entries written before
+    // Amendment 7 added shm_name.  Missing / unquoted = "".
+    let opt_str = |k: &str| -> String {
+        fields
+            .get(k)
+            .and_then(|raw| unquote(raw))
+            .unwrap_or_default()
+    };
     Ok(SessionEntry {
         id: req_num("id")?,
         pid: req_i32("pid")?,
@@ -203,6 +218,7 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         cwd: req_str("cwd")?,
         proto_version: req_u32("proto_version")?,
         created_at_unix: req_num("created_at_unix")?,
+        shm_name: opt_str("shm_name"),
     })
 }
 
@@ -355,6 +371,7 @@ mod tests {
             cwd: "/Users/test/with spaces and \"quotes\"".into(),
             proto_version: PROTO_VERSION,
             created_at_unix: 1_718_000_000 + id,
+            shm_name: format!("/msp-s-{id}"),
         }
     }
 
