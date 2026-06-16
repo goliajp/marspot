@@ -2260,6 +2260,17 @@ fn push_session(
     let inner_x = (rect.x as f32 + padding).round();
     let inner_y = (rect.y_top as f32 + title_h + padding).round();
 
+    // Scan once up front so the per-row glyph loop can override fg
+    // for cells inside a link span (paint the text the same cyan as
+    // the underline, the standard "this is clickable" cue) and the
+    // underline pass below can reuse the same list.
+    let links = marspot_term::grid_links::scan_visible_links(grid, view.view_offset);
+    let in_link = |row: u16, col: u16| -> bool {
+        links
+            .iter()
+            .any(|l| l.row == row && col >= l.col_start && col <= l.col_end)
+    };
+
     for r in 0..grid.rows() {
         let row_y = inner_y + (r as f32) * cell_h;
         let _baseline_y = row_y + ascent;
@@ -2322,7 +2333,15 @@ fn push_session(
                 Some(e) => e,
                 None => continue,
             };
-            let fg = resolve_attrs(cell.attrs).0;
+            let fg = if in_link(r, c as u16) {
+                (
+                    LINK_UNDERLINE_FG.0 as f64,
+                    LINK_UNDERLINE_FG.1 as f64,
+                    LINK_UNDERLINE_FG.2 as f64,
+                )
+            } else {
+                resolve_attrs(cell.attrs).0
+            };
             // Cell-sized slot: place the WHOLE slot at the cell
             // origin.  The glyph's baseline is at integer row
             // `baseline_from_top` inside the slot, identical for
@@ -2448,18 +2467,13 @@ fn push_session(
         }
     }
 
-    // Auto-link underline — scan the visible grid for URLs / file
-    // paths / emails and underline each detected span.  Runs AFTER
-    // selection so the link hint stays visible when the user drags
-    // over a link (the selection blue tints it but the underline
-    // sits on top).  Scan is per-frame; the work is bounded by the
-    // visible grid (~7k cells on a 97×75 pane) so it sits in the
-    // tens of microseconds on M-series.
+    // Auto-link underline — reuse `links` from the up-front scan.
+    // Runs AFTER selection so the link hint stays visible when the
+    // user drags over a link (the selection blue tints it but the
+    // underline sits on top).  Same geometry as the SGR-underline
+    // pass above, so a link sitting on already-underlined text just
+    // paints the link colour over the same row.
     {
-        let links = marspot_term::grid_links::scan_visible_links(grid, view.view_offset);
-        // Same geometry as the SGR-underline pass above, so a link
-        // sitting on already-underlined text just paints the link
-        // colour over the same row.
         for link in &links {
             let row_y = inner_y + (link.row as f32) * cell_h;
             let underline_y = row_y + cell_h - (cell_h - ascent) * 0.45;
