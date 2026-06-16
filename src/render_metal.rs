@@ -2256,69 +2256,6 @@ fn push_session(
     let inner_x = (rect.x as f32 + padding).round();
     let inner_y = (rect.y_top as f32 + title_h + padding).round();
 
-    // Selection BG — paint a single quad per selected row, BEFORE
-    // the per-cell run-length BG fills so coloured cells (e.g.
-    // ANSI-bg text) overdraw correctly.  Selection coordinates
-    // come from the caller in cell coords; we normalise to a
-    // top-left → bottom-right pair inline.
-    if let Some(sel) = view.selection {
-        let (anchor, focus) = (sel.anchor, sel.focus);
-        let max_row = grid.rows().saturating_sub(1);
-        let max_col = grid.cols().saturating_sub(1);
-        if sel.blockwise {
-            // Rectangle: each row from min..=max col, independent
-            // of row position.  Lets the user carve out a column
-            // from multi-column output (ls, top) without dragging
-            // the column-aligned padding along.
-            let r_lo = anchor.1.min(focus.1).min(max_row);
-            let r_hi = anchor.1.max(focus.1).min(max_row);
-            let c_lo = anchor.0.min(focus.0).min(max_col);
-            let c_hi = anchor.0.max(focus.0).min(max_col);
-            if c_hi >= c_lo {
-                let w = (c_hi - c_lo + 1) as f32 * cell_w;
-                for r in r_lo..=r_hi {
-                    cells.push(CellInstance {
-                        origin: [
-                            inner_x + c_lo as f32 * cell_w,
-                            inner_y + r as f32 * cell_h,
-                        ],
-                        size: [w, cell_h],
-                        color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
-                    });
-                }
-            }
-        } else {
-            // Row-band: top row from anchor.col to end, middle rows
-            // full width, bottom row from start to focus.col.
-            let (start, end) = if (anchor.1, anchor.0) <= (focus.1, focus.0) {
-                (anchor, focus)
-            } else {
-                (focus, anchor)
-            };
-            let (s_col, s_row) = start;
-            let (e_col, e_row) = end;
-            let s_row = s_row.min(max_row);
-            let e_row = e_row.min(max_row);
-            for r in s_row..=e_row {
-                let col_lo = if r == s_row { s_col } else { 0 };
-                let col_hi = if r == e_row { e_col } else { max_col };
-                let col_lo = col_lo.min(max_col);
-                let col_hi = col_hi.min(max_col);
-                if col_hi < col_lo {
-                    continue;
-                }
-                let x = inner_x + col_lo as f32 * cell_w;
-                let y = inner_y + r as f32 * cell_h;
-                let w = (col_hi - col_lo + 1) as f32 * cell_w;
-                cells.push(CellInstance {
-                    origin: [x, y],
-                    size: [w, cell_h],
-                    color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
-                });
-            }
-        }
-    }
-
     for r in 0..grid.rows() {
         let row_y = inner_y + (r as f32) * cell_h;
         let _baseline_y = row_y + ascent;
@@ -2438,6 +2375,72 @@ fn push_session(
                 size: [(u - start) as f32 * cell_w, underline_h],
                 color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
             });
+        }
+    }
+
+    // Selection BG — paint a single quad per selected row, AFTER
+    // the per-cell run-length BG fills.  Order matters: the BG
+    // pass writes opaque pixels and the last instance wins, so a
+    // selection drawn before the per-cell BG would be hidden on
+    // any cell carrying an ANSI-coloured BG (red `git diff -`,
+    // green `git diff +`, etc.).  Drawing it here paints over
+    // the cell colours so the highlight is always visible while
+    // active.
+    if let Some(sel) = view.selection {
+        let (anchor, focus) = (sel.anchor, sel.focus);
+        let max_row = grid.rows().saturating_sub(1);
+        let max_col = grid.cols().saturating_sub(1);
+        if sel.blockwise {
+            // Rectangle: each row from min..=max col, independent
+            // of row position.  Lets the user carve out a column
+            // from multi-column output (ls, top) without dragging
+            // the column-aligned padding along.
+            let r_lo = anchor.1.min(focus.1).min(max_row);
+            let r_hi = anchor.1.max(focus.1).min(max_row);
+            let c_lo = anchor.0.min(focus.0).min(max_col);
+            let c_hi = anchor.0.max(focus.0).min(max_col);
+            if c_hi >= c_lo {
+                let w = (c_hi - c_lo + 1) as f32 * cell_w;
+                for r in r_lo..=r_hi {
+                    cells.push(CellInstance {
+                        origin: [
+                            inner_x + c_lo as f32 * cell_w,
+                            inner_y + r as f32 * cell_h,
+                        ],
+                        size: [w, cell_h],
+                        color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+                    });
+                }
+            }
+        } else {
+            // Row-band: top row from anchor.col to end, middle rows
+            // full width, bottom row from start to focus.col.
+            let (start, end) = if (anchor.1, anchor.0) <= (focus.1, focus.0) {
+                (anchor, focus)
+            } else {
+                (focus, anchor)
+            };
+            let (s_col, s_row) = start;
+            let (e_col, e_row) = end;
+            let s_row = s_row.min(max_row);
+            let e_row = e_row.min(max_row);
+            for r in s_row..=e_row {
+                let col_lo = if r == s_row { s_col } else { 0 };
+                let col_hi = if r == e_row { e_col } else { max_col };
+                let col_lo = col_lo.min(max_col);
+                let col_hi = col_hi.min(max_col);
+                if col_hi < col_lo {
+                    continue;
+                }
+                let x = inner_x + col_lo as f32 * cell_w;
+                let y = inner_y + r as f32 * cell_h;
+                let w = (col_hi - col_lo + 1) as f32 * cell_w;
+                cells.push(CellInstance {
+                    origin: [x, y],
+                    size: [w, cell_h],
+                    color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
+                });
+            }
         }
     }
 
