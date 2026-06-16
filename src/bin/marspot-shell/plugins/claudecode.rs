@@ -61,6 +61,118 @@ pub struct ClaudecodePlugin {
     /// Richer per-binding meta we need to act on a badge click:
     /// profile number, sessionId, and the live claude pid.
     last_meta: HashMap<u64, BindMeta>,
+    /// RFC-003 C7 auto-retry monitor: one entry per shelld session
+    /// currently running claudecode.  Created when a session first
+    /// binds, dropped when the bind goes away.  See `MonitorState`.
+    monitors: HashMap<u64, MonitorState>,
+}
+
+/// Long-running watcher for one claudecode pane.  Receives raw PTY
+/// bytes via OBSERVE_PTY, looks for retryable error patterns, sends a
+/// carriage return back to claude on match (with throttling so a
+/// stuck error doesn't loop forever).
+struct MonitorState {
+    /// Channel set up by `attach_raw_only`.  Drained on every plugin
+    /// tick.  Wrapped in a Mutex purely so MonitorState satisfies
+    /// `Sync` for the Plugin trait bound — only the tick thread ever
+    /// touches it, so the lock is uncontended.
+    rx: std::sync::Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
+    /// Unfinished tail bytes from the last drain — patterns are
+    /// line-anchored, so a line split across two Data frames needs
+    /// the carry-over.  Capped to keep a runaway pattern from
+    /// growing this without bound.
+    line_buf: Vec<u8>,
+    /// Wall-clock of every retry we triggered for this session.
+    /// Bounded by `RETRY_WINDOW`; older entries get evicted.  Used to
+    /// throttle so a hard-blocking error doesn't hot-loop.
+    retry_history: Vec<std::time::Instant>,
+}
+
+/// Strip ANSI CSI / OSC escape sequences from a line so the pattern
+/// match doesn't have to know about colour bytes claude prints around
+/// the error glyph.  Keeps printable bytes; drops control runs.
+fn strip_ansi(line: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(line.len());
+    let mut i = 0;
+    while i < line.len() {
+        let b = line[i];
+        if b == 0x1b && i + 1 < line.len() {
+            let nxt = line[i + 1];
+            if nxt == b'[' {
+                // CSI — skip until a terminator in 0x40..=0x7e
+                let mut j = i + 2;
+                while j < line.len() && !(0x40..=0x7e).contains(&line[j]) {
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            if nxt == b']' {
+                // OSC — skip until BEL or ESC\
+                let mut j = i + 2;
+                while j < line.len() {
+                    if line[j] == 0x07 {
+                        j += 1;
+                        break;
+                    }
+                    if line[j] == 0x1b && j + 1 < line.len() && line[j + 1] == b'\\' {
+                        j += 2;
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // Unknown ESC; skip the ESC byte alone.
+            i += 1;
+            continue;
+        }
+        if b == b'\r' {
+            i += 1;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    out
+}
+
+/// Does this buffer (one or more lines) contain a claudecode error
+/// we should retry on?  Conservative — only matches the
+/// "API Error: ... · <kind>" shape.  Returns the kind tag for
+/// logging.  Buffer-level (not per-line) because claude wraps long
+/// errors across two grid rows — the "Rate limited" marker often
+/// straddles a newline.
+fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
+    let stripped = strip_ansi(buf);
+    let s = match std::str::from_utf8(&stripped) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    if !s.contains("API Error") {
+        return None;
+    }
+    // Whitespace-normalise: collapse \n + indent so a wrapped marker
+    // like "...Rate\n  limited" reads as "...Rate limited".  Cheap
+    // — runs once per fire, not per byte.
+    let flat: String = s
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if flat.contains("Rate limited") || flat.contains("rate_limit") {
+        return Some("rate_limited");
+    }
+    if flat.contains("Network error") || flat.contains("network_error") {
+        return Some("network");
+    }
+    if flat.contains("overloaded") {
+        return Some("overloaded");
+    }
+    if flat.contains("Server error") || flat.contains("Internal server error") {
+        return Some("server_error");
+    }
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -262,6 +374,152 @@ impl ClaudecodePlugin {
             shelld: None,
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
+            monitors: HashMap::new(),
+        }
+    }
+
+    /// RFC-003 C7: drain raw PTY bytes for every active monitor, scan
+    /// for retryable error markers, and fire a `\r` back to claude
+    /// when one fires.  Throttled per session to avoid hot-looping on
+    /// a hard-blocking error.
+    fn pump_monitors(&mut self, host: &dyn PluginHost) {
+        const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+        const MAX_RETRIES_PER_WINDOW: usize = 3;
+        /// Settle delay between detecting an error and pressing Enter
+        /// — claude usually finishes printing the error context (a few
+        /// lines) over ~200 ms, and a too-eager retry can race with
+        /// that final flush.
+        const RETRY_SETTLE: std::time::Duration =
+            std::time::Duration::from_millis(400);
+        const MAX_LINE_BUF: usize = 16 * 1024;
+
+        let Some(client) = self.shelld.as_ref().cloned() else { return };
+        let now = std::time::Instant::now();
+        for (sid, mon) in self.monitors.iter_mut() {
+            // Drain raw bytes; cheap when nothing new.
+            let mut pending: Vec<u8> = Vec::new();
+            {
+                let rx = mon.rx.lock().unwrap();
+                while let Ok(chunk) = rx.try_recv() {
+                    pending.extend_from_slice(&chunk);
+                }
+            }
+            if pending.is_empty() {
+                continue;
+            }
+            mon.line_buf.extend_from_slice(&pending);
+            if mon.line_buf.len() > MAX_LINE_BUF {
+                // Trim the leading half; protects against a stream
+                // with no newlines or a marker that never resolves.
+                let keep = mon.line_buf.len() - MAX_LINE_BUF / 2;
+                mon.line_buf.drain(..keep);
+            }
+            // Buffer-level scan: an error marker can straddle a
+            // newline because claude wraps long lines, so we look at
+            // the whole accumulated buffer.  On a match we clear
+            // the buffer to keep from firing again on the same
+            // marker next tick (the throttle below also caps).
+            let matched_kind = retryable_error_kind(&mon.line_buf);
+            let Some(kind) = matched_kind else { continue };
+            mon.line_buf.clear();
+            // Throttle: evict old retries, count remaining, bail if
+            // we've already hit the cap for this window.
+            mon.retry_history.retain(|t| now.duration_since(*t) <= RETRY_WINDOW);
+            if mon.retry_history.len() >= MAX_RETRIES_PER_WINDOW {
+                host.log(
+                    LogLevel::Warn,
+                    "retry.throttled",
+                    &format!(
+                        "shelld_session={} kind={} cap_reached ({}/{}); skipping",
+                        sid,
+                        kind,
+                        mon.retry_history.len(),
+                        MAX_RETRIES_PER_WINDOW
+                    ),
+                );
+                continue;
+            }
+            // Fire-and-settle: log first, then sleep briefly so
+            // claude's error-context flush finishes, then \r.  The
+            // sleep is in the plugin tick which is policed by the
+            // host budget — small enough not to break it.
+            std::thread::sleep(RETRY_SETTLE);
+            if let Err(e) = client.send_input_to(*sid, b"\r") {
+                host.log(
+                    LogLevel::Warn,
+                    "retry.send_failed",
+                    &format!("shelld_session={} kind={} err={}", sid, kind, e),
+                );
+                continue;
+            }
+            mon.retry_history.push(now);
+            host.log(
+                LogLevel::Info,
+                "retry.sent",
+                &format!(
+                    "shelld_session={} kind={} retry={}/{}",
+                    sid,
+                    kind,
+                    mon.retry_history.len(),
+                    MAX_RETRIES_PER_WINDOW
+                ),
+            );
+        }
+    }
+
+    /// Spin up monitors for newly-bound sessions; drop monitors whose
+    /// bind went away.  Called from tick() after `last_meta` is
+    /// updated, so it reflects the current bound set.
+    fn refresh_monitors(&mut self, host: &dyn PluginHost) {
+        let Some(client) = self.shelld.as_ref() else { return };
+        // Add monitors for newly-bound sessions.
+        let mut new_keys: Vec<u64> = Vec::new();
+        for sid in self.last_meta.keys() {
+            if !self.monitors.contains_key(sid) {
+                new_keys.push(*sid);
+            }
+        }
+        for sid in new_keys {
+            match client.attach_raw_only(sid) {
+                Ok(rx) => {
+                    self.monitors.insert(
+                        sid,
+                        MonitorState {
+                            rx: std::sync::Mutex::new(rx),
+                            line_buf: Vec::new(),
+                            retry_history: Vec::new(),
+                        },
+                    );
+                    host.log(
+                        LogLevel::Info,
+                        "monitor.start",
+                        &format!("shelld_session={}", sid),
+                    );
+                }
+                Err(e) => {
+                    host.log(
+                        LogLevel::Warn,
+                        "monitor.attach_failed",
+                        &format!("shelld_session={} err={}", sid, e),
+                    );
+                }
+            }
+        }
+        // Drop monitors whose bind went away.
+        let stale: Vec<u64> = self
+            .monitors
+            .keys()
+            .copied()
+            .filter(|sid| !self.last_meta.contains_key(sid))
+            .collect();
+        for sid in stale {
+            self.monitors.remove(&sid);
+            client.detach_raw(sid);
+            host.log(
+                LogLevel::Info,
+                "monitor.stop",
+                &format!("shelld_session={}", sid),
+            );
         }
     }
 
@@ -689,9 +947,17 @@ impl Plugin for ClaudecodePlugin {
         }
         self.last_mapping = new_mapping;
         self.last_meta = new_meta;
-        // RFC-003: profile-cycle state machine now lives in
+        // RFC-003: profile-cycle state machine lives in
         // ProfileCyclePaneSession::on_tick, driven by the L1 plugin
-        // dispatcher.  Nothing to do here.
+        // dispatcher.
+        //
+        // C7: auto-retry monitor.  Sync the monitor set with the
+        // freshly-rebound `last_meta` (start one per new claude pid,
+        // drop those whose claude exited), then drain whatever raw
+        // PTY bytes accumulated since last tick and scan for
+        // retryable error patterns.
+        self.refresh_monitors(host);
+        self.pump_monitors(host);
     }
 
     fn on_pane_badge_click(
@@ -787,6 +1053,53 @@ mod tests {
         ));
         let kind = tail_last_message_type(&path).unwrap();
         assert_eq!(kind, "user");
+    }
+
+    #[test]
+    fn strip_ansi_drops_csi_and_osc() {
+        // Bold colour around the dot + a plain message.
+        let raw = b"\x1b[1;33m\xe2\x8f\xba\x1b[0m API Error";
+        let stripped = strip_ansi(raw);
+        assert_eq!(&stripped, b"\xe2\x8f\xba API Error");
+    }
+
+    #[test]
+    fn retryable_kind_matches_rate_limit_marker_wrapped() {
+        // Real claude output — error wraps after "Rate" onto the
+        // next line at a 2-space indent.  Our scanner has to
+        // whitespace-normalise to catch it.
+        let buf = b"\xe2\x8f\xba API Error: Server is temporarily limiting requests (not your usage limit) \xc2\xb7 Rate\n  limited\n";
+        assert_eq!(retryable_error_kind(buf), Some("rate_limited"));
+    }
+
+    #[test]
+    fn retryable_kind_matches_rate_limit_marker_inline() {
+        let buf = b"API Error: ... Rate limited\n";
+        assert_eq!(retryable_error_kind(buf), Some("rate_limited"));
+    }
+
+    #[test]
+    fn retryable_kind_matches_overloaded() {
+        let line = b"API Error: overloaded_error";
+        assert_eq!(retryable_error_kind(line), Some("overloaded"));
+    }
+
+    #[test]
+    fn retryable_kind_matches_network() {
+        let line = b"API Error: Network error contacting Anthropic";
+        assert_eq!(retryable_error_kind(line), Some("network"));
+    }
+
+    #[test]
+    fn retryable_kind_ignores_unrelated_lines() {
+        let line = b"  ok, processing your request ...";
+        assert_eq!(retryable_error_kind(line), None);
+    }
+
+    #[test]
+    fn retryable_kind_survives_ansi_around_marker() {
+        let line = b"\x1b[31mAPI Error: Rate limited\x1b[0m\r";
+        assert_eq!(retryable_error_kind(line), Some("rate_limited"));
     }
 }
 
