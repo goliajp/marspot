@@ -179,6 +179,102 @@ impl ShelldSession {
         &mut self.terminal
     }
 
+    /// Block until shelld's StateSnapshot for this session arrives and
+    /// is applied to the local terminal.  Called from `attach()` so
+    /// the caller's first publish reflects shelld's grid rather than
+    /// a freshly-allocated empty Terminal.
+    ///
+    /// Any `Data` chunks that land before the snapshot are pushed
+    /// back into the inbox via the receiver's own ordering — we do
+    /// NOT call `terminal.feed()` on them here, because the snapshot
+    /// is meant to be the origin point.  After the snapshot lands we
+    /// stop, and the regular `pump()` will drain queued live data on
+    /// the next tick.
+    ///
+    /// Errors:
+    ///   - `TimedOut` — no snapshot in `timeout`.  Most common cause
+    ///     is shelld respawned mid-attach and doesn't know this
+    ///     session id.
+    ///   - `InvalidData` — snapshot arrived but apply_snapshot
+    ///     rejected the body (version/magic mismatch).
+    pub fn await_initial_snapshot(
+        &mut self,
+        timeout: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut deferred_data: Vec<Vec<u8>> = Vec::new();
+        let mut deferred_pages: Vec<PendingPage> = Vec::new();
+        let result = loop {
+            let remaining = match deadline.checked_duration_since(Instant::now()) {
+                Some(r) => r,
+                None => break Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "StateSnapshot did not arrive before deadline",
+                )),
+            };
+            let rx = self.inner.rx.lock().unwrap();
+            let msg = match rx.recv_timeout(remaining) {
+                Ok(m) => m,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break Err(
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "StateSnapshot did not arrive before deadline",
+                    ),
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Err(
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "shelld inbox disconnected before StateSnapshot",
+                    ),
+                ),
+            };
+            drop(rx);
+            match msg {
+                InboundMessage::Snapshot { generation, body } => {
+                    if body.is_empty() {
+                        crate::lx_debug!(
+                            "shelld_client.snapshot.empty_initial",
+                            "no prior snapshot, start from empty terminal",
+                            generation = generation
+                        );
+                    } else if let Err(e) = self.terminal.apply_snapshot(&body) {
+                        break Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("apply_snapshot rejected body: {e}"),
+                        ));
+                    } else {
+                        crate::lx_event!(
+                            "ATTACH_SNAPSHOT_APPLIED",
+                            "RFC-002 client applied StateSnapshot",
+                            generation = generation,
+                            body_bytes = body.len()
+                        );
+                    }
+                    break Ok(());
+                }
+                InboundMessage::Data(bytes) => {
+                    // Hold pre-snapshot live bytes; replay after the
+                    // snapshot lands so we don't lose them.
+                    deferred_data.push(bytes);
+                }
+                InboundMessage::ScrollbackPage { line_start, line_count, body } => {
+                    deferred_pages.push(PendingPage {
+                        line_start,
+                        line_count,
+                        body,
+                    });
+                }
+            }
+        };
+        // Replay anything we held back so the regular pump loop sees
+        // it on the next tick.  Order preserved per-kind.
+        for bytes in deferred_data {
+            self.terminal.feed(&bytes);
+        }
+        self.pending_scrollback_pages.extend(deferred_pages);
+        result
+    }
+
     /// Drain whatever the reader thread has queued, feed it through
     /// the terminal parser, return total bytes drained.  Caller
     /// requests a redraw on non-zero return.
@@ -689,11 +785,25 @@ impl ShelldClient {
         // Set up the inbox FIRST so any DATA the reader receives
         // between sending ATTACH and our session.pump() landing is
         // queued, not dropped.
-        let session = self.install_session(id, 0, cols, rows)?;
+        let mut session = self.install_session(id, 0, cols, rows)?;
         self.send_frame(Frame::new(
             MsgType::Attach,
             encode_attach(id, cols, rows),
         ))?;
+        // Block until the StateSnapshot arrives so the caller's first
+        // publish reflects shelld's grid, not the freshly-constructed
+        // empty Terminal.  Without this gate the L3 main loop's
+        // initial `publish_and_poke` paints a blank cell rectangle
+        // into the shm and the pane reads as "all black" until the
+        // next PTY byte or key event triggers another publish — for
+        // an idle claudecode TUI (waiting on API response) that next
+        // event may never come, so the pane stays black indefinitely.
+        // Matches the 2026-06-16 9-pane-blank incident, where shelld
+        // had respawned mid-install and ATTACH(id=1..9) hit a
+        // fresh-table daemon that knew nothing about those ids → the
+        // pre-existing fire-and-forget attach masked the failure as
+        // a "stuck" pane.
+        session.await_initial_snapshot(Duration::from_secs(5))?;
         Ok(session)
     }
 
