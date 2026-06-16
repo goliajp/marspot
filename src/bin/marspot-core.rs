@@ -307,31 +307,17 @@ fn spawn_l3(
     session_id: u64,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
-    // L2 creates + stamps the region; both ends map the same fd.
+    // L2 creates + stamps the region; L3 maps the same fd via dup2.
     let region = grid_shm::create_region(cols, rows)?;
     let region_raw = region.as_raw_fd();
 
-    // Bidirectional control socket; the child inherits one end as fd 3.
-    let mut sp = [0i32; 2];
-    if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sp.as_mut_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let parent_fd: RawFd = sp[0];
-    let child_fd: RawFd = sp[1];
-
-    // CLOEXEC every fd we hold here so a *sibling* L3 spawned later (and
-    // this L3 itself, except via the dup'd well-known fds) never inherits
-    // the core end of a control socket or the shm region.  Without this,
-    // each L3 holds the core end of its own (and prior siblings')
-    // control sockets, so the socket never sees EOF when core dies — the
-    // orphaned engine can't tell its core is gone and lingers forever (a
-    // process + shm leak per core restart).  The pre_exec dup2 below
-    // re-clears CLOEXEC on the target fds 3/4, so the child still gets
-    // its control socket + region.
-    for fd in [parent_fd, child_fd, region_raw] {
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    // CLOEXEC the shm fd we hold here so it can't leak into a sibling
+    // L3 spawned later.  The pre_exec dup2 below re-clears CLOEXEC on
+    // fd 4 so the actual child still sees it.
+    {
+        let flags = unsafe { libc::fcntl(region_raw, libc::F_GETFD) };
         if flags >= 0 {
-            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            unsafe { libc::fcntl(region_raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
         }
     }
 
@@ -350,43 +336,38 @@ fn spawn_l3(
     const SHM_TARGET_FD: RawFd = 4;
     lx_event!(
         "L3_SPAWN",
-        "spawning L3 session",
+        "spawning L3 session (UDS-only control, RFC-003 step 3b)",
         bin = session_bin.display(),
         cols = cols,
         rows = rows,
-        control_fd = DEFAULT_CONTROL_FD,
-        shm_fd = SHM_TARGET_FD
+        shm_fd = SHM_TARGET_FD,
+        session_id = session_id
     );
     let mut cmd = Command::new(&session_bin);
-    cmd.env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string())
-        .env(ENV_SHM_FD, SHM_TARGET_FD.to_string())
+    cmd.env(ENV_SHM_FD, SHM_TARGET_FD.to_string())
         // L2 owns session assignment: hand this L3 the exact session it
         // must drive so N children never race for the same one.
         .env("MARSPOT_SESSION_ID", session_id.to_string())
-        // RFC-003: L3 owns its own PTY (no L4 shelld dependency). The
-        // inherited fd 3 control socket still carries shell_proto frames
-        // for input / resize / paste / GridReady poke, identical to the
-        // pre-RFC-003 wire — only PTY ownership flips. The UDS listener
-        // at sessions/<id>/sock is also up, but the inherited-fd path
-        // is what L2 talks to until step 3b switches the wire over.
+        // RFC-003: L3 owns its own PTY *and* binds its own UDS at
+        // sessions/<id>/sock.  L2 connects to that socket post-spawn
+        // (see wait_and_connect below).
         .env("MARSPOT_L3_OWNS_PTY", "1");
+    // Ensure the child does NOT inherit any control-socket env from
+    // the L2 parent — RFC-003 step 3b leaves the inherited-fd path
+    // behind entirely.
+    cmd.env_remove(ENV_CONTROL_FD);
     // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
-    // libc calls (dup2/close/fcntl) are used, mirroring the shell→core
-    // spawn template.
+    // libc calls (dup2/close/fcntl) are used.
     unsafe {
         cmd.pre_exec(move || {
-            // Move the inherited ends onto the well-known fds, then strip
-            // CLOEXEC so they survive exec.
-            for (src, dst) in [(child_fd, DEFAULT_CONTROL_FD), (region_raw, SHM_TARGET_FD)] {
-                if src != dst {
-                    if libc::dup2(src, dst) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
+            if region_raw != SHM_TARGET_FD {
+                if libc::dup2(region_raw, SHM_TARGET_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
                 }
-                let flags = libc::fcntl(dst, libc::F_GETFD);
-                if flags >= 0 {
-                    libc::fcntl(dst, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-                }
+            }
+            let flags = libc::fcntl(SHM_TARGET_FD, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(SHM_TARGET_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
             }
             Ok(())
         });
@@ -394,18 +375,32 @@ fn spawn_l3(
     let child = cmd.spawn()?;
     lx_event!("L3_SPAWNED", "L3 child running", pid = child.id());
 
-    // Parent no longer needs the child's socket end.
-    unsafe { libc::close(child_fd) };
-
     // Map the region as a reader (mmap survives the fd closing, so the
     // owned `region` can drop after).
     let reader = GridShmReader::from_fd(region_raw)?;
     drop(region);
 
-    // Control: write half → L3Conn (forward keys); read half → poke thread.
-    // The poke thread also routes Cmd-C `SelectionText` replies into a
-    // channel the L3Conn blocks on.
-    let control = unsafe { UnixStream::from_raw_fd(parent_fd) };
+    // RFC-003 step 3b: connect to the L3's UDS instead of inheriting a
+    // socketpair.  L3 boots, binds sessions/<id>/sock, writes entry.toml;
+    // we poll for the entry then handshake.  Failure rolls back the
+    // child (Drop sends SIGKILL via std).
+    let control = match marspot::uds_session_client::wait_and_connect(
+        session_id,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            lx_error!(
+                "core.l3.uds_connect_failed",
+                &format!("{e}"),
+                session_id = session_id
+            );
+            // The child Command::spawn returned a Child handle — its
+            // Drop reaps and SIGKILLs.  Letting `child` drop here is
+            // the rollback.
+            return Err(e);
+        }
+    };
     let reader_stream = control.try_clone()?;
     let tx = event_tx.clone();
     let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
