@@ -60,7 +60,7 @@ prod_shell_running() {
 sup_log() {
   local tag="$1"; shift
   local detail="$*"
-  for bin in "$MACOS/marspot-shelld" "$TREE/current/marspot-shelld" "$TARGET/marspot-shelld"; do
+  for bin in "$MACOS/marspot-core" "$TREE/current/marspot-core" "$TARGET/marspot-core"; do
     [[ -x "$bin" ]] || continue
     "$bin" --log-event "$tag" "$detail" >/dev/null 2>&1 && return 0 || true
   done
@@ -87,7 +87,7 @@ cmd_status() {
   echo "App bundle:    $APP"
   if [[ -d "$APP" ]]; then
     echo "  CFBundleExecutable: $(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$PLIST" 2>/dev/null || echo '?')"
-    for b in marspot-shell marspot-core marspot-shelld; do
+    for b in marspot-shell marspot-core; do
       local p; p="$(bundle_bin "$b")"
       if [[ -f "$p" && ! -L "$p" ]]; then
         echo "  $b: $(stat -f '%z' "$p") B"
@@ -111,14 +111,14 @@ fi
 
 # ── 1. Build ──────────────────────────────────────────────────────
 if (( BUILD )); then
-  echo "==> building release (shell + core + shelld + session)"
+  echo "==> building release (shell + core + session)"
   ( cd "$ROOT" && cargo build --release \
-      --bin marspot-shell --bin marspot-core --bin marspot-shelld --bin marspot-session 2>&1 | tail -3 )
+      --bin marspot-shell --bin marspot-core --bin marspot-session 2>&1 | tail -3 )
 fi
 # marspot-session is the per-pane L3 engine: core spawns it as its
 # sibling, so it must ship in the bundle (and ride updates) or L3 silently
 # falls back to the in-process grid.  Omitting it here was a real bug.
-for b in marspot-shell marspot-core marspot-shelld marspot-session; do
+for b in marspot-shell marspot-core marspot-session; do
   [[ -x "$TARGET/$b" ]] || { echo "ERROR: $TARGET/$b missing after build" >&2; exit 1; }
 done
 
@@ -325,11 +325,10 @@ fi
 echo "==> installing bundle binaries"
 # macOS pgrep -f has a known blind spot for LaunchAgent-spawned processes
 # — the production shelld (launched by com.marspot.shelld.plist) doesn't
-# show up under `pgrep -f $MACOS/marspot-shelld` even though `ps auxww`
 # clearly lists it with that exact ARGV[0].  So mirror line 330's pattern:
 # `ps auxww | grep -F "$MACOS/$b"` is the only check that consistently
 # matches both manually-launched and LaunchAgent-launched bundle bins.
-for b in marspot-shell marspot-core marspot-shelld marspot-session; do
+for b in marspot-shell marspot-core marspot-session; do
   running=0
   if ps auxww 2>/dev/null | grep -F "$MACOS/$b" | grep -vq grep; then
     running=1
@@ -357,8 +356,6 @@ done
 pgrep_says_alive=0
 ps_says_alive=0
 launchctl_says_alive=0
-pgrep -f "$MACOS/marspot-shelld" >/dev/null 2>&1 && pgrep_says_alive=1
-ps auxww 2>/dev/null | grep -F "$MACOS/marspot-shelld" | grep -vq grep && ps_says_alive=1
 launchctl print "gui/$(id -u)/com.marspot.shelld" 2>/dev/null | grep -q "state = running" && launchctl_says_alive=1
 verdict_sum=$(( pgrep_says_alive + ps_says_alive + launchctl_says_alive ))
 sup_log "INSTALL_SHELLD_CHECK" \
@@ -385,7 +382,7 @@ if (( ! RUNNING )); then
   # build regardless of resolve order.
   if [[ -d "$TREE/current" ]]; then
     echo "==> refreshing binaries/current/ to match new bundle (was shadowing)"
-    for b in marspot-shell marspot-core marspot-shelld marspot-session; do
+    for b in marspot-shell marspot-core marspot-session; do
       # MUST be `install` (write-temp + atomic rename = fresh inode), not
       # `cp` (in-place overwrite = same inode).  macOS caches a binary's
       # code-signature cdhash per vnode; overwriting in place leaves the
@@ -457,7 +454,6 @@ if (( SHELLD_CHANGED )); then
   if (( WITH_SHELLD )); then
     echo "==> updating shelld via execv (sessions preserved)"
     mkdir -p "$TREE/pending"
-    cp "$TARGET/marspot-shelld" "$TREE/pending/marspot-shelld"
     if ! "$ROOT/bin/install-shelld.sh" --apply-pending-execv; then
       echo "==> execv path declined — falling back to --apply-pending (KILLS sessions)"
       "$ROOT/bin/install-shelld.sh" --apply-pending
