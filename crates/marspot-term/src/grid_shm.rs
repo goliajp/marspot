@@ -138,6 +138,99 @@ fn next_shm_name() -> std::ffi::CString {
     std::ffi::CString::new(format!("/msp-g-{}-{}", std::process::id(), n)).unwrap()
 }
 
+/// Deterministic shm name for a given session id.  Lets a freshly
+/// spawned L2 reattach to a surviving L3's shm region by name (the
+/// fd doesn't survive the swap; the name does).  Same length budget
+/// as `next_shm_name`: `/msp-s-<u64>` is at most 27 chars including
+/// the leading '/', under macOS's ~31-char cap.
+pub fn session_shm_name(session_id: u64) -> std::ffi::CString {
+    std::ffi::CString::new(format!("/msp-s-{session_id}")).unwrap()
+}
+
+/// Create + size + stamp a fresh shared region under a caller-chosen
+/// name (typically `session_shm_name(id)`), **without** unlinking it
+/// — so a separate process can later `shm_open` the same name.  The
+/// caller is responsible for `delete_region(name)` on retirement.
+///
+/// Used by RFC-003 step 3.5: L2 creates one region per L3 with the
+/// session id baked in the name; a post-silent-update L2 can find a
+/// surviving L3 by scanning `sessions/<id>/entry.toml` and re-opening
+/// the region.
+pub fn create_region_named(
+    cols: u16,
+    rows: u16,
+    name: &std::ffi::CStr,
+) -> io::Result<OwnedFd> {
+    assert!(cols > 0 && rows > 0, "grid_shm: zero dimension");
+    assert!(
+        fits_capacity(cols, rows),
+        "grid_shm: {cols}x{rows} exceeds capacity cap {MAX_CELLS} cells"
+    );
+    let len = capacity_bytes();
+
+    // Best-effort unlink first so a stale name from a prior crashed L3
+    // doesn't block O_EXCL.  ENOENT is the expected case on a fresh
+    // boot — ignore.
+    unsafe { libc::shm_unlink(name.as_ptr()) };
+
+    let fd = unsafe {
+        libc::shm_open(
+            name.as_ptr(),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+    if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd.as_raw_fd(),
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        let h = base as *mut Header;
+        (*h).magic = MAGIC;
+        (*h).version = VERSION;
+        (*h).cell_size = std::mem::size_of::<Cell>() as u32;
+        (*h).cols = cols as u32;
+        (*h).rows = rows as u32;
+        libc::munmap(base, len);
+    }
+    Ok(fd)
+}
+
+/// Re-open an existing shm region by name (RDWR so the caller can use
+/// it as either reader or writer).  Used by L2 boot reattach.
+pub fn open_region(name: &std::ffi::CStr) -> io::Result<OwnedFd> {
+    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Best-effort `shm_unlink` of a region by name.  Called when a
+/// session is retired so the kernel actually frees the memory once
+/// every fd-holder has closed it.
+pub fn delete_region(name: &std::ffi::CStr) {
+    unsafe { libc::shm_unlink(name.as_ptr()) };
+}
+
 /// Create + size + stamp a fresh shared region for `cols × rows`, and
 /// return its fd.
 ///
