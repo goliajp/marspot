@@ -207,9 +207,18 @@ struct ProfileCyclePaneSession {
     stage: CycleStage,
     /// Used as a per-stage timer + overall watchdog.
     started_at: SystemTime,
+    /// Tick counter for the badge spinner cycle.
+    spin_phase: u8,
 }
 
 impl ProfileCyclePaneSession {
+    /// Braille spinner — 8 frames, advanced one step per on_tick.
+    /// Standard 1/8 turn frames, same characters most CLI spinners use.
+    fn spinner_frame(phase: u8) -> char {
+        const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+        FRAMES[(phase as usize) % FRAMES.len()]
+    }
+
     fn pid_alive(pid: i32) -> bool {
         // kill(pid, 0) — no signal, just permission/existence check.
         // 0 = process exists and we can signal; -1 with ESRCH = gone.
@@ -254,6 +263,23 @@ impl crate::plugins::PaneSession for ProfileCyclePaneSession {
         let elapsed = now
             .duration_since(self.started_at)
             .unwrap_or_default();
+        // Advance the spinner every tick, then refresh the badge so
+        // the user sees motion even when the state machine is
+        // mid-stage (e.g. waiting for the claude pid to die).
+        self.spin_phase = self.spin_phase.wrapping_add(1);
+        match self.stage {
+            CycleStage::KillSent => host.set_badge(&format!(
+                "→ P{} {}",
+                self.next_profile,
+                Self::spinner_frame(self.spin_phase)
+            )),
+            CycleStage::ResumeSent => host.set_badge(&format!(
+                "P{} starting {}",
+                self.next_profile,
+                Self::spinner_frame(self.spin_phase)
+            )),
+            CycleStage::PendingKill => {} // first tick sets it below
+        }
         // Global watchdog: 30 s of no-progress kills the session.
         if elapsed > std::time::Duration::from_secs(30) {
             host.log(
@@ -296,7 +322,11 @@ impl crate::plugins::PaneSession for ProfileCyclePaneSession {
                         sid, self.next_profile, self.uuid, self.old_claude_pid
                     ),
                 );
-                host.set_badge(&format!("→ P{} …", self.next_profile));
+                host.set_badge(&format!(
+                    "→ P{} {}",
+                    self.next_profile,
+                    Self::spinner_frame(self.spin_phase)
+                ));
                 self.stage = CycleStage::KillSent;
                 self.started_at = now;
             }
@@ -323,7 +353,11 @@ impl crate::plugins::PaneSession for ProfileCyclePaneSession {
                             sid, self.next_profile, self.uuid
                         ),
                     );
-                    host.set_badge(&format!("P{} starting …", self.next_profile));
+                    host.set_badge(&format!(
+                        "P{} starting {}",
+                        self.next_profile,
+                        Self::spinner_frame(self.spin_phase)
+                    ));
                     self.stage = CycleStage::ResumeSent;
                     self.started_at = now;
                 } else if elapsed >= std::time::Duration::from_secs(3) {
@@ -520,6 +554,7 @@ impl ClaudecodePlugin {
             old_claude_pid: meta.claude_pid,
             stage: CycleStage::PendingKill,
             started_at: SystemTime::now(),
+            spin_phase: 0,
         });
         if let Err(e) = host.begin_pane_session(shelld_sid, session) {
             host.log(

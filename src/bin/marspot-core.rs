@@ -1337,7 +1337,32 @@ impl CoreApp {
     /// drop — same contract as src/main.rs `user_event`).
     fn pump_all(&mut self) -> usize {
         let mut total = 0;
+        // Snapshot which session ids are frozen by an L1 PaneSession;
+        // we can't borrow `self.pane_sessions` and `self.panes` at
+        // the same time inside the loop.
+        let frozen: std::collections::HashSet<u64> = self
+            .pane_sessions
+            .iter()
+            .filter_map(|(sid, st)| {
+                if st.has(marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID) {
+                    Some(*sid)
+                } else {
+                    None
+                }
+            })
+            .collect();
         for (i, p) in self.panes.iter_mut().enumerate() {
+            // FREEZE_GRID: skip the pump entirely so the grid the
+            // renderer sees stays exactly as it was when the plugin
+            // took over.  PTY bytes still queue (shelld + client
+            // channel), they get consumed in one shot when the
+            // session ends and pump runs again.
+            let is_frozen = p
+                .shelld_session_id()
+                .is_some_and(|sid| frozen.contains(&sid));
+            if is_frozen {
+                continue;
+            }
             let n = p.pump();
             total += n;
             let pushed = p.drain_scroll_push_delta();
