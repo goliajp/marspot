@@ -635,24 +635,26 @@ declare_class!(
 
         #[method(doCommandBySelector:)]
         fn do_command_by_selector(&self, selector: Sel) {
-            // interpretKeyEvents calls this for keys the IME routed
-            // through itself but didn't commit as text.  We translate
-            // the well-known selectors to NamedKey so the PTY sees
-            // Enter / Tab / Esc / Backspace / arrows.
-            //
-            // Either way `interpretKeyEvents` *did* hand the event to
-            // the IME, which then decided what to call here — that
-            // counts as "the IME consumed this key event" regardless
-            // of whether we recognise the selector.  In particular,
-            // when a CJK IME is composing and the candidate list is
-            // empty, pressing Space lands here as `noop:` to tell us
-            // "I dropped it on the floor".  Forwarding it as raw
-            // ASCII 0x20 in that case is the bug the user just
-            // reported: their preedit shifts because Space slipped
-            // past as a real key.  Marking the event consumed before
-            // the selector check fixes that and is the AppKit-correct
-            // semantics either way.
+            // `interpretKeyEvents` lands here whenever the IME handed
+            // the key event off as a standard editing command —
+            // Enter, Tab, Backspace, arrows, etc.  In every case the
+            // IME has CONSUMED the key, even when the selector is
+            // `noop:` ("I dropped it on the floor"), so always mark
+            // ime_consumed=true and let the keyDown tail skip the
+            // raw fallback.
             self.ivars().ime_consumed.set(true);
+            // Composition guard: while marked text is non-empty the
+            // IME owns navigation + commit too.  Arrow keys move the
+            // candidate cursor, Enter commits, Backspace edits the
+            // preedit — none of them should reach the PTY.  Without
+            // this guard, hitting Right while composing translated
+            // to `\x1b[C` and the user saw "[C[C[C" smear into the
+            // claudecode input field.  Same shape as the Space-leak
+            // we fixed in the raw fallback path; the IME just routes
+            // arrows here instead of pocketing them silently.
+            if !self.ivars().marked_text.borrow().is_empty() {
+                return;
+            }
             let Some(named) = selector_named_key(selector) else {
                 return;
             };
