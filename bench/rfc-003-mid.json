@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "RFC-003 mid bench \u2014 ssh mini clean machine (Apple Silicon, idle)."
+  ],
+  "captured_at_iso": "2026-06-16T15:55:18Z",
+  "git_head": "45c1a27faffdd6d228086d0b7230e98d5dd1fb09",
+  "host": "ssh mini",
+  "headless_parse_MBps": {
+    "cat-ascii": 181.5,
+    "cat-mixed": 179.1,
+    "cat-cjk": 219.2,
+    "cat-emoji": 203.1
+  },
+  "live_pty_MBps": {
+    "cat-ascii": 152.4,
+    "cat-mixed": 145.5,
+    "cat-cjk": 160.0,
+    "cat-emoji": 160.0
+  },
+  "render_p99_us": 852.3,
+  "scroll_p99_us": 1.9,
+  "scroll_cold_p99_us": 3.2,
+  "binary_size_bytes": {
+    "marspot": 707280,
+    "mcli": 441664
+  },
+  "idle_rss_KiB": {
+    "marspot": 80048,
+    "mcli": 81168
+  },
+  "official_gate": "PASSED (21/21 against bench/baseline.json perf-attack F lock 2026-05-05)"
+}

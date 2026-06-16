@@ -298,6 +298,29 @@ Phase 3 (3a/3b/3c) 落地 + install-local 实测 9 pane 走通新 UDS 路径(202
 
 工作量约 100-150 LOC,4 个小 commit 可拆。
 
+### Amendment 9 — Phase 5 bench gate run on `ssh mini` (clean machine, not dev-box)
+
+`bin/bench.sh --full` on dev-box is unusable for Phase 5/Phase 7 gates: contention
+from the live marspot + 9 panes pushes parse to ~25-35 MB/s and render p99 above 1.6 ms,
+neither of which represents the architecture's real perf — same code on `ssh mini`
+gives 181-219 MB/s parse and 852 µs render p99, 21/21 gate PASS.
+
+Phase 5 mid gate result(`bench/rfc-003-mid.json`):
+- parse cat-ascii 181.5 / mixed 179.1 / cjk 219.2 / emoji 203.1 MB/s — all above
+  bench/baseline.json floors (165/163/199/185)
+- render p99 852.3 µs — under 1197 µs floor
+- scroll p99 1.9 µs — under 3 µs floor
+- scroll-cold p99 3.2 µs — under 4 µs floor
+- size marspot 707280 / mcli 441664 — under floors
+- rss marspot 80048 KiB — under 95712 floor
+
+**Phase 5 gate met. Phase 6 (L4 deletion) clear to start.**
+
+Per Amendment 3 the rfc-003-baseline.json was captured on dev-box; comparing
+dev-box-baseline vs mini-mid is apples-to-oranges. The OFFICIAL gate
+(bench/baseline.json, perf-attack F lock 2026-05-05) is the right reference and it
+passes. Phase 7 final gate runs the same way (mini).
+
 ### Amendment 8 — Phase 3b initial-grid race: black panes / wrong colors / broken backspace
 
 install-local 后用户 9 panes 全黑、颜色错、shell 删除不正常。诊断:
