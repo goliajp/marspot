@@ -34,6 +34,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use marspot::shell_proto::WireKeyEvent;
 use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 
 pub mod claudecode;
@@ -216,6 +217,25 @@ pub trait PluginHost: Send + Sync {
     ) -> Result<(), PluginError> {
         Ok(())
     }
+
+    /// RFC-003: take over the pane backing `shelld_session_id` for
+    /// the duration of the returned PaneSession.  The host:
+    ///   1. emits PaneSessionBegin to L2 with the session's caps
+    ///   2. routes subsequent key / pty / escape events to the
+    ///      session's callbacks until on_end fires
+    ///   3. emits PaneSessionEnd on tear-down
+    ///
+    /// Returns Err when a session for the same pane is already in
+    /// flight (one at a time, per RFC-003 § 9).  Default impl is a
+    /// no-op Err for hosts that haven't wired L2.
+    fn begin_pane_session(
+        &self,
+        shelld_session_id: u64,
+        session: Box<dyn PaneSession>,
+    ) -> Result<(), PluginError> {
+        let _ = (shelld_session_id, session);
+        Err(PluginError::Other("begin_pane_session unsupported".into()))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -271,6 +291,87 @@ pub trait Plugin: Send + Sync {
     ) {
         let _ = (host, shelld_session_id);
     }
+}
+
+/// RFC-003 PaneSession — a plugin temporarily takes over a pane.
+/// One instance binds one shelld_session_id; the host instantiates
+/// the host-side counterpart and routes lifecycle events here.
+pub trait PaneSession: Send {
+    /// Capability bits this session wants the host to honour.
+    /// See `marspot::shell_proto::PANE_SESSION_CAP_*`.
+    fn caps(&self) -> u32;
+
+    /// A keystroke arrived on the held pane.  Only fires when
+    /// LOCK_KEYS is in `caps()`.  Return value decides what the host
+    /// does next.
+    fn on_user_key(
+        &mut self,
+        host: &dyn PaneSessionHost,
+        ev: &WireKeyEvent,
+    ) -> KeyHandling {
+        let _ = (host, ev);
+        KeyHandling::Swallow
+    }
+
+    /// PTY bytes for the held pane.  Only fires when OBSERVE_PTY is
+    /// in `caps()` (wiring lands in C4 — until then, never called).
+    fn on_pty_bytes(&mut self, host: &dyn PaneSessionHost, bytes: &[u8]) {
+        let _ = (host, bytes);
+    }
+
+    /// Periodic tick at the plugin's normal cadence (or faster while
+    /// any PaneSession is alive — see C5).
+    fn on_tick(&mut self, host: &dyn PaneSessionHost) {
+        let _ = host;
+    }
+
+    /// Final callback — session is being torn down.  Host has already
+    /// emitted PaneSessionEnd to L2 by the time this fires; plugin
+    /// drops any local state.
+    fn on_end(&mut self, host: &dyn PaneSessionHost, reason: EndReason) {
+        let _ = (host, reason);
+    }
+}
+
+/// What the host should do after the plugin sees a keystroke.
+/// "Forward to PTY" isn't a host concern — a plugin that wants the
+/// key to reach the shell can call its own `ShelldClient::send_input_to`
+/// from within `on_user_key` and then return `Swallow`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyHandling {
+    /// Done — drop any further L2 processing.
+    Swallow,
+    /// End the session immediately; on_end fires with PluginRequested.
+    EndSession,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    /// Plugin called `host.end()`.
+    PluginRequested,
+    /// User pressed Esc 3× in 5 s (L2 force-end).
+    UserEscape,
+    /// Host-side safety: stale session past max duration.
+    Timeout,
+    /// L2 told us the pane is gone (kill / detach).
+    PaneClosed,
+}
+
+/// Per-PaneSession host handle passed to every plugin callback.
+/// Binds (shelld_session_id, plugin name) implicitly; the plugin
+/// doesn't pass it around.
+pub trait PaneSessionHost {
+    fn shelld_session_id(&self) -> u64;
+    /// Tear down the session.  Triggers on_end with PluginRequested
+    /// on the next tick (or immediately if we're already inside a
+    /// dispatch — implementation can defer to avoid re-entrancy).
+    fn end(&self);
+    /// Update the pane's right-side badge text (typically a spinner /
+    /// progress string while the session runs).  Empty clears.
+    fn set_badge(&self, text: &str);
+    /// Plugin-namespaced log proxy mirroring the regular PluginHost
+    /// log so callbacks don't need to thread the outer host through.
+    fn log(&self, level: LogLevel, tag: &str, msg: &str);
 }
 
 /// Per-plugin runtime state — wraps the user's `Box<dyn Plugin>` with

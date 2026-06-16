@@ -17,13 +17,22 @@ use std::sync::Mutex;
 
 use marspot::{lx_debug, lx_error, lx_info, lx_warn};
 
-use super::{LogLevel, PermissionSet, PluginError, PluginHost, PtyChild};
+use super::{LogLevel, PaneSession, PermissionSet, PluginError, PluginHost, PtyChild};
 
 /// Channel message the shell main loop drains and forwards to L2 core
 /// as a `PaneBadge` frame.  Empty `text` = clear.
 pub struct PaneBadgeUpdate {
     pub shelld_session_id: u64,
     pub text: String,
+}
+
+/// Channel message: a plugin wants to take over a pane.  Main loop
+/// stashes the session in `active_pane_sessions`, emits PaneSessionBegin
+/// to L2, and starts routing key/escape events back here.
+pub struct PaneSessionBeginRequest {
+    pub shelld_session_id: u64,
+    pub plugin_name: &'static str,
+    pub session: Box<dyn PaneSession>,
 }
 
 /// Snapshot taken once per tick by the host so plugins read O(1)
@@ -50,6 +59,8 @@ pub struct ShellPluginHost {
     /// Plugin → host → channel → main loop → CoreConn::send.  None
     /// in tests / standalone hosts where no L2 is around.
     pane_badge_tx: Mutex<Option<Sender<PaneBadgeUpdate>>>,
+    /// PaneSession take-over requests bound for the main loop.
+    pane_session_begin_tx: Mutex<Option<Sender<PaneSessionBeginRequest>>>,
 }
 
 #[derive(Clone)]
@@ -65,6 +76,7 @@ impl ShellPluginHost {
             focused: Arc::new(Mutex::new(None)),
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
+            pane_session_begin_tx: Mutex::new(None),
         }
     }
 
@@ -75,6 +87,11 @@ impl ShellPluginHost {
     /// this channel.
     pub fn attach_pane_badge_tx(&self, tx: Sender<PaneBadgeUpdate>) {
         *self.pane_badge_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Same shape for PaneSession take-overs.
+    pub fn attach_pane_session_begin_tx(&self, tx: Sender<PaneSessionBeginRequest>) {
+        *self.pane_session_begin_tx.lock().unwrap() = Some(tx);
     }
 
     /// Refresh per-pane snapshots.  Called from the shell's tick
@@ -199,6 +216,30 @@ impl PluginHost for ShellPluginHost {
             shelld_session_id,
             text: text.to_string(),
         });
+        Ok(())
+    }
+
+    fn begin_pane_session(
+        &self,
+        shelld_session_id: u64,
+        session: Box<dyn PaneSession>,
+    ) -> Result<(), PluginError> {
+        // No dedicated capability — the same SET_STATUS_LINE that
+        // gates set_pane_badge covers PaneSession too for now; the
+        // session is the meta-action plugin uses to manage that
+        // badge's pane.  Plugins without permission see a clear
+        // refusal instead of a silent drop.
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        let plugin_name = self.plugin_name();
+        let Some(tx) = self.pane_session_begin_tx.lock().unwrap().clone() else {
+            return Err(PluginError::Other("no L2 wired".into()));
+        };
+        tx.send(PaneSessionBeginRequest {
+            shelld_session_id,
+            plugin_name,
+            session,
+        })
+        .map_err(|_| PluginError::Other("main loop dropped".into()))?;
         Ok(())
     }
 }

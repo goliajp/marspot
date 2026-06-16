@@ -470,6 +470,12 @@ enum ShellInbox {
     /// plugin so whichever set the badge can react (claudecode → cycle
     /// the next profile and rerun `claudeN --resume <uuid>`).
     PaneBadgeClicked(u64),
+    /// L2 → L1: a keystroke arrived on a pane held by a LOCK_KEYS
+    /// PaneSession.  Routed to the matching session's on_user_key.
+    PaneSessionKey(u64, marspot::shell_proto::WireKeyEvent),
+    /// L2 → L1: user pressed Esc 3× in 5 s; force-end the session
+    /// regardless of plugin opinion.
+    PaneSessionUserEscape(u64),
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -749,6 +755,59 @@ struct ShellApp {
     /// pushes into; drained each `poll_supervisor` tick and forwarded
     /// to the active core as `MsgType::PaneBadge` frames.
     pane_badge_rx: std::sync::mpsc::Receiver<plugins::host::PaneBadgeUpdate>,
+    /// Receiver for `begin_pane_session` requests.
+    pane_session_begin_rx:
+        std::sync::mpsc::Receiver<plugins::host::PaneSessionBeginRequest>,
+    /// Sender clone of the badge channel — held so PaneSession host
+    /// helpers can push set_badge updates without re-importing the
+    /// channel from inside ShellApp methods.
+    pane_badge_tx_clone: std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
+    /// Active PaneSessions held by L1 plugins, keyed by shelld
+    /// session_id.  At most one per pane.
+    active_pane_sessions:
+        std::collections::HashMap<u64, ActivePaneSession>,
+}
+
+/// Bundle: the plugin's session object + the metadata we need to log
+/// + cleanly tear it down (plugin name for log namespace).
+struct ActivePaneSession {
+    session: Box<dyn plugins::PaneSession>,
+    plugin_name: &'static str,
+}
+
+/// Concrete `PaneSessionHost` constructed per-dispatch; lives only
+/// for the duration of one plugin callback.  set_badge → channel,
+/// end → flips a `Cell` the main-loop checks after the callback
+/// returns.  log → logx via the plugin namespace.
+struct ConcretePaneSessionHost<'a> {
+    sid: u64,
+    plugin_name: &'static str,
+    badge_tx: &'a std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
+    end_requested: &'a std::cell::Cell<bool>,
+}
+
+impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
+    fn shelld_session_id(&self) -> u64 {
+        self.sid
+    }
+    fn end(&self) {
+        self.end_requested.set(true);
+    }
+    fn set_badge(&self, text: &str) {
+        let _ = self.badge_tx.send(plugins::host::PaneBadgeUpdate {
+            shelld_session_id: self.sid,
+            text: text.to_string(),
+        });
+    }
+    fn log(&self, level: plugins::LogLevel, tag: &str, msg: &str) {
+        let composed = format!("plugin.{}.{}", self.plugin_name, tag);
+        match level {
+            plugins::LogLevel::Debug => marspot::lx_debug!(&*composed, msg),
+            plugins::LogLevel::Info => marspot::lx_info!(&*composed, msg),
+            plugins::LogLevel::Warn => marspot::lx_warn!(&*composed, msg),
+            plugins::LogLevel::Error => marspot::lx_error!(&*composed, msg),
+        }
+    }
 }
 
 impl ShellApp {
@@ -756,6 +815,8 @@ impl ShellApp {
         let binaries = BinaryTree::default_for("marspot-core")
             .expect("HOME must be set to manage binary slots");
         let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
+        let pane_badge_tx_clone = pane_badge_tx.clone();
+        let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
             surfaces: None,
@@ -776,11 +837,15 @@ impl ShellApp {
             plugin_host: {
                 let h = ShellPluginHost::new();
                 h.attach_pane_badge_tx(pane_badge_tx);
+                h.attach_pane_session_begin_tx(pane_session_begin_tx);
                 h
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
             pane_badge_rx,
+            pane_session_begin_rx,
+            pane_badge_tx_clone,
+            active_pane_sessions: std::collections::HashMap::new(),
         }
     }
 
@@ -1488,6 +1553,11 @@ impl ShellApp {
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
 
+        // Drain PaneSession begin requests + tick every active
+        // session.  Order matters: drain first so a session begun
+        // mid-tick still gets its first on_tick this round.
+        self.process_pane_sessions();
+
         // Drain any badge updates plugins queued during the tick and
         // forward to L2 as PaneBadge frames.  No L2 (pre-boot or
         // during a crash gap) → just drop the update; the next tick
@@ -1867,7 +1937,123 @@ impl ShellApp {
                 self.plugin_registry
                     .dispatch_pane_badge_click_with(&self.plugin_host, shelld_sid);
             }
+            ShellInbox::PaneSessionKey(sid, ev) => {
+                self.dispatch_pane_session_key(sid, ev);
+            }
+            ShellInbox::PaneSessionUserEscape(sid) => {
+                self.end_pane_session(sid, plugins::EndReason::UserEscape);
+            }
         }
+    }
+
+    /// Drain queued PaneSession take-over requests + drive each
+    /// active session's on_tick.  Called by the supervisor poll
+    /// alongside the regular plugin tick.
+    fn process_pane_sessions(&mut self) {
+        // Drain begin requests → register + emit PaneSessionBegin.
+        while let Ok(req) = self.pane_session_begin_rx.try_recv() {
+            if self.active_pane_sessions.contains_key(&req.shelld_session_id) {
+                lx_warn!(
+                    "shell.pane_session.duplicate_begin",
+                    "rejecting duplicate PaneSession begin",
+                    shelld_session_id = req.shelld_session_id,
+                    plugin = req.plugin_name
+                );
+                continue;
+            }
+            let caps = req.session.caps();
+            if let Some(conn) = self.active.as_ref() {
+                conn.send(
+                    MsgType::PaneSessionBegin,
+                    marspot::shell_proto::encode_pane_session_begin(
+                        req.shelld_session_id,
+                        caps,
+                    ),
+                );
+            }
+            self.active_pane_sessions.insert(
+                req.shelld_session_id,
+                ActivePaneSession {
+                    session: req.session,
+                    plugin_name: req.plugin_name,
+                },
+            );
+            lx_event!(
+                "PANE_SESSION_BEGIN",
+                "plugin took over pane",
+                shelld_session_id = req.shelld_session_id,
+                plugin = req.plugin_name,
+                caps = caps
+            );
+        }
+        // Tick every active session.  end_requested flag flushed after.
+        let sids: Vec<u64> = self.active_pane_sessions.keys().copied().collect();
+        for sid in sids {
+            let end_flag = std::cell::Cell::new(false);
+            let host = ConcretePaneSessionHost {
+                sid,
+                plugin_name: self.active_pane_sessions[&sid].plugin_name,
+                badge_tx: &self.pane_badge_tx_clone,
+                end_requested: &end_flag,
+            };
+            if let Some(active) = self.active_pane_sessions.get_mut(&sid) {
+                active.session.on_tick(&host);
+            }
+            if end_flag.get() {
+                self.end_pane_session(sid, plugins::EndReason::PluginRequested);
+            }
+        }
+    }
+
+    fn dispatch_pane_session_key(
+        &mut self,
+        sid: u64,
+        ev: marspot::shell_proto::WireKeyEvent,
+    ) {
+        let Some(active) = self.active_pane_sessions.get_mut(&sid) else {
+            return;
+        };
+        let plugin_name = active.plugin_name;
+        let end_flag = std::cell::Cell::new(false);
+        let host = ConcretePaneSessionHost {
+            sid,
+            plugin_name,
+            badge_tx: &self.pane_badge_tx_clone,
+            end_requested: &end_flag,
+        };
+        let handling = active.session.on_user_key(&host, &ev);
+        if end_flag.get() || handling == plugins::KeyHandling::EndSession {
+            self.end_pane_session(sid, plugins::EndReason::PluginRequested);
+        }
+    }
+
+    fn end_pane_session(&mut self, sid: u64, reason: plugins::EndReason) {
+        let Some(mut active) = self.active_pane_sessions.remove(&sid) else {
+            return;
+        };
+        let plugin_name = active.plugin_name;
+        let end_flag = std::cell::Cell::new(false);
+        let host = ConcretePaneSessionHost {
+            sid,
+            plugin_name,
+            badge_tx: &self.pane_badge_tx_clone,
+            end_requested: &end_flag,
+        };
+        active.session.on_end(&host, reason);
+        // Tell L2 to leave the locked / frozen state.
+        if let Some(conn) = self.active.as_ref() {
+            conn.send(
+                MsgType::PaneSessionEnd,
+                marspot::shell_proto::encode_pane_session_end(sid),
+            );
+        }
+        lx_event!(
+            "PANE_SESSION_END",
+            "pane session torn down",
+            shelld_session_id = sid,
+            plugin = plugin_name,
+            reason = format!("{:?}", reason)
+        );
     }
 
     /// Route a frame from the **pending** (probationary) core.  It only
@@ -1929,7 +2115,9 @@ impl ShellApp {
             // user-facing pane the click came from.
             ShellInbox::CaretRect(_)
             | ShellInbox::FrameRendered
-            | ShellInbox::PaneBadgeClicked(_) => {}
+            | ShellInbox::PaneBadgeClicked(_)
+            | ShellInbox::PaneSessionKey(_, _)
+            | ShellInbox::PaneSessionUserEscape(_) => {}
         }
     }
 }
@@ -2223,6 +2411,16 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         marspot::shell_proto::decode_pane_badge_clicked(&frame.payload)
                             .ok()
                             .map(ShellInbox::PaneBadgeClicked)
+                    }
+                    MsgType::PaneSessionKey => {
+                        marspot::shell_proto::decode_pane_session_key(&frame.payload)
+                            .ok()
+                            .map(|(sid, ev)| ShellInbox::PaneSessionKey(sid, ev))
+                    }
+                    MsgType::PaneSessionUserEscape => {
+                        marspot::shell_proto::decode_pane_session_user_escape(&frame.payload)
+                            .ok()
+                            .map(ShellInbox::PaneSessionUserEscape)
                     }
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.
