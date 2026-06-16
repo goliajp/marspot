@@ -1366,17 +1366,20 @@ impl CoreApp {
             let n = p.pump();
             total += n;
             let pushed = p.drain_scroll_push_delta();
-            let has_bytes = n > 0;
+            // Slide the selection anchor + focus when the PTY pushed
+            // rows into scrollback so the highlight tracks the same
+            // bytes as they roll up.  We do NOT clear the selection
+            // just because the PTY autonomously emitted bytes — a
+            // claudecode pane prints a spinner every few hundred ms
+            // and the old `has_bytes && !dragging → None` rule made
+            // selection disappear before the user could Cmd-C.
+            // Keyboard input + new clicks + focus changes still clear
+            // selection in their own paths; PTY autonomy doesn't.
             if let Some(sel) = self.selection.as_mut() {
-                if sel.session_idx == i {
-                    if pushed > 0 {
-                        let bump = pushed as u32;
-                        sel.anchor.1 = sel.anchor.1.saturating_add(bump);
-                        sel.focus.1 = sel.focus.1.saturating_add(bump);
-                    }
-                    if has_bytes && !self.selection_dragging {
-                        self.selection = None;
-                    }
+                if sel.session_idx == i && pushed > 0 {
+                    let bump = pushed as u32;
+                    sel.anchor.1 = sel.anchor.1.saturating_add(bump);
+                    sel.focus.1 = sel.focus.1.saturating_add(bump);
                 }
             }
         }
