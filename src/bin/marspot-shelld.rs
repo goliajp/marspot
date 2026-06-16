@@ -1256,11 +1256,23 @@ fn main() {
                     let sess = sessions.clone();
                     thread::spawn(move || handle_client(s, sess));
                 }
-                Err(_) => {
+                Err(e) => {
                     if SHUTDOWN.load(Ordering::Acquire) {
                         break;
                     }
-                    lx_warn!("accept.unexpected_error", "ending accept loop");
+                    // Log the actual io::Error so a future "shelld died
+                    // mid-install" investigation has the kind code to
+                    // grep for (ECONNABORTED vs EBADF vs EINVAL are
+                    // very different root causes).  Without this the
+                    // operator only sees "ending accept loop" and the
+                    // diagnostic trail dead-ends here.
+                    lx_warn!(
+                        "accept.unexpected_error",
+                        "ending accept loop",
+                        kind = format!("{:?}", e.kind()),
+                        raw_os_error = e.raw_os_error().unwrap_or(-1),
+                        message = format!("{e}")
+                    );
                     break;
                 }
             }
