@@ -278,4 +278,24 @@ GridResize → GridReady)。但原 §5 Phase 2 列的几项 RPC 没在 Phase 2 c
 ;延后项都是 polish 或 Phase 4 才用到。强行在 Phase 2 一次性补齐会拖长一周内交付节奏。**不**算
 defer 违规 — 是按"先做最小可工作、再用代码反推延后细节"的原则裁剪 scope。
 
+### Amendment 7 — Phase 3 done with silent-update reattach gap; fix landed before Phase 8
+
+Phase 3 (3a/3b/3c) 落地 + install-local 实测 9 pane 走通新 UDS 路径(2026-06-17 install,日志全 PASS:L3_UDS_BOUND × 9 + L3_UDS_HELLO × 9 + L3_UDS_CLIENT_ADOPTED × 9 + UPDATE_STABLE)。Phase 3 doc 列的 gate "install-local 后 9 pane 全走 L3 直连,L4 socket 流量 0" 达成。
+
+**已知缺口(Phase 8 fault injection 8.3 要求 0 闪 0 黑前必须修)**:
+当前架构 silent-update across L2 swap 不能保留 L3 session:
+- 旧 L2 创建 anon shm 给 L3(MAP_SHARED,shm_open + shm_unlink immediately,name 不可重开)
+- 旧 L2 swap 死 → 新 L2 没有 shm fd
+- 新 L2 boot:扫 registry 看到 alive L3,但无法 attach 到那个 shm,只能 spawn 全新的 9 个 L3
+- 旧 9 个 L3 孤儿(reparent 到 launchd,POKE 写到 shm 上但没人读)
+
+修复路径(放在 Phase 3.5 / Phase 5 中间做,Phase 8 前必完):
+1. `grid_shm::create_region`变体:**不**立即 shm_unlink,保留 shm name
+2. `SessionEntry`加 `shm_name: String`字段
+3. L2 spawn_l3 把 shm_name via env 传给 L3,L3 写入 entry.toml
+4. L2 boot reattach 路径:对 alive entry,`shm_open(name, O_RDONLY)` + `connect_with_handshake(socket)`组装 L3Conn(无 child handle)
+5. `session_registry::delete_session`也 `shm_unlink` 干净
+
+工作量约 100-150 LOC,4 个小 commit 可拆。
+
 (执行中后续追加。)
