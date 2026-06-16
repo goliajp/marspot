@@ -240,4 +240,25 @@ Phase 10 release 阶段决定是否补这一步。
 
 预计 commit 数维持 3 个(1a/1b/1c),复杂度比预想低 30-40%。
 
+### Amendment 5 — registry 用 per-session 子目录,不是 top-level files
+
+原 §2 第 4 条规划 `sessions/<id>.toml` + `sessions/<id>.sock` 作为 top-level 文件,
+但 bytelog 已经在 `sessions/<id>/bytelog`。混存会让同一 session id 在 sessions/ 同时
+以 dir 和 filename prefix 出现,扫描和清理都别扭。
+
+实际采用:**per-session 单一子目录,所有 session 资产打包**:
+
+```
+sessions/
+  .next_id
+  <id>/
+    bytelog       # 字节日志(自 1a 起已在)
+    entry.toml    # 注册表元数据(本 step)
+    sock          # UDS 控制 socket(Phase 2.3)
+```
+
+`list_sessions()` 扫 `sessions/` 子目录、对每个子目录读 `entry.toml`。删 session = `rm -rf <id>/`,一次清干净。
+
+UDS 路径 `sessions/<id>/sock` 在沙箱里约 35-55 字符,macOS 104 限内,安全。
+
 (执行中后续追加。)

@@ -5,22 +5,21 @@
 //! update swaps the L2 process, the new instance scans this registry
 //! to reattach to the L3 children that survived.
 //!
-//! This module currently lands the **id allocator** only (Phase 2.1).
-//! Phase 2.2 will add the per-session `.toml` files + scan API; Phase
-//! 3 wires both into L2.
+//! Lands in two parts: 2a is the id allocator, 2b adds the per-session
+//! `entry.toml` file + scan / read / delete API.  Phase 3 wires this
+//! into L2.
 //!
 //! Storage layout (under `MARSPOT_STATE_DIR/sessions/`):
 //!
 //!   .next_id            — monotonic counter, ASCII decimal u64
-//!   <id>/bytelog        — per-session byte log (owned by L3 in
-//!                          RFC-003)
-//!   <id>.toml           — registry entry (Phase 2.2)
-//!   <id>.sock           — L3 UDS control socket (Phase 2.3)
+//!   <id>/bytelog        — per-session byte log (since 1a)
+//!   <id>/entry.toml     — registry entry (this commit, 2b)
+//!   <id>/sock           — L3 UDS control socket (Phase 2.3 / 2c)
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::paths::sessions_dir;
 
@@ -76,6 +75,192 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
 
     // Lock released via Drop (file close).
     Ok(next)
+}
+
+// ──────────────────────────────────────────────────────────────
+// Per-session entry — Phase 2b
+// ──────────────────────────────────────────────────────────────
+
+/// L3 UDS control surface version. Bumped when the wire shape changes
+/// (Phase 2.3 RPC frames, later evolutions). L2 attach refuses an
+/// entry whose proto_version isn't in its supported set.
+pub const PROTO_VERSION: u32 = 3;
+
+/// Per-session directory: `sessions/<id>/`.
+pub fn session_dir(id: u64) -> PathBuf {
+    sessions_dir().join(id.to_string())
+}
+
+/// Where the registry entry lives.
+pub fn session_entry_path(id: u64) -> PathBuf {
+    session_dir(id).join("entry.toml")
+}
+
+/// Where the L3 UDS listener binds.
+pub fn session_socket_path(id: u64) -> PathBuf {
+    session_dir(id).join("sock")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEntry {
+    pub id: u64,
+    pub pid: i32,
+    pub socket: PathBuf,
+    pub cols: u16,
+    pub rows: u16,
+    pub title: String,
+    pub cwd: String,
+    pub proto_version: u32,
+    pub created_at_unix: u64,
+}
+
+fn quote(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+fn unquote(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.len() < 2 || !raw.starts_with('"') || !raw.ends_with('"') {
+        return None;
+    }
+    let inner = &raw[1..raw.len() - 1];
+    Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"))
+}
+
+/// Write the entry atomically: serialize → tempfile + rename. On any
+/// failure the previous entry (or no entry) is what stays on disk.
+pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
+    let dir = session_dir(entry.id);
+    std::fs::create_dir_all(&dir)?;
+    let path = session_entry_path(entry.id);
+    let tmp = path.with_extension("toml.tmp");
+    let mut s = String::new();
+    use std::fmt::Write;
+    writeln!(s, "# marspot session registry entry — RFC-003").ok();
+    writeln!(s, "id = {}", entry.id).ok();
+    writeln!(s, "pid = {}", entry.pid).ok();
+    writeln!(s, "socket = {}", quote(&entry.socket.to_string_lossy())).ok();
+    writeln!(s, "cols = {}", entry.cols).ok();
+    writeln!(s, "rows = {}", entry.rows).ok();
+    writeln!(s, "title = {}", quote(&entry.title)).ok();
+    writeln!(s, "cwd = {}", quote(&entry.cwd)).ok();
+    writeln!(s, "proto_version = {}", entry.proto_version).ok();
+    writeln!(s, "created_at_unix = {}", entry.created_at_unix).ok();
+    std::fs::write(&tmp, s)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+fn invalid<T: Into<String>>(msg: T) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// Parse one entry.toml. Tolerates unknown fields and blank/comment
+/// lines; rejects only when a required field is missing or the value
+/// can't be parsed at its declared type.
+pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
+    use std::collections::HashMap;
+    let mut fields: HashMap<&str, &str> = HashMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        let val = line[eq + 1..].trim();
+        fields.insert(key, val);
+    }
+    let req_str = |k: &str| -> io::Result<String> {
+        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
+        unquote(raw).ok_or_else(|| invalid(format!("{k} not quoted")))
+    };
+    let req_num = |k: &str| -> io::Result<u64> {
+        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<u64>().map_err(|e| invalid(format!("bad {k}: {e}")))
+    };
+    let req_i32 = |k: &str| -> io::Result<i32> {
+        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<i32>().map_err(|e| invalid(format!("bad {k}: {e}")))
+    };
+    let req_u16 = |k: &str| -> io::Result<u16> {
+        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<u16>().map_err(|e| invalid(format!("bad {k}: {e}")))
+    };
+    let req_u32 = |k: &str| -> io::Result<u32> {
+        let raw = fields.get(k).ok_or_else(|| invalid(format!("missing {k}")))?;
+        raw.parse::<u32>().map_err(|e| invalid(format!("bad {k}: {e}")))
+    };
+    Ok(SessionEntry {
+        id: req_num("id")?,
+        pid: req_i32("pid")?,
+        socket: PathBuf::from(req_str("socket")?),
+        cols: req_u16("cols")?,
+        rows: req_u16("rows")?,
+        title: req_str("title")?,
+        cwd: req_str("cwd")?,
+        proto_version: req_u32("proto_version")?,
+        created_at_unix: req_num("created_at_unix")?,
+    })
+}
+
+pub fn read_session_entry(id: u64) -> io::Result<SessionEntry> {
+    let contents = std::fs::read_to_string(session_entry_path(id))?;
+    parse_session_entry_text(&contents)
+}
+
+/// Remove this session's whole directory tree (entry.toml + sock +
+/// bytelog). Called when L2 has confirmed the L3 is dead and the
+/// session id is being retired.
+pub fn delete_session(id: u64) -> io::Result<()> {
+    let dir = session_dir(id);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Best-effort unlink of a leftover socket file at a session's UDS
+/// path. L3 calls this on boot so its `bind(2)` doesn't trip over a
+/// stale path left behind by a prior process that died before
+/// `delete_session`.
+pub fn cleanup_stale_socket(id: u64) {
+    let p = session_socket_path(id);
+    let _ = std::fs::remove_file(&p);
+}
+
+/// Scan `sessions/` and return every entry that parses successfully.
+/// Stale entries that fail to parse (corrupt write, wrong format) are
+/// skipped — `list_session_entries` is for discovery, callers do
+/// liveness validation (`kill 0`) themselves.
+pub fn list_session_entries() -> Vec<SessionEntry> {
+    let root = sessions_dir();
+    let read_dir = match std::fs::read_dir(&root) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !is_session_dir(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Ok(id) = name.parse::<u64>() else { continue };
+        if let Ok(e) = read_session_entry(id) {
+            out.push(e);
+        }
+    }
+    out
+}
+
+fn is_session_dir(p: &Path) -> bool {
+    p.is_dir()
+        && p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -156,5 +341,86 @@ mod tests {
         for (i, id) in ids.iter().enumerate() {
             assert_eq!(*id, (i + 1) as u64, "got ids {ids:?}");
         }
+    }
+
+    fn sample_entry(id: u64) -> SessionEntry {
+        SessionEntry {
+            id,
+            pid: 12345 + id as i32,
+            socket: session_socket_path(id),
+            cols: 120,
+            rows: 40,
+            title: "zsh".into(),
+            cwd: "/Users/test/with spaces and \"quotes\"".into(),
+            proto_version: PROTO_VERSION,
+            created_at_unix: 1_718_000_000 + id,
+        }
+    }
+
+    #[test]
+    fn entry_roundtrip_persists_all_fields() {
+        let _g = StateDirGuard::new();
+        let want = sample_entry(7);
+        write_session_entry(&want).expect("write");
+        let got = read_session_entry(7).expect("read");
+        assert_eq!(got, want, "roundtrip mismatch");
+        assert!(session_entry_path(7).exists());
+    }
+
+    #[test]
+    fn delete_session_removes_everything() {
+        let _g = StateDirGuard::new();
+        let e = sample_entry(3);
+        write_session_entry(&e).expect("write");
+        // Drop a fake socket file too, mimic a live session.
+        std::fs::write(session_socket_path(3), "").expect("touch sock");
+        assert!(session_dir(3).exists());
+
+        delete_session(3).expect("delete");
+
+        assert!(!session_dir(3).exists(), "session dir should be gone");
+        // Idempotent — second delete returns Ok.
+        delete_session(3).expect("delete again");
+    }
+
+    #[test]
+    fn list_session_entries_skips_non_numeric_and_corrupt() {
+        let _g = StateDirGuard::new();
+        write_session_entry(&sample_entry(1)).expect("write 1");
+        write_session_entry(&sample_entry(5)).expect("write 5");
+
+        // A non-numeric subdir is ignored.
+        std::fs::create_dir_all(sessions_dir().join("notanumber")).expect("mkdir noise");
+
+        // A numeric subdir whose entry.toml is garbage is skipped.
+        std::fs::create_dir_all(sessions_dir().join("9")).expect("mkdir 9");
+        std::fs::write(sessions_dir().join("9/entry.toml"), "garbage\n").expect("write garbage");
+
+        let mut ids: Vec<u64> = list_session_entries().iter().map(|e| e.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 5], "expected only {{1, 5}}, got {ids:?}");
+    }
+
+    #[test]
+    fn cleanup_stale_socket_is_idempotent_and_unlinks_only_that_id() {
+        let _g = StateDirGuard::new();
+        write_session_entry(&sample_entry(2)).expect("write");
+        std::fs::write(session_socket_path(2), "").expect("touch sock");
+        assert!(session_socket_path(2).exists());
+
+        cleanup_stale_socket(2);
+        assert!(!session_socket_path(2).exists(), "sock should be gone");
+
+        // Second call on already-gone path is fine.
+        cleanup_stale_socket(2);
+        // entry.toml + dir still intact — cleanup is narrowly scoped.
+        assert!(session_entry_path(2).exists(), "entry.toml must survive");
+    }
+
+    #[test]
+    fn parse_rejects_missing_required_field() {
+        let txt = "id = 1\npid = 2\ncols = 80\n"; // missing rows / socket / etc
+        let err = parse_session_entry_text(txt).expect_err("should fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
