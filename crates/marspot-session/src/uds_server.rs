@@ -22,12 +22,15 @@ use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use marspot_term::{lx_event, lx_info, lx_warn};
 use marspot_term::session_registry::{
     cleanup_stale_socket, delete_session, session_dir, session_socket_path,
     write_session_entry, SessionEntry, PROTO_VERSION,
+};
+use marspot_term::shell_proto::{
+    decode_hello, encode_hello_ack, Frame, MsgType,
 };
 
 pub struct SessionListener {
@@ -131,19 +134,28 @@ impl Drop for SessionListener {
     }
 }
 
-/// Accept loop — Phase 2c. Future RPCs land in 2d-2f; for now every
-/// incoming connection is recorded for forensics and dropped.
+/// Accept loop. Each accepted connection runs a Hello/HelloAck
+/// handshake (step 2d); on success the connection is currently held
+/// open by `handshake_and_park` until the peer closes it. Step 2e
+/// hands the validated stream off to a control reader so it carries
+/// live KeyEvent/Resize/Paste frames into the main loop.
 fn accept_loop(id: u64, listener: UnixListener) {
     loop {
         match listener.accept() {
-            Ok((stream, addr)) => {
-                lx_info!(
-                    "session.listener.accept",
-                    "accepted connection (drop until 2d)",
-                    session_id = id,
-                    peer = format!("{addr:?}")
-                );
-                handle_connection_stub(id, stream);
+            Ok((stream, _addr)) => {
+                let pid_label = id;
+                thread::Builder::new()
+                    .name(format!("l3-uds-conn-{pid_label}"))
+                    .spawn(move || {
+                        if let Err(e) = handshake_and_park(id, stream) {
+                            lx_warn!(
+                                "session.listener.conn_failed",
+                                &format!("{e}"),
+                                session_id = id
+                            );
+                        }
+                    })
+                    .ok();
             }
             Err(e) => {
                 // Bound socket file got removed (Drop in our owner) or
@@ -160,8 +172,108 @@ fn accept_loop(id: u64, listener: UnixListener) {
     }
 }
 
-/// Phase 2c stub: log + drop. Phase 2d reads a Hello frame and
-/// responds with HelloAck.
-fn handle_connection_stub(_id: u64, stream: UnixStream) {
-    drop(stream);
+/// Per-connection startup: read one Hello frame, reply HelloAck on
+/// version match, then block on read() until the peer closes the
+/// connection.  Step 2e replaces the "park until close" tail with
+/// the live control-reader dispatch loop.
+fn handshake_and_park(id: u64, mut stream: UnixStream) -> io::Result<()> {
+    // Bound the handshake so a stalled client doesn't keep an accept
+    // thread alive forever.  Reads after the ack run on a fresh
+    // timeout (cleared at end of handshake).
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+    let frame = match Frame::read_from(&mut stream)? {
+        Some(f) => f,
+        None => {
+            // Peer closed before sending Hello — nothing wrong, just
+            // an idle probe (e.g. `nc -U` without input).
+            return Ok(());
+        }
+    };
+    if frame.msg_type != MsgType::Hello {
+        let _ = Frame::new(
+            MsgType::Error,
+            format!("expected Hello, got {:?}", frame.msg_type).into_bytes(),
+        )
+        .write_to(&mut stream);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("first frame was {:?}, not Hello", frame.msg_type),
+        ));
+    }
+    let peer_version = decode_hello(&frame.payload)?;
+    if peer_version != PROTO_VERSION {
+        let _ = Frame::new(
+            MsgType::Error,
+            format!(
+                "proto mismatch: client={peer_version} server={PROTO_VERSION}"
+            )
+            .into_bytes(),
+        )
+        .write_to(&mut stream);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("proto mismatch: client={peer_version} server={PROTO_VERSION}"),
+        ));
+    }
+
+    Frame::new(MsgType::HelloAck, encode_hello_ack(PROTO_VERSION))
+        .write_to(&mut stream)?;
+
+    lx_event!(
+        "L3_UDS_HELLO",
+        "client handshake OK",
+        session_id = id,
+        proto_version = PROTO_VERSION
+    );
+
+    // Park-until-close: Phase 2e will replace this with the control
+    // reader / writer hand-off.  For 2d we just need to prove the
+    // handshake closes cleanly and the peer can hold the connection.
+    stream.set_read_timeout(None)?;
+    let mut buf = [0u8; 256];
+    use std::io::Read;
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {} // drop bytes silently until 2e
+        }
+    }
+    Ok(())
+}
+
+/// Helper for clients (the cargo example client + L2 Phase 3 wire) —
+/// open a connection to this session's UDS, perform the Hello
+/// handshake, and return the validated stream ready for further
+/// frames. Lives here so the wire shape has exactly one definition.
+#[allow(dead_code)] // wired up by Phase 3 / the cargo example client
+pub fn connect_with_handshake(socket_path: &std::path::Path) -> io::Result<UnixStream> {
+    use marspot_term::shell_proto::encode_hello;
+    let mut stream = UnixStream::connect(socket_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    Frame::new(MsgType::Hello, encode_hello(PROTO_VERSION)).write_to(&mut stream)?;
+    let reply = Frame::read_from(&mut stream)?.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::UnexpectedEof, "server closed before HelloAck")
+    })?;
+    if reply.msg_type == MsgType::Error {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("server error: {}", String::from_utf8_lossy(&reply.payload)),
+        ));
+    }
+    if reply.msg_type != MsgType::HelloAck {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected HelloAck, got {:?}", reply.msg_type),
+        ));
+    }
+    let v = marspot_term::shell_proto::decode_hello_ack(&reply.payload)?;
+    if v != PROTO_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("server proto={v} doesn't match expected {PROTO_VERSION}"),
+        ));
+    }
+    stream.set_read_timeout(None)?;
+    Ok(stream)
 }

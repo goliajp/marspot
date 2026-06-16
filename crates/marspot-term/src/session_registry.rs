@@ -81,10 +81,11 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
 // Per-session entry — Phase 2b
 // ──────────────────────────────────────────────────────────────
 
-/// L3 UDS control surface version. Bumped when the wire shape changes
-/// (Phase 2.3 RPC frames, later evolutions). L2 attach refuses an
-/// entry whose proto_version isn't in its supported set.
-pub const PROTO_VERSION: u32 = 3;
+/// Re-export the L2↔L3 wire protocol version so callers writing
+/// entry.toml mark it with the same number their Hello handshake
+/// will agree on.  Lives in `shell_proto` since that's the wire
+/// definition; this re-export keeps the registry self-contained.
+pub use crate::shell_proto::PROTO_VERSION;
 
 /// Per-session directory: `sessions/<id>/`.
 pub fn session_dir(id: u64) -> PathBuf {
