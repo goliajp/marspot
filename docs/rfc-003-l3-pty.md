@@ -298,7 +298,31 @@ Phase 3 (3a/3b/3c) 落地 + install-local 实测 9 pane 走通新 UDS 路径(202
 
 工作量约 100-150 LOC,4 个小 commit 可拆。
 
-### Amendment 10 — Phase 7 final gate PASS, 21/21 on mini, all metrics improved
+### Amendment 11 — RFC-003 收官 + debug 队列(Phase 11 production install 完成,挂账问题进 debug)
+
+**收官状态**:
+- ✅ Phase 0-10 全 commit + tag v0.3.0 (HEAD `2708307`)
+- ✅ Phase 11 production:`current/marspot-core` 已是 `27083079|2026-06-17T01:32:53`,core pid 25661 uptime 6+ 小时无 panic,9 panes(session 127-134 + 1 reattached)全活
+- ✅ 3 层架构在 production 跑通:L1 shell / L2 core / L3 session(各持 PTY + UDS + entry.toml),L4 已完全不参与
+
+**Carry-over debug 队列**(都不是 RFC-003 架构问题,但 user 现在用起来不舒服):
+
+1. **Install-local dual-core 重叠期混乱 ~3 分钟,~10 个 core 同时上下,1 个 OLD core panic IOSurfaceLookup nil(`src/bin/marspot-core.rs:1686:28`)**
+   - 根因:install-local 触发 SIGUSR1 后,L1 supervisor 在 1 秒内启了 7 NEW + 3 OLD core,共用同一组 IOSurface ID
+   - 影响:install 当时用户看到全黑 / 颜色乱 / 输入丢
+   - Fix path:install-local 的 dual-core swap 协议要加 generation gate(OLD 必须先释放 IOSurface 后 NEW 才能 attach)
+
+2. **键 / 渲染 bug**(NEW core 25661 上仍存在):
+   - 双 `//`:zsh autocomplete 行为(可能 + L3 local-echo 与 PTY echo 没对齐)
+   - Backspace 不工作:L2→L3 KeyEvent(Backspace) 到 L3 后 `input_core::key_event_to_bytes` 编出 `\x7f` 链路某段断
+   - 颜色全白:SGR 序列被 Terminal::feed 吃掉但没应用 — 可能 Phase 6 重构 Terminal::state 有侧效应
+   - 都需要在 NEW core(non-noise window)抓 PTY trace + debug
+
+3. **claudecode L1 插件 18:36 被 budget_overshoot auto-disable**(`plugin.disabled name=claudecode limit=3`)
+   - 根因:Phase 6d 我把 ShelldClient 调用全 stub 成 ErrorKind::Unsupported,tick 每次返回 Err,超时累积过 50us budget
+   - Fix:tick 路径里检测到 stub 直接快速返回 Ok(()),不再走 list_sessions stub
+
+debug 在新会话推。架构迁移就此**确认收官**。
 
 Final bench (`bench/rfc-003-final.json`) after L4 retirement:
 - parse cat-ascii 186.2 (mid 181.5, +2.6%)
