@@ -319,8 +319,83 @@ pub struct L3Spawn {
     pub selection_rx: Receiver<(u32, String)>,
 }
 
+/// Process handle for an L3 child.  RFC-003 Amendment 7: a `Reattached`
+/// variant represents an L3 that survived an L2 swap — we know its pid
+/// but didn't fork it, so we can't `try_wait` (kill 0 instead) and we
+/// must NOT kill it on Drop (the user, not us, decides retirement).
+pub enum L3Process {
+    Spawned(Child),
+    Reattached { pid: i32 },
+}
+
+impl L3Process {
+    pub fn id(&self) -> u32 {
+        match self {
+            Self::Spawned(c) => c.id(),
+            Self::Reattached { pid } => *pid as u32,
+        }
+    }
+
+    /// `Child::try_wait` for the Spawned variant; emulated via
+    /// `kill(pid, 0)` for the Reattached variant (we don't own the
+    /// process so syscall waitpid isn't allowed).  Returns the same
+    /// shape as `Child::try_wait` so call sites don't branch.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Spawned(c) => c.try_wait(),
+            Self::Reattached { pid } => {
+                let alive = unsafe { libc::kill(*pid, 0) } == 0;
+                if alive {
+                    Ok(None)
+                } else {
+                    // Synthesise a "process gone" status; the only
+                    // caller (`L3Conn::poll`) just needs Some(_).
+                    // Spawn a quickly-exiting helper to obtain a real
+                    // ExitStatus value cheaply.
+                    let st = std::process::Command::new("/usr/bin/true")
+                        .status()?;
+                    Ok(Some(st))
+                }
+            }
+        }
+    }
+
+    /// `Child::kill` for the Spawned variant; SIGTERM via pid for
+    /// the Reattached variant.  Best-effort either way.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Spawned(c) => c.kill(),
+            Self::Reattached { pid } => {
+                unsafe { libc::kill(*pid, libc::SIGTERM) };
+                Ok(())
+            }
+        }
+    }
+
+    /// `Child::wait` for the Spawned variant; busy-poll `kill 0` for
+    /// the Reattached variant (with a short timeout — we can't waitpid
+    /// for a foreign process so we just verify it died).
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Spawned(c) => c.wait(),
+            Self::Reattached { pid } => {
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_millis(200);
+                while std::time::Instant::now() < deadline {
+                    if unsafe { libc::kill(*pid, 0) } != 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                // ExitStatus is needed for the API contract; synthesise.
+                std::process::Command::new("/usr/bin/true").status()
+            }
+        }
+    }
+}
+
 pub struct L3Conn {
-    child: Child,
+    child: L3Process,
     /// Write half of the L2↔L3 control socket — forwards key events.
     /// (A reader thread on the matching half lives in the container,
     /// turning L3's `GridReady` pokes into redraw wakes.)
@@ -377,6 +452,41 @@ pub struct L3Conn {
 }
 
 impl L3Conn {
+    /// RFC-003 Amendment 7 step 4: assemble an L3Conn from pieces we
+    /// reattached to (we didn't fork; the L3 was spawned by a prior
+    /// L2 that has since swapped).  Same shape as `new` except the
+    /// process handle wraps a foreign pid we don't own.
+    pub fn reattach(
+        pid: i32,
+        control: UnixStream,
+        reader: GridShmReader,
+        selection_rx: Receiver<(u32, String)>,
+        session_id: u64,
+    ) -> Self {
+        let (cols, rows) = (reader.cols(), reader.rows());
+        let grid = Grid::new(cols, rows);
+        Self {
+            child: L3Process::Reattached { pid },
+            control,
+            reader,
+            session_id,
+            pending: None,
+            grid,
+            cursor_visible: true,
+            app_cursor_keys: false,
+            bracketed_paste: false,
+            last_seq: 0,
+            req_cols: cols,
+            req_rows: rows,
+            req_view_offset: 0,
+            snap_scrollback_len: 0,
+            exited: false,
+            scratch: Vec::new(),
+            selection_rx,
+            selection_seq: 0,
+        }
+    }
+
     /// Assemble from already-spawned pieces.  The container does the
     /// spawn (socketpair + shm region + `Command`); this is pure
     /// assembly so `Pane`/`PaneBackend` stay free of process-launch glue.
@@ -384,7 +494,7 @@ impl L3Conn {
         let (cols, rows) = (spawn.reader.cols(), spawn.reader.rows());
         let grid = Grid::new(cols, rows);
         Self {
-            child: spawn.child,
+            child: L3Process::Spawned(spawn.child),
             control: spawn.control,
             reader: spawn.reader,
             session_id,
@@ -449,7 +559,7 @@ impl L3Conn {
         let old_pid = self.child.id();
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.child = next.child;
+        self.child = L3Process::Spawned(next.child);
         self.control = next.control;
         self.reader = next.reader;
         self.selection_rx = next.selection_rx;

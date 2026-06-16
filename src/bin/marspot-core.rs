@@ -438,6 +438,59 @@ fn spawn_l3_pane(
     Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
 }
 
+/// RFC-003 Amendment 7 step 4: reattach to an L3 child that survived
+/// the previous L2's death.  Walks entry.toml → shm_open(name) +
+/// connect_with_handshake(socket).  Returns a Pane that drives the
+/// *existing* L3 process without forking a new one.
+///
+/// Returns Err on any failure (registry entry missing, shm name
+/// missing, shm gone, socket gone, handshake refused) — caller falls
+/// through to spawn_l3_pane.
+fn reattach_l3_pane(
+    session_id: u64,
+    event_tx: &Sender<CoreEvent>,
+) -> std::io::Result<Pane> {
+    let entry = marspot_term::session_registry::read_session_entry(session_id)?;
+    if entry.shm_name.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "no shm_name (legacy entry)",
+        ));
+    }
+    let shm_c = std::ffi::CString::new(entry.shm_name.clone())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{e}")))?;
+    let shm_fd = grid_shm::open_region(&shm_c)?;
+    let reader = GridShmReader::from_fd(shm_fd.as_raw_fd())?;
+    // GridShmReader keeps its own mmap; once the fd is mapped we can
+    // drop the OwnedFd (kernel keeps the mapping alive).
+    drop(shm_fd);
+
+    // UDS connect + handshake — same wire as the spawn path.
+    let control = marspot::uds_session_client::wait_and_connect(
+        session_id,
+        std::time::Duration::from_secs(2),
+    )?;
+    let reader_stream = control.try_clone()?;
+    let tx = event_tx.clone();
+    let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
+    std::thread::spawn(move || l3_reader_loop(reader_stream, tx, selection_tx));
+
+    lx_event!(
+        "L3_REATTACHED",
+        "took over surviving L3 from previous L2 image",
+        session_id = session_id,
+        pid = entry.pid,
+        shm_name = entry.shm_name
+    );
+    Ok(Pane::new_l3(L3Conn::reattach(
+        entry.pid,
+        control,
+        reader,
+        selection_rx,
+        session_id,
+    )))
+}
+
 /// The full multi-pane UI state machine — `Marspot` (src/main.rs)
 /// minus the AppKit window plumbing.  Mouse coordinates arrive in
 /// view-local physical pixels, exactly what the shell's NSView
@@ -1726,33 +1779,26 @@ fn main() {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
         }
-        // RFC-003 step 3a: registry-driven discovery.  Scan
-        // sessions/<id>/entry.toml + `kill 0` so dead entries get
-        // pruned, but DO NOT reattach to alive L3s yet — that needs
-        // the UDS connect path from step 3b.  `spawn_l3_pane` would
-        // currently fork a fresh marspot-session for any id passed,
-        // so handing it an id whose L3 is already alive would
-        // duplicate the child.  Until 3b lands, every L2 boot just
-        // allocates fresh ids.
+        // RFC-003 step 3a + Amendment 7 step 4: scan registry,
+        // reattach to alive L3s by shm name + UDS connect, prune dead,
+        // allocate fresh for the remainder.
         let raw_list = list_session_entries();
         for e in &raw_list {
             if !e.title.is_empty() {
                 session_titles.insert(e.id, e.title.clone());
             }
         }
-        let mut alive = 0usize;
+        // Separate alive vs dead and try to reattach to each alive
+        // entry up to n_sessions.
+        let mut alive_ids: Vec<u64> = Vec::new();
         let mut dead = 0usize;
         for e in &raw_list {
-            // kill 0 returns 0 if the pid still exists and we have
-            // permission to signal it.  Dead pids → registry stale,
-            // prune so future scans stay clean.
             let live = unsafe { libc::kill(e.pid, 0) } == 0;
             if live {
-                alive += 1;
+                alive_ids.push(e.id);
             } else {
                 dead += 1;
                 let _ = session_registry::delete_session(e.id);
-                // Amendment 7 step 3: dead L3 → drop its shm too.
                 if !e.shm_name.is_empty() {
                     if let Ok(c) = std::ffi::CString::new(e.shm_name.clone()) {
                         grid_shm::delete_region(&c);
@@ -1760,16 +1806,63 @@ fn main() {
                 }
             }
         }
+        alive_ids.sort();
+        let mut reattached_ids: Vec<u64> = Vec::new();
+        for id in alive_ids.iter().take(n_sessions) {
+            match reattach_l3_pane(*id, &event_tx) {
+                Ok(pane) => {
+                    panes.push(pane);
+                    reattached_ids.push(*id);
+                }
+                Err(e) => {
+                    lx_warn!(
+                        "core.reattach.l3_failed",
+                        &format!("{e} — will SIGTERM + prune"),
+                        session = id
+                    );
+                    // Reattach failed: SIGTERM the orphan + clean
+                    // registry so the next boot doesn't loop on it.
+                    if let Ok(entry) =
+                        marspot_term::session_registry::read_session_entry(*id)
+                    {
+                        unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+                        if !entry.shm_name.is_empty() {
+                            if let Ok(c) =
+                                std::ffi::CString::new(entry.shm_name.clone())
+                            {
+                                grid_shm::delete_region(&c);
+                            }
+                        }
+                    }
+                    let _ = session_registry::delete_session(*id);
+                }
+            }
+        }
+        // Any alive id beyond n_sessions is leftover from a wider
+        // layout; SIGTERM + prune so they don't accumulate.
+        for id in alive_ids.iter().skip(n_sessions) {
+            if let Ok(entry) = marspot_term::session_registry::read_session_entry(*id) {
+                unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+                if !entry.shm_name.is_empty() {
+                    if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
+                        grid_shm::delete_region(&c);
+                    }
+                }
+            }
+            let _ = session_registry::delete_session(*id);
+        }
         lx_event!(
             "core.session_registry.inventory",
             "RFC-003 registry scan at boot",
             total = raw_list.len(),
-            alive = alive,
+            alive = alive_ids.len(),
+            reattached = reattached_ids.len(),
             dead = dead,
             want = n_sessions
         );
+        // Allocate fresh ids for the rest.
         let mut ids: Vec<u64> = Vec::new();
-        while ids.len() < n_sessions {
+        while panes.len() + ids.len() < n_sessions {
             match allocate_next_session_id() {
                 Ok(id) => ids.push(id),
                 Err(e) => {
