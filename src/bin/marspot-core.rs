@@ -307,8 +307,17 @@ fn spawn_l3(
     session_id: u64,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
-    // L2 creates + stamps the region; L3 maps the same fd via dup2.
-    let region = grid_shm::create_region(cols, rows)?;
+    // RFC-003 Amendment 7 step 3: L2 creates the region under the
+    // deterministic per-session name `/msp-s-<id>` so a post-swap L2
+    // can shm_open(name) and reattach to the surviving L3 instead of
+    // spawning a duplicate.  The L3 carries the name in entry.toml
+    // (via MARSPOT_SHM_NAME env) for that lookup.
+    let shm_name_c = grid_shm::session_shm_name(session_id);
+    let shm_name = shm_name_c
+        .to_str()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let region = grid_shm::create_region_named(cols, rows, &shm_name_c)?;
     let region_raw = region.as_raw_fd();
 
     // CLOEXEC the shm fd we hold here so it can't leak into a sibling
@@ -351,7 +360,11 @@ fn spawn_l3(
         // RFC-003: L3 owns its own PTY *and* binds its own UDS at
         // sessions/<id>/sock.  L2 connects to that socket post-spawn
         // (see wait_and_connect below).
-        .env("MARSPOT_L3_OWNS_PTY", "1");
+        .env("MARSPOT_L3_OWNS_PTY", "1")
+        // Amendment 7 step 3: hand the L3 the shm name we chose so it
+        // records it in entry.toml.  A future L2 then knows what to
+        // shm_open for reattach.
+        .env("MARSPOT_SHM_NAME", &shm_name);
     // Ensure the child does NOT inherit any control-socket env from
     // the L2 parent — RFC-003 step 3b leaves the inherited-fd path
     // behind entirely.
@@ -768,6 +781,10 @@ impl CoreApp {
                     unsafe { libc::kill(entry.pid, libc::SIGTERM) };
                 }
                 let _ = session_registry::delete_session(id);
+                // Amendment 7 step 3: also drop the named shm region
+                // so the kernel actually frees the pages once every
+                // fd-holder closes.
+                grid_shm::delete_region(&grid_shm::session_shm_name(id));
             } else if let Err(e) = self.client.kill_session(id) {
                 lx_warn!(
                     "core.close_session.kill_failed",
@@ -1735,6 +1752,12 @@ fn main() {
             } else {
                 dead += 1;
                 let _ = session_registry::delete_session(e.id);
+                // Amendment 7 step 3: dead L3 → drop its shm too.
+                if !e.shm_name.is_empty() {
+                    if let Ok(c) = std::ffi::CString::new(e.shm_name.clone()) {
+                        grid_shm::delete_region(&c);
+                    }
+                }
             }
         }
         lx_event!(
