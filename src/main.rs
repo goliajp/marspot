@@ -9,7 +9,7 @@ use marspot::render_metal::{make_target_texture, MetalRenderer};
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
-use marspot::{lx_debug, lx_error, lx_warn};
+use marspot::{lx_debug, lx_error};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
@@ -200,13 +200,6 @@ struct Marspot {
     /// sidebar [+] button).  Same proxy main passed into `run_app`.
     #[allow(dead_code)]
     event_proxy: EventProxy,
-    /// Connection to `marspot-shelld`.  Sessions are spawned and
-    /// driven through this; marspot itself never forks shells, so
-    /// a `marspot` process restart (silent update, manual relaunch)
-    /// doesn't take any user shells with it.  `None` in tmux-CC
-    /// mode, where the lone session goes through `Session::spawn_with`
-    /// directly (shelld doesn't speak the tmux control protocol yet).
-    shelld: Option<std::sync::Arc<marspot::shelld_client::ShelldClient>>,
 }
 
 #[derive(Default)]
@@ -889,18 +882,26 @@ impl Marspot {
         if self.panes.len() >= SESSION_COUNT_HARD_CAP {
             return;
         }
-        let Some(client) = self.shelld.as_ref() else {
-            lx_error!("gui.spawn.no_shelld_client", "shelld client missing, cannot spawn");
-            return;
+        // RFC-003 Phase 6: standalone marspot spawns in-process
+        // Sessions; cross-restart persistence is not a property here
+        // (use install-local + the split-arch path for that).
+        let proxy_clone = self.event_proxy.clone();
+        let wake = move || {
+            proxy_clone.wake();
         };
-        match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        match marspot::session::Session::spawn_with(
+            &shell,
+            &[],
+            INITIAL_COLS,
+            INITIAL_ROWS,
+            wake,
+        ) {
             Ok(s) => {
-                self.panes.push(marspot::pane::Pane::new_shelld(s));
+                self.panes.push(marspot::pane::Pane::new(s));
                 self.custom_titles.push(None);
             }
-            Err(e) => {
-                lx_error!("gui.spawn.shelld_failed", &format!("{e}"));
-            }
+            Err(e) => lx_error!("gui.spawn.session_failed", &format!("{e}")),
         }
     }
 
@@ -913,25 +914,9 @@ impl Marspot {
         if idx >= self.panes.len() {
             return;
         }
-        // shelld-backed pane: ask shelld to terminate the session +
-        // delete its bytelog BEFORE we drop the local pane. Otherwise
-        // shelld keeps the session alive (the GUI closing the local
-        // handle just detaches a subscriber) and the next time the
-        // user opens a new pane, list_sessions sees this id as still
-        // alive and re-attaches it — the entire bytelog replays into
-        // the new pane and the "closed" content comes back.
-        // Local in-process panes are handled entirely by `panes.remove`
-        // below (their PTY torn down by Session/Pty Drop).
-        if let (Some(id), Some(client)) = (self.panes[idx].shelld_session_id(), self.shelld.as_ref()) {
-            if let Err(e) = client.kill_session(id) {
-                lx_warn!(
-                    "gui.close_session.kill_failed",
-                    &format!("{e}"),
-                    id = id,
-                    pane_idx = idx
-                );
-            }
-        }
+        // RFC-003 Phase 6: standalone marspot owns in-process Sessions
+        // only; their PTY teardown is handled entirely by the Drop
+        // chain below.
         // Drop the session — this fires Session/Pty teardown.
         self.panes.remove(idx);
         // Parallel-array state must shrink in lockstep so the
@@ -1478,27 +1463,6 @@ fn main() {
     // so a marspot restart never SIGHUPs a running session.  tmux-CC
     // mode keeps the local Session::spawn_with path because shelld
     // doesn't speak the tmux control protocol yet.
-    let shelld_client: Option<std::sync::Arc<marspot::shelld_client::ShelldClient>> = if tmux_mode {
-        None
-    } else {
-        let proxy_clone = proxy.clone();
-        let wake = move || {
-            proxy_clone.wake();
-        };
-        let socket = marspot::paths::shelld_socket();
-        let client = marspot::shelld_client::ShelldClient::connect(&socket, wake)
-            .unwrap_or_else(|e| {
-                lx_error!(
-                    "gui.shelld.connect_failed",
-                    &format!("{e}"),
-                    sock = socket.display(),
-                    hint = "run `bin/install-shelld.sh` once to launchctl-load it"
-                );
-                std::process::exit(1);
-            });
-        Some(std::sync::Arc::new(client))
-    };
-
     let panes: Vec<marspot::pane::Pane> = if tmux_mode {
         let proxy_clone = proxy.clone();
         let wake = move || {
@@ -1514,45 +1478,29 @@ fn main() {
         .expect("spawn tmux -CC session");
         vec![marspot::pane::Pane::new(s)]
     } else {
-        let client = shelld_client.as_ref().unwrap();
-        // List existing sessions and reattach if shelld already has
-        // some (this is what makes "marspot restart preserves shells"
-        // work — surviving sessions show their full bytelog history
-        // on attach via shelld's REPLAY).  Fill any remaining slots
-        // with brand-new sessions to reach the layout's cell count.
-        let existing: Vec<marspot::shelld_proto::SessionInfo> = client
-            .list_sessions()
-            .unwrap_or_else(|e| {
-                lx_warn!(
-                    "gui.shelld.list_sessions_failed",
-                    "starting fresh",
-                    err = format!("{e}")
-                );
-                Vec::new()
-            })
-            .into_iter()
-            .filter(|s| s.alive)
-            .collect();
+        // RFC-003 Phase 6: standalone marspot (no L1/L2 split) used
+        // to drive shelld-backed sessions; with L4 retired it falls
+        // back to the in-process Session pane (same as `mcli`'s
+        // model).  Fresh shells each boot — no cross-restart
+        // persistence in this code path; for that the user runs the
+        // installed app (split-arch) which keeps L3 children across
+        // L2 swaps via RFC-003 Amendment 7 reattach.
         let mut panes = Vec::with_capacity(n_sessions);
-        for info in existing.iter().take(n_sessions) {
-            match client.attach(info.session_id, INITIAL_COLS, INITIAL_ROWS) {
-                Ok(s) => panes.push(marspot::pane::Pane::new_shelld(s)),
-                Err(e) => {
-                    lx_error!(
-                        "gui.shelld.attach_failed",
-                        &format!("{e}"),
-                        session = info.session_id
-                    );
-                }
-            }
-        }
-        while panes.len() < n_sessions {
-            match client.new_session(INITIAL_COLS, INITIAL_ROWS, "") {
-                Ok(s) => panes.push(marspot::pane::Pane::new_shelld(s)),
-                Err(e) => {
-                    lx_error!("gui.shelld.new_session_failed", &format!("{e}"));
-                    break;
-                }
+        for _ in 0..n_sessions {
+            let proxy_clone = proxy.clone();
+            let wake = move || {
+                proxy_clone.wake();
+            };
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            match marspot::session::Session::spawn_with(
+                &shell,
+                &[],
+                INITIAL_COLS,
+                INITIAL_ROWS,
+                wake,
+            ) {
+                Ok(s) => panes.push(marspot::pane::Pane::new(s)),
+                Err(e) => lx_error!("gui.session.spawn_failed", &format!("{e}")),
             }
         }
         panes
@@ -1591,7 +1539,6 @@ fn main() {
         rss_dump_started_at: None,
         last_rss_dump: None,
         event_proxy: proxy.clone(),
-        shelld: shelld_client,
     };
 
     let attrs = WindowAttrs {
@@ -1957,7 +1904,6 @@ fn bench_rss_format_dump(arg: &str) {
         rss_dump_started_at: None,
         last_rss_dump: None,
         event_proxy: EventProxy::new(),
-        shelld: None,
     };
     let start = std::time::Instant::now();
     let deadline = start + std::time::Duration::from_millis(secs * 1000 + 500);
