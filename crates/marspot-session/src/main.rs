@@ -33,15 +33,13 @@ use marspot_term::grid_shm::{
     GridShmWriter, ENV_SHM_FD, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
-use marspot_term::paths::shelld_socket;
 use marspot_term::render::grid_selection_text;
 use marspot_term::shell_proto::{
     decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
     decode_paste,
     encode_selection_text, wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
-use marspot_term::shelld_client::{PendingPage, SessionState, ShelldClient, ShelldSession};
-use marspot_term::shelld_proto::SessionInfo;
+use marspot_term::session_state::{PendingPage, SessionState};
 
 use local_session::LocalSession;
 
@@ -57,89 +55,69 @@ use local_session::LocalSession;
 /// difference user-facing is the one env-var-gated dispatch in
 /// `main()`. Phase 6 of RFC-003 deletes the `Shelld` variant once
 /// L2 has fully switched over.
+/// RFC-003 Phase 6: only the L3-owns-PTY path remains; SessionImpl
+/// is a single-variant alias kept for code-shape continuity.
 enum SessionImpl {
-    Shelld(ShelldSession),
     Local(LocalSession),
 }
 
 impl SessionImpl {
     fn id(&self) -> u64 {
         match self {
-            Self::Shelld(s) => s.id(),
             Self::Local(s) => s.id(),
         }
     }
-
     fn child_pid(&self) -> i32 {
         match self {
-            Self::Shelld(s) => s.child_pid(),
             Self::Local(s) => s.child_pid(),
         }
     }
-
     fn is_exited(&self) -> bool {
         match self {
-            Self::Shelld(s) => s.is_exited(),
             Self::Local(s) => s.is_exited(),
         }
     }
-
     fn state(&self) -> SessionState {
         match self {
-            Self::Shelld(s) => s.state(),
             Self::Local(s) => s.state(),
         }
     }
-
     fn terminal(&self) -> &marspot_term::terminal::Terminal {
         match self {
-            Self::Shelld(s) => s.terminal(),
             Self::Local(s) => s.terminal(),
         }
     }
-
     fn terminal_mut(&mut self) -> &mut marspot_term::terminal::Terminal {
         match self {
-            Self::Shelld(s) => s.terminal_mut(),
             Self::Local(s) => s.terminal_mut(),
         }
     }
-
     fn pump(&mut self) -> usize {
         match self {
-            Self::Shelld(s) => s.pump(),
             Self::Local(s) => s.pump(),
         }
     }
-
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::Shelld(s) => s.write(bytes),
             Self::Local(s) => s.write(bytes),
         }
     }
-
     fn resize(&mut self, cols: u16, rows: u16) -> std::io::Result<()> {
         match self {
-            Self::Shelld(s) => s.resize(cols, rows),
             Self::Local(s) => s.resize(cols, rows),
         }
     }
-
     fn request_scrollback_page(
         &mut self,
         line_start: u32,
         line_count: u32,
     ) -> std::io::Result<()> {
         match self {
-            Self::Shelld(s) => s.request_scrollback_page(line_start, line_count),
             Self::Local(s) => s.request_scrollback_page(line_start, line_count),
         }
     }
-
     fn take_pending_scrollback_pages(&mut self) -> Vec<PendingPage> {
         match self {
-            Self::Shelld(s) => s.take_pending_scrollback_pages(),
             Self::Local(s) => s.take_pending_scrollback_pages(),
         }
     }
@@ -527,77 +505,13 @@ fn main() {
         }
         SessionImpl::Local(local)
     } else {
-        let wake_tx = ev_tx.clone();
-        let wake = move || {
-            let _ = wake_tx.send(SessionEvent::Wake);
-        };
-        let sock = shelld_socket();
-        lx_info!(
-            "session.shelld.connecting",
-            "connecting to shelld",
-            socket = sock.display()
+        // RFC-003 Phase 6: L4 shelld retired.  MARSPOT_L3_OWNS_PTY=1
+        // is now mandatory; the old shelld-driven fallback is gone.
+        lx_error!(
+            "session.shelld_path_removed",
+            "MARSPOT_L3_OWNS_PTY=0 used to route through shelld; RFC-003 removed L4 — set MARSPOT_L3_OWNS_PTY=1 (or leave it unset and rely on the default)"
         );
-        let client = match ShelldClient::connect(&sock, wake) {
-            Ok(c) => c,
-            Err(e) => {
-                lx_error!("session.shelld.connect_failed", &format!("{e}"));
-                std::process::exit(1);
-            }
-        };
-
-        // Pick the session to drive. Two regimes:
-        //
-        // * L2-managed (`MARSPOT_SESSION_ID` set): L2 owns assignment.
-        // * Standalone (dev/test/soak, no id): reattach the first live
-        //   session (bytelog replay) if any, else create a fresh one.
-        let want: Option<u64> = std::env::var("MARSPOT_SESSION_ID")
-            .ok()
-            .and_then(|s| s.parse().ok());
-        let attached = match want {
-            Some(id) => {
-                lx_info!(
-                    "session.attach.assigned",
-                    "attaching L2-assigned session",
-                    session_id = id
-                );
-                client.attach(id, cols, rows)
-            }
-            None => {
-                let existing: Vec<SessionInfo> = client
-                    .list_sessions()
-                    .unwrap_or_else(|e| {
-                        lx_warn!(
-                            "session.list_sessions_failed",
-                            &format!("{e} — starting fresh")
-                        );
-                        Vec::new()
-                    })
-                    .into_iter()
-                    .filter(|s| s.alive)
-                    .collect();
-                match existing.first() {
-                    Some(s) => {
-                        lx_info!(
-                            "session.attach.standalone_existing",
-                            "standalone: attaching first live session",
-                            session_id = s.session_id
-                        );
-                        client.attach(s.session_id, cols, rows)
-                    }
-                    None => {
-                        lx_info!(
-                            "session.attach.standalone_fresh",
-                            "standalone: no live session; creating fresh"
-                        );
-                        client.new_session(cols, rows, "")
-                    }
-                }
-            }
-        };
-        SessionImpl::Shelld(attached.unwrap_or_else(|e| {
-            lx_error!("session.setup_failed", &format!("{e}"));
-            std::process::exit(1);
-        }))
+        std::process::exit(1);
     };
     lx_event!(
         "SESSION_DRIVING",

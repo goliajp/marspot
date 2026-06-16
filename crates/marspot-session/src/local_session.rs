@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use marspot_term::bytelog::ByteLog;
 use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
-use marspot_term::shelld_client::{PendingPage, SessionState};
+use marspot_term::session_state::{PendingPage, SessionState};
 use marspot_term::terminal::Terminal;
 
 /// How recently we have to have seen PTY output to count as "active".

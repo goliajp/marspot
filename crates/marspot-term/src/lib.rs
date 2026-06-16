@@ -47,6 +47,7 @@ pub mod render;
 pub mod scrollback;
 pub mod session;
 pub mod session_registry;
+pub mod session_state;
 pub mod shell_proto;
 pub mod shelld_client;
 pub mod shelld_proto;
