@@ -1044,6 +1044,43 @@ impl CoreApp {
 
         let Some(pane) = self.panes.get(self.focused_idx) else { return };
 
+        // RFC-003 Phase 4 (frozen reattach minimum): an exited L3 pane
+        // shows whatever was last published; on key press we revive it
+        // by spawning a fresh L3 at the same session id.  The bytelog
+        // opens in append mode so the new shell's output continues the
+        // same on-disk record.  Only revive on a key press the user
+        // would actually mean as "wake up" (any printable / Enter /
+        // arrow / Tab etc); modifier-only key transitions don't fire.
+        if pane.is_l3() && pane.is_exited() && event.state == KeyState::Pressed {
+            if let Some(sid) = pane.session().shelld_session_id() {
+                // Layout already sized the pane — keep its current
+                // cell dims so the new L3 boots at the same shape.
+                let (cols, rows) = self
+                    .layout
+                    .cells
+                    .get(self.focused_idx)
+                    .map(|c| (c.cols, c.rows))
+                    .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
+                match spawn_l3_pane(cols, rows, sid, &self.event_tx) {
+                    Ok(new_pane) => {
+                        lx_event!(
+                            "L3_REVIVED",
+                            "user keystroke respawned dead L3 at same id",
+                            session_id = sid
+                        );
+                        self.panes[self.focused_idx] = new_pane;
+                        self.needs_render = true;
+                    }
+                    Err(e) => lx_error!(
+                        "core.revive.spawn_failed",
+                        &format!("{e}"),
+                        session_id = sid
+                    ),
+                }
+                return;
+            }
+        }
+
         // L3-backed pane: forward the key *event* to the session process,
         // which encodes with its own modes + local-echoes, then republishes
         // the grid (we re-read it on the GridReady wake).  No local write /
