@@ -298,4 +298,15 @@ Phase 3 (3a/3b/3c) 落地 + install-local 实测 9 pane 走通新 UDS 路径(202
 
 工作量约 100-150 LOC,4 个小 commit 可拆。
 
-(执行中后续追加。)
+### Amendment 8 — Phase 3b initial-grid race: black panes / wrong colors / broken backspace
+
+install-local 后用户 9 panes 全黑、颜色错、shell 删除不正常。诊断:
+
+- L3 owns-pty 模式启动时 `setup_control_socket` 读 `ENV_CONTROL_FD`,我 step 3b 改 L2 `cmd.env_remove(ENV_CONTROL_FD)`,所以 L3 boot 时 `poke = None`
+- 初始 `publish_and_poke` 把 shm 写好但 poke=None → 没发 `GridReady`
+- L2 通过 UDS connect → handshake → `SessionEvent::NewClient` 到达 L3 main → 只 `poke = Some(writer); spawn_control_reader(...)`,**没主动重发一次 GridReady**
+- 结果:L3 已经有完整 grid 内容,L2 永远不知道,panes 显示空(渲染成主题 bg 看上去是黑)。用户打字才触发新一轮 publish → poke,但中间状态机已经走过,渲染异常。
+
+修复:NewClient 后立刻 `publish_and_poke` 一次。带 grid 的最新状态发出去。
+
+影响:1 行 code,Phase 3b 第二次 install。Phase 3c/d 不变。

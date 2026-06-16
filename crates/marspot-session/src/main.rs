@@ -667,20 +667,16 @@ fn main() {
                 SessionEvent::Paste(text) => handle_paste(&mut session, &text),
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone => {
-                    // owns-pty L3 should NOT exit when its client
-                    // disconnects: the PTY + shell live here in our
-                    // process, so dropping us would kill the shell.
-                    // Just drop the writer and wait for a fresh
-                    // NewClient (typical case: L2 silent update).
-                    if owns_pty {
-                        poke = None;
-                        lx_event!(
-                            "L3_UDS_CLIENT_GONE",
-                            "control client closed; awaiting reattach"
-                        );
-                    } else {
-                        core_gone = true;
-                    }
+                    // RFC-003 §6 Amendment 7: in owns-pty mode we
+                    // used to demote CoreGone to "drop poke and
+                    // wait" so a silent-update L2 swap could
+                    // reattach.  But Phase 4 frozen reattach isn't
+                    // landed yet, so the wait is forever — orphan
+                    // L3s pile up across L2 restarts (1 install =
+                    // 9 new zombies).  Restore the "exit on EOF"
+                    // semantics for now; Phase 4 will re-introduce
+                    // a proper revive path.
+                    core_gone = true;
                 }
                 SessionEvent::NewClient(stream) => {
                     // Adopt the validated stream as the control
@@ -691,6 +687,19 @@ fn main() {
                         Ok(writer) => {
                             poke = Some(writer);
                             spawn_control_reader(stream, ev_tx.clone());
+                            // RFC-003 §6 Amendment 7: republish the
+                            // current grid + fire GridReady so L2 has
+                            // a poke to read the shm we already
+                            // wrote.  Without this the first frame
+                            // L2 sees is whatever the next PTY burst
+                            // triggers — until then the pane renders
+                            // empty (looks black).
+                            publish_and_poke(
+                                &mut shm,
+                                &session,
+                                view_offset,
+                                poke.as_mut(),
+                            );
                             lx_event!(
                                 "L3_UDS_CLIENT_ADOPTED",
                                 "control reader spawned on UDS stream"
