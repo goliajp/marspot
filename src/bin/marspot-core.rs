@@ -24,7 +24,6 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use objc2::runtime::ProtocolObject;
@@ -48,7 +47,6 @@ use marspot::shell_proto::{
     wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT,
     ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
-use marspot::shelld_client::ShelldClient;
 use marspot::{lx_debug, lx_debug_sampled, lx_error, lx_event, lx_info, lx_warn};
 use marspot::ui::{
     scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
@@ -543,7 +541,6 @@ struct CoreApp {
     layout_picker_open: bool,
     sidebar_collapsed: bool,
     ime_preedit: String,
-    client: Arc<ShelldClient>,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
     h_phys: f64,
@@ -721,15 +718,13 @@ impl CoreApp {
             }
             return;
         }
-        match self.client.new_session(cols, rows, "") {
-            Ok(s) => {
-                self.panes.push(Pane::new_shelld(s));
-                self.custom_titles.push(None);
-            }
-            Err(e) => {
-                lx_error!("core.spawn.shelld_failed", &format!("{e}"));
-            }
-        }
+        // RFC-003 Phase 6: L3 is the only backend.  If l3_mode is off
+        // we no longer have a shelld fallback — just log + skip.  Run
+        // with MARSPOT_L3=1 (the default) to get a pane.
+        lx_error!(
+            "core.spawn.non_l3_mode",
+            "MARSPOT_L3=0 used to fall back to shelld panes; RFC-003 removed L4 — ignoring spawn request"
+        );
     }
 
     /// Per-session silent update (target #4 step 5a): bring up a
@@ -838,14 +833,9 @@ impl CoreApp {
                 // so the kernel actually frees the pages once every
                 // fd-holder closes.
                 grid_shm::delete_region(&grid_shm::session_shm_name(id));
-            } else if let Err(e) = self.client.kill_session(id) {
-                lx_warn!(
-                    "core.close_session.kill_failed",
-                    &format!("{e}"),
-                    id = id,
-                    pane_idx = idx
-                );
             }
+            // RFC-003 Phase 6: shelld-backed panes don't exist anymore;
+            // the L3-only path above is the entire close path.
         }
         self.panes.remove(idx);
         if idx < self.custom_titles.len() {
@@ -887,20 +877,10 @@ impl CoreApp {
         if let Some(idx) = self.editing_title.take() {
             if idx < self.custom_titles.len() {
                 let trimmed = self.title_edit_buffer.trim().to_string();
-                // Persist to shelld so the title survives a dual-core
-                // silent swap.  Per [[project-silent-update-gate]] the
-                // pre-2026-06-15 design kept titles in core memory only,
-                // so any swap reset them to None on the new core boot.
-                // shelld holds the title for the session's lifetime.
-                if let Some(sid) = self.panes[idx].shelld_session_id() {
-                    if let Err(e) = self.client.set_title(sid, &trimmed) {
-                        lx_warn!(
-                            "core.set_title.failed",
-                            &format!("{e}"),
-                            session = sid
-                        );
-                    }
-                }
+                // RFC-003 Phase 6: titles survive an L2 swap via the
+                // L3 process's persisted entry.toml (Amendment 7
+                // reattach path).  L2-side `custom_titles` is the
+                // current truth.
                 self.custom_titles[idx] =
                     if trimmed.is_empty() { None } else { Some(trimmed) };
             }
@@ -1736,28 +1716,6 @@ fn main() {
     // Main loop blocks on `recv_timeout` so it sleeps until *any*
     // event arrives — idle CPU = 0.
     let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = mpsc::channel();
-    let event_tx_for_wake = event_tx.clone();
-    let wake = move || {
-        let _ = event_tx_for_wake.send(CoreEvent::PumpShelld);
-    };
-
-    let shelld_sock = marspot::paths::shelld_socket();
-    lx_info!(
-        "core.shelld.connect",
-        "connecting to shelld",
-        sock = shelld_sock.display()
-    );
-    let client = match ShelldClient::connect(&shelld_sock, wake) {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            lx_error!(
-                "core.shelld.connect_failed",
-                &format!("{e}"),
-                sock = shelld_sock.display()
-            );
-            return;
-        }
-    };
 
     // Bootstrap the full 9-grid: reattach every surviving shelld
     // session (full bytelog history replays on attach), then fill the
@@ -1929,48 +1887,8 @@ fn main() {
         }
     }
 
-    // Normal boot (also the L3 fallback): reattach every surviving
-    // shelld session, then fill the rest with fresh ones.  Skipped once
-    // an L3 pane is up — step 3 renders exactly that one pane.
-    if panes.is_empty() {
-        let existing: Vec<marspot::shelld_proto::SessionInfo> = client
-            .list_sessions()
-            .unwrap_or_else(|e| {
-                lx_warn!(
-                    "core.shelld.list_sessions_failed",
-                    "starting fresh",
-                    err = format!("{e}")
-                );
-                Vec::new()
-            })
-            .into_iter()
-            .filter(|s| s.alive)
-            .collect();
-        for info in existing.iter().take(n_sessions) {
-            if !info.title.is_empty() {
-                session_titles.insert(info.session_id, info.title.clone());
-            }
-            match client.attach(info.session_id, boot_cols, boot_rows) {
-                Ok(s) => panes.push(Pane::new_shelld(s)),
-                Err(e) => {
-                    lx_error!(
-                        "core.shelld.attach_failed",
-                        &format!("{e}"),
-                        session = info.session_id
-                    );
-                }
-            }
-        }
-        while panes.len() < n_sessions {
-            match client.new_session(boot_cols, boot_rows, "") {
-                Ok(s) => panes.push(Pane::new_shelld(s)),
-                Err(e) => {
-                    lx_error!("core.shelld.new_session_failed", &format!("{e}"));
-                    break;
-                }
-            }
-        }
-    }
+    // RFC-003 Phase 6: shelld fallback path deleted.  If l3_mode failed
+    // to spawn anything we exit; no fallback to L4.
     if panes.is_empty() {
         lx_error!("core.boot.no_sessions", "no sessions could be created — exiting");
         return;
@@ -2018,7 +1936,6 @@ fn main() {
         layout_picker_open: false,
         sidebar_collapsed: true,
         ime_preedit: String::new(),
-        client,
         w_phys,
         h_phys,
         scale,
