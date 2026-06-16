@@ -26,7 +26,48 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use marspot::paths;
-use marspot::shelld_client::ShelldClient;
+// RFC-003 Phase 6: ShelldClient gone.  The L1-side plugin formerly used
+// shelld to walk sessions, send input, and detect attached pids.  Those
+// paths are stubbed via this local no-op type — the badge-mapping core
+// still runs from the file-system scan but profile cycling is degraded
+// until the plugin is rewritten against the L3 UDS surface (followup).
+struct ShelldClient;
+#[allow(dead_code)]
+struct CcSessionInfo {
+    pub session_id: u64,
+    pub alive: bool,
+    pub child_pid: i32,
+    pub title: String,
+}
+impl ShelldClient {
+    fn connect<P: AsRef<std::path::Path>, F: Fn() + Send + 'static>(
+        _socket: P,
+        _wake: F,
+    ) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "RFC-003: shelld retired; claudecode plugin needs L3 UDS rewrite",
+        ))
+    }
+    fn send_input_to(&self, _sid: u64, _bytes: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "RFC-003: shelld send_input_to stubbed",
+        ))
+    }
+    fn attach_raw_only(&self, _sid: u64) -> std::io::Result<std::sync::mpsc::Receiver<Vec<u8>>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "RFC-003: shelld attach_raw_only stubbed",
+        ))
+    }
+    fn detach_raw(&self, _sid: u64) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn list_sessions(&self) -> std::io::Result<Vec<CcSessionInfo>> {
+        Ok(Vec::new())
+    }
+}
 
 use crate::plugins::pidtree;
 use crate::plugins::{
