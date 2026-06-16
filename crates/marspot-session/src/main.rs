@@ -179,6 +179,12 @@ enum SessionEvent {
     /// Standalone sessions have no control socket, so this never fires
     /// there.
     CoreGone,
+    /// RFC-003 step 2e: a UDS client finished its Hello handshake and
+    /// is now the L3's control client.  Carries the validated stream
+    /// so main can spawn a reader on it and adopt the write half as
+    /// `poke`.  In owns-pty mode this replaces the inherited-fd
+    /// control socket — owns-pty L3s have no fd 3 to read from.
+    NewClient(UnixStream),
 }
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -310,7 +316,16 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
         }
     };
     lx_info!("session.control_socket.attached", "control socket fd inherited", fd = fd);
-    let mut reader = stream;
+    spawn_control_reader(stream, tx);
+    Some(writer)
+}
+
+/// RFC-003 step 2e — frame-dispatch loop for the L2↔L3 control socket.
+/// Shared by both the inherited-fd path (`setup_control_socket`) and
+/// the UDS accept path (`uds_server::handshake`) so both ends speak
+/// the same protocol and unknown-frame handling lives in exactly one
+/// place.
+fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>) {
     std::thread::spawn(move || loop {
         match Frame::read_from(&mut reader) {
             Ok(Some(f)) => match f.msg_type {
@@ -318,7 +333,7 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                     if let Ok(w) = decode_key_event(&f.payload) {
                         let (e, m) = wire_to_event(w);
                         if tx.send(SessionEvent::Key(e, m)).is_err() {
-                            break; // main loop gone
+                            break;
                         }
                     }
                 }
@@ -350,20 +365,14 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
                         }
                     }
                 }
-                // Other frame types (paste) arrive in later steps; ignore
-                // unknown-to-us types for now.
                 _ => {}
             },
             Ok(None) | Err(_) => {
-                // L2/core closed the socket — tell the main loop to exit
-                // so this engine doesn't outlive its core (best-effort:
-                // if the loop already went away, the send just fails).
                 let _ = tx.send(SessionEvent::CoreGone);
                 break;
             }
         }
     });
-    Some(writer)
 }
 
 /// Publish the grid and, if connected to L2, poke it so it re-reads the
@@ -504,7 +513,7 @@ fn main() {
         // session — without a registry handle L2 can't reach us, so
         // there's no point continuing.
         let cwd = std::env::var("HOME").unwrap_or_default();
-        match uds_server::SessionListener::bind(id, cols, rows, &cwd) {
+        match uds_server::SessionListener::bind(id, cols, rows, &cwd, ev_tx.clone()) {
             Ok(l) => _listener = Some(l),
             Err(e) => {
                 lx_error!("session.local.uds_bind_failed", &format!("{e}"));
@@ -657,7 +666,44 @@ fn main() {
                 // predict — bulk text isn't latency-sensitive like typing).
                 SessionEvent::Paste(text) => handle_paste(&mut session, &text),
                 SessionEvent::Wake => {}
-                SessionEvent::CoreGone => core_gone = true,
+                SessionEvent::CoreGone => {
+                    // owns-pty L3 should NOT exit when its client
+                    // disconnects: the PTY + shell live here in our
+                    // process, so dropping us would kill the shell.
+                    // Just drop the writer and wait for a fresh
+                    // NewClient (typical case: L2 silent update).
+                    if owns_pty {
+                        poke = None;
+                        lx_event!(
+                            "L3_UDS_CLIENT_GONE",
+                            "control client closed; awaiting reattach"
+                        );
+                    } else {
+                        core_gone = true;
+                    }
+                }
+                SessionEvent::NewClient(stream) => {
+                    // Adopt the validated stream as the control
+                    // socket. spawn_control_reader fires inbound
+                    // frames as SessionEvent::Key/Resize/etc just
+                    // like the inherited-fd path.
+                    match stream.try_clone() {
+                        Ok(writer) => {
+                            poke = Some(writer);
+                            spawn_control_reader(stream, ev_tx.clone());
+                            lx_event!(
+                                "L3_UDS_CLIENT_ADOPTED",
+                                "control reader spawned on UDS stream"
+                            );
+                        }
+                        Err(e) => {
+                            lx_warn!(
+                                "session.uds.try_clone_failed",
+                                &format!("{e}")
+                            );
+                        }
+                    }
+                }
             }
         }
         // Our core vanished: the shelld session lives on (re-attached by
