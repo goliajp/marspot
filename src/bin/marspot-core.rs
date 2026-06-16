@@ -38,6 +38,9 @@ use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
 use marspot::session::SessionState;
+use marspot::session_registry::{
+    self, allocate_next_session_id, list_session_entries,
+};
 use marspot::shell_proto::{
     decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping, decode_preedit,
     decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
@@ -359,7 +362,14 @@ fn spawn_l3(
         .env(ENV_SHM_FD, SHM_TARGET_FD.to_string())
         // L2 owns session assignment: hand this L3 the exact session it
         // must drive so N children never race for the same one.
-        .env("MARSPOT_SESSION_ID", session_id.to_string());
+        .env("MARSPOT_SESSION_ID", session_id.to_string())
+        // RFC-003: L3 owns its own PTY (no L4 shelld dependency). The
+        // inherited fd 3 control socket still carries shell_proto frames
+        // for input / resize / paste / GridReady poke, identical to the
+        // pre-RFC-003 wire — only PTY ownership flips. The UDS listener
+        // at sessions/<id>/sock is also up, but the inherited-fd path
+        // is what L2 talks to until step 3b switches the wire over.
+        .env("MARSPOT_L3_OWNS_PTY", "1");
     // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
     // libc calls (dup2/close/fcntl) are used, mirroring the shell→core
     // spawn template.
@@ -636,12 +646,10 @@ impl CoreApp {
             .map(|c| (c.cols, c.rows))
             .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
         if self.l3_mode {
-            // L2-allocated fresh session → its own L3 process, same path
-            // as the boot spawns.  Keeps the L3 world pure: no shelld pane
-            // ever mixes into an L3-mode window.
-            match self
-                .client
-                .create_session(cols, rows, "")
+            // RFC-003 step 3a: L2 allocates the session id itself via
+            // the on-disk registry (sessions/.next_id with flock), no
+            // L4 round-trip.
+            match allocate_next_session_id()
                 .and_then(|id| spawn_l3_pane(cols, rows, id, &self.event_tx))
             {
                 Ok(pane) => {
@@ -1703,60 +1711,51 @@ fn main() {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
         }
-        let raw_list = client.list_sessions().unwrap_or_else(|e| {
-            lx_warn!(
-                "core.shelld.list_sessions_failed",
-                "starting fresh",
-                err = format!("{e}")
-            );
-            Vec::new()
-        });
-        // Dev fingerprint: a freshly-restarted shelld returns []; a
-        // surviving shelld returns the live session list.  If we see
-        // 0 sessions here right after a dual-core swap, that's the
-        // 2026-06-15 symptom — shelld got SIGTERM'd between cores,
-        // every existing claudecode died via Pty::Drop, and this
-        // boot is now creating a fresh 9-grid from scratch.
-        //
-        // SORT BY session_id ASCENDING — shelld's HashMap iteration
-        // order is unspecified, so on every dual-core swap the same
-        // 9 sessions would land at randomly shuffled pane positions
-        // (user-visible: "I was working in pane 5, now I'm in pane 8").
-        // Monotonic session_id means session 1 lands in pane 1
-        // forever, session 9 lands in pane 9 forever.
-        for s in &raw_list {
-            if !s.title.is_empty() {
-                session_titles.insert(s.session_id, s.title.clone());
+        // RFC-003 step 3a: registry-driven discovery.  Scan
+        // sessions/<id>/entry.toml + `kill 0` so dead entries get
+        // pruned, but DO NOT reattach to alive L3s yet — that needs
+        // the UDS connect path from step 3b.  `spawn_l3_pane` would
+        // currently fork a fresh marspot-session for any id passed,
+        // so handing it an id whose L3 is already alive would
+        // duplicate the child.  Until 3b lands, every L2 boot just
+        // allocates fresh ids.
+        let raw_list = list_session_entries();
+        for e in &raw_list {
+            if !e.title.is_empty() {
+                session_titles.insert(e.id, e.title.clone());
             }
         }
-        let mut alive_ids: Vec<u64> = raw_list
-            .iter()
-            .filter(|s| s.alive)
-            .map(|s| s.session_id)
-            .collect();
-        alive_ids.sort();
-        let mut dead_ids: Vec<u64> = raw_list
-            .iter()
-            .filter(|s| !s.alive)
-            .map(|s| s.session_id)
-            .collect();
-        dead_ids.sort();
+        let mut alive = 0usize;
+        let mut dead = 0usize;
+        for e in &raw_list {
+            // kill 0 returns 0 if the pid still exists and we have
+            // permission to signal it.  Dead pids → registry stale,
+            // prune so future scans stay clean.
+            let live = unsafe { libc::kill(e.pid, 0) } == 0;
+            if live {
+                alive += 1;
+            } else {
+                dead += 1;
+                let _ = session_registry::delete_session(e.id);
+            }
+        }
         lx_event!(
-            "core.shelld.session_inventory",
-            "list_sessions returned at boot",
+            "core.session_registry.inventory",
+            "RFC-003 registry scan at boot",
             total = raw_list.len(),
-            alive = alive_ids.len(),
-            dead = dead_ids.len(),
-            alive_ids = format!("{:?}", alive_ids),
-            dead_ids = format!("{:?}", dead_ids),
+            alive = alive,
+            dead = dead,
             want = n_sessions
         );
-        let mut ids: Vec<u64> = alive_ids.into_iter().take(n_sessions).collect();
+        let mut ids: Vec<u64> = Vec::new();
         while ids.len() < n_sessions {
-            match client.create_session(boot_cols, boot_rows, "") {
+            match allocate_next_session_id() {
                 Ok(id) => ids.push(id),
                 Err(e) => {
-                    lx_error!("core.shelld.create_session_failed", &format!("{e}"));
+                    lx_error!(
+                        "core.session_registry.allocate_failed",
+                        &format!("{e}")
+                    );
                     break;
                 }
             }
