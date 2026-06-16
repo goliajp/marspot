@@ -155,8 +155,12 @@ enum SessionEvent {
     /// Lingering leaks one process + shm region per core restart, which
     /// violates the "cannot get slower the longer it runs" invariant.
     /// Standalone sessions have no control socket, so this never fires
-    /// there.
-    CoreGone,
+    /// there.  RFC-003 §6 Amendment 11 debug-3: carries the client
+    /// generation that owned the dying reader.  Main ignores a
+    /// CoreGone whose generation is older than the current `poke` —
+    /// otherwise an OLD L2's socket EOF, arriving AFTER a NEW L2 has
+    /// already reattached, would null out the poke we just adopted.
+    CoreGone(u64),
     /// RFC-003 step 2e: a UDS client finished its Hello handshake and
     /// is now the L3's control client.  Carries the validated stream
     /// so main can spawn a reader on it and adopt the write half as
@@ -294,7 +298,9 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
         }
     };
     lx_info!("session.control_socket.attached", "control socket fd inherited", fd = fd);
-    spawn_control_reader(stream, tx);
+    // The inherited-fd path runs at generation 0; if it dies, that's a
+    // genuine "no client left" (not a stale-reader race).
+    spawn_control_reader(stream, tx, 0);
     Some(writer)
 }
 
@@ -302,8 +308,9 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
 /// Shared by both the inherited-fd path (`setup_control_socket`) and
 /// the UDS accept path (`uds_server::handshake`) so both ends speak
 /// the same protocol and unknown-frame handling lives in exactly one
-/// place.
-fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>) {
+/// place.  `generation` tags the CoreGone emitted on EOF so a stale
+/// reader (from a swapped-out L2 socket) can't null the current poke.
+fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, generation: u64) {
     std::thread::spawn(move || loop {
         match Frame::read_from(&mut reader) {
             Ok(Some(f)) => match f.msg_type {
@@ -346,7 +353,7 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>) {
                 _ => {}
             },
             Ok(None) | Err(_) => {
-                let _ = tx.send(SessionEvent::CoreGone);
+                let _ = tx.send(SessionEvent::CoreGone(generation));
                 break;
             }
         }
@@ -555,6 +562,12 @@ fn main() {
 
     let start = Instant::now();
     let mut frame: u64 = 0;
+    // RFC-003 §6 Amendment 11 (debug-3): generation tag for control
+    // readers.  Increments on each NewClient adoption; CoreGone events
+    // carry the generation of the reader that died, so a stale EOF
+    // from a swapped-out L2 socket can't null the poke a newer L2
+    // just adopted.
+    let mut client_generation: u64 = 0;
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -585,23 +598,36 @@ fn main() {
                 // predict — bulk text isn't latency-sensitive like typing).
                 SessionEvent::Paste(text) => handle_paste(&mut session, &text),
                 SessionEvent::Wake => {}
-                SessionEvent::CoreGone => {
-                    // RFC-003 §6 Amendment 11 (debug-2 root cause):
-                    // owns-pty L3 MUST NOT exit on control EOF.
-                    // Otherwise a dual-core swap (install-local
-                    // SIGUSR1) does: old L2 dies → every L3 sees
-                    // control EOF → 9 L3s exit → new L2 boots, sees
-                    // empty registry → spawns 9 fresh → user loses
-                    // their work each install.  Drop the poke + keep
-                    // the loop running; the new L2's Amendment 7
-                    // reattach scan picks us up by named shm + UDS
-                    // hello.  Orphan accumulation is bounded by L2
-                    // boot's failed-reattach SIGTERM (already in).
-                    if owns_pty {
+                SessionEvent::CoreGone(gen) => {
+                    // RFC-003 §6 Amendment 11 (debug-2 + debug-3 root
+                    // cause): owns-pty L3 MUST NOT exit on control
+                    // EOF, AND the EOF that ends an OLD client must
+                    // not null out the poke a NEW client already
+                    // adopted.
+                    //
+                    // Sequence during a dual-core swap:
+                    //   T0: OLD L2 connected, control_reader@gen=K
+                    //   T1: NEW L2 reattaches; NewClient fires →
+                    //       client_generation=K+1, poke=NEW
+                    //   T2: OLD L2 dies → OLD reader EOFs → fires
+                    //       CoreGone(K)
+                    //   T3: main sees CoreGone(K) — STALE; ignore.
+                    //
+                    // Without the gen tag, T3 would null poke and
+                    // leave L3 disconnected from the live NEW L2.
+                    if gen < client_generation {
+                        lx_event!(
+                            "L3_UDS_STALE_EOF",
+                            "ignored stale control EOF; current client newer",
+                            stale_gen = gen,
+                            current_gen = client_generation
+                        );
+                    } else if owns_pty {
                         poke = None;
                         lx_event!(
                             "L3_UDS_CLIENT_GONE",
-                            "control client closed; awaiting reattach (owns-pty)"
+                            "control client closed; awaiting reattach (owns-pty)",
+                            gen = gen
                         );
                     } else {
                         core_gone = true;
@@ -611,11 +637,16 @@ fn main() {
                     // Adopt the validated stream as the control
                     // socket. spawn_control_reader fires inbound
                     // frames as SessionEvent::Key/Resize/etc just
-                    // like the inherited-fd path.
+                    // like the inherited-fd path.  Bump the
+                    // generation BEFORE spawning so any in-flight
+                    // CoreGone from the prior reader is recognised
+                    // as stale by the time it reaches the loop.
+                    client_generation += 1;
+                    let this_gen = client_generation;
                     match stream.try_clone() {
                         Ok(writer) => {
                             poke = Some(writer);
-                            spawn_control_reader(stream, ev_tx.clone());
+                            spawn_control_reader(stream, ev_tx.clone(), this_gen);
                             // RFC-003 §6 Amendment 7: republish the
                             // current grid + fire GridReady so L2 has
                             // a poke to read the shm we already
