@@ -4,7 +4,35 @@ A living document. Updated alongside any structural change. The point is
 not "how was it built" but "**where does work happen, what's the cost,
 and where is the next bottleneck**."
 
-## Modules and ownership
+## RFC-003 three-layer split (2026-06-17)
+
+The shipped architecture is three processes per running marspot
+instance + N per-pane L3s:
+
+```
+L1 marspot-shell    NSWindow owner / supervisor state machine /
+                    install-local trigger / banner / probation logic.
+                    Survives L2 self-update via dual-core swap.
+
+L2 marspot-core     Metal renderer / layout / pane management / input
+                    dispatch. THIS is the version users mean when
+                    they say "what marspot are you on?".  Spawns L3
+                    children + reattaches across L2 swap via the
+                    on-disk session registry (Amendment 7).
+
+L3 marspot-session  One process per pane.  Owns the PTY master, shell
+                    child, VT parser, grid, scrollback, bytelog, shm
+                    framebuffer, UDS control socket.  Survives L2 swap;
+                    the registry it writes (sessions/<id>/entry.toml +
+                    sock + shm-name) lets a freshly-spawned L2
+                    re-open without re-forking the shell.
+```
+
+Replaces the prior L1+L2+L3+L4 split where L4 was `marspot-shelld`,
+a per-user daemon that owned every PTY master.  See
+`docs/rfc-003-l3-pty.md` for the migration trail.
+
+## Modules and ownership (pre-RFC-003 standalone-marspot view, still accurate for src/main.rs)
 
 ```
 main.rs         entry point + MarsApp impl
