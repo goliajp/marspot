@@ -323,9 +323,15 @@ fi
 # against THIS bundle path.  Cold launch will pick it up next time
 # the running instance exits cleanly.
 echo "==> installing bundle binaries"
+# macOS pgrep -f has a known blind spot for LaunchAgent-spawned processes
+# — the production shelld (launched by com.marspot.shelld.plist) doesn't
+# show up under `pgrep -f $MACOS/marspot-shelld` even though `ps auxww`
+# clearly lists it with that exact ARGV[0].  So mirror line 330's pattern:
+# `ps auxww | grep -F "$MACOS/$b"` is the only check that consistently
+# matches both manually-launched and LaunchAgent-launched bundle bins.
 for b in marspot-shell marspot-core marspot-shelld marspot-session; do
   running=0
-  if pgrep -f "$MACOS/$b" >/dev/null 2>&1; then
+  if ps auxww 2>/dev/null | grep -F "$MACOS/$b" | grep -vq grep; then
     running=1
   fi
   if (( running )); then
