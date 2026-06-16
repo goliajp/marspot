@@ -628,17 +628,27 @@ declare_class!(
 
         #[method(doCommandBySelector:)]
         fn do_command_by_selector(&self, selector: Sel) {
-            // interpretKeyEvents calls this for keys the IME didn't
-            // consume that map to standard editing commands.  We
-            // translate the well-known selectors to NamedKey so the
-            // PTY sees Enter / Tab / Esc / Backspace / arrows.
-            // Unknown selectors leave ime_consumed=false so the
-            // raw-key fallback in keyDown still fires.
-            let named = match selector_named_key(selector) {
-                Some(k) => k,
-                None => return,
-            };
+            // interpretKeyEvents calls this for keys the IME routed
+            // through itself but didn't commit as text.  We translate
+            // the well-known selectors to NamedKey so the PTY sees
+            // Enter / Tab / Esc / Backspace / arrows.
+            //
+            // Either way `interpretKeyEvents` *did* hand the event to
+            // the IME, which then decided what to call here — that
+            // counts as "the IME consumed this key event" regardless
+            // of whether we recognise the selector.  In particular,
+            // when a CJK IME is composing and the candidate list is
+            // empty, pressing Space lands here as `noop:` to tell us
+            // "I dropped it on the floor".  Forwarding it as raw
+            // ASCII 0x20 in that case is the bug the user just
+            // reported: their preedit shifts because Space slipped
+            // past as a real key.  Marking the event consumed before
+            // the selector check fixes that and is the AppKit-correct
+            // semantics either way.
             self.ivars().ime_consumed.set(true);
+            let Some(named) = selector_named_key(selector) else {
+                return;
+            };
             let ev = MarspotKeyEvent {
                 state: KeyState::Pressed,
                 logical: LogicalKey::Named(named),
