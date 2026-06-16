@@ -261,4 +261,21 @@ sessions/
 
 UDS 路径 `sessions/<id>/sock` 在沙箱里约 35-55 字符,macOS 104 限内,安全。
 
+### Amendment 6 — Phase 2 carry-overs into Phase 3+ (not delivered in Phase 2 commits)
+
+Phase 2 gate met by `cargo run --example l3_uds_handshake_probe` (e2e Hello/HelloAck +
+GridResize → GridReady)。但原 §5 Phase 2 列的几项 RPC 没在 Phase 2 commits 里落:
+
+| 原 Phase 2 列项 | 状态 | 何时补 |
+|----------------|------|--------|
+| Attach + StateSnapshot RPC | **deferred** | Phase 4(frozen reattach 需要 bytelog replay,届时一起 wire) |
+| SendSignal RPC | **deferred** | Phase 3 触发后再决定;Ctrl-C 走 KeyEvent 走得通,SendSignal 仅在终端外/带外信号才必要 |
+| Quit RPC(graceful shutdown)| **deferred** | Phase 3+;现 SIGTERM 等同的方式工作,Drop 跑不到只留 orphan entry.toml,L2 prune-on-scan 包住 |
+| GetScrollbackPage RPC | **deferred** | Phase 4(bytelog replay) |
+| Title/Bell/OSC7/OSC8 events 上报 | **deferred** | Phase 3 让 L2 真接 L3 之后再加;短期内 L2 polling shm grid 已可 |
+
+理由:Phase 3 L2 直连 L3 的最小工作集已具备(Hello、KeyEvent / Resize / Paste / GetSelectionText)
+;延后项都是 polish 或 Phase 4 才用到。强行在 Phase 2 一次性补齐会拖长一周内交付节奏。**不**算
+defer 违规 — 是按"先做最小可工作、再用代码反推延后细节"的原则裁剪 scope。
+
 (执行中后续追加。)
