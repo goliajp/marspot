@@ -710,12 +710,30 @@ impl L3Conn {
 
 impl Drop for L3Conn {
     fn drop(&mut self) {
-        // Bounded teardown: closing the pane kills + reaps the session
-        // process so no L3 is orphaned.  (The shelld session it was
-        // driving lives on in shelld — that's the whole point — but this
-        // L2-side process must not leak.)
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // RFC-003 §6 Amendment 12 — DO NOT kill the L3 child here.
+        //
+        // Pre-RFC-003 this Drop killed+reaped the child as "bounded
+        // teardown" because shelld owned the PTY and the L3 helper
+        // was disposable.  RFC-003 reversed that: L3 owns the PTY +
+        // shell, and L3 is the unit users care about preserving
+        // across an L2 lifetime.  Two cases:
+        //
+        //   * close_session (user clicked × on a pane): marspot-core
+        //     already SIGTERMed entry.pid + delete_session() BEFORE
+        //     dropping the pane.  Killing again here is redundant.
+        //   * L2 process exit (user Cmd-Q on marspot.app, supervisor
+        //     restart, panic, crash): this Drop runs on every L3Conn
+        //     during stack unwind.  Killing the child here destroys
+        //     every L3 along with L2 — meaning a single Cmd-Q wipes
+        //     the user's 9 active shells.  THAT is the "原来可以现在
+        //     不行" regression from L4 retirement.
+        //
+        // Instead, drop the file handles (control socket + shm
+        // reader) silently.  L3 sees the EOF, stays alive via
+        // Amendment 11 debug-2/3, and waits for the next L2 boot to
+        // shm_open + connect_with_handshake it (Amendment 7
+        // reattach).  launchd reaps the orphaned L3 if it ever
+        // exits later.
     }
 }
 
