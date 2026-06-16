@@ -24,6 +24,6 @@
 #                         semantics change.
 
 shell   = "0.2.12"   # L1
-core    = "0.2.31"   # L2 — marspot version
+core    = "0.2.32"   # L2 — marspot version
 session = "0.2.7"    # L3
 shelld  = "0.2.6"    # L4

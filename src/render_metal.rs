@@ -1212,6 +1212,10 @@ const REFRESH_ICON_FG: (f32, f32, f32) = (0.95, 0.74, 0.30);
 /// at a glance; if more plugins land we'll move colour into the wire
 /// format alongside the text.
 const PLUGIN_BADGE_FG: (f32, f32, f32) = (0.85, 0.47, 0.34);
+/// Underline colour for auto-detected clickable spans (URLs, file
+/// paths, email).  Calm cyan so it reads as "I'm a link" without
+/// fighting ANSI-styled body text.
+const LINK_UNDERLINE_FG: (f32, f32, f32) = (0.40, 0.70, 0.95);
 // Selected-row BG kept as an alias of the cell-focused tone so
 // sidebar selection and 9-grid focus read as the same affordance.
 const STATE_ACTIVE: (f32, f32, f32) = (0.30, 0.85, 0.45);
@@ -2441,6 +2445,39 @@ fn push_session(
                     color: [SELECTION_BG.0, SELECTION_BG.1, SELECTION_BG.2, 1.0],
                 });
             }
+        }
+    }
+
+    // Auto-link underline — scan the visible grid for URLs / file
+    // paths / emails and underline each detected span.  Runs AFTER
+    // selection so the link hint stays visible when the user drags
+    // over a link (the selection blue tints it but the underline
+    // sits on top).  Scan is per-frame; the work is bounded by the
+    // visible grid (~7k cells on a 97×75 pane) so it sits in the
+    // tens of microseconds on M-series.
+    {
+        let links = marspot_term::grid_links::scan_visible_links(grid, view.view_offset);
+        // Same geometry as the SGR-underline pass above, so a link
+        // sitting on already-underlined text just paints the link
+        // colour over the same row.
+        for link in &links {
+            let row_y = inner_y + (link.row as f32) * cell_h;
+            let underline_y = row_y + cell_h - (cell_h - ascent) * 0.45;
+            let underline_h = (cell_h * 0.06).max(1.0);
+            let cols_in_span = link.col_end.saturating_sub(link.col_start) + 1;
+            cells.push(CellInstance {
+                origin: [
+                    inner_x + link.col_start as f32 * cell_w,
+                    underline_y,
+                ],
+                size: [cols_in_span as f32 * cell_w, underline_h],
+                color: [
+                    LINK_UNDERLINE_FG.0,
+                    LINK_UNDERLINE_FG.1,
+                    LINK_UNDERLINE_FG.2,
+                    1.0,
+                ],
+            });
         }
     }
 
