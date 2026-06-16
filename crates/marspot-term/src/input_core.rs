@@ -312,18 +312,16 @@ fn encode_named_key(
         ArrowDown => cursor_seq(b'B', mods, cursor_key_app_mode),
         ArrowRight => cursor_seq(b'C', mods, cursor_key_app_mode),
         ArrowLeft => cursor_seq(b'D', mods, cursor_key_app_mode),
-        // Navigation — VT220 numbered keys.  Home/End have two
-        // historically-equal encodings; we send the H/F form since
-        // xterm and tmux both accept it and modern shells (zsh,
-        // readline 6+) bind it.  Modifier path still uses CSI.
+        // Home / End — readline-style by default.  Bare Home → ^A,
+        // bare End → ^E, which is what zsh / bash / fish / readline
+        // and every macOS Cocoa text view do at line-edit time.
+        // Modifier-bearing presses (Shift-Home for selection in TUI
+        // editors, Ctrl-Home to top-of-buffer, etc.) keep the CSI
+        // form so they round-trip through xterm-aware apps.
         Home => {
             let m = encode_mods(mods);
             if m == 1 {
-                if cursor_key_app_mode {
-                    Cow::Borrowed(b"\x1bOH")
-                } else {
-                    Cow::Borrowed(b"\x1b[H")
-                }
+                Cow::Borrowed(b"\x01")
             } else {
                 Cow::Owned(format!("\x1b[1;{}H", m).into_bytes())
             }
@@ -331,11 +329,7 @@ fn encode_named_key(
         End => {
             let m = encode_mods(mods);
             if m == 1 {
-                if cursor_key_app_mode {
-                    Cow::Borrowed(b"\x1bOF")
-                } else {
-                    Cow::Borrowed(b"\x1b[F")
-                }
+                Cow::Borrowed(b"\x05")
             } else {
                 Cow::Owned(format!("\x1b[1;{}F", m).into_bytes())
             }
@@ -455,16 +449,33 @@ mod tests {
     }
 
     #[test]
-    fn home_end_yield_csi_h_f() {
+    fn home_end_yield_ctrl_a_ctrl_e_by_default() {
         let h = pressed(LogicalKey::Named(NamedKey::Home), None);
         let e = pressed(LogicalKey::Named(NamedKey::End), None);
         assert_eq!(
             &*key_event_to_bytes(&h, Modifiers::default(), false, false, || None).unwrap(),
-            b"\x1b[H"
+            b"\x01"
         );
         assert_eq!(
             &*key_event_to_bytes(&e, Modifiers::default(), false, false, || None).unwrap(),
-            b"\x1b[F"
+            b"\x05"
+        );
+    }
+
+    #[test]
+    fn home_end_with_modifier_keep_csi_form() {
+        // Shift-Home / Shift-End preserve the xterm CSI form so TUI
+        // editors that watch for selection-extend still work.
+        let h = pressed(LogicalKey::Named(NamedKey::Home), None);
+        let e = pressed(LogicalKey::Named(NamedKey::End), None);
+        let shift = Modifiers { shift: true, ..Modifiers::default() };
+        assert_eq!(
+            &*key_event_to_bytes(&h, shift, false, false, || None).unwrap(),
+            b"\x1b[1;2H"
+        );
+        assert_eq!(
+            &*key_event_to_bytes(&e, shift, false, false, || None).unwrap(),
+            b"\x1b[1;2F"
         );
     }
 
