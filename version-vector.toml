@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.2.12"   # L1
-core    = "0.3.0"    # L2 — marspot version (major bump for RFC-003)
-session = "0.3.0"    # L3 (major bump for RFC-003 owns-PTY + UDS surface)
+core    = "0.3.1"    # L2 — RFC-003 Amendment 11 (install-swap survives)
+session = "0.3.1"    # L3 — generation-tagged CoreGone
