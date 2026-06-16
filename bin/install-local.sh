@@ -303,13 +303,38 @@ if (( RUNNING )); then
 fi
 
 # ── 4. Install the bundle binaries (cold-launch fallback) ─────────
+#
+# Bundle binaries are the cold-launch fallback path.  Overwriting them
+# while their process is RUNNING is dangerous:
+#
+#   - `install` does atomic rename → new inode, so the old mmap'd inode
+#     in the running process technically lives until close.  In
+#     practice macOS AMFI / taskgated re-checks the bundle CDHash on
+#     various spot events (page faults, fork, etc), and if the disk
+#     image's CDHash no longer matches the in-kernel record, the
+#     running process gets killed.
+#   - shelld 35237 died at exactly the moment of bundle overwrite on
+#     2026-06-16 (see SHELLD_STOP @ 11:11:42.917).  LaunchAgent
+#     respawned it 47 ms later but session table was empty — the 9
+#     L3 children's ATTACH(id=1..9) hit a brand-new shelld that
+#     didn't know those ids → no StateSnapshot → all 9 panes blank.
+#
+# So: skip bundle overwrite for any binary whose process is running
+# against THIS bundle path.  Cold launch will pick it up next time
+# the running instance exits cleanly.
 echo "==> installing bundle binaries"
-install -m 0755 "$TARGET/marspot-shell"   "$MACOS/marspot-shell"
-install -m 0755 "$TARGET/marspot-core"    "$MACOS/marspot-core"
-install -m 0755 "$TARGET/marspot-shelld"  "$MACOS/marspot-shelld"
-install -m 0755 "$TARGET/marspot-session" "$MACOS/marspot-session"
 for b in marspot-shell marspot-core marspot-shelld marspot-session; do
-  xattr -c "$MACOS/$b" 2>/dev/null || true   # clear ALL provenance/quarantine
+  running=0
+  if pgrep -f "$MACOS/$b" >/dev/null 2>&1; then
+    running=1
+  fi
+  if (( running )); then
+    echo "    $b: skipped bundle overwrite ($MACOS/$b is in use; cold launch picks up new bin on next exit)"
+    sup_log "INSTALL_BUNDLE_SKIP" "$b in use; skipped bundle overwrite to avoid AMFI kill"
+  else
+    install -m 0755 "$TARGET/$b" "$MACOS/$b"
+    xattr -c "$MACOS/$b" 2>/dev/null || true   # clear ALL provenance/quarantine
+  fi
 done
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
