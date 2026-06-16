@@ -21,6 +21,7 @@
 //! (self-creates the region, no input source) for the dev/test path.
 
 mod local_session;
+mod uds_server;
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -462,18 +463,32 @@ fn main() {
     // has to fit the region (a mismatch would overflow the mapping).
     let (mut shm, cols, rows) = setup_shm();
 
+    // Phase 2c: when we own the PTY, also own the UDS control socket
+    // + registry entry so L2 (Phase 3) can discover us after a swap.
+    // Bound for the whole owns-pty branch; Drop on exit unbinds +
+    // prunes the on-disk entry.
+    let mut _listener: Option<uds_server::SessionListener> = None;
+
     let mut session: SessionImpl = if owns_pty {
         let wake_tx = ev_tx.clone();
         let wake = move || {
             let _ = wake_tx.send(SessionEvent::Wake);
         };
-        // Standalone L3-owns-PTY: spawn user shell directly. Session id
-        // is purely informational here (no shelld registry to coordinate
-        // with); default to whatever MARSPOT_SESSION_ID says or 1.
-        let id = std::env::var("MARSPOT_SESSION_ID")
+        // L3-owns-PTY: spawn user shell directly. Session id is the
+        // L2-assigned id (MARSPOT_SESSION_ID) when present; otherwise
+        // fall back to .next_id allocation so a standalone dev run
+        // still works without a coordinator.
+        let id = match std::env::var("MARSPOT_SESSION_ID")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+        {
+            Some(id) => id,
+            None => marspot_term::session_registry::allocate_next_session_id()
+                .unwrap_or_else(|e| {
+                    lx_error!("session.local.allocate_id_failed", &format!("{e}"));
+                    std::process::exit(1);
+                }),
+        };
         lx_event!(
             "L3_OWNS_PTY",
             "spawning local PTY (no shelld)",
@@ -485,6 +500,17 @@ fn main() {
             lx_error!("session.local.spawn_failed", &format!("{e}"));
             std::process::exit(1);
         });
+        // Bind UDS + write registry entry. Failure here drops the
+        // session — without a registry handle L2 can't reach us, so
+        // there's no point continuing.
+        let cwd = std::env::var("HOME").unwrap_or_default();
+        match uds_server::SessionListener::bind(id, cols, rows, &cwd) {
+            Ok(l) => _listener = Some(l),
+            Err(e) => {
+                lx_error!("session.local.uds_bind_failed", &format!("{e}"));
+                std::process::exit(1);
+            }
+        }
         SessionImpl::Local(local)
     } else {
         let wake_tx = ev_tx.clone();
