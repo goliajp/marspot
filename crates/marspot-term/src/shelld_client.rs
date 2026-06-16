@@ -260,8 +260,8 @@ impl ShelldSession {
                             &body,
                         ) {
                             Ok(lines) => {
-                                for line in &lines {
-                                    self.terminal.push_historic_line(line);
+                                for (line, wrapped) in &lines {
+                                    self.terminal.push_historic_line(line, *wrapped);
                                 }
                                 self.historic_applied = self
                                     .historic_applied

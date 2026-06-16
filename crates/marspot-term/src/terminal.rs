@@ -658,12 +658,19 @@ impl Terminal {
     ///
     /// ```text
     /// repeat line_count times:
-    ///   [line_cols u32 LE]                — width of THIS line (lines
-    ///                                       may differ when the grid
-    ///                                       was resized)
+    ///   [line_cols u32 LE]                — width of THIS line
+    ///   [wrapped  u8]                     — 1 if this row is a
+    ///                                       continuation of the previous
+    ///                                       row (autowrap), 0 if it
+    ///                                       started a fresh logical line
     ///   [cells: line_cols × 13 bytes]     — same Cell encoding as
     ///                                       `serialize_snapshot`
     /// ```
+    ///
+    /// Without the `wrapped` flag the receiver's later `Grid::resize`
+    /// reflow can't tell hard newlines from autowrap continuations,
+    /// and long lines stay chopped at the narrowest width the grid
+    /// ever saw.
     pub fn serialize_scrollback_page(
         &self,
         line_start: u32,
@@ -676,11 +683,12 @@ impl Terminal {
         let line_count = lines.len() as u32;
         let body_bytes: usize = lines
             .iter()
-            .map(|l| 4 + l.len() * CELL_BYTES)
+            .map(|(l, _)| 4 + 1 + l.len() * CELL_BYTES)
             .sum();
         let mut out = Vec::with_capacity(body_bytes);
-        for line in &lines {
+        for (line, wrapped) in &lines {
             out.extend_from_slice(&(line.len() as u32).to_le_bytes());
+            out.push(if *wrapped { 1 } else { 0 });
             for cell in line {
                 out.extend_from_slice(&(cell.ch as u32).to_le_bytes());
                 out.extend_from_slice(&serialize_attrs(cell.attrs));
@@ -694,9 +702,11 @@ impl Terminal {
     /// the scrollback ring.  Thin wrapper around
     /// `Grid::push_historic_scrollback_line`; same ordering caveat —
     /// caller must apply history in oldest-first order before any
-    /// live data has scrolled off the visible grid.
-    pub fn push_historic_line(&mut self, line: &[Cell]) {
-        self.grid.push_historic_scrollback_line(line);
+    /// live data has scrolled off the visible grid.  `wrapped` is
+    /// the line's autowrap-continuation flag from L4 (see the
+    /// wire-format doc on `serialize_scrollback_page`).
+    pub fn push_historic_line(&mut self, line: &[Cell], wrapped: bool) {
+        self.grid.push_historic_scrollback_line(line, wrapped);
     }
 
     /// Inverse of `serialize_scrollback_page`.  Static — no `&self`
@@ -705,11 +715,12 @@ impl Terminal {
     pub fn decode_scrollback_page_body(
         line_count: u32,
         body: &[u8],
-    ) -> io::Result<Vec<Vec<Cell>>> {
+    ) -> io::Result<Vec<(Vec<Cell>, bool)>> {
         let mut cur = Cursor::new(body);
         let mut out = Vec::with_capacity(line_count as usize);
         for _ in 0..line_count {
             let line_cols = read_u32(&mut cur)? as usize;
+            let wrapped = read_u8(&mut cur)? != 0;
             let mut line = Vec::with_capacity(line_cols);
             for _ in 0..line_cols {
                 let ch_u = read_u32(&mut cur)?;
@@ -717,7 +728,7 @@ impl Terminal {
                 let ch = char::from_u32(ch_u).unwrap_or(' ');
                 line.push(Cell { ch, attrs });
             }
-            out.push(line);
+            out.push((line, wrapped));
         }
         Ok(out)
     }
@@ -1946,12 +1957,14 @@ mod tests {
         let lines = Terminal::decode_scrollback_page_body(line_count, &body).unwrap();
         assert_eq!(lines.len(), 4);
         // Read_lines is oldest-first: A,B,C,D.
-        assert_eq!(lines[0][0].ch, 'A');
-        assert_eq!(lines[3][0].ch, 'D');
+        assert_eq!(lines[0].0[0].ch, 'A');
+        assert_eq!(lines[3].0[0].ch, 'D');
         // Foreground colour survives the wire format.
-        assert!(matches!(lines[0][0].attrs.fg, Color::Indexed(1)));
+        assert!(matches!(lines[0].0[0].attrs.fg, Color::Indexed(1)));
         // Each line padded to grid width.
-        assert_eq!(lines[0].len(), 8);
+        assert_eq!(lines[0].0.len(), 8);
+        // Hard newlines, not autowrap continuations.
+        assert!(!lines[0].1);
     }
 
     #[test]
@@ -1974,9 +1987,9 @@ mod tests {
         let mkline = |ch: char| -> Vec<Cell> {
             (0..8).map(|_| Cell { ch, attrs }).collect()
         };
-        t.push_historic_line(&mkline('H'));
-        t.push_historic_line(&mkline('I'));
-        t.push_historic_line(&mkline('J'));
+        t.push_historic_line(&mkline('H'), false);
+        t.push_historic_line(&mkline('I'), false);
+        t.push_historic_line(&mkline('J'), false);
         assert_eq!(t.grid().scrollback_len(), 3);
         assert_eq!(t.grid().scrollback_line(0).unwrap()[0].ch, 'H');
         assert_eq!(t.grid().scrollback_line(2).unwrap()[0].ch, 'J');

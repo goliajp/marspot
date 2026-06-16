@@ -470,7 +470,7 @@ fn main() {
             session_id = session.id()
         );
     }
-    let mut historic_pages: Vec<Vec<marspot_term::grid::Cell>> = Vec::new();
+    let mut historic_pages: Vec<(Vec<marspot_term::grid::Cell>, bool)> = Vec::new();
 
     let start = Instant::now();
     let mut frame: u64 = 0;
