@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.2.12"   # L1
-core    = "0.3.1"    # L2 — RFC-003 Amendment 11 (install-swap survives)
+core    = "0.3.2"    # L2 — Amendment 12: L3Conn::Drop no-op (Cmd-Q survives)
 session = "0.3.1"    # L3 — generation-tagged CoreGone
