@@ -371,10 +371,20 @@ declare_class!(
             let array = NSArray::from_slice(&[event]);
             unsafe { self.interpretKeyEvents(&array) };
 
-            // Nothing IME-relevant fired (e.g. an unmapped function
-            // key).  Fall back to raw nsevent translation so the app
-            // still sees a key_event.
             if !self.ivars().ime_consumed.get() {
+                // Composing guard: when marked_text is non-empty the
+                // IME owns the keyboard — even if it didn't call any
+                // NSTextInputClient method this round.  Pinyin IME
+                // hitting Space with no candidates is the canonical
+                // case: it pockets the key without ever touching us.
+                // Falling through to raw nsevent dispatch would leak
+                // the ASCII byte (Space, BackTab, anything) into the
+                // PTY and break composition.  Drop it on the floor;
+                // IME will eventually unmarkText / insertText to
+                // close the composition.
+                if !self.ivars().marked_text.borrow().is_empty() {
+                    return;
+                }
                 if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
                     dispatch_event(EventKind::Key(ev, mods));
                 }
@@ -589,9 +599,6 @@ declare_class!(
             *self.ivars().marked_text.borrow_mut() = s.clone();
             // Forward to the app so it can paint an inline preedit
             // overlay (pinyin candidates, hiragana composition, etc.).
-            // The IME also shows its own candidate window — the inline
-            // preview is what tells the user "this is where the
-            // committed text will land".
             dispatch_event(EventKind::ImePreedit(s));
         }
 
