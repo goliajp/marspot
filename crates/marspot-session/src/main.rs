@@ -586,16 +586,26 @@ fn main() {
                 SessionEvent::Paste(text) => handle_paste(&mut session, &text),
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone => {
-                    // RFC-003 §6 Amendment 7: in owns-pty mode we
-                    // used to demote CoreGone to "drop poke and
-                    // wait" so a silent-update L2 swap could
-                    // reattach.  But Phase 4 frozen reattach isn't
-                    // landed yet, so the wait is forever — orphan
-                    // L3s pile up across L2 restarts (1 install =
-                    // 9 new zombies).  Restore the "exit on EOF"
-                    // semantics for now; Phase 4 will re-introduce
-                    // a proper revive path.
-                    core_gone = true;
+                    // RFC-003 §6 Amendment 11 (debug-2 root cause):
+                    // owns-pty L3 MUST NOT exit on control EOF.
+                    // Otherwise a dual-core swap (install-local
+                    // SIGUSR1) does: old L2 dies → every L3 sees
+                    // control EOF → 9 L3s exit → new L2 boots, sees
+                    // empty registry → spawns 9 fresh → user loses
+                    // their work each install.  Drop the poke + keep
+                    // the loop running; the new L2's Amendment 7
+                    // reattach scan picks us up by named shm + UDS
+                    // hello.  Orphan accumulation is bounded by L2
+                    // boot's failed-reattach SIGTERM (already in).
+                    if owns_pty {
+                        poke = None;
+                        lx_event!(
+                            "L3_UDS_CLIENT_GONE",
+                            "control client closed; awaiting reattach (owns-pty)"
+                        );
+                    } else {
+                        core_gone = true;
+                    }
                 }
                 SessionEvent::NewClient(stream) => {
                     // Adopt the validated stream as the control
