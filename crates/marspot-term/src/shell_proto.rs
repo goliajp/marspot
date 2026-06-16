@@ -193,6 +193,32 @@ pub enum MsgType {
     /// plugin can react (cycle profile, open menu, etc.) — L2 has no
     /// idea what the badge means.
     PaneBadgeClicked = 42,
+    /// shell → core: "an L1 plugin is taking over this pane for a
+    /// while; honour these capability bits — freeze the grid, swallow
+    /// keystrokes (forward them back as PaneSessionKey instead),
+    /// allow overlays."  Payload: `session_id u64 LE, caps u32 LE`.
+    /// Subsequent PaneBadge / PaneSessionOverlay frames address the
+    /// session by sid until the matching PaneSessionEnd lands.
+    PaneSessionBegin = 43,
+    /// shell → core: pane session over — restore live grid + key
+    /// forwarding for `session_id u64 LE`.
+    PaneSessionEnd = 44,
+    /// core → shell: a key event arrived while the pane was in a
+    /// LOCK_KEYS session.  Payload: `session_id u64 LE, wire_key_event…`.
+    /// Plugin handler decides: swallow / forward / end-session.
+    PaneSessionKey = 45,
+    /// core → shell: user pressed Esc three times in five seconds
+    /// while a pane session held the keyboard.  Hard exit hatch:
+    /// shell unconditionally ends the session (plugin gets on_end).
+    /// Payload: `session_id u64 LE`.
+    PaneSessionUserEscape = 46,
+    /// shell → core: paint a plugin-controlled region over part of
+    /// the pane.  Payload: `session_id u64 LE, region(4×f32 LE),
+    /// body_len u32 LE, body_utf8`.  Body shape is plugin-defined
+    /// (renderer just blits the text for now); future iterations
+    /// will carry attributed runs.  Stub frame in C1 — full overlay
+    /// rendering lands when a plugin actually uses it.
+    PaneSessionOverlay = 47,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -224,6 +250,11 @@ impl MsgType {
             40 => MsgType::SurfaceAttach,
             41 => MsgType::PaneBadge,
             42 => MsgType::PaneBadgeClicked,
+            43 => MsgType::PaneSessionBegin,
+            44 => MsgType::PaneSessionEnd,
+            45 => MsgType::PaneSessionKey,
+            46 => MsgType::PaneSessionUserEscape,
+            47 => MsgType::PaneSessionOverlay,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -722,6 +753,133 @@ pub fn decode_pane_badge_clicked(payload: &[u8]) -> io::Result<u64> {
         ));
     }
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+/// PaneSession capability bits — packed into the u32 carried by
+/// `PaneSessionBegin`.  Each capability gates one host-mediated
+/// behaviour the plugin can ask for.
+pub const PANE_SESSION_CAP_INPUT: u32 = 1 << 0;
+pub const PANE_SESSION_CAP_LOCK_KEYS: u32 = 1 << 1;
+pub const PANE_SESSION_CAP_FREEZE_GRID: u32 = 1 << 2;
+pub const PANE_SESSION_CAP_OBSERVE_PTY: u32 = 1 << 3;
+pub const PANE_SESSION_CAP_OVERLAY: u32 = 1 << 4;
+
+pub fn encode_pane_session_begin(session_id: u64, caps: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&caps.to_le_bytes());
+    v
+}
+
+pub fn decode_pane_session_begin(payload: &[u8]) -> io::Result<(u64, u32)> {
+    if payload.len() != 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pane_session_begin payload != 12 bytes (got {})", payload.len()),
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let caps = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    Ok((sid, caps))
+}
+
+pub fn encode_pane_session_end(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_session_end(payload: &[u8]) -> io::Result<u64> {
+    if payload.len() != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_session_end payload != 8 bytes",
+        ));
+    }
+    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+/// PaneSessionKey payload: `session_id u64 LE` + the existing
+/// WireKeyEvent encoding (variable-length).  Plugin handler decodes
+/// the WireKeyEvent the same way the regular KeyEvent path does.
+pub fn encode_pane_session_key(session_id: u64, ev: &WireKeyEvent) -> Vec<u8> {
+    let key_payload = encode_key_event(ev);
+    let mut v = Vec::with_capacity(8 + key_payload.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&key_payload);
+    v
+}
+
+pub fn decode_pane_session_key(payload: &[u8]) -> io::Result<(u64, WireKeyEvent)> {
+    if payload.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_session_key payload < 8 bytes",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let ev = decode_key_event(&payload[8..])?;
+    Ok((sid, ev))
+}
+
+pub fn encode_pane_session_user_escape(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_session_user_escape(payload: &[u8]) -> io::Result<u64> {
+    if payload.len() != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_session_user_escape payload != 8 bytes",
+        ));
+    }
+    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
+}
+
+/// PaneSessionOverlay payload (stub format — refined when the first
+/// overlay renderer lands):
+/// ```text
+/// [session_id u64 LE]
+/// [region: x f32, y_top f32, w f32, h f32  (16 bytes, phys px)]
+/// [body_len u32 LE]
+/// [body bytes]            — plugin-defined; renderer treats as UTF-8 for v1
+/// ```
+pub fn encode_pane_session_overlay(
+    session_id: u64,
+    region: (f32, f32, f32, f32),
+    body: &[u8],
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + 16 + 4 + body.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&region.0.to_le_bytes());
+    v.extend_from_slice(&region.1.to_le_bytes());
+    v.extend_from_slice(&region.2.to_le_bytes());
+    v.extend_from_slice(&region.3.to_le_bytes());
+    v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    v.extend_from_slice(body);
+    v
+}
+
+pub fn decode_pane_session_overlay(
+    payload: &[u8],
+) -> io::Result<(u64, (f32, f32, f32, f32), Vec<u8>)> {
+    if payload.len() < 8 + 16 + 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_session_overlay header < 28 bytes",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let rx = f32::from_le_bytes(payload[8..12].try_into().unwrap());
+    let ry = f32::from_le_bytes(payload[12..16].try_into().unwrap());
+    let rw = f32::from_le_bytes(payload[16..20].try_into().unwrap());
+    let rh = f32::from_le_bytes(payload[20..24].try_into().unwrap());
+    let body_len = u32::from_le_bytes(payload[24..28].try_into().unwrap()) as usize;
+    if payload.len() < 28 + body_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_session_overlay body truncated",
+        ));
+    }
+    Ok((sid, (rx, ry, rw, rh), payload[28..28 + body_len].to_vec()))
 }
 
 /// GridResize payload: `cols: u16 LE, rows: u16 LE` — the cell-grid
@@ -1253,6 +1411,73 @@ mod tests {
     #[test]
     fn pane_badge_clicked_rejects_bad_len() {
         let err = decode_pane_badge_clicked(&[0u8; 7]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pane_session_begin_carries_caps() {
+        let caps = PANE_SESSION_CAP_INPUT
+            | PANE_SESSION_CAP_LOCK_KEYS
+            | PANE_SESSION_CAP_FREEZE_GRID;
+        let p = encode_pane_session_begin(11, caps);
+        assert_eq!(decode_pane_session_begin(&p).unwrap(), (11, caps));
+        assert_eq!(MsgType::from_u32(43), Some(MsgType::PaneSessionBegin));
+    }
+
+    #[test]
+    fn pane_session_end_roundtrip() {
+        let p = encode_pane_session_end(42);
+        assert_eq!(decode_pane_session_end(&p).unwrap(), 42);
+        assert_eq!(MsgType::from_u32(44), Some(MsgType::PaneSessionEnd));
+    }
+
+    #[test]
+    fn pane_session_key_wraps_wire_key_event() {
+        let ev = WireKeyEvent {
+            state: WireKeyState::Pressed,
+            mods: 0,
+            kind: WireLogicalKind::Char,
+            key_data: '\r' as u32,
+            text: "\r".to_string(),
+        };
+        let p = encode_pane_session_key(7, &ev);
+        let (sid, decoded) = decode_pane_session_key(&p).unwrap();
+        assert_eq!(sid, 7);
+        assert_eq!(decoded.text, "\r");
+        assert_eq!(decoded.key_data, '\r' as u32);
+        assert_eq!(MsgType::from_u32(45), Some(MsgType::PaneSessionKey));
+    }
+
+    #[test]
+    fn pane_session_user_escape_roundtrip() {
+        let p = encode_pane_session_user_escape(3);
+        assert_eq!(decode_pane_session_user_escape(&p).unwrap(), 3);
+        assert_eq!(MsgType::from_u32(46), Some(MsgType::PaneSessionUserEscape));
+    }
+
+    #[test]
+    fn pane_session_overlay_roundtrip() {
+        let body = b"hello overlay";
+        let p = encode_pane_session_overlay(9, (10.0, 20.0, 100.0, 30.0), body);
+        let (sid, region, decoded) = decode_pane_session_overlay(&p).unwrap();
+        assert_eq!(sid, 9);
+        assert_eq!(region, (10.0, 20.0, 100.0, 30.0));
+        assert_eq!(decoded, body);
+        assert_eq!(MsgType::from_u32(47), Some(MsgType::PaneSessionOverlay));
+    }
+
+    #[test]
+    fn pane_session_overlay_rejects_short_header() {
+        let err = decode_pane_session_overlay(&[0u8; 27]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pane_session_overlay_rejects_truncated_body() {
+        // 28-byte valid header claiming body_len=100, but no body.
+        let mut p = encode_pane_session_overlay(1, (0.0, 0.0, 0.0, 0.0), &[0u8; 100]);
+        p.truncate(28 + 50);
+        let err = decode_pane_session_overlay(&p).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
