@@ -423,6 +423,13 @@ pub struct ShelldClient {
     /// Tracks per-session metadata.  Held so a fresh `attach()` can
     /// reconstruct child_pid into a new ShelldSession.
     sessions: Arc<Mutex<HashMap<u64, Arc<SessionInner>>>>,
+    /// RFC-003 OBSERVE_PTY raw-byte subscribers, keyed by
+    /// session_id.  Reader thread broadcasts every Data frame
+    /// destined for `sid` into this sender too (when present), in
+    /// addition to the regular SessionInner inbox.  One observer per
+    /// pane — the second `attach_raw_only` for the same sid
+    /// replaces the first.
+    raw_inboxes: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
 #[derive(Default)]
@@ -444,11 +451,14 @@ impl ShelldClient {
         let pending = Arc::new(Mutex::new(PendingReplies::default()));
         let sessions: Arc<Mutex<HashMap<u64, Arc<SessionInner>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let raw_inboxes: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let writer_s = writer.clone();
         let inboxes_r = inboxes.clone();
         let pending_r = pending.clone();
         let sessions_r = sessions.clone();
+        let raw_inboxes_r = raw_inboxes.clone();
         let wake = Arc::new(wake);
         let wake_r = wake.clone();
         let socket_path_buf: std::path::PathBuf = socket_path.as_ref().to_path_buf();
@@ -473,6 +483,7 @@ impl ShelldClient {
                     inboxes_r,
                     pending_r,
                     sessions_r,
+                    raw_inboxes_r,
                     wake_r,
                 );
             })
@@ -484,6 +495,7 @@ impl ShelldClient {
             _reader: Mutex::new(Some(reader)),
             pending,
             sessions,
+            raw_inboxes,
         };
 
         // Handshake
@@ -501,6 +513,40 @@ impl ShelldClient {
         let mut stream = self.writer.lock().unwrap();
         frame.write_to(&mut *stream)?;
         Ok(())
+    }
+
+    /// Subscribe to raw PTY bytes for `session_id` without taking the
+    /// session over.  No StateSnapshot is consumed (the reader thread
+    /// still receives one from shelld but discards it because no
+    /// regular SessionInner is registered for the id).  The returned
+    /// Receiver gets one entry per Data frame; the plugin polls it on
+    /// its own cadence.
+    ///
+    /// Sends an Attach frame with `cols=0, rows=0` — shelld treats
+    /// zero dims as the read-only-observer sentinel and skips the
+    /// Terminal resize (so it doesn't squash the live grid the
+    /// regular L3 attached at the real dims).  A second
+    /// `attach_raw_only` for the same sid replaces the first.
+    pub fn attach_raw_only(
+        &self,
+        session_id: u64,
+    ) -> io::Result<std::sync::mpsc::Receiver<Vec<u8>>> {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        self.raw_inboxes.lock().unwrap().insert(session_id, tx);
+        let frame = Frame::new(
+            MsgType::Attach,
+            crate::shelld_proto::encode_attach(session_id, 0, 0),
+        );
+        self.send_frame(frame)?;
+        Ok(rx)
+    }
+
+    /// Drop the OBSERVE_PTY subscription for `session_id`.  Doesn't
+    /// send any wire frame — shelld keeps streaming Data to the L4
+    /// broadcast list while the regular subscriber is still attached;
+    /// only our local channel goes away.
+    pub fn detach_raw(&self, session_id: u64) {
+        self.raw_inboxes.lock().unwrap().remove(&session_id);
     }
 
     /// Send `bytes` to `session_id`'s PTY as an INPUT frame, without
@@ -696,6 +742,7 @@ fn supervisor_loop(
     inboxes: Arc<Mutex<HashMap<u64, SyncSender<Chunk>>>>,
     pending: Arc<Mutex<PendingReplies>>,
     sessions: Arc<Mutex<HashMap<u64, Arc<SessionInner>>>>,
+    raw_inboxes: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Vec<u8>>>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     loop {
@@ -712,6 +759,7 @@ fn supervisor_loop(
             inboxes.clone(),
             pending.clone(),
             sessions.clone(),
+            raw_inboxes.clone(),
             wake.clone(),
         );
 
@@ -797,6 +845,7 @@ fn reader_loop(
     inboxes: Arc<Mutex<HashMap<u64, SyncSender<Chunk>>>>,
     pending: Arc<Mutex<PendingReplies>>,
     sessions: Arc<Mutex<HashMap<u64, Arc<SessionInner>>>>,
+    raw_inboxes: Arc<Mutex<HashMap<u64, std::sync::mpsc::Sender<Vec<u8>>>>>,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     loop {
@@ -863,16 +912,34 @@ fn reader_loop(
                         let inb = inboxes.lock().unwrap();
                         inb.get(&id).cloned()
                     };
+                    // Snapshot raw observers up-front so we copy bytes
+                    // exactly once even when both regular + raw paths
+                    // are wired for the same sid.
+                    let raw_tx = {
+                        let r = raw_inboxes.lock().unwrap();
+                        r.get(&id).cloned()
+                    };
+                    let owned = bytes.to_vec();
                     if let Some(tx) = drop_tx {
                         // Bounded send: if the GUI is slow, this
                         // blocks the reader thread — exactly the
                         // backpressure we want, mirroring kernel
                         // pipe pushback to the child.
-                        let bytes = bytes.to_vec();
-                        if tx.send(InboundMessage::Data(bytes)).is_err() {
+                        if tx.send(InboundMessage::Data(owned.clone())).is_err() {
                             // Inbox closed (session dropped) — quietly
                             // discard the chunk.  Reader thread stays
                             // alive for other sessions.
+                        }
+                    }
+                    if let Some(raw) = raw_tx {
+                        // OBSERVE_PTY subscriber.  Send is non-blocking
+                        // (mpsc unbounded); if the plugin is slow, bytes
+                        // queue up in memory — observers should drain
+                        // promptly.  A drop_tx-style backpressure would
+                        // also stall the regular path, which the plugin
+                        // can't fix from outside.
+                        if raw.send(owned).is_err() {
+                            // Observer dropped; quietly skip.
                         }
                     }
                     wake();

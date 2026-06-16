@@ -1416,10 +1416,20 @@ fn reader_loop(
                         //   3. Drop the lock + send the snapshot frame
                         //      — the SyncSender preserves our send
                         //      order on the receiver.
+                        // RFC-003 OBSERVE_PTY sentinel: a client that
+                        // attaches with cols=0 OR rows=0 is signalling
+                        // "I'm a passive observer — don't squash the
+                        // live grid for me."  Skip the resize / PTY
+                        // SIGWINCH, but still ship a snapshot so the
+                        // sender's reader thread sees one frame and
+                        // moves on (it'll be ignored on the client
+                        // side when no regular SessionInner is
+                        // registered).
+                        let is_observer = cols == 0 || rows == 0;
                         let (body, generation, new_cols, new_rows) = {
                             let mut t = s.terminal.lock().unwrap();
                             let (cur_cols, cur_rows) = (t.grid().cols(), t.grid().rows());
-                            if cur_cols != cols || cur_rows != rows {
+                            if !is_observer && (cur_cols != cols || cur_rows != rows) {
                                 t.resize(cols, rows);
                                 // Also push the new dims out to the
                                 // PTY so the child app's SIGWINCH
@@ -1438,7 +1448,12 @@ fn reader_loop(
                                     );
                                 }
                             }
-                            (t.serialize_snapshot(), t.generation(), cols, rows)
+                            (
+                                t.serialize_snapshot(),
+                                t.generation(),
+                                if is_observer { cur_cols } else { cols },
+                                if is_observer { cur_rows } else { rows },
+                            )
                         };
                         let _ = (new_cols, new_rows); // kept for log clarity below
                         let sub_id = s.attach(attached_tx.clone());
