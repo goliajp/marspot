@@ -133,10 +133,19 @@ fn handle_key(session: &mut ShelldSession, event: MarspotKeyEvent, mods: Modifie
         return false;
     };
     let _ = session.write(&bytes);
+    // Local-echo predict — but ONLY for plain printable runs.  An
+    // escape sequence (ESC-leading) is a control code; the first
+    // byte 0x1b isn't printable so predict_byte rejects it, but the
+    // sequence's tail (`[`, `C`, …) is ASCII printable and would be
+    // painted literally into the grid, producing the `[C[C[C` smear
+    // the user reported every time they pressed an arrow key.  Just
+    // skip the whole run when it starts with ESC.
     let mut predicted = false;
-    for &b in bytes.as_ref() {
-        if session.terminal_mut().predict_byte(b) {
-            predicted = true;
+    if !bytes.starts_with(&[0x1b]) {
+        for &b in bytes.as_ref() {
+            if session.terminal_mut().predict_byte(b) {
+                predicted = true;
+            }
         }
     }
     predicted

@@ -1006,11 +1006,19 @@ impl CoreApp {
             let session = self.panes[self.focused_idx].session_mut();
             let _ = session.write(&bytes);
             // Local-echo: paint each printable-ASCII byte to the grid
-            // immediately, ahead of the PTY round trip.
+            // immediately, ahead of the PTY round trip — but only
+            // for plain text runs.  An escape sequence (ESC-leading)
+            // is a control code: the leading 0x1b isn't printable so
+            // predict_byte rejects it, but the sequence's tail
+            // (`[C`, `[A`, …) is ASCII printable and would smear
+            // literally into the grid.  Skip the whole run when it
+            // starts with ESC.
             let mut predicted = false;
-            for &b in bytes.as_ref() {
-                if session.terminal_mut().predict_byte(b) {
-                    predicted = true;
+            if !bytes.starts_with(&[0x1b]) {
+                for &b in bytes.as_ref() {
+                    if session.terminal_mut().predict_byte(b) {
+                        predicted = true;
+                    }
                 }
             }
             if predicted {
