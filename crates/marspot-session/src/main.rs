@@ -20,6 +20,10 @@
 //! CPU is ~0. With neither env var set it stays fully standalone
 //! (self-creates the region, no input source) for the dev/test path.
 
+// Phase 1b lands LocalSession; Phase 1c flips main() to dispatch to it.
+#[allow(dead_code)]
+mod local_session;
+
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};

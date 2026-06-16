@@ -20,6 +20,10 @@ path = "src/main.rs"
 # resident, and the per-pid session log files are bounded by rotate
 # count + age regardless of whether the rotated files are gzipped.
 marspot-term = { path = "../marspot-term", default-features = false }
+# libc — same FFI binding marspot-term and marspot-shelld already use.
+# Needed because RFC-003 moves PTY ownership into L3: openpty, ioctl
+# TIOCSWINSZ, EIO error checks all live here now. Trivial code size.
+libc = "0.2"
 
 # Dev-only: the L3 echo probe (examples/l3_echo_probe.rs) replicates
 # L2's spawn (clear CLOEXEC on the inherited shm + control fds) to drive
