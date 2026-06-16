@@ -17,8 +17,8 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write as IoWrite};
+use std::fs::OpenOptions;
+use std::io::{self, Write as IoWrite};
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -28,6 +28,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
+use marspot::bytelog::{delete_bytelog, ByteLog};
 use marspot::pty::{Pty, PtyConfig, TerminalSize};
 use marspot::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot::shelld_proto::{
@@ -36,13 +37,6 @@ use marspot::shelld_proto::{
     encode_list_sessions_reply, encode_new_session_reply, encode_scrollback_page,
     encode_snapshot_payload, Frame, MsgType, SessionInfo, PROTO_VERSION,
 };
-
-/// Per-session byte log cap.  When the log file grows past this we
-/// compact: keep the most recent `BYTELOG_RETAIN_BYTES` of bytes,
-/// drop the rest.  100 MiB is generous — even a `cat /dev/urandom`
-/// run for several seconds doesn't fill it.
-const BYTELOG_CAP_BYTES: u64 = 100 * 1024 * 1024;
-const BYTELOG_RETAIN_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Process-wide shutdown flag.  Set by SIGTERM/SIGINT handler; observed
 /// by per-client handlers (the accept loop is woken separately by
@@ -196,87 +190,6 @@ struct Subscriber {
     tx: SyncSender<Frame>,
 }
 
-/// Disk-backed append log of raw PTY bytes per session.  Used to
-/// replay state when a client (re)attaches: the entire current log
-/// is streamed as DATA frames before the live stream resumes.
-///
-/// On disk: one file per session at
-/// `~/Library/Caches/marspot/sessions/<id>/bytelog`.  Capped at
-/// `BYTELOG_CAP_BYTES`; on overflow we copy the last
-/// `BYTELOG_RETAIN_BYTES` to a fresh file and replace the old one
-/// (a few-ms compaction triggered at most once per ~50 MiB write
-/// burst).  Survives shelld restarts so reattach from a fresh
-/// daemon also gets prior history.
-struct ByteLog {
-    path: PathBuf,
-    file: File,
-    bytes_written: u64,
-}
-
-impl ByteLog {
-    fn open(session_id: u64) -> io::Result<Self> {
-        let dir = marspot::paths::sessions_dir().join(session_id.to_string());
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("bytelog");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)?;
-        let bytes_written = file.metadata()?.len();
-        Ok(Self {
-            path,
-            file,
-            bytes_written,
-        })
-    }
-
-    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.file.write_all(bytes)?;
-        self.bytes_written += bytes.len() as u64;
-        if self.bytes_written > BYTELOG_CAP_BYTES {
-            // Best-effort compaction: failure here just leaves the
-            // log oversized until the next append tries again.
-            let _ = self.compact();
-        }
-        Ok(())
-    }
-
-    fn compact(&mut self) -> io::Result<()> {
-        let tmp_path = self.path.with_extension("tmp");
-        {
-            let mut src = OpenOptions::new().read(true).open(&self.path)?;
-            let len = src.metadata()?.len();
-            let keep_from = len.saturating_sub(BYTELOG_RETAIN_BYTES);
-            src.seek(SeekFrom::Start(keep_from))?;
-            let mut dst = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&tmp_path)?;
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = src.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                dst.write_all(&buf[..n])?;
-            }
-        }
-        std::fs::rename(&tmp_path, &self.path)?;
-        // Reopen the file handle so append picks up the truncated
-        // state (the previous fd points at the old inode).
-        self.file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&self.path)?;
-        self.bytes_written = self.file.metadata()?.len();
-        Ok(())
-    }
-
-}
-
 /// RFC-002 step 7: persisted snapshot path on disk.  Lives alongside
 /// the bytelog under each session's dir.  Survives `execv` (we read
 /// it back in `rehydrate_sessions`) and a shelld crash (LaunchAgent
@@ -322,14 +235,6 @@ fn write_terminal_snapshot_to_disk(session_id: u64, body: &[u8]) -> io::Result<(
 fn read_terminal_snapshot_from_disk(session_id: u64) -> Option<Vec<u8>> {
     let path = snapshot_path(session_id);
     std::fs::read(&path).ok()
-}
-
-/// Helper for KILL_SESSION cleanup — removes the bytelog file and
-/// its session directory.  Called from the Kill arm so a session
-/// killed by the GUI doesn't leave gigabytes of log behind.
-fn delete_bytelog(session_id: u64) {
-    let dir = marspot::paths::sessions_dir().join(session_id.to_string());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 struct ShellSession {

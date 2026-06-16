@@ -13,6 +13,7 @@
 //! paths keep resolving.  See `docs/per-session-l3.md`.
 
 pub mod binary_tree;
+pub mod bytelog;
 pub mod emoji_presentation;
 pub mod fast_hash;
 pub mod unicode_data;
