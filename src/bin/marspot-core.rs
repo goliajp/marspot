@@ -1682,11 +1682,31 @@ fn main() {
         scale = scale
     );
 
-    let front = IOSurface::lookup(front_id)
-        .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({front_id}) returned nil"));
+    // Stale env IDs are normal during a dual-core install-local swap
+    // window: L1 spawns this core with a `front_id`/`back_id` pair,
+    // then a few ms later decides the previous core is unrecoverable
+    // and rotates the pair before we get here.  Exit cleanly instead
+    // of panicking so L1's "crash/hang detect → respawn" path picks
+    // the next slot without a backtrace storm in marspot.log.
+    let Some(front) = IOSurface::lookup(front_id) else {
+        lx_warn!(
+            "core.surface.lookup_nil",
+            "IOSurface front id stale (L1 rotated mid-spawn); exiting for respawn",
+            front_id = front_id,
+            back_id = back_id
+        );
+        std::process::exit(2);
+    };
     front.increment_use();
-    let back = IOSurface::lookup(back_id)
-        .unwrap_or_else(|| panic!("[core] IOSurfaceLookup({back_id}) returned nil"));
+    let Some(back) = IOSurface::lookup(back_id) else {
+        lx_warn!(
+            "core.surface.lookup_nil",
+            "IOSurface back id stale (L1 rotated mid-spawn); exiting for respawn",
+            front_id = front_id,
+            back_id = back_id
+        );
+        std::process::exit(2);
+    };
     back.increment_use();
 
     let renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
