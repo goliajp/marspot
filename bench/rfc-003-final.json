@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "RFC-003 final bench \u2014 ssh mini clean machine. POST L4 retirement."
+  ],
+  "captured_at_iso": "2026-06-16T16:20:11Z",
+  "git_head": "888bf1b19df73148e3209dfc8f0216116647c49e",
+  "host": "ssh mini",
+  "headless_parse_MBps": {
+    "cat-ascii": 186.2,
+    "cat-mixed": 184.0,
+    "cat-cjk": 226.8,
+    "cat-emoji": 208.6
+  },
+  "live_pty_MBps": {
+    "cat-ascii": 152.4,
+    "cat-mixed": 145.5,
+    "cat-cjk": 160.0,
+    "cat-emoji": 160.0
+  },
+  "render_p99_us": 829.0,
+  "scroll_p99_us": 1.6,
+  "scroll_cold_p99_us": 2.3,
+  "binary_size_bytes": {
+    "marspot": 707280,
+    "mcli": 441664
+  },
+  "idle_rss_KiB": {
+    "marspot": 79952,
+    "mcli": 82752
+  },
+  "official_gate": "PASSED (21/21 against bench/baseline.json)",
+  "vs_mid_delta": {
+    "parse_cat_ascii_pct": 2.6,
+    "parse_cat_cjk_pct": 3.5,
+    "render_p99_pct": -2.7,
+    "scroll_p99_pct": -15.8,
+    "scroll_cold_p99_pct": -28.1,
+    "rss_marspot_pct": -0.1,
+    "summary": "all metrics improved or held post-L4-deletion"
+  }
+}

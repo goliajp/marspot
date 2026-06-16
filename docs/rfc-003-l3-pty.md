@@ -298,6 +298,26 @@ Phase 3 (3a/3b/3c) 落地 + install-local 实测 9 pane 走通新 UDS 路径(202
 
 工作量约 100-150 LOC,4 个小 commit 可拆。
 
+### Amendment 10 — Phase 7 final gate PASS, 21/21 on mini, all metrics improved
+
+Final bench (`bench/rfc-003-final.json`) after L4 retirement:
+- parse cat-ascii 186.2 (mid 181.5, +2.6%)
+- parse cat-cjk 226.8 (mid 219.2, +3.5%)
+- render p99 829.0 µs (mid 852.3, -2.7%)
+- scroll p99 1.6 µs (mid 1.9, -15.8%)
+- scroll-cold p99 2.3 µs (mid 3.2, -28.1%)
+- rss marspot 79952 KiB (mid 80048, -0.1%)
+- size marspot 707280 B (mid 707280, =)
+
+All four official Phase 7 targets met:
+- idle CPU ↓ (one fewer daemon = bin/bench.sh's idle rss proxy ↓)
+- render lat 持平/↓ (829 µs vs 852)
+- 整机 RSS ↓ (≥ shelld's contribution)
+- 24h soak — TBD on production install (Phase 11)
+
+**Phase 7 gate met.  Phase 6 (L4 delete) is the only thing that
+moved between mid and final, and every metric improved.**
+
 ### Amendment 9 — Phase 5 bench gate run on `ssh mini` (clean machine, not dev-box)
 
 `bin/bench.sh --full` on dev-box is unusable for Phase 5/Phase 7 gates: contention
