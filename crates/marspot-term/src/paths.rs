@@ -42,19 +42,8 @@ pub fn supervisor_log() -> PathBuf {
     log_dir().join("supervisor.log")
 }
 
-/// shelld control socket.  One socket per state root = one daemon
-/// per world; the sandbox shelld never sees production sessions.
-/// `MARSPOT_SHELLD_SOCKET` forces an explicit path (highest
-/// priority) for the rare case a caller wants the socket somewhere
-/// other than under the state root.
-pub fn shelld_socket() -> PathBuf {
-    if let Some(p) = std::env::var_os("MARSPOT_SHELLD_SOCKET") {
-        return PathBuf::from(p);
-    }
-    state_root().join("shelld.sock")
-}
-
-/// shelld per-session storage (bytelogs).
+/// Per-session storage root (RFC-003: each L3 owns one subdirectory
+/// with its bytelog + entry.toml + sock).
 pub fn sessions_dir() -> PathBuf {
     state_root().join("sessions")
 }
@@ -82,25 +71,16 @@ mod tests {
 
     #[test]
     fn default_root_is_under_home_caches() {
-        if std::env::var_os("MARSPOT_STATE_DIR").is_none()
-            && std::env::var_os("MARSPOT_SHELLD_SOCKET").is_none()
-        {
+        if std::env::var_os("MARSPOT_STATE_DIR").is_none() {
             assert!(state_root().ends_with("Library/Caches/marspot"));
             assert!(log_dir().ends_with("Library/Logs/Marspot"));
-            assert!(shelld_socket().starts_with(state_root()));
         }
     }
 
     #[test]
     fn children_live_under_root() {
-        // With no socket override, every child stays under the root —
-        // the property that makes a sandbox state dir leak-proof.
-        if std::env::var_os("MARSPOT_SHELLD_SOCKET").is_some() {
-            return;
-        }
         let root = state_root();
         for p in [
-            shelld_socket(),
             sessions_dir(),
             binaries_root(),
             shell_launch_journal(),

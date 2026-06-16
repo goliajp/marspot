@@ -54,27 +54,7 @@ dev_wipe_state() {
   rm -f "$MARSPOT_STATE_DIR/logs/marspot.log" 2>/dev/null || true
 }
 
-# Bring up a sandbox shelld if one isn't already listening.  Idempotent
-# — the suite shares one across all test scripts.  Builds on demand.
-dev_ensure_shelld() {
-  if pgrep -f "$DEV_SHELLD" >/dev/null 2>&1; then
-    return 0
-  fi
-  if [[ ! -x "$DEV_SHELLD" ]]; then
-    ( cd "$ROOT" && cargo build --release --bin marspot-shelld 2>&1 | tail -2 )
-  fi
-  mkdir -p "$MARSPOT_STATE_DIR"
-  nohup "$DEV_SHELLD" >"$MARSPOT_STATE_DIR/shelld.out" 2>&1 < /dev/null &
-  disown
-  for _ in $(seq 1 50); do
-    [[ -S "$DEV_SOCK" ]] && return 0
-    sleep 0.1
-  done
-  echo "dev-sandbox: shelld did not create $DEV_SOCK within 5s" >&2
-  return 1
-}
-
-# Stop the sandbox shelld (suite teardown).  Scoped to the dev build.
-dev_stop_shelld() {
-  pkill -9 -f "$DEV_SHELLD" >/dev/null 2>&1 || true
-}
+# RFC-003 Phase 6: L4 shelld retired.  These helpers stay as no-ops
+# for backwards compat with any test script still calling them.
+dev_ensure_shelld() { return 0; }
+dev_stop_shelld() { return 0; }

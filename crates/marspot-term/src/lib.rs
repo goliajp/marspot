@@ -49,8 +49,6 @@ pub mod session;
 pub mod session_registry;
 pub mod session_state;
 pub mod shell_proto;
-pub mod shelld_client;
-pub mod shelld_proto;
 pub mod terminal;
 pub mod tmux;
 pub mod uds_session_client;

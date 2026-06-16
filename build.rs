@@ -45,7 +45,7 @@ fn main() {
     // version via `env!("MARSPOT_VERSION_<LAYER>")`; the title bar shows
     // the L2 (core) version as THE marspot version.
     let vv = std::fs::read_to_string("version-vector.toml").unwrap_or_default();
-    for layer in ["shell", "core", "session", "shelld"] {
+    for layer in ["shell", "core", "session"] {
         let version = vv
             .lines()
             .map(str::trim)

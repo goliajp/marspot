@@ -58,10 +58,8 @@ if [ ! -x "$BIN" ]; then
   echo "error: binary not found at $BIN" >&2
   exit 1
 fi
-# Standalone marspot connects to shelld; make sure the sandbox daemon
-# is up (on MARSPOT_STATE_DIR) so it doesn't fall back to / collide
-# with the installed app's daemon.
-dev_ensure_shelld || { echo "error: could not start sandbox shelld" >&2; exit 1; }
+# RFC-003: shelld retired.  Standalone marspot now spawns in-process
+# Sessions per pane (src/main.rs).  No daemon to bring up.
 
 echo "==> launching $BIN"
 # Fully detach stdio so the child outlives this script.  Without redirecting,

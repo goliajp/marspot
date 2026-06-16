@@ -1,0 +1,50 @@
+{
+  "cat-ascii": {
+    "bytes": 33554570,
+    "marspot": {
+      "median_ns": 300000000,
+      "bytes_per_sec": 111848566,
+      "samples": [
+        300000000,
+        300000000,
+        310000000
+      ]
+    }
+  },
+  "cat-mixed": {
+    "bytes": 16777256,
+    "marspot": {
+      "median_ns": 190000000,
+      "bytes_per_sec": 88301347,
+      "samples": [
+        180000000,
+        190000000,
+        190000000
+      ]
+    }
+  },
+  "cat-cjk": {
+    "bytes": 8388690,
+    "marspot": {
+      "median_ns": 130000000,
+      "bytes_per_sec": 64528384,
+      "samples": [
+        120000000,
+        130000000,
+        130000000
+      ]
+    }
+  },
+  "cat-emoji": {
+    "bytes": 8388720,
+    "marspot": {
+      "median_ns": 120000000,
+      "bytes_per_sec": 69906000,
+      "samples": [
+        120000000,
+        120000000,
+        130000000
+      ]
+    }
+  }
+}

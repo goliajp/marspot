@@ -1,8 +1,8 @@
-# Four-layer version vector. THE marspot version is the L2 (core)
-# version — that's what the title bar displays and what users mean
-# when they ask "what version of marspot are you on?". L1 / L3 / L4
-# each carry their own semver, bumped only when their specific code
-# surface changes.
+# Three-layer version vector (RFC-003: L4 shelld retired).  THE
+# marspot version is the L2 (core) version — that's what the title
+# bar displays and what users mean when they ask "what version of
+# marspot are you on?". L1 and L3 each carry their own semver, bumped
+# only when their specific code surface changes.
 #
 # Canonical layer numbering (used everywhere — code, logs, docs):
 #
@@ -12,18 +12,15 @@
 #
 #   L2 = marspot-core     THE marspot version. Renderer (Metal), UI
 #                         dispatch, layout, session bootstrap, control-
-#                         socket protocol driving. Bump on every
+#                         socket protocol driving, registry-based L3
+#                         spawn + reattach (RFC-003). Bump on every
 #                         user-visible release.
 #
-#   L3 = marspot-session  Per-pane terminal engine: parser, grid,
-#                         scrollback, shm publish, control reply. Bump
-#                         when in-process terminal mechanics change.
-#
-#   L4 = marspot-shelld   The PTY daemon. Bump when bytelog format,
-#                         SIGUSR1 execv mechanics, or session table
-#                         semantics change.
+#   L3 = marspot-session  Per-pane terminal engine + PTY owner: parser,
+#                         grid, scrollback, shm publish, UDS control
+#                         surface, bytelog.  Bump when in-process
+#                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.2.12"   # L1
-core    = "0.2.33"   # L2 — marspot version
-session = "0.2.9"    # L3
-shelld  = "0.2.8"    # L4
+core    = "0.3.0"    # L2 — marspot version (major bump for RFC-003)
+session = "0.3.0"    # L3 (major bump for RFC-003 owns-PTY + UDS surface)

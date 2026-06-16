@@ -717,7 +717,7 @@ impl Plugin for ClaudecodePlugin {
         // child_pid → claude descendant → sessionId.  Best-effort:
         // if shelld is down, plugin still runs in global-scan-only
         // mode, no per-session mapping.
-        let socket = paths::shelld_socket();
+        let socket = paths::sessions_dir().join("shelld.sock"); // retired in RFC-003; stub returns Err below
         let wake = Arc::new(AtomicBool::new(false));
         let wk = wake.clone();
         match ShelldClient::connect(&socket, move || {
