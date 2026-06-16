@@ -54,16 +54,13 @@ pub struct ClaudecodePlugin {
     /// Lazy shelld client.  None until first successful connect.
     /// Used to walk shelld's session table → per-session zsh.pid →
     /// pidtree → cwd → encoded project dir → sessionId.
-    shelld: Option<ShelldClient>,
+    shelld: Option<Arc<ShelldClient>>,
     /// Previous-tick mapping of `shelld_session_id → badge string`
     /// ("P<n> <uuid>").  Drives transition logs + per-tick re-push.
     last_mapping: HashMap<u64, String>,
     /// Richer per-binding meta we need to act on a badge click:
     /// profile number, sessionId, and the live claude pid.
     last_meta: HashMap<u64, BindMeta>,
-    /// Profile-cycle jobs in flight, keyed by shelld_session_id.
-    /// Each tick advances the state machine.
-    pending_cycles: HashMap<u64, CycleJob>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,27 +71,164 @@ struct BindMeta {
     claude_pid: i32,
 }
 
-#[derive(Clone, Debug)]
-struct CycleJob {
-    /// Profile to land on after the claude restart (1/2/3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CycleStage {
+    /// `exit\r` not yet sent (right after begin_pane_session).
+    PendingExit,
+    /// `exit\r` written; waiting for the old claude pid to disappear.
+    ExitSent,
+    /// `claudeN --resume <uuid>\r` written; waiting a settle window
+    /// before ending the PaneSession.
+    ResumeSent,
+}
+
+/// RFC-003 §10 PaneSession that drives the claudecode profile cycle:
+/// freeze the pane visually, lock the keyboard, exit → resume.
+struct ProfileCyclePaneSession {
+    client: Arc<ShelldClient>,
     next_profile: u8,
     uuid: String,
-    /// The claude.pid that needs to die before we send the resume
-    /// command — we wait for it to drop from the process table.
+    /// claude pid we're waiting to die before sending the resume
+    /// command.
     old_claude_pid: i32,
     stage: CycleStage,
+    /// Used as a per-stage timer + overall watchdog.
     started_at: SystemTime,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CycleStage {
-    /// `exit\r` has been written to the PTY; waiting for the old
-    /// claude pid to disappear from the process table.
-    ExitSent,
-    /// `claudeN --resume <uuid>\r` has been written; cycle done from
-    /// the plugin's POV — the next regular tick will re-discover the
-    /// new claude pid and update the badge naturally.
-    ResumeSent,
+impl ProfileCyclePaneSession {
+    fn pid_alive(pid: i32) -> bool {
+        // kill(pid, 0) — no signal, just permission/existence check.
+        // 0 = process exists and we can signal; -1 with ESRCH = gone.
+        unsafe {
+            if libc::kill(pid, 0) == 0 {
+                return true;
+            }
+            *libc::__error() != libc::ESRCH
+        }
+    }
+}
+
+impl crate::plugins::PaneSession for ProfileCyclePaneSession {
+    fn caps(&self) -> u32 {
+        marspot::shell_proto::PANE_SESSION_CAP_INPUT
+            | marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS
+            | marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID
+    }
+
+    fn on_user_key(
+        &mut self,
+        _host: &dyn crate::plugins::PaneSessionHost,
+        ev: &marspot::shell_proto::WireKeyEvent,
+    ) -> crate::plugins::KeyHandling {
+        // Esc → bail out; everything else gets swallowed so the
+        // user can't pollute the resume command mid-cycle.
+        if matches!(
+            ev.kind,
+            marspot::shell_proto::WireLogicalKind::Named,
+        ) && ev.key_data
+            == marspot::shell_proto::WireNamedKey::Escape as u32
+        {
+            crate::plugins::KeyHandling::EndSession
+        } else {
+            crate::plugins::KeyHandling::Swallow
+        }
+    }
+
+    fn on_tick(&mut self, host: &dyn crate::plugins::PaneSessionHost) {
+        let sid = host.shelld_session_id();
+        let now = SystemTime::now();
+        let elapsed = now
+            .duration_since(self.started_at)
+            .unwrap_or_default();
+        // Global watchdog: 30 s of no-progress kills the session.
+        if elapsed > std::time::Duration::from_secs(30) {
+            host.log(
+                crate::plugins::LogLevel::Warn,
+                "cycle.timed_out",
+                "stale cycle; aborting",
+            );
+            host.end();
+            return;
+        }
+        match self.stage {
+            CycleStage::PendingExit => {
+                if let Err(e) = self.client.send_input_to(sid, b"exit\r") {
+                    host.log(
+                        crate::plugins::LogLevel::Warn,
+                        "cycle.exit_send_failed",
+                        &format!("{e}"),
+                    );
+                    host.end();
+                    return;
+                }
+                host.log(
+                    crate::plugins::LogLevel::Info,
+                    "cycle.exit_sent",
+                    &format!(
+                        "shelld_session={} → P{} (uuid={}, claude_pid={})",
+                        sid, self.next_profile, self.uuid, self.old_claude_pid
+                    ),
+                );
+                host.set_badge(&format!("→ P{} …", self.next_profile));
+                self.stage = CycleStage::ExitSent;
+                self.started_at = now;
+            }
+            CycleStage::ExitSent => {
+                if !Self::pid_alive(self.old_claude_pid) {
+                    let cmd = format!(
+                        "claude{} --resume {}\r",
+                        self.next_profile, self.uuid
+                    );
+                    if let Err(e) = self.client.send_input_to(sid, cmd.as_bytes()) {
+                        host.log(
+                            crate::plugins::LogLevel::Warn,
+                            "cycle.resume_send_failed",
+                            &format!("{e}"),
+                        );
+                        host.end();
+                        return;
+                    }
+                    host.log(
+                        crate::plugins::LogLevel::Info,
+                        "cycle.resume_sent",
+                        &format!(
+                            "shelld_session={} P{} resume (uuid={})",
+                            sid, self.next_profile, self.uuid
+                        ),
+                    );
+                    host.set_badge(&format!("P{} starting …", self.next_profile));
+                    self.stage = CycleStage::ResumeSent;
+                    self.started_at = now;
+                }
+            }
+            CycleStage::ResumeSent => {
+                // Settle window so the user doesn't see the zsh
+                // prompt + spawn echo before claude paints its first
+                // frame.  2 s covers a healthy machine; the watchdog
+                // catches a hung claude.
+                if elapsed >= std::time::Duration::from_secs(2) {
+                    host.end();
+                }
+            }
+        }
+    }
+
+    fn on_end(
+        &mut self,
+        host: &dyn crate::plugins::PaneSessionHost,
+        reason: crate::plugins::EndReason,
+    ) {
+        host.log(
+            crate::plugins::LogLevel::Info,
+            "cycle.end",
+            &format!("sid={} reason={:?}", host.shelld_session_id(), reason),
+        );
+        // Don't clear the badge here — the regular plugin tick will
+        // re-bind the new claude pid → re-issue a fresh badge with
+        // the new profile tag.  Clearing causes a brief blank between
+        // end and next tick.
+    }
 }
 
 impl ClaudecodePlugin {
@@ -106,18 +240,13 @@ impl ClaudecodePlugin {
             shelld: None,
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
-            pending_cycles: HashMap::new(),
         }
     }
 
     /// Kick off the profile cycle for `shelld_session_id`.  Called
-    /// from `on_pane_badge_click`.  Plan:
-    ///   1. Find the bind (current profile + uuid + claude_pid).
-    ///   2. Compute the next profile (P1 → P2 → P3 → P1).
-    ///   3. Send `exit\r` to that session's PTY so claude shuts
-    ///      down cleanly (jsonl flushes its tail).
-    ///   4. Stash a CycleJob; next tick(s) wait for the pid to die,
-    ///      then send `claudeN --resume <uuid>\r`.
+    /// from `on_pane_badge_click`.  Builds a ProfileCyclePaneSession
+    /// and hands it to the host; the host freezes the grid + locks
+    /// the keyboard while the state machine runs.
     fn start_profile_cycle(
         &mut self,
         host: &dyn PluginHost,
@@ -131,130 +260,34 @@ impl ClaudecodePlugin {
             );
             return;
         };
-        if self.pending_cycles.contains_key(&shelld_sid) {
-            host.log(
-                LogLevel::Info,
-                "cycle.already_in_flight",
-                &format!("shelld_session={} cycle pending; ignoring click", shelld_sid),
-            );
-            return;
-        }
         let next_profile = match meta.profile_num {
             1 => 2,
             2 => 3,
             3 => 1,
-            // Default (.claude) or unknown — land on P1.
             _ => 1,
         };
-        let Some(client) = self.shelld.as_ref() else {
+        let Some(client) = self.shelld.as_ref().cloned() else {
             host.log(
                 LogLevel::Warn,
                 "cycle.no_shelld",
-                "no shelld client; cannot send exit",
+                "no shelld client; cannot start cycle",
             );
             return;
         };
-        if let Err(e) = client.send_input_to(shelld_sid, b"exit\r") {
+        let session = Box::new(ProfileCyclePaneSession {
+            client,
+            next_profile,
+            uuid: meta.uuid,
+            old_claude_pid: meta.claude_pid,
+            stage: CycleStage::PendingExit,
+            started_at: SystemTime::now(),
+        });
+        if let Err(e) = host.begin_pane_session(shelld_sid, session) {
             host.log(
                 LogLevel::Warn,
-                "cycle.exit_send_failed",
+                "cycle.begin_pane_session_failed",
                 &format!("{e}"),
             );
-            return;
-        }
-        host.log(
-            LogLevel::Info,
-            "cycle.exit_sent",
-            &format!(
-                "shelld_session={} P{} → P{} (uuid={}, claude_pid={})",
-                shelld_sid, meta.profile_num, next_profile, meta.uuid, meta.claude_pid
-            ),
-        );
-        self.pending_cycles.insert(
-            shelld_sid,
-            CycleJob {
-                next_profile,
-                uuid: meta.uuid,
-                old_claude_pid: meta.claude_pid,
-                stage: CycleStage::ExitSent,
-                started_at: SystemTime::now(),
-            },
-        );
-    }
-
-    /// Per-tick driver for the cycle jobs.  Each pending cycle:
-    ///   * In `ExitSent`: if the old claude pid is no longer in the
-    ///     proc table, send `claudeN --resume <uuid>\r` and move to
-    ///     ResumeSent.
-    ///   * In `ResumeSent`: drop the job; the next regular bind
-    ///     refresh will pick up the new claude pid.
-    ///   * Jobs older than `CYCLE_TIMEOUT` are dropped with a warn.
-    fn advance_pending_cycles(
-        &mut self,
-        host: &dyn PluginHost,
-        procs: &[pidtree::ProcRow],
-    ) {
-        const CYCLE_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(60);
-        if self.pending_cycles.is_empty() {
-            return;
-        }
-        let Some(client) = self.shelld.as_ref() else {
-            return; // no client; can't push the resume command
-        };
-        let now = SystemTime::now();
-        let mut to_drop: Vec<u64> = Vec::new();
-        let mut to_resume: Vec<(u64, CycleJob)> = Vec::new();
-        for (sid, job) in self.pending_cycles.iter() {
-            if now.duration_since(job.started_at).map(|d| d > CYCLE_TIMEOUT).unwrap_or(true)
-            {
-                host.log(
-                    LogLevel::Warn,
-                    "cycle.timed_out",
-                    &format!("shelld_session={} dropping stale cycle", sid),
-                );
-                to_drop.push(*sid);
-                continue;
-            }
-            match job.stage {
-                CycleStage::ExitSent => {
-                    let still_alive = procs.iter().any(|p| p.pid == job.old_claude_pid);
-                    if !still_alive {
-                        to_resume.push((*sid, job.clone()));
-                    }
-                }
-                CycleStage::ResumeSent => {
-                    to_drop.push(*sid);
-                }
-            }
-        }
-        for (sid, mut job) in to_resume {
-            let cmd = format!("claude{} --resume {}\r", job.next_profile, job.uuid);
-            match client.send_input_to(sid, cmd.as_bytes()) {
-                Ok(()) => {
-                    host.log(
-                        LogLevel::Info,
-                        "cycle.resume_sent",
-                        &format!(
-                            "shelld_session={} P{} resume sent (uuid={})",
-                            sid, job.next_profile, job.uuid
-                        ),
-                    );
-                    job.stage = CycleStage::ResumeSent;
-                    self.pending_cycles.insert(sid, job);
-                }
-                Err(e) => {
-                    host.log(
-                        LogLevel::Warn,
-                        "cycle.resume_send_failed",
-                        &format!("{e}"),
-                    );
-                    to_drop.push(sid);
-                }
-            }
-        }
-        for sid in to_drop {
-            self.pending_cycles.remove(&sid);
         }
     }
 
@@ -376,7 +409,7 @@ impl Plugin for ClaudecodePlugin {
             wk.store(true, Ordering::Release);
         }) {
             Ok(c) => {
-                self.shelld = Some(c);
+                self.shelld = Some(Arc::new(c));
                 host.log(
                     LogLevel::Info,
                     "init.shelld_connected",
@@ -634,8 +667,9 @@ impl Plugin for ClaudecodePlugin {
         }
         self.last_mapping = new_mapping;
         self.last_meta = new_meta;
-        // Advance any pending profile-cycle jobs.
-        self.advance_pending_cycles(host, &procs);
+        // RFC-003: profile-cycle state machine now lives in
+        // ProfileCyclePaneSession::on_tick, driven by the L1 plugin
+        // dispatcher.  Nothing to do here.
     }
 
     fn on_pane_badge_click(
