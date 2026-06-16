@@ -73,12 +73,13 @@ struct BindMeta {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CycleStage {
-    /// `exit\r` not yet sent (right after begin_pane_session).
-    PendingExit,
-    /// `exit\r` written; waiting for the old claude pid to disappear.
-    ExitSent,
-    /// `claudeN --resume <uuid>\r` written; waiting a settle window
-    /// before ending the PaneSession.
+    /// SIGTERM not yet sent to the old claude pid.
+    PendingKill,
+    /// SIGTERM delivered; waiting for the pid to vanish from the
+    /// process table.
+    KillSent,
+    /// `claudeN --resume <uuid>\r` written to the PTY; waiting a
+    /// settle window before ending the PaneSession.
     ResumeSent,
 }
 
@@ -152,29 +153,42 @@ impl crate::plugins::PaneSession for ProfileCyclePaneSession {
             return;
         }
         match self.stage {
-            CycleStage::PendingExit => {
-                if let Err(e) = self.client.send_input_to(sid, b"exit\r") {
-                    host.log(
-                        crate::plugins::LogLevel::Warn,
-                        "cycle.exit_send_failed",
-                        &format!("{e}"),
-                    );
-                    host.end();
-                    return;
+            CycleStage::PendingKill => {
+                // SIGTERM directly to the claude PID — bypass the
+                // PTY entirely so no `Bye!` / `/exit` echo lands in
+                // the grid.  `bare exit` round-trip was ambiguous
+                // (claude treats it as a user message and replies
+                // politely without quitting), `/exit` works but
+                // prints "Bye!", SIGTERM kills cleanly.
+                let r = unsafe { libc::kill(self.old_claude_pid, libc::SIGTERM) };
+                if r != 0 {
+                    let errno = unsafe { *libc::__error() };
+                    if errno == libc::ESRCH {
+                        // Already gone — race with normal exit.
+                        // Treat as success.
+                    } else {
+                        host.log(
+                            crate::plugins::LogLevel::Warn,
+                            "cycle.kill_failed",
+                            &format!("errno={}", errno),
+                        );
+                        host.end();
+                        return;
+                    }
                 }
                 host.log(
                     crate::plugins::LogLevel::Info,
-                    "cycle.exit_sent",
+                    "cycle.kill_sent",
                     &format!(
                         "shelld_session={} → P{} (uuid={}, claude_pid={})",
                         sid, self.next_profile, self.uuid, self.old_claude_pid
                     ),
                 );
                 host.set_badge(&format!("→ P{} …", self.next_profile));
-                self.stage = CycleStage::ExitSent;
+                self.stage = CycleStage::KillSent;
                 self.started_at = now;
             }
-            CycleStage::ExitSent => {
+            CycleStage::KillSent => {
                 if !Self::pid_alive(self.old_claude_pid) {
                     let cmd = format!(
                         "claude{} --resume {}\r",
@@ -200,6 +214,14 @@ impl crate::plugins::PaneSession for ProfileCyclePaneSession {
                     host.set_badge(&format!("P{} starting …", self.next_profile));
                     self.stage = CycleStage::ResumeSent;
                     self.started_at = now;
+                } else if elapsed >= std::time::Duration::from_secs(3) {
+                    // SIGTERM didn't take in 3 s — escalate to SIGKILL.
+                    let r = unsafe { libc::kill(self.old_claude_pid, libc::SIGKILL) };
+                    host.log(
+                        crate::plugins::LogLevel::Warn,
+                        "cycle.escalated_sigkill",
+                        &format!("pid={} kill_r={}", self.old_claude_pid, r),
+                    );
                 }
             }
             CycleStage::ResumeSent => {
@@ -279,7 +301,7 @@ impl ClaudecodePlugin {
             next_profile,
             uuid: meta.uuid,
             old_claude_pid: meta.claude_pid,
-            stage: CycleStage::PendingExit,
+            stage: CycleStage::PendingKill,
             started_at: SystemTime::now(),
         });
         if let Err(e) = host.begin_pane_session(shelld_sid, session) {
