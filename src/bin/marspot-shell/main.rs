@@ -2566,6 +2566,19 @@ fn main() {
     maybe_redirect_to_current_shell();
     if std::env::var_os("MARSPOT_SHELL_SELF_UPDATE").is_some() {
         sup_log::log("SHELL_SELF_UPDATE", "new shell exec'd from current/");
+        // Self-fire SIGUSR1 so the main loop, once it lands on Idle
+        // after the post-execv boot dance (active L2 spawned +
+        // HELLO_ACK + first SurfaceReady), proactively applies any
+        // remaining pending/marspot-core + pending/marspot-session.
+        // Without this, the just-finished L1 swap leaves L2/L3
+        // pending/ sitting there until install-local's 8 s fallback
+        // retrigger or the next user-initiated focus-loss — that's
+        // the "L1 flashes, then several seconds before content
+        // updates and input wakes up" wait the user sees.
+        // (install-local DID stage all three together as one
+        // operation; the post-execv shell should treat them as one
+        // operation too.)
+        SIGUSR1_FLAG.store(true, Ordering::Release);
     }
 
     // Dispatch CLI subcommands before we touch AppKit / start a
