@@ -23,10 +23,9 @@
 mod local_session;
 mod uds_server;
 
-use std::ffi::CString;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -39,7 +38,7 @@ use marspot_term::render::grid_selection_text;
 use marspot_term::shell_proto::{
     decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
     decode_paste,
-    encode_selection_text, encode_self_update_decline, wire_to_event, Frame, MsgType,
+    encode_selection_text, wire_to_event, Frame, MsgType,
     DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::session_state::{PendingPage, SessionState};
@@ -170,279 +169,125 @@ enum SessionEvent {
     /// `poke`.  In owns-pty mode this replaces the inherited-fd
     /// control socket — owns-pty L3s have no fd 3 to read from.
     NewClient(UnixStream),
-    /// RFC-003 §6 Amendment 14 — L2 sent us `RequestSelfUpdate`.  The
-    /// main loop drains, ACKs over the control channel, persists the
-    /// Terminal snapshot, and `execv`s into `current/marspot-session`
-    /// while keeping the PTY master + shell child + UDS listener fds
-    /// alive across the swap (CLOEXEC cleared, handoff manifest
-    /// written to /tmp).  PID is preserved so the running zsh has no
-    /// idea the image flipped under it.  Replaces the v1 SIGUSR2
-    /// trigger — see Frame::read_from forward-compat note for the
-    /// post-mortem.
-    SelfUpdateRequested,
+    /// RFC-003 §6 Amendment 15 — SIGTERM received.  L1 / L2 told us
+    /// to retire (silent upgrade or user-driven marspot quit).  Main
+    /// loop persists Terminal state to `state.bin`, then `exit(0)` —
+    /// `process::exit` does NOT unwind, so `Pty::Drop` never runs and
+    /// the shell is NOT SIGHUP'd.  L1's fd-vault still holds a duped
+    /// PTY master fd (for the silent-upgrade replacement to withdraw),
+    /// or the user-quit path will close that vault entry too, letting
+    /// the shell exit on its own.
+    ShutdownRequested,
 }
 
-/// RFC-003 §6 Amendment 14 — env sentinel that tells the new (post-
-/// execv) image "you are resuming, the rest of the handoff is on
-/// disk".  Value is the path to the manifest TSV.  Removed by the
-/// new image immediately after read so a subsequent unintended
-/// re-exec doesn't fall back into the resume path on stale data.
-const ENV_HANDOFF_MANIFEST: &str = "MARSPOT_L3_HANDOFF_MANIFEST";
+/// RFC-003 §6 Amendment 15 — SIGTERM self-pipe write end.  -1 until
+/// the handler is installed.
+static SIGTERM_PIPE_W: AtomicI32 = AtomicI32::new(-1);
 
-/// RFC-003 §6 Amendment 14 — handoff manifest format version.  Bump
-/// when fields are added / reordered / removed.  The reader rejects
-/// a manifest whose version doesn't match exactly — better to fall
-/// back to a cold start than to misinterpret a stale layout.
-const HANDOFF_MANIFEST_VERSION: u32 = 1;
-
-/// RFC-003 §6 Amendment 14 — the bits the new image needs to rebuild
-/// LocalSession + SessionListener after `execv`.  Lives in a TSV
-/// file under /tmp keyed by the (pid-preserved) process pid; the env
-/// only carries the sentinel `MARSPOT_L3_HANDOFF_MANIFEST=<path>`.
-///
-/// Keeping the payload out of env avoids polluting the env table the
-/// shell child inherits (we'd prefer that table identical to the
-/// pre-execv contents — TERM/COLORTERM/SHELL/HOME/PATH/etc) and
-/// keeps the env-injection surface trivially auditable: one var, one
-/// value, gone after read.
-struct L3Handoff {
-    master_fd: RawFd,
-    child_pid: i32,
-    listen_fd: RawFd,
-    cols: u16,
-    rows: u16,
+extern "C" fn l3_sigterm_handler(_: libc::c_int) {
+    let fd = SIGTERM_PIPE_W.load(AtomicOrdering::Relaxed);
+    if fd >= 0 {
+        let buf: [u8; 1] = [1];
+        unsafe { libc::write(fd, buf.as_ptr() as *const _, 1); }
+    }
 }
 
-/// /tmp/marspot-session-handoff.<pid>.tsv — per-pid so a parallel
-/// dev L3 doesn't collide.
-fn handoff_manifest_path() -> PathBuf {
-    PathBuf::from(format!(
-        "/tmp/marspot-session-handoff.{}.tsv",
-        std::process::id()
-    ))
-}
+/// Install a SIGTERM handler that posts `SessionEvent::ShutdownRequested`
+/// onto the main loop via a self-pipe.  Async-signal-safe write is the
+/// only thing the handler does; the watcher thread translates each
+/// wake byte into a regular SessionEvent so the loop processes it in
+/// its normal drain.
+fn install_sigterm_handler(ev_tx: Sender<SessionEvent>) -> std::io::Result<()> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (r_fd, w_fd) = (fds[0], fds[1]);
+    for fd in [r_fd, w_fd] {
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
+    SIGTERM_PIPE_W.store(w_fd, AtomicOrdering::Relaxed);
 
-/// RFC-003 §6 Amendment 14 — write the manifest in the pre-execv
-/// image.  Format (newline-separated, key=value):
-///
-///   version=1
-///   master_fd=<int>
-///   child_pid=<int>
-///   listen_fd=<int>
-///   cols=<u16>
-///   rows=<u16>
-fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> std::io::Result<()> {
-    let body = format!(
-        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\n",
-        HANDOFF_MANIFEST_VERSION,
-        h.master_fd,
-        h.child_pid,
-        h.listen_fd,
-        h.cols,
-        h.rows,
-    );
-    let tmp = path.with_extension("tsv.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)?;
+    std::thread::Builder::new()
+        .name("l3-sigterm-watcher".to_string())
+        .spawn(move || {
+            let mut buf = [0u8; 1];
+            loop {
+                let n = unsafe { libc::read(r_fd, buf.as_mut_ptr() as *mut _, 1) };
+                if n <= 0 { break; }
+                if ev_tx.send(SessionEvent::ShutdownRequested).is_err() {
+                    break;
+                }
+            }
+        })?;
+
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = l3_sigterm_handler as *const () as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = libc::SA_RESTART;
+        if libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 
-/// RFC-003 §6 Amendment 14 — read + sanity-check a manifest.  Any
-/// missing / unparsable field, or a version mismatch, returns Err so
-/// the caller treats this as "no handoff" and cold-starts.
-fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
-    let body = std::fs::read_to_string(path)?;
-    let mut fields = std::collections::HashMap::new();
-    for line in body.lines() {
+/// RFC-003 §6 Amendment 15 — disk path for the Terminal snapshot we
+/// persist on graceful exit (used for the resurrect-on-boot path when
+/// the L3 process is gone but the pane still has state to show).
+fn session_state_bin_path(id: u64) -> std::path::PathBuf {
+    marspot_term::session_registry::session_dir(id).join("state.bin")
+}
+
+/// RFC-003 §6 Amendment 15 — encode the metadata that travels alongside
+/// the PTY master fd in L1's vault.  Format: line-based, key=value.
+///   child_pid=<i32>
+///   cols=<u16>
+///   rows=<u16>
+/// L1 doesn't know what these mean (it's opaque bytes from its POV);
+/// only L3's encode/decode pair below interprets the payload.
+fn build_resume_metadata(child_pid: i32, cols: u16, rows: u16) -> Vec<u8> {
+    format!("child_pid={child_pid}\ncols={cols}\nrows={rows}\n").into_bytes()
+}
+
+fn parse_resume_metadata(buf: &[u8]) -> std::io::Result<(i32, u16, u16)> {
+    let s = std::str::from_utf8(buf).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("metadata not utf8: {e}"))
+    })?;
+    let mut child_pid: Option<i32> = None;
+    let mut cols: Option<u16> = None;
+    let mut rows: Option<u16> = None;
+    for line in s.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
-            fields.insert(k.trim().to_string(), v.trim().to_string());
+            match k.trim() {
+                "child_pid" => child_pid = v.trim().parse().ok(),
+                "cols" => cols = v.trim().parse().ok(),
+                "rows" => rows = v.trim().parse().ok(),
+                _ => {}
+            }
         }
     }
     let invalid = |k: &str| -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("manifest bad/missing {k}"))
-    };
-    let version: u32 = fields.get("version").ok_or_else(|| invalid("version"))?
-        .parse().map_err(|_| invalid("version"))?;
-    if version != HANDOFF_MANIFEST_VERSION {
-        return Err(std::io::Error::new(
+        std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("manifest version {version} != {HANDOFF_MANIFEST_VERSION}"),
-        ));
-    }
-    let master_fd: RawFd = fields.get("master_fd").ok_or_else(|| invalid("master_fd"))?
-        .parse().map_err(|_| invalid("master_fd"))?;
-    let child_pid: i32 = fields.get("child_pid").ok_or_else(|| invalid("child_pid"))?
-        .parse().map_err(|_| invalid("child_pid"))?;
-    let listen_fd: RawFd = fields.get("listen_fd").ok_or_else(|| invalid("listen_fd"))?
-        .parse().map_err(|_| invalid("listen_fd"))?;
-    let cols: u16 = fields.get("cols").ok_or_else(|| invalid("cols"))?
-        .parse().map_err(|_| invalid("cols"))?;
-    let rows: u16 = fields.get("rows").ok_or_else(|| invalid("rows"))?
-        .parse().map_err(|_| invalid("rows"))?;
-    Ok(L3Handoff { master_fd, child_pid, listen_fd, cols, rows })
-}
-
-/// RFC-003 §6 Amendment 14 — detect an in-flight L3 execv handoff at
-/// `main()` startup.  The env sentinel `MARSPOT_L3_HANDOFF_MANIFEST`
-/// names the manifest file; we read + delete it (one-shot), then strip
-/// the env var so a subsequent unintended re-exec falls back to cold
-/// start instead of trying to read a vanished manifest.  Any error
-/// reading / parsing means "no handoff" → cold start.
-fn try_resume_handoff() -> Option<L3Handoff> {
-    let Ok(path) = std::env::var(ENV_HANDOFF_MANIFEST) else {
-        return None;
+            format!("metadata missing/bad {k}"),
+        )
     };
-    // Strip env BEFORE the read attempt so we can't loop here if the
-    // manifest is unreadable (cold-start path needs a clean env).
-    unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
-    let path = std::path::PathBuf::from(path);
-    match read_handoff_manifest(&path) {
-        Ok(h) => {
-            // Best-effort delete — leaving the file behind on
-            // failure isn't lethal (only the env sentinel matters
-            // and that's already gone), but a clean /tmp is nice.
-            let _ = std::fs::remove_file(&path);
-            Some(h)
-        }
-        Err(e) => {
-            lx_warn!(
-                "l3.handoff.manifest_read_failed",
-                &format!("{e}; falling back to cold start"),
-                path = path.display()
-            );
-            let _ = std::fs::remove_file(&path);
-            None
-        }
-    }
-}
-
-/// RFC-003 §6 Amendment 14 — disk path for the Terminal snapshot we
-/// persist across the execv handoff.  Same per-session dir as the
-/// bytelog / entry.toml.
-fn session_state_bin_path(id: u64) -> std::path::PathBuf {
-    marspot_term::session_registry::session_dir(id).join("state.bin")
-}
-
-/// Clear `FD_CLOEXEC` on a fd so it survives `execv`.
-fn clear_cloexec(fd: RawFd) -> std::io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-}
-
-/// RFC-003 §6 Amendment 14 — perform the L3 silent self-update.
-///
-/// Steps:
-///   1. `local.extract_for_handoff` pulls out (master_fd, child_pid,
-///      terminal, cols, rows) without firing `Pty::Drop` (which would
-///      SIGHUP the running shell — exactly what we're trying to keep
-///      alive).
-///   2. Serialize the Terminal snapshot to `sessions/<id>/state.bin`
-///      so the new image can paint the L2 mirror at the swap moment
-///      with the correct grid instead of a blank `Terminal::new`.
-///   3. `listener.prepare_for_execv` clears CLOEXEC on the kept UDS
-///      listener fd and flips `suppress_drop` so the sock file +
-///      entry.toml survive.
-///   4. Clear CLOEXEC on master_fd too.
-///   5. Set the handoff env vars + `execv current/marspot-session`.
-///   6. On success this function never returns (process image is
-///      replaced).  Any error: log + exit(1); we've already extracted
-///      state so rollback isn't worth the complexity (L2 will spawn a
-///      fresh L3 the next time it tries to use this pane).
-fn do_l3_execv_swap(
-    id: u64,
-    local: local_session::LocalSession,
-    mut listener: uds_server::SessionListener,
-) -> std::io::Result<()> {
-    let started = Instant::now();
-    let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
-
-    let state_path = session_state_bin_path(id);
-    let body = terminal.serialize_snapshot();
-    if let Err(e) = std::fs::write(&state_path, &body) {
-        lx_warn!(
-            "l3.execv.snapshot_persist_failed",
-            &format!("{e}"),
-            session_id = id,
-            state_path = state_path.display()
-        );
-        // Continue anyway — the new image will boot with a fresh
-        // Terminal::new(cols, rows); first PTY burst repaints.
-    } else {
-        lx_debug!(
-            "l3.execv.snapshot_persisted",
-            "wrote state.bin",
-            session_id = id,
-            body_bytes = body.len()
-        );
-    }
-
-    clear_cloexec(master_fd)?;
-    let listen_fd = listener.prepare_for_execv()?;
-
-    // Write the handoff manifest first.  Only on success do we publish
-    // the env sentinel — otherwise the new image would find the
-    // sentinel pointing at a file that doesn't exist and fall back to
-    // cold start (still safe, but the failure mode is clearer when
-    // env + file move atomically).
-    let manifest_path = handoff_manifest_path();
-    let handoff = L3Handoff { master_fd, child_pid, listen_fd, cols, rows };
-    write_handoff_manifest(&handoff, &manifest_path)?;
-
-    let target =
-        marspot_term::binary_tree::BinaryTree::default_for("marspot-session")?.current();
-    let target_c = CString::new(target.to_string_lossy().as_bytes())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target"))?;
-    let argv: [*const libc::c_char; 2] = [target_c.as_ptr(), std::ptr::null()];
-
-    unsafe {
-        std::env::set_var(ENV_HANDOFF_MANIFEST, &manifest_path);
-    }
-
-    lx_event!(
-        "L3_EXECV_INVOKE",
-        "execv into new marspot-session image",
-        session_id = id,
-        target = target.display(),
-        manifest = manifest_path.display(),
-        master_fd = master_fd,
-        listen_fd = listen_fd,
-        child_pid = child_pid,
-        elapsed_us = started.elapsed().as_micros()
-    );
-
-    // Drop the listener here so its `suppress_drop` path runs and the
-    // kept UnixListener is mem::forget'd (no close, no unbind).
-    std::mem::drop(listener);
-
-    // SAFETY: target_c outlives the call; on success execv never
-    // returns, so the borrow is moot.
-    unsafe {
-        libc::execv(target_c.as_ptr(), argv.as_ptr());
-    }
-    let err = std::io::Error::last_os_error();
-    lx_error!(
-        "l3.execv.failed",
-        &format!("{err}"),
-        errno = err.raw_os_error().unwrap_or(0),
-        target = target.display()
-    );
-    // Clean env + manifest so a fresh L3 spawned by L2 (after we
-    // exit) doesn't trip on stale handoff state.
-    unsafe { std::env::remove_var(ENV_HANDOFF_MANIFEST); }
-    let _ = std::fs::remove_file(&manifest_path);
-    Err(err)
+    Ok((
+        child_pid.ok_or_else(|| invalid("child_pid"))?,
+        cols.ok_or_else(|| invalid("cols"))?,
+        rows.ok_or_else(|| invalid("rows"))?,
+    ))
 }
 
 /// Placeholder geometry until L2 drives a real resize (later step).
@@ -626,11 +471,6 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         }
                     }
                 }
-                MsgType::RequestSelfUpdate => {
-                    if tx.send(SessionEvent::SelfUpdateRequested).is_err() {
-                        break;
-                    }
-                }
                 _ => {}
             },
             Ok(None) | Err(_) => {
@@ -744,12 +584,6 @@ fn main() {
     // prunes the on-disk entry.
     let mut _listener: Option<uds_server::SessionListener> = None;
 
-    // RFC-003 §6 Amendment 14 — if we were just exec'd by a previous
-    // L3 image for a silent self-update, the handoff env vars tell us
-    // (master_fd, child_pid, listen_fd, cols, rows).  Rebuild via
-    // `from_handoff` instead of `spawn`/`bind`: no fork, no rebind,
-    // PTY + shell + sock all live across the swap.
-    let handoff = try_resume_handoff();
     let mut session: SessionImpl = if owns_pty {
         let wake_tx = ev_tx.clone();
         let wake = move || {
@@ -766,73 +600,96 @@ fn main() {
                     std::process::exit(1);
                 }),
         };
-        if let Some(h) = handoff {
-            // Adopt inherited PTY + listener.  Terminal state is
-            // replayed from sessions/<id>/state.bin if present (the
-            // pre-execv image wrote it); otherwise we boot with a
-            // fresh Terminal at the handed-in geometry and let the
-            // next PTY burst repaint.
-            let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
+        // RFC-003 §6 Amendment 15 — three boot modes:
+        //   * Resume:   env `MARSPOT_L3_RESUME_KEY=<id>` set →
+        //               withdraw PTY master fd + child_pid from L1
+        //               vault, restore Terminal from state.bin, no
+        //               forkpty.
+        //   * Restore:  env `MARSPOT_L3_RESTORE_STATE_BIN=<path>` →
+        //               cold spawn shell, but apply_snapshot the
+        //               state.bin first so the L2 mirror paints the
+        //               last-known frame from a previous L3 instance
+        //               (resurrect after a marspot quit).
+        //   * Cold:     plain fresh forkpty + shell.  After spawn,
+        //               deposit the master fd into L1's vault.
+        let resume_key: Option<u64> = std::env::var("MARSPOT_L3_RESUME_KEY")
+            .ok()
+            .and_then(|s| s.parse().ok());
+        let restore_state_bin: Option<std::path::PathBuf> = std::env::var(
+            "MARSPOT_L3_RESTORE_STATE_BIN",
+        )
+        .ok()
+        .map(std::path::PathBuf::from);
+        let vault_sock: Option<std::path::PathBuf> =
+            std::env::var(marspot_term::fd_vault::ENV_VAULT_SOCK)
+                .ok()
+                .map(std::path::PathBuf::from);
+
+        let local = if let Some(key) = resume_key {
+            let sock = vault_sock.clone().unwrap_or_else(|| {
+                lx_error!(
+                    "session.resume.no_vault_sock",
+                    "MARSPOT_L3_RESUME_KEY set but ENV_VAULT_SOCK missing"
+                );
+                std::process::exit(1);
+            });
+            lx_event!(
+                "L3_RESUME_WITHDRAW",
+                "withdrawing PTY master fd from L1 vault",
+                session_id = id,
+                key = key,
+                sock = sock.display()
+            );
+            let (owned_fd, metadata) = marspot_term::fd_vault::withdraw_fd(&sock, key)
+                .unwrap_or_else(|e| {
+                    lx_error!("session.resume.withdraw_failed", &format!("{e}"), key = key);
+                    std::process::exit(1);
+                });
+            let (child_pid, prev_cols, prev_rows) = parse_resume_metadata(&metadata)
+                .unwrap_or_else(|e| {
+                    lx_error!("session.resume.metadata_bad", &format!("{e}"));
+                    std::process::exit(1);
+                });
+            // Build Terminal from state.bin (best-effort).  Geometry
+            // comes from the metadata so a mid-resize swap doesn't
+            // mis-shape the grid; PTY will be ioctl'd to match.
+            let mut terminal = marspot_term::terminal::Terminal::new(prev_cols, prev_rows);
             let state_path = session_state_bin_path(id);
             match std::fs::read(&state_path) {
                 Ok(body) => {
                     if let Err(e) = terminal.apply_snapshot(&body) {
                         lx_warn!(
-                            "l3.execv.snapshot_apply_failed",
+                            "l3.resume.snapshot_apply_failed",
                             &format!("{e}"),
-                            session_id = id,
                             body_bytes = body.len()
                         );
                     } else {
                         lx_event!(
-                            "L3_EXECV_SNAPSHOT_APPLIED",
+                            "L3_RESUME_SNAPSHOT_APPLIED",
                             "restored Terminal from state.bin",
-                            session_id = id,
                             body_bytes = body.len()
                         );
                     }
-                    // One-shot file; clean up so a future cold start
-                    // doesn't pick up stale state.
                     let _ = std::fs::remove_file(&state_path);
                 }
                 Err(_) => {
                     lx_warn!(
-                        "l3.execv.snapshot_missing",
-                        "no state.bin to restore; booting fresh Terminal",
-                        session_id = id,
-                        state_path = state_path.display()
+                        "l3.resume.snapshot_missing",
+                        "no state.bin; resumed Terminal stays blank until next PTY burst"
                     );
                 }
             }
-            lx_event!(
-                "L3_EXECV_RESUMED",
-                "adopting inherited PTY + UDS listener after execv",
-                session_id = id,
-                master_fd = h.master_fd,
-                listen_fd = h.listen_fd,
-                child_pid = h.child_pid,
-                cols = h.cols,
-                rows = h.rows
-            );
-            let local = LocalSession::from_handoff(
-                id, h.master_fd, h.child_pid, h.cols, h.rows, terminal, wake,
+            let master_fd: RawFd =
+                <OwnedFd as std::os::fd::IntoRawFd>::into_raw_fd(owned_fd);
+            LocalSession::from_handoff(
+                id, master_fd, child_pid, prev_cols, prev_rows, terminal, wake,
             )
             .unwrap_or_else(|e| {
-                lx_error!("l3.execv.from_handoff_failed", &format!("{e}"));
+                lx_error!("l3.resume.from_handoff_failed", &format!("{e}"));
                 std::process::exit(1);
-            });
-            // Adopt inherited UDS listener fd; no rebind, entry.toml
-            // already has our (preserved) PID.
-            match uds_server::SessionListener::from_handoff(id, h.listen_fd, ev_tx.clone()) {
-                Ok(l) => _listener = Some(l),
-                Err(e) => {
-                    lx_error!("l3.execv.listener_from_handoff_failed", &format!("{e}"));
-                    std::process::exit(1);
-                }
-            }
-            SessionImpl::Local(local)
+            })
         } else {
-            // Cold start: spawn user shell directly.
+            // Cold start (with optional restore-snapshot).
             lx_event!(
                 "L3_OWNS_PTY",
                 "spawning local PTY (no shelld)",
@@ -840,23 +697,86 @@ fn main() {
                 cols = cols,
                 rows = rows
             );
-            let local = LocalSession::spawn(id, cols, rows, "", wake).unwrap_or_else(|e| {
-                lx_error!("session.local.spawn_failed", &format!("{e}"));
-                std::process::exit(1);
-            });
-            let cwd = std::env::var("HOME").unwrap_or_default();
-            let shm_name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
-            match uds_server::SessionListener::bind(
-                id, cols, rows, &cwd, &shm_name, ev_tx.clone(),
-            ) {
-                Ok(l) => _listener = Some(l),
-                Err(e) => {
-                    lx_error!("session.local.uds_bind_failed", &format!("{e}"));
+            let mut local = LocalSession::spawn(id, cols, rows, "", wake)
+                .unwrap_or_else(|e| {
+                    lx_error!("session.local.spawn_failed", &format!("{e}"));
                     std::process::exit(1);
+                });
+            // Resurrect path: paint the saved snapshot before the
+            // fresh shell's prompt arrives (user sees prior content +
+            // new prompt instead of a blank pane).  Best-effort.
+            if let Some(path) = restore_state_bin {
+                match std::fs::read(&path) {
+                    Ok(body) => {
+                        if let Err(e) = local.terminal_mut().apply_snapshot(&body) {
+                            lx_warn!(
+                                "l3.restore.snapshot_apply_failed",
+                                &format!("{e}"),
+                                body_bytes = body.len(),
+                                state_path = path.display()
+                            );
+                        } else {
+                            lx_event!(
+                                "L3_RESURRECT_RESTORED",
+                                "applied state.bin to fresh shell",
+                                session_id = id,
+                                body_bytes = body.len()
+                            );
+                        }
+                        // One-shot: don't repaint stale snapshot on
+                        // a future cold start.
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    Err(e) => {
+                        lx_warn!(
+                            "l3.restore.read_failed",
+                            &format!("{e}"),
+                            state_path = path.display()
+                        );
+                    }
                 }
             }
-            SessionImpl::Local(local)
+            // Deposit master_fd into L1's vault so future upgrades /
+            // resumes can withdraw it.  Best-effort: if the vault is
+            // down, silent updates degrade but the session still works.
+            if let Some(sock) = vault_sock.as_ref() {
+                let master_fd = local.master_raw_fd();
+                let child_pid = local.child_pid();
+                let metadata = build_resume_metadata(child_pid, cols, rows);
+                match marspot_term::fd_vault::deposit_fd(sock, id, &metadata, master_fd) {
+                    Ok(()) => lx_event!(
+                        "L3_VAULT_DEPOSIT",
+                        "PTY master fd deposited to L1 vault",
+                        session_id = id,
+                        key = id,
+                        sock = sock.display()
+                    ),
+                    Err(e) => lx_warn!(
+                        "l3.vault.deposit_failed",
+                        &format!("{e}; silent updates disabled for this session"),
+                        sock = sock.display()
+                    ),
+                }
+            } else {
+                lx_warn!(
+                    "l3.vault.no_sock",
+                    "ENV_VAULT_SOCK not set; running in degraded (no-vault) mode"
+                );
+            }
+            local
+        };
+        let cwd = std::env::var("HOME").unwrap_or_default();
+        let shm_name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
+        match uds_server::SessionListener::bind(
+            id, cols, rows, &cwd, &shm_name, ev_tx.clone(),
+        ) {
+            Ok(l) => _listener = Some(l),
+            Err(e) => {
+                lx_error!("session.local.uds_bind_failed", &format!("{e}"));
+                std::process::exit(1);
+            }
         }
+        SessionImpl::Local(local)
     } else {
         // RFC-003 Phase 6: L4 shelld retired.  MARSPOT_L3_OWNS_PTY=1
         // is now mandatory; the old shelld-driven fallback is gone.
@@ -875,13 +795,25 @@ fn main() {
         rows = rows
     );
 
-    // RFC-003 §6 Amendment 14 — L3 silent self-update is now driven
-    // by `MsgType::RequestSelfUpdate` over the control channel, not
-    // SIGUSR2 (signals had a fatal flaw: older L3 binaries lacking
-    // the handler defaulted to TERM and were killed; frame-based
-    // triggers are silently dropped by `Frame::read_from`'s forward-
-    // compat path, so a peer that doesn't speak this variant is
-    // unharmed).  Nothing to install here.
+    // RFC-003 §6 Amendment 15 — install SIGTERM handler so L2 can
+    // ask us to retire (silent-update path) or L1 can wipe us on
+    // marspot quit.  The handler is just a self-pipe write; the main
+    // loop turns the wake into a `ShutdownRequested` event and drives
+    // the persist-state-then-exit path.  Best-effort: if install
+    // fails the L3 still runs but silent updates degrade to "just
+    // gets SIGKILL'd and loses state.bin".
+    if let Err(e) = install_sigterm_handler(ev_tx.clone()) {
+        lx_warn!(
+            "l3.sigterm.install_failed",
+            &format!("{e}; silent shutdown disabled for this L3")
+        );
+    } else {
+        lx_event!(
+            "L3_SIGTERM_INSTALLED",
+            "SIGTERM handler armed for silent shutdown",
+            pid = std::process::id()
+        );
+    }
 
     // Input source + L2 wake channel: L2 forwards keystrokes over the
     // control socket; we poke it back with GridReady after each publish.
@@ -922,10 +854,6 @@ fn main() {
     // from a swapped-out L2 socket can't null the poke a newer L2
     // just adopted.
     let mut client_generation: u64 = 0;
-    // RFC-003 §6 Amendment 14: SIGUSR2 sets this; we break the loop
-    // and dispatch `do_l3_execv_swap` post-loop so `session` +
-    // `_listener` can be moved into it.
-    let mut want_self_update = false;
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -991,50 +919,50 @@ fn main() {
                         core_gone = true;
                     }
                 }
-                SessionEvent::SelfUpdateRequested => {
-                    // RFC-003 §6 Amendment 14 — L2 sent
-                    // RequestSelfUpdate.  Sanity-check that
-                    // current/marspot-session exists; if not, decline
-                    // (would-be-execv has nowhere to land).
-                    let bt = marspot_term::binary_tree::BinaryTree::default_for(
-                        "marspot-session",
-                    );
-                    let current = bt.as_ref().ok().map(|b| b.current());
-                    let target_exists = current
-                        .as_ref()
-                        .map(|p| p.exists())
-                        .unwrap_or(false);
-                    if !target_exists {
-                        if let Some(w) = poke.as_mut() {
-                            let _ = Frame::new(
-                                MsgType::SelfUpdateDecline,
-                                encode_self_update_decline(
-                                    "no current/marspot-session",
-                                ),
-                            )
-                            .write_to(w);
-                        }
-                        lx_warn!(
-                            "L3_SELF_UPDATE_DECLINE",
-                            "no current/marspot-session — cannot execv",
-                            pid = std::process::id()
-                        );
-                        continue;
+                SessionEvent::ShutdownRequested => {
+                    // RFC-003 §6 Amendment 15 — persist a final
+                    // Terminal snapshot to state.bin (for the
+                    // resurrect-on-boot path) and exit WITHOUT
+                    // running Drops.  Skipping unwind means
+                    // `Pty::Drop` never runs → no SIGHUP for the
+                    // shell.  L1's fd-vault still holds a duped
+                    // master fd, so the kernel object stays alive
+                    // until the replacement L3 withdraws it (silent
+                    // upgrade) or L1's close path drains the vault
+                    // (user-driven quit).
+                    let id = session.id();
+                    let _ = session.pump();
+                    let body = session.terminal().serialize_snapshot();
+                    let path = session_state_bin_path(id);
+                    match std::fs::write(&path, &body) {
+                        Ok(()) => lx_event!(
+                            "L3_SHUTDOWN_SNAPSHOT_PERSISTED",
+                            "state.bin written for handoff",
+                            session_id = id,
+                            body_bytes = body.len(),
+                            path = path.display()
+                        ),
+                        Err(e) => lx_warn!(
+                            "l3.shutdown.snapshot_persist_failed",
+                            &format!("{e}"),
+                            session_id = id,
+                            path = path.display()
+                        ),
                     }
-                    // ACK before defer — once we break the loop the
-                    // control channel will EOF as soon as execv
-                    // discards inherited fds; L2 logs the ack and
-                    // expects the EOF.
-                    if let Some(w) = poke.as_mut() {
-                        let _ = Frame::new(MsgType::SelfUpdateAck, Vec::new())
-                            .write_to(w);
-                    }
-                    want_self_update = true;
+                    // One last publish so a viewer attached to shm
+                    // sees the final frame even before withdrawing
+                    // the fd.
+                    publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
                     lx_event!(
-                        "L3_SELF_UPDATE_REQUESTED",
-                        "RequestSelfUpdate received; will execv after final pump",
+                        "L3_SHUTDOWN_EXIT",
+                        "exiting on SIGTERM (no Drop, no SIGHUP)",
+                        session_id = id,
                         pid = std::process::id()
                     );
+                    // process::exit does NOT unwind, so Drops do not
+                    // fire.  In particular Pty::Drop's SIGHUP path is
+                    // skipped, which is the whole point.
+                    std::process::exit(0);
                 }
                 SessionEvent::NewClient(stream) => {
                     // Adopt the validated stream as the control
@@ -1082,13 +1010,6 @@ fn main() {
         // the next core), so exit rather than linger as an orphan.
         if core_gone {
             lx_event!("CORE_GONE", "L2/core gone (control EOF); exiting cleanly");
-            break;
-        }
-        if want_self_update {
-            // Final pump so the snapshot we persist is current; then
-            // break and let the post-loop dispatcher run execv.
-            let _ = session.pump();
-            publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
             break;
         }
         let resized = pending_resize.is_some();
@@ -1201,35 +1122,6 @@ fn main() {
                 cursor_row = cr,
                 state = state_str(session.state())
             );
-        }
-    }
-    // RFC-003 §6 Amendment 14 — post-loop dispatcher for the L3 silent
-    // self-update.  If the loop broke via SIGUSR2, hand session +
-    // listener to `do_l3_execv_swap`; on success it never returns
-    // (process image replaced), on failure exit 1 so L2 spawns a
-    // fresh L3 next time.
-    if want_self_update {
-        let id = session.id();
-        let SessionImpl::Local(local) = session;
-        if let Some(listener_owned) = _listener.take() {
-            match do_l3_execv_swap(id, local, listener_owned) {
-                Ok(()) => unreachable!("execv returned without err"),
-                Err(e) => {
-                    lx_error!(
-                        "l3.execv.aborted",
-                        &format!("{e}; exiting so L2 respawns this pane"),
-                        session_id = id
-                    );
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            lx_error!(
-                "l3.execv.no_listener",
-                "want_self_update but no SessionListener; bug",
-                session_id = id
-            );
-            std::process::exit(1);
         }
     }
 }

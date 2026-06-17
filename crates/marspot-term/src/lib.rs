@@ -14,6 +14,7 @@
 
 pub mod binary_tree;
 pub mod bytelog;
+pub mod fd_vault;
 pub mod emoji_presentation;
 pub mod fast_hash;
 pub mod unicode_data;

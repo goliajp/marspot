@@ -219,26 +219,6 @@ pub enum MsgType {
     /// will carry attributed runs.  Stub frame in C1 — full overlay
     /// rendering lands when a plugin actually uses it.
     PaneSessionOverlay = 47,
-    // ── L3 silent self-update (50..=59) — RFC-003 §6 Amendment 14 ──
-    /// L2 → L3: "promote your image to current/marspot-session via
-    /// `execv`."  Payload is empty (the target binary path is fixed
-    /// by `BinaryTree::default_for("marspot-session").current()`; the
-    /// L3 looks it up itself).  Triggered by L2 after promoting
-    /// pending/ → current/ on a session-only update — replaces the
-    /// pre-Amendment-14 SIGUSR2 fanout, which had a fatal flaw: an
-    /// L3 binary pre-dating the handler treated SIGUSR2 as TERM and
-    /// died.  Frames are forward-compatible (see `Frame::read_from`)
-    /// so an L3 that doesn't speak this variant silently drops it.
-    RequestSelfUpdate = 50,
-    /// L3 → L2: "ack — about to execv now."  Payload empty.  Logged
-    /// on the L2 side so we know which sessions accepted the update.
-    /// The control channel will EOF within milliseconds as the L3's
-    /// execv discards the inherited control fd.
-    SelfUpdateAck = 51,
-    /// L3 → L2: "I refuse this update."  Payload is an ASCII reason
-    /// string (e.g. "same fingerprint", "no current/marspot-session").
-    /// Pure information — L2 logs and moves on.
-    SelfUpdateDecline = 52,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -275,23 +255,10 @@ impl MsgType {
             45 => MsgType::PaneSessionKey,
             46 => MsgType::PaneSessionUserEscape,
             47 => MsgType::PaneSessionOverlay,
-            50 => MsgType::RequestSelfUpdate,
-            51 => MsgType::SelfUpdateAck,
-            52 => MsgType::SelfUpdateDecline,
             200 => MsgType::Error,
             _ => return None,
         })
     }
-}
-
-/// Decode a `SelfUpdateDecline` payload: ASCII reason string, lossy.
-pub fn decode_self_update_decline(payload: &[u8]) -> String {
-    String::from_utf8_lossy(payload).into_owned()
-}
-
-/// Encode a `SelfUpdateDecline` payload from the given reason.
-pub fn encode_self_update_decline(reason: &str) -> Vec<u8> {
-    reason.as_bytes().to_vec()
 }
 
 #[derive(Debug, Clone)]
@@ -1338,31 +1305,6 @@ mod tests {
         assert_eq!(decode_ping(&read.payload).unwrap(), 7);
     }
 
-    #[test]
-    fn request_self_update_frame_roundtrip() {
-        let f = Frame::new(MsgType::RequestSelfUpdate, Vec::new());
-        let mut buf = Vec::new();
-        f.write_to(&mut buf).unwrap();
-        let mut cur = Cursor::new(buf);
-        let read = Frame::read_from(&mut cur).unwrap().unwrap();
-        assert_eq!(read.msg_type, MsgType::RequestSelfUpdate);
-        assert!(read.payload.is_empty());
-    }
-
-    #[test]
-    fn self_update_decline_roundtrip() {
-        let reason = "same fingerprint";
-        let p = encode_self_update_decline(reason);
-        assert_eq!(decode_self_update_decline(&p), reason);
-        // Wire roundtrip too.
-        let f = Frame::new(MsgType::SelfUpdateDecline, p);
-        let mut buf = Vec::new();
-        f.write_to(&mut buf).unwrap();
-        let mut cur = Cursor::new(buf);
-        let read = Frame::read_from(&mut cur).unwrap().unwrap();
-        assert_eq!(read.msg_type, MsgType::SelfUpdateDecline);
-        assert_eq!(decode_self_update_decline(&read.payload), reason);
-    }
 
     #[test]
     fn hello_roundtrip() {

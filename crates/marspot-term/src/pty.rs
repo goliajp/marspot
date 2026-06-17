@@ -221,6 +221,17 @@ impl Pty {
         let me = std::mem::ManuallyDrop::new(self);
         (me.master, me.child)
     }
+
+    /// RFC-003 §6 Amendment 15 — drop the `child` reference so this
+    /// Pty's Drop does NOT SIGHUP the shell.  Used by L3's SIGTERM
+    /// handler before exit: L1's fd-vault still holds a duped copy
+    /// of the master fd → the kernel object stays alive → the shell
+    /// keeps running through the swap.  The local master fd does
+    /// still close on Drop (our copy), but the kernel object lives
+    /// via the vault's dup until the next L3 withdraws it.
+    pub fn release_for_handoff(&mut self) {
+        self.child = 0;
+    }
 }
 
 impl Drop for Pty {

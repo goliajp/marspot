@@ -169,16 +169,16 @@ impl PaneBackend {
         }
     }
 
-    /// RFC-003 §6 Amendment 14 — frame-based L3 silent self-update.
-    /// Writes a `RequestSelfUpdate` to the L3's control socket; the
-    /// L3 either ACKs and execvs in place (PTY + shell preserved) or
-    /// declines (logged).  No-op for non-L3 backends.
-    pub fn request_l3_self_update(&mut self) -> bool {
+    /// Process pid of the L3 worker for this pane.  Used by the
+    /// fd-vault silent-update path to SIGTERM the current L3 before
+    /// spawning its replacement.
+    pub fn l3_pid(&self) -> Option<i32> {
         match self {
-            PaneBackend::L3(c) => c.request_self_update(),
-            _ => false,
+            PaneBackend::L3(c) => Some(c.child.id() as i32),
+            _ => None,
         }
     }
+
 
     /// A silent-update replacement is staged but not yet promoted.
     pub fn is_l3_swapping(&self) -> bool {
@@ -652,18 +652,6 @@ impl L3Conn {
         self.req_rows = rows;
         let frame = Frame::new(MsgType::GridResize, encode_grid_resize(cols, rows));
         let _ = frame.write_to(&mut self.control);
-    }
-
-    /// RFC-003 §6 Amendment 14 — ask the L3 to `execv` into the
-    /// current/marspot-session binary.  Best-effort: the L3 either
-    /// ACKs (and we'll see its control EOF shortly as the execv
-    /// discards the inherited fd), declines (logged on the reader
-    /// side), or ignores entirely if it's an older build that
-    /// doesn't speak this frame (`Frame::read_from`'s forward-compat
-    /// path drops the unknown variant — see `shell_proto.rs`).
-    pub fn request_self_update(&mut self) -> bool {
-        let frame = Frame::new(MsgType::RequestSelfUpdate, Vec::new());
-        frame.write_to(&mut self.control).is_ok()
     }
 
     /// Ask L3 to publish the window at `view_offset` rows up from live
