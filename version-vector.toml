@@ -23,4 +23,4 @@
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
 core    = "0.9.8"    # L2 — pump_all 检测到 scroll_push delta + view_offset>0 时,本地 bump pane.view_offset(不 forward_scroll,L3 自己同步 bump);修 user 滚动到历史中途、新输出到来时"老内容被新内容覆盖"
-session = "0.8.7"    # L3 — main loop 每次 pump 后用 last_scroll_push 与 grid.scroll_push_count 算 delta,view_offset>0 时同样 bump,clamp 到 scrollback_len;与 L2 对称 auto-pin,无需额外 forward_scroll 往返,publish 一次就在正确 offset
+session = "0.8.8"    # L3 — snapshot v1→v2 把 scrollback 也带过 execv。user 报告"大部分窗口没几行历史"的根因 = L3 silent update execv 后 Terminal::new + apply_snapshot 不复原 scrollback(原 v1 注释明确"Scrollback is NOT touched here")。serialize_snapshot 追加 v2 尾段:u32 count + 每行 (wrapped u8, line_cols u32, cells);apply_snapshot 接受 [MIN_COMPAT=1, VERSION=2],v2 解析后用 push_historic_scrollback_line 重建。cap 每 pane 5000 行(8 pane × ~6.5MB 写入,可控);scrollback wrapped flag 暂写 0(TODO 后续修)。v1 backward-compat unit test + v2 roundtrip test 覆盖
