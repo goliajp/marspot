@@ -269,7 +269,15 @@ fn session_state_bin_path(id: u64) -> std::path::PathBuf {
 /// Fingerprint-match (or missing `current/`) → fall through to the
 /// user-quit cleanup path (state.bin + clean exit, shell SIGHUPs).
 const ENV_HANDOFF_MANIFEST: &str = "MARSPOT_L3_HANDOFF_MANIFEST";
-const HANDOFF_MANIFEST_VERSION: u32 = 1;
+// Manifest version 2 (2026-06-17): added optional `control_stream_fd`
+// so the L3 self-execv can carry the adopted L2↔L3 control UnixStream
+// across the image swap.  Without it the stream's fd kept its default
+// CLOEXEC=1, closed across execv, and L2 saw EOF + had no auto-reconnect
+// → user couldn't type for many minutes after every install.
+// Forward-compat: a v1 manifest is still accepted (`control_stream_fd`
+// defaults to -1, meaning "no inherited stream — wait for NewClient").
+const HANDOFF_MANIFEST_VERSION: u32 = 2;
+const HANDOFF_MANIFEST_MIN_COMPAT: u32 = 1;
 
 struct L3Handoff {
     master_fd: RawFd,
@@ -277,6 +285,11 @@ struct L3Handoff {
     listen_fd: RawFd,
     cols: u16,
     rows: u16,
+    /// Adopted L2↔L3 control UnixStream raw fd, or `-1` if there was
+    /// no live control stream when the execv handoff fired (which
+    /// happens when L2 is mid-swap and the previous client EOF'd
+    /// before NewClient adopted a new one).
+    control_stream_fd: RawFd,
 }
 
 fn handoff_manifest_path() -> std::path::PathBuf {
@@ -288,9 +301,10 @@ fn handoff_manifest_path() -> std::path::PathBuf {
 
 fn write_handoff_manifest(h: &L3Handoff, path: &std::path::Path) -> std::io::Result<()> {
     let body = format!(
-        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\n",
+        "version={}\nmaster_fd={}\nchild_pid={}\nlisten_fd={}\ncols={}\nrows={}\ncontrol_stream_fd={}\n",
         HANDOFF_MANIFEST_VERSION,
         h.master_fd, h.child_pid, h.listen_fd, h.cols, h.rows,
+        h.control_stream_fd,
     );
     let tmp = path.with_extension("tsv.tmp");
     std::fs::write(&tmp, body)?;
@@ -314,12 +328,19 @@ fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
     );
     let version: u32 = fields.get("version").ok_or_else(|| inv("version"))?
         .parse().map_err(|_| inv("version"))?;
-    if version != HANDOFF_MANIFEST_VERSION {
+    if version < HANDOFF_MANIFEST_MIN_COMPAT || version > HANDOFF_MANIFEST_VERSION {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("manifest version {version} != {HANDOFF_MANIFEST_VERSION}"),
+            format!(
+                "manifest version {version} not in [{HANDOFF_MANIFEST_MIN_COMPAT}, {HANDOFF_MANIFEST_VERSION}]"
+            ),
         ));
     }
+    // v1 lacked control_stream_fd — default to -1 (no inherited stream).
+    let control_stream_fd: RawFd = fields
+        .get("control_stream_fd")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-1);
     Ok(L3Handoff {
         master_fd: fields.get("master_fd").ok_or_else(|| inv("master_fd"))?
             .parse().map_err(|_| inv("master_fd"))?,
@@ -331,6 +352,7 @@ fn read_handoff_manifest(path: &std::path::Path) -> std::io::Result<L3Handoff> {
             .parse().map_err(|_| inv("cols"))?,
         rows: fields.get("rows").ok_or_else(|| inv("rows"))?
             .parse().map_err(|_| inv("rows"))?,
+        control_stream_fd,
     })
 }
 
@@ -388,6 +410,7 @@ fn do_l3_execv_swap(
     id: u64,
     local: local_session::LocalSession,
     mut listener: uds_server::SessionListener,
+    poke: Option<UnixStream>,
 ) -> std::io::Result<()> {
     let started = Instant::now();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
@@ -399,8 +422,23 @@ fn do_l3_execv_swap(
     clear_cloexec(master_fd)?;
     let listen_fd = listener.prepare_for_execv()?;
 
+    // Carry the adopted control stream across execv too, so L2's
+    // reader doesn't see EOF.  `into_raw_fd` so the OwnedFd doesn't
+    // close on drop after we've cleared CLOEXEC on it.
+    let control_stream_fd: RawFd = match poke {
+        Some(stream) => {
+            use std::os::fd::IntoRawFd;
+            let fd = stream.into_raw_fd();
+            clear_cloexec(fd)?;
+            fd
+        }
+        None => -1,
+    };
+
     let manifest_path = handoff_manifest_path();
-    let handoff = L3Handoff { master_fd, child_pid, listen_fd, cols, rows };
+    let handoff = L3Handoff {
+        master_fd, child_pid, listen_fd, cols, rows, control_stream_fd,
+    };
     write_handoff_manifest(&handoff, &manifest_path)?;
 
     let target = marspot_term::binary_tree::BinaryTree::default_for("marspot-session")?.current();
@@ -418,6 +456,7 @@ fn do_l3_execv_swap(
         manifest = manifest_path.display(),
         master_fd = master_fd,
         listen_fd = listen_fd,
+        control_stream_fd = control_stream_fd,
         child_pid = child_pid,
         elapsed_us = started.elapsed().as_micros()
     );
@@ -755,6 +794,12 @@ fn main() {
     // prunes the on-disk entry.
     let mut _listener: Option<uds_server::SessionListener> = None;
 
+    // Resumed control stream from the pre-execv image, if any —
+    // populated by the resume branch below.  Lives outside `if
+    // owns_pty` so `setup_control_socket` after the spawn can adopt
+    // it.
+    let mut resumed_poke: Option<UnixStream> = None;
+    let mut resumed_client_generation: u64 = 0;
     let mut session: SessionImpl = if owns_pty {
         let wake_tx = ev_tx.clone();
         let wake = move || {
@@ -814,6 +859,7 @@ fn main() {
                 session_id = id,
                 master_fd = h.master_fd,
                 listen_fd = h.listen_fd,
+                control_stream_fd = h.control_stream_fd,
                 child_pid = h.child_pid
             );
             let local = LocalSession::from_handoff(
@@ -832,6 +878,34 @@ fn main() {
                 Err(e) => {
                     lx_error!("l3.execv.listener_from_handoff_failed", &format!("{e}"));
                     std::process::exit(1);
+                }
+            }
+            // Adopt the inherited control stream so L2's reader
+            // doesn't see EOF across the execv.  Spawn the reader on
+            // generation=1 (higher than the cold-start 0) so a stale
+            // CoreGone from any race during the swap is recognised
+            // and ignored.
+            if h.control_stream_fd >= 0 {
+                let stream = unsafe { UnixStream::from_raw_fd(h.control_stream_fd) };
+                match stream.try_clone() {
+                    Ok(writer) => {
+                        resumed_client_generation = 1;
+                        resumed_poke = Some(writer);
+                        spawn_control_reader(stream, ev_tx.clone(), 1);
+                        lx_event!(
+                            "L3_EXECV_CONTROL_ADOPTED",
+                            "adopted inherited L2 control stream across execv",
+                            session_id = id,
+                            stream_fd = h.control_stream_fd
+                        );
+                    }
+                    Err(e) => {
+                        lx_warn!(
+                            "l3.execv.control_clone_failed",
+                            &format!("{e}; will wait for L2 reconnect via UDS"),
+                            stream_fd = h.control_stream_fd
+                        );
+                    }
                 }
             }
             local
@@ -904,7 +978,13 @@ fn main() {
 
     // Input source + L2 wake channel: L2 forwards keystrokes over the
     // control socket; we poke it back with GridReady after each publish.
-    let mut poke = setup_control_socket(ev_tx.clone());
+    // Resume path: a control stream inherited across execv wins over
+    // anything `setup_control_socket` would resolve from env (it's
+    // already adopted + a reader is running on it).
+    let mut poke = match resumed_poke.take() {
+        Some(s) => Some(s),
+        None => setup_control_socket(ev_tx.clone()),
+    };
     // Scrollback view offset L2 last asked us to publish (0 = live tail).
     let mut view_offset: u16 = 0;
     publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
@@ -940,7 +1020,7 @@ fn main() {
     // carry the generation of the reader that died, so a stale EOF
     // from a swapped-out L2 socket can't null the poke a newer L2
     // just adopted.
-    let mut client_generation: u64 = 0;
+    let mut client_generation: u64 = resumed_client_generation;
     // RFC-003 §6 Amendment 16: SIGTERM watcher sets this; we break
     // the loop and the post-loop dispatcher decides between execv
     // handoff and clean-exit based on `should_execv_on_sigterm`.
@@ -1203,7 +1283,7 @@ fn main() {
                     "fingerprint differs from current/marspot-session — execv",
                     session_id = id
                 );
-                match do_l3_execv_swap(id, local, listener_owned) {
+                match do_l3_execv_swap(id, local, listener_owned, poke.take()) {
                     Ok(()) => unreachable!(),
                     Err(e) => {
                         lx_error!(
