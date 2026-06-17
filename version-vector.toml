@@ -21,6 +21,6 @@
 #                         surface, bytelog.  Bump when in-process
 #                         terminal mechanics or the L2↔L3 wire change.
 
-shell   = "0.5.1"    # L1 — fix idle BG flicker:stale-present safety net 1s → 5s(避免 idle 时 1Hz WindowServer composite 闪)
+shell   = "0.5.2"    # L1 — MarspotView 实现 acceptsFirstMouse:,失焦下单击 pane 即切焦点(消除两次点击)
 core    = "0.6.0"    # L2 — cc 复活:InjectInput frame dispatch → L3Conn.forward_inject_input
 session = "0.6.1"    # L3 — cc 复活 fix:from_handoff 也 rewrite entry.toml(补 shell_child_pid 字段)

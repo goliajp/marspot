@@ -338,6 +338,18 @@ declare_class!(
             true
         }
 
+        // Default AppKit behaviour swallows the first mouse-down on a
+        // non-key window — it only activates the window, never reaches
+        // the view.  For a multi-pane terminal that means "click the
+        // pane I want" requires two clicks when marspot is unfocused.
+        // Returning YES here routes that first click straight into
+        // mouse_down, so the window-activation and pane-focus switch
+        // happen in the same gesture.
+        #[method(acceptsFirstMouse:)]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
         // Flip Y-axis so origin is top-left (matches the rest of the
         // code base's convention; layout / hit-testing assume top-left).
         #[method(isFlipped)]
