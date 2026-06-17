@@ -219,6 +219,26 @@ pub enum MsgType {
     /// will carry attributed runs.  Stub frame in C1 — full overlay
     /// rendering lands when a plugin actually uses it.
     PaneSessionOverlay = 47,
+    // ── L3 silent self-update (50..=59) — RFC-003 §6 Amendment 14 ──
+    /// L2 → L3: "promote your image to current/marspot-session via
+    /// `execv`."  Payload is empty (the target binary path is fixed
+    /// by `BinaryTree::default_for("marspot-session").current()`; the
+    /// L3 looks it up itself).  Triggered by L2 after promoting
+    /// pending/ → current/ on a session-only update — replaces the
+    /// pre-Amendment-14 SIGUSR2 fanout, which had a fatal flaw: an
+    /// L3 binary pre-dating the handler treated SIGUSR2 as TERM and
+    /// died.  Frames are forward-compatible (see `Frame::read_from`)
+    /// so an L3 that doesn't speak this variant silently drops it.
+    RequestSelfUpdate = 50,
+    /// L3 → L2: "ack — about to execv now."  Payload empty.  Logged
+    /// on the L2 side so we know which sessions accepted the update.
+    /// The control channel will EOF within milliseconds as the L3's
+    /// execv discards the inherited control fd.
+    SelfUpdateAck = 51,
+    /// L3 → L2: "I refuse this update."  Payload is an ASCII reason
+    /// string (e.g. "same fingerprint", "no current/marspot-session").
+    /// Pure information — L2 logs and moves on.
+    SelfUpdateDecline = 52,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -255,10 +275,23 @@ impl MsgType {
             45 => MsgType::PaneSessionKey,
             46 => MsgType::PaneSessionUserEscape,
             47 => MsgType::PaneSessionOverlay,
+            50 => MsgType::RequestSelfUpdate,
+            51 => MsgType::SelfUpdateAck,
+            52 => MsgType::SelfUpdateDecline,
             200 => MsgType::Error,
             _ => return None,
         })
     }
+}
+
+/// Decode a `SelfUpdateDecline` payload: ASCII reason string, lossy.
+pub fn decode_self_update_decline(payload: &[u8]) -> String {
+    String::from_utf8_lossy(payload).into_owned()
+}
+
+/// Encode a `SelfUpdateDecline` payload from the given reason.
+pub fn encode_self_update_decline(reason: &str) -> Vec<u8> {
+    reason.as_bytes().to_vec()
 }
 
 #[derive(Debug, Clone)]
@@ -284,38 +317,54 @@ impl Frame {
         Ok(HEADER_LEN + self.payload.len())
     }
 
+    /// Read one frame off `r`.  Forward-compatible: a frame whose
+    /// `msg_type` this build doesn't recognise (e.g. a new variant
+    /// added in a future release) is **silently skipped** — its
+    /// payload is consumed and the loop reads the next frame.  Magic /
+    /// length-cap / IO errors are still hard errors.
+    ///
+    /// This makes peer additions of new message types safe across
+    /// version skew: the old reader stays alive instead of erroring
+    /// and tearing down the control channel.  See RFC-003 §6
+    /// Amendment 14: that property is the foundation of the L3
+    /// silent self-update — a future L2 sending `RequestSelfUpdate`
+    /// at an L3 that lacks the variant must not be lethal.
     pub fn read_from<R: Read>(r: &mut R) -> io::Result<Option<Self>> {
-        let mut header = [0u8; HEADER_LEN];
-        match read_exact_or_eof(r, &mut header)? {
-            ReadEnd::Eof => return Ok(None),
-            ReadEnd::Full => {}
+        loop {
+            let mut header = [0u8; HEADER_LEN];
+            match read_exact_or_eof(r, &mut header)? {
+                ReadEnd::Eof => return Ok(None),
+                ReadEnd::Full => {}
+            }
+            let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            if magic != MAGIC {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bad magic 0x{:08x}, expected 0x{:08x}", magic, MAGIC),
+                ));
+            }
+            let type_raw = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+            if len > MAX_PAYLOAD_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("payload len {} exceeds cap {}", len, MAX_PAYLOAD_LEN),
+                ));
+            }
+            let mut payload = vec![0u8; len];
+            if len > 0 {
+                r.read_exact(&mut payload)?;
+            }
+            match MsgType::from_u32(type_raw) {
+                Some(msg_type) => return Ok(Some(Frame { msg_type, payload })),
+                None => {
+                    // Forward-compat: drop unknown frames on the floor
+                    // and keep reading.  The control channel survives a
+                    // future peer that speaks a wider protocol.
+                    continue;
+                }
+            }
         }
-        let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
-        if magic != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad magic 0x{:08x}, expected 0x{:08x}", magic, MAGIC),
-            ));
-        }
-        let type_raw = u32::from_le_bytes(header[4..8].try_into().unwrap());
-        let msg_type = MsgType::from_u32(type_raw).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unknown msg_type {}", type_raw),
-            )
-        })?;
-        let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-        if len > MAX_PAYLOAD_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("payload len {} exceeds cap {}", len, MAX_PAYLOAD_LEN),
-            ));
-        }
-        let mut payload = vec![0u8; len];
-        if len > 0 {
-            r.read_exact(&mut payload)?;
-        }
-        Ok(Some(Frame { msg_type, payload }))
     }
 }
 
@@ -1264,6 +1313,55 @@ mod tests {
         let mut cur = Cursor::new(buf);
         let err = Frame::read_from(&mut cur).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn frame_unknown_type_is_skipped_then_next_returned() {
+        // Forward-compat: an unknown msg_type frame must NOT error
+        // — it gets dropped, the loop reads the next frame.  This
+        // property gates the Amendment 14 L3 silent self-update:
+        // older L3 builds receive `RequestSelfUpdate` (id 50) and
+        // must stay alive.
+        let mut buf = Vec::new();
+        // unknown frame
+        let mut header = [0u8; HEADER_LEN];
+        header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        header[4..8].copy_from_slice(&999u32.to_le_bytes()); // unassigned
+        header[8..12].copy_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(&[0xAAu8, 0xBB, 0xCC]); // junk payload
+        // followed by a known frame
+        Frame::new(MsgType::Ping, encode_ping(7)).write_to(&mut buf).unwrap();
+        let mut cur = Cursor::new(buf);
+        let read = Frame::read_from(&mut cur).unwrap().unwrap();
+        assert_eq!(read.msg_type, MsgType::Ping);
+        assert_eq!(decode_ping(&read.payload).unwrap(), 7);
+    }
+
+    #[test]
+    fn request_self_update_frame_roundtrip() {
+        let f = Frame::new(MsgType::RequestSelfUpdate, Vec::new());
+        let mut buf = Vec::new();
+        f.write_to(&mut buf).unwrap();
+        let mut cur = Cursor::new(buf);
+        let read = Frame::read_from(&mut cur).unwrap().unwrap();
+        assert_eq!(read.msg_type, MsgType::RequestSelfUpdate);
+        assert!(read.payload.is_empty());
+    }
+
+    #[test]
+    fn self_update_decline_roundtrip() {
+        let reason = "same fingerprint";
+        let p = encode_self_update_decline(reason);
+        assert_eq!(decode_self_update_decline(&p), reason);
+        // Wire roundtrip too.
+        let f = Frame::new(MsgType::SelfUpdateDecline, p);
+        let mut buf = Vec::new();
+        f.write_to(&mut buf).unwrap();
+        let mut cur = Cursor::new(buf);
+        let read = Frame::read_from(&mut cur).unwrap().unwrap();
+        assert_eq!(read.msg_type, MsgType::SelfUpdateDecline);
+        assert_eq!(decode_self_update_decline(&read.payload), reason);
     }
 
     #[test]
