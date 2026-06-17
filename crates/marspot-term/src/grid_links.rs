@@ -49,25 +49,257 @@ pub struct LinkRange {
 /// Walk the visible grid and return every detected span.  Empty grid
 /// → empty Vec.  Allocations: one Vec, one per-row scratch String
 /// (reused).
+///
+/// DECAWM soft-wrap handling: consecutive rows where `wrapped_at_view`
+/// flags the lower one as a continuation are joined into one
+/// **logical line** before pattern scanning, so a URL or path that
+/// overflowed the right edge is matched as a single token instead of
+/// being silently truncated at the wrap.  Matches that span multiple
+/// physical rows are emitted as separate `LinkRange`s (one per row
+/// segment) carrying the SAME `text` — the click dispatcher fires the
+/// same action regardless of which segment received the click, and
+/// the renderer underlines each segment in place.
 pub fn scan_visible_links(grid: &Grid, view_offset: u16) -> Vec<LinkRange> {
     let mut out = Vec::new();
     let rows = grid.rows();
     let cols = grid.cols();
-    let mut line = String::with_capacity(cols as usize);
+    if rows == 0 || cols == 0 {
+        return out;
+    }
+    // Build logical lines by walking viewport rows top→bottom and
+    // joining each row that's flagged as a soft-wrap continuation of
+    // the row above it.  We keep enough info to project a char index
+    // inside the logical line back to its physical (row, col).
+    let mut line = String::with_capacity(cols as usize * 4);
+    // Per-row segment: where in `line` does row `phys_row`'s chars
+    // start, and what physical col does it start at (always 0 for
+    // continuation rows, only the first segment can start mid-row —
+    // but here it always starts at col 0 because we read whole rows).
+    let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
     for r in 0..rows {
-        line.clear();
+        let is_continuation = r > 0 && grid.wrapped_at_view(view_offset, r);
+        if !is_continuation && !segments.is_empty() {
+            scan_logical_line(&line, &segments, out.as_mut());
+            line.clear();
+            segments.clear();
+        }
+        segments.push(LineSegment {
+            phys_row: r,
+            char_offset: line.chars().count(),
+        });
         for c in 0..cols {
             let ch = grid.cell_at_view(view_offset, c, r).ch;
             line.push(if ch == '\0' || ch == ' ' { ' ' } else { ch });
         }
-        scan_line(&line, r, &mut out);
+    }
+    if !segments.is_empty() {
+        scan_logical_line(&line, &segments, out.as_mut());
     }
     out
 }
 
-/// Scan one row's joined text.  Char-indexed; the col positions we
-/// emit are 1:1 with the line chars because the caller built `line`
-/// with one char per grid cell.
+/// One physical row's contribution to a logical (post-soft-wrap-merge)
+/// line.  `phys_row` is the viewport row the chars came from;
+/// `char_offset` is where in the merged `line` String this row's chars
+/// start (in `chars().count()` units, NOT bytes — pattern scanning is
+/// char-indexed throughout).  Each row contributes exactly `cols`
+/// chars (the loop writes one char per grid cell).
+struct LineSegment {
+    phys_row: u16,
+    char_offset: usize,
+}
+
+/// Scan a logical (possibly multi-row-merged) line and emit
+/// `LinkRange`s, one per **physical row** the match touches.  Single-
+/// segment matches collapse to one LinkRange; multi-segment matches
+/// fan out (same `text`, different `phys_row`/col_start/col_end),
+/// preserving the per-row hit-test + per-row underline model.
+fn scan_logical_line(line: &str, segments: &[LineSegment], out: &mut Vec<LinkRange>) {
+    if segments.is_empty() {
+        return;
+    }
+    // Pattern scan produces matches as `(char_lo, char_hi_exclusive,
+    // kind, text)`; project each to one or more LinkRange row spans.
+    let mut row_matches: Vec<LinkRange> = Vec::new();
+    scan_line_into_matches(line, &mut row_matches, segments);
+    out.extend(row_matches.drain(..));
+}
+
+/// Char-pos → (phys_row, col) projector.  Assumes each segment has
+/// exactly `cols` chars (true: outer loop always writes one char per
+/// grid cell).  Linear over the small `segments` slice — O(N segments)
+/// per lookup, but in practice N ≤ 4 even for very wrapped URLs.
+fn locate(segments: &[LineSegment], char_pos: usize, cols_per_row: usize) -> Option<(u16, u16)> {
+    for (i, seg) in segments.iter().enumerate() {
+        let next_off = segments
+            .get(i + 1)
+            .map(|s| s.char_offset)
+            .unwrap_or(usize::MAX);
+        if char_pos < next_off {
+            let col = char_pos - seg.char_offset;
+            if col < cols_per_row {
+                return Some((seg.phys_row, col as u16));
+            }
+        }
+    }
+    None
+}
+
+/// Original pattern scanner, but the per-row emit step now consults
+/// `segments` to fan a multi-row match out into one LinkRange per
+/// physical row it covers.  Each per-row LinkRange carries the FULL
+/// matched `text` (so click dispatch + hover tooltip are identical
+/// across segments).
+fn scan_line_into_matches(line: &str, out: &mut Vec<LinkRange>, segments: &[LineSegment]) {
+    if segments.is_empty() {
+        return;
+    }
+    // cols-per-row: the contribution width of every segment.  Derive
+    // from segment offsets so we don't have to thread `cols` through.
+    let cols_per_row = if segments.len() >= 2 {
+        segments[1].char_offset - segments[0].char_offset
+    } else {
+        line.chars().count()
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+
+        // URL: http:// or https://
+        if matches_prefix(&chars, i, "http://") || matches_prefix(&chars, i, "https://") {
+            let end = scan_until_link_terminator(&chars, i);
+            let span = &chars[i..end];
+            if looks_like_url(span) {
+                let text: String = span.iter().collect();
+                emit_match(out, segments, cols_per_row, i, end, LinkKind::Url, text);
+                i = end;
+                continue;
+            }
+        }
+
+        if c == '/' && i + 1 < n && !is_left_boundary_alnum(&chars, i) {
+            let end = scan_until_link_terminator(&chars, i);
+            let span = &chars[i..end];
+            if looks_like_path(span) {
+                let text: String = span.iter().collect();
+                if is_real_path(&text) {
+                    emit_match(out, segments, cols_per_row, i, end, LinkKind::File, text);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+
+        if c == '~' && i + 1 < n && chars[i + 1] == '/' && !is_left_boundary_alnum(&chars, i) {
+            let end = scan_until_link_terminator(&chars, i);
+            let span = &chars[i..end];
+            if span.len() >= 3 && looks_like_path(span) {
+                let text: String = span.iter().collect();
+                if is_real_path(&text) {
+                    emit_match(out, segments, cols_per_row, i, end, LinkKind::File, text);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+
+        if c == '@' && i > 0 && i + 1 < n {
+            let local_start = scan_back_local(&chars, i);
+            let host_end = scan_forward_host(&chars, i + 1);
+            if local_start < i && host_end > i + 1 && has_dot_in(&chars, i + 1, host_end) {
+                let text: String = chars[local_start..host_end].iter().collect();
+                emit_match(
+                    out,
+                    segments,
+                    cols_per_row,
+                    local_start,
+                    host_end,
+                    LinkKind::Email,
+                    text,
+                );
+                i = host_end;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+}
+
+/// Project one `[char_lo, char_hi)` match onto the physical rows it
+/// touches and push one `LinkRange` per row.  Single-row matches turn
+/// into one LinkRange (unchanged from the legacy per-row scanner);
+/// matches spanning N rows turn into N LinkRanges with the same
+/// `text` and matching per-row col spans.
+fn emit_match(
+    out: &mut Vec<LinkRange>,
+    segments: &[LineSegment],
+    cols_per_row: usize,
+    char_lo: usize,
+    char_hi_exclusive: usize,
+    kind: LinkKind,
+    text: String,
+) {
+    if char_lo >= char_hi_exclusive || segments.is_empty() {
+        return;
+    }
+    let (start_row, start_col) =
+        match locate(segments, char_lo, cols_per_row) {
+            Some(v) => v,
+            None => return,
+        };
+    let (end_row, end_col) =
+        match locate(segments, char_hi_exclusive - 1, cols_per_row) {
+            Some(v) => v,
+            None => return,
+        };
+    if start_row == end_row {
+        out.push(LinkRange {
+            row: start_row,
+            col_start: start_col,
+            col_end: end_col,
+            kind,
+            text,
+        });
+        return;
+    }
+    // Multi-row span: emit one LinkRange per physical row the match
+    // covers.  The first row runs from `start_col` to the row's right
+    // edge; middle rows run the full width; the last row runs from 0
+    // to `end_col`.  Every LinkRange carries the FULL text so click
+    // dispatch is identical regardless of which segment was clicked.
+    let last_col = cols_per_row.saturating_sub(1) as u16;
+    out.push(LinkRange {
+        row: start_row,
+        col_start: start_col,
+        col_end: last_col,
+        kind,
+        text: text.clone(),
+    });
+    for mid in (start_row + 1)..end_row {
+        out.push(LinkRange {
+            row: mid,
+            col_start: 0,
+            col_end: last_col,
+            kind,
+            text: text.clone(),
+        });
+    }
+    out.push(LinkRange {
+        row: end_row,
+        col_start: 0,
+        col_end: end_col,
+        kind,
+        text,
+    });
+}
+
+/// Legacy single-row scanner.  Kept for tests + callers that already
+/// produce a single-row joined `line`; new code paths go through
+/// `scan_line_into_matches` to benefit from soft-wrap merge.
+#[cfg(test)]
 fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
@@ -541,5 +773,58 @@ mod tests {
     fn empty_line_emits_nothing() {
         assert!(scan("").is_empty());
         assert!(scan("                ").is_empty());
+    }
+
+    // Phase 1 — soft-wrap-aware visible-grid scanning.  A URL or
+    // absolute path that overflowed the right edge into a DECAWM
+    // continuation row is matched as a single logical token and
+    // emitted as one LinkRange per physical row segment.
+    #[test]
+    fn url_spanning_soft_wrap_emits_per_row_segments() {
+        // 10-col grid; URL is 13 chars so it spans row 0 (cols 0..=9)
+        // + row 1 (cols 0..=2).  Test the scanner directly on a
+        // pre-built logical line + segment table.
+        let line = "https://x.com";
+        let segments = vec![
+            super::LineSegment {
+                phys_row: 0,
+                char_offset: 0,
+            },
+            super::LineSegment {
+                phys_row: 1,
+                char_offset: 10,
+            },
+        ];
+        let mut out = Vec::new();
+        super::scan_line_into_matches(line, &mut out, &segments);
+        // One match, fanned into 2 LinkRanges (one per physical row).
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, LinkKind::Url);
+        assert_eq!(out[0].text, "https://x.com");
+        assert_eq!(out[0].row, 0);
+        assert_eq!(out[0].col_start, 0);
+        assert_eq!(out[0].col_end, 9);
+        assert_eq!(out[1].kind, LinkKind::Url);
+        assert_eq!(out[1].text, "https://x.com");
+        assert_eq!(out[1].row, 1);
+        assert_eq!(out[1].col_start, 0);
+        assert_eq!(out[1].col_end, 2);
+    }
+
+    #[test]
+    fn single_row_match_still_emits_one_segment() {
+        // No wrap: 1 segment, 1 LinkRange (regression guard for the
+        // common case after the multi-row refactor).
+        let line = "see https://example.com today      ";
+        let segments = vec![super::LineSegment {
+            phys_row: 7,
+            char_offset: 0,
+        }];
+        let mut out = Vec::new();
+        super::scan_line_into_matches(line, &mut out, &segments);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].row, 7);
+        assert_eq!(out[0].kind, LinkKind::Url);
+        assert_eq!(out[0].text, "https://example.com");
     }
 }

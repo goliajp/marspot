@@ -462,6 +462,29 @@ impl Grid {
         self.sb_wrapped.get(idx).copied().unwrap_or(false)
     }
 
+    /// True when the row addressed by `(view_offset, viewport_row)` is
+    /// a DECAWM soft-wrap continuation of the row physically above it.
+    /// Parallels `cell_at_view`: same translation from viewport coords
+    /// to either a live row or a scrollback line.  Out-of-range coords
+    /// return false (no wrap signal == "treat as logical line break").
+    ///
+    /// Callers walking the viewport row-by-row use this to merge a
+    /// soft-wrapped logical line into one unit (selection copy without
+    /// the spurious `\n`, link scanning that survives the wrap, etc.).
+    pub fn wrapped_at_view(&self, view_offset: u16, viewport_row: u16) -> bool {
+        let rows = self.rows() as usize;
+        let abs = view_offset as usize + (rows - 1 - viewport_row as usize);
+        if abs < rows {
+            return self.row_wrapped((rows - 1 - abs) as u16);
+        }
+        let from_end = abs - rows;
+        let sb_len = self.scrollback_len();
+        if from_end < sb_len {
+            return self.scrollback_wrapped(sb_len - 1 - from_end);
+        }
+        false
+    }
+
     /// Drop every continuation flag (live + scrollback).  Used by
     /// full-screen erase — once the screen is wiped, gluing the new
     /// content to pre-wipe history would corrupt reflow.

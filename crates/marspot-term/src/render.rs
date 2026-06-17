@@ -116,7 +116,16 @@ pub fn grid_selection_text(
     let last_view_row = rows.saturating_sub(1);
     let mut out = String::new();
     let mut abs = top_abs;
-    let mut first = true;
+    // Buffer the previous row's raw text (un-finalized) so we can
+    // decide what to do with its tail once we see the next row.  If
+    // the next row is a DECAWM soft-wrap continuation of this one,
+    // the tail is real content (last col was forced to overflow) —
+    // we concatenate without a `\n` and without `trim_end`.  Else
+    // we treat the row boundary as a logical line break: emit `\n`
+    // and `trim_end` the tail (the post-content cells were blank
+    // padding the program never wrote into).
+    let mut prev_text: Option<String> = None;
+    let mut prev_is_blockwise_or_partial = false;
     loop {
         if abs > u16::MAX as u32 {
             // Beyond what cell_at_view can address; treat as unreachable.
@@ -141,6 +150,13 @@ pub fn grid_selection_text(
             let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
             (lo, hi)
         };
+        // Whether THIS row covers the row's full width.  Blockwise and
+        // partial-end rows (first row from top_col onwards, last row up
+        // to bot_col) don't reach the right edge, so a wrap signal
+        // there is moot — the wrap glued physical cells the user
+        // didn't include in the selection.
+        let row_covers_full_width =
+            !blockwise && col_lo == 0 && col_hi >= cols.saturating_sub(1);
         let mut row_text = String::new();
         for c in col_lo..=col_hi {
             if c >= cols {
@@ -154,15 +170,37 @@ pub fn grid_selection_text(
             }
             row_text.push(cell.ch);
         }
-        if !first {
-            out.push('\n');
+        // Soft-wrap merge gate: the flag tells us "this row was
+        // produced by the parser overflowing the previous row's last
+        // column."  Honour it only when BOTH rows are full-width in
+        // the selection — otherwise the merge would glue physical
+        // cells across a partial-width band, which is wrong.
+        let current_is_continuation = grid.wrapped_at_view(abs as u16, last_view_row)
+            && row_covers_full_width
+            && !prev_is_blockwise_or_partial;
+        if let Some(prev) = prev_text.take() {
+            if current_is_continuation {
+                // Preserve every cell of prev — its last column was
+                // forced to overflow into this row, so its trailing
+                // chars are real content, not padding.
+                out.push_str(&prev);
+            } else {
+                out.push_str(prev.trim_end());
+                out.push('\n');
+            }
         }
-        out.push_str(row_text.trim_end());
-        first = false;
+        prev_text = Some(row_text);
+        prev_is_blockwise_or_partial = !row_covers_full_width;
         if abs == bot_abs {
             break;
         }
         abs -= 1;
+    }
+    // Final row of the selection: always trim — its right edge is the
+    // end of the user's drag, not content the program is going to
+    // continue onto another row.
+    if let Some(prev) = prev_text {
+        out.push_str(prev.trim_end());
     }
     if out.is_empty() {
         None
@@ -211,6 +249,48 @@ mod selection_tests {
         assert_eq!(
             grid_selection_text(&grid, (0, 1), (2, 0), false).as_deref(),
             Some("foo\nbar")
+        );
+    }
+
+    // Phase 1 — DECAWM soft-wrap aware selection.  A row that the
+    // parser flagged as a continuation of the row above (`row_wrapped`
+    // set) is merged into the previous row without an intervening `\n`,
+    // and the previous row keeps its trailing chars (no trim) because
+    // they were real content forced down by the overflow.
+    #[test]
+    fn soft_wrap_continuation_merges_without_newline() {
+        let mut grid = Grid::new(5, 3);
+        // Top row (abs 2) fills col 0..=4 with "hello"; the parser
+        // flagged the row BELOW as the wrap continuation.
+        write_row(&mut grid, 0, "hello");
+        // Continuation row (abs 1) carries "world" at cols 0..=4.
+        write_row(&mut grid, 1, "world");
+        // The full-width content row (abs 0) is empty (logical line
+        // ends after "helloworld").
+        // Mark the wrap chain: rows 1 and 2 (live row indices) are
+        // continuations of the row physically above.  set_row_wrapped
+        // takes live-row coords (0 = top live row).
+        grid.set_row_wrapped(1, true);
+        // Select across both wrapped rows.  Expected: merged into a
+        // single token "helloworld" with no `\n`.
+        assert_eq!(
+            grid_selection_text(&grid, (0, 2), (4, 1), false).as_deref(),
+            Some("helloworld")
+        );
+    }
+
+    #[test]
+    fn logical_newline_still_breaks() {
+        let mut grid = Grid::new(10, 3);
+        // Same row-mapping convention as `multi_row_selection_joins_
+        // _with_newline`: write into live rows 1+2 so they map to abs
+        // 1 (top) and abs 0 (bottom) under last_view_row=2.
+        write_row(&mut grid, 1, "abc");
+        write_row(&mut grid, 2, "def");
+        // No wrap flag set — these are two logical lines, joined with `\n`.
+        assert_eq!(
+            grid_selection_text(&grid, (0, 1), (2, 0), false).as_deref(),
+            Some("abc\ndef")
         );
     }
 }
