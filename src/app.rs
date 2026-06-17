@@ -45,7 +45,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSBackingStoreType, NSColor, NSEvent,
     NSEventModifierFlags, NSTextInputClient, NSTitlebarSeparatorStyle, NSView, NSWindow,
     NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
@@ -748,6 +749,26 @@ declare_class!(
             // "close = exit", but we honour the indirection cleanly.
             false
         }
+    }
+
+    unsafe impl NSApplicationDelegate for MarspotWindowDelegate {
+        /// RFC-003 §6 Amendment 15 — route Cmd-Q / Quit Marspot menu /
+        /// dock Quit through the same `CloseRequested` path as the
+        /// window's red close button.  Without this hook AppKit
+        /// runs straight to `exit(0)` and the L1 close cleanup
+        /// (SIGTERM L3s + drain fd-vault) never gets a chance to run
+        /// — that's the 2026-06-17 "user quit but 9 L3s lived on"
+        /// surprise.  We dispatch synchronously and reply
+        /// `NSTerminateNow` so AppKit's normal teardown still runs
+        /// after our cleanup completes inside `close_requested`.
+        #[method(applicationShouldTerminate:)]
+        fn application_should_terminate(
+            &self,
+            _sender: &NSApplication,
+        ) -> NSApplicationTerminateReply {
+            dispatch_event(EventKind::CloseRequested);
+            NSApplicationTerminateReply::NSTerminateNow
+        }
 
         #[method(windowDidResize:)]
         fn window_did_resize(&self, _notification: &NSNotification) {
@@ -937,6 +958,11 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     let proto: &ProtocolObject<dyn NSWindowDelegate> =
         ProtocolObject::from_ref(&*delegate);
     window.setDelegate(Some(proto));
+    // RFC-003 §6 Amendment 15 — also wear the NSApplicationDelegate
+    // hat so Cmd-Q / Quit menu / dock Quit run through `close_requested`.
+    let app_proto: &ProtocolObject<dyn NSApplicationDelegate> =
+        ProtocolObject::from_ref(&*delegate);
+    nsapp.setDelegate(Some(app_proto));
 
     // 4. Register the proxy's source on the main run loop.  Wakes
     //    posted before this point are sticky on the source and fire

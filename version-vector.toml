@@ -21,6 +21,6 @@
 #                         surface, bytelog.  Bump when in-process
 #                         terminal mechanics or the L2↔L3 wire change.
 
-shell   = "0.3.0"    # L1 — Amendment 15: fd-vault server + close cleanup (PTY fd custody)
+shell   = "0.3.1"    # L1 — Amendment 15.1: NSApplicationDelegate routes Cmd-Q to close cleanup
 core    = "0.4.0"    # L2 — Amendment 15: vault-driven L3 swap + boot resurrect (dead-entry replay)
 session = "0.4.0"    # L3 — Amendment 15: deposit/withdraw PTY fd + SIGTERM handler + state.bin restore
