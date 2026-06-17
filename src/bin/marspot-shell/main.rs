@@ -2449,13 +2449,22 @@ impl MarspotApp for ShellApp {
         // 250 ms timer wakes the redraw callback unconditionally,
         // but sampling the IOSurface from here on every tick races
         // against core's mid-render state and produces the flash.
-        // True safety net: if it's been >1 s since the last present
-        // (real "core died" case where no future poke is coming),
-        // force a present anyway so the window doesn't appear frozen.
+        //
+        // Stale safety net: if it's been a long while since the last
+        // present (real "core stuck but alive" case where no future
+        // poke is coming), force a present anyway so the window
+        // doesn't appear frozen.  Threshold deliberately wide (5 s)
+        // because every spurious present makes WindowServer composite
+        // the IOSurface again, and sub-LSB alpha-blend rounding can
+        // produce a faint BG flicker the user sees as "the whole
+        // background pulses" when an idle window force-presents at
+        // 1 Hz.  Crash-respawn is detected separately via
+        // `child.try_wait()` → `restart_core`, so this branch only
+        // matters when the core process is alive but silent.
         let now = Instant::now();
         let stale = self
             .last_present_at
-            .map(|t| now.duration_since(t) > Duration::from_secs(1))
+            .map(|t| now.duration_since(t) > Duration::from_secs(5))
             .unwrap_or(true);
         if !self.frame_pending && !stale {
             return;
