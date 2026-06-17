@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.5.4"    # L1 — post-execv 自触 SIGUSR1,L1 自更新后立刻吃掉 pending/L2+L3,不再等 install-local 8s fallback
-core    = "0.7.2"    # L2 — TITLE_STRIP_PT 24→32,traffic lights + 版本号在 strip 内垂直居中
+core    = "0.7.3"    # L2 — 两个 icon button 改左对齐(sidebar 在前,layout 在后),picker 也跟着左对齐
 session = "0.6.1"    # L3 — cc 复活 fix:from_handoff 也 rewrite entry.toml(补 shell_child_pid 字段)

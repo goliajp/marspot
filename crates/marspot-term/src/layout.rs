@@ -317,7 +317,6 @@ impl Layout {
         let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
         let btn_margin = ICON_BUTTON_LOGICAL_MARGIN * scale;
         let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
-        let main_right = self.window_w;
         // Toolbar band runs from `toolbar_top_phys` to `top_inset`.
         // Center the square buttons vertically inside it.  When the
         // caller hands us 0.0 (snapshot / bench paths with no split
@@ -330,25 +329,28 @@ impl Layout {
         };
         let toolbar_h = (self.top_inset - toolbar_top).max(btn_size);
         let btn_y = toolbar_top + ((toolbar_h - btn_size) * 0.5).max(0.0);
-        // Layout button anchored to top-right of the toolbar; sidebar
-        // button sits immediately to its left so both chrome
-        // affordances live in the same row and stay visible when the
-        // sidebar is collapsed.
-        let btn_x = main_right - btn_margin - btn_size;
-        // Public Rect carries a logical "w" + "h" for compatibility,
-        // but both icon buttons are square now.
+        // Both icon buttons anchored to the LEFT of the toolbar so
+        // the user's hand path stays on one side; sidebar toggle
+        // first (it stays visible when sidebar is collapsed and is
+        // the most-used affordance), layout picker right of it.
+        // Anchored to the window's left edge, NOT to the sidebar's
+        // right edge — the title strip + toolbar both extend full
+        // width over the sidebar area, so window-left is the
+        // consistent anchor whether sidebar is shown or collapsed.
         let btn_w = btn_size;
         let btn_h = btn_size;
-        self.layout_button_rect = Rect {
-            x: btn_x,
+        let sidebar_btn_x = btn_margin;
+        let layout_btn_x = sidebar_btn_x + btn_size + btn_gap;
+        self.sidebar_button_rect = Rect {
+            x: sidebar_btn_x,
             y_top: btn_y,
             w: btn_w,
             h: btn_h,
         };
-        self.sidebar_button_rect = Rect {
-            x: btn_x - btn_gap - btn_size,
+        self.layout_button_rect = Rect {
+            x: layout_btn_x,
             y_top: btn_y,
-            w: btn_size,
+            w: btn_w,
             h: btn_h,
         };
         if picker_open {
@@ -358,9 +360,11 @@ impl Layout {
             let n = PICKER_LAYOUT_DIMS.len();
             let panel_w = pad * 2.0 + opt_size * n as f64 + opt_gap * (n - 1) as f64;
             let panel_h = pad * 2.0 + opt_size;
-            // Right-align the panel under the button so it doesn't
-            // run off the window edge on small windows.
-            let panel_x = (btn_x + btn_w - panel_w).max(self.sidebar_w + 4.0);
+            // Left-align the picker panel under the layout button so
+            // the panel's left edge sits exactly under the button
+            // that opened it.  Clamp against the window right edge
+            // so the panel never runs off-screen on small windows.
+            let panel_x = layout_btn_x.min(self.window_w - panel_w - 4.0).max(4.0);
             let panel_y = btn_y + btn_h + PICKER_PANEL_LOGICAL_GAP_FROM_BUTTON * scale;
             self.picker_panel_rect = Some(Rect {
                 x: panel_x,
