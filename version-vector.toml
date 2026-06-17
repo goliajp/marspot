@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.9.3"    # L2 — grid_selection_text 软换行 merge 不再要求 current row col_hi=cols-1,bot row mid-row 也 merge;3 regression tests 覆盖
+core    = "0.9.4"    # L2 — cc plugin scope: Cmd-C 复制 cc pane 选区时,把 claudecode 固定宽度 hard-wrap 的硬换行接回成连续段落(`src/cc.rs::rejoin_wrapped_paragraphs`);cc 通过 pane_badges 检测,其他 pane 路径不变;CJK/bullet/code-fence 16 个单元测试覆盖
 session = "0.8.5"    # L3 — revert 0.8.4 (L3_SELECTION_DUMP 用完撤掉,不留长期日志)

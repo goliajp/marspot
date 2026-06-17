@@ -1010,6 +1010,21 @@ impl CoreApp {
         } else {
             self.panes.get(idx).and_then(|pane| selection_text(pane, &sel))
         };
+        // cc-only post-processing: claudecode renders to a fixed inner
+        // width with hard `\n` wraps that we don't want on the clipboard.
+        // Detect cc panes via the L1 plugin badge — non-empty entry on
+        // this pane's shelld_session_id means cc plugin tagged it.  See
+        // `src/cc.rs`.
+        let text = text.map(|t| {
+            let is_cc = self
+                .panes
+                .get(idx)
+                .and_then(|p| p.shelld_session_id())
+                .and_then(|sid| self.pane_badges.get(&sid))
+                .map(|b| !b.is_empty())
+                .unwrap_or(false);
+            if is_cc { marspot::cc::rejoin_wrapped_paragraphs(&t) } else { t }
+        });
         match text {
             Some(text) => marspot::input::write_clipboard_text(&text),
             None => false,
