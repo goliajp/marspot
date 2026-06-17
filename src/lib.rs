@@ -46,9 +46,12 @@ pub mod render_metal;
 pub mod ui;
 
 /// Title-strip height in **logical points** — top band that carries
-/// the version label only.  Sized just for ~18pt text + breathing
-/// padding.  Below it sits the toolbar (`TOOLBAR_PT`).
-pub const TITLE_STRIP_PT: f64 = 24.0;
+/// the version label.  Sized to match macOS's standard title-bar
+/// vertical placement so the AppKit-drawn traffic lights (positioned
+/// at a fixed offset from the window top, ~7pt + 14pt = 21pt) sit
+/// visually centered.  Anything shorter clips them against the
+/// title↔toolbar SEAM.  Below it sits the toolbar (`TOOLBAR_PT`).
+pub const TITLE_STRIP_PT: f64 = 32.0;
 /// Toolbar height in **logical points** — band below the title strip
 /// that hosts the L2-owned icon buttons (sidebar toggle, layout
 /// picker).  Sized for a 22×22 square button with ~4pt vertical
