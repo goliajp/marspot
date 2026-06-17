@@ -699,7 +699,12 @@ impl CoreApp {
             cell_w,
             cell_h,
         )
-        .with_chrome(self.scale, self.layout_picker_open, self.panes.len());
+        .with_chrome(
+            self.scale,
+            self.layout_picker_open,
+            self.panes.len(),
+            marspot::TITLE_STRIP_PT * self.scale,
+        );
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);

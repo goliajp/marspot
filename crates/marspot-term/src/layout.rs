@@ -153,18 +153,12 @@ const PICKER_LAYOUT_DIMS: [(usize, usize); 7] = [
     (3, 3), // Nine
 ];
 
-/// [layout] button physical-pixel size at scale 1.0.  Renderer
-/// scales by `scale` (passed via cell_w/cell_h indirectly — we
-/// derive scale from the typical relationship between layout dims
-/// and physical pixels).  Tuned to ~32×16 logical pt at 2× retina.
-const LAYOUT_BUTTON_LOGICAL_W: f64 = 36.0;
-const LAYOUT_BUTTON_LOGICAL_H: f64 = 22.0;
-const LAYOUT_BUTTON_LOGICAL_MARGIN: f64 = 8.0;
-/// Sidebar toggle button — same height as the layout button so the
-/// two chips line up; width is square-ish since the icon (a sidebar
-/// silhouette) reads cleanly in less width than a 3×3 grid icon.
-const SIDEBAR_BUTTON_LOGICAL_W: f64 = 26.0;
-const SIDEBAR_BUTTON_GAP_LOGICAL: f64 = 6.0;
+/// Square icon-button side length (logical pt). Both chrome buttons
+/// (sidebar toggle, layout picker) are now true squares — Lucide-
+/// style monochrome line icons sit inside a 22×22 hit-target.
+const ICON_BUTTON_LOGICAL_SIZE: f64 = 22.0;
+const ICON_BUTTON_LOGICAL_MARGIN: f64 = 8.0;
+const ICON_BUTTON_LOGICAL_GAP: f64 = 6.0;
 
 /// Picker option icon size + spacing.  7 options × 28 + 6 × 4 + 2 × 8 = 220 logical pt wide.
 const PICKER_OPTION_LOGICAL_SIZE: f64 = 28.0;
@@ -306,28 +300,45 @@ impl Layout {
     /// step so snapshot / bench / test paths that don't render
     /// chrome can call the original `build` unchanged.
     /// `scale` is the device pixel ratio (caller already has it
-    /// from `ctx.scale()`); we use it for the layout button +
-    /// picker (logical-pt sizing).  `n_sessions` populates the
-    /// close-[×] rects (one per row).
+    /// from `ctx.scale()`); we use it for the button + picker
+    /// (logical-pt sizing).  `toolbar_top_phys` is the physical-px y
+    /// of the toolbar band (0 < toolbar_top_phys < top_inset means
+    /// the chrome above the grid is split title-strip + toolbar, and
+    /// buttons live in the lower band).  Pass 0.0 to keep buttons in
+    /// the legacy single-band layout for snapshot / bench callers.
+    /// `n_sessions` populates the close-[×] rects (one per row).
     pub fn with_chrome(
         mut self,
         scale: f64,
         picker_open: bool,
         n_sessions: usize,
+        toolbar_top_phys: f64,
     ) -> Self {
-        let btn_w = LAYOUT_BUTTON_LOGICAL_W * scale;
-        let btn_h = LAYOUT_BUTTON_LOGICAL_H * scale;
-        let btn_margin = LAYOUT_BUTTON_LOGICAL_MARGIN * scale;
-        let btn_gap = SIDEBAR_BUTTON_GAP_LOGICAL * scale;
-        let sb_btn_w = SIDEBAR_BUTTON_LOGICAL_W * scale;
+        let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
+        let btn_margin = ICON_BUTTON_LOGICAL_MARGIN * scale;
+        let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
         let main_right = self.window_w;
-        let main_top = self.top_inset;
-        // Layout button anchored to top-right of the main grid area;
-        // sidebar button sits immediately to its left so both chrome
+        // Toolbar band runs from `toolbar_top_phys` to `top_inset`.
+        // Center the square buttons vertically inside it.  When the
+        // caller hands us 0.0 (snapshot / bench paths with no split
+        // header), fall back to the legacy "sit at the top of the
+        // inset with `btn_margin` padding" anchoring.
+        let toolbar_top = if toolbar_top_phys > 0.0 {
+            toolbar_top_phys
+        } else {
+            self.top_inset
+        };
+        let toolbar_h = (self.top_inset - toolbar_top).max(btn_size);
+        let btn_y = toolbar_top + ((toolbar_h - btn_size) * 0.5).max(0.0);
+        // Layout button anchored to top-right of the toolbar; sidebar
+        // button sits immediately to its left so both chrome
         // affordances live in the same row and stay visible when the
         // sidebar is collapsed.
-        let btn_x = main_right - btn_margin - btn_w;
-        let btn_y = main_top + btn_margin;
+        let btn_x = main_right - btn_margin - btn_size;
+        // Public Rect carries a logical "w" + "h" for compatibility,
+        // but both icon buttons are square now.
+        let btn_w = btn_size;
+        let btn_h = btn_size;
         self.layout_button_rect = Rect {
             x: btn_x,
             y_top: btn_y,
@@ -335,9 +346,9 @@ impl Layout {
             h: btn_h,
         };
         self.sidebar_button_rect = Rect {
-            x: btn_x - btn_gap - sb_btn_w,
+            x: btn_x - btn_gap - btn_size,
             y_top: btn_y,
-            w: sb_btn_w,
+            w: btn_size,
             h: btn_h,
         };
         if picker_open {

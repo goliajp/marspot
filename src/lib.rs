@@ -45,9 +45,20 @@ pub mod pane;
 pub mod render_metal;
 pub mod ui;
 
-/// Top chrome strip in **logical points** that every Marspot-style
-/// window must reserve so the macOS traffic-light buttons don't paint
-/// over the terminal grid. Shared between binaries so a single-session
-/// consumer (mcli) gets the same window chrome as the multi-session
-/// container (marspot) automatically.
-pub const HEADER_PT: f64 = 32.0;
+/// Title-strip height in **logical points** — top band that carries
+/// the version label only.  Sized just for ~18pt text + breathing
+/// padding.  Below it sits the toolbar (`TOOLBAR_PT`).
+pub const TITLE_STRIP_PT: f64 = 24.0;
+/// Toolbar height in **logical points** — band below the title strip
+/// that hosts the L2-owned icon buttons (sidebar toggle, layout
+/// picker).  Sized for a 22×22 square button with ~4pt vertical
+/// padding.
+pub const TOOLBAR_PT: f64 = 30.0;
+/// Total chrome reserved above the grid — title strip + toolbar.
+/// Shared between binaries so a single-session consumer (mcli) gets
+/// the same window chrome as the multi-session container (marspot)
+/// automatically.  Layout::build treats this as one `top_inset`; the
+/// internal title↔toolbar split is known only to render code (version
+/// label positioning + button hit-test geometry, both via the
+/// matching constants above).
+pub const HEADER_PT: f64 = TITLE_STRIP_PT + TOOLBAR_PT;

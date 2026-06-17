@@ -1418,15 +1418,19 @@ fn build_instances(
     if layout.top_inset > 0.0 {
         let label = version_label();
         let text_w = label.chars().count() as f32 * cell_w;
-        let buttons_left = layout.sidebar_button_rect.x as f32;
-        let right_edge = if buttons_left > 0.0 {
-            buttons_left
-        } else {
-            layout.window_w as f32
-        };
-        let x = (right_edge - cell_w * 1.5 - text_w).max(cell_w);
+        // Version label lives in the *title strip* (top portion of
+        // top_inset); the toolbar below holds the icon buttons.
+        // Right-align with a small margin so the label hugs the
+        // window edge, not floats relative to button position.
+        let title_h = (layout.top_inset as f32)
+            * (crate::TITLE_STRIP_PT / crate::HEADER_PT) as f32;
+        let right_margin_logical_pt: f32 = 8.0;
+        let scale_approx = (layout.top_inset as f32) / crate::HEADER_PT as f32;
+        let right_margin_phys = right_margin_logical_pt * scale_approx;
+        let x =
+            ((layout.window_w as f32) - right_margin_phys - text_w).max(cell_w);
         let baseline_y =
-            ((layout.top_inset as f32 - cell_h) * 0.5).max(0.0) + ascent;
+            ((title_h - cell_h) * 0.5).max(0.0) + ascent;
         push_text_run(
             &label,
             x,
@@ -1662,6 +1666,17 @@ fn push_border(
 /// shape that option would switch to).  Pad shrinks the grid into
 /// the container so a rim of CHROME_BTN_BG / CHROME_OPTION_BG shows
 /// around it.
+/// Lucide-style stroke width relative to the icon's inner box.  At a
+/// 22pt button on 2× retina we get a ~30-px inner box, so 2 px feels
+/// right — matches Lucide's 24px / stroke-2 default ratio.
+fn icon_stroke(inner: Rect) -> f64 {
+    (inner.w.min(inner.h) * 0.07).round().max(1.0)
+}
+
+/// Lucide `layout-grid` style: outer outline + interior dividers
+/// drawn as thin lines (NOT filled cells).  `dims = (cols, rows)`
+/// drives the divider count so the icon doubles as a "current grid
+/// shape" indicator.
 fn push_grid_icon(
     cells: &mut Vec<CellInstance>,
     container: Rect,
@@ -1672,37 +1687,44 @@ fn push_grid_icon(
     if gc == 0 || gr == 0 {
         return;
     }
-    // Pad ≈ 22 % of the smaller container dim — keeps the icon
-    // visually centred + breathing.
     let pad = (container.w.min(container.h) * 0.22).max(2.0);
     let inner_x = container.x + pad;
     let inner_y = container.y_top + pad;
     let inner_w = (container.w - 2.0 * pad).max(1.0);
     let inner_h = (container.h - 2.0 * pad).max(1.0);
-    // Gap between icon cells — proportional to pad so the gap reads
-    // like a hairline at any size.
-    let gap = (pad * 0.35).max(1.0);
-    let cell_w =
-        ((inner_w - (gc - 1) as f64 * gap) / gc as f64).max(1.0);
-    let cell_h =
-        ((inner_h - (gr - 1) as f64 * gap) / gr as f64).max(1.0);
-    for r in 0..gr {
-        for c in 0..gc {
-            let x = inner_x + c as f64 * (cell_w + gap);
-            let y = inner_y + r as f64 * (cell_h + gap);
-            push_rect(
-                cells,
-                Rect { x, y_top: y, w: cell_w, h: cell_h },
-                color,
-            );
-        }
+    let frame = Rect {
+        x: inner_x,
+        y_top: inner_y,
+        w: inner_w,
+        h: inner_h,
+    };
+    let stroke = icon_stroke(frame);
+    push_border(cells, frame, stroke, color);
+    // Interior column dividers — (gc - 1) thin vertical strokes
+    // evenly distributed across the inner width.
+    for c in 1..gc {
+        let x = inner_x + c as f64 * inner_w / gc as f64 - stroke * 0.5;
+        push_rect(
+            cells,
+            Rect { x, y_top: inner_y, w: stroke, h: inner_h },
+            color,
+        );
+    }
+    // Interior row dividers — (gr - 1) thin horizontal strokes.
+    for r in 1..gr {
+        let y = inner_y + r as f64 * inner_h / gr as f64 - stroke * 0.5;
+        push_rect(
+            cells,
+            Rect { x: inner_x, y_top: y, w: inner_w, h: stroke },
+            color,
+        );
     }
 }
 
-/// Draw a sidebar-silhouette icon inside `container`: a thin outer
-/// rect (the "window") with a small bar on the left (the "sidebar
-/// strip").  When `collapsed`, the bar dims so the icon doubles as a
-/// state indicator — bright bar = currently shown, dim bar = hidden.
+/// Lucide `panel-left` style: outer outline + a single vertical
+/// divider at 1/3 of the inner width.  When `collapsed`, the divider
+/// + the would-be-panel region dims so the icon reads as a state
+/// indicator ("sidebar showing" vs "sidebar hidden") at a glance.
 fn push_sidebar_icon(
     cells: &mut Vec<CellInstance>,
     container: Rect,
@@ -1719,15 +1741,8 @@ fn push_sidebar_icon(
         w: inner_w,
         h: inner_h,
     };
-    push_border(cells, frame, 1.0, CHROME_ICON_FG);
-    // Sidebar strip — roughly 1/3 of the inner width, sits flush
-    // against the frame's left edge.  Painted as a filled rect (over
-    // the frame border so it reads as a solid panel).
-    let strip_w = (inner_w * 0.33).max(2.0);
-    let strip_color = if collapsed {
-        // Match the dim border tone — the strip drops to the same
-        // weight as the frame so "no sidebar visible right now" reads
-        // at a glance.
+    let stroke = icon_stroke(frame);
+    let frame_color = if collapsed {
         [
             CHROME_ICON_FG[0] * 0.55,
             CHROME_ICON_FG[1] * 0.55,
@@ -1737,15 +1752,16 @@ fn push_sidebar_icon(
     } else {
         CHROME_ICON_FG
     };
+    push_border(cells, frame, stroke, frame_color);
+    // Vertical divider at ~1/3 of the inner width — same stroke as
+    // the frame so the icon reads as a single line drawing.  The
+    // divider stays at the brighter colour even when collapsed so
+    // "the affordance toggles sidebar visibility" still reads.
+    let div_x = inner_x + (inner_w / 3.0).round() - stroke * 0.5;
     push_rect(
         cells,
-        Rect {
-            x: inner_x,
-            y_top: inner_y,
-            w: strip_w,
-            h: inner_h,
-        },
-        strip_color,
+        Rect { x: div_x, y_top: inner_y, w: stroke, h: inner_h },
+        CHROME_ICON_FG,
     );
 }
 

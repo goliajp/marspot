@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.5.2"    # L1 — MarspotView 实现 acceptsFirstMouse:,失焦下单击 pane 即切焦点(消除两次点击)
-core    = "0.6.0"    # L2 — cc 复活:InjectInput frame dispatch → L3Conn.forward_inject_input
+core    = "0.7.0"    # L2 — chrome 重排:版本号挪到 title strip 右端,新增 toolbar 放 Lucide 风格 icon button
 session = "0.6.1"    # L3 — cc 复活 fix:from_handoff 也 rewrite entry.toml(补 shell_child_pid 字段)

@@ -34,14 +34,11 @@ const DEFAULT_WIN_H: f64 = 1300.0;
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
 
-/// Header strip height in **logical points** — top band that
-/// reserves space for the traffic-light buttons (and, later,
-/// focused-session status content).  All other vertical layout
-/// (sidebar items, cell rects) starts BELOW this band.  The strip
-/// renders in cell-BG colour so the window reads as one continuous
-/// dark surface; the buttons float over it without their own
-/// separator.
-const HEADER_PT: f64 = 32.0;
+// Header chrome geometry (TITLE_STRIP_PT + TOOLBAR_PT = HEADER_PT)
+// lives in lib.rs so binaries + render code share the same source
+// of truth.  All other vertical layout (sidebar items, cell rects)
+// starts BELOW the HEADER_PT band.
+use marspot::HEADER_PT;
 
 // Sidebar row geometry now lives on `Layout` itself
 // (`Layout::sidebar_top_pad_phys` + `layout::SIDEBAR_ROW_H_PHYS`),
@@ -850,6 +847,7 @@ impl Marspot {
             scale,
             self.layout_picker_open,
             self.panes.len(),
+            marspot::TITLE_STRIP_PT * scale,
         );
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
