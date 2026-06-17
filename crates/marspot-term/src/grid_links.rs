@@ -837,4 +837,98 @@ mod tests {
         assert_eq!(out[0].kind, LinkKind::Url);
         assert_eq!(out[0].text, "https://example.com");
     }
+
+    // End-to-end test through the REAL VT parser: feed a long URL +
+    // newline to a Terminal and check that DECAWM-wrap flag really
+    // gets set on the continuation row AND scan_visible_links picks
+    // it up as a multi-row LinkRange.  This is the production path —
+    // if it passes but the user's `echo` still shows broken wrap, the
+    // bug is in render-side coords or some upstream layer.
+    #[test]
+    fn scan_visible_links_via_real_parser() {
+        use crate::terminal::Terminal;
+        const COLS: u16 = 30;
+        const ROWS: u16 = 5;
+        let mut t = Terminal::new(COLS, ROWS);
+        // 35-char URL — overflows 30-col grid, DECAWM should wrap.
+        let url = "https://example.com/abc/d.html";
+        // Length is exactly 30 chars — fits in one row, won't trigger
+        // wrap.  Bump the length: append a longer path.
+        let url = format!("{url}/extra/segments/here");
+        t.feed(url.as_bytes());
+        // Confirm the parser wrote the URL onto row 0 + row 1 AND set
+        // the wrap flag on row 1.
+        let grid = t.grid();
+        assert!(
+            grid.row_wrapped(1),
+            "row 1 should be flagged as DECAWM continuation"
+        );
+        let links = scan_visible_links(grid, 0);
+        assert!(
+            links.len() >= 2,
+            "expected ≥2 LinkRanges (URL fanned across rows), got {}: {:?}",
+            links.len(),
+            links
+        );
+        // Both LinkRanges should carry the FULL URL.
+        for l in &links {
+            assert_eq!(l.kind, LinkKind::Url);
+            assert_eq!(l.text, url, "all fanned LinkRanges share full URL text");
+        }
+        // First range on row 0, second on row 1.
+        assert_eq!(links[0].row, 0);
+        assert_eq!(links[1].row, 1);
+    }
+
+    // End-to-end test that mirrors how the production renderer drives
+    // scan_visible_links: we build a real Grid, fill DECAWM-wrap-style
+    // rows with a long URL filling the right edge + continuation on
+    // the next row, set the wrap flag, then call scan_visible_links
+    // and assert it emits TWO LinkRanges (top + continuation segment),
+    // both carrying the full URL.
+    #[test]
+    fn scan_visible_links_handles_decawm_wrap() {
+        use crate::grid::{Cell, Grid};
+        const COLS: u16 = 30;
+        const ROWS: u16 = 5;
+        let mut grid = Grid::new(COLS, ROWS);
+        // 35-char URL: spans cols 0..=29 (30 chars) on row 0 then
+        // cols 0..=4 (5 chars) on row 1.  DECAWM would mark row 1
+        // as the wrap continuation.
+        let url = "https://example.com/path/long.htm";
+        let url_chars: Vec<char> = url.chars().collect();
+        assert_eq!(url_chars.len(), 33);
+        // Row 0: cols 0..=29 = url chars 0..=29 (fills row entirely).
+        for (c, &ch) in url_chars.iter().take(COLS as usize).enumerate() {
+            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+        }
+        // Row 1: cols 0..=2 = url chars 30..=32 (3 chars).  Remaining
+        // cols stay default (blank).
+        for (c, &ch) in url_chars.iter().skip(COLS as usize).enumerate() {
+            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+        }
+        // Mark row 1 as the wrap continuation of row 0.
+        grid.set_row_wrapped(1, true);
+        // Scan at view_offset=0 (live grid, top of viewport).
+        let links = scan_visible_links(&grid, 0);
+        // Expect 2 LinkRanges: row 0 [0..=29] + row 1 [0..=2], both
+        // carrying the full URL.
+        assert_eq!(
+            links.len(),
+            2,
+            "expected 2 LinkRanges (row 0 + row 1), got {}: {:?}",
+            links.len(),
+            links
+        );
+        assert_eq!(links[0].kind, LinkKind::Url);
+        assert_eq!(links[0].text, url);
+        assert_eq!(links[0].row, 0);
+        assert_eq!(links[0].col_start, 0);
+        assert_eq!(links[0].col_end, 29);
+        assert_eq!(links[1].kind, LinkKind::Url);
+        assert_eq!(links[1].text, url);
+        assert_eq!(links[1].row, 1);
+        assert_eq!(links[1].col_start, 0);
+        assert_eq!(links[1].col_end, 2);
+    }
 }

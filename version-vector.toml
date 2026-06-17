@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.8.1"    # L2 — scan_visible_links 性能 fix:char_offset 改增量计数(原来 O(rows²×cols),9 pane 时主线程 ~33% CPU 全花在这)
-session = "0.7.0"    # L3 — Cmd-C 选区文本支持 DECAWM 软换行:软换行行间不插 \n、prev 行 tail 不 trim
+core    = "0.9.0"    # L2 — shm v3 reader:从 shm 读 per-row DECAWM wrap flag,scan_visible_links 现在跨 L2/L3 边界能识别软换行长 URL/path
+session = "0.8.0"    # L3 — shm v3 writer:publish 时把 per-row DECAWM wrap flag 也写进 shm

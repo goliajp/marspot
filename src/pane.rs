@@ -436,6 +436,10 @@ pub struct L3Conn {
     /// Scratch buffer for the snapshot cell copy — reused across polls
     /// so the per-frame read allocates zero.
     scratch: Vec<Cell>,
+    /// Scratch buffer for the per-row DECAWM wrapped flags published
+    /// alongside the cells (shm v3+).  Mirrors the same allocate-once
+    /// reuse as `scratch`.
+    scratch_wrapped: Vec<bool>,
     /// Reply channel for `GetSelectionText`: the control-socket reader
     /// thread routes each `SelectionText` frame here, and
     /// `request_selection_text` blocks on it (Cmd-C round-trip).  L3 owns
@@ -479,6 +483,7 @@ impl L3Conn {
             snap_scrollback_len: 0,
             exited: false,
             scratch: Vec::new(),
+            scratch_wrapped: Vec::new(),
             selection_rx,
             selection_seq: 0,
         }
@@ -507,6 +512,7 @@ impl L3Conn {
             snap_scrollback_len: 0,
             exited: false,
             scratch: Vec::new(),
+            scratch_wrapped: Vec::new(),
             selection_rx: spawn.selection_rx,
             selection_seq: 0,
         }
@@ -606,7 +612,10 @@ impl L3Conn {
         if seq == self.last_seq && !force_fill {
             return false;
         }
-        let Some(snap) = self.reader.read(&mut self.scratch) else {
+        let Some(snap) = self
+            .reader
+            .read(&mut self.scratch, &mut self.scratch_wrapped)
+        else {
             return false; // never published yet (seq 0)
         };
         // Reshape the mirror if L3's geometry changed under us.
@@ -619,6 +628,17 @@ impl L3Conn {
                 self.grid
                     .set_cell(col, row, self.scratch[base + col as usize]);
             }
+        }
+        // Per-row DECAWM continuation flags — without this the L2-side
+        // link scanner can't tell a soft-wrapped row from a real
+        // newline, breaking URL/path detection that overflows a row.
+        for row in 0..snap.rows {
+            let flag = self
+                .scratch_wrapped
+                .get(row as usize)
+                .copied()
+                .unwrap_or(false);
+            self.grid.set_row_wrapped(row, flag);
         }
         self.grid.set_cursor(snap.cursor_col, snap.cursor_row);
         self.cursor_visible = snap.flags & FLAG_CURSOR_VISIBLE != 0;

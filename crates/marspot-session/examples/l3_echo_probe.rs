@@ -104,7 +104,7 @@ fn main() {
     let _ = wait_seq_past(&reader, 0, "first publish");
     std::thread::sleep(Duration::from_millis(400));
     let mut buf = Vec::new();
-    let before = reader.read(&mut buf).unwrap_or_else(|| die("no frame after first publish"));
+    let before = reader.read(&mut buf, &mut Vec::new()).unwrap_or_else(|| die("no frame after first publish"));
     let (c0, r0) = (before.cursor_col, before.cursor_row);
     let seq_before = reader.seq();
     eprintln!("[probe] prompt settled; cursor=({c0},{r0}) seq={seq_before}");
@@ -127,7 +127,7 @@ fn main() {
     // or the shell's own echo) and the cursor must advance.
     wait_seq_past(&reader, seq_before, "echo publish");
     std::thread::sleep(Duration::from_millis(100));
-    let after = reader.read(&mut buf).unwrap_or_else(|| die("no frame after key"));
+    let after = reader.read(&mut buf, &mut Vec::new()).unwrap_or_else(|| die("no frame after key"));
     let idx = r0 as usize * COLS as usize + c0 as usize;
     let landed = buf[idx].ch;
     let cursor_advanced = after.cursor_col == c0 + 1 || (after.cursor_row > r0);

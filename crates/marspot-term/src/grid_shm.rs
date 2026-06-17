@@ -42,7 +42,13 @@ use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use crate::grid::{Cell, Grid};
 
 const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
-const VERSION: u32 = 2;
+// VERSION 3 (2026-06-17): per-row DECAWM wrap flags appended after the
+// cell area so L2's mirror grid carries the same `wrapped` signal L3's
+// parser sets.  Without this, scan_visible_links on the L2 side always
+// saw `wrapped = false`, breaking cross-row URL/path detection.  Old
+// writer (v2) + new reader (v3) and vice versa fail fast on the magic
+// match by design — both layers bump together on this protocol change.
+const VERSION: u32 = 3;
 
 /// Capacity bound for a region's cell area, in cells.  A region is
 /// *mapped* to hold up to this many cells so a live resize (target #4
@@ -54,6 +60,13 @@ const VERSION: u32 = 2;
 /// the shm framebuffer.  256 Ki cells covers any realistic single pane
 /// (e.g. a full 6K display at a tiny font ≈ 600 × 282 ≈ 170 Ki).
 pub const MAX_CELLS: usize = 256 * 1024;
+
+/// Maximum viewport rows the wrapped-flag array can address.  Each
+/// row contributes 1 byte (0 or 1) at a fixed offset after the cell
+/// region — see `wrapped_offset()`.  1024 is the documented growth
+/// bound, comfortable for any realistic terminal (a full 6K display
+/// at min font size is ≈ 282 rows).
+pub const MAX_ROWS: usize = 1024;
 
 /// Env var carrying the inherited grid-shm fd from L2 (region creator)
 /// to the L3 child (the writer). Set by L2 when it spawns a session
@@ -113,21 +126,33 @@ impl GridSnapshot {
     }
 }
 
-/// Byte length of the cell area for `cols × rows` (used for bounds
-/// checks — the actual mapping is always [`CAPACITY_BYTES`]).
+/// Byte length the writer/reader actually touches at `cols × rows`:
+/// header + cell region + per-row wrapped flags.  Used for bounds
+/// checks against the (fixed) mapping size — the actual mapping is
+/// always [`capacity_bytes()`].
 fn region_len(cols: u16, rows: u16) -> usize {
-    HEADER_BYTES + cols as usize * rows as usize * std::mem::size_of::<Cell>()
+    HEADER_BYTES
+        + cols as usize * rows as usize * std::mem::size_of::<Cell>()
+        + rows as usize
 }
 
-/// Total mapped bytes for every region: header + the [`MAX_CELLS`] cap.
-/// Fixed so a resize within the cap never remaps.
-const fn capacity_bytes() -> usize {
+/// Fixed offset from `base` to the per-row wrapped-flag array.  Sits
+/// AFTER the cell capacity (not after the live cell area) so the
+/// offset is independent of grid dims — no recomputation per publish.
+const fn wrapped_offset() -> usize {
     HEADER_BYTES + MAX_CELLS * std::mem::size_of::<Cell>()
+}
+
+/// Total mapped bytes for every region: header + the [`MAX_CELLS`]
+/// cap + the [`MAX_ROWS`] wrapped-flag cap.  Fixed so a resize within
+/// the caps never remaps.
+const fn capacity_bytes() -> usize {
+    wrapped_offset() + MAX_ROWS
 }
 
 /// True when a `cols × rows` grid fits the capacity cap.
 fn fits_capacity(cols: u16, rows: u16) -> bool {
-    cols as usize * rows as usize <= MAX_CELLS
+    cols as usize * rows as usize <= MAX_CELLS && rows as usize <= MAX_ROWS
 }
 
 /// Unique-per-process shm name. macOS caps shm names at ~31 bytes
@@ -420,6 +445,14 @@ impl GridShmWriter {
         self.base.add(HEADER_BYTES) as *mut Cell
     }
 
+    /// Per-row wrapped-flag array — one byte per viewport row, fixed
+    /// offset after the cell capacity.  Reader and writer agree by
+    /// construction (same const), independent of live dims.
+    #[inline]
+    unsafe fn wrapped_ptr(&self) -> *mut u8 {
+        self.base.add(wrapped_offset())
+    }
+
     /// Publish the grid's in-view window (`view_offset` rows up from the
     /// live tail) plus cursor + mode flags. Single-writer seqlock.
     pub fn publish(
@@ -469,6 +502,16 @@ impl GridShmWriter {
                     let cell = grid.cell_at_view(view_offset, col, row);
                     std::ptr::write(cells.add(row_base + col as usize), cell);
                 }
+            }
+            // Per-row DECAWM wrapped flags — one byte per viewport row
+            // at the fixed wrapped offset.  L2's link scanner depends
+            // on these to merge soft-wrap continuation rows into one
+            // logical line for URL/path detection.  v=2 omitted them
+            // and L2 always saw `wrapped=false`.
+            let wrapped = self.wrapped_ptr();
+            for row in 0..rows {
+                let flag = grid.wrapped_at_view(view_offset, row) as u8;
+                std::ptr::write(wrapped.add(row as usize), flag);
             }
 
             // Exit the write: publish with a release store to even.
@@ -593,13 +636,30 @@ impl GridShmReader {
         self.base.add(HEADER_BYTES) as *const Cell
     }
 
-    /// Read the latest published frame into `out` (resized to the
-    /// frame's `cols*rows`), retrying until a tear-free snapshot lands.
-    /// The dims come from the header *per read*, so the snapshot tracks a
-    /// live resize without any remap. Returns `None` only if the writer
-    /// has never published (seq still 0).
-    pub fn read(&self, out: &mut Vec<Cell>) -> Option<GridSnapshot> {
-        out.clear();
+    /// Per-row wrapped-flag array (read view) — mirrors the writer
+    /// layout at the fixed offset after the cell capacity.
+    #[inline]
+    unsafe fn wrapped_ptr(&self) -> *const u8 {
+        self.base.add(wrapped_offset())
+    }
+
+    /// Read the latest published frame into `cells_out` + `wrapped_out`
+    /// (both resized to the frame's `cols*rows` and `rows`),  retrying
+    /// until a tear-free snapshot lands.  The dims come from the
+    /// header *per read*, so the snapshot tracks a live resize without
+    /// any remap.  Returns `None` only if the writer has never
+    /// published (seq still 0).
+    ///
+    /// `wrapped_out[r]` is the DECAWM continuation flag for viewport
+    /// row `r` — true means row `r` was wrapped onto from the row
+    /// above by an overflowing parser write.
+    pub fn read(
+        &self,
+        cells_out: &mut Vec<Cell>,
+        wrapped_out: &mut Vec<bool>,
+    ) -> Option<GridSnapshot> {
+        cells_out.clear();
+        wrapped_out.clear();
         // Bounded spin: a single writer holds the odd window for the
         // duration of one ~40 KiB copy, so a handful of retries always
         // suffices in practice; cap to avoid an unbounded loop if a
@@ -635,11 +695,22 @@ impl GridShmReader {
                 let scrollback_len = (*h).scrollback_len;
                 let view_offset = (*h).view_offset as u16;
 
-                out.set_len(0);
-                out.reserve(n);
+                cells_out.set_len(0);
+                cells_out.reserve(n);
                 let cells = self.cells_ptr();
-                std::ptr::copy_nonoverlapping(cells, out.as_mut_ptr(), n);
-                out.set_len(n);
+                std::ptr::copy_nonoverlapping(cells, cells_out.as_mut_ptr(), n);
+                cells_out.set_len(n);
+
+                // Copy the per-row wrapped flags too, in the SAME
+                // seqlock critical section so cells + flags are paired
+                // to one publish.
+                wrapped_out.clear();
+                wrapped_out.reserve(rows as usize);
+                let wptr = self.wrapped_ptr();
+                for row in 0..rows {
+                    let flag = *wptr.add(row as usize) != 0;
+                    wrapped_out.push(flag);
+                }
 
                 fence(Ordering::Acquire);
                 let s2 = (*h).seq.load(Ordering::Relaxed);
@@ -700,11 +771,11 @@ mod tests {
         // Reader before any publish → None.
         let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
         let mut buf = Vec::new();
-        assert!(reader.read(&mut buf).is_none(), "no frame before publish");
+        assert!(reader.read(&mut buf, &mut Vec::new()).is_none(), "no frame before publish");
 
         writer.publish(&grid, 0, FLAG_CURSOR_VISIBLE);
 
-        let snap = reader.read(&mut buf).expect("frame after publish");
+        let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame after publish");
         assert_eq!(snap.cols, cols);
         assert_eq!(snap.rows, rows);
         assert_eq!((snap.cursor_col, snap.cursor_row), (5, 0));
@@ -713,6 +784,33 @@ mod tests {
         assert_eq!(buf[0].ch, 'h');
         assert_eq!(buf[4].ch, 'o');
         assert_eq!(buf[5].ch, ' '); // blank past the text
+    }
+
+    // v3 protocol: per-row DECAWM wrapped flags round-trip through
+    // shm.  Writer sets row_wrapped on a continuation row; reader
+    // gets the same bit in its `wrapped_out` Vec.  Without this, the
+    // L2-side link scanner can't detect cross-row URLs.
+    #[test]
+    fn wrapped_flags_round_trip() {
+        let cols = 10u16;
+        let rows = 4u16;
+        let mut grid = Grid::new(cols, rows);
+        // Mark row 1 + row 2 as wrap continuations (row 3 left clean).
+        grid.set_row_wrapped(1, true);
+        grid.set_row_wrapped(2, true);
+        let mut writer = GridShmWriter::create(cols, rows).expect("create");
+        let reader = GridShmReader::from_fd(dup_fd(writer.fd())).expect("reader");
+        writer.publish(&grid, 0, 0);
+        let mut cells = Vec::new();
+        let mut wrapped = Vec::new();
+        let snap = reader.read(&mut cells, &mut wrapped).expect("frame");
+        assert_eq!(snap.rows, rows);
+        assert_eq!(wrapped.len(), rows as usize);
+        assert_eq!(
+            &wrapped[..],
+            &[false, true, true, false][..],
+            "row 1+2 marked, 0+3 clean"
+        );
     }
 
     #[test]
@@ -729,7 +827,7 @@ mod tests {
             grid.set_cell(0, 0, Cell::from(ch));
             grid.set_cursor(round as u16, 1);
             writer.publish(&grid, 0, 0);
-            let snap = reader.read(&mut buf).expect("frame");
+            let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame");
             assert_eq!(buf[0].ch, ch, "round {round}");
             assert_eq!(snap.cursor_row, 1);
             assert_eq!(snap.cursor_col, round as u16);
@@ -753,7 +851,7 @@ mod tests {
             grid.set_cursor(cols - 1, rows - 1);
             writer.publish(&grid, 0, 0);
 
-            let snap = reader.read(&mut buf).expect("frame");
+            let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame");
             assert_eq!((snap.cols, snap.rows), (cols, rows), "dims track resize");
             assert_eq!(buf.len(), cols as usize * rows as usize);
             assert_eq!(buf[buf.len() - 1].ch, 'X', "far corner copied at {cols}x{rows}");
@@ -796,7 +894,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut reads = 0;
         while reads < 50_000 {
-            if let Some(snap) = reader.read(&mut buf) {
+            if let Some(snap) = reader.read(&mut buf, &mut Vec::new()) {
                 assert_eq!(
                     buf.len(),
                     snap.cols as usize * snap.rows as usize,
@@ -829,7 +927,7 @@ mod tests {
         let reader = GridShmReader::from_fd(dup_fd(region.as_raw_fd())).expect("reader");
         assert_eq!((reader.cols(), reader.rows()), (cols, rows));
         let mut buf = Vec::new();
-        assert!(reader.read(&mut buf).is_none(), "no frame before publish");
+        assert!(reader.read(&mut buf, &mut Vec::new()).is_none(), "no frame before publish");
 
         // Writer takes the region itself.
         let mut writer = GridShmWriter::from_fd(region).expect("writer from_fd");
@@ -838,7 +936,7 @@ mod tests {
         grid.set_cursor(1, 2);
         writer.publish(&grid, 0, FLAG_CURSOR_VISIBLE);
 
-        let snap = reader.read(&mut buf).expect("frame after publish");
+        let snap = reader.read(&mut buf, &mut Vec::new()).expect("frame after publish");
         assert_eq!((snap.cols, snap.rows), (cols, rows));
         assert_eq!((snap.cursor_col, snap.cursor_row), (1, 2));
         assert!(snap.cursor_visible());
@@ -890,7 +988,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut reads = 0;
         while reads < 50_000 {
-            if let Some(_snap) = reader.read(&mut buf) {
+            if let Some(_snap) = reader.read(&mut buf, &mut Vec::new()) {
                 let first = buf[0].ch;
                 assert!(
                     buf.iter().all(|c| c.ch == first),

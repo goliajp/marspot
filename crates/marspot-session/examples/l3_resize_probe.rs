@@ -47,7 +47,7 @@ fn wait_dims(reader: &GridShmReader, cols: u16, rows: u16, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut buf = Vec::new();
     loop {
-        if let Some(snap) = reader.read(&mut buf) {
+        if let Some(snap) = reader.read(&mut buf, &mut Vec::new()) {
             if (snap.cols, snap.rows) == (cols, rows) {
                 // Sanity: the cell buffer length must match the dims.
                 if buf.len() != cols as usize * rows as usize {
@@ -60,7 +60,7 @@ fn wait_dims(reader: &GridShmReader, cols: u16, rows: u16, what: &str) {
             }
         }
         if Instant::now() >= deadline {
-            let last = reader.read(&mut buf).map(|s| (s.cols, s.rows));
+            let last = reader.read(&mut buf, &mut Vec::new()).map(|s| (s.cols, s.rows));
             die(format!("timed out waiting for {what} ({cols}x{rows}); last published {last:?}"));
         }
         std::thread::sleep(Duration::from_millis(10));
