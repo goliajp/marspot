@@ -137,6 +137,9 @@ impl SessionListener {
     pub fn from_handoff(
         id: u64,
         raw_fd: RawFd,
+        shell_child_pid: i32,
+        cols: u16,
+        rows: u16,
         ev_tx: Sender<crate::SessionEvent>,
     ) -> io::Result<Self> {
         // SAFETY: caller asserts `raw_fd` is a live UnixListener fd
@@ -147,6 +150,29 @@ impl SessionListener {
         let accept_thread = thread::Builder::new()
             .name(format!("l3-uds-accept-{id}"))
             .spawn(move || accept_loop(id, listener_for_thread, ev_tx))?;
+        // Re-write entry.toml so newer schema fields (shell_child_pid,
+        // etc) land even when an L3 boots via execv handoff rather
+        // than fresh bind.  PID is preserved across execv so the
+        // socket / pid stay the same; cwd / title we don't carry
+        // through the manifest, so we leave them blank — the cc
+        // plugin only reads pid / shell_child_pid / shm_name.
+        let entry = SessionEntry {
+            id,
+            pid: std::process::id() as i32,
+            socket: session_socket_path(id),
+            cols,
+            rows,
+            title: String::new(),
+            cwd: String::new(),
+            proto_version: PROTO_VERSION,
+            created_at_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            shm_name: std::env::var("MARSPOT_SHM_NAME").unwrap_or_default(),
+            shell_child_pid,
+        };
+        let _ = write_session_entry(&entry);
         Ok(Self {
             id,
             socket_path: session_socket_path(id),

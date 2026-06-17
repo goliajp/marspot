@@ -825,7 +825,9 @@ fn main() {
             });
             // Adopt inherited UDS listener fd; no rebind, entry.toml
             // already has our (preserved) PID.
-            match uds_server::SessionListener::from_handoff(id, h.listen_fd, ev_tx.clone()) {
+            match uds_server::SessionListener::from_handoff(
+                id, h.listen_fd, h.child_pid, h.cols, h.rows, ev_tx.clone(),
+            ) {
                 Ok(l) => _listener = Some(l),
                 Err(e) => {
                     lx_error!("l3.execv.listener_from_handoff_failed", &format!("{e}"));

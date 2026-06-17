@@ -23,4 +23,4 @@
 
 shell   = "0.5.0"    # L1 — cc 复活:entry.toml 读 sessions + InjectInputProxy 路径 + InjectInput frame 转发
 core    = "0.6.0"    # L2 — cc 复活:InjectInput frame dispatch → L3Conn.forward_inject_input
-session = "0.6.0"    # L3 — cc 复活:entry.toml 加 shell_child_pid + InjectInput frame 接受 → 写 PTY 原始字节
+session = "0.6.1"    # L3 — cc 复活 fix:from_handoff 也 rewrite entry.toml(补 shell_child_pid 字段)
