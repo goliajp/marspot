@@ -505,8 +505,13 @@ fn state_str(s: SessionState) -> &'static str {
 
 /// Publish the session's grid window at `view_offset` (rows up from the
 /// live tail, clamped to the available scrollback) + cursor/mode flags
-/// into the shared framebuffer for L2 to render.
-fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) {
+/// into the shared framebuffer for L2 to render.  Returns `true` when
+/// the publish actually wrote a new snapshot (i.e. the grid+cursor+
+/// flags differ from the previous publish).  The caller uses the bool
+/// to decide whether to send a GridReady poke — skipping the poke on
+/// a content-identical publish is what keeps idle L2 asleep when a TUI
+/// pumps the PTY at its own redraw cadence without moving any cell.
+fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> bool {
     let term = session.terminal();
     let mut flags = 0u32;
     if term.cursor_visible() {
@@ -522,7 +527,7 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) {
     // scrollback can shrink (alt-screen enter / reset) between L2's request
     // and this publish, so never hand the writer an out-of-range offset.
     let off = view_offset.min(term.grid().scrollback_len() as u16);
-    shm.publish(term.grid(), off, flags);
+    shm.publish_if_changed(term.grid(), off, flags)
 }
 
 /// Encode one forwarded keystroke with L3's own terminal mode flags,
@@ -699,7 +704,16 @@ fn publish_and_poke(
     view_offset: u16,
     poke: Option<&mut UnixStream>,
 ) {
-    publish(shm, session, view_offset);
+    let changed = publish(shm, session, view_offset);
+    // Dedup: a content-identical publish doesn't wake L2.  Without
+    // this, busy TUIs (claudecode, htop, vim cursor) emit redraw
+    // bytes that produced bit-identical shm snapshots, and each one
+    // woke L2 for a full re-render — measured ~30 L3Ready/s at idle
+    // before the gate.  When the grid genuinely changed we still
+    // poke once, same as before.
+    if !changed {
+        return;
+    }
     if let Some(w) = poke {
         // Best-effort: a dead socket just means L2 went away; the next
         // read EOF tears the reader down and the session keeps running.

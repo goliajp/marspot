@@ -447,6 +447,15 @@ pub struct GridShmWriter {
     len: usize,
     cols: u16,
     rows: u16,
+    /// FNV-1a hash of the most recent `publish()`'s grid + cursor + flags
+    /// + view window.  `publish_if_changed()` skips the entire shm write
+    /// (and the caller's GridReady poke) when the next publish would
+    /// produce a bit-identical snapshot.  Was the leading idle-CPU source
+    /// before this gate: TUIs (claudecode, etc.) hammer the PTY at their
+    /// internal redraw cadence even when the visible grid hasn't moved,
+    /// so without dedupe L3 publishes ~30/s, L2 wakes + renders ~25/s,
+    /// shows up as ~10 % idle CPU on a 9-pane window.
+    last_publish_hash: u64,
 }
 
 // The raw pointer is into a private mmap this struct solely owns; it is
@@ -480,6 +489,11 @@ impl GridShmWriter {
             len,
             cols,
             rows,
+            // 0 is a fine sentinel: a brand-new writer's first publish
+            // computes a real hash that is almost never 0, so the first
+            // publish always proceeds.  Worst case (collision = 0): one
+            // missed first frame; L2 sees the next change.
+            last_publish_hash: 0,
         })
     }
 
@@ -515,6 +529,41 @@ impl GridShmWriter {
     #[inline]
     unsafe fn wrapped_ptr(&self) -> *mut u8 {
         self.base.add(wrapped_offset())
+    }
+
+    /// Hash-dedupe wrapper around [`publish`].  Computes an FNV-1a
+    /// digest of every byte that the next `publish()` would write
+    /// (header fields, cursor, view offset, the whole cell window,
+    /// per-row wrapped flags).  If it matches the last published
+    /// snapshot exactly, this returns `false` without touching the
+    /// shm region — the caller skips its GridReady poke and L2 keeps
+    /// sleeping.  When something genuinely changed, the hash is
+    /// updated and the underlying `publish()` runs as before, and
+    /// the caller proceeds with the poke.
+    ///
+    /// Why this exists: a busy TUI (claudecode, htop, vim with a
+    /// blinking cursor) emits PTY redraw bytes at its own internal
+    /// cadence — often 30+ Hz — even when the visible characters
+    /// haven't moved.  Pre-dedupe, L3 pushed each of those into shm
+    /// and L2 woke + re-rendered the entire window.  On a 9-pane
+    /// setup this manifested as ~10 % idle CPU on marspot-core (per
+    /// `/usr/bin/sample`, event tally showed ~30 L3Ready/s arriving
+    /// despite "nothing" happening visually).  After dedupe, only
+    /// the publishes that actually change a cell survive, and the
+    /// idle baseline drops toward zero.
+    pub fn publish_if_changed(
+        &mut self,
+        grid: &Grid,
+        view_offset: u16,
+        flags: u32,
+    ) -> bool {
+        let h = compute_publish_hash(grid, view_offset, flags);
+        if h == self.last_publish_hash {
+            return false;
+        }
+        self.last_publish_hash = h;
+        self.publish(grid, view_offset, flags);
+        true
     }
 
     /// Publish the grid's in-view window (`view_offset` rows up from the
@@ -581,6 +630,68 @@ impl GridShmWriter {
             // Exit the write: publish with a release store to even.
             fence(Ordering::Release);
             (*h).seq.store(s.wrapping_add(2), Ordering::Release);
+        }
+    }
+}
+
+/// FNV-1a over the full publish payload — header dims/cursor/flags
+/// plus every cell + per-row wrapped flag.  Walked in the same order
+/// `publish()` would write so two identical grids produce identical
+/// hashes regardless of how they were reached.  The constants are the
+/// canonical 64-bit FNV-1a (offset basis + prime) — fast on M-series,
+/// good enough for the equality-only use we make of it (no
+/// adversarial input here, only a same-process L3 hashing its own
+/// terminal state).
+fn compute_publish_hash(grid: &Grid, view_offset: u16, flags: u32) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    #[inline(always)]
+    fn mix(h: u64, x: u64) -> u64 {
+        h.wrapping_mul(FNV_PRIME) ^ x
+    }
+    let cols = grid.cols();
+    let rows = grid.rows();
+    let (cur_c, cur_r) = grid.cursor();
+    let mut h = FNV_OFFSET;
+    h = mix(h, flags as u64);
+    h = mix(h, cur_c as u64);
+    h = mix(h, cur_r as u64);
+    h = mix(h, view_offset as u64);
+    h = mix(h, grid.scroll_push_count() as u64);
+    h = mix(h, grid.scrollback_len() as u64);
+    h = mix(h, cols as u64);
+    h = mix(h, rows as u64);
+    for row in 0..rows {
+        for col in 0..cols {
+            let cell = grid.cell_at_view(view_offset, col, row);
+            h = mix(h, cell.ch as u64);
+            h = mix(h, hash_cell_attrs(&cell.attrs));
+        }
+        h = mix(h, grid.wrapped_at_view(view_offset, row) as u64);
+    }
+    h
+}
+
+#[inline(always)]
+fn hash_cell_attrs(a: &crate::grid::CellAttrs) -> u64 {
+    let bools = (a.bold as u64)
+        | ((a.italic as u64) << 1)
+        | ((a.underline as u64) << 2)
+        | ((a.reverse as u64) << 3)
+        | ((a.dim as u64) << 4);
+    bools
+        .wrapping_add(hash_color(&a.fg) << 8)
+        .wrapping_add(hash_color(&a.bg) << 32)
+}
+
+#[inline(always)]
+fn hash_color(c: &crate::grid::Color) -> u64 {
+    use crate::grid::Color;
+    match c {
+        Color::Default => 0,
+        Color::Indexed(i) => 0x100 | (*i as u64),
+        Color::Rgb(r, g, b) => {
+            0x1_0000_0000 | ((*r as u64) << 16) | ((*g as u64) << 8) | (*b as u64)
         }
     }
 }
