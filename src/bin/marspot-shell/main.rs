@@ -2376,15 +2376,45 @@ impl MarspotApp for ShellApp {
         // sessions/<id>/ directories deliberately survive on disk.
         let mut signalled = 0usize;
         let entries = marspot_term::session_registry::list_session_entries();
+        let mut known_pids: std::collections::HashSet<i32> =
+            std::collections::HashSet::new();
         for entry in &entries {
             if unsafe { libc::kill(entry.pid, libc::SIGTERM) } == 0 {
                 signalled += 1;
+            }
+            known_pids.insert(entry.pid);
+        }
+        // RFC-003 §6 Amendment 15.2 — pgrep sweep for orphan L3s.
+        // Resurrect / silent-update spawn races can leave behind L3
+        // processes whose entry.toml got overwritten by a later
+        // sibling; entry-only SIGTERM misses them.  Walk pgrep
+        // marspot-session, drop pids we already covered, SIGTERM
+        // the rest so they don't accumulate across marspot quits.
+        let mut orphans_killed = 0usize;
+        if let Ok(out) = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", "marspot-session"])
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        if pid == std::process::id() as i32 {
+                            continue;
+                        }
+                        if known_pids.contains(&pid) {
+                            continue;
+                        }
+                        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                            orphans_killed += 1;
+                        }
+                    }
+                }
             }
         }
         // Brief wait so SIGTERM handlers have a chance to land their
         // state.bin write.  Don't block long — we're exiting anyway,
         // and the launchd reaping path catches any stragglers.
-        if signalled > 0 {
+        if signalled + orphans_killed > 0 {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
         let drained = self
@@ -2394,8 +2424,9 @@ impl MarspotApp for ShellApp {
             .unwrap_or(0);
         lx_event!(
             "SHELL_QUIT_CLEANUP",
-            "SIGTERM'd L3s + drained fd-vault for clean user quit",
+            "SIGTERM'd L3s + orphans + drained fd-vault for clean user quit",
             n_signalled = signalled,
+            n_orphans_killed = orphans_killed,
             n_vault_drained = drained,
             n_entries = entries.len()
         );

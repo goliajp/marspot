@@ -456,11 +456,19 @@ fn spawn_l3_with_reason(
             lx_error!(
                 "core.l3.uds_connect_failed",
                 &format!("{e}"),
-                session_id = session_id
+                session_id = session_id,
+                child_pid = child.id()
             );
-            // The child Command::spawn returned a Child handle — its
-            // Drop reaps and SIGKILLs.  Letting `child` drop here is
-            // the rollback.
+            // RFC-003 §6 Amendment 15.2 — std::process::Child::drop
+            // is a no-op (Rust deliberately doesn't reap behind your
+            // back); on this error path the just-spawned L3 would
+            // otherwise live on forever as an orphan.  Explicit
+            // SIGKILL + reap so we don't leak processes (and the
+            // associated PTY + vault deposit, which the kernel
+            // collects when the last reference drops).
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(e);
         }
     };
