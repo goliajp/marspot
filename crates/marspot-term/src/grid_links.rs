@@ -87,22 +87,25 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
     if rows == 0 || cols == 0 {
         return out;
     }
-    // Build logical lines by walking viewport rows top→bottom and
-    // joining each row that's flagged as a soft-wrap continuation of
-    // the row above it.  We track each row's offset into the merged
-    // String as an incremental counter — NEVER call `line.chars()
-    // .count()` per row (the obvious-looking choice would re-iterate
-    // the entire accumulated string on every row, an O(rows² × cols)
-    // hot path that, profiled on a 9-pane 97×74 grid, ate 33 % of the
-    // main thread before being fixed here).  Each grid cell
-    // contributes exactly one char (NUL trail-halves become a space,
-    // everything else is the cell's `char` 1:1).  In cc-mode a
-    // continuation row may contribute fewer than `cols` chars when
-    // its leading hanging-indent is stripped — segment bookkeeping
-    // tracks the stripped col count so `locate()` still maps logical
-    // char positions back to the physical col on click.
-    let line_cap = cols as usize * rows as usize * 4;
-    let mut line = String::with_capacity(line_cap);
+    // Per-frame allocation hot-path note: `scan_visible_links` is
+    // called once per pane per render frame.  An earlier version
+    // built a per-line `String` and `Vec<char>::from_iter`'d it
+    // inside `scan_line_into_matches` — profiling on a 9-pane setup
+    // (samply 15 s while typing) showed ~95 % of the main-thread
+    // non-idle time inside `Vec::<char>::from_iter → realloc`
+    // chains from that path, manifesting as input latency.  The
+    // current shape allocates one `chars` buffer up front and
+    // reuses it across every logical-line scan within this call —
+    // amortised allocs per frame ≈ 1 vs O(logical-lines × panes).
+    //
+    // Each grid cell contributes exactly one char (NUL / trail-half
+    // become a space, everything else is the cell's `char` 1:1).
+    // In cc-mode a continuation row may contribute fewer than `cols`
+    // chars when its leading hanging-indent is stripped — segment
+    // bookkeeping tracks the stripped col count so `locate()` still
+    // maps logical char positions back to the physical col on click.
+    let line_cap = cols as usize * rows as usize;
+    let mut chars: Vec<char> = Vec::with_capacity(line_cap);
     let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
     let mut char_offset: usize = 0;
     for r in 0..rows {
@@ -113,15 +116,11 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
             && is_cc_hard_wrap_continuation(grid, view_offset, r - 1, r, cols);
         let is_continuation = decawm_cont || cc_cont;
         if !is_continuation && !segments.is_empty() {
-            scan_logical_line(&line, &segments, cols as usize, out.as_mut());
-            line.clear();
+            scan_logical_line(&chars, &segments, cols as usize, &mut out);
+            chars.clear();
             segments.clear();
             char_offset = 0;
         }
-        // cc-continuation rows have leading hanging-indent whitespace
-        // stripped — count it once so we can both skip those cells
-        // when pushing chars AND record the col offset in the
-        // segment for `locate()`.
         let col_skip = if cc_cont {
             count_leading_ws(grid, view_offset, r, cols)
         } else {
@@ -134,12 +133,12 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
         });
         for c in col_skip..cols {
             let ch = grid.cell_at_view(view_offset, c, r).ch;
-            line.push(if ch == '\0' || ch == ' ' { ' ' } else { ch });
+            chars.push(if ch == '\0' || ch == ' ' { ' ' } else { ch });
         }
         char_offset += (cols - col_skip) as usize;
     }
     if !segments.is_empty() {
-        scan_logical_line(&line, &segments, cols as usize, out.as_mut());
+        scan_logical_line(&chars, &segments, cols as usize, &mut out);
     }
     out
 }
@@ -252,7 +251,7 @@ struct LineSegment {
 /// fan out (same `text`, different `phys_row`/col_start/col_end),
 /// preserving the per-row hit-test + per-row underline model.
 fn scan_logical_line(
-    line: &str,
+    chars: &[char],
     segments: &[LineSegment],
     cols_per_row: usize,
     out: &mut Vec<LinkRange>,
@@ -260,11 +259,12 @@ fn scan_logical_line(
     if segments.is_empty() {
         return;
     }
-    // Pattern scan produces matches as `(char_lo, char_hi_exclusive,
-    // kind, text)`; project each to one or more LinkRange row spans.
-    let mut row_matches: Vec<LinkRange> = Vec::new();
-    scan_line_into_matches(line, &mut row_matches, segments, cols_per_row);
-    out.extend(row_matches.drain(..));
+    // Pattern scan emits matches directly into `out` — the previous
+    // intermediate `row_matches` Vec was a per-call allocation that
+    // showed up as ~250 samples in the input-lag profile (15 s, 9
+    // panes typing).  emit_match is the only producer, append-only,
+    // so passing `out` straight through is safe and saves the alloc.
+    scan_line_into_matches(chars, out, segments, cols_per_row);
 }
 
 /// Char-pos → (phys_row, col) projector.  Assumes each segment has
@@ -293,7 +293,7 @@ fn locate(segments: &[LineSegment], char_pos: usize, cols_per_row: usize) -> Opt
 /// matched `text` (so click dispatch + hover tooltip are identical
 /// across segments).
 fn scan_line_into_matches(
-    line: &str,
+    chars: &[char],
     out: &mut Vec<LinkRange>,
     segments: &[LineSegment],
     cols_per_row: usize,
@@ -301,7 +301,6 @@ fn scan_line_into_matches(
     if segments.is_empty() {
         return;
     }
-    let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
     let mut i = 0;
     while i < n {
@@ -948,7 +947,7 @@ mod tests {
             },
         ];
         let mut out = Vec::new();
-        super::scan_line_into_matches(line, &mut out, &segments, 10);
+        super::scan_line_into_matches(&line.chars().collect::<Vec<char>>(), &mut out, &segments, 10);
         // One match, fanned into 2 LinkRanges (one per physical row).
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -974,7 +973,7 @@ mod tests {
             col_skip: 0,
         }];
         let mut out = Vec::new();
-        super::scan_line_into_matches(line, &mut out, &segments, line.chars().count());
+        super::scan_line_into_matches(&line.chars().collect::<Vec<char>>(), &mut out, &segments, line.chars().count());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 7);
         assert_eq!(out[0].kind, LinkKind::Url);
