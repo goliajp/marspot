@@ -12,11 +12,11 @@
 # Run it after you've made changes and want them in your live terminal:
 #
 #   bin/install-local.sh            # build, install, silent-update the
-#                                   #   running app — L2 (core) + L3 (session)
-#                                   #   swap silently; L1 (shell) skipped to
-#                                   #   avoid the NSWindow flash from execv.
-#   bin/install-local.sh --with-shell    # also apply a hot L1 shell update
-#                                        #   (window flashes closed→open ~100ms)
+#                                   #   running app — L1 / L2 / L3 all
+#                                   #   swap if changed. L1 swap is the
+#                                   #   ~100 ms NSWindow flash (sessions
+#                                   #   survive via L3 reattach); known
+#                                   #   cost, by design.
 #   bin/install-local.sh --with-shelld   # also update the daemon
 #                                        #   (in-place execv, sessions survive)
 #   bin/install-local.sh --status   # what's installed + running
@@ -68,13 +68,11 @@ sup_log() {
 
 BUILD=1
 WITH_SHELLD=0
-WITH_SHELL=0
 MODE=install
 for arg in "$@"; do
   case "$arg" in
     --no-build)    BUILD=0 ;;
     --with-shelld) WITH_SHELLD=1 ;;
-    --with-shell)  WITH_SHELL=1 ;;
     --status)      MODE=status ;;
     -h|--help)     sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -276,25 +274,14 @@ print_version_vector
 STAGED=0
 if (( RUNNING )); then
   echo "==> staging changed binaries into the running app"
-  # L1 (marspot-shell) is the stable outer shell. Updating it requires
-  # `apply_pending_update` → `try_apply_shell_self_update` → libc::execv,
-  # which tears down + recreates the NSWindow (the ~100 ms visible
-  # flash documented in docs/silent-update.md). Almost every dev iter
-  # touches only L2 / L3 code, so default install-local skips L1
-  # staging entirely: the bundle binary still gets refreshed below for
-  # the next cold launch, but the running shell is not asked to swap
-  # itself, so no flash. Pass --with-shell when an actual L1 code
-  # change needs to land hot.
-  if (( SHELL_CHANGED )); then
-    if (( WITH_SHELL )); then
-      stage marspot-shell; STAGED=1
-    else
-      echo "    marspot-shell: differs but NOT staged (default: avoid L1 execv flash);"
-      echo "                   pass --with-shell to apply hot. Bundle will refresh on next cold launch."
-    fi
-  else
-    echo "    marspot-shell: unchanged"
-  fi
+  # L1 (marspot-shell) update path: `apply_pending_update` →
+  # `try_apply_shell_self_update` → libc::execv, which tears down +
+  # recreates the NSWindow (~100 ms visible flash, see docs/silent-
+  # update.md). Sessions survive via L3 reattach + bytelog replay —
+  # the flash is the *only* user-visible cost, and it's the agreed
+  # design (a long-lived "skip L1" path silently strands new shell
+  # binaries on disk and is worse than the flash).
+  (( SHELL_CHANGED ))   && { stage marspot-shell; STAGED=1; } || echo "    marspot-shell: unchanged"
   (( CORE_CHANGED ))  && { stage marspot-core;  STAGED=1; } || echo "    marspot-core: unchanged"
   # Session rides with the core: the freshly-spawned core boot-promotes
   # pending/marspot-session → current/ (updater::promote_pending_session),
