@@ -125,7 +125,6 @@ pub fn grid_selection_text(
     // and `trim_end` the tail (the post-content cells were blank
     // padding the program never wrote into).
     let mut prev_text: Option<String> = None;
-    let mut prev_is_blockwise_or_partial = false;
     loop {
         if abs > u16::MAX as u32 {
             // Beyond what cell_at_view can address; treat as unreachable.
@@ -150,13 +149,6 @@ pub fn grid_selection_text(
             let hi = if abs == bot_abs { bot_col } else { cols.saturating_sub(1) };
             (lo, hi)
         };
-        // Whether THIS row covers the row's full width.  Blockwise and
-        // partial-end rows (first row from top_col onwards, last row up
-        // to bot_col) don't reach the right edge, so a wrap signal
-        // there is moot — the wrap glued physical cells the user
-        // didn't include in the selection.
-        let row_covers_full_width =
-            !blockwise && col_lo == 0 && col_hi >= cols.saturating_sub(1);
         let mut row_text = String::new();
         for c in col_lo..=col_hi {
             if c >= cols {
@@ -170,14 +162,26 @@ pub fn grid_selection_text(
             }
             row_text.push(cell.ch);
         }
-        // Soft-wrap merge gate: the flag tells us "this row was
-        // produced by the parser overflowing the previous row's last
-        // column."  Honour it only when BOTH rows are full-width in
-        // the selection — otherwise the merge would glue physical
-        // cells across a partial-width band, which is wrong.
-        let current_is_continuation = grid.wrapped_at_view(abs as u16, last_view_row)
-            && row_covers_full_width
-            && !prev_is_blockwise_or_partial;
+        // Soft-wrap merge gate.  The wrap flag is "this row is the
+        // overflow continuation of the row above," i.e. the row
+        // above's col=cols-1 was filled and the parser pushed the
+        // next char down.  Two facts follow:
+        //   * the prev row's tail chars are real content (don't
+        //     `trim_end` them, even if some are real spaces)
+        //   * there is no logical newline between prev and current
+        //     (don't insert `\n`)
+        // Neither fact depends on which COLUMNS of the current row
+        // the user happens to have selected — only on the wrap flag
+        // itself.  Blockwise mode is the lone exception: in a column
+        // band, the "previous row" we buffered is the band of the
+        // row above, not a logical line, so wrap merging would glue
+        // unrelated cells.  Earlier this gate also demanded col_lo=0
+        // / col_hi=cols-1 on both rows; that was wrong (the bot row
+        // of a multi-line selection routinely stops mid-row, so the
+        // wrap merge silently fell through to `\n + trim_end`,
+        // dropping the prev tail and inserting a fake newline).
+        let current_is_continuation =
+            !blockwise && grid.wrapped_at_view(abs as u16, last_view_row);
         if let Some(prev) = prev_text.take() {
             if current_is_continuation {
                 // Preserve every cell of prev — its last column was
@@ -190,7 +194,6 @@ pub fn grid_selection_text(
             }
         }
         prev_text = Some(row_text);
-        prev_is_blockwise_or_partial = !row_covers_full_width;
         if abs == bot_abs {
             break;
         }
@@ -276,6 +279,59 @@ mod selection_tests {
         assert_eq!(
             grid_selection_text(&grid, (0, 2), (4, 1), false).as_deref(),
             Some("helloworld")
+        );
+    }
+
+    // Regression for the "L3_EXECV_INVOKE log 里 control_stream_fd=N…
+    // RESUMED" copy-paste case (2026-06-17): user selects across two
+    // soft-wrapped rows, but the bot row ends mid-row.  Pre-fix, the
+    // wrap-merge required col_hi=cols-1 on the current row, so the
+    // bot row failed the gate, the merge fell through, the prev row
+    // was trim_end + `\n` joined — user saw a phantom newline and
+    // lost the prev row's trailing chars.
+    #[test]
+    fn soft_wrap_merges_when_bot_row_ends_mid_row() {
+        let mut grid = Grid::new(5, 3);
+        write_row(&mut grid, 0, "hello");
+        write_row(&mut grid, 1, "world");
+        grid.set_row_wrapped(1, true);
+        // Select hello..wor (top from col 0, bot up to col 2 only).
+        assert_eq!(
+            grid_selection_text(&grid, (0, 2), (2, 1), false).as_deref(),
+            Some("hellowor")
+        );
+    }
+
+    // Same wrap-merge semantics for a TOP row that starts mid-row.
+    #[test]
+    fn soft_wrap_merges_when_top_row_starts_mid_row() {
+        let mut grid = Grid::new(5, 3);
+        write_row(&mut grid, 0, "hello");
+        write_row(&mut grid, 1, "world");
+        grid.set_row_wrapped(1, true);
+        // Select llo + world (top from col 2 onwards).
+        assert_eq!(
+            grid_selection_text(&grid, (2, 2), (4, 1), false).as_deref(),
+            Some("lloworld")
+        );
+    }
+
+    // Trailing real spaces inside a wrapped row must NOT be trim'd:
+    // they're real content that overflowed.
+    #[test]
+    fn soft_wrap_preserves_trailing_spaces_in_prev_row() {
+        let mut grid = Grid::new(5, 3);
+        // "ab " + "cd" on the row above; the trailing space is real
+        // (parser would only wrap if col=cols-1 was occupied).  For
+        // this scenario assume col 2 is a real space, col 3+4 are
+        // "ab" – so write_row writes "ab cd" across 5 cols.
+        write_row(&mut grid, 0, "ab cd");
+        write_row(&mut grid, 1, "next!");
+        grid.set_row_wrapped(1, true);
+        // Whole selection.
+        assert_eq!(
+            grid_selection_text(&grid, (0, 2), (4, 1), false).as_deref(),
+            Some("ab cdnext!")
         );
     }
 
