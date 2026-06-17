@@ -433,6 +433,34 @@ if (( ! RUNNING )); then
   exit 0
 fi
 
+# Session-only fast path: when only marspot-session changed (no L1/L2
+# bin diff), the supervisor's SIGUSR1 path won't fire — it only
+# promotes pending/marspot-core (see L1 main.rs apply_update gate on
+# `binaries.has_pending()`).  Promote pending/marspot-session → current/
+# ourselves, then SIGTERM every running L3.  Each L3's SIGTERM handler
+# compares its rodata MARSPOT_FP to current/marspot-session's
+# fingerprint; mismatched ones execv into the new image with
+# control_stream_fd carry-across, matching ones clean-exit (then L2
+# respawns).  No L1 flash, no L2 swap — silent + lossless across the
+# L3 image bump.
+if (( STAGED )) \
+   && (( ! SHELL_CHANGED )) && (( ! CORE_CHANGED )) \
+   && (( SESSION_CHANGED )); then
+  echo "==> session-only update (L3 self-execv via SIGTERM fanout)"
+  install -m 0755 "$TREE/pending/marspot-session" "$TREE/current/marspot-session"
+  xattr -c "$TREE/current/marspot-session" 2>/dev/null || true
+  rm -f "$TREE/pending/marspot-session"
+  signalled=0
+  for pid in $(pgrep -f marspot-session 2>/dev/null); do
+    if kill -TERM "$pid" 2>/dev/null; then
+      signalled=$((signalled+1))
+    fi
+  done
+  echo "    promoted current/marspot-session; SIGTERM'd $signalled L3 pids"
+  echo "==> done."
+  exit 0
+fi
+
 if (( STAGED )); then
   echo "==> triggering silent update (window + sessions survive)"
   # Trigger ONCE up front.  Previous behaviour was to fire SIGUSR1
