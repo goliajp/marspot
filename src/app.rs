@@ -81,6 +81,12 @@ pub trait MarspotApp: 'static {
     /// behaviour override this.
     fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
 
+    /// Mouse-moved (no button) at physical-pixel `(x, y)`.  Delivered
+    /// only when the window is key and `setAcceptsMouseMovedEvents`
+    /// is true.  Default no-op — apps that want hover affordances
+    /// override this.
+    fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
+
     /// Mouse-up at physical-pixel `(x, y)`.  Default no-op.
     fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
 
@@ -469,6 +475,19 @@ declare_class!(
             dispatch_event(EventKind::MouseUp { x: x_phys, y: y_phys });
         }
 
+        #[method(mouseMoved:)]
+        fn mouse_moved(&self, event: &NSEvent) {
+            // AppKit only delivers mouseMoved: when the window is key
+            // AND setAcceptsMouseMovedEvents is true (set in
+            // build_window).  Coords match mouse_down.
+            let loc_window = unsafe { event.locationInWindow() };
+            let loc_view = self.convertPoint_fromView(loc_window, None);
+            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let x_phys = loc_view.x * scale;
+            let y_phys = loc_view.y * scale;
+            dispatch_event(EventKind::MouseMove { x: x_phys, y: y_phys });
+        }
+
         #[method(scrollWheel:)]
         fn scroll_wheel(&self, event: &NSEvent) {
             // hasPreciseScrollingDeltas distinguishes trackpads
@@ -813,6 +832,7 @@ enum EventKind {
     ImePreedit(String),
     MouseDrag { x: f64, y: f64 },
     MouseUp { x: f64, y: f64 },
+    MouseMove { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
     Resized,
     Focused(bool),
@@ -843,6 +863,7 @@ fn dispatch_event(kind: EventKind) {
             EventKind::ImePreedit(text) => app.ime_preedit_changed(ctx, &text),
             EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
             EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),
+            EventKind::MouseMove { x, y } => app.mouse_moved(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),
             EventKind::Resized => {
                 let (w, h) = ctx.inner_size_phys();
@@ -960,7 +981,11 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     window.setContentView(Some(unsafe {
         &*(Retained::as_ptr(&view) as *const NSView)
     }));
-    window.setAcceptsMouseMovedEvents(false);
+    // Mouse-moved delivery: enabled so chrome hover affordances
+    // (icon button BG darkens under cursor) update without a click.
+    // High-frequency but the dispatch path is cheap: NSView →
+    // EventKind::MouseMove → MarspotApp::mouse_moved (default no-op).
+    window.setAcceptsMouseMovedEvents(true);
     window.makeFirstResponder(Some(&view));
 
     // 3. Window delegate.

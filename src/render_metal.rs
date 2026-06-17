@@ -280,6 +280,11 @@ pub struct MetalRenderer {
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
+    /// Hovered chrome icon button, if any.  Encoded as u8 to stay
+    /// agnostic of the L2-side enum:  0 = sidebar toggle,  1 =
+    /// layout picker,  `None` = no hover.  Renderer reads this to
+    /// darken the hovered button's BG.
+    hover_chrome_btn: Option<u8>,
     /// Top inset in physical pixels — reserved for window chrome
     /// (macOS traffic-light buttons). Single-session callers (mcli)
     /// set this once at `resumed`; the convenience `render(view)`
@@ -425,6 +430,7 @@ impl MetalRenderer {
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
+            hover_chrome_btn: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -479,6 +485,7 @@ impl MetalRenderer {
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
+            hover_chrome_btn: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -486,6 +493,15 @@ impl MetalRenderer {
 
     pub fn set_window_focused(&mut self, focused: bool) {
         self.window_focused = focused;
+    }
+
+    /// L2 — set which chrome icon button (if any) is under the
+    /// cursor.  `None` clears; `Some(0)` = sidebar toggle, `Some(1)`
+    /// = layout picker.  Renderer uses this in `push_layout_chrome`
+    /// to darken the hovered button's BG.  L2's `CoreApp` calls this
+    /// from its `mouse_moved` after a chrome hit-test.
+    pub fn set_hover_chrome_btn(&mut self, h: Option<u8>) {
+        self.hover_chrome_btn = h;
     }
 
     /// Mark the next IOSurface-target render as needing a hard Clear.
@@ -706,6 +722,7 @@ impl MetalRenderer {
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             window_focused,
+            hover_chrome_btn,
             width_px,
             height_px,
             ..
@@ -721,6 +738,7 @@ impl MetalRenderer {
             sidebar,
             focused_idx,
             window_focused,
+            hover_chrome_btn,
             font,
             atlas,
             color_atlas,
@@ -835,6 +853,7 @@ impl MetalRenderer {
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             window_focused,
+            hover_chrome_btn,
             ..
         } = *self;
 
@@ -848,6 +867,7 @@ impl MetalRenderer {
             sidebar,
             focused_idx,
             window_focused,
+            hover_chrome_btn,
             font,
             atlas,
             color_atlas,
@@ -1234,6 +1254,7 @@ fn build_instances(
     sidebar: &[SidebarEntry],
     focused_idx: usize,
     window_focused: bool,
+    hover_chrome_btn: Option<u8>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -1281,6 +1302,23 @@ fn build_instances(
                 size: [layout.window_w as f32, g],
                 color,
             });
+        }
+        // Title-strip↔toolbar horizontal seam — same SEAM tone as
+        // the header↔grid hairline above, just one band up.  Splits
+        // the top chrome into the (L1-bound) version label area and
+        // the (L2-bound) icon-button toolbar.  Width math mirrors
+        // top_inset's split: title takes TITLE_STRIP_PT / HEADER_PT
+        // of the total chrome.
+        if layout.top_inset > 0.0 {
+            let title_h = (layout.top_inset as f32)
+                * (crate::TITLE_STRIP_PT / crate::HEADER_PT) as f32;
+            if title_h > 0.0 {
+                cells.push(CellInstance {
+                    origin: [0.0, title_h - g],
+                    size: [layout.window_w as f32, g],
+                    color,
+                });
+            }
         }
         // Inter-cell vertical seams.
         for c in 1..layout.grid_cols {
@@ -1369,7 +1407,7 @@ fn build_instances(
     // Floating chrome (layout button + picker overlay + close BGs
     // + add-button BG).  Drawn last so it composites over the
     // cells / sidebar.  Picker only paints when its rect is `Some`.
-    push_layout_chrome(layout, cells);
+    push_layout_chrome(layout, hover_chrome_btn, cells);
     // Close-[×] and add-[+] glyphs piggy-back on the FG (atlas)
     // pipeline so they're real font glyphs (× = U+00D7, + = U+002B)
     // — not axis-aligned rect crosses.
@@ -1788,14 +1826,37 @@ const ADD_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
 
 const SESSION_COUNT_HARD_CAP: usize = 9;
 
-fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
+/// BG fill used when the cursor is over an icon button.  Slightly
+/// darker than CHROME_BTN_BG so the hovered button "presses in" —
+/// matches modern minimal-icon-button affordances (Lucide / shadcn
+/// idiom: idle = barely-visible BG, hover = a few % deeper).
+const CHROME_BTN_BG_HOVER: [f32; 4] = [0.130, 0.140, 0.165, 1.0];
+
+fn push_layout_chrome(
+    layout: &Layout,
+    hover_chrome_btn: Option<u8>,
+    cells: &mut Vec<CellInstance>,
+) {
+    // Per-button BG: darker fill under cursor.  Cursor hover state
+    // is sent by L2 on every MouseMove and ignored when None
+    // (window unfocused or mouse outside both buttons).
+    let sidebar_bg = if hover_chrome_btn == Some(0) {
+        CHROME_BTN_BG_HOVER
+    } else {
+        CHROME_BTN_BG
+    };
+    let layout_bg = if hover_chrome_btn == Some(1) {
+        CHROME_BTN_BG_HOVER
+    } else {
+        CHROME_BTN_BG
+    };
     // Sidebar toggle button — sits left of the layout button so the
     // user always has a way back when the sidebar is collapsed.  The
     // icon's "sidebar bar" dims when collapsed (state derived from
     // sidebar_w, kept in sync by `rebuild_layout_at`) so the
     // affordance doubles as a state indicator.
     let sidebar_collapsed = layout.sidebar_w == 0.0;
-    push_rect(cells, layout.sidebar_button_rect, CHROME_BTN_BG);
+    push_rect(cells, layout.sidebar_button_rect, sidebar_bg);
     push_border(cells, layout.sidebar_button_rect, 1.0, CHROME_BTN_BORDER);
     push_sidebar_icon(
         cells,
@@ -1805,7 +1866,7 @@ fn push_layout_chrome(layout: &Layout, cells: &mut Vec<CellInstance>) {
 
     // Layout button is always present (even at 1×1); shows the
     // current grid shape so the user can tell at a glance.
-    push_rect(cells, layout.layout_button_rect, CHROME_BTN_BG);
+    push_rect(cells, layout.layout_button_rect, layout_bg);
     push_border(cells, layout.layout_button_rect, 1.0, CHROME_BTN_BORDER);
     push_grid_icon(
         cells,
@@ -3354,6 +3415,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -3443,6 +3505,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,

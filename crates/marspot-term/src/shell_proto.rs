@@ -111,6 +111,12 @@ pub enum MsgType {
     /// already-decoded text; L3 wraps it in bracketed-paste markers (if its
     /// terminal enabled the mode) and writes it to the PTY.
     Paste = 16,
+    /// shell → core: bare mouse-move (no button) at physical-pixel
+    /// `(x f64, y f64)` + zero modifier byte.  High-frequency but
+    /// cheap — L2 hit-tests against chrome rects to track hover
+    /// affordances (icon button BG darkens under cursor) and
+    /// requests a redraw only when the hover region changes.
+    MouseMove = 17,
     // ── window state (30..=49) ──
     Focus = 30,
     Resize = 31,
@@ -244,6 +250,7 @@ impl MsgType {
             14 => MsgType::Scroll,
             15 => MsgType::Preedit,
             16 => MsgType::Paste,
+            17 => MsgType::MouseMove,
             30 => MsgType::Focus,
             31 => MsgType::Resize,
             32 => MsgType::SurfaceReady,

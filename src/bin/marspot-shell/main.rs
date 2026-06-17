@@ -2262,6 +2262,12 @@ impl MarspotApp for ShellApp {
         self.send(MsgType::MouseUp, encode_mouse(x, y, 0));
     }
 
+    fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
+        // Forwarded raw — L2 hit-tests against chrome rects and
+        // ignores moves that don't change its hover region (cheap).
+        self.send(MsgType::MouseMove, encode_mouse(x, y, 0));
+    }
+
     fn scroll(&mut self, _ctx: &MarspotAppCtx, dx: f64, dy: f64, precise: bool) {
         self.send(MsgType::Scroll, encode_scroll(dx, dy, precise));
     }

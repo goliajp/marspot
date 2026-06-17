@@ -92,6 +92,25 @@ fn env_required<T: std::str::FromStr>(name: &str) -> T {
 /// Input event the reader thread converts each control-socket frame
 /// into.  The main loop drains a channel of these once per render
 /// frame and dispatches them into `CoreApp`.
+/// Which chrome icon button the cursor is hovering over.  Lives at
+/// module scope so render code can name it without a layer crossing.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ChromeBtn {
+    Sidebar,
+    Layout,
+}
+
+/// Convert the typed hover-button to the renderer's wire shape
+/// (Option<u8>, 0 = Sidebar, 1 = Layout).  Stays a free function so
+/// render-side picks up no knowledge of the L2-side enum.
+fn map_hover_to_u8(h: Option<ChromeBtn>) -> Option<u8> {
+    match h {
+        Some(ChromeBtn::Sidebar) => Some(0),
+        Some(ChromeBtn::Layout) => Some(1),
+        None => None,
+    }
+}
+
 #[derive(Debug)]
 enum CoreEvent {
     Key(MarspotKeyEvent, Modifiers),
@@ -100,6 +119,10 @@ enum CoreEvent {
     /// Coordinates are on the wire but unused — release only ends
     /// the drag (same as src/main.rs `mouse_up`).
     MouseUp,
+    /// Bare mouse-move (no button).  L2 hit-tests against chrome
+    /// rects so icon-button hover affordances update under the
+    /// cursor.  Modifier byte on the wire is currently unused.
+    MouseMove(f64, f64),
     /// `(dy_phys, precise)`; the horizontal delta is dropped at
     /// decode (terminal scrollback is vertical-only).
     Scroll(f64, bool),
@@ -165,6 +188,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .ok()
             .map(|(x, y, _)| CoreEvent::MouseDrag(x, y)),
         MsgType::MouseUp => decode_mouse(&f.payload).ok().map(|_| CoreEvent::MouseUp),
+        MsgType::MouseMove => decode_mouse(&f.payload)
+            .ok()
+            .map(|(x, y, _)| CoreEvent::MouseMove(x, y)),
         MsgType::Scroll => decode_scroll(&f.payload)
             .ok()
             .map(|(_dx, dy, p)| CoreEvent::Scroll(dy, p)),
@@ -556,6 +582,12 @@ struct CoreApp {
     layout_mode: LayoutMode,
     layout_picker_open: bool,
     sidebar_collapsed: bool,
+    /// Which chrome icon button (if any) the cursor is currently
+    /// hovering over.  Updated on every `MouseMove` frame; drives a
+    /// darker BG fill in the toolbar render.  `None` outside both
+    /// buttons.  Kept on `CoreApp` (not Layout) so mouse-move never
+    /// rebuilds the grid math.
+    hover_chrome_btn: Option<ChromeBtn>,
     ime_preedit: String,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
@@ -1266,6 +1298,21 @@ impl CoreApp {
             }
         }
         None
+    }
+
+    fn mouse_moved(&mut self, x_phys: f64, y_phys: f64) {
+        let new_hover = if self.layout.hit_test_sidebar_button(x_phys, y_phys) {
+            Some(ChromeBtn::Sidebar)
+        } else if self.layout.hit_test_layout_button(x_phys, y_phys) {
+            Some(ChromeBtn::Layout)
+        } else {
+            None
+        };
+        if new_hover != self.hover_chrome_btn {
+            self.hover_chrome_btn = new_hover;
+            self.renderer.set_hover_chrome_btn(map_hover_to_u8(new_hover));
+            self.needs_render = true;
+        }
     }
 
     fn mouse_down(&mut self, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
@@ -2051,6 +2098,7 @@ fn main() {
         layout_mode,
         layout_picker_open: false,
         sidebar_collapsed: true,
+        hover_chrome_btn: None,
         ime_preedit: String::new(),
         w_phys,
         h_phys,
@@ -2171,9 +2219,18 @@ fn main() {
                 CoreEvent::MouseDown(x, y, mods) => app.mouse_down(x, y, mods),
                 CoreEvent::MouseDrag(x, y) => app.mouse_drag(x, y),
                 CoreEvent::MouseUp => app.mouse_up(),
+                CoreEvent::MouseMove(x, y) => app.mouse_moved(x, y),
                 CoreEvent::Scroll(dy, precise) => app.scroll(dy, precise),
                 CoreEvent::Focus(focused) => {
                     app.renderer.set_window_focused(focused);
+                    // No mouseMoved deliveries while the window
+                    // isn't key — drop any latched hover so the
+                    // affordance doesn't linger when the user
+                    // alt-tabs away mid-hover.
+                    if !focused && app.hover_chrome_btn.is_some() {
+                        app.hover_chrome_btn = None;
+                        app.renderer.set_hover_chrome_btn(None);
+                    }
                     app.needs_render = true;
                 }
                 CoreEvent::Preedit(text) => app.preedit(text),
