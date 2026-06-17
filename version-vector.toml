@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.2.12"   # L1
-core    = "0.3.2"    # L2 — Amendment 12: L3Conn::Drop no-op (Cmd-Q survives)
-session = "0.3.2"    # L3 — Amendment 13: restore TERM/COLORTERM/ZDOTDIR env
+core    = "0.3.4"    # L2 — Amendment 14 v2: frame-based RequestSelfUpdate fanout (post-mortem of SIGUSR2)
+session = "0.3.4"    # L3 — Amendment 14 v2: frame-driven execv + /tmp manifest (env clean, forward-compat)

@@ -239,6 +239,26 @@ fn l3_reader_loop(
                         let _ = selection_tx.send(reply);
                     }
                 }
+                // RFC-003 §6 Amendment 14 — L3 confirmed it's about to
+                // execv.  Pure observability: the control channel
+                // will EOF within ms; pane.poll's try_wait notices
+                // (the PID is preserved across execv, so it stays
+                // alive).  Log + carry on.
+                MsgType::SelfUpdateAck => {
+                    lx_event!(
+                        "L3_SELF_UPDATE_ACK",
+                        "L3 acked RequestSelfUpdate; will execv momentarily"
+                    );
+                }
+                MsgType::SelfUpdateDecline => {
+                    let reason =
+                        marspot_term::shell_proto::decode_self_update_decline(&f.payload);
+                    lx_event!(
+                        "L3_SELF_UPDATE_DECLINE",
+                        "L3 declined RequestSelfUpdate",
+                        reason = reason
+                    );
+                }
                 _ => {}
             },
             Ok(None) | Err(_) => return,
@@ -736,11 +756,24 @@ impl CoreApp {
     /// click-to-swap affordance for it.  Skips panes already swapping or
     /// exited.  Behind `MARSPOT_L3=1` (no L3 panes otherwise → no-op).
     fn swap_idle_l3(&mut self) {
-        // A session-only live update (SIGUSR2) staged a new engine in
-        // pending/; promote it into current/ first so each replacement L3
-        // (spawned from core's sibling = current/marspot-session) boots the
-        // new binary.  A no-op if nothing's staged — then this is a plain
-        // re-spawn of the same engine (still useful as a manual refresh).
+        // RFC-003 §6 Amendment 14 — under L3-owns-PTY, an L3 can no
+        // longer be "replaced" by spawning a parallel process: the
+        // PTY master fd, shell child, and bytelog all live inside it,
+        // and killing the old one to adopt the new one would kill the
+        // user's shell.  Instead L3 silently `execv`s into the new
+        // binary in-place, keeping its inherited fds + PID.
+        //
+        // The trigger is the `RequestSelfUpdate` control-channel
+        // frame, NOT SIGUSR2 — signals had a fatal flaw: an older L3
+        // binary lacking the handler defaulted to TERM and was killed
+        // (see the 2026-06-17 post-mortem).  Frame-based triggers are
+        // silently dropped by `Frame::read_from`'s forward-compat
+        // path, so a peer that doesn't speak this variant is
+        // unharmed.
+        //
+        // Promote first so each L3's `execv` target — its own binary's
+        // path resolved via `BinaryTree::default_for("marspot-session").current()`
+        // — points at the just-staged image rather than the prior one.
         match marspot::updater::promote_pending_session() {
             Ok(true) => lx_event!(
                 "SESSION_PROMOTE",
@@ -749,22 +782,24 @@ impl CoreApp {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
-        // L2/L3 updates are user-invisible by design: idle panes promote
-        // silently when the replacement's grid mirror matches; focused
-        // panes used to defer behind a ↻ refresh affordance, but the
-        // swap is structurally atomic — both old and new L3 subscribe to
-        // the same shelld session, the bytelog replay reconstructs an
-        // identical grid, and the visible mirror only flips on the next
-        // `try_promote` call (one render frame). So we begin the swap
-        // for every pane unconditionally and let `try_promote` make the
-        // switch when the new L3's grid is steady.
-        for i in 0..self.panes.len() {
-            let pane = &self.panes[i];
-            if !pane.is_l3() || pane.is_exited() || pane.session().is_l3_swapping() {
+        let mut requested = 0usize;
+        let mut socket_failed = 0usize;
+        for pane in &mut self.panes {
+            if !pane.is_l3() || pane.is_exited() {
                 continue;
             }
-            self.begin_pane_swap(i);
+            if pane.session_mut().request_l3_self_update() {
+                requested += 1;
+            } else {
+                socket_failed += 1;
+            }
         }
+        lx_event!(
+            "L3_EXECV_FANOUT",
+            "RequestSelfUpdate fanned out to L3 sessions",
+            n_requested = requested,
+            n_socket_failed = socket_failed
+        );
     }
 
     /// Call right before moving focus to `new_idx`: if the currently-
@@ -1781,16 +1816,24 @@ fn main() {
     // exact id.  `MARSPOT_L3=0` opts back out to the in-process shelld grid
     // (kept as the escape hatch + the fallback if every L3 spawn fails).
     let l3_mode = std::env::var("MARSPOT_L3").as_deref() != Ok("0");
+    // RFC-003 §6 Amendment 14: did the boot promote a fresh marspot-
+    // session binary?  If yes, fan SIGUSR2 out to every reattached L3
+    // after the reattach loop so existing children also pick up the
+    // new image via execv self-update (not just freshly-spawned ones).
+    let mut session_binary_freshly_promoted = false;
     if l3_mode {
         // A core update lands the new session engine in pending/; promote
         // it into current/ before spawning so each L3 (resolved as core's
         // sibling = current/marspot-session in an installed app) boots the
         // new binary in lockstep with this core.
         match marspot::updater::promote_pending_session() {
-            Ok(true) => lx_event!(
-                "SESSION_PROMOTE",
-                "promoted staged marspot-session → current/ at boot"
-            ),
+            Ok(true) => {
+                session_binary_freshly_promoted = true;
+                lx_event!(
+                    "SESSION_PROMOTE",
+                    "promoted staged marspot-session → current/ at boot"
+                );
+            }
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
         }
@@ -1875,6 +1918,39 @@ fn main() {
             dead = dead,
             want = n_sessions
         );
+        // RFC-003 §6 Amendment 14: if boot promoted a new session
+        // binary, ask every reattached L3 to execv into it.  Skipped
+        // for freshly-allocated ids — those L3s will spawn straight
+        // into the new binary below.  Frame-based (RequestSelfUpdate)
+        // so older L3 builds that don't speak the variant ignore it
+        // safely (post-mortem reason this isn't SIGUSR2 anymore).
+        if session_binary_freshly_promoted && !reattached_ids.is_empty() {
+            let mut requested = 0usize;
+            let mut socket_failed = 0usize;
+            for pane in &mut panes {
+                if !pane.is_l3() {
+                    continue;
+                }
+                let Some(sid) = pane.session().l3_session_id() else {
+                    continue;
+                };
+                if !reattached_ids.contains(&sid) {
+                    continue;
+                }
+                if pane.session_mut().request_l3_self_update() {
+                    requested += 1;
+                } else {
+                    socket_failed += 1;
+                }
+            }
+            lx_event!(
+                "L3_EXECV_BOOT_FANOUT",
+                "RequestSelfUpdate sent to reattached L3s after boot session promote",
+                n_requested = requested,
+                n_socket_failed = socket_failed,
+                n_reattached = reattached_ids.len()
+            );
+        }
         // Allocate fresh ids for the rest.
         let mut ids: Vec<u64> = Vec::new();
         while panes.len() + ids.len() < n_sessions {

@@ -19,6 +19,7 @@
 //! drops, the entry and the sock file both go.
 
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
@@ -42,6 +43,17 @@ pub struct SessionListener {
     #[allow(dead_code)]
     socket_path: PathBuf,
     accept_thread: Option<JoinHandle<()>>,
+    /// RFC-003 §6 Amendment 14 — a duplicate of the bound listener fd
+    /// kept here (the original moved into the accept thread via
+    /// `try_clone`).  The execv self-update path needs to publish the
+    /// listener fd into the new image's env, so it must be reachable
+    /// from outside the accept thread; both ends close on Drop.
+    keep_listener: Option<UnixListener>,
+    /// RFC-003 §6 Amendment 14 — when true, Drop is a no-op:
+    /// `prepare_for_execv` flips this so the kept listener fd, the
+    /// on-disk sock, and the registry entry all survive the image
+    /// swap (new image inherits the fd and adopts the entry as-is).
+    suppress_drop: bool,
 }
 
 impl SessionListener {
@@ -64,13 +76,17 @@ impl SessionListener {
 
         let socket_path = session_socket_path(id);
         let listener = UnixListener::bind(&socket_path)?;
+        // Clone before moving into the accept thread: one fd for the
+        // thread to accept() on, one for us to keep so execv handoff
+        // can pull the raw fd out without going through the thread.
+        let listener_for_thread = listener.try_clone()?;
         // Non-blocking accept would let us share a thread with the
         // main loop, but for now a dedicated accept thread keeps the
         // surface simple. One thread per connection is fine at the
         // L3 scale of <100 clients ever.
         let accept_thread = thread::Builder::new()
             .name(format!("l3-uds-accept-{id}"))
-            .spawn(move || accept_loop(id, listener, ev_tx))?;
+            .spawn(move || accept_loop(id, listener_for_thread, ev_tx))?;
 
         let entry = SessionEntry {
             id,
@@ -105,7 +121,67 @@ impl SessionListener {
             id,
             socket_path,
             accept_thread: Some(accept_thread),
+            keep_listener: Some(listener),
+            suppress_drop: false,
         })
+    }
+
+    /// RFC-003 §6 Amendment 14 — adopt an inherited UDS listener fd
+    /// after an L3 execv handoff.  No `bind`, no `write_session_entry`:
+    /// the sock file is still on disk (the pre-execv image's
+    /// `suppress_drop` keeps it intact), entry.toml's pid is still
+    /// ours (PID is preserved across execv), so we just spawn a fresh
+    /// accept loop on the inherited fd and return.
+    pub fn from_handoff(
+        id: u64,
+        raw_fd: RawFd,
+        ev_tx: Sender<crate::SessionEvent>,
+    ) -> io::Result<Self> {
+        // SAFETY: caller asserts `raw_fd` is a live UnixListener fd
+        // inherited across execv (CLOEXEC was cleared by the pre-execv
+        // image's `prepare_for_execv`).
+        let listener = unsafe { UnixListener::from_raw_fd(raw_fd) };
+        let listener_for_thread = listener.try_clone()?;
+        let accept_thread = thread::Builder::new()
+            .name(format!("l3-uds-accept-{id}"))
+            .spawn(move || accept_loop(id, listener_for_thread, ev_tx))?;
+        Ok(Self {
+            id,
+            socket_path: session_socket_path(id),
+            accept_thread: Some(accept_thread),
+            keep_listener: Some(listener),
+            suppress_drop: false,
+        })
+    }
+
+    /// RFC-003 §6 Amendment 14 — prep this listener for the L3 execv
+    /// self-update.  Clears `FD_CLOEXEC` on the kept fd so the new
+    /// image inherits it, sets `suppress_drop` so the on-disk sock +
+    /// registry entry survive when our Drop runs (which it will, the
+    /// listener is dropped after `prepare` returns), and returns the
+    /// raw fd number to publish in the handoff env vars.
+    pub fn prepare_for_execv(&mut self) -> io::Result<RawFd> {
+        let listener = self
+            .keep_listener
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    "prepare_for_execv: no kept listener",
+                )
+            })?;
+        let fd = listener.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        self.suppress_drop = true;
+        Ok(fd)
     }
 
     #[allow(dead_code)] // used by Phase 2d test helpers
@@ -121,6 +197,20 @@ impl SessionListener {
 
 impl Drop for SessionListener {
     fn drop(&mut self) {
+        if self.suppress_drop {
+            // RFC-003 §6 Amendment 14 — execv handoff in progress.
+            // The new image inherits the kept listener fd + the
+            // on-disk sock + entry.toml as-is; we MUST NOT unbind or
+            // delete anything here.  Leak the UnixListener so its own
+            // Drop doesn't close the fd before execv runs.
+            if let Some(l) = self.keep_listener.take() {
+                std::mem::forget(l);
+            }
+            if let Some(h) = self.accept_thread.take() {
+                std::mem::drop(h);
+            }
+            return;
+        }
         // Best-effort tear-down. delete_session removes the whole
         // per-session dir (entry.toml + sock + bytelog). A
         // crashed-not-cleanly-dropped L3 leaves all three behind; L2

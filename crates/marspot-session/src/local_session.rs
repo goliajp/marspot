@@ -18,6 +18,7 @@
 //! exercises spawn → write → pump → exit standalone.
 
 use std::io;
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -290,6 +291,119 @@ impl LocalSession {
     /// vec-returning shape so caller code is identical.
     pub fn take_pending_scrollback_pages(&mut self) -> Vec<PendingPage> {
         std::mem::take(&mut self.pending_scrollback_pages)
+    }
+
+    /// RFC-003 §6 Amendment 14 — L3 execv self-update support.
+    ///
+    /// Reconstruct a LocalSession on top of an already-running PTY +
+    /// shell child that we inherited across `execv`.  No fork, no
+    /// `Pty::spawn` — the pair (master_fd, child_pid) is handed in by
+    /// the pre-execv image via the handoff env vars; PID is preserved
+    /// across `execv` so the shell at the other end of the master fd
+    /// keeps living through the image swap.
+    ///
+    /// The Terminal value carries the serialized grid/cursor/mode
+    /// state the new image must adopt (so the L2 mirror doesn't blink
+    /// to an empty grid between the swap and the next PTY burst).
+    /// Bytelog is re-opened by id — the file on disk is untouched.
+    ///
+    /// Mirrors the reader-thread shape of `spawn` exactly so the rest
+    /// of the L3 main loop is identical after this returns.
+    pub fn from_handoff<W>(
+        id: u64,
+        master_fd: RawFd,
+        child_pid: i32,
+        cols: u16,
+        rows: u16,
+        terminal: Terminal,
+        wake: W,
+    ) -> io::Result<Self>
+    where
+        W: Fn() + Send + 'static,
+    {
+        let pty = Pty::from_raw_master(master_fd, child_pid);
+        let pty = Arc::new(pty);
+
+        // Re-open the bytelog at append.  Pre-execv writes already
+        // landed on disk; the new image appends from here on.
+        let bytelog = ByteLog::open(id).ok();
+
+        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let pty_reader = Arc::clone(&pty);
+        let exited_writer = Arc::clone(&exited);
+        thread::Builder::new()
+            .name(format!("l3-pty-reader-{id}"))
+            .spawn(move || {
+                let mut buf = vec![0u8; READ_BUF_BYTES];
+                loop {
+                    let n = match pty_reader.read_shared(&mut buf) {
+                        Ok(0) => 0,
+                        Ok(n) => n,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(e) if e.raw_os_error() == Some(libc::EIO) => 0,
+                        Err(_) => 0,
+                    };
+                    if n == 0 {
+                        exited_writer.store(true, Ordering::SeqCst);
+                        wake();
+                        break;
+                    }
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            })
+            .expect("spawn l3-pty-reader thread");
+
+        Ok(Self {
+            id,
+            pty,
+            child_pid,
+            terminal,
+            bytelog,
+            rx,
+            exited,
+            last_output: None,
+            pending_scrollback_pages: Vec::new(),
+            cols,
+            rows,
+        })
+    }
+
+    /// RFC-003 §6 Amendment 14 — disassemble for `execv` handoff.
+    ///
+    /// Returns the bits the new image needs to reconstruct via
+    /// `from_handoff`: (master_fd, child_pid, terminal, cols, rows).
+    ///
+    /// `mem::forget`s the rest of Self so:
+    ///   * `Pty::Drop` does NOT SIGHUP the shell child — the running
+    ///     zsh must survive the image swap, that's the whole point.
+    ///   * The reader thread's `Arc<Pty>` + `tx` are orphaned — the
+    ///     subsequent `execv` kills the thread and discards the heap,
+    ///     so no real leak (the OS reclaims everything).
+    ///
+    /// Caller should `pump()` once right before this so any bytes the
+    /// reader has already queued are folded into the Terminal that
+    /// gets serialized; otherwise those bytes are lost in the swap.
+    pub fn extract_for_handoff(self) -> (RawFd, i32, Terminal, u16, u16) {
+        let master_fd = self.pty.raw_master();
+        let child_pid = self.child_pid;
+        let cols = self.cols;
+        let rows = self.rows;
+        // SAFETY: `ptr::read` the Terminal out, then `mem::forget` the
+        // surrounding Self so its Drop (which would drop everything,
+        // including the duplicate Terminal we just moved out) never
+        // runs.  Standard "destructure a !Copy struct without Drop"
+        // pattern.
+        let terminal = unsafe {
+            let t = std::ptr::read(&self.terminal);
+            std::mem::forget(self);
+            t
+        };
+        (master_fd, child_pid, terminal, cols, rows)
     }
 }
 
