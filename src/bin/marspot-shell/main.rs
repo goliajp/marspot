@@ -641,26 +641,6 @@ impl SurfacePair {
     }
 }
 
-/// A silent update in flight.  The shell promotes the new binary,
-/// spawns a `pending` core into a *fresh* IOSurface pair, and lets it
-/// rebuild the screen off-screen (from shelld's bytelog) while the
-/// `active` core keeps rendering the surface the user is looking at.
-/// Once the pending core has HelloAck'd, reported its surface ready,
-/// and survived probation, the shell atomic-swaps the presenter to the
-/// new pair and retires the old core — no flash, because both pairs
-/// carry identical content.  On any failure the pending core is killed
-/// and the binary rolled back; the user never sees a glitch.
-struct PendingUpdate {
-    /// The probationary core, rendering into `surfaces`.
-    conn: CoreConn,
-    /// The fresh IOSurface pair the pending core draws into.  Becomes
-    /// the displayed pair on a successful swap; released on abort.
-    surfaces: SurfacePair,
-    /// True once the pending core confirmed `SurfaceReady` for one of
-    /// the pair's ids — proof it can actually render.
-    surface_ready: bool,
-}
-
 struct ShellApp {
     proxy: EventProxy,
     /// Currently-displayed IOSurface pair — the presenter samples
@@ -674,15 +654,10 @@ struct ShellApp {
     pending_surfaces: Option<SurfacePair>,
     presenter: Option<ShellPresenter>,
     /// The live core: child process, control socket (both directions),
-    /// and liveness-handshake state, aggregated into `CoreConn` so a
-    /// second one (`pending`) can be held during a flash-free
-    /// silent-update swap.  `None` before the first spawn and in the
-    /// brief gap between a crash and the respawn.
+    /// and liveness-handshake state aggregated into `CoreConn`.
+    /// `None` before the first spawn and in the brief gap between a
+    /// crash (or single-core swap retirement) and the respawn.
     active: Option<CoreConn>,
-    /// A silent update on probation: a second core rendering the same
-    /// screen into its own surface, waiting to be swapped in.  `None`
-    /// outside an update.  Present iff `sup_state` is `Probation`.
-    pending: Option<PendingUpdate>,
     /// True after the core has confirmed at least one SurfaceReady.
     /// Until then `redraw` skips `present()` so the user sees the
     /// NSWindow's BG colour (font_cache::BG) instead of an unfilled
@@ -827,7 +802,6 @@ impl ShellApp {
             pending_surfaces: None,
             presenter: None,
             active: None,
-            pending: None,
             first_frame_ready: false,
             redraw_thread_started: false,
             frame_pending: false,
@@ -1120,187 +1094,114 @@ impl ShellApp {
         }
     }
 
-    /// Begin a flash-free silent update.  Promote `pending/marspot-core`
-    /// to `current/`, then spawn a **pending** core into a *fresh*
-    /// IOSurface — WITHOUT touching the active core.  The active core
-    /// keeps rendering the surface the user sees; the pending core
-    /// rebuilds the same screen off-screen from shelld's bytelog.  When
-    /// it proves out (HelloAck + SurfaceReady + probation) the presenter
-    /// atomic-swaps to the new surface (`promote_pending_to_active`); on
-    /// failure it's killed and the binary rolled back, all unseen.
+    /// Apply a pending L2 update via **single-core in-place swap**.
     ///
-    /// Returns `true` if a pending update was started; `false` (no-op)
-    /// when there's no pending binary or one is already in flight.
+    /// History: this used to run a dual-core probation pattern —
+    /// active + pending L2 in parallel for 30 s, presenter atom-swaps
+    /// to pending if it survives probation.  That assumed pending +
+    /// active could share L3 control connections (the L4-shelld model
+    /// where shelld was a multi-consumer broker).  RFC-003 made L3
+    /// single-client: as soon as pending core's UDS hello reaches L3,
+    /// L3 closes the previous client (= active core).  Result for the
+    /// full probation window: active core has dead L3 control sockets,
+    /// L1 still routes input to active, every keystroke drops on the
+    /// floor.  The user sees panes (active still reads grid shm) but
+    /// can't type.
+    ///
+    /// L3 self-execv + state.bin reattach (RFC-003) means each L3
+    /// survives any L2 swap on its own.  We don't need probation as a
+    /// warm-up net — just swap atomically: kill active, spawn new from
+    /// promoted current/, the new core reattaches via registry.  The
+    /// only visible cost is the ~200-500 ms gap from old-core-down to
+    /// new-core's first SurfaceReady; the IOSurface pair is reused, so
+    /// no presenter handshake is required.
+    ///
+    /// Returns `true` if a swap was performed; `false` (no-op) when
+    /// there's nothing to promote or the supervisor isn't Idle.
     fn apply_pending_update(&mut self, ctx: &MarspotAppCtx) -> bool {
-        if !matches!(self.sup_state, SupervisorState::Idle) || self.pending.is_some() {
+        if !matches!(self.sup_state, SupervisorState::Idle) {
             return false;
         }
-        // Task C: shell-self-update has precedence over core update —
-        // a pending shell binary means the supervisor itself wants to
-        // turn over, which implies the renderer probably wants
-        // turning over too (the shell + core release together).
-        // Detecting + promoting the shell's pending here means a
-        // single focus-loss handles both.
+        // Shell self-update has precedence: pending L1 means the
+        // supervisor itself wants to turn over, which implies the
+        // renderer probably wants turning over too.  Doing it first
+        // means a single focus-loss / SIGUSR1 handles both layers.
         if self.try_apply_shell_self_update(ctx.window_frame_pt()) {
-            // We exec'd; this function call's stack frame is gone.
-            // Returning here only happens if exec failed.
+            // We exec'd; this stack frame is gone.  Returning here
+            // only happens if exec failed.
             return false;
         }
         if !self.binaries.has_pending() {
             return false;
         }
-        // Size the pending core's surface pair to the displayed one.
-        let (w_px, h_px) = match self.surfaces.as_ref() {
-            Some(s) => (s.width(), s.height()),
+        let (w_px, h_px, front_id, back_id) = match self.surfaces.as_ref() {
+            Some(s) => {
+                let (f, b) = s.ids();
+                (s.width(), s.height(), f, b)
+            }
             None => {
                 lx_warn!(
                     "shell.apply_update.no_surface",
-                    "no displayed surface to match"
+                    "no displayed surface to swap onto"
                 );
                 return false;
             }
         };
-        lx_event!("UPDATE_APPLY", "starting dual-core update");
-        sup_log::log("UPDATE_APPLY", "promoting pending → current (dual-core)");
+        let scale = ctx.scale();
+
+        lx_event!("UPDATE_APPLY", "starting single-core in-place swap");
+        sup_log::log(
+            "UPDATE_APPLY",
+            "promoting pending → current (single-core swap)",
+        );
         if let Err(e) = self.binaries.promote_pending() {
             lx_event!(
                 "UPDATE_FAIL",
-                "promote_pending failed; leaving active core untouched",
+                "promote_pending failed; active core untouched",
                 error = format!("{e}")
             );
             sup_log::log("UPDATE_FAIL", &format!("promote_pending: {e}"));
             return false;
         }
-        // Fresh pair for the pending core — the active core's pair
-        // (self.surfaces) is left completely alone, so the user sees no
-        // change while the new core warms up.
-        let new_pair = match SurfacePair::create(w_px, h_px) {
-            Ok(p) => p,
-            Err(e) => {
-                lx_event!(
-                    "UPDATE_FAIL",
-                    "pending SurfacePair::create failed",
-                    error = format!("{e}")
-                );
-                sup_log::log("UPDATE_FAIL", &format!("pair create: {e}"));
-                self.rollback_binary("pair create failed");
-                return false;
-            }
-        };
-        let scale = ctx.scale();
-        let (front_id, back_id) = new_pair.ids();
-        let conn = match self.spawn_core(front_id, back_id, w_px, h_px, scale) {
+        // Tear down the active core BEFORE spawning the new one: its
+        // L3 control connections (one per pane) must be closed before
+        // the new core's hello reaches L3, otherwise L3 sees a brief
+        // window where the new client kicks the old (same race that
+        // motivated this rewrite — it's harmless here but cleaner to
+        // make the ordering explicit).  shutdown_active blocks until
+        // the active core process is reaped.
+        self.shutdown_active("retiring active for single-core swap (UPDATE_SWAP)");
+        // Spawn the new active onto the SAME IOSurface pair.  L1 still
+        // holds a ref so the surfaces stay alive across the gap; the
+        // new core's IOSurfaceLookup at boot finds them.  No presenter
+        // handshake needed.
+        self.active = match self.spawn_core(front_id, back_id, w_px, h_px, scale) {
             Some(c) => {
                 self.record_core_boot();
-                c
+                Some(c)
             }
             None => {
-                lx_event!("UPDATE_FAIL", "spawn pending core failed");
-                sup_log::log("UPDATE_FAIL", "spawn pending core");
-                new_pair.release();
-                self.rollback_binary("spawn pending core failed");
+                lx_event!("UPDATE_FAIL", "spawn new active failed");
+                sup_log::log("UPDATE_FAIL", "spawn new active");
+                self.rollback_binary("spawn new active failed");
                 return false;
             }
         };
-        self.pending = Some(PendingUpdate {
-            conn,
-            surfaces: new_pair,
-            surface_ready: false,
-        });
-        // The core doesn't auto-emit SurfaceReady for its initial
-        // env-var pair — send a SurfaceAttach to drive it.  Same dims
-        // here (no resize); this is purely the handshake trigger that
-        // tells the pending core "go render, ack when ready", which is
-        // the second promotion gate.
-        if let Some(p) = self.pending.as_ref() {
-            let (f, b) = p.surfaces.ids();
-            p.conn.send(
-                MsgType::SurfaceAttach,
-                encode_surface_attach(f, b, w_px as f64, h_px as f64, scale),
-            );
-        }
-        self.sup_state = SupervisorState::Probation {
-            started_at: std::time::Instant::now(),
-        };
-        true
-    }
-
-    /// Atomic-swap the presenter onto the pending core's surface, retire
-    /// the old active core, and promote pending → active.  Both surfaces
-    /// carry identical content (same shelld bytelog), so the swap is
-    /// invisible.  Called once the pending core has cleared probation.
-    fn promote_pending_to_active(&mut self) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
-        let PendingUpdate {
-            conn,
-            surfaces: new_pair,
-            ..
-        } = pending;
-        // Point the presenter at the new pair.  The next present()
-        // samples it; until then the old pair is still shown.
-        if let Some(p) = self.presenter.as_mut() {
-            if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
-                // Swap failed — keep the active core + its pair, kill
-                // the pending core, and roll the binary back.  The user
-                // never saw anything change.
+        // Commit the update — drop the rollback target.
+        match self.binaries.finalize_stable() {
+            Ok(()) => sup_log::log("UPDATE_STABLE", "single-core swap; prev/ deleted"),
+            Err(e) => {
                 lx_event!(
-                    "UPDATE_FAIL",
-                    "promote set_pair failed; keeping active core",
+                    "FINALIZE_FAIL",
+                    "finalize_stable failed",
                     error = format!("{e}")
                 );
-                sup_log::log("UPDATE_FAIL", &format!("set_pair: {e}"));
-                new_pair.release();
-                conn.shutdown();
-                self.rollback_binary("set_pair failed");
-                self.sup_state = SupervisorState::Idle;
-                return;
-            }
-        }
-        // Release the old displayed pair, install the new one.  Any
-        // in-flight resize pair is now stale (resize aborts pending
-        // updates, so this is belt-and-suspenders) — drop it too.
-        if let Some(old) = self.surfaces.take() {
-            old.release();
-        }
-        if let Some(stale) = self.pending_surfaces.take() {
-            stale.release();
-        }
-        self.surfaces = Some(new_pair);
-        self.first_frame_ready = true;
-        // Retire the old active core; the pending core becomes active.
-        self.shutdown_active("retired by promoted pending core (UPDATE_SWAP)");
-        self.active = Some(conn);
-        // The update is committed — drop the rollback target.
-        match self.binaries.finalize_stable() {
-            Ok(()) => sup_log::log("UPDATE_STABLE", "dual-core swap; prev/ deleted"),
-            Err(e) => {
-                lx_event!("FINALIZE_FAIL", "finalize_stable failed", error = format!("{e}"));
                 sup_log::log("FINALIZE_FAIL", &format!("{e}"));
             }
         }
-        lx_event!(
-            "UPDATE_SWAP",
-            "dual-core swap complete — pending promoted to active"
-        );
-        sup_log::log("UPDATE_SWAP", "presenter → new surface; pending → active");
-    }
-
-    /// Abort an in-flight pending update: kill the pending core, release
-    /// its surface, and roll the binary back.  The active core and its
-    /// surface are untouched — the user sees nothing.  No-op if there's
-    /// no pending update.
-    fn abort_pending_update(&mut self, reason: &str) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
-        let PendingUpdate { conn, surfaces, .. } = pending;
-        conn.shutdown();
-        surfaces.release();
-        lx_event!("UPDATE_ABORT", "aborting pending update", reason = reason);
-        sup_log::log("UPDATE_ABORT", reason);
-        self.rollback_binary(reason);
+        lx_event!("UPDATE_SWAP", "single-core swap complete");
+        sup_log::log("UPDATE_SWAP", "active → new binary; old core retired");
+        true
     }
 
     /// Roll `current/marspot-core` back to `prev/` after a failed
@@ -1364,11 +1265,6 @@ impl ShellApp {
         // IOSurface is released.  Anything left would be inherited as
         // dangling fds in the new process — clean now.
         self.shutdown_active("shell self-update execv prep");
-        if let Some(pending) = self.pending.take() {
-            let PendingUpdate { conn, surfaces, .. } = pending;
-            conn.shutdown();
-            surfaces.release();
-        }
         if let Some(s) = self.surfaces.take() {
             s.release();
         }
@@ -1609,33 +1505,15 @@ impl ShellApp {
                 c.child.take();
             }
             self.record_crash();
-            // If an update was on probation, the *visible* core just
-            // died — abandon the unproven pending core and restore the
-            // user's core from current/.
-            if self.pending.is_some() {
-                lx_event!(
-                    "CORE_GONE",
-                    "active core died mid-update → aborting pending update"
-                );
-                self.abort_pending_update("active core exited during pending update");
-                self.sup_state = SupervisorState::Idle;
-            } else {
-                lx_event!(
-                    "CORE_GONE",
-                    "active core exited unexpectedly → restarting"
-                );
-            }
+            lx_event!(
+                "CORE_GONE",
+                "active core exited unexpectedly → restarting"
+            );
             self.restart_core(ctx);
             return;
         }
 
-        // 2. Drive any in-flight silent update.  Crash / HELLO-timeout /
-        //    hang → abort + rollback (active untouched);  HelloAck +
-        //    SurfaceReady + probation elapsed → atomic swap.  Leaves
-        //    sup_state Idle when it resolves.
-        self.poll_pending_update();
-
-        // 3. Active HELLO timeout.
+        // 2. Active HELLO timeout.
         let hello_timed_out = self
             .active
             .as_ref()
@@ -1652,7 +1530,7 @@ impl ShellApp {
             return;
         }
 
-        // 4. Time to send the next ping?  Mutate the conn first, then
+        // 3. Time to send the next ping?  Mutate the conn first, then
         // send (which borrows `self` immutably) with the new nonce.
         let now = Instant::now();
         let ping_nonce = self.active.as_mut().and_then(|c| {
@@ -1668,7 +1546,7 @@ impl ShellApp {
             self.send(MsgType::Ping, encode_ping(nonce));
         }
 
-        // 5. Pong deadline → hung.
+        // 4. Pong deadline → hung.
         let pong_timed_out = self
             .active
             .as_ref()
@@ -1684,7 +1562,7 @@ impl ShellApp {
             self.restart_core(ctx);
         }
 
-        // 7. Manual update trigger via SIGUSR1.  Lets a CLI invoke
+        // 5. Manual update trigger via SIGUSR1.  Lets a CLI invoke
         // `kill -USR1 $(pgrep marspot-shell)` to apply a staged
         // update on demand instead of waiting for focus-loss.
         if SIGUSR1_FLAG.swap(false, Ordering::AcqRel) {
@@ -1699,98 +1577,10 @@ impl ShellApp {
             }
         }
 
-        // 6. Recompute the banner once per tick — whatever
+        // 6. Recompute the banner once per tick — whatever (no-op if nothing changed).
         // transition happened above, the visible banner should
         // reflect it.
         self.refresh_banner(ctx);
-    }
-
-    /// Drive an in-flight silent update (`self.pending`).  No-op when
-    /// there's no pending update.  Resolves to either an atomic swap
-    /// (`promote_pending_to_active`) or an abort + rollback, and in
-    /// both cases returns `sup_state` to `Idle`.
-    ///
-    /// The pending core gets the same liveness gauntlet as the active
-    /// one — child-exit, HELLO timeout, and PONG-deadline (we ping it
-    /// during probation) — so a binary that boots but is broken or
-    /// hangs is caught and rolled back *before* it's ever shown.
-    fn poll_pending_update(&mut self) {
-        if self.pending.is_none() {
-            return;
-        }
-        let now = Instant::now();
-
-        // a. Pending child exited, or was killed by a HELLO mismatch
-        //    (child taken → None) → abort.
-        let pending_dead = match self.pending.as_mut() {
-            Some(p) => match p.conn.child.as_mut() {
-                Some(c) => matches!(c.try_wait(), Ok(Some(_))),
-                None => true, // child already gone (mismatch kill)
-            },
-            None => false,
-        };
-        if pending_dead {
-            // Note: a pending-core death does NOT count toward the
-            // active core's crash budget — it never touched the user.
-            // It just fails this update; the rolled-back binary won't be
-            // retried until the updater re-stages pending/.
-            self.abort_pending_update("pending core exited during probation");
-            self.sup_state = SupervisorState::Idle;
-            return;
-        }
-
-        // b. Pending HELLO timeout.
-        let hello_timeout = self
-            .pending
-            .as_ref()
-            .map(|p| !p.conn.hello_acked && p.conn.spawned_at.elapsed() > HELLO_TIMEOUT)
-            .unwrap_or(false);
-        if hello_timeout {
-            self.abort_pending_update("pending core HELLO timeout");
-            self.sup_state = SupervisorState::Idle;
-            return;
-        }
-
-        // c. Pending hung after handshake (PONG deadline).
-        let pong_timeout = self
-            .pending
-            .as_ref()
-            .map(|p| p.conn.hello_acked && now.duration_since(p.conn.last_pong_at) > PONG_DEADLINE)
-            .unwrap_or(false);
-        if pong_timeout {
-            self.abort_pending_update("pending core PONG timeout (hung)");
-            self.sup_state = SupervisorState::Idle;
-            return;
-        }
-
-        // d. Ping the pending core so (c) can catch a hang.
-        let ping_nonce = self.pending.as_mut().and_then(|p| {
-            if p.conn.hello_acked && now >= p.conn.next_ping_at {
-                p.conn.last_ping_nonce = p.conn.last_ping_nonce.wrapping_add(1);
-                p.conn.next_ping_at = now + PING_INTERVAL;
-                Some(p.conn.last_ping_nonce)
-            } else {
-                None
-            }
-        });
-        if let Some(nonce) = ping_nonce {
-            if let Some(p) = self.pending.as_ref() {
-                p.conn.send(MsgType::Ping, encode_ping(nonce));
-            }
-        }
-
-        // e. Ready to promote?  HelloAck + SurfaceReady + probation
-        //    elapsed → atomic swap.
-        let ready = self
-            .pending
-            .as_ref()
-            .map(|p| p.conn.hello_acked && p.surface_ready)
-            .unwrap_or(false)
-            && self.sup_state.probation_elapsed();
-        if ready {
-            self.promote_pending_to_active();
-            self.sup_state = SupervisorState::Idle;
-        }
     }
 
     fn start_redraw_pump(&mut self) {
@@ -2077,70 +1867,6 @@ impl ShellApp {
         );
     }
 
-    /// Route a frame from the **pending** (probationary) core.  It only
-    /// reports progress toward promotion — it isn't displayed, so it
-    /// receives no input and its caret/resize frames are irrelevant.
-    fn handle_pending_msg(&mut self, msg: ShellInbox) {
-        match msg {
-            ShellInbox::SurfaceReady(id) => {
-                // The pending core has painted one half of its pair —
-                // one of the two promotion preconditions.
-                if let Some(p) = self.pending.as_mut() {
-                    let (f, b) = p.surfaces.ids();
-                    if f == id || b == id {
-                        p.surface_ready = true;
-                        lx_event!(
-                            "PENDING_SURFACE_READY",
-                            "pending core SurfaceReady",
-                            id = id
-                        );
-                        sup_log::log("PENDING_SURFACE_READY", &format!("id={id}"));
-                    }
-                }
-            }
-            ShellInbox::HelloAck(v) => {
-                if v == PROTO_VERSION {
-                    if let Some(p) = self.pending.as_mut() {
-                        p.conn.hello_acked = true;
-                    }
-                    lx_event!("PENDING_HELLO_ACK", "pending core HelloAck", v = v);
-                    sup_log::log("PENDING_HELLO_ACK", &format!("v={v}"));
-                } else {
-                    // Version mismatch — kill the pending child; the next
-                    // poll_pending_update tick sees child==None and aborts.
-                    lx_event!(
-                        "PENDING_HELLO_MISMATCH",
-                        "pending core HelloAck version mismatch",
-                        core_v = v,
-                        shell_v = PROTO_VERSION
-                    );
-                    sup_log::log("PENDING_HELLO_MISMATCH", &format!("core_v={v}"));
-                    if let Some(p) = self.pending.as_mut() {
-                        if let Some(mut child) = p.conn.child.take() {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                        }
-                    }
-                }
-            }
-            ShellInbox::Pong(nonce) => {
-                if let Some(p) = self.pending.as_mut() {
-                    if nonce == p.conn.last_ping_nonce {
-                        p.conn.last_pong_at = Instant::now();
-                    }
-                }
-            }
-            // Pending core isn't displayed — its caret + frame pokes are
-            // irrelevant (it renders to its own off-screen surface).
-            // Same for badge clicks: a probationary core never owns the
-            // user-facing pane the click came from.
-            ShellInbox::CaretRect(_)
-            | ShellInbox::FrameRendered
-            | ShellInbox::PaneBadgeClicked(_)
-            | ShellInbox::PaneSessionKey(_, _)
-            | ShellInbox::PaneSessionUserEscape(_) => {}
-        }
-    }
 }
 
 impl MarspotApp for ShellApp {
@@ -2214,13 +1940,6 @@ impl MarspotApp for ShellApp {
         for msg in active_inbox {
             self.handle_active_msg(msg, ctx);
         }
-        let pending_inbox: Vec<ShellInbox> = match self.pending.as_ref() {
-            Some(p) => p.conn.control_rx.try_iter().collect(),
-            None => Vec::new(),
-        };
-        for msg in pending_inbox {
-            self.handle_pending_msg(msg);
-        }
         self.poll_supervisor(ctx);
         ctx.request_redraw();
     }
@@ -2273,24 +1992,6 @@ impl MarspotApp for ShellApp {
     }
 
     fn resized(&mut self, ctx: &MarspotAppCtx, w_phys: f64, h_phys: f64) {
-        // A pending update was sized to the old window; promoting it now
-        // would show a stale-sized surface.  Abort it (rolls the binary
-        // back) — the update retries on the next focus-loss at the new
-        // size.  Only when the dimensions REALLY change, though: AppKit
-        // fires `resized` on its own during the post-execv transition
-        // (same dims, no real change) and aborting there throws away a
-        // perfectly good in-flight update with no user-visible signal.
-        // 2026-06-15 production incident: a same-size resized() canned
-        // the dual-core swap, leaving NEW shell + OLD core paired.
-        if let Some(p) = self.pending.as_ref() {
-            let (pw, ph) = (p.surfaces.width(), p.surfaces.height());
-            let real_resize = (pw as f64 - w_phys).abs() > 0.5
-                || (ph as f64 - h_phys).abs() > 0.5;
-            if real_resize {
-                self.abort_pending_update("window resized during probation");
-                self.sup_state = SupervisorState::Idle;
-            }
-        }
         if let Some(p) = self.presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
             // Present *synchronously* inside the resize callback so
@@ -2426,13 +2127,6 @@ impl MarspotApp for ShellApp {
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
         self.shutdown_active("window close_requested");
-        // Tear down an in-flight update too (no rollback — we're
-        // exiting, not failing an update).
-        if let Some(pending) = self.pending.take() {
-            let PendingUpdate { conn, surfaces, .. } = pending;
-            conn.shutdown();
-            surfaces.release();
-        }
         if let Some(pair) = self.surfaces.take() {
             pair.release();
         }
