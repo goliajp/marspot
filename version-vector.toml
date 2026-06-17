@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.9.7"    # L2 — scan_visible_links 第二段。10s 复 profile 显示 0.9.6 之后剩下的 render 时间(2103 sample 中 1642)还有 906 在 `matches_prefix → prefix.chars().collect()` realloc 链上。matches_prefix 每个 cell × 每帧 × pane 数 → ~6.9M 次小 Vec 分配/sec。改成直接按 ASCII byte 比较,无分配。bench 11/11 PASS;render p99 数无明显变化(headless bench grid 小测不出),但每帧主线程开销显著减少
-session = "0.8.6"    # L3 — idle CPU 大头修复。event tally 看到 idle 时 L3Ready 30/s 进 L2 → L2 render 25/s → ~10% idle CPU。根因:TUI(claudecode 等)以自己内部刷新节奏吐 PTY 字节(同 grid 不同字节序列),L3 每次都 publish + 喊 L2,但视觉内容不变。改:`GridShmWriter::publish_if_changed` FNV-1a hash 整个 publish 负载(header + cursor + flags + cells + wrapped flags),与 last_publish_hash 等就 skip(不写 shm + 不发 GridReady poke)。`publish_and_poke` 用新接口,只在真改变时 poke L2。idle render 应从 25/s → 接近 0;bench 11/11 PASS
+core    = "0.9.8"    # L2 — pump_all 检测到 scroll_push delta + view_offset>0 时,本地 bump pane.view_offset(不 forward_scroll,L3 自己同步 bump);修 user 滚动到历史中途、新输出到来时"老内容被新内容覆盖"
+session = "0.8.7"    # L3 — main loop 每次 pump 后用 last_scroll_push 与 grid.scroll_push_count 算 delta,view_offset>0 时同样 bump,clamp 到 scrollback_len;与 L2 对称 auto-pin,无需额外 forward_scroll 往返,publish 一次就在正确 offset

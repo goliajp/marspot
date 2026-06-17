@@ -1663,6 +1663,17 @@ impl CoreApp {
             let n = p.pump();
             total += n;
             let pushed = p.drain_scroll_push_delta();
+            // Auto-pin the viewport when a row scrolled into scrollback
+            // while the user is reading history.  L3 runs the symmetric
+            // bump in its publish loop so view_offset stays consistent
+            // across the L2↔L3 boundary without a round-trip.  Without
+            // this, every line the shell emits while the user is
+            // scrolled back slides the visible content downward by one
+            // row — the "老内容被新内容覆盖" symptom.
+            if pushed > 0 {
+                let pushed_u16 = pushed.min(u16::MAX as u64) as u16;
+                p.bump_view_offset_on_scroll_push(pushed_u16);
+            }
             // Slide the selection anchor + focus when the PTY pushed
             // rows into scrollback so the highlight tracks the same
             // bytes as they roll up.  We do NOT clear the selection

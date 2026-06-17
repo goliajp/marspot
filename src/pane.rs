@@ -997,6 +997,27 @@ impl Pane {
         true
     }
 
+    /// Auto-pin the viewport when a row scrolls into scrollback while
+    /// the user is viewing history.  L3 runs the symmetric bump in its
+    /// publish loop (`marspot-session::main` keeps a `last_scroll_push`
+    /// counter), so this side just keeps L2's local `view_offset`
+    /// cache in lockstep — no `forward_scroll` because L3 already
+    /// published at the bumped offset on its side, saving a round-trip
+    /// and the one-frame slip that would otherwise be visible.
+    /// No-op when `view_offset == 0` (live tail): nothing to pin.
+    pub fn bump_view_offset_on_scroll_push(&mut self, delta: u16) {
+        if self.view_offset == 0 || delta == 0 {
+            return;
+        }
+        let max = if self.session.is_l3() {
+            self.session.l3_scrollback_len() as u16
+        } else {
+            self.session.grid().scrollback_len() as u16
+        };
+        let new = self.view_offset.saturating_add(delta).min(max);
+        self.view_offset = new;
+    }
+
     /// Force the view back to the live tail. Used by container code
     /// when a non-key event (e.g. PTY write from a remote source)
     /// arrives and we want the user to see fresh output immediately.

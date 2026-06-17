@@ -1001,6 +1001,15 @@ fn main() {
     };
     // Scrollback view offset L2 last asked us to publish (0 = live tail).
     let mut view_offset: u16 = 0;
+    // Track the grid's scroll-push counter so we can auto-pin
+    // `view_offset` when the live grid scrolls a line into scrollback
+    // while the user is viewing scrollback (`view_offset > 0`).  Without
+    // this, every PTY line the shell emits while the user is scrolled
+    // back shifts the visible content downward by one row — the
+    // "老内容被新内容覆盖" symptom.  L2's `pump_all` runs the symmetric
+    // bump so the two sides stay in lockstep without an extra
+    // forward_scroll round-trip.
+    let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
     publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
@@ -1197,6 +1206,19 @@ fn main() {
         };
 
         let n = session.pump();
+        // Auto-pin view_offset on scrollback push: when the grid scrolls
+        // a row into scrollback while the user is viewing history,
+        // shift view_offset by the same delta so the visible window
+        // tracks the same absolute content instead of sliding down.
+        // L2 runs the symmetric bump in `pump_all` so the two stay in
+        // sync without an extra forward_scroll round-trip.
+        let cur_scroll_push = session.terminal().grid().scroll_push_count();
+        if view_offset > 0 && cur_scroll_push > last_scroll_push {
+            let delta = (cur_scroll_push - last_scroll_push).min(u16::MAX as u64) as u16;
+            let max = session.terminal().grid().scrollback_len() as u16;
+            view_offset = view_offset.saturating_add(delta).min(max);
+        }
+        last_scroll_push = cur_scroll_push;
         if session.is_exited() {
             session.pump();
             publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
