@@ -1235,53 +1235,8 @@ fn main() {
         if !selection_reqs.is_empty() {
             if let Some(w) = poke.as_mut() {
                 for (seq, anchor, focus, blockwise) in selection_reqs {
-                    let grid = session.terminal().grid();
-                    // Diagnostic: every Cmd-C also dumps per-row wrap
-                    // flags for the rows the selection touches.  Lets
-                    // us tell, after a "selection picked up a fake
-                    // \\n" report, whether the upstream program drew
-                    // soft-wrap (wrapped=true → marspot's domain) or
-                    // hard newlines (wrapped=false → the program's
-                    // own \\n write, not something marspot can or
-                    // should erase).  Lives at lx_event so it's
-                    // emitted regardless of MARSPOT_LOG_SESSION.
-                    let (a_col, a_abs) = anchor;
-                    let (f_col, f_abs) = focus;
-                    let top_abs = a_abs.max(f_abs);
-                    let bot_abs = a_abs.min(f_abs);
-                    let last_view = grid.rows().saturating_sub(1);
-                    let mut wrap_dump = String::new();
-                    let mut abs = top_abs;
-                    while abs >= bot_abs {
-                        if abs > u16::MAX as u32 {
-                            if abs == 0 { break; }
-                            abs -= 1;
-                            continue;
-                        }
-                        let flag = grid.wrapped_at_view(abs as u16, last_view);
-                        if !wrap_dump.is_empty() {
-                            wrap_dump.push(',');
-                        }
-                        use std::fmt::Write;
-                        let _ = write!(&mut wrap_dump, "{}:{}", abs, if flag { 1 } else { 0 });
-                        if abs == bot_abs || abs == 0 { break; }
-                        abs -= 1;
-                    }
-                    let text = grid_selection_text(grid, anchor, focus, blockwise)
+                    let text = grid_selection_text(session.terminal().grid(), anchor, focus, blockwise)
                         .unwrap_or_default();
-                    let newline_count = text.matches('\n').count();
-                    lx_event!(
-                        "L3_SELECTION_DUMP",
-                        "Cmd-C selection: per-row wrap flags + result newline count",
-                        anchor_col = a_col,
-                        anchor_abs = a_abs,
-                        focus_col = f_col,
-                        focus_abs = f_abs,
-                        blockwise = blockwise,
-                        rows_wrap_flags = wrap_dump.as_str(),
-                        text_len = text.len(),
-                        newlines = newline_count
-                    );
                     let frame = Frame::new(MsgType::SelectionText, encode_selection_text(seq, &text));
                     if let Err(e) = frame.write_to(w) {
                         lx_warn!("session.selection_reply_failed", &format!("{e}"));

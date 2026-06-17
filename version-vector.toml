@@ -23,4 +23,4 @@
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
 core    = "0.9.3"    # L2 — grid_selection_text 软换行 merge 不再要求 current row col_hi=cols-1,bot row mid-row 也 merge;3 regression tests 覆盖
-session = "0.8.4"    # L3 — Cmd-C 加 L3_SELECTION_DUMP 诊断:每次复制 dump 选区涉及行的 wrap flag + result newline count,事后能直接判断"上游程序写了 \\n 还是 DECAWM 软换行"
+session = "0.8.5"    # L3 — revert 0.8.4 (L3_SELECTION_DUMP 用完撤掉,不留长期日志)
