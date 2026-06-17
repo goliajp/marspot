@@ -178,6 +178,22 @@ binary_git_sha() {
     | sed -E 's/^MARSPOT_FP=//;s/\|$//'
 }
 
+# Extract the per-layer version (e.g. `0.5.4`) from a binary's
+# `MARSPOT_LAYER_VERS=shell:X|core:Y|session:Z|END` rodata marker.
+# Returns empty when the marker isn't present (older binary, predates
+# the per-layer-version install-local skip path).
+# $1 = binary path, $2 = layer name (shell / core / session).
+binary_layer_ver() {
+  local bin="$1" layer="$2"
+  [[ -f "$bin" && -n "$layer" ]] || { echo ""; return; }
+  strings "$bin" 2>/dev/null \
+    | grep -oE 'MARSPOT_LAYER_VERS=[^[:cntrl:]]*\|END' \
+    | head -1 \
+    | grep -oE "${layer}:[0-9A-Za-z._-]+" \
+    | head -1 \
+    | sed -E "s/^${layer}://"
+}
+
 # L2 (marspot-core) is the canonical version carrier. L1 (marspot-shell)
 # is a thin stable wrapper; L3 (marspot-session) is a per-pane child of
 # L2. They all ride on the same git commit, so we decide "is this
@@ -224,6 +240,35 @@ changed() {
   [[ -f "$ref" ]] || return 0
   if _l2_decision; then
     return 1  # L2 says same clean commit — whole tree is no-op
+  fi
+  # Per-layer version skip: if the binary embeds a
+  # MARSPOT_LAYER_VERS marker AND that layer's version is unchanged
+  # between running and target, the developer's intent (as declared
+  # in version-vector.toml) is "this layer didn't change."  Skip
+  # stage so a pure-L2 install doesn't restage L1 just because the
+  # rebuild bumped the git sha + build timestamp embedded in every
+  # binary's rodata.
+  # Gated on `-dirty` absence: a dirty workspace is mid-iteration,
+  # the version vector may not yet reflect uncommitted source — fall
+  # through to byte-compare so dev's "edit + install + see change"
+  # cycle keeps working.
+  local layer=""
+  case "$bin" in
+    marspot-shell)   layer="shell" ;;
+    marspot-core)    layer="core" ;;
+    marspot-session) layer="session" ;;
+  esac
+  if [[ -n "$layer" ]]; then
+    local tgt_sha
+    tgt_sha="$(binary_git_sha "$TARGET/$bin")"
+    if [[ -n "$tgt_sha" && "$tgt_sha" != *-dirty ]]; then
+      local ref_ver tgt_ver
+      ref_ver="$(binary_layer_ver "$ref" "$layer")"
+      tgt_ver="$(binary_layer_ver "$TARGET/$bin" "$layer")"
+      if [[ -n "$ref_ver" && -n "$tgt_ver" && "$ref_ver" == "$tgt_ver" ]]; then
+        return 1
+      fi
+    fi
   fi
   ! cmp -s "$TARGET/$bin" "$ref"
 }

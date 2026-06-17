@@ -35,6 +35,27 @@ pub static MARSPOT_FP: &str = concat!(
     "|END"
 );
 
+/// Per-layer version vector embedded in the binary rodata so
+/// `install-local.sh` can decide "did THIS layer's contract change?"
+/// without relying on byte-compare (which sees every rebuild as
+/// different even when source is unchanged) or git sha (same
+/// problem — sha bumps on every commit even if the commit only
+/// touches one layer).  Source of truth is `version-vector.toml`:
+/// if the developer didn't bump the layer's version, install-local
+/// skips that layer's stage + SIGUSR1, so a pure-L2 change doesn't
+/// trigger the L1 self-execv flash.
+#[used]
+#[unsafe(no_mangle)]
+pub static MARSPOT_LAYER_VERS: &str = concat!(
+    "MARSPOT_LAYER_VERS=shell:",
+    env!("MARSPOT_VERSION_SHELL"),
+    "|core:",
+    env!("MARSPOT_VERSION_CORE"),
+    "|session:",
+    env!("MARSPOT_VERSION_SESSION"),
+    "|END"
+);
+
 // GUI-coupled modules (AppKit / Metal / CoreText) — these stay here.
 pub mod app;
 pub mod font_cache;

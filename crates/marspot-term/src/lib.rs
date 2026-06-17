@@ -37,6 +37,26 @@ pub static MARSPOT_FP_TERM: &str = concat!(
     env!("MARSPOT_BUILD_TS"),
     "|END"
 );
+
+/// Per-layer version vector — mirrors `MARSPOT_LAYER_VERS` in the
+/// root `marspot` crate so binaries that link only marspot-term
+/// (notably `marspot-session`) carry the same marker.  See the
+/// root crate for the rationale: `install-local.sh` reads this
+/// from each binary, compares against the running binary's
+/// per-layer version, and skips stage + SIGUSR1 when the layer's
+/// version is unchanged — so a pure-L2 change doesn't trigger the
+/// L1 self-execv flash.
+#[used]
+#[unsafe(no_mangle)]
+pub static MARSPOT_LAYER_VERS_TERM: &str = concat!(
+    "MARSPOT_LAYER_VERS=shell:",
+    env!("MARSPOT_VERSION_SHELL"),
+    "|core:",
+    env!("MARSPOT_VERSION_CORE"),
+    "|session:",
+    env!("MARSPOT_VERSION_SESSION"),
+    "|END"
+);
 pub mod grid_shm;
 pub mod input_core;
 pub mod layout;
