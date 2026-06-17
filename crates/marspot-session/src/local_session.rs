@@ -81,6 +81,40 @@ impl LocalSession {
         } else {
             Some(cwd_override.to_string())
         };
+
+        // RFC-003 §6 Amendment 13 — restore the TERM/COLORTERM/ZDOTDIR
+        // env setup that the deleted L4 shelld used to do.
+        //
+        // GUI-launched marspot.app inherits a minimal env from
+        // launchd; TERM is commonly absent or `network`, which makes
+        // zsh+terminfo derive a dumb terminal capability set.  Two
+        // visible regressions when that happens:
+        //   * backward-delete-char (Backspace) emits a bare ` ` instead
+        //     of `\b \b`, so the deleted column appears blanked but
+        //     the cursor stays put → display looks like "added a
+        //     space, kept old digits".
+        //   * COLORTERM unset → apps downgrade truecolor to the
+        //     256-cube; SGR 38;2;r;g;b approximations are wrong hues
+        //     (claudecode coral orange → rose pink, ls --color labels
+        //     visibly drift), and most output collapses to plain
+        //     white.  marspot's parser does handle 38;2;r;g;b
+        //     truecolor — we just have to advertise it.
+        //
+        // L4 shelld set both of these on its own startup so every
+        // forked zsh saw a sane env.  We replicate the same heuristic
+        // here at the L3 boundary now that L3 owns the spawn.  Same
+        // for the ZDOTDIR shim that installs PROMPT_SP / EOL_MARK.
+        let term_ok = std::env::var("TERM")
+            .map(|t| !t.is_empty() && t != "network" && t != "dumb" && t != "unknown")
+            .unwrap_or(false);
+        if !term_ok {
+            unsafe { std::env::set_var("TERM", "xterm-256color") };
+        }
+        if std::env::var_os("COLORTERM").is_none() {
+            unsafe { std::env::set_var("COLORTERM", "truecolor") };
+        }
+        marspot_term::session::ensure_zdot_shim_for_external_shells();
+
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let argv0 = format!(
             "-{}",

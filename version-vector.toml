@@ -23,4 +23,4 @@
 
 shell   = "0.2.12"   # L1
 core    = "0.3.2"    # L2 — Amendment 12: L3Conn::Drop no-op (Cmd-Q survives)
-session = "0.3.1"    # L3 — generation-tagged CoreGone
+session = "0.3.2"    # L3 — Amendment 13: restore TERM/COLORTERM/ZDOTDIR env
