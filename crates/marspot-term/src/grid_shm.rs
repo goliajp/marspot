@@ -45,10 +45,20 @@ const MAGIC: u32 = 0x4d_53_47_31; // "MSG1"
 // VERSION 3 (2026-06-17): per-row DECAWM wrap flags appended after the
 // cell area so L2's mirror grid carries the same `wrapped` signal L3's
 // parser sets.  Without this, scan_visible_links on the L2 side always
-// saw `wrapped = false`, breaking cross-row URL/path detection.  Old
-// writer (v2) + new reader (v3) and vice versa fail fast on the magic
-// match by design — both layers bump together on this protocol change.
+// saw `wrapped = false`, breaking cross-row URL/path detection.
+//
+// Forward-compat upgrade path (added 2026-06-17 after Amendment 16
+// install fallout — see CLAUDE memory "wire upgrade silent + lossless"):
+// `from_fd` accepts both v2 and v3 regions.  A v2 region is upgraded
+// in place — ftruncate to v3 capacity, zero the wrapped area, then
+// atomic-bump header.version to 3.  After upgrade every subsequent
+// reader / writer (in any process) sees v3 layout, so a silent
+// install across a v2→v3 shm protocol bump is lossless: L3 self-execv
+// into the new image, the new image upgrades the inherited v2 region
+// to v3, PTY + shell + L2 reader all stay attached.  The MIN version
+// the loader will touch is v2; anything older or newer fails fast.
 const VERSION: u32 = 3;
+const VERSION_MIN_COMPAT: u32 = 2;
 
 /// Capacity bound for a region's cell area, in cells.  A region is
 /// *mapped* to hold up to this many cells so a live resize (target #4
@@ -256,6 +266,107 @@ pub fn delete_region(name: &std::ffi::CStr) {
     unsafe { libc::shm_unlink(name.as_ptr()) };
 }
 
+/// Map a region and, if needed, upgrade its layout in place to the
+/// current `VERSION`.  Used by both `GridShmWriter::from_fd` and
+/// `GridShmReader::from_fd` so the silent-update path (L3 self-execv
+/// across a shm wire bump) is lossless regardless of which side
+/// attaches first.
+///
+/// Steps:
+///   1. fstat → size.  If smaller than the current capacity, ftruncate
+///      up so the v3 mapping has room for the new wrapped-flag area.
+///   2. mmap RDWR | SHARED at full capacity.
+///   3. Read magic + version + cell_size + dims.  Reject anything
+///      whose magic / cell_size / dims don't match this build, or
+///      whose version is below `VERSION_MIN_COMPAT` or above the
+///      current `VERSION`.
+///   4. If version < `VERSION`, run the per-version upgrade lambda
+///      (currently just v2→v3: zero the wrapped area, atomic-bump
+///      header.version).  After this everyone sees v3.
+///
+/// Returns `(base, len, cols, rows)` on success.
+fn attach_and_maybe_upgrade(
+    fd: RawFd,
+) -> io::Result<(*mut u8, usize, u16, u16)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let cur_size = st.st_size as usize;
+    if cur_size < HEADER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "grid_shm: region smaller than header",
+        ));
+    }
+    let want_size = capacity_bytes();
+    if cur_size < want_size {
+        // Best-effort grow.  Failure here is fatal — without the
+        // full v3 capacity we can't safely write wrapped flags.
+        if unsafe { libc::ftruncate(fd, want_size as libc::off_t) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let len = want_size;
+    let base = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
+    };
+    if base == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    let base = base as *mut u8;
+
+    let h = base as *const Header;
+    let (magic, version, cell_size, cols, rows) = unsafe {
+        (
+            (*h).magic,
+            (*h).version,
+            (*h).cell_size,
+            (*h).cols,
+            (*h).rows,
+        )
+    };
+    let bad = magic != MAGIC
+        || version < VERSION_MIN_COMPAT
+        || version > VERSION
+        || cell_size != std::mem::size_of::<Cell>() as u32
+        || region_len(cols as u16, rows as u16) > len;
+    if bad {
+        unsafe { libc::munmap(base as *mut libc::c_void, len); }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "grid_shm: incompatible region (magic/version/cell-size/dims)",
+        ));
+    }
+
+    if version < VERSION {
+        // v2 → v3 upgrade: cell layout unchanged, but the v2 mapping
+        // had no wrapped-flag area.  We've already ftruncate'd to v3
+        // capacity above, so the wrapped area exists as zero pages
+        // by virtue of ftruncate's zero-fill guarantee.  Be defensive
+        // anyway and explicitly zero the wrapped region, then atomic-
+        // bump the version so subsequent attachers stop upgrading.
+        unsafe {
+            let wrapped = base.add(wrapped_offset());
+            std::ptr::write_bytes(wrapped, 0, MAX_ROWS);
+            // Release fence so the wrapped zeros + size are visible
+            // before another process observes version=3.
+            fence(Ordering::Release);
+            let h = base as *mut Header;
+            (*h).version = VERSION;
+        }
+    }
+
+    Ok((base, len, cols as u16, rows as u16))
+}
+
 /// Create + size + stamp a fresh shared region for `cols × rows`, and
 /// return its fd.
 ///
@@ -358,64 +469,17 @@ impl GridShmWriter {
     /// magic / version / cell-size are validated so a region from an
     /// incompatible build is refused rather than written through a wrong
     /// layout.
+    ///
+    /// Forward-compat: a v2 region is upgraded to v3 in place (see
+    /// `attach_and_maybe_upgrade`).
     pub fn from_fd(fd: OwnedFd) -> io::Result<Self> {
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let len = st.st_size as usize;
-        if len < HEADER_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "grid_shm: region smaller than header",
-            ));
-        }
-
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd.as_raw_fd(),
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        let base = base as *mut u8;
-
-        let h = base as *const Header;
-        let (magic, version, cell_size, cols, rows) = unsafe {
-            (
-                (*h).magic,
-                (*h).version,
-                (*h).cell_size,
-                (*h).cols,
-                (*h).rows,
-            )
-        };
-        let bad = magic != MAGIC
-            || version != VERSION
-            || cell_size != std::mem::size_of::<Cell>() as u32
-            || region_len(cols as u16, rows as u16) > len;
-        if bad {
-            unsafe {
-                libc::munmap(base as *mut libc::c_void, len);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "grid_shm: incompatible region (magic/version/cell-size/dims)",
-            ));
-        }
-
+        let (base, len, cols, rows) = attach_and_maybe_upgrade(fd.as_raw_fd())?;
         Ok(Self {
             fd,
             base,
             len,
-            cols: cols as u16,
-            rows: rows as u16,
+            cols,
+            rows,
         })
     }
 
@@ -547,64 +611,18 @@ impl GridShmReader {
     /// Map a region by its fd (inherited from the writer's process).
     /// Validates magic / version / cell-size so a region from an
     /// incompatible build is refused rather than misread.
+    ///
+    /// Forward-compat: a v2 region is upgraded to v3 in place (see
+    /// `attach_and_maybe_upgrade`).  Reader is conceptually
+    /// read-only, but maps RDWR so a single one-shot upgrade store
+    /// on first attach is safe.
     pub fn from_fd(fd: RawFd) -> io::Result<Self> {
-        // Size from the fd itself — the writer ftruncate'd it.
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut st) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let len = st.st_size as usize;
-        if len < HEADER_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "grid_shm: region smaller than header",
-            ));
-        }
-
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        let base = base as *const u8;
-
-        let h = base as *const Header;
-        let (magic, version, cell_size, cols, rows) = unsafe {
-            (
-                (*h).magic,
-                (*h).version,
-                (*h).cell_size,
-                (*h).cols,
-                (*h).rows,
-            )
-        };
-        let bad = magic != MAGIC
-            || version != VERSION
-            || cell_size != std::mem::size_of::<Cell>() as u32
-            || region_len(cols as u16, rows as u16) > len;
-        if bad {
-            unsafe {
-                libc::munmap(base as *mut libc::c_void, len);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "grid_shm: incompatible region (magic/version/cell-size/dims)",
-            ));
-        }
-
+        let (base, len, cols, rows) = attach_and_maybe_upgrade(fd)?;
         Ok(Self {
-            base,
+            base: base as *const u8,
             len,
-            cols: cols as u16,
-            rows: rows as u16,
+            cols,
+            rows,
         })
     }
 
