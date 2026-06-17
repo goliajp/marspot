@@ -4,33 +4,219 @@ A living document. Updated alongside any structural change. The point is
 not "how was it built" but "**where does work happen, what's the cost,
 and where is the next bottleneck**."
 
-## RFC-003 three-layer split (2026-06-17)
+## RFC-003 §6 Amendment 16 — three-layer split + L3 self-execv (2026-06-17)
 
 The shipped architecture is three processes per running marspot
-instance + N per-pane L3s:
+instance + N per-pane L3s + (per-layer) the shell child a user
+actually typed at:
 
 ```
-L1 marspot-shell    NSWindow owner / supervisor state machine /
-                    install-local trigger / banner / probation logic.
-                    Survives L2 self-update via dual-core swap.
+L1 marspot-shell    Pure "shell".  NSWindow owner + NSApp delegate
+                    (Cmd-Q routes through CloseRequested), binary
+                    tree manager (current/prev/pending/quarantine),
+                    install-local trigger, supervisor state machine
+                    (probation, abort_pending_update, restart_core).
+                    NO business logic — does not know what L2 does
+                    with the L3s it spawns; does not hold L3 fds.
 
-L2 marspot-core     Metal renderer / layout / pane management / input
-                    dispatch. THIS is the version users mean when
-                    they say "what marspot are you on?".  Spawns L3
-                    children + reattaches across L2 swap via the
-                    on-disk session registry (Amendment 7).
+                    Self-update path: dump frame to NSUserDefaults,
+                    execv "current/marspot-shell", reattach IOSurface
+                    (kernel object survives the image swap), restore
+                    frame.  ~100 ms visible flash; "size + position
+                    + content all preserved" is the user contract.
+                    Rare path — L1 binary updates seldom.
 
-L3 marspot-session  One process per pane.  Owns the PTY master, shell
-                    child, VT parser, grid, scrollback, bytelog, shm
-                    framebuffer, UDS control socket.  Survives L2 swap;
-                    the registry it writes (sessions/<id>/entry.toml +
-                    sock + shm-name) lets a freshly-spawned L2
-                    re-open without re-forking the shell.
+L2 marspot-core     UI brain.  Metal renderer / cell layout / pane
+                    management / input dispatch / per-frame composit-
+                    ion.  Spawns L3 children at boot, reattaches to
+                    surviving L3s across an L2 swap via the on-disk
+                    session registry.  THIS is the version users
+                    mean when they say "what marspot are you on?".
+
+                    Self-update path: dual-core swap.  L1 spawns the
+                    pending L2 alongside the active one, both render
+                    to their own halves of the IOSurface pair;
+                    UPDATE_SWAP flips the presenter to the new half
+                    and SIGTERMs the old core.  Zero user-visible
+                    discontinuity — IOSurface bytes are atomic from
+                    the WindowServer's view.
+
+L3 marspot-session  One process per pane.  Owns the PTY master fd,
+                    shell child, VT parser, grid, scrollback,
+                    bytelog, shm framebuffer (L2-readable), UDS
+                    control socket.  Each L3 writes its registry
+                    entry on bind: `sessions/<id>/entry.toml` carries
+                    pid, socket path, cols/rows, shm name, AND
+                    shell_child_pid (the zsh that L1 plugins like
+                    claudecode walk via pidtree).
+
+                    Self-update path (Amendment 16, L4-shelld model):
+                    on SIGTERM, the L3 reads its own MARSPOT_FP_TERM
+                    rodata fingerprint and the `current/marspot-
+                    session` binary's MARSPOT_FP marker.  If they
+                    differ:
+
+                      1. extract_for_handoff: mem::forget(self) so
+                         Pty::Drop doesn't SIGHUP the shell
+                      2. serialize_snapshot → sessions/<id>/state.bin
+                      3. clear CLOEXEC on master_fd + listen_fd
+                      4. write /tmp/marspot-session-handoff.<pid>.tsv
+                      5. setenv MARSPOT_L3_HANDOFF_MANIFEST=<path>
+                      6. execv("current/marspot-session", argv)
+
+                    The new image's main() detects the env sentinel,
+                    parses the manifest, and rebuilds LocalSession +
+                    SessionListener via from_handoff — adopting the
+                    inherited PTY master fd + UDS listener fd +
+                    apply_snapshot to the saved Terminal state.
+                    PID is preserved across execv, shell child is
+                    unchanged, sock file path is unchanged, L2's
+                    control socket sees a brief read pause then
+                    resumes.  ~1-2 ms total per L3.
+
+                    If fingerprints match (no real update) or
+                    current/marspot-session doesn't exist: clean-exit
+                    branch.  serialize_snapshot, process::exit(0) —
+                    no unwind, no Pty::Drop, so the kernel SIGHUPs
+                    the shell as the parent dies.  That's the
+                    user-quit semantic.
+
+shell (zsh)         The actual login shell at the slave end of L3's
+                    PTY.  PID + tty session preserved across every
+                    silent install from v0.5.0 onward — vim, ssh,
+                    REPLs, claudecode all keep running.
 ```
+
+### Pyramid invariant
+
+The whole silent-update story rests on one rule: **each layer holds
+the stateful resources of the layer below**.
+
+```
+L0 = kernel / WindowServer    holds: IOSurface
+L1 = marspot-shell             holds: IOSurface refs, binary slots, plugin host runtime
+L2 = marspot-core              holds: pane registry, control sockets to L3s
+L3 = marspot-session           holds: PTY master fd, UDS listener fd, shell child PID
+shell                          holds: user's working state
+```
+
+When L3 updates, L3 keeps its own fds (via execv inheritance).  When
+L2 updates, L2 reattaches L3s by reading their on-disk registry — fds
+are not transferred, sockets are reopened by path.  When L1 updates,
+L1 dumps geometry to disk + execv's; IOSurface is held by the kernel
+(via WindowServer), L2 keeps holding its half of the pair, content
+restores from the same kernel objects.
+
+The earlier Amendment 15 tried to put L3 PTY fds in an "L1 fd-vault"
+and was wrong — `OwnedFd` defaults `FD_CLOEXEC=1`, so when L1
+execv'd itself the vault's fds closed and every shell got SIGHUP'd.
+The fix (Amendment 16): persons holding the fd are the ones doing
+the execv.  L3 owns its own fd → L3 execvs itself → fd survives.
+
+### L1↔L2 wire (`shell_proto`)
+
+Bidirectional UDS over fd 3 (inherited from L1's socketpair at L2
+spawn).  Active core only — pending is held off this wire until it
+gets promoted.  Frame format = magic + msg_type + length-prefixed
+payload.  `Frame::read_from` silently skips unknown msg_types
+(forward-compat across version skew).
+
+```
+L1 → L2: KeyEvent / MouseDown/Drag/Up / Scroll / Preedit / Resize /
+          SurfaceAttach / Focus / Hello / Ping /
+          PaneBadge / PaneSessionBegin / PaneSessionEnd /
+          InjectInput               (cc plugin pushes raw PTY bytes)
+
+L2 → L1: HelloAck / Pong / SurfaceReady / FrameRendered /
+          CaretRect / PaneBadgeClicked /
+          PaneSessionKey / PaneSessionUserEscape / PaneSessionOverlay
+```
+
+### L2↔L3 wire (per-pane UDS at sessions/<id>/sock)
+
+`marspot-term::shell_proto::Frame` framing (same crate as L1↔L2
+wire).  Hello/HelloAck handshake on connect.  L3 generations adopt
+the latest client → forwards keystrokes from L2, publishes
+GridReady poke after every shm publish.
+
+```
+L2 → L3: KeyEvent / GridResize / GridScroll / Paste /
+          GetSelectionText /
+          InjectInput               (relayed from cc, raw bytes →
+                                     PTY no bracketed-paste wrap)
+
+L3 → L2: GridReady / SelectionText
+```
+
+### L1 ↔ L3 (no direct wire)
+
+L1 never opens an L3 control socket.  Plugins running in L1 (e.g.
+claudecode) read entry.toml to enumerate sessions, walk pidtree
+from `shell_child_pid` to find descendants (a claude binary,
+say), and bounce keystrokes through L2 via the InjectInput proxy:
+
+```
+cc plugin tick → host.cc_inject_proxy(sid, bytes)
+              → InjectInputRequest channel
+              → shell main loop drain
+              → MsgType::InjectInput frame to active L2
+              → L2::inject_input(sid, bytes)
+              → pane.forward_inject_input
+              → MsgType::InjectInput frame on L3's UDS
+              → L3 main loop SessionEvent::InjectInput(bytes)
+              → session.write(bytes)  (raw PTY write)
+```
+
+This keeps L1 ignorant of L3 internals; L2 is the only layer that
+talks to L3.
+
+### On-disk state
+
+```
+~/Library/Caches/marspot/
+├── binaries/
+│   ├── current/       L1 spawns from here on every layer
+│   ├── prev/          rollback target
+│   ├── pending/       staged by install-local; promoted on next L1 / L2 / L3 boot
+│   └── quarantine/    binaries that failed probation
+├── sessions/<id>/
+│   ├── entry.toml     pid + socket + shm_name + shell_child_pid + ...
+│   ├── sock           L2↔L3 UDS listener path (also survives L3 execv)
+│   ├── state.bin      Terminal snapshot persisted on SIGTERM
+│   └── bytelog        raw PTY bytes, append-only, scrollback source of truth
+├── shell.pid          L1 supervisor pid
+└── logs/marspot.log   logx TSV (shared by every binary)
+```
+
+`/tmp/marspot-session-handoff.<pid>.tsv` is a transient handoff
+manifest written by the pre-execv L3 image, consumed and deleted by
+the post-execv image.
+
+### Cmd-Q / window-close semantics
+
+`MarspotWindowDelegate` implements both `NSWindowDelegate` (red
+button / Cmd-W) and `NSApplicationDelegate` (Cmd-Q / dock Quit / menu
+Quit).  Both routes dispatch `EventKind::CloseRequested`, which
+runs L1's `close_requested`:
+
+  1. plugins stop
+  2. SIGTERM every entry.toml pid
+  3. pgrep sweep marspot-session for orphans (entry.toml may have
+     been overwritten on same-id spawn races; pgrep covers leaks)
+  4. 200 ms wait for SIGTERM handlers to land state.bin
+  5. shutdown active core
+  6. tear down pending update (if any)
+  7. ctx.exit() → run_app returns → process exits cleanly
+
+`applicationShouldTerminate:` returns `NSTerminateCancel` so AppKit
+doesn't race the `windowShouldClose:`-returns-false path; close_
+requested is the single sink.
 
 Replaces the prior L1+L2+L3+L4 split where L4 was `marspot-shelld`,
 a per-user daemon that owned every PTY master.  See
-`docs/rfc-003-l3-pty.md` for the migration trail.
+`docs/rfc-003-l3-pty.md` for the migration trail and Amendment
+post-mortems (14 SIGUSR2-killed-sessions, 15 fd-vault-broke-L1-
+update, 16 self-execv landing).
 
 ## Modules and ownership (pre-RFC-003 standalone-marspot view, still accurate for src/main.rs)
 
@@ -115,6 +301,24 @@ hot path**. Status:
 | Grid::scroll_up | 0 | n/a | ✅ (uses copy_within) |
 | Renderer::draw_frame | n/a | 4× Vec::with_capacity | ❌ to fix: move buffers onto Renderer |
 | Renderer::resolve_char | n/a | HashMap::insert on first sight | OK: warm-up only |
+
+## Idle / present cadence (BG flicker class)
+
+The shell's `redraw()` short-circuits when no `FrameRendered` poke
+is pending, but a stale safety net used to force-present after 1 s.
+At idle the core sleeps a 1 s recv_timeout and never re-renders, so
+that branch fired every ~1 s, presenting an unchanged IOSurface and
+letting WindowServer composite sub-LSB alpha-blend rounding into a
+faint 1 Hz BG flicker the user sees across all panes.
+
+Fix (commit b06aea8, shell 0.5.1): stale threshold 1 s → 5 s.
+Crash respawn is detected separately via `child.try_wait()` →
+`restart_core`, so this safety net only catches "core alive but
+silent", which is fine at 0.2 Hz.
+
+If a future change re-introduces a per-second forced present anywhere
+in the render path: it WILL flicker.  The bar is "present only when
+content actually changed."
 
 ## Latent issues (architectural, not just bugs)
 
