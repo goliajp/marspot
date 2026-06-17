@@ -152,6 +152,13 @@ enum CoreEvent {
     /// re-reads the shm mirror promptly instead of waiting on the 1 s
     /// heartbeat.  Carries no data (the mirror is read from shm).
     L3Ready,
+    /// L3's control reader thread saw EOF / IO error and exited.  Main
+    /// loop reconnects via wait_and_connect + swaps the pane's
+    /// L3Conn.control + respawns the reader.  This is the back-stop
+    /// for any path that drops the L2↔L3 stream (silent-update execv
+    /// before manifest v2 carried `control_stream_fd`, kernel races
+    /// during dual-core swap, plain crashes, etc).
+    L3ControlEof(u64),
     /// SIGUSR2 (per-session silent-update trigger): bring up replacement
     /// L3s on every idle pane's session and swap when they're ready.  The
     /// manual hook the updater will drive once a new `marspot-session` is
@@ -252,6 +259,7 @@ fn reader_loop(mut stream: UnixStream, tx: Sender<CoreEvent>) {
 /// the child's exit.
 fn l3_reader_loop(
     mut stream: UnixStream,
+    session_id: u64,
     tx: Sender<CoreEvent>,
     selection_tx: Sender<(u32, String)>,
 ) {
@@ -275,7 +283,13 @@ fn l3_reader_loop(
                 }
                 _ => {}
             },
-            Ok(None) | Err(_) => return,
+            Ok(None) | Err(_) => {
+                // Tell main loop the pane's L2↔L3 stream went away —
+                // it'll wait_and_connect, swap the pane's control,
+                // and respawn this reader on the new stream.
+                let _ = tx.send(CoreEvent::L3ControlEof(session_id));
+                return;
+            }
         }
     }
 }
@@ -457,7 +471,7 @@ fn spawn_l3(
     let reader_stream = control.try_clone()?;
     let tx = event_tx.clone();
     let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
-    std::thread::spawn(move || l3_reader_loop(reader_stream, tx, selection_tx));
+    std::thread::spawn(move || l3_reader_loop(reader_stream, session_id, tx, selection_tx));
 
     Ok(L3Spawn {
         child,
@@ -513,7 +527,7 @@ fn reattach_l3_pane(
     let reader_stream = control.try_clone()?;
     let tx = event_tx.clone();
     let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
-    std::thread::spawn(move || l3_reader_loop(reader_stream, tx, selection_tx));
+    std::thread::spawn(move || l3_reader_loop(reader_stream, session_id, tx, selection_tx));
 
     lx_event!(
         "L3_REATTACHED",
@@ -2245,6 +2259,59 @@ fn main() {
                 }
                 CoreEvent::PumpShelld => {
                     app.needs_render = true;
+                }
+                CoreEvent::L3ControlEof(sid) => {
+                    // L3's reader EOF'd — typically silent-update
+                    // execv before manifest v2 carried control_stream_fd
+                    // closed the inherited stream; possibly a hard
+                    // crash; possibly a dual-core swap race.
+                    // Reconnect via the same wait_and_connect L3's UDS
+                    // accept path serves, hot-swap the pane's control,
+                    // and respawn the reader on the new stream.  All
+                    // best-effort: a permanent L3 death is detected by
+                    // pane.poll's try_wait on the next tick.
+                    let pane_idx = app.panes.iter().position(|p| {
+                        p.session().l3_session_id() == Some(sid)
+                    });
+                    if let Some(idx) = pane_idx {
+                        match marspot::uds_session_client::wait_and_connect(
+                            sid,
+                            std::time::Duration::from_secs(2),
+                        ) {
+                            Ok(new_control) => {
+                                let reader_half = new_control.try_clone();
+                                match reader_half {
+                                    Ok(rh) => {
+                                        app.panes[idx]
+                                            .session_mut()
+                                            .swap_l3_control(new_control);
+                                        let tx = app.event_tx.clone();
+                                        let (selection_tx, _selection_rx) =
+                                            std::sync::mpsc::channel::<(u32, String)>();
+                                        std::thread::spawn(move || {
+                                            l3_reader_loop(rh, sid, tx, selection_tx);
+                                        });
+                                        lx_event!(
+                                            "L3_CONTROL_RECONNECTED",
+                                            "L2 reader reconnected after EOF",
+                                            session = sid,
+                                            pane = idx
+                                        );
+                                    }
+                                    Err(e) => lx_warn!(
+                                        "core.l3.control_clone_failed",
+                                        &format!("{e}"),
+                                        session = sid
+                                    ),
+                                }
+                            }
+                            Err(e) => lx_warn!(
+                                "core.l3.control_reconnect_failed",
+                                &format!("{e}; pane will go silent until next reconnect"),
+                                session = sid
+                            ),
+                        }
+                    }
                 }
                 CoreEvent::L3Ready => {
                     // Just needs to wake the loop; `pump_all` re-reads

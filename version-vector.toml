@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.9.1"    # L2 — grid_shm forward-compat reader:v2 region 自动 in-place upgrade 到 v3(silent install 跨 shm 协议升级 lossless)
+core    = "0.9.2"    # L2 — l3_reader_loop EOF 后自动 wait_and_connect 重连 + swap_l3_control + 重 spawn reader,根本兜底任何 L2↔L3 stream 断(包括过渡期 L3 manifest v1 没传 control_stream_fd)
 session = "0.8.2"    # L3 — execv handoff 把 L2 control stream fd 也接管(manifest v2,clear CLOEXEC + UnixStream::from_raw_fd)→ install 后立刻能输入,不再 24min 死等 NewClient

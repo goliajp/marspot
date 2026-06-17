@@ -188,6 +188,14 @@ impl PaneBackend {
         }
     }
 
+    /// Hot-swap an L3 pane's control stream (after a reader-loop EOF
+    /// → main loop reconnects).  No-op on non-L3 backends.
+    pub fn swap_l3_control(&mut self, new_control: UnixStream) {
+        if let PaneBackend::L3(c) = self {
+            c.swap_control(new_control);
+        }
+    }
+
 
     /// A silent-update replacement is staged but not yet promoted.
     pub fn is_l3_swapping(&self) -> bool {
@@ -650,6 +658,15 @@ impl L3Conn {
         // frame.
         self.last_seq = seq;
         true
+    }
+
+    /// Replace this L3Conn's L2↔L3 control stream after a backend
+    /// reconnect (`l3_reader_loop` saw EOF, main loop ran
+    /// `wait_and_connect`, and now we hot-swap the write half so
+    /// subsequent `forward_key`/`forward_resize`/etc go through the
+    /// fresh stream).  Old stream's Drop closes the old fd.
+    pub fn swap_control(&mut self, new_control: UnixStream) {
+        self.control = new_control;
     }
 
     /// Forward a keystroke to the session process, which encodes it with
