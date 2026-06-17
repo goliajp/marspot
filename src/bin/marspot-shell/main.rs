@@ -431,7 +431,6 @@ use marspot::shell_proto::{
 };
 
 mod banner;
-mod fd_vault_server;
 mod plugins;
 mod present;
 mod sup_log;
@@ -767,13 +766,6 @@ struct ShellApp {
     /// session_id.  At most one per pane.
     active_pane_sessions:
         std::collections::HashMap<u64, ActivePaneSession>,
-    /// RFC-003 §6 Amendment 15 — L1's fd-vault server.  Holds dup'd
-    /// PTY-master fds (and metadata) on behalf of L2's L3 swap
-    /// orchestration.  L1 doesn't know what the keys / metadata /
-    /// fds mean; it just buffers them.  None if the listener failed
-    /// to bind (degraded mode — silent updates disabled but
-    /// everything else still works).
-    fd_vault: Option<fd_vault_server::VaultServer>,
 }
 
 /// Bundle: the plugin's session object + the metadata we need to log
@@ -854,16 +846,6 @@ impl ShellApp {
             pane_session_begin_rx,
             pane_badge_tx_clone,
             active_pane_sessions: std::collections::HashMap::new(),
-            fd_vault: match fd_vault_server::VaultServer::start() {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    lx_warn!(
-                        "l1.vault.start_failed",
-                        &format!("{e}; silent L3 updates disabled this session")
-                    );
-                    None
-                }
-            },
         }
     }
 
@@ -1037,17 +1019,6 @@ impl ShellApp {
             .env(ENV_SURFACE_HEIGHT, h_phys.to_string())
             .env(ENV_SURFACE_SCALE, scale.to_string())
             .env(ENV_CONTROL_FD, DEFAULT_CONTROL_FD.to_string());
-        // RFC-003 §6 Amendment 15 — point L2 (and through env
-        // inheritance, every L3 it spawns) at L1's fd-vault socket.
-        // When the vault failed to start we just skip the env: L2 /
-        // L3 cold-start and silent updates degrade to "no fd
-        // stashing", but otherwise everything works.
-        if let Some(vault) = self.fd_vault.as_ref() {
-            cmd.env(
-                marspot_term::fd_vault::ENV_VAULT_SOCK,
-                vault.sock_path(),
-            );
-        }
         // SAFETY: pre_exec runs in the forked child between fork and
         // exec.  Only async-signal-safe libc calls are allowed; we
         // only use dup2/close/fcntl which are all on the AS-safe list.
@@ -2417,17 +2388,11 @@ impl MarspotApp for ShellApp {
         if signalled + orphans_killed > 0 {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        let drained = self
-            .fd_vault
-            .as_ref()
-            .map(|v| v.drain())
-            .unwrap_or(0);
         lx_event!(
             "SHELL_QUIT_CLEANUP",
-            "SIGTERM'd L3s + orphans + drained fd-vault for clean user quit",
+            "SIGTERM'd L3s + orphans for clean user quit",
             n_signalled = signalled,
             n_orphans_killed = orphans_killed,
-            n_vault_drained = drained,
             n_entries = entries.len()
         );
 

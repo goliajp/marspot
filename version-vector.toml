@@ -21,6 +21,6 @@
 #                         surface, bytelog.  Bump when in-process
 #                         terminal mechanics or the L2↔L3 wire change.
 
-shell   = "0.3.3"    # L1 — Amendment 15.3: Cmd-Q delegate returns NSTerminateCancel (windowShouldClose deadlock fix)
-core    = "0.4.1"    # L2 — Amendment 15.2: SIGKILL spawned L3 on wait_and_connect error (orphan fix)
-session = "0.4.0"    # L3 — Amendment 15: deposit/withdraw PTY fd + SIGTERM handler + state.bin restore
+shell   = "0.4.0"    # L1 — Amendment 16: vault撤回,L1 回到纯壳(close cleanup + Cmd-Q hook 保留)
+core    = "0.5.0"    # L2 — Amendment 16: swap_idle_l3 + boot fanout 改为只发 SIGTERM 让 L3 自 execv
+session = "0.5.0"    # L3 — Amendment 16: SIGTERM handler 比对 fingerprint → 自 execv handoff(L4 shelld 模式)

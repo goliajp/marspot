@@ -299,39 +299,10 @@ fn install_swap_trigger(tx: Sender<CoreEvent>) {
 /// `L3Ready` wakes (and routing `SelectionText` replies).  Behind
 /// `MARSPOT_L3=1`.  Used both at boot ([`spawn_l3_pane`]) and to bring up a
 /// silent-update replacement on the same session ([`CoreApp::swap_idle_l3`]).
-/// Reason the L3 is being spawned.  Switches what env we hand the
-/// child and which fast-path it takes at boot.  See L3's `main()`.
-#[derive(Clone, Debug)]
-enum L3SpawnReason {
-    /// Brand-new session.  L3 forkpty + zsh; deposits its PTY master
-    /// fd into L1's fd-vault under `session_id`.
-    Cold,
-    /// Replacement of an L3 we just SIGTERM'd for a silent upgrade.
-    /// L3 withdraws the PTY master fd from L1's vault under
-    /// `session_id`; PTY + shell persist across the swap (the dying
-    /// L3 deliberately did NOT SIGHUP).
-    ResumeFromVault,
-    /// Reincarnation of an L3 whose process was killed (typically
-    /// when the user quit marspot).  L3 cold-spawns a fresh shell
-    /// but pre-applies the saved `state.bin` snapshot so the user
-    /// sees the prior pane content under a new prompt.
-    RestoreState { state_bin: std::path::PathBuf },
-}
-
 fn spawn_l3(
     cols: u16,
     rows: u16,
     session_id: u64,
-    event_tx: &Sender<CoreEvent>,
-) -> std::io::Result<L3Spawn> {
-    spawn_l3_with_reason(cols, rows, session_id, L3SpawnReason::Cold, event_tx)
-}
-
-fn spawn_l3_with_reason(
-    cols: u16,
-    rows: u16,
-    session_id: u64,
-    reason: L3SpawnReason,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
     // RFC-003 Amendment 7 step 3: L2 creates the region under the
@@ -344,14 +315,7 @@ fn spawn_l3_with_reason(
         .to_str()
         .map(|s| s.to_string())
         .unwrap_or_default();
-    // RFC-003 §6 Amendment 15 — ResumeFromVault reuses the existing
-    // shm region (the prior L3's writer dup that L2 still maps as a
-    // reader keeps the kernel object alive); other modes create
-    // afresh.  Either way the L3 sees the region via dup2 → fd 4.
-    let region = match &reason {
-        L3SpawnReason::ResumeFromVault => grid_shm::open_region(&shm_name_c)?,
-        _ => grid_shm::create_region_named(cols, rows, &shm_name_c)?,
-    };
+    let region = grid_shm::create_region_named(cols, rows, &shm_name_c)?;
     let region_raw = region.as_raw_fd();
 
     // CLOEXEC the shm fd we hold here so it can't leak into a sibling
@@ -403,22 +367,6 @@ fn spawn_l3_with_reason(
     // the L2 parent — RFC-003 step 3b leaves the inherited-fd path
     // behind entirely.
     cmd.env_remove(ENV_CONTROL_FD);
-    // RFC-003 §6 Amendment 15 — spawn-reason gates which boot path
-    // L3 takes.  See the `L3SpawnReason` enum's doc-comment.
-    match &reason {
-        L3SpawnReason::Cold => {
-            cmd.env_remove("MARSPOT_L3_RESUME_KEY");
-            cmd.env_remove("MARSPOT_L3_RESTORE_STATE_BIN");
-        }
-        L3SpawnReason::ResumeFromVault => {
-            cmd.env("MARSPOT_L3_RESUME_KEY", session_id.to_string());
-            cmd.env_remove("MARSPOT_L3_RESTORE_STATE_BIN");
-        }
-        L3SpawnReason::RestoreState { state_bin } => {
-            cmd.env_remove("MARSPOT_L3_RESUME_KEY");
-            cmd.env("MARSPOT_L3_RESTORE_STATE_BIN", state_bin);
-        }
-    }
     // SAFETY: pre_exec runs between fork and exec; only async-signal-safe
     // libc calls (dup2/close/fcntl) are used.
     unsafe {
@@ -796,17 +744,22 @@ impl CoreApp {
     /// click-to-swap affordance for it.  Skips panes already swapping or
     /// exited.  Behind `MARSPOT_L3=1` (no L3 panes otherwise → no-op).
     fn swap_idle_l3(&mut self) {
-        // RFC-003 §6 Amendment 15 — orchestrate the L3 silent self-update.
-        // For each L3 pane:
-        //   1. SIGTERM the L3 process.  Its SIGTERM handler writes
-        //      state.bin and calls Pty::release_for_handoff (so Drop
-        //      does NOT SIGHUP the shell).  L1's fd-vault still holds
-        //      a duped copy of the PTY master fd → kernel object lives.
-        //   2. Wait briefly for the L3 to exit.
-        //   3. spawn_l3_with_reason(ResumeFromVault): the new L3 boots,
-        //      withdraws the PTY master fd from L1's vault under the
-        //      session id, builds a Pty::from_raw_master(fd, child_pid),
-        //      and continues — the shell is none the wiser.
+        // RFC-003 §6 Amendment 16 — L3 self-execv silent update.
+        //
+        // L2 is purely the trigger: SIGTERM each L3 pid.  L3's handler
+        // looks at current/marspot-session's MARSPOT_FP fingerprint;
+        // if different from its own rodata fingerprint it execvs into
+        // the new image (PTY master fd + UDS listener fd survive via
+        // clear-CLOEXEC + manifest handoff).  If the fingerprint
+        // matches its own (no real update) it falls back to the
+        // user-quit shutdown path (state.bin + clean exit, shell
+        // SIGHUPs).
+        //
+        // L2 doesn't touch fds, doesn't spawn a replacement, doesn't
+        // wait.  The L3 self-execv keeps PID + master_fd + listener_fd
+        // + shell child unchanged; L2 sees a brief control read pause
+        // while the new image rebinds its readers, then keystrokes
+        // resume.
         match marspot::updater::promote_pending_session() {
             Ok(true) => lx_event!(
                 "SESSION_PROMOTE",
@@ -815,100 +768,31 @@ impl CoreApp {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
-        let mut swapped = 0usize;
-        let mut failed = 0usize;
-        for i in 0..self.panes.len() {
-            let pane = &self.panes[i];
+        let mut signalled = 0usize;
+        for pane in &self.panes {
             if !pane.is_l3() || pane.is_exited() {
                 continue;
             }
             let Some(sid) = pane.session().l3_session_id() else {
                 continue;
             };
-            let (cols, rows) = (
-                pane.session().grid().cols(),
-                pane.session().grid().rows(),
-            );
-            match self.swap_one_l3(i, sid, cols, rows) {
-                Ok(()) => swapped += 1,
-                Err(e) => {
-                    failed += 1;
-                    lx_error!(
-                        "core.l3_swap.failed",
-                        &format!("{e}"),
-                        session = sid,
-                        pane = i
-                    );
-                }
+            let Some(pid) = pane.session().l3_pid() else { continue };
+            if pid <= 0 { continue }
+            if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                signalled += 1;
+                lx_event!(
+                    "L3_SWAP_SIGTERM",
+                    "asked L3 to self-execv into current/marspot-session",
+                    session = sid,
+                    pid = pid
+                );
             }
         }
         lx_event!(
             "L3_SWAP_FANOUT",
-            "fd-vault swap fanout complete",
-            n_swapped = swapped,
-            n_failed = failed
+            "SIGTERM fanned out for L3 self-execv",
+            n_signalled = signalled
         );
-    }
-
-    /// RFC-003 §6 Amendment 15 — replace pane `i`'s L3 with a fresh
-    /// `ResumeFromVault` spawn.  Sync: SIGTERM → wait → spawn → adopt.
-    /// Per-pane cost is dominated by the L3's wait_and_connect (≤ tens
-    /// of ms), so a 9-pane window swaps in well under a second.
-    fn swap_one_l3(
-        &mut self,
-        i: usize,
-        sid: u64,
-        cols: u16,
-        rows: u16,
-    ) -> std::io::Result<()> {
-        // Step 1: SIGTERM the existing L3 child.  Its handler writes
-        // state.bin and exits without SIGHUPing the shell.
-        let pid = self.panes[i].session().l3_pid().unwrap_or(0);
-        if pid > 0 {
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-            lx_event!("L3_SWAP_SIGTERM", "asked old L3 to exit", session = sid, pid = pid);
-        }
-        // Step 2: wait up to 1 s for the process to disappear.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while pid > 0
-            && std::time::Instant::now() < deadline
-            && unsafe { libc::kill(pid, 0) } == 0
-        {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 {
-            // Stubborn L3 — SIGKILL.  Loses state.bin write, but the
-            // shell is gone too (no vault holder besides L1), so the
-            // next pane render will just be blank until the new L3
-            // catches up.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-            lx_warn!(
-                "core.l3_swap.sigkill_fallback",
-                "old L3 didn't exit on SIGTERM; SIGKILL fallback",
-                session = sid,
-                pid = pid
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        // Step 3: spawn the replacement.
-        let spawn = spawn_l3_with_reason(
-            cols,
-            rows,
-            sid,
-            L3SpawnReason::ResumeFromVault,
-            &self.event_tx,
-        )?;
-        let new_pid = spawn.child.id();
-        self.panes[i] = Pane::new_l3(L3Conn::new(spawn, sid));
-        lx_event!(
-            "L3_SWAP_ADOPTED",
-            "replaced pane backend with fresh L3 (resumed PTY fd from vault)",
-            session = sid,
-            pane = i,
-            new_pid = new_pid
-        );
-        self.needs_render = true;
-        Ok(())
     }
 
     /// Call right before moving focus to `new_idx`: if the currently-
@@ -2018,62 +1902,40 @@ fn main() {
             }
             let _ = session_registry::delete_session(*id);
         }
-        // RFC-003 §6 Amendment 15 — resurrect dead-entry panes into
-        // the remaining slots: spawn a fresh L3 against the saved
-        // state.bin (so the user sees the prior pane content) + a
-        // fresh shell.  Walks `dead_ids` newest-first (assumes ids
-        // are monotonic — true under allocate_next_session_id).
-        dead_ids.sort();
-        let mut resurrected_ids: Vec<u64> = Vec::new();
-        for id in dead_ids.iter().rev() {
-            if panes.len() >= n_sessions {
-                break;
-            }
-            // The L3's deposit metadata is gone (L1 vault drained on
-            // marspot quit), so the new L3 starts cold + applies
-            // state.bin.  spawn_l3_with_reason handles the
-            // RestoreState env wiring.
-            let state_bin = marspot_term::session_registry::session_dir(*id)
-                .join("state.bin");
-            // The prior shm region was freed when the L3 died; let
-            // spawn_l3_with_reason create a fresh one (Cold-spawn
-            // shm semantics) but mark the reason as RestoreState so
-            // the L3 picks up the snapshot at boot.
-            match spawn_l3_with_reason(
-                boot_cols,
-                boot_rows,
-                *id,
-                L3SpawnReason::RestoreState { state_bin: state_bin.clone() },
-                &event_tx,
-            ) {
-                Ok(spawn) => {
-                    let pid = spawn.child.id();
-                    panes.push(Pane::new_l3(L3Conn::new(spawn, *id)));
-                    resurrected_ids.push(*id);
-                    lx_event!(
-                        "L3_RESURRECTED",
-                        "spawned fresh shell against saved state.bin",
-                        session = id,
-                        pid = pid,
-                        state_bin = state_bin.display()
-                    );
-                }
-                Err(e) => {
-                    lx_warn!(
-                        "core.resurrect.spawn_failed",
-                        &format!("{e}; pruning"),
-                        session = id
-                    );
-                    let _ = session_registry::delete_session(*id);
+        // RFC-003 §6 Amendment 16 — L3 self-execv silent update.
+        // If this boot promoted a fresh marspot-session binary, fan
+        // SIGTERM out to every reattached L3 — their handler will
+        // notice current/marspot-session's MARSPOT_FP differs from
+        // their own rodata fingerprint and self-execv into the new
+        // image (PTY master fd + UDS listener fd + shell child all
+        // preserved via clear-CLOEXEC + manifest handoff).
+        if session_binary_freshly_promoted && !reattached_ids.is_empty() {
+            let mut signalled = 0usize;
+            for id in &reattached_ids {
+                if let Ok(entry) =
+                    marspot_term::session_registry::read_session_entry(*id)
+                {
+                    if unsafe { libc::kill(entry.pid, libc::SIGTERM) } == 0 {
+                        signalled += 1;
+                    }
                 }
             }
+            lx_event!(
+                "L3_BOOT_FANOUT",
+                "SIGTERM sent to reattached L3s for self-execv",
+                n_signalled = signalled,
+                n_reattached = reattached_ids.len()
+            );
         }
-        // Drop any dead ids we couldn't fit so they don't pile up
-        // forever.
-        for id in dead_ids.iter() {
-            if !resurrected_ids.contains(id) {
-                let _ = session_registry::delete_session(*id);
+        for id in &dead_ids {
+            if let Ok(entry) = marspot_term::session_registry::read_session_entry(*id) {
+                if !entry.shm_name.is_empty() {
+                    if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
+                        grid_shm::delete_region(&c);
+                    }
+                }
             }
+            let _ = session_registry::delete_session(*id);
         }
         lx_event!(
             "core.session_registry.inventory",
@@ -2082,60 +1944,8 @@ fn main() {
             alive = alive_ids.len(),
             reattached = reattached_ids.len(),
             dead = dead,
-            resurrected = resurrected_ids.len(),
             want = n_sessions
         );
-        // Promote-at-boot swap: the alive L3s reattached above are
-        // still the OLD binary; we orchestrate the in-place swap via
-        // L1's fd-vault now that the new pending binary is in
-        // current/.
-        if session_binary_freshly_promoted && !reattached_ids.is_empty() {
-            let ids_to_swap: Vec<u64> = reattached_ids.clone();
-            for sid in ids_to_swap {
-                let Some(idx) = panes.iter().position(|p| {
-                    p.session().l3_session_id() == Some(sid)
-                }) else { continue };
-                let (cols, rows) = (
-                    panes[idx].session().grid().cols(),
-                    panes[idx].session().grid().rows(),
-                );
-                let pid = panes[idx].session().l3_pid().unwrap_or(0);
-                if pid > 0 {
-                    unsafe { libc::kill(pid, libc::SIGTERM) };
-                }
-                let deadline = std::time::Instant::now()
-                    + std::time::Duration::from_secs(1);
-                while pid > 0
-                    && std::time::Instant::now() < deadline
-                    && unsafe { libc::kill(pid, 0) } == 0
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 {
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                match spawn_l3_with_reason(
-                    cols, rows, sid, L3SpawnReason::ResumeFromVault, &event_tx,
-                ) {
-                    Ok(spawn) => {
-                        let new_pid = spawn.child.id();
-                        panes[idx] = Pane::new_l3(L3Conn::new(spawn, sid));
-                        lx_event!(
-                            "L3_BOOT_SWAP_ADOPTED",
-                            "swapped reattached L3 to new binary via vault",
-                            session = sid,
-                            new_pid = new_pid
-                        );
-                    }
-                    Err(e) => lx_error!(
-                        "core.boot_swap.failed",
-                        &format!("{e}"),
-                        session = sid
-                    ),
-                }
-            }
-        }
         // Allocate fresh ids for the rest.
         let mut ids: Vec<u64> = Vec::new();
         while panes.len() + ids.len() < n_sessions {
