@@ -754,20 +754,23 @@ declare_class!(
     unsafe impl NSApplicationDelegate for MarspotWindowDelegate {
         /// RFC-003 §6 Amendment 15 — route Cmd-Q / Quit Marspot menu /
         /// dock Quit through the same `CloseRequested` path as the
-        /// window's red close button.  Without this hook AppKit
-        /// runs straight to `exit(0)` and the L1 close cleanup
-        /// (SIGTERM L3s + drain fd-vault) never gets a chance to run
-        /// — that's the 2026-06-17 "user quit but 9 L3s lived on"
-        /// surprise.  We dispatch synchronously and reply
-        /// `NSTerminateNow` so AppKit's normal teardown still runs
-        /// after our cleanup completes inside `close_requested`.
+        /// window's red close button.  Returning `NSTerminateCancel`
+        /// stops AppKit's own teardown (which would deadlock against
+        /// `windowShouldClose:`'s `false` return below) and lets our
+        /// `close_requested` handler shut down cleanly, then call
+        /// `ctx.exit()` so the run loop drains naturally.  Without
+        /// this redirect AppKit's `terminate:` runs straight to
+        /// `exit(0)` and the L1 cleanup (SIGTERM L3s + drain
+        /// fd-vault + pgrep sweep) never gets a chance to fire —
+        /// that's the 2026-06-17 "user Cmd-Q'd but the 9 L3s lived
+        /// on" surprise.
         #[method(applicationShouldTerminate:)]
         fn application_should_terminate(
             &self,
             _sender: &NSApplication,
         ) -> NSApplicationTerminateReply {
             dispatch_event(EventKind::CloseRequested);
-            NSApplicationTerminateReply::NSTerminateNow
+            NSApplicationTerminateReply::NSTerminateCancel
         }
 
         #[method(windowDidResize:)]

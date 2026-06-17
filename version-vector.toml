@@ -21,6 +21,6 @@
 #                         surface, bytelog.  Bump when in-process
 #                         terminal mechanics or the L2↔L3 wire change.
 
-shell   = "0.3.2"    # L1 — Amendment 15.2: pgrep sweep for orphan L3s in close cleanup
+shell   = "0.3.3"    # L1 — Amendment 15.3: Cmd-Q delegate returns NSTerminateCancel (windowShouldClose deadlock fix)
 core    = "0.4.1"    # L2 — Amendment 15.2: SIGKILL spawned L3 on wait_and_connect error (orphan fix)
 session = "0.4.0"    # L3 — Amendment 15: deposit/withdraw PTY fd + SIGTERM handler + state.bin restore
