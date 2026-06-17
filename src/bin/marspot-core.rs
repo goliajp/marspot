@@ -1267,7 +1267,17 @@ impl CoreApp {
         let pane = self.panes.get(idx)?;
         let view_offset = pane.view_offset();
         let grid = pane.session().grid();
-        let links = marspot::grid_links::scan_visible_links(grid, view_offset);
+        // cc-mode: claudecode renders URLs / paths to a fixed inner
+        // width and hard-newlines with a hanging indent.  Tell the
+        // link scanner so it merges the continuation into one
+        // logical token.  See `grid_links::ScanOpts::cc_mode`.
+        let cc_mode = pane
+            .shelld_session_id()
+            .and_then(|sid| self.pane_badges.get(&sid))
+            .map(|b| !b.is_empty())
+            .unwrap_or(false);
+        let opts = marspot::grid_links::ScanOpts { cc_mode };
+        let links = marspot::grid_links::scan_visible_links(grid, view_offset, opts);
         links.into_iter().find(|link| {
             link.row == row && col >= link.col_start && col <= link.col_end
         })

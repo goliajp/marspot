@@ -2341,7 +2341,14 @@ fn push_session(
     // for cells inside a link span (paint the text the same cyan as
     // the underline, the standard "this is clickable" cue) and the
     // underline pass below can reuse the same list.
-    let links = marspot_term::grid_links::scan_visible_links(grid, view.view_offset);
+    // cc-mode: a non-empty plugin badge identifies a claudecode pane;
+    // tell the link scanner so it merges the hanging-indent
+    // continuation rows into one logical URL/path token.  Inert on
+    // non-cc panes (badge is empty).  See `ScanOpts::cc_mode`.
+    let link_opts = marspot_term::grid_links::ScanOpts {
+        cc_mode: !view.right_badge.is_empty(),
+    };
+    let links = marspot_term::grid_links::scan_visible_links(grid, view.view_offset, link_opts);
     let in_link = |row: u16, col: u16| -> bool {
         links
             .iter()
