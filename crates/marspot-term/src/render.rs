@@ -335,6 +335,67 @@ mod selection_tests {
         );
     }
 
+    /// End-to-end test: feed real bytes through the VT parser, then
+    /// run `grid_selection_text` against the resulting grid.  Mirrors
+    /// the actual L3 pipeline (PTY byte stream → Terminal::feed →
+    /// grid → on Cmd-C reply with grid_selection_text), so a fix in
+    /// render.rs that passes unit tests but fails the live pipeline
+    /// gets caught here instead of by the user copy-pasting.
+    fn select_text_via_parser(cols: u16, rows: u16, bytes: &[u8]) -> Option<String> {
+        let mut t = crate::terminal::Terminal::new(cols, rows);
+        t.feed(bytes);
+        let grid = t.grid();
+        // Whole visible viewport: (col 0, abs rows-1) → (cols-1, abs 0).
+        let top_abs = (rows - 1) as u32;
+        let bot_abs = 0u32;
+        grid_selection_text(
+            grid,
+            (0, top_abs),
+            (cols - 1, bot_abs),
+            false,
+        )
+    }
+
+    #[test]
+    fn e2e_soft_wrap_long_ascii_has_no_phantom_newline() {
+        // 200 'a's at 20×3 forces 10 rows of soft-wrap (well over the
+        // viewport).  Grid's bottom 3 rows hold the tail; the wrap
+        // continuation flag is set by the parser on every row after
+        // the first overflow.  Whole-viewport copy must produce a
+        // contiguous run of 'a's with no `\n` interrupting it.
+        let bytes = "a".repeat(200);
+        let out = select_text_via_parser(20, 3, bytes.as_bytes())
+            .expect("non-empty selection");
+        assert!(!out.contains('\n'), "phantom \\n in: {out:?}");
+        assert!(out.chars().all(|c| c == 'a'), "non-'a' char in: {out:?}");
+    }
+
+    #[test]
+    fn e2e_hard_newline_inserts_logical_break() {
+        // Three short lines separated by CR/LF — the parser sets no
+        // wrap flag, so each line boundary is a real logical newline
+        // and selection should preserve it.  Validates the negative
+        // case so we don't accidentally swallow real newlines along
+        // with the soft-wrap fix.
+        let bytes = b"abc\r\ndef\r\nghi";
+        let out = select_text_via_parser(20, 3, bytes)
+            .expect("non-empty selection");
+        assert_eq!(out, "abc\ndef\nghi");
+    }
+
+    #[test]
+    fn e2e_long_url_across_soft_wrap_is_one_logical_line() {
+        // URL that overflows the column width; selection must yield
+        // the URL un-broken — same input grid_links::scan_visible_
+        // links uses to detect the multi-row LinkRange.
+        let cols = 20u16;
+        let url = "https://example.com/some/very/long/path/that/wraps?q=value";
+        let out = select_text_via_parser(cols, 5, url.as_bytes())
+            .expect("non-empty selection");
+        let normalised: String = out.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(normalised, url, "URL mangled by wrap: {out:?}");
+    }
+
     #[test]
     fn logical_newline_still_breaks() {
         let mut grid = Grid::new(10, 3);

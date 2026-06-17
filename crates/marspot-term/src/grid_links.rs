@@ -931,4 +931,38 @@ mod tests {
         assert_eq!(links[1].col_start, 0);
         assert_eq!(links[1].col_end, 2);
     }
+
+    /// End-to-end: feed real bytes through the VT parser and scan
+    /// the resulting grid for links.  Mirrors the live L2 path
+    /// (PTY → Terminal::feed → mirror grid → scan_visible_links →
+    /// Cmd-click hit-test + renderer underline pass), so a fix that
+    /// passes the unit test above but fails the parser pipeline gets
+    /// caught here.
+    #[test]
+    fn e2e_scan_links_via_parser_finds_url_across_soft_wrap() {
+        use crate::terminal::Terminal;
+        let cols = 20u16;
+        let rows = 5u16;
+        let mut t = Terminal::new(cols, rows);
+        let url = "https://example.com/some/very/long/path/that/wraps?q=value";
+        t.feed(url.as_bytes());
+        let grid = t.grid();
+        let links = scan_visible_links(grid, 0);
+        assert!(!links.is_empty(), "no LinkRange emitted for {url:?}");
+        for link in &links {
+            assert_eq!(link.kind, LinkKind::Url);
+            assert_eq!(
+                link.text, url,
+                "LinkRange text mangled by wrap merge: {:?}",
+                link.text
+            );
+        }
+        // The URL is longer than `cols`, so we should see >= 2 rows.
+        assert!(
+            links.len() >= 2,
+            "expected multi-row LinkRange (cols=20, url len {}), got {} segments",
+            url.chars().count(),
+            links.len()
+        );
+    }
 }
