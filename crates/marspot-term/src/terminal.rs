@@ -577,14 +577,14 @@ impl Terminal {
             // simpler per-line walk that doesn't allocate intermediate
             // Vecs — push the cells directly.
             if let Some(line) = self.grid.scrollback_line(line_idx) {
-                // `wrapped` flag for scrollback lines lives separately
-                // on Grid; we conservatively write 0 (hard newline) for
-                // now — the cost of getting this wrong is only that a
-                // wrapped URL/path after execv shows broken-at-the-row-
-                // boundary instead of one logical line in link scans.
-                // TODO: thread wrapped flag through if `scrollback_*`
-                // exposes it.
-                out.push(0u8);
+                // wrapped = the row continued from the previous (DECAWM
+                // soft-wrap).  Read straight off `Grid::scrollback_wrapped`
+                // which is kept in lockstep with `scrollback.push_line`
+                // (see `push_historic_scrollback_line` + grid scroll_up).
+                // Without this flag a cross-row URL gets chopped at the
+                // row boundary in link scans after execv.
+                let wrapped = self.grid.scrollback_wrapped(line_idx) as u8;
+                out.push(wrapped);
                 let line_cols = line.len() as u32;
                 out.extend_from_slice(&line_cols.to_le_bytes());
                 for cell in line.iter() {
@@ -659,11 +659,11 @@ impl Terminal {
         // v2 trailing scrollback section: parsed *before* committing
         // anything to live state so a corrupt scrollback rejects the
         // whole apply, never half-loaded.  v1 stops here.
-        let scrollback_lines: Vec<Vec<Cell>> = if snapshot_v >= 2 {
+        let scrollback_lines: Vec<(Vec<Cell>, bool)> = if snapshot_v >= 2 {
             let sb_count = read_u32(&mut cur)? as usize;
             let mut out = Vec::with_capacity(sb_count);
             for _ in 0..sb_count {
-                let _wrapped = read_u8(&mut cur)?;
+                let wrapped = read_u8(&mut cur)? != 0;
                 let line_cols = read_u32(&mut cur)? as usize;
                 let mut line = Vec::with_capacity(line_cols);
                 for _ in 0..line_cols {
@@ -672,7 +672,7 @@ impl Terminal {
                     let ch = char::from_u32(ch_u).unwrap_or(' ');
                     line.push(Cell { ch, attrs: cell_attrs });
                 }
-                out.push(line);
+                out.push((line, wrapped));
             }
             out
         } else {
@@ -708,9 +708,10 @@ impl Terminal {
         self.pending_response.clear();
         // v2: replay scrollback in arrival order so the ring rebuilds
         // exactly the same shape it had pre-execv.  Wrapped flag is
-        // best-effort 0 for now — see TODO at serialize side.
-        for line in scrollback_lines {
-            self.grid.push_historic_scrollback_line(&line, false);
+        // carried across so cross-row URL / path link scans on
+        // historic content keep working after execv.
+        for (line, wrapped) in scrollback_lines {
+            self.grid.push_historic_scrollback_line(&line, wrapped);
         }
         Ok(())
     }
@@ -865,14 +866,20 @@ const SNAPSHOT_MAGIC: u32 = 0xA557_5301;
 const SNAPSHOT_VERSION: u32 = 2;
 const SNAPSHOT_MIN_COMPAT: u32 = 1;
 /// Cap on how many of the most-recent scrollback lines we serialise
-/// across an execv.  An 8-pane window with ~26 k lines each would
-/// otherwise stage ~130 MB of state.bin IO during install-local —
-/// noticeable disk-write blip and slow resume.  5000 lines per pane
-/// is a generous compromise: covers the entire current visible
-/// claudecode conversation for typical use and weighs ~6.5 MB per
-/// pane.  Older history is left behind only when execv happens;
-/// during normal operation the full 26 k cap applies.
-const SNAPSHOT_SCROLLBACK_LINE_CAP: usize = 5000;
+/// across an execv.  Sized so an 8-pane window full of long
+/// claudecode sessions still finishes its state.bin IO in well under
+/// a second on NVMe.
+///
+/// Phase-2 plan (see project memory `project-scrollback-persistent`):
+/// move scrollback to a per-session file (`scrollback.bin`) that
+/// L3 reopens after execv instead of replaying through snapshot.
+/// Once that lands, this cap goes away and depth becomes unbounded
+/// (with a lazy-load window for daily perf).  Until then 20 000
+/// lines × 80 cols × ~16 B/cell ≈ 26 MB per pane covers typical
+/// usage; 8 panes = ~200 MB writes during install-local, which is
+/// roughly 200 ms on the dev mini.  Acceptable for an event the
+/// user triggers manually.
+const SNAPSHOT_SCROLLBACK_LINE_CAP: usize = 20_000;
 const ATTRS_BYTES: usize = 9;
 const CELL_BYTES: usize = 4 + ATTRS_BYTES;
 
@@ -2065,6 +2072,43 @@ mod tests {
         assert!(
             prefix.starts_with("line "),
             "newest scrollback line should begin with 'line ' prefix; got {prefix:?}"
+        );
+    }
+
+    /// v2 wrapped flag survival: feed a URL that overflows the row
+    /// width so the parser sets wrap, then push it into scrollback,
+    /// roundtrip the snapshot, and assert the wrapped flag came back.
+    /// Without this, link-scan after silent update would chop long
+    /// URLs at the row boundary.
+    #[test]
+    fn snapshot_v2_preserves_scrollback_wrapped_flag() {
+        const COLS: u16 = 20;
+        const ROWS: u16 = 4;
+        let mut src = Terminal::new(COLS, ROWS);
+        // 40 chars of URL forces wrap at col 20, then 12 \n to push
+        // those wrapped rows into scrollback.
+        src.feed(b"https://example.com/path/extra/segments/end");
+        for _ in 0..12 {
+            src.feed(b"\r\n");
+        }
+        // There should be at least one scrollback row with wrapped=true
+        // by now (the row that took the second half of the URL).
+        let any_wrapped_pre = (0..src.grid().scrollback_len())
+            .any(|i| src.grid().scrollback_wrapped(i));
+        assert!(
+            any_wrapped_pre,
+            "test setup expected a wrapped row in scrollback"
+        );
+
+        let bytes = src.serialize_snapshot();
+        let mut dst = Terminal::new(COLS, ROWS);
+        dst.apply_snapshot(&bytes).unwrap();
+
+        let any_wrapped_post = (0..dst.grid().scrollback_len())
+            .any(|i| dst.grid().scrollback_wrapped(i));
+        assert!(
+            any_wrapped_post,
+            "wrapped flag should survive snapshot roundtrip (lost after execv would break link scans)"
         );
     }
 
