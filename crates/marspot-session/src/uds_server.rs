@@ -68,6 +68,7 @@ impl SessionListener {
         rows: u16,
         cwd: &str,
         shm_name: &str,
+        shell_child_pid: i32,
         ev_tx: Sender<crate::SessionEvent>,
     ) -> io::Result<Self> {
         let dir = session_dir(id);
@@ -102,6 +103,7 @@ impl SessionListener {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             shm_name: shm_name.to_string(),
+            shell_child_pid,
         };
         if let Err(e) = write_session_entry(&entry) {
             // Rollback so list / scan won't see a phantom entry.

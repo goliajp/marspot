@@ -149,6 +149,10 @@ enum SessionEvent {
     /// the GUI-free L3 can't read the pasteboard itself. We bracketed-wrap
     /// it (per our terminal's mode) and write it to the PTY.
     Paste(String),
+    /// cc plugin asked to push raw bytes straight into the PTY (no
+    /// bracketed-paste wrap, no key encoding).  Used by the profile-
+    /// cycle state machine to send `claude5 --resume <uuid>\r`.
+    InjectInput(Vec<u8>),
     /// The control socket to L2/core hit EOF — our core is gone (crash,
     /// hang-kill, or clean exit). A freshly-booted core re-attaches the
     /// shelld session (PTY + bytelog survive *in shelld*, kept alive with
@@ -629,6 +633,15 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         }
                     }
                 }
+                MsgType::InjectInput => {
+                    if let Ok((_sid, bytes)) =
+                        marspot_term::shell_proto::decode_inject_input(&f.payload)
+                    {
+                        if tx.send(SessionEvent::InjectInput(bytes)).is_err() {
+                            break;
+                        }
+                    }
+                }
                 _ => {}
             },
             Ok(None) | Err(_) => {
@@ -836,8 +849,9 @@ fn main() {
                 });
             let cwd = std::env::var("HOME").unwrap_or_default();
             let shm_name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
+            let shell_child_pid = local.child_pid();
             match uds_server::SessionListener::bind(
-                id, cols, rows, &cwd, &shm_name, ev_tx.clone(),
+                id, cols, rows, &cwd, &shm_name, shell_child_pid, ev_tx.clone(),
             ) {
                 Ok(l) => _listener = Some(l),
                 Err(e) => {
@@ -958,6 +972,12 @@ fn main() {
                 // back through the normal pump → republish (no local
                 // predict — bulk text isn't latency-sensitive like typing).
                 SessionEvent::Paste(text) => handle_paste(&mut session, &text),
+                SessionEvent::InjectInput(bytes) => {
+                    // Raw write to PTY — no bracketed-paste, no key
+                    // encoding.  Best-effort: a dead PTY just means
+                    // the shell exited and we'll be torn down next.
+                    let _ = session.write(&bytes);
+                }
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone(gen) => {
                     // RFC-003 §6 Amendment 11 (debug-2 + debug-3 root

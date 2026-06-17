@@ -758,6 +758,9 @@ struct ShellApp {
     /// Receiver for `begin_pane_session` requests.
     pane_session_begin_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneSessionBeginRequest>,
+    /// Receiver for cc-plugin inject-input requests; drained each tick
+    /// and forwarded to the active core as `MsgType::InjectInput` frames.
+    inject_input_rx: std::sync::mpsc::Receiver<plugins::host::InjectInputRequest>,
     /// Sender clone of the badge channel — held so PaneSession host
     /// helpers can push set_badge updates without re-importing the
     /// channel from inside ShellApp methods.
@@ -817,6 +820,7 @@ impl ShellApp {
         let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
         let pane_badge_tx_clone = pane_badge_tx.clone();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
+        let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
             surfaces: None,
@@ -838,12 +842,14 @@ impl ShellApp {
                 let h = ShellPluginHost::new();
                 h.attach_pane_badge_tx(pane_badge_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
+                h.attach_inject_input_tx(inject_input_tx);
                 h
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
             pane_badge_rx,
             pane_session_begin_rx,
+            inject_input_rx,
             pane_badge_tx_clone,
             active_pane_sessions: std::collections::HashMap::new(),
         }
@@ -1575,6 +1581,21 @@ impl ShellApp {
             }
             // No active core → drop silently.  Plugin re-pushes every
             // tick so the next valid core will pick it up.
+        }
+
+        // Drain cc inject-input requests onto the active core's
+        // control socket as InjectInput frames; L2 routes by
+        // session_id to the L3 owning that pane.
+        while let Ok(req) = self.inject_input_rx.try_recv() {
+            if let Some(conn) = self.active.as_ref() {
+                conn.send(
+                    MsgType::InjectInput,
+                    marspot::shell_proto::encode_inject_input(
+                        req.session_id,
+                        &req.bytes,
+                    ),
+                );
+            }
         }
 
         // 1. Active core liveness — the core the user is looking at.

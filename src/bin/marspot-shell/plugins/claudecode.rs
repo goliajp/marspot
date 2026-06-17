@@ -26,12 +26,30 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use marspot::paths;
-// RFC-003 Phase 6: ShelldClient gone.  The L1-side plugin formerly used
-// shelld to walk sessions, send input, and detect attached pids.  Those
-// paths are stubbed via this local no-op type — the badge-mapping core
-// still runs from the file-system scan but profile cycling is degraded
-// until the plugin is rewritten against the L3 UDS surface (followup).
-struct ShelldClient;
+// RFC-003 Amendment 16 cc rewrite — read sessions from L3 entry.toml
+// registry (where each L3 records its shell child pid), forward
+// keystrokes via L1 → L2 → L3 InjectInput frame proxy.  Monitor
+// (attach_raw_only) still stubbed until the L3 PTY-broadcast wire
+// frame lands.
+
+/// Replacement for the legacy ShelldClient surface — same shape so
+/// the badge / profile-cycle code below didn't have to change.  Reads
+/// from the L3 entry.toml registry directly; send_input proxies
+/// through the PluginHost's inject_input path.
+struct ShelldClient {
+    /// PluginHost handle so send_input_to can forward through the
+    /// L1 → L2 → L3 wire-frame proxy.  Set by `init_with_host`
+    /// when the plugin is registered with a real host (tests use
+    /// `None` to skip the proxy entirely).
+    host_inject: Option<Arc<dyn InjectInputProxy>>,
+}
+
+/// Indirection trait so the plugin doesn't carry a `&dyn PluginHost`
+/// (the trait isn't `'static`).  Implemented by `ShellPluginHost`.
+pub trait InjectInputProxy: Send + Sync {
+    fn inject_input(&self, session_id: u64, bytes: &[u8]) -> std::io::Result<()>;
+}
+
 #[allow(dead_code)]
 struct CcSessionInfo {
     pub session_id: u64,
@@ -39,33 +57,60 @@ struct CcSessionInfo {
     pub child_pid: i32,
     pub title: String,
 }
+
 impl ShelldClient {
-    fn connect<P: AsRef<std::path::Path>, F: Fn() + Send + 'static>(
-        _socket: P,
-        _wake: F,
-    ) -> std::io::Result<Self> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "RFC-003: shelld retired; claudecode plugin needs L3 UDS rewrite",
-        ))
+    fn new(host_inject: Option<Arc<dyn InjectInputProxy>>) -> Self {
+        Self { host_inject }
     }
-    fn send_input_to(&self, _sid: u64, _bytes: &[u8]) -> std::io::Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "RFC-003: shelld send_input_to stubbed",
-        ))
+
+    /// Walk the L3 entry.toml registry for every live session and
+    /// return CcSessionInfo per entry whose pid (L3 process) is still
+    /// alive.  Each entry carries shell_child_pid (zsh) — the cc
+    /// badge / profile-cycle code walks pidtree from there.
+    fn list_sessions(&self) -> std::io::Result<Vec<CcSessionInfo>> {
+        let entries = marspot_term::session_registry::list_session_entries();
+        let mut out = Vec::with_capacity(entries.len());
+        for e in entries {
+            let alive = unsafe { libc::kill(e.pid, 0) } == 0;
+            out.push(CcSessionInfo {
+                session_id: e.id,
+                alive,
+                child_pid: e.shell_child_pid,
+                title: e.title,
+            });
+        }
+        Ok(out)
     }
+
+    /// Forward raw bytes into the PTY backing `sid`.  Routes through
+    /// L1 → L2 control socket → L3 via the InjectInput wire frame
+    /// the active core knows how to dispatch.  No bracketed-paste
+    /// wrapping — the caller's bytes hit the PTY verbatim, so
+    /// scripts like `claude5 --resume <uuid>\r` work even inside
+    /// apps that have DECSET 2004 on.
+    fn send_input_to(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()> {
+        match self.host_inject.as_ref() {
+            Some(p) => p.inject_input(sid, bytes),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no InjectInputProxy on this host (test build?)",
+            )),
+        }
+    }
+
+    /// PTY-broadcast subscribe — pending the L3-side PTY fan-out
+    /// frame.  Returning Err disables the C7 API-error-retry monitor
+    /// until that wire lands; the badge / profile-cycle paths above
+    /// still work.
     fn attach_raw_only(&self, _sid: u64) -> std::io::Result<std::sync::mpsc::Receiver<Vec<u8>>> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "RFC-003: shelld attach_raw_only stubbed",
+            "PTY raw broadcast TODO (no L3 fan-out frame yet)",
         ))
     }
+
     fn detach_raw(&self, _sid: u64) -> std::io::Result<()> {
         Ok(())
-    }
-    fn list_sessions(&self) -> std::io::Result<Vec<CcSessionInfo>> {
-        Ok(Vec::new())
     }
 }
 
@@ -713,35 +758,18 @@ impl Plugin for ClaudecodePlugin {
             PluginError::Other("HOME not set; claudecode plugin idle".into())
         })?;
         self.projects_root = Some(PathBuf::from(home).join(".claude").join("projects"));
-        // Connect to shelld so tick can map shelld_session_id →
-        // child_pid → claude descendant → sessionId.  Best-effort:
-        // if shelld is down, plugin still runs in global-scan-only
-        // mode, no per-session mapping.
-        let socket = paths::sessions_dir().join("shelld.sock"); // retired in RFC-003; stub returns Err below
-        let wake = Arc::new(AtomicBool::new(false));
-        let wk = wake.clone();
-        match ShelldClient::connect(&socket, move || {
-            wk.store(true, Ordering::Release);
-        }) {
-            Ok(c) => {
-                self.shelld = Some(Arc::new(c));
-                host.log(
-                    LogLevel::Info,
-                    "init.shelld_connected",
-                    &format!("shelld client up ({})", socket.display()),
-                );
-            }
-            Err(e) => {
-                host.log(
-                    LogLevel::Warn,
-                    "init.shelld_unavailable",
-                    &format!(
-                        "shelld at {} unavailable ({e}); per-session mapping disabled",
-                        socket.display()
-                    ),
-                );
-            }
-        }
+        // RFC-003 Amendment 16 cc: read sessions from L3 entry.toml
+        // registry instead of shelld.  ShelldClient is now a thin
+        // façade over `session_registry::list_session_entries()` and
+        // the L1→L2→L3 InjectInput wire-frame proxy (set later by
+        // the registry via `attach_inject_proxy`).
+        let proxy = host.cc_inject_proxy();
+        self.shelld = Some(Arc::new(ShelldClient::new(proxy)));
+        host.log(
+            LogLevel::Info,
+            "init.registry_walker",
+            "cc reading sessions from L3 entry.toml + InjectInput proxy",
+        );
         host.log(
             LogLevel::Info,
             "init",

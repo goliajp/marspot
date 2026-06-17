@@ -119,6 +119,12 @@ pub struct SessionEntry {
     /// doesn't survive the swap; the name does).  Empty string =
     /// legacy entry written before this field existed.
     pub shm_name: String,
+    /// RFC-003 §6 cc: the L3's forkpty child PID (the zsh / login
+    /// shell at the other end of the PTY).  L1-side plugins
+    /// (claudecode, future ones) walk pidtree from this pid to find
+    /// descendants like `claude` they want to badge / send input to.
+    /// `0` = legacy entry written before this field existed.
+    pub shell_child_pid: i32,
 }
 
 fn quote(s: &str) -> String {
@@ -155,6 +161,7 @@ pub fn write_session_entry(entry: &SessionEntry) -> io::Result<()> {
     writeln!(s, "proto_version = {}", entry.proto_version).ok();
     writeln!(s, "created_at_unix = {}", entry.created_at_unix).ok();
     writeln!(s, "shm_name = {}", quote(&entry.shm_name)).ok();
+    writeln!(s, "shell_child_pid = {}", entry.shell_child_pid).ok();
     std::fs::write(&tmp, s)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
@@ -208,6 +215,12 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
             .and_then(|raw| unquote(raw))
             .unwrap_or_default()
     };
+    let opt_i32 = |k: &str| -> i32 {
+        fields
+            .get(k)
+            .and_then(|raw| raw.parse::<i32>().ok())
+            .unwrap_or(0)
+    };
     Ok(SessionEntry {
         id: req_num("id")?,
         pid: req_i32("pid")?,
@@ -219,6 +232,7 @@ pub fn parse_session_entry_text(contents: &str) -> io::Result<SessionEntry> {
         proto_version: req_u32("proto_version")?,
         created_at_unix: req_num("created_at_unix")?,
         shm_name: opt_str("shm_name"),
+        shell_child_pid: opt_i32("shell_child_pid"),
     })
 }
 
@@ -372,6 +386,7 @@ mod tests {
             proto_version: PROTO_VERSION,
             created_at_unix: 1_718_000_000 + id,
             shm_name: format!("/msp-s-{id}"),
+            shell_child_pid: 99000 + id as i32,
         }
     }
 

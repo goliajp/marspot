@@ -61,6 +61,20 @@ pub struct ShellPluginHost {
     pane_badge_tx: Mutex<Option<Sender<PaneBadgeUpdate>>>,
     /// PaneSession take-over requests bound for the main loop.
     pane_session_begin_tx: Mutex<Option<Sender<PaneSessionBeginRequest>>>,
+    /// L1→L2 InjectInput sender — the shell main loop's CoreConn
+    /// transport.  Cc plugin calls in here from its profile-cycle
+    /// state machine to push raw bytes (e.g. `claude5 --resume <uuid>\r`)
+    /// at the PTY backing a given session id.  None in tests.
+    inject_input_tx: Mutex<Option<Sender<InjectInputRequest>>>,
+}
+
+/// What the main loop receives on its inject_input channel.  The
+/// loop walks active core's control socket and writes an InjectInput
+/// frame carrying these bytes for the named session_id.
+#[derive(Debug, Clone)]
+pub struct InjectInputRequest {
+    pub session_id: u64,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -77,6 +91,7 @@ impl ShellPluginHost {
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
             pane_session_begin_tx: Mutex::new(None),
+            inject_input_tx: Mutex::new(None),
         }
     }
 
@@ -92,6 +107,12 @@ impl ShellPluginHost {
     /// Same shape for PaneSession take-overs.
     pub fn attach_pane_session_begin_tx(&self, tx: Sender<PaneSessionBeginRequest>) {
         *self.pane_session_begin_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Wire the channel the shell main loop drains for cc-driven
+    /// PTY inject requests.  Called once during shell startup.
+    pub fn attach_inject_input_tx(&self, tx: Sender<InjectInputRequest>) {
+        *self.inject_input_tx.lock().unwrap() = Some(tx);
     }
 
     /// Refresh per-pane snapshots.  Called from the shell's tick
@@ -139,6 +160,29 @@ impl ShellPluginHost {
 impl Default for ShellPluginHost {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Concrete `InjectInputProxy` that just forwards onto the cc
+/// inject-input channel.  The shell main loop drains the receiver
+/// half and routes through the live core's control socket.
+struct InjectInputForwarder {
+    tx: Sender<InjectInputRequest>,
+}
+
+impl crate::plugins::claudecode::InjectInputProxy for InjectInputForwarder {
+    fn inject_input(&self, session_id: u64, bytes: &[u8]) -> std::io::Result<()> {
+        self.tx
+            .send(InjectInputRequest {
+                session_id,
+                bytes: bytes.to_vec(),
+            })
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "inject_input channel closed",
+                )
+            })
     }
 }
 
@@ -217,6 +261,15 @@ impl PluginHost for ShellPluginHost {
             text: text.to_string(),
         });
         Ok(())
+    }
+
+    fn cc_inject_proxy(
+        &self,
+    ) -> Option<Arc<dyn crate::plugins::claudecode::InjectInputProxy>> {
+        // Clone the tx out once, reuse it through Arc so the cc plugin
+        // doesn't have to lock-and-clone on every keystroke.
+        let tx = self.inject_input_tx.lock().unwrap().clone()?;
+        Some(Arc::new(InjectInputForwarder { tx }))
     }
 
     fn begin_pane_session(

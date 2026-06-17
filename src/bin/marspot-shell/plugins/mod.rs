@@ -232,6 +232,15 @@ pub trait PluginHost: Send + Sync {
         Ok(())
     }
 
+    /// RFC-003 Amendment 16 cc: hand the plugin a proxy it can use
+    /// to forward raw bytes into a pane's PTY via the L1→L2→L3
+    /// `InjectInput` wire frame.  Default `None` for test hosts.
+    fn cc_inject_proxy(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::plugins::claudecode::InjectInputProxy>> {
+        None
+    }
+
     /// RFC-003: take over the pane backing `shelld_session_id` for
     /// the duration of the returned PaneSession.  The host:
     ///   1. emits PaneSessionBegin to L2 with the session's caps

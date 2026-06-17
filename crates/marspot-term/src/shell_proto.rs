@@ -219,6 +219,13 @@ pub enum MsgType {
     /// will carry attributed runs.  Stub frame in C1 — full overlay
     /// rendering lands when a plugin actually uses it.
     PaneSessionOverlay = 47,
+    /// L1 → L2: cc plugin asks L2 to push these raw bytes into the
+    /// PTY backing this session.  Payload: u64 LE session_id +
+    /// u32 LE byte_len + raw bytes.  No bracketed-paste wrap; the
+    /// caller's bytes hit the PTY verbatim.  L2 forwards to L3 via
+    /// its existing control socket using a sibling InjectInput
+    /// frame; L3's main loop writes the bytes straight to the PTY.
+    InjectInput = 48,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -255,10 +262,37 @@ impl MsgType {
             45 => MsgType::PaneSessionKey,
             46 => MsgType::PaneSessionUserEscape,
             47 => MsgType::PaneSessionOverlay,
+            48 => MsgType::InjectInput,
             200 => MsgType::Error,
             _ => return None,
         })
     }
+}
+
+/// Encode an `InjectInput` payload: u64 LE session_id + u32 LE len +
+/// raw bytes.  No bracketed-paste markup — the caller controls every
+/// byte that ends up on the PTY.
+pub fn encode_inject_input(session_id: u64, bytes: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12 + bytes.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    v.extend_from_slice(bytes);
+    v
+}
+
+pub fn decode_inject_input(payload: &[u8]) -> io::Result<(u64, Vec<u8>)> {
+    if payload.len() < 12 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "InjectInput too short"));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let len = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
+    if payload.len() != 12 + len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("InjectInput len {len} but payload total {}", payload.len()),
+        ));
+    }
+    Ok((sid, payload[12..].to_vec()))
 }
 
 #[derive(Debug, Clone)]

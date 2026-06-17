@@ -21,6 +21,6 @@
 #                         surface, bytelog.  Bump when in-process
 #                         terminal mechanics or the L2↔L3 wire change.
 
-shell   = "0.4.0"    # L1 — Amendment 16: vault撤回,L1 回到纯壳(close cleanup + Cmd-Q hook 保留)
-core    = "0.5.0"    # L2 — Amendment 16: swap_idle_l3 + boot fanout 改为只发 SIGTERM 让 L3 自 execv
-session = "0.5.0"    # L3 — Amendment 16: SIGTERM handler 比对 fingerprint → 自 execv handoff(L4 shelld 模式)
+shell   = "0.5.0"    # L1 — cc 复活:entry.toml 读 sessions + InjectInputProxy 路径 + InjectInput frame 转发
+core    = "0.6.0"    # L2 — cc 复活:InjectInput frame dispatch → L3Conn.forward_inject_input
+session = "0.6.0"    # L3 — cc 复活:entry.toml 加 shell_child_pid + InjectInput frame 接受 → 写 PTY 原始字节

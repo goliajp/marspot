@@ -145,6 +145,11 @@ enum CoreEvent {
     PaneSessionBegin(u64, u32),
     /// Shell → core: plugin released the pane back to live mode.
     PaneSessionEnd(u64),
+    /// Shell → core: cc plugin asked to push raw bytes into the PTY
+    /// behind the given shelld session id.  L2 finds the matching L3
+    /// pane and forwards via the existing control channel as an
+    /// InjectInput frame.
+    InjectInput(u64, Vec<u8>),
 }
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
@@ -179,6 +184,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneSessionEnd => marspot::shell_proto::decode_pane_session_end(&f.payload)
             .ok()
             .map(CoreEvent::PaneSessionEnd),
+        MsgType::InjectInput => marspot::shell_proto::decode_inject_input(&f.payload)
+            .ok()
+            .map(|(sid, bytes)| CoreEvent::InjectInput(sid, bytes)),
         MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
@@ -645,6 +653,18 @@ impl CoreApp {
     /// L1 plugin → control socket → here: stash a per-shelld-session
     /// right-side decoration for the title strip.  Empty `text` clears
     /// any prior badge.  Forces a redraw on transition.
+    /// cc plugin asked to push raw bytes into the PTY behind
+    /// `shelld_session_id`.  Find the matching L3 pane and let it
+    /// forward via the existing control channel.
+    fn inject_input(&mut self, shelld_session_id: u64, bytes: &[u8]) {
+        for pane in &mut self.panes {
+            if pane.session().l3_session_id() == Some(shelld_session_id) {
+                pane.session_mut().forward_inject_input(bytes);
+                return;
+            }
+        }
+    }
+
     fn set_pane_badge(&mut self, shelld_session_id: u64, text: String) {
         let prev = self.pane_badges.get(&shelld_session_id).cloned();
         let changed = if text.is_empty() {
@@ -2184,6 +2204,9 @@ fn main() {
                 }
                 CoreEvent::PaneSessionEnd(sid) => {
                     app.pane_session_end(sid);
+                }
+                CoreEvent::InjectInput(sid, bytes) => {
+                    app.inject_input(sid, &bytes);
                 }
             }
         };

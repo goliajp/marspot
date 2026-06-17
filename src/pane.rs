@@ -141,6 +141,15 @@ impl PaneBackend {
         }
     }
 
+    /// Forward raw bytes via the cc inject-input frame (no
+    /// bracketed-paste wrap, no key encoding).  No-op for non-L3
+    /// backends.  Used by L2 to relay `CoreEvent::InjectInput`.
+    pub fn forward_inject_input(&mut self, bytes: &[u8]) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_inject_input(bytes);
+        }
+    }
+
     /// Ask an L3 session to publish its window at `view_offset`.  No-op for
     /// in-process backends, which scroll their own grid at render time.
     pub fn forward_scroll(&mut self, view_offset: u16) {
@@ -637,6 +646,17 @@ impl L3Conn {
     /// socket.
     fn forward_paste(&mut self, text: &str) {
         let frame = Frame::new(MsgType::Paste, encode_paste(text));
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    /// Forward raw bytes (no bracketed-paste wrap) for cc plugin
+    /// inject-input — used by the profile-cycle state machine to
+    /// push `claude5 --resume <uuid>\r` straight into the PTY.
+    fn forward_inject_input(&mut self, bytes: &[u8]) {
+        let frame = Frame::new(
+            MsgType::InjectInput,
+            crate::shell_proto::encode_inject_input(self.session_id, bytes),
+        );
         let _ = frame.write_to(&mut self.control);
     }
 
