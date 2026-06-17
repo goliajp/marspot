@@ -68,32 +68,39 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16) -> Vec<LinkRange> {
     }
     // Build logical lines by walking viewport rows top→bottom and
     // joining each row that's flagged as a soft-wrap continuation of
-    // the row above it.  We keep enough info to project a char index
-    // inside the logical line back to its physical (row, col).
-    let mut line = String::with_capacity(cols as usize * 4);
-    // Per-row segment: where in `line` does row `phys_row`'s chars
-    // start, and what physical col does it start at (always 0 for
-    // continuation rows, only the first segment can start mid-row —
-    // but here it always starts at col 0 because we read whole rows).
+    // the row above it.  We track each row's offset into the merged
+    // String as an incremental counter — NEVER call `line.chars()
+    // .count()` per row (the obvious-looking choice would re-iterate
+    // the entire accumulated string on every row, an O(rows² × cols)
+    // hot path that, profiled on a 9-pane 97×74 grid, ate 33 % of the
+    // main thread before being fixed here).  Each grid cell
+    // contributes exactly one char (NUL trail-halves become a space,
+    // everything else is the cell's `char` 1:1), so `cols` worth of
+    // chars per row is exact.
+    let line_cap = cols as usize * rows as usize * 4;
+    let mut line = String::with_capacity(line_cap);
     let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
+    let mut char_offset: usize = 0;
     for r in 0..rows {
         let is_continuation = r > 0 && grid.wrapped_at_view(view_offset, r);
         if !is_continuation && !segments.is_empty() {
-            scan_logical_line(&line, &segments, out.as_mut());
+            scan_logical_line(&line, &segments, cols as usize, out.as_mut());
             line.clear();
             segments.clear();
+            char_offset = 0;
         }
         segments.push(LineSegment {
             phys_row: r,
-            char_offset: line.chars().count(),
+            char_offset,
         });
         for c in 0..cols {
             let ch = grid.cell_at_view(view_offset, c, r).ch;
             line.push(if ch == '\0' || ch == ' ' { ' ' } else { ch });
         }
+        char_offset += cols as usize;
     }
     if !segments.is_empty() {
-        scan_logical_line(&line, &segments, out.as_mut());
+        scan_logical_line(&line, &segments, cols as usize, out.as_mut());
     }
     out
 }
@@ -114,14 +121,19 @@ struct LineSegment {
 /// segment matches collapse to one LinkRange; multi-segment matches
 /// fan out (same `text`, different `phys_row`/col_start/col_end),
 /// preserving the per-row hit-test + per-row underline model.
-fn scan_logical_line(line: &str, segments: &[LineSegment], out: &mut Vec<LinkRange>) {
+fn scan_logical_line(
+    line: &str,
+    segments: &[LineSegment],
+    cols_per_row: usize,
+    out: &mut Vec<LinkRange>,
+) {
     if segments.is_empty() {
         return;
     }
     // Pattern scan produces matches as `(char_lo, char_hi_exclusive,
     // kind, text)`; project each to one or more LinkRange row spans.
     let mut row_matches: Vec<LinkRange> = Vec::new();
-    scan_line_into_matches(line, &mut row_matches, segments);
+    scan_line_into_matches(line, &mut row_matches, segments, cols_per_row);
     out.extend(row_matches.drain(..));
 }
 
@@ -150,17 +162,15 @@ fn locate(segments: &[LineSegment], char_pos: usize, cols_per_row: usize) -> Opt
 /// physical row it covers.  Each per-row LinkRange carries the FULL
 /// matched `text` (so click dispatch + hover tooltip are identical
 /// across segments).
-fn scan_line_into_matches(line: &str, out: &mut Vec<LinkRange>, segments: &[LineSegment]) {
+fn scan_line_into_matches(
+    line: &str,
+    out: &mut Vec<LinkRange>,
+    segments: &[LineSegment],
+    cols_per_row: usize,
+) {
     if segments.is_empty() {
         return;
     }
-    // cols-per-row: the contribution width of every segment.  Derive
-    // from segment offsets so we don't have to thread `cols` through.
-    let cols_per_row = if segments.len() >= 2 {
-        segments[1].char_offset - segments[0].char_offset
-    } else {
-        line.chars().count()
-    };
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
     let mut i = 0;
@@ -796,7 +806,7 @@ mod tests {
             },
         ];
         let mut out = Vec::new();
-        super::scan_line_into_matches(line, &mut out, &segments);
+        super::scan_line_into_matches(line, &mut out, &segments, 10);
         // One match, fanned into 2 LinkRanges (one per physical row).
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -821,7 +831,7 @@ mod tests {
             char_offset: 0,
         }];
         let mut out = Vec::new();
-        super::scan_line_into_matches(line, &mut out, &segments);
+        super::scan_line_into_matches(line, &mut out, &segments, line.chars().count());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 7);
         assert_eq!(out[0].kind, LinkKind::Url);
