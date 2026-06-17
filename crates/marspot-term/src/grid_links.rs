@@ -542,14 +542,24 @@ fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
     }
 }
 
-/// True when `chars[start..]` begins with `prefix`.
+/// True when `chars[start..]` begins with `prefix`.  All known
+/// callers pass ASCII-only literals (`http://`, `https://`), so we
+/// compare per byte without first re-collecting `prefix` into a
+/// `Vec<char>` — that re-collect was the next hot spot after the
+/// per-line `chars: Vec<char>` fix (samply showed ~6 × 10⁶ small
+/// allocs/sec from this one function with `prefix.chars().collect()`,
+/// realloc churn dominating render).
 fn matches_prefix(chars: &[char], start: usize, prefix: &str) -> bool {
-    let pchars: Vec<char> = prefix.chars().collect();
-    if chars.len() < start + pchars.len() {
+    let pbytes = prefix.as_bytes();
+    if start + pbytes.len() > chars.len() {
         return false;
     }
-    for (i, p) in pchars.iter().enumerate() {
-        if chars[start + i] != *p {
+    debug_assert!(
+        prefix.is_ascii(),
+        "matches_prefix fast path assumes ASCII prefix: {prefix:?}"
+    );
+    for (i, &pb) in pbytes.iter().enumerate() {
+        if chars[start + i] as u32 != pb as u32 {
             return false;
         }
     }

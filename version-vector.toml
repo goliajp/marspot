@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.9.6"    # L2 — scan_visible_links 输入延迟修复。samply 15s/9-pane profile 显示主线程 95% non-idle 时间花在每帧每段 logical line 的 `Vec::<char>::from_iter → realloc` 链上;重构为复用一个 `chars: Vec<char>` 单次预分配跨整次 scan_visible_links 调用 + 直接 push 字符不再走 String 中介 + 砍掉 scan_logical_line 里的 row_matches 中间 Vec。每帧分配数从 O(logical-lines × panes) 降到 ~1。remote bench 11/11 PASS
+core    = "0.9.7"    # L2 — scan_visible_links 第二段。10s 复 profile 显示 0.9.6 之后剩下的 render 时间(2103 sample 中 1642)还有 906 在 `matches_prefix → prefix.chars().collect()` realloc 链上。matches_prefix 每个 cell × 每帧 × pane 数 → ~6.9M 次小 Vec 分配/sec。改成直接按 ASCII byte 比较,无分配。bench 11/11 PASS;render p99 数无明显变化(headless bench grid 小测不出),但每帧主线程开销显著减少
 session = "0.8.5"    # L3 — revert 0.8.4 (L3_SELECTION_DUMP 用完撤掉,不留长期日志)
