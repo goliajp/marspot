@@ -1432,7 +1432,26 @@ fn main() {
         if view_offset > 0 && cur_scroll_push > last_scroll_push {
             let delta = (cur_scroll_push - last_scroll_push).min(u16::MAX as u64) as u16;
             let max = session.terminal().grid().scrollback_len() as u16;
-            view_offset = view_offset.saturating_add(delta).min(max);
+            // F1+8 — `.min(max)` would clamp view_offset DOWN when
+            // the L3 just lost scrollback context (e.g. alt-screen
+            // switch for a TUI like claudecode whose own scrollback
+            // is shorter than the saved-main history we were
+            // viewing).  After every PTY chunk that fired a
+            // scroll_push, view_offset would snap to ~0 — looks
+            // like "Enter 跳完马上弹回".  Skip the bump when max
+            // < view_offset; keep the user's intentional position.
+            if max >= view_offset {
+                view_offset = view_offset.saturating_add(delta).min(max);
+            } else {
+                lx_event!(
+                    "L3_BUMP_SKIP",
+                    "skipping view_offset bump (max < view_offset)",
+                    session_id = session.id(),
+                    view_offset = view_offset as u32,
+                    max_now = max as u32,
+                    delta = delta as u32
+                );
+            }
         }
         last_scroll_push = cur_scroll_push;
         if session.is_exited() {
