@@ -10,3 +10,4 @@
 //! with L2's per-pane state machinery and aren't reusable in `mcli`.
 
 pub mod search_bar;
+pub mod search_list;
