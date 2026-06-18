@@ -2361,21 +2361,23 @@ fn push_session(
     // skip glyph / underline / cursor emission for any cell whose
     // (row, col) falls inside.
     const SEARCH_BAR_COLS: u16 = 40;
-    const SEARCH_BAR_ROWS: u16 = 2;
+    const SEARCH_BAR_CHROME_ROWS: u16 = 3; // top border + query + (separator|bottom)
     const SEARCH_LIST_MAX_ROWS: u16 = 10;
     let overlay_mask: Option<(u16, u16, u16, u16)> = view.search_overlay.as_ref()
         .and_then(|ov| {
             let cols = grid.cols();
             if cols < SEARCH_BAR_COLS + 2 { return None; }
-            // Mirror the geometry decisions in the overlay paint
-            // section at the end of push_session; keep the two in
-            // sync.  Total rows covered = bar (2) + list (clamped
-            // to hits.len()), rounded up because the bar is offset
-            // half a cell down.
+            // Mirror the JetBrains-style geometry in the overlay
+            // paint section at the end of push_session:
+            //   chrome = 3 rows (top ╭─╮, query │…│,
+            //                    separator ├─┤ when list present)
+            //   list   = n_hits, clamped to LIST_MAX_ROWS
+            //   bottom = 1 row ╰─╯ only when list present
             let list_rows = (ov.hits.len() as u16).min(SEARCH_LIST_MAX_ROWS);
-            let covered_rows = SEARCH_BAR_ROWS + list_rows + 1; // +1 for half-cell bar offset
+            let bottom_row = if list_rows > 0 { 1 } else { 0 };
+            let covered_rows = SEARCH_BAR_CHROME_ROWS + list_rows + bottom_row;
             let col_start = cols - SEARCH_BAR_COLS - 1;
-            let col_end_inclusive = cols - 2; // 40-col-wide bar
+            let col_end_inclusive = cols - 2;
             let row_start: u16 = 0;
             let row_end_exclusive = covered_rows.min(grid.rows());
             Some((row_start, row_end_exclusive, col_start, col_end_inclusive))
@@ -2842,189 +2844,203 @@ fn push_session(
     // chrome, no border, just a quiet BG lift on the active pane.
     let _ = gutter; // pane-internal layout doesn't use it any more
 
-    // F1+ — search overlay paint.  Drawn LAST so the bar + list sit
-    // on top of grid glyphs and the active highlight.  Minimum
-    // viable visual:
-    //   • BG strip at top-right of grid inner rect, padded inside
-    //   • Query text + block cursor on row 1
-    //   • Counter `N/M` if present, right-aligned on row 0
-    //   • Result list below the bar (focused row = HIGHLIGHT_BG;
-    //     others = bar BG)
-    // Full §6.4 / §6.5 visual spec (box-drawing border, [Aa] toggle,
-    // [×] close hint) drops in once the renderer chrome glyphs are
-    // wired.
+    // F1+10 — JetBrains-style search overlay paint.  Drawn LAST so
+    // the chrome + list sit on top of grid glyphs and the active
+    // highlight.
+    //
+    // Visual:
+    //   ╭─ Find ────────── 4/64  Aa  × ─╮
+    //   │ ▌foo bar                      │      <- query + cursor
+    //   ├───────────────────────────────┤
+    //   │  function foo() { return... │       <- list row (unfocused)
+    //   │▸ if (foo) { bar.update();   │       <- focused row (indigo BG)
+    //   │  // foo: see bar value      │
+    //   ╰───────────────────────────────╯
+    //
+    // Palette: dark gray-blue ("Darcula"-ish), bright text for query
+    // and focused row, dimmer text for chrome.  Focused row uses an
+    // indigo blue (NOT the yellow HIGHLIGHT_BG, which is reserved
+    // for in-grid match highlighting; sharing the colour would make
+    // them visually conflict).
     if let Some(overlay) = view.search_overlay.as_ref() {
-        const BAR_COLS: u16 = 40;
-        const BAR_ROWS: u16 = 2;
-        const LIST_MAX_ROWS: u16 = 10;
-        // Anchor: top-right of grid inner rect, 1-cell margin.
+        const OVERLAY_COLS: u16 = SEARCH_BAR_COLS;
+        const LIST_MAX_ROWS: u16 = SEARCH_LIST_MAX_ROWS;
+        const OVERLAY_BG: (f32, f32, f32) = (0.13, 0.14, 0.17);
+        const OVERLAY_BORDER: (f32, f32, f32) = (0.42, 0.45, 0.52);
+        const OVERLAY_TEXT: (f32, f32, f32) = (0.95, 0.96, 0.97);
+        const OVERLAY_DIM: (f32, f32, f32) = (0.60, 0.63, 0.70);
+        const OVERLAY_ACCENT: (f32, f32, f32) = (0.40, 0.62, 1.0);
+        const OVERLAY_FOCUSED_BG: (f32, f32, f32) = (0.18, 0.28, 0.48);
         let cols = grid.cols();
         let rows = grid.rows();
-        if cols >= BAR_COLS + 2 {
-            let bar_left_col = cols - BAR_COLS - 1;
+        if cols >= OVERLAY_COLS + 2 {
+            let n_list = (overlay.hits.len() as u16).min(LIST_MAX_ROWS);
+            // Layout (cell rows from top of overlay):
+            //   0  — top border ╭───╮ (with label & right controls)
+            //   1  — query row │ … │
+            //   2  — separator ├───┤ when list present, else bottom ╰───╯
+            //   3..3+n_list — list rows
+            //   3+n_list — bottom border ╰───╯
+            let has_list = n_list > 0;
+            let total_rows = if has_list { 3 + n_list + 1 } else { 3 };
+            // Clamp height so the overlay doesn't run past the grid.
+            let total_rows = total_rows.min(rows);
+
+            let bar_left_col = cols - OVERLAY_COLS - 1;
             let bar_x = inner_x + bar_left_col as f32 * cell_w;
-            let bar_y_top = inner_y + 0.5 * cell_h;
-            let bar_w = BAR_COLS as f32 * cell_w;
-            let bar_h = BAR_ROWS as f32 * cell_h;
-            // BG: BG_PANEL one step brighter so it reads as chrome
-            // sitting above the grid.  Use BG_PANEL + small lift.
-            const SEARCH_BAR_BG: (f32, f32, f32) = (0.085, 0.095, 0.130);
+            let bar_y_top = inner_y;
+            let bar_w = OVERLAY_COLS as f32 * cell_w;
+            let bar_h = total_rows as f32 * cell_h;
+
+            // 1. BG fill for the entire overlay.
             cells.push(CellInstance {
                 origin: [bar_x, bar_y_top],
                 size: [bar_w, bar_h],
-                color: [SEARCH_BAR_BG.0, SEARCH_BAR_BG.1, SEARCH_BAR_BG.2, 1.0],
+                color: [OVERLAY_BG.0, OVERLAY_BG.1, OVERLAY_BG.2, 1.0],
             });
-            // Border: 1-px SEAM line around the bar rect.
-            let seam = [SEAM.0, SEAM.1, SEAM.2, 1.0];
-            // Top
-            cells.push(CellInstance {
-                origin: [bar_x, bar_y_top],
-                size: [bar_w, 1.0],
-                color: seam,
-            });
-            // Bottom
-            cells.push(CellInstance {
-                origin: [bar_x, bar_y_top + bar_h - 1.0],
-                size: [bar_w, 1.0],
-                color: seam,
-            });
-            // Left
-            cells.push(CellInstance {
-                origin: [bar_x, bar_y_top],
-                size: [1.0, bar_h],
-                color: seam,
-            });
-            // Right
-            cells.push(CellInstance {
-                origin: [bar_x + bar_w - 1.0, bar_y_top],
-                size: [1.0, bar_h],
-                color: seam,
-            });
-            // Row 0 (chrome row): counter `N/M` right-aligned.
-            let chrome_baseline = bar_y_top + (cell_h - cell_h) * 0.5 + ascent;
-            if let Some((cur, total)) = overlay.counter {
-                let counter_text = format!("{cur}/{total}");
-                let counter_chars = counter_text.chars().count() as f32;
-                let counter_x = bar_x + bar_w - 2.0 - counter_chars * cell_w;
-                push_text_run(
-                    &counter_text,
-                    counter_x,
-                    chrome_baseline,
-                    [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
-                    cell_w,
-                    cell_h,
-                    ascent,
-                    atlas_w,
-                    atlas_h,
-                    font,
-                    atlas,
-                    glyphs,
-                );
+
+            let border_color = [
+                OVERLAY_BORDER.0, OVERLAY_BORDER.1, OVERLAY_BORDER.2, 1.0,
+            ];
+            let text_color = [OVERLAY_TEXT.0, OVERLAY_TEXT.1, OVERLAY_TEXT.2, 1.0];
+            let dim_color = [OVERLAY_DIM.0, OVERLAY_DIM.1, OVERLAY_DIM.2, 1.0];
+            let accent_color = [OVERLAY_ACCENT.0, OVERLAY_ACCENT.1, OVERLAY_ACCENT.2, 1.0];
+
+            // Geometry helper: column → x.
+            let xc = |col: u16| -> f32 { bar_x + col as f32 * cell_w };
+            let row_baseline = |row: u16| -> f32 {
+                bar_y_top + row as f32 * cell_h + ascent
+            };
+            let row_y = |row: u16| -> f32 { bar_y_top + row as f32 * cell_h };
+
+            // 2. Top border with embedded label "Find" + right controls.
+            //
+            // Layout split (cells from left to right):
+            //   0       ╭
+            //   1       ─
+            //   2       (space)
+            //   3..6    Find
+            //   7       (space)
+            //   8..R-1  ─ filler
+            //   R       counter text (e.g. "4/64")
+            //   R+CW+1  Aa (case toggle)
+            //   R+CW+4  × (close)
+            //   N-2     ─
+            //   N-1     ╮
+            push_text_run("╭", xc(0), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            push_text_run("─", xc(1), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            push_text_run("Find", xc(3), row_baseline(0), text_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+
+            let counter_text = overlay.counter.map(|(c, t)| format!("{c}/{t}")).unwrap_or_default();
+            let counter_w = counter_text.chars().count() as u16;
+            let aa_w: u16 = 2;
+            let close_w: u16 = 1;
+            // Right group width: counter [+2 gap] + Aa [+2 gap] + ×
+            let right_group_w = if counter_w > 0 {
+                counter_w + 2 + aa_w + 2 + close_w
+            } else {
+                aa_w + 2 + close_w
+            };
+            // Position: last cells available before final ─╮ (cols N-2, N-1).
+            let right_start_col = OVERLAY_COLS - 2 - right_group_w;
+
+            // Mid-dashes from col 8 to right_start_col - 1.
+            if right_start_col > 8 {
+                let mid: String = "─".repeat((right_start_col - 8) as usize);
+                push_text_run(&mid, xc(8), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
             }
-            // Optional case-sensitive marker on the left of row 0.
-            let aa = if overlay.case_sensitive { "Aa" } else { "aa" };
-            push_text_run(
-                aa,
-                bar_x + 4.0,
-                chrome_baseline,
-                [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
-                cell_w,
-                cell_h,
-                ascent,
-                atlas_w,
-                atlas_h,
-                font,
-                atlas,
-                glyphs,
-            );
-            // Row 1 (query row): query text + block cursor.
-            let query_baseline = bar_y_top + cell_h + ascent;
-            let query_x = bar_x + 4.0;
-            if !overlay.query.is_empty() {
-                push_text_run(
-                    &overlay.query,
-                    query_x,
-                    query_baseline,
-                    [1.0, 1.0, 1.0, 1.0],
-                    cell_w,
-                    cell_h,
-                    ascent,
-                    atlas_w,
-                    atlas_h,
-                    font,
-                    atlas,
-                    glyphs,
-                );
+
+            // Counter (e.g. "4/64") in DIM.
+            let mut right_col = right_start_col;
+            if counter_w > 0 {
+                push_text_run(&counter_text, xc(right_col), row_baseline(0), dim_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                right_col += counter_w + 2;
             }
-            // Block cursor — thin vertical line at query_cursor column.
-            let cursor_x = query_x + overlay.query_cursor as f32 * cell_w;
+            // Aa — ACCENT when case_sensitive, DIM otherwise.
+            let aa_color = if overlay.case_sensitive { accent_color } else { dim_color };
+            push_text_run("Aa", xc(right_col), row_baseline(0), aa_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            right_col += aa_w + 2;
+            // × close hint.
+            push_text_run("×", xc(right_col), row_baseline(0), dim_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+
+            // Trailing ─╮
+            push_text_run("─", xc(OVERLAY_COLS - 2), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            push_text_run("╮", xc(OVERLAY_COLS - 1), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+
+            // 3. Query row.
+            //   │ <query>...                    │
+            push_text_run("│", xc(0), row_baseline(1), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            let query_col = 2u16;
+            let query_max_chars = (OVERLAY_COLS - 4) as usize;
+            let query_display: String = overlay.query.chars().take(query_max_chars).collect();
+            if !query_display.is_empty() {
+                push_text_run(&query_display, xc(query_col), row_baseline(1), text_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            }
+            // Block cursor — thin vertical accent at query_cursor column.
+            let cursor_col_in_query = (overlay.query_cursor as usize).min(query_max_chars) as u16;
+            let cursor_x = xc(query_col + cursor_col_in_query);
             cells.push(CellInstance {
-                origin: [cursor_x, bar_y_top + cell_h + 2.0],
-                size: [(cell_w * 0.5).max(2.0), cell_h - 4.0],
-                color: [1.0, 1.0, 1.0, 0.85],
+                origin: [cursor_x, row_y(1) + 2.0],
+                size: [(cell_w * 0.4).max(2.0), cell_h - 4.0],
+                color: [OVERLAY_TEXT.0, OVERLAY_TEXT.1, OVERLAY_TEXT.2, 0.9],
             });
-            // Result list below the bar.
-            if !overlay.hits.is_empty() {
-                let list_h_rows = (overlay.hits.len() as u16).min(LIST_MAX_ROWS);
-                let list_y_top = bar_y_top + bar_h;
-                let list_h = list_h_rows as f32 * cell_h;
-                // Clamp so list doesn't overflow the grid bottom edge.
-                let grid_bottom = inner_y + rows as f32 * cell_h;
-                let list_h_clamped = list_h.min(grid_bottom - list_y_top).max(0.0);
-                if list_h_clamped > 0.0 {
-                    // BG fill (opaque — bar + list must read as chrome
-                    // sitting fully ABOVE the grid; any translucency
-                    // causes terminal content to bleed through and the
-                    // overlay reads as a stain rather than a panel).
-                    cells.push(CellInstance {
-                        origin: [bar_x, list_y_top],
-                        size: [bar_w, list_h_clamped],
-                        color: [SEARCH_BAR_BG.0, SEARCH_BAR_BG.1, SEARCH_BAR_BG.2, 1.0],
-                    });
-                    // Per-hit row.
-                    let max_visible = (list_h_clamped / cell_h) as usize;
-                    for (i, h) in overlay.hits.iter().take(max_visible).enumerate() {
-                        let row_y = list_y_top + i as f32 * cell_h;
-                        if h.is_focused {
-                            // Focused row gets HIGHLIGHT_BG (opaque).
-                            cells.push(CellInstance {
-                                origin: [bar_x, row_y],
-                                size: [bar_w, cell_h],
-                                color: [
-                                    HIGHLIGHT_BG.0,
-                                    HIGHLIGHT_BG.1,
-                                    HIGHLIGHT_BG.2,
-                                    1.0,
-                                ],
-                            });
-                        }
-                        // Clip snippet to bar width minus a small inset.
-                        let max_chars = (BAR_COLS as usize).saturating_sub(2);
-                        let snip: String = h.snippet.chars().take(max_chars).collect();
-                        let text_fg = if h.is_focused {
-                            [0.0, 0.0, 0.0, 1.0]
-                        } else {
-                            [1.0, 1.0, 1.0, 0.92]
-                        };
-                        push_text_run(
-                            &snip,
-                            bar_x + 4.0,
-                            row_y + ascent,
-                            text_fg,
-                            cell_w,
-                            cell_h,
-                            ascent,
-                            atlas_w,
-                            atlas_h,
-                            font,
-                            atlas,
-                            glyphs,
-                        );
+            push_text_run("│", xc(OVERLAY_COLS - 1), row_baseline(1), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+
+            // 4. Separator (if list present) or bottom border directly.
+            let sep_row = 2u16;
+            if has_list {
+                push_text_run("├", xc(0), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                let mid: String = "─".repeat((OVERLAY_COLS - 2) as usize);
+                push_text_run(&mid, xc(1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                push_text_run("┤", xc(OVERLAY_COLS - 1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+
+                // 5. List rows.
+                let visible = n_list.min(total_rows.saturating_sub(4));
+                for i in 0..visible {
+                    let r = 3 + i;
+                    let h = &overlay.hits[i as usize];
+                    if h.is_focused {
+                        // Indigo focused-row BG inside the borders.
+                        cells.push(CellInstance {
+                            origin: [xc(1), row_y(r)],
+                            size: [(OVERLAY_COLS - 2) as f32 * cell_w, cell_h],
+                            color: [
+                                OVERLAY_FOCUSED_BG.0,
+                                OVERLAY_FOCUSED_BG.1,
+                                OVERLAY_FOCUSED_BG.2,
+                                1.0,
+                            ],
+                        });
                     }
+                    push_text_run("│", xc(0), row_baseline(r), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                    // Focus marker.
+                    let marker = if h.is_focused { "▸" } else { " " };
+                    let marker_color = if h.is_focused { accent_color } else { dim_color };
+                    push_text_run(marker, xc(1), row_baseline(r), marker_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                    // Snippet, clipped to inner width.
+                    let inner_w_chars = (OVERLAY_COLS - 3) as usize;
+                    let snip: String = h.snippet.chars().take(inner_w_chars).collect();
+                    push_text_run(&snip, xc(2), row_baseline(r), text_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                    push_text_run("│", xc(OVERLAY_COLS - 1), row_baseline(r), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
                 }
+
+                // 6. Bottom border ╰───╯ after list.
+                let bot_row = 3 + visible;
+                if bot_row < total_rows {
+                    push_text_run("╰", xc(0), row_baseline(bot_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                    let mid: String = "─".repeat((OVERLAY_COLS - 2) as usize);
+                    push_text_run(&mid, xc(1), row_baseline(bot_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                    push_text_run("╯", xc(OVERLAY_COLS - 1), row_baseline(bot_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                }
+            } else {
+                // Bottom border directly at row 2 (no list).
+                push_text_run("╰", xc(0), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                let mid: String = "─".repeat((OVERLAY_COLS - 2) as usize);
+                push_text_run(&mid, xc(1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                push_text_run("╯", xc(OVERLAY_COLS - 1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
             }
         }
-        let _ = rows; // touched for clamp above on some paths only
+        let _ = rows;
     }
 }
 
