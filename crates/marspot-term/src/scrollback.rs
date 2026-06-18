@@ -672,13 +672,32 @@ pub struct FileScrollback {
     idx_path: std::path::PathBuf,
     cols: usize,
     ram_capacity: usize,
-    bin: std::io::BufWriter<std::fs::File>,
-    idx: std::io::BufWriter<std::fs::File>,
-    /// Separate read-only fd for cold reads — never sees the writer
-    /// buffer's unflushed bytes.  Reads of recent lines hit the RAM
-    /// ring, so missing-from-file isn't observable.
+    // A2: `bin` / `idx` writers wrapped in RefCell so cold reads
+    // (via `&self`-only cell_at) can flush BufWriters before reading
+    // the file via mmap/pread.  Without this, a line that aged out
+    // of the RAM ring but is still in BufWriter's user-space buffer
+    // would not be visible to mmap, breaking the "ring miss ⇒ file
+    // hit" invariant.
+    bin: std::cell::RefCell<std::io::BufWriter<std::fs::File>>,
+    idx: std::cell::RefCell<std::io::BufWriter<std::fs::File>>,
+    /// Separate read-only fd for cold reads.  Reads of recent lines
+    /// hit the RAM ring, so missing-from-file isn't observable.
     bin_for_read: std::fs::File,
     idx_for_read: std::fs::File,
+    // A2: mmap state for cold reads.  Pointer is NULL until first
+    // cold read forces an mmap.  Remap happens when a needed offset
+    // exceeds the current mapping length (file has grown since the
+    // last mmap).  Both fields wrapped in `Cell` so `cell_at(&self)`
+    // can update them on remap without taking `&mut self`.
+    bin_mmap_ptr: std::cell::Cell<*mut u8>,
+    bin_mmap_len: std::cell::Cell<usize>,
+    idx_mmap_ptr: std::cell::Cell<*mut u8>,
+    idx_mmap_len: std::cell::Cell<usize>,
+    /// Set true on every `push_line`, false after a successful
+    /// flush in the cold-read path.  Cheap "is the file consistent
+    /// for a cold read?" probe so we don't pay a syscall when the
+    /// user is just reading from the RAM ring.
+    has_unflushed: std::cell::Cell<bool>,
     // RAM ring: zero-alloc flat-Vec mirror of the newest `ram_capacity`
     // lines, with parallel wrapped flags.
     ram_cells: Vec<crate::grid::Cell>,
@@ -695,6 +714,13 @@ pub struct FileScrollback {
     /// after the first push sizes it.
     scratch: Vec<u8>,
 }
+
+// Raw mmap ptrs are private to this struct and the kernel takes care
+// of cross-thread coherence — `FileScrollback` itself is owned by a
+// single L3 process so there's no inter-process concurrent mutation
+// either.  Marker impls let the type cross thread boundaries when
+// embedded in `Scrollback` (which `Send` is naturally derived for).
+unsafe impl Send for FileScrollback {}
 
 impl FileScrollback {
     /// Open or create.  Validates header on an existing file;
@@ -837,10 +863,15 @@ impl FileScrollback {
             idx_path,
             cols,
             ram_capacity,
-            bin,
-            idx,
+            bin: std::cell::RefCell::new(bin),
+            idx: std::cell::RefCell::new(idx),
             bin_for_read,
             idx_for_read,
+            bin_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
+            bin_mmap_len: std::cell::Cell::new(0),
+            idx_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
+            idx_mmap_len: std::cell::Cell::new(0),
+            has_unflushed: std::cell::Cell::new(false),
             ram_cells,
             ram_wrapped,
             ram_head: 0,
@@ -977,23 +1008,134 @@ impl FileScrollback {
         // .idx entry for this line should hold.
         let rec_offset = self.bin_tail_offset;
 
-        // Write to bin BufWriter.  Best-effort: ENOSPC etc. become a
+        // Write to bin BufWriter (interior-mutable via RefCell so
+        // cold reads from `cell_at(&self, …)` can flush on demand —
+        // see `ensure_flushed`).  Best-effort: ENOSPC etc. become a
         // log + RAM-only fallback.  v1 doesn't surface this through
         // the API; if push_line silently dropped a write to file we
         // still keep it in the RAM ring so the user sees recent
         // content normally — they only lose persistence across execv
         // for the dropped line.
-        if self.bin.write_all(&self.scratch).is_ok() {
+        if self.bin.borrow_mut().write_all(&self.scratch).is_ok() {
             self.bin_tail_offset += total_bytes as u64;
-            // Write the new line's offset to .idx.  We DON'T write a
-            // sentinel here — sentinel gets rewritten on graceful
-            // drop OR rebuilt on next open's idx-rebuild path.
-            let _ = self.idx.write_all(&rec_offset.to_le_bytes());
+            // Idx is dense (no sentinel); rebuilt on next open if
+            // it ever gets corrupt / truncated.
+            let _ = self.idx.borrow_mut().write_all(&rec_offset.to_le_bytes());
         }
+        // Mark unflushed so the first cold-read will flush before
+        // touching mmap / pread.
+        self.has_unflushed.set(true);
 
         // Always push into RAM ring so reads observe the line.
         self.push_into_ring(line, wrapped);
         self.total_lines += 1;
+    }
+
+    /// Cheap idempotent flush: a cold-read path calls this before
+    /// consulting mmap / pread so any line that aged out of the RAM
+    /// ring but still sits in the BufWriter user-space buffer is
+    /// fully visible on disk.  Called at most once per cold-read
+    /// burst because `has_unflushed` clears here and only `push_line`
+    /// re-sets it.
+    fn ensure_flushed(&self) {
+        use std::io::Write;
+        if !self.has_unflushed.get() {
+            return;
+        }
+        let _ = self.bin.borrow_mut().flush();
+        let _ = self.idx.borrow_mut().flush();
+        self.has_unflushed.set(false);
+    }
+
+    /// Ensure `self.bin_mmap_*` covers at least `needed_len` bytes.
+    /// First call mmaps the file; later calls remap when the file
+    /// has grown.  Called from cold-read paths after `ensure_flushed`
+    /// guarantees the kernel sees a consistent file.
+    fn ensure_bin_mmap_covers(&self, needed_len: u64) -> std::io::Result<()> {
+        let cur_len = self.bin_mmap_len.get();
+        if cur_len as u64 >= needed_len && !self.bin_mmap_ptr.get().is_null() {
+            return Ok(());
+        }
+        // Remap to the file's current size (which may be larger than
+        // needed_len — that's fine, virtual reservation only).
+        let file_len = self.bin_for_read.metadata()?.len();
+        if file_len == 0 {
+            return Ok(());
+        }
+        // Unmap old if any.
+        let old_ptr = self.bin_mmap_ptr.get();
+        if !old_ptr.is_null() && cur_len > 0 {
+            unsafe { libc::munmap(old_ptr as *mut libc::c_void, cur_len); }
+        }
+        // Map new.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                file_len as libc::size_t,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                std::os::unix::io::AsRawFd::as_raw_fd(&self.bin_for_read),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            self.bin_mmap_ptr.set(std::ptr::null_mut());
+            self.bin_mmap_len.set(0);
+            return Err(std::io::Error::last_os_error());
+        }
+        self.bin_mmap_ptr.set(ptr as *mut u8);
+        self.bin_mmap_len.set(file_len as usize);
+        Ok(())
+    }
+
+    fn ensure_idx_mmap_covers(&self, needed_len: u64) -> std::io::Result<()> {
+        let cur_len = self.idx_mmap_len.get();
+        if cur_len as u64 >= needed_len && !self.idx_mmap_ptr.get().is_null() {
+            return Ok(());
+        }
+        let file_len = self.idx_for_read.metadata()?.len();
+        if file_len == 0 {
+            return Ok(());
+        }
+        let old_ptr = self.idx_mmap_ptr.get();
+        if !old_ptr.is_null() && cur_len > 0 {
+            unsafe { libc::munmap(old_ptr as *mut libc::c_void, cur_len); }
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                file_len as libc::size_t,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                std::os::unix::io::AsRawFd::as_raw_fd(&self.idx_for_read),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            self.idx_mmap_ptr.set(std::ptr::null_mut());
+            self.idx_mmap_len.set(0);
+            return Err(std::io::Error::last_os_error());
+        }
+        self.idx_mmap_ptr.set(ptr as *mut u8);
+        self.idx_mmap_len.set(file_len as usize);
+        Ok(())
+    }
+
+    /// Read the byte offset of line `idx` from the idx mmap, falling
+    /// back to pread if mmap isn't covering yet.
+    fn read_idx_via_mmap(&self, line_idx: u64) -> std::io::Result<u64> {
+        let off_in_idx = line_idx * 8;
+        self.ensure_idx_mmap_covers(off_in_idx + 8)?;
+        let mmap_ptr = self.idx_mmap_ptr.get();
+        let mmap_len = self.idx_mmap_len.get();
+        if !mmap_ptr.is_null() && (off_in_idx as usize) + 8 <= mmap_len {
+            let buf = unsafe {
+                std::slice::from_raw_parts(mmap_ptr.add(off_in_idx as usize), 8)
+            };
+            return Ok(u64::from_le_bytes(buf.try_into().unwrap()));
+        }
+        // Fallback (rare): pread.
+        read_idx_at(&self.idx_for_read, line_idx)
     }
 
     fn push_into_ring(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
@@ -1037,10 +1179,73 @@ impl FileScrollback {
             let start = slot * self.cols;
             return self.ram_cells.get(start + col).copied();
         }
-        // Cold: pread the idx, then the record, decode just the cell.
-        let off = read_idx_at(&self.idx_for_read, line_idx as u64).ok()?;
-        let (cells, _wrapped) = read_record_at(&self.bin_for_read, off).ok()?;
-        cells.get(col).copied()
+        // Cold: flush BufWriters so any line that aged out of the
+        // ring is on disk, then read from the mmap tier.  The first
+        // cold-read in a session pays the flush + mmap (one-shot
+        // cost); subsequent cold reads in the same burst are pure
+        // memory accesses.
+        self.ensure_flushed();
+        let off = self.read_idx_via_mmap(line_idx as u64).ok()?;
+        self.read_record_via_mmap(off, Some(col)).map(|(cells, _w)| cells.into_iter().next()).flatten()
+            .or_else(|| {
+                // Fallback if mmap path failed for any reason: classic
+                // pread.  Same correctness; just slower.
+                let (cells, _w) = read_record_at(&self.bin_for_read, off).ok()?;
+                cells.get(col).copied()
+            })
+    }
+
+    /// Read a single record from the bin mmap.  `col_filter` is an
+    /// optimisation: when Some(col) we still decode the whole line
+    /// (because cell offsets within the record are positional), but
+    /// the caller can pick the column it wanted.  Returning the
+    /// whole `Vec<Cell>` keeps the API simple; v1's cold-read
+    /// budget already absorbs the per-line decode cost.
+    fn read_record_via_mmap(&self, offset: u64, _col_filter: Option<usize>) -> Option<(Vec<crate::grid::Cell>, bool)> {
+        // Ensure mmap covers at least the rec_len header.
+        self.ensure_bin_mmap_covers(offset + 4).ok()?;
+        let mmap_ptr = self.bin_mmap_ptr.get();
+        let mmap_len = self.bin_mmap_len.get();
+        if mmap_ptr.is_null() || (offset as usize) + 4 > mmap_len {
+            return None;
+        }
+        let len_slice = unsafe {
+            std::slice::from_raw_parts(mmap_ptr.add(offset as usize), 4)
+        };
+        let rec_len = u32::from_le_bytes(len_slice.try_into().unwrap()) as usize;
+        // Extend mmap if record's body lives past current end.
+        if (offset as usize) + 4 + rec_len > mmap_len {
+            self.ensure_bin_mmap_covers(offset + 4 + rec_len as u64).ok()?;
+        }
+        let mmap_ptr = self.bin_mmap_ptr.get();
+        let mmap_len = self.bin_mmap_len.get();
+        if (offset as usize) + 4 + rec_len > mmap_len {
+            return None;
+        }
+        let body = unsafe {
+            std::slice::from_raw_parts(mmap_ptr.add(offset as usize + 4), rec_len)
+        };
+        if body.len() < 3 {
+            return None;
+        }
+        let wrapped = body[0] != 0;
+        let cols = u16::from_le_bytes([body[1], body[2]]) as usize;
+        let want_cells_bytes = cols * crate::terminal::CELL_BYTES_PUB;
+        if body.len() < 3 + want_cells_bytes {
+            return None;
+        }
+        let mut cells = Vec::with_capacity(cols);
+        let mut p = 3;
+        for _ in 0..cols {
+            let ch_u = u32::from_le_bytes(body[p..p + 4].try_into().unwrap());
+            let attrs = crate::terminal::deserialize_attrs_pub(
+                &body[p + 4..p + 4 + crate::terminal::ATTRS_BYTES_PUB],
+            );
+            let ch = char::from_u32(ch_u).unwrap_or(' ');
+            cells.push(crate::grid::Cell { ch, attrs });
+            p += crate::terminal::CELL_BYTES_PUB;
+        }
+        Some((cells, wrapped))
     }
 
     pub fn read_line(&self, idx: usize) -> Option<Vec<crate::grid::Cell>> {
@@ -1054,9 +1259,14 @@ impl FileScrollback {
             let start = slot * self.cols;
             return Some(self.ram_cells[start..start + self.cols].to_vec());
         }
-        let off = read_idx_at(&self.idx_for_read, idx as u64).ok()?;
-        let (cells, _wrapped) = read_record_at(&self.bin_for_read, off).ok()?;
-        Some(cells)
+        self.ensure_flushed();
+        let off = self.read_idx_via_mmap(idx as u64).ok()?;
+        self.read_record_via_mmap(off, None)
+            .map(|(c, _)| c)
+            .or_else(|| {
+                let (cells, _wrapped) = read_record_at(&self.bin_for_read, off).ok()?;
+                Some(cells)
+            })
     }
 
     pub fn wrapped_at(&self, idx: usize) -> bool {
@@ -1069,7 +1279,11 @@ impl FileScrollback {
             let slot = (self.ram_head + ring_idx) % self.ram_capacity.max(1);
             return self.ram_wrapped.get(slot).copied().unwrap_or(false);
         }
-        let Some(off) = read_idx_at(&self.idx_for_read, idx as u64).ok() else { return false; };
+        self.ensure_flushed();
+        let Some(off) = self.read_idx_via_mmap(idx as u64).ok() else { return false; };
+        if let Some((_, w)) = self.read_record_via_mmap(off, None) {
+            return w;
+        }
         let Some((_cells, wrapped)) = read_record_at(&self.bin_for_read, off).ok() else { return false; };
         wrapped
     }
@@ -1102,14 +1316,21 @@ impl FileScrollback {
 impl Drop for FileScrollback {
     fn drop(&mut self) {
         use std::io::{Seek, SeekFrom, Write};
-        // Flush both BufWriters so any buffered bytes hit the page
-        // cache before our fds close.  No fsync — kernel decides
-        // when pages flush to disk; a crash truncates the trailing
-        // partial record on next open.  Dense idx (no sentinel)
-        // means there's nothing to rewrite here; just flush.
-        let _ = self.bin.flush();
-        let _ = self.idx.flush();
-        // Rewind read fds (defence-in-depth for test sharing).
+        // Flush BufWriters so any buffered bytes hit the page cache
+        // before our fds close.  No fsync.  Dense idx — no sentinel.
+        let _ = self.bin.borrow_mut().flush();
+        let _ = self.idx.borrow_mut().flush();
+        // Unmap any active mmap regions.
+        let bp = self.bin_mmap_ptr.get();
+        let bl = self.bin_mmap_len.get();
+        if !bp.is_null() && bl > 0 {
+            unsafe { libc::munmap(bp as *mut libc::c_void, bl); }
+        }
+        let ip = self.idx_mmap_ptr.get();
+        let il = self.idx_mmap_len.get();
+        if !ip.is_null() && il > 0 {
+            unsafe { libc::munmap(ip as *mut libc::c_void, il); }
+        }
         let _ = self.bin_for_read.seek(SeekFrom::Start(0));
         let _ = self.idx_for_read.seek(SeekFrom::Start(0));
     }
@@ -1613,6 +1834,90 @@ mod tests {
         assert!(sb.wrapped_at(1));
         assert!(!sb.wrapped_at(2));
         assert!(sb.wrapped_at(3));
+    }
+
+    /// A2: cold reads of lines that aged out of the RAM ring but
+    /// might still sit in the BufWriter buffer must trigger an
+    /// explicit flush + mmap before reading.  Without this, reads of
+    /// such lines would either miss bytes (pread sees only flushed)
+    /// or miss mmap coverage entirely.  Use a NARROW cols so the
+    /// 64-KiB BufWriter swallows lots of records and the ring rolls
+    /// before the buffer naturally overflows.
+    #[test]
+    fn file_a2_cold_read_triggers_flush_and_mmap() {
+        let tmp = TmpDir::new("a2-cold");
+        let cols = 4usize;  // ~59 bytes/record -> ~1100 fit in 64 KiB
+        let ram_capacity = 16;  // tiny ring
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity)
+            .expect("create");
+        // Push enough lines so the ring has rolled many times but
+        // the BufWriter still has not auto-flushed.
+        let n = 200usize;  // 200 * 59 = 11.8 KiB < 64 KiB buffer
+        for i in 0..n {
+            let ch = ((b'a' + (i % 26) as u8)) as u8;
+            sb.push_line(&fill(ch, cols), false);
+        }
+        assert_eq!(sb.len(), n);
+        // Recent lines: should be in RAM ring, no IO needed.
+        let recent_idx = n - 1;
+        let ch_recent = ((b'a' + (recent_idx % 26) as u8)) as char;
+        assert_eq!(sb.cell_at(recent_idx, 0).unwrap().ch, ch_recent);
+        // Old line: must have aged out of the ring.  Bytes are
+        // still in the BufWriter buffer.  cell_at must flush + read
+        // correctly.
+        let old_idx = 5;
+        let ch_old = ((b'a' + (old_idx % 26) as u8)) as char;
+        assert_eq!(
+            sb.cell_at(old_idx, 0).expect("old cell").ch,
+            ch_old,
+            "cold read of pre-buffer line must flush + read correctly"
+        );
+        // After cold read: has_unflushed should be back to false.
+        assert!(!sb.has_unflushed.get(), "ensure_flushed should clear flag");
+        // mmap should be populated.
+        assert!(!sb.bin_mmap_ptr.get().is_null(), "bin mmap should be set");
+        assert!(!sb.idx_mmap_ptr.get().is_null(), "idx mmap should be set");
+    }
+
+    /// A2: after a cold read mmaps the bin, subsequent pushes that
+    /// grow the file beyond the current mmap_len must trigger a
+    /// remap on the NEXT cold read.  Without remap, reading the
+    /// newly-cold lines would access unmapped memory or stale length.
+    #[test]
+    fn file_a2_mmap_remap_on_file_growth() {
+        let tmp = TmpDir::new("a2-remap");
+        let cols = 4usize;
+        let ram_capacity = 4;
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity)
+            .expect("create");
+        // First batch: push 20 lines, cold-read to mmap them.
+        for i in 0..20 {
+            sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
+        }
+        let first_old_idx = 5;
+        let _ = sb.cell_at(first_old_idx, 0); // triggers initial mmap
+        let mmap_len_first = sb.bin_mmap_len.get();
+        assert!(mmap_len_first > 0, "first mmap should be non-empty");
+        // Second batch: push another 50 lines so the file grows
+        // past mmap_len_first.
+        for i in 20..70 {
+            sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
+        }
+        // Cold-read a line that landed in the second batch (now
+        // aged out of ring of 4).
+        let cold_after_growth = 30usize;
+        let want_ch = ((b'a' + (cold_after_growth % 26) as u8)) as char;
+        assert_eq!(
+            sb.cell_at(cold_after_growth, 0).expect("cell after growth").ch,
+            want_ch,
+            "remap on growth should let us read freshly-cold lines"
+        );
+        assert!(
+            sb.bin_mmap_len.get() > mmap_len_first,
+            "mmap should have remapped to cover new file size: was {}, now {}",
+            mmap_len_first,
+            sb.bin_mmap_len.get()
+        );
     }
 
     #[test]
