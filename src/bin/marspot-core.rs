@@ -1022,11 +1022,12 @@ impl CoreApp {
 
     // ─── C5: scrollback search overlay ────────────────────────────
 
-    /// `MARSPOT_SEARCH=1` opt-in gate.  F1 removes this gate (the
-    /// feature ships on by default).  Until then Cmd+F is a no-op
-    /// for any user who hasn't exported the env var.
+    /// F1 — scrollback search is default-on.  `MARSPOT_SEARCH=0` is
+    /// the kill-switch for users who need to disable Cmd+F (e.g.
+    /// because a keystroke conflict surfaced).  Removed entirely
+    /// in a later cleanup once the default has settled.
     fn search_enabled() -> bool {
-        std::env::var("MARSPOT_SEARCH").as_deref() == Ok("1")
+        std::env::var("MARSPOT_SEARCH").as_deref() != Ok("0")
     }
 
     /// Minimum pane width (in cell cols) below which Cmd+F is a no-op

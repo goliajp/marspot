@@ -22,6 +22,12 @@
 //! eviction target still _is_ disk (kernel swap), even though the
 //! file system layer is no longer involved.
 
+// F1 — `Scrollback::Disk` is `#[deprecated]` for callers but the
+// in-module match arms here still need to construct / pattern-match
+// it.  Module-scoped allow so caller-side uses (outside this module)
+// still surface the deprecation warning while internals stay clean.
+#![allow(deprecated)]
+
 use crate::grid::Cell;
 
 /// Lines per disk page.  Page is the read-cache and ring-rotation
@@ -34,8 +40,18 @@ pub const LINES_PER_PAGE: usize = 256;
 /// `Scrollback::push_line` for every line that scrolls off.
 /// Trait-object dispatch costs ~1 % on emoji-dense parse benches;
 /// the enum lets the compiler inline through the match.
+#[allow(deprecated)]
 pub enum Scrollback {
     Memory(MemoryScrollback),
+    /// F1 — `Disk` is superseded by `File` for any session-scoped
+    /// scrollback.  Kept as a fallback for `--snapshot` / mcli /
+    /// tests where no session id is present (those never touched
+    /// the disk pages anyway).  F2 removes it entirely once F1 has
+    /// soaked for ~1 week.
+    #[deprecated(
+        since = "0.10.0",
+        note = "use File variant (default since F1); Disk removed in F2"
+    )]
     Disk(DiskScrollback),
     /// Persistent file-backed scrollback (A1 of pane upgrade — see
     /// `docs/scrollback-search.md`).  Survives L3 self-execv via

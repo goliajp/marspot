@@ -35,14 +35,13 @@ fn disk_scrollback_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("MARSPOT_DISK_SCROLLBACK").as_deref() != Ok("0"))
 }
 
-/// A3: opt-in file-backed scrollback gate.  Per `docs/scrollback-search.md`
-/// §8, the env-gate keeps the file path unreachable for normal users
-/// until F1 flips the default.  Activated only when BOTH
-/// `MARSPOT_FILE_SCROLLBACK=1` AND `MARSPOT_SESSION_ID=<u64>` are set
-/// — the latter is what binds the file to a specific session dir,
-/// and is automatically present in `marspot-session` main.  Other
-/// callers of `Terminal::new` (tests, `mcli`, `--snapshot` headless
-/// renderer) won't have session_id and so won't activate File.
+/// F1 — file-backed scrollback is the default whenever a session id
+/// is present (i.e. inside an L3 `marspot-session` process; tests /
+/// mcli / `--snapshot` don't set MARSPOT_SESSION_ID and so fall
+/// through to Disk/Memory, preserving their behaviour).
+/// `MARSPOT_FILE_SCROLLBACK=0` is the kill-switch for users who want
+/// to opt OUT in case of a regression.  Removed entirely in a later
+/// cleanup once the default has settled.
 fn fallback_disk_or_memory(cols: u16) -> Scrollback {
     Scrollback::disk(
         DISK_SCROLLBACK_RAM_LINES,
@@ -58,13 +57,11 @@ fn fallback_disk_or_memory(cols: u16) -> Scrollback {
 }
 
 fn file_scrollback_session_id() -> Option<u64> {
-    // No OnceLock cache here: Terminal::new is cold-path (once per
-    // L3 boot) so two extra env reads cost nothing measurable, and
-    // caching breaks unit tests that need different env states in
-    // the same process (cargo test runs tests in one process; an
-    // earlier test that touched Terminal::new without env set would
-    // pin the cache to None and starve every later opt-in test).
-    if std::env::var("MARSPOT_FILE_SCROLLBACK").as_deref() != Ok("1") {
+    // F1 — file scrollback is now default-on whenever a session id is
+    // present.  `MARSPOT_FILE_SCROLLBACK=0` is the kill-switch (e.g.
+    // a user hits a regression and wants the Disk/Memory fallback);
+    // anything else (unset / "1" / etc.) activates File.
+    if std::env::var("MARSPOT_FILE_SCROLLBACK").as_deref() == Ok("0") {
         return None;
     }
     std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
@@ -3081,6 +3078,14 @@ mod tests {
 
     #[test]
     fn csi_3_J_clears_scrollback_only() {
+        // F1 — File scrollback deliberately preserves `total_lines`
+        // across CSI 3 J (the .bin file IS the user's history; CSI
+        // 3 J just drops the in-RAM view).  This test asserts the
+        // pre-F1 Memory/Disk semantics where `len()` returns 0, so
+        // explicitly opt into that variant via the kill-switch.
+        // SAFETY: tests mutate process env; restored at the end.
+        let prev = std::env::var("MARSPOT_FILE_SCROLLBACK").ok();
+        unsafe { std::env::set_var("MARSPOT_FILE_SCROLLBACK", "0"); }
         let mut t = Terminal::new(3, 2);
         // Build some scrollback by feeding many lines.
         for _ in 0..5 {
@@ -3092,6 +3097,12 @@ mod tests {
         assert_eq!(t.grid().scrollback_len(), 0);
         // Visible row 0 should still hold what was there.
         assert_eq!(t.grid().cell(0, 0).ch, 'x');
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MARSPOT_FILE_SCROLLBACK", v),
+                None => std::env::remove_var("MARSPOT_FILE_SCROLLBACK"),
+            }
+        }
     }
 
     // ----- soak: long-running scroll must not grow memory -----
