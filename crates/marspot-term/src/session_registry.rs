@@ -102,6 +102,21 @@ pub fn session_socket_path(id: u64) -> PathBuf {
     session_dir(id).join("sock")
 }
 
+/// Persistent scrollback data file (A1 of pane upgrade — see
+/// `docs/scrollback-search.md`).  Append-only Cell records prefixed
+/// with `rec_len` for crash-safe trailing-record trim.
+pub fn scrollback_bin_path(id: u64) -> PathBuf {
+    session_dir(id).join("scrollback.bin")
+}
+
+/// Sidecar index for `scrollback_bin_path` — dense `[u64 LE
+/// byte_offset]` array with an EOF sentinel so `len(idx) - 1` =
+/// scrollback line count.  Rebuildable from `.bin` if missing /
+/// truncated.
+pub fn scrollback_idx_path(id: u64) -> PathBuf {
+    session_dir(id).join("scrollback.idx")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
     pub id: u64,

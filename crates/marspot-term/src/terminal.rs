@@ -883,6 +883,37 @@ const SNAPSHOT_SCROLLBACK_LINE_CAP: usize = 20_000;
 const ATTRS_BYTES: usize = 9;
 const CELL_BYTES: usize = 4 + ATTRS_BYTES;
 
+/// Public re-exports for sibling modules (`scrollback::FileScrollback`)
+/// that need to serialise / deserialise cells with the same byte
+/// layout snapshot uses.  Keeping the constants private and exposing
+/// only `*_PUB` aliases avoids accidental external dependency on the
+/// numeric values — they're an internal ABI gated by the
+/// `cell_abi` field in `scrollback.bin`'s header.
+pub const CELL_BYTES_PUB: usize = CELL_BYTES;
+pub const ATTRS_BYTES_PUB: usize = ATTRS_BYTES;
+
+pub fn serialize_attrs_pub(a: CellAttrs) -> [u8; ATTRS_BYTES] {
+    serialize_attrs(a)
+}
+
+pub fn deserialize_attrs_pub(buf: &[u8]) -> CellAttrs {
+    debug_assert!(buf.len() >= ATTRS_BYTES, "attrs slice shorter than ATTRS_BYTES");
+    let flags = buf[0];
+    let fg_kind = buf[1];
+    let fg_payload = [buf[2], buf[3], buf[4]];
+    let bg_kind = buf[5];
+    let bg_payload = [buf[6], buf[7], buf[8]];
+    CellAttrs {
+        bold:      (flags & (1 << 0)) != 0,
+        italic:    (flags & (1 << 1)) != 0,
+        underline: (flags & (1 << 2)) != 0,
+        reverse:   (flags & (1 << 3)) != 0,
+        dim:       (flags & (1 << 4)) != 0,
+        fg: decode_color(fg_kind, fg_payload).unwrap_or(Color::Default),
+        bg: decode_color(bg_kind, bg_payload).unwrap_or(Color::Default),
+    }
+}
+
 fn serialize_attrs(a: CellAttrs) -> [u8; ATTRS_BYTES] {
     let mut flags = 0u8;
     if a.bold      { flags |= 1 << 0; }
