@@ -376,34 +376,20 @@ done
 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
   -f "$APP" >/dev/null 2>&1 || true
 
-# ── 5. shelld LaunchAgent (production daemon, default socket) ──────
-# Defence in depth.  Triggering install-shelld.sh is destructive
-# (`launchctl bootout` sends SIGTERM to a live shelld → Pty::Drop
-# SIGHUPs every claudecode child → 2026-06-15 we lost 9 in-flight
-# sessions).  Cost of a false "down" verdict (kills user work) >>
-# cost of a false "alive" verdict (skips installing the LaunchAgent
-# this round; user can re-run after manually starting shelld).
-# Therefore the gate is generous: only conclude "shelld is down"
-# when ALL THREE liveness signals agree.
-pgrep_says_alive=0
-ps_says_alive=0
-launchctl_says_alive=0
-launchctl print "gui/$(id -u)/com.marspot.shelld" 2>/dev/null | grep -q "state = running" && launchctl_says_alive=1
-verdict_sum=$(( pgrep_says_alive + ps_says_alive + launchctl_says_alive ))
-sup_log "INSTALL_SHELLD_CHECK" \
-  "alive verdict pgrep=$pgrep_says_alive ps=$ps_says_alive launchctl=$launchctl_says_alive sum=$verdict_sum/3"
-if (( verdict_sum == 0 )); then
-  sup_log "INSTALL_SHELLD_BOOTSTRAP" "all three checks agree shelld is down; calling install-shelld.sh (triggers SIGTERM via bootout)"
-  echo "==> shelld not running (3/3 checks agree) — installing LaunchAgent"
-  "$ROOT/bin/install-shelld.sh" >/dev/null
-elif (( verdict_sum < 3 )); then
-  # Disagreement: trust the majority-alive signal and skip the
-  # destructive bootout path.  A real "stuck shelld" still gets
-  # surfaced via this log line so triage can find it.
-  sup_log "INSTALL_SHELLD_DISAGREE" \
-    "alive checks disagree but ≥1 says alive (sum=$verdict_sum/3); skipping bootstrap to avoid SIGTERM cascade"
-  echo "==> shelld liveness disagreement ($verdict_sum/3 say alive) — skipping LaunchAgent reinstall (won't risk SIGTERM)"
-fi
+# ── 5. shelld LaunchAgent — retired (RFC-003) ─────────────────────
+# F2+2b — L4 marspot-shelld was retired by RFC-003 (L3 owns its own
+# PTY + UDS listener + registry; nothing dials shelld anymore).  Up
+# to 2026-06-18 a stale `com.marspot.shelld.plist` was still being
+# launchd-managed (KeepAlive: true), running a zombie 8.7 MB daemon
+# and getting in the way of `launchctl bootout` paths every install.
+# Tear-down is now manual + one-time:
+#     launchctl unload ~/Library/LaunchAgents/com.marspot.shelld.plist
+#     rm ~/Library/LaunchAgents/com.marspot.shelld.plist
+# (a backup of the old plist sits in retired-launchagent-backup/ if
+# we ever need to resurrect it).  The bootstrap path that previously
+# called `install-shelld.sh` is gone — the script was already absent
+# from the tree, so any `verdict_sum=0` branch would have errored
+# out anyway.
 
 # ── 6. Apply the silent update ────────────────────────────────────
 if (( ! RUNNING )); then

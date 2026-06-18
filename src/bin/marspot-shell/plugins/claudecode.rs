@@ -151,6 +151,16 @@ pub struct ClaudecodePlugin {
     /// currently running claudecode.  Created when a session first
     /// binds, dropped when the bind goes away.  See `MonitorState`.
     monitors: HashMap<u64, MonitorState>,
+    /// F2+2a — set true after the first `attach_raw_only` call returns
+    /// `ErrorKind::Unsupported`, so subsequent ticks skip the attach
+    /// loop entirely instead of retrying for every (pane, tick) pair.
+    /// Without this gate, 9 claudecode panes × 0.5 Hz plugin tick
+    /// fires 4.5 attach attempts / 4.5 Warn logs per second forever
+    /// — 24 765 of 26 371 (94 %) log lines in a 95-min window were
+    /// this single retry loop.  Reset to false on host swap (cold L2
+    /// reboot) since the new host could in principle wire the
+    /// missing feature.
+    monitor_unsupported: bool,
 }
 
 /// Long-running watcher for one claudecode pane.  Receives raw PTY
@@ -495,6 +505,7 @@ impl ClaudecodePlugin {
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
             monitors: HashMap::new(),
+            monitor_unsupported: false,
         }
     }
 
@@ -551,6 +562,16 @@ impl ClaudecodePlugin {
     /// updated, so it reflects the current bound set.
     fn refresh_monitors(&mut self, host: &dyn PluginHost) {
         let Some(client) = self.shelld.as_ref() else { return };
+        // F2+2a — `attach_raw_only` is a hard-coded `Err(Unsupported)`
+        // until the L3 PTY fan-out wire ships (see line 105 TODO).
+        // Without this gate, every plugin tick re-attempts attach for
+        // every bound session and logs `monitor.attach_failed` each
+        // time — measured as 4.5 lines / s across 9 panes, 94 % of
+        // all log volume.  Once the first attempt comes back
+        // `Unsupported`, latch the flag and skip the whole loop.
+        if self.monitor_unsupported {
+            return;
+        }
         // Add monitors for newly-bound sessions.
         let mut new_keys: Vec<u64> = Vec::new();
         for sid in self.last_meta.keys() {
@@ -574,6 +595,22 @@ impl ClaudecodePlugin {
                         "monitor.start",
                         &format!("shelld_session={}", sid),
                     );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    // Permanent: the host doesn't (yet) expose PTY
+                    // raw broadcast.  Log once at Info, latch the
+                    // flag so subsequent ticks short-circuit.
+                    host.log(
+                        LogLevel::Info,
+                        "monitor.disabled",
+                        &format!(
+                            "attach_raw_only unsupported by host ({}); \
+                             monitor feature disabled until wire lands",
+                            e
+                        ),
+                    );
+                    self.monitor_unsupported = true;
+                    break;
                 }
                 Err(e) => {
                     host.log(
