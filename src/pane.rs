@@ -1199,6 +1199,41 @@ impl Pane {
             0
         };
         let (top_fixed_h_cells, bot_fixed_h_cells) = self.tool_fixed_height_sums();
+        let search_overlay = self.search.as_ref().map(|s| {
+            // Take up to the next `VIEWPORT` rows starting at
+            // `visible_top` — matches what the renderer paints.
+            let from = s.list.visible_top;
+            let take = crate::tools::search_list::VIEWPORT.min(
+                s.list.hits.len().saturating_sub(from),
+            );
+            let hits: Vec<marspot_term::render::SearchHitView> = s
+                .list
+                .hits
+                .iter()
+                .skip(from)
+                .take(take)
+                .enumerate()
+                .map(|(i, h)| marspot_term::render::SearchHitView {
+                    snippet: h.snippet.clone(),
+                    is_focused: s.list.focused == Some(from + i),
+                })
+                .collect();
+            let counter = if s.list.hits.is_empty() {
+                None
+            } else {
+                Some((
+                    s.list.focused_one_based(),
+                    s.list.hits.len() as u32,
+                ))
+            };
+            marspot_term::render::SearchOverlayView {
+                query: s.bar.query.clone(),
+                query_cursor: s.bar.cursor.min(u16::MAX as usize) as u16,
+                case_sensitive: s.bar.case_sensitive,
+                counter,
+                hits,
+            }
+        });
         SessionView {
             grid: self.session.grid(),
             view_offset,
@@ -1216,6 +1251,7 @@ impl Pane {
                 .as_ref()
                 .map(|h| h.spans.as_slice())
                 .unwrap_or(&[]),
+            search_overlay,
         }
     }
 

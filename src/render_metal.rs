@@ -2795,6 +2795,188 @@ fn push_session(
     // already done above.  iTerm2 reads exactly this way: no
     // chrome, no border, just a quiet BG lift on the active pane.
     let _ = gutter; // pane-internal layout doesn't use it any more
+
+    // F1+ — search overlay paint.  Drawn LAST so the bar + list sit
+    // on top of grid glyphs and the active highlight.  Minimum
+    // viable visual:
+    //   • BG strip at top-right of grid inner rect, padded inside
+    //   • Query text + block cursor on row 1
+    //   • Counter `N/M` if present, right-aligned on row 0
+    //   • Result list below the bar (focused row = HIGHLIGHT_BG;
+    //     others = bar BG)
+    // Full §6.4 / §6.5 visual spec (box-drawing border, [Aa] toggle,
+    // [×] close hint) drops in once the renderer chrome glyphs are
+    // wired.
+    if let Some(overlay) = view.search_overlay.as_ref() {
+        const BAR_COLS: u16 = 40;
+        const BAR_ROWS: u16 = 2;
+        const LIST_MAX_ROWS: u16 = 10;
+        // Anchor: top-right of grid inner rect, 1-cell margin.
+        let cols = grid.cols();
+        let rows = grid.rows();
+        if cols >= BAR_COLS + 2 {
+            let bar_left_col = cols - BAR_COLS - 1;
+            let bar_x = inner_x + bar_left_col as f32 * cell_w;
+            let bar_y_top = inner_y + 0.5 * cell_h;
+            let bar_w = BAR_COLS as f32 * cell_w;
+            let bar_h = BAR_ROWS as f32 * cell_h;
+            // BG: BG_PANEL one step brighter so it reads as chrome
+            // sitting above the grid.  Use BG_PANEL + small lift.
+            const SEARCH_BAR_BG: (f32, f32, f32) = (0.085, 0.095, 0.130);
+            cells.push(CellInstance {
+                origin: [bar_x, bar_y_top],
+                size: [bar_w, bar_h],
+                color: [SEARCH_BAR_BG.0, SEARCH_BAR_BG.1, SEARCH_BAR_BG.2, 1.0],
+            });
+            // Border: 1-px SEAM line around the bar rect.
+            let seam = [SEAM.0, SEAM.1, SEAM.2, 1.0];
+            // Top
+            cells.push(CellInstance {
+                origin: [bar_x, bar_y_top],
+                size: [bar_w, 1.0],
+                color: seam,
+            });
+            // Bottom
+            cells.push(CellInstance {
+                origin: [bar_x, bar_y_top + bar_h - 1.0],
+                size: [bar_w, 1.0],
+                color: seam,
+            });
+            // Left
+            cells.push(CellInstance {
+                origin: [bar_x, bar_y_top],
+                size: [1.0, bar_h],
+                color: seam,
+            });
+            // Right
+            cells.push(CellInstance {
+                origin: [bar_x + bar_w - 1.0, bar_y_top],
+                size: [1.0, bar_h],
+                color: seam,
+            });
+            // Row 0 (chrome row): counter `N/M` right-aligned.
+            let chrome_baseline = bar_y_top + (cell_h - cell_h) * 0.5 + ascent;
+            if let Some((cur, total)) = overlay.counter {
+                let counter_text = format!("{cur}/{total}");
+                let counter_chars = counter_text.chars().count() as f32;
+                let counter_x = bar_x + bar_w - 2.0 - counter_chars * cell_w;
+                push_text_run(
+                    &counter_text,
+                    counter_x,
+                    chrome_baseline,
+                    [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+                    cell_w,
+                    cell_h,
+                    ascent,
+                    atlas_w,
+                    atlas_h,
+                    font,
+                    atlas,
+                    glyphs,
+                );
+            }
+            // Optional case-sensitive marker on the left of row 0.
+            let aa = if overlay.case_sensitive { "Aa" } else { "aa" };
+            push_text_run(
+                aa,
+                bar_x + 4.0,
+                chrome_baseline,
+                [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+                cell_w,
+                cell_h,
+                ascent,
+                atlas_w,
+                atlas_h,
+                font,
+                atlas,
+                glyphs,
+            );
+            // Row 1 (query row): query text + block cursor.
+            let query_baseline = bar_y_top + cell_h + ascent;
+            let query_x = bar_x + 4.0;
+            if !overlay.query.is_empty() {
+                push_text_run(
+                    &overlay.query,
+                    query_x,
+                    query_baseline,
+                    [1.0, 1.0, 1.0, 1.0],
+                    cell_w,
+                    cell_h,
+                    ascent,
+                    atlas_w,
+                    atlas_h,
+                    font,
+                    atlas,
+                    glyphs,
+                );
+            }
+            // Block cursor — thin vertical line at query_cursor column.
+            let cursor_x = query_x + overlay.query_cursor as f32 * cell_w;
+            cells.push(CellInstance {
+                origin: [cursor_x, bar_y_top + cell_h + 2.0],
+                size: [(cell_w * 0.5).max(2.0), cell_h - 4.0],
+                color: [1.0, 1.0, 1.0, 0.85],
+            });
+            // Result list below the bar.
+            if !overlay.hits.is_empty() {
+                let list_h_rows = (overlay.hits.len() as u16).min(LIST_MAX_ROWS);
+                let list_y_top = bar_y_top + bar_h;
+                let list_h = list_h_rows as f32 * cell_h;
+                // Clamp so list doesn't overflow the grid bottom edge.
+                let grid_bottom = inner_y + rows as f32 * cell_h;
+                let list_h_clamped = list_h.min(grid_bottom - list_y_top).max(0.0);
+                if list_h_clamped > 0.0 {
+                    // BG fill.
+                    cells.push(CellInstance {
+                        origin: [bar_x, list_y_top],
+                        size: [bar_w, list_h_clamped],
+                        color: [SEARCH_BAR_BG.0, SEARCH_BAR_BG.1, SEARCH_BAR_BG.2, 0.95],
+                    });
+                    // Per-hit row.
+                    let max_visible = (list_h_clamped / cell_h) as usize;
+                    for (i, h) in overlay.hits.iter().take(max_visible).enumerate() {
+                        let row_y = list_y_top + i as f32 * cell_h;
+                        if h.is_focused {
+                            // Focused row gets HIGHLIGHT_BG.
+                            cells.push(CellInstance {
+                                origin: [bar_x, row_y],
+                                size: [bar_w, cell_h],
+                                color: [
+                                    HIGHLIGHT_BG.0,
+                                    HIGHLIGHT_BG.1,
+                                    HIGHLIGHT_BG.2,
+                                    0.85,
+                                ],
+                            });
+                        }
+                        // Clip snippet to bar width minus a small inset.
+                        let max_chars = (BAR_COLS as usize).saturating_sub(2);
+                        let snip: String = h.snippet.chars().take(max_chars).collect();
+                        let text_fg = if h.is_focused {
+                            [0.0, 0.0, 0.0, 1.0]
+                        } else {
+                            [1.0, 1.0, 1.0, 0.92]
+                        };
+                        push_text_run(
+                            &snip,
+                            bar_x + 4.0,
+                            row_y + ascent,
+                            text_fg,
+                            cell_w,
+                            cell_h,
+                            ascent,
+                            atlas_w,
+                            atlas_h,
+                            font,
+                            atlas,
+                            glyphs,
+                        );
+                    }
+                }
+            }
+        }
+        let _ = rows; // touched for clamp above on some paths only
+    }
 }
 
 /// Build a Shared-storage MTLBuffer over `bytes`.  Returns `None`
@@ -3456,6 +3638,7 @@ mod tests {
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
+            search_overlay: None,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3549,6 +3732,7 @@ mod tests {
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
+            search_overlay: None,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3615,6 +3799,7 @@ mod tests {
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
+            search_overlay: None,
         };
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
@@ -3705,11 +3890,23 @@ mod tests {
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
+            search_overlay: None,
         };
         // Baseline cell count (no highlight) for the same layout/grid.
         let baseline_view = SessionView {
+            grid: view.grid,
+            view_offset: view.view_offset,
+            cursor_visible: view.cursor_visible,
+            focused: view.focused,
+            title: view.title,
+            selection: view.selection,
+            ime_preedit: view.ime_preedit,
+            update_pending: view.update_pending,
+            right_badge: view.right_badge,
+            top_fixed_h_cells: view.top_fixed_h_cells,
+            bot_fixed_h_cells: view.bot_fixed_h_cells,
             highlight_spans: &[],
-            ..view
+            search_overlay: None,
         };
         let mut run = |v: &SessionView| -> Vec<CellInstance> {
             let mut cells: Vec<CellInstance> = Vec::new();
@@ -3802,6 +3999,7 @@ mod tests {
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
+            search_overlay: None,
         };
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
@@ -3857,12 +4055,14 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
+            search_overlay: None,
         };
         let view_bot = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
+            search_overlay: None,
         };
         let mut run = |view: &SessionView| -> Vec<GlyphInstance> {
             let mut cells: Vec<CellInstance> = Vec::new();

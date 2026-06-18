@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.10.0"   # L2 — F1 (pane upgrade rollout):scrollback search overlay 默认启用。Cmd+F 打开 SearchBar(C2)+ SearchList(C3),Enter / 点击 jump 到 hit 行 + HIGHLIGHT_BG(C4)+ view_offset 自动 scroll。`MARSPOT_SEARCH=0` 仅作 kill-switch 保留。整套 C1-C5 + B3 + B4 worker / wire 协议 dispatch / last-write-wins / debounce 100ms 都接通
+core    = "0.10.1"   # L2 — F1+ render:SearchBar + SearchList 最小可见 overlay 绘制(40×2 cell bar 框 + 焦点行 HIGHLIGHT_BG + counter + 大小写指示).补 C2/C3 留下的 render gap,Cmd+F 现在用户能看到 UI 而不是默默吞键
 session = "0.9.0"    # L3 — F1: File scrollback 默认开,持久 `.bin`+`.idx` byte 格式(A1-A4),scrollback_search 算法 + worker 线程 + FileSnapshot 独立 pread(B1+B3),live grid 合并(B4 u64::MAX 合成索引)。`MARSPOT_FILE_SCROLLBACK=0` 仅作 kill-switch 保留。MsgType 50-53 SearchScrollback/Results/More/Cancel(B2)L3 dispatch 收发已稳定

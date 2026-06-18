@@ -151,6 +151,42 @@ pub struct SessionView<'a> {
     /// `HIGHLIGHT_BG` under each listed `(view_row, col_start..=
     /// col_end_inclusive)`.
     pub highlight_spans: &'a [HighlightSpan],
+    /// F1+ — search overlay snapshot.  `None` when the pane has no
+    /// active search (the overlay is invisible); `Some` when Cmd+F
+    /// has opened the bar.  The renderer draws a query input strip
+    /// at the top-right of the pane and an optional result list
+    /// below it.  Built per-frame from `pane.search` so any
+    /// keystroke that mutates the live state reflects on the next
+    /// render.
+    pub search_overlay: Option<SearchOverlayView>,
+}
+
+/// F1+ — immutable per-frame snapshot of the search overlay, fed to
+/// the renderer in `SessionView`.  Owned (not `'a`-borrowed) so the
+/// renderer doesn't need to keep `pane.search` borrowed across
+/// `build_instances`; the clone cost is paid only when search is
+/// open (a String per query + per visible snippet, < 1 µs).  Subset
+/// of §6.6.5's `SearchOverlay` fields — minimum needed to paint the
+/// bar + a minimal result list.
+#[derive(Clone, Debug)]
+pub struct SearchOverlayView {
+    pub query: String,
+    /// Char-column of the edit cursor inside `query`.
+    pub query_cursor: u16,
+    pub case_sensitive: bool,
+    /// `(focused_1based, total)` — drawn as `N/M`.  `None` skips the
+    /// counter (e.g. before the first SearchResults arrives).
+    pub counter: Option<(u32, u32)>,
+    /// Up to `VIEWPORT` hit snippets (newest-first).  Each row's
+    /// `is_focused` flag drives the focused-row BG highlight.
+    pub hits: Vec<SearchHitView>,
+}
+
+/// Per-row view of one hit in the result list.
+#[derive(Clone, Debug)]
+pub struct SearchHitView {
+    pub snippet: String,
+    pub is_focused: bool,
 }
 
 #[derive(Copy, Clone, Debug)]

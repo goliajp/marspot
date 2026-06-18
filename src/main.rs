@@ -2002,6 +2002,7 @@ fn bench_metal_render(arg: &str) {
         top_fixed_h_cells: 0,
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
+        search_overlay: None,
     };
     let views = std::slice::from_ref(&view);
 
