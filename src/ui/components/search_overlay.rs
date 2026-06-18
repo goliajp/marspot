@@ -1,57 +1,46 @@
-//! Per-pane search overlay: floating popover with query row + counter +
-//! Aa toggle + × close + scrollable hit list.  Built on top of `View`
-//! so it shares the always-on-top + opaque-by-default invariants.
+//! Per-pane search overlay — composed from primitive UI kit pieces:
 //!
-//! Originally lived as ~170 lines inline inside `render_metal::push_session`
-//! — same shape as the Process Monitor before F3+1.6, with the same
-//! latent "background leaks grid glyphs" failure mode.  Migrated here
-//! in F3+1.8 so it routes through overlay scratches automatically.
+//!   - `core::View` (always-on-top + opaque BG via overlay scratches)
+//!   - `components::Panel` (View wrapper with content padding)
+//!   - `components::TextInput` (query text + caret)
+//!   - `components::ListView` (results list with focused-row highlight)
+//!
+//! The free-standing icons (× close, Aa toggle, M/N counter) are still
+//! rendered inline because they're tiny widgets only this scene uses
+//! — pure colocate-per-React.  If a second feature wants them, lift
+//! into their own components.
 
 use marspot_term::layout::Rect;
 use marspot_term::render::SearchOverlayView;
-use crate::ui::core::{View, ViewStyle, ViewPainter, Backdrop};
+use crate::ui::core::{ViewPainter, ViewStyle, Backdrop};
+use super::{
+    Panel, TextInput, TextInputStyle, ListView, ListRow, ListViewStyle,
+};
 
-/// What the renderer needs to position + paint one pane's search
-/// overlay.  Caller (build_instances) gathers per-pane fields from
-/// the layout cell + SessionView once they're known and hands them
-/// over.  Lifetimes inherit from `SearchOverlayView`'s borrowed
-/// `hits` / `query` strings — the renderer never stores any of this
-/// across frames.
 pub struct SearchOverlayParams<'a> {
     pub overlay: &'a SearchOverlayView,
-    /// Pane's inner content origin (after pane padding + cell title).
     pub inner_x: f32,
     pub inner_y: f32,
-    /// Grid dimensions of the pane (cell count, not pixels).
     pub grid_cols: u16,
     pub grid_rows: u16,
 }
 
-// Palette: Darcula-ish dark gray-blue panel, JetBrains-style indigo
-// selection.  Distinct from grid-side HIGHLIGHT_BG so semantic
-// meanings don't collide.
-const OVERLAY_BG:          [f32; 4] = [0.13, 0.14, 0.17, 1.0];
-const OVERLAY_BORDER:      [f32; 4] = [0.30, 0.32, 0.38, 1.0];
-const OVERLAY_TEXT:        [f32; 4] = [0.95, 0.96, 0.97, 1.0];
-const OVERLAY_DIM:         [f32; 4] = [0.60, 0.63, 0.70, 1.0];
-const OVERLAY_ACCENT:      [f32; 4] = [0.40, 0.62, 1.00, 1.0];
-const OVERLAY_FOCUSED_BG:  [f32; 4] = [0.18, 0.28, 0.48, 1.0];
-const OVERLAY_DIVIDER:     [f32; 4] = [0.22, 0.24, 0.28, 1.0];
-const OVERLAY_CARET:       [f32; 4] = [0.40, 0.62, 1.00, 0.95];
+// Palette
+const PANEL_BG:        [f32; 4] = [0.13, 0.14, 0.17, 1.0];
+const PANEL_BORDER:    [f32; 4] = [0.30, 0.32, 0.38, 1.0];
+const TEXT_FG:         [f32; 4] = [0.95, 0.96, 0.97, 1.0];
+const DIM_FG:          [f32; 4] = [0.60, 0.63, 0.70, 1.0];
+const ACCENT_FG:       [f32; 4] = [0.40, 0.62, 1.00, 1.0];
+const FOCUSED_BG:      [f32; 4] = [0.18, 0.28, 0.48, 1.0];
+const DIVIDER_FG:      [f32; 4] = [0.22, 0.24, 0.28, 1.0];
 const PANEL_RADIUS_PX: f32 = 10.0;
 const ROW_RADIUS_PX: f32 = 5.0;
 const SHADOW_BLUR_PX: f32 = 18.0;
 const SHADOW_ALPHA: f32 = 0.45;
 
-// Mirrors the consts that lived inline in `render_metal::push_session`
-// before F3+1.8.  If a future feature wants a wider bar, the source of
-// truth moves here.
 pub const OVERLAY_COLS: u16 = 40;
 pub const LIST_MAX_ROWS: u16 = 10;
 
-/// Paint one pane's search overlay (or no-op when the pane doesn't
-/// have one).  Routes through `ViewPainter` → overlay scratches, so
-/// the bar always sits above the pane's grid glyphs by construction.
 pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>) {
     let overlay = params.overlay;
     if params.grid_cols < OVERLAY_COLS + 2 {
@@ -59,7 +48,6 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
     }
     let cell_w = p.cell_w;
     let cell_h = p.cell_h;
-    let ascent = p.ascent;
     let inner_x = params.inner_x;
     let inner_y = params.inner_y;
     let grid_bottom = inner_y + (params.grid_rows as f32) * cell_h;
@@ -78,67 +66,71 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
     let panel_w = (OVERLAY_COLS as f32) * cell_w;
     let panel_h = panel_h_uncapped.min((grid_bottom - panel_y).max(0.0));
 
-    let view = View {
-        rect: Rect {
+    let panel = Panel::new(
+        Rect {
             x: bar_x as f64,
             y_top: panel_y as f64,
             w: panel_w as f64,
             h: panel_h as f64,
         },
-        style: ViewStyle {
-            bg: OVERLAY_BG,
-            border_color: OVERLAY_BORDER,
+        ViewStyle {
+            bg: PANEL_BG,
+            border_color: PANEL_BORDER,
             border_width: 1.0,
             corner_radius: PANEL_RADIUS_PX,
             shadow_blur: SHADOW_BLUR_PX,
             shadow_alpha: SHADOW_ALPHA,
             backdrop: Backdrop::None,
         },
-    };
+        panel_inner_pad as f64,
+    );
 
-    view.paint(p, |p| {
-        let inner_left = bar_x + panel_inner_pad;
-        let inner_top = panel_y + panel_inner_pad;
+    panel.paint(p, |p| {
+        let content = panel.content_rect();
+        let inner_left = content.x as f32;
+        let inner_top = content.y_top as f32;
 
-        // Query row text.
-        let query_baseline = inner_top + ascent;
-        let query_x = inner_left;
-        let query_max_chars = (OVERLAY_COLS - 12) as usize;
-        let query_display: String =
-            overlay.query.chars().take(query_max_chars).collect();
-        if !query_display.is_empty() {
-            p.text(query_x, query_baseline, &query_display, OVERLAY_TEXT);
-        }
-        // Caret: thin accent vertical at query_cursor column.
-        let caret_col = (overlay.query_cursor as usize).min(query_max_chars) as f32;
-        let caret_x = query_x + caret_col * cell_w;
-        p.fill_rect(
-            Rect {
-                x: caret_x as f64,
-                y_top: (inner_top + 2.0) as f64,
-                w: 2.0,
-                h: (cell_h - 4.0) as f64,
+        // Query input row.  Reserve trailing space for × / Aa /
+        // counter at the right.
+        let trailing_reserve_chars = 12.0_f32;
+        let input_w = (panel_w - 2.0 * panel_inner_pad
+            - trailing_reserve_chars * cell_w).max(cell_w);
+        let input = TextInput {
+            rect: Rect {
+                x: inner_left as f64,
+                y_top: inner_top as f64,
+                w: input_w as f64,
+                h: cell_h as f64,
             },
-            OVERLAY_CARET,
-        );
-        // × close hint.
+            value: &overlay.query,
+            cursor: overlay.query_cursor,
+            style: TextInputStyle {
+                fg: TEXT_FG,
+                caret_color: ACCENT_FG,
+                caret_w: 2.0,
+                caret_inset_y: 2.0,
+            },
+        };
+        input.paint(p);
+
+        // Trailing icons (× / Aa / counter) — colocated because only
+        // this scene uses them.
+        let query_baseline = inner_top + p.ascent;
         let close_x = bar_x + panel_w - panel_inner_pad - cell_w;
-        p.text(close_x, query_baseline, "×", OVERLAY_DIM);
-        // Aa toggle (accent when case-sensitive).
+        p.text(close_x, query_baseline, "×", DIM_FG);
         let aa_x = close_x - 3.0 * cell_w;
-        let aa_color = if overlay.case_sensitive { OVERLAY_ACCENT } else { OVERLAY_DIM };
+        let aa_color = if overlay.case_sensitive { ACCENT_FG } else { DIM_FG };
         p.text(aa_x, query_baseline, "Aa", aa_color);
-        // Counter "4/64".
         if let Some((c, t)) = overlay.counter {
             let counter_text = format!("{c}/{t}");
             let counter_w_chars = counter_text.chars().count() as f32;
             let counter_x = aa_x - (counter_w_chars + 1.0) * cell_w;
-            p.text(counter_x, query_baseline, &counter_text, OVERLAY_DIM);
+            p.text(counter_x, query_baseline, &counter_text, DIM_FG);
         }
 
-        // Divider.
-        let divider_y = inner_top + cell_h + (panel_inner_pad * 0.5).round();
+        // Divider hairline + list rows.
         if has_list {
+            let divider_y = inner_top + cell_h + (panel_inner_pad * 0.5).round();
             p.fill_rounded_rect(
                 Rect {
                     x: inner_left as f64,
@@ -146,38 +138,36 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
                     w: (panel_w - 2.0 * panel_inner_pad) as f64,
                     h: 1.0,
                 },
-                OVERLAY_DIVIDER,
+                DIVIDER_FG,
                 0.5,
                 ([0.0, 0.0, 0.0, 0.0], 0.0),
             );
-        }
-
-        // List rows.
-        let list_top = divider_y + (panel_inner_pad * 0.5).round();
-        let max_visible = ((grid_bottom - list_top) / cell_h).floor() as u16;
-        let visible = n_list.min(max_visible).min(LIST_MAX_ROWS);
-        for i in 0..visible {
-            let h = &overlay.hits[i as usize];
-            let row_y = list_top + (i as f32) * cell_h;
-            let row_baseline = row_y + ascent;
-            if h.is_focused {
-                let inset = 4.0;
-                p.fill_rounded_rect(
-                    Rect {
-                        x: (bar_x + inset) as f64,
-                        y_top: row_y as f64,
-                        w: (panel_w - 2.0 * inset) as f64,
-                        h: cell_h as f64,
-                    },
-                    OVERLAY_FOCUSED_BG,
-                    ROW_RADIUS_PX,
-                    ([0.0, 0.0, 0.0, 0.0], 0.0),
-                );
-            }
-            let inner_w_chars = (OVERLAY_COLS - 2) as usize;
-            let snip: String = h.snippet.chars().take(inner_w_chars).collect();
-            let snip_color = if h.is_focused { OVERLAY_TEXT } else { OVERLAY_DIM };
-            p.text(inner_left, row_baseline, &snip, snip_color);
+            let list_top = divider_y + (panel_inner_pad * 0.5).round();
+            let list_h = (grid_bottom - list_top).max(0.0);
+            let rows: Vec<ListRow> = overlay.hits.iter().map(|h| {
+                ListRow { label: &h.snippet, is_focused: h.is_focused }
+            }).collect();
+            let list_view = ListView {
+                rect: Rect {
+                    x: bar_x as f64,
+                    y_top: list_top as f64,
+                    w: panel_w as f64,
+                    h: list_h as f64,
+                },
+                rows: &rows,
+                row_h: cell_h,
+                // Match the panel's inner left so list text aligns
+                // with the query text.
+                text_pad_left: panel_inner_pad,
+                style: ListViewStyle {
+                    fg: DIM_FG,
+                    fg_focused: TEXT_FG,
+                    focused_bg: FOCUSED_BG,
+                    focused_radius: ROW_RADIUS_PX,
+                    focused_inset_x: 4.0,
+                },
+            };
+            list_view.paint(p);
         }
     });
 }

@@ -188,7 +188,10 @@ scene 必须走 widget,widget 必须走 ViewPainter,ViewPainter 自己 push.
 | `components/modal_frame.rs` | ModalFrame / ModalLayoutSpec | 中心 modal 几何(default / maximized / minimized / drag offset) |
 | `components/tab_strip.rs` | TabStrip | 等宽 tab + ellipsis 截断 |
 | `components/scroll_view.rs` | ScrollView | 垂直 scroll 状态 + wheel/clamp |
-| `components/search_overlay.rs` | paint_search_overlay / SearchOverlayParams | 每 pane 的 search bar + list,F3+1.8 用 View 迁移 |
+| `components/panel.rs` | Panel | View + 内边距 + content_rect() 自动 inset |
+| `components/text_input.rs` | TextInput / TextInputStyle | 单行文本输入(值 + 光标 + 截断),paint-only |
+| `components/list_view.rs` | ListView / ListRow / ListViewStyle | 垂直行列表 + focused 行高亮 + row_rect(i) 给 caller hit_test |
+| `components/search_overlay.rs` | paint_search_overlay / SearchOverlayParams | 用 Panel + TextInput + ListView 组合,F3+1.9 |
 
 scene 代码:
 

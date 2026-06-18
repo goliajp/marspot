@@ -8,8 +8,14 @@ pub mod tab_strip;
 pub mod scroll_view;
 pub mod modal_frame;
 pub mod search_overlay;
+pub mod panel;
+pub mod text_input;
+pub mod list_view;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
 pub use modal_frame::ModalFrame;
 pub use search_overlay::{SearchOverlayParams, paint_search_overlay};
+pub use panel::Panel;
+pub use text_input::{TextInput, TextInputStyle};
+pub use list_view::{ListView, ListRow, ListViewStyle};
