@@ -245,13 +245,6 @@ vertex URVOut ui_rect_vertex(
     return o;
 }
 
-// SDF for an axis-aligned rounded rect centred at origin with half-extent
-// `half` and corner radius `r`.  Returns negative inside, positive outside.
-inline float sdf_rounded_rect(float2 p, float2 half, float r) {
-    float2 q = abs(p) - half + float2(r, r);
-    return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0, 0.0))) - r;
-}
-
 fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
     // Convert quad_uv (0..1 across padded quad) back to a centred
     // coord in fill-rect space (i.e. the SDF reference frame is the
@@ -259,8 +252,12 @@ fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
     float2 p = (in.quad_uv * in.padded_size) - in.padded_size * 0.5;
     // Clamp corner radius defensively.
     float radius = min(in.corner_radius, min(in.fill_size.x, in.fill_size.y) * 0.5);
-    float2 fill_half = in.fill_size * 0.5;
-    float d = sdf_rounded_rect(p, fill_half, radius);
+    float2 fill_half_ext = in.fill_size * 0.5;
+    // Inline SDF for axis-aligned rounded rect — avoids referencing a
+    // free function (Metal had trouble linking ours; inlining sidesteps
+    // any linker quirk).
+    float2 q = abs(p) - fill_half_ext + float2(radius, radius);
+    float d = min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0, 0.0))) - radius;
 
     // Anti-alias band: ~1 px in screen space.
     float aa = fwidth(d) * 0.7;
