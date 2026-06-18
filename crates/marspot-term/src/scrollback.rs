@@ -1214,7 +1214,16 @@ impl FileScrollback {
         // memory accesses.
         self.ensure_flushed();
         let off = self.read_idx_via_mmap(line_idx as u64).ok()?;
-        self.read_record_via_mmap(off, Some(col)).map(|(cells, _w)| cells.into_iter().next()).flatten()
+        // BUGFIX (F2+3) — was `cells.into_iter().next()` which returns
+        // cell 0 of the row regardless of `col`, so every column of an
+        // off-ring scrollback line rendered as the row's first
+        // character (the "row of repeated chars" corruption pattern
+        // visible after F1+13 dropped RAM ring 1024→256, which made
+        // the mmap path the common case).  The pread fallback below
+        // already used `cells.get(col)`; this aligns the primary mmap
+        // path with it.
+        self.read_record_via_mmap(off, Some(col))
+            .and_then(|(cells, _w)| cells.get(col).copied())
             .or_else(|| {
                 // Fallback if mmap path failed for any reason: classic
                 // pread.  Same correctness; just slower.
@@ -1833,6 +1842,52 @@ mod tests {
         assert_eq!(got[0].ch, 'a');
         assert_eq!(sb.cell_at(0, 3).unwrap().ch, 'a');
         assert!(!sb.wrapped_at(0));
+    }
+
+    /// REGRESSION (F2+3) — `cell_at(line, col)` must return the cell at
+    /// `col`, NOT the row's first cell, when the line has aged out of
+    /// the RAM ring and is served by the file mmap path.  The original
+    /// A2 cold-read code path used `cells.into_iter().next()` after
+    /// decoding the whole row, which silently returned cell 0 for every
+    /// column.  Hit thresholds: line index < (total_lines - ram_capacity).
+    /// On real users this manifested as scrollback rows rendered as
+    /// "the row's first char repeated N times" (e.g. 'eeee…', 'aaaa…').
+    /// Caught after F1+13 dropped ram_capacity 1024→256, so the mmap
+    /// path became the steady-state for daily-use depths.
+    #[test]
+    fn cell_at_off_ring_returns_correct_column() {
+        let tmp = TmpDir::new("off-ring-col");
+        let cols = 8usize;
+        let ram_cap = 4usize; // tiny so eviction is easy
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_cap)
+            .expect("create");
+        // Build a row whose first char != other chars so the bug
+        // (return cell 0 for every col) is observable.
+        let mut row0: Vec<Cell> = Vec::with_capacity(cols);
+        for c in 0..cols {
+            row0.push(Cell {
+                ch: (b'A' + c as u8) as char,
+                ..Default::default()
+            });
+        }
+        sb.push_line(&row0, false);
+        // Push enough fillers to evict row 0 from the RAM ring.
+        for _ in 0..(ram_cap + 4) {
+            sb.push_line(&fill(b'.', cols), false);
+        }
+        // Row 0 now lives only on disk; cell_at(0, col) must take the
+        // mmap path.  Assert each column returns its own letter.
+        for c in 0..cols {
+            let got = sb.cell_at(0, c)
+                .unwrap_or_else(|| panic!("cell_at(0, {}) returned None", c));
+            let want = (b'A' + c as u8) as char;
+            assert_eq!(
+                got.ch, want,
+                "cell_at(0, {}) returned {:?}, expected {:?} \
+                 (regression: mmap path returning cell 0 for every col)",
+                c, got.ch, want
+            );
+        }
     }
 
     #[test]
