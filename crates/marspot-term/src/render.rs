@@ -21,7 +21,52 @@
 //!   drift regardless of where the cell lands on the grid.
 
 use crate::grid::Grid;
+use crate::input_core::{MarspotKeyEvent, Modifiers};
 use crate::session::SessionState;
+
+/// C1 — where a `PaneTool` claims pane real estate.  TopFixed /
+/// BottomFixed tools each subtract their `fixed_height_rows()` worth
+/// of cell-rows from the grid's inner rect; Overlay tools float and
+/// do not affect grid layout.  See `docs/scrollback-search.md` §6.1.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ToolSlot {
+    TopFixed,
+    BottomFixed,
+    Overlay,
+}
+
+/// C1 — what a tool's input handler returns.  `Pass` means "I didn't
+/// handle this; let the next layer try."  `Handled` means stop;
+/// `HandledRequestRedraw` is `Handled` + please redraw.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InputDisposition {
+    Pass,
+    Handled,
+    HandledRequestRedraw,
+}
+
+/// C1 — pane attachment that owns per-pane interactive state above
+/// the terminal grid: search bar, result list, future tools.  The
+/// trait is intentionally minimal in C1 (no `render()` yet); C2 will
+/// add a render hook once the search bar gives the framework its
+/// first real consumer.  `Send` so the search worker (B3) and tool
+/// state can coexist on the L2 main thread without lock contention.
+pub trait PaneTool: Send {
+    /// Which slot this tool occupies.
+    fn slot(&self) -> ToolSlot;
+    /// Height in cell rows for fixed slots; ignored for Overlay.
+    fn fixed_height_rows(&self) -> u16 {
+        0
+    }
+    /// Hit-test (overlay only): is `(x_phys, y_phys)` inside?
+    fn hit_test(&self, _x_phys: f64, _y_phys: f64) -> bool {
+        false
+    }
+    /// Key event while this tool has focus.  Default: Pass.
+    fn on_key(&mut self, _ev: &MarspotKeyEvent, _mods: Modifiers) -> InputDisposition {
+        InputDisposition::Pass
+    }
+}
 
 /// Per-session render parameters.  Caller bundles the relevant bits
 /// so the renderer doesn't need to know about Session, Marspot, or
@@ -68,6 +113,16 @@ pub struct SessionView<'a> {
     /// plugins can surface per-pane metadata without overloading the
     /// main title.  Empty = nothing drawn.  See `MsgType::PaneBadge`.
     pub right_badge: &'a str,
+    /// C1 — total cell-rows reserved below the title strip for
+    /// `ToolSlot::TopFixed` tools.  Sum of each TopFixed tool's
+    /// `fixed_height_rows()`.  The renderer shifts the grid inner
+    /// rect's top edge down by this many cells.  `0` = no top tools
+    /// (same as pre-C1 behaviour, byte-identical render).
+    pub top_fixed_h_cells: u16,
+    /// C1 — total cell-rows reserved at the bottom of the pane for
+    /// `ToolSlot::BottomFixed` tools.  Shrinks the grid inner rect's
+    /// bottom edge upward by this many cells.  `0` = no bottom tools.
+    pub bot_fixed_h_cells: u16,
 }
 
 #[derive(Copy, Clone, Debug)]

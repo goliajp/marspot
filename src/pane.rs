@@ -827,6 +827,12 @@ pub struct Pane {
     /// strip while this is set; clicking it triggers the swap.  Target #4
     /// step 5b.  Only ever set on an L3 pane.
     update_pending: bool,
+    /// C1 — pane-attached interactive overlays (search bar in C2,
+    /// result list in C3, …).  Default empty; layout math sums their
+    /// `fixed_height_rows()` on each frame via `tool_fixed_height_sums`
+    /// so an empty `tools` Vec is byte-identical to pre-C1 behaviour.
+    /// See `docs/scrollback-search.md` §6.1.
+    pub tools: Vec<Box<dyn marspot_term::render::PaneTool>>,
 }
 
 impl Pane {
@@ -838,6 +844,7 @@ impl Pane {
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
+            tools: Vec::new(),
         }
     }
 
@@ -851,6 +858,7 @@ impl Pane {
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
+            tools: Vec::new(),
         }
     }
 
@@ -1078,6 +1086,7 @@ impl Pane {
         } else {
             0
         };
+        let (top_fixed_h_cells, bot_fixed_h_cells) = self.tool_fixed_height_sums();
         SessionView {
             grid: self.session.grid(),
             view_offset,
@@ -1088,6 +1097,28 @@ impl Pane {
             ime_preedit: "",
             update_pending: self.update_pending,
             right_badge,
+            top_fixed_h_cells,
+            bot_fixed_h_cells,
         }
+    }
+
+    /// C1 — sum the fixed-row heights of attached PaneTools, split by
+    /// slot (Top vs Bottom).  Returns `(top, bot)`.  Empty `tools` →
+    /// `(0, 0)`, byte-identical to pre-C1 layout.
+    fn tool_fixed_height_sums(&self) -> (u16, u16) {
+        let mut top: u16 = 0;
+        let mut bot: u16 = 0;
+        for t in &self.tools {
+            match t.slot() {
+                marspot_term::render::ToolSlot::TopFixed => {
+                    top = top.saturating_add(t.fixed_height_rows())
+                }
+                marspot_term::render::ToolSlot::BottomFixed => {
+                    bot = bot.saturating_add(t.fixed_height_rows())
+                }
+                marspot_term::render::ToolSlot::Overlay => {}
+            }
+        }
+        (top, bot)
     }
 }

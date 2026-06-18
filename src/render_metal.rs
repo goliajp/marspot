@@ -2335,7 +2335,15 @@ fn push_session(
     let cell_w = cell_w.round();
     let cell_h = cell_h.round();
     let inner_x = (rect.x as f32 + padding).round();
-    let inner_y = (rect.y_top as f32 + title_h + padding).round();
+    // C1 — `TopFixed` tools (search bar etc.) push the grid's
+    // top edge down by `top_fixed_h_cells * cell_h`.  Empty
+    // `tools` ⇒ `top_fixed_h_cells == 0` ⇒ render byte-identical
+    // to pre-C1.  `bot_fixed_h_cells` reserves space at the
+    // bottom for `BottomFixed` tools — currently informational
+    // (no `BottomFixed` consumer until a future tool needs it);
+    // the L3 already sizes its grid so renderable rows fit.
+    let top_fixed_h = view.top_fixed_h_cells as f32 * cell_h;
+    let inner_y = (rect.y_top as f32 + title_h + padding + top_fixed_h).round();
 
     // Scan once up front so the per-row glyph loop can override fg
     // for cells inside a link span (paint the text the same cyan as
@@ -3410,6 +3418,8 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             right_badge: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3500,6 +3510,8 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             right_badge: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3525,5 +3537,155 @@ mod tests {
         assert_eq!(color_glyphs.len(), 1, "emoji should emit one colour glyph");
         assert_eq!(glyphs.len(), 1, "the 'A' should be the only mono glyph");
         assert!(color_atlas.cache_len() >= 1, "colour atlas should hold the emoji");
+    }
+
+    // ─── C1: PaneTool framework layout-shrink tests ───────────────
+
+    /// Build instances for a 2-row grid with `top_fixed_h_cells = N`.
+    /// Returns the glyphs vec for inspection.  Helper shared by the
+    /// two layout-shrink tests below.
+    fn build_glyphs_with_top_fixed(top_fixed: u16) -> Vec<GlyphInstance> {
+        use crate::grid::{Cell, Grid};
+        use crate::layout::Layout;
+        let device = system_default_device().expect("metal device");
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut grid = Grid::new(10, 4);
+        grid.set_cell(0, 0, Cell { ch: 'A', attrs: Default::default() });
+        grid.set_cell(2, 0, Cell { ch: 'B', attrs: Default::default() });
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            1,
+            font.cell_w,
+            font.cell_h,
+        );
+        let view = SessionView {
+            grid: &grid,
+            view_offset: 0,
+            cursor_visible: false,
+            focused: true,
+            title: "",
+            selection: None,
+            ime_preedit: "",
+            update_pending: false,
+            right_badge: "",
+            top_fixed_h_cells: top_fixed,
+            bot_fixed_h_cells: 0,
+        };
+        let mut cells: Vec<CellInstance> = Vec::new();
+        let mut glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut color_glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut dots: Vec<CellInstance> = Vec::new();
+        build_instances(
+            &layout,
+            std::slice::from_ref(&view),
+            &[],
+            0,
+            true,
+            None,
+            &mut font,
+            &mut atlas,
+            &mut color_atlas,
+            &mut cells,
+            &mut glyphs,
+            &mut color_glyphs,
+            &mut dots,
+        );
+        glyphs
+    }
+
+    /// C1 — a `TopFixed` tool claiming N rows shifts the grid's
+    /// glyph origin Y down by exactly `N * cell_h`.  No tool, no
+    /// shift (byte-identical to pre-C1, per §12.C1 DoD).
+    #[test]
+    fn c1_top_fixed_tool_shifts_grid_glyph_y() {
+        if system_default_device().is_err() {
+            return;
+        }
+        let font_cell_h = FontCache::build().expect("font").cell_h as f32;
+        let g0 = build_glyphs_with_top_fixed(0);
+        let g2 = build_glyphs_with_top_fixed(2);
+        assert!(!g0.is_empty(), "baseline produced glyphs");
+        assert_eq!(g0.len(), g2.len(), "glyph count must be identical");
+        // Match by uv (identifies the character; A vs B have distinct
+        // uv).  For each glyph, the v2 origin_y should be exactly
+        // 2 * cell_h above (numerically higher, i.e. lower on screen).
+        for (g0_inst, g2_inst) in g0.iter().zip(g2.iter()) {
+            assert_eq!(g0_inst.uv0, g2_inst.uv0, "uv must match (same char)");
+            let dy = g2_inst.origin[1] - g0_inst.origin[1];
+            let expected = 2.0 * font_cell_h.round();
+            assert!(
+                (dy - expected).abs() < 0.5,
+                "TopFixed=2 should shift glyph Y by ~{expected}; got dy={dy}"
+            );
+        }
+    }
+
+    /// C1 — a `BottomFixed` tool DOES NOT shift the grid's glyph
+    /// origin (only TopFixed does).  This locks down the invariant
+    /// that the BottomFixed slot reserves space against the pane's
+    /// lower edge — the grid sits where it always did.
+    #[test]
+    fn c1_bottom_fixed_tool_does_not_shift_grid_glyph_y() {
+        use crate::grid::{Cell, Grid};
+        use crate::layout::Layout;
+        if system_default_device().is_err() {
+            return;
+        }
+        let device = system_default_device().expect("metal device");
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let mut grid = Grid::new(10, 4);
+        grid.set_cell(0, 0, Cell { ch: 'A', attrs: Default::default() });
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0, 0.0, 0.0, 1, 1, font.cell_w, font.cell_h,
+        );
+        let view_base = SessionView {
+            grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
+            title: "", selection: None, ime_preedit: "", update_pending: false,
+            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+        };
+        let view_bot = SessionView {
+            grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
+            title: "", selection: None, ime_preedit: "", update_pending: false,
+            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
+        };
+        let mut run = |view: &SessionView| -> Vec<GlyphInstance> {
+            let mut cells: Vec<CellInstance> = Vec::new();
+            let mut glyphs: Vec<GlyphInstance> = Vec::new();
+            let mut color_glyphs: Vec<GlyphInstance> = Vec::new();
+            let mut dots: Vec<CellInstance> = Vec::new();
+            build_instances(
+                &layout,
+                std::slice::from_ref(view),
+                &[],
+                0,
+                true,
+                None,
+                &mut font,
+                &mut atlas,
+                &mut color_atlas,
+                &mut cells,
+                &mut glyphs,
+                &mut color_glyphs,
+                &mut dots,
+            );
+            glyphs
+        };
+        let g0 = run(&view_base);
+        let gb = run(&view_bot);
+        assert_eq!(g0.len(), gb.len());
+        for (a, b) in g0.iter().zip(gb.iter()) {
+            assert_eq!(a.origin[1], b.origin[1], "bot_fixed must NOT shift grid Y");
+        }
     }
 }

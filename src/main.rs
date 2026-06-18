@@ -1999,6 +1999,8 @@ fn bench_metal_render(arg: &str) {
         ime_preedit: "",
         update_pending: false,
         right_badge: "",
+        top_fixed_h_cells: 0,
+        bot_fixed_h_cells: 0,
     };
     let views = std::slice::from_ref(&view);
 
