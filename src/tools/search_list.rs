@@ -284,13 +284,20 @@ impl SearchList {
             return (InputDisposition::Pass, JumpRequest::None);
         }
         match &ev.logical {
+            // §6.7 — ArrowUp/Down ONLY move focus (preview).  The
+            // grid does NOT jump and the highlight does NOT update
+            // until the user commits with Enter / Cmd+G / click.
+            // This was the cause of the F1+ "highlight 漂过来" UX
+            // — every ↑/↓ used to fire jump_to_focused_hit and
+            // L3 republished its grid window asynchronously so the
+            // highlight floated over stale content for a frame.
             LogicalKey::Named(NamedKey::ArrowUp) => {
-                let j = self.focus_prev();
-                (InputDisposition::HandledRequestRedraw, j)
+                self.focus_prev();
+                (InputDisposition::HandledRequestRedraw, JumpRequest::None)
             }
             LogicalKey::Named(NamedKey::ArrowDown) => {
-                let j = self.focus_next();
-                (InputDisposition::HandledRequestRedraw, j)
+                self.focus_next();
+                (InputDisposition::HandledRequestRedraw, JumpRequest::None)
             }
             LogicalKey::Named(NamedKey::Enter) => {
                 if self.focused_hit().is_some() {
@@ -506,16 +513,18 @@ mod tests {
     }
 
     #[test]
-    fn c3_arrow_keys_move_focus() {
+    fn c3_arrow_keys_move_focus_without_jump() {
+        // F1+3 — ↑/↓ are preview-only per §6.7 (jump only on
+        // Enter / Cmd+G / click).  Asserts JumpRequest::None.
         let mut l = SearchList::new();
         l.query_id = 1;
         l.apply_results(1, vec![hit(0, "a"), hit(1, "b"), hit(2, "c")], false);
         let (d, j) = l.handle_key(&pressed_named(NamedKey::ArrowDown), Modifiers::default());
         assert_eq!(d, InputDisposition::HandledRequestRedraw);
-        assert_eq!(j, JumpRequest::JumpToFocused);
+        assert_eq!(j, JumpRequest::None);
         assert_eq!(l.focused, Some(1));
         let (_d, j) = l.handle_key(&pressed_named(NamedKey::ArrowUp), Modifiers::default());
-        assert_eq!(j, JumpRequest::JumpToFocused);
+        assert_eq!(j, JumpRequest::None);
         assert_eq!(l.focused, Some(0));
     }
 
@@ -585,6 +594,7 @@ mod tests {
         l.query_id = 1;
         l.apply_results(1, vec![hit(0, "a"), hit(1, "b")], false);
         let dyn_tool: &mut dyn PaneTool = &mut l;
+        // ↑/↓ are preview-only (F1+3) — focus moves but no jump.
         let d = dyn_tool.on_key(&pressed_named(NamedKey::ArrowDown), Modifiers::default());
         assert_eq!(d, InputDisposition::HandledRequestRedraw);
         assert_eq!(l.focused, Some(1));
