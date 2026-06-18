@@ -1434,21 +1434,16 @@ impl CoreApp {
         if event.state == KeyState::Pressed && self.search_consume_key(&event, modifiers) {
             return;
         }
-        // F1+9 — when the search overlay is open on the focused pane,
-        // SWALLOW key releases too.  Otherwise the Released event
-        // falls through to the L3 forward path's `snap_to_live()` →
-        // `forward_scroll(0)`, which is exactly the "hold Enter to
-        // see, release to bounce back to live" symptom: every
-        // Released → L3 view_offset resets to 0 → mirror republishes
-        // at live tail.  `search_consume_key` is press-only by design
-        // (bar/list don't react to key-up), so just block the
-        // fallthrough at this layer for ALL events while search is
-        // active on the focused pane.
-        if let Some(pane) = self.panes.get(self.focused_idx) {
-            if pane.search.as_ref().is_some_and(|s| s.bar.focused) {
-                return;
-            }
-        }
+        // F1+12 — F1+9 had a too-wide guard here that returned early
+        // for ALL events when search was open, swallowing Cmd-C / Cmd-B
+        // before their dedicated handlers below could fire.  User
+        // could navigate hits but Cmd-C wouldn't copy without Esc'ing
+        // out of search first.
+        //
+        // The actual bouncer F1+9 was trying to defuse lives inside
+        // the L3 forward path (`snap_to_live` + `forward_key`).  We
+        // moved the guard there (further down) so Cmd-C / Cmd-B /
+        // Cmd-V keep working while search is open.
 
         // Cmd-C: copy current text selection to the macOS clipboard.
         if event.state == KeyState::Pressed
@@ -1551,6 +1546,21 @@ impl CoreApp {
         // the grid (we re-read it on the GridReady wake).  No local write /
         // predict here.
         if pane.is_l3() {
+            // F1+12 — when the search overlay owns the keyboard, any key
+            // that fell through to here must not (a) snap_to_live (the
+            // F1+9 bouncer) or (b) forward_key into the PTY (would type
+            // search-bar shortcuts into the shell).  Cmd-C / Cmd-B
+            // already ran above; bar-bound printable / arrows / Enter
+            // were already consumed by search_consume_key on the press
+            // event.  Anything left (e.g. KeyState::Released, or a
+            // Cmd-? we don't recognise) is dropped silently.
+            if self.panes[self.focused_idx]
+                .search
+                .as_ref()
+                .is_some_and(|s| s.bar.focused)
+            {
+                return;
+            }
             // Cmd-V: L3 is GUI-free and can't read the macOS pasteboard, so
             // L2 resolves it here and forwards the text; the session
             // bracketed-wraps it and writes the PTY.  (Without this, Cmd-V
