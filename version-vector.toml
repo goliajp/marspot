@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.10.4"   # L2 — F1+3 ↑/↓ 只换焦点不 jump(§6.7 spec 行为):原 SearchList::handle_key 在 ↑/↓ 时返回 JumpToFocused → main loop 跳 view_offset + 重算 highlight.L3 异步 republish 让 user 看见 highlight 漂在 stale grid 上.改为 ↑/↓ → JumpRequest::None (preview-only),Enter / 点击才真 jump.符合 spec 也消除"高亮漂"
+core    = "0.10.5"   # L2 — F1+4 jump 加固:Enter 跳到 hit 后立刻关 overlay 让用户看见落点(原 spec 保留 bar focus 但实际遮 hit 内容).jump_to_focused_hit 去掉 view_offset dedup gate (L2 / L3Conn req_view_offset 双方可能 desync,只信 L3Conn 自己 dedup).加 L2_SEARCH_JUMP dev event
 session = "0.9.0"    # L3 — F1: File scrollback 默认开,持久 `.bin`+`.idx` byte 格式(A1-A4),scrollback_search 算法 + worker 线程 + FileSnapshot 独立 pread(B1+B3),live grid 合并(B4 u64::MAX 合成索引)。`MARSPOT_FILE_SCROLLBACK=0` 仅作 kill-switch 保留。MsgType 50-53 SearchScrollback/Results/More/Cancel(B2)L3 dispatch 收发已稳定

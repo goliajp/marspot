@@ -1301,11 +1301,35 @@ impl CoreApp {
             query_id: hit_qid,
             spans: new_spans,
         });
+        // F1+4 — set + push without dedup gate.  Previous code
+        // checked `old_offset != new_view_offset` and silently
+        // skipped forward_scroll when equal, but `pane.view_offset`
+        // and the L3Conn-side `req_view_offset` could desync (e.g.
+        // L3 republished at 0 after some other path) which left the
+        // grid frozen at live even though L2 thought it was at K.
+        // Set the L2 side AND push the scroll; the L3Conn does its
+        // own req_view_offset dedup that handles the genuinely-no-op
+        // case.
         let old_offset = pane.view_offset();
-        if old_offset != new_view_offset {
-            pane.set_view_offset(new_view_offset);
-            pane.session_mut().forward_scroll(new_view_offset);
-        }
+        pane.set_view_offset(new_view_offset);
+        pane.session_mut().forward_scroll(new_view_offset);
+        lx_event!(
+            "L2_SEARCH_JUMP",
+            "jump to focused search hit",
+            pane_idx = pane_idx as u32,
+            is_live = if is_live { 1u32 } else { 0u32 },
+            primary_row = primary_row,
+            old_offset = old_offset as u32,
+            new_offset = new_view_offset as u32
+        );
+        // F1+4 — close the overlay AFTER jumping so the user sees
+        // the jumped-to grid + highlight without the bar / list
+        // sitting on top of it.  Highlight stays on grid (cleared
+        // when user opens search again with a different query).
+        // Spec §6.7 had "query stays focused" but in practice the
+        // overlay obscures the very content the user wanted to see.
+        // Cmd+F re-opens for a follow-up search.
+        pane.search = None;
         self.needs_render = true;
     }
 
