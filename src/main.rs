@@ -2003,6 +2003,7 @@ fn bench_metal_render(arg: &str) {
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
         search_overlay: None,
+        seq: 0,
     };
     let views = std::slice::from_ref(&view);
 

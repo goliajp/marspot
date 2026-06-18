@@ -78,7 +78,14 @@ fn file_scrollback_session_id() -> Option<u64> {
 /// region access is already as fast as Vec index), so the trade
 /// failed: small idle-resident upside, measurable burst-output
 /// downside.  Data on `feature/disk-scrollback-mmap` 2026-05-04.
-const DISK_SCROLLBACK_RAM_LINES: usize = 1024;
+/// F1+13 — reduced from 1024 → 256 (each session was sitting on
+/// ~1024 × cols × 24 B ≈ 3 MB of RAM ring per L3, and with 9
+/// claudecode panes that's ~30 MB just for the hot ring).  The
+/// earlier 1024 figure was chosen against a 4096 alternative that
+/// faulted into the parse hot path — 256 keeps the recent-line
+/// fast path (search worker + mid-burst scrollback reads) cheap on
+/// the same machinery while halving steady-state L3 RSS.
+const DISK_SCROLLBACK_RAM_LINES: usize = 256;
 
 /// Disk pages cap (each = 256 lines).  100 pages × 256 lines × 80
 /// cols × 24 B/cell ≈ 50 MiB on-disk per session.  At 9 sessions

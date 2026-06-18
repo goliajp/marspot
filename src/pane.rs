@@ -1013,6 +1013,28 @@ impl Pane {
     }
 
     /// Current view offset (rows into scrollback, 0 = live tail).
+    /// F1+13 — grid-content "freshness" tag.  For L3 panes this is the
+    /// shm reader's last accepted seq (bumps on every L3 publish).
+    /// For Local (in-process) panes we fall back to a coarse signal
+    /// derived from cursor + scroll-push count — enough to invalidate
+    /// the renderer's per-pane instance cache when content changes,
+    /// at the cost of some over-invalidation that the cache layer can
+    /// absorb.
+    pub fn grid_seq(&self) -> u64 {
+        match &self.session {
+            PaneBackend::L3(c) => c.last_seq,
+            PaneBackend::Local(s) => {
+                let g = s.terminal().grid();
+                let (cc, cr) = g.cursor();
+                // Pack into u64 so a movement (cursor) or push
+                // (scroll_push_count) reliably changes the tag.
+                ((g.scroll_push_count() & 0xFFFF_FFFF) << 32)
+                    | ((cc as u64) << 16)
+                    | (cr as u64)
+            }
+        }
+    }
+
     pub fn view_offset(&self) -> u16 {
         self.view_offset
     }
@@ -1212,6 +1234,7 @@ impl Pane {
             0
         };
         let (top_fixed_h_cells, bot_fixed_h_cells) = self.tool_fixed_height_sums();
+        let seq = self.grid_seq();
         let search_overlay = self.search.as_ref().map(|s| {
             // Take up to the next `VIEWPORT` rows starting at
             // `visible_top` — matches what the renderer paints.
@@ -1265,6 +1288,7 @@ impl Pane {
                 .map(|h| h.spans.as_slice())
                 .unwrap_or(&[]),
             search_overlay,
+            seq,
         }
     }
 

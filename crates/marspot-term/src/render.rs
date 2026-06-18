@@ -159,6 +159,13 @@ pub struct SessionView<'a> {
     /// keystroke that mutates the live state reflects on the next
     /// render.
     pub search_overlay: Option<SearchOverlayView>,
+    /// F1+13 — content-freshness tag the renderer uses to short-
+    /// circuit per-pane instance rebuilds.  Caller (`Pane::as_view`)
+    /// supplies a monotonic-ish counter that bumps whenever the
+    /// underlying grid / view state would change the rendered
+    /// output.  `0` (default for tests / mcli) disables caching
+    /// for that pane.
+    pub seq: u64,
 }
 
 /// F1+ — immutable per-frame snapshot of the search overlay, fed to

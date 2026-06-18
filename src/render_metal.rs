@@ -173,6 +173,97 @@ pub struct GlyphInstance {
     pub color: [f32; 4],
 }
 
+/// F1+13 — cached per-pane render contributions.  When a pane's
+/// `fingerprint` (computed from its `SessionView` fields) and both
+/// atlas generations match the previous frame, the renderer
+/// `extend_from_slice`s the cached vecs straight into the current
+/// frame's accumulators — skipping `push_session` for that pane
+/// entirely.  Cache is invalidated whenever an atlas was rebuilt
+/// or any contributing input changed.
+#[derive(Default)]
+struct PaneInstanceCache {
+    fingerprint: u64,
+    atlas_gen: u64,
+    color_atlas_gen: u64,
+    cells: Vec<CellInstance>,
+    glyphs: Vec<GlyphInstance>,
+    color_glyphs: Vec<GlyphInstance>,
+    /// `true` once this slot has actually been built at least once;
+    /// distinguishes "fresh default" from "valid but happens to
+    /// have empty contributions".
+    primed: bool,
+}
+
+/// Compute the fingerprint hash of the inputs to push_session that
+/// affect rendered output.  Any change here invalidates the per-pane
+/// instance cache and forces a rebuild.  Cheap (~tens of ns) so it's
+/// run unconditionally each frame.
+fn pane_fingerprint(
+    view: &SessionView,
+    rect: &CellRect,
+    window_focused: bool,
+    hover_chrome_btn: Option<u8>,
+    cell_w: f32,
+    cell_h: f32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = marspot_term::fast_hash::FxHasher::default();
+    view.seq.hash(&mut h);
+    view.view_offset.hash(&mut h);
+    view.cursor_visible.hash(&mut h);
+    view.focused.hash(&mut h);
+    view.title.hash(&mut h);
+    view.right_badge.hash(&mut h);
+    view.update_pending.hash(&mut h);
+    view.ime_preedit.hash(&mut h);
+    view.top_fixed_h_cells.hash(&mut h);
+    view.bot_fixed_h_cells.hash(&mut h);
+    // Selection
+    if let Some(sel) = view.selection {
+        true.hash(&mut h);
+        sel.anchor.0.hash(&mut h);
+        sel.anchor.1.hash(&mut h);
+        sel.focus.0.hash(&mut h);
+        sel.focus.1.hash(&mut h);
+        sel.blockwise.hash(&mut h);
+    } else {
+        false.hash(&mut h);
+    }
+    // Highlight spans (search active hit).
+    view.highlight_spans.len().hash(&mut h);
+    for span in view.highlight_spans {
+        span.view_row.hash(&mut h);
+        span.col_start.hash(&mut h);
+        span.col_end_inclusive.hash(&mut h);
+    }
+    // Search overlay snapshot — every field affecting paint.
+    if let Some(ov) = view.search_overlay.as_ref() {
+        true.hash(&mut h);
+        ov.query.hash(&mut h);
+        ov.query_cursor.hash(&mut h);
+        ov.case_sensitive.hash(&mut h);
+        ov.counter.hash(&mut h);
+        ov.hits.len().hash(&mut h);
+        for hit in &ov.hits {
+            hit.is_focused.hash(&mut h);
+            hit.snippet.hash(&mut h);
+        }
+    } else {
+        false.hash(&mut h);
+    }
+    window_focused.hash(&mut h);
+    hover_chrome_btn.hash(&mut h);
+    // Layout (catches resize → cache invalidation naturally).
+    (rect.x as i64).hash(&mut h);
+    (rect.y_top as i64).hash(&mut h);
+    (rect.w as i64).hash(&mut h);
+    (rect.h as i64).hash(&mut h);
+    // Font metrics (catches font / DPI change).
+    (cell_w as i64).hash(&mut h);
+    (cell_h as i64).hash(&mut h);
+    h.finish()
+}
+
 /// F1+11 — one UI rect's draw data, layout-compatible with `UiRect`
 /// in `src/shaders/cells.metal`.  A real pixel-mode rounded rectangle
 /// with anti-aliased corners, optional border stroke, and optional
@@ -312,6 +403,15 @@ pub struct MetalRenderer {
     /// panel, future menus / tooltips).  Drawn between
     /// cells/highlight and glyphs so panel BG sits under panel text.
     ui_rects_scratch: Vec<UiRectInstance>,
+    /// F1+13 — per-pane instance cache.  Each entry holds the
+    /// cells / glyphs / color_glyphs slice the renderer produced
+    /// for one pane on the most recent frame it actually built
+    /// that pane.  When the next frame finds a matching
+    /// `fingerprint` (covers grid seq + every relevant
+    /// `SessionView` field) AND the same atlas generations, the
+    /// renderer copies the cached slice instead of recomputing —
+    /// the dominant L2 CPU cost in 9-claudecode workloads.
+    pane_caches: Vec<PaneInstanceCache>,
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
@@ -465,6 +565,7 @@ impl MetalRenderer {
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             ui_rects_scratch: Vec::new(),
+            pane_caches: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
@@ -523,6 +624,7 @@ impl MetalRenderer {
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             ui_rects_scratch: Vec::new(),
+            pane_caches: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
@@ -764,6 +866,7 @@ impl MetalRenderer {
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             ref mut ui_rects_scratch,
+            ref mut pane_caches,
             window_focused,
             hover_chrome_btn,
             width_px,
@@ -791,6 +894,7 @@ impl MetalRenderer {
             color_glyphs_scratch,
             dots_scratch,
             ui_rects_scratch,
+            pane_caches,
         );
 
         let layer = layer.as_ref().unwrap();
@@ -901,6 +1005,7 @@ impl MetalRenderer {
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             ref mut ui_rects_scratch,
+            ref mut pane_caches,
             window_focused,
             hover_chrome_btn,
             ..
@@ -926,6 +1031,7 @@ impl MetalRenderer {
             color_glyphs_scratch,
             dots_scratch,
             ui_rects_scratch,
+            pane_caches,
         );
 
         let cmd = match queue.commandBuffer() {
@@ -1356,6 +1462,7 @@ fn build_instances(
     color_glyphs: &mut Vec<GlyphInstance>,
     dots: &mut Vec<CellInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
+    pane_caches: &mut Vec<PaneInstanceCache>,
 ) {
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
@@ -1445,11 +1552,43 @@ fn build_instances(
         }
     }
 
+    // Ensure cache has a slot per pane (grown lazily; never shrunk
+    // intra-session — pane count is bounded by the 9-grid layout).
+    while pane_caches.len() < views.len() {
+        pane_caches.push(PaneInstanceCache::default());
+    }
+
     for (i, view) in views.iter().enumerate() {
         let rect = match layout.cells.get(i) {
             Some(r) => r,
             None => continue,
         };
+        // F1+13 — per-pane instance cache.  Hash the inputs that
+        // affect `push_session`'s output.  Hit ⇒ memcpy cached
+        // slices into the global accumulators (cheap).  Miss ⇒
+        // rebuild + snapshot the slice this pane just produced
+        // into the cache so the NEXT idle frame for this pane is
+        // a hit.  ui_rects are NOT cached (only one pane has the
+        // search overlay at a time, and rebuilding it is cheap).
+        let fp = pane_fingerprint(
+            view, rect, window_focused, hover_chrome_btn, cell_w, cell_h,
+        );
+        let cur_atlas_gen = atlas.rebuild_count;
+        let cur_color_gen = color_atlas.rebuild_count;
+        let cache = &mut pane_caches[i];
+        let hit = cache.primed
+            && cache.fingerprint == fp
+            && cache.atlas_gen == cur_atlas_gen
+            && cache.color_atlas_gen == cur_color_gen;
+        if hit {
+            cells.extend_from_slice(&cache.cells);
+            glyphs.extend_from_slice(&cache.glyphs);
+            color_glyphs.extend_from_slice(&cache.color_glyphs);
+            continue;
+        }
+        let cells_start = cells.len();
+        let glyphs_start = glyphs.len();
+        let color_glyphs_start = color_glyphs.len();
         push_session(
             rect,
             view,
@@ -1470,6 +1609,22 @@ fn build_instances(
             layout.padding as f32,
             layout.cell_title_h as f32,
         );
+        // Snapshot this pane's contributions into the cache.
+        // Re-read atlas gens after the call: a glyph miss during
+        // push_session may have triggered a rebuild, in which case
+        // the slice we're caching uses the post-rebuild uvs and
+        // must record THAT gen for the hit check to be sound.
+        let cache = &mut pane_caches[i];
+        cache.fingerprint = fp;
+        cache.atlas_gen = atlas.rebuild_count;
+        cache.color_atlas_gen = color_atlas.rebuild_count;
+        cache.cells.clear();
+        cache.cells.extend_from_slice(&cells[cells_start..]);
+        cache.glyphs.clear();
+        cache.glyphs.extend_from_slice(&glyphs[glyphs_start..]);
+        cache.color_glyphs.clear();
+        cache.color_glyphs.extend_from_slice(&color_glyphs[color_glyphs_start..]);
+        cache.primed = true;
     }
 
     // Cells past the last view are "empty" — N sessions < layout
@@ -2469,7 +2624,15 @@ fn push_session(
             let row_end_exclusive = covered_rows.min(grid.rows());
             Some((row_start, row_end_exclusive, col_start, col_end_inclusive))
         });
+    // F1+13 — fast-path: when the overlay is closed (the common case),
+    // bail out without touching `overlay_mask`'s scrutinee on every
+    // per-cell call.  Keeps `under_overlay` a tight inline check on
+    // the per-row / per-cell hot path.
+    let overlay_active = overlay_mask.is_some();
     let under_overlay = |row: u16, col: u16| -> bool {
+        if !overlay_active {
+            return false;
+        }
         match overlay_mask {
             Some((r0, r1, c0, c1)) => row >= r0 && row < r1 && col >= c0 && col <= c1,
             None => false,
@@ -3817,6 +3980,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            seq: 0,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3837,6 +4001,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -3912,6 +4077,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            seq: 0,
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3932,6 +4098,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
 
@@ -3980,6 +4147,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            seq: 0,
         };
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
@@ -3999,6 +4167,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
         glyphs
@@ -4072,6 +4241,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
             search_overlay: None,
+            seq: 0,
         };
         // Baseline cell count (no highlight) for the same layout/grid.
         let baseline_view = SessionView {
@@ -4088,6 +4258,7 @@ mod tests {
             bot_fixed_h_cells: view.bot_fixed_h_cells,
             highlight_spans: &[],
             search_overlay: None,
+            seq: 0,
         };
         let mut run = |v: &SessionView| -> Vec<CellInstance> {
             let mut cells: Vec<CellInstance> = Vec::new();
@@ -4108,6 +4279,7 @@ mod tests {
                 &mut glyphs,
                 &mut color_glyphs,
                 &mut dots,
+                &mut Vec::new(),
                 &mut Vec::new(),
             );
             cells
@@ -4182,6 +4354,7 @@ mod tests {
             bot_fixed_h_cells: 0,
             highlight_spans: &spans,
             search_overlay: None,
+            seq: 0,
         };
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
@@ -4201,6 +4374,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
             &mut Vec::new(),
         );
         // No HIGHLIGHT_BG cell should be present.
@@ -4239,6 +4413,7 @@ mod tests {
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
+            seq: 0,
         };
         let view_bot = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
@@ -4246,6 +4421,7 @@ mod tests {
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,
+            seq: 0,
         };
         let mut run = |view: &SessionView| -> Vec<GlyphInstance> {
             let mut cells: Vec<CellInstance> = Vec::new();
@@ -4266,6 +4442,7 @@ mod tests {
                 &mut glyphs,
                 &mut color_glyphs,
                 &mut dots,
+                &mut Vec::new(),
                 &mut Vec::new(),
             );
             glyphs
