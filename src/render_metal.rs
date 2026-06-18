@@ -1911,34 +1911,16 @@ fn build_instances(
         glyphs,
     );
 
-    // F3+1.6 — Process Monitor modal renders into the OVERLAY
-    // scratches.  After build_instances returns, the encoder runs two
-    // extra passes (overlay UI → overlay FG) AFTER all four main
-    // passes; the overlay sits on top of every grid pixel by virtue
-    // of pipeline order, no filter / glyph-origin gymnastics needed.
-    // This is the architecturally correct "always-on-top" for any
-    // overlay.  Drop the filter approach entirely.
+    // F3+1.7 — Process Monitor modal renders via the `View` component
+    // which owns the overlay-scratch + extra-pass plumbing.  Build
+    // sites only see the painter; backdrop / frame / always-on-top
+    // are configured up front and applied automatically.
     if let Some(panel) = process_panel {
-        if panel.draw_backdrop {
-            // Backdrop dim sits below marspot title strip so the
-            // strip stays always-on-top (version label + chrome
-            // buttons readable; user explicitly wanted opaque +
-            // always-on-top title strip).
-            let top_inset = layout.top_inset as f32;
-            overlay_ui_rects.push(UiRectInstance {
-                origin: [0.0, top_inset],
-                size: [layout.window_w as f32, (layout.window_h as f32 - top_inset).max(0.0)],
-                fill_color: [0.0, 0.0, 0.0, 0.45],
-                border_color: [0.0, 0.0, 0.0, 0.0],
-                corner_radius: 0.0,
-                border_width: 0.0,
-                shadow_blur: 0.0,
-                shadow_alpha: 0.0,
-                shadow_color: [0.0, 0.0, 0.0, 1.0],
-            });
-        }
-        push_process_panel(
-            panel, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+        push_process_panel_via_view(
+            panel,
+            layout.top_inset,
+            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            layout.window_w, layout.window_h,
             font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
         );
     }
@@ -2287,213 +2269,180 @@ const PROCESS_PANEL_BODY_PAD_TOP_LOGICAL: f32 = 6.0;
 const PROCESS_PANEL_INDENT_LOGICAL: f32 = 14.0;
 const PROCESS_PANEL_KILL_W_LOGICAL: f32 = 18.0;
 
-/// F3+1.4 — paint the centered Process Monitor modal.  Layout:
-///
-///   ┌─────────────────────────────────────────┐
-///   │ ●●●   Process Monitor                    │  title bar (28 pt)
-///   ├─────────────────────────────────────────┤
-///   │ [Pane 1] [Pane 2] [Pane 3] ...           │  tab strip (30 pt)
-///   ├─────────────────────────────────────────┤
-///   │ sid=240  shell pid=1632                  │  active tab body
-///   │   1632 zsh                               │
-///   │     4567 node                        [×] │
-///   │     4568 claude                      [×] │
-///   │ ...                                       │
-///   └─────────────────────────────────────────┘
-///
-/// Hit rects (close button, tab strip, per-row [×]) are computed in
-/// L2 (`build_process_panel_render`) with the SAME constants this
-/// function reads, so a click on the visible [×] hits its rect.
-fn push_process_panel(
+/// F3+1.7 — paint the Process Monitor modal via the `View` component.
+/// The modal's frame chrome (BG, border, shadow, backdrop) is owned
+/// by `View::paint`; only the modal-specific content (title bar fill,
+/// traffic lights, tabs, body rows) lives in the closure below.  All
+/// drawing routes through `ViewPainter` into overlay scratches, so
+/// the modal is always-on-top by construction — no filter pass on
+/// the grid scratches needed.
+fn push_process_panel_via_view(
     panel: &ProcessPanelRender,
+    top_inset: f64,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
     atlas_w: f32,
     atlas_h: f32,
+    window_w: f64,
+    window_h: f64,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
 ) {
+    use crate::ui::components::view::{View, ViewStyle, ViewPainter, Backdrop};
+    let mut painter = ViewPainter {
+        cell_w, cell_h, ascent, atlas_w, atlas_h,
+        window_w, window_h,
+        font, atlas, cells, glyphs, ui_rects,
+    };
+    let view = View {
+        rect: panel.rect,
+        style: ViewStyle {
+            bg: PROCESS_PANEL_BG,
+            border_color: PROCESS_PANEL_BORDER,
+            border_width: 1.0,
+            corner_radius: PROCESS_PANEL_CORNER_RADIUS,
+            shadow_blur: 16.0,
+            shadow_alpha: 0.45,
+            backdrop: if panel.draw_backdrop {
+                Backdrop::Dim {
+                    color: [0.0, 0.0, 0.0, 0.45],
+                    exclude_above_y: top_inset,
+                }
+            } else {
+                Backdrop::None
+            },
+        },
+    };
+    view.paint(&mut painter, |p| {
+        paint_process_panel_content(panel, p);
+    });
+}
+
+/// Internal: the content of the Process Monitor modal (title bar
+/// fill, traffic lights, title text, tab strip, body rows + [×]
+/// kill buttons).  Called from `push_process_panel_via_view` with
+/// a `ViewPainter` routing to overlay scratches.
+fn paint_process_panel_content(
+    panel: &ProcessPanelRender,
+    p: &mut crate::ui::components::view::ViewPainter,
+) {
     let px = panel.rect.x as f32;
     let py = panel.rect.y_top as f32;
     let pw = panel.rect.w as f32;
     let ph = panel.rect.h as f32;
-    let scale_hint = (cell_h / 20.0).max(0.5); // rough scale heuristic from font cell_h
+    // The original push_process_panel inferred scale from cell_h;
+    // keep that heuristic so glyph sizes stay in proportion.
+    let scale_hint = (p.cell_h / 20.0).max(0.5);
     let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
     let tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
     let traffic = PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL * scale_hint;
     let traffic_gap = PROCESS_PANEL_TRAFFIC_GAP_LOGICAL * scale_hint;
     let traffic_left_pad = PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL * scale_hint;
 
-    // 1) Modal BG (rounded rect + 1 px border + soft drop shadow).
-    ui_rects.push(UiRectInstance {
-        origin: [px, py],
-        size: [pw, ph],
-        fill_color: PROCESS_PANEL_BG,
-        border_color: PROCESS_PANEL_BORDER,
-        corner_radius: PROCESS_PANEL_CORNER_RADIUS,
-        border_width: 1.0,
-        shadow_blur: 16.0,
-        shadow_alpha: 0.45,
-        shadow_color: [0.0, 0.0, 0.0, 1.0],
-    });
-
-    // 2) Title bar fill (a flat rect from top inside the rounded
-    // corners, ending at the title bar separator line).  We use
-    // `push_rect` (cells pipeline) since these are axis-aligned and
-    // SDF round corners aren't needed — the modal BG already drew
-    // them on the outer frame.
-    push_rect(
-        cells,
+    // Title bar fill (flat over the rounded chrome).
+    p.fill_rect(
         Rect { x: px as f64, y_top: py as f64, w: pw as f64, h: title_h as f64 },
         PROCESS_PANEL_TITLE_BAR_BG,
     );
-    // 1 px separator under the title bar.
-    push_rect(
-        cells,
-        Rect { x: px as f64, y_top: (py + title_h) as f64,
-               w: pw as f64, h: 1.0 },
+    // 1 px separator below title bar.
+    p.fill_rect(
+        Rect { x: px as f64, y_top: (py + title_h) as f64, w: pw as f64, h: 1.0 },
         PROCESS_PANEL_SEPARATOR,
     );
-
-    // 3) Traffic lights: red close + yellow + green dots.  Drawn as
-    // small filled rectangles (close enough to circles at this size;
-    // a proper SDF disc would need its own pipeline).
+    // Traffic lights (3 SDF discs anchored title-bar left).
     let traffic_y = py + (title_h - traffic) * 0.5;
     let close_x = px + traffic_left_pad;
     let min_x = close_x + traffic + traffic_gap;
     let max_x = min_x + traffic + traffic_gap;
     for (x, color) in [
         (close_x, PROCESS_PANEL_TRAFFIC_CLOSE),
-        (min_x, PROCESS_PANEL_TRAFFIC_MIN),
-        (max_x, PROCESS_PANEL_TRAFFIC_MAX),
+        (min_x,   PROCESS_PANEL_TRAFFIC_MIN),
+        (max_x,   PROCESS_PANEL_TRAFFIC_MAX),
     ] {
-        // Use a tiny UiRectInstance per light so it's a real disc
-        // (corner_radius = traffic / 2 makes the rect a pill / circle
-        // when w == h).
-        ui_rects.push(UiRectInstance {
-            origin: [x, traffic_y],
-            size: [traffic, traffic],
-            fill_color: color,
-            border_color: [0.0, 0.0, 0.0, 0.25],
-            corner_radius: traffic * 0.5,
-            border_width: 1.0,
-            shadow_blur: 0.0,
-            shadow_alpha: 0.0,
-            shadow_color: [0.0, 0.0, 0.0, 1.0],
-        });
+        p.fill_rounded_rect(
+            Rect { x: x as f64, y_top: traffic_y as f64, w: traffic as f64, h: traffic as f64 },
+            color,
+            traffic * 0.5,
+            ([0.0, 0.0, 0.0, 0.25], 1.0),
+        );
     }
-
-    // 4) Title centered.
+    // Centered title text.
     let title_w_chars = panel.title.chars().count() as f32;
-    let title_x = px + (pw - title_w_chars * cell_w) * 0.5;
-    let title_baseline_y = py + (title_h - cell_h) * 0.5 + ascent;
-    push_text_run(
-        &panel.title, title_x, title_baseline_y, PROCESS_PANEL_TITLE_FG,
-        cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-    );
+    let title_x = px + (pw - title_w_chars * p.cell_w) * 0.5;
+    let title_baseline = py + (title_h - p.cell_h) * 0.5 + p.ascent;
+    p.text(title_x, title_baseline, &panel.title, PROCESS_PANEL_TITLE_FG);
 
-    // Minimized: skip tab strip + body so only title bar shows.
     if panel.minimized {
         return;
     }
 
-    // 5) Tab strip.
+    // Tab strip.
     if !panel.tabs.is_empty() {
         let strip_y = py + title_h;
         let tab_w = pw / (panel.tabs.len() as f32);
         for (i, label) in panel.tabs.iter().enumerate() {
             let tx = px + (i as f32) * tab_w;
-            let bg = if i == panel.active_tab {
-                PROCESS_PANEL_TAB_BG_ACTIVE
+            let (bg, fg) = if i == panel.active_tab {
+                (PROCESS_PANEL_TAB_BG_ACTIVE, PROCESS_PANEL_TAB_FG_ACTIVE)
             } else {
-                PROCESS_PANEL_TAB_BG
+                (PROCESS_PANEL_TAB_BG,        PROCESS_PANEL_TAB_FG)
             };
-            let fg = if i == panel.active_tab {
-                PROCESS_PANEL_TAB_FG_ACTIVE
-            } else {
-                PROCESS_PANEL_TAB_FG
-            };
-            push_rect(
-                cells,
-                Rect { x: tx as f64, y_top: strip_y as f64,
-                       w: tab_w as f64, h: tab_h as f64 },
+            p.fill_rect(
+                Rect { x: tx as f64, y_top: strip_y as f64, w: tab_w as f64, h: tab_h as f64 },
                 bg,
             );
-            // Center the label horizontally inside this tab.
             let label_w_chars = label.chars().count() as f32;
-            let label_x = tx + (tab_w - label_w_chars * cell_w) * 0.5;
-            let label_baseline_y = strip_y + (tab_h - cell_h) * 0.5 + ascent;
-            push_text_run(
-                label, label_x, label_baseline_y, fg,
-                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-            );
+            let label_x = tx + (tab_w - label_w_chars * p.cell_w) * 0.5;
+            let label_baseline = strip_y + (tab_h - p.cell_h) * 0.5 + p.ascent;
+            p.text(label_x, label_baseline, label, fg);
         }
-        // Separator under tab strip.
-        push_rect(
-            cells,
-            Rect { x: px as f64, y_top: (strip_y + tab_h) as f64,
-                   w: pw as f64, h: 1.0 },
+        p.fill_rect(
+            Rect { x: px as f64, y_top: (strip_y + tab_h) as f64, w: pw as f64, h: 1.0 },
             PROCESS_PANEL_SEPARATOR,
         );
     }
 
-    // 6) Body rows.  Honors `panel.scroll_y` so rows scrolled above
-    // the body get a negative y_top and are skipped; rows past the
-    // bottom break the loop.
+    // Body rows (with scroll).
     let body_top = py + title_h + tab_h;
     let body_pad_top = PROCESS_PANEL_BODY_PAD_TOP_LOGICAL * scale_hint;
     let body_pad_left = PROCESS_PANEL_BODY_PAD_LEFT_LOGICAL * scale_hint;
     let body_pad_right = PROCESS_PANEL_BODY_PAD_RIGHT_LOGICAL * scale_hint;
     let indent = PROCESS_PANEL_INDENT_LOGICAL * scale_hint;
     let kill_w = PROCESS_PANEL_KILL_W_LOGICAL * scale_hint;
-    let row_h = cell_h * 1.2;
+    let row_h = p.cell_h * 1.2;
     let body_bottom = py + ph - 6.0 * scale_hint;
     let kill_h = (row_h - 4.0).max(8.0);
     let scroll_y = panel.scroll_y as f32;
     for (i, row) in panel.rows.iter().enumerate() {
         let row_y = body_top + body_pad_top + (i as f32) * row_h - scroll_y;
-        if row_y + row_h > body_bottom {
-            break;
-        }
-        if row_y + row_h < body_top {
-            // Scrolled past the top edge — skip but keep iterating
-            // since later rows may still be visible.
-            continue;
-        }
+        if row_y + row_h > body_bottom { break; }
+        if row_y + row_h < body_top    { continue; }
         let text_x = px + body_pad_left + (row.depth as f32) * indent;
-        let baseline_y = row_y + ascent;
-        let fg = if row.is_header {
-            PROCESS_PANEL_HEADER_FG
-        } else {
-            PROCESS_PANEL_ROW_FG
-        };
-        push_text_run(
-            &row.text, text_x, baseline_y, fg,
-            cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-        );
+        let baseline = row_y + p.ascent;
+        let fg = if row.is_header { PROCESS_PANEL_HEADER_FG } else { PROCESS_PANEL_ROW_FG };
+        p.text(text_x, baseline, &row.text, fg);
         if !row.is_header {
             let kill_x = px + pw - body_pad_right - kill_w;
             let kill_y = row_y + (row_h - kill_h) * 0.5;
-            push_rect(
-                cells,
+            p.fill_rect(
                 Rect { x: kill_x as f64, y_top: kill_y as f64,
                        w: kill_w as f64, h: kill_h as f64 },
                 PROCESS_PANEL_KILL_BG,
             );
-            push_text_run(
+            p.text(
+                kill_x + (kill_w - p.cell_w) * 0.5,
+                kill_y + p.ascent + (kill_h - p.cell_h) * 0.5,
                 "×",
-                kill_x + (kill_w - cell_w) * 0.5,
-                kill_y + ascent + (kill_h - cell_h) * 0.5,
                 PROCESS_PANEL_KILL_FG,
-                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
             );
         }
     }
 }
+
 
 /// F3+1 — Lucide-style "list tree" icon: three horizontal bars,
 /// progressively indented to suggest nesting.  Drawn with the same
@@ -2894,7 +2843,7 @@ pub fn version_label() -> String {
 /// physical pixels, advancing one monospace cell per char.  Shared
 /// by the cell-title strip and the header version label.
 #[allow(clippy::too_many_arguments)]
-fn push_text_run(
+pub(crate) fn push_text_run(
     text: &str,
     x_start: f32,
     baseline_y: f32,

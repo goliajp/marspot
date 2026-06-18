@@ -20,8 +20,10 @@ pub mod traffic_lights;
 pub mod tab_strip;
 pub mod scroll_view;
 pub mod modal_frame;
+pub mod view;
 
 pub use traffic_lights::{TrafficLights, TrafficLightHit};
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
 pub use modal_frame::ModalFrame;
+pub use view::{View, ViewStyle, ViewPainter, Backdrop};
