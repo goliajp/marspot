@@ -129,6 +129,14 @@ struct ProcessPanelState {
     /// CoreApp.panes so the renderer can pick by pane order.
     panes: Vec<PanePidTree>,
     last_refresh: Instant,
+    /// F3+1.3 — flattened per-row kill hit rects, rebuilt every render
+    /// frame in parallel with the renderer's row positions.  `mouse_down`
+    /// walks this list to map (x_phys, y_phys) → pid_to_kill.
+    row_kill_rects: Vec<(i32, marspot_term::layout::Rect)>,
+    /// F3+1.3 — kills awaiting SIGTERM→SIGKILL escalation.  Each entry
+    /// is (pid, sent_at) — when sent_at + KILL_ESCALATION_GRACE elapses
+    /// AND pid_is_alive(pid), we send SIGKILL and drop the entry.
+    pending_kills: Vec<(i32, Instant)>,
 }
 
 struct PanePidTree {
@@ -136,6 +144,17 @@ struct PanePidTree {
     shell_child_pid: Option<i32>,
     tree: Option<marspot::pidtree::ProcNode>,
 }
+
+/// F3+1.3 — how long after a SIGTERM before we escalate to SIGKILL.
+/// Chosen for "user clicks [×] and expects the row to vanish soon":
+/// 2 s is long enough that a graceful shutdown (claude flushing logs,
+/// node closing the socket) can complete, short enough that the user
+/// doesn't think the click was ignored.
+const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
+
+/// F3+1.3 — panel size + refresh cadence.
+const PROCESS_PANEL_WIDTH_LOGICAL: f64 = 320.0;
+const PROCESS_PANEL_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// F3+1 — read `sessions/<sid>/entry.toml`'s `shell_child_pid` field.
 /// Returns None on missing file, parse error, or absent field; the
@@ -1768,6 +1787,132 @@ impl CoreApp {
         None
     }
 
+    /// F3+1.3 — build the panel render data (rect + rows) and the
+    /// parallel `row_kill_rects` for hit-testing.  Called every
+    /// render frame while the panel is open.  Returns the data to
+    /// push to the renderer; also persists kill rects into
+    /// `process_panel.row_kill_rects` for `mouse_down`.
+    fn build_process_panel_render(&mut self) -> Option<marspot::render_metal::ProcessPanelRender> {
+        use marspot::render_metal::{ProcessPanelRender, ProcessPanelRow};
+        let scale = self.scale.max(0.1);
+        let panel_w_phys = (PROCESS_PANEL_WIDTH_LOGICAL * scale).max(160.0);
+        let top_inset = self.layout.top_inset;
+        let panel_rect = marspot_term::layout::Rect {
+            x: (self.w_phys as f64 - panel_w_phys).max(0.0),
+            y_top: top_inset,
+            w: panel_w_phys.min(self.w_phys as f64),
+            h: (self.h_phys as f64 - top_inset).max(0.0),
+        };
+        let panel = self.process_panel.as_mut()?;
+        // Build rows: per-pane header + flattened tree.
+        let mut rows: Vec<ProcessPanelRow> = Vec::new();
+        // Parallel: (pid, depth, row_idx) so we can compute kill
+        // rects below in one second pass.
+        let mut kill_meta: Vec<(i32, usize)> = Vec::new(); // (pid, row_idx)
+        for (i, pane) in panel.panes.iter().enumerate() {
+            let header_text = match pane.shell_child_pid {
+                Some(p) => format!("Pane {}  sid={}  pid={}",
+                    i + 1, pane.shelld_session_id, p),
+                None => format!("Pane {}  sid={}  (no pid)",
+                    i + 1, pane.shelld_session_id),
+            };
+            rows.push(ProcessPanelRow {
+                depth: 0,
+                text: header_text,
+                is_header: true,
+            });
+            if let Some(tree) = pane.tree.as_ref() {
+                let flat = marspot::pidtree::flatten_pre_order(tree);
+                for (depth, node) in flat {
+                    let row_idx = rows.len();
+                    rows.push(ProcessPanelRow {
+                        depth: ((depth + 1).min(8)) as u8,
+                        text: format!("{} {}", node.pid, node.comm),
+                        is_header: false,
+                    });
+                    kill_meta.push((node.pid, row_idx));
+                }
+            }
+        }
+        // Match the renderer's row layout: row_y = panel.y_top + i*row_h + 4
+        // row_h = cell_h * 1.2.
+        let (_cw, cell_h_f64) = self.renderer.cell_dims();
+        let cell_h = cell_h_f64 as f32;
+        let row_h = cell_h * 1.2;
+        let kill_w_logical = 18.0_f32 * (scale as f32);
+        let right_pad_logical = 10.0_f32 * (scale as f32);
+        let kill_h = (row_h - 4.0).max(8.0);
+        let panel_x = panel_rect.x as f32;
+        let panel_y = panel_rect.y_top as f32;
+        let panel_w = panel_rect.w as f32;
+        panel.row_kill_rects.clear();
+        for (pid, row_idx) in kill_meta {
+            let row_y = panel_y + (row_idx as f32) * row_h + 4.0;
+            let kill_x = panel_x + panel_w - right_pad_logical - kill_w_logical;
+            let kill_y = row_y + (row_h - kill_h) * 0.5;
+            panel.row_kill_rects.push((pid, marspot_term::layout::Rect {
+                x: kill_x as f64,
+                y_top: kill_y as f64,
+                w: kill_w_logical as f64,
+                h: kill_h as f64,
+            }));
+        }
+        Some(ProcessPanelRender {
+            rect: panel_rect,
+            rows,
+        })
+    }
+
+    /// F3+1.3 — send SIGTERM to `pid` and track it for SIGKILL
+    /// escalation 2 s later if it hasn't exited.  Logged at Info so
+    /// post-mortem can correlate UI clicks with process deaths.
+    fn kill_and_track(&mut self, pid: i32) {
+        match marspot::pidtree::kill_pid(pid, libc::SIGTERM) {
+            Ok(()) => {
+                marspot::lx_event!(
+                    "PROCESS_PANEL_SIGTERM",
+                    "user clicked panel [×] — SIGTERM sent",
+                    pid = pid
+                );
+                if let Some(panel) = self.process_panel.as_mut() {
+                    panel.pending_kills.push((pid, Instant::now()));
+                }
+            }
+            Err(e) => {
+                marspot::lx_warn!(
+                    "process_panel.sigterm_failed",
+                    &format!("kill({pid}, SIGTERM): {e}")
+                );
+            }
+        }
+    }
+
+    /// F3+1.3 — escalate any pending SIGTERM that the target ignored
+    /// past the grace period.  Called from the main loop; cheap when
+    /// `pending_kills` is empty (the typical case).
+    fn tick_process_panel_kills(&mut self) {
+        let Some(panel) = self.process_panel.as_mut() else { return };
+        if panel.pending_kills.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        panel.pending_kills.retain(|(pid, sent_at)| {
+            if !marspot::pidtree::pid_is_alive(*pid) {
+                // Gone already — graceful TERM took it.
+                return false;
+            }
+            if now.duration_since(*sent_at) >= KILL_ESCALATION_GRACE {
+                let _ = marspot::pidtree::kill_pid(*pid, libc::SIGKILL);
+                // Drop the entry whether SIGKILL succeeded or failed;
+                // a failure means the pid disappeared between the
+                // is_alive check and the kill, which is a win, not
+                // a loss.
+                return false;
+            }
+            true
+        });
+    }
+
     /// F3+1 — re-walk libproc + read each pane's entry.toml to
     /// rebuild the process-tree cache.  Called when the panel opens,
     /// and on the main loop's render path when `last_refresh` is
@@ -1823,6 +1968,23 @@ impl CoreApp {
             self.rebuild_layout();
             return;
         }
+        // F3+1.3 — check process-panel row kill clicks FIRST so a
+        // click on a row [×] doesn't fall through to the cell behind.
+        // We snapshot the (pid, rect) pair to drop the borrow on
+        // self.process_panel before calling `kill_and_track`.
+        let kill_hit: Option<i32> = self.process_panel.as_ref().and_then(|p| {
+            p.row_kill_rects
+                .iter()
+                .find(|(_, rect)| rect.contains(x_phys, y_phys))
+                .map(|(pid, _)| *pid)
+        });
+        if let Some(pid) = kill_hit {
+            self.kill_and_track(pid);
+            // Force immediate refresh so the row vanishes / updates.
+            self.refresh_process_panel();
+            self.needs_render = true;
+            return;
+        }
         // F3+1 — process-tree panel toggle.  Same priority tier as
         // sidebar: a click on the icon never falls through.  Opening
         // forces an immediate libproc walk so the panel paints
@@ -1834,6 +1996,8 @@ impl CoreApp {
                 self.process_panel = Some(ProcessPanelState {
                     panes: Vec::new(),
                     last_refresh: Instant::now() - std::time::Duration::from_secs(10),
+                    row_kill_rects: Vec::new(),
+                    pending_kills: Vec::new(),
                 });
                 self.refresh_process_panel();
             }
@@ -2216,6 +2380,12 @@ impl CoreApp {
             .map(|s| truncate_for_sidebar(s, MAX_SIDEBAR_LABEL_CHARS))
             .collect();
 
+        // F3+1.3 — build + push process-panel data BEFORE we
+        // borrow `self.panes` into `views`.  Renderer holds the
+        // panel data via `set_process_panel`, freeing `&self` for
+        // the render call below.
+        let panel_data = self.build_process_panel_render();
+        self.renderer.set_process_panel(panel_data);
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.
         let cell_count = self.layout.cells.len();
@@ -2725,6 +2895,20 @@ fn main() {
                 Err(RecvTimeoutError::Disconnected) => break 'main,
             }
         };
+        // F3+1.3 — periodic tasks driven off the same wakeups:
+        //   1) escalate any SIGTERM that the target ignored past the
+        //      grace period (cheap — empty Vec when no pending).
+        //   2) re-walk libproc every PROCESS_PANEL_REFRESH_INTERVAL
+        //      so the panel reflects forked-since-last-walk children
+        //      / dead descendants.  Bypassed entirely when the panel
+        //      is closed.
+        app.tick_process_panel_kills();
+        if let Some(panel) = app.process_panel.as_ref() {
+            if panel.last_refresh.elapsed() >= PROCESS_PANEL_REFRESH_INTERVAL {
+                app.refresh_process_panel();
+                app.needs_render = true;
+            }
+        }
         // Drain pending control-socket events.  Attach coalescing:
         // keep only the latest SurfaceAttach (resize fires fast in a
         // live drag — old attach payloads are stale by the time we

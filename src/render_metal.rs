@@ -194,6 +194,33 @@ struct PaneInstanceCache {
     primed: bool,
 }
 
+/// F3+1.3 — one row in the process-tree panel that the renderer
+/// draws.  Pure data; L2 builds these every frame from its
+/// `process_panel` state, the renderer just paints.
+#[derive(Debug, Clone)]
+pub struct ProcessPanelRow {
+    /// Indent depth (0 = pane header, 1+ = tree node nesting).
+    pub depth: u8,
+    /// Pre-formatted display text for the row.  L2 owns formatting
+    /// so the renderer doesn't pull in pidtree types.
+    pub text: String,
+    /// Tint hint: true = "pane header" (no [×] icon, slightly bold-
+    /// looking FG); false = "process row" (regular FG + [×] icon).
+    pub is_header: bool,
+}
+
+/// F3+1.3 — full data for one render of the process panel.  Renderer
+/// pulls this via `set_process_panel`.  `None` = panel closed; nothing
+/// drawn.
+#[derive(Debug, Clone)]
+pub struct ProcessPanelRender {
+    /// Background rectangle (physical px).  Computed by L2 from
+    /// window dims; renderer doesn't recompute.
+    pub rect: Rect,
+    /// Rows in render order.  Empty Vec is OK — paints just BG.
+    pub rows: Vec<ProcessPanelRow>,
+}
+
 /// Compute the fingerprint hash of the inputs to push_session that
 /// affect rendered output.  Any change here invalidates the per-pane
 /// instance cache and forces a rebuild.  Cheap (~tens of ns) so it's
@@ -417,9 +444,14 @@ pub struct MetalRenderer {
     window_focused: bool,
     /// Hovered chrome icon button, if any.  Encoded as u8 to stay
     /// agnostic of the L2-side enum:  0 = sidebar toggle,  1 =
-    /// layout picker,  `None` = no hover.  Renderer reads this to
-    /// darken the hovered button's BG.
+    /// layout picker,  2 = process-tree panel toggle,  `None` = no
+    /// hover.  Renderer reads this to darken the hovered button's BG.
     hover_chrome_btn: Option<u8>,
+    /// F3+1.3 — process-tree panel render data.  `None` = panel
+    /// closed (renderer paints nothing).  Pushed by L2 every frame
+    /// while the panel is open; cheap because rows are typically
+    /// tens of entries.
+    process_panel: Option<ProcessPanelRender>,
     /// Top inset in physical pixels — reserved for window chrome
     /// (macOS traffic-light buttons). Single-session callers (mcli)
     /// set this once at `resumed`; the convenience `render(view)`
@@ -570,6 +602,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
+            process_panel: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -629,6 +662,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
+            process_panel: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -636,6 +670,14 @@ impl MetalRenderer {
 
     pub fn set_window_focused(&mut self, focused: bool) {
         self.window_focused = focused;
+    }
+
+    /// F3+1.3 — push the process-tree panel render data.  `None`
+    /// closes (renderer skips the panel pass).  Called by L2 on every
+    /// render frame while the panel is open; cheap because typical
+    /// row counts are < 200 and we're just storing the Vec.
+    pub fn set_process_panel(&mut self, data: Option<ProcessPanelRender>) {
+        self.process_panel = data;
     }
 
     /// L2 — set which chrome icon button (if any) is under the
@@ -869,6 +911,7 @@ impl MetalRenderer {
             ref mut pane_caches,
             window_focused,
             hover_chrome_btn,
+            ref process_panel,
             width_px,
             height_px,
             ..
@@ -886,6 +929,7 @@ impl MetalRenderer {
             focused_idx,
             window_focused,
             hover_chrome_btn,
+            process_panel.as_ref(),
             font,
             atlas,
             color_atlas,
@@ -1008,6 +1052,7 @@ impl MetalRenderer {
             ref mut pane_caches,
             window_focused,
             hover_chrome_btn,
+            ref process_panel,
             ..
         } = *self;
 
@@ -1023,6 +1068,7 @@ impl MetalRenderer {
             focused_idx,
             window_focused,
             hover_chrome_btn,
+            process_panel.as_ref(),
             font,
             atlas,
             color_atlas,
@@ -1454,6 +1500,7 @@ fn build_instances(
     focused_idx: usize,
     window_focused: bool,
     hover_chrome_btn: Option<u8>,
+    process_panel: Option<&ProcessPanelRender>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -1697,6 +1744,16 @@ fn build_instances(
         atlas,
         glyphs,
     );
+
+    // F3+1.3 — process-tree panel.  Drawn AFTER chrome so its BG
+    // sits on top of the grid + toolbar (intentional — the panel is
+    // a transient overlay; user opens it, kills, closes).
+    if let Some(panel) = process_panel {
+        push_process_panel(
+            panel, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            font, atlas, cells, glyphs, ui_rects,
+        );
+    }
 
     // Header version label — quiet metadata in the header strip,
     // right-aligned just left of the chrome buttons (or the window
@@ -2013,6 +2070,109 @@ fn push_grid_icon(
 /// divider at 1/3 of the inner width.  When `collapsed`, the divider
 /// + the would-be-panel region dims so the icon reads as a state
 /// indicator ("sidebar showing" vs "sidebar hidden") at a glance.
+/// F3+1.3 panel constants.  Pulled together so a future restyle
+/// changes one place.
+const PROCESS_PANEL_BG: [f32; 4] = [0.10, 0.11, 0.135, 0.95];
+const PROCESS_PANEL_BORDER: [f32; 4] = [0.20, 0.22, 0.26, 1.0];
+const PROCESS_PANEL_CORNER_RADIUS: f32 = 10.0;
+const PROCESS_PANEL_ROW_FG: [f32; 4] = [0.86, 0.88, 0.92, 1.0];
+const PROCESS_PANEL_HEADER_FG: [f32; 4] = [0.65, 0.78, 0.95, 1.0];
+const PROCESS_PANEL_KILL_BG: [f32; 4] = [0.18, 0.07, 0.08, 0.85];
+const PROCESS_PANEL_KILL_FG: [f32; 4] = [0.92, 0.62, 0.62, 1.0];
+const PROCESS_PANEL_LEFT_PAD_LOGICAL: f32 = 10.0;
+const PROCESS_PANEL_RIGHT_PAD_LOGICAL: f32 = 10.0;
+const PROCESS_PANEL_INDENT_LOGICAL: f32 = 12.0;
+const PROCESS_PANEL_KILL_W_LOGICAL: f32 = 18.0;
+
+/// F3+1.3 — paint the process-tree panel.  Composes:
+///   - SDF rounded-rect BG (subtle dark fill + 1 px border)
+///   - Per row: indented text in `PROCESS_PANEL_ROW_FG`, header rows
+///     in `PROCESS_PANEL_HEADER_FG`
+///   - Per non-header row: a small [×] kill button on the right (BG +
+///     red `×` glyph), tinted like the sidebar's close-session [×]
+///
+/// Row Y positions follow `row_y(panel, i, cell_h)` — same formula
+/// L2 uses to build `row_kill_rects` for hit-testing, so click
+/// targets match the visible glyph.
+fn push_process_panel(
+    panel: &ProcessPanelRender,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
+) {
+    // Panel BG: SDF rounded-rect with subtle border + soft shadow.
+    ui_rects.push(UiRectInstance {
+        origin: [panel.rect.x as f32, panel.rect.y_top as f32],
+        size: [panel.rect.w as f32, panel.rect.h as f32],
+        fill_color: PROCESS_PANEL_BG,
+        border_color: PROCESS_PANEL_BORDER,
+        corner_radius: PROCESS_PANEL_CORNER_RADIUS,
+        border_width: 1.0,
+        shadow_blur: 8.0,
+        shadow_alpha: 0.35,
+        shadow_color: [0.0, 0.0, 0.0, 1.0],
+    });
+    // Use cell_h as our row metric so rows align to the same vertical
+    // rhythm as the rest of the UI's text.
+    let row_h = cell_h * 1.2;
+    let left_pad = PROCESS_PANEL_LEFT_PAD_LOGICAL;
+    let right_pad = PROCESS_PANEL_RIGHT_PAD_LOGICAL;
+    let indent = PROCESS_PANEL_INDENT_LOGICAL;
+    let kill_w = PROCESS_PANEL_KILL_W_LOGICAL;
+    let panel_x = panel.rect.x as f32;
+    let panel_y = panel.rect.y_top as f32;
+    let panel_w = panel.rect.w as f32;
+    let kill_h = (row_h - 4.0).max(8.0);
+    for (i, row) in panel.rows.iter().enumerate() {
+        let row_y = panel_y + (i as f32) * row_h + 4.0;
+        // Bail when we'd draw past the panel — bounded scroll comes
+        // in a follow-up; for now we just clip rows past the panel
+        // bottom.
+        if row_y + row_h > panel_y + panel.rect.h as f32 - 4.0 {
+            break;
+        }
+        let text_x = panel_x + left_pad + (row.depth as f32) * indent;
+        let baseline_y = row_y + ascent;
+        let fg = if row.is_header {
+            PROCESS_PANEL_HEADER_FG
+        } else {
+            PROCESS_PANEL_ROW_FG
+        };
+        push_text_run(
+            &row.text, text_x, baseline_y, fg,
+            cell_w, cell_h, ascent, atlas_w, atlas_h,
+            font, atlas, glyphs,
+        );
+        if !row.is_header {
+            // Kill button BG + ×.
+            let kill_x = panel_x + panel_w - right_pad - kill_w;
+            let kill_y = row_y + (row_h - kill_h) * 0.5;
+            push_rect(
+                cells,
+                Rect { x: kill_x as f64, y_top: kill_y as f64,
+                       w: kill_w as f64, h: kill_h as f64 },
+                PROCESS_PANEL_KILL_BG,
+            );
+            // × glyph centered in the kill rect.
+            push_text_run(
+                "×",
+                kill_x + (kill_w - cell_w) * 0.5,
+                kill_y + ascent + (kill_h - cell_h) * 0.5,
+                PROCESS_PANEL_KILL_FG,
+                cell_w, cell_h, ascent, atlas_w, atlas_h,
+                font, atlas, glyphs,
+            );
+        }
+    }
+}
+
 /// F3+1 — Lucide-style "list tree" icon: three horizontal bars,
 /// progressively indented to suggest nesting.  Drawn with the same
 /// stroke metric as the sidebar / layout icons so all three buttons
@@ -4040,6 +4200,7 @@ mod tests {
             0,
             true,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4137,6 +4298,7 @@ mod tests {
             0,
             true,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4205,6 +4367,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             &mut font,
             &mut atlas,
@@ -4318,6 +4481,7 @@ mod tests {
                 0,
                 true,
                 None,
+                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -4413,6 +4577,7 @@ mod tests {
             0,
             true,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4480,6 +4645,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 &mut font,
                 &mut atlas,
