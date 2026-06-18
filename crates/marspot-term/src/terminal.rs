@@ -759,8 +759,23 @@ impl Terminal {
         // exactly the same shape it had pre-execv.  Wrapped flag is
         // carried across so cross-row URL / path link scans on
         // historic content keep working after execv.
-        for (line, wrapped) in scrollback_lines {
-            self.grid.push_historic_scrollback_line(&line, wrapped);
+        //
+        // F2+4 — but ONLY when the live scrollback is empty.  When file-
+        // or disk-backed scrollback is active and already non-empty
+        // (the common case on L3 self-execv: scrollback.bin survived the
+        // execv with the full history intact), replaying the snapshot
+        // section duplicates the tail of the persisted scrollback into
+        // the file once per execv — measured today at ~20 k extra rows
+        // × 9 panes × 6 installs/day ≈ 1 M dup rows/day.  The snapshot
+        // section was designed for the Memory variant (where it was the
+        // only carrier of history across execv); when the file/disk
+        // variant owns persistence, it's redundant.  Cheap probe:
+        // `scrollback_len() > 0` means persistence is alive and
+        // carrying the same content (or more) the snapshot would push.
+        if self.grid.scrollback_len() == 0 {
+            for (line, wrapped) in scrollback_lines {
+                self.grid.push_historic_scrollback_line(&line, wrapped);
+            }
         }
         Ok(())
     }
@@ -2152,6 +2167,44 @@ mod tests {
         assert!(
             prefix.starts_with("line "),
             "newest scrollback line should begin with 'line ' prefix; got {prefix:?}"
+        );
+    }
+
+    /// F2+4 — when the live scrollback is already non-empty at
+    /// apply_snapshot time (the common L3 self-execv case: the file-
+    /// or disk-backed scrollback survived the execv with the full
+    /// history intact), the snapshot's scrollback section must NOT
+    /// be replayed.  Replaying duplicates the tail of the persisted
+    /// scrollback into the file once per execv — measured at
+    /// ~20 k rows × 9 panes × ~6 installs/day ≈ 1 M dup rows/day
+    /// before this gate.
+    #[test]
+    fn snapshot_skips_scrollback_replay_when_live_scrollback_nonempty() {
+        const COLS: u16 = 20;
+        const ROWS: u16 = 5;
+        // Source: 50 lines → 45 in scrollback.
+        let mut src = Terminal::new(COLS, ROWS);
+        for i in 0..50u32 {
+            src.feed(format!("line {i:03}\r\n").as_bytes());
+        }
+        let sb_pre = src.grid().scrollback_len();
+        assert!(sb_pre > 0);
+        let bytes = src.serialize_snapshot();
+        // Destination: ALSO already has some scrollback content (simulates
+        // a live L3 that opened an existing file/disk variant and saw
+        // history before the snapshot was applied).
+        let mut dst = Terminal::new(COLS, ROWS);
+        for i in 0..30u32 {
+            dst.feed(format!("seed {i:03}\r\n").as_bytes());
+        }
+        let dst_seed_len = dst.grid().scrollback_len();
+        assert!(dst_seed_len > 0, "test setup expected dst seed");
+        dst.apply_snapshot(&bytes).unwrap();
+        let sb_post = dst.grid().scrollback_len();
+        assert_eq!(
+            sb_post, dst_seed_len,
+            "non-empty live scrollback should NOT be augmented by snapshot replay \
+             (was {dst_seed_len}, got {sb_post}, snapshot carried {sb_pre} lines)"
         );
     }
 

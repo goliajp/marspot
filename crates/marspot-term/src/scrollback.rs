@@ -1014,6 +1014,26 @@ impl FileScrollback {
     /// Append one line.  Hot path.
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
         use std::io::Write;
+        // F2+4 — trim trailing default cells before writing.  A
+        // claudecode-style TUI row in a 200-col grid is typically ~30
+        // chars of real text + ~170 trailing blanks; encoding each
+        // blank at the full 13 bytes/cell costs ~2 kB/row × millions of
+        // rows = multi-GB files.  We strip trailing `Cell::default()`
+        // tail before the record write; the read path naturally fills
+        // missing columns with `Cell::default()` via `cell_at_view`'s
+        // None-fallback (see grid.rs).  The RAM ring still pads to
+        // `self.cols` in `push_into_ring` so hot reads via the ring see
+        // the same shape as before.  Mid-row blank runs and
+        // background-colored blanks are NOT trimmed (only the trailing
+        // tail of cells equal to `Cell::default()`), so a status-bar
+        // pad or a syntax-highlighted gap survives intact.
+        let default_cell = crate::grid::Cell::default();
+        let trimmed_len = line
+            .iter()
+            .rposition(|c| *c != default_cell)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line = &line[..trimmed_len];
         let cols_u16 = line.len().min(u16::MAX as usize) as u16;
         // Build the record header + cells in scratch.
         let rec_body_bytes = FILE_REC_HEADER_BYTES - 4 + line.len() * crate::terminal::CELL_BYTES_PUB;
@@ -1842,6 +1862,78 @@ mod tests {
         assert_eq!(got[0].ch, 'a');
         assert_eq!(sb.cell_at(0, 3).unwrap().ch, 'a');
         assert!(!sb.wrapped_at(0));
+    }
+
+    /// F2+4 — trailing default cells get trimmed at write time.  We
+    /// write a known-real-content prefix + a long default tail, then
+    /// look at the on-disk record size and confirm only the prefix
+    /// + the 7-byte record header (4 rec_len + 1 wrapped + 2 cols)
+    /// reached the file.  cell_at still returns the row's prefix cells
+    /// at their original columns and `Cell::default()` for trimmed-tail
+    /// columns (via `cells.get(col).copied()` returning None on the
+    /// mmap path, which the higher-level `cell_at_view` falls back to
+    /// default for).
+    #[test]
+    fn trailing_default_cells_trimmed_on_write() {
+        use std::io::{Read, Seek, SeekFrom};
+        let tmp = TmpDir::new("trim-tail");
+        let cols = 200usize;
+        let prefix_len = 30usize;
+        // Build a row: 30 distinct chars, then 170 default cells.
+        let mut row = Vec::with_capacity(cols);
+        for i in 0..prefix_len {
+            row.push(Cell { ch: (b'a' + (i % 26) as u8) as char, ..Default::default() });
+        }
+        for _ in prefix_len..cols {
+            row.push(Cell::default());
+        }
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
+            .expect("create");
+        sb.push_line(&row, false);
+        // Force an off-ring lookup by evicting row 0 from the ring.
+        for _ in 0..6 {
+            sb.push_line(&fill(b'.', cols), false);
+        }
+        // 1) The on-disk record for row 0 should be sized for ONLY the
+        //    prefix cells (30) + header.
+        let bin_path = tmp.bin();
+        // Flush so we can read what got written.
+        drop(sb);
+        let mut f = std::fs::File::open(&bin_path).expect("open bin");
+        f.seek(SeekFrom::Start(FILE_HEADER_BYTES)).unwrap();
+        let mut rec_len_buf = [0u8; 4];
+        f.read_exact(&mut rec_len_buf).unwrap();
+        let rec_len = u32::from_le_bytes(rec_len_buf) as usize;
+        // Expected: 1 wrapped + 2 cols + prefix_len × 13 cells.
+        let expected = 1 + 2 + prefix_len * crate::terminal::CELL_BYTES_PUB;
+        assert_eq!(
+            rec_len, expected,
+            "row record size {} != expected {} — trim didn't fire \
+             (cell count saved = {}; cols requested = {})",
+            rec_len, expected,
+            (rec_len.saturating_sub(3)) / crate::terminal::CELL_BYTES_PUB,
+            cols
+        );
+        // 2) Reopen and confirm the prefix reads back correctly and
+        //    the trimmed-away tail comes back as None from cell_at
+        //    (which higher-level cell_at_view turns into default).
+        let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
+            .expect("reopen");
+        for c in 0..prefix_len {
+            let want = (b'a' + (c % 26) as u8) as char;
+            let got = sb2.cell_at(0, c)
+                .unwrap_or_else(|| panic!("cell_at(0, {}) = None for prefix", c))
+                .ch;
+            assert_eq!(got, want, "prefix col {} mismatch", c);
+        }
+        for c in prefix_len..cols {
+            assert!(
+                sb2.cell_at(0, c).is_none(),
+                "cell_at(0, {}) returned Some after trim — expected None \
+                 (cell_at_view fills default)",
+                c
+            );
+        }
     }
 
     /// REGRESSION (F2+3) — `cell_at(line, col)` must return the cell at
