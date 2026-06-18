@@ -194,9 +194,9 @@ struct PaneInstanceCache {
     primed: bool,
 }
 
-/// F3+1.3 — one row in the process-tree panel that the renderer
-/// draws.  Pure data; L2 builds these every frame from its
-/// `process_panel` state, the renderer just paints.
+/// F3+1.4 — one row in the process-tree panel body.  Pure data;
+/// L2 builds these every frame for the active tab, the renderer
+/// just paints.
 #[derive(Debug, Clone)]
 pub struct ProcessPanelRow {
     /// Indent depth (0 = pane header, 1+ = tree node nesting).
@@ -209,15 +209,25 @@ pub struct ProcessPanelRow {
     pub is_header: bool,
 }
 
-/// F3+1.3 — full data for one render of the process panel.  Renderer
-/// pulls this via `set_process_panel`.  `None` = panel closed; nothing
-/// drawn.
+/// F3+1.4 — full data for one render of the centered Process Monitor
+/// modal.  Renderer pulls this via `set_process_panel`.  `None` =
+/// closed, nothing drawn.
 #[derive(Debug, Clone)]
 pub struct ProcessPanelRender {
-    /// Background rectangle (physical px).  Computed by L2 from
-    /// window dims; renderer doesn't recompute.
+    /// Modal frame rectangle (physical px), centered by L2 over the
+    /// window.  Includes title bar + tab strip + body.
     pub rect: Rect,
-    /// Rows in render order.  Empty Vec is OK — paints just BG.
+    /// Title bar text — currently always "Process Monitor".  Kept
+    /// a String so a future plugin could rename per-pane modals.
+    pub title: String,
+    /// Tab labels in render order — one per pane.  Empty Vec
+    /// (no panes alive) draws an "(no panes)" body placeholder.
+    pub tabs: Vec<String>,
+    /// Which tab index is active.  Body rows correspond to this tab.
+    /// Out-of-range silently clamped to 0 by the renderer.
+    pub active_tab: usize,
+    /// Rows of the active tab's pane (header + flatten_pre_order
+    /// tree).  Empty Vec OK.
     pub rows: Vec<ProcessPanelRow>,
 }
 
@@ -2088,30 +2098,52 @@ fn push_grid_icon(
 /// divider at 1/3 of the inner width.  When `collapsed`, the divider
 /// + the would-be-panel region dims so the icon reads as a state
 /// indicator ("sidebar showing" vs "sidebar hidden") at a glance.
-/// F3+1.3 panel constants.  Pulled together so a future restyle
-/// changes one place.
-const PROCESS_PANEL_BG: [f32; 4] = [0.10, 0.11, 0.135, 1.0];
-const PROCESS_PANEL_BORDER: [f32; 4] = [0.20, 0.22, 0.26, 1.0];
+/// F3+1.4 — Process Monitor modal constants.
+const PROCESS_PANEL_BG: [f32; 4] = [0.13, 0.14, 0.17, 1.0];
+const PROCESS_PANEL_BORDER: [f32; 4] = [0.32, 0.34, 0.40, 1.0];
 const PROCESS_PANEL_CORNER_RADIUS: f32 = 10.0;
+const PROCESS_PANEL_TITLE_BAR_BG: [f32; 4] = [0.18, 0.19, 0.23, 1.0];
+const PROCESS_PANEL_SEPARATOR: [f32; 4] = [0.06, 0.07, 0.09, 1.0];
+const PROCESS_PANEL_TITLE_FG: [f32; 4] = [0.92, 0.94, 0.97, 1.0];
+const PROCESS_PANEL_TAB_BG: [f32; 4] = [0.10, 0.11, 0.135, 1.0];
+const PROCESS_PANEL_TAB_BG_ACTIVE: [f32; 4] = [0.20, 0.30, 0.55, 1.0];
+const PROCESS_PANEL_TAB_FG: [f32; 4] = [0.78, 0.80, 0.86, 1.0];
+const PROCESS_PANEL_TAB_FG_ACTIVE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const PROCESS_PANEL_ROW_FG: [f32; 4] = [0.86, 0.88, 0.92, 1.0];
 const PROCESS_PANEL_HEADER_FG: [f32; 4] = [0.65, 0.78, 0.95, 1.0];
-const PROCESS_PANEL_KILL_BG: [f32; 4] = [0.18, 0.07, 0.08, 0.85];
-const PROCESS_PANEL_KILL_FG: [f32; 4] = [0.92, 0.62, 0.62, 1.0];
-const PROCESS_PANEL_LEFT_PAD_LOGICAL: f32 = 10.0;
-const PROCESS_PANEL_RIGHT_PAD_LOGICAL: f32 = 10.0;
-const PROCESS_PANEL_INDENT_LOGICAL: f32 = 12.0;
+const PROCESS_PANEL_KILL_BG: [f32; 4] = [0.30, 0.10, 0.11, 1.0];
+const PROCESS_PANEL_KILL_FG: [f32; 4] = [0.96, 0.70, 0.70, 1.0];
+const PROCESS_PANEL_TRAFFIC_CLOSE: [f32; 4]  = [0.99, 0.36, 0.31, 1.0]; // macOS-ish red
+const PROCESS_PANEL_TRAFFIC_MIN: [f32; 4]    = [0.99, 0.74, 0.18, 1.0]; // yellow
+const PROCESS_PANEL_TRAFFIC_MAX: [f32; 4]    = [0.21, 0.78, 0.35, 1.0]; // green
+const PROCESS_PANEL_TITLE_BAR_H_LOGICAL: f32 = 28.0;
+const PROCESS_PANEL_TAB_STRIP_H_LOGICAL: f32 = 30.0;
+const PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL: f32 = 12.0;
+const PROCESS_PANEL_TRAFFIC_GAP_LOGICAL: f32 = 8.0;
+const PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL: f32 = 12.0;
+const PROCESS_PANEL_BODY_PAD_LEFT_LOGICAL: f32 = 14.0;
+const PROCESS_PANEL_BODY_PAD_RIGHT_LOGICAL: f32 = 14.0;
+const PROCESS_PANEL_BODY_PAD_TOP_LOGICAL: f32 = 6.0;
+const PROCESS_PANEL_INDENT_LOGICAL: f32 = 14.0;
 const PROCESS_PANEL_KILL_W_LOGICAL: f32 = 18.0;
 
-/// F3+1.3 — paint the process-tree panel.  Composes:
-///   - SDF rounded-rect BG (subtle dark fill + 1 px border)
-///   - Per row: indented text in `PROCESS_PANEL_ROW_FG`, header rows
-///     in `PROCESS_PANEL_HEADER_FG`
-///   - Per non-header row: a small [×] kill button on the right (BG +
-///     red `×` glyph), tinted like the sidebar's close-session [×]
+/// F3+1.4 — paint the centered Process Monitor modal.  Layout:
 ///
-/// Row Y positions follow `row_y(panel, i, cell_h)` — same formula
-/// L2 uses to build `row_kill_rects` for hit-testing, so click
-/// targets match the visible glyph.
+///   ┌─────────────────────────────────────────┐
+///   │ ●●●   Process Monitor                    │  title bar (28 pt)
+///   ├─────────────────────────────────────────┤
+///   │ [Pane 1] [Pane 2] [Pane 3] ...           │  tab strip (30 pt)
+///   ├─────────────────────────────────────────┤
+///   │ sid=240  shell pid=1632                  │  active tab body
+///   │   1632 zsh                               │
+///   │     4567 node                        [×] │
+///   │     4568 claude                      [×] │
+///   │ ...                                       │
+///   └─────────────────────────────────────────┘
+///
+/// Hit rects (close button, tab strip, per-row [×]) are computed in
+/// L2 (`build_process_panel_render`) with the SAME constants this
+/// function reads, so a click on the visible [×] hits its rect.
 fn push_process_panel(
     panel: &ProcessPanelRender,
     cell_w: f32,
@@ -2125,38 +2157,141 @@ fn push_process_panel(
     glyphs: &mut Vec<GlyphInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
 ) {
-    // Panel BG: SDF rounded-rect with subtle border + soft shadow.
+    let px = panel.rect.x as f32;
+    let py = panel.rect.y_top as f32;
+    let pw = panel.rect.w as f32;
+    let ph = panel.rect.h as f32;
+    let scale_hint = (cell_h / 20.0).max(0.5); // rough scale heuristic from font cell_h
+    let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
+    let tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
+    let traffic = PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL * scale_hint;
+    let traffic_gap = PROCESS_PANEL_TRAFFIC_GAP_LOGICAL * scale_hint;
+    let traffic_left_pad = PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL * scale_hint;
+
+    // 1) Modal BG (rounded rect + 1 px border + soft drop shadow).
     ui_rects.push(UiRectInstance {
-        origin: [panel.rect.x as f32, panel.rect.y_top as f32],
-        size: [panel.rect.w as f32, panel.rect.h as f32],
+        origin: [px, py],
+        size: [pw, ph],
         fill_color: PROCESS_PANEL_BG,
         border_color: PROCESS_PANEL_BORDER,
         corner_radius: PROCESS_PANEL_CORNER_RADIUS,
         border_width: 1.0,
-        shadow_blur: 8.0,
-        shadow_alpha: 0.35,
+        shadow_blur: 16.0,
+        shadow_alpha: 0.45,
         shadow_color: [0.0, 0.0, 0.0, 1.0],
     });
-    // Use cell_h as our row metric so rows align to the same vertical
-    // rhythm as the rest of the UI's text.
+
+    // 2) Title bar fill (a flat rect from top inside the rounded
+    // corners, ending at the title bar separator line).  We use
+    // `push_rect` (cells pipeline) since these are axis-aligned and
+    // SDF round corners aren't needed — the modal BG already drew
+    // them on the outer frame.
+    push_rect(
+        cells,
+        Rect { x: px as f64, y_top: py as f64, w: pw as f64, h: title_h as f64 },
+        PROCESS_PANEL_TITLE_BAR_BG,
+    );
+    // 1 px separator under the title bar.
+    push_rect(
+        cells,
+        Rect { x: px as f64, y_top: (py + title_h) as f64,
+               w: pw as f64, h: 1.0 },
+        PROCESS_PANEL_SEPARATOR,
+    );
+
+    // 3) Traffic lights: red close + yellow + green dots.  Drawn as
+    // small filled rectangles (close enough to circles at this size;
+    // a proper SDF disc would need its own pipeline).
+    let traffic_y = py + (title_h - traffic) * 0.5;
+    let close_x = px + traffic_left_pad;
+    let min_x = close_x + traffic + traffic_gap;
+    let max_x = min_x + traffic + traffic_gap;
+    for (x, color) in [
+        (close_x, PROCESS_PANEL_TRAFFIC_CLOSE),
+        (min_x, PROCESS_PANEL_TRAFFIC_MIN),
+        (max_x, PROCESS_PANEL_TRAFFIC_MAX),
+    ] {
+        // Use a tiny UiRectInstance per light so it's a real disc
+        // (corner_radius = traffic / 2 makes the rect a pill / circle
+        // when w == h).
+        ui_rects.push(UiRectInstance {
+            origin: [x, traffic_y],
+            size: [traffic, traffic],
+            fill_color: color,
+            border_color: [0.0, 0.0, 0.0, 0.25],
+            corner_radius: traffic * 0.5,
+            border_width: 1.0,
+            shadow_blur: 0.0,
+            shadow_alpha: 0.0,
+            shadow_color: [0.0, 0.0, 0.0, 1.0],
+        });
+    }
+
+    // 4) Title centered.
+    let title_w_chars = panel.title.chars().count() as f32;
+    let title_x = px + (pw - title_w_chars * cell_w) * 0.5;
+    let title_baseline_y = py + (title_h - cell_h) * 0.5 + ascent;
+    push_text_run(
+        &panel.title, title_x, title_baseline_y, PROCESS_PANEL_TITLE_FG,
+        cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+    );
+
+    // 5) Tab strip.
+    if !panel.tabs.is_empty() {
+        let strip_y = py + title_h;
+        let tab_w = pw / (panel.tabs.len() as f32);
+        for (i, label) in panel.tabs.iter().enumerate() {
+            let tx = px + (i as f32) * tab_w;
+            let bg = if i == panel.active_tab {
+                PROCESS_PANEL_TAB_BG_ACTIVE
+            } else {
+                PROCESS_PANEL_TAB_BG
+            };
+            let fg = if i == panel.active_tab {
+                PROCESS_PANEL_TAB_FG_ACTIVE
+            } else {
+                PROCESS_PANEL_TAB_FG
+            };
+            push_rect(
+                cells,
+                Rect { x: tx as f64, y_top: strip_y as f64,
+                       w: tab_w as f64, h: tab_h as f64 },
+                bg,
+            );
+            // Center the label horizontally inside this tab.
+            let label_w_chars = label.chars().count() as f32;
+            let label_x = tx + (tab_w - label_w_chars * cell_w) * 0.5;
+            let label_baseline_y = strip_y + (tab_h - cell_h) * 0.5 + ascent;
+            push_text_run(
+                label, label_x, label_baseline_y, fg,
+                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+            );
+        }
+        // Separator under tab strip.
+        push_rect(
+            cells,
+            Rect { x: px as f64, y_top: (strip_y + tab_h) as f64,
+                   w: pw as f64, h: 1.0 },
+            PROCESS_PANEL_SEPARATOR,
+        );
+    }
+
+    // 6) Body rows.
+    let body_top = py + title_h + tab_h;
+    let body_pad_top = PROCESS_PANEL_BODY_PAD_TOP_LOGICAL * scale_hint;
+    let body_pad_left = PROCESS_PANEL_BODY_PAD_LEFT_LOGICAL * scale_hint;
+    let body_pad_right = PROCESS_PANEL_BODY_PAD_RIGHT_LOGICAL * scale_hint;
+    let indent = PROCESS_PANEL_INDENT_LOGICAL * scale_hint;
+    let kill_w = PROCESS_PANEL_KILL_W_LOGICAL * scale_hint;
     let row_h = cell_h * 1.2;
-    let left_pad = PROCESS_PANEL_LEFT_PAD_LOGICAL;
-    let right_pad = PROCESS_PANEL_RIGHT_PAD_LOGICAL;
-    let indent = PROCESS_PANEL_INDENT_LOGICAL;
-    let kill_w = PROCESS_PANEL_KILL_W_LOGICAL;
-    let panel_x = panel.rect.x as f32;
-    let panel_y = panel.rect.y_top as f32;
-    let panel_w = panel.rect.w as f32;
+    let body_bottom = py + ph - 6.0 * scale_hint;
     let kill_h = (row_h - 4.0).max(8.0);
     for (i, row) in panel.rows.iter().enumerate() {
-        let row_y = panel_y + (i as f32) * row_h + 4.0;
-        // Bail when we'd draw past the panel — bounded scroll comes
-        // in a follow-up; for now we just clip rows past the panel
-        // bottom.
-        if row_y + row_h > panel_y + panel.rect.h as f32 - 4.0 {
+        let row_y = body_top + body_pad_top + (i as f32) * row_h;
+        if row_y + row_h > body_bottom {
             break;
         }
-        let text_x = panel_x + left_pad + (row.depth as f32) * indent;
+        let text_x = px + body_pad_left + (row.depth as f32) * indent;
         let baseline_y = row_y + ascent;
         let fg = if row.is_header {
             PROCESS_PANEL_HEADER_FG
@@ -2165,12 +2300,10 @@ fn push_process_panel(
         };
         push_text_run(
             &row.text, text_x, baseline_y, fg,
-            cell_w, cell_h, ascent, atlas_w, atlas_h,
-            font, atlas, glyphs,
+            cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
         );
         if !row.is_header {
-            // Kill button BG + ×.
-            let kill_x = panel_x + panel_w - right_pad - kill_w;
+            let kill_x = px + pw - body_pad_right - kill_w;
             let kill_y = row_y + (row_h - kill_h) * 0.5;
             push_rect(
                 cells,
@@ -2178,14 +2311,12 @@ fn push_process_panel(
                        w: kill_w as f64, h: kill_h as f64 },
                 PROCESS_PANEL_KILL_BG,
             );
-            // × glyph centered in the kill rect.
             push_text_run(
                 "×",
                 kill_x + (kill_w - cell_w) * 0.5,
                 kill_y + ascent + (kill_h - cell_h) * 0.5,
                 PROCESS_PANEL_KILL_FG,
-                cell_w, cell_h, ascent, atlas_w, atlas_h,
-                font, atlas, glyphs,
+                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
             );
         }
     }
