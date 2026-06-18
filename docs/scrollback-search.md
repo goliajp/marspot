@@ -17,6 +17,19 @@ Tracking memory: [[project-scrollback-persistent]] in
 
 ---
 
+## §-1  Author note
+
+User delegated UI / UX / polish judgement to me with the
+instruction "怎么把细节做好... 是你要考虑清楚的".  All visual
+and behavioural decisions below (sizes in cells, colour roles,
+mouse / keyboard policies, edge cases) are mine, made within the
+constraints of §0 and the existing framework patterns audited in
+§2.  If any specific decision feels off after first use, that's
+where to push back; I won't second-guess them mid-rollout (per
+P1).
+
+---
+
 ## §0  Product principle (overrides everything)
 
 **性能必须极佳;功能不要都可以.**  This is marspot's product
@@ -768,22 +781,221 @@ visual language as text selection).
 When user navigates `Cmd-G` / clicks a hit, the highlight updates;
 `needs_render = true` triggers redraw.
 
-### §6.7  Keybindings (D19)
+### §6.6.5  Tool-state model — snapshot pattern
 
-| key combo | handled by | action |
+Tool state lives **mutably on `Pane`**.  Per-frame, build_instances
+takes an immutable snapshot of each tool's render-relevant fields
+and uses it without retaining references.  This keeps the
+existing `SessionView<'a>` borrow shape unchanged:
+
+```rust
+// On Pane:
+pub struct Pane {
+    // ... existing fields ...
+    pub search: Option<PaneSearch>,        // None until Cmd+F opens it
+    pub active_highlight: Option<ActiveHighlight>,
+}
+
+pub struct PaneSearch {
+    pub bar: SearchBar,                    // input state
+    pub list: SearchList,                  // result list state
+    pub last_emitted_query_id: u32,        // monotonic per pane
+    pub debounce_until: Instant,           // 100 ms typing debounce
+}
+```
+
+Render-side immutable view passed via SessionView:
+
+```rust
+pub struct SearchOverlay<'a> {
+    pub query:           &'a str,
+    pub query_cursor:    u16,              // char column of edit cursor
+    pub case_sensitive:  bool,
+    pub counter:         Option<(u32, u32)>,
+    pub hits:            &'a [SearchHit],
+    pub focused_hit:     Option<usize>,
+    pub visible_top:     usize,
+    pub list_height:     u16,              // rows actually rendered (clamped)
+}
+```
+
+Input routing in CoreApp::key reads `&mut self.panes[focused].search`
+directly; no borrow conflict because layout snapshot is built
+later (in build_instances) from the post-input state.
+
+### §6.6.6  Tool ownership and focus rules
+
+- **One pane, one search overlay**: each pane independently owns
+  its `Option<PaneSearch>`.  Opening Cmd+F in pane A leaves pane
+  B unchanged.
+- **Rendered only when its pane is focused**: a search overlay
+  belonging to a non-focused pane stays in memory but is NOT
+  drawn (would clutter visual).  Re-focus brings it back exactly
+  where it was.
+- **Tool focus**: while `PaneSearch.is_some()` on the focused
+  pane, that pane's grid does NOT receive printable keys; they
+  go to the search bar's query input.  Existing PTY-input path
+  is suppressed (same mechanism as the PaneSession LOCK_KEYS
+  capability already in §2 C6).
+- **Pane-level Cmd-shortcuts still work**: Cmd-C copies grid
+  selection (not query selection — see edge case below), Cmd-B
+  toggles sidebar, Cmd-Q quits.
+
+### §6.7  Keybindings (D19) — full table
+
+| key combo | scope | action |
 |---|---|---|
-| Cmd+F | CoreApp::key (before tool loop, intercept early) | spawn SearchBar tool if not already; focus it |
-| Esc | SearchBar.on_key when focused | clear highlight; remove SearchBar + SearchList tools |
-| Cmd+G | SearchBar.on_key OR (when not focused) CoreApp::key | move focused result +1 |
-| Shift+Cmd+G | same | move focused result -1 |
-| Enter | SearchBar.on_key when focused | jump to focused hit; do NOT close bar |
-| ↑ / ↓ | SearchBar.on_key when focused | move focused result |
-| printable / Backspace | SearchBar.on_key when focused | edit query; debounce 100 ms; emit new SearchScrollback (cancel old) |
-| Cmd+A / Cmd+C / Cmd+V | SearchBar.on_key when focused | text-edit on query |
-| Cmd+Q | unchanged — quits app | |
+| Cmd+F | global, only intercept while focused pane width ≥ 24 cols | open SearchBar on focused pane; focus query input; if already open, select-all query |
+| Esc | search-active | close entire overlay; clear highlight; restore prior view_offset (the one before any hit-jump) |
+| Cmd+G / F3 | search-active OR (last-search-still-has-results) | move focused result +1, jump grid, update highlight |
+| Shift+Cmd+G / Shift+F3 | same | move focused result -1, jump grid, update highlight |
+| Enter | query focused | jump to focused result; query stays focused |
+| ↑ / ↓ | query focused | move focused result ±1 (no in-query-text cursor concept — query is single-line) |
+| ← / → / Home / End | query focused | move query edit cursor |
+| printable char | query focused | insert at cursor; debounce 100 ms; re-search |
+| Backspace | query focused | delete left of cursor; debounce 100 ms; re-search |
+| Delete (fn+Backspace) | query focused | delete right of cursor; re-search |
+| Cmd+A | query focused | select-all in query input |
+| Cmd+C | query focused, with query selection | copy query selection to clipboard |
+| Cmd+C | query focused, no query selection | fall through to grid (existing selection copy) |
+| Cmd+V | query focused | paste at cursor; strip non-printables; re-search |
+| Cmd+B | unchanged (toggles sidebar) | — |
+| Cmd+Q | unchanged (closes app) | — |
+| All other Cmd-keys | fall through to existing handlers | — |
 
 Click on a hit row in SearchList: `SearchList::on_mouse` triggers
 the same "jump to hit + highlight" as Enter.
+
+### §6.8  Visual specification
+
+All sizes in **cell units** so the layout scales with font.
+
+| element | size | anchor | notes |
+|---|---|---|---|
+| Search bar | 40 cols × 2 rows | top-right of grid inner rect, 1-cell margin from each edge | min pane width to show = 24 cols; below that, bar suppressed (log info) |
+| Result list | 40 cols × up to 11 rows (1 header + up to 10 hits) | directly below search bar, 0-cell gap | shorter when fewer hits; never overflows grid bottom edge (clamps) |
+| Highlight on grid | per-cell BG override | n/a (cell-aligned) | same cell-fill primitive as text selection BG |
+
+Search bar layout (40 × 2 cells):
+
+```text
+Row 0: ┌────────────────────────────────────────┐
+       │ [Aa]  case-on/off    23/412       [×] │   ← row 0: chrome
+       │ ▍foo bar_                              │   ← row 1: query input
+       └────────────────────────────────────────┘
+       (border drawn with box-drawing chars,
+        same primitives as today's selection rect)
+```
+
+- `[Aa]` = case toggle.  ON state = bright fg on dim BG.  OFF
+  state = dim fg.  Click-target = the 4 cells of `[Aa]`.
+- counter `23/412` = `current/total` (focused index 1-based,
+  total hits known so far).  While search is in flight and we
+  don't yet know total: shows `23/…`.
+- `[×]` = close hint.  Click closes (same as Esc).
+- `▍` = block cursor at the query's edit position.  **Does NOT
+  blink** (per Idle CPU 0 % constraint — same rule as the grid
+  cursor when window isn't focused).
+- Query renders left-to-right.  When query length exceeds the
+  visible region (37 cells = 40 minus border + cursor), the
+  view scrolls horizontally to keep the cursor visible.
+
+Result list layout (40 × ≤ 11 cells):
+
+```text
+Row 0: ┌── Search results · 23 of 412 ─────────┐    ← header
+Row 1: │ ▶L 1247: …context foo bar context…    │    ← focused row
+Row 2: │  L 1183: …more context foo more text…│
+...
+Row 10:│  L  204: …context with foo in middle… │
+       │  loading more…                        │    ← only if !exhausted & pending
+       └────────────────────────────────────────┘
+```
+
+- `▶` = focused row marker.
+- `L 1247:` = `L` + line index (right-padded to 4 chars for
+  alignment); colon separator.
+- Snippet = `…prefix MATCH suffix…` — match chars rendered with
+  **SGR bold + reverse** (no new pipeline state needed, attrs
+  already supported).
+- `loading more…` row appears only when SearchMore is in flight
+  and there might be more results.
+- Empty state: result list NOT rendered when query empty.
+- Zero results: result list shows single row `   0 results.` in
+  dim fg.
+
+Colour roles:
+
+- Search bar BG = title-strip BG (slightly darker than grid BG)
+- Search bar border = title-strip seam tone
+- Search bar text (query) = grid default fg
+- Counter text = grid dim fg
+- Focused result row BG = highlight yellow (same as active match)
+- Unfocused result rows = title-strip BG
+- Match within snippet = bold + reverse (SGR-driven, theme-
+  independent)
+- Active highlight on grid cells = highlight yellow BG, original
+  fg preserved (distinct from text-selection's BG+fg inversion)
+
+### §6.9  UX behaviour matrix
+
+| situation | behaviour |
+|---|---|
+| Cmd+F when search not open | open SearchBar; focus query input; result list not yet rendered (no query) |
+| Cmd+F when search already open | re-focus query input; **select-all the existing query** so re-typing replaces it (standard browser convention) |
+| typing in query field | debounce 100 ms; on quiescence emit new SearchScrollback (auto-cancels prior in-flight) |
+| query becomes empty | clear results; clear highlight; result list hides |
+| Esc with focus on query | close entire search overlay (bar + list); clear highlight; restore prior grid view_offset |
+| Esc with focus on result list | NOT applicable — focus never leaves query in v1 (↑/↓ moves selection without moving focus) |
+| Enter | jump to focused result; highlight persists; query input stays focused so user can immediately Cmd+G to advance |
+| Cmd+G | move focused result +1 (wraps to 0 at end); jump grid; update highlight |
+| Shift+Cmd+G | move focused result -1 (wraps to N-1 at start); jump grid; update highlight |
+| ↑ / ↓ | same as Cmd+G / Shift+Cmd+G — moves focused result without text-cursor concept (query is single-line) |
+| click on result row | focus that row; same jump-and-highlight as Enter |
+| click on `[Aa]` toggle | flip case sensitivity; **re-run query immediately** (same as a fresh keystroke) |
+| click on `[×]` | close (same as Esc) |
+| click on grid cells (outside overlay) | grid takes the click as today (selection, etc.); search overlay stays open |
+| drag selection on grid while search open | works exactly as today; the selection rect and the search highlight can coexist visually |
+| mouse-wheel inside result list rect | scrolls list (loads SearchMore on threshold cross); does NOT scroll grid |
+| mouse-wheel outside overlay | scrolls grid as today |
+| Cmd-C inside query input | copies query selection (if any); if no query selection, falls through to grid selection copy (compat with today) |
+| Cmd-V inside query input | pastes clipboard text into query at cursor |
+| IME composition into query | preedit stripe shown above query input row; same primitives as PTY IME |
+| narrow pane (< 24 cols) | search bar not shown; Cmd+F logs an info event and is a no-op; same key in a wider pane works |
+| Cmd+F on a non-focused pane | only the focused pane sees Cmd+F; switching focus then Cmd+F opens search on the newly focused pane |
+| user switches focus to another pane | overlay stops drawing; state preserved; re-focus brings it back |
+| install-local triggers L3 self-execv with search open | overlay closes per D20; new L3 starts; user can Cmd+F again |
+| L3 crash with search open | L2's reconnect path triggers; SearchBar is removed from pane; user re-opens |
+| highlight is off-screen after a jump | scroll behaviour centres the hit row at viewport row `rows / 2`; if hit is in live grid, view_offset stays 0 |
+| highlight goes off-screen as user scrolls the grid manually | highlight stays bound to its logical line; if user scrolls back, it re-appears |
+| query containing non-printable chars (e.g. NUL) | strip before sending; treat NUL as space |
+| query > 256 chars | clip query rendering at 256; SearchScrollback still encodes whole query (bounded by 1024 cap) |
+| more than `MAX_HITS = 256` results loaded | trim oldest from list head; user can scroll back up to lose some history but always sees `MAX_HITS` worth of recent ones |
+
+### §6.10  Animations and transitions
+
+**None.**  No fade, slide, bounce.  Open / close / focus changes
+are instant.  Rationale:
+
+- Animations cost render cycles → leaks into idle CPU budget.
+- Less code, less maintenance.
+- macOS "Reduce Motion" default-applies — animated UIs become
+  inconsistent with that preference.
+- Matches existing marspot polish (no animated cursor, no
+  scroll inertia within terminal, etc.).
+
+Sole exception (allowed if eventually wanted): the `[Aa]`
+toggle and `[×]` close glyph can briefly highlight on hover
+because that already piggybacks on the existing
+`hover_chrome_btn` redraw path which is already debounced.
+
+### §6.11  Accessibility — best-effort baseline
+
+VoiceOver / NSAccessibility is out of scope for v1 (defer with
+the rest of `marspot` accessibility work).  We do not regress
+what little exists today: search overlay does not steal
+focus-events from the system focus model; it only diverts
+keyboard input post-WindowServer.
 
 ---
 
@@ -1166,18 +1378,26 @@ For absolute clarity:
 
 User reviews and confirms:
 
-- [ ] §0 product principle ("性能必须极佳;功能不要都可以") is the
+- [x] §-1 author-delegation note recorded — UI/UX/polish judgement
+  is mine; user pushes back if a SPECIFIC decision is off, not
+  mid-rollout
+- [x] §0 product principle ("性能必须极佳;功能不要都可以") is the
   unbreakable axis for the whole rollout
-- [ ] Goals + non-goals in §0.5/§1 match user intent
-- [ ] All decisions D1-D20 are correct
-- [ ] Commit sequence in §8 is acceptable
-- [ ] Rollback strategy in §9 is sufficient
-- [ ] DoD checklists in §12 are appropriate gates
-- [ ] Every perf budget in §3.6 / §4.6 / §12 is a hard ceiling I'm
+- [x] Goals + non-goals in §0.5/§1 match user intent
+- [x] All decisions D1-D20 are correct (4 cuts explained
+  separately and accepted)
+- [x] §6.8/§6.9/§6.10 visual + UX matrix fully concrete
+- [x] §6.7 keybinding table covers every combo
+- [x] Commit sequence in §8 is acceptable
+- [x] Rollback strategy in §9 is sufficient
+- [x] DoD checklists in §12 are appropriate gates
+- [x] Every perf budget in §3.6 / §4.6 / §12 is a hard ceiling I'm
   willing to drop features to defend
-- [ ] No mid-execution decisions remain (search this doc for
+- [x] No mid-execution decisions remain (search this doc for
   "decide later" / "TBD" / "?" — none should remain)
-- [ ] Scope is correct (§13 cuts match user intent)
+- [x] Scope is correct (§13 cuts match user intent)
+
+All boxes ticked: rollout begins at A1.
 
 Once these are all green, implementation begins at A1.  No
 mid-execution alteration of any of the above; only stop-revise-
