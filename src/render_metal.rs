@@ -474,6 +474,17 @@ pub struct MetalRenderer {
     /// while the panel is open; cheap because rows are typically
     /// tens of entries.
     process_panel: Option<ProcessPanelRender>,
+    /// F3+1.6 — overlay scratches.  Anything pushed here gets
+    /// encoded in EXTRA UI + FG passes AFTER the main grid render,
+    /// so it lands on top of all grid pixels regardless of which
+    /// pipeline contributed them.  Filtering grid instances by
+    /// glyph origin is brittle (vertical/horizontal extents bleed
+    /// past origin checks); a dedicated overlay pass is the only
+    /// architecturally correct way to make a modal "always on top".
+    overlay_cells_scratch: Vec<CellInstance>,
+    overlay_glyphs_scratch: Vec<GlyphInstance>,
+    overlay_color_glyphs_scratch: Vec<GlyphInstance>,
+    overlay_ui_rects_scratch: Vec<UiRectInstance>,
     /// Top inset in physical pixels — reserved for window chrome
     /// (macOS traffic-light buttons). Single-session callers (mcli)
     /// set this once at `resumed`; the convenience `render(view)`
@@ -619,6 +630,10 @@ impl MetalRenderer {
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             ui_rects_scratch: Vec::new(),
+            overlay_cells_scratch: Vec::new(),
+            overlay_glyphs_scratch: Vec::new(),
+            overlay_color_glyphs_scratch: Vec::new(),
+            overlay_ui_rects_scratch: Vec::new(),
             pane_caches: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
@@ -679,6 +694,10 @@ impl MetalRenderer {
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
             ui_rects_scratch: Vec::new(),
+            overlay_cells_scratch: Vec::new(),
+            overlay_glyphs_scratch: Vec::new(),
+            overlay_color_glyphs_scratch: Vec::new(),
+            overlay_ui_rects_scratch: Vec::new(),
             pane_caches: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
@@ -931,6 +950,10 @@ impl MetalRenderer {
             ref mut dots_scratch,
             ref mut ui_rects_scratch,
             ref mut pane_caches,
+            ref mut overlay_cells_scratch,
+            ref mut overlay_glyphs_scratch,
+            ref mut overlay_color_glyphs_scratch,
+            ref mut overlay_ui_rects_scratch,
             window_focused,
             hover_chrome_btn,
             ref process_panel,
@@ -944,6 +967,10 @@ impl MetalRenderer {
         color_glyphs_scratch.clear();
         dots_scratch.clear();
         ui_rects_scratch.clear();
+        overlay_cells_scratch.clear();
+        overlay_glyphs_scratch.clear();
+        overlay_color_glyphs_scratch.clear();
+        overlay_ui_rects_scratch.clear();
         build_instances(
             layout,
             views,
@@ -961,6 +988,9 @@ impl MetalRenderer {
             dots_scratch,
             ui_rects_scratch,
             pane_caches,
+            overlay_cells_scratch,
+            overlay_glyphs_scratch,
+            overlay_ui_rects_scratch,
         );
 
         let layer = layer.as_ref().unwrap();
@@ -992,6 +1022,9 @@ impl MetalRenderer {
             glyphs_scratch,
             color_glyphs_scratch,
             ui_rects_scratch,
+            overlay_cells_scratch,
+            overlay_glyphs_scratch,
+            overlay_ui_rects_scratch,
             width_px as f32,
             height_px as f32,
             // CAMetalLayer drawable, same process — no cross-process
@@ -1072,6 +1105,10 @@ impl MetalRenderer {
             ref mut dots_scratch,
             ref mut ui_rects_scratch,
             ref mut pane_caches,
+            ref mut overlay_cells_scratch,
+            ref mut overlay_glyphs_scratch,
+            ref mut overlay_color_glyphs_scratch,
+            ref mut overlay_ui_rects_scratch,
             window_focused,
             hover_chrome_btn,
             ref process_panel,
@@ -1083,6 +1120,10 @@ impl MetalRenderer {
         color_glyphs_scratch.clear();
         dots_scratch.clear();
         ui_rects_scratch.clear();
+        overlay_cells_scratch.clear();
+        overlay_glyphs_scratch.clear();
+        overlay_color_glyphs_scratch.clear();
+        overlay_ui_rects_scratch.clear();
         build_instances(
             layout,
             views,
@@ -1100,6 +1141,9 @@ impl MetalRenderer {
             dots_scratch,
             ui_rects_scratch,
             pane_caches,
+            overlay_cells_scratch,
+            overlay_glyphs_scratch,
+            overlay_ui_rects_scratch,
         );
 
         let cmd = match queue.commandBuffer() {
@@ -1123,6 +1167,9 @@ impl MetalRenderer {
             glyphs_scratch,
             color_glyphs_scratch,
             ui_rects_scratch,
+            overlay_cells_scratch,
+            overlay_glyphs_scratch,
+            overlay_ui_rects_scratch,
             width_px as f32,
             height_px as f32,
             // IOSurface path — cross-process race-free only when Load
@@ -1158,6 +1205,9 @@ fn encode_passes(
     glyphs: &[GlyphInstance],
     color_glyphs: &[GlyphInstance],
     ui_rects: &[UiRectInstance],
+    overlay_cells: &[CellInstance],
+    overlay_glyphs: &[GlyphInstance],
+    overlay_ui_rects: &[UiRectInstance],
     viewport_w: f32,
     viewport_h: f32,
     // Clear-vs-Load for the BG pass.  `true` = hard Clear to SIDEBAR_BG
@@ -1348,6 +1398,97 @@ fn encode_passes(
         }
         cfg_encoder.endEncoding();
     }
+
+    // F3+1.6 — OVERLAY PASSES.  Drawn after every main pass so the
+    // overlay (Process Monitor modal, future tooltips/sheets) covers
+    // whatever the grid + chrome + glyphs produced underneath.  No
+    // filtering of grid scratches needed; the overlay's BG is on top
+    // by construction.  Sequence: BG cells → UI rects → FG glyphs.
+    // (Cells go FIRST so opaque flat fills sit below the SDF chrome
+    // rects; glyphs LAST so text always reads on top.)
+    if !overlay_cells.is_empty() {
+        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let buf = make_instance_buffer(device, cells_as_bytes(overlay_cells));
+        let enc = cmd
+            .renderCommandEncoderWithDescriptor(&pass)
+            .expect("overlay cells encoder");
+        enc.setRenderPipelineState(bg_pipeline);
+        if let Some(b) = &buf {
+            unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+        }
+        unsafe {
+            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                overlay_cells.len(),
+            );
+        }
+        enc.endEncoding();
+    }
+    if !overlay_ui_rects.is_empty() {
+        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let buf = make_instance_buffer(device, ui_rects_as_bytes(overlay_ui_rects));
+        let enc = cmd
+            .renderCommandEncoderWithDescriptor(&pass)
+            .expect("overlay ui encoder");
+        enc.setRenderPipelineState(ui_pipeline);
+        if let Some(b) = &buf {
+            unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+        }
+        unsafe {
+            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                overlay_ui_rects.len(),
+            );
+        }
+        enc.endEncoding();
+    }
+    if !overlay_glyphs.is_empty() {
+        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let buf = make_instance_buffer(device, glyphs_as_bytes(overlay_glyphs));
+        let enc = cmd
+            .renderCommandEncoderWithDescriptor(&pass)
+            .expect("overlay fg encoder");
+        enc.setRenderPipelineState(fg_pipeline);
+        if let Some(b) = &buf {
+            unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+        }
+        unsafe {
+            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            enc.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+            enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                overlay_glyphs.len(),
+            );
+        }
+        enc.endEncoding();
+    }
 }
 
 /// Allocate a render-target MTLTexture.  Helper for tests + the
@@ -1532,6 +1673,9 @@ fn build_instances(
     dots: &mut Vec<CellInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
     pane_caches: &mut Vec<PaneInstanceCache>,
+    overlay_cells: &mut Vec<CellInstance>,
+    overlay_glyphs: &mut Vec<GlyphInstance>,
+    overlay_ui_rects: &mut Vec<UiRectInstance>,
 ) {
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
@@ -1767,33 +1911,21 @@ fn build_instances(
         glyphs,
     );
 
-    // F3+1.5 — Process Monitor modal.  Pipeline:
-    //   (1) Filter EVERYTHING inside the modal rect out of grid scratches
-    //       so panel-owned instances are the only ones living there.
-    //   (2) Backdrop dim: window-wide semi-trans ui_rect, BUT only the
-    //       region BELOW the marspot title strip (y >= top_inset).  The
-    //       title strip stays bright and on top — user wants it always
-    //       visible & opaque even when the modal is open.
-    //   (3) Push the modal frame itself.
+    // F3+1.6 — Process Monitor modal renders into the OVERLAY
+    // scratches.  After build_instances returns, the encoder runs two
+    // extra passes (overlay UI → overlay FG) AFTER all four main
+    // passes; the overlay sits on top of every grid pixel by virtue
+    // of pipeline order, no filter / glyph-origin gymnastics needed.
+    // This is the architecturally correct "always-on-top" for any
+    // overlay.  Drop the filter approach entirely.
     if let Some(panel) = process_panel {
-        let px = panel.rect.x as f32;
-        let py = panel.rect.y_top as f32;
-        let pw = panel.rect.w as f32;
-        let ph = panel.rect.h as f32;
-        let in_modal = |x: f32, y: f32| -> bool {
-            x >= px && x < px + pw && y >= py && y < py + ph
-        };
-        glyphs.retain(|g| !in_modal(g.origin[0], g.origin[1]));
-        color_glyphs.retain(|g| !in_modal(g.origin[0], g.origin[1]));
-        cells.retain(|c| !in_modal(c.origin[0], c.origin[1]));
-        dots.retain(|c| !in_modal(c.origin[0], c.origin[1]));
         if panel.draw_backdrop {
-            // F3+1.5+ — backdrop sits BELOW the marspot title strip so
-            // the strip stays always-on-top (version label + chrome
-            // buttons readable; user reported the strip "looked
-            // transparent" while modal was open).
+            // Backdrop dim sits below marspot title strip so the
+            // strip stays always-on-top (version label + chrome
+            // buttons readable; user explicitly wanted opaque +
+            // always-on-top title strip).
             let top_inset = layout.top_inset as f32;
-            ui_rects.push(UiRectInstance {
+            overlay_ui_rects.push(UiRectInstance {
                 origin: [0.0, top_inset],
                 size: [layout.window_w as f32, (layout.window_h as f32 - top_inset).max(0.0)],
                 fill_color: [0.0, 0.0, 0.0, 0.45],
@@ -1807,9 +1939,8 @@ fn build_instances(
         }
         push_process_panel(
             panel, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            font, atlas, cells, glyphs, ui_rects,
+            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
         );
-        let _ = (pw, ph);
     }
 
     // Header version label — quiet metadata in the header strip,
@@ -4401,6 +4532,9 @@ mod tests {
             &mut dots,
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
         );
 
         // Expected glyph instances:
@@ -4499,6 +4633,9 @@ mod tests {
             &mut dots,
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
         );
 
         assert_eq!(color_glyphs.len(), 1, "emoji should emit one colour glyph");
@@ -4567,6 +4704,9 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
         );
@@ -4682,6 +4822,9 @@ mod tests {
                 &mut dots,
                 &mut Vec::new(),
                 &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
             );
             cells
         };
@@ -4778,6 +4921,9 @@ mod tests {
             &mut dots,
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
         );
         // No HIGHLIGHT_BG cell should be present.
         let highlight_count = cells
@@ -4845,6 +4991,9 @@ mod tests {
                 &mut glyphs,
                 &mut color_glyphs,
                 &mut dots,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
                 &mut Vec::new(),
                 &mut Vec::new(),
             );
