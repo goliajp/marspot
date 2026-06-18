@@ -7,6 +7,14 @@
 //! (selection projection / serialisation, scroll math) live here;
 //! each front-end keeps only its event plumbing.
 
+/// F3+1.5 — reusable visual components.  Start of a deliberate
+/// "marspot UI kit": small composable pieces (traffic lights, tab
+/// strip, scroll view, modal frame) that any feature wanting a
+/// macOS-ish look should reach for instead of hand-rolling the
+/// fifth slightly-different SDF rect.  See each submodule for its
+/// contract.
+pub mod components;
+
 use crate::pane::Pane;
 use crate::render::SelectionView;
 

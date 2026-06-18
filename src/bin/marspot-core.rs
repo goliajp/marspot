@@ -147,6 +147,41 @@ struct ProcessPanelState {
     /// F3+1.4 — per-tab clickable rects in the tab strip.  Empty
     /// Vec when there are no panes.
     tab_rects: Vec<marspot_term::layout::Rect>,
+    /// F3+1.5 — yellow minimize traffic light hit rect.
+    min_btn_rect: marspot_term::layout::Rect,
+    /// F3+1.5 — green maximize traffic light hit rect.
+    max_btn_rect: marspot_term::layout::Rect,
+    /// F3+1.5 — title bar hit rect; clicks here begin a drag.  Body
+    /// + tab strip do NOT initiate drag, only title bar (matches
+    /// macOS window-drag semantics).
+    title_bar_rect: marspot_term::layout::Rect,
+    /// F3+1.5 — body viewport rect (used for scroll wheel routing
+    /// + content clip).
+    body_rect: marspot_term::layout::Rect,
+    /// F3+1.5 — full modal frame rect (title + tabs + body union).
+    /// `mouse_down` uses this to decide "inside modal = swallow,
+    /// outside modal = backdrop click closes".
+    modal_rect: marspot_term::layout::Rect,
+    /// F3+1.5 — collapse body so only the title bar shows.  Yellow
+    /// traffic light toggles this.
+    minimized: bool,
+    /// F3+1.5 — expand modal to ~95×90 % of window.  Green traffic
+    /// light toggles this.
+    maximized: bool,
+    /// F3+1.5 — body content scroll, in physical pixels.  Clamped
+    /// to `[0, content_h - viewport_h]`.  Mouse wheel updates.
+    scroll_y: f64,
+    /// F3+1.5 — content total height (sum of all body rows) computed
+    /// during the last build.  Used to clamp scroll_y.
+    content_h: f64,
+    /// F3+1.5 — modal position offset from default center, in
+    /// physical pixels.  Drag updates `pos_offset` by `(mouse_delta)`.
+    pos_offset: (f64, f64),
+    /// F3+1.5 — drag in progress.  `(grab_mouse_x, grab_mouse_y,
+    /// grab_pos_offset_x, grab_pos_offset_y)` snapshotted at mouse-
+    /// down so motion delta translates to pos_offset diff.  None
+    /// means not dragging.
+    drag_grab: Option<(f64, f64, f64, f64)>,
 }
 
 struct PanePidTree {
@@ -1453,6 +1488,21 @@ impl CoreApp {
     fn key(&mut self, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
 
+        // F3+1.5 — Process Monitor modal eats ESC + arrow keys + Cmd-W
+        // when open (modal semantics).  Sits above every other key
+        // path so a modal-active terminal still has working pane
+        // keys after closing.
+        if self.process_panel.is_some() && event.state == KeyState::Pressed {
+            let is_esc = matches!(event.logical, LogicalKey::Named(NamedKey::Escape));
+            let is_cmd_w = matches!(event.logical, LogicalKey::Char('w'))
+                && modifiers.super_;
+            if is_esc || is_cmd_w {
+                self.process_panel = None;
+                self.needs_render = true;
+                return;
+            }
+        }
+
         // RFC-003 LOCK_KEYS: if the focused pane is in a plugin-held
         // PaneSession that asked for the keyboard, route the event up
         // to L1 instead of forwarding to the PTY.  Also count Esc
@@ -1801,36 +1851,22 @@ impl CoreApp {
         None
     }
 
-    /// F3+1.4 — build the centered Process Monitor modal data.
-    /// Returns render data + populates parallel hit-test state
-    /// (close button rect, tab rects, row_kill_rects).  All rects
-    /// are physical pixels; mouse_down hit-tests them directly.
+    /// F3+1.5 — build the centered Process Monitor modal data via the
+    /// new UI component kit (ModalFrame, TrafficLights, TabStrip,
+    /// ScrollView).  Returns render data + populates parallel hit-test
+    /// state.  All rects are physical pixels.
     fn build_process_panel_render(&mut self) -> Option<marspot::render_metal::ProcessPanelRender> {
         use marspot::render_metal::{ProcessPanelRender, ProcessPanelRow};
+        use marspot::ui::components::{ModalFrame, TrafficLights, TabStrip, ScrollView};
+        use marspot::ui::components::modal_frame::ModalLayoutSpec;
         let scale = self.scale.max(0.1);
-        let panel_w_phys = PROCESS_PANEL_WIDTH_LOGICAL * scale;
-        let panel_h_phys = PROCESS_PANEL_HEIGHT_LOGICAL * scale;
-        // Clamp to fit inside the window if user shrank it below the
-        // modal size — keeps the corners visible.
-        let panel_w_phys = panel_w_phys.min((self.w_phys as f64) * 0.95);
-        let panel_h_phys = panel_h_phys.min((self.h_phys as f64) * 0.92);
-        let panel_x = ((self.w_phys as f64) - panel_w_phys) * 0.5;
-        let panel_y = ((self.h_phys as f64) - panel_h_phys) * 0.5;
-        let panel_rect = marspot_term::layout::Rect {
-            x: panel_x,
-            y_top: panel_y,
-            w: panel_w_phys,
-            h: panel_h_phys,
-        };
-        let title_h = 28.0 * scale;
-        let tab_h = 30.0 * scale;
-        let traffic_size = 12.0 * scale;
-        let traffic_gap = 8.0 * scale;
-        let traffic_left_pad = 12.0 * scale;
-        let traffic_top_pad = (title_h - traffic_size) * 0.5;
-        // Clamp active_tab first so the borrow on `panel` only spans
-        // what we actually need.
+        // Snapshot fields we'll need before any &mut borrow of panel.
         let panes_len;
+        let active_tab_in;
+        let minimized;
+        let maximized;
+        let pos_offset;
+        let scroll_y_in;
         {
             let panel = self.process_panel.as_mut()?;
             if !panel.panes.is_empty() {
@@ -1840,104 +1876,134 @@ impl CoreApp {
             } else {
                 panel.active_tab = 0;
             }
-            panes_len = panel.panes.len();
+            panes_len     = panel.panes.len();
+            active_tab_in = panel.active_tab;
+            minimized     = panel.minimized;
+            maximized     = panel.maximized;
+            pos_offset    = panel.pos_offset;
+            scroll_y_in   = panel.scroll_y;
         }
-        // Tab strip rects: one rect per pane.  Equal-width tabs
-        // sharing the body width.  Empty body when no panes.
-        let mut tabs_labels: Vec<String> = Vec::with_capacity(panes_len);
-        let mut tab_rects: Vec<marspot_term::layout::Rect> = Vec::with_capacity(panes_len);
-        if panes_len > 0 {
-            let tab_w = panel_w_phys / (panes_len as f64);
-            for i in 0..panes_len {
-                tabs_labels.push(format!("Pane {}", i + 1));
-                tab_rects.push(marspot_term::layout::Rect {
-                    x: panel_x + (i as f64) * tab_w,
-                    y_top: panel_y + title_h,
-                    w: tab_w,
-                    h: tab_h,
-                });
-            }
-        }
-        // Close (red) traffic light hit rect — only this one is
-        // functional; yellow + green are decorative.
-        let close_btn_rect = marspot_term::layout::Rect {
-            x: panel_x + traffic_left_pad,
-            y_top: panel_y + traffic_top_pad,
-            w: traffic_size,
-            h: traffic_size,
+        // Modal frame layout via component.
+        let frame = ModalFrame::layout(
+            self.w_phys as f64,
+            self.h_phys as f64,
+            ModalLayoutSpec {
+                default_w:   PROCESS_PANEL_WIDTH_LOGICAL  * scale,
+                default_h:   PROCESS_PANEL_HEIGHT_LOGICAL * scale,
+                title_bar_h: 28.0 * scale,
+                tab_strip_h: 30.0 * scale,
+                maximized,
+                max_w_ratio: 0.95,
+                max_h_ratio: 0.90,
+                minimized,
+                with_tab_strip: panes_len > 0,
+                pos_offset,
+            },
+        );
+        // Traffic lights (anchored to title bar left).
+        let lights = TrafficLights::layout(
+            frame.title_bar,
+            12.0 * scale,
+            8.0  * scale,
+            12.0 * scale,
+        );
+        // Tab strip (only when not minimized).
+        let (cell_w_f64, cell_h_f64) = self.renderer.cell_dims();
+        let labels: Vec<String> = if !minimized {
+            (1..=panes_len).map(|i| format!("Pane {}", i)).collect()
+        } else {
+            Vec::new()
         };
-        // Reuse the immutable read of panel before mutating it for kill rects.
-        let active_tab = {
-            let panel = self.process_panel.as_ref()?;
-            panel.active_tab
-        };
-        // Build body rows for ACTIVE tab only.
+        let tabs_view = TabStrip::layout(
+            frame.tab_strip,
+            &labels,
+            active_tab_in,
+            cell_w_f64,
+            8.0 * scale,
+        );
+        // Build body rows for ACTIVE tab.
         let mut rows: Vec<ProcessPanelRow> = Vec::new();
         let mut kill_meta: Vec<(i32, usize)> = Vec::new();
-        let panel_ref = self.process_panel.as_ref()?;
-        if let Some(pane) = panel_ref.panes.get(active_tab) {
-            let header_text = match pane.shell_child_pid {
-                Some(p) => format!("sid={}  shell pid={}",
-                    pane.shelld_session_id, p),
-                None => format!("sid={}  (no pid)", pane.shelld_session_id),
-            };
-            rows.push(ProcessPanelRow {
-                depth: 0,
-                text: header_text,
-                is_header: true,
-            });
-            if let Some(tree) = pane.tree.as_ref() {
-                let flat = marspot::pidtree::flatten_pre_order(tree);
-                for (depth, node) in flat {
-                    let row_idx = rows.len();
-                    rows.push(ProcessPanelRow {
-                        depth: ((depth + 1).min(8)) as u8,
-                        text: format!("{} {}", node.pid, node.comm),
-                        is_header: false,
-                    });
-                    kill_meta.push((node.pid, row_idx));
+        if !minimized {
+            let panel_ref = self.process_panel.as_ref()?;
+            if let Some(pane) = panel_ref.panes.get(active_tab_in) {
+                let header_text = match pane.shell_child_pid {
+                    Some(p) => format!("sid={}  shell pid={}",
+                        pane.shelld_session_id, p),
+                    None => format!("sid={}  (no pid)", pane.shelld_session_id),
+                };
+                rows.push(ProcessPanelRow {
+                    depth: 0, text: header_text, is_header: true,
+                });
+                if let Some(tree) = pane.tree.as_ref() {
+                    let flat = marspot::pidtree::flatten_pre_order(tree);
+                    for (depth, node) in flat {
+                        let row_idx = rows.len();
+                        rows.push(ProcessPanelRow {
+                            depth: ((depth + 1).min(8)) as u8,
+                            text: format!("{} {}", node.pid, node.comm),
+                            is_header: false,
+                        });
+                        kill_meta.push((node.pid, row_idx));
+                    }
                 }
             }
         }
-        // Row Y = body_top + i*row_h + body_pad.  Match the renderer
-        // (push_process_panel constants in render_metal.rs).
-        let (_cw, cell_h_f64) = self.renderer.cell_dims();
-        let cell_h = cell_h_f64;
-        let row_h = cell_h * 1.2;
-        let body_top = panel_y + title_h + tab_h;
+        // Scroll math via component.
+        let row_h = cell_h_f64 * 1.2;
         let body_pad_top = 6.0 * scale;
-        let body_pad_left = 14.0 * scale;
         let body_pad_right = 14.0 * scale;
         let kill_w = 18.0 * scale;
         let kill_h = (row_h - 4.0).max(8.0);
+        let content_h = body_pad_top + (rows.len() as f64) * row_h + body_pad_top;
+        let mut sv = ScrollView::new(frame.body);
+        sv.content_h = content_h;
+        sv.scroll_y = scroll_y_in;
+        sv.clamp();
+        let scroll_y_clamped = sv.scroll_y;
+        // Per-row kill rects, accounting for scroll.
         let mut row_kill_rects: Vec<(i32, marspot_term::layout::Rect)> =
             Vec::with_capacity(kill_meta.len());
         for (pid, row_idx) in kill_meta {
-            let row_y = body_top + body_pad_top + (row_idx as f64) * row_h;
-            let kill_x = panel_x + panel_w_phys - body_pad_right - kill_w;
+            let row_y = frame.body.y_top + body_pad_top
+                + (row_idx as f64) * row_h - scroll_y_clamped;
+            // Off-screen rows can't be clicked; skip them so a click
+            // through the clipped area doesn't accidentally hit a
+            // ghost rect.
+            if row_y + row_h < frame.body.y_top
+                || row_y > frame.body.y_top + frame.body.h
+            {
+                continue;
+            }
+            let kill_x = frame.body.x + frame.body.w - body_pad_right - kill_w;
             let kill_y = row_y + (row_h - kill_h) * 0.5;
             row_kill_rects.push((pid, marspot_term::layout::Rect {
-                x: kill_x,
-                y_top: kill_y,
-                w: kill_w,
-                h: kill_h,
+                x: kill_x, y_top: kill_y, w: kill_w, h: kill_h,
             }));
         }
-        // Persist hit rects (drop the immutable borrow first).
-        let _ = body_pad_left; // body text x uses this in render only
+        // Persist hit rects + clamp/feedback into state.
         {
             let panel = self.process_panel.as_mut()?;
-            panel.tab_rects = tab_rects;
-            panel.close_btn_rect = close_btn_rect;
+            panel.tab_rects      = tabs_view.tab_rects.clone();
+            panel.close_btn_rect = lights.close;
+            panel.min_btn_rect   = lights.min;
+            panel.max_btn_rect   = lights.max;
+            panel.title_bar_rect = frame.title_bar;
+            panel.body_rect      = frame.body;
+            panel.modal_rect     = frame.frame;
             panel.row_kill_rects = row_kill_rects;
+            panel.scroll_y       = scroll_y_clamped;
+            panel.content_h      = content_h;
         }
-        let active_tab = self.process_panel.as_ref()?.active_tab;
         Some(ProcessPanelRender {
-            rect: panel_rect,
+            rect: frame.frame,
             title: "Process Monitor".to_string(),
-            tabs: tabs_labels,
-            active_tab,
+            tabs: tabs_view.display_labels,
+            active_tab: active_tab_in,
             rows,
+            minimized,
+            scroll_y: scroll_y_clamped,
+            draw_backdrop: true,
         })
     }
 
@@ -2046,15 +2112,16 @@ impl CoreApp {
             self.rebuild_layout();
             return;
         }
-        // F3+1.4 — Process Monitor modal click priorities:
-        //   1. row [×] kill button → SIGTERM + force refresh
+        // F3+1.5 — Process Monitor modal click priorities (high → low):
+        //   1. row [×] kill (only when not minimized — rects empty)
         //   2. tab strip → switch active tab
-        //   3. close (red traffic light) → close modal
-        //   4. any other click within modal rect → SWALLOW (modal
-        //      semantics; don't fall through to grid below)
-        // Yellow / green traffic lights are decorative — no-op clicks.
+        //   3. traffic lights: close / min / max
+        //   4. title bar (non-light) → start drag
+        //   5. body → swallow (modal semantics)
+        //   6. backdrop (anywhere else in window) → swallow as well so
+        //      a stray click doesn't punch through to the grid behind.
         if let Some(panel) = self.process_panel.as_ref() {
-            // 1) Row kill button
+            // 1) Row kill
             let kill_hit: Option<i32> = panel
                 .row_kill_rects
                 .iter()
@@ -2076,45 +2143,50 @@ impl CoreApp {
             if let Some(i) = tab_hit {
                 if let Some(p) = self.process_panel.as_mut() {
                     p.active_tab = i;
+                    p.scroll_y = 0.0;
                 }
                 self.needs_render = true;
                 return;
             }
-            // 3) Close (red traffic light)
+            // 3) Traffic lights
             if panel.close_btn_rect.contains(x_phys, y_phys) {
                 self.process_panel = None;
                 self.needs_render = true;
                 return;
             }
-            // 4) Modal swallows the click — no fall-through to grid
-            if panel
-                .row_kill_rects
-                .iter()
-                .map(|(_, r)| r)
-                .chain(panel.tab_rects.iter())
-                .chain(std::iter::once(&panel.close_btn_rect))
-                .next()
-                .is_some()
-            {
-                // Compute the modal frame rect from cached close button
-                // + tab strip to get the full bounds.  Cheaper to keep
-                // a `panel_rect` field, but we already have its corners
-                // implicit in the cached rects.
-                // Simpler approach: re-derive from window dims.
-                let scale = self.scale.max(0.1);
-                let pw = (PROCESS_PANEL_WIDTH_LOGICAL * scale)
-                    .min((self.w_phys as f64) * 0.95);
-                let ph = (PROCESS_PANEL_HEIGHT_LOGICAL * scale)
-                    .min((self.h_phys as f64) * 0.92);
-                let px = ((self.w_phys as f64) - pw) * 0.5;
-                let py = ((self.h_phys as f64) - ph) * 0.5;
-                let modal = marspot_term::layout::Rect {
-                    x: px, y_top: py, w: pw, h: ph,
-                };
-                if modal.contains(x_phys, y_phys) {
-                    return;
+            if panel.min_btn_rect.contains(x_phys, y_phys) {
+                if let Some(p) = self.process_panel.as_mut() {
+                    p.minimized = !p.minimized;
+                    if p.minimized { p.maximized = false; }
                 }
+                self.needs_render = true;
+                return;
             }
+            if panel.max_btn_rect.contains(x_phys, y_phys) {
+                if let Some(p) = self.process_panel.as_mut() {
+                    p.maximized = !p.maximized;
+                    if p.maximized { p.minimized = false; }
+                }
+                self.needs_render = true;
+                return;
+            }
+            // 4) Title bar drag — anywhere in title bar that isn't a
+            //    traffic light starts a window-drag.
+            if panel.title_bar_rect.contains(x_phys, y_phys) {
+                if let Some(p) = self.process_panel.as_mut() {
+                    p.drag_grab = Some((x_phys, y_phys, p.pos_offset.0, p.pos_offset.1));
+                }
+                return;
+            }
+            // 5) Click inside modal but on no widget → swallow.
+            if panel.modal_rect.contains(x_phys, y_phys) {
+                return;
+            }
+            // 6) Click on backdrop (outside modal) → close the modal.
+            // Familiar pattern: clicking outside a modal dismisses it.
+            self.process_panel = None;
+            self.needs_render = true;
+            return;
         }
         // F3+1 — process-tree panel toggle.  Same priority tier as
         // sidebar: a click on the icon never falls through.  Opening
@@ -2132,6 +2204,17 @@ impl CoreApp {
                     active_tab: 0,
                     close_btn_rect: marspot_term::layout::Rect::ZERO,
                     tab_rects: Vec::new(),
+                    min_btn_rect: marspot_term::layout::Rect::ZERO,
+                    max_btn_rect: marspot_term::layout::Rect::ZERO,
+                    title_bar_rect: marspot_term::layout::Rect::ZERO,
+                    body_rect: marspot_term::layout::Rect::ZERO,
+                    modal_rect: marspot_term::layout::Rect::ZERO,
+                    minimized: false,
+                    maximized: false,
+                    scroll_y: 0.0,
+                    content_h: 0.0,
+                    pos_offset: (0.0, 0.0),
+                    drag_grab: None,
                 });
                 self.refresh_process_panel();
             }
@@ -2310,6 +2393,16 @@ impl CoreApp {
     }
 
     fn mouse_drag(&mut self, x_phys: f64, y_phys: f64) {
+        // F3+1.5 — modal title bar drag.  Snapshot at mouse_down
+        // (drag_grab = Some((grab_x, grab_y, grab_off_x, grab_off_y)))
+        // → motion delta translates to pos_offset diff.
+        if let Some(panel) = self.process_panel.as_mut() {
+            if let Some((gx, gy, gox, goy)) = panel.drag_grab {
+                panel.pos_offset = (gox + (x_phys - gx), goy + (y_phys - gy));
+                self.needs_render = true;
+                return;
+            }
+        }
         if !self.selection_dragging {
             return;
         }
@@ -2364,7 +2457,14 @@ impl CoreApp {
         self.needs_render = true;
     }
 
+    fn end_modal_drag(&mut self) {
+        if let Some(panel) = self.process_panel.as_mut() {
+            panel.drag_grab = None;
+        }
+    }
+
     fn mouse_up(&mut self) {
+        self.end_modal_drag();
         // A click without movement leaves anchor == focus → treat as
         // "no selection" so a stray single-click doesn't ghost a
         // single-cell highlight.
@@ -2379,6 +2479,23 @@ impl CoreApp {
     }
 
     fn scroll(&mut self, dy_phys: f64, precise: bool) {
+        // F3+1.5 — when the Process Monitor modal is open, the wheel
+        // belongs to it (assuming the cursor is over the modal — and
+        // since the modal swallows clicks anyway, treating ALL scroll
+        // as modal scroll while it's open is the simpler, more
+        // predictable mapping).
+        if let Some(panel) = self.process_panel.as_mut() {
+            if !panel.minimized {
+                let _ = precise;
+                panel.scroll_y += dy_phys;
+                // Clamp using last-frame content_h.
+                let max = (panel.content_h - panel.body_rect.h).max(0.0);
+                if panel.scroll_y < 0.0 { panel.scroll_y = 0.0; }
+                if panel.scroll_y > max { panel.scroll_y = max; }
+                self.needs_render = true;
+            }
+            return;
+        }
         let (_, cell_h) = self.renderer.cell_dims();
         let lines = scroll_lines(dy_phys, precise, cell_h);
         if lines == 0 {

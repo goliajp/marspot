@@ -229,6 +229,18 @@ pub struct ProcessPanelRender {
     /// Rows of the active tab's pane (header + flatten_pre_order
     /// tree).  Empty Vec OK.
     pub rows: Vec<ProcessPanelRow>,
+    /// F3+1.5 — collapse body so only the title bar paints.  When
+    /// `true`, `tabs` + `rows` are NOT rendered (still walked for
+    /// hit-rect bookkeeping on the L2 side).
+    pub minimized: bool,
+    /// F3+1.5 — body scroll offset (physical px).  Renderer paints
+    /// rows starting at `body_top + body_pad_top - scroll_y`, with
+    /// clipping at the body rect bottom.  Clamped by L2.
+    pub scroll_y: f64,
+    /// F3+1.5 — semi-transparent backdrop covering the rest of the
+    /// window so the modal reads as focused.  Painted as one
+    /// `UiRectInstance` before the modal frame.
+    pub draw_backdrop: bool,
 }
 
 /// Compute the fingerprint hash of the inputs to push_session that
@@ -1755,32 +1767,56 @@ fn build_instances(
         glyphs,
     );
 
-    // F3+1.3 — process-tree panel.  The render pass order is BG → DOT
-    // → UI → FG (cells.metal), so any FG glyphs pushed BEFORE this
-    // point that fall inside the panel rect will draw OVER the
-    // panel's opaque BG — that's the "still transparent" complaint.
-    // Cure: strip those glyphs (mono + color + cursor dots + BG
-    // cells) from their scratch vecs FIRST, THEN push the panel's
-    // own content (BG into ui_rects, rows + [×] into cells / glyphs),
-    // so only panel-owned instances live inside the rect when the
-    // FG pass runs.  Cells/dots are filtered too so we don't waste
-    // GPU drawing them behind an opaque cover.
+    // F3+1.5 — Process Monitor modal.  Two-stage filter:
+    //   (1) Backdrop dim: when draw_backdrop, push a window-wide
+    //       semi-transparent ui_rect first so the modal reads as
+    //       focused (drawn over everything pre-FG).  Grid FG glyphs
+    //       outside the modal still paint over the dim — that's fine,
+    //       you can still read what's behind, just at lower contrast.
+    //   (2) Modal-frame filter: remove all FG glyphs / BG cells / dots
+    //       inside the modal frame rect so the modal's own content
+    //       is what shows up when the FG pass runs.  Skip when
+    //       minimized: only filter inside the title bar to keep the
+    //       body area "rolled up".
     if let Some(panel) = process_panel {
+        // (1) backdrop
+        if panel.draw_backdrop {
+            // Cover the whole window with a dim rect.
+            ui_rects.push(UiRectInstance {
+                origin: [0.0, 0.0],
+                size: [0.0, 0.0], // sized below by inferring from the modal
+                fill_color: [0.0, 0.0, 0.0, 0.45],
+                border_color: [0.0, 0.0, 0.0, 0.0],
+                corner_radius: 0.0,
+                border_width: 0.0,
+                shadow_blur: 0.0,
+                shadow_alpha: 0.0,
+                shadow_color: [0.0, 0.0, 0.0, 1.0],
+            });
+            // Set the size to the window's current physical bounds.
+            // Pulled from the last UiRectInstance.  We use a very
+            // large rect — the SDF shader clips to the rect; the
+            // user's modal sits in the foreground.
+            let last = ui_rects.last_mut().unwrap();
+            // Stretch to 100000 px so it covers any plausible display.
+            last.size = [100_000.0, 100_000.0];
+        }
         let px = panel.rect.x as f32;
         let py = panel.rect.y_top as f32;
         let pw = panel.rect.w as f32;
         let ph = panel.rect.h as f32;
-        let in_panel = |x: f32, y: f32| -> bool {
+        let in_modal = |x: f32, y: f32| -> bool {
             x >= px && x < px + pw && y >= py && y < py + ph
         };
-        glyphs.retain(|g| !in_panel(g.origin[0], g.origin[1]));
-        color_glyphs.retain(|g| !in_panel(g.origin[0], g.origin[1]));
-        cells.retain(|c| !in_panel(c.origin[0], c.origin[1]));
-        dots.retain(|c| !in_panel(c.origin[0], c.origin[1]));
+        glyphs.retain(|g| !in_modal(g.origin[0], g.origin[1]));
+        color_glyphs.retain(|g| !in_modal(g.origin[0], g.origin[1]));
+        cells.retain(|c| !in_modal(c.origin[0], c.origin[1]));
+        dots.retain(|c| !in_modal(c.origin[0], c.origin[1]));
         push_process_panel(
             panel, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             font, atlas, cells, glyphs, ui_rects,
         );
+        let _ = (pw, ph);
     }
 
     // Header version label — quiet metadata in the header strip,
@@ -2236,6 +2272,11 @@ fn push_process_panel(
         cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
     );
 
+    // Minimized: skip tab strip + body so only title bar shows.
+    if panel.minimized {
+        return;
+    }
+
     // 5) Tab strip.
     if !panel.tabs.is_empty() {
         let strip_y = py + title_h;
@@ -2276,7 +2317,9 @@ fn push_process_panel(
         );
     }
 
-    // 6) Body rows.
+    // 6) Body rows.  Honors `panel.scroll_y` so rows scrolled above
+    // the body get a negative y_top and are skipped; rows past the
+    // bottom break the loop.
     let body_top = py + title_h + tab_h;
     let body_pad_top = PROCESS_PANEL_BODY_PAD_TOP_LOGICAL * scale_hint;
     let body_pad_left = PROCESS_PANEL_BODY_PAD_LEFT_LOGICAL * scale_hint;
@@ -2286,10 +2329,16 @@ fn push_process_panel(
     let row_h = cell_h * 1.2;
     let body_bottom = py + ph - 6.0 * scale_hint;
     let kill_h = (row_h - 4.0).max(8.0);
+    let scroll_y = panel.scroll_y as f32;
     for (i, row) in panel.rows.iter().enumerate() {
-        let row_y = body_top + body_pad_top + (i as f32) * row_h;
+        let row_y = body_top + body_pad_top + (i as f32) * row_h - scroll_y;
         if row_y + row_h > body_bottom {
             break;
+        }
+        if row_y + row_h < body_top {
+            // Scrolled past the top edge — skip but keep iterating
+            // since later rows may still be visible.
+            continue;
         }
         let text_x = px + body_pad_left + (row.depth as f32) * indent;
         let baseline_y = row_y + ascent;
