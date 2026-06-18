@@ -1322,14 +1322,11 @@ impl CoreApp {
             old_offset = old_offset as u32,
             new_offset = new_view_offset as u32
         );
-        // F1+4 — close the overlay AFTER jumping so the user sees
-        // the jumped-to grid + highlight without the bar / list
-        // sitting on top of it.  Highlight stays on grid (cleared
-        // when user opens search again with a different query).
-        // Spec §6.7 had "query stays focused" but in practice the
-        // overlay obscures the very content the user wanted to see.
-        // Cmd+F re-opens for a follow-up search.
-        pane.search = None;
+        // F1+5 — bar stays open per §6.7.  Closing on Enter (F1+4)
+        // made the immediate next keystroke hit the L3 forward
+        // path's snap_to_live and bounce view_offset back to 0
+        // before the user could see the hit.  Esc closes the overlay
+        // and clears the highlight in one shot.
         self.needs_render = true;
     }
 
