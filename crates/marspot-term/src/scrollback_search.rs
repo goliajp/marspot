@@ -471,6 +471,140 @@ fn build_phys_spans(line: &LogicalLine, char_offset: usize, char_len: usize) -> 
     spans
 }
 
+// B3 — `SearchSource` adapter for `FileSnapshot`.  Lives here (not
+// in scrollback.rs) so the engine-internal trait can stay private to
+// this module while the file-backed source slots in as another
+// implementation.
+impl SearchSource for crate::scrollback::FileSnapshot {
+    fn line_count(&self) -> u64 {
+        self.total_lines()
+    }
+    fn line(&self, idx: u64) -> Option<Vec<Cell>> {
+        self.search_line(idx)
+    }
+    fn wrapped(&self, idx: u64) -> bool {
+        self.search_wrapped(idx)
+    }
+}
+
+// ──────────────────── B3: worker thread + wire shape ─────────────
+
+/// Off-thread search worker.  Owned by the L3 main loop; dropping it
+/// is the cancel signal.  The thread polls `cancel` between each
+/// emitted hit (≤ a few µs per check at search throughput) and
+/// abandons its batch on cancel, so no result can ever land for a
+/// cancelled query_id.
+pub struct SearchWorker {
+    pub query_id: u32,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // Detached on drop — the worker exits within < 1 ms of its next
+    // cancel check.  We don't join (would block the main loop).
+    _handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SearchWorker {
+    pub fn cancel(&self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Snapshot the cancel flag.  Used by tests to assert that
+    /// last-write-wins cancels the prior worker.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl Drop for SearchWorker {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Don't join — the worker exits at its next cancel.load(),
+        // which inside `scan_logical` is at most one logical line
+        // away.  Joining would risk blocking the main loop for the
+        // duration of one substring scan over a giant logical line.
+    }
+}
+
+/// Convert a fully-built `SearchHit` into the wire shape used by the
+/// `SearchResults` frame (§5.3 of `docs/scrollback-search.md`).
+pub fn to_wire_hit(h: SearchHit) -> crate::shell_proto::WireSearchHit {
+    let spans = h
+        .physical_rows
+        .into_iter()
+        .map(|s| crate::shell_proto::WirePhysicalSpan {
+            phys_row_idx: s.phys_row_idx,
+            col_start: s.col_start,
+            col_end_inclusive: s.col_end_inclusive,
+        })
+        .collect();
+    crate::shell_proto::WireSearchHit {
+        logical_line_idx: h.logical_line_idx,
+        char_offset: h.char_offset,
+        char_len: h.char_len,
+        snippet: h.snippet,
+        snippet_match_start: h.snippet_match_start,
+        snippet_match_end: h.snippet_match_end,
+        spans,
+    }
+}
+
+/// Spawn a search worker thread.  Takes ownership of `source` (a
+/// `Send` `SearchSource` — typically `FileSnapshot`) and runs the
+/// engine to completion (or cancel).  Delivers exactly one batch
+/// via `on_batch(query_id, hits, has_more, total_seen)` when the
+/// scan finishes naturally; delivers nothing when cancelled.
+///
+/// `has_more = (hits.len() == opts.max_total)` is an approximate
+/// flag — it's true whenever the engine stopped because it filled
+/// the cap, false when it ran to the end of scrollback first.
+/// `SearchMore` (D-phase) will turn this into a streaming protocol.
+pub fn spawn_search<S, F>(
+    query_id: u32,
+    source: S,
+    query: String,
+    opts: SearchOpts,
+    on_batch: F,
+) -> SearchWorker
+where
+    S: SearchSource + Send + 'static,
+    F: FnOnce(u32, Vec<crate::shell_proto::WireSearchHit>, bool, u32) + Send + 'static,
+{
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_w = std::sync::Arc::clone(&cancel);
+    let cap = opts.max_total;
+    let handle = std::thread::Builder::new()
+        .name(format!("l3-search-{query_id}"))
+        .spawn(move || {
+            let mut iter = search_scrollback(source, query, opts);
+            let mut hits: Vec<crate::shell_proto::WireSearchHit> = Vec::new();
+            let mut total_seen: u32 = 0;
+            loop {
+                if cancel_w.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                match iter.next() {
+                    Some(h) => {
+                        total_seen = total_seen.saturating_add(1);
+                        hits.push(to_wire_hit(h));
+                    }
+                    None => break,
+                }
+            }
+            if cancel_w.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let has_more = (hits.len() as u32) == cap;
+            on_batch(query_id, hits, has_more, total_seen);
+        })
+        .expect("spawn search worker");
+    SearchWorker {
+        query_id,
+        cancel,
+        _handle: Some(handle),
+    }
+}
+
 /// Centre an 80-char snippet on the match.  Returns
 /// `(snippet, snip_match_start, snip_match_end)` where the start/end
 /// are *char* offsets within the returned snippet.

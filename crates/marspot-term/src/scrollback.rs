@@ -153,6 +153,18 @@ impl Scrollback {
         }
     }
 
+    /// B3 — hand back an off-thread search snapshot of the File
+    /// variant (Memory/Disk return None).  The snapshot is `Send` and
+    /// owns its own read fds; the worker thread it gets handed to
+    /// can pread the file in parallel with the live writer.  See
+    /// `FileSnapshot` for the semantics.
+    pub fn file_snapshot(&self) -> Option<FileSnapshot> {
+        match self {
+            Self::File(f) => f.snapshot_for_search().ok(),
+            _ => None,
+        }
+    }
+
     /// File variant only: per-line wrapped flag.  Memory/Disk return
     /// false (Grid's `sb_wrapped` is the truth there).
     pub fn wrapped_at(&self, idx: usize) -> bool {
@@ -1333,6 +1345,90 @@ impl Drop for FileScrollback {
         }
         let _ = self.bin_for_read.seek(SeekFrom::Start(0));
         let _ = self.idx_for_read.seek(SeekFrom::Start(0));
+    }
+}
+
+/// B3 — frozen-at-snapshot read view of a `FileScrollback`, sized for
+/// the off-thread search worker.  Owns its own read-only fds so the
+/// worker can `pread()` the file in parallel with the live writer
+/// (POSIX guarantees pread on one fd is safe against concurrent
+/// O_APPEND on another).  `total_lines` is captured at snapshot time
+/// — appends that arrive after `snapshot_for_search()` returns are
+/// invisible to this view; the live-grid merge in B4 covers the
+/// most-recent rows that haven't yet been pushed to scrollback.
+///
+/// Cheap to construct: 2 file opens + 1 flush of the live BufWriters.
+/// No clone of any in-RAM buffer — the worker pays a pread per row,
+/// served entirely by the kernel page cache for recently-written
+/// pages and by disk for older ones.
+pub struct FileSnapshot {
+    bin: std::fs::File,
+    idx: std::fs::File,
+    total_lines: u64,
+    /// LRU-of-1 record cache.  `scrollback_search::SearchIter` calls
+    /// `wrapped(row)` + `line(row)` and `is_cc_hard_wrap()` (two more
+    /// `line()` reads) back-to-back inside `next_logical` — without
+    /// this cache that's up to 4 pread+decode round-trips per
+    /// physical row.
+    last_read: std::cell::RefCell<Option<(u64, std::sync::Arc<(Vec<crate::grid::Cell>, bool)>)>>,
+}
+
+// Owned by a single worker thread; the RefCell only ever sees that
+// one thread.  Send (not Sync) is what the worker needs.
+unsafe impl Send for FileSnapshot {}
+
+impl FileSnapshot {
+    pub fn total_lines(&self) -> u64 {
+        self.total_lines
+    }
+
+    fn read_row(&self, idx: u64) -> Option<std::sync::Arc<(Vec<crate::grid::Cell>, bool)>> {
+        if idx >= self.total_lines {
+            return None;
+        }
+        if let Some((cached_idx, cached)) = &*self.last_read.borrow() {
+            if *cached_idx == idx {
+                return Some(std::sync::Arc::clone(cached));
+            }
+        }
+        let off = read_idx_at(&self.idx, idx).ok()?;
+        let (cells, wrapped) = read_record_at(&self.bin, off).ok()?;
+        let arc = std::sync::Arc::new((cells, wrapped));
+        *self.last_read.borrow_mut() = Some((idx, std::sync::Arc::clone(&arc)));
+        Some(arc)
+    }
+
+    /// `SearchSource::line` for the search engine.
+    pub fn search_line(&self, idx: u64) -> Option<Vec<crate::grid::Cell>> {
+        self.read_row(idx).map(|a| a.0.clone())
+    }
+
+    /// `SearchSource::wrapped` for the search engine.
+    pub fn search_wrapped(&self, idx: u64) -> bool {
+        self.read_row(idx).map(|a| a.1).unwrap_or(false)
+    }
+}
+
+impl FileScrollback {
+    /// B3 — flush the live writer's BufWriters and hand back a
+    /// `FileSnapshot` that the search worker can pread independently.
+    /// The new fds are opened against the same `.bin` / `.idx` paths
+    /// the live writer is appending to; pread on the snapshot's fds
+    /// never blocks the writer and the writer never invalidates the
+    /// snapshot's view (appends only grow the file past
+    /// `total_lines`).
+    pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
+        use std::io::Write;
+        self.bin.borrow_mut().flush()?;
+        self.idx.borrow_mut().flush()?;
+        let bin = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
+        let idx = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
+        Ok(FileSnapshot {
+            bin,
+            idx,
+            total_lines: self.total_lines,
+            last_read: std::cell::RefCell::new(None),
+        })
     }
 }
 

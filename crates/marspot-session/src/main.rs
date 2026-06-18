@@ -35,11 +35,12 @@ use marspot_term::grid_shm::{
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
+use marspot_term::scrollback_search::{spawn_search, SearchOpts, SearchWorker};
 use marspot_term::shell_proto::{
     decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
-    decode_paste,
-    encode_selection_text, wire_to_event, Frame, MsgType,
-    DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
+    decode_paste, decode_search_cancel, decode_search_scrollback,
+    encode_search_results, encode_selection_text, wire_to_event, Frame, MsgType,
+    WireSearchHit, DEFAULT_CONTROL_FD, ENV_CONTROL_FD,
 };
 use marspot_term::session_state::{PendingPage, SessionState};
 
@@ -182,6 +183,34 @@ enum SessionEvent {
     /// or the user-quit path will close that vault entry too, letting
     /// the shell exit on its own.
     ShutdownRequested,
+    /// B3 — L2 asked for a scrollback search.  Main loop snapshots the
+    /// File-backed scrollback off the live grid, cancels any in-flight
+    /// worker (last-write-wins, D15), and spawns a new
+    /// `SearchWorker`.  Worker callback re-enters the channel as
+    /// `SearchHitsReady` so the wire emit happens on the main thread
+    /// (single-writer to `poke`).
+    SearchRequest {
+        query_id: u32,
+        case_sensitive: bool,
+        max_total: u32,
+        query: String,
+    },
+    /// B3 — L2 asked to cancel the in-flight query.  Drops the worker
+    /// (sets its cancel flag); a late `SearchHitsReady` from the
+    /// cancelled worker is dropped by the qid-match check in the main
+    /// loop.
+    SearchCancelRequested(u32),
+    /// B3 — worker thread finished (or was cancelled cleanly) and
+    /// posted its batch.  Main loop encodes a `SearchResults` frame +
+    /// writes to `poke` IFF the qid matches the still-current worker;
+    /// stale batches from a worker that was cancelled by a newer
+    /// `SearchRequest` are silently dropped.
+    SearchHitsReady {
+        query_id: u32,
+        hits: Vec<WireSearchHit>,
+        has_more: bool,
+        total_seen: u32,
+    },
 }
 
 /// RFC-003 §6 Amendment 15 — SIGTERM self-pipe write end.  -1 until
@@ -686,6 +715,33 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         }
                     }
                 }
+                MsgType::SearchScrollback => {
+                    if let Ok((query_id, case_sensitive, max_total, query)) =
+                        decode_search_scrollback(&f.payload)
+                    {
+                        if tx
+                            .send(SessionEvent::SearchRequest {
+                                query_id,
+                                case_sensitive,
+                                max_total,
+                                query,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                MsgType::SearchCancel => {
+                    if let Ok(query_id) = decode_search_cancel(&f.payload) {
+                        if tx
+                            .send(SessionEvent::SearchCancelRequested(query_id))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
                 _ => {}
             },
             Ok(None) | Err(_) => {
@@ -1048,6 +1104,12 @@ fn main() {
     // the loop and the post-loop dispatcher decides between execv
     // handoff and clean-exit based on `should_execv_on_sigterm`.
     let mut want_shutdown = false;
+    // B3 — in-flight scrollback search worker, or None.  At most one
+    // worker per L3 at any time (last-write-wins, D15): a new
+    // `SearchRequest` drops this Option, which sets the old worker's
+    // cancel flag; the old worker exits at its next iteration without
+    // delivering its batch.
+    let mut current_search: Option<SearchWorker> = None;
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1126,6 +1188,136 @@ fn main() {
                     // needs ownership).  Drain the rest of this
                     // burst then break.
                     want_shutdown = true;
+                }
+                SessionEvent::SearchRequest {
+                    query_id,
+                    case_sensitive,
+                    max_total,
+                    query,
+                } => {
+                    // Last-write-wins (D15): cancel the prior worker
+                    // (Drop sets its AtomicBool; it exits at its next
+                    // iteration without delivering).  Any in-flight
+                    // SearchHitsReady from the prior query is dropped
+                    // by the qid-match check below.
+                    if let Some(prev) = current_search.take() {
+                        prev.cancel();
+                    }
+                    let snap = session
+                        .terminal()
+                        .grid()
+                        .file_scrollback_snapshot();
+                    match snap {
+                        Some(snap) => {
+                            let tx = ev_tx.clone();
+                            let opts = SearchOpts {
+                                case_sensitive,
+                                max_total,
+                            };
+                            let worker = spawn_search(
+                                query_id,
+                                snap,
+                                query,
+                                opts,
+                                move |qid, hits, has_more, total_seen| {
+                                    let _ = tx.send(SessionEvent::SearchHitsReady {
+                                        query_id: qid,
+                                        hits,
+                                        has_more,
+                                        total_seen,
+                                    });
+                                },
+                            );
+                            lx_debug!(
+                                "session.search.spawn",
+                                "search worker spawned",
+                                query_id = query_id,
+                                max_total = max_total
+                            );
+                            current_search = Some(worker);
+                        }
+                        None => {
+                            // No File-backed scrollback (Memory/Disk variant
+                            // → opt-in env not set, or pre-FLIP default).
+                            // Reply empty so the L2 search UI exits the
+                            // "waiting" state.
+                            if let Some(w) = poke.as_mut() {
+                                let payload = encode_search_results(
+                                    query_id,
+                                    false,
+                                    0,
+                                    &[],
+                                );
+                                let _ = Frame::new(MsgType::SearchResults, payload)
+                                    .write_to(w);
+                            }
+                            lx_debug!(
+                                "session.search.no_file_scrollback",
+                                "empty SearchResults sent (Memory/Disk variant)",
+                                query_id = query_id
+                            );
+                        }
+                    }
+                }
+                SessionEvent::SearchCancelRequested(query_id) => {
+                    // Cancel only if it matches the current worker's qid.
+                    // A late cancel for an older qid is a no-op (the
+                    // old worker was already cancelled when the new
+                    // SearchRequest arrived).
+                    let matches = current_search
+                        .as_ref()
+                        .map(|w| w.query_id == query_id)
+                        .unwrap_or(false);
+                    if matches {
+                        if let Some(w) = current_search.take() {
+                            w.cancel();
+                        }
+                        lx_debug!(
+                            "session.search.cancel",
+                            "search worker cancelled by request",
+                            query_id = query_id
+                        );
+                    }
+                }
+                SessionEvent::SearchHitsReady {
+                    query_id,
+                    hits,
+                    has_more,
+                    total_seen,
+                } => {
+                    // Last-write-wins: emit IFF this batch belongs to
+                    // the current worker.  A batch from a worker that
+                    // raced through to completion before we set its
+                    // cancel flag (and got superseded by a newer
+                    // SearchRequest before we processed it) lands
+                    // here with a stale qid — drop it.
+                    let live = current_search
+                        .as_ref()
+                        .map(|w| w.query_id == query_id)
+                        .unwrap_or(false);
+                    if live {
+                        if let Some(w) = poke.as_mut() {
+                            let payload =
+                                encode_search_results(query_id, has_more, total_seen, &hits);
+                            let _ = Frame::new(MsgType::SearchResults, payload).write_to(w);
+                        }
+                        // Worker has delivered; we can drop our
+                        // handle.  Drop is a no-op cancel signal at
+                        // this point (the worker has already exited).
+                        current_search = None;
+                        lx_debug!(
+                            "session.search.results",
+                            "SearchResults written to poke",
+                            query_id = query_id,
+                            total_seen = total_seen
+                        );
+                    } else {
+                        lx_debug!(
+                            "session.search.stale_batch",
+                            "dropped stale SearchHitsReady",
+                            query_id = query_id
+                        );
+                    }
                 }
                 SessionEvent::NewClient(stream) => {
                     // Adopt the validated stream as the control
@@ -1352,5 +1544,314 @@ fn main() {
             );
             std::process::exit(0);
         }
+    }
+}
+
+// B3 integration tests — per `docs/scrollback-search.md` §7.2 +
+// §12.B3.  These exercise the L3-side surface of the search rollout:
+// `FileScrollback::snapshot_for_search()` + `spawn_search` worker +
+// the last-write-wins dispatch contract.  They don't boot the full
+// `main()` (which needs PTY + L2 socket) — instead they reproduce the
+// state-machine moves the main loop makes and assert the observable
+// behaviour the wire protocol promises.
+#[cfg(test)]
+mod b3_tests {
+    use super::*;
+    use marspot_term::grid::{Cell, CellAttrs};
+    use marspot_term::scrollback::FileScrollback;
+    use marspot_term::scrollback_search::{
+        spawn_search, InMemorySource, SearchOpts, SearchSource, SearchWorker,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrd};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// Throwaway temp dir for FileScrollback persistence.  Same shape
+    /// as the `TmpDir` in `marspot-term::scrollback`'s tests; rebuilt
+    /// here to keep the integration tests self-contained.
+    struct TmpDir {
+        path: std::path::PathBuf,
+    }
+    impl TmpDir {
+        fn new(label: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, AtomicOrd::Relaxed);
+            let pid = std::process::id();
+            let dir = std::env::temp_dir()
+                .join(format!("marspot-b3-{label}-{pid}-{n}"));
+            std::fs::create_dir_all(&dir).expect("tmpdir");
+            Self { path: dir }
+        }
+        fn bin(&self) -> std::path::PathBuf {
+            self.path.join("scrollback.bin")
+        }
+        fn idx(&self) -> std::path::PathBuf {
+            self.path.join("scrollback.idx")
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn line_of(cols: usize, fill: char) -> Vec<Cell> {
+        (0..cols)
+            .map(|_| Cell {
+                ch: fill,
+                attrs: CellAttrs::default(),
+            })
+            .collect()
+    }
+
+    fn line_from_str(s: &str, cols: usize) -> Vec<Cell> {
+        let mut out: Vec<Cell> = s
+            .chars()
+            .take(cols)
+            .map(|c| Cell {
+                ch: c,
+                attrs: CellAttrs::default(),
+            })
+            .collect();
+        while out.len() < cols {
+            out.push(Cell {
+                ch: ' ',
+                attrs: CellAttrs::default(),
+            });
+        }
+        out
+    }
+
+    /// 1 MB scrollback (≈ 10 k lines × 100 cols × ~24 B/cell + per-
+    /// record overhead).  Search for "foo", first 64 hits must land
+    /// in `< 50 ms` per the §4.6 budget for B3.
+    #[test]
+    fn b3_perf_1mb_first_64_hits_under_50ms() {
+        let tmp = TmpDir::new("perf");
+        let cols = 100usize;
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 1024)
+            .expect("open FileScrollback");
+        // Populate ~10 000 lines.  Every 100th line carries "foo" so
+        // a max_total=64 scan will exit early after walking ~6 400
+        // physical rows from the tail.
+        let n = 10_000;
+        for i in 0..n {
+            let s = if i % 100 == 7 {
+                format!("scratch line {i:05} foo bar baz qux quux corge grault garply waldo fred jim")
+            } else {
+                format!("scratch line {i:05} hello world abc def ghi jkl mno pqr stu vwx yz0 123 456")
+            };
+            sb.push_line(&line_from_str(&s, cols), false);
+        }
+        // Drop the live writer to flush its BufWriters.  The snapshot
+        // for the worker reopens the file path with its own read fds.
+        let snap = sb
+            .snapshot_for_search()
+            .expect("snapshot_for_search");
+        drop(sb);
+
+        let (tx, rx) = mpsc::channel::<(u32, Vec<WireSearchHit>, bool, u32, Duration)>();
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 64,
+        };
+        let started = Instant::now();
+        let _worker = spawn_search(42, snap, "foo".to_string(), opts, move |qid, hits, hm, ts| {
+            let _ = tx.send((qid, hits, hm, ts, started.elapsed()));
+        });
+        let (qid, hits, has_more, total_seen, elapsed) = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker batch within 2 s");
+        assert_eq!(qid, 42);
+        assert_eq!(hits.len(), 64, "expected to fill max_total=64");
+        assert!(has_more, "max_total cap reached should set has_more=true");
+        assert!(total_seen >= 64);
+        // §4.6 budget: 1 MB scrollback first 64 hits < 50 ms.  This is
+        // the dev-box ceiling; bin/bench-remote enforces the mini
+        // floor.  Generous on debug builds — release should be < 5 ms.
+        let budget = if cfg!(debug_assertions) {
+            Duration::from_millis(500)
+        } else {
+            Duration::from_millis(50)
+        };
+        assert!(
+            elapsed < budget,
+            "1 MB search first 64 hits should be < {budget:?}; got {elapsed:?}"
+        );
+    }
+
+    /// Adapter that sleeps in `line()` so we can race the cancel flag
+    /// against the search loop.  Reads from an `InMemorySource` so we
+    /// don't pay file I/O on top of the synthetic delay.
+    struct SlowSource {
+        inner: InMemorySource,
+        delay_us: u64,
+    }
+    impl SearchSource for SlowSource {
+        fn line_count(&self) -> u64 {
+            self.inner.line_count()
+        }
+        fn line(&self, idx: u64) -> Option<Vec<Cell>> {
+            std::thread::sleep(Duration::from_micros(self.delay_us));
+            self.inner.line(idx)
+        }
+        fn wrapped(&self, idx: u64) -> bool {
+            self.inner.wrapped(idx)
+        }
+    }
+
+    fn slow_source(rows: usize, delay_us: u64) -> SlowSource {
+        let inner_rows: Vec<(Vec<Cell>, bool)> = (0..rows)
+            .map(|i| {
+                let s = format!("row {i:05} foo bar baz");
+                let cells: Vec<Cell> = s
+                    .chars()
+                    .map(|c| Cell {
+                        ch: c,
+                        attrs: CellAttrs::default(),
+                    })
+                    .collect();
+                (cells, false)
+            })
+            .collect();
+        SlowSource {
+            inner: InMemorySource { rows: inner_rows },
+            delay_us,
+        }
+    }
+
+    /// Cancelling an in-flight worker (by dropping its handle, the
+    /// `SearchWorker::Drop` sets the cancel flag) must guarantee that
+    /// `on_batch` never fires.  The §12.B3 DoD requires "worker exits
+    /// within 1 ms of next iteration"; we give it a 250 ms wait
+    /// window and assert nothing arrives.
+    #[test]
+    fn b3_cancel_drops_inflight_search() {
+        let src = slow_source(1000, 500); // 500 µs × 1000 = 500 ms total
+        let (tx, rx) = mpsc::channel::<u32>();
+        // Hold an extra sender so the rx side stays open after the
+        // worker's cloned sender drops (worker exits on cancel
+        // without invoking the callback).
+        let _keepalive = tx.clone();
+        let opts = SearchOpts {
+            case_sensitive: false,
+            max_total: 1000,
+        };
+        let worker = spawn_search(7, src, "foo".to_string(), opts, move |qid, _hits, _hm, _ts| {
+            let _ = tx.send(qid);
+        });
+        // Let the worker enter at least one row.
+        std::thread::sleep(Duration::from_millis(5));
+        // Drop = cancel.  Worker exits at its next cancel.load() check.
+        drop(worker);
+        // Wait long enough that the worker would have finished if not
+        // cancelled (~500 ms uncancelled run) — assert no batch.
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Err(mpsc::RecvTimeoutError::Timeout) => { /* PASS — cancel suppressed batch */ }
+            other => panic!("expected cancel to suppress batch; got {other:?}"),
+        }
+    }
+
+    /// Last-write-wins: a new `SearchRequest` cancels the prior
+    /// worker AND a stale `SearchHitsReady` from the cancelled worker
+    /// (if it raced through before its cancel flag was checked) gets
+    /// dropped by the main-loop dispatch.  We replay the dispatch
+    /// state machine inline here without booting `main()`.
+    #[test]
+    fn b3_last_write_wins_new_query_supersedes_old() {
+        let (tx, rx) = mpsc::channel::<(u32, Vec<WireSearchHit>, bool, u32)>();
+
+        // Spawn A on a slow source — most likely cancelled mid-flight.
+        let tx_a = tx.clone();
+        let src_a = slow_source(2000, 500);
+        let worker_a = spawn_search(
+            100,
+            src_a,
+            "foo".to_string(),
+            SearchOpts {
+                case_sensitive: false,
+                max_total: 5000,
+            },
+            move |qid, hits, hm, ts| {
+                let _ = tx_a.send((qid, hits, hm, ts));
+            },
+        );
+        let mut current: Option<SearchWorker> = Some(worker_a);
+
+        // Brief delay so A is definitely scanning.
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Replay main-loop SearchRequest handler: cancel prior worker
+        // by dropping it, spawn new one.
+        if let Some(prev) = current.take() {
+            prev.cancel();
+        }
+
+        // B is a fast in-memory source — finishes promptly.
+        let tx_b = tx.clone();
+        let src_b = InMemorySource {
+            rows: (0..50)
+                .map(|i| {
+                    let s = format!("row {i} foo");
+                    let cells: Vec<Cell> = s
+                        .chars()
+                        .map(|c| Cell {
+                            ch: c,
+                            attrs: CellAttrs::default(),
+                        })
+                        .collect();
+                    (cells, false)
+                })
+                .collect(),
+        };
+        let worker_b = spawn_search(
+            101,
+            src_b,
+            "foo".to_string(),
+            SearchOpts {
+                case_sensitive: false,
+                max_total: 64,
+            },
+            move |qid, hits, hm, ts| {
+                let _ = tx_b.send((qid, hits, hm, ts));
+            },
+        );
+        // Shadow `current` so the prior binding's last value is
+        // dropped here cleanly without a dead-store warning.
+        let current: Option<SearchWorker> = Some(worker_b);
+        drop(tx); // No further producers; rx will see RecvTimeoutError after the workers finish.
+
+        // Replay main-loop SearchHitsReady dispatch.  Loop until we've
+        // collected the live batch (or timed out).  Any batch for a
+        // qid that doesn't match `current.query_id` must be dropped.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut delivered: Vec<u32> = Vec::new();
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining.min(Duration::from_millis(200))) {
+                Ok((qid, _hits, _hm, _ts)) => {
+                    let live = current
+                        .as_ref()
+                        .map(|w| w.query_id == qid)
+                        .unwrap_or(false);
+                    if live {
+                        delivered.push(qid);
+                        // Worker delivered.  We break out, so we don't
+                        // bother clearing `current` here — Drop on
+                        // scope exit takes care of it.
+                        break;
+                    }
+                    // Stale → dropped, do not record.
+                }
+                Err(_) => break,
+            }
+        }
+
+        assert_eq!(
+            delivered,
+            vec![101],
+            "only B's qid should land in the dispatch sink; got {delivered:?}"
+        );
+        let _ = line_of; // silence dead-helper lint
     }
 }

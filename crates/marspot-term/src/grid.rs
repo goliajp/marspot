@@ -643,6 +643,13 @@ impl Grid {
 
     pub fn scrollback_len(&self) -> usize { self.scrollback.len() }
     pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity() }
+    /// B3 — hand back an off-thread search snapshot of the File-backed
+    /// scrollback (returns None for Memory/Disk variants).  Used by
+    /// the L3 main loop on `SearchScrollback` to feed an isolated
+    /// view to the search worker thread.
+    pub fn file_scrollback_snapshot(&self) -> Option<crate::scrollback::FileSnapshot> {
+        self.scrollback.file_snapshot()
+    }
     /// One cell from scrollback by `(line_idx, col)`.  Hot path —
     /// avoids per-line allocation that the disk-backed variant
     /// would otherwise need to materialise a slice.
