@@ -1133,7 +1133,15 @@ fn main() {
             match ev {
                 SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
-                SessionEvent::Scroll(off) => pending_scroll = Some(off),
+                SessionEvent::Scroll(off) => {
+                    lx_event!(
+                        "L3_SCROLL_RECV",
+                        "GridScroll received from L2",
+                        session_id = session.id(),
+                        off = off as u32
+                    );
+                    pending_scroll = Some(off);
+                }
                 // Each request gets its own reply (don't coalesce — L2 is
                 // blocking on a reply per request).
                 SessionEvent::GetSelection(seq, a, f, bw) => selection_reqs.push((seq, a, f, bw)),
@@ -1437,6 +1445,15 @@ fn main() {
         // a resize (grid shape changed), or a scroll (window changed) —
         // even when no bytes pumped this tick.
         if n > 0 || predicted || resized || scrolled {
+            if scrolled {
+                lx_event!(
+                    "L3_PUBLISH",
+                    "publish_and_poke after scroll",
+                    session_id = session.id(),
+                    view_offset = view_offset as u32,
+                    cause = "scrolled"
+                );
+            }
             publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
         }
 
