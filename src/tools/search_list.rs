@@ -162,32 +162,40 @@ impl SearchList {
         self.pending_more = false;
     }
 
-    /// Cycle focus forward by 1.  Wraps at the end (§6.9: "Cmd+G
-    /// move focused result +1 (wraps to 0 at end)").  Adjusts
-    /// `visible_top` to keep `focused` in the viewport.  Returns a
-    /// `JumpRequest::JumpToFocused` when there was a focused hit to
-    /// move to, so the caller can jump the grid view.
+    /// Move focus forward by 1.  Stops at the end (no wrap-around —
+    /// per F1+ user feedback the spec §6.9 wrap behaviour was
+    /// disorienting when paging through results; jumping back to
+    /// the newest hit after passing the end made the list look like
+    /// it "lost" the user's scroll position).  Returns `None` when
+    /// already at the end (so the caller can skip the redraw),
+    /// `JumpToFocused` when focus moved.  Adjusts `visible_top` to
+    /// keep `focused` in the viewport.
     pub fn focus_next(&mut self) -> JumpRequest {
         let n = self.hits.len();
         if n == 0 {
             return JumpRequest::None;
         }
         let cur = self.focused.unwrap_or(0);
-        let next = (cur + 1) % n;
-        self.focused = Some(next);
+        if cur + 1 >= n {
+            return JumpRequest::None;
+        }
+        self.focused = Some(cur + 1);
         self.clamp_visible_to_focus();
         JumpRequest::JumpToFocused
     }
 
-    /// Cycle focus backward by 1.  Wraps at the start.
+    /// Move focus backward by 1.  Stops at the start (no wrap-around;
+    /// see `focus_next`).
     pub fn focus_prev(&mut self) -> JumpRequest {
         let n = self.hits.len();
         if n == 0 {
             return JumpRequest::None;
         }
         let cur = self.focused.unwrap_or(0);
-        let prev = if cur == 0 { n - 1 } else { cur - 1 };
-        self.focused = Some(prev);
+        if cur == 0 {
+            return JumpRequest::None;
+        }
+        self.focused = Some(cur - 1);
         self.clamp_visible_to_focus();
         JumpRequest::JumpToFocused
     }
@@ -379,7 +387,9 @@ mod tests {
     }
 
     #[test]
-    fn c3_focus_next_wraps_at_end_and_jumps() {
+    fn c3_focus_next_stops_at_end() {
+        // F1+: per user feedback, no wrap-around — staying at the
+        // last entry is the more intuitive behaviour when paging.
         let mut l = SearchList::new();
         l.query_id = 1;
         l.apply_results(1, vec![hit(3, "a"), hit(2, "b"), hit(1, "c")], false);
@@ -388,19 +398,26 @@ mod tests {
         assert_eq!(l.focused, Some(1));
         l.focus_next();
         assert_eq!(l.focused, Some(2));
-        l.focus_next();
-        assert_eq!(l.focused, Some(0)); // wrapped
+        // At end → no-op + JumpRequest::None.
+        assert_eq!(l.focus_next(), JumpRequest::None);
+        assert_eq!(l.focused, Some(2));
     }
 
     #[test]
-    fn c3_focus_prev_wraps_at_start() {
+    fn c3_focus_prev_stops_at_start() {
         let mut l = SearchList::new();
         l.query_id = 1;
         l.apply_results(1, vec![hit(3, "a"), hit(2, "b"), hit(1, "c")], false);
-        l.focus_prev();
-        assert_eq!(l.focused, Some(2)); // wrap to end
-        l.focus_prev();
+        // At start → no-op + JumpRequest::None.
+        assert_eq!(l.focus_prev(), JumpRequest::None);
+        assert_eq!(l.focused, Some(0));
+        // Move forward, then back, should reach start fine.
+        l.focus_next();
         assert_eq!(l.focused, Some(1));
+        l.focus_prev();
+        assert_eq!(l.focused, Some(0));
+        // Hit boundary again.
+        assert_eq!(l.focus_prev(), JumpRequest::None);
     }
 
     #[test]

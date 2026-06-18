@@ -2926,18 +2926,21 @@ fn push_session(
                 let grid_bottom = inner_y + rows as f32 * cell_h;
                 let list_h_clamped = list_h.min(grid_bottom - list_y_top).max(0.0);
                 if list_h_clamped > 0.0 {
-                    // BG fill.
+                    // BG fill (opaque — bar + list must read as chrome
+                    // sitting fully ABOVE the grid; any translucency
+                    // causes terminal content to bleed through and the
+                    // overlay reads as a stain rather than a panel).
                     cells.push(CellInstance {
                         origin: [bar_x, list_y_top],
                         size: [bar_w, list_h_clamped],
-                        color: [SEARCH_BAR_BG.0, SEARCH_BAR_BG.1, SEARCH_BAR_BG.2, 0.95],
+                        color: [SEARCH_BAR_BG.0, SEARCH_BAR_BG.1, SEARCH_BAR_BG.2, 1.0],
                     });
                     // Per-hit row.
                     let max_visible = (list_h_clamped / cell_h) as usize;
                     for (i, h) in overlay.hits.iter().take(max_visible).enumerate() {
                         let row_y = list_y_top + i as f32 * cell_h;
                         if h.is_focused {
-                            // Focused row gets HIGHLIGHT_BG.
+                            // Focused row gets HIGHLIGHT_BG (opaque).
                             cells.push(CellInstance {
                                 origin: [bar_x, row_y],
                                 size: [bar_w, cell_h],
@@ -2945,7 +2948,7 @@ fn push_session(
                                     HIGHLIGHT_BG.0,
                                     HIGHLIGHT_BG.1,
                                     HIGHLIGHT_BG.2,
-                                    0.85,
+                                    1.0,
                                 ],
                             });
                         }
