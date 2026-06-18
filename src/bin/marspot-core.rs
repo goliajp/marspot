@@ -180,6 +180,18 @@ enum CoreEvent {
     /// pane and forwards via the existing control channel as an
     /// InjectInput frame.
     InjectInput(u64, Vec<u8>),
+    /// C5 — L3 → L2 `SearchResults` frame.  Carries the shelld
+    /// session id (so we can route to the right pane in a multi-pane
+    /// world), the query_id (so a stale batch from a cancelled
+    /// worker gets dropped by the pane's `SearchList`), and the
+    /// decoded payload fields.
+    SearchResults(
+        u64,
+        u32,
+        bool,
+        u32,
+        Vec<marspot::shell_proto::WireSearchHit>,
+    ),
 }
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
@@ -279,6 +291,22 @@ fn l3_reader_loop(
                     // reply from an earlier, timed-out request.
                     if let Ok(reply) = decode_selection_text(&f.payload) {
                         let _ = selection_tx.send(reply);
+                    }
+                }
+                // C5 — L3 search worker delivered a batch.  Stale
+                // qid is dropped by the pane's SearchList in
+                // `apply_results` (D15 last-write-wins).
+                MsgType::SearchResults => {
+                    if let Ok((qid, has_more, total_seen, hits)) =
+                        marspot::shell_proto::decode_search_results(&f.payload)
+                    {
+                        let _ = tx.send(CoreEvent::SearchResults(
+                            session_id,
+                            qid,
+                            has_more,
+                            total_seen,
+                            hits,
+                        ));
                     }
                 }
                 _ => {}
@@ -992,6 +1020,294 @@ impl CoreApp {
         self.title_edit_buffer.clear();
     }
 
+    // ─── C5: scrollback search overlay ────────────────────────────
+
+    /// `MARSPOT_SEARCH=1` opt-in gate.  F1 removes this gate (the
+    /// feature ships on by default).  Until then Cmd+F is a no-op
+    /// for any user who hasn't exported the env var.
+    fn search_enabled() -> bool {
+        std::env::var("MARSPOT_SEARCH").as_deref() == Ok("1")
+    }
+
+    /// Minimum pane width (in cell cols) below which Cmd+F is a no-op
+    /// per §6.7.  The search bar is 40 cols wide; a 24-col floor leaves
+    /// headroom for narrow PaneSession dialogs that legitimately use
+    /// the keyboard.
+    const SEARCH_MIN_PANE_COLS: u16 = 24;
+
+    /// Cmd+F handler.  When search is closed → open + focus query.
+    /// When already open → re-focus + select-all (browser convention
+    /// per §6.9).  Narrow-pane fallback skips the open entirely.
+    fn handle_cmd_f(&mut self) -> bool {
+        if !Self::search_enabled() {
+            return false;
+        }
+        let idx = self.focused_idx;
+        let Some(pane) = self.panes.get_mut(idx) else { return false };
+        // Width gate (§6.7).
+        let grid_cols = pane.session().grid().cols();
+        if grid_cols < Self::SEARCH_MIN_PANE_COLS {
+            lx_event!(
+                "L2_SEARCH_NARROW_PANE",
+                "Cmd+F suppressed; pane too narrow",
+                cols = grid_cols,
+                min = Self::SEARCH_MIN_PANE_COLS as u32
+            );
+            return true; // claim it so the key isn't typed as 'f'
+        }
+        match pane.search.as_mut() {
+            None => {
+                pane.search = Some(marspot::pane::PaneSearch::open());
+                self.needs_render = true;
+                lx_event!(
+                    "L2_SEARCH_OPEN",
+                    "Cmd+F opened search overlay",
+                    pane_idx = idx as u32
+                );
+            }
+            Some(s) => {
+                // Re-focus + select-all: bar cursor to end (we don't
+                // model selection inside the single-line query; the
+                // SearchBar's Cmd+A behaviour maps to "cursor to end").
+                s.bar.focused = true;
+                s.bar.cursor = s.bar.query_char_len();
+                self.needs_render = true;
+            }
+        }
+        true
+    }
+
+    /// Apply an incoming `SearchResults` batch.  Routes to the pane
+    /// hosting `shelld_session_id`; drops stale batches via the
+    /// SearchList's qid check.
+    fn apply_search_results(
+        &mut self,
+        shelld_session_id: u64,
+        query_id: u32,
+        has_more: bool,
+        hits: Vec<marspot::shell_proto::WireSearchHit>,
+    ) {
+        let Some(pane) = self.panes.iter_mut().find(|p| {
+            p.session().shelld_session_id() == Some(shelld_session_id)
+        }) else { return };
+        let Some(s) = pane.search.as_mut() else { return };
+        let changed = s.list.apply_results(query_id, hits, has_more);
+        if changed {
+            self.needs_render = true;
+        }
+    }
+
+    /// Walk panes whose search is open + debounce_until is past;
+    /// emit a fresh `SearchScrollback` frame on each.  Called from
+    /// `pump_all` each loop iteration; cheap when no search is open
+    /// (idle = single `is_none` check per pane).
+    fn process_search_debounces(&mut self) {
+        let now = std::time::Instant::now();
+        for pane in self.panes.iter_mut() {
+            let Some(s) = pane.search.as_mut() else { continue };
+            let fire = match s.bar.debounce_until {
+                Some(t) if now >= t => true,
+                _ => false,
+            };
+            if !fire {
+                continue;
+            }
+            s.bar.debounce_until = None;
+            // Skip the emit when the query hasn't actually changed
+            // since the last fire (Cmd+A / arrow keys reset the
+            // debounce by editing intent but produce no diff).
+            if s.bar.query == s.last_emitted_query {
+                continue;
+            }
+            let qid = s.next_query_id;
+            s.next_query_id = s.next_query_id.wrapping_add(1).max(1);
+            s.bar.query_id = qid;
+            s.last_emitted_query = s.bar.query.clone();
+            // Empty query — cancel any in-flight worker, clear the
+            // list, don't emit a new search.
+            if s.bar.query.is_empty() {
+                s.list.reset_for_query(qid);
+                pane.session_mut().forward_search_cancel(qid);
+                pane.active_highlight = None;
+                continue;
+            }
+            s.list.reset_for_query(qid);
+            pane.active_highlight = None;
+            let case_sensitive = s.bar.case_sensitive;
+            let query = s.bar.query.clone();
+            pane.session_mut()
+                .forward_search_scrollback(qid, case_sensitive, 64, &query);
+        }
+    }
+
+    /// Routes a key event to the focused pane's search overlay (if
+    /// open).  Returns `true` when the key was consumed (don't
+    /// propagate to PTY / Cmd-C / etc.).  Implements §6.7 routing
+    /// rules: ↑/↓/Enter → list; everything else → bar.
+    fn search_consume_key(
+        &mut self,
+        event: &MarspotKeyEvent,
+        mods: Modifiers,
+    ) -> bool {
+        use marspot::input::{LogicalKey, NamedKey};
+        if !Self::search_enabled() {
+            return false;
+        }
+        let idx = self.focused_idx;
+        // Decision: list vs bar.  Done in a scope so the mutable
+        // borrow of `self.panes` ends before we call
+        // `jump_to_focused_hit(idx)` (which needs a fresh &mut self).
+        enum Outcome {
+            NotOpen,
+            Consumed,
+            ConsumedJump,
+            ConsumedClosed,
+            Pass,
+        }
+        let outcome: Outcome = {
+            let Some(pane) = self.panes.get_mut(idx) else { return false };
+            let Some(search) = pane.search.as_mut() else { return false };
+            if !search.bar.focused {
+                Outcome::NotOpen
+            } else {
+                let to_list = matches!(
+                    event.logical,
+                    LogicalKey::Named(NamedKey::ArrowUp)
+                        | LogicalKey::Named(NamedKey::ArrowDown)
+                        | LogicalKey::Named(NamedKey::Enter)
+                );
+                if to_list && !search.list.hits.is_empty() {
+                    let (disp, jump) = search.list.handle_key(event, mods);
+                    let consumed = !matches!(
+                        disp,
+                        marspot_term::render::InputDisposition::Pass
+                    );
+                    let jumped = matches!(
+                        jump,
+                        marspot::tools::search_list::JumpRequest::JumpToFocused
+                    );
+                    if consumed && jumped {
+                        Outcome::ConsumedJump
+                    } else if consumed {
+                        Outcome::Consumed
+                    } else {
+                        Outcome::Pass
+                    }
+                } else {
+                    // Bar-routed.
+                    let disp = search.bar.handle_key(
+                        event,
+                        mods,
+                        std::time::Instant::now(),
+                    );
+                    let consumed = !matches!(
+                        disp,
+                        marspot_term::render::InputDisposition::Pass
+                    );
+                    if !search.bar.focused {
+                        // Esc → close entire overlay.
+                        pane.search = None;
+                        pane.active_highlight = None;
+                        Outcome::ConsumedClosed
+                    } else if consumed {
+                        Outcome::Consumed
+                    } else {
+                        Outcome::Pass
+                    }
+                }
+            }
+        };
+        match outcome {
+            Outcome::NotOpen => false,
+            Outcome::Pass => false,
+            Outcome::Consumed | Outcome::ConsumedClosed => {
+                self.needs_render = true;
+                true
+            }
+            Outcome::ConsumedJump => {
+                self.needs_render = true;
+                self.jump_to_focused_hit(idx);
+                true
+            }
+        }
+    }
+
+    /// Realise a `JumpRequest::JumpToFocused`: compute view_offset +
+    /// HighlightSpan from the focused hit's WireSearchHit, store on
+    /// the pane, and forward GridScroll if needed.
+    fn jump_to_focused_hit(&mut self, pane_idx: usize) {
+        let Some(pane) = self.panes.get_mut(pane_idx) else { return };
+        let Some(search) = pane.search.as_ref() else { return };
+        let Some(hit) = search.list.focused_hit() else { return };
+        let rows = pane.session().grid().rows();
+        // Live hit detection: B4 remap stamps live hits with
+        // logical_line_idx in [u64::MAX - rows + 1, u64::MAX].  Anything
+        // below that threshold is a scrollback hit.
+        let live_threshold = u64::MAX.saturating_sub(rows as u64);
+        let is_live = hit.logical_line_idx > live_threshold;
+        let hit_qid = search.bar.query_id;
+        let primary_row = hit
+            .spans
+            .iter()
+            .map(|s| s.phys_row_idx)
+            .next()
+            .unwrap_or(0);
+        let new_spans: Vec<marspot_term::render::HighlightSpan>;
+        let new_view_offset: u16;
+        if is_live {
+            // Live: span.phys_row_idx is already live-local (0..rows-1);
+            // view_offset = 0 puts the live grid bottom at viewport row
+            // rows-1, so view_row = phys_row_idx works as-is.
+            new_view_offset = 0;
+            new_spans = hit
+                .spans
+                .iter()
+                .filter(|s| (s.phys_row_idx as u16) < rows)
+                .map(|s| marspot_term::render::HighlightSpan {
+                    view_row: s.phys_row_idx as u16,
+                    col_start: s.col_start,
+                    col_end_inclusive: s.col_end_inclusive,
+                })
+                .collect();
+        } else {
+            // Scrollback hit: target the hit at viewport row rows/2.
+            // At view_offset = K, viewport row R shows
+            // scrollback[sb_len - K + R].  Solving for K so that
+            // R = target gives K = sb_len + target - primary_row.
+            let target_r: i64 = (rows as i64) / 2;
+            let sb_len = pane.session().l3_scrollback_len() as i64;
+            let raw_k = sb_len + target_r - primary_row as i64;
+            // Clamp to a sane view_offset range.
+            let max_k = (sb_len + rows as i64 - 1).max(0);
+            new_view_offset = raw_k.clamp(0, max_k) as u16;
+            new_spans = hit
+                .spans
+                .iter()
+                .map(|s| {
+                    // view_row = target_R + (S - primary_row).
+                    let vr = target_r + (s.phys_row_idx as i64 - primary_row as i64);
+                    (vr, s.col_start, s.col_end_inclusive)
+                })
+                .filter(|(vr, _, _)| *vr >= 0 && *vr < rows as i64)
+                .map(|(vr, cs, ce)| marspot_term::render::HighlightSpan {
+                    view_row: vr as u16,
+                    col_start: cs,
+                    col_end_inclusive: ce,
+                })
+                .collect();
+        }
+        pane.active_highlight = Some(marspot_term::render::ActiveHighlight {
+            query_id: hit_qid,
+            spans: new_spans,
+        });
+        let old_offset = pane.view_offset();
+        if old_offset != new_view_offset {
+            pane.set_view_offset(new_view_offset);
+            pane.session_mut().forward_scroll(new_view_offset);
+        }
+        self.needs_render = true;
+    }
+
     fn copy_selection_to_clipboard(&mut self) -> bool {
         let Some(sel) = self.selection else { return false };
         let idx = sel.session_idx;
@@ -1077,6 +1393,24 @@ impl CoreApp {
                     return;
                 }
             }
+        }
+
+        // C5 — Cmd+F intercept (env-gated on `MARSPOT_SEARCH=1`).
+        // Sits ahead of all PTY routing + Cmd-C / Cmd-B so an open
+        // search bar gets the keys; falls through silently when the
+        // env gate is off.  F1 flips by removing the env check inside
+        // `handle_cmd_f` and `search_consume_key` / opening on every
+        // session.
+        if event.state == KeyState::Pressed
+            && modifiers.super_key()
+            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'f'))
+        {
+            if self.handle_cmd_f() {
+                return;
+            }
+        }
+        if event.state == KeyState::Pressed && self.search_consume_key(&event, modifiers) {
+            return;
         }
 
         // Cmd-C: copy current text selection to the macOS clipboard.
@@ -1633,6 +1967,10 @@ impl CoreApp {
     /// selection state honest (scroll-push bump + in-place-repaint
     /// drop — same contract as src/main.rs `user_event`).
     fn pump_all(&mut self) -> usize {
+        // C5 — fire any pane's queued SearchScrollback when its
+        // debounce window has elapsed.  Cheap when no search is
+        // open (single `is_none` check per pane).
+        self.process_search_debounces();
         let mut total = 0;
         // Snapshot which session ids are frozen by an L1 PaneSession;
         // we can't borrow `self.pane_sessions` and `self.panes` at
@@ -2372,6 +2710,9 @@ fn main() {
                 }
                 CoreEvent::InjectInput(sid, bytes) => {
                     app.inject_input(sid, &bytes);
+                }
+                CoreEvent::SearchResults(sid, qid, has_more, _total_seen, hits) => {
+                    app.apply_search_results(sid, qid, has_more, hits);
                 }
             }
         };

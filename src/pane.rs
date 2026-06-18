@@ -30,8 +30,11 @@ use crate::render::SessionView;
 use crate::session::{Session, SessionState};
 use crate::shell_proto::{
     encode_get_selection_text, encode_grid_resize, encode_grid_scroll, encode_key_event,
-    encode_paste, event_to_wire, Frame, MsgType,
+    encode_paste, encode_search_cancel, encode_search_more, encode_search_scrollback,
+    event_to_wire, Frame, MsgType,
 };
+use crate::tools::search_bar::SearchBar;
+use crate::tools::search_list::SearchList;
 use crate::terminal::Terminal;
 
 /// One pane's backend: a locally forked PTY (the legacy / mcli /
@@ -147,6 +150,36 @@ impl PaneBackend {
     pub fn forward_inject_input(&mut self, bytes: &[u8]) {
         if let PaneBackend::L3(c) = self {
             c.forward_inject_input(bytes);
+        }
+    }
+
+    /// C5 — send a `SearchScrollback` frame to the L3 session
+    /// behind this pane.  No-op on non-L3 backends (search is
+    /// File-backed scrollback only, which only L3 owns).
+    pub fn forward_search_scrollback(
+        &mut self,
+        query_id: u32,
+        case_sensitive: bool,
+        max_total: u32,
+        query: &str,
+    ) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_search_scrollback(query_id, case_sensitive, max_total, query);
+        }
+    }
+
+    /// C5 — cancel an in-flight L3 search by query_id.
+    pub fn forward_search_cancel(&mut self, query_id: u32) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_search_cancel(query_id);
+        }
+    }
+
+    /// C5 — request more hits for the in-flight search (D-phase
+    /// pagination; v1 only uses direction=0 → older).
+    pub fn forward_search_more(&mut self, query_id: u32, count: u32) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_search_more(query_id, count);
         }
     }
 
@@ -697,6 +730,36 @@ impl L3Conn {
         let _ = frame.write_to(&mut self.control);
     }
 
+    /// C5 — send a search request to the L3 worker.  The L3 main
+    /// loop cancels any in-flight worker, snapshots the File
+    /// scrollback + live grid (B3 + B4), and replies with
+    /// `SearchResults` frames on the same socket (decoded by
+    /// `l3_reader_loop` into `CoreEvent::SearchResults`).
+    fn forward_search_scrollback(
+        &mut self,
+        query_id: u32,
+        case_sensitive: bool,
+        max_total: u32,
+        query: &str,
+    ) {
+        let payload = encode_search_scrollback(query_id, case_sensitive, max_total, query);
+        let frame = Frame::new(MsgType::SearchScrollback, payload);
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    fn forward_search_cancel(&mut self, query_id: u32) {
+        let payload = encode_search_cancel(query_id);
+        let frame = Frame::new(MsgType::SearchCancel, payload);
+        let _ = frame.write_to(&mut self.control);
+    }
+
+    fn forward_search_more(&mut self, query_id: u32, count: u32) {
+        // v1: direction is always 0 (older); D-phase will expose newer.
+        let payload = encode_search_more(query_id, count, 0);
+        let frame = Frame::new(MsgType::SearchMore, payload);
+        let _ = frame.write_to(&mut self.control);
+    }
+
     /// Forward a cell-grid resize to the session process (dedup'd against
     /// the last requested dims).  L3 resizes its Terminal + PTY, reflows,
     /// and republishes at the new dims; the mirror reshapes on the next
@@ -837,6 +900,40 @@ pub struct Pane {
     /// user navigates to a hit.  `None` = no highlight (renderer
     /// passes empty `highlight_spans` to `build_instances`).
     pub active_highlight: Option<marspot_term::render::ActiveHighlight>,
+    /// C5 — per-pane search overlay state.  `None` until Cmd+F
+    /// opens it; `Some` until Esc closes it.  Independent of any
+    /// other pane's search state (each pane has its own).
+    pub search: Option<PaneSearch>,
+}
+
+/// C5 — per-pane bundle of the search overlay state.  Wraps the
+/// `SearchBar` (input) + `SearchList` (results) + the L2-side
+/// query-id counter + debounce timer that drives the wire
+/// `SearchScrollback` emission.
+pub struct PaneSearch {
+    pub bar: SearchBar,
+    pub list: SearchList,
+    /// Monotonic query id allocated locally; bumped on every
+    /// `apply_pending_query`.  L3 uses it for last-write-wins
+    /// cancellation (D15).
+    pub next_query_id: u32,
+    /// Last `query` we actually sent on the wire.  Suppresses
+    /// re-emits when the user types and then deletes back to the
+    /// same text.
+    pub last_emitted_query: String,
+}
+
+impl PaneSearch {
+    pub fn open() -> Self {
+        let mut bar = SearchBar::new();
+        bar.focused = true;
+        Self {
+            bar,
+            list: SearchList::new(),
+            next_query_id: 1,
+            last_emitted_query: String::new(),
+        }
+    }
 }
 
 impl Pane {
@@ -850,6 +947,7 @@ impl Pane {
             update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
+            search: None,
         }
     }
 
@@ -865,6 +963,7 @@ impl Pane {
             update_pending: false,
             tools: Vec::new(),
             active_highlight: None,
+            search: None,
         }
     }
 
@@ -1030,6 +1129,13 @@ impl Pane {
         };
         let new = self.view_offset.saturating_add(delta).min(max);
         self.view_offset = new;
+    }
+
+    /// C5 — explicit view_offset setter, used by the search-jump
+    /// path which computes the offset analytically (not via
+    /// scroll deltas).
+    pub fn set_view_offset(&mut self, off: u16) {
+        self.view_offset = off;
     }
 
     /// Force the view back to the live tail. Used by container code
