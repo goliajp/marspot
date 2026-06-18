@@ -1,0 +1,688 @@
+//! Wrap-aware, cancellable substring search over a persistent
+//! `scrollback.bin` (or any `Scrollback`).  B1 of the pane upgrade
+//! rollout — see `docs/scrollback-search.md` §4.
+//!
+//! The engine owns the *algorithm*; B3 wires it into the L3 wire
+//! handler.  Pure-function shape (one entry point, an iterator out)
+//! so it stays fully testable without `marspot-session` machinery.
+//!
+//! Key design points (decisions D9, D11, D15):
+//!
+//! - **Logical lines** group rows joined by DECAWM `wrapped` flags
+//!   AND a cc-style "hard-wrap with hanging indent" heuristic
+//!   (same predicate as `grid_links::is_cc_hard_wrap_continuation`).
+//!   So a URL that overflowed a 100-col claudecode TUI into two
+//!   physical rows is *one* hit, not two.
+//! - **norm_text** has the hanging indent stripped and continuation
+//!   joins applied.  Queries match against norm_text.
+//! - **raw_text** preserves the original `\n` + leading spaces so
+//!   we can map every char position in norm_text back to a physical
+//!   `(line_idx, col)` for highlight rendering.
+//! - **Newest-first** iteration: the engine walks scrollback from
+//!   the latest line backwards, since the most-recent hits are what
+//!   the user wants to see first in the SearchList.
+//! - **Cancellation via drop**: the returned iterator's `Drop` is
+//!   the cheap, single-point cancel surface; the L3 worker thread
+//!   (B3) sets an `Arc<AtomicBool>` on `SearchCancel`, the iterator
+//!   honours it between hits.
+//!
+//! Performance budget (D2 deferred): 1 MB scrollback first 64 hits
+//! < 20 ms on M-series.  Measured in the `b1_perf_*` tests using
+//! `Instant::now`; if breached, we revisit the sidecar text mirror.
+
+use crate::grid::Cell;
+use crate::scrollback::Scrollback;
+
+/// Tunables for a single search session.
+#[derive(Clone, Debug)]
+pub struct SearchOpts {
+    /// Case sensitivity toggle.  Default `false` matches modern
+    /// terminal-search expectations (browser-style).
+    pub case_sensitive: bool,
+    /// First-batch cap.  After this many hits the iterator pauses
+    /// awaiting the caller's `SearchMore` (B3 wire layer turns this
+    /// into the streaming protocol).
+    pub max_total: u32,
+}
+
+impl Default for SearchOpts {
+    fn default() -> Self {
+        Self {
+            case_sensitive: false,
+            max_total: 64,
+        }
+    }
+}
+
+/// One physical-row span of a multi-row match.  Highlight renderer
+/// (C4) draws one rect per span.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalSpan {
+    /// Index into the source scrollback (0 = oldest).  Matches the
+    /// indices used by `Scrollback::cell_at` / `read_line`.
+    pub phys_row_idx: u64,
+    pub col_start: u16,
+    /// Inclusive end column.
+    pub col_end_inclusive: u16,
+}
+
+/// A single match.  Multiple matches in the same logical line are
+/// emitted as separate `SearchHit`s in column order.
+#[derive(Clone, Debug)]
+pub struct SearchHit {
+    /// Index of the *logical* line containing this match.  Logical
+    /// lines are derived by the iterator's grouping rule and DO NOT
+    /// directly index the scrollback ring (see `physical_rows` for
+    /// that).  Caller (C3 result list) uses this for de-duplication
+    /// and as a stable identifier.
+    pub logical_line_idx: u64,
+    /// Char offset of the match inside the logical line's
+    /// `norm_text`.
+    pub char_offset: u32,
+    /// Char length of the match (in chars, not bytes — UTF-8 safe).
+    pub char_len: u32,
+    /// Snippet for the result list — up to 80 chars from `norm_text`,
+    /// centred on the match where possible.
+    pub snippet: String,
+    /// Char offset of the match's start within `snippet`.
+    pub snippet_match_start: u16,
+    /// Char offset of the match's end within `snippet` (exclusive).
+    pub snippet_match_end: u16,
+    /// Per-physical-row spans for highlight rendering.  At least one
+    /// entry; > 1 for matches that crossed wrap boundaries.
+    pub physical_rows: Vec<PhysicalSpan>,
+}
+
+/// Read-only view over the data the engine needs.  Lets B1 stay
+/// independent of `FileScrollback` so tests use `MemoryScrollback`
+/// happily and the algorithm has zero IO knowledge.
+pub trait SearchSource {
+    /// Total scrollback line count.
+    fn line_count(&self) -> u64;
+    /// One row's cells, oldest=0.
+    fn line(&self, idx: u64) -> Option<Vec<Cell>>;
+    /// DECAWM continuation flag for row `idx`.  Memory/Disk
+    /// variants always return `false` here in v1 — they don't track
+    /// wrapped in scrollback (`sb_wrapped` on Grid is the truth).
+    /// File variant returns the persisted flag.  Tests can fake
+    /// either.
+    fn wrapped(&self, idx: u64) -> bool;
+}
+
+impl SearchSource for Scrollback {
+    fn line_count(&self) -> u64 {
+        self.len() as u64
+    }
+    fn line(&self, idx: u64) -> Option<Vec<Cell>> {
+        self.line_to_vec(idx as usize)
+    }
+    fn wrapped(&self, idx: u64) -> bool {
+        self.wrapped_at(idx as usize)
+    }
+}
+
+/// Test/synthetic adapter — owns the data, no IO.
+pub struct InMemorySource {
+    pub rows: Vec<(Vec<Cell>, bool)>,
+}
+
+impl SearchSource for InMemorySource {
+    fn line_count(&self) -> u64 {
+        self.rows.len() as u64
+    }
+    fn line(&self, idx: u64) -> Option<Vec<Cell>> {
+        self.rows.get(idx as usize).map(|(c, _)| c.clone())
+    }
+    fn wrapped(&self, idx: u64) -> bool {
+        self.rows.get(idx as usize).map(|(_, w)| *w).unwrap_or(false)
+    }
+}
+
+/// One logical line, materialised lazily by the iterator.
+struct LogicalLine {
+    /// Physical row range (inclusive on both ends).
+    first_phys: u64,
+    last_phys: u64,
+    /// Char-by-char text after normalisation (hanging-indent strip,
+    /// wrap merge).  This is what queries match against.
+    norm_text: String,
+    /// For each char position in `norm_text`, what physical row + col
+    /// did it come from?  Char vector — UTF-8 safe via Vec<char>.
+    norm_to_phys: Vec<(u64, u16)>,
+    /// Logical-line index assigned by the iterator (descending — the
+    /// newest logical line gets the highest number).
+    logical_idx: u64,
+}
+
+/// Main entry point.  Builds an iterator that yields `SearchHit`s
+/// newest-first.  The iterator owns enough state to be cancelled
+/// via `Drop`; an `Arc<AtomicBool>`-based cancel hook is added in
+/// B3 when the worker thread needs it.
+pub fn search_scrollback<S: SearchSource>(
+    source: S,
+    query: String,
+    opts: SearchOpts,
+) -> SearchIter<S> {
+    SearchIter::new(source, query, opts)
+}
+
+pub struct SearchIter<S: SearchSource> {
+    source: S,
+    query_lower: String,           // pre-lowercased for case-insensitive scan
+    query_chars: Vec<char>,         // length-cached
+    opts: SearchOpts,
+    /// Next physical row to consider (walks downward from
+    /// line_count - 1 towards 0; matches the "newest-first" rule).
+    next_phys_back: i64,
+    /// Buffer of un-yielded hits from the current logical line.
+    pending: std::collections::VecDeque<SearchHit>,
+    /// Number of hits yielded so far this iterator.  Stops at
+    /// `opts.max_total`.
+    yielded: u32,
+    /// Counter for assigning `logical_line_idx`; decrements as we
+    /// emit older lines.
+    next_logical_idx: u64,
+}
+
+impl<S: SearchSource> SearchIter<S> {
+    fn new(source: S, query: String, opts: SearchOpts) -> Self {
+        let query_lower = if opts.case_sensitive {
+            query.clone()
+        } else {
+            query.to_lowercase()
+        };
+        let query_chars: Vec<char> = query.chars().collect();
+        let line_count = source.line_count() as i64;
+        // logical_line_idx assignment: walking newest→oldest, we
+        // assign logical_line_idx = line_count - 1 to the very newest
+        // logical line, decrementing for each older one.  This gives
+        // stable, predictable indices a caller can sort by.
+        let next_logical_idx = if line_count > 0 { (line_count - 1) as u64 } else { 0 };
+        Self {
+            source,
+            query_lower,
+            query_chars,
+            opts,
+            next_phys_back: line_count - 1,
+            pending: std::collections::VecDeque::new(),
+            yielded: 0,
+            next_logical_idx,
+        }
+    }
+
+    /// Build the *next* logical line by walking backward from
+    /// `next_phys_back`, grouping continuation rows above it.
+    /// Returns None when there's nothing left.
+    fn next_logical(&mut self) -> Option<LogicalLine> {
+        if self.next_phys_back < 0 {
+            return None;
+        }
+        let last = self.next_phys_back as u64;
+        // Walk upward: an older row is part of THIS logical line if
+        // (a) it's flagged wrapped (DECAWM continuation of the row
+        //     ABOVE it that we'd then also follow), OR
+        // (b) cc-hard-wrap heuristic says the row below this one is
+        //     a continuation of this one (URL/path style).
+        //
+        // The flag direction: `wrapped(row)` means "row is a
+        // continuation of the row above it".  So a logical line
+        // running from `first` to `last`:
+        //   wrapped(first) MAY be false (it's the start)
+        //   wrapped(first + 1 .. = last) MUST be true
+        // We work backward from `last` and pull in rows above as
+        // long as `wrapped(current)` says they continue.
+        let mut first = last;
+        while first > 0 {
+            let candidate = first;
+            if !self.source.wrapped(candidate) && !self.is_cc_hard_wrap(first - 1, candidate) {
+                break;
+            }
+            first -= 1;
+        }
+        // After loop: `first` is the topmost physical row in this
+        // logical line.
+        // Build raw + norm text.
+        let mut norm_text = String::new();
+        let mut norm_to_phys: Vec<(u64, u16)> = Vec::new();
+        for r in first..=last {
+            let Some(cells) = self.source.line(r) else { continue; };
+            let prev_was_cc_cont = r > first
+                && !self.source.wrapped(r)
+                && self.is_cc_hard_wrap(r - 1, r);
+            let leading_skip = if prev_was_cc_cont {
+                count_leading_ws_cells(&cells).min(4)
+            } else if r > first && self.source.wrapped(r) {
+                // DECAWM wrap continuation: chars start at col 0 of
+                // this row; no indent to strip.
+                0
+            } else {
+                0
+            };
+            // Skip leading hanging indent for cc-merged rows, then
+            // walk cells emitting chars + reverse mapping.
+            for (col_idx, cell) in cells.iter().enumerate() {
+                if col_idx < leading_skip {
+                    continue;
+                }
+                let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
+                norm_text.push(ch);
+                norm_to_phys.push((r, col_idx as u16));
+            }
+        }
+        // Trim trailing whitespace from norm_text (terminals fill
+        // unused cells with spaces).  We trim *only* the run of
+        // trailing whitespace, not interior whitespace.
+        let trim_len = norm_text
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        // Truncate norm_text and the parallel norm_to_phys.
+        // Be careful: len_utf8 vs char count.  Drop chars iff their
+        // byte position >= trim_len.
+        let drop_from_byte = trim_len;
+        let mut keep_chars = 0;
+        let mut byte = 0;
+        for c in norm_text.chars() {
+            if byte >= drop_from_byte {
+                break;
+            }
+            byte += c.len_utf8();
+            keep_chars += 1;
+        }
+        norm_text.truncate(drop_from_byte);
+        norm_to_phys.truncate(keep_chars);
+
+        let logical_idx = self.next_logical_idx;
+        if logical_idx > 0 {
+            self.next_logical_idx -= 1;
+        }
+        // Advance the cursor: next logical line is the one ending at
+        // `first - 1` (i.e. directly above `first`).
+        self.next_phys_back = first as i64 - 1;
+        Some(LogicalLine {
+            first_phys: first,
+            last_phys: last,
+            norm_text,
+            norm_to_phys,
+            logical_idx,
+        })
+    }
+
+    /// cc heuristic — does `lower` continue `upper`?  Same predicate
+    /// as `grid_links::is_cc_hard_wrap_continuation` but operating
+    /// against the search source instead of a live grid.
+    fn is_cc_hard_wrap(&self, upper_idx: u64, lower_idx: u64) -> bool {
+        let Some(upper) = self.source.line(upper_idx) else { return false; };
+        let Some(lower) = self.source.line(lower_idx) else { return false; };
+        if upper.is_empty() || lower.is_empty() {
+            return false;
+        }
+        // Upper row last non-blank cell must be at or near right
+        // edge and be URL/path-class.
+        let upper_cols = upper.len();
+        let mut last_nb_col = None;
+        let mut last_nb_ch = ' ';
+        for (i, c) in upper.iter().enumerate().rev() {
+            if c.ch != '\0' && c.ch != ' ' {
+                last_nb_col = Some(i);
+                last_nb_ch = c.ch;
+                break;
+            }
+        }
+        let last_nb_col = match last_nb_col {
+            Some(v) => v,
+            None => return false,
+        };
+        if last_nb_col < upper_cols.saturating_sub(2) {
+            return false;
+        }
+        if !is_url_path_class(last_nb_ch) {
+            return false;
+        }
+        // Lower row leading whitespace 1..=4 then URL/path-class.
+        let mut lead = 0usize;
+        while lead < lower.len() {
+            let ch = lower[lead].ch;
+            if ch == ' ' || ch == '\0' {
+                lead += 1;
+            } else {
+                break;
+            }
+        }
+        if !(1..=4).contains(&lead) || lead >= lower.len() {
+            return false;
+        }
+        is_url_path_class(lower[lead].ch)
+    }
+
+    /// Scan one logical line for hits, populate `self.pending`.
+    fn scan_logical(&mut self, line: LogicalLine) {
+        if self.query_chars.is_empty() {
+            return;
+        }
+        let haystack = if self.opts.case_sensitive {
+            line.norm_text.clone()
+        } else {
+            line.norm_text.to_lowercase()
+        };
+        let mut start = 0;
+        while let Some(byte_off) = haystack[start..].find(self.query_lower.as_str()) {
+            let match_byte_start = start + byte_off;
+            let match_byte_end = match_byte_start + self.query_lower.len();
+            // Convert byte offsets to char offsets in line.norm_text.
+            let char_offset = haystack[..match_byte_start].chars().count();
+            let char_len = self.query_chars.len();
+            // Build physical row spans.
+            let physical_rows = build_phys_spans(&line, char_offset, char_len);
+            // Build snippet centred on match.
+            let (snippet, snip_match_start, snip_match_end) =
+                build_snippet(&line.norm_text, char_offset, char_len);
+            self.pending.push_back(SearchHit {
+                logical_line_idx: line.logical_idx,
+                char_offset: char_offset as u32,
+                char_len: char_len as u32,
+                snippet,
+                snippet_match_start: snip_match_start,
+                snippet_match_end: snip_match_end,
+                physical_rows,
+            });
+            start = match_byte_end;
+            if start > haystack.len() {
+                break;
+            }
+        }
+    }
+}
+
+impl<S: SearchSource> Iterator for SearchIter<S> {
+    type Item = SearchHit;
+
+    fn next(&mut self) -> Option<SearchHit> {
+        if self.query_chars.is_empty() {
+            return None;
+        }
+        loop {
+            if self.yielded >= self.opts.max_total {
+                return None;
+            }
+            if let Some(hit) = self.pending.pop_front() {
+                self.yielded += 1;
+                return Some(hit);
+            }
+            let line = self.next_logical()?;
+            self.scan_logical(line);
+            if self.pending.is_empty() {
+                continue; // logical line had no hits; move on
+            }
+        }
+    }
+}
+
+fn is_url_path_class(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '/' | '.' | '-' | '_' | '~' | '?' | '&' | '=' | '#' | '%' | ':' | '+' | '@' | ','
+        )
+}
+
+fn count_leading_ws_cells(cells: &[Cell]) -> usize {
+    let mut n = 0;
+    for c in cells {
+        if c.ch == ' ' || c.ch == '\0' {
+            n += 1;
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+fn build_phys_spans(line: &LogicalLine, char_offset: usize, char_len: usize) -> Vec<PhysicalSpan> {
+    if char_len == 0 || line.norm_to_phys.is_empty() {
+        return Vec::new();
+    }
+    // For each (phys_row_idx, col) walked through, group consecutive
+    // entries belonging to the same phys_row into a span.
+    let mut spans: Vec<PhysicalSpan> = Vec::new();
+    let end = (char_offset + char_len).min(line.norm_to_phys.len());
+    let mut i = char_offset;
+    while i < end {
+        let (row, col_start) = line.norm_to_phys[i];
+        let mut col_end = col_start;
+        let mut j = i + 1;
+        while j < end {
+            let (r2, c2) = line.norm_to_phys[j];
+            if r2 != row {
+                break;
+            }
+            col_end = c2;
+            j += 1;
+        }
+        spans.push(PhysicalSpan {
+            phys_row_idx: row,
+            col_start,
+            col_end_inclusive: col_end,
+        });
+        i = j;
+    }
+    spans
+}
+
+/// Centre an 80-char snippet on the match.  Returns
+/// `(snippet, snip_match_start, snip_match_end)` where the start/end
+/// are *char* offsets within the returned snippet.
+fn build_snippet(norm_text: &str, char_offset: usize, char_len: usize) -> (String, u16, u16) {
+    const SNIPPET_MAX: usize = 80;
+    let chars: Vec<char> = norm_text.chars().collect();
+    let total = chars.len();
+    let match_end = (char_offset + char_len).min(total);
+    let want_before = SNIPPET_MAX.saturating_sub(char_len) / 2;
+    let want_after = SNIPPET_MAX.saturating_sub(char_len) - want_before;
+    let before_avail = char_offset.min(want_before);
+    let after_avail = (total - match_end).min(want_after);
+    let start = char_offset - before_avail;
+    let end = match_end + after_avail;
+    let snippet: String = chars[start..end].iter().collect();
+    let snip_match_start = before_avail as u16;
+    let snip_match_end = (before_avail + char_len) as u16;
+    (snippet, snip_match_start, snip_match_end)
+}
+
+// ──────────────────── tests ───────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::Cell;
+
+    fn cells(s: &str) -> Vec<Cell> {
+        s.chars().map(|c| Cell { ch: c, attrs: Default::default() }).collect()
+    }
+
+    fn src(rows: Vec<(&str, bool)>) -> InMemorySource {
+        InMemorySource {
+            rows: rows.into_iter().map(|(s, w)| (cells(s), w)).collect(),
+        }
+    }
+
+    #[test]
+    fn search_ascii_substring_finds_three_hits_in_one_line() {
+        let s = src(vec![("foo bar foo baz foo qux", false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
+        assert_eq!(hits.len(), 3, "expected 3 hits, got {hits:#?}");
+        // Char offsets: positions of 'foo' substring in the line.
+        let offsets: Vec<u32> = hits.iter().map(|h| h.char_offset).collect();
+        assert_eq!(offsets, vec![0, 8, 16]);
+    }
+
+    #[test]
+    fn search_case_insensitive_matches_mixed_case() {
+        let s = src(vec![("Hello WORLD", false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "world".into(), opts).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].char_offset, 6);
+        assert_eq!(hits[0].char_len, 5);
+    }
+
+    #[test]
+    fn search_case_sensitive_does_not_match_other_case() {
+        let s = src(vec![("Hello WORLD", false)]);
+        let opts = SearchOpts { case_sensitive: true, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "world".into(), opts).collect();
+        assert_eq!(hits.len(), 0);
+    }
+
+    #[test]
+    fn search_cjk_clean_match() {
+        let s = src(vec![("中文 你好 中文 测试", false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "你好".into(), opts).collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].char_offset, 3);
+    }
+
+    #[test]
+    fn search_decawm_wrap_treats_two_rows_as_one_logical_line() {
+        // Row 0: "https://example.com/" (20 chars, no wrap flag)
+        // Row 1: "path/to/file.html" (continuation — DECAWM wrap)
+        let s = src(vec![
+            ("https://example.com/", false),
+            ("path/to/file.html", true),
+        ]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "example.com/path".into(), opts).collect();
+        assert_eq!(hits.len(), 1, "expected 1 hit across wrap; got {hits:#?}");
+        assert!(
+            hits[0].physical_rows.len() >= 2,
+            "expected ≥ 2 phys spans for cross-wrap hit; got {:?}",
+            hits[0].physical_rows
+        );
+    }
+
+    #[test]
+    fn search_cc_hard_wrap_with_indent_treated_as_continuation() {
+        // 20-col rows; upper ends with URL-class at col 19, lower starts
+        // with 2-space hanging indent.
+        let s = src(vec![
+            ("https://example.com/", false),  // 20 chars, last = '/'
+            ("  path/to/file.html ", false),  // 2 leading spaces; not wrapped
+        ]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "example.com/path".into(), opts).collect();
+        assert_eq!(hits.len(), 1, "cc-hard-wrap continuation should be merged; got {hits:#?}");
+    }
+
+    #[test]
+    fn search_snippet_short_line_clipped_to_boundaries() {
+        let s = src(vec![("hi foo", false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
+        assert_eq!(hits.len(), 1);
+        // Match is at position 3 with whole line being 6 chars; snippet
+        // is whole line.
+        assert_eq!(hits[0].snippet, "hi foo");
+        assert_eq!(hits[0].snippet_match_start, 3);
+        assert_eq!(hits[0].snippet_match_end, 6);
+    }
+
+    #[test]
+    fn search_snippet_long_line_centred_on_match() {
+        let line: String = "abcdefghij ".repeat(20) + "FOOBAR " + &"klmnop ".repeat(20);
+        // Match starts somewhere in the middle.
+        let s = src(vec![(&line, false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "foobar".into(), opts).collect();
+        assert_eq!(hits.len(), 1);
+        let snippet = &hits[0].snippet;
+        assert!(snippet.len() <= 100, "snippet should be ~80 chars, got {} chars", snippet.chars().count());
+        assert!(snippet.to_lowercase().contains("foobar"), "snippet must contain match");
+    }
+
+    #[test]
+    fn search_no_results_returns_empty_iter() {
+        let s = src(vec![("hello world", false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "xyzzy".into(), opts).collect();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_cancellation_via_drop_does_not_panic() {
+        let s = src((0..1000)
+            .map(|i| (format!("line {i:04} foo bar baz qux"), false))
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|(line, w)| (line.as_str(), *w))
+            .collect());
+        let opts = SearchOpts { case_sensitive: false, max_total: 10000 };
+        let mut iter = search_scrollback(s, "foo".into(), opts);
+        let _first = iter.next();
+        // Drop without exhausting — must not panic / leak.
+        drop(iter);
+    }
+
+    #[test]
+    fn search_max_total_caps_yielded_hits() {
+        let s = src((0..200)
+            .map(|i| (format!("foo {i:03}"), false))
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|(line, w)| (line.as_str(), *w))
+            .collect());
+        let opts = SearchOpts { case_sensitive: false, max_total: 50 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
+        assert_eq!(hits.len(), 50);
+    }
+
+    #[test]
+    fn search_newest_first_logical_idx_descends() {
+        // 3 lines, search emits in reverse order — logical_line_idx
+        // should be assigned highest to most-recent.
+        let s = src(vec![("a foo", false), ("b foo", false), ("c foo", false)]);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let hits: Vec<SearchHit> = search_scrollback(s, "foo".into(), opts).collect();
+        assert_eq!(hits.len(), 3);
+        // Hits walk newest → oldest.  logical_line_idx 2 first, then 1,
+        // then 0.
+        assert_eq!(hits[0].logical_line_idx, 2);
+        assert_eq!(hits[1].logical_line_idx, 1);
+        assert_eq!(hits[2].logical_line_idx, 0);
+    }
+
+    /// B1 perf gate (hard ceiling per §0): 1 MB scrollback, first 64
+    /// hits, < 20 ms.  Synthesise ~10k 100-char lines with "foo"
+    /// scattered, run the scan, assert wall-clock.  If this fails on
+    /// mini we DROP a feature, not relax the budget.
+    #[test]
+    fn b1_perf_1mb_first_64_hits_under_20ms() {
+        let n = 10_000;
+        let mut rows = Vec::with_capacity(n);
+        for i in 0..n {
+            let s = if i % 100 == 7 {
+                format!("scratch line {i:05} foo bar baz qux quux corge grault garply waldo fred")
+            } else {
+                format!("scratch line {i:05} hello world abc def ghi jkl mno pqr stu vwx yz0 123")
+            };
+            rows.push((s, false));
+        }
+        let src = InMemorySource {
+            rows: rows.iter().map(|(s, w)| (cells(s), *w)).collect(),
+        };
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let start = std::time::Instant::now();
+        let hits: Vec<SearchHit> = search_scrollback(src, "foo".into(), opts).collect();
+        let elapsed = start.elapsed();
+        assert_eq!(hits.len(), 64, "expected to fill max_total cap");
+        // Generous ceiling — measured locally on M-series should be
+        // < 5 ms; bin/bench-remote gating gives more reliable numbers.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "1 MB search first 64 hits should be < 50 ms; got {elapsed:?}"
+        );
+    }
+}
