@@ -64,6 +64,7 @@ pub mod glyph_atlas;
 pub mod input;
 pub mod iosurface;
 pub mod pane;
+pub mod pidtree;
 pub mod render_metal;
 pub mod tools;
 pub mod ui;

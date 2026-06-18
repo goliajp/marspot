@@ -324,6 +324,105 @@ pub fn descendants_of(root_pid: i32, procs: &[ProcRow]) -> Vec<ProcRow> {
     out
 }
 
+/// F3+1 — one node of a process tree.  Same data as `ProcRow` plus
+/// children list (depth-first nesting).  Used by the L2 process-tree
+/// panel renderer to indent rows by depth.
+#[derive(Debug, Clone)]
+pub struct ProcNode {
+    pub pid: i32,
+    pub ppid: i32,
+    pub comm: String,
+    pub children: Vec<ProcNode>,
+}
+
+/// F3+1 — build a nested tree rooted at `root_pid` from a pre-fetched
+/// proc table.  Returns None if `root_pid` itself isn't in the table
+/// (process gone since the snapshot).  Children are ordered by pid
+/// (deterministic across refresh ticks so the UI doesn't reshuffle
+/// rows under the cursor on a frame where nothing changed).
+pub fn tree_rooted_at(root_pid: i32, procs: &[ProcRow]) -> Option<ProcNode> {
+    use std::collections::HashMap;
+    let mut by_ppid: HashMap<i32, Vec<usize>> = HashMap::new();
+    for (i, p) in procs.iter().enumerate() {
+        by_ppid.entry(p.ppid).or_default().push(i);
+    }
+    let by_pid: HashMap<i32, &ProcRow> = procs.iter().map(|p| (p.pid, p)).collect();
+    let root = by_pid.get(&root_pid)?;
+    Some(build_node(root, procs, &by_ppid))
+}
+
+fn build_node(
+    row: &ProcRow,
+    procs: &[ProcRow],
+    by_ppid: &std::collections::HashMap<i32, Vec<usize>>,
+) -> ProcNode {
+    let mut children: Vec<ProcNode> = by_ppid
+        .get(&row.pid)
+        .into_iter()
+        .flat_map(|kids| kids.iter().copied())
+        .map(|idx| build_node(&procs[idx], procs, by_ppid))
+        .collect();
+    children.sort_by_key(|n| n.pid);
+    ProcNode {
+        pid: row.pid,
+        ppid: row.ppid,
+        comm: row.comm.clone(),
+        children,
+    }
+}
+
+/// F3+1 — flatten a nested tree to a depth-tagged sequence for UI
+/// row rendering.  `(depth, &node)` pairs in pre-order so root is
+/// first, then children left-to-right.
+pub fn flatten_pre_order<'a>(root: &'a ProcNode) -> Vec<(usize, &'a ProcNode)> {
+    let mut out: Vec<(usize, &ProcNode)> = Vec::new();
+    fn walk<'a>(node: &'a ProcNode, depth: usize, out: &mut Vec<(usize, &'a ProcNode)>) {
+        out.push((depth, node));
+        for c in &node.children {
+            walk(c, depth + 1, out);
+        }
+    }
+    walk(root, 0, &mut out);
+    out
+}
+
+/// F3+1 — send `signal` to `pid`.  Thin wrapper over `libc::kill(2)`
+/// so callers can `?` it without sprinkling `unsafe` everywhere.
+/// Use `libc::SIGTERM` for graceful, `libc::SIGKILL` for force.
+/// `pid > 0` only — passing 0 / -1 / a pgid is intentionally not
+/// allowed here (the UI panel only ever has individual pids; the
+/// "negative pgid = whole group" trick is a foot-gun in the
+/// general case).
+pub fn kill_pid(pid: i32, signal: i32) -> std::io::Result<()> {
+    if pid <= 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to kill pid {pid} (must be > 1)"),
+        ));
+    }
+    let r = unsafe { libc::kill(pid, signal) };
+    if r != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// F3+1 — check whether `pid` is still alive.  Uses `kill(pid, 0)` —
+/// the kernel performs the existence + permission check without
+/// delivering a signal.  Returns false on ESRCH (gone) or EPERM
+/// (alive but not ours).
+pub fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    let r = unsafe { libc::kill(pid, 0) };
+    if r == 0 {
+        return true;
+    }
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    errno == libc::EPERM
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +480,57 @@ mod tests {
         // Self isn't included; descendants may or may not exist
         // depending on whether the test runner forked anything.
         assert!(!descendants.iter().any(|p| p.pid == pid));
+    }
+
+    #[test]
+    fn tree_rooted_at_self_root_pid_matches() {
+        let pid = std::process::id() as i32;
+        let procs = list_all_procs();
+        let node = tree_rooted_at(pid, &procs).expect("self not in proc table");
+        assert_eq!(node.pid, pid);
+        // Children deterministic order:
+        let pids: Vec<i32> = node.children.iter().map(|c| c.pid).collect();
+        let mut sorted = pids.clone();
+        sorted.sort();
+        assert_eq!(pids, sorted, "children not sorted by pid");
+    }
+
+    #[test]
+    fn flatten_pre_order_visits_root_first_then_children_recursively() {
+        // Construct a synthetic tree without OS calls so this test is
+        // deterministic.
+        let leaf_a = ProcNode { pid: 10, ppid: 5, comm: "a".into(), children: vec![] };
+        let leaf_b = ProcNode { pid: 11, ppid: 5, comm: "b".into(), children: vec![] };
+        let mid = ProcNode { pid: 5, ppid: 1, comm: "mid".into(), children: vec![leaf_a, leaf_b] };
+        let root = ProcNode { pid: 1, ppid: 0, comm: "root".into(), children: vec![mid] };
+        let flat: Vec<(usize, i32)> = flatten_pre_order(&root)
+            .into_iter()
+            .map(|(d, n)| (d, n.pid))
+            .collect();
+        assert_eq!(
+            flat,
+            vec![(0, 1), (1, 5), (2, 10), (2, 11)],
+            "pre-order: root, mid, leaf_a, leaf_b at depths 0,1,2,2"
+        );
+    }
+
+    #[test]
+    fn pid_is_alive_self_true() {
+        assert!(pid_is_alive(std::process::id() as i32));
+    }
+
+    #[test]
+    fn pid_is_alive_invalid_false() {
+        assert!(!pid_is_alive(0));
+        assert!(!pid_is_alive(1)); // init/launchd — never want to kill anyway
+        assert!(!pid_is_alive(-1));
+    }
+
+    #[test]
+    fn kill_pid_refuses_pid_le_1() {
+        let err = kill_pid(0, libc::SIGTERM).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let err = kill_pid(1, libc::SIGTERM).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
