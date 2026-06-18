@@ -104,6 +104,10 @@ pub struct Layout {
     /// Always present (even when the sidebar is currently collapsed)
     /// so the user can re-open it.
     pub sidebar_button_rect: Rect,
+    /// F3+1 — third chrome icon button immediately right of the
+    /// layout button.  Toggles the right-side process-tree panel.
+    /// Always present so the user can pop the panel any time.
+    pub process_button_rect: Rect,
     /// Layout-picker overlay panel — `Some` while the picker is
     /// showing, `None` otherwise.  Renderer paints the panel BG
     /// behind the option icons; mouse_down hits inside this rect
@@ -285,6 +289,7 @@ impl Layout {
             // zeroed; marspot's main path always layers on the chrome.
             layout_button_rect: Rect::ZERO,
             sidebar_button_rect: Rect::ZERO,
+            process_button_rect: Rect::ZERO,
             picker_panel_rect: None,
             picker_option_rects: Vec::new(),
             picker_option_dims: Vec::new(),
@@ -341,6 +346,11 @@ impl Layout {
         let btn_h = btn_size;
         let sidebar_btn_x = btn_margin;
         let layout_btn_x = sidebar_btn_x + btn_size + btn_gap;
+        // F3+1 — process-tree toggle sits immediately right of layout
+        // picker, anchored to the left toolbar group.  Keeps all three
+        // affordances clustered so the user's eye can scan them in one
+        // movement.
+        let process_btn_x = layout_btn_x + btn_size + btn_gap;
         self.sidebar_button_rect = Rect {
             x: sidebar_btn_x,
             y_top: btn_y,
@@ -349,6 +359,12 @@ impl Layout {
         };
         self.layout_button_rect = Rect {
             x: layout_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.process_button_rect = Rect {
+            x: process_btn_x,
             y_top: btn_y,
             w: btn_w,
             h: btn_h,
@@ -445,6 +461,12 @@ impl Layout {
     /// sidebar is collapsed, since it's the only way back).
     pub fn hit_test_sidebar_button(&self, px: f64, py: f64) -> bool {
         self.sidebar_button_rect.contains(px, py)
+    }
+
+    /// F3+1 — true when `(px, py)` falls inside the floating process-
+    /// tree toggle button.
+    pub fn hit_test_process_button(&self, px: f64, py: f64) -> bool {
+        self.process_button_rect.contains(px, py)
     }
 
     /// Returns the picker option index (0..7) the click landed in,

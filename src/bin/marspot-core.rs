@@ -98,17 +98,63 @@ fn env_required<T: std::str::FromStr>(name: &str) -> T {
 enum ChromeBtn {
     Sidebar,
     Layout,
+    /// F3+1 — process-tree panel toggle.
+    ProcessTree,
 }
 
 /// Convert the typed hover-button to the renderer's wire shape
-/// (Option<u8>, 0 = Sidebar, 1 = Layout).  Stays a free function so
-/// render-side picks up no knowledge of the L2-side enum.
+/// (Option<u8>, 0 = Sidebar, 1 = Layout, 2 = ProcessTree).  Stays a
+/// free function so render-side picks up no knowledge of the L2-side
+/// enum.
 fn map_hover_to_u8(h: Option<ChromeBtn>) -> Option<u8> {
     match h {
         Some(ChromeBtn::Sidebar) => Some(0),
         Some(ChromeBtn::Layout) => Some(1),
+        Some(ChromeBtn::ProcessTree) => Some(2),
         None => None,
     }
+}
+
+/// F3+1 — open process-tree panel state.  Holds per-pane trees +
+/// a last-refresh timestamp so the main loop can decide when to
+/// re-walk libproc (≥2 s gap = stale, refresh on next render).
+/// `None` on `CoreApp.process_panel` means the panel is closed —
+/// libproc is NOT walked at all in that state, so the panel has
+/// zero idle cost when invisible.
+struct ProcessPanelState {
+    /// Per pane: (shelld_session_id, root shell pid, optional tree
+    /// rooted at the shell child pid).  Tree is None when the pid
+    /// can't be resolved (session has no entry.toml yet, or the
+    /// shell child died before walk).  Indexed parallel to
+    /// CoreApp.panes so the renderer can pick by pane order.
+    panes: Vec<PanePidTree>,
+    last_refresh: Instant,
+}
+
+struct PanePidTree {
+    shelld_session_id: u64,
+    shell_child_pid: Option<i32>,
+    tree: Option<marspot::pidtree::ProcNode>,
+}
+
+/// F3+1 — read `sessions/<sid>/entry.toml`'s `shell_child_pid` field.
+/// Returns None on missing file, parse error, or absent field; the
+/// caller renders the pane's tree as "no root pid" in that case.
+/// Cheap one-shot read (typical entry.toml ~200 bytes); we don't
+/// cache because panel refresh is already throttled to ≥ 2 s.
+fn read_shell_child_pid(shelld_session_id: u64) -> Option<i32> {
+    let path = marspot_term::session_registry::session_dir(shelld_session_id)
+        .join("entry.toml");
+    let body = std::fs::read_to_string(&path).ok()?;
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("shell_child_pid") {
+            // tolerate "= 1234" or "=1234"
+            let v = rest.trim_start_matches(|c: char| c == '=' || c.is_whitespace());
+            return v.parse::<i32>().ok();
+        }
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -630,6 +676,8 @@ struct CoreApp {
     /// buttons.  Kept on `CoreApp` (not Layout) so mouse-move never
     /// rebuilds the grid math.
     hover_chrome_btn: Option<ChromeBtn>,
+    /// F3+1 — process-tree panel.  `None` = closed (no libproc cost).
+    process_panel: Option<ProcessPanelState>,
     ime_preedit: String,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
@@ -1720,11 +1768,34 @@ impl CoreApp {
         None
     }
 
+    /// F3+1 — re-walk libproc + read each pane's entry.toml to
+    /// rebuild the process-tree cache.  Called when the panel opens,
+    /// and on the main loop's render path when `last_refresh` is
+    /// older than 2 s.  No-op when the panel is closed.
+    fn refresh_process_panel(&mut self) {
+        let Some(panel) = self.process_panel.as_mut() else { return };
+        let all = marspot::pidtree::list_all_procs();
+        panel.panes.clear();
+        for pane in &self.panes {
+            let Some(sid) = pane.shelld_session_id() else { continue };
+            let pid = read_shell_child_pid(sid);
+            let tree = pid.and_then(|p| marspot::pidtree::tree_rooted_at(p, &all));
+            panel.panes.push(PanePidTree {
+                shelld_session_id: sid,
+                shell_child_pid: pid,
+                tree,
+            });
+        }
+        panel.last_refresh = Instant::now();
+    }
+
     fn mouse_moved(&mut self, x_phys: f64, y_phys: f64) {
         let new_hover = if self.layout.hit_test_sidebar_button(x_phys, y_phys) {
             Some(ChromeBtn::Sidebar)
         } else if self.layout.hit_test_layout_button(x_phys, y_phys) {
             Some(ChromeBtn::Layout)
+        } else if self.layout.hit_test_process_button(x_phys, y_phys) {
+            Some(ChromeBtn::ProcessTree)
         } else {
             None
         };
@@ -1750,6 +1821,23 @@ impl CoreApp {
         if sidebar_btn_hit {
             self.sidebar_collapsed = !self.sidebar_collapsed;
             self.rebuild_layout();
+            return;
+        }
+        // F3+1 — process-tree panel toggle.  Same priority tier as
+        // sidebar: a click on the icon never falls through.  Opening
+        // forces an immediate libproc walk so the panel paints
+        // populated on its first frame.
+        if self.layout.hit_test_process_button(x_phys, y_phys) {
+            if self.process_panel.is_some() {
+                self.process_panel = None;
+            } else {
+                self.process_panel = Some(ProcessPanelState {
+                    panes: Vec::new(),
+                    last_refresh: Instant::now() - std::time::Duration::from_secs(10),
+                });
+                self.refresh_process_panel();
+            }
+            self.needs_render = true;
             return;
         }
         if self.layout_picker_open {
@@ -2534,6 +2622,7 @@ fn main() {
         layout_picker_open: false,
         sidebar_collapsed: true,
         hover_chrome_btn: None,
+        process_panel: None,
         ime_preedit: String::new(),
         w_phys,
         h_phys,

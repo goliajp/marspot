@@ -2013,6 +2013,39 @@ fn push_grid_icon(
 /// divider at 1/3 of the inner width.  When `collapsed`, the divider
 /// + the would-be-panel region dims so the icon reads as a state
 /// indicator ("sidebar showing" vs "sidebar hidden") at a glance.
+/// F3+1 — Lucide-style "list tree" icon: three horizontal bars,
+/// progressively indented to suggest nesting.  Drawn with the same
+/// stroke metric as the sidebar / layout icons so all three buttons
+/// read as one icon family.
+fn push_process_tree_icon(cells: &mut Vec<CellInstance>, container: Rect) {
+    let pad = (container.w.min(container.h) * 0.22).max(2.0);
+    let inner_x = container.x + pad;
+    let inner_y = container.y_top + pad;
+    let inner_w = (container.w - 2.0 * pad).max(1.0);
+    let inner_h = (container.h - 2.0 * pad).max(1.0);
+    let frame = Rect { x: inner_x, y_top: inner_y, w: inner_w, h: inner_h };
+    let stroke = icon_stroke(frame);
+    // Three bars at 25 %, 55 %, 85 % of inner_h (vertical centers).
+    // Lengths: 75 %, 55 %, 55 % of inner_w; lower bars indented.
+    let bar_thick = stroke;
+    let bar_y_offsets = [0.20, 0.50, 0.80];
+    let bar_x_indents = [0.00, 0.20, 0.20];
+    let bar_lengths   = [0.75, 0.55, 0.55];
+    for ((y_o, x_i), len) in bar_y_offsets.iter()
+        .zip(bar_x_indents.iter())
+        .zip(bar_lengths.iter())
+    {
+        let by = inner_y + inner_h * y_o - bar_thick * 0.5;
+        let bx = inner_x + inner_w * x_i;
+        let bw = (inner_w * len).max(1.0);
+        push_rect(
+            cells,
+            Rect { x: bx, y_top: by, w: bw, h: bar_thick },
+            CHROME_ICON_FG,
+        );
+    }
+}
+
 fn push_sidebar_icon(
     cells: &mut Vec<CellInstance>,
     container: Rect,
@@ -2100,6 +2133,11 @@ fn push_layout_chrome(
     } else {
         CHROME_BTN_BG
     };
+    let process_bg = if hover_chrome_btn == Some(2) {
+        CHROME_BTN_BG_HOVER
+    } else {
+        CHROME_BTN_BG
+    };
     // Sidebar toggle button — sits left of the layout button so the
     // user always has a way back when the sidebar is collapsed.  The
     // icon's "sidebar bar" dims when collapsed (state derived from
@@ -2124,6 +2162,14 @@ fn push_layout_chrome(
         (layout.grid_cols, layout.grid_rows),
         CHROME_ICON_FG,
     );
+
+    // F3+1 — process-tree toggle.  Always present so the user can
+    // pop the panel any time.  Icon: three left-anchored bars with
+    // progressive indents — reads as a "task list / tree" affordance
+    // (the Lucide `list-tree` shape but simplified to fit a cell).
+    push_rect(cells, layout.process_button_rect, process_bg);
+    push_border(cells, layout.process_button_rect, 1.0, CHROME_BTN_BORDER);
+    push_process_tree_icon(cells, layout.process_button_rect);
 
     // Picker overlay.  Painted only when open; option rects are
     // pre-computed in `Layout::with_chrome`.
