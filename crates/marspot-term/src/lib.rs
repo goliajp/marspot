@@ -23,37 +23,6 @@ pub mod grid_links;
 pub mod logx;
 pub mod scrollback_search;
 
-/// F1+14 — ask the system allocator to release any unused dirty
-/// pages back to the kernel.  Marspot's startup paths (Terminal
-/// snapshot replay, bytelog ingest, scrollback RAM ring init) all
-/// peak the working set well above steady state; without an
-/// explicit nudge, libmalloc keeps those pages mapped as
-/// `MALLOC_LARGE (empty)` / `MALLOC_SMALL (empty)` for future
-/// allocations.  `vmmap -summary` on a 9-claudecode marspot showed
-/// ~50 MB per L3 sitting in that empty bucket — a free 450 MB
-/// across the fleet just by asking nicely.
-///
-/// `malloc_zone_pressure_relief(NULL, 0)` is macOS-only; the second
-/// arg is "bytes you'd LIKE freed" (0 = release everything you can).
-/// Returns immediately; the kernel reclaims pages lazily.  Idempotent
-/// — safe to call any time, costs roughly nothing when there's
-/// nothing to release.
-pub fn release_unused_memory() {
-    // SAFETY: `malloc_zone_pressure_relief` is part of the public
-    // libmalloc surface (macOS 10.7+).  Passing a NULL zone means
-    // "all zones".
-    #[cfg(target_os = "macos")]
-    unsafe {
-        extern "C" {
-            fn malloc_zone_pressure_relief(
-                zone: *mut std::ffi::c_void,
-                goal: libc::size_t,
-            ) -> libc::size_t;
-        }
-        let _ = malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-    }
-}
-
 /// Fingerprint embedded into the binary's rodata so `install-local.sh`
 /// can extract the git sha + build timestamp via `strings BIN | grep
 /// MARSPOT_FP=` without running the binary. `#[used]` keeps the linker

@@ -1070,19 +1070,6 @@ fn main() {
     let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
     publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
 
-    // F1+14 — first publish done, so the heavy startup peaks
-    // (Terminal::deserialize from state.bin, bytelog ingest,
-    // scrollback RAM ring + idx mmap reopen) are over.  Ask
-    // libmalloc to return any "MALLOC_LARGE / SMALL (empty)" pages
-    // it's hoarding back to the kernel; without this, the RSS sits
-    // ~50 MB above steady-state per L3.  Cheap; idempotent.
-    marspot_term::release_unused_memory();
-    // Schedule the next opportunistic relief tick — every 60 s of
-    // idle wall time we run it again so the long-uptime fleet
-    // doesn't accumulate post-burst hoarding.
-    let mut next_pressure_relief: Instant =
-        Instant::now() + Duration::from_secs(60);
-
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
     // snapshots — the daemon parses every PTY byte itself, so on
@@ -1134,15 +1121,6 @@ fn main() {
                 break;
             }
         };
-        // F1+14 — periodic pressure relief.  Cheap (no-op if there's
-        // nothing to release), and tying it to a wall-clock cadence
-        // means a long-uptime L3 that briefly spikes (e.g. a `cat
-        // giant.log`) can shed the leftover empty heap blocks
-        // within ~60 s of idling.
-        if Instant::now() >= next_pressure_relief {
-            marspot_term::release_unused_memory();
-            next_pressure_relief = Instant::now() + Duration::from_secs(60);
-        }
         // Drain the burst: handle every queued key now, coalesce wakes
         // into the single pump below, and collapse a flurry of resizes to
         // the final dims (intermediate sizes never need a reflow).
