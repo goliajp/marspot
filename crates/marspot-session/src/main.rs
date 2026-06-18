@@ -35,7 +35,9 @@ use marspot_term::grid_shm::{
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
-use marspot_term::scrollback_search::{spawn_search, SearchOpts, SearchWorker};
+use marspot_term::scrollback_search::{
+    spawn_search_merged, LiveGridSnapshot, SearchOpts, SearchWorker,
+};
 use marspot_term::shell_proto::{
     decode_get_selection_text, decode_grid_resize, decode_grid_scroll, decode_key_event,
     decode_paste, decode_search_cancel, decode_search_scrollback,
@@ -1209,14 +1211,28 @@ fn main() {
                         .file_scrollback_snapshot();
                     match snap {
                         Some(snap) => {
+                            // B4 — capture live grid alongside the
+                            // file snapshot so unscrolled-yet rows
+                            // are searched too.  Cell-clone cost is
+                            // O(rows × cols) on the cold path (one
+                            // per SearchRequest).  Hits remapped to
+                            // u64::MAX-based synthetic indices in
+                            // `spawn_search_merged`.
+                            let live = LiveGridSnapshot::from_rows(
+                                session
+                                    .terminal()
+                                    .grid()
+                                    .live_grid_snapshot_for_search(),
+                            );
                             let tx = ev_tx.clone();
                             let opts = SearchOpts {
                                 case_sensitive,
                                 max_total,
                             };
-                            let worker = spawn_search(
+                            let worker = spawn_search_merged(
                                 query_id,
                                 snap,
+                                live,
                                 query,
                                 opts,
                                 move |qid, hits, has_more, total_seen| {

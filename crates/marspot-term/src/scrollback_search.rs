@@ -549,6 +549,127 @@ pub fn to_wire_hit(h: SearchHit) -> crate::shell_proto::WireSearchHit {
     }
 }
 
+/// B4 — owned snapshot of the currently-visible grid rows.  Slotted
+/// "above" the scrollback file in the worker's composed source so
+/// hits in the live grid are returned first (newest-first walk).
+///
+/// Convention: `rows[0]` is the topmost visible grid row,
+/// `rows[rows.len() - 1]` is the bottom row (closest to the cursor).
+/// This matches `Grid::live_grid_snapshot_for_search`'s output order.
+pub struct LiveGridSnapshot {
+    pub rows: Vec<(Vec<Cell>, bool)>,
+}
+
+impl LiveGridSnapshot {
+    pub fn from_rows(rows: Vec<(Vec<Cell>, bool)>) -> Self {
+        Self { rows }
+    }
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// B4 — composed source: file rows at indices `0..file.line_count()`,
+/// then live rows immediately above at `file.line_count()..
+/// file.line_count() + live.len()`.  The newest physical row
+/// (`line_count() - 1`) is the bottom of the live grid, so the
+/// engine's newest-first walk hits the live grid's bottom row first
+/// and proceeds upward through the live grid, then continues into
+/// the most-recent scrollback rows.  Worker post-processing
+/// translates any hit whose primary row landed in the live range
+/// into the `u64::MAX - row_offset` synthetic index (§4.5).
+struct MergedLiveFileSource<S: SearchSource> {
+    file: S,
+    live: LiveGridSnapshot,
+    file_total: u64,
+}
+
+impl<S: SearchSource> MergedLiveFileSource<S> {
+    fn new(file: S, live: LiveGridSnapshot) -> Self {
+        let file_total = file.line_count();
+        Self {
+            file,
+            live,
+            file_total,
+        }
+    }
+}
+
+impl<S: SearchSource> SearchSource for MergedLiveFileSource<S> {
+    fn line_count(&self) -> u64 {
+        self.file_total + self.live.rows.len() as u64
+    }
+    fn line(&self, idx: u64) -> Option<Vec<Cell>> {
+        if idx < self.file_total {
+            self.file.line(idx)
+        } else {
+            let local = (idx - self.file_total) as usize;
+            self.live.rows.get(local).map(|(c, _)| c.clone())
+        }
+    }
+    fn wrapped(&self, idx: u64) -> bool {
+        if idx < self.file_total {
+            self.file.wrapped(idx)
+        } else {
+            let local = (idx - self.file_total) as usize;
+            self.live.rows.get(local).map(|(_, w)| *w).unwrap_or(false)
+        }
+    }
+}
+
+/// Map a `SearchHit` to a wire-shape `WireSearchHit`, remapping any
+/// span landing in the live-grid range to a live-local row index and
+/// translating the logical_line_idx to the `u64::MAX - row_offset`
+/// synthetic-index convention (§4.5).  Used by `spawn_search_merged`.
+fn remap_to_wire(hit: SearchHit, file_total: u64) -> crate::shell_proto::WireSearchHit {
+    // Determine whether this hit's "primary" row is live.  Per §4.5
+    // the synthetic index encodes the live row offset, so we key off
+    // the LAST physical row (= the row farthest from the
+    // newest = the bottom of the matched span when reading
+    // top-to-bottom).  For a single-row match the answer is the same.
+    let max_phys = hit
+        .physical_rows
+        .iter()
+        .map(|s| s.phys_row_idx)
+        .max()
+        .unwrap_or(0);
+    let is_live = max_phys >= file_total;
+    let logical_line_idx = if is_live {
+        let live_local = max_phys - file_total;
+        u64::MAX - live_local
+    } else {
+        hit.logical_line_idx
+    };
+    let spans = hit
+        .physical_rows
+        .into_iter()
+        .map(|s| {
+            let phys_row_idx = if s.phys_row_idx >= file_total {
+                s.phys_row_idx - file_total
+            } else {
+                s.phys_row_idx
+            };
+            crate::shell_proto::WirePhysicalSpan {
+                phys_row_idx,
+                col_start: s.col_start,
+                col_end_inclusive: s.col_end_inclusive,
+            }
+        })
+        .collect();
+    crate::shell_proto::WireSearchHit {
+        logical_line_idx,
+        char_offset: hit.char_offset,
+        char_len: hit.char_len,
+        snippet: hit.snippet,
+        snippet_match_start: hit.snippet_match_start,
+        snippet_match_end: hit.snippet_match_end,
+        spans,
+    }
+}
+
 /// Spawn a search worker thread.  Takes ownership of `source` (a
 /// `Send` `SearchSource` — typically `FileSnapshot`) and runs the
 /// engine to completion (or cancel).  Delivers exactly one batch
@@ -598,6 +719,63 @@ where
             on_batch(query_id, hits, has_more, total_seen);
         })
         .expect("spawn search worker");
+    SearchWorker {
+        query_id,
+        cancel,
+        _handle: Some(handle),
+    }
+}
+
+/// B4 — spawn the search worker against a merged live-grid + file
+/// scrollback source.  Same cancel + delivery contract as
+/// `spawn_search`; the only behavioural delta is that hits whose
+/// primary physical row landed in the live grid range are remapped
+/// to the `u64::MAX - row_offset` synthetic logical-line index and
+/// their spans are translated into live-local row indices.  L2
+/// decodes `logical_line_idx >= u64::MAX - rows` as a live-grid hit
+/// and computes view_offset = `rows - 1 - (u64::MAX - hit.idx)`.
+pub fn spawn_search_merged<S, F>(
+    query_id: u32,
+    file_source: S,
+    live: LiveGridSnapshot,
+    query: String,
+    opts: SearchOpts,
+    on_batch: F,
+) -> SearchWorker
+where
+    S: SearchSource + Send + 'static,
+    F: FnOnce(u32, Vec<crate::shell_proto::WireSearchHit>, bool, u32) + Send + 'static,
+{
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_w = std::sync::Arc::clone(&cancel);
+    let cap = opts.max_total;
+    let handle = std::thread::Builder::new()
+        .name(format!("l3-search-merged-{query_id}"))
+        .spawn(move || {
+            let merged = MergedLiveFileSource::new(file_source, live);
+            let file_total = merged.file_total;
+            let mut iter = search_scrollback(merged, query, opts);
+            let mut hits: Vec<crate::shell_proto::WireSearchHit> = Vec::new();
+            let mut total_seen: u32 = 0;
+            loop {
+                if cancel_w.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                match iter.next() {
+                    Some(h) => {
+                        total_seen = total_seen.saturating_add(1);
+                        hits.push(remap_to_wire(h, file_total));
+                    }
+                    None => break,
+                }
+            }
+            if cancel_w.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            let has_more = (hits.len() as u32) == cap;
+            on_batch(query_id, hits, has_more, total_seen);
+        })
+        .expect("spawn merged search worker");
     SearchWorker {
         query_id,
         cancel,
@@ -786,6 +964,129 @@ mod tests {
         assert_eq!(hits[0].logical_line_idx, 2);
         assert_eq!(hits[1].logical_line_idx, 1);
         assert_eq!(hits[2].logical_line_idx, 0);
+    }
+
+    // ─── B4: live-grid merge tests ────────────────────────────────
+
+    /// Helper: a `SearchSource` that exposes zero file rows.  Stand-in
+    /// for the "no scrollback yet" case so we can exercise the live
+    /// half of `MergedLiveFileSource` in isolation.
+    struct EmptyFileSource;
+    impl SearchSource for EmptyFileSource {
+        fn line_count(&self) -> u64 {
+            0
+        }
+        fn line(&self, _idx: u64) -> Option<Vec<Cell>> {
+            None
+        }
+        fn wrapped(&self, _idx: u64) -> bool {
+            false
+        }
+    }
+
+    /// B4 — a query matching only the live grid (with empty file
+    /// scrollback) must return a hit whose `logical_line_idx` falls
+    /// in the synthetic range `[u64::MAX - rows + 1, u64::MAX]`, AND
+    /// whose spans use live-local row indices (0..rows).
+    #[test]
+    fn b4_live_grid_only_query_returns_synthetic_index() {
+        // 4-row live grid; the match is in row 2 (middle).  No file
+        // scrollback at all.
+        let rows = vec![
+            (cells("first row blah"), false),
+            (cells("second row"), false),
+            (cells("third row has needle here"), false),
+            (cells("fourth and last"), false),
+        ];
+        let live = LiveGridSnapshot::from_rows(rows);
+        let live_len = live.rows.len();
+        let merged = MergedLiveFileSource::new(EmptyFileSource, live);
+        let file_total = merged.file_total;
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let mut hits = Vec::new();
+        for h in search_scrollback(merged, "needle".into(), opts) {
+            hits.push(remap_to_wire(h, file_total));
+        }
+        assert_eq!(hits.len(), 1, "expected exactly one hit");
+        let h = &hits[0];
+        // Live grid row 2, file_total = 0 → synthetic = u64::MAX - 2.
+        assert_eq!(h.logical_line_idx, u64::MAX - 2);
+        // L2's decode: view_offset = (rows - 1) - (u64::MAX - idx)
+        // For our 4-row grid: view_offset = 3 - 2 = 1.
+        let view_offset = (live_len as u64 - 1) - (u64::MAX - h.logical_line_idx);
+        assert_eq!(view_offset, 1);
+        // Spans must be live-local (< rows count).
+        assert!(!h.spans.is_empty());
+        for s in &h.spans {
+            assert!(
+                (s.phys_row_idx as usize) < live_len,
+                "span phys_row_idx {} should be live-local (< {})",
+                s.phys_row_idx,
+                live_len
+            );
+        }
+    }
+
+    /// B4 — file scrollback + live grid both contain the query; the
+    /// live hit must use synthetic indices, the file hit must keep
+    /// its scrollback index unchanged.
+    #[test]
+    fn b4_merged_hits_separate_file_and_live() {
+        let file_rows: Vec<(Vec<Cell>, bool)> = (0..50)
+            .map(|i| {
+                let s = if i == 20 {
+                    "file row 20 has needle deep".to_string()
+                } else {
+                    format!("file row {i:02} filler line")
+                };
+                (cells(&s), false)
+            })
+            .collect();
+        let file = InMemorySource { rows: file_rows };
+        let live = LiveGridSnapshot::from_rows(vec![
+            (cells("live row 0"), false),
+            (cells("live row 1 has needle on it"), false),
+            (cells("live row 2"), false),
+        ]);
+        let live_len = live.rows.len() as u64;
+        let file_total = file.line_count();
+        let merged = MergedLiveFileSource::new(file, live);
+        let opts = SearchOpts { case_sensitive: false, max_total: 64 };
+        let mut hits = Vec::new();
+        for h in search_scrollback(merged, "needle".into(), opts) {
+            hits.push(remap_to_wire(h, file_total));
+        }
+        assert_eq!(hits.len(), 2, "expected file + live hit");
+        // newest-first order: live hit comes first (lives at the top
+        // of the merged source, so the engine walks it before the
+        // file).
+        let live_hit = &hits[0];
+        let file_hit = &hits[1];
+        assert!(
+            live_hit.logical_line_idx >= u64::MAX - live_len,
+            "live hit logical_line_idx {} should be in synthetic range",
+            live_hit.logical_line_idx
+        );
+        assert!(
+            file_hit.logical_line_idx < file_total,
+            "file hit logical_line_idx {} should be < file_total {}",
+            file_hit.logical_line_idx,
+            file_total
+        );
+        for s in &live_hit.spans {
+            assert!(
+                (s.phys_row_idx as u64) < live_len,
+                "live span row_idx {} should be live-local",
+                s.phys_row_idx
+            );
+        }
+        for s in &file_hit.spans {
+            assert!(
+                s.phys_row_idx < file_total,
+                "file span row_idx {} should be in file range",
+                s.phys_row_idx
+            );
+        }
     }
 
     /// B1 perf gate (hard ceiling per §0): 1 MB scrollback, first 64

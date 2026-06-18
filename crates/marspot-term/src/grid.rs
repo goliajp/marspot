@@ -650,6 +650,31 @@ impl Grid {
     pub fn file_scrollback_snapshot(&self) -> Option<crate::scrollback::FileSnapshot> {
         self.scrollback.file_snapshot()
     }
+
+    /// B4 — snapshot the currently-visible grid rows (oldest visible
+    /// first, newest visible last) for off-thread search.  Each entry
+    /// is `(row_cells, row_wrapped)` matching the same shape the
+    /// scrollback-search engine consumes via `SearchSource::line` /
+    /// `wrapped`.  Cells are owned (cloned) so the snapshot is fully
+    /// independent of the live grid — the worker thread can iterate
+    /// without locking and without racing the PTY pump.
+    ///
+    /// The cost is O(rows × cols) cell clones, paid once per
+    /// `SearchRequest` event on the main loop.  Bounded by the live
+    /// grid (typically ~50 × 200 = 10 k cells) — well inside the
+    /// "single SearchRequest is a cold event" budget.
+    pub fn live_grid_snapshot_for_search(&self) -> Vec<(Vec<Cell>, bool)> {
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+        let mut out = Vec::with_capacity(rows);
+        for r in 0..rows as u16 {
+            let pr = self.phys_row(r);
+            let row_cells = self.cells[pr * cols..(pr + 1) * cols].to_vec();
+            let wrapped = self.wrapped[pr];
+            out.push((row_cells, wrapped));
+        }
+        out
+    }
     /// One cell from scrollback by `(line_idx, col)`.  Hot path —
     /// avoids per-line allocation that the disk-backed variant
     /// would otherwise need to materialise a slice.
