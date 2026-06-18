@@ -23,6 +23,14 @@
 mod local_session;
 mod uds_server;
 
+/// F1+14 — use mimalloc as the global allocator so freed pages are
+/// returned to the kernel via `madvise(MADV_FREE)` instead of being
+/// hoarded by macOS libmalloc as "MALLOC_LARGE/SMALL (empty)".  See
+/// the Cargo.toml `mimalloc` dependency block for the justification
+/// against marspot's self-build principle.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicI32, Ordering as AtomicOrdering};
@@ -1070,18 +1078,12 @@ fn main() {
     let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
     publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
 
-    // F1+14 — first publish done, so the heavy startup peaks
-    // (Terminal::deserialize from state.bin, bytelog ingest,
-    // scrollback RAM ring + idx mmap reopen) are over.  Ask
-    // libmalloc to return any "MALLOC_LARGE / SMALL (empty)" pages
-    // it's hoarding back to the kernel; without this, the RSS sits
-    // ~50 MB above steady-state per L3.  Cheap; idempotent.
-    marspot_term::release_unused_memory();
-    // Schedule the next opportunistic relief tick — every 60 s of
-    // idle wall time we run it again so the long-uptime fleet
-    // doesn't accumulate post-burst hoarding.
-    let mut next_pressure_relief: Instant =
-        Instant::now() + Duration::from_secs(60);
+    // F1+14 — mimalloc (global allocator, see top of file) handles
+    // page release back to the kernel on its own background thread,
+    // so we no longer need an explicit `pressure_relief` call here.
+    // The macOS `malloc_zone_pressure_relief` helper is retained in
+    // marspot-term as a no-op-ish defensive nudge for any binary
+    // that doesn't pick up mimalloc (mcli single-pane path).
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1134,15 +1136,6 @@ fn main() {
                 break;
             }
         };
-        // F1+14 — periodic pressure relief.  Cheap (no-op if there's
-        // nothing to release), and tying it to a wall-clock cadence
-        // means a long-uptime L3 that briefly spikes (e.g. a `cat
-        // giant.log`) can shed the leftover empty heap blocks
-        // within ~60 s of idling.
-        if Instant::now() >= next_pressure_relief {
-            marspot_term::release_unused_memory();
-            next_pressure_relief = Instant::now() + Duration::from_secs(60);
-        }
         // Drain the burst: handle every queued key now, coalesce wakes
         // into the single pump below, and collapse a flurry of resizes to
         // the final dims (intermediate sizes never need a reflow).

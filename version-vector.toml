@@ -23,4 +23,4 @@
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
 core    = "0.10.13"  # L2 — F1+13 perf 三连:(1) 加 PaneInstanceCache per-pane fingerprint hit→memcpy slice skip push_session.fingerprint 哈 grid seq + view 字段 + 两套 atlas rebuild_count,任意一项变就 rebuild + snapshot.目标 9-claudecode idle frame L2 从 22% 砍掉一大块;(2) overlay_mask 早返回守不进 closure;(3) SessionView 加 seq 字段, Pane::as_view 填 L3 mirror last_seq(Local 退化用 cursor + scroll_push 拼)
-session = "0.9.4"    # L3 — F1+14: 启动 publish 完调一次 + 每 60s idle tick 调一次 `marspot_term::release_unused_memory()` (macOS `malloc_zone_pressure_relief(NULL, 0)`).vmmap -summary 显示原 L3 RSS 64MB 里 ~57MB 是 MALLOC_LARGE/SMALL "empty"(Rust 系统分配器 free 后没还 kernel).解决后单 L3 应回到 vmmap 报的 48MB physical footprint 附近,9 session 总省 ~450MB
+session = "0.9.5"    # L3 — F1+14: 改换 mimalloc 做 marspot-session 的 global allocator.macOS libmalloc 的 pressure_relief 是 advisory,实测不真还 page;mimalloc(Microsoft Research,MIT,~30kB code)走 `madvise(MADV_FREE)` 激进还内存.fight 23MB state.bin 读完 drop 后 libmalloc 死留页问题(每 L3 ~50MB×9 = 450MB 浪费).单 L3 期望从 65MB RSS → ~48MB(vmmap physical footprint)
