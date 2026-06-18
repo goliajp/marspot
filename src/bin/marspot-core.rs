@@ -1434,6 +1434,21 @@ impl CoreApp {
         if event.state == KeyState::Pressed && self.search_consume_key(&event, modifiers) {
             return;
         }
+        // F1+9 — when the search overlay is open on the focused pane,
+        // SWALLOW key releases too.  Otherwise the Released event
+        // falls through to the L3 forward path's `snap_to_live()` →
+        // `forward_scroll(0)`, which is exactly the "hold Enter to
+        // see, release to bounce back to live" symptom: every
+        // Released → L3 view_offset resets to 0 → mirror republishes
+        // at live tail.  `search_consume_key` is press-only by design
+        // (bar/list don't react to key-up), so just block the
+        // fallthrough at this layer for ALL events while search is
+        // active on the focused pane.
+        if let Some(pane) = self.panes.get(self.focused_idx) {
+            if pane.search.as_ref().is_some_and(|s| s.bar.focused) {
+                return;
+            }
+        }
 
         // Cmd-C: copy current text selection to the macOS clipboard.
         if event.state == KeyState::Pressed
