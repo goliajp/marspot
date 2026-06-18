@@ -58,13 +58,16 @@ fn fallback_disk_or_memory(cols: u16) -> Scrollback {
 }
 
 fn file_scrollback_session_id() -> Option<u64> {
-    static SESSION_ID: OnceLock<Option<u64>> = OnceLock::new();
-    *SESSION_ID.get_or_init(|| {
-        if std::env::var("MARSPOT_FILE_SCROLLBACK").as_deref() != Ok("1") {
-            return None;
-        }
-        std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
-    })
+    // No OnceLock cache here: Terminal::new is cold-path (once per
+    // L3 boot) so two extra env reads cost nothing measurable, and
+    // caching breaks unit tests that need different env states in
+    // the same process (cargo test runs tests in one process; an
+    // earlier test that touched Terminal::new without env set would
+    // pin the cache to None and starve every later opt-in test).
+    if std::env::var("MARSPOT_FILE_SCROLLBACK").as_deref() != Ok("1") {
+        return None;
+    }
+    std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
 }
 
 /// In-RAM ring size when disk scrollback is active.  Front-line

@@ -1931,6 +1931,77 @@ mod tests {
     /// `#[ignore]` so `cargo test` skips it by default; `cargo test
     /// -- --ignored a3_terminal_file_scrollback_end_to_end` runs it
     /// explicitly.  Manual e2e in §7.4 covers the same.
+    /// A4: snapshot v2 replay must write its scrollback section
+    /// through the File variant so silent-update execv preserves
+    /// history.  This is the "first install moment" migration path:
+    /// pre-A3 L3 wrote v2 snapshot containing scrollback (up to 20k
+    /// lines per pane); the post-A3 image with file env-gate active
+    /// reads that snapshot in `apply_snapshot`, which calls
+    /// `push_historic_scrollback_line`, which (after A3) routes
+    /// through `push_line_with_wrapped` so File variant records
+    /// land in `scrollback.bin`.  After this single seeding, all
+    /// future execvs read the file directly — snapshot is just
+    /// the bootstrap path.
+    #[test]
+    #[ignore]
+    fn a4_snapshot_v2_replay_writes_into_file_scrollback() {
+        let tmp = TmpDir::new("a4-seed");
+        let state_dir = tmp.path.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let sid = 2u64;
+        let session_dir = state_dir.join("sessions").join(sid.to_string());
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        // 1. Build a "source" Terminal under Disk (env unset) and
+        //    push lines so the snapshot carries a scrollback section.
+        let cols = 20u16;
+        let rows = 4u16;
+        let snapshot_body = {
+            let mut t = crate::terminal::Terminal::new(cols, rows);
+            for i in 0..30u32 {
+                t.feed(format!("seed {i}\r\n").as_bytes());
+            }
+            t.serialize_snapshot()
+        };
+
+        // 2. Build a "target" Terminal under File env, replay snapshot,
+        //    drop, reopen → assert scrollback survived through the
+        //    file, not just the in-process state.
+        unsafe {
+            std::env::set_var("MARSPOT_STATE_DIR", &state_dir);
+            std::env::set_var("MARSPOT_FILE_SCROLLBACK", "1");
+            std::env::set_var("MARSPOT_SESSION_ID", sid.to_string());
+        }
+
+        let pre_sb_len = {
+            let mut t = crate::terminal::Terminal::new(cols, rows);
+            t.apply_snapshot(&snapshot_body).expect("apply");
+            t.grid().scrollback_len()
+        };
+        assert!(
+            pre_sb_len >= 20,
+            "snapshot replay should populate scrollback ≥ 20 lines, got {pre_sb_len}"
+        );
+
+        // Reopen — the new instance must see the seeded scrollback
+        // via the FILE, not via snapshot (we don't apply_snapshot
+        // here on purpose).
+        let post_sb_len = {
+            let t = crate::terminal::Terminal::new(cols, rows);
+            t.grid().scrollback_len()
+        };
+        assert!(
+            post_sb_len >= pre_sb_len,
+            "scrollback after reopen-via-file must be ≥ the snapshot-seeded value; got pre={pre_sb_len} post={post_sb_len}"
+        );
+
+        unsafe {
+            std::env::remove_var("MARSPOT_FILE_SCROLLBACK");
+            std::env::remove_var("MARSPOT_SESSION_ID");
+            std::env::remove_var("MARSPOT_STATE_DIR");
+        }
+    }
+
     #[test]
     #[ignore]
     fn a3_terminal_file_scrollback_end_to_end() {
