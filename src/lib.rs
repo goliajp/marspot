@@ -65,6 +65,7 @@ pub mod input;
 pub mod iosurface;
 pub mod pane;
 pub mod render_metal;
+pub mod tools;
 pub mod ui;
 
 /// Title-strip height in **logical points** — top band that carries
