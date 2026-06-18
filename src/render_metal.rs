@@ -173,6 +173,29 @@ pub struct GlyphInstance {
     pub color: [f32; 4],
 }
 
+/// F1+11 — one UI rect's draw data, layout-compatible with `UiRect`
+/// in `src/shaders/cells.metal`.  A real pixel-mode rounded rectangle
+/// with anti-aliased corners, optional border stroke, and optional
+/// soft drop shadow — all computed in one fragment shader.
+///
+/// `origin` + `size` describe the FILL rect in physical pixels (NOT
+/// inflated by shadow).  `corner_radius` is also in pixels.  Set
+/// `shadow_blur = 0` to skip the shadow path entirely (the SDF still
+/// runs but contributes nothing).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UiRectInstance {
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+    pub fill_color: [f32; 4],
+    pub border_color: [f32; 4],
+    pub corner_radius: f32,
+    pub border_width: f32,
+    pub shadow_blur: f32,
+    pub shadow_alpha: f32,
+    pub shadow_color: [f32; 4],
+}
+
 /// Pixel format the Metal pipeline + the CAMetalLayer agree on.
 ///
 /// We use plain `BGRA8Unorm` (NOT `_sRGB`).  The sRGB-encoded variant
@@ -259,6 +282,12 @@ pub struct MetalRenderer {
     /// inscribed in the quad.  Alpha-blended so the AA edge composites
     /// over the underlying sidebar BG.
     dot_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    /// F1+11 — Pipeline state for the UI rect pass: anti-aliased
+    /// rounded rectangles with optional stroke + soft drop shadow.
+    /// Drawn AFTER cells/highlight but BEFORE glyphs so panel
+    /// chrome sits over the grid while text on top of the panel
+    /// (which goes through `glyphs_scratch`) reads correctly.
+    ui_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Shared font handling — same data the AppKit renderer uses.
     font: FontCache,
     /// Glyph atlas backing the FG pass.  Constructed in `new` /
@@ -279,6 +308,10 @@ pub struct MetalRenderer {
     /// Sidebar status dots — same instance layout as cells, but the
     /// dot pipeline clips them to a circle.
     dots_scratch: Vec<CellInstance>,
+    /// F1+11 — UI rect instances for the per-frame chrome (search
+    /// panel, future menus / tooltips).  Drawn between
+    /// cells/highlight and glyphs so panel BG sits under panel text.
+    ui_rects_scratch: Vec<UiRectInstance>,
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
@@ -329,6 +362,7 @@ impl MetalRenderer {
         let fg_color_pipeline = build_fg_color_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
+        let ui_pipeline = build_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 2048×2048 R8 atlas = 4 MiB.  Fits ~6000 Menlo 13pt 2× glyphs.
         // 9-grid sessions all feed this single atlas and accumulate
@@ -424,11 +458,13 @@ impl MetalRenderer {
             fg_color_pipeline,
             fg_sampler,
             dot_pipeline,
+            ui_pipeline,
             font,
             atlas,
             color_atlas,
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
+            ui_rects_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
@@ -453,6 +489,7 @@ impl MetalRenderer {
         let fg_color_pipeline = build_fg_color_pipeline(&device, &library)?;
         let fg_sampler = build_fg_sampler(&device)?;
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
+        let ui_pipeline = build_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
         // 2048×2048 R8 atlas = 4 MiB.  Fits ~6000 Menlo 13pt 2× glyphs.
         // 9-grid sessions all feed this single atlas and accumulate
@@ -479,11 +516,13 @@ impl MetalRenderer {
             fg_color_pipeline,
             fg_sampler,
             dot_pipeline,
+            ui_pipeline,
             font,
             atlas,
             color_atlas,
             cells_scratch: Vec::new(),
             dots_scratch: Vec::new(),
+            ui_rects_scratch: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
@@ -716,6 +755,7 @@ impl MetalRenderer {
             ref fg_color_pipeline,
             ref fg_sampler,
             ref dot_pipeline,
+            ref ui_pipeline,
             ref mut font,
             ref mut atlas,
             ref mut color_atlas,
@@ -723,6 +763,7 @@ impl MetalRenderer {
             ref mut glyphs_scratch,
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
+            ref mut ui_rects_scratch,
             window_focused,
             hover_chrome_btn,
             width_px,
@@ -734,6 +775,7 @@ impl MetalRenderer {
         glyphs_scratch.clear();
         color_glyphs_scratch.clear();
         dots_scratch.clear();
+        ui_rects_scratch.clear();
         build_instances(
             layout,
             views,
@@ -748,6 +790,7 @@ impl MetalRenderer {
             glyphs_scratch,
             color_glyphs_scratch,
             dots_scratch,
+            ui_rects_scratch,
         );
 
         let layer = layer.as_ref().unwrap();
@@ -769,6 +812,7 @@ impl MetalRenderer {
             dot_pipeline,
             fg_pipeline,
             fg_color_pipeline,
+            ui_pipeline,
             fg_sampler,
             atlas,
             color_atlas,
@@ -777,6 +821,7 @@ impl MetalRenderer {
             dots_scratch,
             glyphs_scratch,
             color_glyphs_scratch,
+            ui_rects_scratch,
             width_px as f32,
             height_px as f32,
             // CAMetalLayer drawable, same process — no cross-process
@@ -847,6 +892,7 @@ impl MetalRenderer {
             ref fg_color_pipeline,
             ref fg_sampler,
             ref dot_pipeline,
+            ref ui_pipeline,
             ref mut font,
             ref mut atlas,
             ref mut color_atlas,
@@ -854,6 +900,7 @@ impl MetalRenderer {
             ref mut glyphs_scratch,
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
+            ref mut ui_rects_scratch,
             window_focused,
             hover_chrome_btn,
             ..
@@ -863,6 +910,7 @@ impl MetalRenderer {
         glyphs_scratch.clear();
         color_glyphs_scratch.clear();
         dots_scratch.clear();
+        ui_rects_scratch.clear();
         build_instances(
             layout,
             views,
@@ -877,6 +925,7 @@ impl MetalRenderer {
             glyphs_scratch,
             color_glyphs_scratch,
             dots_scratch,
+            ui_rects_scratch,
         );
 
         let cmd = match queue.commandBuffer() {
@@ -890,6 +939,7 @@ impl MetalRenderer {
             dot_pipeline,
             fg_pipeline,
             fg_color_pipeline,
+            ui_pipeline,
             fg_sampler,
             atlas,
             color_atlas,
@@ -898,6 +948,7 @@ impl MetalRenderer {
             dots_scratch,
             glyphs_scratch,
             color_glyphs_scratch,
+            ui_rects_scratch,
             width_px as f32,
             height_px as f32,
             // IOSurface path — cross-process race-free only when Load
@@ -923,6 +974,7 @@ fn encode_passes(
     dot_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_color_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    ui_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
     atlas: &GlyphAtlas,
     color_atlas: &GlyphAtlas,
@@ -931,6 +983,7 @@ fn encode_passes(
     dots: &[CellInstance],
     glyphs: &[GlyphInstance],
     color_glyphs: &[GlyphInstance],
+    ui_rects: &[UiRectInstance],
     viewport_w: f32,
     viewport_h: f32,
     // Clear-vs-Load for the BG pass.  `true` = hard Clear to SIDEBAR_BG
@@ -1022,6 +1075,39 @@ fn encode_passes(
             );
         }
         dot_encoder.endEncoding();
+    }
+
+    // UI rect pass — anti-aliased rounded rectangles for chrome
+    // overlays (search panel, future tooltips/menus).  Drawn AFTER
+    // grid BG / highlights / dots, BEFORE the glyph passes — so
+    // glyphs that belong to the overlay (panel text) read on top.
+    // Skipped entirely when no overlay is queued.
+    if !ui_rects.is_empty() {
+        let ui_pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = ui_pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Load);
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        let ui_buffer = make_instance_buffer(device, ui_rects_as_bytes(ui_rects));
+        let ui_encoder = cmd
+            .renderCommandEncoderWithDescriptor(&ui_pass)
+            .expect("ui encoder");
+        ui_encoder.setRenderPipelineState(ui_pipeline);
+        if let Some(buf) = &ui_buffer {
+            unsafe { ui_encoder.setVertexBuffer_offset_atIndex(Some(buf), 0, 0) };
+        }
+        unsafe {
+            ui_encoder.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            ui_encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                ui_rects.len(),
+            );
+        }
+        ui_encoder.endEncoding();
     }
 
     // FG pass — textured glyph quads, alpha-blended on top.
@@ -1269,6 +1355,7 @@ fn build_instances(
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
     dots: &mut Vec<CellInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
 ) {
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
@@ -1378,6 +1465,7 @@ fn build_instances(
             cells,
             glyphs,
             color_glyphs,
+            ui_rects,
             layout.gutter as f32,
             layout.padding as f32,
             layout.cell_title_h as f32,
@@ -2184,6 +2272,7 @@ fn push_session(
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
     gutter: f32,
     padding: f32,
     title_h: f32,
@@ -2361,21 +2450,19 @@ fn push_session(
     // skip glyph / underline / cursor emission for any cell whose
     // (row, col) falls inside.
     const SEARCH_BAR_COLS: u16 = 40;
-    const SEARCH_BAR_CHROME_ROWS: u16 = 3; // top border + query + (separator|bottom)
     const SEARCH_LIST_MAX_ROWS: u16 = 10;
     let overlay_mask: Option<(u16, u16, u16, u16)> = view.search_overlay.as_ref()
         .and_then(|ov| {
             let cols = grid.cols();
             if cols < SEARCH_BAR_COLS + 2 { return None; }
-            // Mirror the JetBrains-style geometry in the overlay
-            // paint section at the end of push_session:
-            //   chrome = 3 rows (top ╭─╮, query │…│,
-            //                    separator ├─┤ when list present)
-            //   list   = n_hits, clamped to LIST_MAX_ROWS
-            //   bottom = 1 row ╰─╯ only when list present
+            // Mirror the F1+11 pixel-mode overlay geometry: the panel
+            // floats ~½ cell down from the grid top, occupies query
+            // (1 row) + divider (½ row) + list rows + 2× inner
+            // padding.  Round generously upward so grid glyphs under
+            // the panel are masked.
             let list_rows = (ov.hits.len() as u16).min(SEARCH_LIST_MAX_ROWS);
-            let bottom_row = if list_rows > 0 { 1 } else { 0 };
-            let covered_rows = SEARCH_BAR_CHROME_ROWS + list_rows + bottom_row;
+            // 1 (margin) + 1 (query) + 1 (divider region) + list + 1 (bottom pad)
+            let covered_rows = 1 + 1 + 1 + list_rows + 1;
             let col_start = cols - SEARCH_BAR_COLS - 1;
             let col_end_inclusive = cols - 2;
             let row_start: u16 = 0;
@@ -2844,200 +2931,196 @@ fn push_session(
     // chrome, no border, just a quiet BG lift on the active pane.
     let _ = gutter; // pane-internal layout doesn't use it any more
 
-    // F1+10 — JetBrains-style search overlay paint.  Drawn LAST so
-    // the chrome + list sit on top of grid glyphs and the active
-    // highlight.
+    // F1+11 — true pixel-mode UI overlay.  Drawn via the new
+    // `ui_rect_pipeline`: a SDF-based rounded rectangle with
+    // anti-aliased corners, optional stroke, and a soft drop shadow
+    // — NOT cell-grid characters.  Pixel-precise positioning, freed
+    // from the box-drawing approximation.  Text inside still goes
+    // through the cell glyph atlas (proportional UI font is Phase 2),
+    // but everything BEHIND the text — panel, borders, focused-row
+    // selection — is real GPU-side vector chrome.
     //
-    // Visual:
-    //   ╭─ Find ────────── 4/64  Aa  × ─╮
-    //   │ ▌foo bar                      │      <- query + cursor
-    //   ├───────────────────────────────┤
-    //   │  function foo() { return... │       <- list row (unfocused)
-    //   │▸ if (foo) { bar.update();   │       <- focused row (indigo BG)
-    //   │  // foo: see bar value      │
-    //   ╰───────────────────────────────╯
+    // Layout:
+    //   ┌── panel(rounded rect + shadow + 1px stroke)
+    //   │  query row : query text + caret
+    //   │  divider line (thin rounded rect, dim color)
+    //   │  list rows : focused row is a separate rounded rect
+    //   │              behind the snippet text
+    //   └──
     //
-    // Palette: dark gray-blue ("Darcula"-ish), bright text for query
-    // and focused row, dimmer text for chrome.  Focused row uses an
-    // indigo blue (NOT the yellow HIGHLIGHT_BG, which is reserved
-    // for in-grid match highlighting; sharing the colour would make
-    // them visually conflict).
+    // Palette: Darcula-ish dark gray-blue panel, JetBrains-style
+    // indigo selection (NOT the yellow grid-side HIGHLIGHT_BG —
+    // those have distinct semantic meanings and must not collide).
     if let Some(overlay) = view.search_overlay.as_ref() {
         const OVERLAY_COLS: u16 = SEARCH_BAR_COLS;
         const LIST_MAX_ROWS: u16 = SEARCH_LIST_MAX_ROWS;
-        const OVERLAY_BG: (f32, f32, f32) = (0.13, 0.14, 0.17);
-        const OVERLAY_BORDER: (f32, f32, f32) = (0.42, 0.45, 0.52);
+        const OVERLAY_BG: (f32, f32, f32, f32) = (0.13, 0.14, 0.17, 1.0);
+        const OVERLAY_BORDER: (f32, f32, f32, f32) = (0.30, 0.32, 0.38, 1.0);
         const OVERLAY_TEXT: (f32, f32, f32) = (0.95, 0.96, 0.97);
         const OVERLAY_DIM: (f32, f32, f32) = (0.60, 0.63, 0.70);
         const OVERLAY_ACCENT: (f32, f32, f32) = (0.40, 0.62, 1.0);
-        const OVERLAY_FOCUSED_BG: (f32, f32, f32) = (0.18, 0.28, 0.48);
+        const OVERLAY_FOCUSED_BG: (f32, f32, f32, f32) = (0.18, 0.28, 0.48, 1.0);
+        const OVERLAY_DIVIDER: (f32, f32, f32, f32) = (0.22, 0.24, 0.28, 1.0);
+        const PANEL_RADIUS_PX: f32 = 10.0;
+        const ROW_RADIUS_PX: f32 = 5.0;
+        const SHADOW_BLUR_PX: f32 = 18.0;
+        const SHADOW_ALPHA: f32 = 0.45;
         let cols = grid.cols();
         let rows = grid.rows();
         if cols >= OVERLAY_COLS + 2 {
             let n_list = (overlay.hits.len() as u16).min(LIST_MAX_ROWS);
-            // Layout (cell rows from top of overlay):
-            //   0  — top border ╭───╮ (with label & right controls)
-            //   1  — query row │ … │
-            //   2  — separator ├───┤ when list present, else bottom ╰───╯
-            //   3..3+n_list — list rows
-            //   3+n_list — bottom border ╰───╯
             let has_list = n_list > 0;
-            let total_rows = if has_list { 3 + n_list + 1 } else { 3 };
-            // Clamp height so the overlay doesn't run past the grid.
-            let total_rows = total_rows.min(rows);
+            // Visual rows occupied (text rows): query (1) + divider gap (½) +
+            // list rows.  Total panel height is approximated in cells so
+            // it scales with font, then padded for breathing room.
+            let chrome_rows: f32 = 1.0; // query row
+            let divider_rows: f32 = if has_list { 0.4 } else { 0.0 };
+            let list_rows: f32 = if has_list { n_list as f32 } else { 0.0 };
+            let total_rows_f = chrome_rows + divider_rows + list_rows;
+            // Panel height: total text rows + outer padding (½ row top + ½ bottom).
+            let panel_inner_pad = (cell_h * 0.4).max(6.0);
+            let panel_h = (total_rows_f * cell_h).round() + 2.0 * panel_inner_pad;
+            // Clamp height to grid bottom so the overlay never overshoots.
+            let grid_bottom = inner_y + rows as f32 * cell_h;
 
             let bar_left_col = cols - OVERLAY_COLS - 1;
             let bar_x = inner_x + bar_left_col as f32 * cell_w;
-            let bar_y_top = inner_y;
-            let bar_w = OVERLAY_COLS as f32 * cell_w;
-            let bar_h = total_rows as f32 * cell_h;
+            // Anchor: small floating margin from grid top (looks like
+            // a popover, not flush-attached chrome).
+            let panel_y = inner_y + (cell_h * 0.5).round();
+            let panel_w = OVERLAY_COLS as f32 * cell_w;
+            let panel_h = panel_h.min((grid_bottom - panel_y).max(0.0));
 
-            // 1. BG fill for the entire overlay.
-            cells.push(CellInstance {
-                origin: [bar_x, bar_y_top],
-                size: [bar_w, bar_h],
-                color: [OVERLAY_BG.0, OVERLAY_BG.1, OVERLAY_BG.2, 1.0],
+            // 1. Panel: rounded rect + 1px stroke + drop shadow, all
+            //    computed in one instance via the SDF shader.
+            ui_rects.push(UiRectInstance {
+                origin: [bar_x, panel_y],
+                size: [panel_w, panel_h],
+                fill_color: [OVERLAY_BG.0, OVERLAY_BG.1, OVERLAY_BG.2, OVERLAY_BG.3],
+                border_color: [
+                    OVERLAY_BORDER.0,
+                    OVERLAY_BORDER.1,
+                    OVERLAY_BORDER.2,
+                    OVERLAY_BORDER.3,
+                ],
+                corner_radius: PANEL_RADIUS_PX,
+                border_width: 1.0,
+                shadow_blur: SHADOW_BLUR_PX,
+                shadow_alpha: SHADOW_ALPHA,
+                shadow_color: [0.0, 0.0, 0.0, 1.0],
             });
 
-            let border_color = [
-                OVERLAY_BORDER.0, OVERLAY_BORDER.1, OVERLAY_BORDER.2, 1.0,
-            ];
+            // Inner content origin (after panel padding).
+            let inner_left = bar_x + panel_inner_pad;
+            let inner_top = panel_y + panel_inner_pad;
+
             let text_color = [OVERLAY_TEXT.0, OVERLAY_TEXT.1, OVERLAY_TEXT.2, 1.0];
             let dim_color = [OVERLAY_DIM.0, OVERLAY_DIM.1, OVERLAY_DIM.2, 1.0];
             let accent_color = [OVERLAY_ACCENT.0, OVERLAY_ACCENT.1, OVERLAY_ACCENT.2, 1.0];
 
-            // Geometry helper: column → x.
-            let xc = |col: u16| -> f32 { bar_x + col as f32 * cell_w };
-            let row_baseline = |row: u16| -> f32 {
-                bar_y_top + row as f32 * cell_h + ascent
-            };
-            let row_y = |row: u16| -> f32 { bar_y_top + row as f32 * cell_h };
-
-            // 2. Top border with embedded label "Find" + right controls.
-            //
-            // Layout split (cells from left to right):
-            //   0       ╭
-            //   1       ─
-            //   2       (space)
-            //   3..6    Find
-            //   7       (space)
-            //   8..R-1  ─ filler
-            //   R       counter text (e.g. "4/64")
-            //   R+CW+1  Aa (case toggle)
-            //   R+CW+4  × (close)
-            //   N-2     ─
-            //   N-1     ╮
-            push_text_run("╭", xc(0), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-            push_text_run("─", xc(1), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-            push_text_run("Find", xc(3), row_baseline(0), text_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-
-            let counter_text = overlay.counter.map(|(c, t)| format!("{c}/{t}")).unwrap_or_default();
-            let counter_w = counter_text.chars().count() as u16;
-            let aa_w: u16 = 2;
-            let close_w: u16 = 1;
-            // Right group width: counter [+2 gap] + Aa [+2 gap] + ×
-            let right_group_w = if counter_w > 0 {
-                counter_w + 2 + aa_w + 2 + close_w
-            } else {
-                aa_w + 2 + close_w
-            };
-            // Position: last cells available before final ─╮ (cols N-2, N-1).
-            let right_start_col = OVERLAY_COLS - 2 - right_group_w;
-
-            // Mid-dashes from col 8 to right_start_col - 1.
-            if right_start_col > 8 {
-                let mid: String = "─".repeat((right_start_col - 8) as usize);
-                push_text_run(&mid, xc(8), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-            }
-
-            // Counter (e.g. "4/64") in DIM.
-            let mut right_col = right_start_col;
-            if counter_w > 0 {
-                push_text_run(&counter_text, xc(right_col), row_baseline(0), dim_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                right_col += counter_w + 2;
-            }
-            // Aa — ACCENT when case_sensitive, DIM otherwise.
-            let aa_color = if overlay.case_sensitive { accent_color } else { dim_color };
-            push_text_run("Aa", xc(right_col), row_baseline(0), aa_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-            right_col += aa_w + 2;
-            // × close hint.
-            push_text_run("×", xc(right_col), row_baseline(0), dim_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-
-            // Trailing ─╮
-            push_text_run("─", xc(OVERLAY_COLS - 2), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-            push_text_run("╮", xc(OVERLAY_COLS - 1), row_baseline(0), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-
-            // 3. Query row.
-            //   │ <query>...                    │
-            push_text_run("│", xc(0), row_baseline(1), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-            let query_col = 2u16;
-            let query_max_chars = (OVERLAY_COLS - 4) as usize;
-            let query_display: String = overlay.query.chars().take(query_max_chars).collect();
+            // 2. Query row: text + caret + right-aligned counter +
+            //    Aa toggle + × close.  Pixel-positioned, not
+            //    cell-aligned.
+            let query_baseline = inner_top + ascent;
+            let query_x = inner_left;
+            let query_max_chars = (OVERLAY_COLS - 12) as usize;
+            let query_display: String =
+                overlay.query.chars().take(query_max_chars).collect();
             if !query_display.is_empty() {
-                push_text_run(&query_display, xc(query_col), row_baseline(1), text_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                push_text_run(
+                    &query_display, query_x, query_baseline, text_color,
+                    cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+                );
             }
-            // Block cursor — thin vertical accent at query_cursor column.
-            let cursor_col_in_query = (overlay.query_cursor as usize).min(query_max_chars) as u16;
-            let cursor_x = xc(query_col + cursor_col_in_query);
+            // Caret — thin accent stripe at the query_cursor column.
+            let caret_col = (overlay.query_cursor as usize).min(query_max_chars) as f32;
+            let caret_x = query_x + caret_col * cell_w;
             cells.push(CellInstance {
-                origin: [cursor_x, row_y(1) + 2.0],
-                size: [(cell_w * 0.4).max(2.0), cell_h - 4.0],
-                color: [OVERLAY_TEXT.0, OVERLAY_TEXT.1, OVERLAY_TEXT.2, 0.9],
+                origin: [caret_x, inner_top + 2.0],
+                size: [2.0, cell_h - 4.0],
+                color: [OVERLAY_ACCENT.0, OVERLAY_ACCENT.1, OVERLAY_ACCENT.2, 0.95],
             });
-            push_text_run("│", xc(OVERLAY_COLS - 1), row_baseline(1), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
 
-            // 4. Separator (if list present) or bottom border directly.
-            let sep_row = 2u16;
+            // Right side: × close hint, Aa toggle, counter "4/64".
+            let close_x = bar_x + panel_w - panel_inner_pad - cell_w;
+            push_text_run(
+                "×", close_x, query_baseline, dim_color,
+                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+            );
+            let aa_x = close_x - 3.0 * cell_w;
+            let aa_color = if overlay.case_sensitive { accent_color } else { dim_color };
+            push_text_run(
+                "Aa", aa_x, query_baseline, aa_color,
+                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+            );
+            if let Some((c, t)) = overlay.counter {
+                let counter_text = format!("{c}/{t}");
+                let counter_w_chars = counter_text.chars().count() as f32;
+                let counter_x = aa_x - (counter_w_chars + 1.0) * cell_w;
+                push_text_run(
+                    &counter_text, counter_x, query_baseline, dim_color,
+                    cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+                );
+            }
+
+            // 3. Divider — 1px hairline rounded rect across the panel
+            //    when a list is shown.
+            let divider_y = inner_top + cell_h + (panel_inner_pad * 0.5).round();
             if has_list {
-                push_text_run("├", xc(0), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                let mid: String = "─".repeat((OVERLAY_COLS - 2) as usize);
-                push_text_run(&mid, xc(1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                push_text_run("┤", xc(OVERLAY_COLS - 1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                ui_rects.push(UiRectInstance {
+                    origin: [inner_left, divider_y],
+                    size: [panel_w - 2.0 * panel_inner_pad, 1.0],
+                    fill_color: [
+                        OVERLAY_DIVIDER.0,
+                        OVERLAY_DIVIDER.1,
+                        OVERLAY_DIVIDER.2,
+                        OVERLAY_DIVIDER.3,
+                    ],
+                    border_color: [0.0, 0.0, 0.0, 0.0],
+                    corner_radius: 0.5,
+                    border_width: 0.0,
+                    shadow_blur: 0.0,
+                    shadow_alpha: 0.0,
+                    shadow_color: [0.0, 0.0, 0.0, 0.0],
+                });
+            }
 
-                // 5. List rows.
-                let visible = n_list.min(total_rows.saturating_sub(4));
-                for i in 0..visible {
-                    let r = 3 + i;
-                    let h = &overlay.hits[i as usize];
-                    if h.is_focused {
-                        // Indigo focused-row BG inside the borders.
-                        cells.push(CellInstance {
-                            origin: [xc(1), row_y(r)],
-                            size: [(OVERLAY_COLS - 2) as f32 * cell_w, cell_h],
-                            color: [
-                                OVERLAY_FOCUSED_BG.0,
-                                OVERLAY_FOCUSED_BG.1,
-                                OVERLAY_FOCUSED_BG.2,
-                                1.0,
-                            ],
-                        });
-                    }
-                    push_text_run("│", xc(0), row_baseline(r), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                    // Focus marker.
-                    let marker = if h.is_focused { "▸" } else { " " };
-                    let marker_color = if h.is_focused { accent_color } else { dim_color };
-                    push_text_run(marker, xc(1), row_baseline(r), marker_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                    // Snippet, clipped to inner width.
-                    let inner_w_chars = (OVERLAY_COLS - 3) as usize;
-                    let snip: String = h.snippet.chars().take(inner_w_chars).collect();
-                    push_text_run(&snip, xc(2), row_baseline(r), text_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                    push_text_run("│", xc(OVERLAY_COLS - 1), row_baseline(r), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+            // 4. List rows.
+            let list_top = divider_y + (panel_inner_pad * 0.5).round();
+            let max_visible = ((grid_bottom - list_top) / cell_h).floor() as u16;
+            let visible = n_list.min(max_visible).min(LIST_MAX_ROWS);
+            for i in 0..visible {
+                let h = &overlay.hits[i as usize];
+                let row_y_px = list_top + i as f32 * cell_h;
+                let row_baseline_px = row_y_px + ascent;
+                if h.is_focused {
+                    // Rounded indigo selection bar, inset 4px from
+                    // the panel edges so the corner radius reads.
+                    let inset = 4.0;
+                    ui_rects.push(UiRectInstance {
+                        origin: [bar_x + inset, row_y_px],
+                        size: [panel_w - 2.0 * inset, cell_h],
+                        fill_color: [
+                            OVERLAY_FOCUSED_BG.0,
+                            OVERLAY_FOCUSED_BG.1,
+                            OVERLAY_FOCUSED_BG.2,
+                            OVERLAY_FOCUSED_BG.3,
+                        ],
+                        border_color: [0.0, 0.0, 0.0, 0.0],
+                        corner_radius: ROW_RADIUS_PX,
+                        border_width: 0.0,
+                        shadow_blur: 0.0,
+                        shadow_alpha: 0.0,
+                        shadow_color: [0.0, 0.0, 0.0, 0.0],
+                    });
                 }
-
-                // 6. Bottom border ╰───╯ after list.
-                let bot_row = 3 + visible;
-                if bot_row < total_rows {
-                    push_text_run("╰", xc(0), row_baseline(bot_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                    let mid: String = "─".repeat((OVERLAY_COLS - 2) as usize);
-                    push_text_run(&mid, xc(1), row_baseline(bot_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                    push_text_run("╯", xc(OVERLAY_COLS - 1), row_baseline(bot_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                }
-            } else {
-                // Bottom border directly at row 2 (no list).
-                push_text_run("╰", xc(0), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                let mid: String = "─".repeat((OVERLAY_COLS - 2) as usize);
-                push_text_run(&mid, xc(1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
-                push_text_run("╯", xc(OVERLAY_COLS - 1), row_baseline(sep_row), border_color, cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs);
+                let inner_w_chars = (OVERLAY_COLS - 2) as usize;
+                let snip: String = h.snippet.chars().take(inner_w_chars).collect();
+                let snip_color = if h.is_focused { text_color } else { dim_color };
+                push_text_run(
+                    &snip, inner_left, row_baseline_px, snip_color,
+                    cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
+                );
             }
         }
         let _ = rows;
@@ -3208,6 +3291,31 @@ fn build_dot_pipeline(
         .map_err(|e| format!("newRenderPipelineState (dot) error: {:?}", e))
 }
 
+fn build_ui_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+    library: &ProtocolObject<dyn MTLLibrary>,
+) -> Result<Retained<ProtocolObject<dyn MTLRenderPipelineState>>, String> {
+    let vfn = pipeline_function(library, "ui_rect_vertex")?;
+    let ffn = pipeline_function(library, "ui_rect_fragment")?;
+
+    let descriptor = MTLRenderPipelineDescriptor::new();
+    descriptor.setVertexFunction(Some(&vfn));
+    descriptor.setFragmentFunction(Some(&ffn));
+    let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
+    attachment.setPixelFormat(TARGET_FORMAT);
+    attachment.setBlendingEnabled(true);
+    attachment.setRgbBlendOperation(MTLBlendOperation::Add);
+    attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+    attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+    attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+    device
+        .newRenderPipelineStateWithDescriptor_error(&descriptor)
+        .map_err(|e| format!("newRenderPipelineState (ui_rect) error: {:?}", e))
+}
+
 fn build_fg_sampler(
     device: &ProtocolObject<dyn MTLDevice>,
 ) -> Result<Retained<ProtocolObject<dyn MTLSamplerState>>, String> {
@@ -3356,6 +3464,11 @@ fn cells_as_bytes(cells: &[CellInstance]) -> &[u8] {
 
 /// SAFETY: same reasoning as `cells_as_bytes` — `GlyphInstance` is
 /// `#[repr(C)]` with no padding.
+fn ui_rects_as_bytes(rects: &[UiRectInstance]) -> &[u8] {
+    let len = std::mem::size_of_val(rects);
+    unsafe { std::slice::from_raw_parts(rects.as_ptr() as *const u8, len) }
+}
+
 fn glyphs_as_bytes(glyphs: &[GlyphInstance]) -> &[u8] {
     let len = std::mem::size_of_val(glyphs);
     unsafe { std::slice::from_raw_parts(glyphs.as_ptr() as *const u8, len) }
@@ -3724,6 +3837,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
         );
 
         // Expected glyph instances:
@@ -3818,6 +3932,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
         );
 
         assert_eq!(color_glyphs.len(), 1, "emoji should emit one colour glyph");
@@ -3884,6 +3999,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
         );
         glyphs
     }
@@ -3992,6 +4108,7 @@ mod tests {
                 &mut glyphs,
                 &mut color_glyphs,
                 &mut dots,
+                &mut Vec::new(),
             );
             cells
         };
@@ -4084,6 +4201,7 @@ mod tests {
             &mut glyphs,
             &mut color_glyphs,
             &mut dots,
+            &mut Vec::new(),
         );
         // No HIGHLIGHT_BG cell should be present.
         let highlight_count = cells
@@ -4148,6 +4266,7 @@ mod tests {
                 &mut glyphs,
                 &mut color_glyphs,
                 &mut dots,
+                &mut Vec::new(),
             );
             glyphs
         };

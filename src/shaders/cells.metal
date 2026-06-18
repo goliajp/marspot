@@ -173,3 +173,134 @@ fragment float4 dot_fragment(DVOut in [[stage_in]]) {
     float coverage = 1.0 - smoothstep(0.5 - aa, 0.5, d);
     return float4(in.color.rgb, in.color.a * coverage);
 }
+
+// ----------------------------------------------------------------------
+// UI rect pass — anti-aliased rounded rectangle via SDF.  Each
+// instance is a panel / chrome element (search bar, future menu,
+// future tooltip) that needs:
+//   • Pixel-precise positioning (not cell-aligned)
+//   • A real fillet corner radius (no Unicode box-drawing approx)
+//   • Optional 1-px stroke border
+//   • Optional soft drop shadow (alpha falloff outside the rect)
+// All computed in one fragment shader so a single instance pushes
+// BG + border + shadow without extra pipeline switches.
+// ----------------------------------------------------------------------
+
+struct UiRect {
+    float2 origin;        // top-left in physical px (the FILL rect)
+    float2 size;          // fill rect size in physical px
+    float4 fill_color;    // panel BG, premultiplied alpha allowed
+    float4 border_color;  // 1-px stroke; alpha=0 to skip
+    float corner_radius;  // px; clamped to min(size)/2 in shader
+    float border_width;   // px; 0 to skip border
+    float shadow_blur;    // px; 0 to skip shadow
+    float shadow_alpha;   // 0..1 shadow intensity
+    float4 shadow_color;  // typically black, alpha-mixed by shadow_alpha
+};
+
+struct URVOut {
+    float4 position [[position]];
+    float2 quad_uv;       // 0..1 across the *padded* (shadow-inclusive) quad
+    // Per-instance constants (forwarded to fragment so each pixel can SDF).
+    float2 padded_size;   // size + 2 * shadow_blur, mirrored from vertex
+    float2 fill_size;     // size, mirrored from vertex (no inflation)
+    float4 fill_color;
+    float4 border_color;
+    float corner_radius;
+    float border_width;
+    float shadow_blur;
+    float shadow_alpha;
+    float4 shadow_color;
+};
+
+vertex URVOut ui_rect_vertex(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const UiRect* rects [[buffer(0)]],
+    constant float2& viewport_px [[buffer(1)]]
+) {
+    UiRect r = rects[iid];
+    // Inflate the quad by shadow_blur on each side so the shadow falloff
+    // has pixels to draw into.  Drop shadow becomes a 0-cost optional
+    // by setting shadow_blur=0.
+    float2 padded_origin = r.origin - float2(r.shadow_blur, r.shadow_blur);
+    float2 padded_size = r.size + float2(2.0 * r.shadow_blur, 2.0 * r.shadow_blur);
+    float2 px = padded_origin + padded_size * corners[vid];
+
+    float2 ndc = (px / viewport_px) * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+
+    URVOut o;
+    o.position = float4(ndc, 0.0, 1.0);
+    o.quad_uv = corners[vid];
+    o.padded_size = padded_size;
+    o.fill_size = r.size;
+    o.fill_color = r.fill_color;
+    o.border_color = r.border_color;
+    o.corner_radius = r.corner_radius;
+    o.border_width = r.border_width;
+    o.shadow_blur = r.shadow_blur;
+    o.shadow_alpha = r.shadow_alpha;
+    o.shadow_color = r.shadow_color;
+    return o;
+}
+
+// SDF for an axis-aligned rounded rect centred at origin with half-extent
+// `half` and corner radius `r`.  Returns negative inside, positive outside.
+inline float sdf_rounded_rect(float2 p, float2 half, float r) {
+    float2 q = abs(p) - half + float2(r, r);
+    return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0, 0.0))) - r;
+}
+
+fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
+    // Convert quad_uv (0..1 across padded quad) back to a centred
+    // coord in fill-rect space (i.e. the SDF reference frame is the
+    // fill rect, not the padded shadow quad).
+    float2 p = (in.quad_uv * in.padded_size) - in.padded_size * 0.5;
+    // Clamp corner radius defensively.
+    float radius = min(in.corner_radius, min(in.fill_size.x, in.fill_size.y) * 0.5);
+    float2 fill_half = in.fill_size * 0.5;
+    float d = sdf_rounded_rect(p, fill_half, radius);
+
+    // Anti-alias band: ~1 px in screen space.
+    float aa = fwidth(d) * 0.7;
+
+    // Inside-vs-edge coverage for the fill.
+    float fill_coverage = 1.0 - smoothstep(-aa, aa, d);
+
+    // Border ring coverage: |d| < border_width/2.
+    float border_coverage = 0.0;
+    if (in.border_width > 0.0 && in.border_color.a > 0.0) {
+        float bw = in.border_width * 0.5;
+        // |d| close to 0 → on the boundary, ramp to 0 either side.
+        float band = abs(d) - bw;
+        border_coverage = 1.0 - smoothstep(-aa, aa, band);
+    }
+
+    // Soft shadow falloff outside the fill rect.
+    float shadow_coverage = 0.0;
+    if (in.shadow_blur > 0.0 && in.shadow_alpha > 0.0) {
+        // d > 0 outside; ramp from full at d=0 to 0 at d=shadow_blur.
+        shadow_coverage = (1.0 - smoothstep(0.0, in.shadow_blur, max(d, 0.0))) * in.shadow_alpha;
+        // Don't draw shadow inside the rect — fill takes over there.
+        shadow_coverage *= step(0.0, d);
+    }
+
+    // Composite: shadow underneath, fill on top, border on top of both.
+    float4 rgba = float4(in.shadow_color.rgb, in.shadow_color.a * shadow_coverage);
+    // Fill over shadow.
+    {
+        float a = in.fill_color.a * fill_coverage;
+        float inv = 1.0 - a;
+        rgba.rgb = in.fill_color.rgb * a + rgba.rgb * inv;
+        rgba.a   = a + rgba.a * inv;
+    }
+    // Border over fill.
+    if (border_coverage > 0.0) {
+        float a = in.border_color.a * border_coverage;
+        float inv = 1.0 - a;
+        rgba.rgb = in.border_color.rgb * a + rgba.rgb * inv;
+        rgba.a   = a + rgba.a * inv;
+    }
+    return rgba;
+}

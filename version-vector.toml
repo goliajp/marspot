@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.10.9"   # L2 — F1+10 search overlay JetBrains-style 重做:圆角 box-drawing 边框 ╭╮╰╯ ─ │,header"Find"标 + counter + [Aa] toggle + [×] close,query row 带细光标,separator ├─┤,list 焦点行 indigo BG(让 grid 内 HIGHLIGHT_BG 黄留给 match)+ ▸ 焦点 marker.Darcula 配色
+core    = "0.10.10"  # L2 — F1+11 真 UI pipeline 接入:加 `ui_rect` SDF shader(rounded rect + AA corner + 1px stroke + 软 drop shadow,单 instance 完整 widget).search overlay 改用它:panel 真圆角带 18px blur 阴影,焦点行 inset 4px rounded indigo selection,divider 一根 1px hairline,字符 box-drawing 全删.text 暂仍走 cell glyph atlas(比例字体留 Phase 2).真 chrome ≠ 字符,user 说要看齐 JetBrains 的第一步
 session = "0.9.2"    # L3 — F1+8: 同型 alt-screen clamp 修(L3 自己的 auto-pin 也跑 `.min(max)`,user 按住 Enter 时不弹是因为每次按都重 forward_scroll;松开后 L3 端 bump 把 view_offset 拉回 alt screen 小 scrollback_len).改 max >= view_offset 才 bump,否则 L3_BUMP_SKIP log + 保位.
