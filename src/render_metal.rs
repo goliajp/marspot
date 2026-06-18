@@ -1911,6 +1911,42 @@ fn build_instances(
         glyphs,
     );
 
+    // F3+1.8 — per-pane search overlay.  Painted via the same
+    // overlay-scratch path as the modal — no filter, no in-cache
+    // mixing, opaque BG by default via `ViewStyle`.  Position is
+    // pane-local, sourced from the layout cell rect we already
+    // walked to push the session's grid.
+    {
+        use crate::ui::core::view::ViewPainter;
+        use crate::ui::components::search_overlay::{
+            paint_search_overlay, SearchOverlayParams,
+        };
+        for (i, view) in views.iter().enumerate() {
+            let Some(rect) = layout.cells.get(i) else { continue };
+            let Some(overlay) = view.search_overlay.as_ref() else { continue };
+            let inner_x = rect.x as f32 + layout.padding as f32;
+            let inner_y = rect.y_top as f32
+                + layout.cell_title_h as f32
+                + layout.padding as f32;
+            let mut painter = ViewPainter {
+                cell_w, cell_h, ascent,
+                atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+                window_w: layout.window_w, window_h: layout.window_h,
+                font, atlas,
+                cells: overlay_cells,
+                glyphs: overlay_glyphs,
+                ui_rects: overlay_ui_rects,
+            };
+            paint_search_overlay(&mut painter, SearchOverlayParams {
+                overlay,
+                inner_x,
+                inner_y,
+                grid_cols: view.grid.cols(),
+                grid_rows: view.grid.rows(),
+            });
+        }
+    }
+
     // F3+1.7 — Process Monitor modal renders via the `View` component
     // which owns the overlay-scratch + extra-pass plumbing.  Build
     // sites only see the painter; backdrop / frame / always-on-top
@@ -2292,7 +2328,7 @@ fn push_process_panel_via_view(
     glyphs: &mut Vec<GlyphInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
 ) {
-    use crate::ui::components::view::{View, ViewStyle, ViewPainter, Backdrop};
+    use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
     let mut painter = ViewPainter {
         cell_w, cell_h, ascent, atlas_w, atlas_h,
         window_w, window_h,
@@ -2328,7 +2364,7 @@ fn push_process_panel_via_view(
 /// a `ViewPainter` routing to overlay scratches.
 fn paint_process_panel_content(
     panel: &ProcessPanelRender,
-    p: &mut crate::ui::components::view::ViewPainter,
+    p: &mut crate::ui::core::view::ViewPainter,
 ) {
     let px = panel.rect.x as f32;
     let py = panel.rect.y_top as f32;
@@ -3591,180 +3627,11 @@ fn push_session(
     // Palette: Darcula-ish dark gray-blue panel, JetBrains-style
     // indigo selection (NOT the yellow grid-side HIGHLIGHT_BG —
     // those have distinct semantic meanings and must not collide).
-    if let Some(overlay) = view.search_overlay.as_ref() {
-        const OVERLAY_COLS: u16 = SEARCH_BAR_COLS;
-        const LIST_MAX_ROWS: u16 = SEARCH_LIST_MAX_ROWS;
-        const OVERLAY_BG: (f32, f32, f32, f32) = (0.13, 0.14, 0.17, 1.0);
-        const OVERLAY_BORDER: (f32, f32, f32, f32) = (0.30, 0.32, 0.38, 1.0);
-        const OVERLAY_TEXT: (f32, f32, f32) = (0.95, 0.96, 0.97);
-        const OVERLAY_DIM: (f32, f32, f32) = (0.60, 0.63, 0.70);
-        const OVERLAY_ACCENT: (f32, f32, f32) = (0.40, 0.62, 1.0);
-        const OVERLAY_FOCUSED_BG: (f32, f32, f32, f32) = (0.18, 0.28, 0.48, 1.0);
-        const OVERLAY_DIVIDER: (f32, f32, f32, f32) = (0.22, 0.24, 0.28, 1.0);
-        const PANEL_RADIUS_PX: f32 = 10.0;
-        const ROW_RADIUS_PX: f32 = 5.0;
-        const SHADOW_BLUR_PX: f32 = 18.0;
-        const SHADOW_ALPHA: f32 = 0.45;
-        let cols = grid.cols();
-        let rows = grid.rows();
-        if cols >= OVERLAY_COLS + 2 {
-            let n_list = (overlay.hits.len() as u16).min(LIST_MAX_ROWS);
-            let has_list = n_list > 0;
-            // Visual rows occupied (text rows): query (1) + divider gap (½) +
-            // list rows.  Total panel height is approximated in cells so
-            // it scales with font, then padded for breathing room.
-            let chrome_rows: f32 = 1.0; // query row
-            let divider_rows: f32 = if has_list { 0.4 } else { 0.0 };
-            let list_rows: f32 = if has_list { n_list as f32 } else { 0.0 };
-            let total_rows_f = chrome_rows + divider_rows + list_rows;
-            // Panel height: total text rows + outer padding (½ row top + ½ bottom).
-            let panel_inner_pad = (cell_h * 0.4).max(6.0);
-            let panel_h = (total_rows_f * cell_h).round() + 2.0 * panel_inner_pad;
-            // Clamp height to grid bottom so the overlay never overshoots.
-            let grid_bottom = inner_y + rows as f32 * cell_h;
-
-            let bar_left_col = cols - OVERLAY_COLS - 1;
-            let bar_x = inner_x + bar_left_col as f32 * cell_w;
-            // Anchor: small floating margin from grid top (looks like
-            // a popover, not flush-attached chrome).
-            let panel_y = inner_y + (cell_h * 0.5).round();
-            let panel_w = OVERLAY_COLS as f32 * cell_w;
-            let panel_h = panel_h.min((grid_bottom - panel_y).max(0.0));
-
-            // 1. Panel: rounded rect + 1px stroke + drop shadow, all
-            //    computed in one instance via the SDF shader.
-            ui_rects.push(UiRectInstance {
-                origin: [bar_x, panel_y],
-                size: [panel_w, panel_h],
-                fill_color: [OVERLAY_BG.0, OVERLAY_BG.1, OVERLAY_BG.2, OVERLAY_BG.3],
-                border_color: [
-                    OVERLAY_BORDER.0,
-                    OVERLAY_BORDER.1,
-                    OVERLAY_BORDER.2,
-                    OVERLAY_BORDER.3,
-                ],
-                corner_radius: PANEL_RADIUS_PX,
-                border_width: 1.0,
-                shadow_blur: SHADOW_BLUR_PX,
-                shadow_alpha: SHADOW_ALPHA,
-                shadow_color: [0.0, 0.0, 0.0, 1.0],
-            });
-
-            // Inner content origin (after panel padding).
-            let inner_left = bar_x + panel_inner_pad;
-            let inner_top = panel_y + panel_inner_pad;
-
-            let text_color = [OVERLAY_TEXT.0, OVERLAY_TEXT.1, OVERLAY_TEXT.2, 1.0];
-            let dim_color = [OVERLAY_DIM.0, OVERLAY_DIM.1, OVERLAY_DIM.2, 1.0];
-            let accent_color = [OVERLAY_ACCENT.0, OVERLAY_ACCENT.1, OVERLAY_ACCENT.2, 1.0];
-
-            // 2. Query row: text + caret + right-aligned counter +
-            //    Aa toggle + × close.  Pixel-positioned, not
-            //    cell-aligned.
-            let query_baseline = inner_top + ascent;
-            let query_x = inner_left;
-            let query_max_chars = (OVERLAY_COLS - 12) as usize;
-            let query_display: String =
-                overlay.query.chars().take(query_max_chars).collect();
-            if !query_display.is_empty() {
-                push_text_run(
-                    &query_display, query_x, query_baseline, text_color,
-                    cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-                );
-            }
-            // Caret — thin accent stripe at the query_cursor column.
-            let caret_col = (overlay.query_cursor as usize).min(query_max_chars) as f32;
-            let caret_x = query_x + caret_col * cell_w;
-            cells.push(CellInstance {
-                origin: [caret_x, inner_top + 2.0],
-                size: [2.0, cell_h - 4.0],
-                color: [OVERLAY_ACCENT.0, OVERLAY_ACCENT.1, OVERLAY_ACCENT.2, 0.95],
-            });
-
-            // Right side: × close hint, Aa toggle, counter "4/64".
-            let close_x = bar_x + panel_w - panel_inner_pad - cell_w;
-            push_text_run(
-                "×", close_x, query_baseline, dim_color,
-                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-            );
-            let aa_x = close_x - 3.0 * cell_w;
-            let aa_color = if overlay.case_sensitive { accent_color } else { dim_color };
-            push_text_run(
-                "Aa", aa_x, query_baseline, aa_color,
-                cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-            );
-            if let Some((c, t)) = overlay.counter {
-                let counter_text = format!("{c}/{t}");
-                let counter_w_chars = counter_text.chars().count() as f32;
-                let counter_x = aa_x - (counter_w_chars + 1.0) * cell_w;
-                push_text_run(
-                    &counter_text, counter_x, query_baseline, dim_color,
-                    cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-                );
-            }
-
-            // 3. Divider — 1px hairline rounded rect across the panel
-            //    when a list is shown.
-            let divider_y = inner_top + cell_h + (panel_inner_pad * 0.5).round();
-            if has_list {
-                ui_rects.push(UiRectInstance {
-                    origin: [inner_left, divider_y],
-                    size: [panel_w - 2.0 * panel_inner_pad, 1.0],
-                    fill_color: [
-                        OVERLAY_DIVIDER.0,
-                        OVERLAY_DIVIDER.1,
-                        OVERLAY_DIVIDER.2,
-                        OVERLAY_DIVIDER.3,
-                    ],
-                    border_color: [0.0, 0.0, 0.0, 0.0],
-                    corner_radius: 0.5,
-                    border_width: 0.0,
-                    shadow_blur: 0.0,
-                    shadow_alpha: 0.0,
-                    shadow_color: [0.0, 0.0, 0.0, 0.0],
-                });
-            }
-
-            // 4. List rows.
-            let list_top = divider_y + (panel_inner_pad * 0.5).round();
-            let max_visible = ((grid_bottom - list_top) / cell_h).floor() as u16;
-            let visible = n_list.min(max_visible).min(LIST_MAX_ROWS);
-            for i in 0..visible {
-                let h = &overlay.hits[i as usize];
-                let row_y_px = list_top + i as f32 * cell_h;
-                let row_baseline_px = row_y_px + ascent;
-                if h.is_focused {
-                    // Rounded indigo selection bar, inset 4px from
-                    // the panel edges so the corner radius reads.
-                    let inset = 4.0;
-                    ui_rects.push(UiRectInstance {
-                        origin: [bar_x + inset, row_y_px],
-                        size: [panel_w - 2.0 * inset, cell_h],
-                        fill_color: [
-                            OVERLAY_FOCUSED_BG.0,
-                            OVERLAY_FOCUSED_BG.1,
-                            OVERLAY_FOCUSED_BG.2,
-                            OVERLAY_FOCUSED_BG.3,
-                        ],
-                        border_color: [0.0, 0.0, 0.0, 0.0],
-                        corner_radius: ROW_RADIUS_PX,
-                        border_width: 0.0,
-                        shadow_blur: 0.0,
-                        shadow_alpha: 0.0,
-                        shadow_color: [0.0, 0.0, 0.0, 0.0],
-                    });
-                }
-                let inner_w_chars = (OVERLAY_COLS - 2) as usize;
-                let snip: String = h.snippet.chars().take(inner_w_chars).collect();
-                let snip_color = if h.is_focused { text_color } else { dim_color };
-                push_text_run(
-                    &snip, inner_left, row_baseline_px, snip_color,
-                    cell_w, cell_h, ascent, atlas_w, atlas_h, font, atlas, glyphs,
-                );
-            }
-        }
-        let _ = rows;
-    }
+    // F3+1.8 — search overlay rendering moved to
+    // `ui::components::search_overlay::paint_search_overlay`, called
+    // from `build_instances` post-pane-loop into the overlay
+    // scratches.  push_session no longer touches it; the per-pane
+    // instance cache stays purely grid content.
 }
 
 /// Build a Shared-storage MTLBuffer over `bytes`.  Returns `None`

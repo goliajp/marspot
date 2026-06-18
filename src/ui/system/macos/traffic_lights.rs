@@ -6,6 +6,7 @@ use marspot_term::layout::Rect;
 use crate::render_metal::UiRectInstance;
 
 /// Layout: 3 dots anchored left.  Rects use physical px.
+#[derive(Debug, Clone)]
 pub struct TrafficLights {
     pub close: Rect,
     pub min: Rect,

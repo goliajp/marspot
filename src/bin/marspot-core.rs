@@ -1857,7 +1857,8 @@ impl CoreApp {
     /// state.  All rects are physical pixels.
     fn build_process_panel_render(&mut self) -> Option<marspot::render_metal::ProcessPanelRender> {
         use marspot::render_metal::{ProcessPanelRender, ProcessPanelRow};
-        use marspot::ui::components::{ModalFrame, TrafficLights, TabStrip, ScrollView};
+        use marspot::ui::components::{ModalFrame, TabStrip, ScrollView};
+        use marspot::ui::system::macos::TrafficLights;
         use marspot::ui::components::modal_frame::ModalLayoutSpec;
         let scale = self.scale.max(0.1);
         // Snapshot fields we'll need before any &mut borrow of panel.

@@ -7,12 +7,21 @@
 //! (selection projection / serialisation, scroll math) live here;
 //! each front-end keeps only its event plumbing.
 
-/// F3+1.5 — reusable visual components.  Start of a deliberate
-/// "marspot UI kit": small composable pieces (traffic lights, tab
-/// strip, scroll view, modal frame) that any feature wanting a
-/// macOS-ish look should reach for instead of hand-rolling the
-/// fifth slightly-different SDF rect.  See each submodule for its
-/// contract.
+/// F3+1.8 — marspot UI kit, organised in three tiers:
+///
+///   `core/`    — foundation primitives every UI reaches for first
+///                (the `View` overlay surface, painter, backdrop)
+///   `system/`  — platform-specific chrome
+///                (`system::macos::traffic_lights`, `::title_bar`)
+///   `components/` — composite widgets built on top of core + system
+///                (tab strip, scroll view, modal frame, search
+///                overlay, …)
+///
+/// Scene-private rendering (e.g. the Process Monitor's body row layout)
+/// lives next to its scene code in `marspot-core`; the UI kit is for
+/// the pieces a second scene would also want.
+pub mod core;
+pub mod system;
 pub mod components;
 
 use crate::pane::Pane;
