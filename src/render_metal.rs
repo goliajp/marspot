@@ -1745,10 +1745,28 @@ fn build_instances(
         glyphs,
     );
 
-    // F3+1.3 — process-tree panel.  Drawn AFTER chrome so its BG
-    // sits on top of the grid + toolbar (intentional — the panel is
-    // a transient overlay; user opens it, kills, closes).
+    // F3+1.3 — process-tree panel.  The render pass order is BG → DOT
+    // → UI → FG (cells.metal), so any FG glyphs pushed BEFORE this
+    // point that fall inside the panel rect will draw OVER the
+    // panel's opaque BG — that's the "still transparent" complaint.
+    // Cure: strip those glyphs (mono + color + cursor dots + BG
+    // cells) from their scratch vecs FIRST, THEN push the panel's
+    // own content (BG into ui_rects, rows + [×] into cells / glyphs),
+    // so only panel-owned instances live inside the rect when the
+    // FG pass runs.  Cells/dots are filtered too so we don't waste
+    // GPU drawing them behind an opaque cover.
     if let Some(panel) = process_panel {
+        let px = panel.rect.x as f32;
+        let py = panel.rect.y_top as f32;
+        let pw = panel.rect.w as f32;
+        let ph = panel.rect.h as f32;
+        let in_panel = |x: f32, y: f32| -> bool {
+            x >= px && x < px + pw && y >= py && y < py + ph
+        };
+        glyphs.retain(|g| !in_panel(g.origin[0], g.origin[1]));
+        color_glyphs.retain(|g| !in_panel(g.origin[0], g.origin[1]));
+        cells.retain(|c| !in_panel(c.origin[0], c.origin[1]));
+        dots.retain(|c| !in_panel(c.origin[0], c.origin[1]));
         push_process_panel(
             panel, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             font, atlas, cells, glyphs, ui_rects,
