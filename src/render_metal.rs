@@ -2072,7 +2072,7 @@ fn push_grid_icon(
 /// indicator ("sidebar showing" vs "sidebar hidden") at a glance.
 /// F3+1.3 panel constants.  Pulled together so a future restyle
 /// changes one place.
-const PROCESS_PANEL_BG: [f32; 4] = [0.10, 0.11, 0.135, 0.95];
+const PROCESS_PANEL_BG: [f32; 4] = [0.10, 0.11, 0.135, 1.0];
 const PROCESS_PANEL_BORDER: [f32; 4] = [0.20, 0.22, 0.26, 1.0];
 const PROCESS_PANEL_CORNER_RADIUS: f32 = 10.0;
 const PROCESS_PANEL_ROW_FG: [f32; 4] = [0.86, 0.88, 0.92, 1.0];
