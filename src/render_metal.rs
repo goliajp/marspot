@@ -57,6 +57,8 @@ use crate::render::{
     box_drawing_arms, block_element_rects, rasterize_arms_into_buf, rasterize_block_into_buf,
     SessionView, SidebarEntry,
 };
+#[cfg(test)]
+use crate::render::HighlightSpan;
 use crate::session::SessionState;
 
 use core_graphics::font::CGGlyph;
@@ -1180,6 +1182,11 @@ const BG_PANEL: (f32, f32, f32) = (0.040, 0.050, 0.075);
 // foreground glyphs in pure white, so the BG-to-glyph contrast is
 // dominated by glyph color, not a few thousandths of BG tint.
 const BG_FOCUSED: (f32, f32, f32) = (0.000, 0.000, 0.000);
+/// C4 — search-hit highlight BG.  Bright yellow with reverse foreground
+/// (mid-luminance, slightly desaturated so the original glyph FG
+/// reads clearly on top — distinct from text-selection's BG+FG
+/// inversion).  §6.8 colour roles.
+const HIGHLIGHT_BG: (f32, f32, f32) = (0.92, 0.78, 0.20);
 // Pre-mixed against BG_PANEL ≈ 50%, so the 0.5-px sub-pixel quad
 // reads as a translucent hairline.  Going through alpha blending
 // would need pipeline changes; this gets the same visual effect
@@ -2392,6 +2399,34 @@ fn push_session(
             });
         }
 
+        // C4 — search-hit highlight BG.  Drawn AFTER cell BG so it
+        // wins z-order, BEFORE glyphs so they paint on top with
+        // their original FG (the "highlight yellow BG, original fg
+        // preserved" rule from §6.8).  Bounded by grid cols — a
+        // span fed with `col_end_inclusive >= cols` is clamped to
+        // the right edge.  Per-row loop: O(spans) work scoped to
+        // rows where the highlight lives; renderer p99 delta on a
+        // typical single-row span = one extra `CellInstance` push.
+        for span in view.highlight_spans {
+            if span.view_row != r {
+                continue;
+            }
+            let cols_u16 = cols as u16;
+            if span.col_start >= cols_u16 {
+                continue;
+            }
+            let col_end = span.col_end_inclusive.min(cols_u16 - 1);
+            if span.col_start > col_end {
+                continue;
+            }
+            let n_cols = (col_end + 1 - span.col_start) as f32;
+            cells.push(CellInstance {
+                origin: [inner_x + span.col_start as f32 * cell_w, row_y],
+                size: [n_cols * cell_w, cell_h],
+                color: [HIGHLIGHT_BG.0, HIGHLIGHT_BG.1, HIGHLIGHT_BG.2, 1.0],
+            });
+        }
+
         // Glyphs.  Skip the cursor cell when the cursor is solid —
         // we re-emit it after with BG colour so the glyph reads
         // inverted on the white cursor block (mirrors render.rs).
@@ -3420,6 +3455,7 @@ mod tests {
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
+            highlight_spans: &[],
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3512,6 +3548,7 @@ mod tests {
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
+            highlight_spans: &[],
         };
 
         let mut cells: Vec<CellInstance> = Vec::new();
@@ -3577,6 +3614,7 @@ mod tests {
             right_badge: "",
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
+            highlight_spans: &[],
         };
         let mut cells: Vec<CellInstance> = Vec::new();
         let mut glyphs: Vec<GlyphInstance> = Vec::new();
@@ -3627,6 +3665,171 @@ mod tests {
         }
     }
 
+    /// C4 — `highlight_spans` covering two viewport rows emits 2
+    /// `CellInstance` fills tinted `HIGHLIGHT_BG`, one per row at
+    /// the listed column range.  Verifies span row-filter +
+    /// per-row col clipping + bounded cells.len() growth (≤ 1
+    /// `CellInstance` per spanned row).
+    #[test]
+    fn c4_highlight_two_row_span_emits_two_cells() {
+        use crate::grid::{Cell, Grid};
+        use crate::layout::Layout;
+        if system_default_device().is_err() {
+            return;
+        }
+        let device = system_default_device().expect("metal device");
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let grid = Grid::new(10, 4);
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0, 0.0, 0.0, 1, 1, font.cell_w, font.cell_h,
+        );
+        // Two-row span: row 1 col 5-9 (5 cols), row 2 col 0-3 (4 cols).
+        let spans = vec![
+            HighlightSpan { view_row: 1, col_start: 5, col_end_inclusive: 9 },
+            HighlightSpan { view_row: 2, col_start: 0, col_end_inclusive: 3 },
+        ];
+        let view = SessionView {
+            grid: &grid,
+            view_offset: 0,
+            cursor_visible: false,
+            focused: true,
+            title: "",
+            selection: None,
+            ime_preedit: "",
+            update_pending: false,
+            right_badge: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
+            highlight_spans: &spans,
+        };
+        // Baseline cell count (no highlight) for the same layout/grid.
+        let baseline_view = SessionView {
+            highlight_spans: &[],
+            ..view
+        };
+        let mut run = |v: &SessionView| -> Vec<CellInstance> {
+            let mut cells: Vec<CellInstance> = Vec::new();
+            let mut glyphs: Vec<GlyphInstance> = Vec::new();
+            let mut color_glyphs: Vec<GlyphInstance> = Vec::new();
+            let mut dots: Vec<CellInstance> = Vec::new();
+            build_instances(
+                &layout,
+                std::slice::from_ref(v),
+                &[],
+                0,
+                true,
+                None,
+                &mut font,
+                &mut atlas,
+                &mut color_atlas,
+                &mut cells,
+                &mut glyphs,
+                &mut color_glyphs,
+                &mut dots,
+            );
+            cells
+        };
+        let baseline = run(&baseline_view);
+        let with_hl = run(&view);
+        let extra = with_hl.len() - baseline.len();
+        assert_eq!(
+            extra, 2,
+            "expected exactly 2 extra CellInstance for two-row span; got {extra}"
+        );
+        // Find the highlight cells (colour = HIGHLIGHT_BG).
+        let highlight: Vec<&CellInstance> = with_hl
+            .iter()
+            .filter(|c| (c.color[0] - HIGHLIGHT_BG.0).abs() < 1e-3)
+            .collect();
+        assert_eq!(highlight.len(), 2);
+        // Each highlight cell sits one cell_h below the previous (consecutive rows).
+        // `push_session` rounds cell_w / cell_h to integer pixels before
+        // emitting cell instances; mirror the rounding in our assertions.
+        let cell_h = (font.cell_h as f32).round();
+        let mut ys: Vec<f32> = highlight.iter().map(|c| c.origin[1]).collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((ys[1] - ys[0] - cell_h).abs() < 1.0, "row gap should be cell_h");
+        // Sizes: 5 cells wide vs 4 cells wide.
+        let cell_w = (font.cell_w as f32).round();
+        let widths: Vec<f32> = highlight.iter().map(|c| c.size[0]).collect();
+        assert!(
+            widths.iter().any(|w| (w - 5.0 * cell_w).abs() < 1.0),
+            "expected a 5-cell-wide highlight (cell_w={cell_w}); got widths {widths:?}"
+        );
+        assert!(
+            widths.iter().any(|w| (w - 4.0 * cell_w).abs() < 1.0),
+            "expected a 4-cell-wide highlight (cell_w={cell_w}); got widths {widths:?}"
+        );
+    }
+
+    /// C4 — a highlight span whose `view_row` is past the grid's
+    /// row count is silently skipped (no panic, no emission).
+    #[test]
+    fn c4_highlight_out_of_range_row_is_skipped() {
+        use crate::grid::Grid;
+        use crate::layout::Layout;
+        if system_default_device().is_err() {
+            return;
+        }
+        let device = system_default_device().expect("metal device");
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let grid = Grid::new(10, 4);
+        let layout = Layout::build(
+            font.cell_w * 10.0,
+            font.cell_h * 4.0,
+            0.0, 0.0, 0.0, 1, 1, font.cell_w, font.cell_h,
+        );
+        // view_row = 9 is past grid.rows() = 4 — should be skipped.
+        let spans = vec![
+            HighlightSpan { view_row: 9, col_start: 0, col_end_inclusive: 4 },
+        ];
+        let view = SessionView {
+            grid: &grid,
+            view_offset: 0,
+            cursor_visible: false,
+            focused: true,
+            title: "",
+            selection: None,
+            ime_preedit: "",
+            update_pending: false,
+            right_badge: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
+            highlight_spans: &spans,
+        };
+        let mut cells: Vec<CellInstance> = Vec::new();
+        let mut glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut color_glyphs: Vec<GlyphInstance> = Vec::new();
+        let mut dots: Vec<CellInstance> = Vec::new();
+        build_instances(
+            &layout,
+            std::slice::from_ref(&view),
+            &[],
+            0,
+            true,
+            None,
+            &mut font,
+            &mut atlas,
+            &mut color_atlas,
+            &mut cells,
+            &mut glyphs,
+            &mut color_glyphs,
+            &mut dots,
+        );
+        // No HIGHLIGHT_BG cell should be present.
+        let highlight_count = cells
+            .iter()
+            .filter(|c| (c.color[0] - HIGHLIGHT_BG.0).abs() < 1e-3)
+            .count();
+        assert_eq!(highlight_count, 0);
+    }
+
     /// C1 — a `BottomFixed` tool DOES NOT shift the grid's glyph
     /// origin (only TopFixed does).  This locks down the invariant
     /// that the BottomFixed slot reserves space against the pane's
@@ -3653,11 +3856,13 @@ mod tests {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+            highlight_spans: &[],
         };
         let view_bot = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
+            highlight_spans: &[],
         };
         let mut run = |view: &SessionView| -> Vec<GlyphInstance> {
             let mut cells: Vec<CellInstance> = Vec::new();

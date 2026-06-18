@@ -833,6 +833,10 @@ pub struct Pane {
     /// so an empty `tools` Vec is byte-identical to pre-C1 behaviour.
     /// See `docs/scrollback-search.md` §6.1.
     pub tools: Vec<Box<dyn marspot_term::render::PaneTool>>,
+    /// C4 — active search highlight, set by C5's main loop when the
+    /// user navigates to a hit.  `None` = no highlight (renderer
+    /// passes empty `highlight_spans` to `build_instances`).
+    pub active_highlight: Option<marspot_term::render::ActiveHighlight>,
 }
 
 impl Pane {
@@ -845,6 +849,7 @@ impl Pane {
             last_seen_scroll_push: 0,
             update_pending: false,
             tools: Vec::new(),
+            active_highlight: None,
         }
     }
 
@@ -859,6 +864,7 @@ impl Pane {
             last_seen_scroll_push: 0,
             update_pending: false,
             tools: Vec::new(),
+            active_highlight: None,
         }
     }
 
@@ -1099,6 +1105,11 @@ impl Pane {
             right_badge,
             top_fixed_h_cells,
             bot_fixed_h_cells,
+            highlight_spans: self
+                .active_highlight
+                .as_ref()
+                .map(|h| h.spans.as_slice())
+                .unwrap_or(&[]),
         }
     }
 
