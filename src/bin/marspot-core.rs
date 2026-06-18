@@ -1898,6 +1898,9 @@ impl CoreApp {
                 minimized,
                 with_tab_strip: panes_len > 0,
                 pos_offset,
+                // F3+1.5+ — marspot title strip stays always on top
+                // of the modal; clamp modal y to ≥ top_inset.
+                top_obstruction: self.layout.top_inset,
             },
         );
         // Traffic lights (anchored to title bar left).

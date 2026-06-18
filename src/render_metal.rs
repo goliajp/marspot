@@ -1767,40 +1767,15 @@ fn build_instances(
         glyphs,
     );
 
-    // F3+1.5 — Process Monitor modal.  Two-stage filter:
-    //   (1) Backdrop dim: when draw_backdrop, push a window-wide
-    //       semi-transparent ui_rect first so the modal reads as
-    //       focused (drawn over everything pre-FG).  Grid FG glyphs
-    //       outside the modal still paint over the dim — that's fine,
-    //       you can still read what's behind, just at lower contrast.
-    //   (2) Modal-frame filter: remove all FG glyphs / BG cells / dots
-    //       inside the modal frame rect so the modal's own content
-    //       is what shows up when the FG pass runs.  Skip when
-    //       minimized: only filter inside the title bar to keep the
-    //       body area "rolled up".
+    // F3+1.5 — Process Monitor modal.  Pipeline:
+    //   (1) Filter EVERYTHING inside the modal rect out of grid scratches
+    //       so panel-owned instances are the only ones living there.
+    //   (2) Backdrop dim: window-wide semi-trans ui_rect, BUT only the
+    //       region BELOW the marspot title strip (y >= top_inset).  The
+    //       title strip stays bright and on top — user wants it always
+    //       visible & opaque even when the modal is open.
+    //   (3) Push the modal frame itself.
     if let Some(panel) = process_panel {
-        // (1) backdrop
-        if panel.draw_backdrop {
-            // Cover the whole window with a dim rect.
-            ui_rects.push(UiRectInstance {
-                origin: [0.0, 0.0],
-                size: [0.0, 0.0], // sized below by inferring from the modal
-                fill_color: [0.0, 0.0, 0.0, 0.45],
-                border_color: [0.0, 0.0, 0.0, 0.0],
-                corner_radius: 0.0,
-                border_width: 0.0,
-                shadow_blur: 0.0,
-                shadow_alpha: 0.0,
-                shadow_color: [0.0, 0.0, 0.0, 1.0],
-            });
-            // Set the size to the window's current physical bounds.
-            // Pulled from the last UiRectInstance.  We use a very
-            // large rect — the SDF shader clips to the rect; the
-            // user's modal sits in the foreground.
-            let last = ui_rects.last_mut().unwrap();
-            // Stretch to 100000 px so it covers any plausible display.
-            last.size = [100_000.0, 100_000.0];
-        }
         let px = panel.rect.x as f32;
         let py = panel.rect.y_top as f32;
         let pw = panel.rect.w as f32;
@@ -1812,6 +1787,24 @@ fn build_instances(
         color_glyphs.retain(|g| !in_modal(g.origin[0], g.origin[1]));
         cells.retain(|c| !in_modal(c.origin[0], c.origin[1]));
         dots.retain(|c| !in_modal(c.origin[0], c.origin[1]));
+        if panel.draw_backdrop {
+            // F3+1.5+ — backdrop sits BELOW the marspot title strip so
+            // the strip stays always-on-top (version label + chrome
+            // buttons readable; user reported the strip "looked
+            // transparent" while modal was open).
+            let top_inset = layout.top_inset as f32;
+            ui_rects.push(UiRectInstance {
+                origin: [0.0, top_inset],
+                size: [layout.window_w as f32, (layout.window_h as f32 - top_inset).max(0.0)],
+                fill_color: [0.0, 0.0, 0.0, 0.45],
+                border_color: [0.0, 0.0, 0.0, 0.0],
+                corner_radius: 0.0,
+                border_width: 0.0,
+                shadow_blur: 0.0,
+                shadow_alpha: 0.0,
+                shadow_color: [0.0, 0.0, 0.0, 1.0],
+            });
+        }
         push_process_panel(
             panel, cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             font, atlas, cells, glyphs, ui_rects,

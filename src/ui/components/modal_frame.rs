@@ -31,6 +31,11 @@ pub struct ModalLayoutSpec {
     pub with_tab_strip: bool,
     /// Offset from centered default position (pixels).  Drag-controlled.
     pub pos_offset: (f64, f64),
+    /// Top obstruction in physical px — region at the top of the
+    /// window the modal must NOT cover (e.g. marspot's title strip
+    /// stays always-on-top, so the modal frame y_top is clamped
+    /// to `≥ top_obstruction`).
+    pub top_obstruction: f64,
 }
 
 impl ModalFrame {
@@ -48,8 +53,11 @@ impl ModalFrame {
         let cy = (window_h - h_full) * 0.5 + spec.pos_offset.1;
         // Clamp the offset position so the modal stays at least
         // partially on-screen (title bar must remain accessible).
+        // The top obstruction (marspot title strip) is treated as
+        // a hard floor — modal frame y_top never goes above it,
+        // so the strip stays visibly on top of the modal.
         let cx = cx.clamp(-w * 0.5, window_w - w * 0.5);
-        let cy = cy.clamp(0.0, window_h - spec.title_bar_h);
+        let cy = cy.clamp(spec.top_obstruction, window_h - spec.title_bar_h);
         let frame_h = if spec.minimized { spec.title_bar_h } else { h_full };
         let frame = Rect { x: cx, y_top: cy, w, h: frame_h };
         let title_bar = Rect {
@@ -86,6 +94,7 @@ mod tests {
             minimized,
             with_tab_strip: true,
             pos_offset: (0.0, 0.0),
+            top_obstruction: 0.0,
         }
     }
 
@@ -143,5 +152,16 @@ mod tests {
         s.pos_offset = (0.0, 100_000.0);
         let m = ModalFrame::layout(1920.0, 1080.0, s);
         assert!(m.frame.y_top <= 1080.0 - 28.0);
+    }
+
+    #[test]
+    fn top_obstruction_floors_modal_y_top() {
+        let mut s = spec(false, false);
+        // Drag way up off-screen.
+        s.pos_offset = (0.0, -100_000.0);
+        s.top_obstruction = 64.0;
+        let m = ModalFrame::layout(1920.0, 1080.0, s);
+        assert_eq!(m.frame.y_top, 64.0,
+            "modal must not cover the top obstruction (marspot title strip)");
     }
 }
