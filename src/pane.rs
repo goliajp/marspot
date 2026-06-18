@@ -1127,6 +1127,19 @@ impl Pane {
         } else {
             self.session.grid().scrollback_len() as u16
         };
+        // F1+7 — if `max` (L3-reported scrollback_len) is less than
+        // the current `view_offset`, L3 just temporarily lost its
+        // scrollback context — most commonly because it entered the
+        // alt-screen for a TUI (claudecode etc.) whose own
+        // scrollback is shorter than the saved main's history we
+        // were viewing.  Clamping view_offset down to `max` would
+        // visually look like a "bounce back to live" after every
+        // PTY chunk emitted by the TUI.  Leave view_offset as-is
+        // until the next jump or snap_to_live moves it intentionally;
+        // the renderer will show whatever L3 published last.
+        if max < self.view_offset {
+            return;
+        }
         let new = self.view_offset.saturating_add(delta).min(max);
         self.view_offset = new;
     }

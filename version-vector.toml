@@ -22,5 +22,5 @@
 #                         terminal mechanics or the L2↔L3 wire change.
 
 shell   = "0.6.0"    # L1 — 砍掉 dual-core probation(L4-shelld 时代遗物,RFC-003 L3 单客户端 UDS 后实际上让 active 输入死掉 30s),改 single-core in-place swap
-core    = "0.10.6"   # L2 — F1+5 jump 不再 close-on-Enter:F1+4 的 close 让 bar 关掉后,用户立刻按的下一个键走 L3 forward path → snap_to_live → forward_scroll(0) → 视图弹回 live(真根因,log L2_SEARCH_JUMP 已证 old_offset 每次都=0).改回 spec §6.7 行为:bar 留着,Esc 才关 + 清高亮.dedup-gate 去除保留(L3Conn req_view_offset 自管 dedup)
+core    = "0.10.7"   # L2 — F1+7 bump_view_offset_on_scroll_push 不再缩 view_offset:claudecode TUI 进 alt-screen 时 L3 published.scrollback_len 比当前 view_offset 小,原 `.min(max)` 把它拉低 → 每 PTY chunk 都把 view_offset 往下 clamp → 看起来 "Enter 跳完马上弹回".加 max < view_offset 早返回,L2 跟踪位置保稳直到 user intentional jump/snap
 session = "0.9.1"    # L3 — F1+6 dev log:接到 Scroll(off) 时 lx_event L3_SCROLL_RECV,scrolled 后 publish 时 lx_event L3_PUBLISH.诊断"Enter 跳完 view_offset 立刻回 0"路径(L2 jump → L3 recv → L3 publish 三段时间线)
