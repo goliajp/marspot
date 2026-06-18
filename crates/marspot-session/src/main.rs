@@ -277,6 +277,84 @@ fn session_state_bin_path(id: u64) -> std::path::PathBuf {
     marspot_term::session_registry::session_dir(id).join("state.bin")
 }
 
+/// F2+1 — read-only mmap of a file as a byte slice.  Used for the
+/// post-execv `state.bin` restore: `std::fs::read` puts the entire
+/// snapshot body (~23 MB for a busy claudecode pane) onto the heap as
+/// one `Vec<u8>`; when that Vec drops after `apply_snapshot` consumes
+/// it, libmalloc retains the freed pages in the `MALLOC_LARGE (empty)`
+/// bucket indefinitely (no orthodox way to reclaim — `pressure_relief`
+/// is advisory and observed not to release these on macOS 26.5).
+///
+/// `mmap(PROT_READ, MAP_PRIVATE)` instead: pages are file-backed and
+/// page-cache-managed by the kernel.  The slice we hand to
+/// `apply_snapshot` is read-only; the decoder copies the bits it
+/// keeps (Grid cells, scrollback rows, etc.) into its own buffers and
+/// never retains the slice past return.  `Drop` munmaps and the
+/// kernel reclaims pages on demand — they NEVER land in the malloc
+/// empty-bucket footprint.  Direct 23 MB cut to the L3 physical
+/// footprint per pane × 9 panes = ~210 MB fleet savings.
+///
+/// SAFETY contract:
+/// - The `&[u8]` returned by `as_slice` is valid only for the
+///   lifetime of the `MappedFile`.  Any consumer that wants to keep
+///   bytes past Drop must copy them.
+/// - The underlying file MUST NOT be truncated or written to during
+///   the mapping's lifetime.  We mmap state.bin and unlink it after
+///   apply_snapshot — that's safe because Unix unlink only removes
+///   the directory entry; the inode stays alive until the last
+///   mapping is dropped.
+struct MappedFile {
+    ptr: *const u8,
+    len: usize,
+}
+
+impl MappedFile {
+    fn open(path: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        if len == 0 {
+            return Ok(MappedFile { ptr: std::ptr::null(), len: 0 });
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Hint the kernel: we'll read this once sequentially.  Lets
+        // the page cache evict our pages aggressively after read.
+        unsafe {
+            let _ = libc::madvise(ptr, len, libc::MADV_SEQUENTIAL);
+        }
+        Ok(MappedFile { ptr: ptr as *const u8, len })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for MappedFile {
+    fn drop(&mut self) {
+        if self.len > 0 {
+            unsafe {
+                libc::munmap(self.ptr as *mut _, self.len);
+            }
+        }
+    }
+}
+
 /// RFC-003 §6 Amendment 16 — L3 self-execv handoff (L4 shelld model).
 ///
 /// On SIGTERM, the L3 looks at the `current/marspot-session` binary
@@ -901,21 +979,30 @@ fn main() {
             // Adopt inherited PTY + listener — see do_l3_execv_swap.
             let mut terminal = marspot_term::terminal::Terminal::new(h.cols, h.rows);
             let state_path = session_state_bin_path(id);
-            match std::fs::read(&state_path) {
-                Ok(body) => {
-                    if let Err(e) = terminal.apply_snapshot(&body) {
+            // F2+1 — mmap state.bin instead of std::fs::read so the
+            // ~23 MB body never lands in libmalloc's MALLOC_LARGE
+            // bucket.  apply_snapshot copies the bits it keeps into
+            // Terminal/Grid Vecs; on Drop the mapping unmaps and the
+            // pages go back to the kernel page cache (NOT to libmalloc
+            // "empty").  See MappedFile docs for the full why.
+            match MappedFile::open(&state_path) {
+                Ok(mapped) => {
+                    let body = mapped.as_slice();
+                    let body_bytes = body.len();
+                    if let Err(e) = terminal.apply_snapshot(body) {
                         lx_warn!(
                             "l3.execv.snapshot_apply_failed",
                             &format!("{e}"),
-                            body_bytes = body.len()
+                            body_bytes = body_bytes
                         );
                     } else {
                         lx_event!(
                             "L3_EXECV_SNAPSHOT_APPLIED",
-                            "restored Terminal from state.bin",
-                            body_bytes = body.len()
+                            "restored Terminal from state.bin (mmap)",
+                            body_bytes = body_bytes
                         );
                     }
+                    drop(mapped);
                     let _ = std::fs::remove_file(&state_path);
                 }
                 Err(_) => {
