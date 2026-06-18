@@ -2352,6 +2352,41 @@ fn push_session(
     let top_fixed_h = view.top_fixed_h_cells as f32 * cell_h;
     let inner_y = (rect.y_top as f32 + title_h + padding + top_fixed_h).round();
 
+    // F1++ — overlay glyph mask.  Metal renders BG and FG in two
+    // separate passes (BG first, then glyphs).  Without this mask
+    // grid glyphs under the search bar / list FG-pass straight onto
+    // the opaque overlay BG painted in the BG pass, so the underlying
+    // terminal text "bleeds through" the chrome.  Pre-compute the
+    // overlay's covered cell range here; the per-cell loops below
+    // skip glyph / underline / cursor emission for any cell whose
+    // (row, col) falls inside.
+    const SEARCH_BAR_COLS: u16 = 40;
+    const SEARCH_BAR_ROWS: u16 = 2;
+    const SEARCH_LIST_MAX_ROWS: u16 = 10;
+    let overlay_mask: Option<(u16, u16, u16, u16)> = view.search_overlay.as_ref()
+        .and_then(|ov| {
+            let cols = grid.cols();
+            if cols < SEARCH_BAR_COLS + 2 { return None; }
+            // Mirror the geometry decisions in the overlay paint
+            // section at the end of push_session; keep the two in
+            // sync.  Total rows covered = bar (2) + list (clamped
+            // to hits.len()), rounded up because the bar is offset
+            // half a cell down.
+            let list_rows = (ov.hits.len() as u16).min(SEARCH_LIST_MAX_ROWS);
+            let covered_rows = SEARCH_BAR_ROWS + list_rows + 1; // +1 for half-cell bar offset
+            let col_start = cols - SEARCH_BAR_COLS - 1;
+            let col_end_inclusive = cols - 2; // 40-col-wide bar
+            let row_start: u16 = 0;
+            let row_end_exclusive = covered_rows.min(grid.rows());
+            Some((row_start, row_end_exclusive, col_start, col_end_inclusive))
+        });
+    let under_overlay = |row: u16, col: u16| -> bool {
+        match overlay_mask {
+            Some((r0, r1, c0, c1)) => row >= r0 && row < r1 && col >= c0 && col <= c1,
+            None => false,
+        }
+    };
+
     // Scan once up front so the per-row glyph loop can override fg
     // for cells inside a link span (paint the text the same cyan as
     // the underline, the standard "this is clickable" cue) and the
@@ -2437,6 +2472,13 @@ fn push_session(
             && window_focused;
         for c in 0..cols {
             if solid_cursor && cursor == (c as u16, r) {
+                continue;
+            }
+            // F1++ — skip grid glyphs covered by the search overlay
+            // chrome (BG / FG run in separate passes so without this
+            // mask, the underlying terminal text bleeds through the
+            // opaque overlay).
+            if under_overlay(r, c as u16) {
                 continue;
             }
             let cell = grid.cell_at_view(view.view_offset, c as u16, r);
@@ -2631,6 +2673,9 @@ fn push_session(
         && window_focused
     {
         let (col, row) = grid.cursor();
+        // F1++ — skip cursor glyph re-emit when the cursor lands
+        // under the overlay (would bleed through the BG pass).
+        if !under_overlay(row, col) {
         let cell = grid.cell_at_view(0, col, row);
         if cell.ch != ' ' && cell.ch != '\0' {
             let metrics = SlotMetrics {
@@ -2659,6 +2704,7 @@ fn push_session(
                     color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
                 });
             }
+        }
         }
     }
 
