@@ -512,7 +512,13 @@ impl Grid {
         for _ in 0..lines {
             let pr = self.top_row as usize;
             let start = pr * cols;
-            self.scrollback.push_line(&self.cells[start..start + cols]);
+            // Wrapped-aware push: File variant persists the flag on
+            // its record; Memory/Disk drop it (their truth is the
+            // `sb_wrapped` mirror below).
+            self.scrollback.push_line_with_wrapped(
+                &self.cells[start..start + cols],
+                self.wrapped[pr],
+            );
             // The pushed row's continuation flag follows it into the
             // scrollback mirror; the physical row is about to become
             // the new (blank) bottom row, so its live flag resets.
@@ -699,7 +705,10 @@ impl Grid {
     /// shrink → grow round trip leaves long lines permanently
     /// chopped.
     pub fn push_historic_scrollback_line(&mut self, line: &[Cell], wrapped: bool) {
-        self.scrollback.push_line(line);
+        // Go through the wrapped-aware path so the File variant
+        // persists the flag in its record; Memory/Disk variants drop
+        // the flag (their truth lives in `sb_wrapped` below).
+        self.scrollback.push_line_with_wrapped(line, wrapped);
         self.sb_wrapped.push_back(wrapped);
         while self.sb_wrapped.len() > self.scrollback.len() {
             self.sb_wrapped.pop_front();
@@ -934,7 +943,9 @@ impl Grid {
         for (i, (cells, cont)) in segs[..live_start].iter().enumerate() {
             let mut row = cells.clone();
             row.resize(new_cols, pad_cell(i, &segs));
-            self.scrollback.push_line(&row);
+            // Wrapped-aware push so File variant records keep the
+            // reflow-derived continuation flag.
+            self.scrollback.push_line_with_wrapped(&row, *cont);
             self.sb_wrapped.push_back(*cont);
         }
         while self.sb_wrapped.len() > self.scrollback.len() {

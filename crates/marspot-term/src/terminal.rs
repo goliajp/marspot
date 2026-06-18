@@ -35,6 +35,38 @@ fn disk_scrollback_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("MARSPOT_DISK_SCROLLBACK").as_deref() != Ok("0"))
 }
 
+/// A3: opt-in file-backed scrollback gate.  Per `docs/scrollback-search.md`
+/// §8, the env-gate keeps the file path unreachable for normal users
+/// until F1 flips the default.  Activated only when BOTH
+/// `MARSPOT_FILE_SCROLLBACK=1` AND `MARSPOT_SESSION_ID=<u64>` are set
+/// — the latter is what binds the file to a specific session dir,
+/// and is automatically present in `marspot-session` main.  Other
+/// callers of `Terminal::new` (tests, `mcli`, `--snapshot` headless
+/// renderer) won't have session_id and so won't activate File.
+fn fallback_disk_or_memory(cols: u16) -> Scrollback {
+    Scrollback::disk(
+        DISK_SCROLLBACK_RAM_LINES,
+        DISK_SCROLLBACK_PAGES,
+        cols as usize,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "[marspot] disk scrollback init failed ({e}); falling back to RAM-only"
+        );
+        Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
+    })
+}
+
+fn file_scrollback_session_id() -> Option<u64> {
+    static SESSION_ID: OnceLock<Option<u64>> = OnceLock::new();
+    *SESSION_ID.get_or_init(|| {
+        if std::env::var("MARSPOT_FILE_SCROLLBACK").as_deref() != Ok("1") {
+            return None;
+        }
+        std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
+    })
+}
+
 /// In-RAM ring size when disk scrollback is active.  Front-line
 /// cache for the most-recent N lines; older history goes through
 /// the mmap'd ring.  Kept at 1024 deliberately:
@@ -194,21 +226,31 @@ struct SavedCursor {
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
-        // Disk-backed scrollback is default-on; set MARSPOT_DISK_SCROLLBACK=0
-        // to opt out.  Falls back to the in-RAM ring on any mmap-init
-        // error (no panic — the user just gets the bounded-RAM history).
-        let scrollback = if disk_scrollback_enabled() {
-            Scrollback::disk(
-                DISK_SCROLLBACK_RAM_LINES,
-                DISK_SCROLLBACK_PAGES,
+        // A3 (env-gated until F1): file-backed scrollback wins when
+        // MARSPOT_FILE_SCROLLBACK=1 AND MARSPOT_SESSION_ID is set.
+        // Falls through to Disk on any open error so a missing
+        // sessions dir / permission issue doesn't kill the session.
+        let scrollback = if let Some(sid) = file_scrollback_session_id() {
+            match crate::scrollback::Scrollback::file(
+                crate::session_registry::scrollback_bin_path(sid),
+                crate::session_registry::scrollback_idx_path(sid),
                 cols as usize,
-            )
-            .unwrap_or_else(|e| {
-                eprintln!(
-                    "[marspot] disk scrollback init failed ({e}); falling back to RAM-only"
-                );
-                Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
-            })
+                DISK_SCROLLBACK_RAM_LINES,
+            ) {
+                Ok(sb) => sb,
+                Err(e) => {
+                    eprintln!(
+                        "[marspot] file scrollback init failed (sid={sid}): {e}; falling back to disk variant"
+                    );
+                    fallback_disk_or_memory(cols)
+                }
+            }
+        } else if disk_scrollback_enabled() {
+            // Disk-backed scrollback is default-on; set
+            // MARSPOT_DISK_SCROLLBACK=0 to opt out.  Falls back to
+            // the in-RAM ring on any mmap-init error (no panic —
+            // the user just gets the bounded-RAM history).
+            fallback_disk_or_memory(cols)
         } else {
             Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
         };
