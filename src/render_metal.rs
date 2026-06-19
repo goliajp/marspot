@@ -2462,19 +2462,24 @@ fn paint_process_panel_content(
         let fg = if row.is_header { PROCESS_PANEL_HEADER_FG } else { PROCESS_PANEL_ROW_FG };
         p.text(text_x, baseline, &row.text, fg);
         if !row.is_header {
+            // F3+1.10 — kill button uses the new `Button` widget
+            // (destructive style).  Used to be inline `fill_rect + text`,
+            // ~9 lines per call site; now one declarative widget.
+            use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
             let kill_x = px + pw - body_pad_right - kill_w;
             let kill_y = row_y + (row_h - kill_h) * 0.5;
-            p.fill_rect(
-                Rect { x: kill_x as f64, y_top: kill_y as f64,
-                       w: kill_w as f64, h: kill_h as f64 },
-                PROCESS_PANEL_KILL_BG,
-            );
-            p.text(
-                kill_x + (kill_w - p.cell_w) * 0.5,
-                kill_y + p.ascent + (kill_h - p.cell_h) * 0.5,
-                "×",
-                PROCESS_PANEL_KILL_FG,
-            );
+            let btn = Button {
+                rect: Rect {
+                    x: kill_x as f64, y_top: kill_y as f64,
+                    w: kill_w as f64, h: kill_h as f64,
+                },
+                label: None,
+                icon: Some(IconSpec::Glyph("×")),
+                icon_position: IconPosition::Only,
+                hovered: false,
+                style: ButtonStyle::destructive(),
+            };
+            btn.paint(p);
         }
     }
 }

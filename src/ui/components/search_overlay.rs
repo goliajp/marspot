@@ -15,6 +15,7 @@ use marspot_term::render::SearchOverlayView;
 use crate::ui::core::{ViewPainter, ViewStyle, Backdrop};
 use super::{
     Panel, TextInput, TextInputStyle, ListView, ListRow, ListViewStyle,
+    Button, ButtonStyle, IconSpec, IconPosition,
 };
 
 pub struct SearchOverlayParams<'a> {
@@ -113,14 +114,48 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
         };
         input.paint(p);
 
-        // Trailing icons (× / Aa / counter) — colocated because only
-        // this scene uses them.
+        // Trailing buttons (× / Aa / counter).  × and Aa are real
+        // Button widgets in ghost style (transparent BG when idle,
+        // subtle fill on hover).  Counter stays as a free text run
+        // since it's read-only label, not interactive.
         let query_baseline = inner_top + p.ascent;
         let close_x = bar_x + panel_w - panel_inner_pad - cell_w;
-        p.text(close_x, query_baseline, "×", DIM_FG);
+        let close_btn = Button {
+            rect: Rect {
+                x: close_x as f64,
+                y_top: inner_top as f64,
+                w: (cell_w * 1.5) as f64,
+                h: cell_h as f64,
+            },
+            label: None,
+            icon: Some(IconSpec::Glyph("×")),
+            icon_position: IconPosition::Only,
+            hovered: false,
+            style: ButtonStyle::ghost(),
+        };
+        close_btn.paint(p);
+        // Aa toggle: text-only button.  FG accents when case-sensitive
+        // (on); dim otherwise — handled via a per-frame style mutation.
         let aa_x = close_x - 3.0 * cell_w;
-        let aa_color = if overlay.case_sensitive { ACCENT_FG } else { DIM_FG };
-        p.text(aa_x, query_baseline, "Aa", aa_color);
+        let mut aa_style = ButtonStyle::ghost();
+        if overlay.case_sensitive {
+            aa_style.fg = ACCENT_FG;
+            aa_style.fg_hover = ACCENT_FG;
+        }
+        let aa_btn = Button {
+            rect: Rect {
+                x: aa_x as f64,
+                y_top: inner_top as f64,
+                w: (cell_w * 2.5) as f64,
+                h: cell_h as f64,
+            },
+            label: Some("Aa"),
+            icon: None,
+            icon_position: IconPosition::Only,
+            hovered: false,
+            style: aa_style,
+        };
+        aa_btn.paint(p);
         if let Some((c, t)) = overlay.counter {
             let counter_text = format!("{c}/{t}");
             let counter_w_chars = counter_text.chars().count() as f32;

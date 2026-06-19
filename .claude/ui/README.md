@@ -191,6 +191,7 @@ scene 必须走 widget,widget 必须走 ViewPainter,ViewPainter 自己 push.
 | `components/panel.rs` | Panel | View + 内边距 + content_rect() 自动 inset |
 | `components/text_input.rs` | TextInput / TextInputStyle | 单行文本输入(值 + 光标 + 截断),paint-only |
 | `components/list_view.rs` | ListView / ListRow / ListViewStyle | 垂直行列表 + focused 行高亮 + row_rect(i) 给 caller hit_test |
+| `components/button.rs` | Button / ButtonStyle / IconSpec / IconPosition | 圆角按钮.支持 4 layout(Only/Before/After/text-only)、3 内置 style(default/ghost/destructive)、glyph icon + custom paint icon |
 | `components/search_overlay.rs` | paint_search_overlay / SearchOverlayParams | 用 Panel + TextInput + ListView 组合,F3+1.9 |
 
 scene 代码:

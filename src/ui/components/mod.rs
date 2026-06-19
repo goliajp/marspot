@@ -11,6 +11,7 @@ pub mod search_overlay;
 pub mod panel;
 pub mod text_input;
 pub mod list_view;
+pub mod button;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
@@ -19,3 +20,4 @@ pub use search_overlay::{SearchOverlayParams, paint_search_overlay};
 pub use panel::Panel;
 pub use text_input::{TextInput, TextInputStyle};
 pub use list_view::{ListView, ListRow, ListViewStyle};
+pub use button::{Button, ButtonStyle, IconSpec, IconPosition};
