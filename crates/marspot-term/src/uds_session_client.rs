@@ -92,7 +92,31 @@ pub fn wait_for_entry(id: u64, timeout: Duration) -> io::Result<std::path::PathB
 /// running so the returned control stream is wire-compatible with
 /// the pre-RFC-003 socketpair-fd-3 path (same shell_proto frames go
 /// through).
+///
+/// F3+3.2 — retry on `ConnectionRefused`.  Reattach path is racy
+/// during silent updates: the alive_check (`kill 0`) passes while
+/// L3 is mid-execv (binary swap), but `connect(2)` lands in the
+/// gap between `execv()` and `from_handoff`'s `accept_loop` spawn
+/// — typically <100 ms, but under install-storm load (9 L3s
+/// simultaneously self-execv'ing) it stretches to several hundred
+/// ms.  A single connect was throwing 1/9 reattaches into prune +
+/// fresh-spawn territory each install, which the user saw as
+/// "missing pane after update".  Retry with 20 ms backoff until
+/// the supplied timeout, then surface the last error.
 pub fn wait_and_connect(id: u64, timeout: Duration) -> io::Result<UnixStream> {
     let socket_path = wait_for_entry(id, timeout)?;
-    connect_with_handshake(&socket_path)
+    let deadline = Instant::now() + timeout;
+    loop {
+        match connect_with_handshake(&socket_path) {
+            Ok(s) => return Ok(s),
+            Err(e)
+                if e.kind() == io::ErrorKind::ConnectionRefused
+                    && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }

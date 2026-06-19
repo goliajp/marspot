@@ -474,6 +474,12 @@ pub struct MetalRenderer {
     /// while the panel is open; cheap because rows are typically
     /// tens of entries.
     process_panel: Option<ProcessPanelRender>,
+    /// F3+3.0 — LayoutModal state: `Some((pending_cols, pending_rows,
+    /// scale))` when open, `None` when closed.  Pulled by build
+    /// instances when laying down overlay rects; scale comes through
+    /// because chrome sizing is in logical pt and the modal floats
+    /// during AppKit resize before the next render() call.
+    layout_modal_state: Option<(usize, usize, f64)>,
     /// F3+1.6 — overlay scratches.  Anything pushed here gets
     /// encoded in EXTRA UI + FG passes AFTER the main grid render,
     /// so it lands on top of all grid pixels regardless of which
@@ -639,7 +645,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None,
+            process_panel: None, layout_modal_state: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -703,7 +709,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None,
+            process_panel: None, layout_modal_state: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -719,6 +725,14 @@ impl MetalRenderer {
     /// row counts are < 200 and we're just storing the Vec.
     pub fn set_process_panel(&mut self, data: Option<ProcessPanelRender>) {
         self.process_panel = data;
+    }
+
+    /// F3+3.0 — caller publishes LayoutModal open state + pending
+    /// (cols, rows) every frame the modal might paint.  `None`
+    /// disables the modal entirely.  Renderer reads this when
+    /// laying down overlay rects.  Cheap (three small Copy values).
+    pub fn set_layout_modal(&mut self, state: Option<(usize, usize, f64)>) {
+        self.layout_modal_state = state;
     }
 
     /// L2 — set which chrome icon button (if any) is under the
@@ -979,6 +993,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             process_panel.as_ref(),
+            self.layout_modal_state,
             font,
             atlas,
             color_atlas,
@@ -1132,6 +1147,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             process_panel.as_ref(),
+            self.layout_modal_state,
             font,
             atlas,
             color_atlas,
@@ -1664,6 +1680,7 @@ fn build_instances(
     window_focused: bool,
     hover_chrome_btn: Option<u8>,
     process_panel: Option<&ProcessPanelRender>,
+    layout_modal_state: Option<(usize, usize, f64)>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -2013,6 +2030,18 @@ fn build_instances(
         );
     }
 
+    // F3+3.0 — LayoutModal: cols/rows steppers + Apply.  Overlay
+    // scratches → renders on top of grid, modal-style backdrop dims
+    // everything below the title strip.
+    if let Some((pending_cols, pending_rows, modal_scale)) = layout_modal_state {
+        push_layout_modal_via_view(
+            pending_cols, pending_rows, modal_scale,
+            layout.top_inset,
+            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            layout.window_w, layout.window_h,
+            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
+        );
+    }
 }
 
 /// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`
@@ -2374,6 +2403,196 @@ fn push_process_panel_via_view(
     });
 }
 
+/// F3+3.0 — paint the `LayoutModal` overlay.  Same plumbing as
+/// `push_process_panel_via_view`: routes through a `ViewPainter`
+/// → overlay scratches so it lands on top of the grid.  Geometry
+/// is computed from the modal's own `LayoutModal::layout` (cols
+/// × rows steppers + Apply + footer text are all positional).
+#[allow(clippy::too_many_arguments)]
+fn push_layout_modal_via_view(
+    pending_cols: usize,
+    pending_rows: usize,
+    scale: f64,
+    top_inset: f64,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    window_w: f64,
+    window_h: f64,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
+) {
+    use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
+    use crate::ui::components::LayoutModal;
+    let modal = LayoutModal::layout(window_w, window_h, scale, top_inset);
+    let mut painter = ViewPainter {
+        cell_w, cell_h, ascent, atlas_w, atlas_h,
+        window_w, window_h,
+        font, atlas, cells, glyphs, ui_rects,
+    };
+    let view = View {
+        rect: modal.frame,
+        style: ViewStyle {
+            bg: PROCESS_PANEL_BG,
+            border_color: PROCESS_PANEL_BORDER,
+            border_width: 1.0,
+            corner_radius: PROCESS_PANEL_CORNER_RADIUS,
+            shadow_blur: 16.0,
+            shadow_alpha: 0.45,
+            backdrop: Backdrop::Dim {
+                color: [0.0, 0.0, 0.0, 0.45],
+                exclude_above_y: top_inset,
+            },
+        },
+    };
+    view.paint(&mut painter, |p| {
+        paint_layout_modal_content(&modal, pending_cols, pending_rows, scale, p);
+    });
+}
+
+/// Internal paint of the modal's content (title text, close X,
+/// stepper buttons + values, footer total, Apply button).  All
+/// rects come pre-computed from `LayoutModal::layout`; here we
+/// just draw atop them.
+fn paint_layout_modal_content(
+    modal: &crate::ui::components::LayoutModal,
+    pending_cols: usize,
+    pending_rows: usize,
+    scale: f64,
+    p: &mut crate::ui::core::view::ViewPainter,
+) {
+    use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
+    // Colors mirror process panel for visual consistency.
+    let stepper_bg = [0.18, 0.20, 0.24, 1.0];
+    let stepper_bg_hover = [0.24, 0.26, 0.30, 1.0];
+    let stepper_fg = [0.85, 0.88, 0.92, 1.0];
+    let title_fg = [0.85, 0.88, 0.92, 1.0];
+    let muted_fg = [0.55, 0.60, 0.66, 1.0];
+    let apply_bg = [0.20, 0.42, 0.68, 1.0];
+    let apply_fg = [0.95, 0.97, 1.0, 1.0];
+    let stepper_style = ButtonStyle {
+        bg: stepper_bg,
+        bg_hover: stepper_bg_hover,
+        fg: stepper_fg,
+        fg_hover: stepper_fg,
+        border_color: [0.0; 4],
+        border_width: 0.0,
+        corner_radius: 4.0,
+        padding_x: 0.0,
+        icon_gap: 0.0,
+        icon_size: (12.0 * scale) as f32,
+    };
+    // Title text — top of title bar, vertically centered.
+    let title_text = "Layout";
+    let title_baseline = modal.title_bar.y_top as f32
+        + ((modal.title_bar.h as f32 - p.cell_h) * 0.5)
+        + p.ascent;
+    p.text(
+        (modal.title_bar.x + 14.0 * scale) as f32,
+        title_baseline,
+        title_text,
+        title_fg,
+    );
+    // Close [×] — small × glyph centered in close_btn.
+    let x_baseline = modal.close_btn.y_top as f32
+        + ((modal.close_btn.h as f32 - p.cell_h) * 0.5)
+        + p.ascent;
+    let x_text_w = p.cell_w; // monospace
+    let x_text_x = modal.close_btn.x as f32
+        + (modal.close_btn.w as f32 - x_text_w) * 0.5;
+    p.text(x_text_x, x_baseline, "×", muted_fg);
+    // Stepper buttons: cols [-] [+], rows [-] [+].  Use Button
+    // component (label "-" / "+", icon None, button paints BG +
+    // text centered).
+    for (rect, label) in [
+        (modal.cols_dec, "−"),
+        (modal.cols_inc, "+"),
+        (modal.rows_dec, "−"),
+        (modal.rows_inc, "+"),
+    ] {
+        let btn = Button {
+            rect,
+            label: Some(label),
+            icon: None as Option<IconSpec>,
+            icon_position: IconPosition::Only,
+            hovered: false,
+            style: stepper_style,
+        };
+        btn.paint(p);
+    }
+    // Stepper values — center "N" in cols_value / rows_value.
+    // (Snapshot painter metrics so we can borrow p mutably in the
+    // text() calls below — closure-capturing p.cell_h would lock
+    // p as &.)
+    let cell_w = p.cell_w;
+    let cell_h = p.cell_h;
+    let ascent = p.ascent;
+    let value_baseline = |rect: marspot_term::layout::Rect| -> f32 {
+        rect.y_top as f32 + ((rect.h as f32 - cell_h) * 0.5) + ascent
+    };
+    let cols_str = pending_cols.to_string();
+    let rows_str = pending_rows.to_string();
+    let cols_w = cols_str.chars().count() as f32 * cell_w;
+    let rows_w = rows_str.chars().count() as f32 * cell_w;
+    p.text(
+        modal.cols_value.x as f32 + (modal.cols_value.w as f32 - cols_w) * 0.5,
+        value_baseline(modal.cols_value),
+        &cols_str,
+        title_fg,
+    );
+    p.text(
+        modal.rows_value.x as f32 + (modal.rows_value.w as f32 - rows_w) * 0.5,
+        value_baseline(modal.rows_value),
+        &rows_str,
+        title_fg,
+    );
+    // Row labels — "Columns" / "Rows" anchored to the left of the
+    // body, baseline aligned with the value cell.
+    let label_pad = 16.0 * scale;
+    let label_x = modal.frame.x as f32 + label_pad as f32;
+    p.text(label_x, value_baseline(modal.cols_value), "Columns", title_fg);
+    p.text(label_x, value_baseline(modal.rows_value), "Rows", title_fg);
+    // Footer: "Total: N panes" centered in total_label rect.
+    let total = pending_cols * pending_rows;
+    let total_str = format!("Total: {}×{} = {} pane{}",
+        pending_cols, pending_rows, total,
+        if total == 1 { "" } else { "s" });
+    let total_w = total_str.chars().count() as f32 * cell_w;
+    p.text(
+        modal.total_label.x as f32 + (modal.total_label.w as f32 - total_w) * 0.5,
+        value_baseline(modal.total_label),
+        &total_str,
+        muted_fg,
+    );
+    // Apply button — full-width blue, white "Apply" label.
+    let apply_style = ButtonStyle {
+        bg: apply_bg,
+        bg_hover: apply_bg,
+        fg: apply_fg,
+        fg_hover: apply_fg,
+        border_color: [0.0; 4],
+        border_width: 0.0,
+        corner_radius: 4.0,
+        padding_x: 0.0,
+        icon_gap: 0.0,
+        icon_size: 0.0,
+    };
+    let apply_btn = Button {
+        rect: modal.apply_btn,
+        label: Some("Apply"),
+        icon: None as Option<IconSpec>,
+        icon_position: IconPosition::Only,
+        hovered: false,
+        style: apply_style,
+    };
+    apply_btn.paint(p);
+}
+
 /// Internal: the content of the Process Monitor modal (title bar
 /// fill, traffic lights, title text, tab strip, body rows + [×]
 /// kill buttons).  Called from `push_process_panel_via_view` with
@@ -2671,42 +2890,8 @@ fn push_layout_chrome(
         btn.paint(p);
     }
 
-    // Picker overlay.  When open, panel BG + per-option GridIcon
-    // previews.  Panel and option BGs go through the painter so
-    // they share the same UI pipeline as Button BGs.
-    if let Some(panel) = layout.picker_panel_rect {
-        p.fill_rounded_rect(panel, CHROME_PANEL_BG, 0.0,
-            (CHROME_BTN_BORDER, 1.0));
-        for (rect, dims) in layout
-            .picker_option_rects
-            .iter()
-            .zip(layout.picker_option_dims.iter())
-        {
-            let opt_icon = GridIcon { cols: dims.0, rows: dims.1 };
-            let opt_btn = Button {
-                rect: *rect,
-                label: None,
-                icon: Some(IconSpec::Component(
-                    &opt_icon as &dyn crate::ui::core::IconComponent
-                )),
-                icon_position: IconPosition::Only,
-                hovered: false,
-                style: ButtonStyle {
-                    bg: CHROME_OPTION_BG,
-                    bg_hover: CHROME_BTN_BG_HOVER,
-                    fg: CHROME_ICON_FG,
-                    fg_hover: [0.85, 0.88, 0.92, 1.0],
-                    border_color: [0.0, 0.0, 0.0, 0.0],
-                    border_width: 0.0,
-                    corner_radius: 4.0,
-                    padding_x: 4.0,
-                    icon_gap: 4.0,
-                    icon_size: 16.0,
-                },
-            };
-            opt_btn.paint(p);
-        }
-    }
+    // F3+3.0 — picker popup removed; `LayoutModal` (separate
+    // component) replaces it.
 
     // Sidebar close-[×] BG tints (FG `×` glyph laid down later in
     // `push_close_glyphs`).  Painted as plain rounded rects via the
@@ -4381,6 +4566,7 @@ mod tests {
             true,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4482,6 +4668,7 @@ mod tests {
             true,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4553,6 +4740,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             &mut font,
@@ -4671,6 +4859,7 @@ mod tests {
                 true,
                 None,
                 None,
+                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -4770,6 +4959,7 @@ mod tests {
             true,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4840,6 +5030,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 &mut font,

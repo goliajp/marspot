@@ -11,8 +11,8 @@ use marspot::terminal::Terminal;
 use marspot::tmux;
 use marspot::{lx_debug, lx_error};
 use marspot::ui::{
-    scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
-    Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
+    scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar,
+    Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS,
     SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL,
 };
 
@@ -160,13 +160,14 @@ struct Marspot {
     /// True between mouse_down (in a cell body) and mouse_up — drag
     /// events update the selection only while this is set.
     selection_dragging: bool,
-    /// Current main-area grid shape.  Determines how many cells the
-    /// layout builder lays down; NOT tied to `sessions.len()`.
-    layout_mode: LayoutMode,
-    /// `true` while the layout-picker overlay is showing.  The picker
-    /// floats over the main area; while open, mouse_down hits hit-test
-    /// the picker first and swallow background clicks.
-    layout_picker_open: bool,
+    /// F3+3.0 — grid shape (cols × rows) is now an arbitrary pair
+    /// rather than a 7-variant enum.  User changes it via the
+    /// `LayoutModal` (toolbar layout button → modal).
+    grid_cols: usize,
+    grid_rows: usize,
+    /// True while the `LayoutModal` is open; toolbar layout button
+    /// click toggles it.
+    layout_modal_open: bool,
     /// `true` when the user has collapsed the sidebar (Cmd-B).  The
     /// next `rebuild_layout_at` zeroes `sidebar_phys`, handing the
     /// reclaimed width to the cell grid.  `Layout::build` already
@@ -454,16 +455,12 @@ impl MarspotApp for Marspot {
         let (
             layout_btn_hit,
             sidebar_btn_hit,
-            picker_option_hit,
-            picker_panel_hit,
             close_session_hit,
         ) = {
             let Some(layout) = &self.layout else { return };
             (
                 layout.hit_test_layout_button(x_phys, y_phys),
                 layout.hit_test_sidebar_button(x_phys, y_phys),
-                layout.hit_test_picker_option(x_phys, y_phys),
-                layout.hit_test_picker_panel(x_phys, y_phys),
                 layout.hit_test_close_session(x_phys, y_phys),
             )
         };
@@ -476,32 +473,9 @@ impl MarspotApp for Marspot {
             ctx.request_redraw();
             return;
         }
-        if self.layout_picker_open {
-            if let Some(opt_idx) = picker_option_hit {
-                self.layout_mode = PICKER_LAYOUTS[opt_idx];
-                self.layout_picker_open = false;
-                self.rebuild_layout(ctx);
-                ctx.request_redraw();
-                return;
-            }
-            if layout_btn_hit || picker_panel_hit {
-                // Re-click button or click panel BG (not on an option):
-                // close picker without other side effects.
-                self.layout_picker_open = false;
-                self.rebuild_layout(ctx);
-                ctx.request_redraw();
-                return;
-            }
-            // Click landed outside the picker entirely — close picker
-            // and let the click fall through so the user doesn't have
-            // to click twice (close, then act) when they meant to go
-            // straight to a cell or sidebar row.
-            self.layout_picker_open = false;
-            self.rebuild_layout(ctx);
-            // No early return — fall through to cell/sidebar dispatch.
-        } else if layout_btn_hit {
-            self.layout_picker_open = true;
-            self.rebuild_layout(ctx);
+        // F3+3.0 — layout button toggles the modal.
+        if layout_btn_hit {
+            self.layout_modal_open = !self.layout_modal_open;
             ctx.request_redraw();
             return;
         }
@@ -836,7 +810,7 @@ impl Marspot {
         } else {
             SIDEBAR_W_LOGICAL * scale
         };
-        let (lc, lr) = self.layout_mode.dims();
+        let (lc, lr) = (self.grid_cols, self.grid_rows);
         let header_phys = HEADER_PT * scale;
         let title_phys = CELL_TITLE_PT * scale;
         let layout = Layout::build(
@@ -845,7 +819,6 @@ impl Marspot {
         )
         .with_chrome(
             scale,
-            self.layout_picker_open,
             self.panes.len(),
             marspot::TITLE_STRIP_PT * scale,
         );
@@ -1449,12 +1422,12 @@ fn main() {
     let proxy = EventProxy::new();
 
     let tmux_mode = args.iter().any(|a| a == "--tmux");
-    let initial_layout = if tmux_mode {
-        LayoutMode::Single
+    let (initial_cols, initial_rows): (usize, usize) = if tmux_mode {
+        (1, 1)
     } else {
-        LayoutMode::Nine
+        (3, 3)
     };
-    let n_sessions = initial_layout.cells();
+    let n_sessions = initial_cols * initial_rows;
 
     // Bring up the shelld connection up front for non-tmux mode.
     // marspot doesn't fork shells itself any more; shelld owns them
@@ -1529,8 +1502,9 @@ fn main() {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
-        layout_mode: initial_layout,
-        layout_picker_open: false,
+        grid_cols: initial_cols,
+        grid_rows: initial_rows,
+        layout_modal_open: false,
         sidebar_collapsed: true,
         ime_preedit: String::new(),
         profile_rss_path,
@@ -1894,8 +1868,9 @@ fn bench_rss_format_dump(arg: &str) {
         title_edit_buffer: String::new(),
         selection: None,
         selection_dragging: false,
-        layout_mode: LayoutMode::Nine,
-        layout_picker_open: false,
+        grid_cols: 3,
+        grid_rows: 3,
+        layout_modal_open: false,
         sidebar_collapsed: true,
         ime_preedit: String::new(),
         profile_rss_path,

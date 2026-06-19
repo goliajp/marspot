@@ -49,8 +49,8 @@ use marspot::shell_proto::{
 };
 use marspot::{lx_debug, lx_debug_sampled, lx_error, lx_event, lx_info, lx_warn};
 use marspot::ui::{
-    scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar, LayoutMode,
-    Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS, PICKER_LAYOUTS,
+    scroll_lines, selection_text, selection_view_for_pane, truncate_for_sidebar,
+    Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS,
     SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL,
 };
 use marspot::HEADER_PT;
@@ -758,8 +758,21 @@ struct CoreApp {
     esc_history: std::collections::VecDeque<std::time::Instant>,
     selection: Option<Selection>,
     selection_dragging: bool,
-    layout_mode: LayoutMode,
-    layout_picker_open: bool,
+    /// F3+3.0 — grid shape (cols × rows) is now an arbitrary
+    /// pair rather than a 7-variant enum.  Cell total = cols×rows;
+    /// when N panes > cells the overflow stays in the sidebar.
+    /// User changes via the `LayoutModal`.
+    grid_cols: usize,
+    grid_rows: usize,
+    /// True while the `LayoutModal` is open; toolbar layout button
+    /// click toggles it.  Modal contents (cols/rows +/- controls
+    /// + preview) live in the modal component.
+    layout_modal_open: bool,
+    /// Modal-staged cols / rows.  Updated by clicks on the modal's
+    /// +/- steppers; committed to `grid_cols` / `grid_rows` on Apply.
+    /// Initialised from grid_* every time the modal opens.
+    pending_grid_cols: usize,
+    pending_grid_rows: usize,
     sidebar_collapsed: bool,
     /// Which chrome icon button (if any) the cursor is currently
     /// hovering over.  Updated on every `MouseMove` frame; drives a
@@ -900,7 +913,7 @@ impl CoreApp {
         } else {
             SIDEBAR_W_LOGICAL * self.scale
         };
-        let (lc, lr) = self.layout_mode.dims();
+        let (lc, lr) = (self.grid_cols, self.grid_rows);
         let layout = Layout::build(
             self.w_phys,
             self.h_phys,
@@ -914,7 +927,6 @@ impl CoreApp {
         )
         .with_chrome(
             self.scale,
-            self.layout_picker_open,
             self.panes.len(),
             marspot::TITLE_STRIP_PT * self.scale,
         );
@@ -2126,8 +2138,6 @@ impl CoreApp {
         let layout = &self.layout;
         let layout_btn_hit = layout.hit_test_layout_button(x_phys, y_phys);
         let sidebar_btn_hit = layout.hit_test_sidebar_button(x_phys, y_phys);
-        let picker_option_hit = layout.hit_test_picker_option(x_phys, y_phys);
-        let picker_panel_hit = layout.hit_test_picker_panel(x_phys, y_phys);
         let close_session_hit = layout.hit_test_close_session(x_phys, y_phys);
         let add_session_hit = layout.hit_test_add_session_button(x_phys, y_phys);
         let refresh_hit = layout.hit_test_cell_refresh(x_phys, y_phys);
@@ -2248,25 +2258,90 @@ impl CoreApp {
             self.needs_render = true;
             return;
         }
-        if self.layout_picker_open {
-            if let Some(opt_idx) = picker_option_hit {
-                self.layout_mode = PICKER_LAYOUTS[opt_idx];
-                self.layout_picker_open = false;
-                self.rebuild_layout();
-                return;
+        // F3+3.0 — when the LayoutModal is open, intercept ALL
+        // clicks: hit-test its controls first, swallow non-control
+        // clicks landing inside the frame so the modal feels modal
+        // (doesn't punch through to the grid).
+        if self.layout_modal_open {
+            use marspot::ui::components::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
+            let modal = LayoutModal::layout(
+                self.w_phys, self.h_phys, self.scale,
+                marspot::TITLE_STRIP_PT * self.scale,
+            );
+            match modal.hit_test(x_phys, y_phys) {
+                Some(LayoutModalHit::Close) => {
+                    self.layout_modal_open = false;
+                    self.needs_render = true;
+                    return;
+                }
+                Some(LayoutModalHit::Apply) => {
+                    self.layout_modal_open = false;
+                    self.grid_cols = self.pending_grid_cols;
+                    self.grid_rows = self.pending_grid_rows;
+                    // F3+3.0 shrink-guard — if focused pane slot is
+                    // beyond the new cell count, jump focus to the
+                    // last surviving cell so the user sees a focused
+                    // pane in-grid.  Overflowed sessions stay alive
+                    // in the sidebar (n_sessions > cells handling
+                    // is already preserved by `take(cell_count)`).
+                    let cells = self.grid_cols * self.grid_rows;
+                    if cells > 0 && self.focused_idx >= cells {
+                        self.focused_idx = cells - 1;
+                    }
+                    self.rebuild_layout();
+                    return;
+                }
+                Some(LayoutModalHit::ColsDec) => {
+                    if self.pending_grid_cols > GRID_MIN {
+                        self.pending_grid_cols -= 1;
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                Some(LayoutModalHit::ColsInc) => {
+                    if self.pending_grid_cols < GRID_MAX {
+                        self.pending_grid_cols += 1;
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                Some(LayoutModalHit::RowsDec) => {
+                    if self.pending_grid_rows > GRID_MIN {
+                        self.pending_grid_rows -= 1;
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                Some(LayoutModalHit::RowsInc) => {
+                    if self.pending_grid_rows < GRID_MAX {
+                        self.pending_grid_rows += 1;
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                Some(_) => {
+                    // TitleBar / Frame: swallow.
+                    return;
+                }
+                None => {
+                    // Click outside the modal closes it without
+                    // any other side effect.
+                    self.layout_modal_open = false;
+                    self.needs_render = true;
+                    return;
+                }
             }
-            if layout_btn_hit || picker_panel_hit {
-                self.layout_picker_open = false;
-                self.rebuild_layout();
-                return;
+        }
+        // F3+3.0 — toolbar layout button toggles the LayoutModal.
+        // Re-init pending values from current grid_* every open so
+        // the modal always starts in sync with the live grid.
+        if layout_btn_hit {
+            if !self.layout_modal_open {
+                self.pending_grid_cols = self.grid_cols;
+                self.pending_grid_rows = self.grid_rows;
             }
-            // Click outside the picker: close it and fall through so
-            // the user doesn't have to click twice.
-            self.layout_picker_open = false;
-            self.rebuild_layout();
-        } else if layout_btn_hit {
-            self.layout_picker_open = true;
-            self.rebuild_layout();
+            self.layout_modal_open = !self.layout_modal_open;
+            self.needs_render = true;
             return;
         }
 
@@ -2410,6 +2485,20 @@ impl CoreApp {
 
         let new_focus = sidebar_hit.or(cell_hit);
         if let Some(idx) = new_focus {
+            // F3+3.0 — click on an empty cell (idx >= panes.len(),
+            // which means the grid has more cells than sessions
+            // after a layout grow) spawns a new session and focuses
+            // it.  Matches the sidebar [+] behaviour but lands the
+            // user directly in the cell they clicked, so growing
+            // the grid + filling it reads as one motion.
+            if idx >= self.panes.len() && cell_hit.is_some() {
+                if self.panes.len() < SESSION_COUNT_HARD_CAP {
+                    self.spawn_session();
+                    self.focused_idx = self.panes.len() - 1;
+                    self.rebuild_layout();
+                }
+                return;
+            }
             if idx < self.panes.len() && idx != self.focused_idx {
                 self.resolve_pending_on_defocus(idx);
                 self.focused_idx = idx;
@@ -2687,6 +2776,14 @@ impl CoreApp {
         // the render call below.
         let panel_data = self.build_process_panel_render();
         self.renderer.set_process_panel(panel_data);
+        // F3+3.0 — publish LayoutModal state every frame.  Renderer
+        // paints when Some, skips when None.  Same event-driven flow
+        // as process panel.
+        self.renderer.set_layout_modal(if self.layout_modal_open {
+            Some((self.pending_grid_cols, self.pending_grid_rows, self.scale))
+        } else {
+            None
+        });
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.
         let cell_count = self.layout.cells.len();
@@ -2841,11 +2938,12 @@ fn main() {
     // placeholder size and resizing afterwards would replay the whole
     // bytelog into the wrong grid and then churn it through a reflow
     // for nothing (and, pre-reflow, used to destroy it outright).
-    let layout_mode = LayoutMode::Nine;
-    let n_sessions = layout_mode.cells();
+    // F3+3.0 — boot at Nine (3×3); user resizes via LayoutModal.
+    let (grid_cols, grid_rows): (usize, usize) = (3, 3);
+    let n_sessions = grid_cols * grid_rows;
     let (boot_cols, boot_rows) = {
         let (cell_w, cell_h) = renderer.cell_dims();
-        let (lc, lr) = layout_mode.dims();
+        let (lc, lr) = (grid_cols, grid_rows);
         let boot = Layout::build(
             w_phys,
             h_phys,
@@ -2934,15 +3032,20 @@ fn main() {
                 Err(e) => {
                     lx_warn!(
                         "core.reattach.l3_failed",
-                        &format!("{e} — will SIGTERM + prune"),
+                        &format!("{e} — will SIGKILL + prune"),
                         session = id
                     );
-                    // Reattach failed: SIGTERM the orphan + clean
+                    // Reattach failed: SIGKILL the orphan + clean
                     // registry so the next boot doesn't loop on it.
+                    // F3+3.2 — SIGKILL (not SIGTERM), same reason
+                    // as the prune loop below: SIGTERM is overloaded
+                    // to trigger L3 self-execv on fingerprint
+                    // mismatch, which would leave a leaked L3
+                    // running with no L2 client.
                     if let Ok(entry) =
                         marspot_term::session_registry::read_session_entry(*id)
                     {
-                        unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+                        unsafe { libc::kill(entry.pid, libc::SIGKILL) };
                         if !entry.shm_name.is_empty() {
                             if let Ok(c) =
                                 std::ffi::CString::new(entry.shm_name.clone())
@@ -2956,10 +3059,22 @@ fn main() {
             }
         }
         // Any alive id beyond n_sessions is leftover from a wider
-        // layout; SIGTERM + prune so they don't accumulate.
+        // layout; KILL + prune so they don't accumulate.
+        //
+        // F3+3.2 — SIGKILL, not SIGTERM.  SIGTERM is overloaded by
+        // RFC-003 §6 Amendment 16 to mean "binary fingerprint
+        // differs → self-execv into the new image".  During an
+        // install storm, an old L3 that we want to PRUNE receives
+        // SIGTERM, sees the new current/marspot-session fingerprint
+        // differs from its own, and execv's instead of dying.
+        // After execv it sits idle (no L2 client), leaking a whole
+        // marspot-session process.  SIGKILL bypasses the handler so
+        // the pruned L3 is reliably gone.  PTY child + sockets get
+        // cleaned by the kernel; `delete_session` below clears the
+        // registry dir.
         for id in alive_ids.iter().skip(n_sessions) {
             if let Ok(entry) = marspot_term::session_registry::read_session_entry(*id) {
-                unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+                unsafe { libc::kill(entry.pid, libc::SIGKILL) };
                 if !entry.shm_name.is_empty() {
                     if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
                         grid_shm::delete_region(&c);
@@ -3090,8 +3205,11 @@ fn main() {
         esc_history: std::collections::VecDeque::with_capacity(3),
         selection: None,
         selection_dragging: false,
-        layout_mode,
-        layout_picker_open: false,
+        grid_cols,
+        grid_rows,
+        layout_modal_open: false,
+        pending_grid_cols: grid_cols,
+        pending_grid_rows: grid_rows,
         sidebar_collapsed: true,
         hover_chrome_btn: None,
         process_panel: None,
@@ -3109,7 +3227,7 @@ fn main() {
     lx_info!(
         "core.layout.ready",
         "initial layout built",
-        mode = format!("{:?}", app.layout_mode),
+        mode = format!("{}x{}", app.grid_cols, app.grid_rows),
         panes = app.panes.len(),
         cols = app.layout.cells[0].cols,
         rows = app.layout.cells[0].rows

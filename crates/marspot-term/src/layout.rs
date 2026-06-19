@@ -108,21 +108,11 @@ pub struct Layout {
     /// layout button.  Toggles the right-side process-tree panel.
     /// Always present so the user can pop the panel any time.
     pub process_button_rect: Rect,
-    /// Layout-picker overlay panel — `Some` while the picker is
-    /// showing, `None` otherwise.  Renderer paints the panel BG
-    /// behind the option icons; mouse_down hits inside this rect
-    /// (but outside any option) close the picker.
-    pub picker_panel_rect: Option<Rect>,
-    /// Per-option icon rect inside the picker, in render order.
-    /// Length matches `picker_option_dims`.  Empty when the picker
-    /// is closed.
-    pub picker_option_rects: Vec<Rect>,
-    /// `(grid_cols, grid_rows)` for each picker option, parallel to
-    /// `picker_option_rects`.  Renderer reads this to draw the
-    /// preview grid inside each option icon.  Same indices as the
-    /// `LayoutMode` enum variants (Single, SplitH, SplitV, Quad,
-    /// SixH, SixV, Nine).
-    pub picker_option_dims: Vec<(usize, usize)>,
+    // F3+3.0 — picker popup removed.  The toolbar layout button
+    // now opens a `LayoutModal` (see `src/ui/components/`) where
+    // the user sets arbitrary cols × rows.  The modal is rendered
+    // by the chrome layer, not layout.rs — Layout no longer carries
+    // picker-overlay rects.
     /// One rect per sidebar row — the close [×] hit-target on the
     /// row's right edge.  Length == n_sessions.  Empty when the
     /// chrome wasn't built or n_sessions == 0.  Renderer paints a
@@ -144,31 +134,12 @@ pub struct Layout {
     pub sidebar_top_pad_phys: f64,
 }
 
-/// Layouts the picker offers, in the order they appear in the
-/// overlay (left → right).  Kept here so layout.rs can compute
-/// rects without depending on main.rs's LayoutMode enum.
-const PICKER_LAYOUT_DIMS: [(usize, usize); 7] = [
-    (1, 1), // Single
-    (2, 1), // SplitH (horizontal split, cells side-by-side)
-    (1, 2), // SplitV (vertical split, cells stacked)
-    (2, 2), // Quad
-    (3, 2), // SixH
-    (2, 3), // SixV
-    (3, 3), // Nine
-];
-
 /// Square icon-button side length (logical pt). Both chrome buttons
 /// (sidebar toggle, layout picker) are now true squares — Lucide-
 /// style monochrome line icons sit inside a 22×22 hit-target.
 const ICON_BUTTON_LOGICAL_SIZE: f64 = 22.0;
 const ICON_BUTTON_LOGICAL_MARGIN: f64 = 8.0;
 const ICON_BUTTON_LOGICAL_GAP: f64 = 6.0;
-
-/// Picker option icon size + spacing.  7 options × 28 + 6 × 4 + 2 × 8 = 220 logical pt wide.
-const PICKER_OPTION_LOGICAL_SIZE: f64 = 28.0;
-const PICKER_OPTION_LOGICAL_GAP: f64 = 4.0;
-const PICKER_PANEL_LOGICAL_PAD: f64 = 8.0;
-const PICKER_PANEL_LOGICAL_GAP_FROM_BUTTON: f64 = 6.0;
 
 /// Sidebar geometry, all in physical pixels.  Renderer reads
 /// `Layout::sidebar_top_pad_phys` (computed at build time so the
@@ -290,9 +261,6 @@ impl Layout {
             layout_button_rect: Rect::ZERO,
             sidebar_button_rect: Rect::ZERO,
             process_button_rect: Rect::ZERO,
-            picker_panel_rect: None,
-            picker_option_rects: Vec::new(),
-            picker_option_dims: Vec::new(),
             close_session_rects: Vec::new(),
             add_session_button_rect: Rect::ZERO,
             sidebar_top_pad_phys,
@@ -315,7 +283,6 @@ impl Layout {
     pub fn with_chrome(
         mut self,
         scale: f64,
-        picker_open: bool,
         n_sessions: usize,
         toolbar_top_phys: f64,
     ) -> Self {
@@ -369,43 +336,6 @@ impl Layout {
             w: btn_w,
             h: btn_h,
         };
-        if picker_open {
-            let opt_size = PICKER_OPTION_LOGICAL_SIZE * scale;
-            let opt_gap = PICKER_OPTION_LOGICAL_GAP * scale;
-            let pad = PICKER_PANEL_LOGICAL_PAD * scale;
-            let n = PICKER_LAYOUT_DIMS.len();
-            let panel_w = pad * 2.0 + opt_size * n as f64 + opt_gap * (n - 1) as f64;
-            let panel_h = pad * 2.0 + opt_size;
-            // Left-align the picker panel under the layout button so
-            // the panel's left edge sits exactly under the button
-            // that opened it.  Clamp against the window right edge
-            // so the panel never runs off-screen on small windows.
-            let panel_x = layout_btn_x.min(self.window_w - panel_w - 4.0).max(4.0);
-            let panel_y = btn_y + btn_h + PICKER_PANEL_LOGICAL_GAP_FROM_BUTTON * scale;
-            self.picker_panel_rect = Some(Rect {
-                x: panel_x,
-                y_top: panel_y,
-                w: panel_w,
-                h: panel_h,
-            });
-
-            let mut options = Vec::with_capacity(n);
-            let mut dims = Vec::with_capacity(n);
-            for (i, &(c, r)) in PICKER_LAYOUT_DIMS.iter().enumerate() {
-                let ox = panel_x + pad + i as f64 * (opt_size + opt_gap);
-                let oy = panel_y + pad;
-                options.push(Rect {
-                    x: ox,
-                    y_top: oy,
-                    w: opt_size,
-                    h: opt_size,
-                });
-                dims.push((c, r));
-            }
-            self.picker_option_rects = options;
-            self.picker_option_dims = dims;
-        }
-
         // Sidebar close-[×] rects.  Geometry uses
         // `sidebar_top_pad_phys` (set by `build`) so it always lines
         // up with the visually painted row — both renderers consume
@@ -469,23 +399,11 @@ impl Layout {
         self.process_button_rect.contains(px, py)
     }
 
-    /// Returns the picker option index (0..7) the click landed in,
-    /// or `None`.  Always `None` when the picker is closed.
-    pub fn hit_test_picker_option(&self, px: f64, py: f64) -> Option<usize> {
-        self.picker_option_rects
-            .iter()
-            .position(|r| r.contains(px, py))
-    }
-
-    /// True when the picker is open AND `(px, py)` is inside its
-    /// panel (used to swallow clicks that hit the panel BG but
-    /// missed any option — they close the picker without firing
-    /// any cell / sidebar action).
-    pub fn hit_test_picker_panel(&self, px: f64, py: f64) -> bool {
-        self.picker_panel_rect
-            .map(|r| r.contains(px, py))
-            .unwrap_or(false)
-    }
+    // F3+3.0 — `hit_test_picker_option` / `hit_test_picker_panel`
+    // removed alongside the popup picker.  The toolbar layout
+    // button now opens a `LayoutModal` whose hit-tests live in
+    // its own component (sees the modal rects via the modal
+    // state struct, not via Layout).
 
     /// Returns the sidebar row index whose close-[×] button
     /// `(px, py)` falls inside, or `None`.  Hit-target lives on the

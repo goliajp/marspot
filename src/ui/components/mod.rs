@@ -15,6 +15,7 @@ pub mod button;
 pub mod grid_seams;
 pub mod grid_item;
 pub mod sidebar;
+pub mod layout_modal;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
@@ -27,3 +28,4 @@ pub use button::{Button, ButtonStyle, IconSpec, IconPosition};
 pub use grid_seams::{GridSeams, SeamStyle};
 pub use grid_item::{GridItem, GridEdges, Outline};
 pub use sidebar::{Sidebar, SidebarRow, SidebarStyle};
+pub use layout_modal::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};

@@ -27,57 +27,12 @@ pub mod components;
 use crate::pane::Pane;
 use crate::render::SelectionView;
 
-/// Switchable session-grid layouts (mouse-driven via the [layout]
-/// button in the main area).  Cell counts ∈ {1, 2, 4, 6, 9}; 2 and 6
-/// have horizontal / vertical orientation variants.  Sessions live
-/// independently — the layout decides how many cells get rendered in
-/// the main area, not how many sessions exist.  When N sessions <
-/// cells, extra cells render as empty placeholders; when N > cells,
-/// extra sessions stay in the sidebar but don't get a main-area cell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LayoutMode {
-    Single,
-    SplitH,
-    SplitV,
-    Quad,
-    SixH,
-    SixV,
-    Nine,
-}
-
-impl LayoutMode {
-    /// `(grid_cols, grid_rows)` — the shape passed straight to
-    /// `Layout::build`.  Names follow the orientation of the *split*:
-    /// `SplitH` is a horizontal split = 2 cells side by side = (2,1).
-    pub fn dims(self) -> (usize, usize) {
-        match self {
-            Self::Single => (1, 1),
-            Self::SplitH => (2, 1),
-            Self::SplitV => (1, 2),
-            Self::Quad => (2, 2),
-            Self::SixH => (3, 2),
-            Self::SixV => (2, 3),
-            Self::Nine => (3, 3),
-        }
-    }
-    pub fn cells(self) -> usize {
-        let (c, r) = self.dims();
-        c * r
-    }
-}
-
-/// Picker option index → LayoutMode.  Order must match
-/// `layout::PICKER_LAYOUT_DIMS` (private to layout.rs but the
-/// dims line up): Single, SplitH, SplitV, Quad, SixH, SixV, Nine.
-pub const PICKER_LAYOUTS: [LayoutMode; 7] = [
-    LayoutMode::Single,
-    LayoutMode::SplitH,
-    LayoutMode::SplitV,
-    LayoutMode::Quad,
-    LayoutMode::SixH,
-    LayoutMode::SixV,
-    LayoutMode::Nine,
-];
+// F3+3.0 — `LayoutMode` + `PICKER_LAYOUTS` removed.  The grid shape
+// is now a free `(cols, rows)` carried in CoreState; the user picks
+// it via the `LayoutModal` (toolbar layout button → modal).  Cell
+// total = cols × rows; when N sessions < cells extra cells render
+// as empty placeholders; when N > cells extras stay alive in the
+// sidebar without a main-area cell (unchanged from earlier behaviour).
 
 pub const SIDEBAR_W_LOGICAL: f64 = 200.0;
 
@@ -95,10 +50,12 @@ pub const CELL_TITLE_PT: f64 = 22.0;
 /// label, plays nicer with the user's preference than `…`).
 pub const MAX_SIDEBAR_LABEL_CHARS: usize = 22;
 
-/// Hard cap on how many sessions marspot permits at once.  The
-/// sidebar [+] button is disabled past this count; the layout
-/// picker only offers shapes whose cells ≤ cap (== 9).
-pub const SESSION_COUNT_HARD_CAP: usize = 9;
+/// Hard cap on how many sessions marspot permits at once.  Sized
+/// to match the LayoutModal's GRID_MAX² (6×6 = 36) — the modal
+/// won't offer a shape past this, and the sidebar [+] button is
+/// disabled past it.  Pre-F3+3.0 this was 9 (locked to the fixed
+/// Nine grid); freed once arbitrary cols × rows landed.
+pub const SESSION_COUNT_HARD_CAP: usize = 36;
 
 /// Truncate a sidebar label to at most `max_chars` total characters,
 /// replacing the dropped tail with three ASCII dots.  Counts
