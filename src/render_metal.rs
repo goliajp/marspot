@@ -1691,37 +1691,12 @@ fn build_instances(
     // cell↔cell — uses one uniformly weak SEAM tone at one width.
     // The eye reads structure (this is a sidebar / this is a grid /
     // this is a cell) without any seam taking on chrome weight.
-    // F3+1.12 — inter-pane seams + chrome (sidebar↔grid, header↔grid,
-    // title-strip↔toolbar) all route through ui kit now.  Inline
-    // cells.push code replaced by `GridSeams` + a small block inside
-    // `push_layout_chrome` for the chrome hairlines.
-    if layout.gutter > 0.0 && !layout.cells.is_empty() {
-        use crate::ui::components::{GridSeams, SeamStyle};
-        use crate::ui::core::view::ViewPainter;
-        let mut seam_painter = ViewPainter {
-            cell_w, cell_h, ascent,
-            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
-            window_w: layout.window_w, window_h: layout.window_h,
-            font, atlas, cells, glyphs, ui_rects,
-        };
-        let seam_style = SeamStyle {
-            color: [SEAM.0, SEAM.1, SEAM.2, 1.0],
-            thickness: layout.gutter,
-        };
-        // Strip CellRect's cols/rows fields — GridSeams just needs
-        // x/y_top/w/h.  Cheap (≤ 9 cells in marspot's layouts).
-        let pane_rects: Vec<Rect> = layout.cells.iter().map(|c| Rect {
-            x: c.x, y_top: c.y_top, w: c.w, h: c.h,
-        }).collect();
-        GridSeams {
-            cells: &pane_rects,
-            cols: layout.grid_cols,
-            rows: layout.grid_rows,
-            vertical: seam_style,
-            horizontal: seam_style,
-        }
-        .paint(&mut seam_painter);
-    }
+    // F3+1.18 — GridSeams now uses the BG (cells) pipeline so seams
+    // tile pixel-perfect with no SDF AA seams.  This means push
+    // order matters (BG pass renders in instance order): GridSeams
+    // MUST run AFTER pane BG cells (push_session in pane loop), so
+    // seams cover pane BG instead of being overdrawn by it.  Moved
+    // to inside the chrome painter scope below.
 
     // Ensure cache has a slot per pane (grown lazily; never shrunk
     // intra-session — pane count is bounded by the 9-grid layout).
@@ -1806,6 +1781,7 @@ fn build_instances(
         use crate::ui::core::view::ViewPainter;
         use crate::ui::components::{
             Sidebar, SidebarRow, SidebarStyle, Button, ButtonStyle, IconSpec, IconPosition,
+            GridSeams, SeamStyle, GridItem, Outline, GridEdges,
         };
         let mut painter = ViewPainter {
             cell_w, cell_h, ascent,
@@ -1813,6 +1789,64 @@ fn build_instances(
             window_w: layout.window_w, window_h: layout.window_h,
             font, atlas, cells, glyphs, ui_rects,
         };
+
+        // F3+1.19 — grid base seams FIRST (gray dividers between
+        // panes), then per-pane GridItem outline.  Both go through
+        // the BG pipeline (fill_rect, no SDF AA), so push order =
+        // z order: pane BG (pushed by pane loop above) → base seams
+        // → focus outline on the focused pane.  All boundaries are
+        // pixel-perfect — rasterizer assigns each pixel to one rect
+        // by sample-center rule, no AA seams.
+        if layout.gutter > 0.0 && !layout.cells.is_empty() {
+            // F3+1.14 — pane grid seams thickened to 4× gutter so the
+            // grid reads as deliberate panes, not gutters-as-margin.
+            let seam_thickness = (layout.gutter * 4.0).max(2.0);
+            let seam_style = SeamStyle {
+                color: [SEAM.0, SEAM.1, SEAM.2, 1.0],
+                thickness: seam_thickness,
+            };
+            let pane_rects: Vec<Rect> = layout.cells.iter().map(|c| Rect {
+                x: c.x, y_top: c.y_top, w: c.w, h: c.h,
+            }).collect();
+            GridSeams {
+                cells: &pane_rects,
+                cols: layout.grid_cols,
+                rows: layout.grid_rows,
+                vertical: seam_style,
+                horizontal: seam_style,
+            }
+            .paint(&mut painter);
+
+            // F3+1.20 — per-pane focus outline.  RN-style outline
+            // (doesn't shrink pane content), width + gutter passed
+            // so GridItem places the 8 ring rects at exactly where
+            // the GridSeams base seams sit — outline pixel-for-pixel
+            // REPLACES the gray seam color on the focused side, no
+            // overshoot beyond the seam footprint.
+            let focus_outline = Outline {
+                color: [0.72, 0.76, 0.82, 1.0],
+                width: seam_thickness,
+            };
+            let cols = layout.grid_cols.max(1);
+            let rows = layout.grid_rows.max(1);
+            for (idx, rect) in pane_rects.iter().enumerate().take(views.len()) {
+                let r = idx / cols;
+                let c = idx % cols;
+                GridItem {
+                    rect: *rect,
+                    focused: idx == focused_idx,
+                    outline: focus_outline,
+                    gutter: layout.gutter,
+                    edges: GridEdges {
+                        top:    r == 0,
+                        right:  c == cols - 1,
+                        bottom: r == rows - 1,
+                        left:   c == 0,
+                    },
+                }
+                .paint(&mut painter);
+            }
+        }
 
         // Empty-cell BG overlay + [+] hint.  Each empty cell becomes
         // a low-key ghost Button with a "+" glyph centered inside.

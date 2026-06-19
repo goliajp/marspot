@@ -92,13 +92,34 @@ impl<'a> GridSeams<'a> {
                 );
             }
         }
+
+        // F3+1.19 — focus outline removed from GridSeams.  Focus is
+        // a per-item visual concern, not a grid concern; it lives on
+        // GridItem (which the caller paints alongside pane content
+        // and lets manage its own focused state + ring rendering).
     }
 }
 
-/// Route through UI pipeline so seams render after pane BG cells
-/// (which live in the BG pipeline).
+/// F3+1.18 — seams use the BG (cells) pipeline, NOT the UI pipeline.
+///
+/// Why: the UI pipeline runs SDF anti-aliasing on every rect edge.
+/// When focus rects abut base seam rects (or each other) at pixel
+/// boundaries, both sides land in the AA band; the premultiplied-
+/// alpha blend leaves ~98 % coverage instead of 100 %.  Visible as
+/// "线宽和分隔线不一致" (focus line slightly thinner than base
+/// gray) and "四个角没有 100 % 与线融合" (corner dim seam).
+///
+/// The BG pipeline draws flat colored rects with no SDF AA — the
+/// rasterizer assigns each pixel to one rect by sample-center rule.
+/// Two abutting axis-aligned rects tile pixel-perfect.  No seams,
+/// no width mismatch.  Caller must round-snap coordinates to
+/// integers (or let cell layout guarantee that, which marspot's
+/// does) for the boundary to land on a pixel edge.
+///
+/// Caller must arrange to push seams AFTER pane BG in build order
+/// (same pipeline = push order = z order).
 fn ui_fill(p: &mut ViewPainter, rect: Rect, color: [f32; 4]) {
-    p.fill_rounded_rect(rect, color, 0.0, ([0.0, 0.0, 0.0, 0.0], 0.0));
+    p.fill_rect(rect, color);
 }
 
 #[cfg(test)]
@@ -127,6 +148,7 @@ mod tests {
             cells: &cells, cols: 1, rows: 1,
             vertical: SeamStyle { color: [1.0; 4], thickness: 2.0 },
             horizontal: SeamStyle { color: [1.0; 4], thickness: 2.0 },
+            
         };
         // We don't have a painter spy in this crate; assert bounds
         // line up with the single cell (smoke test for the math).
@@ -146,6 +168,7 @@ mod tests {
             cells: &cells, cols: 3, rows: 3,
             vertical:   SeamStyle { color: [1.0; 4], thickness: 1.0 },
             horizontal: SeamStyle { color: [1.0; 4], thickness: 1.0 },
+            
         };
         // Inter-col seams at x = 100, 200.  Inter-row at y = 100, 200.
         // Verify by recomputing the formula GridSeams uses.
@@ -175,6 +198,7 @@ mod tests {
             cells: &cells, cols: 2, rows: 2,
             vertical:   SeamStyle { color: [1.0; 4], thickness: 1.0 },
             horizontal: SeamStyle { color: [1.0; 4], thickness: 1.0 },
+            
         };
         // Grid right = 60 + 100 = 160; grid bottom = 50 + 80 = 130.
         let grid_left = gs.cells[0].x;
