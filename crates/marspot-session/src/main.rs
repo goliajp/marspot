@@ -841,18 +841,9 @@ fn publish_and_poke(
     mut poke: Option<&mut UnixStream>,
 ) {
     let changed = publish(shm, session, view_offset);
-    // F3+2.1 — cwd change → PaneCwd frame.  Independent of grid
-    // change: cd doesn't always produce visible grid bytes the same
-    // tick (the shell may just stage state for the next prompt), so
-    // we drain dirty even when `changed == false`.  Best-effort
-    // write — a dead socket just means L2 went away.
-    let cwd_dirty = session.terminal_mut().take_cwd_dirty();
-    if cwd_dirty {
-        if let (Some(w), Some(cwd)) = (poke.as_deref_mut(), session.terminal().cwd()) {
-            let _ = Frame::new(MsgType::PaneCwd, cwd.as_bytes().to_vec())
-                .write_to(w);
-        }
-    }
+    // F3+3.6 — OSC 7 push-based cwd publish removed; L2 now pull-
+    // fetches cwd via `proc_pidinfo` when the user opens LayoutModal.
+    let _ = &mut poke;
     // Dedup: a content-identical publish doesn't wake L2.  Without
     // this, busy TUIs (claudecode, htop, vim cursor) emit redraw
     // bytes that produced bit-identical shm snapshots, and each one

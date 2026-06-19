@@ -283,10 +283,6 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
-    /// L3 → core: pane's shell reported a new cwd via OSC 7.  L2
-    /// caches the path per session_id and uses its basename as the
-    /// pane title placeholder when no custom title is set.
-    PaneCwd(u64, String),
     /// Shell → core: a plugin took over the pane backing this shelld
     /// session.  Capability bits say what L2 should change while the
     /// session is active (lock keys, freeze grid, accept overlays).
@@ -443,19 +439,10 @@ fn l3_reader_loop(
                         ));
                     }
                 }
-                // F3+2.1 — L3 reported a new cwd via OSC 7.  Payload
-                // is the raw utf-8 path (frame length = byte length).
-                // Drop the event silently on invalid utf-8 (don't
-                // pretend the cwd reset) — wire is forward-compat, an
-                // upstream that sends junk just gets ignored.
-                MsgType::PaneCwd => {
-                    if let Ok(s) = std::str::from_utf8(&f.payload) {
-                        let _ = tx.send(CoreEvent::PaneCwd(
-                            session_id,
-                            s.to_string(),
-                        ));
-                    }
-                }
+                // F3+3.6 — old PaneCwd MsgType arm retired; cwd is
+                // now pulled via proc_pidinfo on LayoutModal open.
+                // Any stale PaneCwd frame from a not-yet-upgraded L3
+                // falls into the silent-skip path below.
                 _ => {}
             },
             Ok(None) | Err(_) => {
@@ -977,6 +964,29 @@ impl CoreApp {
     /// pending grid shape.  Called when the modal opens, when the
     /// user changes cols/rows in the modal (since the cell count
     /// changes), and on apply (after permuting).
+    /// F3+3.6 — pull-based cwd refresh.  Walks every pane, reads its
+    /// `shell_child_pid` from `entry.toml`, then `proc_pidinfo`s the
+    /// cwd and writes the basename-bearing absolute path into
+    /// `pane_cwds`.  Called when the user opens the LayoutModal —
+    /// the modal preview + the title-strip placeholder both consume
+    /// `pane_cwds`, so a freshly opened modal always shows the
+    /// current cwd of each pane.  Between opens the cache is stale.
+    ///
+    /// Each iteration is bounded work: one entry.toml read + one
+    /// `proc_pidinfo` syscall per pane, ≤ SESSION_COUNT_HARD_CAP
+    /// total, no allocation in the cold-path miss case (the
+    /// HashMap reuses its buckets).  Not on the render hot path —
+    /// fires once per modal open click.
+    fn refresh_pane_cwds(&mut self) {
+        for pane in &self.panes {
+            let Some(sid) = pane.shelld_session_id() else { continue };
+            let Some(pid) = read_shell_child_pid(sid) else { continue };
+            let Some(path) = marspot::pidtree::proc_cwd(pid) else { continue };
+            let s = path.to_string_lossy().into_owned();
+            self.pane_cwds.insert(sid, s);
+        }
+    }
+
     fn reset_card_slots(&mut self) {
         let cells = self.pending_grid_cols * self.pending_grid_rows;
         self.card_slots = (0..cells).collect();
@@ -2482,6 +2492,10 @@ impl CoreApp {
                 self.pending_grid_cols = self.grid_cols;
                 self.pending_grid_rows = self.grid_rows;
                 self.reset_card_slots();
+                // F3+3.6 — pull-fetch each pane's cwd on the
+                // open transition so the modal preview + the
+                // title-strip placeholder show fresh values.
+                self.refresh_pane_cwds();
             }
             self.layout_modal_open = !self.layout_modal_open;
             self.layout_drag = None;
@@ -3646,18 +3660,6 @@ fn main() {
                 }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
-                }
-                // F3+2.1 — L3 forwarded OSC 7.  L3 already dedup's
-                // (`take_cwd_dirty` only fires on actual change), so
-                // any frame that gets here is a real change.  Empty
-                // string clears via remove (matches PaneBadge convention).
-                CoreEvent::PaneCwd(sid, path) => {
-                    if path.is_empty() {
-                        app.pane_cwds.remove(&sid);
-                    } else {
-                        app.pane_cwds.insert(sid, path);
-                    }
-                    app.needs_render = true;
                 }
                 CoreEvent::PaneSessionBegin(sid, caps) => {
                     app.pane_session_begin(sid, caps);

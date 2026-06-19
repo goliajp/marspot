@@ -278,13 +278,11 @@ pub enum MsgType {
     SearchMore = 52,
     /// L2 → L3: cancel an in-flight search.  Payload: query_id u32 LE.
     SearchCancel = 53,
-    /// L3 → L2: pane's shell reported a new working directory via OSC 7
-    /// (`\e]7;file://host/path\07`).  Payload: utf-8 bytes of the path
-    /// (no length prefix — the frame length IS the payload length).
-    /// L2 caches one cwd per pane and uses its `Path::file_name` as
-    /// the pane title placeholder when the user hasn't set a custom
-    /// title.  Sent only on actual change; idle cost is exactly zero.
-    PaneCwd = 54,
+    // 54 was `PaneCwd` (L3→L2 OSC 7 push) — retired in F3+3.6 after
+    // the modal switched to a pull-based `proc_pidinfo` lookup.  The
+    // discriminant is left as a hole so a future L3 (briefly on the
+    // old binary across an install) sending a PaneCwd frame just
+    // falls into the unknown-msg-type silent-skip path.
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -327,7 +325,6 @@ impl MsgType {
             51 => MsgType::SearchResults,
             52 => MsgType::SearchMore,
             53 => MsgType::SearchCancel,
-            54 => MsgType::PaneCwd,
             200 => MsgType::Error,
             _ => return None,
         })

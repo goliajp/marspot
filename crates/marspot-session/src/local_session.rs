@@ -114,15 +114,6 @@ impl LocalSession {
         if std::env::var_os("COLORTERM").is_none() {
             unsafe { std::env::set_var("COLORTERM", "truecolor") };
         }
-        // F3+2.1 — TERM_PROGRAM gates macOS /etc/zshrc's OSC 7 hook
-        // (update_terminal_cwd), which emits `\e]7;file://host/path\07`
-        // after every prompt.  Setting it here means every fresh
-        // zsh on the system that sources /etc/zshrc gets the hook
-        // for free — marspot's terminal parses OSC 7 → pane title
-        // placeholder becomes the cwd basename, dynamically.
-        if std::env::var_os("TERM_PROGRAM").is_none() {
-            unsafe { std::env::set_var("TERM_PROGRAM", "marspot") };
-        }
         marspot_term::session::ensure_zdot_shim_for_external_shells();
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
