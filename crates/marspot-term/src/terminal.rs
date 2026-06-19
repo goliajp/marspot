@@ -201,6 +201,23 @@ pub struct Terminal {
     /// + renderer-shaping work tracked under task #5.
     cluster_buf: String,
     grapheme_cursor: crate::grapheme::GraphemeCursor,
+    /// Current working directory, as reported by the shell via OSC 7
+    /// (`\e]7;file://host/path\e\\` or `\07`-terminated).  macOS's default
+    /// /etc/zshrc registers this hook when `TERM_PROGRAM` is set, so
+    /// most users get it for free.  `None` until the first OSC 7 lands
+    /// (and stays None for shells that don't emit it).  Read by the
+    /// pane title placeholder in L2 — pane title falls back to this
+    /// path's basename when the user hasn't set a custom title.
+    ///
+    /// Updated only on OSC 7 dispatch (event-driven, not polled), so
+    /// idle cost is exactly zero.  Setting this flips
+    /// `cwd_dirty` so the L3 main loop can publish the change up to
+    /// L2 via the `PaneCwd` wire frame.
+    cwd: Option<String>,
+    /// True when `cwd` has changed since the last L3 publish.  The L3
+    /// main loop reads + clears this after each Terminal::feed pass
+    /// and emits a `PaneCwd` frame when set.
+    cwd_dirty: bool,
     /// Diagnostics — predictions confirmed by an echo byte.
     pub predictions_hit: u64,
     /// Diagnostics — predictions rolled back on mismatch (or alt-screen
@@ -281,6 +298,8 @@ impl Terminal {
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             predictions_hit: 0,
             predictions_miss: 0,
+            cwd: None,
+            cwd_dirty: false,
             generation: 0,
         }
     }
@@ -291,6 +310,29 @@ impl Terminal {
 
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+
+    /// Last-seen cwd reported by the shell via OSC 7.  `None` until
+    /// the first OSC 7 lands (e.g. shell hasn't sourced its rc yet,
+    /// or this shell doesn't emit OSC 7).  Read by L2's pane title
+    /// placeholder.
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    /// Peek the cwd-dirty flag without clearing it.  Callers that
+    /// publish on dirty should use `take_cwd_dirty` instead.
+    pub fn cwd_dirty(&self) -> bool {
+        self.cwd_dirty
+    }
+
+    /// Read + clear the cwd-dirty flag.  L3's main loop calls this
+    /// after each `feed()` and, when true, emits a `PaneCwd` wire
+    /// frame to L2 with the current cwd.
+    pub fn take_cwd_dirty(&mut self) -> bool {
+        let d = self.cwd_dirty;
+        self.cwd_dirty = false;
+        d
     }
 
     /// True when the terminal is in DECCKM application cursor key mode.
@@ -458,6 +500,8 @@ impl Terminal {
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let grapheme_cursor = &mut self.grapheme_cursor;
+            let cwd = &mut self.cwd;
+            let cwd_dirty = &mut self.cwd_dirty;
             let mut handler = Handler {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
@@ -470,6 +514,8 @@ impl Terminal {
                 pending_wrap,
                 cluster_buf,
                 grapheme_cursor,
+                cwd,
+                cwd_dirty,
             };
             parser.advance(&mut handler, bytes[i]);
             i += 1;
@@ -509,6 +555,8 @@ impl Terminal {
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let grapheme_cursor = &mut self.grapheme_cursor;
+            let cwd = &mut self.cwd;
+            let cwd_dirty = &mut self.cwd_dirty;
             let mut handler = Handler {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
@@ -521,6 +569,8 @@ impl Terminal {
                 pending_wrap,
                 cluster_buf,
                 grapheme_cursor,
+                cwd,
+                cwd_dirty,
             };
             handler.flush_cluster_keep_cursor();
         }
@@ -1082,6 +1132,8 @@ struct Handler<'a> {
     pending_wrap: &'a mut bool,
     cluster_buf: &'a mut String,
     grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
+    cwd: &'a mut Option<String>,
+    cwd_dirty: &'a mut bool,
 }
 
 impl<'a> Handler<'a> {
@@ -1773,9 +1825,22 @@ impl<'a> ParserCallbacks for Handler<'a> {
 
     fn osc_dispatch(&mut self, data: &[u8]) {
         self.flush_cluster_for_break();
-        // OSC handlers (window title, hyperlinks, palette) — later phase.
-        // Surface what's coming through at DEBUG so the next round of
-        // OSC implementation has a "what do apps actually send" log.
+        // OSC 7 — `\e]7;file://host/path\07` reports the shell's cwd.
+        // macOS's default /etc/zshrc registers this hook when
+        // TERM_PROGRAM is set, so most users get it for free.  We
+        // strip the `file://` prefix + the host (we don't care for
+        // local panes), percent-decode the path, and stash it.  An
+        // empty / malformed payload leaves the previous value alone
+        // (don't blank a known-good cwd on noise).
+        if let Some(rest) = data.strip_prefix(b"7;") {
+            if let Some(path) = parse_osc7_path(rest) {
+                if self.cwd.as_deref() != Some(path.as_str()) {
+                    *self.cwd = Some(path);
+                    *self.cwd_dirty = true;
+                }
+            }
+            return;
+        }
         lx_debug!(
             "term.osc.dispatch",
             "OSC payload (handler not implemented yet)",
@@ -1786,6 +1851,58 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 .map(|b| b as char)
                 .unwrap_or('?')
         );
+    }
+}
+
+/// Parse OSC 7 payload (`file://host/path`) into a filesystem path.
+/// Tolerant: accepts missing `file://` prefix (some emitters skip
+/// it), accepts missing host (path-only form), returns None on
+/// invalid percent encoding.  Always allocates a fresh String —
+/// fine because OSC 7 fires only on `cd`, not per byte.
+fn parse_osc7_path(payload: &[u8]) -> Option<String> {
+    // Strip optional "file://" scheme.
+    let after_scheme = if payload.starts_with(b"file://") {
+        &payload[7..]
+    } else {
+        payload
+    };
+    // After scheme we may have either "host/path" or just "/path".
+    // Find the first `/` — everything from there on is the path.
+    let path_bytes = match after_scheme.iter().position(|&b| b == b'/') {
+        Some(i) => &after_scheme[i..],
+        // No `/` → not a usable path.
+        None => return None,
+    };
+    if path_bytes.is_empty() {
+        return None;
+    }
+    // Percent-decode in place into a new buffer.  Invalid escape
+    // (`%` not followed by two hex digits) → None.
+    let mut out = Vec::with_capacity(path_bytes.len());
+    let mut i = 0;
+    while i < path_bytes.len() {
+        let b = path_bytes[i];
+        if b == b'%' && i + 2 < path_bytes.len() {
+            let hi = hex_nibble(path_bytes[i + 1])?;
+            let lo = hex_nibble(path_bytes[i + 2])?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else if b == b'%' {
+            return None;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -3286,6 +3403,8 @@ mod tests {
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
             predictions_hit: 0,
             predictions_miss: 0,
+            cwd: None,
+            cwd_dirty: false,
             generation: 0,
         };
 

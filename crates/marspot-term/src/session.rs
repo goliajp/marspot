@@ -60,6 +60,31 @@ PROMPT_EOL_MARK=""
 # Done in a function so it runs AFTER zle is initialized; assigning
 # at top-level can race with plugins that mutate zle_highlight later.
 () { zle_highlight=(paste:none) } 2>/dev/null
+
+# F3+2.1 — OSC 7 cwd reporting.  marspot parses `\e]7;file://host/path\07`
+# and uses the basename as the pane title placeholder (when no custom
+# title is set).  Apple's /etc/zshrc_Apple_Terminal has the same hook
+# but it's only loaded by Terminal.app — we ship our own here so every
+# marspot pane gets dynamic title for free.
+__marspot_osc7() {
+    emulate -L zsh
+    local url_path=''
+    {
+        local i ch hexch LC_CTYPE=C LC_COLLATE=C LC_ALL= LANG=
+        for ((i = 1; i <= ${#PWD}; ++i)); do
+            ch="$PWD[i]"
+            if [[ "$ch" =~ [/._~A-Za-z0-9-] ]]; then
+                url_path+="$ch"
+            else
+                printf -v hexch '%%%02X' "'$ch"
+                url_path+="$hexch"
+            fi
+        done
+    }
+    printf '\e]7;%s\a' "file://${HOST:-localhost}$url_path"
+}
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __marspot_osc7
+__marspot_osc7
 "#;
     let _ = std::fs::write(dir.join(".zshrc"), shim);
     // Setting ZDOTDIR also reroutes .zshenv / .zprofile / .zlogin to
@@ -110,6 +135,12 @@ PROMPT_EOL_MARK=""
     // hues — e.g. Claude Code's coral orange → rose/pink at cube index
     // 174).  marspot renders truecolor, so claim it.  Leave a pre-set
     // value alone (a parent terminal may know better).
+    // F3+2.1 — TERM_PROGRAM gates macOS /etc/zshrc's OSC 7 hook.
+    // See `crates/marspot-session/src/local_session.rs` for the
+    // longer rationale — mirrored here for the mcli spawn path.
+    if std::env::var_os("TERM_PROGRAM").is_none() {
+        unsafe { std::env::set_var("TERM_PROGRAM", "marspot") };
+    }
     if std::env::var_os("COLORTERM").is_none() {
         unsafe { std::env::set_var("COLORTERM", "truecolor") };
     }

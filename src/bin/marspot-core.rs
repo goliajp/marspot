@@ -283,6 +283,10 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
+    /// L3 → core: pane's shell reported a new cwd via OSC 7.  L2
+    /// caches the path per session_id and uses its basename as the
+    /// pane title placeholder when no custom title is set.
+    PaneCwd(u64, String),
     /// Shell → core: a plugin took over the pane backing this shelld
     /// session.  Capability bits say what L2 should change while the
     /// session is active (lock keys, freeze grid, accept overlays).
@@ -420,6 +424,19 @@ fn l3_reader_loop(
                             has_more,
                             total_seen,
                             hits,
+                        ));
+                    }
+                }
+                // F3+2.1 — L3 reported a new cwd via OSC 7.  Payload
+                // is the raw utf-8 path (frame length = byte length).
+                // Drop the event silently on invalid utf-8 (don't
+                // pretend the cwd reset) — wire is forward-compat, an
+                // upstream that sends junk just gets ignored.
+                MsgType::PaneCwd => {
+                    if let Ok(s) = std::str::from_utf8(&f.payload) {
+                        let _ = tx.send(CoreEvent::PaneCwd(
+                            session_id,
+                            s.to_string(),
                         ));
                     }
                 }
@@ -716,6 +733,12 @@ struct CoreApp {
     /// Per-shelld-session right-side badge, set by L1 plugins via
     /// `MsgType::PaneBadge`.  Empty string clears via removal.
     pane_badges: std::collections::HashMap<u64, String>,
+    /// F3+2.1 — cwd reported by each pane's shell via OSC 7.  Keyed
+    /// by shelld_session_id.  Read by the title placeholder chain
+    /// (`Path::file_name` of the cached path → basename string).
+    /// Populated event-driven by `MsgType::PaneCwd` frames, so the
+    /// hot path stays zero-syscall.
+    pane_cwds: std::collections::HashMap<u64, String>,
     /// Frames queued by event handlers (mouse_down etc.) to be
     /// written to the control socket by the main loop.  Avoids
     /// reaching the writer from inside the trait callbacks where
@@ -2608,14 +2631,37 @@ impl CoreApp {
         let states: Vec<SessionState> =
             self.panes.iter().map(|p| p.session().state()).collect();
 
+        // F3+2.1 — title placeholder = basename of the shell's
+        // last-reported cwd (OSC 7).  The cwd comes in as a
+        // `PaneCwd` wire frame from L3 (Terminal::osc_dispatch parses
+        // `\e]7;file://host/path\07`).  Macos's default /etc/zshrc
+        // emits the hook when `TERM_PROGRAM` is set, so most users
+        // get it for free.  Zero hot-path syscalls — every byte
+        // here is cached state populated by event-driven dispatch.
+        // `None` means "no OSC 7 seen yet" (in-process pane / shell
+        // hasn't sourced rc / non-zsh shell that doesn't emit it /
+        // cwd at filesystem root with no basename) → fall through to
+        // the ordinal label.
+        let cwd_basenames: Vec<Option<&str>> = (0..self.panes.len())
+            .map(|i| {
+                let sid = self.panes[i].shelld_session_id()?;
+                let path = self.pane_cwds.get(&sid)?;
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+            })
+            .collect();
+
         // Resolved label per cell: edit-mode buffer → user-set custom
-        // title → default ordinal label.
+        // title → cwd basename (dynamic placeholder) → ordinal fallback.
         let resolved_labels: Vec<String> = (0..self.panes.len())
             .map(|i| {
                 if self.editing_title == Some(i) {
                     self.title_edit_buffer.clone()
                 } else if let Some(Some(custom)) = self.custom_titles.get(i) {
                     custom.clone()
+                } else if let Some(Some(name)) = cwd_basenames.get(i) {
+                    (*name).to_string()
                 } else {
                     labels.get(i).cloned().unwrap_or_default()
                 }
@@ -3038,6 +3084,7 @@ fn main() {
         editing_title: None,
         title_edit_buffer: String::new(),
         pane_badges: std::collections::HashMap::new(),
+        pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
         pane_sessions: std::collections::HashMap::new(),
         esc_history: std::collections::VecDeque::with_capacity(3),
@@ -3276,6 +3323,18 @@ fn main() {
                 }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
+                }
+                // F3+2.1 — L3 forwarded OSC 7.  L3 already dedup's
+                // (`take_cwd_dirty` only fires on actual change), so
+                // any frame that gets here is a real change.  Empty
+                // string clears via remove (matches PaneBadge convention).
+                CoreEvent::PaneCwd(sid, path) => {
+                    if path.is_empty() {
+                        app.pane_cwds.remove(&sid);
+                    } else {
+                        app.pane_cwds.insert(sid, path);
+                    }
+                    app.needs_render = true;
                 }
                 CoreEvent::PaneSessionBegin(sid, caps) => {
                     app.pane_session_begin(sid, caps);

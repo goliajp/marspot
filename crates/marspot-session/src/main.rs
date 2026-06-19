@@ -836,11 +836,23 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
 /// shm — keeps L2 event-driven instead of polling per frame.
 fn publish_and_poke(
     shm: &mut GridShmWriter,
-    session: &SessionImpl,
+    session: &mut SessionImpl,
     view_offset: u16,
-    poke: Option<&mut UnixStream>,
+    mut poke: Option<&mut UnixStream>,
 ) {
     let changed = publish(shm, session, view_offset);
+    // F3+2.1 — cwd change → PaneCwd frame.  Independent of grid
+    // change: cd doesn't always produce visible grid bytes the same
+    // tick (the shell may just stage state for the next prompt), so
+    // we drain dirty even when `changed == false`.  Best-effort
+    // write — a dead socket just means L2 went away.
+    let cwd_dirty = session.terminal_mut().take_cwd_dirty();
+    if cwd_dirty {
+        if let (Some(w), Some(cwd)) = (poke.as_deref_mut(), session.terminal().cwd()) {
+            let _ = Frame::new(MsgType::PaneCwd, cwd.as_bytes().to_vec())
+                .write_to(w);
+        }
+    }
     // Dedup: a content-identical publish doesn't wake L2.  Without
     // this, busy TUIs (claudecode, htop, vim cursor) emit redraw
     // bytes that produced bit-identical shm snapshots, and each one
@@ -1155,7 +1167,7 @@ fn main() {
     // bump so the two sides stay in lockstep without an extra
     // forward_scroll round-trip.
     let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
-    publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
+    publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1453,7 +1465,7 @@ fn main() {
                             // empty (looks black).
                             publish_and_poke(
                                 &mut shm,
-                                &session,
+                                &mut session,
                                 view_offset,
                                 poke.as_mut(),
                             );
@@ -1482,7 +1494,7 @@ fn main() {
             // Final pump before post-loop dispatcher decides
             // execv-handoff vs clean-exit.
             let _ = session.pump();
-            publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
             break;
         }
         let resized = pending_resize.is_some();
@@ -1543,7 +1555,7 @@ fn main() {
         last_scroll_push = cur_scroll_push;
         if session.is_exited() {
             session.pump();
-            publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
             lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
             break;
         }
@@ -1560,7 +1572,7 @@ fn main() {
                     cause = "scrolled"
                 );
             }
-            publish_and_poke(&mut shm, &session, view_offset, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
         }
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
