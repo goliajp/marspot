@@ -78,6 +78,22 @@ view.paint(&mut painter, |p| {
 
 `p.text` 内部走 `push_text_run`,但调用者看不到这个细节.
 
+### 2.5 没有 custom paint 闭包
+
+`Button` 的 `IconSpec` 只支持两个变体:
+
+```rust
+pub enum IconSpec<'a> {
+    Glyph(&'a str),                       // ✓
+    Component(&'a dyn IconComponent),     // ✓
+    // NO Custom(&'a dyn Fn(...))         — 禁止
+}
+```
+
+需要新形状的图标:在 `system/<platform>/icons/` 或 `components/icons/`
+开一个文件,impl `IconComponent` trait,带 unit test.scene 不允许用闭包
+画 icon —— 闭包是漏点,被画过的形状没人能复用 / 检视 / 测.
+
 ## 3. 怎么用 — 参考 React
 
 ### 3.1 一个 scene 一个文件
@@ -183,8 +199,12 @@ scene 必须走 widget,widget 必须走 ViewPainter,ViewPainter 自己 push.
 | 路径 | 类型 | 用途 |
 |---|---|---|
 | `core/view.rs` | View / ViewStyle / ViewPainter / Backdrop | 任何 overlay 的基类 |
+| `core/icon.rs` | IconComponent (trait) | 所有 icon 必须 impl 它 —— 没有闭包形 icon |
 | `system/macos/traffic_lights.rs` | TrafficLights / TrafficLightHit | macOS 红黄绿 |
 | `system/macos/title_bar.rs` | TitleBar / TitleBarHit | macOS 标题栏(traffic + 居中 title text) |
+| `system/macos/icons/grid.rs` | GridIcon | Lucide layout-grid:外框 + 内部分隔线,参数化 cols×rows |
+| `system/macos/icons/sidebar.rs` | SidebarIcon | Lucide panel-left:外框 + 1/3 处分隔线,collapsed 状态 dim |
+| `system/macos/icons/list_tree.rs` | ListTreeIcon | Lucide list-tree:3 横条递进缩进 |
 | `components/modal_frame.rs` | ModalFrame / ModalLayoutSpec | 中心 modal 几何(default / maximized / minimized / drag offset) |
 | `components/tab_strip.rs` | TabStrip | 等宽 tab + ellipsis 截断 |
 | `components/scroll_view.rs` | ScrollView | 垂直 scroll 状态 + wheel/clamp |

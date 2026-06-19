@@ -1867,10 +1867,22 @@ fn build_instances(
         );
     }
 
-    // Floating chrome (layout button + picker overlay + close BGs
-    // + add-button BG).  Drawn last so it composites over the
-    // cells / sidebar.  Picker only paints when its rect is `Some`.
-    push_layout_chrome(layout, hover_chrome_btn, cells);
+    // Floating chrome (toolbar buttons + picker overlay + close BGs
+    // + add-button BG).  All routed through Button + IconComponent
+    // via a ViewPainter wrapping the MAIN scratches — they aren't
+    // overlays in the always-on-top sense (toolbar is base UI, not
+    // a modal), so they share the main pipeline order with the rest
+    // of the grid chrome.
+    {
+        use crate::ui::core::view::ViewPainter;
+        let mut chrome_painter = ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas, cells, glyphs, ui_rects,
+        };
+        push_layout_chrome(layout, hover_chrome_btn, &mut chrome_painter);
+    }
     // Close-[×] and add-[+] glyphs piggy-back on the FG (atlas)
     // pipeline so they're real font glyphs (× = U+00D7, + = U+002B)
     // — not axis-aligned rect crosses.
@@ -2590,103 +2602,91 @@ const CHROME_BTN_BG_HOVER: [f32; 4] = [0.130, 0.140, 0.165, 1.0];
 fn push_layout_chrome(
     layout: &Layout,
     hover_chrome_btn: Option<u8>,
-    cells: &mut Vec<CellInstance>,
+    p: &mut crate::ui::core::view::ViewPainter,
 ) {
-    // Per-button BG: darker fill under cursor.  Cursor hover state
-    // is sent by L2 on every MouseMove and ignored when None
-    // (window unfocused or mouse outside both buttons).
-    let sidebar_bg = if hover_chrome_btn == Some(0) {
-        CHROME_BTN_BG_HOVER
-    } else {
-        CHROME_BTN_BG
-    };
-    let layout_bg = if hover_chrome_btn == Some(1) {
-        CHROME_BTN_BG_HOVER
-    } else {
-        CHROME_BTN_BG
-    };
-    let process_bg = if hover_chrome_btn == Some(2) {
-        CHROME_BTN_BG_HOVER
-    } else {
-        CHROME_BTN_BG
-    };
-    // Sidebar toggle button — sits left of the layout button so the
-    // user always has a way back when the sidebar is collapsed.  The
-    // icon's "sidebar bar" dims when collapsed (state derived from
-    // sidebar_w, kept in sync by `rebuild_layout_at`) so the
-    // affordance doubles as a state indicator.
+    use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
+    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon};
+    // Three toolbar Buttons — sidebar / layout / process tree.
+    // Each is a Button with chrome() style + an IconComponent.  No
+    // raw paint code lives in this function any more (vs. F3+1.10
+    // which still had push_rect + push_border + push_<icon>).
     let sidebar_collapsed = layout.sidebar_w == 0.0;
-    push_rect(cells, layout.sidebar_button_rect, sidebar_bg);
-    push_border(cells, layout.sidebar_button_rect, 1.0, CHROME_BTN_BORDER);
-    push_sidebar_icon(
-        cells,
-        layout.sidebar_button_rect,
-        sidebar_collapsed,
-    );
+    let sidebar_icon = SidebarIcon { collapsed: sidebar_collapsed };
+    let grid_icon = GridIcon { cols: layout.grid_cols, rows: layout.grid_rows };
+    let list_tree_icon = ListTreeIcon;
+    let chrome = ButtonStyle::chrome();
+    for (rect, hover_id, icon) in [
+        (layout.sidebar_button_rect, 0u8,
+         &sidebar_icon as &dyn crate::ui::core::IconComponent),
+        (layout.layout_button_rect, 1u8,
+         &grid_icon as &dyn crate::ui::core::IconComponent),
+        (layout.process_button_rect, 2u8,
+         &list_tree_icon as &dyn crate::ui::core::IconComponent),
+    ] {
+        let btn = Button {
+            rect,
+            label: None,
+            icon: Some(IconSpec::Component(icon)),
+            icon_position: IconPosition::Only,
+            hovered: hover_chrome_btn == Some(hover_id),
+            style: chrome,
+        };
+        btn.paint(p);
+    }
 
-    // Layout button is always present (even at 1×1); shows the
-    // current grid shape so the user can tell at a glance.
-    push_rect(cells, layout.layout_button_rect, layout_bg);
-    push_border(cells, layout.layout_button_rect, 1.0, CHROME_BTN_BORDER);
-    push_grid_icon(
-        cells,
-        layout.layout_button_rect,
-        (layout.grid_cols, layout.grid_rows),
-        CHROME_ICON_FG,
-    );
-
-    // F3+1 — process-tree toggle.  Always present so the user can
-    // pop the panel any time.  Icon: three left-anchored bars with
-    // progressive indents — reads as a "task list / tree" affordance
-    // (the Lucide `list-tree` shape but simplified to fit a cell).
-    push_rect(cells, layout.process_button_rect, process_bg);
-    push_border(cells, layout.process_button_rect, 1.0, CHROME_BTN_BORDER);
-    push_process_tree_icon(cells, layout.process_button_rect);
-
-    // Picker overlay.  Painted only when open; option rects are
-    // pre-computed in `Layout::with_chrome`.
+    // Picker overlay.  When open, panel BG + per-option GridIcon
+    // previews.  Panel and option BGs go through the painter so
+    // they share the same UI pipeline as Button BGs.
     if let Some(panel) = layout.picker_panel_rect {
-        push_rect(cells, panel, CHROME_PANEL_BG);
-        push_border(cells, panel, 1.0, CHROME_BTN_BORDER);
+        p.fill_rounded_rect(panel, CHROME_PANEL_BG, 0.0,
+            (CHROME_BTN_BORDER, 1.0));
         for (rect, dims) in layout
             .picker_option_rects
             .iter()
             .zip(layout.picker_option_dims.iter())
         {
-            push_rect(cells, *rect, CHROME_OPTION_BG);
-            push_grid_icon(cells, *rect, *dims, CHROME_ICON_FG);
+            let opt_icon = GridIcon { cols: dims.0, rows: dims.1 };
+            let opt_btn = Button {
+                rect: *rect,
+                label: None,
+                icon: Some(IconSpec::Component(
+                    &opt_icon as &dyn crate::ui::core::IconComponent
+                )),
+                icon_position: IconPosition::Only,
+                hovered: false,
+                style: ButtonStyle {
+                    bg: CHROME_OPTION_BG,
+                    bg_hover: CHROME_BTN_BG_HOVER,
+                    fg: CHROME_ICON_FG,
+                    fg_hover: [0.85, 0.88, 0.92, 1.0],
+                    border_color: [0.0, 0.0, 0.0, 0.0],
+                    border_width: 0.0,
+                    corner_radius: 4.0,
+                    padding_x: 4.0,
+                    icon_gap: 4.0,
+                    icon_size: 16.0,
+                },
+            };
+            opt_btn.paint(p);
         }
     }
 
-    // Sidebar close-[×] BG tints (FG `×` glyph is laid down later
-    // in `push_close_glyphs`, since glyphs need atlas + font).
-    // When this is the last remaining session, the BG fades to
-    // gray — `mouse_down` already refuses the click, the dim look
-    // tells the user *why* nothing happened.
+    // Sidebar close-[×] BG tints (FG `×` glyph laid down later in
+    // `push_close_glyphs`).  Painted as plain rounded rects via the
+    // UI pipeline so they layer correctly on top of sidebar BG.
     let n_sessions = layout.close_session_rects.len();
     let close_disabled = n_sessions == 1;
-    let close_bg = if close_disabled {
-        CLOSE_BTN_BG_DISABLED
-    } else {
-        CLOSE_BTN_BG
-    };
+    let close_bg = if close_disabled { CLOSE_BTN_BG_DISABLED } else { CLOSE_BTN_BG };
     for rect in &layout.close_session_rects {
-        push_rect(cells, *rect, close_bg);
+        p.fill_rounded_rect(*rect, close_bg, 0.0,
+            ([0.0, 0.0, 0.0, 0.0], 0.0));
     }
-
-    // Sidebar [+] add-session button BG (FG `+` glyph laid down
-    // later in `push_add_button_glyph`).  Disabled at the hard cap
-    // of 9 sessions; `mouse_down` ignores the click then.  Painted
-    // before close × so close × always reads as a per-row
-    // affordance even on the same y-band.
+    // Sidebar [+] add-session BG.  Same pipeline reasoning.
     if layout.add_session_button_rect.w > 0.0 {
         let add_disabled = n_sessions >= SESSION_COUNT_HARD_CAP;
-        let add_bg = if add_disabled {
-            ADD_BTN_BG_DISABLED
-        } else {
-            ADD_BTN_BG
-        };
-        push_rect(cells, layout.add_session_button_rect, add_bg);
+        let add_bg = if add_disabled { ADD_BTN_BG_DISABLED } else { ADD_BTN_BG };
+        p.fill_rounded_rect(layout.add_session_button_rect, add_bg, 0.0,
+            ([0.0, 0.0, 0.0, 0.0], 0.0));
     }
 }
 

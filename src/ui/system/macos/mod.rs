@@ -5,6 +5,8 @@
 
 pub mod traffic_lights;
 pub mod title_bar;
+pub mod icons;
 
 pub use traffic_lights::{TrafficLights, TrafficLightHit};
 pub use title_bar::TitleBar;
+pub use icons::{GridIcon, SidebarIcon, ListTreeIcon};

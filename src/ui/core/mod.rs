@@ -7,5 +7,7 @@
 //! chrome, composite widgets) is built on top of it.
 
 pub mod view;
+pub mod icon;
 
 pub use view::{View, ViewStyle, ViewPainter, Backdrop};
+pub use icon::IconComponent;

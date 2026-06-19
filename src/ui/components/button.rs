@@ -15,7 +15,7 @@
 //! whatever it wants into the icon box.
 
 use marspot_term::layout::Rect;
-use crate::ui::core::ViewPainter;
+use crate::ui::core::{ViewPainter, IconComponent};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ButtonStyle {
@@ -76,6 +76,24 @@ impl ButtonStyle {
         }
     }
 
+    /// Toolbar chrome — quiet raised surface on idle, slightly deeper
+    /// on hover.  Pairs with the chrome icons (sidebar / grid /
+    /// list-tree) to make the toolbar buttons visually one family.
+    pub fn chrome() -> Self {
+        Self {
+            bg:           [0.085, 0.095, 0.115, 1.0],
+            bg_hover:     [0.130, 0.140, 0.165, 1.0],
+            fg:           [0.55, 0.60, 0.65, 1.0],
+            fg_hover:     [0.75, 0.80, 0.85, 1.0],
+            border_color: [0.18, 0.20, 0.23, 1.0],
+            border_width: 1.0,
+            corner_radius: 4.0,
+            padding_x: 4.0,
+            icon_gap: 4.0,
+            icon_size: 14.0,
+        }
+    }
+
     /// Destructive / kill button — red-tinted variant for "you sure?"
     /// affordances like the process panel row [×] or sidebar close-
     /// session [×].  Same shape as the default filled button, just
@@ -98,15 +116,16 @@ impl ButtonStyle {
 
 #[derive(Copy, Clone)]
 pub enum IconSpec<'a> {
-    /// Render a short string (typically one char) via the glyph atlas.
-    /// Centered in the icon slot.  Use for "×", "+", "▸", text-like
-    /// glyphs that already live in the font.
+    /// Render a short string (typically one char) via the glyph
+    /// atlas.  Centered in the icon slot.  Use for "×", "+", "▸",
+    /// text-like glyphs that already live in the font.
     Glyph(&'a str),
-    /// Custom paint.  The closure receives the icon's bounding rect
-    /// and a painter routing to the same scratches as the button.
-    /// Use for chrome shapes drawn from thin stroked rects (sidebar
-    /// bar, grid preview, list-tree, etc.).
-    Custom(&'a dyn Fn(&mut ViewPainter, Rect)),
+    /// A named, tested `IconComponent` impl (e.g. `GridIcon`,
+    /// `SidebarIcon`, `ListTreeIcon`).  No raw paint closures in
+    /// scene code — pick a concrete icon from
+    /// `system/macos/icons/*` or `components/icons/*`, or add a new
+    /// one there with its own unit test.
+    Component(&'a dyn IconComponent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,7 +262,7 @@ fn paint_icon(
             let ty = rect.y_top as f32 + (rect.h as f32 - cell_h) * 0.5 + ascent;
             p.text(tx, ty, s, fg);
         }
-        IconSpec::Custom(f) => f(p, rect),
+        IconSpec::Component(c) => c.paint(p, rect, fg),
     }
 }
 
