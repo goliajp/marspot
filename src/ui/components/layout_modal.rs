@@ -14,7 +14,7 @@
 //! Caller (CoreState / Marspot) owns the pending values, the
 //! `layout_modal_open` flag, and applies on click.
 
-use marspot_term::layout::Rect;
+use marspot_term::layout::{Rect, Alignment};
 use super::modal_frame::{ModalFrame, ModalLayoutSpec};
 
 /// Caps for cols / rows.  Practical maximum tied to readability —
@@ -67,10 +67,14 @@ pub struct LayoutModal {
     pub card_grid: Rect,
 }
 
-const MODAL_W_LOGICAL: f64 = 320.0;
+// F3+3.7 — bumped modal width + min card sizes so the preview can
+// host cwd-basename titles (which may run 10–20 chars: `claudecode`,
+// `lab31-luna`, `marspot`-style).  Old 320 pt × 44 pt cards clipped
+// anything past ~6 chars at 1× scale.
+const MODAL_W_LOGICAL: f64 = 440.0;
 /// Modal min height when card grid is tiny.  Modal stretches
 /// vertically beyond this when the card grid needs more room.
-const MODAL_MIN_H_LOGICAL: f64 = 280.0;
+const MODAL_MIN_H_LOGICAL: f64 = 380.0;
 const TITLE_BAR_H_LOGICAL: f64 = 28.0;
 const STEPPER_BTN_LOGICAL: f64 = 28.0;
 const STEPPER_VALUE_W_LOGICAL: f64 = 56.0;
@@ -78,12 +82,11 @@ const APPLY_BTN_H_LOGICAL: f64 = 32.0;
 const ROW_GAP_LOGICAL: f64 = 12.0;
 const SIDE_PAD_LOGICAL: f64 = 16.0;
 /// Card grid dims.  Card aspect ratio kept close to 4:3 so a
-/// "wide" 5×2 grid reads differently from a "tall" 2×5.  Min
-/// card edge picked so 3-char titles ("245") read at 1× scale.
-const CARD_GAP_LOGICAL: f64 = 6.0;
-const CARD_MIN_W_LOGICAL: f64 = 44.0;
-const CARD_MIN_H_LOGICAL: f64 = 32.0;
-const CARD_GRID_PAD_LOGICAL: f64 = 14.0;
+/// "wide" 5×2 grid reads differently from a "tall" 2×5.  Min card
+/// edge sized for ~9–10 chars at 1× scale (typical workdir basename).
+const CARD_GAP_LOGICAL: f64 = 8.0;
+const CARD_MIN_W_LOGICAL: f64 = 80.0;
+const CARD_MIN_H_LOGICAL: f64 = 56.0;
 /// Aspect-ratio target for one card (width / height) — picked
 /// so the preview at default density matches the real grid's
 /// roughly 4:3 cells.  Both dimensions still floor at min above.
@@ -111,31 +114,36 @@ impl LayoutModal {
         let value_w = STEPPER_VALUE_W_LOGICAL * scale;
         let apply_h = APPLY_BTN_H_LOGICAL * scale;
         let card_gap = CARD_GAP_LOGICAL * scale;
-        let card_grid_pad = CARD_GRID_PAD_LOGICAL * scale;
-        // Compute the card grid first so the modal height can
-        // grow to fit it.  Width comes from MODAL_W minus paddings;
-        // card cell size = floor of (w - gaps) / cols, with a
-        // CARD_ASPECT-driven height (floored at min).
+        // F3+3.7 — modal sizes itself from the card block intrinsic
+        // dims, then over-rounds up to MODAL_MIN.  Any leftover
+        // vertical space lands as flex around the card block (the
+        // block sits Center within the region between rows-stepper
+        // and total-label), so a small grid (e.g. 1×1) doesn't push
+        // the steppers + Apply to opposite ends of a near-empty
+        // modal.  Width: cards fill body width by default; min card
+        // size is the lower bound so tiny grids still get readable
+        // cells.
         let modal_w = MODAL_W_LOGICAL * scale;
-        let card_grid_w = modal_w - 2.0 * side_pad;
+        let body_w = modal_w - 2.0 * side_pad;
         let cards_in = cols.max(1);
         let rows_in = rows.max(1);
-        let inner_card_w = (card_grid_w - (cards_in - 1) as f64 * card_gap)
+        let natural_card_w = (body_w - (cards_in - 1) as f64 * card_gap)
             / cards_in as f64;
-        let card_w = inner_card_w.max(CARD_MIN_W_LOGICAL * scale);
+        let card_w = natural_card_w.max(CARD_MIN_W_LOGICAL * scale);
         let aspect_card_h = card_w / CARD_ASPECT;
         let card_h = aspect_card_h.max(CARD_MIN_H_LOGICAL * scale);
-        let card_grid_inner_h = card_h * rows_in as f64
+        let card_block_w = cards_in as f64 * card_w
+            + (cards_in - 1) as f64 * card_gap;
+        let card_block_h = rows_in as f64 * card_h
             + (rows_in - 1) as f64 * card_gap;
-        let card_grid_h = card_grid_inner_h + 2.0 * card_grid_pad;
         // Body content: top pad + cols row + gap + rows row + gap
-        //              + card grid + gap + total label + gap + apply.
+        //              + card block + gap + total label + gap + apply.
         let body_h = side_pad
             + stepper_btn
             + row_gap
             + stepper_btn
             + row_gap
-            + card_grid_h
+            + card_block_h
             + row_gap
             + stepper_btn  // total label
             + row_gap
@@ -197,26 +205,8 @@ impl LayoutModal {
         let rows_inc = Rect {
             x: cluster_x + stepper_btn + value_w, y_top: row2_top, w: stepper_btn, h: stepper_btn,
         };
-        // Card grid: below row2, framed by a padded subgrid.
-        let card_grid = Rect {
-            x: body.x + side_pad,
-            y_top: row2_top + stepper_btn + row_gap,
-            w: card_grid_w,
-            h: card_grid_h,
-        };
-        let mut cards: Vec<Rect> = Vec::with_capacity(cards_in * rows_in);
-        for r in 0..rows_in {
-            for c in 0..cards_in {
-                let cx = card_grid.x + card_grid_pad
-                    + c as f64 * (card_w + card_gap);
-                let cy = card_grid.y_top + card_grid_pad
-                    + r as f64 * (card_h + card_gap);
-                cards.push(Rect {
-                    x: cx, y_top: cy, w: card_w, h: card_h,
-                });
-            }
-        }
-        // Footer: total label + Apply button at the bottom.
+        // Footer first (pinned to body bottom) so the card region
+        // can be computed against it.
         let apply_btn = Rect {
             x: body.x + side_pad,
             y_top: body.y_top + body.h - side_pad - apply_h,
@@ -230,6 +220,33 @@ impl LayoutModal {
             w: body.w - 2.0 * side_pad,
             h: stepper_btn,
         };
+        // F3+3.7 — card region = vertical band between the rows
+        // stepper bottom and the total label top, full body width.
+        // The card block (cards_in × rows_in cards with gaps) sits
+        // Center-aligned inside this region so any flex space lands
+        // evenly around the cards rather than stacking at the
+        // bottom.
+        let region_top = row2_top + stepper_btn + row_gap;
+        let region_bottom = total_label.y_top - row_gap;
+        let card_region = Rect {
+            x: body.x + side_pad,
+            y_top: region_top,
+            w: body_w,
+            h: (region_bottom - region_top).max(0.0),
+        };
+        let card_grid = card_region.place(
+            card_block_w, card_block_h, Alignment::Center,
+        );
+        let mut cards: Vec<Rect> = Vec::with_capacity(cards_in * rows_in);
+        for r in 0..rows_in {
+            for c in 0..cards_in {
+                let cx = card_grid.x + c as f64 * (card_w + card_gap);
+                let cy = card_grid.y_top + r as f64 * (card_h + card_gap);
+                cards.push(Rect {
+                    x: cx, y_top: cy, w: card_w, h: card_h,
+                });
+            }
+        }
         Self {
             frame: frame.frame,
             title_bar: frame.title_bar,
