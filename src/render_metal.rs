@@ -209,6 +209,28 @@ pub struct ProcessPanelRow {
     pub is_header: bool,
 }
 
+/// F3+3.0 / 3.3 — full data for one render of the LayoutModal.
+/// `set_layout_modal(Some(_))` toggles it on, with the per-slot
+/// titles + active drag info needed to paint cards.
+#[derive(Debug, Clone)]
+pub struct LayoutModalRender {
+    pub cols: usize,
+    pub rows: usize,
+    pub scale: f64,
+    /// One title per slot, in slot order (length = cols * rows).
+    /// Empty string = empty slot (no card content drawn).
+    pub slot_titles: Vec<String>,
+    /// Drag state if a card drag is in progress this frame.
+    pub drag: Option<LayoutModalDragRender>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutModalDragRender {
+    pub from_slot: usize,
+    pub grab_offset_phys: (f64, f64),
+    pub mouse_phys: (f64, f64),
+}
+
 /// F3+1.4 — full data for one render of the centered Process Monitor
 /// modal.  Renderer pulls this via `set_process_panel`.  `None` =
 /// closed, nothing drawn.
@@ -474,12 +496,9 @@ pub struct MetalRenderer {
     /// while the panel is open; cheap because rows are typically
     /// tens of entries.
     process_panel: Option<ProcessPanelRender>,
-    /// F3+3.0 — LayoutModal state: `Some((pending_cols, pending_rows,
-    /// scale))` when open, `None` when closed.  Pulled by build
-    /// instances when laying down overlay rects; scale comes through
-    /// because chrome sizing is in logical pt and the modal floats
-    /// during AppKit resize before the next render() call.
-    layout_modal_state: Option<(usize, usize, f64)>,
+    /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
+    /// open, `None` when closed.  See `LayoutModalRender` below.
+    layout_modal_state: Option<LayoutModalRender>,
     /// F3+1.6 — overlay scratches.  Anything pushed here gets
     /// encoded in EXTRA UI + FG passes AFTER the main grid render,
     /// so it lands on top of all grid pixels regardless of which
@@ -727,11 +746,11 @@ impl MetalRenderer {
         self.process_panel = data;
     }
 
-    /// F3+3.0 — caller publishes LayoutModal open state + pending
-    /// (cols, rows) every frame the modal might paint.  `None`
-    /// disables the modal entirely.  Renderer reads this when
-    /// laying down overlay rects.  Cheap (three small Copy values).
-    pub fn set_layout_modal(&mut self, state: Option<(usize, usize, f64)>) {
+    /// F3+3.0 / 3.3 — caller publishes LayoutModal open state +
+    /// pending (cols, rows) + per-slot titles + active drag info
+    /// every frame the modal might paint.  `None` disables the
+    /// modal entirely.
+    pub fn set_layout_modal(&mut self, state: Option<LayoutModalRender>) {
         self.layout_modal_state = state;
     }
 
@@ -993,7 +1012,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             process_panel.as_ref(),
-            self.layout_modal_state,
+            self.layout_modal_state.as_ref(),
             font,
             atlas,
             color_atlas,
@@ -1147,7 +1166,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             process_panel.as_ref(),
-            self.layout_modal_state,
+            self.layout_modal_state.as_ref(),
             font,
             atlas,
             color_atlas,
@@ -1680,7 +1699,7 @@ fn build_instances(
     window_focused: bool,
     hover_chrome_btn: Option<u8>,
     process_panel: Option<&ProcessPanelRender>,
-    layout_modal_state: Option<(usize, usize, f64)>,
+    layout_modal_state: Option<&LayoutModalRender>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -2033,9 +2052,9 @@ fn build_instances(
     // F3+3.0 — LayoutModal: cols/rows steppers + Apply.  Overlay
     // scratches → renders on top of grid, modal-style backdrop dims
     // everything below the title strip.
-    if let Some((pending_cols, pending_rows, modal_scale)) = layout_modal_state {
+    if let Some(modal_state) = layout_modal_state {
         push_layout_modal_via_view(
-            pending_cols, pending_rows, modal_scale,
+            modal_state,
             layout.top_inset,
             cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             layout.window_w, layout.window_h,
@@ -2388,6 +2407,7 @@ fn push_process_panel_via_view(
             corner_radius: PROCESS_PANEL_CORNER_RADIUS,
             shadow_blur: 16.0,
             shadow_alpha: 0.45,
+            padding: 0.0,
             backdrop: if panel.draw_backdrop {
                 Backdrop::Dim {
                     color: [0.0, 0.0, 0.0, 0.45],
@@ -2410,9 +2430,7 @@ fn push_process_panel_via_view(
 /// × rows steppers + Apply + footer text are all positional).
 #[allow(clippy::too_many_arguments)]
 fn push_layout_modal_via_view(
-    pending_cols: usize,
-    pending_rows: usize,
-    scale: f64,
+    state: &LayoutModalRender,
     top_inset: f64,
     cell_w: f32,
     cell_h: f32,
@@ -2429,7 +2447,10 @@ fn push_layout_modal_via_view(
 ) {
     use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
     use crate::ui::components::LayoutModal;
-    let modal = LayoutModal::layout(window_w, window_h, scale, top_inset);
+    let modal = LayoutModal::layout(
+        window_w, window_h, state.scale, top_inset,
+        state.cols, state.rows,
+    );
     let mut painter = ViewPainter {
         cell_w, cell_h, ascent, atlas_w, atlas_h,
         window_w, window_h,
@@ -2444,6 +2465,7 @@ fn push_layout_modal_via_view(
             corner_radius: PROCESS_PANEL_CORNER_RADIUS,
             shadow_blur: 16.0,
             shadow_alpha: 0.45,
+            padding: 0.0,
             backdrop: Backdrop::Dim {
                 color: [0.0, 0.0, 0.0, 0.45],
                 exclude_above_y: top_inset,
@@ -2451,7 +2473,7 @@ fn push_layout_modal_via_view(
         },
     };
     view.paint(&mut painter, |p| {
-        paint_layout_modal_content(&modal, pending_cols, pending_rows, scale, p);
+        paint_layout_modal_content(&modal, state, p);
     });
 }
 
@@ -2461,12 +2483,14 @@ fn push_layout_modal_via_view(
 /// just draw atop them.
 fn paint_layout_modal_content(
     modal: &crate::ui::components::LayoutModal,
-    pending_cols: usize,
-    pending_rows: usize,
-    scale: f64,
+    state: &LayoutModalRender,
     p: &mut crate::ui::core::view::ViewPainter,
 ) {
+    let pending_cols = state.cols;
+    let pending_rows = state.rows;
+    let scale = state.scale;
     use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
+    use marspot_term::layout::Alignment;
     // Colors mirror process panel for visual consistency.
     let stepper_bg = [0.18, 0.20, 0.24, 1.0];
     let stepper_bg_hover = [0.24, 0.26, 0.30, 1.0];
@@ -2487,28 +2511,20 @@ fn paint_layout_modal_content(
         icon_gap: 0.0,
         icon_size: (12.0 * scale) as f32,
     };
-    // Title text — top of title bar, vertically centered.
-    let title_text = "Layout";
-    let title_baseline = modal.title_bar.y_top as f32
-        + ((modal.title_bar.h as f32 - p.cell_h) * 0.5)
-        + p.ascent;
-    p.text(
-        (modal.title_bar.x + 14.0 * scale) as f32,
-        title_baseline,
-        title_text,
-        title_fg,
-    );
-    // Close [×] — small × glyph centered in close_btn.
-    let x_baseline = modal.close_btn.y_top as f32
-        + ((modal.close_btn.h as f32 - p.cell_h) * 0.5)
-        + p.ascent;
-    let x_text_w = p.cell_w; // monospace
-    let x_text_x = modal.close_btn.x as f32
-        + (modal.close_btn.w as f32 - x_text_w) * 0.5;
-    p.text(x_text_x, x_baseline, "×", muted_fg);
-    // Stepper buttons: cols [-] [+], rows [-] [+].  Use Button
-    // component (label "-" / "+", icon None, button paints BG +
-    // text centered).
+    // F3+3.4 — `text_in(rect, s, color, align)` replaces all the
+    // hand-rolled `(rect.h - cell_h) * 0.5 + ascent` math below.
+    // Title text — left-pad'd, vertically centered in title_bar.
+    let title_pad_left = 14.0 * scale;
+    let title_inner = marspot_term::layout::Rect {
+        x: modal.title_bar.x + title_pad_left,
+        y_top: modal.title_bar.y_top,
+        w: modal.title_bar.w - title_pad_left,
+        h: modal.title_bar.h,
+    };
+    p.text_in(title_inner, "Layout", title_fg, Alignment::CenterLeft);
+    // Close [×] glyph, fully centered in its hit-target.
+    p.text_in(modal.close_btn, "×", muted_fg, Alignment::Center);
+    // Stepper buttons: cols [-] [+], rows [-] [+].
     for (rect, label) in [
         (modal.cols_dec, "−"),
         (modal.cols_inc, "+"),
@@ -2525,50 +2541,40 @@ fn paint_layout_modal_content(
         };
         btn.paint(p);
     }
-    // Stepper values — center "N" in cols_value / rows_value.
-    // (Snapshot painter metrics so we can borrow p mutably in the
-    // text() calls below — closure-capturing p.cell_h would lock
-    // p as &.)
-    let cell_w = p.cell_w;
-    let cell_h = p.cell_h;
-    let ascent = p.ascent;
-    let value_baseline = |rect: marspot_term::layout::Rect| -> f32 {
-        rect.y_top as f32 + ((rect.h as f32 - cell_h) * 0.5) + ascent
-    };
+    // Stepper VALUES — N inside cols_value / rows_value, centered.
     let cols_str = pending_cols.to_string();
     let rows_str = pending_rows.to_string();
-    let cols_w = cols_str.chars().count() as f32 * cell_w;
-    let rows_w = rows_str.chars().count() as f32 * cell_w;
-    p.text(
-        modal.cols_value.x as f32 + (modal.cols_value.w as f32 - cols_w) * 0.5,
-        value_baseline(modal.cols_value),
-        &cols_str,
-        title_fg,
-    );
-    p.text(
-        modal.rows_value.x as f32 + (modal.rows_value.w as f32 - rows_w) * 0.5,
-        value_baseline(modal.rows_value),
-        &rows_str,
-        title_fg,
-    );
-    // Row labels — "Columns" / "Rows" anchored to the left of the
-    // body, baseline aligned with the value cell.
+    p.text_in(modal.cols_value, &cols_str, title_fg, Alignment::Center);
+    p.text_in(modal.rows_value, &rows_str, title_fg, Alignment::Center);
+    // Row labels — left-aligned with same vertical baseline as the
+    // adjacent value cell.  Use the value rect as the y reference
+    // (so they're guaranteed visually aligned), but x = body left
+    // pad of the modal frame.
     let label_pad = 16.0 * scale;
-    let label_x = modal.frame.x as f32 + label_pad as f32;
-    p.text(label_x, value_baseline(modal.cols_value), "Columns", title_fg);
-    p.text(label_x, value_baseline(modal.rows_value), "Rows", title_fg);
-    // Footer: "Total: N panes" centered in total_label rect.
+    let cols_label_rect = marspot_term::layout::Rect {
+        x: modal.frame.x + label_pad,
+        y_top: modal.cols_value.y_top,
+        w: modal.cols_value.x - modal.frame.x - label_pad,
+        h: modal.cols_value.h,
+    };
+    let rows_label_rect = marspot_term::layout::Rect {
+        x: modal.frame.x + label_pad,
+        y_top: modal.rows_value.y_top,
+        w: modal.rows_value.x - modal.frame.x - label_pad,
+        h: modal.rows_value.h,
+    };
+    p.text_in(cols_label_rect, "Columns", title_fg, Alignment::CenterLeft);
+    p.text_in(rows_label_rect, "Rows", title_fg, Alignment::CenterLeft);
+    // Footer: "Total: N panes" centered.
     let total = pending_cols * pending_rows;
     let total_str = format!("Total: {}×{} = {} pane{}",
         pending_cols, pending_rows, total,
         if total == 1 { "" } else { "s" });
-    let total_w = total_str.chars().count() as f32 * cell_w;
-    p.text(
-        modal.total_label.x as f32 + (modal.total_label.w as f32 - total_w) * 0.5,
-        value_baseline(modal.total_label),
-        &total_str,
-        muted_fg,
-    );
+    p.text_in(modal.total_label, &total_str, muted_fg, Alignment::Center);
+    // Cache atlas-driven metrics needed by the card-paint block.
+    let cell_w = p.cell_w;
+    let cell_h = p.cell_h;
+    let ascent = p.ascent;
     // Apply button — full-width blue, white "Apply" label.
     let apply_style = ButtonStyle {
         bg: apply_bg,
@@ -2591,6 +2597,74 @@ fn paint_layout_modal_content(
         style: apply_style,
     };
     apply_btn.paint(p);
+
+    // F3+3.3 — card grid + drag overlay.  Each slot renders a
+    // small rounded card with its pane's title centered.  Order
+    // matters: BG cards first, then drop-target highlight on the
+    // hovered slot, then the dragged card on top so it floats
+    // above everything.
+    let card_bg = [0.13, 0.15, 0.18, 1.0];
+    let card_bg_drag_origin = [0.10, 0.12, 0.14, 1.0];
+    let card_bg_drop_target = [0.22, 0.36, 0.52, 1.0];
+    let card_border = [0.30, 0.34, 0.40, 1.0];
+    let card_fg = [0.80, 0.85, 0.90, 1.0];
+    let card_fg_drag_origin = [0.40, 0.45, 0.50, 1.0];
+    // Drop target: only highlighted while a drag is active AND
+    // the drop target differs from the source slot.
+    let drop_target_slot: Option<usize> = state.drag.as_ref().and_then(|d| {
+        let cw = modal.cards.first().map(|c| c.w).unwrap_or(0.0);
+        let ch = modal.cards.first().map(|c| c.h).unwrap_or(0.0);
+        let cx = d.mouse_phys.0 - d.grab_offset_phys.0 + cw * 0.5;
+        let cy = d.mouse_phys.1 - d.grab_offset_phys.1 + ch * 0.5;
+        modal.nearest_card(cx, cy).filter(|&s| s != d.from_slot)
+    });
+    for (slot, rect) in modal.cards.iter().enumerate() {
+        let is_drag_origin = state
+            .drag
+            .as_ref()
+            .map(|d| d.from_slot == slot)
+            .unwrap_or(false);
+        let is_drop_target = drop_target_slot == Some(slot);
+        let bg = if is_drag_origin {
+            card_bg_drag_origin
+        } else if is_drop_target {
+            card_bg_drop_target
+        } else {
+            card_bg
+        };
+        p.fill_rounded_rect(*rect, bg, 6.0, (card_border, 1.0));
+        // Title text centered in the card via text_in.
+        if let Some(title) = state.slot_titles.get(slot) {
+            if !title.is_empty() {
+                let fg = if is_drag_origin { card_fg_drag_origin } else { card_fg };
+                p.text_in(*rect, title, fg, Alignment::Center);
+            }
+        }
+    }
+    let _ = (cell_w, cell_h, ascent);
+    // Floating dragged card: a copy of the source card painted at
+    // (mouse - grab_offset).  Drawn LAST so it sits on top of all
+    // other cards.  Same BG / border as a regular card but more
+    // saturated to read as "lifted".
+    if let Some(d) = state.drag.as_ref() {
+        if d.from_slot < modal.cards.len() {
+            let src = modal.cards[d.from_slot];
+            let drag_rect = marspot_term::layout::Rect {
+                x: d.mouse_phys.0 - d.grab_offset_phys.0,
+                y_top: d.mouse_phys.1 - d.grab_offset_phys.1,
+                w: src.w,
+                h: src.h,
+            };
+            let drag_bg = [0.22, 0.26, 0.32, 1.0];
+            let drag_border = [0.55, 0.62, 0.72, 1.0];
+            p.fill_rounded_rect(drag_rect, drag_bg, 6.0, (drag_border, 1.5));
+            if let Some(title) = state.slot_titles.get(d.from_slot) {
+                if !title.is_empty() {
+                    p.text_in(drag_rect, title, card_fg, Alignment::Center);
+                }
+            }
+        }
+    }
 }
 
 /// Internal: the content of the Process Monitor modal (title bar

@@ -312,6 +312,22 @@ enum CoreEvent {
     ),
 }
 
+/// F3+3.3 — LayoutModal drag state owned by CoreApp.  Started on
+/// mouse_down inside a card, updated each mouse_drag, committed on
+/// mouse_up by swapping `card_slots[from_slot]` ↔ slot under cursor.
+/// No animation in V2.0; bounce + magnetic snap are V2.1.
+#[derive(Debug, Clone, Copy)]
+struct LayoutModalDrag {
+    /// Slot the user grabbed from.
+    from_slot: usize,
+    /// Mouse offset inside the source card at grab time (physical
+    /// pixels) so the visual stays under the cursor across motion.
+    grab_offset_phys: (f64, f64),
+    /// Current mouse position in physical pixels.  Live updated by
+    /// mouse_drag; renderer uses `mouse - grab_offset` as draw origin.
+    mouse_phys: (f64, f64),
+}
+
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
     match f.msg_type {
         MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|w| {
@@ -773,6 +789,17 @@ struct CoreApp {
     /// Initialised from grid_* every time the modal opens.
     pending_grid_cols: usize,
     pending_grid_rows: usize,
+    /// F3+3.3 — per-slot assignment for the LayoutModal preview /
+    /// drag area.  `card_slots[slot_idx] = pane_idx` shows that
+    /// pane's title in slot `slot_idx`.  A pane_idx out of range
+    /// (>= panes.len()) renders as an empty slot.  Length is
+    /// always `pending_grid_cols * pending_grid_rows`; reset to
+    /// `(0..cells).collect()` whenever the modal opens or cells
+    /// count changes.  Drag-drop swaps two entries here; Apply
+    /// permutes `self.panes` to match.
+    card_slots: Vec<usize>,
+    /// Active drag, if any.  None while no drag in progress.
+    layout_drag: Option<LayoutModalDrag>,
     sidebar_collapsed: bool,
     /// Which chrome icon button (if any) the cursor is currently
     /// hovering over.  Updated on every `MouseMove` frame; drives a
@@ -944,6 +971,93 @@ impl CoreApp {
         // (Steady-state frames use Load to dodge the cross-process
         // race; see `MetalRenderer::clear_bg_required`.)
         self.renderer.mark_bg_clear_required();
+    }
+
+    /// F3+3.3 — reset `card_slots` to identity for the current
+    /// pending grid shape.  Called when the modal opens, when the
+    /// user changes cols/rows in the modal (since the cell count
+    /// changes), and on apply (after permuting).
+    fn reset_card_slots(&mut self) {
+        let cells = self.pending_grid_cols * self.pending_grid_rows;
+        self.card_slots = (0..cells).collect();
+        self.layout_drag = None;
+    }
+
+    /// F3+3.3 — apply `card_slots` as a permutation on the leading
+    /// `cells` panes.  After this, `self.panes[slot_idx]` is the
+    /// pane that previously sat at `card_slots[slot_idx]` (== the
+    /// pane the user dragged into slot_idx in the modal).
+    ///
+    /// `card_slots` entries that point past the live pane count
+    /// are skipped (empty cards stay empty).  The post-cells tail
+    /// of `self.panes` (sidebar overflow) is untouched.  Same
+    /// permutation is applied to `custom_titles` so the title-
+    /// strip / sidebar labels travel with their owning pane.
+    /// Resets `card_slots` to identity afterwards.
+    fn apply_card_slot_permutation(&mut self, cells: usize) {
+        let n_in_grid = cells.min(self.panes.len());
+        if n_in_grid == 0 || self.card_slots.len() < n_in_grid {
+            self.reset_card_slots();
+            return;
+        }
+        // Build new layouts for the leading n_in_grid slots.  Slots
+        // pointing at out-of-range pane indices map to None (empty)
+        // and the corresponding existing pane keeps its place at
+        // the tail (skipped during reorder).
+        let mut new_panes: Vec<Option<Pane>> = (0..n_in_grid).map(|_| None).collect();
+        let mut new_titles: Vec<Option<Option<String>>> = (0..n_in_grid).map(|_| None).collect();
+        // Drain the leading n_in_grid panes into Option holders so
+        // we can move them around without re-borrow conflicts.
+        let mut drained: Vec<Option<Pane>> =
+            self.panes.drain(..n_in_grid).map(Some).collect();
+        let mut drained_titles: Vec<Option<Option<String>>> =
+            if self.custom_titles.len() >= n_in_grid {
+                self.custom_titles.drain(..n_in_grid).map(Some).collect()
+            } else {
+                (0..n_in_grid).map(|_| Some(None)).collect()
+            };
+        for slot_idx in 0..n_in_grid {
+            let from = self.card_slots[slot_idx];
+            if from < drained.len() {
+                new_panes[slot_idx] = drained[from].take();
+                new_titles[slot_idx] = drained_titles
+                    .get_mut(from)
+                    .and_then(|t| t.take());
+            }
+        }
+        // Re-insert at the head.  Any leftover (None) means the slot
+        // had no source pane — should not happen with identity-only
+        // permutations but defensible: pull from a leftover pool to
+        // avoid panicking.
+        let mut leftover: Vec<Pane> = drained.into_iter().flatten().collect();
+        let mut leftover_titles: Vec<Option<String>> = drained_titles
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut ordered: Vec<Pane> = Vec::with_capacity(n_in_grid);
+        let mut ordered_titles: Vec<Option<String>> = Vec::with_capacity(n_in_grid);
+        for i in 0..n_in_grid {
+            if let Some(p) = new_panes[i].take() {
+                ordered.push(p);
+            } else if let Some(p) = leftover.pop() {
+                ordered.push(p);
+            }
+            if let Some(t) = new_titles[i].take() {
+                ordered_titles.push(t);
+            } else if let Some(t) = leftover_titles.pop() {
+                ordered_titles.push(t);
+            } else {
+                ordered_titles.push(None);
+            }
+        }
+        // Re-prepend.
+        let tail_panes = std::mem::take(&mut self.panes);
+        self.panes = ordered;
+        self.panes.extend(tail_panes);
+        let tail_titles = std::mem::take(&mut self.custom_titles);
+        self.custom_titles = ordered_titles;
+        self.custom_titles.extend(tail_titles);
+        self.reset_card_slots();
     }
 
     /// Spawn a fresh session and append it.  Refuses past
@@ -2267,7 +2381,24 @@ impl CoreApp {
             let modal = LayoutModal::layout(
                 self.w_phys, self.h_phys, self.scale,
                 marspot::TITLE_STRIP_PT * self.scale,
+                self.pending_grid_cols, self.pending_grid_rows,
             );
+            // F3+3.3 — card drag start has priority over the
+            // generic hit_test below (which would otherwise classify
+            // a card click as `LayoutModalHit::Frame` and swallow it).
+            if let Some(card_idx) = modal.hit_test_card(x_phys, y_phys) {
+                let card = modal.cards[card_idx];
+                self.layout_drag = Some(LayoutModalDrag {
+                    from_slot: card_idx,
+                    grab_offset_phys: (
+                        x_phys - card.x,
+                        y_phys - card.y_top,
+                    ),
+                    mouse_phys: (x_phys, y_phys),
+                });
+                self.needs_render = true;
+                return;
+            }
             match modal.hit_test(x_phys, y_phys) {
                 Some(LayoutModalHit::Close) => {
                     self.layout_modal_open = false;
@@ -2278,13 +2409,20 @@ impl CoreApp {
                     self.layout_modal_open = false;
                     self.grid_cols = self.pending_grid_cols;
                     self.grid_rows = self.pending_grid_rows;
-                    // F3+3.0 shrink-guard — if focused pane slot is
+                    // F3+3.3 — apply card_slots permutation to
+                    // self.panes so the modal's drag-reordered
+                    // arrangement lands in the actual grid.  Only
+                    // the in-cells portion is reordered (panes past
+                    // grid cells stay in sidebar order).  Identity
+                    // mapping = no-op.
+                    let cells = self.grid_cols * self.grid_rows;
+                    self.apply_card_slot_permutation(cells);
+                    // shrink-guard — if focused pane slot is
                     // beyond the new cell count, jump focus to the
                     // last surviving cell so the user sees a focused
                     // pane in-grid.  Overflowed sessions stay alive
                     // in the sidebar (n_sessions > cells handling
                     // is already preserved by `take(cell_count)`).
-                    let cells = self.grid_cols * self.grid_rows;
                     if cells > 0 && self.focused_idx >= cells {
                         self.focused_idx = cells - 1;
                     }
@@ -2294,6 +2432,7 @@ impl CoreApp {
                 Some(LayoutModalHit::ColsDec) => {
                     if self.pending_grid_cols > GRID_MIN {
                         self.pending_grid_cols -= 1;
+                        self.reset_card_slots();
                         self.needs_render = true;
                     }
                     return;
@@ -2301,6 +2440,7 @@ impl CoreApp {
                 Some(LayoutModalHit::ColsInc) => {
                     if self.pending_grid_cols < GRID_MAX {
                         self.pending_grid_cols += 1;
+                        self.reset_card_slots();
                         self.needs_render = true;
                     }
                     return;
@@ -2308,6 +2448,7 @@ impl CoreApp {
                 Some(LayoutModalHit::RowsDec) => {
                     if self.pending_grid_rows > GRID_MIN {
                         self.pending_grid_rows -= 1;
+                        self.reset_card_slots();
                         self.needs_render = true;
                     }
                     return;
@@ -2315,6 +2456,7 @@ impl CoreApp {
                 Some(LayoutModalHit::RowsInc) => {
                     if self.pending_grid_rows < GRID_MAX {
                         self.pending_grid_rows += 1;
+                        self.reset_card_slots();
                         self.needs_render = true;
                     }
                     return;
@@ -2339,8 +2481,10 @@ impl CoreApp {
             if !self.layout_modal_open {
                 self.pending_grid_cols = self.grid_cols;
                 self.pending_grid_rows = self.grid_rows;
+                self.reset_card_slots();
             }
             self.layout_modal_open = !self.layout_modal_open;
+            self.layout_drag = None;
             self.needs_render = true;
             return;
         }
@@ -2509,6 +2653,14 @@ impl CoreApp {
     }
 
     fn mouse_drag(&mut self, x_phys: f64, y_phys: f64) {
+        // F3+3.3 — LayoutModal card drag.  Take priority over the
+        // process panel drag so a layout modal session never gets
+        // captured by chrome elsewhere.
+        if let Some(d) = self.layout_drag.as_mut() {
+            d.mouse_phys = (x_phys, y_phys);
+            self.needs_render = true;
+            return;
+        }
         // F3+1.5 — modal title bar drag.  Snapshot at mouse_down
         // (drag_grab = Some((grab_x, grab_y, grab_off_x, grab_off_y)))
         // → motion delta translates to pos_offset diff.
@@ -2580,6 +2732,35 @@ impl CoreApp {
     }
 
     fn mouse_up(&mut self) {
+        // F3+3.3 — finalize LayoutModal card drag: pick the
+        // destination slot under the cursor, swap, redraw.  No
+        // animation (V2.0); settle = single-frame jump.
+        if let Some(d) = self.layout_drag.take() {
+            use marspot::ui::components::LayoutModal;
+            let modal = LayoutModal::layout(
+                self.w_phys, self.h_phys, self.scale,
+                marspot::TITLE_STRIP_PT * self.scale,
+                self.pending_grid_cols, self.pending_grid_rows,
+            );
+            // Drop position = card origin (mouse - grab_offset),
+            // plus card center offset so the lookup tracks visual
+            // intent (cursor pointing at the dragged card's CENTER).
+            let card_w = modal.cards.first().map(|c| c.w).unwrap_or(0.0);
+            let card_h = modal.cards.first().map(|c| c.h).unwrap_or(0.0);
+            let cx = d.mouse_phys.0 - d.grab_offset_phys.0 + card_w * 0.5;
+            let cy = d.mouse_phys.1 - d.grab_offset_phys.1 + card_h * 0.5;
+            if let Some(to_slot) = modal.nearest_card(cx, cy) {
+                if to_slot != d.from_slot
+                    && to_slot < self.card_slots.len()
+                    && d.from_slot < self.card_slots.len()
+                {
+                    self.card_slots.swap(d.from_slot, to_slot);
+                }
+            }
+            self.needs_render = true;
+            // Don't continue into selection / process-panel paths.
+            return;
+        }
         self.end_modal_drag();
         // A click without movement leaves anchor == focus → treat as
         // "no selection" so a stray single-click doesn't ghost a
@@ -2776,11 +2957,33 @@ impl CoreApp {
         // the render call below.
         let panel_data = self.build_process_panel_render();
         self.renderer.set_process_panel(panel_data);
-        // F3+3.0 — publish LayoutModal state every frame.  Renderer
-        // paints when Some, skips when None.  Same event-driven flow
-        // as process panel.
+        // F3+3.0 / 3.3 — publish LayoutModal state every frame.
+        // Per-slot titles built from card_slots → resolved title
+        // chain (custom > cwd basename > ordinal).  Empty slot if
+        // the slot points at a pane index past the live count.
         self.renderer.set_layout_modal(if self.layout_modal_open {
-            Some((self.pending_grid_cols, self.pending_grid_rows, self.scale))
+            use marspot::render_metal::{LayoutModalRender, LayoutModalDragRender};
+            let cells = self.pending_grid_cols * self.pending_grid_rows;
+            let slot_titles: Vec<String> = (0..cells)
+                .map(|slot| {
+                    let pane_idx = self.card_slots.get(slot).copied().unwrap_or(usize::MAX);
+                    resolved_labels
+                        .get(pane_idx)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            Some(LayoutModalRender {
+                cols: self.pending_grid_cols,
+                rows: self.pending_grid_rows,
+                scale: self.scale,
+                slot_titles,
+                drag: self.layout_drag.map(|d| LayoutModalDragRender {
+                    from_slot: d.from_slot,
+                    grab_offset_phys: d.grab_offset_phys,
+                    mouse_phys: d.mouse_phys,
+                }),
+            })
         } else {
             None
         });
@@ -3210,6 +3413,8 @@ fn main() {
         layout_modal_open: false,
         pending_grid_cols: grid_cols,
         pending_grid_rows: grid_rows,
+        card_slots: (0..(grid_cols * grid_rows)).collect(),
+        layout_drag: None,
         sidebar_collapsed: true,
         hover_chrome_btn: None,
         process_panel: None,

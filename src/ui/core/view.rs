@@ -35,7 +35,7 @@
 //! });
 //! ```
 
-use marspot_term::layout::Rect;
+use marspot_term::layout::{Rect, Alignment};
 use crate::render_metal::{CellInstance, GlyphInstance, UiRectInstance};
 use crate::font_cache::FontCache;
 use crate::glyph_atlas::GlyphAtlas;
@@ -53,6 +53,10 @@ pub struct ViewStyle {
     pub shadow_blur: f32,
     pub shadow_alpha: f32,
     pub backdrop: Backdrop,
+    /// F3+3.4 — uniform inset from view rect edge to content area
+    /// (physical px).  `View::content_rect()` returns `rect.inset(padding)`;
+    /// children layout inside that.  Default 0 = content fills view.
+    pub padding: f64,
 }
 
 /// Optional "behind-the-view" dimmer.  Painted in overlay scratches
@@ -75,6 +79,7 @@ impl Default for ViewStyle {
             shadow_blur: 16.0,
             shadow_alpha: 0.45,
             backdrop: Backdrop::None,
+            padding: 0.0,
         }
     }
 }
@@ -93,6 +98,14 @@ impl View {
     /// ViewStyle when the caller wants opaque defaults.
     pub fn new(rect: Rect, style: ViewStyle) -> Self {
         Self { rect, style }
+    }
+
+    /// F3+3.4 — inner rect for child content.  Equals
+    /// `self.rect.inset(self.style.padding)`.  Use this for laying
+    /// out children rather than `self.rect` so the view's padding
+    /// is honoured automatically.  See `Rect::inset`.
+    pub fn content_rect(&self) -> Rect {
+        self.rect.inset(self.style.padding)
     }
 
     /// Translate a rect from "relative to this view's top-left" to
@@ -247,6 +260,33 @@ impl<'a> ViewPainter<'a> {
             self.atlas_w, self.atlas_h,
             self.font, self.atlas, self.glyphs,
         );
+    }
+
+    /// F3+3.4 — anchor-aligned text inside a rect.  Text width is
+    /// `s.chars().count() * cell_w` (assumes monospace, fine for
+    /// chrome labels in marspot); text height is `cell_h`.  Caller
+    /// picks the anchor — `Alignment::CenterLeft` for "left-padded
+    /// vertical center", `Alignment::Center` for fully centered,
+    /// `Alignment::CenterRight` for right-aligned, etc.
+    ///
+    /// Internally calls `Rect::place` to compute the text box, then
+    /// `text()` at the resulting top-left + ascent baseline.
+    /// Saves chrome paint sites from doing the `(w - text_w) * 0.5`
+    /// math by hand (and getting it inconsistent / off-by-one).
+    pub fn text_in(
+        &mut self,
+        rect: Rect,
+        s: &str,
+        color: [f32; 4],
+        align: Alignment,
+    ) {
+        let cell_w = self.cell_w;
+        let cell_h = self.cell_h;
+        let ascent = self.ascent;
+        let text_w = s.chars().count() as f32 * cell_w;
+        let box_rect = rect.place(text_w as f64, cell_h as f64, align);
+        let baseline_y = box_rect.y_top as f32 + ascent;
+        self.text(box_rect.x as f32, baseline_y, s, color);
     }
 }
 

@@ -82,6 +82,7 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
             shadow_blur: SHADOW_BLUR_PX,
             shadow_alpha: SHADOW_ALPHA,
             backdrop: Backdrop::None,
+            padding: 0.0,
         },
         panel_inner_pad as f64,
     );

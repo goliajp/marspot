@@ -758,12 +758,38 @@ impl Terminal {
         // v2 trailing scrollback section: parsed *before* committing
         // anything to live state so a corrupt scrollback rejects the
         // whole apply, never half-loaded.  v1 stops here.
+        //
+        // F3+3.5 — sanity-cap `sb_count` + `line_cols` so a corrupt
+        // u32 read (random bits or truncated file padded with
+        // garbage) doesn't trigger a multi-GB `Vec::with_capacity`
+        // → allocator abort.  Caps chosen well above any plausible
+        // legitimate value (1M lines × 4096 cols = 16M cells max).
+        const MAX_SCROLLBACK_LINES_DESER: usize = 1_000_000;
+        const MAX_LINE_COLS_DESER: usize = 4096;
         let scrollback_lines: Vec<(Vec<Cell>, bool)> = if snapshot_v >= 2 {
             let sb_count = read_u32(&mut cur)? as usize;
+            if sb_count > MAX_SCROLLBACK_LINES_DESER {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "snapshot scrollback line count {} exceeds {} cap",
+                        sb_count, MAX_SCROLLBACK_LINES_DESER
+                    ),
+                ));
+            }
             let mut out = Vec::with_capacity(sb_count);
             for _ in 0..sb_count {
                 let wrapped = read_u8(&mut cur)? != 0;
                 let line_cols = read_u32(&mut cur)? as usize;
+                if line_cols > MAX_LINE_COLS_DESER {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "snapshot line width {} exceeds {} cap",
+                            line_cols, MAX_LINE_COLS_DESER
+                        ),
+                    ));
+                }
                 let mut line = Vec::with_capacity(line_cols);
                 for _ in 0..line_cols {
                     let ch_u = read_u32(&mut cur)?;

@@ -352,11 +352,18 @@ impl MemoryScrollback {
         if self.capacity == 0 {
             return;
         }
-        debug_assert_eq!(
-            source.len(),
-            self.cols,
-            "pushed line width mismatches scrollback cols"
-        );
+        // F3+3.5 — release-build runtime guard.  Same rationale as
+        // `Disk::push_line`: a width-mismatched source corrupts
+        // the cells Vec (growing phase) or panics on
+        // `copy_from_slice` (steady state).  Normalise to a one-
+        // shot scratch padded / truncated to `self.cols`.
+        if source.len() != self.cols {
+            let mut buf: Vec<Cell> = Vec::with_capacity(self.cols);
+            let n = source.len().min(self.cols);
+            buf.extend_from_slice(&source[..n]);
+            buf.resize(self.cols, Cell::default());
+            return self.push_line(&buf);
+        }
 
         if self.len < self.capacity {
             // Growing phase: extend onto the end.  After exactly
@@ -560,13 +567,40 @@ impl DiskScrollback {
     }
 
     pub fn push_line(&mut self, source: &[Cell]) {
-        debug_assert_eq!(source.len(), self.cols);
+        // F3+3.5 — release-build runtime guard.  Old code asserted
+        // `source.len() == self.cols` in debug only; release would
+        // run `copy_nonoverlapping(source.as_ptr(), …, self.line_bytes)`
+        // with no length check.  When `source.len() == 0` (e.g. an
+        // empty scrollback line from a corrupted state.bin),
+        // `Vec::<Cell>::as_ptr()` returns `NonNull::dangling()` =
+        // `align_of::<Cell>() = 0x4`, and the unsafe read of
+        // `self.line_bytes` bytes faults at 0x4.  Diagnosed via the
+        // sid 248 crash report (2026-06-19): KERN_INVALID_ADDRESS @
+        // 0x0000000000000004 inside `_platform_memmove` called from
+        // `push_historic_scrollback_line`.
+        //
+        // The cheapest safe path is: if source isn't exactly cols
+        // wide, normalise to a one-shot scratch buffer padded with
+        // `Cell::default()` (the same fallback `cell_at_view`
+        // returns for missing columns).  Empty / short lines now
+        // copy zero/few user bytes + (self.cols - n) blanks; over-
+        // wide lines truncate to self.cols.  Either way the mmap
+        // slot ends up exactly `line_bytes` written, no UB.
+        if source.len() != self.cols {
+            let mut buf: Vec<Cell> = Vec::with_capacity(self.cols);
+            let n = source.len().min(self.cols);
+            buf.extend_from_slice(&source[..n]);
+            buf.resize(self.cols, Cell::default());
+            return self.push_line(&buf);
+        }
         let global_line = self.total_lines_written;
         let slot = (global_line % self.max_lines) as usize;
         let offset = slot * self.line_bytes;
         debug_assert!(offset + self.line_bytes <= self.mmap_len);
         // SAFETY: bounds checked above (`offset + line_bytes <= mmap_len`,
-        // `slot < max_lines` by modulo).  Source and destination are
+        // `slot < max_lines` by modulo) and `source.len() == self.cols`
+        // (post-guard above), so `self.line_bytes` bytes from
+        // `source.as_ptr()` is in-bounds.  Source and destination are
         // disjoint memory regions (caller's slice vs mmap region).
         unsafe {
             std::ptr::copy_nonoverlapping(

@@ -57,30 +57,97 @@ pub struct LayoutModal {
     pub apply_btn: Rect,
     /// Total = cols × rows footer text region.
     pub total_label: Rect,
+    /// F3+3.3 — preview / drag area.  Holds the per-slot card
+    /// rects in row-major order.  Length == pending_cols *
+    /// pending_rows.  Caller drags cards to reorder which pane
+    /// shows in which slot.
+    pub cards: Vec<Rect>,
+    /// Bounding rect of the card grid area.  Used to clip drag
+    /// overlay + as the hit-test bounds.
+    pub card_grid: Rect,
 }
 
-const MODAL_W_LOGICAL: f64 = 280.0;
-const MODAL_H_LOGICAL: f64 = 220.0;
+const MODAL_W_LOGICAL: f64 = 320.0;
+/// Modal min height when card grid is tiny.  Modal stretches
+/// vertically beyond this when the card grid needs more room.
+const MODAL_MIN_H_LOGICAL: f64 = 280.0;
 const TITLE_BAR_H_LOGICAL: f64 = 28.0;
 const STEPPER_BTN_LOGICAL: f64 = 28.0;
 const STEPPER_VALUE_W_LOGICAL: f64 = 56.0;
 const APPLY_BTN_H_LOGICAL: f64 = 32.0;
 const ROW_GAP_LOGICAL: f64 = 12.0;
 const SIDE_PAD_LOGICAL: f64 = 16.0;
+/// Card grid dims.  Card aspect ratio kept close to 4:3 so a
+/// "wide" 5×2 grid reads differently from a "tall" 2×5.  Min
+/// card edge picked so 3-char titles ("245") read at 1× scale.
+const CARD_GAP_LOGICAL: f64 = 6.0;
+const CARD_MIN_W_LOGICAL: f64 = 44.0;
+const CARD_MIN_H_LOGICAL: f64 = 32.0;
+const CARD_GRID_PAD_LOGICAL: f64 = 14.0;
+/// Aspect-ratio target for one card (width / height) — picked
+/// so the preview at default density matches the real grid's
+/// roughly 4:3 cells.  Both dimensions still floor at min above.
+const CARD_ASPECT: f64 = 4.0 / 3.0;
 
 impl LayoutModal {
     /// Build modal geometry centered in the window.  `scale` is
     /// device pixel ratio; sizes above are logical pt and get
     /// multiplied here so the modal stays the same physical size
-    /// regardless of display density.
-    pub fn layout(window_w: f64, window_h: f64, scale: f64, top_obstruction: f64) -> Self {
+    /// regardless of display density.  `cols/rows` carry the
+    /// PENDING grid shape (modal state) — the preview card grid
+    /// matches those dims, not the committed ones.
+    pub fn layout(
+        window_w: f64,
+        window_h: f64,
+        scale: f64,
+        top_obstruction: f64,
+        cols: usize,
+        rows: usize,
+    ) -> Self {
         let title_h = TITLE_BAR_H_LOGICAL * scale;
+        let side_pad = SIDE_PAD_LOGICAL * scale;
+        let row_gap = ROW_GAP_LOGICAL * scale;
+        let stepper_btn = STEPPER_BTN_LOGICAL * scale;
+        let value_w = STEPPER_VALUE_W_LOGICAL * scale;
+        let apply_h = APPLY_BTN_H_LOGICAL * scale;
+        let card_gap = CARD_GAP_LOGICAL * scale;
+        let card_grid_pad = CARD_GRID_PAD_LOGICAL * scale;
+        // Compute the card grid first so the modal height can
+        // grow to fit it.  Width comes from MODAL_W minus paddings;
+        // card cell size = floor of (w - gaps) / cols, with a
+        // CARD_ASPECT-driven height (floored at min).
+        let modal_w = MODAL_W_LOGICAL * scale;
+        let card_grid_w = modal_w - 2.0 * side_pad;
+        let cards_in = cols.max(1);
+        let rows_in = rows.max(1);
+        let inner_card_w = (card_grid_w - (cards_in - 1) as f64 * card_gap)
+            / cards_in as f64;
+        let card_w = inner_card_w.max(CARD_MIN_W_LOGICAL * scale);
+        let aspect_card_h = card_w / CARD_ASPECT;
+        let card_h = aspect_card_h.max(CARD_MIN_H_LOGICAL * scale);
+        let card_grid_inner_h = card_h * rows_in as f64
+            + (rows_in - 1) as f64 * card_gap;
+        let card_grid_h = card_grid_inner_h + 2.0 * card_grid_pad;
+        // Body content: top pad + cols row + gap + rows row + gap
+        //              + card grid + gap + total label + gap + apply.
+        let body_h = side_pad
+            + stepper_btn
+            + row_gap
+            + stepper_btn
+            + row_gap
+            + card_grid_h
+            + row_gap
+            + stepper_btn  // total label
+            + row_gap
+            + apply_h
+            + side_pad;
+        let modal_h = (title_h + body_h).max(MODAL_MIN_H_LOGICAL * scale);
         let frame = ModalFrame::layout(
             window_w,
             window_h,
             ModalLayoutSpec {
-                default_w: MODAL_W_LOGICAL * scale,
-                default_h: MODAL_H_LOGICAL * scale,
+                default_w: modal_w,
+                default_h: modal_h,
                 title_bar_h: title_h,
                 tab_strip_h: 0.0,
                 maximized: false,
@@ -102,11 +169,6 @@ impl LayoutModal {
         };
         // Body rows: stack within the body area.
         let body = frame.body;
-        let side_pad = SIDE_PAD_LOGICAL * scale;
-        let row_gap = ROW_GAP_LOGICAL * scale;
-        let stepper_btn = STEPPER_BTN_LOGICAL * scale;
-        let value_w = STEPPER_VALUE_W_LOGICAL * scale;
-        let apply_h = APPLY_BTN_H_LOGICAL * scale;
         // Right-anchor the stepper cluster so the row reads
         // "Columns        [-] 3 [+]".  Label fills the slack on
         // the left (caller paints the label text, modal owns
@@ -135,6 +197,25 @@ impl LayoutModal {
         let rows_inc = Rect {
             x: cluster_x + stepper_btn + value_w, y_top: row2_top, w: stepper_btn, h: stepper_btn,
         };
+        // Card grid: below row2, framed by a padded subgrid.
+        let card_grid = Rect {
+            x: body.x + side_pad,
+            y_top: row2_top + stepper_btn + row_gap,
+            w: card_grid_w,
+            h: card_grid_h,
+        };
+        let mut cards: Vec<Rect> = Vec::with_capacity(cards_in * rows_in);
+        for r in 0..rows_in {
+            for c in 0..cards_in {
+                let cx = card_grid.x + card_grid_pad
+                    + c as f64 * (card_w + card_gap);
+                let cy = card_grid.y_top + card_grid_pad
+                    + r as f64 * (card_h + card_gap);
+                cards.push(Rect {
+                    x: cx, y_top: cy, w: card_w, h: card_h,
+                });
+            }
+        }
         // Footer: total label + Apply button at the bottom.
         let apply_btn = Rect {
             x: body.x + side_pad,
@@ -152,6 +233,8 @@ impl LayoutModal {
         Self {
             frame: frame.frame,
             title_bar: frame.title_bar,
+            cards,
+            card_grid,
             close_btn,
             cols_dec,
             cols_inc,
@@ -162,6 +245,33 @@ impl LayoutModal {
             apply_btn,
             total_label,
         }
+    }
+
+    /// Index of the card whose rect contains `(px, py)`, or
+    /// `None`.  Used by mouse_down to start a drag.
+    pub fn hit_test_card(&self, px: f64, py: f64) -> Option<usize> {
+        self.cards
+            .iter()
+            .position(|r| r.contains(px, py))
+    }
+
+    /// Card slot whose CENTER is closest to `(px, py)`.  Used
+    /// during drag to highlight the drop target + on drop to
+    /// settle the dragged card to its destination slot.  Never
+    /// returns None when the modal has at least one card.
+    pub fn nearest_card(&self, px: f64, py: f64) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, r) in self.cards.iter().enumerate() {
+            let cx = r.x + r.w * 0.5;
+            let cy = r.y_top + r.h * 0.5;
+            let dx = cx - px;
+            let dy = cy - py;
+            let d2 = dx * dx + dy * dy;
+            if best.map_or(true, |(_, bd)| d2 < bd) {
+                best = Some((i, d2));
+            }
+        }
+        best.map(|(i, _)| i)
     }
 
     pub fn hit_test(&self, px: f64, py: f64) -> Option<LayoutModalHit> {
@@ -199,7 +309,7 @@ mod tests {
 
     #[test]
     fn modal_centers_in_window() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
         // Frame should be roughly centered.
         let cx = m.frame.x + m.frame.w * 0.5;
         let cy = m.frame.y_top + m.frame.h * 0.5;
@@ -209,7 +319,7 @@ mod tests {
 
     #[test]
     fn close_btn_is_inside_title_bar() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
         assert!(m.title_bar.contains(
             m.close_btn.x + 1.0,
             m.close_btn.y_top + 1.0,
@@ -218,7 +328,7 @@ mod tests {
 
     #[test]
     fn hit_test_dispatches_close() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
         let cx = m.close_btn.x + m.close_btn.w * 0.5;
         let cy = m.close_btn.y_top + m.close_btn.h * 0.5;
         assert_eq!(m.hit_test(cx, cy), Some(LayoutModalHit::Close));
@@ -226,7 +336,7 @@ mod tests {
 
     #[test]
     fn hit_test_dispatches_apply() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
         let cx = m.apply_btn.x + m.apply_btn.w * 0.5;
         let cy = m.apply_btn.y_top + m.apply_btn.h * 0.5;
         assert_eq!(m.hit_test(cx, cy), Some(LayoutModalHit::Apply));
@@ -234,7 +344,7 @@ mod tests {
 
     #[test]
     fn outside_returns_none() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
         assert_eq!(m.hit_test(0.0, 0.0), None);
     }
 }
