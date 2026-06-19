@@ -94,6 +94,30 @@ pub enum IconSpec<'a> {
 开一个文件,impl `IconComponent` trait,带 unit test.scene 不允许用闭包
 画 icon —— 闭包是漏点,被画过的形状没人能复用 / 检视 / 测.
 
+### 2.6 View 可嵌套(React Native 风)
+
+`View::child(offset, style)` 把 offset(相对父 view 左上)翻译成绝对
+坐标,返回新的 child View.嵌套任意层:
+
+```rust
+let parent = View::new(absolute_rect, parent_style);
+parent.paint(p, |p| {
+    let inner = parent.child(
+        Rect { x: 10.0, y_top: 10.0, w: 200.0, h: 50.0 },
+        ViewStyle::default(),
+    );
+    inner.paint(p, |p| {
+        let deeper = inner.child(Rect { x: 5.0, y_top: 5.0, w: 40.0, h: 30.0 },
+            ViewStyle::default());
+        deeper.paint(p, |p| { p.text(...) });
+    });
+});
+```
+
+每个 child 都进 overlay scratches,push 顺序 = z 顺序,parent 在底,
+child 在上.**没有自动裁剪** —— child 画到父矩形外仍会画出来,把
+parent rect 当**设计意图**,不是物理边界.
+
 ## 3. 怎么用 — 参考 React
 
 ### 3.1 一个 scene 一个文件
@@ -211,7 +235,8 @@ scene 必须走 widget,widget 必须走 ViewPainter,ViewPainter 自己 push.
 | `components/panel.rs` | Panel | View + 内边距 + content_rect() 自动 inset |
 | `components/text_input.rs` | TextInput / TextInputStyle | 单行文本输入(值 + 光标 + 截断),paint-only |
 | `components/list_view.rs` | ListView / ListRow / ListViewStyle | 垂直行列表 + focused 行高亮 + row_rect(i) 给 caller hit_test |
-| `components/button.rs` | Button / ButtonStyle / IconSpec / IconPosition | 圆角按钮.支持 4 layout(Only/Before/After/text-only)、3 内置 style(default/ghost/destructive)、glyph icon + custom paint icon |
+| `components/button.rs` | Button / ButtonStyle / IconSpec / IconPosition | 圆角按钮.支持 4 layout(Only/Before/After/text-only)、4 内置 style(default/ghost/destructive/chrome)、icon 两种 spec(Glyph 字符 / Component impl IconComponent).不接受 closure |
+| `components/grid_seams.rs` | GridSeams / SeamStyle | x×y 网格的分隔线(inter-pane seams).vertical/horizontal 独立 SeamStyle{color, thickness},thickness=0 跳过.支持不均匀 cell —— seam 跨整个 grid 高/宽 |
 | `components/search_overlay.rs` | paint_search_overlay / SearchOverlayParams | 用 Panel + TextInput + ListView 组合,F3+1.9 |
 
 scene 代码:

@@ -89,6 +89,51 @@ pub struct View {
 }
 
 impl View {
+    /// Convenience constructor.  Pairs with `Default::default()` for
+    /// ViewStyle when the caller wants opaque defaults.
+    pub fn new(rect: Rect, style: ViewStyle) -> Self {
+        Self { rect, style }
+    }
+
+    /// Translate a rect from "relative to this view's top-left" to
+    /// absolute screen coords.  Mirrors React Native's child-position
+    /// convention: caller treats the parent's top-left as origin.
+    ///
+    /// ```ignore
+    /// let parent = View::new(absolute_rect, parent_style);
+    /// parent.paint(p, |p| {
+    ///     // Child at (10, 10) inside parent, 200×50.
+    ///     let child = parent.child(
+    ///         Rect { x: 10.0, y_top: 10.0, w: 200.0, h: 50.0 },
+    ///         child_style,
+    ///     );
+    ///     child.paint(p, |p| {
+    ///         p.text(child.rect.x as f32,
+    ///                child.rect.y_top as f32 + p.ascent,
+    ///                "nested", FG);
+    ///     });
+    /// });
+    /// ```
+    ///
+    /// Nesting is purely additive — every child painted inside the
+    /// parent's body closure lands on top in z-order (push order).
+    /// No automatic clipping: a child that paints past the parent
+    /// rect will still draw.  Treat parent rect as design intent.
+    pub fn relative_rect(&self, offset: Rect) -> Rect {
+        Rect {
+            x: self.rect.x + offset.x,
+            y_top: self.rect.y_top + offset.y_top,
+            w: offset.w,
+            h: offset.h,
+        }
+    }
+
+    /// Build a nested child view at `offset` relative to this view's
+    /// top-left.  Shortcut for `View::new(self.relative_rect(offset), style)`.
+    pub fn child(&self, offset: Rect, style: ViewStyle) -> View {
+        View::new(self.relative_rect(offset), style)
+    }
+
     /// Push the View's backdrop (if any) + chrome (shadow / BG /
     /// border) into the painter's overlay scratches, then call
     /// `body` so the caller paints their content into the same
@@ -214,5 +259,53 @@ mod tests {
         let s = ViewStyle::default();
         assert_eq!(s.bg[3], 1.0, "View BG must be opaque by default");
         assert_eq!(s.border_color[3], 1.0, "border must be opaque by default");
+    }
+
+    #[test]
+    fn relative_rect_translates_offset_by_parent_origin() {
+        let parent = View::new(
+            Rect { x: 100.0, y_top: 50.0, w: 800.0, h: 600.0 },
+            ViewStyle::default(),
+        );
+        let child_offset = Rect { x: 20.0, y_top: 10.0, w: 200.0, h: 50.0 };
+        let child_abs = parent.relative_rect(child_offset);
+        assert_eq!(child_abs.x, 120.0);
+        assert_eq!(child_abs.y_top, 60.0);
+        assert_eq!(child_abs.w, 200.0);
+        assert_eq!(child_abs.h, 50.0);
+    }
+
+    #[test]
+    fn child_builds_view_at_relative_offset() {
+        let parent = View::new(
+            Rect { x: 10.0, y_top: 10.0, w: 100.0, h: 100.0 },
+            ViewStyle::default(),
+        );
+        let c = parent.child(
+            Rect { x: 5.0, y_top: 5.0, w: 20.0, h: 20.0 },
+            ViewStyle::default(),
+        );
+        assert_eq!(c.rect.x, 15.0);
+        assert_eq!(c.rect.y_top, 15.0);
+    }
+
+    #[test]
+    fn nesting_is_associative_two_levels_deep() {
+        // grandparent → parent (offset 10, 10) → child (offset 5, 5)
+        // should end at gp.origin + 15, +15.
+        let gp = View::new(
+            Rect { x: 100.0, y_top: 50.0, w: 800.0, h: 600.0 },
+            ViewStyle::default(),
+        );
+        let parent = gp.child(
+            Rect { x: 10.0, y_top: 10.0, w: 400.0, h: 300.0 },
+            ViewStyle::default(),
+        );
+        let child = parent.child(
+            Rect { x: 5.0, y_top: 5.0, w: 200.0, h: 100.0 },
+            ViewStyle::default(),
+        );
+        assert_eq!(child.rect.x, 115.0);
+        assert_eq!(child.rect.y_top, 65.0);
     }
 }

@@ -1691,78 +1691,36 @@ fn build_instances(
     // cell↔cell — uses one uniformly weak SEAM tone at one width.
     // The eye reads structure (this is a sidebar / this is a grid /
     // this is a cell) without any seam taking on chrome weight.
+    // F3+1.12 — inter-pane seams + chrome (sidebar↔grid, header↔grid,
+    // title-strip↔toolbar) all route through ui kit now.  Inline
+    // cells.push code replaced by `GridSeams` + a small block inside
+    // `push_layout_chrome` for the chrome hairlines.
     if layout.gutter > 0.0 && !layout.cells.is_empty() {
-        let g = layout.gutter as f32;
-        let inset = layout.top_inset as f32;
-        let avail_h = (layout.window_h - layout.top_inset) as f32;
-        let color = [SEAM.0, SEAM.1, SEAM.2, 1.0];
-        // Sidebar↔grid vertical seam (in the strip the layout
-        // reserved immediately after the sidebar).
-        if layout.sidebar_w > 0.0 {
-            cells.push(CellInstance {
-                origin: [layout.sidebar_w as f32, inset],
-                size: [g, avail_h],
-                color,
-            });
+        use crate::ui::components::{GridSeams, SeamStyle};
+        use crate::ui::core::view::ViewPainter;
+        let mut seam_painter = ViewPainter {
+            cell_w, cell_h, ascent,
+            atlas_w: atlas_w_f, atlas_h: atlas_h_f,
+            window_w: layout.window_w, window_h: layout.window_h,
+            font, atlas, cells, glyphs, ui_rects,
+        };
+        let seam_style = SeamStyle {
+            color: [SEAM.0, SEAM.1, SEAM.2, 1.0],
+            thickness: layout.gutter,
+        };
+        // Strip CellRect's cols/rows fields — GridSeams just needs
+        // x/y_top/w/h.  Cheap (≤ 9 cells in marspot's layouts).
+        let pane_rects: Vec<Rect> = layout.cells.iter().map(|c| Rect {
+            x: c.x, y_top: c.y_top, w: c.w, h: c.h,
+        }).collect();
+        GridSeams {
+            cells: &pane_rects,
+            cols: layout.grid_cols,
+            rows: layout.grid_rows,
+            vertical: seam_style,
+            horizontal: seam_style,
         }
-        // Header↔grid horizontal seam — spans the full window width
-        // above the 9-grid (right of sidebar+seam if a sidebar
-        // exists; full width otherwise).  Sits exactly at y =
-        // top_inset, so it visually closes the top of the grid the
-        // same way the rounded window edge closes its sides.
-        if layout.top_inset > 0.0 {
-            cells.push(CellInstance {
-                origin: [0.0, inset - g],
-                size: [layout.window_w as f32, g],
-                color,
-            });
-        }
-        // Title-strip↔toolbar horizontal seam — same SEAM tone as
-        // the header↔grid hairline above, just one band up.  Splits
-        // the top chrome into the (L1-bound) version label area and
-        // the (L2-bound) icon-button toolbar.  Width math mirrors
-        // top_inset's split: title takes TITLE_STRIP_PT / HEADER_PT
-        // of the total chrome.
-        if layout.top_inset > 0.0 {
-            let title_h = (layout.top_inset as f32)
-                * (crate::TITLE_STRIP_PT / crate::HEADER_PT) as f32;
-            if title_h > 0.0 {
-                cells.push(CellInstance {
-                    origin: [0.0, title_h - g],
-                    size: [layout.window_w as f32, g],
-                    color,
-                });
-            }
-        }
-        // Inter-cell vertical seams.
-        for c in 1..layout.grid_cols {
-            let prev = layout.cells[c - 1];
-            cells.push(CellInstance {
-                origin: [(prev.x + prev.w) as f32, inset],
-                size: [g, avail_h],
-                color,
-            });
-        }
-        // Inter-cell horizontal seams.
-        let grid_left = layout
-            .cells
-            .first()
-            .map(|c| c.x as f32)
-            .unwrap_or(layout.sidebar_w as f32);
-        let grid_right = layout
-            .cells
-            .last()
-            .map(|c| (c.x + c.w) as f32)
-            .unwrap_or(layout.window_w as f32);
-        let avail_w_grid = grid_right - grid_left;
-        for r in 1..layout.grid_rows {
-            let prev = layout.cells[(r - 1) * layout.grid_cols];
-            cells.push(CellInstance {
-                origin: [grid_left, (prev.y_top + prev.h) as f32],
-                size: [avail_w_grid, g],
-                color,
-            });
-        }
+        .paint(&mut seam_painter);
     }
 
     // Ensure cache has a slot per pane (grown lazily; never shrunk
@@ -2606,6 +2564,39 @@ fn push_layout_chrome(
 ) {
     use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
     use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon};
+
+    // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid +
+    // title-strip↔toolbar).  Same SEAM tone as GridSeams; routed
+    // through the painter (UI pipeline) so they layer over pane BG
+    // like the rest of the chrome.
+    if layout.gutter > 0.0 {
+        let g = layout.gutter;
+        let seam = [SEAM.0, SEAM.1, SEAM.2, 1.0];
+        let ui_fill = |p: &mut crate::ui::core::ViewPainter, r: Rect| {
+            p.fill_rounded_rect(r, seam, 0.0, ([0.0, 0.0, 0.0, 0.0], 0.0));
+        };
+        if layout.sidebar_w > 0.0 {
+            ui_fill(p, Rect {
+                x: layout.sidebar_w, y_top: layout.top_inset,
+                w: g, h: layout.window_h - layout.top_inset,
+            });
+        }
+        if layout.top_inset > 0.0 {
+            ui_fill(p, Rect {
+                x: 0.0, y_top: layout.top_inset - g,
+                w: layout.window_w, h: g,
+            });
+            let title_h = layout.top_inset
+                * (crate::TITLE_STRIP_PT / crate::HEADER_PT);
+            if title_h > 0.0 {
+                ui_fill(p, Rect {
+                    x: 0.0, y_top: title_h - g,
+                    w: layout.window_w, h: g,
+                });
+            }
+        }
+    }
+
     // Three toolbar Buttons — sidebar / layout / process tree.
     // Each is a Button with chrome() style + an IconComponent.  No
     // raw paint code lives in this function any more (vs. F3+1.10
