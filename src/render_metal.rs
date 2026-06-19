@@ -1798,88 +1798,136 @@ fn build_instances(
         cache.primed = true;
     }
 
-    // Cells past the last view are "empty" — N sessions < layout
-    // cells.  Paint a subtle highlight + a centred [+] glyph so
-    // they read as "open slot" rather than "broken layout".  The
-    // [+] glyph itself goes in `push_empty_cell_glyphs` below
-    // because it needs the atlas + font borrows.
-    push_empty_cells(layout, views.len(), cells);
-
-    if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
-        push_sidebar(
-            sidebar,
-            focused_idx,
-            layout.sidebar_w as f32,
-            layout.top_inset as f32,
-            layout.sidebar_top_pad_phys as f32,
-            cell_w,
-            cell_h,
-            ascent,
-            atlas_w_f,
-            atlas_h_f,
-            font,
-            atlas,
-            cells,
-            glyphs,
-            dots,
-        );
-    }
-
-    // Floating chrome (toolbar buttons + picker overlay + close BGs
-    // + add-button BG).  All routed through Button + IconComponent
-    // via a ViewPainter wrapping the MAIN scratches — they aren't
-    // overlays in the always-on-top sense (toolbar is base UI, not
-    // a modal), so they share the main pipeline order with the rest
-    // of the grid chrome.
+    // F3+1.13 — all post-pane main-scratch UI in one ViewPainter
+    // scope: empty cells, sidebar, chrome toolbar, close × / add +
+    // glyphs, version label.  No more raw cells.push / glyphs.push
+    // in this function past this point.
     {
         use crate::ui::core::view::ViewPainter;
-        let mut chrome_painter = ViewPainter {
+        use crate::ui::components::{
+            Sidebar, SidebarRow, SidebarStyle, Button, ButtonStyle, IconSpec, IconPosition,
+        };
+        let mut painter = ViewPainter {
             cell_w, cell_h, ascent,
             atlas_w: atlas_w_f, atlas_h: atlas_h_f,
             window_w: layout.window_w, window_h: layout.window_h,
             font, atlas, cells, glyphs, ui_rects,
         };
-        push_layout_chrome(layout, hover_chrome_btn, &mut chrome_painter);
+
+        // Empty-cell BG overlay + [+] hint.  Each empty cell becomes
+        // a low-key ghost Button with a "+" glyph centered inside.
+        let n_visible = views.len();
+        let empty_style = ButtonStyle {
+            bg:           [EMPTY_CELL_OVERLAY[0], EMPTY_CELL_OVERLAY[1],
+                           EMPTY_CELL_OVERLAY[2], EMPTY_CELL_OVERLAY[3]],
+            bg_hover:     [EMPTY_CELL_OVERLAY[0], EMPTY_CELL_OVERLAY[1],
+                           EMPTY_CELL_OVERLAY[2], EMPTY_CELL_OVERLAY[3]],
+            fg:           EMPTY_CELL_GLYPH_FG,
+            fg_hover:     EMPTY_CELL_GLYPH_FG,
+            border_color: [0.0, 0.0, 0.0, 0.0],
+            border_width: 0.0,
+            corner_radius: 0.0,
+            padding_x: 0.0,
+            icon_gap: 0.0,
+            icon_size: cell_h,
+        };
+        for cell_rect in layout.cells.iter().skip(n_visible) {
+            let inner_top = cell_rect.y_top + layout.cell_title_h;
+            let inner_h = (cell_rect.h - layout.cell_title_h).max(0.0);
+            let inner = Rect {
+                x: cell_rect.x, y_top: inner_top,
+                w: cell_rect.w, h: inner_h,
+            };
+            Button {
+                rect: inner,
+                label: None,
+                icon: Some(IconSpec::Glyph("+")),
+                icon_position: IconPosition::Only,
+                hovered: false,
+                style: empty_style,
+            }.paint(&mut painter);
+        }
+
+        // Sidebar — rows + status dot + label.  Replaces push_sidebar.
+        if !sidebar.is_empty() && layout.sidebar_w > 0.0 {
+            let rows: Vec<SidebarRow> = sidebar.iter().map(|e| {
+                let dot = match e.state {
+                    SessionState::Active => STATE_ACTIVE,
+                    SessionState::Idle   => STATE_IDLE,
+                    SessionState::Exited => STATE_EXITED,
+                };
+                SidebarRow {
+                    label: e.label,
+                    dot_color: [dot.0, dot.1, dot.2, 1.0],
+                }
+            }).collect();
+            Sidebar {
+                rect: Rect {
+                    x: 0.0,
+                    y_top: layout.top_inset,
+                    w: layout.sidebar_w,
+                    h: (layout.window_h - layout.top_inset).max(0.0),
+                },
+                rows: &rows,
+                focused_idx,
+                style: SidebarStyle {
+                    focused_bg: [BG_FOCUSED.0, BG_FOCUSED.1, BG_FOCUSED.2, 1.0],
+                    label_fg:   [SIDEBAR_TEXT_FG.0, SIDEBAR_TEXT_FG.1, SIDEBAR_TEXT_FG.2, 1.0],
+                    row_h: SIDEBAR_ROW_H,
+                    top_pad: layout.sidebar_top_pad_phys as f32,
+                    left_pad: SIDEBAR_LEFT_PAD,
+                    dot_radius: SIDEBAR_DOT_R,
+                    dot_label_gap: SIDEBAR_DOT_LABEL_GAP,
+                },
+            }
+            .paint(&mut painter);
+        }
+
+        // Toolbar buttons + picker overlay + close/add BGs.
+        push_layout_chrome(layout, hover_chrome_btn, &mut painter);
+
+        // Close-[×] glyph per close button — `painter.text("×", ...)`
+        // centred in each close_session_rect.  Replaces push_close_glyphs.
+        if !layout.close_session_rects.is_empty() {
+            let close_disabled = layout.close_session_rects.len() == 1;
+            let color = if close_disabled { CLOSE_BTN_FG_DISABLED } else { CLOSE_BTN_FG };
+            for r in &layout.close_session_rects {
+                let x = (r.x + (r.w - cell_w as f64) * 0.5) as f32;
+                let y_baseline = (r.y_top + (r.h - cell_h as f64) * 0.5) as f32 + ascent;
+                painter.text(x, y_baseline, "×", color);
+            }
+        }
+        // Add-[+] glyph in the sidebar add button.  Replaces
+        // push_add_button_glyph.
+        if layout.add_session_button_rect.w > 0.0 {
+            let add_disabled =
+                layout.close_session_rects.len() >= SESSION_COUNT_HARD_CAP;
+            let color = if add_disabled { ADD_BTN_FG_DISABLED } else { ADD_BTN_FG };
+            let r = layout.add_session_button_rect;
+            let x = (r.x + (r.w - cell_w as f64) * 0.5) as f32;
+            let y_baseline = (r.y_top + (r.h - cell_h as f64) * 0.5) as f32 + ascent;
+            painter.text(x, y_baseline, "+", color);
+        }
+
+        // Header version label — quiet metadata in the title strip.
+        if layout.top_inset > 0.0 {
+            let label = version_label();
+            let text_w = label.chars().count() as f32 * cell_w;
+            let title_h = (layout.top_inset as f32)
+                * (crate::TITLE_STRIP_PT / crate::HEADER_PT) as f32;
+            let right_margin_logical_pt: f32 = 8.0;
+            let scale_approx = (layout.top_inset as f32) / crate::HEADER_PT as f32;
+            let right_margin_phys = right_margin_logical_pt * scale_approx;
+            let x =
+                ((layout.window_w as f32) - right_margin_phys - text_w).max(cell_w);
+            let baseline_y =
+                ((title_h - cell_h) * 0.5).max(0.0) + ascent;
+            painter.text(
+                x, baseline_y, &label,
+                [HEADER_VERSION_FG.0, HEADER_VERSION_FG.1, HEADER_VERSION_FG.2, 1.0],
+            );
+        }
     }
-    // Close-[×] and add-[+] glyphs piggy-back on the FG (atlas)
-    // pipeline so they're real font glyphs (× = U+00D7, + = U+002B)
-    // — not axis-aligned rect crosses.
-    push_close_glyphs(
-        layout,
-        cell_w,
-        cell_h,
-        ascent,
-        atlas_w_f,
-        atlas_h_f,
-        font,
-        atlas,
-        glyphs,
-    );
-    push_add_button_glyph(
-        layout,
-        cell_w,
-        cell_h,
-        ascent,
-        atlas_w_f,
-        atlas_h_f,
-        font,
-        atlas,
-        glyphs,
-    );
-    // Empty-cell [+] hints — drawn through the FG pipeline because
-    // the glyph wants real font shape, not a rect cross.
-    push_empty_cell_glyphs(
-        layout,
-        views.len(),
-        cell_w,
-        cell_h,
-        ascent,
-        atlas_w_f,
-        atlas_h_f,
-        font,
-        atlas,
-        glyphs,
-    );
 
     // F3+1.8 — per-pane search overlay.  Painted via the same
     // overlay-scratch path as the modal — no filter, no in-cache
@@ -1931,42 +1979,6 @@ fn build_instances(
         );
     }
 
-    // Header version label — quiet metadata in the header strip,
-    // right-aligned just left of the chrome buttons (or the window
-    // edge when there are none).  The git sha is stamped per build,
-    // so this string changes on every silent update — the user sees
-    // the new core land here.
-    if layout.top_inset > 0.0 {
-        let label = version_label();
-        let text_w = label.chars().count() as f32 * cell_w;
-        // Version label lives in the *title strip* (top portion of
-        // top_inset); the toolbar below holds the icon buttons.
-        // Right-align with a small margin so the label hugs the
-        // window edge, not floats relative to button position.
-        let title_h = (layout.top_inset as f32)
-            * (crate::TITLE_STRIP_PT / crate::HEADER_PT) as f32;
-        let right_margin_logical_pt: f32 = 8.0;
-        let scale_approx = (layout.top_inset as f32) / crate::HEADER_PT as f32;
-        let right_margin_phys = right_margin_logical_pt * scale_approx;
-        let x =
-            ((layout.window_w as f32) - right_margin_phys - text_w).max(cell_w);
-        let baseline_y =
-            ((title_h - cell_h) * 0.5).max(0.0) + ascent;
-        push_text_run(
-            &label,
-            x,
-            baseline_y,
-            [HEADER_VERSION_FG.0, HEADER_VERSION_FG.1, HEADER_VERSION_FG.2, 1.0],
-            cell_w,
-            cell_h,
-            ascent,
-            atlas_w_f,
-            atlas_h_f,
-            font,
-            atlas,
-            glyphs,
-        );
-    }
 }
 
 /// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`

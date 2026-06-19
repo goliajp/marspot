@@ -237,6 +237,7 @@ scene 必须走 widget,widget 必须走 ViewPainter,ViewPainter 自己 push.
 | `components/list_view.rs` | ListView / ListRow / ListViewStyle | 垂直行列表 + focused 行高亮 + row_rect(i) 给 caller hit_test |
 | `components/button.rs` | Button / ButtonStyle / IconSpec / IconPosition | 圆角按钮.支持 4 layout(Only/Before/After/text-only)、4 内置 style(default/ghost/destructive/chrome)、icon 两种 spec(Glyph 字符 / Component impl IconComponent).不接受 closure |
 | `components/grid_seams.rs` | GridSeams / SeamStyle | x×y 网格的分隔线(inter-pane seams).vertical/horizontal 独立 SeamStyle{color, thickness},thickness=0 跳过.支持不均匀 cell —— seam 跨整个 grid 高/宽 |
+| `components/sidebar.rs` | Sidebar / SidebarRow / SidebarStyle | 会话列表:焦点 row BG + 状态圆点(`fill_rounded_rect` radius=w/2 = 圆)+ label glyph.row_rect(i) 给 caller hit_test |
 | `components/search_overlay.rs` | paint_search_overlay / SearchOverlayParams | 用 Panel + TextInput + ListView 组合,F3+1.9 |
 
 scene 代码:
