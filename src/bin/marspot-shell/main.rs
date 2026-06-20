@@ -663,6 +663,11 @@ struct ShellApp {
     /// NSWindow's BG colour (font_cache::BG) instead of an unfilled
     /// black IOSurface — kills the cold-start flash.
     first_frame_ready: bool,
+    /// F3+6.1 — last saved (x, y, w, h, display_id) so per-frame
+    /// `resized` / `moved` callbacks dedup: only the saves where the
+    /// frame actually changed since the last bin write actually fire
+    /// I/O.  Eliminates the live-resize 60+ writes/s storm.
+    last_saved_window: Option<(f64, f64, f64, f64, u32)>,
     redraw_thread_started: bool,
     /// `redraw()` only calls `present()` when this is true.  Set by
     /// every `FrameRendered` poke from the active core (its
@@ -803,6 +808,7 @@ impl ShellApp {
             presenter: None,
             active: None,
             first_frame_ready: false,
+            last_saved_window: None,
             redraw_thread_started: false,
             frame_pending: false,
             last_present_at: None,
@@ -1869,22 +1875,31 @@ impl ShellApp {
 
 }
 
-/// F3+6.1 — read the NSWindow's current frame + the display id of the
-/// screen it's currently on, atomic-write to `window-state.bin`.
-/// Failures are logged but don't propagate — persistence is best-
-/// effort.  Display id is `CGDirectDisplayID` (u32) from the screen's
-/// `deviceDescription["NSScreenNumber"]` field.
-fn save_window_state(ctx: &MarspotAppCtx) {
-    let (x, y, w, h) = ctx.window_frame_pt();
-    let display_id = ctx.window_display_id().unwrap_or(0);
-    let saved = marspot::state::SavedWindow {
-        display_id, x, y, w, h,
-    };
-    if let Err(e) = marspot::state::write_window(&saved) {
-        marspot::lx_warn!(
-            "shell.window_state.write_failed",
-            &format!("{e}")
-        );
+impl ShellApp {
+    /// F3+6.1 — read the NSWindow's current frame + screen, atomic-
+    /// write to `window-state.bin` ONLY when the values changed since
+    /// the last save.  Without dedup the `resized` callback fires
+    /// 60+ times during a live drag = a write storm; tracking the
+    /// last-saved tuple turns that into a single save per genuine
+    /// change.  Frames compared at 1-pt granularity (sub-pt diffs
+    /// from AppKit's internal float math get coalesced).
+    fn save_window_state_if_changed(&mut self, ctx: &MarspotAppCtx) {
+        let (x, y, w, h) = ctx.window_frame_pt();
+        let display_id = ctx.window_display_id().unwrap_or(0);
+        let cur = (x.round(), y.round(), w.round(), h.round(), display_id);
+        if self.last_saved_window == Some(cur) {
+            return;
+        }
+        self.last_saved_window = Some(cur);
+        let saved = marspot::state::SavedWindow {
+            display_id, x, y, w, h,
+        };
+        if let Err(e) = marspot::state::write_window(&saved) {
+            marspot::lx_warn!(
+                "shell.window_state.write_failed",
+                &format!("{e}")
+            );
+        }
     }
 }
 
@@ -2015,7 +2030,7 @@ impl MarspotApp for ShellApp {
         // rename means a live drag can fire 60+ saves/s and the file
         // is always valid; the cost (~50us memcpy + 1 syscall) is
         // well below the per-frame resize budget.
-        save_window_state(ctx);
+        self.save_window_state_if_changed(ctx);
         if let Some(p) = self.presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
             // Present *synchronously* inside the resize callback so
@@ -2063,7 +2078,7 @@ impl MarspotApp for ShellApp {
         // delegate vocabulary; `windowDidMove:` fires per-step during
         // the drag instead.  Each step writes the bin — atomic rename
         // means the file is always consistent and the cost is cheap.
-        save_window_state(ctx);
+        self.save_window_state_if_changed(ctx);
     }
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
