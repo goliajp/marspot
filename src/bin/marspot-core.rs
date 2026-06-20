@@ -137,16 +137,21 @@ struct ProcessPanelState {
     /// is (pid, sent_at) — when sent_at + KILL_ESCALATION_GRACE elapses
     /// AND pid_is_alive(pid), we send SIGKILL and drop the entry.
     pending_kills: Vec<(i32, Instant)>,
-    /// F3+1.4 — which tab (pane index) is currently shown in the
-    /// modal body.  Clamped to panes.len()-1 each render so a
-    /// closed pane doesn't strand the active tab.
-    active_tab: usize,
+    /// F3+4 — which pane (row in the master column) is currently
+    /// selected; the detail column shows that pane's tree.  Clamped
+    /// each render so a closed pane doesn't strand the selection.
+    selected_pane: usize,
+    /// F3+4 — previous-sample CPU times per pid + sample wall clock,
+    /// used to derive CPU% via delta.  Pids that don't reappear on
+    /// the next refresh get dropped.  Cleared when the panel is
+    /// closed so idle has no carrying state.
+    prev_pid_stats: std::collections::HashMap<i32, (u64, Instant)>,
     /// F3+1.4 — close button (red traffic light) hit rect, rebuilt
     /// per frame in parallel with the renderer's modal position.
     close_btn_rect: marspot_term::layout::Rect,
-    /// F3+1.4 — per-tab clickable rects in the tab strip.  Empty
-    /// Vec when there are no panes.
-    tab_rects: Vec<marspot_term::layout::Rect>,
+    /// F3+4 — per-pane-row clickable rects in the master column.
+    /// Empty Vec when there are no panes.  Replaces tab_rects.
+    pane_row_rects: Vec<marspot_term::layout::Rect>,
     /// F3+1.5 — yellow minimize traffic light hit rect.
     min_btn_rect: marspot_term::layout::Rect,
     /// F3+1.5 — green maximize traffic light hit rect.
@@ -188,6 +193,14 @@ struct PanePidTree {
     shelld_session_id: u64,
     shell_child_pid: Option<i32>,
     tree: Option<marspot::pidtree::ProcNode>,
+    /// F3+4 — aggregate stats over the tree, populated by
+    /// `refresh_process_panel` from the latest pidtree + proc_stat
+    /// sample.  Master column in the renderer reads these.
+    name: String,
+    n_pids: u32,
+    cpu_pct: f32,
+    rss_kb: u64,
+    busy: String,
 }
 
 /// F3+1.3 — how long after a SIGTERM before we escalate to SIGKILL.
@@ -2015,14 +2028,24 @@ impl CoreApp {
     /// ScrollView).  Returns render data + populates parallel hit-test
     /// state.  All rects are physical pixels.
     fn build_process_panel_render(&mut self) -> Option<marspot::render_metal::ProcessPanelRender> {
-        use marspot::render_metal::{ProcessPanelRender, ProcessPanelRow};
-        use marspot::ui::components::{ModalFrame, TabStrip, ScrollView};
+        // F3+4 — char-level truncation with ASCII ellipsis (matches the
+        // sidebar's `truncate_for_sidebar` style; kept inline to avoid
+        // pulling a "process panel utils" module in for one helper).
+        fn truncate_to(s: &str, max_chars: usize) -> String {
+            let n = s.chars().count();
+            if n <= max_chars { return s.to_string(); }
+            let head: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+            format!("{head}…")
+        }
+        use marspot::render_metal::{
+            ProcessPanelRender, ProcessPanelRow, ProcessPanelPaneRow,
+        };
+        use marspot::ui::components::ScrollView;
         use marspot::ui::system::macos::TrafficLights;
-        use marspot::ui::components::modal_frame::ModalLayoutSpec;
+        use marspot::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
         let scale = self.scale.max(0.1);
-        // Snapshot fields we'll need before any &mut borrow of panel.
         let panes_len;
-        let active_tab_in;
+        let selected_pane;
         let minimized;
         let maximized;
         let pos_offset;
@@ -2030,20 +2053,20 @@ impl CoreApp {
         {
             let panel = self.process_panel.as_mut()?;
             if !panel.panes.is_empty() {
-                if panel.active_tab >= panel.panes.len() {
-                    panel.active_tab = panel.panes.len() - 1;
+                if panel.selected_pane >= panel.panes.len() {
+                    panel.selected_pane = panel.panes.len() - 1;
                 }
             } else {
-                panel.active_tab = 0;
+                panel.selected_pane = 0;
             }
             panes_len     = panel.panes.len();
-            active_tab_in = panel.active_tab;
+            selected_pane = panel.selected_pane;
             minimized     = panel.minimized;
             maximized     = panel.maximized;
             pos_offset    = panel.pos_offset;
             scroll_y_in   = panel.scroll_y;
         }
-        // Modal frame layout via component.
+        // F3+4 — modal frame: no tab strip anymore.
         let frame = ModalFrame::layout(
             self.w_phys as f64,
             self.h_phys as f64,
@@ -2051,60 +2074,100 @@ impl CoreApp {
                 default_w:   PROCESS_PANEL_WIDTH_LOGICAL  * scale,
                 default_h:   PROCESS_PANEL_HEIGHT_LOGICAL * scale,
                 title_bar_h: 28.0 * scale,
-                tab_strip_h: 30.0 * scale,
+                tab_strip_h: 0.0,
                 maximized,
                 max_w_ratio: 0.95,
                 max_h_ratio: 0.90,
                 minimized,
-                with_tab_strip: panes_len > 0,
+                with_tab_strip: false,
                 pos_offset,
-                // F3+1.5+ — marspot title strip stays always on top
-                // of the modal; clamp modal y to ≥ top_inset.
                 top_obstruction: self.layout.top_inset,
             },
         );
-        // Traffic lights (anchored to title bar left).
         let lights = TrafficLights::layout(
             frame.title_bar,
             12.0 * scale,
             8.0  * scale,
             12.0 * scale,
         );
-        // Tab strip (only when not minimized).
-        let (cell_w_f64, cell_h_f64) = self.renderer.cell_dims();
-        let labels: Vec<String> = if !minimized {
-            (1..=panes_len).map(|i| format!("Pane {}", i)).collect()
-        } else {
-            Vec::new()
-        };
-        let tabs_view = TabStrip::layout(
-            frame.tab_strip,
-            &labels,
-            active_tab_in,
-            cell_w_f64,
-            8.0 * scale,
-        );
-        // Build body rows for ACTIVE tab.
-        let mut rows: Vec<ProcessPanelRow> = Vec::new();
+        let (_cell_w_f64, cell_h_f64) = self.renderer.cell_dims();
+
+        // F3+4 — emit master rows (sorted by CPU% desc) + detail rows
+        // for the selected pane.  Master row hit rects are persisted
+        // so mouse_down can route clicks to selected_pane updates.
+        let mut pane_rows: Vec<ProcessPanelPaneRow> = Vec::new();
+        let mut detail_rows: Vec<ProcessPanelRow> = Vec::new();
         let mut kill_meta: Vec<(i32, usize)> = Vec::new();
+        // Map sorted-row index → original pane index, so selected_pane
+        // (kept stable across resort) still points at the same pane.
+        let mut sorted_to_orig: Vec<usize> = Vec::new();
         if !minimized {
             let panel_ref = self.process_panel.as_ref()?;
-            if let Some(pane) = panel_ref.panes.get(active_tab_in) {
-                let header_text = match pane.shell_child_pid {
-                    Some(p) => format!("sid={}  shell pid={}",
-                        pane.shelld_session_id, p),
-                    None => format!("sid={}  (no pid)", pane.shelld_session_id),
-                };
-                rows.push(ProcessPanelRow {
-                    depth: 0, text: header_text, is_header: true,
+            let mut orig: Vec<usize> = (0..panel_ref.panes.len()).collect();
+            orig.sort_by(|&a, &b| {
+                panel_ref.panes[b].cpu_pct.total_cmp(&panel_ref.panes[a].cpu_pct)
+            });
+            sorted_to_orig = orig.clone();
+            for &i in &orig {
+                let pane = &panel_ref.panes[i];
+                pane_rows.push(ProcessPanelPaneRow {
+                    name: truncate_to(&pane.name, 22),
+                    sid: pane.shelld_session_id,
+                    n_pids: pane.n_pids,
+                    cpu_pct: pane.cpu_pct,
+                    rss_kb: pane.rss_kb,
+                    busy: truncate_to(&pane.busy, 18),
+                });
+            }
+            // Selected pane's tree → detail rows.
+            let selected_orig = sorted_to_orig.get(selected_pane).copied()
+                .unwrap_or(0);
+            if let Some(pane) = panel_ref.panes.get(selected_orig) {
+                detail_rows.push(ProcessPanelRow {
+                    depth: 0,
+                    pid: 0,
+                    comm: format!("{} · sid {} · shell pid {}",
+                        pane.name, pane.shelld_session_id,
+                        pane.shell_child_pid.unwrap_or(0)),
+                    cpu_pct: 0.0,
+                    rss_kb: 0,
+                    is_header: true,
                 });
                 if let Some(tree) = pane.tree.as_ref() {
                     let flat = marspot::pidtree::flatten_pre_order(tree);
                     for (depth, node) in flat {
-                        let row_idx = rows.len();
-                        rows.push(ProcessPanelRow {
+                        let row_idx = detail_rows.len();
+                        let (cpu, rss) =
+                            if let Some(stat) = panel_ref.prev_pid_stats
+                                .get(&node.pid)
+                            {
+                                let _ = stat;
+                                // For per-row CPU/RSS we sample current
+                                // stats fresh — prev_pid_stats only
+                                // holds cumulative + timestamp; CPU% was
+                                // computed during refresh into the
+                                // aggregates but not per-pid.  Re-sample
+                                // is one syscall; cheap on demand.
+                                let s = marspot::pidtree::proc_stat(node.pid);
+                                let cpu = s.and_then(|cur| {
+                                    let dt_ns = panel_ref.last_refresh
+                                        .elapsed().as_nanos() as u64 + 1;
+                                    let prev = panel_ref.prev_pid_stats
+                                        .get(&node.pid)?.0;
+                                    if cur.total_cpu_ns >= prev {
+                                        Some(((cur.total_cpu_ns - prev) as f64
+                                            / dt_ns as f64) as f32 * 100.0)
+                                    } else { Some(0.0) }
+                                }).unwrap_or(0.0);
+                                let rss = s.map(|s| s.rss_bytes / 1024).unwrap_or(0);
+                                (cpu, rss)
+                            } else { (0.0, 0) };
+                        detail_rows.push(ProcessPanelRow {
                             depth: ((depth + 1).min(8)) as u8,
-                            text: format!("{} {}", node.pid, node.comm),
+                            pid: node.pid,
+                            comm: node.comm.clone(),
+                            cpu_pct: cpu,
+                            rss_kb: rss,
                             is_header: false,
                         });
                         kill_meta.push((node.pid, row_idx));
@@ -2112,42 +2175,66 @@ impl CoreApp {
                 }
             }
         }
-        // Scroll math via component.
-        let row_h = cell_h_f64 * 1.2;
-        let body_pad_top = 6.0 * scale;
-        let body_pad_right = 14.0 * scale;
+        // F3+4.1 — match the renderer's Table layout 1:1.  Master
+        // is the left 38 % including its own header; detail fills
+        // the rest.  Both Tables share row_h / header_h.
+        let cell_w_f64 = self.renderer.cell_dims().0;
+        let row_h = cell_h_f64 * 1.3;
+        let header_h = cell_h_f64 * 1.4;
         let kill_w = 18.0 * scale;
         let kill_h = (row_h - 4.0).max(8.0);
-        let content_h = body_pad_top + (rows.len() as f64) * row_h + body_pad_top;
-        let mut sv = ScrollView::new(frame.body);
+        let master_w = frame.body.w * 0.38;
+        let master_rows_top = frame.body.y_top + header_h;
+        let mut pane_row_rects: Vec<marspot_term::layout::Rect> =
+            Vec::with_capacity(pane_rows.len());
+        for i in 0..pane_rows.len() {
+            let row_y = master_rows_top + (i as f64) * row_h;
+            if row_y + row_h > frame.body.y_top + frame.body.h { break; }
+            pane_row_rects.push(marspot_term::layout::Rect {
+                x: frame.body.x, y_top: row_y,
+                w: master_w, h: row_h,
+            });
+        }
+        // Detail scroll body (under the header).
+        let detail_rows_top = frame.body.y_top + header_h;
+        let content_h = (detail_rows.len() as f64) * row_h;
+        let detail_body = marspot_term::layout::Rect {
+            x: frame.body.x + master_w,
+            y_top: detail_rows_top,
+            w: frame.body.w - master_w,
+            h: frame.body.h - header_h,
+        };
+        let mut sv = ScrollView::new(detail_body);
         sv.content_h = content_h;
         sv.scroll_y = scroll_y_in;
         sv.clamp();
         let scroll_y_clamped = sv.scroll_y;
-        // Per-row kill rects, accounting for scroll.
+        // Detail table's column geometry: same widths as renderer.
+        // Last column = kill column (kill_w + 8 px).  Process flex
+        // gets the remainder.
+        let pid_w  = cell_w_f64 * 7.0;
+        let cpu_w  = cell_w_f64 * 7.0;
+        let rss_w  = cell_w_f64 * 8.0;
+        let kill_col_w = kill_w + 8.0;
+        let kill_col_x = detail_body.x + detail_body.w - kill_col_w;
+        // Per-data-row kill rects (skip section/header rows).
         let mut row_kill_rects: Vec<(i32, marspot_term::layout::Rect)> =
             Vec::with_capacity(kill_meta.len());
         for (pid, row_idx) in kill_meta {
-            let row_y = frame.body.y_top + body_pad_top
-                + (row_idx as f64) * row_h - scroll_y_clamped;
-            // Off-screen rows can't be clicked; skip them so a click
-            // through the clipped area doesn't accidentally hit a
-            // ghost rect.
-            if row_y + row_h < frame.body.y_top
-                || row_y > frame.body.y_top + frame.body.h
-            {
-                continue;
-            }
-            let kill_x = frame.body.x + frame.body.w - body_pad_right - kill_w;
-            let kill_y = row_y + (row_h - kill_h) * 0.5;
+            let row_y = detail_rows_top + (row_idx as f64) * row_h - scroll_y_clamped;
+            if row_y + row_h < detail_rows_top { continue; }
+            if row_y > frame.body.y_top + frame.body.h { continue; }
+            let bx = kill_col_x + (kill_col_w - kill_w) * 0.5;
+            let by = row_y + (row_h - kill_h) * 0.5;
             row_kill_rects.push((pid, marspot_term::layout::Rect {
-                x: kill_x, y_top: kill_y, w: kill_w, h: kill_h,
+                x: bx, y_top: by, w: kill_w, h: kill_h,
             }));
         }
-        // Persist hit rects + clamp/feedback into state.
+        let _ = (pid_w, cpu_w, rss_w);
+        // Persist hit-test state.
         {
             let panel = self.process_panel.as_mut()?;
-            panel.tab_rects      = tabs_view.tab_rects.clone();
+            panel.pane_row_rects = pane_row_rects;
             panel.close_btn_rect = lights.close;
             panel.min_btn_rect   = lights.min;
             panel.max_btn_rect   = lights.max;
@@ -2158,12 +2245,13 @@ impl CoreApp {
             panel.scroll_y       = scroll_y_clamped;
             panel.content_h      = content_h;
         }
+        let _ = panes_len;
         Some(ProcessPanelRender {
             rect: frame.frame,
             title: "Process Monitor".to_string(),
-            tabs: tabs_view.display_labels,
-            active_tab: active_tab_in,
-            rows,
+            pane_rows,
+            selected_pane,
+            rows: detail_rows,
             minimized,
             scroll_y: scroll_y_clamped,
             draw_backdrop: true,
@@ -2225,20 +2313,89 @@ impl CoreApp {
     /// and on the main loop's render path when `last_refresh` is
     /// older than 2 s.  No-op when the panel is closed.
     fn refresh_process_panel(&mut self) {
+        // F3+4 — walk libproc, sample per-pid stats, compute CPU%
+        // deltas vs the previous refresh, build per-pane aggregates.
+        // Two-pass: pass A snapshots procs + new stats; pass B walks
+        // panes building summaries.  prev_pid_stats is rolled forward
+        // (only pids seen this tick survive into next).
         let Some(panel) = self.process_panel.as_mut() else { return };
         let all = marspot::pidtree::list_all_procs();
+        let now = Instant::now();
+        // Sample CPU + RSS for every pid we'll touch (descendants of
+        // any pane's shell child).  Caller already has the tree so
+        // we'd double-walk if we sampled lazily inside `build_node` —
+        // do it once into a flat map.
+        let mut cur_stats: std::collections::HashMap<i32, marspot::pidtree::ProcStat> =
+            std::collections::HashMap::new();
+        // Snapshot CWD for each pane's shell child for the name col.
         panel.panes.clear();
-        for pane in &self.panes {
+        for (pane_idx, pane) in self.panes.iter().enumerate() {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let pid = read_shell_child_pid(sid);
             let tree = pid.and_then(|p| marspot::pidtree::tree_rooted_at(p, &all));
+            // Aggregate: walk descendants, sample stats, sum CPU% +
+            // RSS, find top-busy non-shell process.
+            let mut n = 0u32;
+            let mut sum_cpu_pct = 0.0f32;
+            let mut sum_rss_kb = 0u64;
+            let mut top_busy = (0.0f32, String::new());
+            if let Some(ref root) = tree {
+                let flat = marspot::pidtree::flatten_pre_order(root);
+                for (_depth, node) in &flat {
+                    let p = node.pid;
+                    let Some(stat) = marspot::pidtree::proc_stat(p) else { continue };
+                    cur_stats.insert(p, stat);
+                    n += 1;
+                    sum_rss_kb += stat.rss_bytes / 1024;
+                    // CPU% via delta.
+                    let cpu = if let Some(&(prev_cpu, prev_t)) =
+                        panel.prev_pid_stats.get(&p)
+                    {
+                        let dt_ns = now.duration_since(prev_t).as_nanos() as u64;
+                        if dt_ns > 0 && stat.total_cpu_ns >= prev_cpu {
+                            let dcpu = stat.total_cpu_ns - prev_cpu;
+                            (dcpu as f64 / dt_ns as f64) as f32 * 100.0
+                        } else { 0.0 }
+                    } else { 0.0 };
+                    sum_cpu_pct += cpu;
+                    if cpu > top_busy.0 && !node.comm.starts_with("-zsh") {
+                        top_busy = (cpu, node.comm.clone());
+                    }
+                }
+            }
+            // Resolve pane name same way the title strip does:
+            // custom > cwd basename > ordinal.
+            let name = {
+                let custom = self.custom_titles.get(pane_idx).and_then(|t| t.clone())
+                    .filter(|s| !s.is_empty());
+                if let Some(c) = custom { c }
+                else if let Some(p) = self.pane_cwds.get(&sid) {
+                    std::path::Path::new(p).file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| format!("sid {sid}"))
+                } else {
+                    format!("{}", pane_idx + 1)
+                }
+            };
+            let busy = if top_busy.0 < 0.1 { String::from("(idle)") } else { top_busy.1 };
             panel.panes.push(PanePidTree {
                 shelld_session_id: sid,
                 shell_child_pid: pid,
                 tree,
+                name,
+                n_pids: n,
+                cpu_pct: sum_cpu_pct,
+                rss_kb: sum_rss_kb,
+                busy,
             });
         }
-        panel.last_refresh = Instant::now();
+        // Roll the stats cache forward: keep only pids we sampled this
+        // tick (dead pids drop out automatically).
+        panel.prev_pid_stats.clear();
+        for (pid, stat) in cur_stats {
+            panel.prev_pid_stats.insert(pid, (stat.total_cpu_ns, now));
+        }
+        panel.last_refresh = now;
     }
 
     fn mouse_moved(&mut self, x_phys: f64, y_phys: f64) {
@@ -2294,16 +2451,16 @@ impl CoreApp {
                 self.needs_render = true;
                 return;
             }
-            // 2) Tab strip
-            let tab_hit: Option<usize> = panel
-                .tab_rects
+            // F3+4 — master pane list row clicks switch the selection.
+            let pane_hit: Option<usize> = panel
+                .pane_row_rects
                 .iter()
                 .enumerate()
                 .find(|(_, r)| r.contains(x_phys, y_phys))
                 .map(|(i, _)| i);
-            if let Some(i) = tab_hit {
+            if let Some(i) = pane_hit {
                 if let Some(p) = self.process_panel.as_mut() {
-                    p.active_tab = i;
+                    p.selected_pane = i;
                     p.scroll_y = 0.0;
                 }
                 self.needs_render = true;
@@ -2362,9 +2519,10 @@ impl CoreApp {
                     last_refresh: Instant::now() - std::time::Duration::from_secs(10),
                     row_kill_rects: Vec::new(),
                     pending_kills: Vec::new(),
-                    active_tab: 0,
+                    selected_pane: 0,
+                    prev_pid_stats: std::collections::HashMap::new(),
                     close_btn_rect: marspot_term::layout::Rect::ZERO,
-                    tab_rects: Vec::new(),
+                    pane_row_rects: Vec::new(),
                     min_btn_rect: marspot_term::layout::Rect::ZERO,
                     max_btn_rect: marspot_term::layout::Rect::ZERO,
                     title_bar_rect: marspot_term::layout::Rect::ZERO,

@@ -16,6 +16,7 @@ pub mod grid_seams;
 pub mod grid;
 pub mod grid_item;
 pub mod sidebar;
+pub mod table;
 pub mod layout_modal;
 
 pub use tab_strip::TabStrip;
@@ -30,4 +31,5 @@ pub use grid_seams::{GridSeams, SeamStyle};
 pub use grid::{Grid, GridStyle};
 pub use grid_item::{GridItem, GridEdges, Outline};
 pub use sidebar::{Sidebar, SidebarRow, SidebarStyle};
+pub use table::{Table, TableColumn, TableRow, TableStyle, ColumnWidth, RowKind, SortDir};
 pub use layout_modal::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};

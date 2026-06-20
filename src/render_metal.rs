@@ -194,19 +194,50 @@ struct PaneInstanceCache {
     primed: bool,
 }
 
-/// F3+1.4 — one row in the process-tree panel body.  Pure data;
-/// L2 builds these every frame for the active tab, the renderer
-/// just paints.
+/// F3+4 — one row in the detail process-tree panel (right column of
+/// the redesigned Process Monitor).  Pure data; L2 builds these every
+/// frame for the selected pane.  Includes per-pid resource cols so
+/// the renderer can lay out a proper sortable table.
 #[derive(Debug, Clone)]
 pub struct ProcessPanelRow {
-    /// Indent depth (0 = pane header, 1+ = tree node nesting).
+    /// Indent depth (0 = pane header / shell-root, 1+ = tree
+    /// descendants).  Cosmetic only — the leftmost column.
     pub depth: u8,
-    /// Pre-formatted display text for the row.  L2 owns formatting
-    /// so the renderer doesn't pull in pidtree types.
-    pub text: String,
-    /// Tint hint: true = "pane header" (no [×] icon, slightly bold-
-    /// looking FG); false = "process row" (regular FG + [×] icon).
+    /// Process pid.  0 if `is_header` (panel header row).
+    pub pid: i32,
+    /// Process comm (16 chars max on macOS — what `ps` shows).
+    pub comm: String,
+    /// Sampled CPU% (delta of two task_info samples / wall-clock dt
+    /// × 100).  May exceed 100 for multi-threaded procs (a `rustc`
+    /// pinning one P-core reads ~100; a parallel `cargo build` walks
+    /// up to ncpu × 100).  0 for header rows.
+    pub cpu_pct: f32,
+    /// Resident set size in KB at the latest sample.
+    pub rss_kb: u64,
+    /// True when this is the synthetic header row for the pane (no
+    /// kill button drawn, slightly heavier FG).  False for tree rows.
     pub is_header: bool,
+}
+
+/// F3+4 — one row in the MASTER pane list (left column of the
+/// redesigned Process Monitor).  Each row summarises one pane: name +
+/// aggregate process count / CPU% / RSS over the pane's pid tree.
+#[derive(Debug, Clone)]
+pub struct ProcessPanelPaneRow {
+    /// Pane name as the user sees it elsewhere — custom title >
+    /// cwd basename > ordinal.  Already truncated by L2 to fit the
+    /// master column width.
+    pub name: String,
+    pub sid: u64,
+    /// Number of pids in the pane's tree (including the shell root).
+    pub n_pids: u32,
+    /// Sum of `ProcessPanelRow.cpu_pct` across the tree.
+    pub cpu_pct: f32,
+    /// Sum of `ProcessPanelRow.rss_kb` across the tree.
+    pub rss_kb: u64,
+    /// "What's busy" hint: comm of the top non-shell process by CPU%,
+    /// or "(idle)" / "" when the pane is quiet.  Pre-truncated.
+    pub busy: String,
 }
 
 /// F3+3.0 / 3.3 — full data for one render of the LayoutModal.
@@ -237,27 +268,29 @@ pub struct LayoutModalDragRender {
 #[derive(Debug, Clone)]
 pub struct ProcessPanelRender {
     /// Modal frame rectangle (physical px), centered by L2 over the
-    /// window.  Includes title bar + tab strip + body.
+    /// window.  Includes title bar + master/detail body.
     pub rect: Rect,
     /// Title bar text — currently always "Process Monitor".  Kept
     /// a String so a future plugin could rename per-pane modals.
     pub title: String,
-    /// Tab labels in render order — one per pane.  Empty Vec
-    /// (no panes alive) draws an "(no panes)" body placeholder.
-    pub tabs: Vec<String>,
-    /// Which tab index is active.  Body rows correspond to this tab.
-    /// Out-of-range silently clamped to 0 by the renderer.
-    pub active_tab: usize,
-    /// Rows of the active tab's pane (header + flatten_pre_order
-    /// tree).  Empty Vec OK.
+    /// F3+4 — MASTER column: one row per pane (left side).
+    /// Pre-sorted by L2; renderer paints in order.  Empty Vec
+    /// (no live panes) draws an "(no panes)" placeholder.
+    pub pane_rows: Vec<ProcessPanelPaneRow>,
+    /// Which pane row in `pane_rows` is currently selected; the
+    /// `rows` field below is the process tree of that pane.  Out-
+    /// of-range silently clamped to 0 by the renderer.
+    pub selected_pane: usize,
+    /// F3+4 — DETAIL column: rows of the selected pane's process
+    /// tree (header + flatten_pre_order).  Empty Vec OK.
     pub rows: Vec<ProcessPanelRow>,
     /// F3+1.5 — collapse body so only the title bar paints.  When
-    /// `true`, `tabs` + `rows` are NOT rendered (still walked for
-    /// hit-rect bookkeeping on the L2 side).
+    /// `true`, `pane_rows` + `rows` are NOT rendered (still walked
+    /// for hit-rect bookkeeping on the L2 side).
     pub minimized: bool,
-    /// F3+1.5 — body scroll offset (physical px).  Renderer paints
-    /// rows starting at `body_top + body_pad_top - scroll_y`, with
-    /// clipping at the body rect bottom.  Clamped by L2.
+    /// F3+1.5 — body scroll offset (physical px) for the DETAIL
+    /// column.  Renderer paints rows starting at
+    /// `body_top + body_pad_top - scroll_y`, clipped at body bottom.
     pub scroll_y: f64,
     /// F3+1.5 — semi-transparent backdrop covering the rest of the
     /// window so the modal reads as focused.  Painted as one
@@ -2725,63 +2758,178 @@ fn paint_process_panel_content(
         return;
     }
 
-    // Tab strip.
-    if !panel.tabs.is_empty() {
-        let strip_y = py + title_h;
-        let tab_w = pw / (panel.tabs.len() as f32);
-        for (i, label) in panel.tabs.iter().enumerate() {
-            let tx = px + (i as f32) * tab_w;
-            let (bg, fg) = if i == panel.active_tab {
-                (PROCESS_PANEL_TAB_BG_ACTIVE, PROCESS_PANEL_TAB_FG_ACTIVE)
-            } else {
-                (PROCESS_PANEL_TAB_BG,        PROCESS_PANEL_TAB_FG)
-            };
-            p.fill_rect(
-                Rect { x: tx as f64, y_top: strip_y as f64, w: tab_w as f64, h: tab_h as f64 },
-                bg,
-            );
-            let label_w_chars = label.chars().count() as f32;
-            let label_x = tx + (tab_w - label_w_chars * p.cell_w) * 0.5;
-            let label_baseline = strip_y + (tab_h - p.cell_h) * 0.5 + p.ascent;
-            p.text(label_x, label_baseline, label, fg);
-        }
-        p.fill_rect(
-            Rect { x: px as f64, y_top: (strip_y + tab_h) as f64, w: pw as f64, h: 1.0 },
-            PROCESS_PANEL_SEPARATOR,
-        );
-    }
+    // F3+4.1 — master / detail rendered via the new `Table`
+    // component.  The kill [×] is layered on top of the detail
+    // Table after paint() since Table is text-only.
+    use marspot_term::layout::Alignment;
+    use crate::ui::components::{
+        Button, ButtonStyle, IconSpec, IconPosition,
+        Table, TableColumn, TableRow, TableStyle, ColumnWidth, RowKind,
+    };
 
-    // Body rows (with scroll).
-    let body_top = py + title_h + tab_h;
-    let body_pad_top = PROCESS_PANEL_BODY_PAD_TOP_LOGICAL * scale_hint;
-    let body_pad_left = PROCESS_PANEL_BODY_PAD_LEFT_LOGICAL * scale_hint;
-    let body_pad_right = PROCESS_PANEL_BODY_PAD_RIGHT_LOGICAL * scale_hint;
-    let indent = PROCESS_PANEL_INDENT_LOGICAL * scale_hint;
-    let kill_w = PROCESS_PANEL_KILL_W_LOGICAL * scale_hint;
-    let row_h = p.cell_h * 1.2;
+    let body_top = py + title_h;
     let body_bottom = py + ph - 6.0 * scale_hint;
-    let kill_h = (row_h - 4.0).max(8.0);
-    let scroll_y = panel.scroll_y as f32;
-    for (i, row) in panel.rows.iter().enumerate() {
-        let row_y = body_top + body_pad_top + (i as f32) * row_h - scroll_y;
-        if row_y + row_h > body_bottom { break; }
-        if row_y + row_h < body_top    { continue; }
-        let text_x = px + body_pad_left + (row.depth as f32) * indent;
-        let baseline = row_y + p.ascent;
-        let fg = if row.is_header { PROCESS_PANEL_HEADER_FG } else { PROCESS_PANEL_ROW_FG };
-        p.text(text_x, baseline, &row.text, fg);
-        if !row.is_header {
-            // F3+1.10 — kill button uses the new `Button` widget
-            // (destructive style).  Used to be inline `fill_rect + text`,
-            // ~9 lines per call site; now one declarative widget.
-            use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
-            let kill_x = px + pw - body_pad_right - kill_w;
-            let kill_y = row_y + (row_h - kill_h) * 0.5;
+    let master_w = pw * 0.38;
+    let split_x = px + master_w;
+
+    // Vertical separator between master and detail spans full body.
+    p.fill_rect(
+        Rect { x: split_x as f64, y_top: body_top as f64,
+               w: 1.0, h: (body_bottom - body_top) as f64 },
+        PROCESS_PANEL_SEPARATOR,
+    );
+
+    // Shared Table style with marspot's panel palette.
+    let style = TableStyle {
+        header_h:           (p.cell_h * 1.4) as f64,
+        row_h:              (p.cell_h * 1.3) as f64,
+        indent_px:          12.0 * scale_hint as f64,
+        col_pad:            10.0 * scale_hint as f64,
+        header_bg:          PROCESS_PANEL_TITLE_BAR_BG,
+        header_fg:          PROCESS_PANEL_HEADER_FG,
+        header_separator:   PROCESS_PANEL_SEPARATOR,
+        row_bg:             [0.0; 4],
+        row_bg_alt:         [0.0; 4],
+        row_bg_selected:    PROCESS_PANEL_TAB_BG_ACTIVE,
+        row_fg:             PROCESS_PANEL_ROW_FG,
+        row_fg_selected:    PROCESS_PANEL_TAB_FG_ACTIVE,
+        section_fg:         PROCESS_PANEL_HEADER_FG,
+    };
+
+    // ── Master ───────────────────────────────────────────────────
+    let m_cols = vec![
+        TableColumn {
+            header: "Pane".into(),
+            width: ColumnWidth::Flex(1.0),
+            align: Alignment::CenterLeft,
+            sort: None, sortable: false,
+        },
+        TableColumn {
+            header: "pids".into(),
+            width: ColumnWidth::Px((p.cell_w * 6.0) as f64),
+            align: Alignment::CenterRight,
+            sort: None, sortable: false,
+        },
+        TableColumn {
+            header: "CPU%".into(),
+            width: ColumnWidth::Px((p.cell_w * 7.0) as f64),
+            align: Alignment::CenterRight,
+            sort: Some(crate::ui::components::SortDir::Desc),
+            sortable: false,
+        },
+        TableColumn {
+            header: "RSS".into(),
+            width: ColumnWidth::Px((p.cell_w * 8.0) as f64),
+            align: Alignment::CenterRight,
+            sort: None, sortable: false,
+        },
+    ];
+    let m_rows: Vec<TableRow> = panel.pane_rows.iter().map(|r| TableRow {
+        cells: vec![
+            r.name.clone(),
+            r.n_pids.to_string(),
+            format!("{:.1}", r.cpu_pct),
+            format_rss(r.rss_kb),
+        ],
+        depth: 0,
+        kind: RowKind::Data,
+    }).collect();
+    let master_table = Table {
+        rect: Rect {
+            x: px as f64, y_top: body_top as f64,
+            w: master_w as f64,
+            h: (body_bottom - body_top) as f64,
+        },
+        columns: &m_cols,
+        rows: &m_rows,
+        style,
+        selected: Some(panel.selected_pane),
+        scroll_y: 0.0,
+        show_header: true,
+    };
+    master_table.paint(p);
+
+    // ── Detail ───────────────────────────────────────────────────
+    let d_cols = vec![
+        TableColumn {
+            header: "Process".into(),
+            width: ColumnWidth::Flex(1.0),
+            align: Alignment::CenterLeft,
+            sort: None, sortable: false,
+        },
+        TableColumn {
+            header: "pid".into(),
+            width: ColumnWidth::Px((p.cell_w * 7.0) as f64),
+            align: Alignment::CenterRight,
+            sort: None, sortable: false,
+        },
+        TableColumn {
+            header: "CPU%".into(),
+            width: ColumnWidth::Px((p.cell_w * 7.0) as f64),
+            align: Alignment::CenterRight,
+            sort: None, sortable: false,
+        },
+        TableColumn {
+            header: "RSS".into(),
+            width: ColumnWidth::Px((p.cell_w * 8.0) as f64),
+            align: Alignment::CenterRight,
+            sort: None, sortable: false,
+        },
+        TableColumn {
+            header: "".into(),
+            width: ColumnWidth::Px(
+                (PROCESS_PANEL_KILL_W_LOGICAL * scale_hint + 8.0) as f64,
+            ),
+            align: Alignment::Center,
+            sort: None, sortable: false,
+        },
+    ];
+    let d_rows: Vec<TableRow> = panel.rows.iter().map(|r| TableRow {
+        cells: if r.is_header {
+            vec![r.comm.clone(), String::new(), String::new(), String::new(), String::new()]
+        } else {
+            vec![
+                r.comm.clone(),
+                r.pid.to_string(),
+                if r.cpu_pct > 0.05 { format!("{:.1}", r.cpu_pct) } else { "·".into() },
+                format_rss(r.rss_kb),
+                String::new(),
+            ]
+        },
+        depth: r.depth,
+        kind: if r.is_header { RowKind::Section } else { RowKind::Data },
+    }).collect();
+    let detail_table = Table {
+        rect: Rect {
+            x: split_x as f64, y_top: body_top as f64,
+            w: (pw - master_w) as f64,
+            h: (body_bottom - body_top) as f64,
+        },
+        columns: &d_cols,
+        rows: &d_rows,
+        style,
+        selected: None,
+        scroll_y: panel.scroll_y,
+        show_header: true,
+    };
+    detail_table.paint(p);
+
+    // Kill buttons overlay the Table's last column for non-header rows.
+    let kill_w = PROCESS_PANEL_KILL_W_LOGICAL * scale_hint;
+    let kill_h = (style.row_h as f32 - 4.0).max(8.0);
+    let col_xw = detail_table.column_x_widths();
+    let kill_col = col_xw.last().copied();
+    if let Some((kx, kw)) = kill_col {
+        for (i, row) in panel.rows.iter().enumerate() {
+            if row.is_header { continue; }
+            let row_rect = detail_table.row_rect(i);
+            if row_rect.y_top + row_rect.h <= detail_table.body_rect().y_top { continue; }
+            if row_rect.y_top >= detail_table.body_rect().y_top
+                + detail_table.body_rect().h { break; }
+            let bx = kx + (kw - kill_w as f64) * 0.5;
+            let by = row_rect.y_top + (row_rect.h - kill_h as f64) * 0.5;
             let btn = Button {
-                rect: Rect {
-                    x: kill_x as f64, y_top: kill_y as f64,
-                    w: kill_w as f64, h: kill_h as f64,
-                },
+                rect: Rect { x: bx, y_top: by, w: kill_w as f64, h: kill_h as f64 },
                 label: None,
                 icon: Some(IconSpec::Glyph("×")),
                 icon_position: IconPosition::Only,
@@ -2790,6 +2938,19 @@ fn paint_process_panel_content(
             };
             btn.paint(p);
         }
+    }
+}
+
+/// F3+4 — pretty-print RSS bytes (KB units) as a `X.Y M` / `X.Y G`
+/// style human-readable string for the master/detail rss column.
+/// Pre-formatted by L2 so the renderer doesn't pull format helpers.
+fn format_rss(kb: u64) -> String {
+    if kb >= 1024 * 1024 {
+        format!("{:.1}G", kb as f64 / (1024.0 * 1024.0))
+    } else if kb >= 1024 {
+        format!("{:.0}M", kb as f64 / 1024.0)
+    } else {
+        format!("{}K", kb)
     }
 }
 
