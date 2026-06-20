@@ -1025,10 +1025,16 @@ impl CoreApp {
                 }
             }
         }
+        // F3+5.1 — bump the debounce clock BEFORE the syscalls fire,
+        // so a permanently-failing fetch (entry.toml without
+        // shell_child_pid, sandbox-blocked proc_pidinfo) still ticks
+        // the debounce instead of getting force-retried every frame
+        // by the build_views lazy fill.  Worst case becomes 1 attempt
+        // per CWD_REFRESH_DEBOUNCE per pane instead of 60 fps × N.
+        self.last_cwd_refresh.insert(sid, now);
         let Some(pid) = read_shell_child_pid(sid) else { return false };
         let Some(path) = marspot::pidtree::proc_cwd(pid) else { return false };
         self.pane_cwds.insert(sid, path.to_string_lossy().into_owned());
-        self.last_cwd_refresh.insert(sid, now);
         true
     }
 
@@ -1043,7 +1049,12 @@ impl CoreApp {
         for i in 0..self.panes.len() {
             let Some(sid) = self.panes[i].shelld_session_id() else { continue };
             if self.pane_cwds.contains_key(&sid) { continue; }
-            self.refresh_pane_cwd_for(i, true);
+            // F3+5.1 — `force=false`: paired with the now-always-bumped
+            // debounce clock in `refresh_pane_cwd_for`, this means a
+            // pane that hasn't filled yet retries at most every
+            // `CWD_REFRESH_DEBOUNCE`, not every frame.  Steady state
+            // (all populated) skips entirely via contains_key above.
+            self.refresh_pane_cwd_for(i, false);
         }
     }
 
