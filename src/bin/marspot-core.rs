@@ -210,6 +210,13 @@ struct PanePidTree {
 /// doesn't think the click was ignored.
 const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
 
+/// F3+5 — per-sid debounce window on `refresh_pane_cwd_for`.  A
+/// multi-line paste fires Enter N times; only the first within this
+/// window triggers a syscall.  150 ms keeps "cd && cd" sequences
+/// reflected near-instantly while collapsing pasted scripts into a
+/// single fetch.
+const CWD_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+
 /// F3+1.4 — modal size in logical points (auto-scales by display
 /// scale).  Centered over the marspot window.  Slightly smaller than
 /// the user's 800×600 spec when scale > 1 to leave room for the
@@ -789,6 +796,12 @@ struct CoreApp {
     /// Initialised from grid_* every time the modal opens.
     pending_grid_cols: usize,
     pending_grid_rows: usize,
+    /// F3+5 — per-sid debounce window for `refresh_pane_cwd_for`.
+    /// A burst of Enter keys (multi-line paste) hits this map and
+    /// returns within the debounce → at most one syscall per
+    /// `CWD_REFRESH_DEBOUNCE` per pane.  Cleared per-sid on
+    /// `close_session`.
+    last_cwd_refresh: std::collections::HashMap<u64, Instant>,
     /// F3+3.3 — per-slot assignment for the LayoutModal preview /
     /// drag area.  `card_slots[slot_idx] = pane_idx` shows that
     /// pane's title in slot `slot_idx`.  A pane_idx out of range
@@ -977,26 +990,60 @@ impl CoreApp {
     /// pending grid shape.  Called when the modal opens, when the
     /// user changes cols/rows in the modal (since the cell count
     /// changes), and on apply (after permuting).
-    /// F3+3.6 — pull-based cwd refresh.  Walks every pane, reads its
-    /// `shell_child_pid` from `entry.toml`, then `proc_pidinfo`s the
-    /// cwd and writes the basename-bearing absolute path into
-    /// `pane_cwds`.  Called when the user opens the LayoutModal —
-    /// the modal preview + the title-strip placeholder both consume
-    /// `pane_cwds`, so a freshly opened modal always shows the
-    /// current cwd of each pane.  Between opens the cache is stale.
-    ///
-    /// Each iteration is bounded work: one entry.toml read + one
-    /// `proc_pidinfo` syscall per pane, ≤ SESSION_COUNT_HARD_CAP
-    /// total, no allocation in the cold-path miss case (the
-    /// HashMap reuses its buckets).  Not on the render hot path —
-    /// fires once per modal open click.
+    /// F3+3.6 — batch pull-based cwd refresh.  Walks every pane,
+    /// `read_shell_child_pid` + `pidtree::proc_cwd` per pane.  Used
+    /// by LayoutModal open to one-shot fresh all 9.
     fn refresh_pane_cwds(&mut self) {
+        let now = Instant::now();
         for pane in &self.panes {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let Some(pid) = read_shell_child_pid(sid) else { continue };
             let Some(path) = marspot::pidtree::proc_cwd(pid) else { continue };
             let s = path.to_string_lossy().into_owned();
             self.pane_cwds.insert(sid, s);
+            self.last_cwd_refresh.insert(sid, now);
+        }
+    }
+
+    /// F3+5 — single-pane cwd refresh with per-sid debounce.
+    /// Returns `true` if a syscall actually ran.  Callers pass
+    /// `force=true` when the trigger has just-occurred semantics
+    /// (pane spawn, modal open) to bypass debounce; `false` for
+    /// rate-limited triggers (every focus change, every Enter).
+    ///
+    /// Cost: at most two syscalls (one toml read + one
+    /// `proc_pidinfo`) when not debounced; zero on debounce hit.
+    /// Not on the render hot path.
+    fn refresh_pane_cwd_for(&mut self, pane_idx: usize, force: bool) -> bool {
+        let Some(pane) = self.panes.get(pane_idx) else { return false };
+        let Some(sid) = pane.shelld_session_id() else { return false };
+        let now = Instant::now();
+        if !force {
+            if let Some(&prev) = self.last_cwd_refresh.get(&sid) {
+                if now.duration_since(prev) < CWD_REFRESH_DEBOUNCE {
+                    return false;
+                }
+            }
+        }
+        let Some(pid) = read_shell_child_pid(sid) else { return false };
+        let Some(path) = marspot::pidtree::proc_cwd(pid) else { return false };
+        self.pane_cwds.insert(sid, path.to_string_lossy().into_owned());
+        self.last_cwd_refresh.insert(sid, now);
+        true
+    }
+
+    /// F3+5 — fill `pane_cwds` for any pane that doesn't yet have an
+    /// entry cached.  Called at the top of `build_views` so the title
+    /// strip placeholder always reads a populated value (modulo
+    /// genuinely-failing fetches: pid not yet written, sandbox, etc).
+    /// O(panes) with HashMap.contains_key on the hot path; the
+    /// syscall only fires for the misses, which on a stable session
+    /// = zero per frame after the first.
+    fn lazy_fill_missing_cwds(&mut self) {
+        for i in 0..self.panes.len() {
+            let Some(sid) = self.panes[i].shelld_session_id() else { continue };
+            if self.pane_cwds.contains_key(&sid) { continue; }
+            self.refresh_pane_cwd_for(i, true);
         }
     }
 
@@ -1108,6 +1155,14 @@ impl CoreApp {
                 Ok(pane) => {
                     self.panes.push(pane);
                     self.custom_titles.push(None);
+                    // F3+5 — initial cwd pull for the new pane so the
+                    // title strip lands populated on its first paint.
+                    // shell_child_pid may not be written yet on this
+                    // very tick — `refresh_pane_cwd_for` silently
+                    // returns false, and the build_views lazy-fill
+                    // catches it on a later frame.
+                    let new_idx = self.panes.len() - 1;
+                    self.refresh_pane_cwd_for(new_idx, true);
                 }
                 Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
             }
@@ -1251,6 +1306,12 @@ impl CoreApp {
             }
             // RFC-003 Phase 6: shelld-backed panes don't exist anymore;
             // the L3-only path above is the entire close path.
+            // F3+5 — drop cached cwd state so it can't leak past the
+            // pane.  Same id may eventually be reused; a fresh pane
+            // gets a fresh refresh.
+            self.pane_cwds.remove(&id);
+            self.last_cwd_refresh.remove(&id);
+            self.pane_badges.remove(&id);
         }
         self.panes.remove(idx);
         if idx < self.custom_titles.len() {
@@ -1934,6 +1995,14 @@ impl CoreApp {
             }
             if predicted {
                 self.needs_render = true;
+            }
+            // F3+5 — Enter pressed → shell about to execute a line
+            // (potentially `cd`).  Debounced refresh keeps a multi-
+            // line paste collapsed to one syscall.  Carriage return
+            // OR linefeed both count (modes may emit either).
+            if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
+                let focused = self.focused_idx;
+                self.refresh_pane_cwd_for(focused, false);
             }
         }
     }
@@ -2819,6 +2888,11 @@ impl CoreApp {
                 self.resolve_pending_on_defocus(idx);
                 self.focused_idx = idx;
                 let _ = self.panes[self.focused_idx].snap_to_live();
+                // F3+5 — focus change = "user is looking at this pane
+                // right now"; refresh its cwd so the title strip stays
+                // current.  Debounced per-sid (cheap when same pane is
+                // focused twice in a row).
+                self.refresh_pane_cwd_for(idx, false);
                 self.needs_render = true;
             }
         }
@@ -3073,17 +3147,16 @@ impl CoreApp {
         let states: Vec<SessionState> =
             self.panes.iter().map(|p| p.session().state()).collect();
 
-        // F3+2.1 — title placeholder = basename of the shell's
-        // last-reported cwd (OSC 7).  The cwd comes in as a
-        // `PaneCwd` wire frame from L3 (Terminal::osc_dispatch parses
-        // `\e]7;file://host/path\07`).  Macos's default /etc/zshrc
-        // emits the hook when `TERM_PROGRAM` is set, so most users
-        // get it for free.  Zero hot-path syscalls — every byte
-        // here is cached state populated by event-driven dispatch.
-        // `None` means "no OSC 7 seen yet" (in-process pane / shell
-        // hasn't sourced rc / non-zsh shell that doesn't emit it /
-        // cwd at filesystem root with no basename) → fall through to
-        // the ordinal label.
+        // F3+5 — title placeholder = basename of the cwd cached in
+        // `pane_cwds`.  Population strategy is hybrid passive:
+        // (1) pane spawn, (2) focus change, (3) Enter key in focused
+        // pane, (4) LayoutModal open (all panes), (5) `lazy_fill_missing_cwds`
+        // here at the top of build_views as a tail-of-conditions
+        // fallback — if anything else missed it, this catches it on
+        // the first paint.  Cost: HashMap.contains_key per pane (no
+        // syscall) on the steady-state hot path; one proc_pidinfo
+        // syscall only on a miss.
+        self.lazy_fill_missing_cwds();
         let cwd_basenames: Vec<Option<&str>> = (0..self.panes.len())
             .map(|i| {
                 let sid = self.panes[i].shelld_session_id()?;
@@ -3587,6 +3660,7 @@ fn main() {
         pending_grid_rows: grid_rows,
         card_slots: (0..(grid_cols * grid_rows)).collect(),
         layout_drag: None,
+        last_cwd_refresh: std::collections::HashMap::new(),
         sidebar_collapsed: true,
         hover_chrome_btn: None,
         process_panel: None,
