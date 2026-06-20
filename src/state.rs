@@ -67,6 +67,63 @@ pub struct SavedWindow {
     pub h: f64,
 }
 
+/// F3+6.1 — separate file for the window frame so L1 (marspot-shell,
+/// AppKit) can own writes without coordinating with L2 (marspot-core).
+/// One file per writer = no atomic-rename race.
+const WINDOW_MAGIC: u32 = 0xA5505011;
+const WINDOW_VERSION: u32 = 1;
+
+pub fn window_state_file_path() -> PathBuf {
+    let base: PathBuf = match std::env::var_os("MARSPOT_STATE_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(home).join("Library/Caches/marspot")
+        }
+    };
+    base.join("window-state.bin")
+}
+
+/// Best-effort read of window frame.  Same fail-soft policy as
+/// `read()` — returns None on missing / corrupt / version drift.
+pub fn read_window() -> Option<SavedWindow> {
+    let body = std::fs::read(window_state_file_path()).ok()?;
+    let mut cur = Cursor::new(body.as_slice());
+    if read_u32(&mut cur)? != WINDOW_MAGIC { return None; }
+    if read_u32(&mut cur)? != WINDOW_VERSION { return None; }
+    let display_id = read_u32(&mut cur)?;
+    let x = read_f64(&mut cur)?;
+    let y = read_f64(&mut cur)?;
+    let w = read_f64(&mut cur)?;
+    let h = read_f64(&mut cur)?;
+    Some(SavedWindow { display_id, x, y, w, h })
+}
+
+/// Best-effort atomic write of the window frame.
+pub fn write_window(s: &SavedWindow) -> io::Result<()> {
+    let path = window_state_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body: Vec<u8> = Vec::with_capacity(40);
+    body.extend_from_slice(&WINDOW_MAGIC.to_le_bytes());
+    body.extend_from_slice(&WINDOW_VERSION.to_le_bytes());
+    body.extend_from_slice(&s.display_id.to_le_bytes());
+    body.extend_from_slice(&s.x.to_le_bytes());
+    body.extend_from_slice(&s.y.to_le_bytes());
+    body.extend_from_slice(&s.w.to_le_bytes());
+    body.extend_from_slice(&s.h.to_le_bytes());
+    let mut tmp = path.clone();
+    tmp.set_extension("bin.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&body)?;
+        f.sync_all().ok();
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 /// Resolve `~/Library/Caches/marspot/shell-state.bin`, respecting
 /// `MARSPOT_STATE_DIR` for dev sandbox / test paths.
 pub fn state_file_path() -> PathBuf {

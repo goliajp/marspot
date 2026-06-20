@@ -99,6 +99,11 @@ pub trait MarspotApp: 'static {
     /// of a live resize plus once after the window is initially shown.
     fn resized(&mut self, ctx: &MarspotAppCtx, width_phys: f64, height_phys: f64);
 
+    /// F3+6.1 — fired on `windowDidMove:` so apps can persist window
+    /// frame on drag.  Default no-op so existing apps don't have to
+    /// care.  Use `ctx.window_frame_pt()` to read the new frame.
+    fn moved(&mut self, _ctx: &MarspotAppCtx) {}
+
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool);
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx);
@@ -174,6 +179,33 @@ impl MarspotAppCtx {
     pub fn window_frame_pt(&self) -> (f64, f64, f64, f64) {
         let f = self.nswindow.frame();
         (f.origin.x, f.origin.y, f.size.width, f.size.height)
+    }
+
+    /// F3+6.1 — `CGDirectDisplayID` (u32) of the screen the window
+    /// is currently on, via `[NSWindow screen].deviceDescription[
+    /// @"NSScreenNumber"]`.  None when the window isn't attached to a
+    /// screen (off-screen / between displays during a drag).  Used by
+    /// the persistence layer to re-anchor on the same monitor across
+    /// L1 restarts.
+    pub fn window_display_id(&self) -> Option<u32> {
+        unsafe {
+            let screen = self.nswindow.screen()?;
+            let desc = screen.deviceDescription();
+            // NSScreenNumber is an NSNumber wrapped in the NSScreen's
+            // device-description dictionary; pull it out via objc2's
+            // NSDictionary indexing + downcast to NSNumber.
+            use objc2_foundation::{NSNumber, NSString};
+            let key: Retained<NSString> = NSString::from_str("NSScreenNumber");
+            let val = desc.objectForKey(key.as_ref())?;
+            // The dict value is documented as an NSNumber.  Cast via
+            // raw pointer + NSNumber method dispatch — objc2's
+            // generic downcast varies across versions, raw cast keeps
+            // us API-stable.  SAFETY: documented NSDictionary value
+            // type at the NSScreenNumber key.
+            let ptr: *const objc2::runtime::AnyObject = &*val;
+            let num: &NSNumber = &*(ptr as *const NSNumber);
+            Some(num.unsignedIntValue())
+        }
     }
 }
 
@@ -809,6 +841,11 @@ declare_class!(
             dispatch_event(EventKind::Resized);
         }
 
+        #[method(windowDidMove:)]
+        fn window_did_move(&self, _notification: &NSNotification) {
+            dispatch_event(EventKind::Moved);
+        }
+
         #[method(windowDidBecomeKey:)]
         fn window_did_become_key(&self, _notification: &NSNotification) {
             dispatch_event(EventKind::Focused(true));
@@ -835,6 +872,7 @@ enum EventKind {
     MouseMove { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
     Resized,
+    Moved,
     Focused(bool),
     CloseRequested,
 }
@@ -869,6 +907,7 @@ fn dispatch_event(kind: EventKind) {
                 let (w, h) = ctx.inner_size_phys();
                 app.resized(ctx, w, h);
             }
+            EventKind::Moved => app.moved(ctx),
             EventKind::Focused(f) => app.focused(ctx, f),
             EventKind::CloseRequested => app.close_requested(ctx),
         }

@@ -1869,6 +1869,25 @@ impl ShellApp {
 
 }
 
+/// F3+6.1 — read the NSWindow's current frame + the display id of the
+/// screen it's currently on, atomic-write to `window-state.bin`.
+/// Failures are logged but don't propagate — persistence is best-
+/// effort.  Display id is `CGDirectDisplayID` (u32) from the screen's
+/// `deviceDescription["NSScreenNumber"]` field.
+fn save_window_state(ctx: &MarspotAppCtx) {
+    let (x, y, w, h) = ctx.window_frame_pt();
+    let display_id = ctx.window_display_id().unwrap_or(0);
+    let saved = marspot::state::SavedWindow {
+        display_id, x, y, w, h,
+    };
+    if let Err(e) = marspot::state::write_window(&saved) {
+        marspot::lx_warn!(
+            "shell.window_state.write_failed",
+            &format!("{e}")
+        );
+    }
+}
+
 impl MarspotApp for ShellApp {
     fn resumed(&mut self, ctx: &MarspotAppCtx) {
         let (w_phys, h_phys) = ctx.inner_size_phys();
@@ -1992,6 +2011,11 @@ impl MarspotApp for ShellApp {
     }
 
     fn resized(&mut self, ctx: &MarspotAppCtx, w_phys: f64, h_phys: f64) {
+        // F3+6.1 — persist window frame on every resize step.  Atomic
+        // rename means a live drag can fire 60+ saves/s and the file
+        // is always valid; the cost (~50us memcpy + 1 syscall) is
+        // well below the per-frame resize budget.
+        save_window_state(ctx);
         if let Some(p) = self.presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
             // Present *synchronously* inside the resize callback so
@@ -2032,6 +2056,14 @@ impl MarspotApp for ShellApp {
             }
         }
         ctx.request_redraw();
+    }
+
+    fn moved(&mut self, ctx: &MarspotAppCtx) {
+        // F3+6.1 — drag-end has no explicit callback in AppKit's
+        // delegate vocabulary; `windowDidMove:` fires per-step during
+        // the drag instead.  Each step writes the bin — atomic rename
+        // means the file is always consistent and the cost is cheap.
+        save_window_state(ctx);
     }
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
@@ -2355,6 +2387,14 @@ Usage:\n\
             [x, y, w, h] if w > 0.0 && h > 0.0 => Some((x, y, w, h)),
             _ => None,
         }
+    });
+    // F3+6.1 — fall back to the persisted window-state.bin when the
+    // env-var path (used by L1 self-execv to round-trip through itself)
+    // didn't carry a frame.  Sane bounds: w/h > 50 pt guards against a
+    // corrupt file shrinking the window to a sliver.
+    let restore_frame = restore_frame.or_else(|| {
+        let w = marspot::state::read_window()?;
+        if w.w > 50.0 && w.h > 50.0 { Some((w.x, w.y, w.w, w.h)) } else { None }
     });
     let attrs = WindowAttrs {
         title: DEFAULT_TITLE.to_string(),
