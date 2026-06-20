@@ -1080,7 +1080,12 @@ fn main() {
                 cols = cols,
                 rows = rows
             );
-            let local = LocalSession::spawn(id, cols, rows, "", wake)
+            // F3+6 — if L2 supplied an initial cwd via env, propagate
+            // it to LocalSession::spawn so the shell forks inside the
+            // user's saved working directory (cold restart from
+            // shell-state.bin path).  Empty / unset = $HOME fallback.
+            let initial_cwd = std::env::var("MARSPOT_INITIAL_CWD").unwrap_or_default();
+            let local = LocalSession::spawn(id, cols, rows, &initial_cwd, wake)
                 .unwrap_or_else(|e| {
                     lx_error!("session.local.spawn_failed", &format!("{e}"));
                     std::process::exit(1);

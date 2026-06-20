@@ -66,6 +66,7 @@ pub mod iosurface;
 pub mod pane;
 pub mod pidtree;
 pub mod render_metal;
+pub mod state;
 pub mod tools;
 pub mod ui;
 

@@ -535,6 +535,16 @@ fn spawn_l3(
     session_id: u64,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
+    spawn_l3_with_cwd(cols, rows, session_id, "", event_tx)
+}
+
+fn spawn_l3_with_cwd(
+    cols: u16,
+    rows: u16,
+    session_id: u64,
+    initial_cwd: &str,
+    event_tx: &Sender<CoreEvent>,
+) -> std::io::Result<L3Spawn> {
     // RFC-003 Amendment 7 step 3: L2 creates the region under the
     // deterministic per-session name `/msp-s-<id>` so a post-swap L2
     // can shm_open(name) and reattach to the surviving L3 instead of
@@ -593,6 +603,11 @@ fn spawn_l3(
         // records it in entry.toml.  A future L2 then knows what to
         // shm_open for reattach.
         .env("MARSPOT_SHM_NAME", &shm_name);
+    // F3+6 — pass the user's saved cwd through so the shell forks
+    // there instead of $HOME.  Empty = unset (L3 falls back to $HOME).
+    if !initial_cwd.is_empty() {
+        cmd.env("MARSPOT_INITIAL_CWD", initial_cwd);
+    }
     // Ensure the child does NOT inherit any control-socket env from
     // the L2 parent — RFC-003 step 3b leaves the inherited-fd path
     // behind entirely.
@@ -670,7 +685,17 @@ fn spawn_l3_pane(
     session_id: u64,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<Pane> {
-    let spawn = spawn_l3(cols, rows, session_id, event_tx)?;
+    spawn_l3_pane_with_cwd(cols, rows, session_id, "", event_tx)
+}
+
+fn spawn_l3_pane_with_cwd(
+    cols: u16,
+    rows: u16,
+    session_id: u64,
+    initial_cwd: &str,
+    event_tx: &Sender<CoreEvent>,
+) -> std::io::Result<Pane> {
+    let spawn = spawn_l3_with_cwd(cols, rows, session_id, initial_cwd, event_tx)?;
     Ok(Pane::new_l3(L3Conn::new(spawn, session_id)))
 }
 
@@ -1038,6 +1063,37 @@ impl CoreApp {
         true
     }
 
+    /// F3+6 — snapshot every persistable bit of state to
+    /// `shell-state.bin`.  Called from spawn / close / focus-change /
+    /// layout-apply / title-commit so a hard kill leaves a recent
+    /// state on disk.  ~50 us per call (memcpy + atomic rename); no
+    /// debounce because we never call this on the render hot path.
+    fn save_session_state(&self) {
+        use marspot::state::{SavedPane, SavedState};
+        let panes: Vec<SavedPane> = self.panes.iter().enumerate().map(|(i, p)| {
+            let sid = p.shelld_session_id().unwrap_or(0);
+            let custom_title = self.custom_titles.get(i)
+                .and_then(|t| t.clone())
+                .unwrap_or_default();
+            let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
+            SavedPane { sid, custom_title, last_cwd }
+        }).collect();
+        let saved = SavedState {
+            grid_cols: self.grid_cols as u16,
+            grid_rows: self.grid_rows as u16,
+            focused_idx: self.focused_idx as u16,
+            panes,
+            // F3+6.1 reserved — L1 writes window frame on its side.
+            window: None,
+        };
+        if let Err(e) = marspot::state::write(&saved) {
+            lx_warn!(
+                "core.state_file.write_failed",
+                &format!("{e}; saved state not persisted this tick")
+            );
+        }
+    }
+
     /// F3+5 — fill `pane_cwds` for any pane that doesn't yet have an
     /// entry cached.  Called at the top of `build_views` so the title
     /// strip placeholder always reads a populated value (modulo
@@ -1046,6 +1102,7 @@ impl CoreApp {
     /// syscall only fires for the misses, which on a stable session
     /// = zero per frame after the first.
     fn lazy_fill_missing_cwds(&mut self) {
+        let mut filled = false;
         for i in 0..self.panes.len() {
             let Some(sid) = self.panes[i].shelld_session_id() else { continue };
             if self.pane_cwds.contains_key(&sid) { continue; }
@@ -1054,7 +1111,16 @@ impl CoreApp {
             // pane that hasn't filled yet retries at most every
             // `CWD_REFRESH_DEBOUNCE`, not every frame.  Steady state
             // (all populated) skips entirely via contains_key above.
-            self.refresh_pane_cwd_for(i, false);
+            if self.refresh_pane_cwd_for(i, false) && self.pane_cwds.contains_key(&sid) {
+                filled = true;
+            }
+        }
+        // F3+6 — once we successfully ingested at least one fresh cwd,
+        // persist immediately so the saved file isn't empty after the
+        // very first frame's worth of fills.  No-op when nothing was
+        // actually filled (steady state skips above).
+        if filled {
+            self.save_session_state();
         }
     }
 
@@ -1174,6 +1240,7 @@ impl CoreApp {
                     // catches it on a later frame.
                     let new_idx = self.panes.len() - 1;
                     self.refresh_pane_cwd_for(new_idx, true);
+                    self.save_session_state();
                 }
                 Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
             }
@@ -1358,6 +1425,7 @@ impl CoreApp {
             }
             _ => {}
         }
+        self.save_session_state();
     }
 
     fn commit_title_edit(&mut self) {
@@ -1372,6 +1440,7 @@ impl CoreApp {
                     if trimmed.is_empty() { None } else { Some(trimmed) };
             }
             self.title_edit_buffer.clear();
+            self.save_session_state();
         }
     }
 
@@ -2675,6 +2744,7 @@ impl CoreApp {
                         self.focused_idx = cells - 1;
                     }
                     self.rebuild_layout();
+                    self.save_session_state();
                     return;
                 }
                 Some(LayoutModalHit::ColsDec) => {
@@ -3397,9 +3467,21 @@ fn main() {
     // placeholder size and resizing afterwards would replay the whole
     // bytelog into the wrong grid and then churn it through a reflow
     // for nothing (and, pre-reflow, used to destroy it outright).
-    // F3+3.0 — boot at Nine (3×3); user resizes via LayoutModal.
-    let (grid_cols, grid_rows): (usize, usize) = (3, 3);
-    let n_sessions = grid_cols * grid_rows;
+    // F3+6 — read persisted shell-state.bin first; defaults to 3×3
+    // when none / corrupt.  `saved_state` then drives reattach order,
+    // fresh-spawn cwds, focused_idx and custom_titles below.
+    let saved_state = marspot::state::read();
+    let (grid_cols, grid_rows): (usize, usize) = match saved_state.as_ref() {
+        Some(s) if s.grid_cols > 0 && s.grid_rows > 0 => (
+            (s.grid_cols as usize).clamp(1, 6),
+            (s.grid_rows as usize).clamp(1, 6),
+        ),
+        _ => (3, 3),
+    };
+    let n_sessions = match saved_state.as_ref() {
+        Some(s) => s.panes.len().clamp(1, SESSION_COUNT_HARD_CAP),
+        None => grid_cols * grid_rows,
+    };
     let (boot_cols, boot_rows) = {
         let (cell_w, cell_h) = renderer.cell_dims();
         let (lc, lr) = (grid_cols, grid_rows);
@@ -3480,7 +3562,27 @@ fn main() {
             }
         }
         let dead = dead_ids.len();
-        alive_ids.sort();
+        // F3+6 — order: saved.panes first (in saved order, for sids
+        // that survived), then any other alive sid as tail.  Without
+        // saved state, fall back to numeric sort (legacy).
+        if let Some(ref s) = saved_state {
+            let alive_set: std::collections::HashSet<u64> =
+                alive_ids.iter().copied().collect();
+            let saved_set: std::collections::HashSet<u64> =
+                s.panes.iter().map(|p| p.sid).filter(|&id| id != 0).collect();
+            let mut ordered: Vec<u64> = s.panes.iter()
+                .map(|p| p.sid)
+                .filter(|&id| id != 0 && alive_set.contains(&id))
+                .collect();
+            for &id in &alive_ids {
+                if !saved_set.contains(&id) {
+                    ordered.push(id);
+                }
+            }
+            alive_ids = ordered;
+        } else {
+            alive_ids.sort();
+        }
         let mut reattached_ids: Vec<u64> = Vec::new();
         for id in alive_ids.iter().take(n_sessions) {
             match reattach_l3_pane(*id, &event_tx) {
@@ -3600,8 +3702,19 @@ fn main() {
                 }
             }
         }
-        for id in ids {
-            match spawn_l3_pane(boot_cols, boot_rows, id, &event_tx) {
+        for (slot, id) in ids.into_iter().enumerate() {
+            // F3+6 — pick the cwd from saved.panes for the slot this
+            // spawn is filling.  `slot` indexes into the missing-tail
+            // (saved indexes 0..panes.len() are already reattached
+            // above; freshly spawned slots start at panes.len()
+            // before this iter began).
+            let target_slot = panes.len();
+            let cwd = saved_state.as_ref()
+                .and_then(|s| s.panes.get(target_slot))
+                .map(|p| p.last_cwd.clone())
+                .unwrap_or_default();
+            let _ = slot;
+            match spawn_l3_pane_with_cwd(boot_cols, boot_rows, id, &cwd, &event_tx) {
                 Ok(pane) => panes.push(pane),
                 Err(e) => lx_error!(
                     "core.spawn.l3_boot_failed",
@@ -3625,18 +3738,30 @@ fn main() {
         return;
     }
 
-    // Repopulate per-pane custom titles from the shelld-side metadata
-    // collected during boot.  Without this, every silent update reset
-    // the user's custom labels back to None — see the SET_TITLE
-    // round-trip on shelld for the persistence path.
+    // Repopulate per-pane custom titles.  F3+6 — `saved_state.panes`
+    // wins over `session_titles` (the entry.toml-derived source)
+    // because the bin file reflects the user's last interactive
+    // state, including titles set after the last L3 reattach hop.
+    // Fallback chain: saved → session_titles → None.
     let custom_titles_init: Vec<Option<String>> = panes
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
+            if let Some(ref s) = saved_state {
+                if let Some(entry) = s.panes.get(i) {
+                    if !entry.custom_title.is_empty() {
+                        return Some(entry.custom_title.clone());
+                    }
+                }
+            }
             p.shelld_session_id()
                 .and_then(|sid| session_titles.get(&sid).cloned())
                 .filter(|t| !t.is_empty())
         })
         .collect();
+    let initial_focused_idx = saved_state.as_ref()
+        .map(|s| (s.focused_idx as usize).min(panes.len().saturating_sub(1)))
+        .unwrap_or(0);
     let mut app = CoreApp {
         renderer,
         // Placeholder; `rebuild_layout` below builds the real one
@@ -3653,7 +3778,7 @@ fn main() {
             16.0,
         ),
         panes,
-        focused_idx: 0,
+        focused_idx: initial_focused_idx,
         custom_titles: custom_titles_init,
         editing_title: None,
         title_edit_buffer: String::new(),
@@ -3686,6 +3811,10 @@ fn main() {
         event_tx: event_tx.clone(),
     };
     app.rebuild_layout();
+    // F3+6 — first save right after boot so a hard kill before any
+    // user action still leaves the file populated.  Costs one write
+    // (~50us); idempotent if shell-state.bin already matched.
+    app.save_session_state();
     lx_info!(
         "core.layout.ready",
         "initial layout built",
