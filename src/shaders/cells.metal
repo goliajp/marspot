@@ -265,13 +265,18 @@ fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
     // Inside-vs-edge coverage for the fill.
     float fill_coverage = 1.0 - smoothstep(-aa, aa, d);
 
-    // Border ring coverage: |d| < border_width/2.
+    // Inside-stroke border: the border lives in `-border_width < d < 0`,
+    // i.e. the outermost `border_width` pixels of the rect's INTERIOR.
+    // This matches the CSS `box-sizing: border-box` convention — a 1 px
+    // border eats 1 px of interior, it never extends outside the rect.
+    // (The old `|d| < border_width/2` "centered stroke" extended half a
+    // pixel past the rect bounds, which subtly inflated every card by
+    // ~1 px and was the source of the "border looks clipped" feedback.)
     float border_coverage = 0.0;
     if (in.border_width > 0.0 && in.border_color.a > 0.0) {
-        float bw = in.border_width * 0.5;
-        // |d| close to 0 → on the boundary, ramp to 0 either side.
-        float band = abs(d) - bw;
-        border_coverage = 1.0 - smoothstep(-aa, aa, band);
+        float outside_band = 1.0 - smoothstep(-aa, aa, d);
+        float beyond_inner = smoothstep(-aa, aa, d + in.border_width);
+        border_coverage = outside_band * beyond_inner;
     }
 
     // Soft shadow falloff outside the fill rect.

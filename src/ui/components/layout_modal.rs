@@ -81,16 +81,25 @@ const STEPPER_VALUE_W_LOGICAL: f64 = 56.0;
 const APPLY_BTN_H_LOGICAL: f64 = 32.0;
 const ROW_GAP_LOGICAL: f64 = 12.0;
 const SIDE_PAD_LOGICAL: f64 = 16.0;
-/// Card grid dims.  Card aspect ratio kept close to 4:3 so a
-/// "wide" 5×2 grid reads differently from a "tall" 2×5.  Min card
-/// edge sized for ~9–10 chars at 1× scale (typical workdir basename).
+/// Card grid dims.  Cards run flat (wider than tall) so the
+/// preview reads as "list of slots" rather than "miniature
+/// terminals" — a tall 1:1 card invited the comparison and
+/// always lost it.  Min card edge sized for ~9–10 chars at 1×
+/// scale (typical workdir basename).
 const CARD_GAP_LOGICAL: f64 = 8.0;
 const CARD_MIN_W_LOGICAL: f64 = 80.0;
-const CARD_MIN_H_LOGICAL: f64 = 56.0;
-/// Aspect-ratio target for one card (width / height) — picked
-/// so the preview at default density matches the real grid's
-/// roughly 4:3 cells.  Both dimensions still floor at min above.
-const CARD_ASPECT: f64 = 4.0 / 3.0;
+const CARD_MIN_H_LOGICAL: f64 = 44.0;
+/// Aspect-ratio target for one card (width / height).  2.4 ≈
+/// 12:5 keeps cards readably flat across the cols range
+/// (3-col → ~55 pt tall, 1-col → ~170 pt tall — still capped
+/// by `CARD_MAX_H_LOGICAL` below so the 1-col case doesn't
+/// turn into a huge banner).
+const CARD_ASPECT: f64 = 2.4;
+/// Upper bound on card height — keeps the 1-col / 2-col
+/// preview from blowing up into a wall of card.  At default
+/// density the body width / 2 (≈ 200 pt) × 1/CARD_ASPECT
+/// already ≈ 83 pt, so this cap only kicks in for cols=1.
+const CARD_MAX_H_LOGICAL: f64 = 96.0;
 
 impl LayoutModal {
     /// Build modal geometry centered in the window.  `scale` is
@@ -131,24 +140,22 @@ impl LayoutModal {
             / cards_in as f64;
         let card_w = natural_card_w.max(CARD_MIN_W_LOGICAL * scale);
         let aspect_card_h = card_w / CARD_ASPECT;
-        let card_h = aspect_card_h.max(CARD_MIN_H_LOGICAL * scale);
+        let ideal_card_h = aspect_card_h
+            .max(CARD_MIN_H_LOGICAL * scale)
+            .min(CARD_MAX_H_LOGICAL * scale);
         let card_block_w = cards_in as f64 * card_w
             + (cards_in - 1) as f64 * card_gap;
-        let card_block_h = rows_in as f64 * card_h
+        let ideal_card_block_h = rows_in as f64 * ideal_card_h
             + (rows_in - 1) as f64 * card_gap;
         // Body content: top pad + cols row + gap + rows row + gap
         //              + card block + gap + total label + gap + apply.
-        let body_h = side_pad
-            + stepper_btn
-            + row_gap
-            + stepper_btn
-            + row_gap
-            + card_block_h
-            + row_gap
-            + stepper_btn  // total label
-            + row_gap
-            + apply_h
-            + side_pad;
+        // Split into fixed (non-card) part + card block — we'll need
+        // the fixed part again after `ModalFrame` clamps the frame.
+        let fixed_body_h = 2.0 * side_pad
+            + 3.0 * stepper_btn
+            + 4.0 * row_gap
+            + apply_h;
+        let body_h = fixed_body_h + ideal_card_block_h;
         let modal_h = (title_h + body_h).max(MODAL_MIN_H_LOGICAL * scale);
         let frame = ModalFrame::layout(
             window_w,
@@ -167,6 +174,23 @@ impl LayoutModal {
                 top_obstruction,
             },
         );
+        // F3+3.7-fix — `ModalFrame::layout` clamps default_h to
+        // `window_h * 0.95`, so the frame we actually got back may
+        // be shorter than what we asked for.  All the squish lands
+        // on the card region (apply is bottom-anchored, steppers are
+        // top-anchored).  Re-derive card_h from the frame's real
+        // body.h so the card block always fits — bottom border stays
+        // visible instead of overflowing into the total/apply band.
+        let actual_card_block_h = (frame.body.h - fixed_body_h).max(0.0);
+        let card_h = if actual_card_block_h < ideal_card_block_h {
+            ((actual_card_block_h - (rows_in - 1) as f64 * card_gap)
+                / rows_in as f64)
+                .max(1.0)
+        } else {
+            ideal_card_h
+        };
+        let card_block_h = rows_in as f64 * card_h
+            + (rows_in - 1) as f64 * card_gap;
         // Close [×] sits flush against title bar right edge.
         let close_size = title_h - 8.0 * scale;
         let close_btn = Rect {
@@ -363,5 +387,54 @@ mod tests {
     fn outside_returns_none() {
         let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
         assert_eq!(m.hit_test(0.0, 0.0), None);
+    }
+
+    /// Regression — F3+3.7 bug: rows=4 in a short window made the
+    /// modal_h request exceed `window_h * 0.95`, ModalFrame clamped,
+    /// and the card block overflowed past the total label so the
+    /// last row's bottom border was hidden.  After fix card_h
+    /// shrinks to fit; last card's bottom must stay clear of the
+    /// total label rect.
+    #[test]
+    fn last_row_bottom_clears_total_label_when_window_squishes_modal() {
+        // 660pt is a typical-ish short window; 3×4 modal at scale=1
+        // wants ~640pt, which gets clamped to 660 * 0.95 = 627.
+        let m = LayoutModal::layout(800.0, 660.0, 1.0, 0.0, 3, 4);
+        let last = m.cards.last().expect("4 rows × 3 cols → 12 cards");
+        let last_bottom = last.y_top + last.h;
+        assert!(
+            last_bottom <= m.total_label.y_top + 0.5,
+            "last card bottom {} must not overflow into total label \
+             (y_top={})",
+            last_bottom, m.total_label.y_top,
+        );
+    }
+
+    /// And the inverse case — when the modal has plenty of room
+    /// (1080pt window), card_h must NOT shrink, so it keeps the
+    /// nice 4:3 aspect.
+    #[test]
+    fn card_h_keeps_ideal_size_when_window_has_room() {
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 4);
+        let card = m.cards.first().expect("≥ 1 card");
+        // Ideal: card_w / CARD_ASPECT, card_w ≈ (440-32-16)/3 ≈
+        // 130.67, CARD_ASPECT 2.4 → card_h ≈ 54.4.  Within [MIN=44,
+        // MAX=96] so neither clamp kicks in.
+        assert!(
+            (card.h - 54.44).abs() < 0.5,
+            "expected ideal card_h ≈ 54pt (flat), got {}", card.h,
+        );
+    }
+
+    /// 1-col case used to be a tall banner (body_w / CARD_ASPECT
+    /// ≈ 170pt).  The MAX cap clamps it to 96pt.
+    #[test]
+    fn card_h_capped_at_max_for_single_column() {
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 1, 4);
+        let card = m.cards.first().expect("≥ 1 card");
+        assert!(
+            (card.h - 96.0).abs() < 0.5,
+            "expected cap at 96pt, got {}", card.h,
+        );
     }
 }
