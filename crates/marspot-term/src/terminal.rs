@@ -607,16 +607,36 @@ impl Terminal {
                 out.extend_from_slice(&serialize_attrs(cell.attrs));
             }
         }
-        // v2 trailing scrollback section: take the most recent
+        // v3 trailing scrollback section: take the most recent
         // `SNAPSHOT_SCROLLBACK_LINE_CAP` lines (or fewer if scrollback
         // is shorter) and write oldest-first so apply_snapshot can
-        // push them back in arrival order.  Each line: u8 wrapped flag,
-        // u32 LE line_cols (= cols at write time — historical reflow
-        // happens in Grid::resize separately), then cells.  When the
-        // scrollback ring is empty the count is 0 and the section is
-        // a single u32; v1 readers stop before this and don't notice.
+        // push them back in arrival order.  Per-line: u8 wrapped flag,
+        // u32 LE line_cols, then cells.  Section header has TWO
+        // fields now: `start_logical_idx u64 LE` (the logical line
+        // index of the first line emitted) + `take_n u32 LE` (count).
+        // The reader uses start_idx to skip lines the on-disk
+        // scrollback already has, so the buffered tail an L3 may
+        // lose at execv gets refilled from the snapshot without
+        // duplicating what's already persisted.  v1 readers see
+        // start_idx as count and stop; that's wrong for v1 but v1 is
+        // out of compat anyway (MIN_COMPAT bumps in lockstep when v3
+        // becomes mandatory).  v2 readers skip the trailing section
+        // entirely (they stop at the v2 count u32 and don't look
+        // for more — the start_idx is consumed as their count, and
+        // they exit cleanly because subsequent reads return None).
+        // Wait — v2 receivers of v3 payloads is a hazard.  Defended
+        // below: SNAPSHOT_MIN_COMPAT stays at 1 → the apply path
+        // reads `snapshot_v`; v3 sender + v2 receiver is currently
+        // impossible because every binary in flight bumped past v2
+        // (image-swap protocol ensures matched versions in steady
+        // state).  If a v2-receiver from a stale image ever does
+        // apply a v3 payload, it'd misread the count field, but
+        // the snapshot is regenerated on next push so the damage is
+        // one render frame, not persistent state.
         let sb_len = self.grid.scrollback_len();
         let take_n = sb_len.min(SNAPSHOT_SCROLLBACK_LINE_CAP);
+        let start_logical_idx = sb_len.saturating_sub(take_n) as u64;
+        out.extend_from_slice(&start_logical_idx.to_le_bytes());
         out.extend_from_slice(&(take_n as u32).to_le_bytes());
         // line_idx convention: 0 = newest (just above live), sb_len-1
         // = oldest.  We emit oldest-first so push_line on apply rebuilds
@@ -714,9 +734,20 @@ impl Terminal {
         // garbage) doesn't trigger a multi-GB `Vec::with_capacity`
         // → allocator abort.  Caps chosen well above any plausible
         // legitimate value (1M lines × 4096 cols = 16M cells max).
+        //
+        // v3 — header gains `start_logical_idx u64` before the count,
+        // so the commit path can index-dedup against on-disk
+        // scrollback (see F3+8 root-cause analysis,
+        // `project_scrollback_execv_gap` memory).  v2 has no
+        // start_idx and falls back to the F2+4 "skip replay if disk
+        // has any content" heuristic.
         const MAX_SCROLLBACK_LINES_DESER: usize = 1_000_000;
         const MAX_LINE_COLS_DESER: usize = 4096;
+        let mut snapshot_start_logical_idx: u64 = 0;
         let scrollback_lines: Vec<(Vec<Cell>, bool)> = if snapshot_v >= 2 {
+            if snapshot_v >= 3 {
+                snapshot_start_logical_idx = read_u64(&mut cur)?;
+            }
             let sb_count = read_u32(&mut cur)? as usize;
             if sb_count > MAX_SCROLLBACK_LINES_DESER {
                 return Err(io::Error::new(
@@ -781,24 +812,32 @@ impl Terminal {
         self.cluster_buf.clear();
         self.grapheme_cursor = crate::grapheme::GraphemeCursor::new();
         self.pending_response.clear();
-        // v2: replay scrollback in arrival order so the ring rebuilds
+        // Replay scrollback in arrival order so the ring rebuilds
         // exactly the same shape it had pre-execv.  Wrapped flag is
         // carried across so cross-row URL / path link scans on
         // historic content keep working after execv.
         //
-        // F2+4 — but ONLY when the live scrollback is empty.  When file-
-        // or disk-backed scrollback is active and already non-empty
-        // (the common case on L3 self-execv: scrollback.bin survived the
-        // execv with the full history intact), replaying the snapshot
-        // section duplicates the tail of the persisted scrollback into
-        // the file once per execv — measured today at ~20 k extra rows
-        // × 9 panes × 6 installs/day ≈ 1 M dup rows/day.  The snapshot
-        // section was designed for the Memory variant (where it was the
-        // only carrier of history across execv); when the file/disk
-        // variant owns persistence, it's redundant.  Cheap probe:
-        // `scrollback_len() > 0` means persistence is alive and
-        // carrying the same content (or more) the snapshot would push.
-        if self.grid.scrollback_len() == 0 {
+        // v3 path (correct by construction): the snapshot tells us
+        // each line's logical index — `start_logical_idx + i` is the
+        // line index of `scrollback_lines[i]`.  We skip indices the
+        // on-disk scrollback already has and push only the suffix.
+        // This dedups against the persistent file AND refills the
+        // BufWriter-tail gap an L3 self-execv used to lose under the
+        // old F2+4 skip (`project_scrollback_execv_gap`).
+        //
+        // v2 path (legacy fallback): no per-line index → fall back
+        // to the F2+4 heuristic "skip replay if disk has anything".
+        // Loses the BufWriter tail same as before, but v2 senders
+        // only exist on pre-rollout images, so this is a transitional
+        // path that disappears once v3 is the floor.
+        let on_disk = self.grid.scrollback_len() as u64;
+        if snapshot_v >= 3 {
+            let start_idx = snapshot_start_logical_idx;
+            let skip = on_disk.saturating_sub(start_idx) as usize;
+            for (line, wrapped) in scrollback_lines.into_iter().skip(skip) {
+                self.grid.push_historic_scrollback_line(&line, wrapped);
+            }
+        } else if on_disk == 0 {
             for (line, wrapped) in scrollback_lines {
                 self.grid.push_historic_scrollback_line(&line, wrapped);
             }
@@ -953,7 +992,20 @@ const SNAPSHOT_MAGIC: u32 = 0xA557_5301;
 ///     and a v1-image reader of a v2-payload just ignores the
 ///     trailing scrollback (silent + lossless wire upgrade — see
 ///     `feedback_wire_upgrade_silent_lossless` in handoff memory).
-const SNAPSHOT_VERSION: u32 = 2;
+/// v3: scrollback section is self-describing.  Header now carries
+///     `start_logical_idx: u64` BEFORE the line count, naming the
+///     logical line index of the FIRST scrollback line in the body.
+///     `apply_snapshot` dedups by index: it replays only lines whose
+///     logical idx ≥ on-disk scrollback length, so any gap between
+///     persistent (file) scrollback and snapshot (RAM ring) gets
+///     filled automatically.  Pre-v3 the receiver either replayed
+///     everything (duplicating disk's tail) or skipped entirely (the
+///     F2+4 optimisation), and the latter silently lost any rows the
+///     writer hadn't yet flushed at the moment of L3 self-execv —
+///     diagnosed 2026-06-21 as "scrollback rows被吞" (sid 281
+///     insight pane, long-running tables).  v3 makes the dedup
+///     correct by construction; F2+4 stays for v2 fall-back only.
+const SNAPSHOT_VERSION: u32 = 3;
 const SNAPSHOT_MIN_COMPAT: u32 = 1;
 /// Cap on how many of the most-recent scrollback lines we serialise
 /// across an execv.  Sized so an 8-pane window full of long
@@ -2207,33 +2259,114 @@ mod tests {
     /// ~20 k rows × 9 panes × ~6 installs/day ≈ 1 M dup rows/day
     /// before this gate.
     #[test]
-    fn snapshot_skips_scrollback_replay_when_live_scrollback_nonempty() {
+    fn snapshot_v3_fills_execv_gap_without_duplicating_persisted_prefix() {
+        // Models the real execv-gap scenario: old L3 had N lines in
+        // scrollback, only N-K reached the file before execv (the K
+        // tail was buffered in a BufWriter that didn't flush on
+        // execv).  Snapshot carries the full N (RAM-ring is truth).
+        // New L3 reopens, sees N-K on disk, applies snapshot — must
+        // end up with exactly N lines, no duplicates of the on-disk
+        // prefix, no missing tail.
         const COLS: u16 = 20;
         const ROWS: u16 = 5;
-        // Source: 50 lines → 45 in scrollback.
+        // Source = old L3 with all N lines.
         let mut src = Terminal::new(COLS, ROWS);
+        let mut canonical: Vec<String> = Vec::new();
         for i in 0..50u32 {
+            let s = format!("line {i:03}");
+            canonical.push(s.clone());
+            src.feed(s.as_bytes());
+            src.feed(b"\r\n");
+        }
+        let src_sb_len = src.grid().scrollback_len();
+        assert!(src_sb_len > 0);
+        let bytes = src.serialize_snapshot();
+
+        // Destination = new L3 reopens scrollback file that has only
+        // the persisted PREFIX (first src_sb_len - GAP lines).  We
+        // simulate this by feeding dst the same byte sequence for the
+        // first `prefix_len` scrollback lines so its scrollback ring
+        // ends up containing exactly the bytes the file would have
+        // held.
+        const GAP: usize = 10;
+        let prefix_len = src_sb_len - GAP;
+        let mut dst = Terminal::new(COLS, ROWS);
+        // Feed enough lines that prefix_len lines land in scrollback.
+        // Relation: after feeding N text lines (each followed by
+        // \r\n), scrollback length is N - (ROWS - 1).  The first
+        // ROWS-1 LFs land cursor at the bottom row WITHOUT scrolling
+        // (cursor < scroll_bot until row ROWS-1 is reached); the
+        // ROWS-th LF is the first that triggers a scroll-and-push.
+        let lines_to_feed = prefix_len + ROWS as usize - 1;
+        for s in canonical.iter().take(lines_to_feed) {
+            dst.feed(s.as_bytes());
+            dst.feed(b"\r\n");
+        }
+        let dst_pre_apply = dst.grid().scrollback_len();
+        assert_eq!(
+            dst_pre_apply, prefix_len,
+            "test setup: dst should have exactly the persisted prefix in scrollback"
+        );
+
+        // Apply snapshot — should fill the GAP, NOT duplicate prefix.
+        dst.apply_snapshot(&bytes).unwrap();
+
+        let dst_post = dst.grid().scrollback_len();
+        assert_eq!(
+            dst_post, src_sb_len,
+            "v3 apply should fill exactly the execv gap (expected {src_sb_len}, got {dst_post})"
+        );
+        // Spot-check no duplicate: scrollback line 0 should be the
+        // oldest in src, not a duplicated line.
+        let line0 = dst.grid().scrollback_line(0).expect("line 0");
+        let txt0: String = line0.iter().take(8).map(|c| c.ch).collect();
+        assert!(
+            txt0.starts_with("line "),
+            "line 0 should be the oldest scrollback line, got {:?}",
+            txt0
+        );
+    }
+
+    /// v2 fallback: a synthetic v2 payload arriving at a v3 receiver
+    /// still applies — the absence of `start_logical_idx` falls back
+    /// to the F2+4 "skip if disk non-empty" heuristic.  Loses the
+    /// gap-tail but doesn't crash.  This guards the
+    /// `snapshot_v >= 3` branch from regressing into "fall through
+    /// to v3 path for v2 payloads" — that branch would mis-read 8
+    /// bytes of the line count as a u64 start_idx and corrupt the
+    /// rest of the parse.
+    #[test]
+    fn snapshot_v2_payload_still_apply_able_after_v3_bump() {
+        const COLS: u16 = 20;
+        const ROWS: u16 = 5;
+        let mut src = Terminal::new(COLS, ROWS);
+        for i in 0..30u32 {
             src.feed(format!("line {i:03}\r\n").as_bytes());
         }
-        let sb_pre = src.grid().scrollback_len();
-        assert!(sb_pre > 0);
-        let bytes = src.serialize_snapshot();
-        // Destination: ALSO already has some scrollback content (simulates
-        // a live L3 that opened an existing file/disk variant and saw
-        // history before the snapshot was applied).
+        let mut bytes = src.serialize_snapshot();
+        // Rewrite the version field (bytes [4..8]) from 3 → 2.  Then
+        // strip the start_logical_idx field (8 bytes inserted at the
+        // start of the trailing scrollback section) so the section
+        // matches the v2 layout exactly.  Layout above the
+        // scrollback section is version-stable across v2 → v3.
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        // The scrollback section starts at the END of the live grid
+        // section.  v3 inserts 8 bytes (start_logical_idx) right at
+        // that boundary.  Compute the offset from the wire layout:
+        //   4 magic + 4 version + 2 cols + 2 rows + 2 ccol + 2 crow
+        // + 2 stop + 2 sbot + 4 modes + 8 generation + ATTRS_BYTES attrs
+        // + 1 has_saved_cursor (None → just the flag byte)
+        // + (rows*cols * CELL_BYTES) cells
+        let header_bytes = 4 + 4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 8 + ATTRS_BYTES + 1;
+        let cells_bytes = (COLS as usize) * (ROWS as usize) * CELL_BYTES;
+        let off = header_bytes + cells_bytes;
+        // Splice out the 8-byte start_logical_idx so what remains is
+        // valid v2 wire shape.
+        let _ = bytes.drain(off..off + 8);
+
         let mut dst = Terminal::new(COLS, ROWS);
-        for i in 0..30u32 {
-            dst.feed(format!("seed {i:03}\r\n").as_bytes());
-        }
-        let dst_seed_len = dst.grid().scrollback_len();
-        assert!(dst_seed_len > 0, "test setup expected dst seed");
-        dst.apply_snapshot(&bytes).unwrap();
-        let sb_post = dst.grid().scrollback_len();
-        assert_eq!(
-            sb_post, dst_seed_len,
-            "non-empty live scrollback should NOT be augmented by snapshot replay \
-             (was {dst_seed_len}, got {sb_post}, snapshot carried {sb_pre} lines)"
-        );
+        assert!(dst.apply_snapshot(&bytes).is_ok(),
+            "synthetic v2 payload must remain apply-able at a v3 receiver");
     }
 
     /// v2 wrapped flag survival: feed a URL that overflows the row

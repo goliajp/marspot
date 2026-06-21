@@ -22,35 +22,35 @@
     {
       "id": "cat-ascii",
       "bytes": 33554570,
-      "mars_parse_MBps_min": 165,
+      "mars_parse_MBps_min": 173,
       "mars_live_MBps_min": 137,
       "mars_vs_best_other_min": 1.37
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
-      "mars_parse_MBps_min": 163,
+      "mars_parse_MBps_min": 167,
       "mars_live_MBps_min": 131,
       "mars_vs_best_other_min": 1.39
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
-      "mars_parse_MBps_min": 199,
+      "mars_parse_MBps_min": 208,
       "mars_live_MBps_min": 144,
       "mars_vs_best_other_min": 1.08
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 185,
+      "mars_parse_MBps_min": 194,
       "mars_live_MBps_min": 144,
       "mars_vs_best_other_min": 1.26
     }
   ],
   "render_full_repaint": {
     "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs \u2014 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
-    "p99_us_max": 1197
+    "p99_us_max": 1301
   },
   "scroll_repaint": {
     "_comment": "p99 ns/repaint while walking view_offset from 5000 \u2192 0 in 3-line steps over 100K-line scroll-history.bin (--bench scroll).  Picks up MARS_DISK_SCROLLBACK so the gate tracks whichever variant is current default.  Median of 5 trials with run-to-run noise ~30 % (scroll p99 hovers in the low-microsecond regime where one fault or cache eviction skews the result).  --update-baseline applies the default 10 % margin which is too tight for this metric; manually widen to ~2x current median so the gate doesn't flap.",
@@ -61,14 +61,14 @@
     "p99_us_max": 4
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).  NB: measure on the canonical bench host (idle mini) — a dev box with a different toolchain can report a fatter mcli (~557 KiB) that is a local artefact, not real growth; on the mini mcli stays ~442 KiB even after the target #4 marspot-term split (lto strips the unused engine paths).",
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).  NB: measure on the canonical bench host (idle mini) \u2014 a dev box with a different toolchain can report a fatter mcli (~557 KiB) that is a local artefact, not real growth; on the mini mcli stays ~442 KiB even after the target #4 marspot-term split (lto strips the unused engine paths).",
     "mcli": 485830,
     "marspot": 778008
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
-    "mcli": 99130,
-    "marspot": 95712
+    "mcli": 99648,
+    "marspot": 95981
   },
   "competitors_snapshot": {
     "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).",

@@ -557,8 +557,15 @@ if do_update:
     # snapshot.  10 % safety margin on marspot throughput AND on the
     # vs-best ratio — the ratio is what protects against silent slip,
     # so re-locking it from the same observation is the right move.
+    #
+    # `snap` is only loaded in `--full` mode (see line ~430); in fast
+    # tier the variable name doesn't exist at all, so the bare
+    # `is not None` check used to NameError out and abort the whole
+    # baseline write.  Guard by checking `mode == "full"` here too.
     multi_cfg = baseline.get("multi_session_thresholds")
-    if multi_cfg and snap is not None:
+    snap_local = locals().get("snap") if mode == "full" else None
+    if multi_cfg and snap_local is not None:
+        snap = snap_local
         for sid, cfg in multi_cfg.get("scenarios", {}).items():
             metric = cfg["metric"]
             scen = snap.get("scenarios", {}).get(sid, {})
