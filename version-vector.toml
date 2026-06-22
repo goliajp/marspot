@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.8"   # 修 0.6.7 启动 panic — apply_saved_frame 改 deferred
+shell   = "0.6.9"   # dev panel 加 tab strip + UI tab(左 menu + 5 类 sample)
 core    = "0.10.68" # toolbar dev icon click → DevPanelToggle wire → L1
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

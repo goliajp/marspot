@@ -17,7 +17,21 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.8**
+Current: **0.6.9**
+
+### 0.6.9
+
+dev panel 加 tab strip + UI tab(左 menu + 右 sample 区).tab strip 三个 tab(UI / Tokens / Components,后两个是 placeholder).UI tab 内左侧 140pt menu 列五项(Colors / Units / Rects / Lines / Text),右侧 content 区把五段 sample 全部 stack 显示:
+
+- **Colors** — 7 个色块演示 `Color::rgba` 7 种命名色 + alpha 0.5 半透明
+- **Units** — 5 条横向 bar 对比 `Pt(40/80/160)` 跟 `Pct(0.25/0.50)`,带标签
+- **Rects** — fill / border(透明 fill + 1pt 描边)/ radius(10) / shadow 四种 builder 用法
+- **Lines** — 1/2/3pt 线宽 + alpha 0.30 + 一条 diagonal 演示 line 不锁轴
+- **Text** — 5 种 token 色 + 一种显式 Color::rgba 红色
+
+DevPanelState 加 `active_section: usize`(默认 `SECTION_COLORS`),菜单当前 row highlight 走它.mouse routing into dev window 还没接,所以菜单点不动 —— 当前 right area 永远 stack 全部 sample,user 直接看就行(等 mouse 接通后改成 active_section 切单一 section view).
+
+shell 0.6.8 → 0.6.9.
 
 ### 0.6.8
 
