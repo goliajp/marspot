@@ -17,7 +17,26 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.11**
+Current: **0.6.12**
+
+### 0.6.12
+
+UI 系统 v2 framework 落定(`docs/ui-system-model.md` 的 P3a → P3h + P3k).新增 ~1500 LOC,无组件迁移(留 P3i),零回归,213/213 lib tests PASS.
+
+落地的(实际可用):
+- **P3a** `src/ui/theme/token.rs`:18 色 token + 6 space 档 + 4 radius 档 + PILL
+- **P3b** `Length::Ch(f64)` 单位 + `resolve_for_axis_with_cell` 三参数 resolver(老 2 参数 resolver Ch → 0 兜底)
+- **P3c** `src/ui/view/{types,view}.rs`:`View` enum(Text/Spacer/Filled/Hairline/VStack/HStack/ZStack/Modified)+ `Modifier` 链(Padding/Background/Border/CornerRadius/Shadow/Frame/Offset/ZIndex/Hidden/OnHover/OnClick/Id)+ `Edges`/`Anchor`(9 anchor SwiftUI shape)/`FrameSpec`/`Shadow`/`ActionId`/`HoverId`/`ViewId`。fluent chain API(`Text::new("h").padding(MD).background(...).border(...).frame(...)`)。
+- **P3d/e/f** `src/ui/view/layout.rs`:Constraints two-pass 算法(完整 Flutter 同形),VStack/HStack/ZStack + Spacer flex,Modified 走 Padding/Frame/Background/Border/Shadow/Offset/Id 烤进 `Decoration`。
+- **P3g** `src/ui/view/paint.rs`:LaidOut → Canvas,submission order = z order,Text truncate End/Middle/None + TextWeight::Dim(alpha × 0.6)+ TextAlign Leading/Center/Trailing。
+- **P3h** `src/ui/view/hit_test.rs`:tree-walk post-order + reverse children = deepest+topmost wins,跟 paint 的 z 顺序一致。
+- **P3k** `src/ui/theme/mod.rs` re-export,ThemeId 全局 slot 留好(v1 只有 Dark)。
+
+留 P3i 的(下次):各组件(ContextMenu / LayoutModal / DevPanel / Table / Sidebar)从手算 canvas builder 迁到 View 树。P3j(ViewPainter 退役)= P3i 完成的副产品。
+
+参考 `docs/ui-system-model.md` 全 doc 看完整设计。
+
+shell 0.6.11 → 0.6.12.27 个新 view-tree tests + 全部 213 lib tests PASS.
 
 ### 0.6.11
 
