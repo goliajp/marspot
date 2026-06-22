@@ -17,7 +17,26 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.12**
+Current: **0.6.13**
+
+### 0.6.13
+
+DevPanel Model section 完整呈现 v2 model + **用 v2 framework 自身渲染** —— 自反 demo:看到的这个面板,就是用面板描述的体系建出来的.
+
+落地内容:
+- 新 `build_model_view() -> View` 返一棵完整 View 树
+- L1-L5 五层各一段:
+  - L1 Foundation:Length(Pt/Pct/Ch)/ Color / Tokens 含 5-swatch palette demo
+  - L2 Box Model:一个 padding + border + radius + shadow 全有的 box demo + 3 条 hint
+  - L3 Primitives(Canvas):Canvas + submission order 说明
+  - L4 View Tree + Modifiers(新):原子/容器/modifiers 列表 + **VStack/HStack/ZStack 三个 mini demo 并排**(各 3 色块)+ Constraints/Align/Distribute/Anchor
+  - L5 Components:未来要迁的组件清单
+- 渲染路径走 `layout_view + paint_into` 在 dev panel canvas 里 layout + paint — Model section 完全走新 framework;其余 sections (Colors/Units/Rects/Lines/Text) 仍走老 canvas builder
+- View 加 fluent helpers:`.vstack_gap(L)` / `.hstack_gap(L)` / `.align_cross_*` / `.distribute(D)` — 在 stack view 上配 gap/align/distribute 不用 enum 解构
+
+`build_dev_panel_canvas` 加 `chrome_ascent: f32` 参数(layout 把 text 基线放 `rect.y + ascent`).callers(`dev_window.rs` + `render_metal.rs` 两处)同步.
+
+shell 0.6.12 → 0.6.13.9/9 dev_panel tests PASS,zero 编译回归.
 
 ### 0.6.12
 

@@ -191,6 +191,44 @@ impl View {
         }
     }
 
+    /// Stack-only fluent: set gap.  No-op on non-stack variants
+    /// (so caller doesn't have to type-check downstream).
+    pub fn vstack_gap(self, g: Length) -> Self {
+        match self {
+            View::VStack { children, align, distribute, .. } =>
+                View::VStack { children, gap: g, align, distribute },
+            View::HStack { children, align, distribute, .. } =>
+                View::HStack { children, gap: g, align, distribute },
+            other => other,
+        }
+    }
+    pub fn hstack_gap(self, g: Length) -> Self { self.vstack_gap(g) }
+
+    pub fn align_cross_start(self) -> Self    { self.align_cross(AlignCross::Start) }
+    pub fn align_cross_center(self) -> Self   { self.align_cross(AlignCross::Center) }
+    pub fn align_cross_end(self) -> Self      { self.align_cross(AlignCross::End) }
+    pub fn align_cross_stretch(self) -> Self  { self.align_cross(AlignCross::Stretch) }
+
+    pub fn align_cross(self, a: AlignCross) -> Self {
+        match self {
+            View::VStack { children, gap, distribute, .. } =>
+                View::VStack { children, gap, align: a, distribute },
+            View::HStack { children, gap, distribute, .. } =>
+                View::HStack { children, gap, align: a, distribute },
+            other => other,
+        }
+    }
+
+    pub fn distribute(self, d: Distribute) -> Self {
+        match self {
+            View::VStack { children, gap, align, .. } =>
+                View::VStack { children, gap, align, distribute: d },
+            View::HStack { children, gap, align, .. } =>
+                View::HStack { children, gap, align, distribute: d },
+            other => other,
+        }
+    }
+
     pub fn padding(self, e: Edges) -> Self { self.add_mod(Modifier::Padding(e)) }
     pub fn background(self, c: Color) -> Self { self.add_mod(Modifier::Background(c)) }
     pub fn border(self, w: Length, c: Color) -> Self { self.add_mod(Modifier::Border(w, c)) }

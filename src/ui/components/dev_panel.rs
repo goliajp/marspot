@@ -209,6 +209,7 @@ pub fn build_dev_panel_canvas(
     window_h_phys: f64,
     chrome_cell_w: f32,
     chrome_cell_h: f32,
+    chrome_ascent: f32,
 ) -> Canvas {
     let scale = state.scale;
     let mut canvas = Canvas::new(scale, ParentRect::window(window_w_phys, window_h_phys));
@@ -336,8 +337,30 @@ pub fn build_dev_panel_canvas(
 
     match state.active_section {
         SECTION_MODEL => {
-            let y = draw_section_header(&mut canvas, content_x, y, "Model");
-            let _ = draw_model_sample(&mut canvas, content_x, y);
+            let y = draw_section_header(&mut canvas, content_x, y, "v2 Model");
+            // Drink our own champagne — the Model section is rendered
+            // through the new View tree + Modifier + Constraints layout
+            // + paint pipeline, so the surface you see IS the model
+            // demonstrating itself.  Width-bounded by (window - menu -
+            // padding); height grows by content.
+            let ctx = crate::ui::view::LayoutCtx {
+                scale,
+                cell_w_phys: chrome_cell_w as f64,
+                cell_h_phys: chrome_cell_h as f64,
+                ascent_phys: chrome_ascent as f64,
+            };
+            let avail_w_pt = (window_w_phys / scale) - content_x - 16.0;
+            let avail_h_pt = (window_h_phys / scale) - y;
+            let view = build_model_view();
+            let laid = crate::ui::view::layout_view(
+                &view, ctx,
+                (content_x * scale, y * scale),
+                crate::ui::view::Constraints::loose(
+                    avail_w_pt * scale,
+                    avail_h_pt * scale,
+                ),
+            );
+            crate::ui::view::paint_into(&mut canvas, &laid, ctx);
         }
         SECTION_COLORS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Colors");
@@ -385,10 +408,195 @@ fn draw_section_header(canvas: &mut Canvas, x: f64, y: f64, label: &str) -> f64 
     y + 26.0
 }
 
-/// Model: the CSS-like mental model the rest of the UI tab demos
-/// piece by piece.  This is the "read me first" section — `Length`,
-/// the box model, `Color`, z-order.  Mostly text + one Z-order
-/// visual demo because z-order isn't shown elsewhere.
+/// v2 Model section — built with the **new View tree + Modifier
+/// chain + Constraints layout + paint pipeline** end-to-end.  This
+/// is the self-referential demo: the surface that *describes* the
+/// model is *built with* the model.
+///
+/// Layout shape:
+///
+/// ```text
+/// L1 Foundation
+///   text + small Length/Color/Token examples
+/// L2 Box Model
+///   demo box (bg + border + radius + shadow) labelled
+/// L3 Primitives (Canvas)
+///   text only — Canvas is described, not shown (the whole panel
+///   IS Canvas)
+/// L4 View Tree (new)
+///   atoms / containers / modifiers as text + tiny VStack/HStack/
+///   ZStack demos side-by-side
+/// L5 Components
+///   text list
+/// ```
+fn build_model_view() -> crate::ui::view::View {
+    use crate::ui::view::{
+        View, Text, TextSize, TextWeight, Edges, FrameSpec, AlignCross, Distribute,
+        vstack, hstack, zstack, filled, hairline_horiz, spacer,
+    };
+    use crate::ui::theme::{color, space, radius};
+    use crate::ui::core::Length;
+
+    // Helpers --------------------------------------------------
+    let h1 = |s: &str| Text::new(s).color(color::ACCENT_DIM).size(TextSize::Header).build();
+    let body = |s: &str| Text::new(s).color(color::FG).build();
+    let mono = |s: &str| Text::new(s).color(color::ACCENT_DIM).build();
+    let hint = |s: &str| Text::new(s).color(color::HINT).weight(TextWeight::Dim).build();
+
+    let mk_swatch = |c| {
+        filled(c).corner_radius(radius::SM).frame(FrameSpec {
+            width:  Some(Length::Pt(14.0)),
+            height: Some(Length::Pt(14.0)),
+            ..Default::default()
+        })
+    };
+
+    // ── L1 Foundation ────────────────────────────────────────
+    let l1 = vstack(vec![
+        h1("L1 — Foundation"),
+        body("Length:  Pt(N) | Pct(F) | Ch(N)"),
+        hint("    Pt(1) ≡ CSS 1px   scale-independent"),
+        hint("    Pct(0.5) ≡ 50%    of parent axis"),
+        hint("    Ch(3) = 3 chrome cells   terminal-domain"),
+        body("Color:   Color::rgba(r, g, b, a)   ≡ CSS rgba()"),
+        // Mini palette demo using View::Filled.
+        hstack(vec![
+            mono("Tokens:"),
+            mk_swatch(color::FG),
+            mk_swatch(color::ACCENT),
+            mk_swatch(color::SUCCESS),
+            mk_swatch(color::WARN),
+            mk_swatch(color::DANGER),
+            hint("color::FG/ACCENT/SUCCESS/WARN/DANGER"),
+        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
+        hint("    space::XS(4) SM(8) MD(12) LG(16) XL(24)"),
+        hint("    radius::SM(3) MD(6) LG(10) PILL(9999)"),
+    ]).vstack_gap(Length::Pt(2.0));
+
+    // ── L2 Box Model — actual box demo ───────────────────────
+    use crate::ui::view::Shadow;
+    let box_demo = Text::new("content").color(color::FG).build()
+        .padding(Edges::all(space::MD))
+        .background(color::BG_PANEL)
+        .border(Length::Pt(1.0), color::BORDER)
+        .corner_radius(radius::MD)
+        .shadow(Shadow {
+            blur: Length::Pt(6.0),
+            offset: (Length::Pt(0.0), Length::Pt(2.0)),
+            color: color::SHADOW,
+        });
+    let l2 = vstack(vec![
+        h1("L2 — Box Model"),
+        hstack(vec![
+            box_demo,
+            spacer(),
+            vstack(vec![
+                hint("box-sizing: border-box   .size() 量外缘"),
+                hint("inside-stroke border   不撑大尺寸"),
+                hint("NO margin   父级 padding / gap"),
+            ]).vstack_gap(Length::Pt(2.0)),
+        ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
+    ]).vstack_gap(Length::Pt(4.0));
+
+    // ── L3 Primitives ────────────────────────────────────────
+    let l3 = vstack(vec![
+        h1("L3 — Primitives (Canvas)"),
+        hint("    rect / line / text   builders chain .fill/.border/.radius/.shadow"),
+        hint("    submission order = z order   no z-index needed"),
+        hint("    this entire panel IS Canvas — what you see, you can build"),
+    ]).vstack_gap(Length::Pt(2.0));
+
+    // ── L4 View Tree — text + 3 mini stack demos side-by-side ─
+    let mini = |c| filled(c).corner_radius(radius::SM).frame(FrameSpec {
+        width:  Some(Length::Pt(16.0)),
+        height: Some(Length::Pt(16.0)),
+        ..Default::default()
+    });
+    let vstack_demo = vstack(vec![
+        mini(color::DANGER),
+        mini(color::SUCCESS),
+        mini(color::ACCENT),
+    ]).vstack_gap(Length::Pt(4.0));
+    let hstack_demo = hstack(vec![
+        mini(color::DANGER),
+        mini(color::SUCCESS),
+        mini(color::ACCENT),
+    ]).hstack_gap(Length::Pt(4.0));
+    // ZStack: 3 overlapping squares with offset.
+    let zstack_demo = zstack(vec![
+        mini(color::DANGER).frame(FrameSpec {
+            width: Some(Length::Pt(28.0)),
+            height: Some(Length::Pt(28.0)),
+            ..Default::default()
+        }),
+        mini(color::SUCCESS).offset(Length::Pt(8.0), Length::Pt(8.0)),
+        mini(color::ACCENT).offset(Length::Pt(16.0), Length::Pt(16.0)),
+    ]);
+
+    let l4 = vstack(vec![
+        h1("L4 — View Tree + Modifiers (new)"),
+        hint("    Atoms:        Text / Spacer / Filled / Hairline"),
+        hint("    Containers:   VStack / HStack / ZStack"),
+        hint("    Modifiers:    .padding / .background / .border / .corner_radius"),
+        hint("                  .shadow / .frame / .offset / .z_index / .hidden"),
+        hint("                  .on_hover / .on_click / .id"),
+        // Three mini demos in a row.
+        hstack(vec![
+            vstack(vec![hint("VStack"), vstack_demo]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
+            spacer(),
+            vstack(vec![hint("HStack"), hstack_demo]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
+            spacer(),
+            vstack(vec![hint("ZStack"), zstack_demo]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
+            spacer(),
+        ]).align_cross_start(),
+        hint("    Constraints two-pass:   parent → constraints → child returns size"),
+        hint("    AlignCross:   Start / Center / End / Stretch"),
+        hint("    Distribute:   Start / Center / End / Spaced / Between"),
+        hint("    Anchor (9):   TopLeading … BottomTrailing"),
+    ]).vstack_gap(Length::Pt(2.0));
+
+    // ── L5 Components ────────────────────────────────────────
+    let l5 = vstack(vec![
+        h1("L5 — Components"),
+        hint("    ContextMenu / LayoutModal / DevPanel / Table / Sidebar / TabStrip"),
+        hint("    Built on L4 in P3i (migration pending — this panel is the first)"),
+    ]).vstack_gap(Length::Pt(2.0));
+
+    // ── Hairline separators between layers ───────────────────
+    let sep = || hairline_horiz(color::DIVIDER)
+        .frame(FrameSpec {
+            height: Some(Length::Pt(1.0)),
+            width: Some(Length::Pct(1.0)),
+            ..Default::default()
+        });
+
+    vstack(vec![
+        l1,
+        sep(),
+        l2,
+        sep(),
+        l3,
+        sep(),
+        l4,
+        sep(),
+        l5,
+    ]).vstack_gap(Length::Pt(8.0))
+    .frame(FrameSpec {
+        width: Some(Length::Pct(1.0)),
+        ..Default::default()
+    })
+    .padding(Edges::only(
+        Length::Pt(0.0),
+        Length::Pt(16.0),
+        Length::Pt(16.0),
+        Length::Pt(0.0),
+    ))
+}
+
+/// Legacy `draw_model_sample` — kept around as a fallback in case
+/// the View-tree path needs to be bypassed.  Not on the default
+/// code path; remove once the new pipeline has soaked.
+#[allow(dead_code)]
 fn draw_model_sample(canvas: &mut Canvas, x: f64, mut y: f64) -> f64 {
     let line_h = 18.0;
     let block_gap = 14.0;
@@ -700,7 +908,7 @@ mod tests {
     #[test]
     fn ui_tab_canvas_emits_bg_tab_strip_and_samples() {
         let s = DevPanelState::default();
-        let c = build_dev_panel_canvas(&s, 1920.0, 1080.0, 16.0, 32.0);
+        let c = build_dev_panel_canvas(&s, 1920.0, 1080.0, 16.0, 32.0, 24.0);
         let prims = c.primitives();
         // Substantial output — BG, tab strip BG, active tab + accent,
         // tab labels, hairline, menu BG, divider, 5 menu rows + 1
@@ -719,7 +927,7 @@ mod tests {
     #[test]
     fn non_ui_tab_renders_placeholder() {
         let s = DevPanelState { active_tab: TAB_TOKENS, ..Default::default() };
-        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0);
+        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0);
         // Just BG + tab strip BG + active tab BG + accent + a few tab
         // labels + divider hairline + placeholder text.  Don't pin
         // the exact count (it shifts as tab list grows) — just check
@@ -780,7 +988,7 @@ mod tests {
         // builder mustn't panic when called — defensive lower bound
         // for the input space.
         let s = DevPanelState { visible: false, ..Default::default() };
-        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0);
+        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0);
         assert!(c.len() > 0);
     }
 }

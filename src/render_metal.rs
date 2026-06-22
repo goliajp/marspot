@@ -1239,7 +1239,7 @@ impl MetalRenderer {
                 let canvas = crate::ui::components::build_dev_panel_canvas(
                     dev_state,
                     width_px, height_px,
-                    chrome_cell_w, chrome_cell_h,
+                    chrome_cell_w, chrome_cell_h, chrome_ascent,
                 );
                 encode_canvas_into(
                     &canvas, &texture, &cmd,
@@ -1435,7 +1435,7 @@ impl MetalRenderer {
             if dev_state.visible {
                 let canvas = crate::ui::components::build_dev_panel_canvas(
                     dev_state, width_px, height_px,
-                    chrome_cell_w, chrome_cell_h,
+                    chrome_cell_w, chrome_cell_h, chrome_ascent,
                 );
                 encode_canvas_into(
                     &canvas, target, &cmd,

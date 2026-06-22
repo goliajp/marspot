@@ -441,7 +441,7 @@ impl DevWindow {
         let chrome_ascent = self.renderer_font_metrics().2 as f32;
         let canvas = crate::ui::components::build_dev_panel_canvas(
             &s, width_phys, height_phys,
-            chrome_cell_w, chrome_cell_h,
+            chrome_cell_w, chrome_cell_h, chrome_ascent,
         );
         self.renderer.render_canvas_into_layer(
             &canvas,
