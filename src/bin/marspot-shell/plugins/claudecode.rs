@@ -891,9 +891,33 @@ impl Plugin for ClaudecodePlugin {
             for (lvl, tag, msg) in &result.log_lines {
                 host.log(*lvl, tag, msg);
             }
-            // Clear badges whose binding disappeared this round.
-            for sh_sid in self.last_mapping.keys() {
+            // Log mapping transitions (new bindings / lost bindings)
+            // here on the main side — worker can't diff vs the host-
+            // owned `self.last_mapping` cheaply.  Steady-state ticks
+            // emit zero lines, so the file stays quiet.
+            for (sh_sid, cc_sid) in &result.new_mapping {
+                let prev = self.last_mapping.get(sh_sid);
+                if prev.map(|p| p != cc_sid).unwrap_or(true) {
+                    host.log(
+                        LogLevel::Info,
+                        "session.bound",
+                        &format!(
+                            "shelld_session={} → claudecode sid={}",
+                            sh_sid, cc_sid
+                        ),
+                    );
+                }
+            }
+            for (sh_sid, cc_sid) in &self.last_mapping {
                 if !result.new_mapping.contains_key(sh_sid) {
+                    host.log(
+                        LogLevel::Info,
+                        "session.unbound",
+                        &format!(
+                            "shelld_session={} (was sid={})",
+                            sh_sid, cc_sid
+                        ),
+                    );
                     let _ = host.set_pane_badge(*sh_sid, "");
                 }
             }
@@ -1178,7 +1202,7 @@ impl WorkerCtx {
                     Some(t) => format!("{} {}", t, sid_uuid),
                     None => sid_uuid.clone(),
                 };
-                new_mapping.insert(s.session_id, badge.clone());
+                new_mapping.insert(s.session_id, badge);
                 new_meta.insert(
                     s.session_id,
                     BindMeta {
@@ -1187,14 +1211,11 @@ impl WorkerCtx {
                         claude_pid: claude.pid,
                     },
                 );
-                log_lines.push((
-                    LogLevel::Info,
-                    "session.bound",
-                    format!(
-                        "shelld_session={} → claudecode sid={}",
-                        s.session_id, badge
-                    ),
-                ));
+                // No log line here on purpose — `session.bound` is
+                // transition-only.  Main side diffs `result.new_mapping`
+                // against `self.last_mapping` and only logs the deltas;
+                // otherwise we'd write 12 lines per 2 s tick in steady
+                // state and drown the file.
             }
         }
 
