@@ -21,11 +21,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::SystemTime;
-
-use marspot::paths;
 // RFC-003 Amendment 16 cc rewrite — read sessions from L3 entry.toml
 // registry (where each L3 records its shell child pid), forward
 // keystrokes via L1 → L2 → L3 InjectInput frame proxy.  Monitor
@@ -133,10 +132,6 @@ struct SessionInfo {
 
 pub struct ClaudecodePlugin {
     initialised: bool,
-    /// Keyed by jsonl path (uniquely identifies a session file).
-    seen: HashMap<PathBuf, SessionInfo>,
-    /// Where ~/.claude/projects lives.  Cached at init.
-    projects_root: Option<PathBuf>,
     /// Lazy shelld client.  None until first successful connect.
     /// Used to walk shelld's session table → per-session zsh.pid →
     /// pidtree → cwd → encoded project dir → sessionId.
@@ -161,6 +156,27 @@ pub struct ClaudecodePlugin {
     /// reboot) since the new host could in principle wire the
     /// missing feature.
     monitor_unsupported: bool,
+    /// 2026-06-22 — tick was sync disk-IO + pidtree, which spiked to
+    /// 700ms-2s under disk contention and tripped the 100ms HOOK_BUDGET
+    /// 3-strike rule (permanent disable).  Heavy work is now a
+    /// background `claudecode-scan` worker thread; tick only drains
+    /// the result channel and pushes badges through the host.  See
+    /// `WorkerCtx` and `worker_main`.
+    worker: Option<JoinHandle<()>>,
+    /// Send a unit to ask the worker to run another full scan pass.
+    /// `None` after `stop()` so `tick` skips the send.
+    scan_req_tx: Option<Sender<()>>,
+    /// Newest `ScanResult` arrives here.  `tick` drains it eagerly
+    /// (only the latest result matters; older ones are stale).
+    /// `Mutex` purely to satisfy `Plugin: Sync` — only the L1 main
+    /// loop ever touches it, so the lock is uncontended.  Mirrors
+    /// the same trick used for `MonitorState.rx`.
+    scan_res_rx: Option<std::sync::Mutex<Receiver<ScanResult>>>,
+    /// True after `tick` queued a scan request the worker hasn't
+    /// answered yet.  Stops `tick` from piling up requests if the
+    /// worker is slow / stuck (worker queue would otherwise grow
+    /// unbounded while plugin tick keeps firing every 2 s).
+    scan_inflight: bool,
 }
 
 /// Long-running watcher for one claudecode pane.  Receives raw PTY
@@ -499,13 +515,15 @@ impl ClaudecodePlugin {
     pub fn new() -> Self {
         Self {
             initialised: false,
-            seen: HashMap::new(),
-            projects_root: None,
             shelld: None,
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
             monitors: HashMap::new(),
             monitor_unsupported: false,
+            worker: None,
+            scan_req_tx: None,
+            scan_res_rx: None,
+            scan_inflight: false,
         }
     }
 
@@ -688,22 +706,6 @@ impl ClaudecodePlugin {
         }
     }
 
-    /// Reverse-lookup: given an encoded project dir (e.g.
-    /// `-Users-doracawl-workspace-foo`), return the latest sessionId
-    /// we've seen for it.  Walks the `seen` map; cheap when only a
-    /// dozen projects are active.
-    fn session_id_for_project(&self, encoded_dir: &str) -> Option<String> {
-        let mut newest: Option<(SystemTime, &SessionInfo)> = None;
-        for s in self.seen.values() {
-            if s.project_dir == encoded_dir {
-                match newest {
-                    Some((t, _)) if t >= s.last_mtime => {}
-                    _ => newest = Some((s.last_mtime, s)),
-                }
-            }
-        }
-        newest.map(|(_, s)| s.session_id.clone())
-    }
 }
 
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
@@ -794,14 +796,15 @@ impl Plugin for ClaudecodePlugin {
         let home = std::env::var_os("HOME").ok_or_else(|| {
             PluginError::Other("HOME not set; claudecode plugin idle".into())
         })?;
-        self.projects_root = Some(PathBuf::from(home).join(".claude").join("projects"));
+        let projects_root = PathBuf::from(home).join(".claude").join("projects");
         // RFC-003 Amendment 16 cc: read sessions from L3 entry.toml
         // registry instead of shelld.  ShelldClient is now a thin
         // façade over `session_registry::list_session_entries()` and
         // the L1→L2→L3 InjectInput wire-frame proxy (set later by
         // the registry via `attach_inject_proxy`).
         let proxy = host.cc_inject_proxy();
-        self.shelld = Some(Arc::new(ShelldClient::new(proxy)));
+        let shelld = Arc::new(ShelldClient::new(proxy));
+        self.shelld = Some(shelld.clone());
         host.log(
             LogLevel::Info,
             "init.registry_walker",
@@ -812,9 +815,35 @@ impl Plugin for ClaudecodePlugin {
             "init",
             &format!(
                 "claudecode plugin initialised (projects_root={})",
-                self.projects_root.as_ref().unwrap().display()
+                projects_root.display()
             ),
         );
+
+        // Spin up the background scan worker.  All disk IO + pidtree
+        // walks happen there; `tick` only drains the result channel
+        // and pushes badges through the host.  Without this, the
+        // tick blocked on `~/.claude/projects` IO and spiked to
+        // 700ms-2s under disk contention — 3 such ticks tripped the
+        // 100ms HOOK_BUDGET strike rule and the host permanently
+        // disabled the plugin.
+        let (req_tx, req_rx) = mpsc::channel::<()>();
+        let (res_tx, res_rx) = mpsc::channel::<ScanResult>();
+        let ctx = WorkerCtx {
+            projects_root,
+            shelld,
+            seen: HashMap::new(),
+        };
+        let handle = std::thread::Builder::new()
+            .name("claudecode-scan".into())
+            .spawn(move || worker_main(ctx, req_rx, res_tx))
+            .map_err(|e| {
+                PluginError::Other(format!("spawn claudecode-scan worker: {e}"))
+            })?;
+        self.worker = Some(handle);
+        self.scan_req_tx = Some(req_tx);
+        self.scan_res_rx = Some(std::sync::Mutex::new(res_rx));
+        self.scan_inflight = false;
+
         self.initialised = true;
         Ok(())
     }
@@ -823,14 +852,195 @@ impl Plugin for ClaudecodePlugin {
         if !self.initialised {
             return;
         }
-        let root = match &self.projects_root {
-            Some(r) => r.clone(),
-            None => return,
-        };
-        // Walk one level down.  Each subdir = one project (encoded cwd).
-        let projects = match fs::read_dir(&root) {
+        // (1) Drain any results the worker delivered since last tick.
+        // Apply only the newest — older results are stale (the worker
+        // already overrode their mapping in its next pass).
+        let mut latest: Option<ScanResult> = None;
+        let mut disconnected = false;
+        if let Some(rx_lock) = &self.scan_res_rx {
+            let rx = rx_lock.lock().unwrap();
+            loop {
+                match rx.try_recv() {
+                    Ok(r) => {
+                        latest = Some(r);
+                        self.scan_inflight = false;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if disconnected {
+            host.log(
+                LogLevel::Warn,
+                "worker.gone",
+                "scan worker channel closed; plugin idle until restart",
+            );
+            self.scan_res_rx = None;
+            self.scan_req_tx = None;
+            self.initialised = false;
+            return;
+        }
+        if let Some(result) = latest {
+            // Replay log lines the worker accumulated.  Stays cheap:
+            // a typical scan emits 0 lines (no transitions); only
+            // first-discovery / mapping change ticks have any.
+            for (lvl, tag, msg) in &result.log_lines {
+                host.log(*lvl, tag, msg);
+            }
+            // Clear badges whose binding disappeared this round.
+            for sh_sid in self.last_mapping.keys() {
+                if !result.new_mapping.contains_key(sh_sid) {
+                    let _ = host.set_pane_badge(*sh_sid, "");
+                }
+            }
+            // Re-push every active badge every tick (idempotent).
+            // Why not transition-only: L2 core can spawn/crash/
+            // respawn between ticks (CORE_BOOT_LOOP, silent update);
+            // transition-only would leave the fresh core with no
+            // badges until something changes.  Per tick ≤ 9 small
+            // frames = a few hundred bytes.
+            for (sh_sid, cc_sid) in &result.new_mapping {
+                if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
+                    host.log(
+                        LogLevel::Warn,
+                        "pane_badge.set_failed",
+                        &format!("{e}"),
+                    );
+                }
+            }
+            self.last_mapping = result.new_mapping;
+            self.last_meta = result.new_meta;
+        }
+
+        // (2) Kick off the next scan if the worker is idle.  At most
+        // one in-flight request: if the worker is still chewing on
+        // the previous (slow disk), we skip — preserves the worker
+        // queue from growing unbounded.
+        if !self.scan_inflight {
+            if let Some(tx) = &self.scan_req_tx {
+                if tx.send(()).is_ok() {
+                    self.scan_inflight = true;
+                } else {
+                    host.log(
+                        LogLevel::Warn,
+                        "worker.send_failed",
+                        "scan worker dropped request channel",
+                    );
+                    self.scan_req_tx = None;
+                    self.initialised = false;
+                    return;
+                }
+            }
+        }
+
+        // (3) RFC-003 profile-cycle state machine lives in
+        // ProfileCyclePaneSession::on_tick, driven by the L1 plugin
+        // dispatcher (not here).
+        //
+        // C7 auto-retry monitors: cheap host-side bookkeeping, no
+        // disk IO.  `monitor_unsupported` latches true on first
+        // tick (PTY raw broadcast not wired yet) so the body is a
+        // no-op in steady state.
+        self.refresh_monitors(host);
+        self.pump_monitors(host);
+    }
+
+    fn on_pane_badge_click(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) {
+        self.start_profile_cycle(host, shelld_session_id);
+    }
+
+    fn stop(&mut self, host: &dyn PluginHost) {
+        host.log(LogLevel::Info, "stop", "plugin stopped");
+        self.initialised = false;
+        // Drop the request channel — the worker's recv loop sees Err
+        // and exits cleanly.  Then join so the thread is fully torn
+        // down before the plugin slot is dropped (otherwise the
+        // thread would outlive the plugin briefly and the next
+        // start would race the previous one's last send).
+        self.scan_req_tx = None;
+        if let Some(h) = self.worker.take() {
+            let _ = h.join();
+        }
+        self.scan_res_rx = None;
+        self.scan_inflight = false;
+    }
+}
+
+// ============================================================
+// Background scan worker — owns all disk IO + pidtree walks
+// that previously ran on the plugin tick.  See `ClaudecodePlugin`
+// field docs and `init()` for the wiring.
+// ============================================================
+
+/// What `WorkerCtx::scan_once` returns to `tick`.  Owned, Send-safe.
+struct ScanResult {
+    /// `shelld_session_id → badge string ("P<n> <uuid>")`.  Replaces
+    /// `last_mapping` on the main side every time it arrives.
+    new_mapping: HashMap<u64, String>,
+    /// `shelld_session_id → BindMeta`.  Drives `on_pane_badge_click`'s
+    /// profile-cycle dispatch on the main side.
+    new_meta: HashMap<u64, BindMeta>,
+    /// Log lines the worker wanted to emit but can't (host is main-
+    /// thread-only).  `tick` replays them through `host.log`.  Stays
+    /// near-empty in steady state — only transitions add lines.
+    log_lines: Vec<(LogLevel, &'static str, String)>,
+}
+
+/// Everything the worker owns.  No shared mutable state with the
+/// plugin; the worker reads disk + procs and sends ScanResult back.
+struct WorkerCtx {
+    projects_root: PathBuf,
+    shelld: Arc<ShelldClient>,
+    /// Same role as the old `ClaudecodePlugin::seen` field, but the
+    /// worker owns it now and the plugin never touches it.
+    seen: HashMap<PathBuf, SessionInfo>,
+}
+
+/// Worker thread entry.  Lives until the request channel is dropped
+/// (which `stop()` triggers by clearing `scan_req_tx`).
+fn worker_main(
+    mut ctx: WorkerCtx,
+    req_rx: Receiver<()>,
+    res_tx: Sender<ScanResult>,
+) {
+    while req_rx.recv().is_ok() {
+        let result = ctx.scan_once();
+        if res_tx.send(result).is_err() {
+            // Main side hung up; nothing left to do.
+            break;
+        }
+    }
+}
+
+impl WorkerCtx {
+    /// One full scan pass: walk `~/.claude/projects/*/*.jsonl`,
+    /// update `self.seen`, list shelld sessions, BFS each for a
+    /// `claude` descendant, and compute the new badge mapping.
+    /// Slow (disk + sysctl) but runs off the L1 main loop so its
+    /// runtime is invisible to the plugin host's 100ms tick budget.
+    fn scan_once(&mut self) -> ScanResult {
+        let mut log_lines: Vec<(LogLevel, &'static str, String)> = Vec::new();
+
+        // -- jsonl pass: refresh self.seen ---------------------------
+        let projects = match fs::read_dir(&self.projects_root) {
             Ok(d) => d,
-            Err(_) => return, // No projects dir yet — silent
+            Err(_) => {
+                // No projects dir yet — silent.  Still return so
+                // tick clears any stale mapping.
+                return ScanResult {
+                    new_mapping: HashMap::new(),
+                    new_meta: HashMap::new(),
+                    log_lines,
+                };
+            }
         };
         let mut newly_seen = 0usize;
         let mut updates = 0usize;
@@ -843,7 +1053,6 @@ impl Plugin for ClaudecodePlugin {
                 Some(n) => n.to_string_lossy().to_string(),
                 None => continue,
             };
-            // Find newest .jsonl in this project.
             let mut newest: Option<(PathBuf, SystemTime, u64)> = None;
             let dir = match fs::read_dir(&project_path) {
                 Ok(d) => d,
@@ -868,21 +1077,16 @@ impl Plugin for ClaudecodePlugin {
             let Some((jsonl_path, mtime, size)) = newest else {
                 continue;
             };
-            // Update tracking.  Skip if path + mtime + size unchanged.
             if let Some(prev) = self.seen.get(&jsonl_path) {
                 if prev.last_mtime == mtime && prev.last_size == size {
                     continue;
                 }
             }
-            // Parse sessionId from first line of the file.
             let session_id = match parse_session_id(&jsonl_path) {
                 Some(id) => id,
-                None => continue, // malformed; try again next tick
+                None => continue,
             };
-            // Inspect last message type (tail-read).  Cheap heuristic:
-            // read last 32 KB, find newline-anchored last record.
             let last_message_kind = tail_last_message_type(&jsonl_path);
-
             let is_new = !self.seen.contains_key(&jsonl_path);
             self.seen.insert(
                 jsonl_path.clone(),
@@ -897,70 +1101,63 @@ impl Plugin for ClaudecodePlugin {
             );
             if is_new {
                 newly_seen += 1;
-                host.log(
+                log_lines.push((
                     LogLevel::Info,
                     "session",
-                    &format!(
+                    format!(
                         "session detected sid={} project={} kind={} size={}",
                         session_id,
                         project_dir,
                         last_message_kind.as_deref().unwrap_or("?"),
                         size
                     ),
-                );
+                ));
             } else {
                 updates += 1;
-                host.log(
+                log_lines.push((
                     LogLevel::Debug,
                     "session.update",
-                    &format!(
+                    format!(
                         "sid={} kind={} size={}",
                         session_id,
                         last_message_kind.as_deref().unwrap_or("?"),
                         size
                     ),
-                );
+                ));
             }
         }
         if newly_seen > 0 || updates > 0 {
-            host.log(
+            log_lines.push((
                 LogLevel::Debug,
                 "tick.summary",
-                &format!("new={} updated={}", newly_seen, updates),
-            );
+                format!("new={} updated={}", newly_seen, updates),
+            ));
         }
 
-        // M3.2 — per-shelld-session mapping.  For each live shelld
-        // session, BFS its zsh.pid for a `claude` descendant; if
-        // found, encode its cwd and reverse-lookup the sessionId
-        // from `self.seen`.  Log only on transitions to keep the
-        // log file quiet for a steady-state session.
-        let Some(client) = self.shelld.as_ref() else {
-            return; // shelld unavailable; skip mapping silently
-        };
-        let sessions = match client.list_sessions() {
+        // -- per-session mapping: BFS each shelld session ------------
+        let mut new_mapping: HashMap<u64, String> = HashMap::new();
+        let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
+        let sessions = match self.shelld.list_sessions() {
             Ok(v) => v,
             Err(e) => {
-                host.log(
+                log_lines.push((
                     LogLevel::Info,
                     "tick.shelld_list_failed",
-                    &format!("{e}"),
-                );
-                return;
+                    format!("{e}"),
+                ));
+                return ScanResult { new_mapping, new_meta, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
-        let mut new_mapping: HashMap<u64, String> = HashMap::new();
-        let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
         for s in &sessions {
             if !s.alive {
                 continue;
             }
-            let descendants =
-                pidtree::descendants_of(s.child_pid, &procs);
-            let Some(claude) = descendants.iter().find(|d| looks_like_claudecode(d))
+            let descendants = pidtree::descendants_of(s.child_pid, &procs);
+            let Some(claude) =
+                descendants.iter().find(|d| looks_like_claudecode(d))
             else {
-                continue; // pane isn't running claudecode right now
+                continue;
             };
             let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
                 continue;
@@ -977,15 +1174,11 @@ impl Plugin for ClaudecodePlugin {
                     }
                     None => (None, u8::MAX),
                 };
-                // Badge format: "<prefix> <uuid>".  The renderer
-                // treats the text before the first space as the
-                // clickable prefix and underlines it; everything
-                // after is plain.
                 let badge = match tag {
                     Some(t) => format!("{} {}", t, sid_uuid),
                     None => sid_uuid.clone(),
                 };
-                new_mapping.insert(s.session_id, badge);
+                new_mapping.insert(s.session_id, badge.clone());
                 new_meta.insert(
                     s.session_id,
                     BindMeta {
@@ -994,84 +1187,33 @@ impl Plugin for ClaudecodePlugin {
                         claude_pid: claude.pid,
                     },
                 );
-            }
-        }
-        // Log transitions (bound / unbound) vs. last tick.
-        for (sh_sid, cc_sid) in &new_mapping {
-            let prev = self.last_mapping.get(sh_sid);
-            if prev.map(|p| p != cc_sid).unwrap_or(true) {
-                host.log(
+                log_lines.push((
                     LogLevel::Info,
                     "session.bound",
-                    &format!(
+                    format!(
                         "shelld_session={} → claudecode sid={}",
-                        sh_sid, cc_sid
+                        s.session_id, badge
                     ),
-                );
+                ));
             }
         }
-        for (sh_sid, cc_sid) in &self.last_mapping {
-            if !new_mapping.contains_key(sh_sid) {
-                host.log(
-                    LogLevel::Info,
-                    "session.unbound",
-                    &format!(
-                        "shelld_session={} (was sid={})",
-                        sh_sid, cc_sid
-                    ),
-                );
-                // Empty badge text = clear on L2 side.
-                let _ = host.set_pane_badge(*sh_sid, "");
-            }
-        }
-        // Re-push every active badge every tick (idempotent).  Why
-        // not transition-only: L2 core can spawn/crash/respawn between
-        // ticks (CORE_BOOT_LOOP, silent update, etc.); a transition-
-        // only push leaves the freshly-spawned core with no badges
-        // until something changes.  Per tick ≤ 9 small frames = a few
-        // hundred bytes; cheap compared to staying out-of-sync.
-        //
-        // Badge text is the full UUID — same string the claudecode
-        // `/resume` picker shows, so the user can map a pane to a
-        // resume entry by eye.  Badge is its own variable (NOT a
-        // suffix of `title`): L2 stores them separately, render
-        // strip draws them as independent items on the same row.
-        for (sh_sid, cc_sid) in &new_mapping {
-            if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
-                host.log(
-                    LogLevel::Warn,
-                    "pane_badge.set_failed",
-                    &format!("{e}"),
-                );
-            }
-        }
-        self.last_mapping = new_mapping;
-        self.last_meta = new_meta;
-        // RFC-003: profile-cycle state machine lives in
-        // ProfileCyclePaneSession::on_tick, driven by the L1 plugin
-        // dispatcher.
-        //
-        // C7: auto-retry monitor.  Sync the monitor set with the
-        // freshly-rebound `last_meta` (start one per new claude pid,
-        // drop those whose claude exited), then drain whatever raw
-        // PTY bytes accumulated since last tick and scan for
-        // retryable error patterns.
-        self.refresh_monitors(host);
-        self.pump_monitors(host);
+
+        ScanResult { new_mapping, new_meta, log_lines }
     }
 
-    fn on_pane_badge_click(
-        &mut self,
-        host: &dyn PluginHost,
-        shelld_session_id: u64,
-    ) {
-        self.start_profile_cycle(host, shelld_session_id);
-    }
-
-    fn stop(&mut self, host: &dyn PluginHost) {
-        host.log(LogLevel::Info, "stop", "plugin stopped");
-        self.initialised = false;
-        self.seen.clear();
+    /// Reverse-lookup: encoded project dir → newest known sessionId.
+    /// Cheap scan over `seen`; a dozen projects active in practice.
+    fn session_id_for_project(&self, encoded_dir: &str) -> Option<String> {
+        let mut newest: Option<(SystemTime, &SessionInfo)> = None;
+        for s in self.seen.values() {
+            if s.project_dir == encoded_dir {
+                match newest {
+                    Some((t, _)) if t >= s.last_mtime => {}
+                    _ => newest = Some((s.last_mtime, s)),
+                }
+            }
+        }
+        newest.map(|(_, s)| s.session_id.clone())
     }
 }
 
