@@ -1147,6 +1147,17 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         });
     });
 
+    // Build the independent dev-panel window BEFORE handing control
+    // to the app's `resumed` handler — `resumed` is where L1 reads
+    // `dev-window-state.bin` and calls `apply_saved_frame`, which
+    // needs `with_dev_window` to actually find a built window.
+    // Reverse order silently drops the saved frame (real bug observed
+    // 2026-06-23: dev panel always opened at default 420×552 after
+    // every install/restart, ignoring the persisted geometry).
+    if let Err(e) = crate::dev_window::ensure_built(mtm) {
+        eprintln!("[marspot] dev_window init failed: {e}; toolbar toggle will be a no-op");
+    }
+
     APP_STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let state = slot.as_mut().unwrap();
@@ -1158,12 +1169,6 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             state.app.redraw(&state.ctx);
         }
     });
-
-    // Build the independent dev-panel window.  Hidden by default;
-    // the app toggles visibility via dev_window::with_dev_window.
-    if let Err(e) = crate::dev_window::ensure_built(mtm) {
-        eprintln!("[marspot] dev_window init failed: {e}; toolbar toggle will be a no-op");
-    }
 
     // 6. Run.  Returns after dispatch_event sees an exit request.
     unsafe { nsapp.run() };

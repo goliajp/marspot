@@ -17,7 +17,15 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.6**
+Current: **0.6.7**
+
+### 0.6.7
+
+修 0.6.6 引入的 dev panel 持久化漏空 —— `app.rs::run_app` 里 `dev_window::ensure_built` 调用在 `app.resumed()` **之后**.L1 的 `resumed` 走的是"read `dev-window-state.bin` → `with_dev_window` → `apply_saved_frame`",但那一刻 dev window 还没建,`with_dev_window` 静默返 `None`,saved frame 丢.
+
+现象:每次重启 / 重 install 后 dev panel 都在默认位置 / 默认尺寸打开,完全不读 disk 里持久化的 frame.
+
+修:`ensure_built` 挪到 `resumed` 调用之前,确保 L1 `apply_saved_frame` 能找到真实的 NSWindow.顺序敏感的初始化错位,纯调用顺序问题,代码体小但行为完全反转.`dev_panel.visible = saved.visible` 那条本来就 work(不依赖 dev_window 存在),所以 visible 在 0.6.6 里 OK 只是 frame 漏.
 
 ### 0.6.6
 
