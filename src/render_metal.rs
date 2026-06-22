@@ -1151,6 +1151,38 @@ impl MetalRenderer {
             true,
         );
 
+        // P2c — ContextMenu draws OUT-OF-BAND via the Canvas
+        // pipeline: built fresh per frame and encoded with
+        // submission-order = z-order semantics, AFTER the main
+        // encode_passes so it sits above every other overlay.
+        if let Some(menu_state) = self.context_menu_state.as_ref() {
+            let chrome_cell_w = font.cell_w as f32;
+            let chrome_cell_h = font.cell_h as f32;
+            let chrome_ascent = font.ascent as f32;
+            let canvas = build_context_menu_canvas(
+                menu_state,
+                width_px,
+                height_px,
+                chrome_cell_w,
+                chrome_cell_h,
+            );
+            let viewport_px = [width_px as f32, height_px as f32];
+            encode_canvas_into(
+                &canvas,
+                &texture,
+                &cmd,
+                ui_pipeline,
+                fg_pipeline,
+                fg_sampler,
+                atlas,
+                device,
+                font,
+                None, // Load — preserve everything below
+                &viewport_px,
+                chrome_cell_w, chrome_cell_h, chrome_ascent,
+            );
+        }
+
         // `presentsWithTransaction = true` path (set up in `new`):
         // commit + waitUntilScheduled + drawable.present() so the
         // drawable lands in the next CATransaction alongside any
@@ -1298,6 +1330,24 @@ impl MetalRenderer {
             // `mark_bg_clear_required` (e.g. resize, layout change).
             clear_bg,
         );
+        // P2c — ContextMenu canvas pass (same shape as render_layout).
+        if let Some(menu_state) = self.context_menu_state.as_ref() {
+            let chrome_cell_w = font.cell_w as f32;
+            let chrome_cell_h = font.cell_h as f32;
+            let chrome_ascent = font.ascent as f32;
+            let canvas = build_context_menu_canvas(
+                menu_state, width_px, height_px,
+                chrome_cell_w, chrome_cell_h,
+            );
+            let viewport_px = [width_px as f32, height_px as f32];
+            encode_canvas_into(
+                &canvas, target, &cmd,
+                ui_pipeline, fg_pipeline, fg_sampler,
+                atlas, device, font,
+                None, &viewport_px,
+                chrome_cell_w, chrome_cell_h, chrome_ascent,
+            );
+        }
         cmd.commit();
         unsafe { cmd.waitUntilCompleted() };
     }
@@ -2149,18 +2199,12 @@ fn build_instances(
         );
     }
 
-    // F3+9 — right-click ContextMenu.  Painted LAST so it sits on top
-    // of every other overlay (LayoutModal / process panel / etc.) —
-    // a context menu must visually trump everything else while it's
-    // up.
-    if let Some(menu_state) = context_menu_state {
-        push_context_menu_via_view(
-            menu_state,
-            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
-            layout.window_w, layout.window_h,
-            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
-        );
-    }
+    // F3+9 / P2c — right-click ContextMenu render is NOT routed
+    // through the shared overlay scratches; it builds a `Canvas`
+    // in render_layout AFTER the main encode_passes and uses
+    // `encode_canvas` to draw in submission-order.  The variable
+    // is consumed there.
+    let _ = context_menu_state;
 }
 
 /// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`
@@ -2523,35 +2567,29 @@ fn push_process_panel_via_view(
     });
 }
 
-/// F3+9 — paint the right-click ContextMenu.  Geometry comes from
-/// the component's own `ContextMenu::layout`; chrome is the same
-/// `View`-based path the other overlays use (1 px inside border
-/// per F3+3.8, opaque BG per `feedback_overlays_must_be_opaque`).
-/// No backdrop dim — a context menu is a transient surface; we
-/// don't want to wash out the underlying content while the user
-/// decides what to click.
-#[allow(clippy::too_many_arguments)]
-fn push_context_menu_via_view(
+/// F3+9 / P2c — build the right-click ContextMenu as a `Canvas`.
+/// Geometry from `ContextMenu::layout`; submission order = z so
+/// frame BG goes first, then hover band, then divider hairline,
+/// then text — last-submitted wins on top.  Caller flushes the
+/// returned canvas via `MetalRenderer::encode_canvas` AFTER all
+/// other overlay passes so the menu trumps everything else.
+///
+/// Why a separate canvas (not the shared overlay scratches):
+/// the encode_passes path fixes the BG-cells-before-UI-rects
+/// order, which silently buried the divider in F3+12.x.  Routing
+/// the menu through its own canvas + `encode_canvas` puts every
+/// primitive on a submission-order timeline regardless of which
+/// pipeline carries it.
+fn build_context_menu_canvas(
     state: &ContextMenuRender,
-    cell_w: f32,
-    cell_h: f32,
-    ascent: f32,
-    atlas_w: f32,
-    atlas_h: f32,
     window_w: f64,
     window_h: f64,
-    font: &mut FontCache,
-    atlas: &mut GlyphAtlas,
-    cells: &mut Vec<CellInstance>,
-    glyphs: &mut Vec<GlyphInstance>,
-    ui_rects: &mut Vec<UiRectInstance>,
-) {
-    use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
+    chrome_cell_w: f32,
+    chrome_cell_h: f32,
+) -> crate::ui::core::Canvas {
+    use crate::ui::core::{Canvas, Color, Length, Pt, ParentRect};
     use crate::ui::components::{ContextMenu, MenuItem};
-    use marspot_term::layout::{Rect, Alignment};
 
-    // Re-build the per-row MenuItem list from the wire-shape rows so
-    // ContextMenu::layout produces the same rects L2's hit-test used.
     let menu_items: Vec<MenuItem> = state
         .items
         .iter()
@@ -2570,87 +2608,78 @@ fn push_context_menu_via_view(
         &menu_items,
     );
 
-    let mut painter = ViewPainter {
-        cell_w, cell_h, ascent, atlas_w, atlas_h,
-        window_w, window_h,
-        font, atlas, cells, glyphs, ui_rects,
-    };
-    let view = View {
-        rect: menu.frame,
-        style: ViewStyle {
-            bg: PROCESS_PANEL_BG,
-            border_color: PROCESS_PANEL_BORDER,
-            border_width: 1.0,
-            corner_radius: 6.0,
-            shadow_blur: 16.0,
-            shadow_alpha: 0.45,
-            padding: 0.0,
-            backdrop: Backdrop::None,
-        },
-    };
-    view.paint(&mut painter, |p| {
-        let label_fg = [0.85, 0.88, 0.92, 1.0];
-        let label_fg_disabled = [0.45, 0.48, 0.52, 1.0];
-        let hint_fg = [0.55, 0.60, 0.66, 1.0];
-        let hover_bg = [0.20, 0.42, 0.68, 1.0];
-        // F3+12.6 — semi-transparent white,  rendered through the
-        // ui_rects SDF pipeline (which actually alpha-blends).
-        // The menu frame is drawn LATER in the SAME pipeline so a
-        // post-frame submission lands above it visually.
-        let divider_color = [1.0, 1.0, 1.0, 0.22];
-        let side_pad_logical = 12.0_f64;
-        let side_pad = side_pad_logical * state.scale;
-        for (i, row) in state.items.iter().enumerate() {
-            let rect = menu.item_rects[i];
-            if row.divider {
-                // Render the divider via the ui_rects pipeline.
-                // Reason: encode_passes draws overlay cells FIRST
-                // and overlay ui_rects SECOND, so any divider on
-                // the cells pipeline gets occluded by the menu's
-                // SDF frame.  Routing through ui_rects puts the
-                // divider above the frame.  Make the line ≥ 3 px
-                // tall so SDF anti-alias band doesn't zero the
-                // entire rect (1-px-tall SDF rects render at 0
-                // intensity because the AA band exceeds the body).
-                let line_h_phys = 3.0;
-                let line_y = (rect.y_top + (rect.h * 0.5)).round()
-                    - (line_h_phys * 0.5);
-                let line = Rect {
-                    x: rect.x + side_pad,
-                    y_top: line_y,
-                    w: rect.w - 2.0 * side_pad,
-                    h: line_h_phys,
-                };
-                p.fill_rounded_rect(line, divider_color, 0.0, ([0.0; 4], 0.0));
-                continue;
-            }
-            // Hover highlight — full-row band, drawn under text.
-            if state.hovered_idx == Some(i) {
-                p.fill_rounded_rect(
-                    Rect {
-                        x: rect.x + side_pad * 0.5,
-                        y_top: rect.y_top,
-                        w: rect.w - side_pad,
-                        h: rect.h,
-                    },
-                    hover_bg, 4.0, ([0.0; 4], 0.0),
-                );
-            }
-            let fg = if row.enabled { label_fg } else { label_fg_disabled };
-            // Label — left-aligned with side_pad.
-            let label_rect = Rect {
-                x: rect.x + side_pad,
-                y_top: rect.y_top,
-                w: rect.w - 2.0 * side_pad,
-                h: rect.h,
-            };
-            p.text_in(label_rect, &row.label, fg, Alignment::CenterLeft);
-            // Shortcut hint — right-aligned.
-            if !row.shortcut_hint.is_empty() {
-                p.text_in(label_rect, &row.shortcut_hint, hint_fg, Alignment::CenterRight);
-            }
+    let mut canvas = Canvas::new(state.scale, ParentRect::window(window_w, window_h));
+
+    // ── Style tokens (will move to a theme module in P3) ──
+    let bg          = Color::rgba(33, 36, 43, 1.0);     // PROCESS_PANEL_BG
+    let border      = Color::rgba(56, 60, 70, 1.0);     // approx PROCESS_PANEL_BORDER
+    let shadow      = Color::rgba(0, 0, 0, 0.45);
+    let label_fg    = Color::rgba(217, 224, 235, 1.0);
+    let label_disab = Color::rgba(115, 122, 133, 1.0);
+    let hint_fg     = Color::rgba(140, 153, 168, 1.0);
+    let hover_bg    = Color::rgba(51, 107, 173, 1.0);
+    let divider_c   = Color::rgba(255, 255, 255, 0.22);
+    let side_pad_pt = 12.0_f64;
+
+    // Helper: phys → Pt via `/ scale` so existing layout output
+    // (which is already physical px) plugs cleanly into the
+    // logical Pt API.  Length::Pt(x) resolves back to `x * scale`,
+    // so this round-trips bit-perfectly at every scale.
+    let pt_phys = |phys: f64| Length::Pt(phys / state.scale);
+    let side_pad_phys = side_pad_pt * state.scale;
+    let label_w_phys  = |s: &str| s.chars().count() as f64 * chrome_cell_w as f64;
+
+    // 1. Menu frame: BG + border + shadow.
+    canvas.rect()
+        .at(pt_phys(menu.frame.x), pt_phys(menu.frame.y_top))
+        .size(pt_phys(menu.frame.w), pt_phys(menu.frame.h))
+        .fill(bg)
+        .radius(Pt(6.0))
+        .border(Pt(1.0), border)
+        .shadow(Pt(16.0), (Pt(0.0), Pt(0.0)), shadow)
+        .draw();
+
+    // 2. Per-row primitives.  All sub-row arithmetic done in
+    // physical pixels (item rects come from ContextMenu::layout
+    // pre-scaled), then `pt_phys` wraps for the builder.
+    for (i, row) in state.items.iter().enumerate() {
+        let item = &menu.item_rects[i];
+        if row.divider {
+            let cy = item.y_top + item.h * 0.5;
+            canvas.line(
+                (pt_phys(item.x + side_pad_phys), pt_phys(cy)),
+                (pt_phys(item.x + item.w - side_pad_phys), pt_phys(cy)),
+            )
+            .stroke(Pt(1.0), divider_c)
+            .draw();
+            continue;
         }
-    });
+        if state.hovered_idx == Some(i) {
+            canvas.rect()
+                .at(pt_phys(item.x + side_pad_phys * 0.5), pt_phys(item.y_top))
+                .size(pt_phys(item.w - side_pad_phys), pt_phys(item.h))
+                .fill(hover_bg)
+                .radius(Pt(4.0))
+                .draw();
+        }
+        let fg = if row.enabled { label_fg } else { label_disab };
+        let text_y_phys = item.y_top + (item.h - chrome_cell_h as f64) * 0.5;
+        canvas.text(
+            pt_phys(item.x + side_pad_phys),
+            pt_phys(text_y_phys),
+            &row.label,
+        ).color(fg).draw();
+        if !row.shortcut_hint.is_empty() {
+            let hint_w = label_w_phys(&row.shortcut_hint);
+            canvas.text(
+                pt_phys(item.x + item.w - side_pad_phys - hint_w),
+                pt_phys(text_y_phys),
+                &row.shortcut_hint,
+            ).color(hint_fg).draw();
+        }
+    }
+
+    canvas
 }
 
 /// F3+3.0 — paint the `LayoutModal` overlay.  Same plumbing as
@@ -4929,17 +4958,120 @@ fn build_canvas_runs(
     runs
 }
 
+/// Free-function `encode_canvas` — composes with caller's
+/// destructured `&mut self` borrows (render_layout style).  The
+/// method wrapper below is for tests / one-shot callers.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_canvas_into(
+    canvas: &crate::ui::core::canvas::Canvas,
+    target: &ProtocolObject<dyn MTLTexture>,
+    cmd: &ProtocolObject<dyn MTLCommandBuffer>,
+    ui_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
+    atlas: &mut GlyphAtlas,
+    device: &ProtocolObject<dyn MTLDevice>,
+    font: &mut FontCache,
+    clear_color: Option<MTLClearColor>,
+    viewport_px: &[f32; 2],
+    chrome_cell_w: f32,
+    chrome_cell_h: f32,
+    chrome_ascent: f32,
+) {
+    let (aw, ah) = atlas.dims();
+    let atlas_w_f = aw as f32;
+    let atlas_h_f = ah as f32;
+    let mut ui_buf: Vec<UiRectInstance> = Vec::new();
+    let mut gl_buf: Vec<GlyphInstance> = Vec::new();
+    let runs = build_canvas_runs(
+        canvas,
+        chrome_cell_w, chrome_cell_h, chrome_ascent,
+        atlas_w_f, atlas_h_f,
+        font, atlas,
+        &mut ui_buf, &mut gl_buf,
+    );
+
+    let mut ui_cursor = 0usize;
+    let mut gl_cursor = 0usize;
+    let mut first_pass = true;
+    let viewport_ptr = NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap();
+    let viewport_len = std::mem::size_of::<[f32; 2]>();
+
+    for run in &runs {
+        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            if first_pass && clear_color.is_some() {
+                color.setLoadAction(MTLLoadAction::Clear);
+                color.setClearColor(clear_color.unwrap());
+            } else {
+                color.setLoadAction(MTLLoadAction::Load);
+            }
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        first_pass = false;
+
+        let enc = match cmd.renderCommandEncoderWithDescriptor(&pass) {
+            Some(e) => e,
+            None => continue,
+        };
+        unsafe {
+            enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+        }
+        match run.kind {
+            CanvasRunKind::UiRect => {
+                enc.setRenderPipelineState(ui_pipeline);
+                let slice = &ui_buf[ui_cursor..ui_cursor + run.count];
+                let buf = make_instance_buffer(device, ui_rects_as_bytes(slice));
+                if let Some(b) = &buf {
+                    unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+                }
+                unsafe {
+                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                        MTLPrimitiveType::Triangle, 0, 6, run.count,
+                    );
+                }
+                ui_cursor += run.count;
+            }
+            CanvasRunKind::Glyph => {
+                enc.setRenderPipelineState(fg_pipeline);
+                let slice = &gl_buf[gl_cursor..gl_cursor + run.count];
+                let buf = make_instance_buffer(device, glyphs_as_bytes(slice));
+                if let Some(b) = &buf {
+                    unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+                }
+                unsafe {
+                    enc.setFragmentTexture_atIndex(Some(atlas.texture()), 0);
+                    enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                        MTLPrimitiveType::Triangle, 0, 6, run.count,
+                    );
+                }
+                gl_cursor += run.count;
+            }
+        }
+        enc.endEncoding();
+    }
+
+    if first_pass && clear_color.is_some() {
+        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        unsafe {
+            let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+            color.setTexture(Some(target));
+            color.setLoadAction(MTLLoadAction::Clear);
+            color.setClearColor(clear_color.unwrap());
+            color.setStoreAction(MTLStoreAction::Store);
+        }
+        if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
+            enc.endEncoding();
+        }
+    }
+}
+
 impl MetalRenderer {
-    /// Encode a Canvas's primitive queue to `target` as one or
-    /// more render passes — one per same-pipeline run, so
-    /// submission order is preserved as z-order across the
-    /// ui_rects / glyph pipeline boundary.  Atlas is the
-    /// monochrome chrome atlas; colour atlas isn't wired yet
-    /// (the canvas API doesn't expose colour glyphs).
-    ///
-    /// `clear_color`:  Some(c) makes the first pass Clear with
-    /// that colour; None uses Load (assumes target already has
-    /// content the caller wants to preserve).
+    /// Method wrapper — calls the free `encode_canvas_into`
+    /// with the renderer's own state.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_canvas(
         &mut self,
@@ -4952,99 +5084,13 @@ impl MetalRenderer {
         chrome_cell_h: f32,
         chrome_ascent: f32,
     ) {
-        let (aw, ah) = self.atlas.dims();
-        let atlas_w_f = aw as f32;
-        let atlas_h_f = ah as f32;
-        let mut ui_buf: Vec<UiRectInstance> = Vec::new();
-        let mut gl_buf: Vec<GlyphInstance> = Vec::new();
-        let runs = build_canvas_runs(
-            canvas,
+        encode_canvas_into(
+            canvas, target, cmd,
+            &self.ui_pipeline, &self.fg_pipeline, &self.fg_sampler,
+            &mut self.atlas, &self.device, &mut self.font,
+            clear_color, viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
-            atlas_w_f, atlas_h_f,
-            &mut self.font,
-            &mut self.atlas,
-            &mut ui_buf,
-            &mut gl_buf,
         );
-
-        let mut ui_cursor = 0usize;
-        let mut gl_cursor = 0usize;
-        let mut first_pass = true;
-        let viewport_ptr = NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap();
-        let viewport_len = std::mem::size_of::<[f32; 2]>();
-
-        for run in &runs {
-            let pass = unsafe { MTLRenderPassDescriptor::new() };
-            unsafe {
-                let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-                color.setTexture(Some(target));
-                if first_pass && clear_color.is_some() {
-                    color.setLoadAction(MTLLoadAction::Clear);
-                    color.setClearColor(clear_color.unwrap());
-                } else {
-                    color.setLoadAction(MTLLoadAction::Load);
-                }
-                color.setStoreAction(MTLStoreAction::Store);
-            }
-            first_pass = false;
-
-            let enc = match cmd.renderCommandEncoderWithDescriptor(&pass) {
-                Some(e) => e,
-                None => continue,
-            };
-            unsafe {
-                enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
-            }
-            match run.kind {
-                CanvasRunKind::UiRect => {
-                    enc.setRenderPipelineState(&self.ui_pipeline);
-                    let slice = &ui_buf[ui_cursor..ui_cursor + run.count];
-                    let buf = make_instance_buffer(&self.device, ui_rects_as_bytes(slice));
-                    if let Some(b) = &buf {
-                        unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-                    }
-                    unsafe {
-                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                            MTLPrimitiveType::Triangle, 0, 6, run.count,
-                        );
-                    }
-                    ui_cursor += run.count;
-                }
-                CanvasRunKind::Glyph => {
-                    enc.setRenderPipelineState(&self.fg_pipeline);
-                    let slice = &gl_buf[gl_cursor..gl_cursor + run.count];
-                    let buf = make_instance_buffer(&self.device, glyphs_as_bytes(slice));
-                    if let Some(b) = &buf {
-                        unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
-                    }
-                    unsafe {
-                        enc.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
-                        enc.setFragmentSamplerState_atIndex(Some(&self.fg_sampler), 0);
-                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                            MTLPrimitiveType::Triangle, 0, 6, run.count,
-                        );
-                    }
-                    gl_cursor += run.count;
-                }
-            }
-            enc.endEncoding();
-        }
-
-        // If the canvas was empty AND a clear was requested, still
-        // honour the clear so callers get a known initial state.
-        if first_pass && clear_color.is_some() {
-            let pass = unsafe { MTLRenderPassDescriptor::new() };
-            unsafe {
-                let color = pass.colorAttachments().objectAtIndexedSubscript(0);
-                color.setTexture(Some(target));
-                color.setLoadAction(MTLLoadAction::Clear);
-                color.setClearColor(clear_color.unwrap());
-                color.setStoreAction(MTLStoreAction::Store);
-            }
-            if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
-                enc.endEncoding();
-            }
-        }
     }
 
     /// Test helper: encode a Canvas into a freshly-allocated
