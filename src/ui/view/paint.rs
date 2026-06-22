@@ -79,8 +79,14 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     match view {
         View::Text(t) => {
-            // Baseline y = top + ascent (NOT top + line_h).
-            let baseline_pt = phys_to_pt(rect.y + ctx.ascent_phys);
+            // `TextPrim` is documented top-left in physical pixels;
+            // the renderer converts `y → y + ascent` internally to
+            // hit the baseline.  So we pass `rect.y` as-is here —
+            // emitting `rect.y + ascent` would shift everything down
+            // by an ascent (~12 pt), driving subsequent rows into
+            // each other (real bug, observed 2026-06-23 dev panel
+            // overlap on L1 / L4).
+            let top_pt = phys_to_pt(rect.y);
             // Truncate to fit rect width if Single-line.
             let max_chars = (rect.w / ctx.cell_w_phys).floor().max(0.0) as usize;
             let drawn: String = match &t.lines {
@@ -112,7 +118,7 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
                 super::view::TextAlign::Center   => (rect.w - content_w_phys) * 0.5,
                 super::view::TextAlign::Trailing => rect.w - content_w_phys,
             };
-            canvas.text(phys_to_pt(rect.x + x_pad), baseline_pt, &drawn)
+            canvas.text(phys_to_pt(rect.x + x_pad), top_pt, &drawn)
                 .color(color)
                 .draw();
         }

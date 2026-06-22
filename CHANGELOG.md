@@ -17,7 +17,24 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.13**
+Current: **0.6.14**
+
+### 0.6.14
+
+修 0.6.13 dev panel L1/L4 文字撞下面 swatches/squares 的真根因.
+
+`canvas::TextPrim::y` 注释说"Top-left in physical pixels",render_metal 处理 Text primitive 时**自己** `baseline_y = t.y + ascent`(line 5059).但 v2 paint.rs `paint_atom` 自己**又**加了 ascent:
+
+```rust
+let baseline_pt = phys_to_pt(rect.y + ctx.ascent_phys);  // ← 错,自己加了
+canvas.text(.. baseline_pt, ..)                          // renderer 再加 → text 实际 y = rect.y + 2 × ascent
+```
+
+结果每个 text 都比 layout 算的位置低一个 ascent(~12 pt),撞下一行.L1 swatches 跟 Color: 文本撞,L4 mini squares 跟 VStack/HStack/ZStack 标签撞.
+
+修:paint_atom 改用 `top_pt = phys_to_pt(rect.y)`,把 top 传给 canvas.text,renderer 自己加 ascent.5 个 paint/hit_test 测试仍 PASS.
+
+shell 0.6.13 → 0.6.14.
 
 ### 0.6.13
 

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.13"  # DevPanel Model section 用 v2 framework 自渲染(自反 demo + 5 层完整)
+shell   = "0.6.14"  # 修 v2 paint pass 双加 ascent — text y 该传 top,renderer 自己加 ascent
 core    = "0.10.68" # toolbar dev icon click → DevPanelToggle wire → L1
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
