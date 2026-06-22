@@ -893,7 +893,7 @@ declare_class!(
 // Event dispatch
 // ---------------------------------------------------------------------------
 
-enum EventKind {
+pub enum EventKind {
     UserEvent,
     Key(MarspotKeyEvent, Modifiers),
     MouseDown { x: f64, y: f64, mods: Modifiers },
@@ -907,6 +907,10 @@ enum EventKind {
     Moved,
     Focused(bool),
     CloseRequested,
+    /// Dev panel NSWindow was resized / moved / changed visibility.
+    /// Signals that the next redraw needs to recompute dev panel
+    /// dimensions and re-paint into the new layer size.
+    DevWindowChanged,
 }
 
 struct AppState {
@@ -918,6 +922,10 @@ thread_local! {
     /// Owns the user's `MarspotApp` and the per-window context.
     /// Populated by `run_app`; accessed from every event handler.
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn dispatch_event_pub(kind: EventKind) {
+    dispatch_event(kind);
 }
 
 fn dispatch_event(kind: EventKind) {
@@ -943,6 +951,12 @@ fn dispatch_event(kind: EventKind) {
             EventKind::Moved => app.moved(ctx),
             EventKind::Focused(f) => app.focused(ctx, f),
             EventKind::CloseRequested => app.close_requested(ctx),
+            EventKind::DevWindowChanged => {
+                // The dev window's NSWindowDelegate noticed a resize
+                // / move / etc.  Drive a redraw so the dev panel
+                // recomputes against the new content area.
+                ctx.request_redraw();
+            }
         }
 
         if ctx.redraw_pending.replace(false) {
@@ -955,6 +969,12 @@ fn dispatch_event(kind: EventKind) {
             post_dummy_event(&ctx.nsapp);
         }
     });
+    // Apply any AppKit window operations queued from inside the
+    // APP_STATE borrow (dev panel show/hide).  Running here means
+    // `makeKeyAndOrderFront:` can synchronously fire window
+    // notifications back through `dispatch_event` without
+    // tripping a re-entrant `borrow_mut`.
+    crate::dev_window::drain_pending_actions();
 }
 
 fn post_dummy_event(nsapp: &NSApplication) {
@@ -1128,6 +1148,12 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             state.app.redraw(&state.ctx);
         }
     });
+
+    // Build the independent dev-panel window.  Hidden by default;
+    // the app toggles visibility via dev_window::with_dev_window.
+    if let Err(e) = crate::dev_window::ensure_built(mtm) {
+        eprintln!("[marspot] dev_window init failed: {e}; toolbar toggle will be a no-op");
+    }
 
     // 6. Run.  Returns after dispatch_event sees an exit request.
     unsafe { nsapp.run() };

@@ -575,6 +575,9 @@ pub struct MetalRenderer {
     layout_modal_state: Option<LayoutModalRender>,
     /// F3+9 — right-click context menu state.  `Some` while open.
     context_menu_state: Option<ContextMenuRender>,
+    /// Dev-panel state.  `Some` while visible.  Owned by L2;
+    /// renderer just reads it to build a Canvas and encode.
+    dev_panel_state: Option<crate::ui::components::DevPanelState>,
     /// F3+1.6 — overlay scratches.  Anything pushed here gets
     /// encoded in EXTRA UI + FG passes AFTER the main grid render,
     /// so it lands on top of all grid pixels regardless of which
@@ -740,7 +743,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, layout_modal_state: None, context_menu_state: None,
+            process_panel: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -804,7 +807,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, layout_modal_state: None, context_menu_state: None,
+            process_panel: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -836,6 +839,16 @@ impl MetalRenderer {
     /// cursor.
     pub fn set_context_menu(&mut self, state: Option<ContextMenuRender>) {
         self.context_menu_state = state;
+    }
+
+    /// Set the dev panel render state.  `Some` when visible,
+    /// `None` when hidden.  Caller (L2) toggles via toolbar
+    /// button / keyboard shortcut; we just paint it.
+    pub fn set_dev_panel(
+        &mut self,
+        state: Option<crate::ui::components::DevPanelState>,
+    ) {
+        self.dev_panel_state = state;
     }
 
     /// L2 — set which chrome icon button (if any) is under the
@@ -1032,6 +1045,70 @@ impl MetalRenderer {
     /// grid + scrollback, emits BG cell instances + FG glyph
     /// instances, then runs both passes against the next CAMetalLayer
     /// drawable and presents.  No-op in headless mode.
+    /// Chrome font metrics: (cell_w, cell_h, ascent) in physical
+    /// pixels.  Exposed for the dev-window subsystem which builds
+    /// canvases outside the main render flow.
+    pub fn chrome_font_metrics(&self) -> (f32, f32, f32) {
+        (self.font.cell_w as f32, self.font.cell_h as f32, self.font.ascent as f32)
+    }
+
+    /// Render one `Canvas` directly into our CAMetalLayer's next
+    /// drawable.  Used by `DevWindow` which owns this renderer
+    /// and has no `Layout` / sessions to feed into `render_layout`.
+    /// `width_px` / `height_px` size the layer + viewport this
+    /// frame; caller has already informed the renderer of any
+    /// resize.
+    pub fn render_canvas_into_layer(
+        &mut self,
+        canvas: &crate::ui::core::canvas::Canvas,
+        width_px: f32,
+        height_px: f32,
+        chrome_cell_w: f32,
+        chrome_cell_h: f32,
+        chrome_ascent: f32,
+    ) {
+        let Some(layer) = self.layer.as_ref() else { return };
+        // Size the layer to match the view.  drawableSize is in
+        // physical pixels.
+        unsafe {
+            use objc2_foundation::CGSize;
+            layer.setDrawableSize(CGSize {
+                width: width_px as f64,
+                height: height_px as f64,
+            });
+        }
+        let drawable = match unsafe { layer.nextDrawable() } {
+            Some(d) => d,
+            None => return,
+        };
+        let texture = unsafe { drawable.texture() };
+        let cmd = match self.queue.commandBuffer() {
+            Some(c) => c,
+            None => return,
+        };
+        let viewport_px = [width_px, height_px];
+        encode_canvas_into(
+            canvas,
+            &texture,
+            &cmd,
+            &self.ui_pipeline,
+            &self.fg_pipeline,
+            &self.fg_sampler,
+            &mut self.atlas,
+            &self.device,
+            &mut self.font,
+            Some(MTLClearColor { red: 0.078, green: 0.086, blue: 0.110, alpha: 1.0 }),
+            &viewport_px,
+            chrome_cell_w, chrome_cell_h, chrome_ascent,
+        );
+        cmd.commit();
+        cmd.waitUntilScheduled();
+        use objc2_metal::MTLDrawable;
+        let mtl_drawable: &ProtocolObject<dyn objc2_metal::MTLDrawable> =
+            ProtocolObject::from_ref(&*drawable);
+        mtl_drawable.present();
+    }
+
     pub fn render_layout(
         &mut self,
         layout: &Layout,
@@ -1151,14 +1228,34 @@ impl MetalRenderer {
             true,
         );
 
+        // Dev panel — Canvas-based overlay. Encoded BEFORE the
+        // context menu so the menu (if open) sits on top.
+        let chrome_cell_w = font.cell_w as f32;
+        let chrome_cell_h = font.cell_h as f32;
+        let chrome_ascent = font.ascent as f32;
+        let viewport_px = [width_px as f32, height_px as f32];
+        if let Some(dev_state) = self.dev_panel_state.as_ref() {
+            if dev_state.visible {
+                let canvas = crate::ui::components::build_dev_panel_canvas(
+                    dev_state,
+                    width_px, height_px,
+                    chrome_cell_w, chrome_cell_h,
+                );
+                encode_canvas_into(
+                    &canvas, &texture, &cmd,
+                    ui_pipeline, fg_pipeline, fg_sampler,
+                    atlas, device, font,
+                    None, &viewport_px,
+                    chrome_cell_w, chrome_cell_h, chrome_ascent,
+                );
+            }
+        }
+
         // P2c — ContextMenu draws OUT-OF-BAND via the Canvas
         // pipeline: built fresh per frame and encoded with
         // submission-order = z-order semantics, AFTER the main
         // encode_passes so it sits above every other overlay.
         if let Some(menu_state) = self.context_menu_state.as_ref() {
-            let chrome_cell_w = font.cell_w as f32;
-            let chrome_cell_h = font.cell_h as f32;
-            let chrome_ascent = font.ascent as f32;
             let canvas = build_context_menu_canvas(
                 menu_state,
                 width_px,
@@ -1166,7 +1263,6 @@ impl MetalRenderer {
                 chrome_cell_w,
                 chrome_cell_h,
             );
-            let viewport_px = [width_px as f32, height_px as f32];
             encode_canvas_into(
                 &canvas,
                 &texture,
@@ -1330,16 +1426,31 @@ impl MetalRenderer {
             // `mark_bg_clear_required` (e.g. resize, layout change).
             clear_bg,
         );
-        // P2c — ContextMenu canvas pass (same shape as render_layout).
+        // Dev panel + ContextMenu canvases (same shape as render_layout).
+        let chrome_cell_w = font.cell_w as f32;
+        let chrome_cell_h = font.cell_h as f32;
+        let chrome_ascent = font.ascent as f32;
+        let viewport_px = [width_px as f32, height_px as f32];
+        if let Some(dev_state) = self.dev_panel_state.as_ref() {
+            if dev_state.visible {
+                let canvas = crate::ui::components::build_dev_panel_canvas(
+                    dev_state, width_px, height_px,
+                    chrome_cell_w, chrome_cell_h,
+                );
+                encode_canvas_into(
+                    &canvas, target, &cmd,
+                    ui_pipeline, fg_pipeline, fg_sampler,
+                    atlas, device, font,
+                    None, &viewport_px,
+                    chrome_cell_w, chrome_cell_h, chrome_ascent,
+                );
+            }
+        }
         if let Some(menu_state) = self.context_menu_state.as_ref() {
-            let chrome_cell_w = font.cell_w as f32;
-            let chrome_cell_h = font.cell_h as f32;
-            let chrome_ascent = font.ascent as f32;
             let canvas = build_context_menu_canvas(
                 menu_state, width_px, height_px,
                 chrome_cell_w, chrome_cell_h,
             );
-            let viewport_px = [width_px as f32, height_px as f32];
             encode_canvas_into(
                 &canvas, target, &cmd,
                 ui_pipeline, fg_pipeline, fg_sampler,
@@ -2618,7 +2729,13 @@ fn build_context_menu_canvas(
     let label_disab = Color::rgba(115, 122, 133, 1.0);
     let hint_fg     = Color::rgba(140, 153, 168, 1.0);
     let hover_bg    = Color::rgba(51, 107, 173, 1.0);
-    let divider_c   = Color::rgba(255, 255, 255, 0.22);
+    // Web `border: 1px solid` semantics: 1pt thick + alpha tuned for
+    // clear visibility on the menu BG.  alpha=0.5 lands the rendered
+    // pixel ≈ rgb(144, 145, 149) over bg rgb(33, 36, 43) — the kind
+    // of contrast Chrome / Safari show for `rgba(255,255,255,0.5)`
+    // on a near-black panel.  Earlier 0.22 was a misjudgement (line
+    // showed but user reported "几乎看不清").
+    let divider_c   = Color::rgba(255, 255, 255, 0.50);
     let side_pad_pt = 12.0_f64;
 
     // Helper: phys → Pt via `/ scale` so existing layout output
@@ -3289,7 +3406,7 @@ fn push_layout_chrome(
     p: &mut crate::ui::core::view::ViewPainter,
 ) {
     use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
-    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon};
+    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon};
 
     // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid +
     // title-strip↔toolbar).  Same SEAM tone as GridSeams; routed
@@ -3331,6 +3448,7 @@ fn push_layout_chrome(
     let sidebar_icon = SidebarIcon { collapsed: sidebar_collapsed };
     let grid_icon = GridIcon { cols: layout.grid_cols, rows: layout.grid_rows };
     let list_tree_icon = ListTreeIcon;
+    let dev_panel_icon = DevPanelIcon;
     let chrome = ButtonStyle::chrome();
     for (rect, hover_id, icon) in [
         (layout.sidebar_button_rect, 0u8,
@@ -3339,6 +3457,8 @@ fn push_layout_chrome(
          &grid_icon as &dyn crate::ui::core::IconComponent),
         (layout.process_button_rect, 2u8,
          &list_tree_icon as &dyn crate::ui::core::IconComponent),
+        (layout.dev_panel_button_rect, 3u8,
+         &dev_panel_icon as &dyn crate::ui::core::IconComponent),
     ] {
         let btn = Button {
             rect,

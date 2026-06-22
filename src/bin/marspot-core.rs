@@ -100,6 +100,8 @@ enum ChromeBtn {
     Layout,
     /// F3+1 — process-tree panel toggle.
     ProcessTree,
+    /// UI-system dev panel toggle.
+    DevPanel,
 }
 
 /// Convert the typed hover-button to the renderer's wire shape
@@ -111,6 +113,7 @@ fn map_hover_to_u8(h: Option<ChromeBtn>) -> Option<u8> {
         Some(ChromeBtn::Sidebar) => Some(0),
         Some(ChromeBtn::Layout) => Some(1),
         Some(ChromeBtn::ProcessTree) => Some(2),
+        Some(ChromeBtn::DevPanel) => Some(3),
         None => None,
     }
 }
@@ -894,6 +897,11 @@ struct CoreApp {
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
     context_menu: Option<ContextMenuState>,
+    /// UI-system dev panel — the workbench where tokens, primitives
+    /// and components are exercised in isolation.  Default-open so
+    /// fresh installs see it; toggle via toolbar button (added in a
+    /// later commit) or persistence (also coming).
+    dev_panel: marspot::ui::components::DevPanelState,
     /// Modal-staged cols / rows.  Updated by clicks on the modal's
     /// +/- steppers; committed to `grid_cols` / `grid_rows` on Apply.
     /// Initialised from grid_* every time the modal opens.
@@ -2888,6 +2896,8 @@ impl CoreApp {
             Some(ChromeBtn::Layout)
         } else if self.layout.hit_test_process_button(x_phys, y_phys) {
             Some(ChromeBtn::ProcessTree)
+        } else if self.layout.hit_test_dev_panel_button(x_phys, y_phys) {
+            Some(ChromeBtn::DevPanel)
         } else {
             None
         };
@@ -3060,6 +3070,12 @@ impl CoreApp {
                 });
                 self.refresh_process_panel();
             }
+            self.needs_render = true;
+            return;
+        }
+        // UI-system dev panel toggle.
+        if self.layout.hit_test_dev_panel_button(x_phys, y_phys) {
+            self.dev_panel.visible = !self.dev_panel.visible;
             self.needs_render = true;
             return;
         }
@@ -3666,6 +3682,17 @@ impl CoreApp {
         let panel_data = self.build_process_panel_render();
         self.renderer.set_process_panel(panel_data);
         // F3+9 — publish ContextMenu render state every frame.
+        // Dev panel renders into its own NSWindow now, not into
+        // the main grid render.  Keep set_dev_panel(None) so any
+        // residual in-main-window paint is suppressed.
+        self.renderer.set_dev_panel(None);
+        marspot::dev_window::with_dev_window(|w| {
+            w.set_visible_deferred(self.dev_panel.visible);
+            if self.dev_panel.visible {
+                w.render(&self.dev_panel);
+            }
+        });
+
         self.renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
             use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
             ContextMenuRender {
@@ -4191,6 +4218,7 @@ fn main() {
         grid_rows,
         layout_modal_open: false,
         context_menu: None,
+        dev_panel: marspot::ui::components::DevPanelState::default(),
         pending_grid_cols: grid_cols,
         pending_grid_rows: grid_rows,
         card_slots: (0..(grid_cols * grid_rows)).collect(),
