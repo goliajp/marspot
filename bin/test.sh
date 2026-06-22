@@ -16,4 +16,10 @@ cd "$ROOT"
 # --workspace so the marspot-term crate's tests (the terminal engine —
 # parser/grid/terminal/scrollback/… extracted for target #4) run too,
 # not just the GUI crate's handful of lib tests.
-exec cargo nextest run --workspace --lib "$@"
+#
+# `--all-targets` (instead of `--lib`) includes integration tests —
+# in particular `crates/marspot-term/tests/scrollback_display.rs`, the
+# user-perspective gate that catches scrollback display bugs (blank
+# pushes leaking into scrollback, torn-write history loss, scroll
+# cap mismatches, resize content corruption) BEFORE they ship.
+exec cargo nextest run --workspace --all-targets "$@"
