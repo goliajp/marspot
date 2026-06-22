@@ -4777,6 +4777,339 @@ pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLD
         .ok_or_else(|| "MTLCreateSystemDefaultDevice → null after non-null check".into())
 }
 
+// ───────────────────────────────────────────────────────────────────
+// Canvas flush — submission-order = z-order multi-encoder path.
+// (P2b of the UI system RFC.  See docs/ui-system-rfc.md.)
+// ───────────────────────────────────────────────────────────────────
+
+/// Convert a `RectPrim` to a `UiRectInstance` for the ui_rects
+/// pipeline.  Border / shadow optional fields fold cleanly into
+/// the shader's existing knobs (0 / TRANSPARENT = skip).
+fn ui_rect_instance_from_rect(r: &crate::ui::core::canvas::RectPrim) -> UiRectInstance {
+    let (border_w, border_c) = r.border
+        .map(|(w, c)| (w as f32, c.to_rgba_f32()))
+        .unwrap_or((0.0, [0.0; 4]));
+    let (shadow_blur, shadow_alpha, shadow_color) = r.shadow
+        .map(|(blur, _offset, c)| (blur as f32, c.a as f32, c.to_rgba_f32()))
+        .unwrap_or((0.0, 0.0, [0.0; 4]));
+    UiRectInstance {
+        origin: [r.x as f32, r.y as f32],
+        size:   [r.w as f32, r.h as f32],
+        fill_color: r.fill.to_rgba_f32(),
+        border_color: border_c,
+        corner_radius: r.radius as f32,
+        border_width: border_w,
+        shadow_blur,
+        shadow_alpha,
+        shadow_color,
+    }
+}
+
+/// Axis-aligned horizontal or vertical line, emitted as a
+/// degenerate `UiRectInstance` with radius=0.  Width = stroke
+/// width.  Non-axis-aligned lines aren't supported yet — they'd
+/// need a rotated line shader.
+fn ui_rect_instance_from_line(l: &crate::ui::core::canvas::LinePrim) -> UiRectInstance {
+    let (x, y, w, h) = if (l.from.1 - l.to.1).abs() < 0.5 {
+        // Horizontal line.
+        let x_min = l.from.0.min(l.to.0);
+        let x_max = l.from.0.max(l.to.0);
+        let cy = (l.from.1 + l.to.1) * 0.5;
+        (x_min, cy - l.width * 0.5, x_max - x_min, l.width)
+    } else if (l.from.0 - l.to.0).abs() < 0.5 {
+        // Vertical line.
+        let y_min = l.from.1.min(l.to.1);
+        let y_max = l.from.1.max(l.to.1);
+        let cx = (l.from.0 + l.to.0) * 0.5;
+        (cx - l.width * 0.5, y_min, l.width, y_max - y_min)
+    } else {
+        // Diagonal — degenerate fallback: bounding box.  Caller
+        // hits this only on accidental misuse; lines should be
+        // axis-aligned for now.
+        let x = l.from.0.min(l.to.0);
+        let y = l.from.1.min(l.to.1);
+        let w = (l.from.0 - l.to.0).abs().max(l.width);
+        let h = (l.from.1 - l.to.1).abs().max(l.width);
+        (x, y, w, h)
+    };
+    UiRectInstance {
+        origin: [x as f32, y as f32],
+        size:   [w as f32, h as f32],
+        fill_color: l.color.to_rgba_f32(),
+        border_color: [0.0; 4],
+        corner_radius: 0.0,
+        border_width: 0.0,
+        shadow_blur: 0.0,
+        shadow_alpha: 0.0,
+        shadow_color: [0.0; 4],
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CanvasRunKind {
+    UiRect,
+    Glyph,
+}
+
+struct CanvasRun {
+    kind: CanvasRunKind,
+    count: usize,
+}
+
+/// Walk a Canvas's primitives in submission order, emit instances
+/// into the two flat buffers, and record contiguous runs by
+/// pipeline kind so the encoder can switch pipelines at run
+/// boundaries (preserving submission-order = z-order).
+///
+/// `font_metrics` carries the cell-grid sizing the chrome font
+/// uses; the renderer's existing `push_text_run` consumes them
+/// the same way.
+#[allow(clippy::too_many_arguments)]
+fn build_canvas_runs(
+    canvas: &crate::ui::core::canvas::Canvas,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w_f: f32,
+    atlas_h_f: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    out_ui: &mut Vec<UiRectInstance>,
+    out_glyphs: &mut Vec<GlyphInstance>,
+) -> Vec<CanvasRun> {
+    use crate::ui::core::canvas::Primitive;
+
+    let mut runs: Vec<CanvasRun> = Vec::new();
+    let mut cur: Option<CanvasRunKind> = None;
+    let mut bump = |runs: &mut Vec<CanvasRun>, k: CanvasRunKind, n: usize| {
+        if runs.last().map(|r| r.kind == k).unwrap_or(false) {
+            runs.last_mut().unwrap().count += n;
+        } else {
+            runs.push(CanvasRun { kind: k, count: n });
+        }
+    };
+
+    for p in canvas.primitives() {
+        match p {
+            Primitive::Rect(r) => {
+                out_ui.push(ui_rect_instance_from_rect(r));
+                bump(&mut runs, CanvasRunKind::UiRect, 1);
+                cur = Some(CanvasRunKind::UiRect);
+            }
+            Primitive::Line(l) => {
+                out_ui.push(ui_rect_instance_from_line(l));
+                bump(&mut runs, CanvasRunKind::UiRect, 1);
+                cur = Some(CanvasRunKind::UiRect);
+            }
+            Primitive::Text(t) => {
+                let before = out_glyphs.len();
+                // The renderer's existing chrome-text path puts the
+                // anchor at the BASELINE; canvas treats it as
+                // top-left.  Convert: baseline_y = anchor_y +
+                // ascent.
+                let baseline_y = t.y as f32 + ascent;
+                push_text_run(
+                    &t.content,
+                    t.x as f32,
+                    baseline_y,
+                    t.color.to_rgba_f32(),
+                    cell_w, cell_h, ascent,
+                    atlas_w_f, atlas_h_f,
+                    font, atlas, out_glyphs,
+                );
+                let added = out_glyphs.len() - before;
+                if added > 0 {
+                    bump(&mut runs, CanvasRunKind::Glyph, added);
+                    cur = Some(CanvasRunKind::Glyph);
+                }
+            }
+        }
+    }
+    let _ = cur;
+    runs
+}
+
+impl MetalRenderer {
+    /// Encode a Canvas's primitive queue to `target` as one or
+    /// more render passes — one per same-pipeline run, so
+    /// submission order is preserved as z-order across the
+    /// ui_rects / glyph pipeline boundary.  Atlas is the
+    /// monochrome chrome atlas; colour atlas isn't wired yet
+    /// (the canvas API doesn't expose colour glyphs).
+    ///
+    /// `clear_color`:  Some(c) makes the first pass Clear with
+    /// that colour; None uses Load (assumes target already has
+    /// content the caller wants to preserve).
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_canvas(
+        &mut self,
+        canvas: &crate::ui::core::canvas::Canvas,
+        target: &ProtocolObject<dyn MTLTexture>,
+        cmd: &ProtocolObject<dyn MTLCommandBuffer>,
+        clear_color: Option<MTLClearColor>,
+        viewport_px: &[f32; 2],
+        chrome_cell_w: f32,
+        chrome_cell_h: f32,
+        chrome_ascent: f32,
+    ) {
+        let (aw, ah) = self.atlas.dims();
+        let atlas_w_f = aw as f32;
+        let atlas_h_f = ah as f32;
+        let mut ui_buf: Vec<UiRectInstance> = Vec::new();
+        let mut gl_buf: Vec<GlyphInstance> = Vec::new();
+        let runs = build_canvas_runs(
+            canvas,
+            chrome_cell_w, chrome_cell_h, chrome_ascent,
+            atlas_w_f, atlas_h_f,
+            &mut self.font,
+            &mut self.atlas,
+            &mut ui_buf,
+            &mut gl_buf,
+        );
+
+        let mut ui_cursor = 0usize;
+        let mut gl_cursor = 0usize;
+        let mut first_pass = true;
+        let viewport_ptr = NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap();
+        let viewport_len = std::mem::size_of::<[f32; 2]>();
+
+        for run in &runs {
+            let pass = unsafe { MTLRenderPassDescriptor::new() };
+            unsafe {
+                let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+                color.setTexture(Some(target));
+                if first_pass && clear_color.is_some() {
+                    color.setLoadAction(MTLLoadAction::Clear);
+                    color.setClearColor(clear_color.unwrap());
+                } else {
+                    color.setLoadAction(MTLLoadAction::Load);
+                }
+                color.setStoreAction(MTLStoreAction::Store);
+            }
+            first_pass = false;
+
+            let enc = match cmd.renderCommandEncoderWithDescriptor(&pass) {
+                Some(e) => e,
+                None => continue,
+            };
+            unsafe {
+                enc.setVertexBytes_length_atIndex(viewport_ptr, viewport_len, 1);
+            }
+            match run.kind {
+                CanvasRunKind::UiRect => {
+                    enc.setRenderPipelineState(&self.ui_pipeline);
+                    let slice = &ui_buf[ui_cursor..ui_cursor + run.count];
+                    let buf = make_instance_buffer(&self.device, ui_rects_as_bytes(slice));
+                    if let Some(b) = &buf {
+                        unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+                    }
+                    unsafe {
+                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                            MTLPrimitiveType::Triangle, 0, 6, run.count,
+                        );
+                    }
+                    ui_cursor += run.count;
+                }
+                CanvasRunKind::Glyph => {
+                    enc.setRenderPipelineState(&self.fg_pipeline);
+                    let slice = &gl_buf[gl_cursor..gl_cursor + run.count];
+                    let buf = make_instance_buffer(&self.device, glyphs_as_bytes(slice));
+                    if let Some(b) = &buf {
+                        unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+                    }
+                    unsafe {
+                        enc.setFragmentTexture_atIndex(Some(self.atlas.texture()), 0);
+                        enc.setFragmentSamplerState_atIndex(Some(&self.fg_sampler), 0);
+                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                            MTLPrimitiveType::Triangle, 0, 6, run.count,
+                        );
+                    }
+                    gl_cursor += run.count;
+                }
+            }
+            enc.endEncoding();
+        }
+
+        // If the canvas was empty AND a clear was requested, still
+        // honour the clear so callers get a known initial state.
+        if first_pass && clear_color.is_some() {
+            let pass = unsafe { MTLRenderPassDescriptor::new() };
+            unsafe {
+                let color = pass.colorAttachments().objectAtIndexedSubscript(0);
+                color.setTexture(Some(target));
+                color.setLoadAction(MTLLoadAction::Clear);
+                color.setClearColor(clear_color.unwrap());
+                color.setStoreAction(MTLStoreAction::Store);
+            }
+            if let Some(enc) = cmd.renderCommandEncoderWithDescriptor(&pass) {
+                enc.endEncoding();
+            }
+        }
+    }
+
+    /// Test helper: encode a Canvas into a freshly-allocated
+    /// `width × height` Managed texture, sync back to CPU,
+    /// return the BGRA8 bytes.  Pairs with the
+    /// `canvas_*` tests below to verify submission-order
+    /// invariants on pixel readback.
+    pub fn render_canvas_to_bitmap(
+        &mut self,
+        width: u32,
+        height: u32,
+        canvas: &crate::ui::core::canvas::Canvas,
+        chrome_cell_w: f32,
+        chrome_cell_h: f32,
+        chrome_ascent: f32,
+    ) -> Result<Vec<u8>, String> {
+        let descriptor = unsafe {
+            objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                TARGET_FORMAT, width as usize, height as usize, false,
+            )
+        };
+        descriptor.setUsage(
+            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+        );
+        descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
+        let texture = self.device.newTextureWithDescriptor(&descriptor)
+            .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())?;
+
+        let cmd = self.queue.commandBuffer()
+            .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+        let viewport_px: [f32; 2] = [width as f32, height as f32];
+        self.encode_canvas(
+            canvas,
+            ProtocolObject::from_ref(&*texture),
+            ProtocolObject::from_ref(&*cmd),
+            Some(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 }),
+            &viewport_px,
+            chrome_cell_w, chrome_cell_h, chrome_ascent,
+        );
+
+        let blit = cmd.blitCommandEncoder()
+            .ok_or_else(|| "blitCommandEncoder returned nil".to_string())?;
+        let resource: &ProtocolObject<dyn objc2_metal::MTLResource> =
+            ProtocolObject::from_ref(&*texture);
+        blit.synchronizeResource(resource);
+        blit.endEncoding();
+        cmd.commit();
+        unsafe { cmd.waitUntilCompleted() };
+
+        let bytes_per_row = (width as usize) * 4;
+        let mut bytes = vec![0u8; bytes_per_row * height as usize];
+        let region = objc2_metal::MTLRegion {
+            origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
+            size: objc2_metal::MTLSize { width: width as usize, height: height as usize, depth: 1 },
+        };
+        unsafe {
+            texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                NonNull::new(bytes.as_mut_ptr() as *mut c_void).unwrap(),
+                bytes_per_row, region, 0,
+            );
+        }
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5491,6 +5824,94 @@ mod tests {
         assert_eq!(g0.len(), gb.len());
         for (a, b) in g0.iter().zip(gb.iter()) {
             assert_eq!(a.origin[1], b.origin[1], "bot_fixed must NOT shift grid Y");
+        }
+    }
+
+    // ── P2b: Canvas → Metal flush, submission-order = z-order ──
+
+    /// Z-order invariant: three opaque rects at the SAME coord
+    /// in submission order red → green → blue must land blue on
+    /// the screen.  Same pipeline (all rects), so this verifies
+    /// the basic "last instance wins" within a single encoder.
+    #[test]
+    fn canvas_same_pipeline_submission_order_is_z_order() {
+        use crate::ui::core::{Canvas, ParentRect, Color, Length};
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => { eprintln!("skip (no Metal): {e}"); return; }
+        };
+        let w = 8u32;
+        let h = 8u32;
+        let mut canvas = Canvas::new(1.0, ParentRect::window(w as f64, h as f64));
+        // All three at (0, 0) sized full window.  Same pipeline
+        // (Rect), so the encoder draws them in array order.
+        canvas.rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pct(1.0), Length::Pct(1.0))
+            .fill(Color::rgb(255, 0, 0))
+            .draw();
+        canvas.rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pct(1.0), Length::Pct(1.0))
+            .fill(Color::rgb(0, 255, 0))
+            .draw();
+        canvas.rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pct(1.0), Length::Pct(1.0))
+            .fill(Color::rgb(0, 0, 255))
+            .draw();
+
+        let bytes = renderer.render_canvas_to_bitmap(w, h, &canvas, 48.0, 12.0, 9.0)
+            .expect("render");
+        // Sample the centre pixel.  BGRA8: bytes are B, G, R, A.
+        let px = w as usize / 2 + (h as usize / 2) * w as usize;
+        let i = px * 4;
+        let b = bytes[i];
+        let g = bytes[i + 1];
+        let r = bytes[i + 2];
+        // Blue is the last-submitted: expect pure blue.
+        assert!(b > 200, "expected blue dominant, got B={b} G={g} R={r}");
+        assert!(g < 60,  "green should be near zero, got G={g}");
+        assert!(r < 60,  "red should be near zero, got R={r}");
+    }
+
+    /// `build_canvas_runs` correctly merges consecutive same-kind
+    /// primitives into one run and splits at kind transitions.
+    #[test]
+    fn canvas_runs_batch_same_kind_split_on_transition() {
+        use crate::ui::core::{Canvas, ParentRect, Color, Length};
+        let mut canvas = Canvas::new(1.0, ParentRect::window(100.0, 100.0));
+        canvas.rect().fill(Color::WHITE).draw();
+        canvas.rect().fill(Color::BLACK).draw();
+        canvas.text(Length::Pt(0.0), Length::Pt(0.0), "x").color(Color::WHITE).draw();
+        canvas.rect().fill(Color::WHITE).draw();
+        // Minimal headless deps for build_canvas_runs.  This test
+        // doesn't render — it just probes the run-grouping logic.
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => { eprintln!("skip (no Metal): {e}"); return; }
+        };
+        let mut ui = Vec::new();
+        let mut gl = Vec::new();
+        let runs = build_canvas_runs(
+            &canvas, 48.0, 12.0, 9.0, 256.0, 256.0,
+            &mut renderer.font, &mut renderer.atlas,
+            &mut ui, &mut gl,
+        );
+        // Expected sequence: UiRect (2 rects) → Glyph (text) →
+        // UiRect (final rect).  Text may produce 0 or 1+ glyphs
+        // depending on whether 'x' resolves through the chrome
+        // font — guard the assertion against the 0-glyph case
+        // by collapsing the middle run.
+        assert!(runs.len() >= 2, "expected at least 2 runs, got {runs:?}", runs = runs.len());
+        assert_eq!(runs[0].kind, CanvasRunKind::UiRect);
+        assert_eq!(runs[0].count, 2);
+        assert_eq!(runs.last().unwrap().kind, CanvasRunKind::UiRect);
+        // If the text produced glyphs, there's a Glyph run in the middle.
+        if !gl.is_empty() {
+            assert_eq!(runs.len(), 3);
+            assert_eq!(runs[1].kind, CanvasRunKind::Glyph);
+            assert_eq!(runs[1].count, gl.len());
         }
     }
 }
