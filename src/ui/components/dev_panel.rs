@@ -683,7 +683,13 @@ fn build_model_view() -> crate::ui::view::View {
             ..Default::default()
         });
 
-    vstack(vec![
+    use crate::ui::view::{scroll_view, ViewId};
+    // ViewId 给 dev panel Model section 的 ScrollView.  arbitrary
+    // u32,只要全局唯一即可 — 这里用 magic number 标 dev-panel/
+    // model 路径(便于 grep).
+    let model_scroll_id = ViewId(0xDE7_0001);
+
+    let content = vstack(vec![
         l1,
         sep(),
         l2,
@@ -707,8 +713,16 @@ fn build_model_view() -> crate::ui::view::View {
         Length::Pt(16.0),
         Length::Pt(16.0),
         Length::Pt(0.0),
-    ))
+    ));
+
+    scroll_view(model_scroll_id, content)
 }
+
+/// Public — the dev_window's wheel handler needs to know which
+/// `ViewId` to apply scroll deltas to.  Kept in sync with the id
+/// `build_model_view` embeds.
+pub const DEV_PANEL_MODEL_SCROLL_ID: crate::ui::view::ViewId =
+    crate::ui::view::ViewId(0xDE7_0001);
 
 /// Legacy `draw_model_sample` — kept around as a fallback in case
 /// the View-tree path needs to be bypassed.  Not on the default

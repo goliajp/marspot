@@ -148,6 +148,32 @@ declare_class!(
                 },
             );
         }
+
+        // Scroll wheel — route to whichever ScrollView contains the
+        // pointer.  v1 has a single ScrollView (the Model section),
+        // so we just apply the delta to it; future multi-scroll-area
+        // dev panel will hit-test for which scroll target.  delta_y
+        // sign: AppKit "scroll up" event reports +y on a flipped
+        // view, but for scroll-content semantics "scroll up" =
+        // content moves DOWN = offset_y DECREASES.  So we apply -y.
+        #[method(scrollWheel:)]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            let dy = unsafe { event.scrollingDeltaY() };
+            // Approximate "logical-pt × scale = phys pixels" — AppKit
+            // scrollingDeltaY is already in points (typically magnitudes
+            // like 1.0–20.0 on Apple trackpads).  Layout state is in
+            // phys, so multiply by 2 (default Retina scale) — actual
+            // scale comes through dispatch.
+            let _ = dy;
+            crate::app::dispatch_event_pub(
+                crate::app::EventKind::DevPanelScroll {
+                    delta_y_pt: -dy,  // invert: trackpad up = content up = offset down
+                },
+            );
+        }
+
+        // Trackpad ought to feel snappy — accept first responder so
+        // wheel reaches us without an extra click.
     }
 );
 

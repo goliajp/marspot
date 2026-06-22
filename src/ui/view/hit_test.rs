@@ -19,13 +19,18 @@ pub enum HitTarget {
 /// Find the deepest / topmost click target containing the point.
 /// `None` when no view at that position carries an `OnClick` modifier.
 pub fn hit_test_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
-    if laid.deco.hidden || !laid.rect.contains(p) {
-        return None;
-    }
-    // Children paint after self → children are on top → check them
-    // first.  Within children, later = on top, so check in reverse.
+    hit_test_click_clipped(laid, p, None)
+}
+
+fn hit_test_click_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::layout::Rect>) -> Option<ActionId> {
+    if laid.deco.hidden { return None; }
+    if let Some(c) = clip { if !c.contains(p) { return None; } }
+    if !laid.rect.contains(p) { return None; }
+    let child_clip = if matches!(&laid.view, super::view::View::ScrollView { .. }) {
+        Some(&laid.rect)
+    } else { clip };
     for ch in laid.children.iter().rev() {
-        if let Some(h) = hit_test_click(ch, p) {
+        if let Some(h) = hit_test_click_clipped(ch, p, child_clip) {
             return Some(h);
         }
     }
@@ -34,11 +39,18 @@ pub fn hit_test_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
 
 /// Same as `hit_test_click` but for hover regions.
 pub fn hit_test_hover(laid: &LaidOut, p: (f64, f64)) -> Option<HoverId> {
-    if laid.deco.hidden || !laid.rect.contains(p) {
-        return None;
-    }
+    hit_test_hover_clipped(laid, p, None)
+}
+
+fn hit_test_hover_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::layout::Rect>) -> Option<HoverId> {
+    if laid.deco.hidden { return None; }
+    if let Some(c) = clip { if !c.contains(p) { return None; } }
+    if !laid.rect.contains(p) { return None; }
+    let child_clip = if matches!(&laid.view, super::view::View::ScrollView { .. }) {
+        Some(&laid.rect)
+    } else { clip };
     for ch in laid.children.iter().rev() {
-        if let Some(h) = hit_test_hover(ch, p) {
+        if let Some(h) = hit_test_hover_clipped(ch, p, child_clip) {
             return Some(h);
         }
     }

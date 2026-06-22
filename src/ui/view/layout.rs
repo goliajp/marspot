@@ -143,17 +143,25 @@ impl LayoutCtx {
 
 // ─── Layout entry point ───────────────────────────────────────
 
+/// CJK / wide-character aware string-width in cells.  Routes
+/// through `marspot_term::grid::char_width` so chrome and the
+/// terminal grid agree on what counts as 1 cell vs 2 cells (CJK
+/// ideographs, fullwidth forms, emoji, ambiguous-wide when opted
+/// in via `MARSPOT_AMBIGUOUS_WIDE=1`).
+pub fn text_width_cells(s: &str) -> usize {
+    s.chars().map(|c| marspot_term::grid::char_width(c) as usize).sum()
+}
+
 /// Run the layout pass.  `origin` is the parent's top-left in phys;
 /// `constraints` bounds this node's size.  Returns the laid-out
 /// subtree with all rects in phys.
 pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -> LaidOut {
     match view {
         View::Text(t) => {
-            // Width = char count × cell_w (clamped); height = lines × line_h.
-            // Wrap currently truncated to single-line — wrap support lands
-            // when we wire a real text shaper (out of v1 scope).
+            // Width = display-cells × cell_w (CJK = 2 cells).
+            // Height = line_h.  Wrap = single-line for v1.
             let line_h = ctx.line_h_phys(t.size);
-            let raw_w = t.content.chars().count() as f64 * ctx.cell_w_phys;
+            let raw_w = text_width_cells(&t.content) as f64 * ctx.cell_w_phys;
             let size = c.clamp(raw_w, line_h);
             LaidOut {
                 view: view.clone(),
@@ -194,7 +202,58 @@ pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -
         View::ZStack { children, align } => {
             layout_zstack(children, *align, ctx, origin, c, view)
         }
+        View::ScrollView { child, id } => layout_scroll(child, *id, ctx, origin, c, view),
         View::Modified { child, mods } => layout_modified(child, mods, ctx, origin, c, view),
+    }
+}
+
+// ─── ScrollView ───────────────────────────────────────────────
+
+fn layout_scroll(
+    child: &View,
+    id: super::types::ViewId,
+    ctx: LayoutCtx,
+    origin: (f64, f64),
+    c: Constraints,
+    self_view: &View,
+) -> LaidOut {
+    // 1. Read current scroll state (offset).  content_h / viewport_h
+    //    will be updated after we measure.
+    let mut state = super::scroll::scroll_state(id);
+
+    // 2. Lay the child out with bounded width(scroll only vertical)
+    //    and unbounded height(content can be arbitrarily tall).
+    let inner_c = Constraints {
+        min_w: c.min_w,
+        max_w: c.max_w,
+        min_h: 0.0,
+        max_h: f64::INFINITY,
+    };
+    // Child's origin = our origin in PRE-scroll coords.  We shift
+    // its subtree afterwards by -offset_y so painted positions land
+    // inside the viewport.
+    let mut child_laid = layout(child, ctx, origin, inner_c);
+
+    // 3. Self viewport size = full constraint (fill given space).
+    //    Clamp offset to new content extent + viewport height.
+    let viewport_w = c.max_w.min(child_laid.rect.w.max(c.min_w));
+    let viewport_h = if c.max_h.is_finite() { c.max_h } else { child_laid.rect.h };
+    state.content_h = child_laid.rect.h;
+    state.viewport_h = viewport_h;
+    state.clamp_offset();
+    super::scroll::set_scroll_state(id, state);
+
+    // 4. Shift child subtree by -offset_y so painted y = real -
+    //    scroll offset.  Self stays at origin.
+    if state.offset_y != 0.0 {
+        shift_subtree(&mut child_laid, 0.0, -state.offset_y);
+    }
+
+    LaidOut {
+        view: self_view.clone(),
+        rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
+        deco: Decoration::default(),
+        children: vec![child_laid],
     }
 }
 

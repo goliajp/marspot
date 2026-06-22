@@ -2300,6 +2300,17 @@ impl MarspotApp for ShellApp {
         }
     }
 
+    fn dev_panel_scroll(&mut self, _ctx: &MarspotAppCtx, delta_y_pt: f64) {
+        // The wheel delta arrives in logical points; ScrollView state
+        // is in phys.  Multiply by the panel's current scale.
+        let scale = self.dev_panel.scale.max(0.1);
+        let delta_y_phys = delta_y_pt * scale * 3.0; // *3 = light "speed" multiplier
+        let _ = marspot::ui::view::apply_scroll_delta(
+            marspot::ui::components::DEV_PANEL_MODEL_SCROLL_ID,
+            delta_y_phys,
+        );
+    }
+
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
         // Sync the dev panel's NSWindow visibility against the L1
         // state bit, and render its contents when visible.  Cheap

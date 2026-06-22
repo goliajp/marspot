@@ -12,6 +12,7 @@
 
 pub mod types;
 pub mod view;
+pub mod scroll;
 pub mod layout;
 pub mod paint;
 pub mod hit_test;
@@ -31,3 +32,9 @@ pub use layout::{
 };
 pub use paint::{paint, paint_into};
 pub use hit_test::{hit_test_click, hit_test_hover, HitTarget};
+pub use scroll::{
+    ScrollState,
+    scroll_state, set_scroll_state, with_scroll_state, apply_scroll_delta,
+    forget as forget_scroll_state,
+};
+pub use view::scroll_view;

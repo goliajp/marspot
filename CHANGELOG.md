@@ -17,7 +17,46 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.15**
+Current: **0.6.16**
+
+### 0.6.16
+
+修中文乱码 + 实施 ScrollView,响应用户 "panel 要可以滚动" + "中文问题要解决".
+
+CJK / 宽字符宽度:
+- v3 doc 列了 `Length::Ch`,但 Text layout / paint / truncate 都按
+  `chars().count() × cell_w` 算,CJK 字宽 1 cell 算成 1 而非 2,
+  导致 `[v1 待补]` 渲染成 `[v1 待` (补] 越界 hstack 后被吃掉),
+  整片中文挤碎 ("乱麻").
+- 新 helper `view::layout::text_width_cells(s)` 走 `marspot_term::
+  grid::char_width(c)` —— 跟终端 grid 用同一张 East Asian Wide 表
+- Text layout / paint / truncate / hstack 宽度量度全切到 cells,
+  CJK 现在按 2 cells 算,跟实际渲染对齐.
+
+ScrollView(v1 vertical-only):
+- 新 `src/ui/view/scroll.rs`:`ScrollState { offset_y, content_h,
+  viewport_h }` + thread_local `SCROLL_STATES: HashMap<ViewId, _>`
+  + 公开 API:`scroll_state` / `set_scroll_state` / `apply_scroll_delta`
+  / `forget` / `with_scroll_state`
+- 新 `View::ScrollView { child, id }` variant + `scroll_view(id, view)`
+  builder
+- Layout:child 按 unbounded height 排布,然后整 subtree shift -offset_y
+- Paint:viewport culling — rect 完全在 clip 外 skip,边缘允许 overflow
+  (Canvas 没 clip primitive,真 scissor 走 v3 follow-up)
+- Hit-test:ScrollView 给 descendants 加 clip,被 culled 的视图收不到点击
+
+DevPanel 接入:
+- `build_model_view()` 把 vstack 内容用 `scroll_view(DEV_PANEL_MODEL_
+  SCROLL_ID, content)` 包起来
+- DevPanelView 加 `-scrollWheel:` selector,dispatch EventKind::
+  DevPanelScroll { delta_y_pt }
+- ShellApp 加 `dev_panel_scroll` impl:`apply_scroll_delta(MODEL_ID,
+  delta_y_pt × scale × 3.0)` (3x = 滚动手感乘子) + request_redraw
+- 现在 dev panel 可以滚到底看 L6 / footer
+
+`build_dev_panel_canvas` 签名跟 callers (`dev_window.rs` + 2 处
+`render_metal.rs`) 已有 chrome_ascent.shell 0.6.15 → 0.6.16.
+39 view tests PASS,无 lib 回归.
 
 ### 0.6.15
 

@@ -50,6 +50,13 @@ pub enum View {
         children: Vec<View>,
         align: super::types::Anchor,
     },
+    /// Scroll viewport — clips + offsets child along main axis.
+    /// Stateful: holds offset_y in `super::scroll::SCROLL_STATES`
+    /// keyed by `id`.  v1 vertical-only.
+    ScrollView {
+        child: Box<View>,
+        id: ViewId,
+    },
 
     // ─── Modified (modifier chain internal form) ──────────────
     Modified {
@@ -166,6 +173,11 @@ pub fn hairline_horiz(color: Color) -> View {
 
 pub fn hairline_vert(color: Color) -> View {
     View::Hairline { color, vertical: true }
+}
+
+/// Wrap `child` in a scrolling viewport keyed by `id`.
+pub fn scroll_view(id: ViewId, child: View) -> View {
+    View::ScrollView { child: Box::new(child), id }
 }
 
 // ─── Modifier chain (extension methods) ───────────────────────

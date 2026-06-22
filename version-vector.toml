@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.15"  # UI 模型 v3 + DevPanel Model section 补完整 — 加 L6 cross-cutting / ScrollView/Gesture/Stateful/Image/Material/Lifecycle/Accessibility,带 ✓/v1 待补/v2+ 状态标
+shell   = "0.6.16"  # 修中文/CJK 宽度 + 实施 ScrollView(thread_local state + culling paint + dev panel 接滚轮)
 core    = "0.10.68" # toolbar dev icon click → DevPanelToggle wire → L1
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

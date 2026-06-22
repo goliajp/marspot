@@ -148,6 +148,7 @@ pub trait MarspotApp: 'static {
     /// Default no-op; L1 overrides to hit-test against tab strip /
     /// menu and mutate `DevPanelState`.
     fn dev_panel_click(&mut self, _ctx: &MarspotAppCtx, _x_pt: f64, _y_pt: f64) {}
+    fn dev_panel_scroll(&mut self, _ctx: &MarspotAppCtx, _delta_y_pt: f64) {}
 }
 
 /// Handle passed to every `MarspotApp` callback.  Owns the NSWindow /
@@ -929,6 +930,11 @@ pub enum EventKind {
     /// L1 hit-tests against the dev panel layout to update active
     /// tab / section, then re-draws.
     DevPanelClick { x_pt: f64, y_pt: f64 },
+    /// Trackpad / scroll wheel inside the dev panel.  Already
+    /// sign-inverted at the source: positive = content scrolls down
+    /// (offset_y increases).  In logical pt; multiply by current
+    /// scale at apply time to get phys.
+    DevPanelScroll { delta_y_pt: f64 },
 }
 
 struct AppState {
@@ -980,6 +986,10 @@ fn dispatch_event(kind: EventKind) {
             }
             EventKind::DevPanelClick { x_pt, y_pt } => {
                 app.dev_panel_click(ctx, x_pt, y_pt);
+                ctx.request_redraw();
+            }
+            EventKind::DevPanelScroll { delta_y_pt } => {
+                app.dev_panel_scroll(ctx, delta_y_pt);
                 ctx.request_redraw();
             }
         }

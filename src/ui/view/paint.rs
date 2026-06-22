@@ -23,21 +23,41 @@ pub fn paint(laid: &LaidOut, ctx: LayoutCtx, parent_w: f64, parent_h: f64) -> Ca
 /// driver(eg dev panel renderer)wants ONE canvas for the whole
 /// frame instead of one per subtree.
 pub fn paint_into(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx) {
+    paint_into_clipped(canvas, laid, ctx, None);
+}
+
+/// Paint with optional viewport clip(rect in phys).  `clip = Some`
+/// = ScrollView in effect; descendants whose rect lies fully outside
+/// the clip are skipped(viewport culling).
+fn paint_into_clipped(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx, clip: Option<&super::layout::Rect>) {
     if laid.deco.hidden {
         return;
     }
-    // 1. Self decoration first(shadow → bg → border).  CSS paint
-    //    order: background-color → background-image → border.  We
-    //    add shadow before bg so the shadow looks like it casts
-    //    from the box.
+    // Cull if rect is entirely outside the active clip.
+    if let Some(c) = clip {
+        let rect = &laid.rect;
+        let outside =
+            rect.x + rect.w < c.x ||
+            rect.x > c.x + c.w ||
+            rect.y + rect.h < c.y ||
+            rect.y > c.y + c.h;
+        if outside { return; }
+    }
+
+    // 1. Self decoration first(shadow → bg → border).
     paint_decoration(canvas, &laid.rect, &laid.deco, ctx);
 
     // 2. Self primitive(if this node is an atom).
     paint_atom(canvas, &laid.view, &laid.rect, ctx);
 
-    // 3. Children — submission order = z order.
+    // 3. Children — submission order = z order.  ScrollView
+    //    establishes a clip for its descendants(culling-only, not
+    //    pixel-clipped — see scroll.rs doc).
+    let child_clip = if matches!(&laid.view, View::ScrollView { .. }) {
+        Some(&laid.rect)
+    } else { clip };
     for ch in laid.children.iter() {
-        paint_into(canvas, ch, ctx);
+        paint_into_clipped(canvas, ch, ctx, child_clip);
     }
 }
 
@@ -87,14 +107,16 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
             // each other (real bug, observed 2026-06-23 dev panel
             // overlap on L1 / L4).
             let top_pt = phys_to_pt(rect.y);
-            // Truncate to fit rect width if Single-line.
-            let max_chars = (rect.w / ctx.cell_w_phys).floor().max(0.0) as usize;
+            // Truncate to fit rect width if Single-line.  Width
+            // measured in cells (CJK = 2) via the same shared
+            // helper as layout, so widths agree.
+            let max_cells = (rect.w / ctx.cell_w_phys).floor().max(0.0) as usize;
             let drawn: String = match &t.lines {
                 super::view::TextLines::Single { truncate } => {
-                    if t.content.chars().count() <= max_chars {
+                    if super::layout::text_width_cells(&t.content) <= max_cells {
                         t.content.clone()
                     } else {
-                        truncate_text(&t.content, max_chars, *truncate)
+                        truncate_text(&t.content, max_cells, *truncate)
                     }
                 }
                 super::view::TextLines::Wrap { .. } => {
@@ -112,7 +134,7 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
                 _ => t.color,
             };
             // Horizontal align — compute x_offset from rect.x.
-            let content_w_phys = drawn.chars().count() as f64 * ctx.cell_w_phys;
+            let content_w_phys = super::layout::text_width_cells(&drawn) as f64 * ctx.cell_w_phys;
             let x_pad = match t.align {
                 super::view::TextAlign::Leading  => 0.0,
                 super::view::TextAlign::Center   => (rect.w - content_w_phys) * 0.5,
@@ -150,30 +172,53 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
     }
 }
 
-fn truncate_text(s: &str, max_chars: usize, mode: super::view::Truncate) -> String {
-    if max_chars == 0 { return String::new(); }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars { return s.to_string(); }
+/// Truncate `s` to fit within `max_cells` display columns (CJK = 2).
+/// Greedy: walk chars, sum widths, stop when adding the next char
+/// would exceed budget.  Reserve 1 cell for the ellipsis when
+/// truncate mode adds one.
+fn truncate_text(s: &str, max_cells: usize, mode: super::view::Truncate) -> String {
+    if max_cells == 0 { return String::new(); }
+    if super::layout::text_width_cells(s) <= max_cells {
+        return s.to_string();
+    }
+    let take_to_cells = |budget: usize| -> String {
+        let mut acc = String::new();
+        let mut used = 0usize;
+        for c in s.chars() {
+            let w = marspot_term::grid::char_width(c) as usize;
+            if used + w > budget { break; }
+            acc.push(c);
+            used += w;
+        }
+        acc
+    };
     match mode {
         super::view::Truncate::End => {
-            if max_chars == 0 { String::new() }
-            else if max_chars == 1 { "…".into() }
+            if max_cells == 1 { "…".into() }
             else {
-                let head: String = chars.iter().take(max_chars - 1).collect();
+                let head = take_to_cells(max_cells - 1);
                 format!("{head}…")
             }
         }
         super::view::Truncate::Middle => {
-            if max_chars < 3 { "…".repeat(max_chars) }
+            if max_cells < 3 { "…".repeat(max_cells) }
             else {
-                let head_len = (max_chars - 1) / 2;
-                let tail_len = max_chars - 1 - head_len;
-                let head: String = chars.iter().take(head_len).collect();
-                let tail: String = chars.iter().skip(chars.len() - tail_len).collect();
+                let half = (max_cells - 1) / 2;
+                let head = take_to_cells(half);
+                // For tail, walk from the back.
+                let mut tail_chars: Vec<char> = Vec::new();
+                let mut used = 0usize;
+                for c in s.chars().rev() {
+                    let w = marspot_term::grid::char_width(c) as usize;
+                    if used + w > (max_cells - 1 - half) { break; }
+                    tail_chars.push(c);
+                    used += w;
+                }
+                let tail: String = tail_chars.iter().rev().collect();
                 format!("{head}…{tail}")
             }
         }
-        super::view::Truncate::None => chars.iter().take(max_chars).collect(),
+        super::view::Truncate::None => take_to_cells(max_cells),
     }
 }
 
