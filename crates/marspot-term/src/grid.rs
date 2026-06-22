@@ -512,16 +512,18 @@ impl Grid {
         for _ in 0..lines {
             let pr = self.top_row as usize;
             let start = pr * cols;
-            // Wrapped-aware push: File variant persists the flag on
-            // its record; Memory/Disk drop it (their truth is the
-            // `sb_wrapped` mirror below).
+            // F3+12.1 — back to dumb-store after F3+12 blank-skip
+            // turned out to delete legit user blank lines (Enter on
+            // empty prompt, intentional paragraph breaks, echo "",
+            // ...).  iTerm2 / Alacritty / xterm don't filter and
+            // we shouldn't either.  Spinner pollution from TUIs
+            // like claudecode is a known trade-off; user can wipe
+            // scrollback when it gets unwieldy.  We won't make a
+            // policy guess that can't be undone at read time.
             self.scrollback.push_line_with_wrapped(
                 &self.cells[start..start + cols],
                 self.wrapped[pr],
             );
-            // The pushed row's continuation flag follows it into the
-            // scrollback mirror; the physical row is about to become
-            // the new (blank) bottom row, so its live flag resets.
             self.sb_wrapped.push_back(self.wrapped[pr]);
             self.wrapped[pr] = false;
             for c in &mut self.cells[start..start + cols] {
@@ -642,6 +644,12 @@ impl Grid {
     }
 
     pub fn scrollback_len(&self) -> usize { self.scrollback.len() }
+    /// F3+10 — flush File-variant BufWriter tail to kernel page
+    /// cache before execv.  Memory / Disk no-op.  See
+    /// `Scrollback::flush_for_handoff` for the rationale.
+    pub fn scrollback_flush_for_handoff(&self) {
+        self.scrollback.flush_for_handoff();
+    }
     pub fn scrollback_capacity(&self) -> usize { self.scrollback.capacity() }
     /// B3 — hand back an off-thread search snapshot of the File-backed
     /// scrollback (returns None for Memory/Disk variants).  Used by
@@ -970,6 +978,13 @@ impl Grid {
                 Cell::default()
             }
         };
+        // F3+10f — restart wipes File scrollback (truncates bin/idx);
+        // the loop below repopulates at new_cols from the gathered
+        // segments.  Net effect for File: entire file gets rewritten
+        // at the new width on every cols-change resize.  Cost is
+        // bounded (the on-disk file's size at the old width); the
+        // result is that historical content always matches the
+        // current display width with no width-drift artifacts.
         self.scrollback.restart(new_cols);
         self.sb_wrapped.clear();
         for (i, (cells, cont)) in segs[..live_start].iter().enumerate() {
@@ -1086,7 +1101,6 @@ mod tests {
         g.scroll_up(5, Cell::default()); // scroll farther than height
         // All 2 rows pushed (capped at rows).
         assert_eq!(g.scrollback_len(), 2);
-        // Visible region is fully blank.
         for r in 0..2 {
             for c in 0..2 {
                 assert_eq!(g.cell(c, r), Cell::default());

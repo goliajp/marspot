@@ -262,6 +262,33 @@ pub struct LayoutModalDragRender {
     pub mouse_phys: (f64, f64),
 }
 
+/// F3+9 — full data for one render of a right-click context menu.
+/// L2 builds this from `Marspot::context_menu` on every frame the
+/// menu is open; renderer paints it through overlay scratches so it
+/// lands on top of the grid + sidebar.
+#[derive(Debug, Clone)]
+pub struct ContextMenuRender {
+    pub scale: f64,
+    pub anchor_phys: (f64, f64),
+    pub top_inset: f64,
+    /// One per row.  Drives label + shortcut + enabled / divider
+    /// rendering.  Owned by the renderer-side struct (rebuilt each
+    /// frame the menu is open) so the renderer doesn't need a shared
+    /// reference into Marspot state.
+    pub items: Vec<ContextMenuRow>,
+    /// Index of the row currently under the cursor, or `None` if
+    /// the cursor isn't over any actionable row.
+    pub hovered_idx: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextMenuRow {
+    pub label: String,
+    pub shortcut_hint: String,
+    pub enabled: bool,
+    pub divider: bool,
+}
+
 /// F3+1.4 — full data for one render of the centered Process Monitor
 /// modal.  Renderer pulls this via `set_process_panel`.  `None` =
 /// closed, nothing drawn.
@@ -532,6 +559,8 @@ pub struct MetalRenderer {
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
     /// open, `None` when closed.  See `LayoutModalRender` below.
     layout_modal_state: Option<LayoutModalRender>,
+    /// F3+9 — right-click context menu state.  `Some` while open.
+    context_menu_state: Option<ContextMenuRender>,
     /// F3+1.6 — overlay scratches.  Anything pushed here gets
     /// encoded in EXTRA UI + FG passes AFTER the main grid render,
     /// so it lands on top of all grid pixels regardless of which
@@ -697,7 +726,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, layout_modal_state: None,
+            process_panel: None, layout_modal_state: None, context_menu_state: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -761,7 +790,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, layout_modal_state: None,
+            process_panel: None, layout_modal_state: None, context_menu_state: None,
             top_inset_phys: 0.0,
             clear_bg_required: true,
         })
@@ -785,6 +814,14 @@ impl MetalRenderer {
     /// modal entirely.
     pub fn set_layout_modal(&mut self, state: Option<LayoutModalRender>) {
         self.layout_modal_state = state;
+    }
+
+    /// F3+9 — set the context-menu render state.  `Some` while the
+    /// menu is open, `None` when closed.  Re-published every frame
+    /// by L2 with current hovered_idx so the highlight tracks the
+    /// cursor.
+    pub fn set_context_menu(&mut self, state: Option<ContextMenuRender>) {
+        self.context_menu_state = state;
     }
 
     /// L2 — set which chrome icon button (if any) is under the
@@ -1046,6 +1083,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             process_panel.as_ref(),
             self.layout_modal_state.as_ref(),
+            self.context_menu_state.as_ref(),
             font,
             atlas,
             color_atlas,
@@ -1200,6 +1238,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             process_panel.as_ref(),
             self.layout_modal_state.as_ref(),
+            self.context_menu_state.as_ref(),
             font,
             atlas,
             color_atlas,
@@ -1733,6 +1772,7 @@ fn build_instances(
     hover_chrome_btn: Option<u8>,
     process_panel: Option<&ProcessPanelRender>,
     layout_modal_state: Option<&LayoutModalRender>,
+    context_menu_state: Option<&ContextMenuRender>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -2089,6 +2129,19 @@ fn build_instances(
         push_layout_modal_via_view(
             modal_state,
             layout.top_inset,
+            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            layout.window_w, layout.window_h,
+            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
+        );
+    }
+
+    // F3+9 — right-click ContextMenu.  Painted LAST so it sits on top
+    // of every other overlay (LayoutModal / process panel / etc.) —
+    // a context menu must visually trump everything else while it's
+    // up.
+    if let Some(menu_state) = context_menu_state {
+        push_context_menu_via_view(
+            menu_state,
             cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
             layout.window_w, layout.window_h,
             font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
@@ -2453,6 +2506,136 @@ fn push_process_panel_via_view(
     };
     view.paint(&mut painter, |p| {
         paint_process_panel_content(panel, p);
+    });
+}
+
+/// F3+9 — paint the right-click ContextMenu.  Geometry comes from
+/// the component's own `ContextMenu::layout`; chrome is the same
+/// `View`-based path the other overlays use (1 px inside border
+/// per F3+3.8, opaque BG per `feedback_overlays_must_be_opaque`).
+/// No backdrop dim — a context menu is a transient surface; we
+/// don't want to wash out the underlying content while the user
+/// decides what to click.
+#[allow(clippy::too_many_arguments)]
+fn push_context_menu_via_view(
+    state: &ContextMenuRender,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    window_w: f64,
+    window_h: f64,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
+) {
+    use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
+    use crate::ui::components::{ContextMenu, MenuItem};
+    use marspot_term::layout::{Rect, Alignment};
+
+    // Re-build the per-row MenuItem list from the wire-shape rows so
+    // ContextMenu::layout produces the same rects L2's hit-test used.
+    let menu_items: Vec<MenuItem> = state
+        .items
+        .iter()
+        .map(|r| MenuItem {
+            label: r.label.clone(),
+            shortcut_hint: r.shortcut_hint.clone(),
+            enabled: r.enabled,
+            divider: r.divider,
+            action_tag: 0,
+        })
+        .collect();
+    let menu = ContextMenu::layout(
+        window_w, window_h, state.scale,
+        state.anchor_phys.0, state.anchor_phys.1,
+        state.top_inset,
+        &menu_items,
+    );
+
+    let mut painter = ViewPainter {
+        cell_w, cell_h, ascent, atlas_w, atlas_h,
+        window_w, window_h,
+        font, atlas, cells, glyphs, ui_rects,
+    };
+    let view = View {
+        rect: menu.frame,
+        style: ViewStyle {
+            bg: PROCESS_PANEL_BG,
+            border_color: PROCESS_PANEL_BORDER,
+            border_width: 1.0,
+            corner_radius: 6.0,
+            shadow_blur: 16.0,
+            shadow_alpha: 0.45,
+            padding: 0.0,
+            backdrop: Backdrop::None,
+        },
+    };
+    view.paint(&mut painter, |p| {
+        let label_fg = [0.85, 0.88, 0.92, 1.0];
+        let label_fg_disabled = [0.45, 0.48, 0.52, 1.0];
+        let hint_fg = [0.55, 0.60, 0.66, 1.0];
+        let hover_bg = [0.20, 0.42, 0.68, 1.0];
+        // F3+12.6 — semi-transparent white,  rendered through the
+        // ui_rects SDF pipeline (which actually alpha-blends).
+        // The menu frame is drawn LATER in the SAME pipeline so a
+        // post-frame submission lands above it visually.
+        let divider_color = [1.0, 1.0, 1.0, 0.22];
+        let side_pad_logical = 12.0_f64;
+        let side_pad = side_pad_logical * state.scale;
+        for (i, row) in state.items.iter().enumerate() {
+            let rect = menu.item_rects[i];
+            if row.divider {
+                // Render the divider via the ui_rects pipeline.
+                // Reason: encode_passes draws overlay cells FIRST
+                // and overlay ui_rects SECOND, so any divider on
+                // the cells pipeline gets occluded by the menu's
+                // SDF frame.  Routing through ui_rects puts the
+                // divider above the frame.  Make the line ≥ 3 px
+                // tall so SDF anti-alias band doesn't zero the
+                // entire rect (1-px-tall SDF rects render at 0
+                // intensity because the AA band exceeds the body).
+                let line_h_phys = 3.0;
+                let line_y = (rect.y_top + (rect.h * 0.5)).round()
+                    - (line_h_phys * 0.5);
+                let line = Rect {
+                    x: rect.x + side_pad,
+                    y_top: line_y,
+                    w: rect.w - 2.0 * side_pad,
+                    h: line_h_phys,
+                };
+                p.fill_rounded_rect(line, divider_color, 0.0, ([0.0; 4], 0.0));
+                continue;
+            }
+            // Hover highlight — full-row band, drawn under text.
+            if state.hovered_idx == Some(i) {
+                p.fill_rounded_rect(
+                    Rect {
+                        x: rect.x + side_pad * 0.5,
+                        y_top: rect.y_top,
+                        w: rect.w - side_pad,
+                        h: rect.h,
+                    },
+                    hover_bg, 4.0, ([0.0; 4], 0.0),
+                );
+            }
+            let fg = if row.enabled { label_fg } else { label_fg_disabled };
+            // Label — left-aligned with side_pad.
+            let label_rect = Rect {
+                x: rect.x + side_pad,
+                y_top: rect.y_top,
+                w: rect.w - 2.0 * side_pad,
+                h: rect.h,
+            };
+            p.text_in(label_rect, &row.label, fg, Alignment::CenterLeft);
+            // Shortcut hint — right-aligned.
+            if !row.shortcut_hint.is_empty() {
+                p.text_in(label_rect, &row.shortcut_hint, hint_fg, Alignment::CenterRight);
+            }
+        }
     });
 }
 
@@ -4802,6 +4985,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4904,6 +5088,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -4975,6 +5160,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -5095,6 +5281,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -5195,6 +5382,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -5265,6 +5453,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 None,

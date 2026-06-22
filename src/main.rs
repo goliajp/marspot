@@ -15,6 +15,78 @@ use marspot::ui::{
     Selection, SelectionMode, CELL_TITLE_PT, MAX_SIDEBAR_LABEL_CHARS,
     SESSION_COUNT_HARD_CAP, SIDEBAR_W_LOGICAL,
 };
+use marspot::ui::components::{ContextMenu, ContextMenuHit, MenuItem};
+
+/// F3+9 — which region of the window the user right-clicked.  Used
+/// to pick the menu's items.  Stored on `ContextMenuState` so the
+/// action dispatcher knows the target (e.g. `Close pane` needs to
+/// know *which* pane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextRegion {
+    /// Inside the cell grid of pane index `usize` (the focused-or-
+    /// hovered terminal area).
+    Pane(usize),
+    /// Sidebar row index — `Close` / `Rename` etc. target this slot.
+    SidebarSlot(usize),
+    /// Inside the title strip (window chrome above the grid).  No
+    /// pane-specific actions; toggles sidebar / layout etc.
+    TitleStrip,
+}
+
+/// F3+9 — closed set of menu actions.  The component itself stores an
+/// opaque `action_tag: u32` per item; we map u32 → this enum in
+/// `dispatch_action`.  Action handlers reach into the existing
+/// methods (`spawn_session`, `close_session`, `copy_selection_to_clipboard`,
+/// etc.) — the menu is a UI surface for already-existing behaviour, not
+/// a new behaviour layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextMenuAction {
+    CopySelection,
+    Paste,
+    ClearScrollback,
+    ClosePane,
+    SplitNewPane,
+    RenameTitle,
+    ToggleSidebar,
+    OpenLayout,
+}
+
+impl ContextMenuAction {
+    fn tag(self) -> u32 {
+        self as u32
+    }
+    fn from_tag(t: u32) -> Option<Self> {
+        // SAFETY: same-variant round-trip; if `t` isn't a tag we emit
+        // ourselves the caller treats None as "ignore".
+        match t {
+            x if x == Self::CopySelection.tag() => Some(Self::CopySelection),
+            x if x == Self::Paste.tag() => Some(Self::Paste),
+            x if x == Self::ClearScrollback.tag() => Some(Self::ClearScrollback),
+            x if x == Self::ClosePane.tag() => Some(Self::ClosePane),
+            x if x == Self::SplitNewPane.tag() => Some(Self::SplitNewPane),
+            x if x == Self::RenameTitle.tag() => Some(Self::RenameTitle),
+            x if x == Self::ToggleSidebar.tag() => Some(Self::ToggleSidebar),
+            x if x == Self::OpenLayout.tag() => Some(Self::OpenLayout),
+            _ => None,
+        }
+    }
+}
+
+/// F3+9 — live state of the right-click menu.  `None` on `Marspot`
+/// means the menu is closed.  Open state holds:
+/// - the items (so `paint` re-walks them without rebuilding),
+/// - the anchor (so resize / scroll redraws keep the menu put), and
+/// - the region (so the action dispatcher knows the target pane /
+///   slot when an item fires).
+/// `hovered_idx` is the row currently under the cursor (None = no
+/// row hovered, e.g. cursor over the menu frame's padding).
+struct ContextMenuState {
+    items: Vec<MenuItem>,
+    anchor_x: f64,
+    anchor_y: f64,
+    region: ContextRegion,
+    hovered_idx: Option<usize>,
+}
 
 // Standalone marspot is essentially L2 (core) packaged with its own
 // NSWindow rather than going through the shell+core split — so its
@@ -168,6 +240,12 @@ struct Marspot {
     /// True while the `LayoutModal` is open; toolbar layout button
     /// click toggles it.
     layout_modal_open: bool,
+    /// F3+9 — right-click context menu state.  `None` when the menu
+    /// is closed.  Right-mouse-down resolves the click region (a
+    /// pane, a sidebar slot, …) and stashes the items + anchor here;
+    /// the renderer reads it and paints; mouse_down + key_event Esc
+    /// dismiss it.
+    context_menu: Option<ContextMenuState>,
     /// `true` when the user has collapsed the sidebar (Cmd-B).  The
     /// next `rebuild_layout_at` zeroes `sidebar_phys`, handing the
     /// reclaimed width to the cell grid.  `Layout::build` already
@@ -323,6 +401,18 @@ impl MarspotApp for Marspot {
     fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, modifiers: MarspotModifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
 
+        // F3+9 — Esc dismisses the context menu if open.  Swallowed
+        // (the keystroke does NOT reach the focused pane) — that
+        // matches NSMenu, and avoids surprise side-effects like
+        // sending `\e` to a vim session that meant to close a menu.
+        if event.state == KeyState::Pressed && self.context_menu.is_some() {
+            if let LogicalKey::Named(NamedKey::Escape) = event.logical {
+                self.context_menu = None;
+                ctx.request_redraw();
+                return;
+            }
+        }
+
         // Cmd-C: copy current text selection to the macOS clipboard.
         // Must run before the title-edit fall-through so a selection
         // captured before opening the title editor can still be
@@ -448,6 +538,51 @@ impl MarspotApp for Marspot {
     }
 
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, modifiers: marspot::input::Modifiers) {
+        // F3+9 — context menu is modal w.r.t. left-clicks while open.
+        // Click on an enabled item → fire its action + close menu;
+        // click on disabled / divider / menu frame padding → swallow
+        // (matches macOS NSMenu); click outside the menu → close
+        // menu and fall through so the click also reaches the
+        // underlying chrome / pane.
+        if self.context_menu.is_some() {
+            let (window_w, window_h) = ctx.inner_size_phys();
+            let scale = ctx.scale();
+            let top_inset = self.layout.as_ref().map(|l| l.top_inset).unwrap_or(0.0);
+            let (hit, region) = {
+                let state = self.context_menu.as_ref().unwrap();
+                let menu = ContextMenu::layout(
+                    window_w, window_h, scale,
+                    state.anchor_x, state.anchor_y,
+                    top_inset,
+                    &state.items,
+                );
+                (menu.hit_test(&state.items, x_phys, y_phys), state.region)
+            };
+            match hit {
+                ContextMenuHit::Item(idx) => {
+                    let tag = self.context_menu.as_ref().unwrap().items[idx].action_tag;
+                    if let Some(action) = ContextMenuAction::from_tag(tag) {
+                        self.dispatch_context_action(ctx, action, region);
+                    } else {
+                        self.context_menu = None;
+                        ctx.request_redraw();
+                    }
+                    return;
+                }
+                ContextMenuHit::Frame => {
+                    // Inside the menu but not on an actionable row —
+                    // swallow so divider / disabled clicks don't
+                    // dismiss the menu (consistent with NSMenu).
+                    return;
+                }
+                ContextMenuHit::Outside => {
+                    self.context_menu = None;
+                    ctx.request_redraw();
+                    // Fall through — the click also drives normal
+                    // focus / selection.
+                }
+            }
+        }
         // Layout-button + picker-overlay + close-[×] dispatch: a top-
         // level intercept that fires before any cell/sidebar handling.
         // Done in a tight borrow scope so the immutable borrow on
@@ -722,6 +857,59 @@ impl MarspotApp for Marspot {
         }
     }
 
+    fn mouse_right_down(
+        &mut self,
+        ctx: &MarspotAppCtx,
+        x_phys: f64,
+        y_phys: f64,
+        _modifiers: marspot::input::Modifiers,
+    ) {
+        // If the menu is already open, a right-click anywhere first
+        // closes it.  The new menu opens only after the first click
+        // dismisses the old; matches macOS finder behaviour where a
+        // second secondary-click cycles the menu.
+        if self.context_menu.take().is_some() {
+            ctx.request_redraw();
+        }
+        let region = self.resolve_context_region(x_phys, y_phys);
+        let items = self.build_menu_items(region);
+        if items.is_empty() {
+            return;
+        }
+        self.context_menu = Some(ContextMenuState {
+            items,
+            anchor_x: x_phys,
+            anchor_y: y_phys,
+            region,
+            hovered_idx: None,
+        });
+        ctx.request_redraw();
+    }
+
+    fn mouse_moved(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64) {
+        // Drive context-menu hover highlight when the menu is open.
+        // Layout has to re-walk so this is `O(items)` per mouse move
+        // — negligible for menus of ~10 rows.
+        if self.context_menu.is_none() {
+            return;
+        }
+        let (window_w, window_h) = ctx.inner_size_phys();
+        let scale = ctx.scale();
+        let top_inset = self.layout.as_ref().map(|l| l.top_inset).unwrap_or(0.0);
+        let Some(state) = self.context_menu.as_mut() else { return };
+        let menu = ContextMenu::layout(
+            window_w, window_h, scale,
+            state.anchor_x, state.anchor_y,
+            top_inset,
+            &state.items,
+        );
+        let new_hover = menu.hover_index(&state.items, x_phys, y_phys);
+        if new_hover != state.hovered_idx {
+            state.hovered_idx = new_hover;
+            ctx.request_redraw();
+        }
+    }
+
     fn scroll(&mut self, ctx: &MarspotAppCtx, _dx_phys: f64, dy_phys: f64, precise: bool) {
         let cell_h = self
             .renderer
@@ -846,6 +1034,174 @@ impl Marspot {
     /// Refuses past `SESSION_COUNT_HARD_CAP`.  No-op in tmux mode
     /// (the single tmux -CC session is created at startup; runtime
     /// spawn would attach a second client and confuse the parser).
+    /// F3+9 — decide which region of the window a right-click at
+    /// `(x_phys, y_phys)` falls into.  The mapping is exclusive: a
+    /// point is in exactly one region.  Used by `mouse_right_down`
+    /// to pick the menu's items.
+    fn resolve_context_region(&self, x_phys: f64, y_phys: f64) -> ContextRegion {
+        let Some(layout) = &self.layout else {
+            // Headless / mid-resize — fall back to a pane on the
+            // focused index so the menu still works.
+            return ContextRegion::Pane(self.focused_idx);
+        };
+        // Sidebar row check first — sidebar overlaps the same y-band
+        // as panes in the title-strip area, and we want sidebar
+        // priority.
+        let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
+        if let Some(idx) = layout.hit_test_sidebar_row(
+            x_phys, y_phys, row_phys, top_pad_phys, self.panes.len(),
+        ) {
+            return ContextRegion::SidebarSlot(idx);
+        }
+        // Cell area → pane idx.
+        if let Some(idx) = layout.hit_test(x_phys, y_phys) {
+            return ContextRegion::Pane(idx);
+        }
+        // Anywhere in the title strip band (above the cell grid,
+        // below the top obstruction).  We don't get pixel-perfect
+        // here; anything in chrome that isn't sidebar/cell counts as
+        // TitleStrip.
+        ContextRegion::TitleStrip
+    }
+
+    /// F3+9 — build the menu rows for a given region.  Returning an
+    /// empty Vec dismisses the right-click silently (the menu won't
+    /// open).  Each row's `action_tag` round-trips through
+    /// `ContextMenuAction::tag` / `from_tag` so the dispatcher can
+    /// pattern-match instead of carrying closures.
+    fn build_menu_items(&self, region: ContextRegion) -> Vec<MenuItem> {
+        let has_selection = self.selection.is_some();
+        match region {
+            ContextRegion::Pane(_) => {
+                let copy = if has_selection {
+                    MenuItem::entry("Copy", ContextMenuAction::CopySelection.tag())
+                        .with_shortcut("⌘C")
+                } else {
+                    MenuItem::entry("Copy", ContextMenuAction::CopySelection.tag())
+                        .with_shortcut("⌘C")
+                        .disabled()
+                };
+                let close_disabled = self.panes.len() <= 1;
+                let close = {
+                    let mi = MenuItem::entry("Close pane", ContextMenuAction::ClosePane.tag());
+                    if close_disabled { mi.disabled() } else { mi }
+                };
+                vec![
+                    copy,
+                    MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
+                        .with_shortcut("⌘V"),
+                    MenuItem::divider(),
+                    MenuItem::entry("Clear scrollback", ContextMenuAction::ClearScrollback.tag()),
+                    MenuItem::divider(),
+                    MenuItem::entry("New pane", ContextMenuAction::SplitNewPane.tag()),
+                    close,
+                ]
+            }
+            ContextRegion::SidebarSlot(_) => {
+                let close_disabled = self.panes.len() <= 1;
+                let close = {
+                    let mi = MenuItem::entry("Close pane", ContextMenuAction::ClosePane.tag());
+                    if close_disabled { mi.disabled() } else { mi }
+                };
+                vec![
+                    MenuItem::entry("Rename…", ContextMenuAction::RenameTitle.tag()),
+                    MenuItem::divider(),
+                    close,
+                ]
+            }
+            ContextRegion::TitleStrip => vec![
+                MenuItem::entry("Toggle sidebar", ContextMenuAction::ToggleSidebar.tag())
+                    .with_shortcut("⌘B"),
+                MenuItem::entry("Open layout…", ContextMenuAction::OpenLayout.tag()),
+            ],
+        }
+    }
+
+    /// F3+9 — single-point action dispatch.  Called when a menu
+    /// click resolves to an enabled item.  Closes the menu before
+    /// firing so the redraw triggered inside `action` paints the
+    /// post-action state.
+    fn dispatch_context_action(
+        &mut self,
+        ctx: &MarspotAppCtx,
+        action: ContextMenuAction,
+        region: ContextRegion,
+    ) {
+        self.context_menu = None;
+        match action {
+            ContextMenuAction::CopySelection => {
+                let _ = self.copy_selection_to_clipboard();
+            }
+            ContextMenuAction::Paste => {
+                // Read the macOS pasteboard, route bytes through the
+                // focused pane's PTY.  We reuse the same path Cmd-V
+                // takes — the editing-title branch isn't relevant
+                // here (no menu is open while editing a title).
+                if let Some(txt) = marspot::input::read_clipboard_text() {
+                    let bracketed = self.panes[self.focused_idx]
+                        .session()
+                        .terminal()
+                        .bracketed_paste_mode();
+                    let bytes = if bracketed {
+                        let mut buf = Vec::with_capacity(txt.len() + 12);
+                        buf.extend_from_slice(b"\x1b[200~");
+                        buf.extend_from_slice(txt.as_bytes());
+                        buf.extend_from_slice(b"\x1b[201~");
+                        buf
+                    } else {
+                        txt.into_bytes()
+                    };
+                    let _ = self.panes[self.focused_idx]
+                        .session_mut()
+                        .write(&bytes);
+                }
+            }
+            ContextMenuAction::ClearScrollback => {
+                let _ = self.panes[self.focused_idx]
+                    .session_mut()
+                    .write(b"\x1b[3J");
+            }
+            ContextMenuAction::ClosePane => {
+                let idx = match region {
+                    ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
+                    _ => self.focused_idx,
+                };
+                if self.panes.len() > 1 && idx < self.panes.len() {
+                    self.close_session(idx);
+                    self.rebuild_layout(ctx);
+                }
+            }
+            ContextMenuAction::SplitNewPane => {
+                if self.panes.len() < SESSION_COUNT_HARD_CAP {
+                    self.spawn_session();
+                    self.rebuild_layout(ctx);
+                }
+            }
+            ContextMenuAction::RenameTitle => {
+                let idx = match region {
+                    ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
+                    _ => self.focused_idx,
+                };
+                if idx < self.panes.len() {
+                    self.editing_title = Some(idx);
+                    let cur = self.custom_titles.get(idx)
+                        .and_then(|t| t.clone())
+                        .unwrap_or_default();
+                    self.title_edit_buffer = cur;
+                }
+            }
+            ContextMenuAction::ToggleSidebar => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.rebuild_layout(ctx);
+            }
+            ContextMenuAction::OpenLayout => {
+                self.layout_modal_open = true;
+            }
+        }
+        ctx.request_redraw();
+    }
+
     fn spawn_session(&mut self) {
         if self.tmux.is_some() {
             return;
@@ -1383,6 +1739,25 @@ impl Marspot {
         let layout = self.layout.as_ref().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
         let (cell_w, cell_h) = renderer.cell_dims();
+        // F3+9 — publish ContextMenu render state every frame the
+        // menu is open.  Re-builds the row list from the items Vec
+        // so the renderer doesn't share a borrow back into Marspot
+        // (mirrors set_layout_modal's per-frame publish shape).
+        renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
+            use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
+            ContextMenuRender {
+                scale: ctx.scale(),
+                anchor_phys: (state.anchor_x, state.anchor_y),
+                top_inset: layout.top_inset,
+                items: state.items.iter().map(|it| ContextMenuRow {
+                    label: it.label.clone(),
+                    shortcut_hint: it.shortcut_hint.clone(),
+                    enabled: it.enabled,
+                    divider: it.divider,
+                }).collect(),
+                hovered_idx: state.hovered_idx,
+            }
+        }));
         renderer.render_layout(layout, &views, &entries, sidebar_focus);
 
         // Publish the focused-pane caret rect (view-local physical
@@ -1505,6 +1880,7 @@ fn main() {
         grid_cols: initial_cols,
         grid_rows: initial_rows,
         layout_modal_open: false,
+        context_menu: None,
         sidebar_collapsed: true,
         ime_preedit: String::new(),
         profile_rss_path,
@@ -1871,6 +2247,7 @@ fn bench_rss_format_dump(arg: &str) {
         grid_cols: 3,
         grid_rows: 3,
         layout_modal_open: false,
+        context_menu: None,
         sidebar_collapsed: true,
         ime_preedit: String::new(),
         profile_rss_path,

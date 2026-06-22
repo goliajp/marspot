@@ -117,6 +117,13 @@ pub enum MsgType {
     /// affordances (icon button BG darkens under cursor) and
     /// requests a redraw only when the hover region changes.
     MouseMove = 17,
+    /// shell → core: right-mouse-down at physical-pixel `(x f64, y f64)`
+    /// + modifier byte.  Same encoding as `MouseDown`.  Drives the
+    /// F3+9 right-click context menu in L2; missing on pre-F3+9
+    /// images, which is wire-safe per `feedback_frame_forward_compat`
+    /// (older receivers silently skip the unknown msg_type, older
+    /// senders simply never produce it).
+    MouseRightDown = 18,
     // ── window state (30..=49) ──
     Focus = 30,
     Resize = 31,
@@ -302,6 +309,7 @@ impl MsgType {
             15 => MsgType::Preedit,
             16 => MsgType::Paste,
             17 => MsgType::MouseMove,
+            18 => MsgType::MouseRightDown,
             30 => MsgType::Focus,
             31 => MsgType::Resize,
             32 => MsgType::SurfaceReady,

@@ -2005,6 +2005,19 @@ impl MarspotApp for ShellApp {
         );
     }
 
+    fn mouse_right_down(
+        &mut self,
+        _ctx: &MarspotAppCtx,
+        x: f64,
+        y: f64,
+        mods: Modifiers,
+    ) {
+        self.send(
+            MsgType::MouseRightDown,
+            encode_mouse(x, y, struct_to_mods_byte(mods)),
+        );
+    }
+
     fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
         // No modifier info on drag — pass zero; the renderer doesn't
         // currently need mods for drag-extend selection.

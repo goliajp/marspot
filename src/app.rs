@@ -76,6 +76,24 @@ pub trait MarspotApp: 'static {
     /// Mouse-down with location in physical pixels, origin top-left.
     fn mouse_down(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, modifiers: Modifiers);
 
+    /// Right-mouse-down (AppKit `rightMouseDown:`).  Same coord
+    /// convention as `mouse_down`.  Default no-op so existing apps
+    /// (mcli / shell / snapshot) don't have to care — Marspot
+    /// itself overrides to drive the context menu.
+    ///
+    /// Note: macOS converts Ctrl-Left-Click into rightMouseDown by
+    /// default at the AppKit layer (`controlMouseClicksOpenMenus`
+    /// is the system default), so this handler also receives that
+    /// path — caller doesn't need to special-case it.
+    fn mouse_right_down(
+        &mut self,
+        _ctx: &MarspotAppCtx,
+        _x_phys: f64,
+        _y_phys: f64,
+        _modifiers: Modifiers,
+    ) {
+    }
+
     /// Mouse-dragged (button still pressed) at physical-pixel `(x, y)`.
     /// Default implementation is a no-op — apps that want drag/select
     /// behaviour override this.
@@ -484,6 +502,19 @@ declare_class!(
             dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys, mods });
         }
 
+        #[method(rightMouseDown:)]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            // Same coord conversion as mouse_down.  AppKit folds
+            // Ctrl-Left-Click into this path on macOS by default.
+            let loc_window = unsafe { event.locationInWindow() };
+            let loc_view = self.convertPoint_fromView(loc_window, None);
+            let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+            let x_phys = loc_view.x * scale;
+            let y_phys = loc_view.y * scale;
+            let mods = nsevent_modifiers(event);
+            dispatch_event(EventKind::MouseRightDown { x: x_phys, y: y_phys, mods });
+        }
+
         #[method(mouseDragged:)]
         fn mouse_dragged(&self, event: &NSEvent) {
             // Same coord conversion as mouse_down — AppKit only
@@ -866,6 +897,7 @@ enum EventKind {
     UserEvent,
     Key(MarspotKeyEvent, Modifiers),
     MouseDown { x: f64, y: f64, mods: Modifiers },
+    MouseRightDown { x: f64, y: f64, mods: Modifiers },
     ImePreedit(String),
     MouseDrag { x: f64, y: f64 },
     MouseUp { x: f64, y: f64 },
@@ -898,6 +930,7 @@ fn dispatch_event(kind: EventKind) {
             EventKind::UserEvent => app.user_event(ctx),
             EventKind::Key(ev, mods) => app.key_event(ctx, ev, mods),
             EventKind::MouseDown { x, y, mods } => app.mouse_down(ctx, x, y, mods),
+            EventKind::MouseRightDown { x, y, mods } => app.mouse_right_down(ctx, x, y, mods),
             EventKind::ImePreedit(text) => app.ime_preedit_changed(ctx, &text),
             EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
             EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),

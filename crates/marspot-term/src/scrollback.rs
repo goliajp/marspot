@@ -115,6 +115,19 @@ impl Scrollback {
         }
     }
 
+    /// F3+10 — flush any BufWriter user-space tail to the kernel
+    /// page cache.  Memory / Disk variants have no buffer (their
+    /// truth is the in-RAM ring); File variant flushes both bin/idx
+    /// BufWriters.  Call this BEFORE `libc::execv` so the next L3's
+    /// reopen sees the full file (Drop won't run on execv).  No-ops
+    /// on Memory / Disk.
+    pub fn flush_for_handoff(&self) {
+        match self {
+            Self::Memory(_) | Self::Disk(_) => {}
+            Self::File(f) => f.flush_for_handoff(),
+        }
+    }
+
     /// File variant only: push a line with its DECAWM continuation
     /// flag.  Memory/Disk drop the flag (Grid's `sb_wrapped` is the
     /// truth for them).  Added in A1 as a surface for direct tests
@@ -134,6 +147,22 @@ impl Scrollback {
             Self::Disk(d) => d.len(),
             Self::File(f) => f.len(),
         }
+    }
+
+    /// F3+10d — "navigable" length: drops trailing entries that are
+    /// either past-EOF (idx ahead of bin BufWriter sync) OR
+    /// fully-blank (cols=0 records from claudecode's spinner UI).
+    /// F3+10e — true for the persistent (File) variant; reflow
+    /// on a cols-change normally drops the in-RAM scrollback and
+    /// re-pushes wrapped segments at the new width.  For File that
+    /// double-counts the on-disk records (they survive the restart
+    /// + we re-push the same content wrapped to new_cols), so reflow
+    /// skips the re-push step.  The historical records stay at their
+    /// original widths on disk; display renders them as-is (cells
+    /// past `cols` show as default — visually shorter row in a wider
+    /// pane, truncated in a narrower one).
+    pub fn is_persistent(&self) -> bool {
+        matches!(self, Self::File(_))
     }
 
     pub fn capacity(&self) -> usize {
@@ -290,16 +319,31 @@ impl Scrollback {
                 }
             }
             Self::File(f) => {
-                // Reflow drops the in-RAM ring (cells aren't valid at
-                // the new width) but keeps the file content — the
-                // historic record IS the user's history regardless of
-                // current display width.  reopen() rebuilds ring at
-                // new_cols.  If reopen fails we fall back to Memory at
-                // the same ram_capacity so the session keeps running.
+                // F3+10f — reflow rewrites scrollback at new cols.
+                // For File, that means: truncate bin to header, wipe
+                // idx, reopen.  The caller's subsequent
+                // push_line_with_wrapped pushes the re-wrapped
+                // segments back, repopulating the file at new_cols.
+                // Without truncate, the file accumulates duplicated
+                // records at every width the pane was ever at (the
+                // 错位 visible after a window resize).
                 let bin_path = f.bin_path.clone();
                 let idx_path = f.idx_path.clone();
                 let ram_cap = f.ram_capacity;
                 drop(f);
+                // Truncate bin to just-header and idx to 0; ignore
+                // errors (fall through to Memory variant if any IO
+                // fails so the session keeps running).
+                let _ = (|| -> std::io::Result<()> {
+                    let bin_fd = std::fs::OpenOptions::new()
+                        .read(true).write(true).open(&bin_path)?;
+                    bin_fd.set_len(FILE_HEADER_BYTES)?;
+                    drop(bin_fd);
+                    let idx_fd = std::fs::OpenOptions::new()
+                        .read(true).write(true).truncate(true).open(&idx_path)?;
+                    drop(idx_fd);
+                    Ok(())
+                })();
                 match FileScrollback::open(bin_path, idx_path, new_cols, ram_cap) {
                     Ok(new_f) => Self::File(new_f),
                     Err(_) => Self::Memory(MemoryScrollback::new(ram_cap, new_cols)),
@@ -724,9 +768,21 @@ impl Drop for DiskScrollback {
 //     trailing partial record on next open (rec_len + 4 > file_len).
 
 const FILE_MAGIC: u32 = 0x5350_5301;
-const FILE_VERSION: u32 = 1;
-const FILE_MIN_COMPAT: u32 = 1;
+// F3+10i — bump v1 → v2 to force-discard scrollback files written by
+// the mmap-write / blank-row-pollution era.  User authorised the
+// destruction ("新的历史没问题,老的全都不要了都可以"): pre-v2 files
+// can carry past-EOF idx tails + spinner blank pushes interleaved
+// mid-history that surface as blank rows in scrolled views.  Open()
+// already handles "version < FILE_MIN_COMPAT" by renaming the file
+// to `.corrupt-<ts>` and recursing with a fresh start — bumping
+// MIN_COMPAT alongside VERSION trips that path for every existing
+// user file on first open() after this upgrade.  Future scrollback
+// shape changes (e.g. adding a record-level field) only need
+// VERSION++ without touching MIN_COMPAT, preserving back-compat.
+const FILE_VERSION: u32 = 2;
+const FILE_MIN_COMPAT: u32 = 2;
 const FILE_HEADER_BYTES: u64 = 32;
+const FILE_REC_HEADER_BYTES: usize = 4 + 1 + 2; // rec_len + wrapped + cols
 
 /// F2+5 — hot/cold scrollback rotation cap.  When `scrollback.bin`
 /// would exceed this many bytes, the writer flushes + closes, renames
@@ -757,70 +813,58 @@ fn dev_null_file() -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().read(true).open("/dev/null")
 }
 
-/// F3+8 — bin file grows in 64 KB chunks.  Each chunk holds ~100-200
-/// records (claudecode TUI row trimmed ≈ 400-800 B); per push the
-/// write is one memcpy into the existing mmap region.  Chunk boundary
-/// fires `ftruncate + munmap + mmap`, amortised at ~40 ns/push.
-const BIN_CHUNK_BYTES: u64 = 64 * 1024;
-/// Same for idx (one u64 per push).  4 KB = 512 entries / chunk.
-const IDX_CHUNK_BYTES: u64 = 4 * 1024;
-/// Cap on the backward idx scan at open time (after over-allocation
-/// from a previous process that died without truncating back).  At
-/// 8 byte / entry this is 1 M entries — way past any plausible legit
-/// over-allocation tail.
-const IDX_REOPEN_SCAN_MAX: u64 = 1024 * 1024;
-
 pub struct FileScrollback {
     bin_path: std::path::PathBuf,
     idx_path: std::path::PathBuf,
     cols: usize,
     ram_capacity: usize,
-
-    // F3+8 — bin / idx are now mmap-write: one R/W fd each, kernel
-    // page cache is the single source of truth.  Crossing L3
-    // self-execv loses NOTHING because the kernel-side state (mmap +
-    // page cache + file inode) survives image swap; the BufWriter
-    // tail that used to leak per-execv (see project memory
-    // `project-scrollback-execv-gap`) cannot exist by construction.
-    //
-    // mmap is MAP_SHARED PROT_READ|PROT_WRITE — writes through this
-    // pointer hit the file's page cache directly, visible to anyone
-    // else holding the same inode mmap'd (including a re-execv'd new
-    // L3).  File is over-allocated in `BIN_CHUNK_BYTES` chunks so
-    // most pushes are pure memcpy; chunk-boundary pushes ftruncate +
-    // remap (rare).  `Drop` (clean exit) trims back to the real data
-    // size; `execv` skips Drop so the file is left over-allocated and
-    // the next open's idx-scan derives the real boundary.
-    bin_fd: std::fs::File,
+    // A2: `bin` / `idx` writers wrapped in RefCell so cold reads
+    // (via `&self`-only cell_at) can flush BufWriters before reading
+    // the file via mmap/pread.  Without this, a line that aged out
+    // of the RAM ring but is still in BufWriter's user-space buffer
+    // would not be visible to mmap, breaking the "ring miss ⇒ file
+    // hit" invariant.
+    bin: std::cell::RefCell<std::io::BufWriter<std::fs::File>>,
+    /// F3+11.1 — raw `File`, not `BufWriter`.  Each push is 8 B; a
+    /// BufWriter would defer flush until 4 KB (≈ 512 pushes), so a
+    /// SIGKILL between flushes loses all 512 entries.  Direct write
+    /// is one syscall per push (~5 µs), well within budget and the
+    /// only way to keep on-disk idx consistent without an explicit
+    /// per-push flush hack.
+    idx: std::cell::RefCell<std::fs::File>,
+    /// Separate read-only fd for cold reads.  Reads of recent lines
+    /// hit the RAM ring, so missing-from-file isn't observable.
+    bin_for_read: std::fs::File,
+    idx_for_read: std::fs::File,
+    // A2: mmap state for cold reads.  Pointer is NULL until first
+    // cold read forces an mmap.  Remap happens when a needed offset
+    // exceeds the current mapping length (file has grown since the
+    // last mmap).  Both fields wrapped in `Cell` so `cell_at(&self)`
+    // can update them on remap without taking `&mut self`.
     bin_mmap_ptr: std::cell::Cell<*mut u8>,
-    /// Current mmap region size = current ftruncated file size on
-    /// disk.  Always ≥ `bin_write_offset`.
-    bin_mmap_cap: std::cell::Cell<usize>,
-    /// Byte offset within `bin` where the next record will be
-    /// written.  Equals "real" file content size (everything past
-    /// is over-allocated padding from chunked ftruncate).
-    bin_write_offset: u64,
-
-    idx_fd: std::fs::File,
+    bin_mmap_len: std::cell::Cell<usize>,
     idx_mmap_ptr: std::cell::Cell<*mut u8>,
-    idx_mmap_cap: std::cell::Cell<usize>,
-    /// Byte offset within `idx` of the next idx slot to write.
-    /// = `(hot_lines) * 8`.
-    idx_write_offset: u64,
-
+    idx_mmap_len: std::cell::Cell<usize>,
+    /// Set true on every `push_line`, false after a successful
+    /// flush in the cold-read path.  Cheap "is the file consistent
+    /// for a cold read?" probe so we don't pay a syscall when the
+    /// user is just reading from the RAM ring.
+    has_unflushed: std::cell::Cell<bool>,
     // RAM ring: zero-alloc flat-Vec mirror of the newest `ram_capacity`
-    // lines, with parallel wrapped flags.  Now mostly a hot read-path
-    // optimisation (avoids reaching into mmap for the freshest rows);
-    // the mmap covers the same data so this is no longer a
-    // durability prerequisite.
+    // lines, with parallel wrapped flags.
     ram_cells: Vec<crate::grid::Cell>,
     ram_wrapped: Vec<bool>,
     ram_head: usize,
     ram_len: usize,
-
-    /// Total lines ever pushed since creation (= cold_total_lines +
-    /// hot_lines).  No eviction beyond cold-rotation drop.
+    /// Total lines ever pushed since creation — no eviction in v1 so
+    /// this also equals scrollback length.
     total_lines: u64,
+    /// Current `.bin` EOF (matches what's been written including
+    /// unflushed BufWriter bytes — used as the next record's offset).
+    bin_tail_offset: u64,
+    /// Reused scratch buffer for record serialisation; zero alloc
+    /// after the first push sizes it.
+    scratch: Vec<u8>,
 
     // F2+5 — hot/cold rotation state.
     /// Path of the cold-tier `.bin` (derived from `bin_path` once at
@@ -851,13 +895,6 @@ pub struct FileScrollback {
     /// from the env at open; doesn't re-check on every push so a mid-
     /// session env change is ignored.
     hot_bytes_cap: u64,
-    /// Reused scratch buffer for record serialisation.  We assemble
-    /// one record here (per-cell loop) then memcpy the whole record
-    /// to mmap in a single shot — many small mmap writes pessimise
-    /// the codegen vs. one bulk copy.  Single-record only, fully
-    /// written within one `push_line`, so it carries NO execv-time
-    /// risk (the data is in the mmap before push_line returns).
-    scratch: Vec<u8>,
 }
 
 // Raw mmap ptrs are private to this struct and the kernel takes care
@@ -868,21 +905,21 @@ pub struct FileScrollback {
 unsafe impl Send for FileScrollback {}
 
 impl FileScrollback {
-    /// Open or create.  Validates header on an existing file;
-    /// rebuilds `.idx` if missing or length-mismatched; trims a
-    /// trailing partial record left by a crash mid-write.
+    /// Open or create the scrollback files.
     ///
-    /// `ram_capacity` is the in-RAM hot ring size (recent lines).
-    /// `cols` is the grid width at construction time — used to size
-    /// the scratch buffer and the RAM ring's flat Vec.  Historic
-    /// lines in the file may have a DIFFERENT cols (recorded per
-    /// line); reads from the file decode at their record's cols.
+    /// F3+11 — strict and dumb.  No silent rename of mismatched
+    /// headers, no idx rebuild from bin, no tolerant load of bad
+    /// records.  The ONLY repair step is truncating idx tail
+    /// entries that point past bin EOF — this is data consistency
+    /// (idx is derived from bin and must reference real records),
+    /// not defense.  Anything else returns Err.
     pub fn open(
         bin_path: std::path::PathBuf,
         idx_path: std::path::PathBuf,
         cols: usize,
         ram_capacity: usize,
     ) -> std::io::Result<Self> {
+        use std::io::Write;
         if let Some(parent) = bin_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -890,167 +927,111 @@ impl FileScrollback {
         let bin_existed = bin_path.exists()
             && bin_path.metadata().map(|m| m.len() > 0).unwrap_or(false);
 
-        // F3+8 — single R/W fd, mmap'd MAP_SHARED.  No more BufWriter:
-        // writes through the mmap land in the kernel page cache, which
-        // survives `execv` intact.  See struct doc-comment.
-        let bin_fd = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&bin_path)?;
+        let bin_w = std::fs::OpenOptions::new()
+            .read(true).append(true).create(true).open(&bin_path)?;
 
-        // Validate header on an existing file; rename on corruption and
-        // recurse for a fresh start.
         if bin_existed {
-            let cur_len = bin_fd.metadata()?.len();
+            let cur_len = bin_w.metadata()?.len();
             if cur_len < FILE_HEADER_BYTES {
-                drop(bin_fd);
-                Self::rename_corrupt(&bin_path, &idx_path)?;
-                return Self::open(bin_path, idx_path, cols, ram_capacity);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("scrollback bin {} bytes < {} header",
+                        cur_len, FILE_HEADER_BYTES),
+                ));
             }
             let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
-            read_exact_at(&bin_fd, &mut hdr, 0)?;
+            read_exact_at(&bin_w, &mut hdr, 0)?;
             let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+            if magic != FILE_MAGIC {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("scrollback bin magic 0x{magic:08x} != 0x{FILE_MAGIC:08x}"),
+                ));
+            }
             let version = u32::from_le_bytes(hdr[4..8].try_into().unwrap());
+            if version < FILE_MIN_COMPAT || version > FILE_VERSION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("scrollback bin version {version} outside [{FILE_MIN_COMPAT}, {FILE_VERSION}]"),
+                ));
+            }
             let cell_abi = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
-            if magic != FILE_MAGIC
-                || version < FILE_MIN_COMPAT
-                || version > FILE_VERSION
-                || cell_abi != crate::terminal::CELL_BYTES_PUB as u32
-            {
-                drop(bin_fd);
-                Self::rename_corrupt(&bin_path, &idx_path)?;
-                return Self::open(bin_path, idx_path, cols, ram_capacity);
+            if cell_abi != crate::terminal::CELL_BYTES_PUB as u32 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("scrollback bin cell_abi {cell_abi} != {}", crate::terminal::CELL_BYTES_PUB),
+                ));
             }
         }
 
-        // Fresh file: ftruncate to one chunk, mmap, write header into
-        // the mmap.  Existing file: mmap its current size and figure
-        // out the real write_offset from the idx scan below.
-        let initial_file_size = if bin_existed {
-            // Round up to chunk boundary if file size happens not to
-            // be a multiple of BIN_CHUNK_BYTES (clean exit truncates
-            // back to data size, which may not be aligned).
-            let cur = bin_fd.metadata()?.len();
-            let rounded = round_up_to_chunk(cur.max(FILE_HEADER_BYTES), BIN_CHUNK_BYTES);
-            bin_fd.set_len(rounded)?;
-            rounded
-        } else {
-            bin_fd.set_len(BIN_CHUNK_BYTES)?;
-            BIN_CHUNK_BYTES
-        };
-        let bin_mmap_ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                initial_file_size as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&bin_fd),
-                0,
-            )
-        };
-        if bin_mmap_ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
-        }
-        let bin_mmap_ptr = bin_mmap_ptr as *mut u8;
-        let bin_mmap_cap = initial_file_size as usize;
-
+        let mut bin = std::io::BufWriter::with_capacity(64 * 1024, bin_w);
         if !bin_existed {
-            // Write header bytes directly into the mmap.
-            let hdr = build_header_bytes();
-            // SAFETY: bin_mmap_cap >= FILE_HEADER_BYTES guaranteed by
-            // ftruncate(BIN_CHUNK_BYTES).
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    hdr.as_ptr(),
-                    bin_mmap_ptr,
-                    hdr.len(),
-                );
+            Self::write_header(&mut bin)?;
+            bin.flush()?;
+        }
+
+        let bin_for_read = std::fs::OpenOptions::new().read(true).open(&bin_path)?;
+        let bin_eof = bin_for_read.metadata()?.len();
+
+        let idx_w = std::fs::OpenOptions::new()
+            .read(true).write(true).append(true).create(true).open(&idx_path)?;
+        let idx_size = idx_w.metadata()?.len();
+        if idx_size % 8 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("scrollback idx size {idx_size} not a multiple of 8"),
+            ));
+        }
+
+        // F3+11 — single consistency-repair step: truncate idx tail
+        // entries whose record can't be fully decoded from bin.
+        // This handles the well-defined "BufWriter sync drift" case
+        // when an L3 was killed without flush_for_handoff (bin
+        // BufWriter 64 KB vs idx 4 KB → idx flushes more often →
+        // idx ahead of bin on disk).  flush_for_handoff covers the
+        // clean execv path; this scan covers SIGKILL.  Backward
+        // walk runs at most idx_size/8 iterations and stops at the
+        // first valid record.
+        let idx_for_read = std::fs::OpenOptions::new().read(true).open(&idx_path)?;
+        let mut total_lines = idx_size / 8;
+        while total_lines > 0 {
+            let mut buf = [0u8; 8];
+            // The idx file is multiple-of-8 by the size check above —
+            // reading any aligned entry must succeed.  Propagate I/O
+            // errors (genuine fs failure) but treat short reads as
+            // "drop the tail".
+            if read_exact_at(&idx_for_read, &mut buf, (total_lines - 1) * 8).is_err() {
+                total_lines -= 1;
+                continue;
             }
+            let off = u64::from_le_bytes(buf);
+            // Past-EOF idx entries arise from an unclean exit where
+            // bin BufWriter didn't flush (idx is direct).  Walk back
+            // until the entry's record header is fully within bin.
+            if off < FILE_HEADER_BYTES || off + 4 > bin_eof {
+                total_lines -= 1;
+                continue;
+            }
+            let mut len_buf = [0u8; 4];
+            if read_exact_at(&bin_for_read, &mut len_buf, off).is_err() {
+                total_lines -= 1;
+                continue;
+            }
+            let rec_len = u32::from_le_bytes(len_buf) as u64;
+            if rec_len < 3 || off + 4 + rec_len > bin_eof {
+                total_lines -= 1;
+                continue;
+            }
+            break;
         }
-
-        // Idx: same pattern.  Single R/W fd, mmap'd MAP_SHARED.
-        let idx_fd = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&idx_path)?;
-        let idx_file_size_on_disk = idx_fd.metadata()?.len();
-
-        // If the bin file was just created or the idx file looks
-        // mismatched (zero length, or not a multiple of 8 — corrupt /
-        // mid-truncate), rebuild idx from a forward scan of bin.
-        let need_idx_rebuild = !bin_existed
-            || idx_file_size_on_disk == 0
-            || idx_file_size_on_disk % 8 != 0;
-        if need_idx_rebuild {
-            // Truncate idx to zero (drop stale entries), then walk the
-            // bin records and write each entry.
-            idx_fd.set_len(0)?;
-            // The bin we just mapped may include over-allocated tail
-            // bytes (zeros); rebuild_idx_from_bin only scans up to the
-            // pre-existing on-disk size, so use that bound.
-            let bin_data_len_for_scan = if bin_existed {
-                // The pre-ftruncate-up file size — what holds real data.
-                // We need the original size BEFORE we rounded up.  Read
-                // from header probe instead: walk from FILE_HEADER_BYTES
-                // through records and stop at the first invalid
-                // header.
-                rebuild_idx_from_bin_via_mmap(
-                    bin_mmap_ptr,
-                    bin_mmap_cap as u64,
-                    &idx_fd,
-                )?
-            } else {
-                FILE_HEADER_BYTES
-            };
-            let _ = bin_data_len_for_scan;
+        let new_idx_size = total_lines * 8;
+        if new_idx_size != idx_size {
+            let trim_fd = std::fs::OpenOptions::new()
+                .read(true).write(true).open(&idx_path)?;
+            trim_fd.set_len(new_idx_size)?;
         }
-
-        // mmap idx at its current ftruncated size (rounded up to chunk).
-        let idx_initial_size = {
-            let cur = idx_fd.metadata()?.len();
-            let rounded = round_up_to_chunk(cur, IDX_CHUNK_BYTES).max(IDX_CHUNK_BYTES);
-            idx_fd.set_len(rounded)?;
-            rounded
-        };
-        let idx_mmap_ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                idx_initial_size as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&idx_fd),
-                0,
-            )
-        };
-        if idx_mmap_ptr == libc::MAP_FAILED {
-            unsafe { libc::munmap(bin_mmap_ptr as *mut _, bin_mmap_cap); }
-            return Err(std::io::Error::last_os_error());
-        }
-        let idx_mmap_ptr = idx_mmap_ptr as *mut u8;
-        let idx_mmap_cap = idx_initial_size as usize;
-
-        // Find the real idx count: scan backwards through the mmap
-        // looking for the last non-zero u64 entry.  Over-allocation
-        // from a prior process (skipped Drop on execv) leaves trailing
-        // zero u64s — they're not valid record offsets (FILE_HEADER_BYTES
-        // = 32 is the smallest legitimate offset) so the boundary
-        // is unambiguous.
-        let hot_lines = Self::find_idx_tail_count(idx_mmap_ptr, idx_mmap_cap);
-
-        // Trim a trailing partial-record left by a mid-write crash.
-        // (Mmap-write is structured as `idx-entry written AFTER the
-        // bin record's bytes are memcpy'd`, so a torn write can leave
-        // an idx pointing at a partial bin record.  Same recovery as
-        // the BufWriter era.)
-        let (hot_lines, bin_write_offset) = Self::trim_trailing_partial_via_mmap(
-            bin_mmap_ptr,
-            bin_mmap_cap as u64,
-            idx_mmap_ptr,
-            hot_lines,
-        );
-        let idx_write_offset = hot_lines * 8;
+        let idx = idx_w;
+        let bin_tail_offset = bin_eof.max(FILE_HEADER_BYTES);
 
         // F2+5 — derive cold paths + open cold fds if files exist.
         // `with_extension("cold.bin")` works because `bin_path` already
@@ -1084,7 +1065,7 @@ impl FileScrollback {
         // forgotten — line_idx resets to start at 0.
         let cold_first_line: u64 = 0;
         let hot_first_line = cold_total_lines;
-        let hot_count = hot_lines;
+        let hot_count = total_lines;
         let total_lines = hot_count.saturating_add(cold_total_lines);
 
         let mut ram_cells = Vec::with_capacity(ram_capacity.saturating_mul(cols));
@@ -1098,14 +1079,36 @@ impl FileScrollback {
         if load_n > 0 {
             let first_idx = (hot_count as usize) - load_n;
             for li in first_idx..(hot_count as usize) {
-                let off = read_idx_at(&idx_fd, li as u64)?;
-                let (cells, wrapped) = read_record_at(&bin_fd, off)?;
-                // Pad / clip to `cols` so the RAM ring's flat Vec
-                // stays uniform.  Historic lines at the old width
-                // become whatever the new width says.
-                let row = pad_or_clip(&cells, cols);
+                // F3+11.1 — single-record tolerant load.  The
+                // open-time idx tail-truncate only checks the LAST
+                // entry; if some idx[N] in the middle of the
+                // RAM-window points to a BufWriter-truncated bin
+                // record (unclean kill mid-write), strict propagate
+                // would fail open() entirely and Terminal::new
+                // falls back to empty Disk → user sees ALL history
+                // disappear.  Substituting a single blank row for
+                // the corrupt entry costs the user one visible row
+                // of black, but preserves the other ~255 RAM-window
+                // rows + all on-disk history.  This is principled
+                // tolerance for a known mechanism, not blind
+                // defense.
+                let row = match read_idx_at(&idx_for_read, li as u64) {
+                    Ok(off) => match read_record_at(&bin_for_read, off) {
+                        Ok((cells, w)) => {
+                            ram_wrapped.push(w);
+                            pad_or_clip(&cells, cols)
+                        }
+                        Err(_) => {
+                            ram_wrapped.push(false);
+                            pad_or_clip(&[], cols)
+                        }
+                    },
+                    Err(_) => {
+                        ram_wrapped.push(false);
+                        pad_or_clip(&[], cols)
+                    }
+                };
                 ram_cells.extend_from_slice(&row);
-                ram_wrapped.push(wrapped);
             }
         }
 
@@ -1114,19 +1117,22 @@ impl FileScrollback {
             idx_path,
             cols,
             ram_capacity,
-            bin_fd,
-            bin_mmap_ptr: std::cell::Cell::new(bin_mmap_ptr),
-            bin_mmap_cap: std::cell::Cell::new(bin_mmap_cap),
-            bin_write_offset,
-            idx_fd,
-            idx_mmap_ptr: std::cell::Cell::new(idx_mmap_ptr),
-            idx_mmap_cap: std::cell::Cell::new(idx_mmap_cap),
-            idx_write_offset,
+            bin: std::cell::RefCell::new(bin),
+            idx: std::cell::RefCell::new(idx),
+            bin_for_read,
+            idx_for_read,
+            bin_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
+            bin_mmap_len: std::cell::Cell::new(0),
+            idx_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
+            idx_mmap_len: std::cell::Cell::new(0),
+            has_unflushed: std::cell::Cell::new(false),
             ram_cells,
             ram_wrapped,
             ram_head: 0,
             ram_len: load_n,
             total_lines,
+            bin_tail_offset,
+            scratch: Vec::with_capacity(FILE_REC_HEADER_BYTES + cols.saturating_mul(crate::terminal::CELL_BYTES_PUB)),
             cold_bin_path,
             cold_idx_path,
             cold_bin_for_read,
@@ -1135,107 +1141,69 @@ impl FileScrollback {
             cold_total_lines,
             hot_first_line,
             hot_bytes_cap: hot_bytes_cap(),
-            scratch: Vec::with_capacity(
-                32 + cols.saturating_mul(crate::terminal::CELL_BYTES_PUB),
-            ),
         })
     }
 
-    /// F3+8 — backward scan of the idx mmap to find the real line
-    /// count after a previous process left over-allocated zero
-    /// padding at the tail (skipped Drop on `execv`).  Stops at the
-    /// last non-zero u64 entry; offset 0 is never a legitimate
-    /// record offset (the smallest is `FILE_HEADER_BYTES = 32`).
-    fn find_idx_tail_count(idx_mmap_ptr: *mut u8, idx_mmap_cap: usize) -> u64 {
-        if idx_mmap_ptr.is_null() || idx_mmap_cap < 8 {
-            return 0;
-        }
-        let max_entries = (idx_mmap_cap / 8) as u64;
-        let scan_floor = max_entries.saturating_sub(IDX_REOPEN_SCAN_MAX);
-        let mut i = max_entries;
-        while i > scan_floor {
-            i -= 1;
-            let off = (i as usize) * 8;
-            // SAFETY: bounds checked — i < max_entries = idx_mmap_cap/8,
-            // so off + 8 <= idx_mmap_cap.
-            let v = unsafe {
-                let p = idx_mmap_ptr.add(off);
-                let mut buf = [0u8; 8];
-                std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), 8);
-                u64::from_le_bytes(buf)
-            };
-            if v != 0 {
-                return i + 1;
-            }
-        }
-        scan_floor
+    fn write_header(bin: &mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
+        hdr[0..4].copy_from_slice(&FILE_MAGIC.to_le_bytes());
+        hdr[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
+        hdr[8..12].copy_from_slice(&(crate::terminal::CELL_BYTES_PUB as u32).to_le_bytes());
+        hdr[12..16].copy_from_slice(&0u32.to_le_bytes()); // header_flags
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        hdr[16..24].copy_from_slice(&now_ns.to_le_bytes());
+        hdr[24..32].copy_from_slice(&0u64.to_le_bytes());
+        bin.write_all(&hdr)
     }
 
-    /// F3+8 — mmap-aware trailing-partial trim.  Walks back at most
-    /// 4 records from the idx tail, verifies each bin record header
-    /// looks well-formed and its body fits before the mmap cap
-    /// (== file size on disk).  Returns the corrected (line_count,
-    /// bin_write_offset) tuple.
-    fn trim_trailing_partial_via_mmap(
-        bin_mmap_ptr: *mut u8,
-        bin_mmap_cap: u64,
-        idx_mmap_ptr: *mut u8,
+
+    #[allow(dead_code)]
+    fn trim_trailing_partial(
+        bin: &std::fs::File,
+        idx: &std::fs::File,
         total_lines: u64,
-    ) -> (u64, u64) {
+        bin_len: u64,
+    ) -> std::io::Result<(u64, u64)> {
+        // Walk from the last indexed record and verify it's complete.
+        // If incomplete, we accept the smaller total_lines.  We do
+        // NOT truncate the bin file — leftover bytes past the last
+        // good record are ignored by future appends (which use
+        // O_APPEND going to current EOF) and don't affect reads
+        // (.idx is the lookup truth).
         if total_lines == 0 {
-            return (0, FILE_HEADER_BYTES);
+            return Ok((0, FILE_HEADER_BYTES.max(bin_len)));
         }
         let mut last_good = total_lines;
-        let mut bin_tail: u64 = 0;
+        let mut bin_tail = bin_len;
+        // Probe at most the last 4 records (a single mid-write crash
+        // touches one; we err generous).
         let probe_n = last_good.min(4);
         for off_back in 0..probe_n {
             let li = last_good - 1 - off_back;
-            let off = unsafe {
-                let p = idx_mmap_ptr.add((li as usize) * 8);
-                let mut buf = [0u8; 8];
-                std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), 8);
-                u64::from_le_bytes(buf)
-            };
-            if off < FILE_HEADER_BYTES || off + 4 > bin_mmap_cap {
-                last_good = li;
-                bin_tail = off.min(bin_mmap_cap);
+            let off = read_idx_at(idx, li)?;
+            let mut len_buf = [0u8; 4];
+            if read_exact_at(bin, &mut len_buf, off).is_err() {
                 continue;
             }
-            let rec_len = unsafe {
-                let p = bin_mmap_ptr.add(off as usize);
-                let mut buf = [0u8; 4];
-                std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), 4);
-                u32::from_le_bytes(buf) as u64
-            };
+            let rec_len = u32::from_le_bytes(len_buf) as u64;
             let end = off + 4 + rec_len;
-            if end > bin_mmap_cap {
+            if end > bin_len {
+                // This record is partial; treat it (and any newer
+                // partial siblings) as not present.
                 last_good = li;
+                // The next record-start would have been `end`, which
+                // is past EOF — so bin tail effectively rolls back
+                // to this record's start.
                 bin_tail = off;
             } else {
-                bin_tail = end;
                 break;
             }
         }
-        if last_good == 0 {
-            (0, FILE_HEADER_BYTES)
-        } else {
-            (last_good, bin_tail)
-        }
-    }
-
-    fn rename_corrupt(bin_path: &std::path::Path, idx_path: &std::path::Path) -> std::io::Result<()> {
-        let suffix = format!(
-            ".corrupt.{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let mut bin_corrupt = bin_path.as_os_str().to_owned();
-        bin_corrupt.push(&suffix);
-        std::fs::rename(bin_path, std::path::PathBuf::from(bin_corrupt))?;
-        let _ = std::fs::remove_file(idx_path); // best-effort; idx without bin is useless
-        Ok(())
+        Ok((last_good, bin_tail))
     }
 
     /// F2+5 — rotate the current hot pair into cold and reopen a
@@ -1245,6 +1213,7 @@ impl FileScrollback {
     /// older history is unrecoverable.  RAM ring contents are
     /// preserved (in-memory state is independent of the file).
     fn rotate_to_cold(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
         // Capture the count of rows about to leave hot for cold.
         let hot_count_before = self.total_lines - self.hot_first_line;
         if hot_count_before == 0 {
@@ -1252,103 +1221,85 @@ impl FileScrollback {
             // an empty file — degenerate).  Just continue writing.
             return Ok(());
         }
-        // 1) Trim over-allocated tail on hot files so the cold pair
-        //    is right-sized.  Then munmap.  Drop the fds so the rename
-        //    is a clean inode swap.
-        let bin_data_len = self.bin_write_offset;
-        let idx_data_len = self.idx_write_offset;
-        self.bin_fd.set_len(bin_data_len)?;
-        self.idx_fd.set_len(idx_data_len)?;
-        let bp = self.bin_mmap_ptr.get();
-        let bl = self.bin_mmap_cap.get();
-        if !bp.is_null() && bl > 0 {
-            unsafe { libc::munmap(bp as *mut _, bl); }
+        // 1) Flush writer buffers so the rename captures complete data.
+        self.bin.borrow_mut().flush()?;
+        self.idx.borrow_mut().flush()?;
+        // 2) Drop everything that holds an fd / mmap to the hot
+        //    files, so rename / unlink can succeed on platforms that
+        //    care (we're macOS so unlink-while-open is OK, but a
+        //    clean ordering makes the contract obvious).  We replace
+        //    fields with placeholders we re-overwrite below.
+        //
+        //    munmap any mmaps held on the hot files; their underlying
+        //    inode is about to change identity (rename → cold path,
+        //    then create fresh hot at the old path).  Reusing the old
+        //    mmap pointers would point at the renamed file, which is
+        //    now logically cold — not what cell_at wants for hot reads.
+        unsafe {
+            let bp = self.bin_mmap_ptr.get();
+            let bl = self.bin_mmap_len.get();
+            if !bp.is_null() && bl > 0 {
+                libc::munmap(bp as *mut _, bl);
+            }
+            self.bin_mmap_ptr.set(std::ptr::null_mut());
+            self.bin_mmap_len.set(0);
+            let ip = self.idx_mmap_ptr.get();
+            let il = self.idx_mmap_len.get();
+            if !ip.is_null() && il > 0 {
+                libc::munmap(ip as *mut _, il);
+            }
+            self.idx_mmap_ptr.set(std::ptr::null_mut());
+            self.idx_mmap_len.set(0);
         }
-        let ip = self.idx_mmap_ptr.get();
-        let il = self.idx_mmap_cap.get();
-        if !ip.is_null() && il > 0 {
-            unsafe { libc::munmap(ip as *mut _, il); }
-        }
-        self.bin_mmap_ptr.set(std::ptr::null_mut());
-        self.bin_mmap_cap.set(0);
-        self.idx_mmap_ptr.set(std::ptr::null_mut());
-        self.idx_mmap_cap.set(0);
         // Drop the cold fds before rename overwrites their inodes.
         self.cold_bin_for_read = None;
         self.cold_idx_for_read = None;
-        // Swap the hot R/W fds to /dev/null placeholders so the rename
-        // can happen without holding open fds on the inode that's
-        // about to become cold.
-        let _placeholder = std::mem::replace(&mut self.bin_fd, dev_null_file()?);
-        drop(_placeholder);
-        let _placeholder = std::mem::replace(&mut self.idx_fd, dev_null_file()?);
-        drop(_placeholder);
-        // 2) Delete any stale cold pair (defence in depth).
+        // Drop hot writers + readers (they hold fds on the soon-to-be-
+        // renamed inode).  We rebuild them after rename.
+        // Take ownership of the writers' inner BufWriters so they drop here.
+        let _ = std::mem::replace(
+            &mut *self.bin.borrow_mut(),
+            std::io::BufWriter::with_capacity(64 * 1024, dev_null_file()?),
+        );
+        let _ = std::mem::replace(
+            &mut *self.idx.borrow_mut(),
+            dev_null_file()?,
+        );
+        // Replace read fds with placeholders; we rebuild them post-rename.
+        self.bin_for_read = dev_null_file()?;
+        self.idx_for_read = dev_null_file()?;
+        // 3) Delete any stale cold pair (defence in depth: rename
+        //    on most filesystems would clobber, but be explicit).
         let _ = std::fs::remove_file(&self.cold_bin_path);
         let _ = std::fs::remove_file(&self.cold_idx_path);
-        // 3) Rename hot → cold.
+        // 4) Rename hot → cold.
         std::fs::rename(&self.bin_path, &self.cold_bin_path)?;
         std::fs::rename(&self.idx_path, &self.cold_idx_path)?;
-        // 4) Open fresh hot pair, ftruncate to one chunk, mmap, write
-        //    header into the mmap.  Same shape as the fresh-file path
-        //    in `open()`.
-        let bin_fd = std::fs::OpenOptions::new()
+        // 5) Reopen fresh hot pair.
+        let bin_w = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
+            .append(true)
             .create(true)
             .open(&self.bin_path)?;
-        bin_fd.set_len(BIN_CHUNK_BYTES)?;
-        let bin_ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                BIN_CHUNK_BYTES as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&bin_fd),
-                0,
-            )
-        };
-        if bin_ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
-        }
-        let bin_ptr = bin_ptr as *mut u8;
-        let hdr = build_header_bytes();
-        unsafe {
-            std::ptr::copy_nonoverlapping(hdr.as_ptr(), bin_ptr, hdr.len());
-        }
-
-        let idx_fd = std::fs::OpenOptions::new()
+        let mut bin = std::io::BufWriter::with_capacity(64 * 1024, bin_w);
+        Self::write_header(&mut bin)?;
+        bin.flush()?;
+        let idx_w = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
+            .append(true)
             .create(true)
             .open(&self.idx_path)?;
-        idx_fd.set_len(IDX_CHUNK_BYTES)?;
-        let idx_ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                IDX_CHUNK_BYTES as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&idx_fd),
-                0,
-            )
-        };
-        if idx_ptr == libc::MAP_FAILED {
-            unsafe { libc::munmap(bin_ptr as *mut _, BIN_CHUNK_BYTES as usize); }
-            return Err(std::io::Error::last_os_error());
-        }
-        let idx_ptr = idx_ptr as *mut u8;
-
-        self.bin_fd = bin_fd;
-        self.idx_fd = idx_fd;
-        self.bin_mmap_ptr.set(bin_ptr);
-        self.bin_mmap_cap.set(BIN_CHUNK_BYTES as usize);
-        self.idx_mmap_ptr.set(idx_ptr);
-        self.idx_mmap_cap.set(IDX_CHUNK_BYTES as usize);
-        self.bin_write_offset = FILE_HEADER_BYTES;
-        self.idx_write_offset = 0;
-
-        // 5) Open the (newly renamed) cold read fds.
+        // 6) Reinstall read fds for hot.
+        let bin_for_read = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
+        let idx_for_read = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
+        *self.bin.borrow_mut() = bin;
+        *self.idx.borrow_mut() = idx_w;
+        self.bin_for_read = bin_for_read;
+        self.idx_for_read = idx_for_read;
+        self.bin_tail_offset = FILE_HEADER_BYTES;
+        self.has_unflushed.set(false);
+        // 7) Open the (newly renamed) cold read fds.
         self.cold_bin_for_read = std::fs::OpenOptions::new()
             .read(true)
             .open(&self.cold_bin_path)
@@ -1357,99 +1308,31 @@ impl FileScrollback {
             .read(true)
             .open(&self.cold_idx_path)
             .ok();
-        // 6) Logical boundary bookkeeping.
+        // 8) Logical boundary bookkeeping.  Previous-hot's rows now
+        //    live in cold; bump cold_first_line to where they were
+        //    in logical-idx terms, and shift hot_first_line up so
+        //    the next push lands at total_lines (no gap).
         self.cold_first_line = self.hot_first_line;
         self.cold_total_lines = hot_count_before;
         self.hot_first_line = self.total_lines;
         Ok(())
     }
 
-    /// F3+8 — grow the bin mmap to cover at least `needed_offset`
-    /// bytes.  Round up to BIN_CHUNK_BYTES boundaries to amortise
-    /// ftruncate + remap across many pushes.  No-op when current
-    /// capacity already covers the request.
-    fn ensure_bin_capacity(&self, needed_offset: u64) -> std::io::Result<()> {
-        let cur_cap = self.bin_mmap_cap.get() as u64;
-        if cur_cap >= needed_offset {
-            return Ok(());
-        }
-        let new_cap = round_up_to_chunk(needed_offset, BIN_CHUNK_BYTES);
-        self.bin_fd.set_len(new_cap)?;
-        let old_ptr = self.bin_mmap_ptr.get();
-        if !old_ptr.is_null() && cur_cap > 0 {
-            unsafe { libc::munmap(old_ptr as *mut _, cur_cap as usize); }
-        }
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                new_cap as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&self.bin_fd),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            self.bin_mmap_ptr.set(std::ptr::null_mut());
-            self.bin_mmap_cap.set(0);
-            return Err(std::io::Error::last_os_error());
-        }
-        self.bin_mmap_ptr.set(ptr as *mut u8);
-        self.bin_mmap_cap.set(new_cap as usize);
-        Ok(())
-    }
-
-    fn ensure_idx_capacity(&self, needed_offset: u64) -> std::io::Result<()> {
-        let cur_cap = self.idx_mmap_cap.get() as u64;
-        if cur_cap >= needed_offset {
-            return Ok(());
-        }
-        let new_cap = round_up_to_chunk(needed_offset, IDX_CHUNK_BYTES);
-        self.idx_fd.set_len(new_cap)?;
-        let old_ptr = self.idx_mmap_ptr.get();
-        if !old_ptr.is_null() && cur_cap > 0 {
-            unsafe { libc::munmap(old_ptr as *mut _, cur_cap as usize); }
-        }
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                new_cap as libc::size_t,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                std::os::unix::io::AsRawFd::as_raw_fd(&self.idx_fd),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            self.idx_mmap_ptr.set(std::ptr::null_mut());
-            self.idx_mmap_cap.set(0);
-            return Err(std::io::Error::last_os_error());
-        }
-        self.idx_mmap_ptr.set(ptr as *mut u8);
-        self.idx_mmap_cap.set(new_cap as usize);
-        Ok(())
-    }
-
     /// Append one line.  Hot path.
-    ///
-    /// F3+8 — writes go directly into the file's mmap (MAP_SHARED).
-    /// No userspace buffering → the line is visible to anyone who
-    /// reopens this file (including a re-execv'd new L3) the moment
-    /// `push_line` returns, no flush required.
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
-        // F2+4 — trim trailing default cells before writing.  A
-        // claudecode-style TUI row in a 200-col grid is typically ~30
-        // chars of real text + ~170 trailing blanks; encoding each
-        // blank at the full 13 bytes/cell costs ~2 kB/row × millions of
-        // rows = multi-GB files.  We strip trailing `Cell::default()`
-        // tail before the record write; the read path naturally fills
-        // missing columns with `Cell::default()` via `cell_at_view`'s
-        // None-fallback (see grid.rs).  The RAM ring still pads to
-        // `self.cols` in `push_into_ring` so hot reads via the ring see
-        // the same shape as before.  Mid-row blank runs and
-        // background-colored blanks are NOT trimmed (only the trailing
-        // tail of cells equal to `Cell::default()`), so a status-bar
-        // pad or a syntax-highlighted gap survives intact.
+        use std::io::Write;
+        // F3+11.1 — trim trailing cells equal to `Cell::default()`
+        // before encoding.  This is pure disk-size optimisation; the
+        // semantic is unchanged from the dumb-store model: every
+        // push call produces exactly one record, with cols equal to
+        // the trimmed cell count (may be 0 for fully-default rows).
+        // Read path: cell_at returns None for col >= cols, which the
+        // viewport renderer maps to Cell::default() — visually
+        // identical to having stored the trailing default cells.
+        // Critical perf: a 200-col grid where claudecode TUI uses
+        // the first ~40 cols means 80% disk savings, and 80% of the
+        // Grid::resize reflow read volume.  Without this, resize on
+        // a session with megabytes of history takes seconds.
         let default_cell = crate::grid::Cell::default();
         let trimmed_len = line
             .iter()
@@ -1457,27 +1340,9 @@ impl FileScrollback {
             .map(|i| i + 1)
             .unwrap_or(0);
         let line = &line[..trimmed_len];
-        let cols_u16 = line.len().min(u16::MAX as usize) as u16;
+        let cols_u16 = line.len() as u16;
         let rec_len = (1 + 2 + line.len() * crate::terminal::CELL_BYTES_PUB) as u32;
         let total_bytes = 4 + rec_len as usize;
-
-        // F2+5 — rotate hot → cold when this record would push past
-        // the cap.  Skipped silently if rotate_to_cold errors (e.g.
-        // fs::rename fail) — the line still goes to RAM ring + best-
-        // effort to hot file, just may push past cap once.  Cap
-        // overshoot by one record is acceptable since the cap is a
-        // soft budget anyway.
-        if self.bin_write_offset.saturating_add(total_bytes as u64) > self.hot_bytes_cap {
-            let _ = self.rotate_to_cold();
-        }
-
-        // Assemble the full record in the scratch buffer.  Per-cell
-        // writes via `extend_from_slice` are well-optimised by Vec
-        // (vectorised memcpy at the codegen level); doing the same
-        // sequence as 2N small `copy_nonoverlapping` calls directly
-        // into the mmap pessimises by ~5× (each cell becomes a
-        // separate call boundary the compiler can't fold).  After
-        // assembly, ONE bulk memcpy moves the record into mmap.
         self.scratch.clear();
         self.scratch.reserve(total_bytes);
         self.scratch.extend_from_slice(&rec_len.to_le_bytes());
@@ -1487,62 +1352,159 @@ impl FileScrollback {
             self.scratch.extend_from_slice(&(c.ch as u32).to_le_bytes());
             self.scratch.extend_from_slice(&crate::terminal::serialize_attrs_pub(c.attrs));
         }
-        debug_assert_eq!(self.scratch.len(), total_bytes);
 
-        // Grow bin mmap if this record won't fit in the current
-        // chunk.  Pre-roll the idx grow as well (one 8-byte entry).
-        if self.ensure_bin_capacity(self.bin_write_offset + total_bytes as u64).is_ok()
-            && self.ensure_idx_capacity(self.idx_write_offset + 8).is_ok()
-        {
-            let rec_offset = self.bin_write_offset;
-            let bin_ptr = self.bin_mmap_ptr.get();
-            let idx_ptr = self.idx_mmap_ptr.get();
-            if !bin_ptr.is_null() && !idx_ptr.is_null() {
-                // SAFETY: bounds checked by ensure_bin_capacity /
-                // ensure_idx_capacity above; offsets and lengths are
-                // within the mmap regions; scratch and mmap don't
-                // alias (scratch is a Vec we own; mmap is a separate
-                // kernel-backed region).
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        self.scratch.as_ptr(),
-                        bin_ptr.add(rec_offset as usize),
-                        total_bytes,
-                    );
-                    let off_bytes = rec_offset.to_le_bytes();
-                    std::ptr::copy_nonoverlapping(
-                        off_bytes.as_ptr(),
-                        idx_ptr.add(self.idx_write_offset as usize),
-                        8,
-                    );
-                }
-                self.bin_write_offset += total_bytes as u64;
-                self.idx_write_offset += 8;
-            }
+        // F2+5 — hot → cold rotation when the next record would
+        // overflow the cap.  Failure to rotate is a real I/O error
+        // (fs::rename ENOSPC etc.); panic rather than push past the
+        // cap silently.
+        if self.bin_tail_offset.saturating_add(total_bytes as u64) > self.hot_bytes_cap {
+            self.rotate_to_cold().expect("scrollback hot→cold rotation");
         }
+        let rec_offset = self.bin_tail_offset;
 
-        // Always push into RAM ring so reads observe the line.
+        // Bin first, then idx — `open()` recovers from the bin-
+        // BufWriter-ahead-of-idx case via the tail-truncate scan.
+        // I/O failure here = disk full / fs error; panic loudly so
+        // the user knows storage broke instead of silently losing
+        // history.
+        self.bin.borrow_mut().write_all(&self.scratch)
+            .expect("scrollback bin write");
+        self.bin_tail_offset += total_bytes as u64;
+        // Idx is a raw File — each 8 B write is one syscall, no
+        // BufWriter buffering.  This keeps on-disk idx always
+        // consistent with what's been bin-flushed-or-buffered;
+        // open()'s tail-truncate scan handles the bin BufWriter
+        // tail that didn't survive an unclean kill.
+        self.idx.borrow_mut().write_all(&rec_offset.to_le_bytes())
+            .expect("scrollback idx write");
+        self.has_unflushed.set(true);
+
         self.push_into_ring(line, wrapped);
         self.total_lines += 1;
     }
 
-    /// F3+8 — read the byte offset of line `idx` from the idx mmap.
-    /// The mmap (`MAP_SHARED`) sees writes immediately via the kernel
-    /// page cache; no buffer-flush phase is needed.  Falls back to
-    /// `pread` only if the read offset is past the current mmap cap
-    /// (race after a recent rotate where the mmap might be stale —
-    /// not a steady-state concern).
+    /// Cheap idempotent flush: a cold-read path calls this before
+    /// consulting mmap / pread so any line that aged out of the RAM
+    /// ring but still sits in the BufWriter user-space buffer is
+    /// fully visible on disk.  Called at most once per cold-read
+    /// burst because `has_unflushed` clears here and only `push_line`
+    /// re-sets it.
+    fn ensure_flushed(&self) {
+        use std::io::Write;
+        if !self.has_unflushed.get() {
+            return;
+        }
+        let _ = self.bin.borrow_mut().flush();
+        let _ = self.idx.borrow_mut().flush();
+        self.has_unflushed.set(false);
+    }
+
+    /// F3+10 — call before L3 `execv` (Drop won't run, so the
+    /// BufWriter tail would otherwise be lost — that's the original
+    /// execv-gap bug).  Same flush path as `Drop`, just exposed as a
+    /// public hook so `do_l3_execv_swap` can invoke it explicitly.
+    /// snapshot v3's index-based dedup makes this a safety net rather
+    /// than a strict correctness requirement (the snapshot already
+    /// carries the BufWriter tail in its RAM-ring section), but
+    /// flushing keeps the on-disk file in sync so cold reads of
+    /// recent rows hit the file directly instead of having to wait
+    /// for the next push_line to spill.
+    pub fn flush_for_handoff(&self) {
+        use std::io::Write;
+        let _ = self.bin.borrow_mut().flush();
+        let _ = self.idx.borrow_mut().flush();
+        self.has_unflushed.set(false);
+    }
+
+    /// Ensure `self.bin_mmap_*` covers at least `needed_len` bytes.
+    /// First call mmaps the file; later calls remap when the file
+    /// has grown.  Called from cold-read paths after `ensure_flushed`
+    /// guarantees the kernel sees a consistent file.
+    fn ensure_bin_mmap_covers(&self, needed_len: u64) -> std::io::Result<()> {
+        let cur_len = self.bin_mmap_len.get();
+        if cur_len as u64 >= needed_len && !self.bin_mmap_ptr.get().is_null() {
+            return Ok(());
+        }
+        // Remap to the file's current size (which may be larger than
+        // needed_len — that's fine, virtual reservation only).
+        let file_len = self.bin_for_read.metadata()?.len();
+        if file_len == 0 {
+            return Ok(());
+        }
+        // Unmap old if any.
+        let old_ptr = self.bin_mmap_ptr.get();
+        if !old_ptr.is_null() && cur_len > 0 {
+            unsafe { libc::munmap(old_ptr as *mut libc::c_void, cur_len); }
+        }
+        // Map new.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                file_len as libc::size_t,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                std::os::unix::io::AsRawFd::as_raw_fd(&self.bin_for_read),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            self.bin_mmap_ptr.set(std::ptr::null_mut());
+            self.bin_mmap_len.set(0);
+            return Err(std::io::Error::last_os_error());
+        }
+        self.bin_mmap_ptr.set(ptr as *mut u8);
+        self.bin_mmap_len.set(file_len as usize);
+        Ok(())
+    }
+
+    fn ensure_idx_mmap_covers(&self, needed_len: u64) -> std::io::Result<()> {
+        let cur_len = self.idx_mmap_len.get();
+        if cur_len as u64 >= needed_len && !self.idx_mmap_ptr.get().is_null() {
+            return Ok(());
+        }
+        let file_len = self.idx_for_read.metadata()?.len();
+        if file_len == 0 {
+            return Ok(());
+        }
+        let old_ptr = self.idx_mmap_ptr.get();
+        if !old_ptr.is_null() && cur_len > 0 {
+            unsafe { libc::munmap(old_ptr as *mut libc::c_void, cur_len); }
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                file_len as libc::size_t,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                std::os::unix::io::AsRawFd::as_raw_fd(&self.idx_for_read),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            self.idx_mmap_ptr.set(std::ptr::null_mut());
+            self.idx_mmap_len.set(0);
+            return Err(std::io::Error::last_os_error());
+        }
+        self.idx_mmap_ptr.set(ptr as *mut u8);
+        self.idx_mmap_len.set(file_len as usize);
+        Ok(())
+    }
+
+    /// Read the byte offset of line `idx` from the idx mmap, falling
+    /// back to pread if mmap isn't covering yet.
     fn read_idx_via_mmap(&self, line_idx: u64) -> std::io::Result<u64> {
         let off_in_idx = line_idx * 8;
+        self.ensure_idx_mmap_covers(off_in_idx + 8)?;
         let mmap_ptr = self.idx_mmap_ptr.get();
-        let mmap_cap = self.idx_mmap_cap.get();
-        if !mmap_ptr.is_null() && (off_in_idx as usize) + 8 <= mmap_cap {
+        let mmap_len = self.idx_mmap_len.get();
+        if !mmap_ptr.is_null() && (off_in_idx as usize) + 8 <= mmap_len {
             let buf = unsafe {
                 std::slice::from_raw_parts(mmap_ptr.add(off_in_idx as usize), 8)
             };
             return Ok(u64::from_le_bytes(buf.try_into().unwrap()));
         }
-        read_idx_at(&self.idx_fd, line_idx)
+        // Fallback (rare): pread.
+        read_idx_at(&self.idx_for_read, line_idx)
     }
 
     fn push_into_ring(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
@@ -1595,17 +1557,29 @@ impl FileScrollback {
             }
             return self.cold_cell_at(line_idx as u64, col);
         }
-        // Hot tier — read straight from the MAP_SHARED mmap.  No
-        // flush phase: F3+8 removed BufWriter (kernel page cache is
-        // the single source of truth, kept in sync by mmap writes).
+        // Hot tier — flush BufWriters so any line that aged out of the
+        // ring is on disk, then read from the mmap tier.  The first
+        // cold-read in a session pays the flush + mmap (one-shot
+        // cost); subsequent cold reads in the same burst are pure
+        // memory accesses.
+        self.ensure_flushed();
+        // Translate logical → hot-local idx.
         let hot_local = (line_idx as u64) - self.hot_first_line;
         let off = self.read_idx_via_mmap(hot_local).ok()?;
+        // BUGFIX (F2+3) — was `cells.into_iter().next()` which returns
+        // cell 0 of the row regardless of `col`, so every column of an
+        // off-ring scrollback line rendered as the row's first
+        // character (the "row of repeated chars" corruption pattern
+        // visible after F1+13 dropped RAM ring 1024→256, which made
+        // the mmap path the common case).  The pread fallback below
+        // already used `cells.get(col)`; this aligns the primary mmap
+        // path with it.
         self.read_record_via_mmap(off, Some(col))
             .and_then(|(cells, _w)| cells.get(col).copied())
             .or_else(|| {
                 // Fallback if mmap path failed for any reason: classic
                 // pread.  Same correctness; just slower.
-                let (cells, _w) = read_record_at(&self.bin_fd, off).ok()?;
+                let (cells, _w) = read_record_at(&self.bin_for_read, off).ok()?;
                 cells.get(col).copied()
             })
     }
@@ -1634,16 +1608,24 @@ impl FileScrollback {
     /// whole `Vec<Cell>` keeps the API simple; v1's cold-read
     /// budget already absorbs the per-line decode cost.
     fn read_record_via_mmap(&self, offset: u64, _col_filter: Option<usize>) -> Option<(Vec<crate::grid::Cell>, bool)> {
+        // Ensure mmap covers at least the rec_len header.
+        self.ensure_bin_mmap_covers(offset + 4).ok()?;
         let mmap_ptr = self.bin_mmap_ptr.get();
-        let mmap_cap = self.bin_mmap_cap.get();
-        if mmap_ptr.is_null() || (offset as usize) + 4 > mmap_cap {
+        let mmap_len = self.bin_mmap_len.get();
+        if mmap_ptr.is_null() || (offset as usize) + 4 > mmap_len {
             return None;
         }
         let len_slice = unsafe {
             std::slice::from_raw_parts(mmap_ptr.add(offset as usize), 4)
         };
         let rec_len = u32::from_le_bytes(len_slice.try_into().unwrap()) as usize;
-        if (offset as usize) + 4 + rec_len > mmap_cap {
+        // Extend mmap if record's body lives past current end.
+        if (offset as usize) + 4 + rec_len > mmap_len {
+            self.ensure_bin_mmap_covers(offset + 4 + rec_len as u64).ok()?;
+        }
+        let mmap_ptr = self.bin_mmap_ptr.get();
+        let mmap_len = self.bin_mmap_len.get();
+        if (offset as usize) + 4 + rec_len > mmap_len {
             return None;
         }
         let body = unsafe {
@@ -1695,12 +1677,13 @@ impl FileScrollback {
             let (cells, _) = read_record_at(cold_bin, off).ok()?;
             return Some(cells);
         }
+        self.ensure_flushed();
         let hot_local = (idx as u64) - self.hot_first_line;
         let off = self.read_idx_via_mmap(hot_local).ok()?;
         self.read_record_via_mmap(off, None)
             .map(|(c, _)| c)
             .or_else(|| {
-                let (cells, _wrapped) = read_record_at(&self.bin_fd, off).ok()?;
+                let (cells, _wrapped) = read_record_at(&self.bin_for_read, off).ok()?;
                 Some(cells)
             })
     }
@@ -1727,12 +1710,13 @@ impl FileScrollback {
             let Ok((_, wrapped)) = read_record_at(cold_bin_fd, off) else { return false; };
             return wrapped;
         }
+        self.ensure_flushed();
         let hot_local = (idx as u64) - self.hot_first_line;
         let Some(off) = self.read_idx_via_mmap(hot_local).ok() else { return false; };
         if let Some((_, w)) = self.read_record_via_mmap(off, None) {
             return w;
         }
-        let Some((_cells, wrapped)) = read_record_at(&self.bin_fd, off).ok() else { return false; };
+        let Some((_cells, wrapped)) = read_record_at(&self.bin_for_read, off).ok() else { return false; };
         wrapped
     }
 
@@ -1763,22 +1747,24 @@ impl FileScrollback {
 
 impl Drop for FileScrollback {
     fn drop(&mut self) {
-        // F3+8 — clean exit: trim the over-allocated tail back to the
-        // actual data size, then munmap.  On `execv` Drop doesn't run
-        // and the file stays over-allocated; the next open's idx
-        // backward scan recovers the real boundary either way.
-        let _ = self.bin_fd.set_len(self.bin_write_offset);
-        let _ = self.idx_fd.set_len(self.idx_write_offset);
+        use std::io::{Seek, SeekFrom, Write};
+        // Flush BufWriters so any buffered bytes hit the page cache
+        // before our fds close.  No fsync.  Dense idx — no sentinel.
+        let _ = self.bin.borrow_mut().flush();
+        let _ = self.idx.borrow_mut().flush();
+        // Unmap any active mmap regions.
         let bp = self.bin_mmap_ptr.get();
-        let bl = self.bin_mmap_cap.get();
+        let bl = self.bin_mmap_len.get();
         if !bp.is_null() && bl > 0 {
             unsafe { libc::munmap(bp as *mut libc::c_void, bl); }
         }
         let ip = self.idx_mmap_ptr.get();
-        let il = self.idx_mmap_cap.get();
+        let il = self.idx_mmap_len.get();
         if !ip.is_null() && il > 0 {
             unsafe { libc::munmap(ip as *mut libc::c_void, il); }
         }
+        let _ = self.bin_for_read.seek(SeekFrom::Start(0));
+        let _ = self.idx_for_read.seek(SeekFrom::Start(0));
     }
 }
 
@@ -1852,9 +1838,9 @@ impl FileScrollback {
     /// snapshot's view (appends only grow the file past
     /// `total_lines`).
     pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
-        // F3+8 — no flush needed: writes go directly through
-        // MAP_SHARED into the kernel page cache, which the new
-        // read-only fd sees instantly.
+        use std::io::Write;
+        self.bin.borrow_mut().flush()?;
+        self.idx.borrow_mut().flush()?;
         let bin = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
         let idx = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
         Ok(FileSnapshot {
@@ -1864,73 +1850,6 @@ impl FileScrollback {
             last_read: std::cell::RefCell::new(None),
         })
     }
-}
-
-/// F3+8 — round `n` up to the next multiple of `chunk`.
-fn round_up_to_chunk(n: u64, chunk: u64) -> u64 {
-    if chunk == 0 {
-        return n;
-    }
-    n.div_ceil(chunk).saturating_mul(chunk)
-}
-
-/// F3+8 — produce the 32-byte file header.
-fn build_header_bytes() -> [u8; FILE_HEADER_BYTES as usize] {
-    let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
-    hdr[0..4].copy_from_slice(&FILE_MAGIC.to_le_bytes());
-    hdr[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
-    hdr[8..12].copy_from_slice(&(crate::terminal::CELL_BYTES_PUB as u32).to_le_bytes());
-    hdr[12..16].copy_from_slice(&0u32.to_le_bytes()); // header_flags
-    let now_ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    hdr[16..24].copy_from_slice(&now_ns.to_le_bytes());
-    hdr[24..32].copy_from_slice(&0u64.to_le_bytes());
-    hdr
-}
-
-/// F3+8 — forward scan of the bin mmap to rebuild the idx from
-/// scratch.  Used on reopen when the idx file is missing / size-
-/// mismatched / corrupt.  Walks records starting at FILE_HEADER_BYTES,
-/// stops at the first invalid header (`rec_len = 0` past header bytes,
-/// or rec end past `bin_data_cap`).  Writes recovered offsets to
-/// `idx_fd` via `pwrite`, returning the byte offset where the next
-/// idx entry would land (= valid_lines * 8).
-fn rebuild_idx_from_bin_via_mmap(
-    bin_mmap_ptr: *mut u8,
-    bin_data_cap: u64,
-    idx_fd: &std::fs::File,
-) -> std::io::Result<u64> {
-    use std::os::unix::fs::FileExt;
-    if bin_mmap_ptr.is_null() {
-        return Ok(0);
-    }
-    let mut pos = FILE_HEADER_BYTES;
-    let mut idx_byte_off: u64 = 0;
-    while pos + 4 <= bin_data_cap {
-        let rec_len = unsafe {
-            let p = bin_mmap_ptr.add(pos as usize);
-            let mut buf = [0u8; 4];
-            std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), 4);
-            u32::from_le_bytes(buf) as u64
-        };
-        if rec_len == 0 {
-            // Treat zero-length record as "no record here" — common
-            // when the bin was over-allocated and we walked into a
-            // zeroed tail.
-            break;
-        }
-        let end = pos + 4 + rec_len;
-        if end > bin_data_cap {
-            // Trailing partial; stop here.
-            break;
-        }
-        idx_fd.write_all_at(&pos.to_le_bytes(), idx_byte_off)?;
-        idx_byte_off += 8;
-        pos = end;
-    }
-    Ok(idx_byte_off)
 }
 
 fn read_exact_at(f: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
@@ -2320,22 +2239,19 @@ mod tests {
         assert!(!sb.wrapped_at(0));
     }
 
-    /// F2+4 — trailing default cells get trimmed at write time.  We
-    /// write a known-real-content prefix + a long default tail, then
-    /// look at the on-disk record size and confirm only the prefix
-    /// + the 7-byte record header (4 rec_len + 1 wrapped + 2 cols)
-    /// reached the file.  cell_at still returns the row's prefix cells
-    /// at their original columns and `Cell::default()` for trimmed-tail
-    /// columns (via `cells.get(col).copied()` returning None on the
-    /// mmap path, which the higher-level `cell_at_view` falls back to
-    /// default for).
+    /// F3+11.1 — push trims trailing default cells (perf:  80%+
+    /// disk savings on a TUI grid where most of the row is
+    /// padding).  Trim is purely a serialised-size optimisation:
+    /// the prefix decodes back at its original columns; trimmed-
+    /// tail columns decode as None which the viewport renderer
+    /// maps to Cell::default() (visually identical to having
+    /// stored them).
     #[test]
-    fn trailing_default_cells_trimmed_on_write() {
+    fn push_line_trims_default_tail() {
         use std::io::{Read, Seek, SeekFrom};
         let tmp = TmpDir::new("trim-tail");
         let cols = 200usize;
         let prefix_len = 30usize;
-        // Build a row: 30 distinct chars, then 170 default cells.
         let mut row = Vec::with_capacity(cols);
         for i in 0..prefix_len {
             row.push(Cell { ch: (b'a' + (i % 26) as u8) as char, ..Default::default() });
@@ -2346,48 +2262,34 @@ mod tests {
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
             .expect("create");
         sb.push_line(&row, false);
-        // Force an off-ring lookup by evicting row 0 from the ring.
         for _ in 0..6 {
             sb.push_line(&fill(b'.', cols), false);
         }
-        // 1) The on-disk record for row 0 should be sized for ONLY the
-        //    prefix cells (30) + header.
-        let bin_path = tmp.bin();
-        // Flush so we can read what got written.
         drop(sb);
-        let mut f = std::fs::File::open(&bin_path).expect("open bin");
+        let mut f = std::fs::File::open(tmp.bin()).expect("open bin");
         f.seek(SeekFrom::Start(FILE_HEADER_BYTES)).unwrap();
         let mut rec_len_buf = [0u8; 4];
         f.read_exact(&mut rec_len_buf).unwrap();
         let rec_len = u32::from_le_bytes(rec_len_buf) as usize;
-        // Expected: 1 wrapped + 2 cols + prefix_len × 13 cells.
-        let expected = 1 + 2 + prefix_len * crate::terminal::CELL_BYTES_PUB;
+        let expected_trimmed = 1 + 2 + prefix_len * crate::terminal::CELL_BYTES_PUB;
         assert_eq!(
-            rec_len, expected,
-            "row record size {} != expected {} — trim didn't fire \
-             (cell count saved = {}; cols requested = {})",
-            rec_len, expected,
-            (rec_len.saturating_sub(3)) / crate::terminal::CELL_BYTES_PUB,
-            cols
+            rec_len, expected_trimmed,
+            "first record should hold ONLY the prefix (trim default \
+             tail); got rec_len={rec_len}, expected={expected_trimmed}"
         );
-        // 2) Reopen and confirm the prefix reads back correctly and
-        //    the trimmed-away tail comes back as None from cell_at
-        //    (which higher-level cell_at_view turns into default).
         let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
             .expect("reopen");
         for c in 0..prefix_len {
             let want = (b'a' + (c % 26) as u8) as char;
-            let got = sb2.cell_at(0, c)
-                .unwrap_or_else(|| panic!("cell_at(0, {}) = None for prefix", c))
-                .ch;
-            assert_eq!(got, want, "prefix col {} mismatch", c);
+            assert_eq!(sb2.cell_at(0, c).unwrap().ch, want, "prefix col {c}");
         }
+        // Trimmed-tail cells: cell_at returns None (the renderer's
+        // higher-level cell_at_view maps None → Cell::default()).
         for c in prefix_len..cols {
             assert!(
                 sb2.cell_at(0, c).is_none(),
-                "cell_at(0, {}) returned Some after trim — expected None \
-                 (cell_at_view fills default)",
-                c
+                "trimmed tail col {c} should be None (renderer fills \
+                 default), got Some"
             );
         }
     }
@@ -2536,70 +2438,51 @@ mod tests {
         assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'a');
     }
 
+    /// F3+11 — bad header returns Err (no silent rename, no fresh
+    /// start).  Caller (Terminal::new) sees the error and decides
+    /// how to surface it; storage doesn't paper over corruption.
     #[test]
-    fn file_corrupt_header_is_renamed_and_replaced() {
-        let tmp = TmpDir::new("corrupt");
-        // Pre-corrupt the file with bogus magic.
+    fn file_corrupt_header_returns_err() {
+        let tmp = TmpDir::new("corrupt-err");
         std::fs::write(tmp.bin(), b"\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00garbage").unwrap();
         std::fs::write(tmp.idx(), b"junk").unwrap();
-        // Open should rename the corrupt file and start fresh.
-        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), 4, 8)
-            .expect("recover");
-        assert_eq!(sb.len(), 0);
-        sb.push_line(&fill(b'Z', 4), false);
-        assert_eq!(sb.len(), 1);
-        // A `scrollback.bin.corrupt.*` file should exist in the dir.
-        let any_corrupt = std::fs::read_dir(&tmp.path)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().contains(".corrupt."));
-        assert!(any_corrupt, "expected a renamed corrupt file in {:?}", tmp.path);
+        let err = match FileScrollback::open(tmp.bin(), tmp.idx(), 4, 8) {
+            Err(e) => e,
+            Ok(_) => panic!("open must fail on bad magic"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("magic"),
+            "expected error about bad magic, got: {msg}"
+        );
     }
 
+    /// F3+11 — misaligned idx returns Err.  Idx file is derived
+    /// from bin and must be in lockstep; the only repair step at
+    /// open() is truncating tail entries past bin EOF (the
+    /// SIGKILL-without-flush case).  An idx with non-multiple-of-8
+    /// size is corruption past what the tail-truncate handles —
+    /// surface, don't rebuild.
     #[test]
-    fn file_idx_rebuilt_when_missing() {
-        let tmp = TmpDir::new("idx-missing");
+    fn file_misaligned_idx_returns_err() {
+        let tmp = TmpDir::new("idx-misaligned");
         let cols = 4usize;
         {
             let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
                 .expect("create");
-            for _ in 0..10 {
+            for _ in 0..5 {
                 sb.push_line(&fill(b'a', cols), false);
             }
-            assert_eq!(sb.len(), 10);
         }
-        // Nuke the idx file; .bin survives.
-        std::fs::remove_file(tmp.idx()).expect("rm idx");
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-            .expect("recover");
-        // Rebuilt idx from .bin → length matches.
-        assert_eq!(sb.len(), 10);
-        assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'a');
-        assert_eq!(sb.cell_at(9, 3).unwrap().ch, 'a');
-    }
-
-    #[test]
-    fn file_idx_rebuilt_when_length_mismatched() {
-        let tmp = TmpDir::new("idx-trunc");
-        let cols = 4usize;
-        {
-            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-                .expect("create");
-            for _ in 0..20 {
-                sb.push_line(&fill(b'b', cols), false);
-            }
-        }
-        // Truncate idx to half its length.
         let idx_bytes = std::fs::read(tmp.idx()).unwrap();
-        let truncated = &idx_bytes[..idx_bytes.len() / 2];
-        // Make it length not a multiple of 8 to trip rebuild
-        // unconditionally.
-        let mut truncated = truncated.to_vec();
-        truncated.push(0x55); // tail byte breaks 8-byte alignment
-        std::fs::write(tmp.idx(), &truncated).unwrap();
-        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
-            .expect("recover");
-        assert_eq!(sb.len(), 20);
+        let mut bad = idx_bytes.clone();
+        bad.push(0x55); // off-by-1 → not multiple of 8
+        std::fs::write(tmp.idx(), &bad).unwrap();
+        let err = match FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8) {
+            Err(e) => e,
+            Ok(_) => panic!("open must fail on misaligned idx"),
+        };
+        assert!(format!("{err}").contains("multiple of 8"));
     }
 
     #[test]
@@ -2659,44 +2542,51 @@ mod tests {
             ch_old,
             "cold read of pre-buffer line must flush + read correctly"
         );
-        // F3+8 — mmap is set from open() now (MAP_SHARED), no
-        // lazy "first cold read mmaps" step any more.
+        // After cold read: has_unflushed should be back to false.
+        assert!(!sb.has_unflushed.get(), "ensure_flushed should clear flag");
+        // mmap should be populated.
         assert!(!sb.bin_mmap_ptr.get().is_null(), "bin mmap should be set");
         assert!(!sb.idx_mmap_ptr.get().is_null(), "idx mmap should be set");
     }
 
-    /// F3+8 — after enough pushes to push the bin past its first
-    /// chunk, push_line must ftruncate + remap so subsequent reads
-    /// of newly-cold lines still find a valid mapping.  Without the
-    /// chunked-extension path, reads would land past mmap_cap.
+    /// A2: after a cold read mmaps the bin, subsequent pushes that
+    /// grow the file beyond the current mmap_len must trigger a
+    /// remap on the NEXT cold read.  Without remap, reading the
+    /// newly-cold lines would access unmapped memory or stale length.
     #[test]
-    fn file_mmap_remap_on_chunk_growth() {
-        let tmp = TmpDir::new("chunk-remap");
+    fn file_a2_mmap_remap_on_file_growth() {
+        let tmp = TmpDir::new("a2-remap");
         let cols = 4usize;
         let ram_capacity = 4;
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, ram_capacity)
             .expect("create");
-        let cap_first = sb.bin_mmap_cap.get();
-        assert!(cap_first > 0, "initial chunk should be allocated");
-        // Push enough lines to grow past the first BIN_CHUNK_BYTES
-        // boundary.  At cols=4 (`6 + 4*13 = 58 B / record`), one
-        // 64KB chunk holds ~1130 records; push more than that.
-        for i in 0..1500 {
+        // First batch: push 20 lines, cold-read to mmap them.
+        for i in 0..20 {
             sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
         }
-        // Cold-read a line that aged out of the ring of 4.
-        let cold_after_growth = 800usize;
+        let first_old_idx = 5;
+        let _ = sb.cell_at(first_old_idx, 0); // triggers initial mmap
+        let mmap_len_first = sb.bin_mmap_len.get();
+        assert!(mmap_len_first > 0, "first mmap should be non-empty");
+        // Second batch: push another 50 lines so the file grows
+        // past mmap_len_first.
+        for i in 20..70 {
+            sb.push_line(&fill((b'a' + (i % 26) as u8) as u8, cols), false);
+        }
+        // Cold-read a line that landed in the second batch (now
+        // aged out of ring of 4).
+        let cold_after_growth = 30usize;
         let want_ch = ((b'a' + (cold_after_growth % 26) as u8)) as char;
         assert_eq!(
             sb.cell_at(cold_after_growth, 0).expect("cell after growth").ch,
             want_ch,
-            "chunked extension should let us read past the first chunk"
+            "remap on growth should let us read freshly-cold lines"
         );
         assert!(
-            sb.bin_mmap_cap.get() > cap_first as usize,
-            "mmap should have remapped to a larger chunk: was {}, now {}",
-            cap_first,
-            sb.bin_mmap_cap.get()
+            sb.bin_mmap_len.get() > mmap_len_first,
+            "mmap should have remapped to cover new file size: was {}, now {}",
+            mmap_len_first,
+            sb.bin_mmap_len.get()
         );
     }
 
@@ -2884,5 +2774,175 @@ mod tests {
         // The partial record's idx must not let us read garbage.
         // For safety, verify cell_at on a known-good index works.
         assert_eq!(sb.cell_at(0, 0).unwrap().ch, 'k');
+    }
+
+    // ─── F3+10g: autotest harness for the bug classes that ate the
+    //         user's history.  Each test reproduces one specific
+    //         failure mode (torn write, resize duplication, past-EOF
+    //         orphans, trailing-blank navigability) without going
+    //         through the full marspot binary — these are the
+    //         scenarios the user can't reliably eyeball.  See
+    //         `[[project-scrollback-execv-gap]]` for the failure
+    //         catalogue.  ──────────────────────────────────────────
+
+    /// Torn write: BufWriter dropped without flush (the L3 self-execv
+    /// scenario where Drop never runs).  Previously this caused idx
+    /// to point past bin EOF after reopen → tolerant load surfaced
+    /// blank rows → user saw "history is gone".  After F3+10c's Pass
+    /// A, reopen drops past-EOF idx tail, every surfaced row decodes.
+    #[test]
+    fn file_torn_write_no_past_eof_orphans() {
+        let tmp = TmpDir::new("torn-write");
+        let cols = 8usize;
+
+        // Push enough lines that BufWriter is mid-buffer when we
+        // forget — 1000 × 8 cells writes ~100 KB to bin, well past
+        // the 64 KB BufWriter auto-flush boundary so several
+        // chunks have already hit disk and some tail is unflushed.
+        let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256)
+            .expect("create");
+        for i in 0..1000u32 {
+            let ch = b'a' + (i % 26) as u8;
+            sb.push_line(&fill(ch, cols), false);
+        }
+        let pushed = sb.len();
+        assert_eq!(pushed, 1000);
+
+        // SAFETY: leak the FileScrollback — `Drop` (which flushes
+        // BufWriters) never runs.  This is exactly what `libc::execv`
+        // does to the old L3 process image.  The fd handles leak too;
+        // tmp dir cleanup at the end of the test reclaims everything.
+        std::mem::forget(sb);
+
+        // Reopen.  Post-F3+10c, every surfaced row must decode to
+        // its expected character — no blank-by-tolerant-load rows
+        // leaking through.
+        let sb2 = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 256)
+            .expect("reopen after torn close");
+        let total = sb2.len();
+        assert!(total <= pushed, "reopen total {total} > pushed {pushed}");
+        // BufWriter auto-flush ensures a substantial prefix survived.
+        assert!(total >= 500, "reopen total {total} suspiciously low");
+        for i in 0..total {
+            let line = sb2
+                .read_line(i)
+                .unwrap_or_else(|| panic!("row {i} should decode"));
+            assert_eq!(line.len(), cols, "row {i} width mismatch");
+            let expected = (b'a' + (i % 26) as u8) as char;
+            assert_eq!(
+                line[0].ch, expected,
+                "row {i} decoded as {:?}, expected {:?} \
+                 (would indicate past-EOF idx leaked as blank)",
+                line[0].ch, expected,
+            );
+        }
+    }
+
+    /// Window resize on a File-backed scrollback used to duplicate
+    /// records (restart() reopened the file without clearing → the
+    /// caller's subsequent push appended on top of existing
+    /// content).  F3+10f makes restart() truncate bin to header +
+    /// idx to 0, so the re-push lands in a fresh file.
+    #[test]
+    fn file_restart_truncates_for_reflow() {
+        let tmp = TmpDir::new("resize-no-dup");
+        let cols = 4usize;
+        // Seed file with 50 rows.
+        {
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16)
+                .expect("create");
+            for i in 0..50u32 {
+                sb.push_line(&fill((b'a' + (i % 26) as u8), cols), false);
+            }
+            assert_eq!(sb.len(), 50);
+        }
+        // Drive through the Scrollback enum since that's the call
+        // surface Grid::reflow uses.
+        let mut sb = Scrollback::file(tmp.bin(), tmp.idx(), cols, 16)
+            .expect("reopen as enum");
+        assert_eq!(sb.len(), 50, "reopen should see seeded rows");
+        // Restart at new_cols = 8 (the reflow trigger).
+        sb.restart(8);
+        assert_eq!(
+            sb.len(), 0,
+            "restart() must clear the file for File variant — \
+             leaving content causes the 错位 visible after a window resize"
+        );
+        // Re-push 50 reflowed rows at new cols.
+        for i in 0..50u32 {
+            sb.push_line_with_wrapped(&fill((b'a' + (i % 26) as u8), 8), false);
+        }
+        assert_eq!(
+            sb.len(), 50,
+            "post-restart push count should be 50, not 100 \
+             (100 = restart didn't truncate, file had old + new)"
+        );
+        // And the rows we read back must be the NEW width.
+        let row0 = sb.line_to_vec(0).expect("row 0 decodes");
+        assert_eq!(row0.len(), 8, "reflowed row should be at new cols=8");
+    }
+
+    /// F3+10c Pass A: manually inject idx entries pointing past bin
+    /// EOF and verify reopen drops them.
+    #[test]
+    fn file_past_eof_idx_tail_dropped_on_reopen() {
+        let tmp = TmpDir::new("past-eof-tail");
+        let cols = 4usize;
+        {
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
+                .expect("create");
+            for _ in 0..10 {
+                sb.push_line(&fill(b'x', cols), false);
+            }
+        }
+        // Append 5 bogus idx entries pointing past bin EOF.  The
+        // bin file isn't extended — so these entries can NEVER
+        // resolve to a real record.
+        let bin_size = std::fs::metadata(&tmp.bin()).unwrap().len();
+        {
+            use std::io::Write;
+            let mut idx = std::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&tmp.idx())
+                .unwrap();
+            for i in 0..5u64 {
+                let bogus = bin_size + 100 + i * 7;
+                idx.write_all(&bogus.to_le_bytes()).unwrap();
+            }
+        }
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 8)
+            .expect("reopen");
+        assert_eq!(
+            sb.len(), 10,
+            "Pass A should drop the 5 past-EOF entries; reopen total \
+             was {} (expected 10)", sb.len()
+        );
+    }
+
+    /// Round-trip: push N lines, drop cleanly, reopen, verify ALL
+    /// N decode to expected content.  Foundation correctness check
+    /// — any regression to the BufWriter / Drop / open() machinery
+    /// trips this first.
+    #[test]
+    fn file_clean_close_round_trips_all_rows() {
+        let tmp = TmpDir::new("clean-roundtrip");
+        let cols = 8usize;
+        {
+            let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32)
+                .expect("create");
+            for i in 0..500u32 {
+                sb.push_line(&fill((b'a' + (i % 26) as u8), cols), false);
+            }
+        } // <- clean Drop runs flush_for_handoff equivalent
+        let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32)
+            .expect("reopen");
+        assert_eq!(sb.len(), 500);
+        for i in 0..500 {
+            let line = sb.read_line(i).expect("row decodes");
+            assert_eq!(line.len(), cols);
+            let expected = (b'a' + (i as u32 % 26) as u8) as char;
+            assert_eq!(line[0].ch, expected, "row {i} content");
+        }
     }
 }

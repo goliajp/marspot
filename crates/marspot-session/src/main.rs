@@ -527,6 +527,14 @@ fn do_l3_execv_swap(
     let body = terminal.serialize_snapshot();
     let state_path = session_state_bin_path(id);
     let _ = std::fs::write(&state_path, &body);
+    // F3+10 — flush the FileScrollback BufWriter tail to the kernel
+    // page cache before execv.  Drop won't run on `libc::execv` so
+    // anything sitting in the writer's 64 KB user-space buffer would
+    // otherwise be lost to the next L3.  Snapshot v3 self-describing
+    // index dedup is the safety net (it'll refill any remaining gap
+    // from its RAM-ring section), but flushing keeps disk + RAM in
+    // sync so the next L3's cold reads hit complete data immediately.
+    terminal.grid().scrollback_flush_for_handoff();
 
     clear_cloexec(master_fd)?;
     let listen_fd = listener.prepare_for_execv()?;

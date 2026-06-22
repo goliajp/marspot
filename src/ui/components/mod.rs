@@ -18,6 +18,7 @@ pub mod grid_item;
 pub mod sidebar;
 pub mod table;
 pub mod layout_modal;
+pub mod context_menu;
 
 pub use tab_strip::TabStrip;
 pub use scroll_view::ScrollView;
@@ -33,3 +34,4 @@ pub use grid_item::{GridItem, GridEdges, Outline};
 pub use sidebar::{Sidebar, SidebarRow, SidebarStyle};
 pub use table::{Table, TableColumn, TableRow, TableStyle, ColumnWidth, RowKind, SortDir};
 pub use layout_modal::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
+pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};

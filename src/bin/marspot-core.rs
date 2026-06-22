@@ -245,10 +245,60 @@ fn read_shell_child_pid(shelld_session_id: u64) -> Option<i32> {
     None
 }
 
+// F3+9 — right-click context menu plumbing.  Mirrors the standalone
+// `src/main.rs` shape so the menu behaviour is identical across the
+// split-arch (L1→L2 wire) and single-binary paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextRegion {
+    Pane(usize),
+    SidebarSlot(usize),
+    TitleStrip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextMenuAction {
+    CopySelection,
+    Paste,
+    ClearScrollback,
+    ClosePane,
+    SplitNewPane,
+    RenameTitle,
+    ToggleSidebar,
+    OpenLayout,
+}
+
+impl ContextMenuAction {
+    fn tag(self) -> u32 { self as u32 }
+    fn from_tag(t: u32) -> Option<Self> {
+        match t {
+            x if x == Self::CopySelection.tag() => Some(Self::CopySelection),
+            x if x == Self::Paste.tag() => Some(Self::Paste),
+            x if x == Self::ClearScrollback.tag() => Some(Self::ClearScrollback),
+            x if x == Self::ClosePane.tag() => Some(Self::ClosePane),
+            x if x == Self::SplitNewPane.tag() => Some(Self::SplitNewPane),
+            x if x == Self::RenameTitle.tag() => Some(Self::RenameTitle),
+            x if x == Self::ToggleSidebar.tag() => Some(Self::ToggleSidebar),
+            x if x == Self::OpenLayout.tag() => Some(Self::OpenLayout),
+            _ => None,
+        }
+    }
+}
+
+struct ContextMenuState {
+    items: Vec<marspot::ui::components::MenuItem>,
+    anchor_x: f64,
+    anchor_y: f64,
+    region: ContextRegion,
+    hovered_idx: Option<usize>,
+}
+
 #[derive(Debug)]
 enum CoreEvent {
     Key(MarspotKeyEvent, Modifiers),
     MouseDown(f64, f64, Modifiers),
+    /// F3+9 — right-click in screen coords + modifier byte.
+    /// Drives the L2 context menu (same handler shape as MouseDown).
+    MouseRightDown(f64, f64, Modifiers),
     MouseDrag(f64, f64),
     /// Coordinates are on the wire but unused — release only ends
     /// the drag (same as src/main.rs `mouse_up`).
@@ -353,6 +403,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::MouseDown => decode_mouse(&f.payload)
             .ok()
             .map(|(x, y, m)| CoreEvent::MouseDown(x, y, mods_to_struct(m))),
+        MsgType::MouseRightDown => decode_mouse(&f.payload)
+            .ok()
+            .map(|(x, y, m)| CoreEvent::MouseRightDown(x, y, mods_to_struct(m))),
         MsgType::MouseDrag => decode_mouse(&f.payload)
             .ok()
             .map(|(x, y, _)| CoreEvent::MouseDrag(x, y)),
@@ -816,6 +869,10 @@ struct CoreApp {
     /// click toggles it.  Modal contents (cols/rows +/- controls
     /// + preview) live in the modal component.
     layout_modal_open: bool,
+    /// F3+9 — right-click ContextMenu live state.  `None` when closed.
+    /// Set by `mouse_right_down`; cleared by `mouse_down` outside
+    /// the menu, Esc key, or after dispatching an action.
+    context_menu: Option<ContextMenuState>,
     /// Modal-staged cols / rows.  Updated by clicks on the modal's
     /// +/- steppers; committed to `grid_cols` / `grid_rows` on Apply.
     /// Initialised from grid_* every time the modal opens.
@@ -1211,6 +1268,162 @@ impl CoreApp {
     /// `SESSION_COUNT_HARD_CAP`.  Sized to the cell it will land in
     /// (falling back to the first cell's shape) so the shell prompt
     /// prints at the right width from its very first byte.
+    // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
+
+    fn mouse_right_down(
+        &mut self,
+        x_phys: f64,
+        y_phys: f64,
+        _modifiers: Modifiers,
+    ) {
+        // Second right-click closes the previous menu first.
+        if self.context_menu.take().is_some() {
+            self.needs_render = true;
+        }
+        let region = self.resolve_context_region(x_phys, y_phys);
+        let items = self.build_menu_items(region);
+        if items.is_empty() {
+            return;
+        }
+        self.context_menu = Some(ContextMenuState {
+            items,
+            anchor_x: x_phys,
+            anchor_y: y_phys,
+            region,
+            hovered_idx: None,
+        });
+        self.needs_render = true;
+    }
+
+    fn resolve_context_region(&self, x_phys: f64, y_phys: f64) -> ContextRegion {
+        // Sidebar row check first — wins over the cell-area hit when
+        // both overlap (the sidebar overlays the title-strip band).
+        let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let top_pad_phys = self.layout.top_inset + self.layout.sidebar_top_pad_phys;
+        if let Some(idx) = self.layout.hit_test_sidebar_row(
+            x_phys, y_phys, row_phys, top_pad_phys, self.panes.len(),
+        ) {
+            return ContextRegion::SidebarSlot(idx);
+        }
+        if let Some(idx) = self.layout.hit_test(x_phys, y_phys) {
+            return ContextRegion::Pane(idx);
+        }
+        ContextRegion::TitleStrip
+    }
+
+    fn build_menu_items(
+        &self,
+        region: ContextRegion,
+    ) -> Vec<marspot::ui::components::MenuItem> {
+        use marspot::ui::components::MenuItem;
+        match region {
+            ContextRegion::Pane(_) => {
+                let close_disabled = self.panes.len() <= 1;
+                let close = {
+                    let mi = MenuItem::entry(
+                        "Close pane", ContextMenuAction::ClosePane.tag(),
+                    );
+                    if close_disabled { mi.disabled() } else { mi }
+                };
+                let copy = MenuItem::entry(
+                    "Copy", ContextMenuAction::CopySelection.tag(),
+                ).with_shortcut("⌘C");
+                vec![
+                    if self.selection.is_some() { copy } else { copy.disabled() },
+                    MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
+                        .with_shortcut("⌘V"),
+                    MenuItem::divider(),
+                    MenuItem::entry("Clear scrollback",
+                        ContextMenuAction::ClearScrollback.tag()),
+                    MenuItem::divider(),
+                    MenuItem::entry("New pane",
+                        ContextMenuAction::SplitNewPane.tag()),
+                    close,
+                ]
+            }
+            ContextRegion::SidebarSlot(_) => {
+                let close_disabled = self.panes.len() <= 1;
+                let close = {
+                    let mi = MenuItem::entry(
+                        "Close pane", ContextMenuAction::ClosePane.tag(),
+                    );
+                    if close_disabled { mi.disabled() } else { mi }
+                };
+                vec![
+                    MenuItem::entry("Rename…",
+                        ContextMenuAction::RenameTitle.tag()),
+                    MenuItem::divider(),
+                    close,
+                ]
+            }
+            ContextRegion::TitleStrip => vec![
+                MenuItem::entry("Toggle sidebar",
+                    ContextMenuAction::ToggleSidebar.tag())
+                    .with_shortcut("⌘B"),
+                MenuItem::entry("Open layout…",
+                    ContextMenuAction::OpenLayout.tag()),
+            ],
+        }
+    }
+
+    fn dispatch_context_action(
+        &mut self,
+        action: ContextMenuAction,
+        region: ContextRegion,
+    ) {
+        self.context_menu = None;
+        match action {
+            ContextMenuAction::CopySelection => {
+                let _ = self.copy_selection_to_clipboard();
+            }
+            ContextMenuAction::Paste => {
+                if let Some(txt) = marspot::input::read_clipboard_text() {
+                    if let Some(pane) = self.panes.get_mut(self.focused_idx) {
+                        pane.session_mut().forward_paste(&txt);
+                    }
+                }
+            }
+            ContextMenuAction::ClearScrollback => {
+                if let Some(pane) = self.panes.get_mut(self.focused_idx) {
+                    pane.session_mut().forward_inject_input(b"\x1b[3J");
+                }
+            }
+            ContextMenuAction::ClosePane => {
+                let idx = match region {
+                    ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
+                    _ => self.focused_idx,
+                };
+                if self.panes.len() > 1 && idx < self.panes.len() {
+                    self.close_session(idx);
+                    self.rebuild_layout();
+                }
+            }
+            ContextMenuAction::SplitNewPane => {
+                if self.panes.len() < marspot::ui::SESSION_COUNT_HARD_CAP {
+                    self.spawn_session();
+                    self.rebuild_layout();
+                }
+            }
+            ContextMenuAction::RenameTitle => {
+                let idx = match region {
+                    ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
+                    _ => self.focused_idx,
+                };
+                if idx < self.panes.len() {
+                    self.editing_title = Some(idx);
+                }
+            }
+            ContextMenuAction::ToggleSidebar => {
+                self.sidebar_collapsed = !self.sidebar_collapsed;
+                self.rebuild_layout();
+            }
+            ContextMenuAction::OpenLayout => {
+                self.layout_modal_open = true;
+            }
+        }
+        self.needs_render = true;
+    }
+
     fn spawn_session(&mut self) {
         if self.panes.len() >= SESSION_COUNT_HARD_CAP {
             return;
@@ -1800,6 +2013,16 @@ impl CoreApp {
 
     fn key(&mut self, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
+
+        // F3+9 — Esc closes the context menu if open.  Swallowed so the
+        // \e doesn't reach the focused pane.
+        if event.state == KeyState::Pressed && self.context_menu.is_some() {
+            if let LogicalKey::Named(NamedKey::Escape) = event.logical {
+                self.context_menu = None;
+                self.needs_render = true;
+                return;
+            }
+        }
 
         // F3+1.5 — Process Monitor modal eats ESC + arrow keys + Cmd-W
         // when open (modal semantics).  Sits above every other key
@@ -2548,6 +2771,22 @@ impl CoreApp {
     }
 
     fn mouse_moved(&mut self, x_phys: f64, y_phys: f64) {
+        // F3+9 — drive context menu hover highlight when open.
+        if let Some(state) = self.context_menu.as_mut() {
+            use marspot::ui::components::ContextMenu;
+            let menu = ContextMenu::layout(
+                self.layout.window_w, self.layout.window_h, self.scale,
+                state.anchor_x, state.anchor_y,
+                self.layout.top_inset,
+                &state.items,
+            );
+            let new_hover = menu.hover_index(&state.items, x_phys, y_phys);
+            if new_hover != state.hovered_idx {
+                state.hovered_idx = new_hover;
+                self.needs_render = true;
+            }
+        }
+
         let new_hover = if self.layout.hit_test_sidebar_button(x_phys, y_phys) {
             Some(ChromeBtn::Sidebar)
         } else if self.layout.hit_test_layout_button(x_phys, y_phys) {
@@ -2565,6 +2804,46 @@ impl CoreApp {
     }
 
     fn mouse_down(&mut self, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
+        // F3+9 — when context menu is open, a left click first
+        // dispatches an item / swallows on frame / closes-on-outside.
+        if self.context_menu.is_some() {
+            use marspot::ui::components::{ContextMenu, ContextMenuHit};
+            let (hit, region) = {
+                let state = self.context_menu.as_ref().unwrap();
+                let menu = ContextMenu::layout(
+                    self.layout.window_w, self.layout.window_h, self.scale,
+                    state.anchor_x, state.anchor_y,
+                    self.layout.top_inset,
+                    &state.items,
+                );
+                (menu.hit_test(&state.items, x_phys, y_phys), state.region)
+            };
+            match hit {
+                ContextMenuHit::Item(idx) => {
+                    let tag = self.context_menu.as_ref().unwrap()
+                        .items[idx].action_tag;
+                    if let Some(action) = ContextMenuAction::from_tag(tag) {
+                        self.dispatch_context_action(action, region);
+                    } else {
+                        self.context_menu = None;
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                ContextMenuHit::Frame => {
+                    // Click on divider / disabled row / padding —
+                    // swallow, NSMenu-style.
+                    return;
+                }
+                ContextMenuHit::Outside => {
+                    self.context_menu = None;
+                    self.needs_render = true;
+                    // Fall through: click also triggers normal
+                    // focus / selection behaviour.
+                }
+            }
+        }
+
         let layout = &self.layout;
         let layout_btn_hit = layout.hit_test_layout_button(x_phys, y_phys);
         let sidebar_btn_hit = layout.hit_test_sidebar_button(x_phys, y_phys);
@@ -3283,6 +3562,22 @@ impl CoreApp {
         // the render call below.
         let panel_data = self.build_process_panel_render();
         self.renderer.set_process_panel(panel_data);
+        // F3+9 — publish ContextMenu render state every frame.
+        self.renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
+            use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
+            ContextMenuRender {
+                scale: self.scale,
+                anchor_phys: (state.anchor_x, state.anchor_y),
+                top_inset: self.layout.top_inset,
+                items: state.items.iter().map(|it| ContextMenuRow {
+                    label: it.label.clone(),
+                    shortcut_hint: it.shortcut_hint.clone(),
+                    enabled: it.enabled,
+                    divider: it.divider,
+                }).collect(),
+                hovered_idx: state.hovered_idx,
+            }
+        }));
         // F3+3.0 / 3.3 — publish LayoutModal state every frame.
         // Per-slot titles built from card_slots → resolved title
         // chain (custom > cwd basename > ordinal).  Empty slot if
@@ -3792,6 +4087,7 @@ fn main() {
         grid_cols,
         grid_rows,
         layout_modal_open: false,
+        context_menu: None,
         pending_grid_cols: grid_cols,
         pending_grid_rows: grid_rows,
         card_slots: (0..(grid_cols * grid_rows)).collect(),
@@ -3936,6 +4232,7 @@ fn main() {
             match ev {
                 CoreEvent::Key(event, mods) => app.key(event, mods),
                 CoreEvent::MouseDown(x, y, mods) => app.mouse_down(x, y, mods),
+                CoreEvent::MouseRightDown(x, y, mods) => app.mouse_right_down(x, y, mods),
                 CoreEvent::MouseDrag(x, y) => app.mouse_drag(x, y),
                 CoreEvent::MouseUp => app.mouse_up(),
                 CoreEvent::MouseMove(x, y) => app.mouse_moved(x, y),

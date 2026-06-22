@@ -587,6 +587,20 @@ impl GridShmWriter {
         self.cols = cols;
         self.rows = rows;
         let (cur_c, cur_r) = grid.cursor();
+        // F3+11.1 — when L3 publishes a scrolled view (view_offset > 0)
+        // the cells the reader sees are scrollback content, but
+        // `grid.cursor()` is the LIVE cursor position — drawing it
+        // at those live coordinates would land the cursor block on
+        // top of scrollback text, NOT at the input prompt where the
+        // user actually types.  Hide the cursor whenever the view is
+        // scrolled; cursor reappears when the user scrolls back to
+        // the live tail.  Other terminals (iTerm2 / Alacritty) do
+        // the same — cursor only visible at view_offset == 0.
+        let flags = if view_offset == 0 {
+            flags
+        } else {
+            flags & !FLAG_CURSOR_VISIBLE
+        };
 
         unsafe {
             let h = self.header();
