@@ -154,6 +154,16 @@ pub struct HoverId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ViewId(pub u32);
 
+/// Scroll-wheel target id — used by `Modifier::OnScroll` to route
+/// wheel events from `hit_test_scroll` to the right reducer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScrollWheelId(pub u32);
+
+/// Drag-begin target id — pairs the begin event with subsequent
+/// move / end events so reducers know which interaction continues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DragId(pub u32);
+
 #[cfg(test)]
 mod tests {
     use super::*;

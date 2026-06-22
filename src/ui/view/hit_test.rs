@@ -8,7 +8,7 @@
 //! See `docs/ui-system-model.md` §8.
 
 use super::layout::LaidOut;
-use super::types::{ActionId, HoverId};
+use super::types::{ActionId, HoverId, ScrollWheelId, DragId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitTarget {
@@ -23,18 +23,7 @@ pub fn hit_test_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
 }
 
 fn hit_test_click_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::layout::Rect>) -> Option<ActionId> {
-    if laid.deco.hidden { return None; }
-    if let Some(c) = clip { if !c.contains(p) { return None; } }
-    if !laid.rect.contains(p) { return None; }
-    let child_clip = if matches!(&laid.view, super::view::View::ScrollView { .. }) {
-        Some(&laid.rect)
-    } else { clip };
-    for ch in laid.children.iter().rev() {
-        if let Some(h) = hit_test_click_clipped(ch, p, child_clip) {
-            return Some(h);
-        }
-    }
-    laid.deco.on_click
+    hit_test_field(laid, p, clip, |d| d.on_click)
 }
 
 /// Same as `hit_test_click` but for hover regions.
@@ -46,7 +35,7 @@ fn hit_test_hover_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::la
     if laid.deco.hidden { return None; }
     if let Some(c) = clip { if !c.contains(p) { return None; } }
     if !laid.rect.contains(p) { return None; }
-    let child_clip = if matches!(&laid.view, super::view::View::ScrollView { .. }) {
+    let child_clip = if establishes_clip(&laid.view, &laid.deco) {
         Some(&laid.rect)
     } else { clip };
     for ch in laid.children.iter().rev() {
@@ -55,6 +44,53 @@ fn hit_test_hover_clipped(laid: &LaidOut, p: (f64, f64), clip: Option<&super::la
         }
     }
     laid.deco.on_hover
+}
+
+/// `Modifier::OnDoubleClick(...)` target lookup — same walk shape
+/// as `hit_test_click` but reads a different deco field.
+pub fn hit_test_double_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
+    hit_test_field(laid, p, None, |d| d.on_double_click)
+}
+
+/// `Modifier::OnRightClick(...)` target lookup.
+pub fn hit_test_right_click(laid: &LaidOut, p: (f64, f64)) -> Option<ActionId> {
+    hit_test_field(laid, p, None, |d| d.on_right_click)
+}
+
+/// `Modifier::OnScroll(...)` target lookup — used to route wheel
+/// events to the right `ScrollWheelId`.
+pub fn hit_test_scroll(laid: &LaidOut, p: (f64, f64)) -> Option<ScrollWheelId> {
+    hit_test_field(laid, p, None, |d| d.on_scroll)
+}
+
+/// `Modifier::OnDragBegin(...)` target lookup — mouse-down hit
+/// during gesture begin.
+pub fn hit_test_drag_begin(laid: &LaidOut, p: (f64, f64)) -> Option<DragId> {
+    hit_test_field(laid, p, None, |d| d.on_drag_begin)
+}
+
+fn hit_test_field<T: Copy>(
+    laid: &LaidOut,
+    p: (f64, f64),
+    clip: Option<&super::layout::Rect>,
+    field: impl Fn(&super::layout::Decoration) -> Option<T> + Copy,
+) -> Option<T> {
+    if laid.deco.hidden { return None; }
+    if let Some(c) = clip { if !c.contains(p) { return None; } }
+    if !laid.rect.contains(p) { return None; }
+    let child_clip = if establishes_clip(&laid.view, &laid.deco) {
+        Some(&laid.rect)
+    } else { clip };
+    for ch in laid.children.iter().rev() {
+        if let Some(h) = hit_test_field(ch, p, child_clip, field) {
+            return Some(h);
+        }
+    }
+    field(&laid.deco)
+}
+
+fn establishes_clip(view: &super::view::View, deco: &super::layout::Decoration) -> bool {
+    matches!(view, super::view::View::ScrollView { .. }) || deco.clip.is_some()
 }
 
 #[cfg(test)]

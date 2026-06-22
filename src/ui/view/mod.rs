@@ -22,16 +22,20 @@ pub use types::{
     ActionId, HoverId, ViewId,
 };
 pub use view::{
-    View, Modifier, Text, TextSize, TextWeight, TextAlign,
-    TextLines, Truncate,
+    View, Modifier, Text, TextSize, TextWeight, TextStyle, TextAlign,
+    TextLines, Truncate, ClipShape, AspectMode,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
 };
+pub use types::{ScrollWheelId, DragId};
 pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,
 };
 pub use paint::{paint, paint_into};
-pub use hit_test::{hit_test_click, hit_test_hover, HitTarget};
+pub use hit_test::{
+    hit_test_click, hit_test_double_click, hit_test_right_click,
+    hit_test_scroll, hit_test_drag_begin, hit_test_hover, HitTarget,
+};
 pub use scroll::{
     ScrollState,
     scroll_state, set_scroll_state, with_scroll_state, apply_scroll_delta,

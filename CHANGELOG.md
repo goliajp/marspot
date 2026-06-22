@@ -17,7 +17,39 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.16**
+Current: **0.6.17**
+
+### 0.6.17
+
+P3 roadmap 推三件 — P3l TextStyle + P3m Opacity/Clip/AspectRatio/Collapsed + P3n Gesture modifier.
+
+**P3l TextStyle 形式化**:
+- 新 `TextStyle { size, weight, color }` struct + `Text::style(s)` builder
+- 新 `theme::text::{CAPTION, BODY, HEADER, LARGE_HEADER, HINT, CODE}` 6 个 token
+- 新 `theme::elev::{E0, E1, E2, E3}` 4 档 Material-style elevation shadow token
+- 退掉 `TextWeight::Dim = alpha × 0.6` hack:Dim variant 删,Bold 留(无 op,文档化为 v2+ 真 weight 落)
+- DevPanel `hint/body/h1/mono` 全切到 token::text::* — 之前散的 `Text::new().color(...).size(...).weight(...)` 都退场
+
+**P3m Opacity / Clip / AspectRatio / Collapsed 真实施**:
+- `Modifier::Opacity(f64)` — paint 累乘下,所有 fill/border/text/Filled/Hairline alpha 都乘
+- `Modifier::Clip(ClipShape::Rect | RoundedRect(L))` — descendants 走 culling clip;真 pixel-clip 留 P3 follow-up(Metal scissor)
+- `Modifier::AspectRatio(ratio, Fit | Fill)` + `apply_aspect()` 在 layout pass 中改 inner_c;`FrameSpec.aspect` 也接通
+- `Modifier::Collapsed(bool)` — `display: none` 语义,layout 直接 zero-size return,不走 child layout 也不 paint
+- `Decoration` 加 `opacity / clip` 字段,custom Default(opacity=1.0)
+
+**P3n Gesture modifier 完整化**:
+- `Modifier::OnDoubleClick / OnRightClick / OnScroll / OnDragBegin`
+- 新类型 `ScrollWheelId(u32) / DragId(u32)` 跟 `ActionId / HoverId / ViewId` 同 newtype 模型
+- 新 `hit_test_double_click / hit_test_right_click / hit_test_scroll / hit_test_drag_begin`
+- 共享 `hit_test_field` helper(泛型 `field: impl Fn(&Decoration) -> Option<T>`),click/hover/double/right/scroll/drag 都走同一路径
+- 共享 `establishes_clip()` 把 ScrollView + Clip modifier 的视口语义合并
+
+DevPanel Model section 状态标更新:
+- L2 opacity/clip/aspect_ratio: `[v1 待补]` → `[✓]`
+- L4 Gesture (hit-test 层): `[v1 待补]` → `[✓]`
+- L4 完整 InputEvent + DragInProgress 仍 `[v1 待补]`(下一发)
+
+shell 0.6.16 → 0.6.17.31 view tests + 9 dev_panel tests + 4 scroll tests + 7 layout tests 全 PASS.无 lib 回归.
 
 ### 0.6.16
 

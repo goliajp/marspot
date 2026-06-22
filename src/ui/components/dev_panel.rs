@@ -431,17 +431,17 @@ fn draw_section_header(canvas: &mut Canvas, x: f64, y: f64, label: &str) -> f64 
 /// ```
 fn build_model_view() -> crate::ui::view::View {
     use crate::ui::view::{
-        View, Text, TextSize, TextWeight, Edges, FrameSpec, AlignCross, Distribute,
+        Text, Edges, FrameSpec,
         vstack, hstack, zstack, filled, hairline_horiz, spacer,
     };
-    use crate::ui::theme::{color, space, radius};
+    use crate::ui::theme::{color, space, radius, text};
     use crate::ui::core::Length;
 
-    // Helpers --------------------------------------------------
-    let h1 = |s: &str| Text::new(s).color(color::ACCENT_DIM).size(TextSize::Header).build();
-    let body = |s: &str| Text::new(s).color(color::FG).build();
-    let mono = |s: &str| Text::new(s).color(color::ACCENT_DIM).build();
-    let hint = |s: &str| Text::new(s).color(color::HINT).weight(TextWeight::Dim).build();
+    // Helpers using TextStyle tokens (P3l) ----------------------
+    let h1   = |s: &str| Text::new(s).style(text::HEADER).build();
+    let body = |s: &str| Text::new(s).style(text::BODY).build();
+    let mono = |s: &str| Text::new(s).style(text::CODE).build();
+    let hint = |s: &str| Text::new(s).style(text::HINT).build();
 
     let mk_swatch = |c| {
         filled(c).corner_radius(radius::SM).frame(FrameSpec {
@@ -455,7 +455,7 @@ fn build_model_view() -> crate::ui::view::View {
     // planned at a glance.  Mark per line with [✓] / [v1 待补] / [v2+].
     let ok      = |s: &str| Text::new(s).color(color::SUCCESS).build();
     let todo_v1 = |s: &str| Text::new(s).color(color::WARN).build();
-    let todo_v2 = |s: &str| Text::new(s).color(color::HINT).weight(TextWeight::Dim).build();
+    let todo_v2 = |s: &str| Text::new(s).style(text::HINT).build();
 
     // ── L1 Foundation ────────────────────────────────────────
     let l1 = vstack(vec![
@@ -515,7 +515,7 @@ fn build_model_view() -> crate::ui::view::View {
                 ]).hstack_gap(Length::Pt(6.0)),
                 hint("    box-sizing: border-box   inside-stroke   NO margin"),
                 hstack(vec![
-                    todo_v1("[v1 待补]"),
+                    ok("[✓]"),
                     hint("opacity / clip / aspect_ratio"),
                 ]).hstack_gap(Length::Pt(6.0)),
                 hstack(vec![
@@ -604,10 +604,14 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    process panel / sidebar / table / search overlay 都得滚"),
         hstack(vec![
-            todo_v1("[v1 待补]"),
-            body("Gesture: Drag / DoubleClick / RightClick / Hover / Scroll"),
+            ok("[✓]"),
+            body("Gesture hit-test: DoubleClick / RightClick / Scroll / DragBegin"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    + InputEvent enum + DragInProgress 状态机 + hit_test_event router"),
+        hint("    Modifier + hit_test_* + ActionId/ScrollWheelId/DragId enum"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            hint("    完整 InputEvent + DragInProgress 状态机 + reducer 派发"),
+        ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             todo_v1("[v1 待补]"),
             body("Stateful views: TextField / Toggle / Picker"),

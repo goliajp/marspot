@@ -80,7 +80,23 @@ pub struct Text {
 pub enum TextSize { Caption, Body, Header, LargeHeader }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextWeight { Regular, Bold, Dim }
+pub enum TextWeight {
+    Regular,
+    /// Mapped to no-op in the current paint pass — chrome font has
+    /// no bold cut.  Reserved for v2+ when real font weights land.
+    Bold,
+}
+
+/// Bundle of `size` + `weight` + `color` used by `Text::style()`.
+/// Tokens in `crate::ui::theme::text::*` are typed `TextStyle`
+/// constants — components reach for them by name rather than
+/// composing primitives ad-hoc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextStyle {
+    pub size: TextSize,
+    pub weight: TextWeight,
+    pub color: crate::ui::core::Color,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAlign { Leading, Center, Trailing }
@@ -107,6 +123,15 @@ impl Text {
     }
 }
 
+/// Clip shape — `.clip()` modifier's payload.  Rect = self bounding
+/// box;  RoundedRect = self bbox with corner radius;  more shapes
+/// (Circle / Capsule / Path) follow in P3 follow-up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClipShape {
+    Rect,
+    RoundedRect(Length),
+}
+
 /// Modifier chain entry.  Order matters: outer modifiers wrap
 /// inner ones (`.padding().background()` paints background outside
 /// the padding box; `.background().padding()` paints background
@@ -120,13 +145,51 @@ pub enum Modifier {
     Shadow(Shadow),
     Frame(FrameSpec),
     Offset(Length, Length),
+    /// Multiplies the cumulative alpha applied to self + descendants'
+    /// painted primitives.  Clamped to [0.0, 1.0].
+    Opacity(f64),
+    /// Restricts paint of descendants to within self's rect (or
+    /// rounded-rect for `RoundedRect`).  v1 uses culling (skips
+    /// fully-outside primitives) — true pixel clip via Metal scissor
+    /// stays in P3 follow-up.
+    Clip(ClipShape),
+    /// Aspect ratio enforcement applied in layout.  Equivalent to
+    /// `.frame(aspect: Some(r))` but standalone.
+    AspectRatio(f64, AspectMode),
     /// Composited on top of same-z siblings — only meaningful inside
     /// a ZStack; ignored elsewhere.
     ZIndex(i32),
+    /// Don't paint self or descendants; still occupies layout space.
     Hidden(bool),
+    /// Skip the whole subtree from layout AND paint.  Like CSS
+    /// `display: none`.
+    Collapsed(bool),
     OnHover(HoverId),
     OnClick(ActionId),
+    /// Double-click target.  Paired with `OnClick` it fires both
+    /// (single click + double click separately).
+    OnDoubleClick(ActionId),
+    /// Right-click target (already used by marspot ContextMenu).
+    OnRightClick(ActionId),
+    /// Scroll-wheel target — applied when pointer is inside self's
+    /// rect.  `ScrollId` namespaces the target so reducers can
+    /// distinguish between multiple scrollable regions.
+    OnScroll(super::types::ScrollWheelId),
+    /// Drag-begin target.  Reducer dispatches matching `OnDragMove`
+    /// / `OnDragEnd` events keyed by `DragId` while the drag is in
+    /// progress.
+    OnDragBegin(super::types::DragId),
     Id(ViewId),
+}
+
+/// Aspect ratio enforcement mode.  Mirrors SwiftUI `ContentMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AspectMode {
+    /// Fit within the constraint (shrink to satisfy aspect, leaving
+    /// gap on the other axis).  Default.
+    Fit,
+    /// Fill the constraint (grow on the other axis, may overflow).
+    Fill,
 }
 
 // ─── Builder helpers ──────────────────────────────────────────
@@ -252,7 +315,18 @@ impl View {
     pub fn hidden(self, h: bool) -> Self { self.add_mod(Modifier::Hidden(h)) }
     pub fn on_hover(self, id: HoverId) -> Self { self.add_mod(Modifier::OnHover(id)) }
     pub fn on_click(self, id: ActionId) -> Self { self.add_mod(Modifier::OnClick(id)) }
+    pub fn on_double_click(self, id: ActionId) -> Self { self.add_mod(Modifier::OnDoubleClick(id)) }
+    pub fn on_right_click(self, id: ActionId) -> Self { self.add_mod(Modifier::OnRightClick(id)) }
+    pub fn on_scroll(self, id: super::types::ScrollWheelId) -> Self { self.add_mod(Modifier::OnScroll(id)) }
+    pub fn on_drag_begin(self, id: super::types::DragId) -> Self { self.add_mod(Modifier::OnDragBegin(id)) }
     pub fn id(self, id: ViewId) -> Self { self.add_mod(Modifier::Id(id)) }
+
+    pub fn opacity(self, o: f64) -> Self { self.add_mod(Modifier::Opacity(o)) }
+    pub fn clip(self, shape: ClipShape) -> Self { self.add_mod(Modifier::Clip(shape)) }
+    pub fn aspect_ratio(self, ratio: f64, mode: AspectMode) -> Self {
+        self.add_mod(Modifier::AspectRatio(ratio, mode))
+    }
+    pub fn collapsed(self, c: bool) -> Self { self.add_mod(Modifier::Collapsed(c)) }
 }
 
 // Text-specific modifiers — different from View modifiers (which
@@ -264,6 +338,15 @@ impl Text {
     pub fn weight(mut self, w: TextWeight) -> Self { self.weight = w; self }
     pub fn text_align(mut self, a: TextAlign) -> Self { self.align = a; self }
     pub fn lines(mut self, l: TextLines) -> Self { self.lines = l; self }
+
+    /// Apply a `TextStyle` preset — sets size + weight + color in
+    /// one go.  Subsequent `.color()` / `.size()` calls override.
+    pub fn style(mut self, s: TextStyle) -> Self {
+        self.size = s.size;
+        self.weight = s.weight;
+        self.color = s.color;
+        self
+    }
 
     /// Convenience — single-line, truncate end.
     pub fn truncate(mut self, t: Truncate) -> Self {

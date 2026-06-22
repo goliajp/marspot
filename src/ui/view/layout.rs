@@ -89,17 +89,51 @@ impl Rect {
 
 /// Decoration baked from the modifier chain.  Paint reads this
 /// directly instead of re-walking modifiers.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Decoration {
     pub bg: Option<crate::ui::core::Color>,
     pub border: Option<(f64, crate::ui::core::Color)>, // (width_phys, color)
     pub radius: f64, // phys
     pub shadow: Option<DecoShadow>,
     pub padding: EdgesPhys, // phys
+    /// Cumulative opacity 0..=1 — multiplies bg/border/text/img
+    /// primitive colors emitted by self and descendants.  Default 1.
+    pub opacity: f64,
+    /// Clip shape applied to descendants.  None = no clip.
+    pub clip: Option<super::view::ClipShape>,
+    /// `Hidden` — skip paint but keep layout space.  `Collapsed`
+    /// = both layout + paint skipped; handled at layout entry by
+    /// returning a zero-size rect.
     pub hidden: bool,
     pub on_click: Option<super::types::ActionId>,
+    pub on_double_click: Option<super::types::ActionId>,
+    pub on_right_click: Option<super::types::ActionId>,
     pub on_hover: Option<super::types::HoverId>,
+    pub on_scroll: Option<super::types::ScrollWheelId>,
+    pub on_drag_begin: Option<super::types::DragId>,
     pub id: Option<super::types::ViewId>,
+}
+
+impl Default for Decoration {
+    fn default() -> Self {
+        Self {
+            bg: None,
+            border: None,
+            radius: 0.0,
+            shadow: None,
+            padding: EdgesPhys::default(),
+            opacity: 1.0,            // 1.0 = fully opaque
+            clip: None,
+            hidden: false,
+            on_click: None,
+            on_double_click: None,
+            on_right_click: None,
+            on_hover: None,
+            on_scroll: None,
+            on_drag_begin: None,
+            id: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -463,6 +497,15 @@ fn layout_modified(
     c: Constraints,
     self_view: &View,
 ) -> LaidOut {
+    // Short-circuit Collapsed — zero-size rect, no child layout.
+    if has_collapsed(mods) {
+        return LaidOut {
+            view: self_view.clone(),
+            rect: Rect { x: origin.0, y: origin.1, w: 0.0, h: 0.0 },
+            deco: Decoration { hidden: true, ..Decoration::default() },
+            children: Vec::new(),
+        };
+    }
     // Apply modifiers outward-to-inward to derive the child's constraints.
     let mut inner_c = c;
     let mut total_pad = EdgesPhys::default();
@@ -514,6 +557,9 @@ fn layout_modified(
                     let v = max_h.resolve_for_axis_with_cell(c.max_h, ctx.scale, ctx.cell_w_phys);
                     inner_c.max_h = inner_c.max_h.min(v);
                 }
+                if let Some(r) = f.aspect {
+                    apply_aspect(&mut inner_c, r, super::view::AspectMode::Fit);
+                }
             }
             Modifier::Offset(x, y) => {
                 let xp = x.resolve_for_axis_with_cell(c.max_w, ctx.scale, ctx.cell_w_phys);
@@ -536,10 +582,27 @@ fn layout_modified(
                 bake.shadow = Some(DecoShadow { blur, offset: (ox, oy), color: s.color });
             }
             Modifier::Hidden(h) => bake.hidden = *h,
+            Modifier::Collapsed(_) => { /* handled at layout entry */ }
+            Modifier::Opacity(o) => {
+                bake.opacity *= o.clamp(0.0, 1.0);
+            }
+            Modifier::Clip(shape) => {
+                bake.clip = Some(*shape);
+            }
+            Modifier::AspectRatio(r, mode) => {
+                // Re-resolve inner_c to honor ratio.  Done after
+                // current inner_c is settled (Padding / Frame
+                // already applied); behave like frame.aspect.
+                apply_aspect(&mut inner_c, *r, *mode);
+            }
             Modifier::OnClick(id) => bake.on_click = Some(*id),
+            Modifier::OnDoubleClick(id) => bake.on_double_click = Some(*id),
+            Modifier::OnRightClick(id) => bake.on_right_click = Some(*id),
+            Modifier::OnScroll(id) => bake.on_scroll = Some(*id),
+            Modifier::OnDragBegin(id) => bake.on_drag_begin = Some(*id),
             Modifier::OnHover(id) => bake.on_hover = Some(*id),
             Modifier::Id(id) => bake.id = Some(*id),
-            Modifier::ZIndex(_) => { /* read at paint */ }
+            Modifier::ZIndex(_) => { /* read at paint, future */ }
         }
     }
     bake.padding = total_pad;
@@ -597,6 +660,51 @@ fn shift_subtree(laid: &mut LaidOut, dx: f64, dy: f64) {
     for c in laid.children.iter_mut() {
         shift_subtree(c, dx, dy);
     }
+}
+
+/// Constrain `inner_c` to match aspect ratio `w / h = ratio` per
+/// `mode`.  `Fit` shrinks the longer axis so the box fits;  `Fill`
+/// grows the shorter axis so the box covers.
+fn apply_aspect(inner_c: &mut Constraints, ratio: f64, mode: super::view::AspectMode) {
+    if ratio <= 0.0 { return; }
+    let w_max = inner_c.max_w;
+    let h_max = inner_c.max_h;
+    if !w_max.is_finite() || !h_max.is_finite() { return; }
+    let current_ratio = w_max / h_max.max(0.001);
+    match mode {
+        super::view::AspectMode::Fit => {
+            if current_ratio > ratio {
+                // Too wide — shrink w.
+                let new_w = h_max * ratio;
+                inner_c.max_w = new_w;
+                inner_c.min_w = inner_c.min_w.min(new_w);
+            } else {
+                // Too tall — shrink h.
+                let new_h = w_max / ratio;
+                inner_c.max_h = new_h;
+                inner_c.min_h = inner_c.min_h.min(new_h);
+            }
+        }
+        super::view::AspectMode::Fill => {
+            // Pull the smaller axis up so the ratio is satisfied.
+            // Caller should clip if overflow matters.
+            if current_ratio > ratio {
+                let new_h = w_max / ratio;
+                inner_c.min_h = inner_c.min_h.max(new_h);
+                inner_c.max_h = inner_c.max_h.max(new_h);
+            } else {
+                let new_w = h_max * ratio;
+                inner_c.min_w = inner_c.min_w.max(new_w);
+                inner_c.max_w = inner_c.max_w.max(new_w);
+            }
+        }
+    }
+}
+
+/// Check the modifier chain for `Collapsed(true)` — if found, return
+/// `true` so the caller short-circuits to a zero-size rect.
+fn has_collapsed(mods: &[super::view::Modifier]) -> bool {
+    mods.iter().any(|m| matches!(m, super::view::Modifier::Collapsed(true)))
 }
 
 #[cfg(test)]

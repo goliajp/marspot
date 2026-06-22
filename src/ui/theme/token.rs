@@ -62,3 +62,80 @@ pub mod radius {
     /// Effectively a pill / fully rounded — > any practical box size.
     pub const PILL: Length = Length::Pt(9999.0);
 }
+
+/// Semantic text styles — size + weight + color preset.  Components
+/// reference `text::CAPTION` etc. instead of composing `.size()` +
+/// `.weight()` + `.color()` ad-hoc.  See `docs/ui-system-model.md`
+/// §5.4 / §11.
+pub mod text {
+    use crate::ui::view::{TextSize, TextWeight, TextStyle};
+    use super::color;
+
+    pub const CAPTION: TextStyle = TextStyle {
+        size:   TextSize::Caption,
+        weight: TextWeight::Regular,
+        color:  color::FG_MUTED,
+    };
+    pub const BODY: TextStyle = TextStyle {
+        size:   TextSize::Body,
+        weight: TextWeight::Regular,
+        color:  color::FG,
+    };
+    pub const HEADER: TextStyle = TextStyle {
+        size:   TextSize::Header,
+        weight: TextWeight::Bold,
+        color:  color::ACCENT_DIM,
+    };
+    pub const LARGE_HEADER: TextStyle = TextStyle {
+        size:   TextSize::LargeHeader,
+        weight: TextWeight::Bold,
+        color:  color::FG,
+    };
+    /// Etched / hint-like text — same shape as `CAPTION` but with
+    /// the hint color (slightly different muted gray).
+    pub const HINT: TextStyle = TextStyle {
+        size:   TextSize::Caption,
+        weight: TextWeight::Regular,
+        color:  color::HINT,
+    };
+    /// Mono-emphasis (still mono font, but colored like accent).
+    pub const CODE: TextStyle = TextStyle {
+        size:   TextSize::Body,
+        weight: TextWeight::Regular,
+        color:  color::ACCENT_DIM,
+    };
+}
+
+/// Semantic elevation shadows — Material-style E0..E3 tiers.
+/// Components reach for `elev::E1` instead of constructing `Shadow`
+/// ad-hoc.
+pub mod elev {
+    use crate::ui::view::Shadow;
+    use crate::ui::core::Length;
+    use super::color;
+
+    /// No shadow.
+    pub const E0: Shadow = Shadow {
+        blur: Length::Pt(0.0),
+        offset: (Length::Pt(0.0), Length::Pt(0.0)),
+        color: color::SHADOW,
+    };
+    /// Subtle — hint of depth.  Toolbar buttons, low cards.
+    pub const E1: Shadow = Shadow {
+        blur: Length::Pt(3.0),
+        offset: (Length::Pt(0.0), Length::Pt(1.0)),
+        color: color::SHADOW,
+    };
+    /// Standard — panel-on-bg / popover.
+    pub const E2: Shadow = Shadow {
+        blur: Length::Pt(6.0),
+        offset: (Length::Pt(0.0), Length::Pt(2.0)),
+        color: color::SHADOW,
+    };
+    /// High — modal / overlay / floating menu.
+    pub const E3: Shadow = Shadow {
+        blur: Length::Pt(12.0),
+        offset: (Length::Pt(0.0), Length::Pt(4.0)),
+        color: color::SHADOW,
+    };
+}

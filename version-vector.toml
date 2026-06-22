@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.16"  # 修中文/CJK 宽度 + 实施 ScrollView(thread_local state + culling paint + dev panel 接滚轮)
+shell   = "0.6.17"  # P3l TextStyle 形式化 + P3m Opacity/Clip/AspectRatio/Collapsed 真实施 + P3n Gesture modifier 完整化(DoubleClick/RightClick/Scroll/DragBegin + hit_test_*)
 core    = "0.10.68" # toolbar dev icon click → DevPanelToggle wire → L1
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

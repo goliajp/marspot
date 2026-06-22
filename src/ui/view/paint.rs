@@ -23,13 +23,21 @@ pub fn paint(laid: &LaidOut, ctx: LayoutCtx, parent_w: f64, parent_h: f64) -> Ca
 /// driver(eg dev panel renderer)wants ONE canvas for the whole
 /// frame instead of one per subtree.
 pub fn paint_into(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx) {
-    paint_into_clipped(canvas, laid, ctx, None);
+    paint_into_inner(canvas, laid, ctx, None, 1.0);
 }
 
-/// Paint with optional viewport clip(rect in phys).  `clip = Some`
-/// = ScrollView in effect; descendants whose rect lies fully outside
-/// the clip are skipped(viewport culling).
-fn paint_into_clipped(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx, clip: Option<&super::layout::Rect>) {
+/// Paint with optional viewport clip + cumulative opacity.  `clip =
+/// Some` = ScrollView or `.clip()` modifier in effect; descendants
+/// whose rect lies fully outside the clip are skipped(viewport
+/// culling).  `opacity_mult` multiplies down through subtrees so
+/// `.opacity(0.5)` on a parent darkens every descendant proportional.
+fn paint_into_inner(
+    canvas: &mut Canvas,
+    laid: &LaidOut,
+    ctx: LayoutCtx,
+    clip: Option<&super::layout::Rect>,
+    opacity_mult: f64,
+) {
     if laid.deco.hidden {
         return;
     }
@@ -43,25 +51,31 @@ fn paint_into_clipped(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx, clip:
             rect.y > c.y + c.h;
         if outside { return; }
     }
+    // Multiply in this node's own opacity for self + descendants.
+    let local_opacity = (opacity_mult * laid.deco.opacity).clamp(0.0, 1.0);
+    if local_opacity <= 0.0 { return; }
 
     // 1. Self decoration first(shadow → bg → border).
-    paint_decoration(canvas, &laid.rect, &laid.deco, ctx);
+    paint_decoration(canvas, &laid.rect, &laid.deco, ctx, local_opacity);
 
     // 2. Self primitive(if this node is an atom).
-    paint_atom(canvas, &laid.view, &laid.rect, ctx);
+    paint_atom(canvas, &laid.view, &laid.rect, ctx, local_opacity);
 
-    // 3. Children — submission order = z order.  ScrollView
-    //    establishes a clip for its descendants(culling-only, not
-    //    pixel-clipped — see scroll.rs doc).
-    let child_clip = if matches!(&laid.view, View::ScrollView { .. }) {
-        Some(&laid.rect)
-    } else { clip };
+    // 3. Children — submission order = z order.  ScrollView OR a
+    //    `.clip()` modifier establishes a clip for descendants.
+    let establishes_clip =
+        matches!(&laid.view, View::ScrollView { .. }) || laid.deco.clip.is_some();
+    let child_clip = if establishes_clip { Some(&laid.rect) } else { clip };
     for ch in laid.children.iter() {
-        paint_into_clipped(canvas, ch, ctx, child_clip);
+        paint_into_inner(canvas, ch, ctx, child_clip, local_opacity);
     }
 }
 
-fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Decoration, ctx: LayoutCtx) {
+fn mul_alpha(c: Color, m: f64) -> Color {
+    Color { a: (c.a * m).clamp(0.0, 1.0), ..c }
+}
+
+fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Decoration, ctx: LayoutCtx, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     let r_x = phys_to_pt(rect.x);
     let r_y = phys_to_pt(rect.y);
@@ -74,13 +88,13 @@ fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Deco
     let mut b = canvas.rect()
         .at(r_x, r_y)
         .size(r_w, r_h);
-    if let Some(c) = deco.bg { b = b.fill(c); }
+    if let Some(c) = deco.bg { b = b.fill(mul_alpha(c, opacity)); }
     else { b = b.fill(Color::rgba(0, 0, 0, 0.0)); }
     if deco.radius > 0.0 {
         b = b.radius(crate::ui::core::Pt(deco.radius / ctx.scale));
     }
     if let Some((w_phys, c)) = deco.border {
-        b = b.border(crate::ui::core::Pt(w_phys / ctx.scale), c);
+        b = b.border(crate::ui::core::Pt(w_phys / ctx.scale), mul_alpha(c, opacity));
     }
     if let Some(s) = deco.shadow {
         b = b.shadow(
@@ -89,13 +103,13 @@ fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Deco
                 crate::ui::core::Pt(s.offset.0 / ctx.scale),
                 crate::ui::core::Pt(s.offset.1 / ctx.scale),
             ),
-            s.color,
+            mul_alpha(s.color, opacity),
         );
     }
     b.draw();
 }
 
-fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx: LayoutCtx) {
+fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx: LayoutCtx, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     match view {
         View::Text(t) => {
@@ -124,15 +138,13 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
                     t.content.clone()
                 }
             };
-            // Color dim if weight=Dim.
-            let color = match t.weight {
-                super::view::TextWeight::Dim => {
-                    let mut c = t.color;
-                    c.a *= 0.6;
-                    c
-                }
-                _ => t.color,
-            };
+            // Weight is currently a no-op in the renderer (chrome font
+            // has no bold cut).  v2+ will swap glyph variants per
+            // weight when SDF supports it.  Color is the source of
+            // visual differentiation — callers use tokens like
+            // `theme::text::HINT` / `CAPTION` to vary perceived weight.
+            // Multiply alpha by opacity for Opacity-modified subtrees.
+            let color = mul_alpha(t.color, opacity);
             // Horizontal align — compute x_offset from rect.x.
             let content_w_phys = super::layout::text_width_cells(&drawn) as f64 * ctx.cell_w_phys;
             let x_pad = match t.align {
@@ -152,7 +164,7 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
             canvas.rect()
                 .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
                 .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
-                .fill(*color)
+                .fill(mul_alpha(*color, opacity))
                 .radius(r_pt)
                 .draw();
         }
@@ -162,7 +174,7 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
             let end_x = phys_to_pt(rect.x + if *vertical { rect.w * 0.5 } else { rect.w });
             let end_y = phys_to_pt(rect.y + if *vertical { rect.h } else { rect.h * 0.5 });
             canvas.line((cx, cy), (end_x, end_y))
-                .stroke(crate::ui::core::Pt(1.0), *color)
+                .stroke(crate::ui::core::Pt(1.0), mul_alpha(*color, opacity))
                 .draw();
         }
         // Stacks / Modified / Spacer don't paint anything on their
