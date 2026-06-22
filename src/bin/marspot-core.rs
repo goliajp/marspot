@@ -265,6 +265,11 @@ enum ContextMenuAction {
     RenameTitle,
     ToggleSidebar,
     OpenLayout,
+    /// Pass the link text (URL / file path) to `/usr/bin/open`.
+    /// Reads `ContextMenuState.link` for the actual string.
+    OpenLink,
+    /// Copy the link text to the clipboard verbatim.
+    CopyLink,
 }
 
 impl ContextMenuAction {
@@ -279,9 +284,21 @@ impl ContextMenuAction {
             x if x == Self::RenameTitle.tag() => Some(Self::RenameTitle),
             x if x == Self::ToggleSidebar.tag() => Some(Self::ToggleSidebar),
             x if x == Self::OpenLayout.tag() => Some(Self::OpenLayout),
+            x if x == Self::OpenLink.tag() => Some(Self::OpenLink),
+            x if x == Self::CopyLink.tag() => Some(Self::CopyLink),
             _ => None,
         }
     }
+}
+
+/// Owned snapshot of the URL/path the menu was opened on.  Lives on
+/// `ContextMenuState` so the dispatcher can pull it after the menu
+/// has been cleared.  Kept tiny — the kind drives label wording, the
+/// text drives Open + Copy actions.
+#[derive(Debug, Clone)]
+struct LinkContext {
+    text: String,
+    kind: marspot::grid_links::LinkKind,
 }
 
 struct ContextMenuState {
@@ -290,6 +307,10 @@ struct ContextMenuState {
     anchor_y: f64,
     region: ContextRegion,
     hovered_idx: Option<usize>,
+    /// Set when the menu was opened on top of an actionable link
+    /// (URL / file path).  `dispatch_context_action` reads this for
+    /// the OpenLink / CopyLink actions before clearing the menu.
+    link: Option<LinkContext>,
 }
 
 #[derive(Debug)]
@@ -1280,8 +1301,15 @@ impl CoreApp {
         if self.context_menu.take().is_some() {
             self.needs_render = true;
         }
+        // A right-click that lands on a recognised URL / file path
+        // gets a link-specific menu (Open / Copy) instead of the
+        // generic pane menu.  Email is recognised but inert.
+        let link = self.hit_test_link_at_xy(x_phys, y_phys);
         let region = self.resolve_context_region(x_phys, y_phys);
-        let items = self.build_menu_items(region);
+        let items = match &link {
+            Some(l) => self.build_link_menu_items(l),
+            None => self.build_menu_items(region),
+        };
         if items.is_empty() {
             return;
         }
@@ -1291,6 +1319,7 @@ impl CoreApp {
             anchor_y: y_phys,
             region,
             hovered_idx: None,
+            link,
         });
         self.needs_render = true;
     }
@@ -1366,11 +1395,40 @@ impl CoreApp {
         }
     }
 
+    /// Two-entry menu shown when the user clicks (either button) on
+    /// a URL or file-path span.  Labels read per-kind so the user
+    /// can tell from the menu what they're acting on.
+    fn build_link_menu_items(
+        &self,
+        link: &LinkContext,
+    ) -> Vec<marspot::ui::components::MenuItem> {
+        use marspot::grid_links::LinkKind;
+        use marspot::ui::components::MenuItem;
+        let (open_label, copy_label) = match link.kind {
+            LinkKind::Url => ("Open URL", "Copy URL"),
+            LinkKind::File => ("Open file", "Copy path"),
+            // Email is filtered at `hit_test_link_at_xy`, but stay
+            // safe in case the filter shape ever changes.
+            LinkKind::Email => return Vec::new(),
+        };
+        vec![
+            MenuItem::entry(open_label, ContextMenuAction::OpenLink.tag()),
+            MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
+        ]
+    }
+
     fn dispatch_context_action(
         &mut self,
         action: ContextMenuAction,
         region: ContextRegion,
     ) {
+        // Snapshot the link text before clearing the menu — the
+        // OpenLink / CopyLink arms read it after the clear.
+        let link_text = self
+            .context_menu
+            .as_ref()
+            .and_then(|s| s.link.as_ref())
+            .map(|l| l.text.clone());
         self.context_menu = None;
         match action {
             ContextMenuAction::CopySelection => {
@@ -1419,6 +1477,16 @@ impl CoreApp {
             }
             ContextMenuAction::OpenLayout => {
                 self.layout_modal_open = true;
+            }
+            ContextMenuAction::OpenLink => {
+                if let Some(t) = link_text {
+                    spawn_open(&t);
+                }
+            }
+            ContextMenuAction::CopyLink => {
+                if let Some(t) = link_text {
+                    let _ = marspot::input::write_clipboard_text(&t);
+                }
             }
         }
         self.needs_render = true;
@@ -2339,6 +2407,31 @@ impl CoreApp {
         })
     }
 
+    /// Top-level link hit-test from physical pixel coordinates.
+    /// Folds the (x_phys, y_phys) → (pane, col, row) step the
+    /// renderer-aware caller would otherwise repeat, and filters
+    /// out the inert `Email` kind so callers can treat a `Some`
+    /// as actionable.  Returns owned text + kind so the result can
+    /// be stashed in `ContextMenuState.link` and survive the menu's
+    /// clear-on-dispatch.
+    fn hit_test_link_at_xy(
+        &self,
+        x_phys: f64,
+        y_phys: f64,
+    ) -> Option<LinkContext> {
+        let (cw, ch) = self.renderer.cell_dims();
+        let (idx, col, row) = self.layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
+        let link = self.hit_test_pane_link(idx, col, row)?;
+        match link.kind {
+            marspot::grid_links::LinkKind::Url
+            | marspot::grid_links::LinkKind::File => Some(LinkContext {
+                text: link.text,
+                kind: link.kind,
+            }),
+            marspot::grid_links::LinkKind::Email => None,
+        }
+    }
+
     /// Hit-test the right-side plugin badge's clickable prefix (text
     /// before the first space).  Returns the pane index when a click
     /// at (x_phys, y_phys) hits the underlined prefix; None
@@ -3177,21 +3270,29 @@ impl CoreApp {
         }
 
         // Auto-link hit-test: a click that lands on an underlined
-        // URL / file span fires the open action.  Sits ahead of
-        // selection so the click doesn't simultaneously start a
-        // fresh selection on the link cells.  Email is recognised
-        // but inert (per user request).
-        if let Some((idx, col, row)) = cell_pos_hit {
-            if let Some(link) = self.hit_test_pane_link(idx, col, row) {
-                match link.kind {
-                    marspot::grid_links::LinkKind::Url
-                    | marspot::grid_links::LinkKind::File => {
-                        spawn_open(&link.text);
-                    }
-                    marspot::grid_links::LinkKind::Email => {}
-                }
-                return;
+        // URL / file span opens the same context menu the right-
+        // click path uses (Open + Copy).  User-facing behaviour is
+        // "any click on a URL/path gives you the choice" instead
+        // of "left-click opens directly" — so an accidental click
+        // doesn't silently spawn `/usr/bin/open`.  Email is
+        // recognised but inert.  Sits ahead of selection so the
+        // click doesn't simultaneously start a fresh selection
+        // on the link cells.
+        if let Some(link) = self.hit_test_link_at_xy(x_phys, y_phys) {
+            let items = self.build_link_menu_items(&link);
+            if !items.is_empty() {
+                let region = self.resolve_context_region(x_phys, y_phys);
+                self.context_menu = Some(ContextMenuState {
+                    items,
+                    anchor_x: x_phys,
+                    anchor_y: y_phys,
+                    region,
+                    hovered_idx: None,
+                    link: Some(link),
+                });
+                self.needs_render = true;
             }
+            return;
         }
 
         // Click in cell body → start a fresh selection there AND
