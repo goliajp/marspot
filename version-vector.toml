@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.18"  # P3o HostState 通用 + P3t lifecycle reconcile 骨架
-core    = "0.10.69" # 修 push_text_run x 推进不按 char_width — CJK 真正乱码根因 + lifecycle reconcile / HostState 跟着
+shell   = "0.6.19"  # P3 roadmap 推完 pure-Rust 部分:LazyVStack + Image/Gradient/Shape + ThemeId + AX stub + Material API
+core    = "0.10.70" # P3 framework 加 LazyVStack/Image/Shape/Gradient/Material 渲染路径
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

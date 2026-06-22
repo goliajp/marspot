@@ -14,6 +14,7 @@ pub mod types;
 pub mod view;
 pub mod scroll;
 pub mod state;
+pub mod lazy;
 pub mod layout;
 pub mod paint;
 pub mod hit_test;
@@ -25,9 +26,12 @@ pub use types::{
 pub use view::{
     View, Modifier, Text, TextSize, TextWeight, TextStyle, TextAlign,
     TextLines, Truncate, ClipShape, AspectMode,
+    Image, ImageSource, ContentMode, ShapeSpec,
+    LinearGradient, GradientDir, MaterialStyle, AxRole,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
 };
 pub use types::{ScrollWheelId, DragId};
+pub use lazy::lazy_vstack;
 pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,

@@ -17,7 +17,39 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.18**
+Current: **0.6.19**
+
+### 0.6.19
+
+P3 roadmap pure-Rust 部分推完:LazyVStack / Image / LinearGradient / Shape / Material API / ThemeId / Accessibility stub.AppKit-heavy 部分(真 NSVisualEffectView vibrancy / TextField IME / Metal scissor clip / Path SDF)留 v2+.
+
+**P3r LazyVStack**:
+- `View::LazyVStack { items, gap, item_height, id }` + `lazy_vstack(id, items, item_h, gap)` builder
+- 自带 scroll 容器(ScrollState 跟 ScrollView 共用),无需 wrap in ScrollView
+- 只 layout visible window 内 items(`visible_range(items_len, item_h, gap, offset, viewport)`)
+- 假 uniform-height 假设(v1);variable-height 走 HostState item-h cache,留 v2+
+- 6 个 lazy unit tests
+
+**P3q Image / Gradient / Shape / Material**:
+- `View::Image(Image { source: ImageSource, mode: ContentMode, tint })` + 4 个 source(Glyph/Raw/IOSurface/Named)
+- `View::Shape(ShapeSpec)` — Circle / Capsule / RoundedRect(Path 留 v2+)
+- `Modifier::BackgroundGradient(LinearGradient)` — paint 走 16-band 近似(真 Gradient primitive 留 v2+ Metal)
+- `Modifier::BackgroundMaterial(MaterialStyle)` — v1 = 半透明 BG_PANEL fallback(真 NSVisualEffectView 留 v2+)
+- `Color` 插值 helper `sample_gradient` + 16-band painter
+
+**P3v ThemeId**:
+- `ThemeId::{Dark, Light, HighContrast}` enum
+- `theme::current()` / `theme::set_current(id)` AtomicU8 全局
+- v1 只 Dark token 数据;Light/HC token 数据留 v2+
+
+**P3u Accessibility stub**:
+- `.accessibility_label(s)` / `.accessibility_role(AxRole)` modifier
+- `AxRole::{Button, Heading, ListItem, TextField, Image, StaticText, Group, Link, Checkbox, Toggle}`
+- bake 进 `Decoration.ax_label / ax_role`;真接 NSAccessibility 留 v2+
+
+DevPanel Model section 大更新:LazyVStack/Image/Gradient/Material/Theme/AX/Lifecycle/HostState 全切 [✓].留 [v2+] 的:Material 真 vibrancy / mask/transform/blend / TextField / Animation / Light theme token data / i18n / Path SDF / LazyHStack+Grid.
+
+shell 0.6.18 → 0.6.19;core 0.10.69 → 0.10.70.45 view 域 tests PASS.
 
 ### 0.6.18
 
@@ -273,7 +305,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.69**
+Current: **0.10.70**
+
+### 0.10.70
+
+P3 framework 加 LazyVStack/Image/Shape/Gradient/Material 渲染路径(View enum 6 个新 variants;paint pass 处理).Renderer 端无新 primitive — gradient 用 16 个 solid bands 近似,Image/Material 用 tinted rect 占位.
 
 ### 0.10.69
 

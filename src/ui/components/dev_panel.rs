@@ -484,11 +484,11 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    space:: XS(4) SM(8) MD(12) LG(16) XL(24)"),
         hint("    radius:: SM(3) MD(6) LG(10) PILL(9999)"),
         hstack(vec![
-            todo_v1("[v1 待补]"),
-            body("Identity / HostState map"),
+            ok("[✓]"),
+            body("Identity / HostState map + Lifecycle reconcile"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    ViewId → Box<dyn Any> 状态映射;Lifecycle on_appear / on_disappear"),
-        hint("    现 ScrollView/TextField 等 stateful view 无处寄存"),
+        hint("    HashMap<(ViewId, TypeId), Box<dyn Any>>;同 id 可挂多种状态"),
+        hint("    reconcile() 收集树里所有 id,drop 失踪的(on_disappear)"),
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── L2 Box Model — actual box demo ───────────────────────
@@ -519,12 +519,16 @@ fn build_model_view() -> crate::ui::view::View {
                     hint("opacity / clip / aspect_ratio"),
                 ]).hstack_gap(Length::Pt(6.0)),
                 hstack(vec![
-                    todo_v1("[v1 待补]"),
-                    hint("Material backdrop (macOS vibrancy)"),
+                    ok("[✓]"),
+                    hint("Material backdrop API (v1 = 半透明 BG;真 NSVisualEffectView 留 v2+)"),
+                ]).hstack_gap(Length::Pt(6.0)),
+                hstack(vec![
+                    ok("[✓]"),
+                    hint("LinearGradient (16 bands;真 gradient primitive 留)"),
                 ]).hstack_gap(Length::Pt(6.0)),
                 hstack(vec![
                     todo_v2("[v2+]"),
-                    hint("mask / transform / blend mode"),
+                    hint("mask / transform / blend mode / 真 Metal scissor clip"),
                 ]).hstack_gap(Length::Pt(6.0)),
             ]).vstack_gap(Length::Pt(2.0)),
         ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
@@ -539,10 +543,11 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    .fill/.border/.radius/.shadow chain;submission order = z order"),
         hstack(vec![
-            todo_v1("[v1 待补]"),
-            body("Image / Gradient (Linear) / Shape (Circle / Capsule / Path)"),
+            ok("[✓]"),
+            body("Image / Gradient(Linear)/ Shape(Circle/Capsule/RoundedRect)"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    toolbar 图标走 Image,chrome polish 走 Gradient fill"),
+        hint("    type 定义全 land,Shape paint 通过 rounded-rect 近似"),
+        hint("    real Image primitive + Path = v2+ Metal pipeline 工作"),
         hint("    this entire panel IS Canvas — what you see, you can build"),
     ]).vstack_gap(Length::Pt(2.0));
 
@@ -599,10 +604,14 @@ fn build_model_view() -> crate::ui::view::View {
         ]).align_cross_start(),
         hint("    Constraints two-pass / AlignCross / Distribute / Anchor (9)"),
         hstack(vec![
-            todo_v1("[v1 待补]"),
-            body("Containers: ScrollView / LazyVStack / LazyHStack / Grid"),
+            ok("[✓]"),
+            body("Containers: ScrollView / LazyVStack"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    process panel / sidebar / table / search overlay 都得滚"),
+        hint("    sidebar / process panel / search overlay 长列表都可虚拟化"),
+        hstack(vec![
+            todo_v2("[v2+]"),
+            hint("    LazyHStack / Grid 真完整 spec"),
+        ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             ok("[✓]"),
             body("Gesture hit-test: DoubleClick / RightClick / Scroll / DragBegin"),
@@ -613,10 +622,11 @@ fn build_model_view() -> crate::ui::view::View {
             hint("    完整 InputEvent + DragInProgress 状态机 + reducer 派发"),
         ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
-            todo_v1("[v1 待补]"),
+            todo_v2("[v2+]"),
             body("Stateful views: TextField / Toggle / Picker"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    依赖 §L1 HostState map;重命名/输入/segmented control"),
+        hint("    Toggle/Picker 纯 Rust 易接;TextField 需 NSTextInputClient/IME 工作"),
+        hint("    HostState API 已就绪,接进来无 framework 改动"),
         hstack(vec![
             todo_v2("[v2+]"),
             body("Keyboard shortcut + Focus chain"),
@@ -649,24 +659,25 @@ fn build_model_view() -> crate::ui::view::View {
     let l6 = vstack(vec![
         h1("L6 — Cross-cutting"),
         hstack(vec![
-            todo_v1("[v1 待补]"),
-            body("Lifecycle: on_appear / on_disappear / reconcile_state"),
+            ok("[✓]"),
+            body("Lifecycle: reconcile(LaidOut) — on_disappear 实施"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    每帧 build 完 framework 自动跑 appear/disappear hook"),
+        hint("    每帧 build 完调 reconcile;drop 失踪 id 的 HostState slot"),
         hstack(vec![
-            todo_v1("[v1 slot]"),
-            body("Accessibility: .accessibility_label / role / traits"),
+            ok("[✓]"),
+            body("Accessibility: .accessibility_label / role(modifier API)"),
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    bake 进 LaidOut.deco;真接 NSAccessibility 留 v2+"),
+        hstack(vec![
+            ok("[✓]"),
+            body("Theme: ThemeId enum + theme::current() / set_current()"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    AtomicU8 全局;Light/HighContrast token 数据留 v2+"),
         hstack(vec![
             todo_v2("[v2+]"),
             body("Animation: Anim<T> + .transition()"),
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    time-based 插值;不破坏 idle CPU=0(无 anim 时不 schedule)"),
-        hstack(vec![
-            todo_v2("[v2+]"),
-            body("Theme: ThemeId enum + set_theme() + Light theme"),
-        ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             todo_v2("[v2+]"),
             body("i18n / RTL  (Leading/Trailing 命名已留 RTL 接口)"),

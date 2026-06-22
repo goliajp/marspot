@@ -57,12 +57,80 @@ pub enum View {
         child: Box<View>,
         id: ViewId,
     },
+    /// Uniform-height virtualised list — only items in the visible
+    /// viewport get laid out + painted.  See `lazy.rs` for details.
+    LazyVStack {
+        items: Vec<View>,
+        gap: Length,
+        item_height: Length,
+        id: ViewId,
+    },
+    /// Image primitive — type defined; real renderer Image
+    /// primitive support is a v2+ follow-up (currently paints as
+    /// a tinted placeholder rect).  Always wrap in `.frame(width:,
+    /// height:)` since we have no intrinsic image dims yet.
+    Image(Image),
+    /// Geometric shape primitive — Circle / Capsule / RoundedRect /
+    /// Path (v2+).  v1 renders as approximating rects/lines through
+    /// the existing Canvas; richer SDF paths land later.
+    Shape(ShapeSpec),
 
     // ─── Modified (modifier chain internal form) ──────────────
     Modified {
         child: Box<View>,
         mods: Vec<Modifier>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct Image {
+    pub source: ImageSource,
+    pub mode: ContentMode,
+    pub tint: Option<Color>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ImageSource {
+    /// Glyph atlas entry — the renderer's existing chrome SDF
+    /// path can paint this.  Reserved name; wiring lands when
+    /// real Image primitive is added.
+    Glyph(u32),
+    /// Inline RGBA bytes (PNG/JPEG decoded).  Paint emits a
+    /// placeholder until Image primitive is added.
+    Raw(std::sync::Arc<Vec<u8>>),
+    /// IOSurface — for shared GPU images (future use).
+    IOSurface(u32),
+    /// Placeholder named token (eg system icon) — v1 paints as
+    /// tinted rect.
+    Named(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentMode { Fit, Fill, Center }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShapeSpec {
+    Circle { fill: Color },
+    Capsule { fill: Color },
+    RoundedRect { radius: Length, fill: Color },
+}
+
+/// Linear gradient — list of color stops along an axis.  Currently
+/// used by `.background_gradient()`.  Paint emits as a series of
+/// solid-color rect bands (cheap approximation until renderer adds
+/// a Gradient primitive).
+#[derive(Clone, Debug)]
+pub struct LinearGradient {
+    pub stops: Vec<(f64, Color)>,  // (offset 0..1, color)
+    pub direction: GradientDir,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientDir {
+    TopToBottom,
+    LeftToRight,
+    BottomToTop,
+    RightToLeft,
 }
 
 /// Text view payload.
@@ -140,6 +208,14 @@ pub enum ClipShape {
 pub enum Modifier {
     Padding(Edges),
     Background(Color),
+    /// Linear gradient background.  Painted as a sequence of
+    /// solid-color bands approximating the stops along
+    /// `LinearGradient::direction`.
+    BackgroundGradient(LinearGradient),
+    /// Material backdrop placeholder.  v1 emits a flat color
+    /// (semi-opaque BG_PANEL).  Real macOS vibrancy via
+    /// NSVisualEffectView is a v2+ AppKit follow-up.
+    BackgroundMaterial(MaterialStyle),
     Border(Length, Color),
     CornerRadius(Length),
     Shadow(Shadow),
@@ -180,6 +256,27 @@ pub enum Modifier {
     /// progress.
     OnDragBegin(super::types::DragId),
     Id(ViewId),
+    /// Accessibility label string.  Baked into `Decoration` for
+    /// future NSAccessibility tree dispatch (v2+).
+    AccessibilityLabel(String),
+    /// Accessibility role / semantic category.
+    AccessibilityRole(AxRole),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxRole {
+    Button, Heading, ListItem, TextField, Image, StaticText,
+    Group, Link, Checkbox, Toggle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialStyle {
+    /// Standard system material — semi-opaque dark panel BG.
+    Regular,
+    /// Thicker — modal / popover.
+    Thick,
+    /// Thin — hud / tooltip.
+    Thin,
 }
 
 /// Aspect ratio enforcement mode.  Mirrors SwiftUI `ContentMode`.
@@ -327,6 +424,20 @@ impl View {
         self.add_mod(Modifier::AspectRatio(ratio, mode))
     }
     pub fn collapsed(self, c: bool) -> Self { self.add_mod(Modifier::Collapsed(c)) }
+
+    pub fn background_gradient(self, g: LinearGradient) -> Self {
+        self.add_mod(Modifier::BackgroundGradient(g))
+    }
+    pub fn background_material(self, m: MaterialStyle) -> Self {
+        self.add_mod(Modifier::BackgroundMaterial(m))
+    }
+
+    pub fn accessibility_label(self, s: impl Into<String>) -> Self {
+        self.add_mod(Modifier::AccessibilityLabel(s.into()))
+    }
+    pub fn accessibility_role(self, r: AxRole) -> Self {
+        self.add_mod(Modifier::AccessibilityRole(r))
+    }
 }
 
 // Text-specific modifiers — different from View modifiers (which

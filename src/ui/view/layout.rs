@@ -112,6 +112,14 @@ pub struct Decoration {
     pub on_scroll: Option<super::types::ScrollWheelId>,
     pub on_drag_begin: Option<super::types::DragId>,
     pub id: Option<super::types::ViewId>,
+    /// Linear gradient background — baked from `Modifier::Background
+    /// Gradient`.  Paint emits as a series of solid bands per stop.
+    pub bg_gradient: Option<super::view::LinearGradient>,
+    /// Accessibility label / role — surfaced via `NSAccessibility`
+    /// bridge in v2+;  v1 just preserves the data for inspection /
+    /// future routing.
+    pub ax_label: Option<String>,
+    pub ax_role: Option<super::view::AxRole>,
 }
 
 impl Default for Decoration {
@@ -132,6 +140,9 @@ impl Default for Decoration {
             on_scroll: None,
             on_drag_begin: None,
             id: None,
+            bg_gradient: None,
+            ax_label: None,
+            ax_role: None,
         }
     }
 }
@@ -237,7 +248,84 @@ pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -
             layout_zstack(children, *align, ctx, origin, c, view)
         }
         View::ScrollView { child, id } => layout_scroll(child, *id, ctx, origin, c, view),
+        View::LazyVStack { items, gap, item_height, id } =>
+            layout_lazy_vstack(items, *gap, *item_height, *id, ctx, origin, c, view),
+        View::Image(_) => {
+            // Hug constraints or full size if unbounded.  Caller is
+            // expected to wrap in `.frame(width:, height:)`.
+            let w = if c.max_w.is_finite() { c.max_w } else { 64.0 };
+            let h = if c.max_h.is_finite() { c.max_h } else { 64.0 };
+            let size = c.clamp(w, h);
+            LaidOut {
+                view: view.clone(),
+                rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
+                deco: Decoration::default(),
+                children: Vec::new(),
+            }
+        }
+        View::Shape(_) => {
+            // Same shape contract as Filled — fills constraints.
+            let w = if c.max_w.is_finite() { c.max_w } else { 32.0 };
+            let h = if c.max_h.is_finite() { c.max_h } else { 32.0 };
+            let size = c.clamp(w, h);
+            LaidOut {
+                view: view.clone(),
+                rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
+                deco: Decoration::default(),
+                children: Vec::new(),
+            }
+        }
         View::Modified { child, mods } => layout_modified(child, mods, ctx, origin, c, view),
+    }
+}
+
+// ─── LazyVStack ───────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn layout_lazy_vstack(
+    items: &[View],
+    gap: Length,
+    item_height: Length,
+    id: super::types::ViewId,
+    ctx: LayoutCtx,
+    origin: (f64, f64),
+    c: Constraints,
+    self_view: &View,
+) -> LaidOut {
+    let gap_phys = gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let item_h_phys = item_height.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let viewport_w = c.max_w;
+    let viewport_h = if c.max_h.is_finite() { c.max_h } else { 400.0 };
+
+    // Update / read scroll state (uniform-height list = ScrollView
+    // state shape; reuse same key).
+    let mut state = super::scroll::scroll_state(id);
+    state.content_h = super::lazy::total_height(items.len(), item_h_phys, gap_phys);
+    state.viewport_h = viewport_h;
+    state.clamp_offset();
+    super::scroll::set_scroll_state(id, state);
+
+    let (first, last) = super::lazy::visible_range(
+        items.len(), item_h_phys, gap_phys, state.offset_y, viewport_h,
+    );
+
+    let mut laid_children = Vec::with_capacity(last.saturating_sub(first));
+    for i in first..last {
+        let item_y_local = super::lazy::item_y(i, item_h_phys, gap_phys);
+        let item_origin = (origin.0, origin.1 + item_y_local - state.offset_y);
+        let item_c = Constraints {
+            min_w: 0.0, max_w: viewport_w,
+            min_h: item_h_phys, max_h: item_h_phys,
+        };
+        let laid = layout(&items[i], ctx, item_origin, item_c);
+        laid_children.push(laid);
+    }
+
+    LaidOut {
+        view: self_view.clone(),
+        rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
+        deco: Decoration::default(),
+        children: laid_children,
     }
 }
 
@@ -603,6 +691,22 @@ fn layout_modified(
             Modifier::OnHover(id) => bake.on_hover = Some(*id),
             Modifier::Id(id) => bake.id = Some(*id),
             Modifier::ZIndex(_) => { /* read at paint, future */ }
+            Modifier::BackgroundGradient(g) => {
+                bake.bg_gradient = Some(g.clone());
+            }
+            Modifier::BackgroundMaterial(_m) => {
+                // v1: render as semi-opaque BG_PANEL.  Real macOS
+                // vibrancy = v2+ NSVisualEffectView wiring.
+                let mut c = crate::ui::theme::color::BG_PANEL;
+                c.a = 0.85;
+                bake.bg = Some(c);
+            }
+            Modifier::AccessibilityLabel(s) => {
+                bake.ax_label = Some(s.clone());
+            }
+            Modifier::AccessibilityRole(r) => {
+                bake.ax_role = Some(*r);
+            }
         }
     }
     bake.padding = total_pad;

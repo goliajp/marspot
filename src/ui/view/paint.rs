@@ -75,6 +75,62 @@ fn mul_alpha(c: Color, m: f64) -> Color {
     Color { a: (c.a * m).clamp(0.0, 1.0), ..c }
 }
 
+/// Approximate a linear gradient as N solid bands.  Cheap, OK-looking
+/// for chrome polish use cases.  Real gradient primitive needs Metal
+/// pipeline support — v3 follow-up.
+fn paint_gradient_bands(canvas: &mut Canvas, rect: &super::layout::Rect, g: &super::view::LinearGradient, ctx: LayoutCtx, opacity: f64) {
+    if g.stops.is_empty() { return; }
+    let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
+    const BANDS: usize = 16;
+    for i in 0..BANDS {
+        let t = i as f64 / BANDS as f64;
+        let color = sample_gradient(&g.stops, t);
+        let (bx, by, bw, bh) = match g.direction {
+            super::view::GradientDir::TopToBottom => {
+                let h = rect.h / BANDS as f64;
+                (rect.x, rect.y + t * rect.h, rect.w, h)
+            }
+            super::view::GradientDir::BottomToTop => {
+                let h = rect.h / BANDS as f64;
+                (rect.x, rect.y + (1.0 - t - 1.0 / BANDS as f64) * rect.h, rect.w, h)
+            }
+            super::view::GradientDir::LeftToRight => {
+                let w = rect.w / BANDS as f64;
+                (rect.x + t * rect.w, rect.y, w, rect.h)
+            }
+            super::view::GradientDir::RightToLeft => {
+                let w = rect.w / BANDS as f64;
+                (rect.x + (1.0 - t - 1.0 / BANDS as f64) * rect.w, rect.y, w, rect.h)
+            }
+        };
+        canvas.rect()
+            .at(phys_to_pt(bx), phys_to_pt(by))
+            .size(phys_to_pt(bw), phys_to_pt(bh))
+            .fill(mul_alpha(color, opacity))
+            .draw();
+    }
+}
+
+fn sample_gradient(stops: &[(f64, Color)], t: f64) -> Color {
+    if stops.is_empty() { return Color::rgba(0, 0, 0, 0.0); }
+    if t <= stops[0].0 { return stops[0].1; }
+    if t >= stops.last().unwrap().0 { return stops.last().unwrap().1; }
+    for w in stops.windows(2) {
+        let (t0, c0) = (w[0].0, w[0].1);
+        let (t1, c1) = (w[1].0, w[1].1);
+        if t >= t0 && t <= t1 {
+            let f = (t - t0) / (t1 - t0).max(1e-6);
+            return Color {
+                r: ((c0.r as f64) * (1.0 - f) + (c1.r as f64) * f) as u8,
+                g: ((c0.g as f64) * (1.0 - f) + (c1.g as f64) * f) as u8,
+                b: ((c0.b as f64) * (1.0 - f) + (c1.b as f64) * f) as u8,
+                a: c0.a * (1.0 - f) + c1.a * f,
+            };
+        }
+    }
+    stops[0].1
+}
+
 fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Decoration, ctx: LayoutCtx, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     let r_x = phys_to_pt(rect.x);
@@ -82,6 +138,12 @@ fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Deco
     let r_w = phys_to_pt(rect.w);
     let r_h = phys_to_pt(rect.h);
 
+    if let Some(g) = &deco.bg_gradient {
+        // Paint as N solid bands along the gradient axis.  Each band
+        // gets the interpolated color from the stops.  N = 16 by
+        // default — enough to look smooth in most cases.
+        paint_gradient_bands(canvas, rect, g, ctx, opacity);
+    }
     if deco.bg.is_none() && deco.border.is_none() && deco.shadow.is_none() {
         return;
     }
@@ -177,10 +239,63 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
                 .stroke(crate::ui::core::Pt(1.0), mul_alpha(*color, opacity))
                 .draw();
         }
-        // Stacks / Modified / Spacer don't paint anything on their
-        // own — decoration is already painted above, children come
-        // next in the recursion.
+        View::Image(img) => {
+            // v1 stub: paint a tinted placeholder rect.  Real Image
+            // primitive support lands when renderer adds it.
+            let placeholder_color = img.tint
+                .unwrap_or(crate::ui::theme::color::BG_HOVER);
+            canvas.rect()
+                .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
+                .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
+                .fill(mul_alpha(placeholder_color, opacity))
+                .draw();
+        }
+        View::Shape(spec) => {
+            paint_shape(canvas, spec, rect, ctx, opacity);
+        }
+        // Stacks / Modified / Spacer / LazyVStack / ScrollView don't
+        // paint anything on their own — decoration is already painted
+        // above, children come next in the recursion.
         _ => {}
+    }
+}
+
+fn paint_shape(canvas: &mut Canvas, spec: &super::view::ShapeSpec, rect: &super::layout::Rect, ctx: LayoutCtx, opacity: f64) {
+    let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
+    use super::view::ShapeSpec::*;
+    match spec {
+        Circle { fill } => {
+            // Approximate via rounded-rect with radius = half the
+            // smaller dim.  Real circle/SDF lands when renderer adds.
+            let r = rect.w.min(rect.h) * 0.5;
+            canvas.rect()
+                .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
+                .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
+                .fill(mul_alpha(*fill, opacity))
+                .radius(crate::ui::core::Pt(r / ctx.scale))
+                .draw();
+        }
+        Capsule { fill } => {
+            let r = rect.h * 0.5;
+            canvas.rect()
+                .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
+                .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
+                .fill(mul_alpha(*fill, opacity))
+                .radius(crate::ui::core::Pt(r / ctx.scale))
+                .draw();
+        }
+        RoundedRect { radius, fill } => {
+            let r_pt = match radius {
+                Length::Pt(p) => crate::ui::core::Pt(*p),
+                _ => crate::ui::core::Pt(4.0),
+            };
+            canvas.rect()
+                .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
+                .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
+                .fill(mul_alpha(*fill, opacity))
+                .radius(r_pt)
+                .draw();
+        }
     }
 }
 
