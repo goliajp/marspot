@@ -456,14 +456,28 @@ const TARGET_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 /// colour-space change.
 pub fn pin_layer_colorspace(layer: &CAMetalLayer) {
     // SAFETY: `kCGColorSpaceSRGB` is an extern static (reading it is
-    // `unsafe`); `setColorspace` is reached via msg_send because the
-    // `colorspace` property isn't in the objc2-quartz-core binding yet.
+    // `unsafe`); `setColorspace` is reached via raw `objc_msgSend`
+    // because the `colorspace` property isn't in the objc2-quartz-core
+    // binding yet AND objc2's macro runtime-checks the @encode type
+    // ("^{CGColorSpace=}") which doesn't match our `*mut c_void`
+    // (`^v`) cast.  Release ships fine because the check is debug-
+    // only; for dev (`bin/run.sh`) we go through the raw FFI path
+    // so debug builds boot too.
     unsafe {
         let cs = CGColorSpace::create_with_name(kCGColorSpaceSRGB).expect(
             "CGColorSpaceCreateWithName(kCGColorSpaceSRGB) cannot fail on supported macOS",
         );
         let cs_ptr = cs.as_ptr() as *mut c_void;
-        let _: () = msg_send![layer, setColorspace: cs_ptr];
+        let layer_ptr: *mut objc2::runtime::AnyObject =
+            (layer as *const CAMetalLayer as *mut CAMetalLayer).cast();
+        let sel = objc2::sel!(setColorspace:);
+        type Setter = unsafe extern "C" fn(
+            *mut objc2::runtime::AnyObject,
+            objc2::runtime::Sel,
+            *mut c_void,
+        );
+        let imp: Setter = std::mem::transmute(objc2::ffi::objc_msgSend as *const ());
+        imp(layer_ptr, sel, cs_ptr);
     }
 }
 

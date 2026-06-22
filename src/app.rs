@@ -843,6 +843,26 @@ declare_class!(
             // "close = exit", but we honour the indirection cleanly.
             false
         }
+
+        #[method(windowDidResize:)]
+        fn window_did_resize(&self, _notification: &NSNotification) {
+            dispatch_event(EventKind::Resized);
+        }
+
+        #[method(windowDidMove:)]
+        fn window_did_move(&self, _notification: &NSNotification) {
+            dispatch_event(EventKind::Moved);
+        }
+
+        #[method(windowDidBecomeKey:)]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            dispatch_event(EventKind::Focused(true));
+        }
+
+        #[method(windowDidResignKey:)]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            dispatch_event(EventKind::Focused(false));
+        }
     }
 
     unsafe impl NSApplicationDelegate for MarspotWindowDelegate {
@@ -865,26 +885,6 @@ declare_class!(
         ) -> NSApplicationTerminateReply {
             dispatch_event(EventKind::CloseRequested);
             NSApplicationTerminateReply::NSTerminateCancel
-        }
-
-        #[method(windowDidResize:)]
-        fn window_did_resize(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Resized);
-        }
-
-        #[method(windowDidMove:)]
-        fn window_did_move(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Moved);
-        }
-
-        #[method(windowDidBecomeKey:)]
-        fn window_did_become_key(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Focused(true));
-        }
-
-        #[method(windowDidResignKey:)]
-        fn window_did_resign_key(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Focused(false));
         }
     }
 );
