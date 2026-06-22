@@ -1169,6 +1169,13 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             state.app.redraw(&state.ctx);
         }
     });
+    // Drain anything `resumed` / `redraw` queued via the dev_window
+    // deferral path (e.g. `apply_saved_frame` from L1).  Same reason
+    // `dispatch_event` drains after its borrow drops — AppKit calls
+    // here fire `windowDidMove:` etc. into our delegate, which
+    // dispatch_event_pub's into APP_STATE → if APP_STATE were still
+    // borrowed we'd re-enter and panic.
+    crate::dev_window::drain_pending_actions();
 
     // 6. Run.  Returns after dispatch_event sees an exit request.
     unsafe { nsapp.run() };

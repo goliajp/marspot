@@ -17,7 +17,13 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.7**
+Current: **0.6.8**
+
+### 0.6.8
+
+修 0.6.7 自己引入的启动 panic.0.6.7 把 `apply_saved_frame` 放进 `ShellApp::resumed`,但 `setFrame_display(r, true)` 同步 fire `windowDidMove:` 进 delegate → `dispatch_event_pub` → `APP_STATE.borrow_mut()` —— `resumed` 这时还借着 APP_STATE.borrow_mut,re-entrant borrow panic.objc2 declare_class 方法是 `nounwind` → 进程 abort,LaunchAgent rate-limit 不拉,marspot 完全打不开.
+
+修法跟 `set_visible_deferred` 同套路:新加 `PENDING_FRAME: RefCell<Option<(x,y,w,h)>>` thread_local;`apply_saved_frame` 改成只写 PENDING_FRAME(不调 AppKit);`drain_pending_actions` 排两件事 —— 先 apply frame(避免窗口先在默认位置闪一下再跳到 saved),再 apply visibility.同时 `run_app` 在 `state.app.resumed()` 之后多加一次 `drain_pending_actions`,确保 boot 路径的 deferred 在 borrow 释放后真的 land.
 
 ### 0.6.7
 

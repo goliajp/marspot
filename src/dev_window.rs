@@ -106,6 +106,14 @@ thread_local! {
     /// `borrow_mut` panic when AppKit synchronously fires
     /// `windowDidBecomeKey` / etc. into our window-delegate path.
     static PENDING_VISIBLE: RefCell<Option<bool>> = const { RefCell::new(None) };
+    /// Same deferral pattern for `setFrame:display:` — calling it
+    /// inline from `resumed` (which holds the APP_STATE borrow)
+    /// crashes the process because the synchronous `windowDidMove:`
+    /// delegate notification re-enters `dispatch_event` and tries
+    /// to `borrow_mut` an already-borrowed cell.  See the
+    /// 2026-06-23 incident (panic in `DevWindowDelegate::window_did_move`,
+    /// process aborts because objc2 declare_class methods are nounwind).
+    static PENDING_FRAME: RefCell<Option<(f64, f64, f64, f64)>> = const { RefCell::new(None) };
 }
 
 pub struct DevWindow {
@@ -279,19 +287,24 @@ impl DevWindow {
     }
 
     /// Restore a previously-saved geometry.  Logical pt, screen
-    /// coordinates (bottom-left origin per NSWindow).  `set_frame`
-    /// silently clamps to a usable region — off-screen geometry from
-    /// a now-disconnected display is dealt with by AppKit, not us.
+    /// coordinates (bottom-left origin per NSWindow).  AppKit silently
+    /// clamps to a usable region — off-screen geometry from a
+    /// now-disconnected display is dealt with by AppKit, not us.
+    ///
+    /// **Deferred** — `setFrame:display:` synchronously fires
+    /// `windowDidMove:` into our delegate, which dispatches a
+    /// `DevWindowChanged` event back through `APP_STATE`.  If the
+    /// caller is already inside an `APP_STATE.borrow_mut()` (e.g.,
+    /// `MarspotApp::resumed`), the re-entrant borrow panics in a
+    /// `nounwind` objc2 method = process abort.  We write to a
+    /// `PENDING_FRAME` thread-local instead; `drain_pending_actions`
+    /// applies it after the host's borrow drops.  Same pattern as
+    /// `set_visible_deferred`.
     pub fn apply_saved_frame(&self, x: f64, y: f64, w: f64, h: f64) {
         if w < 50.0 || h < 50.0 {
-            // Corrupt persistence — refuse rather than draw a slit.
             return;
         }
-        let r = NSRect::new(
-            NSPoint::new(x, y),
-            NSSize::new(w, h),
-        );
-        unsafe { self.nswindow.setFrame_display(r, true); }
+        PENDING_FRAME.with(|cell| *cell.borrow_mut() = Some((x, y, w, h)));
     }
 
     /// Render the dev panel state into our own Metal layer.  No-op
@@ -410,6 +423,20 @@ pub fn with_dev_window<R>(f: impl FnOnce(&mut DevWindow) -> R) -> Option<R> {
 /// `borrow_mut` → panic.  We clone the `Retained<NSWindow>` out
 /// (cheap refcount bump), drop the cell borrow, then act.
 pub fn drain_pending_actions() {
+    // PENDING_FRAME goes first — apply the saved geometry before
+    // showing the window so the user doesn't see it flash at the
+    // default 420×552 origin then jump to the saved position.
+    let pending_frame = PENDING_FRAME.with(|cell| cell.borrow_mut().take());
+    if let Some((x, y, w, h)) = pending_frame {
+        let nswindow = DEV_WINDOW_HANDLE.with(|cell| {
+            cell.borrow().as_ref().map(|wh| wh.nswindow.clone())
+        });
+        if let Some(window) = nswindow {
+            let r = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+            unsafe { window.setFrame_display(r, true); }
+        }
+    }
+
     let pending = PENDING_VISIBLE.with(|cell| cell.borrow_mut().take());
     if let Some(visible) = pending {
         let nswindow = DEV_WINDOW_HANDLE.with(|cell| {
