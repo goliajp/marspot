@@ -85,32 +85,44 @@ impl Pct {
     pub const FULL: Pct = Pct(1.0);
 }
 
-/// Resolvable length — sum type over absolute and parent-relative.
+/// Resolvable length — sum type over absolute, parent-relative,
+/// and chrome-cell-relative.
 ///
 /// Used everywhere a UI primitive accepts a position or size.
 /// At paint time, the parent rect supplies the dimension a `Pct`
 /// resolves against; if absent, `Pct` resolves to 0.
+///
+/// `Ch(N)` ≡ CSS `Nch` — N chrome-font cell widths.  Resolves
+/// against `cell_w_phys` passed to the resolver; callers that
+/// don't supply it get 0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Length {
     Pt(f64),
     Pct(f64),
+    Ch(f64),
 }
 
 impl Length {
-    /// Resolve to physical pixels.  `parent` is the parent's
-    /// relevant axis dimension already in physical pixels (so
-    /// `Pct` math is pure ratio).  `scale` is the device pixel
-    /// ratio; `Pt` multiplies through it.
-    ///
-    /// Resolution rules:
-    /// - `Pt(p)` → `p * scale` (parent ignored).
-    /// - `Pct(f)` → `parent * f` (scale ignored; already-phys
-    ///   parent carries the scale).
+    /// Resolve to physical pixels.  Two-arg form retained for
+    /// callers that don't use `Ch`; `Ch(N)` resolves to 0 here
+    /// (loud failure — everything stacks at origin / zero size).
     #[inline]
     pub fn resolve_for_axis(self, parent_phys: f64, scale: f64) -> f64 {
+        self.resolve_for_axis_with_cell(parent_phys, scale, 0.0)
+    }
+
+    /// Three-arg form — `cell_w_phys` is the chrome font cell width
+    /// in physical pixels (the renderer's `chrome_font_metrics().0`
+    /// at the current scale).  Layout pass uses this; the existing
+    /// canvas builder can opt in via `Canvas::with_cell_w`.
+    #[inline]
+    pub fn resolve_for_axis_with_cell(
+        self, parent_phys: f64, scale: f64, cell_w_phys: f64,
+    ) -> f64 {
         match self {
             Length::Pt(p) => p * scale,
             Length::Pct(f) => parent_phys * f,
+            Length::Ch(c) => c * cell_w_phys,
         }
     }
 }
@@ -183,6 +195,17 @@ mod tests {
     #[test]
     fn length_pct_of_zero_parent_is_zero() {
         assert_eq!(Length::Pct(0.5).resolve_for_axis(0.0, 2.0), 0.0);
+    }
+
+    #[test]
+    fn length_ch_resolves_against_cell_w_phys() {
+        // Ch(N) = N * cell_w_phys; parent_phys / scale ignored.
+        assert_eq!(
+            Length::Ch(3.0).resolve_for_axis_with_cell(999.0, 2.0, 16.0),
+            48.0,
+        );
+        // Without cell_w_phys, Ch resolves to 0 — loud failure mode.
+        assert_eq!(Length::Ch(3.0).resolve_for_axis(999.0, 2.0), 0.0);
     }
 
     #[test]

@@ -23,6 +23,8 @@
 pub mod core;
 pub mod system;
 pub mod components;
+pub mod theme;
+pub mod view;
 
 use crate::pane::Pane;
 use crate::render::SelectionView;
