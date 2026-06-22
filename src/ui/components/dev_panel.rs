@@ -109,13 +109,17 @@ const TAB_LABELS: &[(&str, usize)] = &[
 ];
 
 /// Section anchors within the UI tab's left menu.  Same role as
-/// `active_tab` but for the menu's vertical list.
-pub const SECTION_COLORS: usize = 0;
-pub const SECTION_UNITS: usize = 1;
-pub const SECTION_RECTS: usize = 2;
-pub const SECTION_LINES: usize = 3;
-pub const SECTION_TEXT: usize = 4;
+/// `active_tab` but for the menu's vertical list.  "Model" sits at
+/// the top because it's the entry-point explanation — read this
+/// first, the rest are individual primitive demos.
+pub const SECTION_MODEL: usize = 0;
+pub const SECTION_COLORS: usize = 1;
+pub const SECTION_UNITS: usize = 2;
+pub const SECTION_RECTS: usize = 3;
+pub const SECTION_LINES: usize = 4;
+pub const SECTION_TEXT: usize = 5;
 const SECTION_LABELS: &[(&str, usize)] = &[
+    ("Model", SECTION_MODEL),
     ("Colors", SECTION_COLORS),
     ("Units", SECTION_UNITS),
     ("Rects", SECTION_RECTS),
@@ -161,7 +165,10 @@ impl Default for DevPanelState {
             origin_pt: (60.0, 80.0),
             size_pt: (420.0, 520.0),
             active_tab: TAB_UI,
-            active_section: SECTION_COLORS,
+            // Model first — it's the mental-model overview the rest
+            // of the sections individually demo.  Fresh open reads as
+            // "what is this thing" rather than "here are some swatches".
+            active_section: SECTION_MODEL,
             scale: 2.0,
         }
     }
@@ -328,6 +335,10 @@ pub fn build_dev_panel_canvas(
     let y = body_y + 16.0;
 
     match state.active_section {
+        SECTION_MODEL => {
+            let y = draw_section_header(&mut canvas, content_x, y, "Model");
+            let _ = draw_model_sample(&mut canvas, content_x, y);
+        }
         SECTION_COLORS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Colors");
             let _ = draw_colors_sample(&mut canvas, content_x, y, cell_w_pt);
@@ -372,6 +383,119 @@ fn draw_section_header(canvas: &mut Canvas, x: f64, y: f64, label: &str) -> f64 
     .stroke(Pt(1.0), tokens::DIVIDER)
     .draw();
     y + 26.0
+}
+
+/// Model: the CSS-like mental model the rest of the UI tab demos
+/// piece by piece.  This is the "read me first" section — `Length`,
+/// the box model, `Color`, z-order.  Mostly text + one Z-order
+/// visual demo because z-order isn't shown elsewhere.
+fn draw_model_sample(canvas: &mut Canvas, x: f64, mut y: f64) -> f64 {
+    let line_h = 18.0;
+    let block_gap = 14.0;
+
+    // 1. Length
+    canvas.text(Length::Pt(x), Length::Pt(y), "Length = Pt | Pct")
+        .color(tokens::SECTION_BODY_FG)
+        .draw();
+    y += line_h;
+    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
+        "Pt(N) ≈ CSS N px — logical pt, scale-independent")
+        .color(tokens::SAMPLE_HINT_FG)
+        .draw();
+    y += line_h;
+    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
+        "Pct(F) = F × parent (0.0..1.0)")
+        .color(tokens::SAMPLE_HINT_FG)
+        .draw();
+    y += block_gap + line_h;
+
+    // 2. Box model — Rect builder
+    canvas.text(Length::Pt(x), Length::Pt(y), "Rect = box-model")
+        .color(tokens::SECTION_BODY_FG)
+        .draw();
+    y += line_h;
+    let api_lines = [
+        ".at(x, y)              — top / left",
+        ".size(w, h)            — width / height",
+        ".fill(color)           — background",
+        ".border(width, color)  — border (inside-stroke, box-sizing: border-box)",
+        ".radius(r)             — border-radius",
+        ".shadow(blur, off, c)  — box-shadow",
+    ];
+    for line in api_lines.iter() {
+        canvas.text(Length::Pt(x + 16.0), Length::Pt(y), line)
+            .color(tokens::SAMPLE_HINT_FG)
+            .draw();
+        y += line_h;
+    }
+    y += block_gap;
+
+    // 3. Color — CSS rgba
+    canvas.text(Length::Pt(x), Length::Pt(y), "Color = CSS rgba")
+        .color(tokens::SECTION_BODY_FG)
+        .draw();
+    y += line_h;
+    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
+        "Color::rgba(r, g, b, a)  — r/g/b 0..255, a 0.0..1.0")
+        .color(tokens::SAMPLE_HINT_FG)
+        .draw();
+    y += line_h;
+    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
+        "alpha 跟 CSS rgba() 一致;0.0 完全透明,1.0 不透明")
+        .color(tokens::SAMPLE_HINT_FG)
+        .draw();
+    y += block_gap + line_h;
+
+    // 4. Z-order — submission order
+    canvas.text(Length::Pt(x), Length::Pt(y), "Z order = submission order")
+        .color(tokens::SECTION_BODY_FG)
+        .draw();
+    y += line_h;
+    canvas.text(Length::Pt(x + 16.0), Length::Pt(y),
+        "later .draw() paints on top (no z-index, no explicit ordering)")
+        .color(tokens::SAMPLE_HINT_FG)
+        .draw();
+    y += line_h + 6.0;
+
+    // Z-order visual demo: 3 overlapping rects of decreasing size,
+    // each .draw() lands above the previous.  Labels to the right.
+    let demo_x = x + 16.0;
+    let demo_w = 64.0;
+    let demo_h = 32.0;
+    let demo_step = 16.0;
+    let z1 = Color::rgba(220,  60,  60, 1.0);  // red
+    let z2 = Color::rgba( 80, 190, 110, 1.0);  // green
+    let z3 = Color::rgba( 91, 162, 250, 1.0);  // blue
+    // Draw in 1→2→3 order; expect green to cover red's right edge,
+    // blue to cover green's right edge.
+    canvas.rect()
+        .at(Length::Pt(demo_x), Length::Pt(y))
+        .size(Length::Pt(demo_w), Length::Pt(demo_h))
+        .fill(z1)
+        .radius(Pt(4.0))
+        .draw();
+    canvas.rect()
+        .at(Length::Pt(demo_x + demo_step), Length::Pt(y + 6.0))
+        .size(Length::Pt(demo_w), Length::Pt(demo_h))
+        .fill(z2)
+        .radius(Pt(4.0))
+        .draw();
+    canvas.rect()
+        .at(Length::Pt(demo_x + demo_step * 2.0), Length::Pt(y + 12.0))
+        .size(Length::Pt(demo_w), Length::Pt(demo_h))
+        .fill(z3)
+        .radius(Pt(4.0))
+        .draw();
+    canvas.text(
+        Length::Pt(demo_x + demo_w + demo_step * 2.0 + 12.0),
+        Length::Pt(y + 18.0),
+        "1st .draw() ← red,  2nd ← green,  3rd ← blue (top)",
+    )
+    .color(tokens::SAMPLE_HINT_FG)
+    .draw();
+    y += demo_h + 20.0;
+
+    y
 }
 
 /// Colors: a row of named swatches.  Demonstrates `Color::rgba` +
@@ -568,7 +692,7 @@ mod tests {
         let s = DevPanelState::default();
         assert!(s.visible);
         assert_eq!(s.active_tab, TAB_UI);
-        assert_eq!(s.active_section, SECTION_COLORS);
+        assert_eq!(s.active_section, SECTION_MODEL);
         assert!(s.size_pt.0 > 200.0);
         assert!(s.size_pt.1 > 200.0);
     }
@@ -622,16 +746,16 @@ mod tests {
     #[test]
     fn hit_test_lands_on_menu_row() {
         let s = DevPanelState::default();
-        // y just past the tab strip + menu top pad → first row "Colors".
+        // y just past the tab strip + menu top pad → first row "Model".
         let h = hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0)
             .expect("expected hit");
-        assert_eq!(h, DevPanelHit::Section(SECTION_COLORS));
-        // Two rows down → "Rects".
+        assert_eq!(h, DevPanelHit::Section(SECTION_MODEL));
+        // Two rows down → 3rd row = "Units".
         let h2 = hit_test(
             &s, 8.0, 20.0,
             TAB_BAR_H_PT + MENU_TOP_PAD_PT + 2.0 * MENU_ROW_H_PT + 5.0,
         ).expect("expected hit");
-        assert_eq!(h2, DevPanelHit::Section(SECTION_RECTS));
+        assert_eq!(h2, DevPanelHit::Section(SECTION_UNITS));
     }
 
     #[test]

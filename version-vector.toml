@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.10"  # dev panel mouse routing 接通 — tab / menu 真能点
+shell   = "0.6.11"  # dev panel 加 Model section,讲清 CSS 类心智模型 + Z-order demo
 core    = "0.10.68" # toolbar dev icon click → DevPanelToggle wire → L1
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

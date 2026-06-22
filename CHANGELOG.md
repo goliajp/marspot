@@ -17,7 +17,21 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.10**
+Current: **0.6.11**
+
+### 0.6.11
+
+UI tab 左 menu 新增第一项 **Model** — 讲清 marspot UI 系统的 CSS 类心智模型,新人 / future-self 打开 dev panel 第一眼看到的就是体系本身,不是 swatches.
+
+四段:
+- **Length = Pt | Pct**:`Pt(N) ≈ CSS Npx`(逻辑 pt,scale-independent);`Pct(F) = F × parent`
+- **Rect = box-model**:`.at(x,y)` / `.size(w,h)` / `.fill(color)` / `.border(width, color)`(inside-stroke,box-sizing: border-box)/ `.radius(r)` / `.shadow(blur, off, c)` —— 跟 CSS 一一对应
+- **Color = CSS rgba**:`Color::rgba(r, g, b, a)`,alpha 0..1 跟 CSS rgba() 一致
+- **Z order = submission order**:later `.draw()` paints on top,无 z-index 概念;配 3 个重叠 rect 视觉 demo(红→绿→蓝 后画的在上)
+
+默认 `active_section = SECTION_MODEL`(不再 SECTION_COLORS),fresh open 直接看 model 而不是色块.菜单顺序:Model / Colors / Units / Rects / Lines / Text.
+
+shell 0.6.10 → 0.6.11.9/9 dev_panel tests PASS.
 
 ### 0.6.10
 
