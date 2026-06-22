@@ -12,6 +12,7 @@
 
 pub mod types;
 pub mod view;
+pub mod layout;
 
 pub use types::{
     AlignCross, Anchor, Distribute, Edges, FrameSpec, Shadow,
@@ -21,4 +22,8 @@ pub use view::{
     View, Modifier, Text, TextSize, TextWeight, TextAlign,
     TextLines, Truncate,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
+};
+pub use layout::{
+    layout as layout_view, Constraints, Size, Rect, LaidOut,
+    Decoration, DecoShadow, EdgesPhys, LayoutCtx,
 };
