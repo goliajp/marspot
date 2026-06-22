@@ -451,26 +451,44 @@ fn build_model_view() -> crate::ui::view::View {
         })
     };
 
+    // Status hints — colored tags so reader sees what's live vs
+    // planned at a glance.  Mark per line with [✓] / [v1 待补] / [v2+].
+    let ok      = |s: &str| Text::new(s).color(color::SUCCESS).build();
+    let todo_v1 = |s: &str| Text::new(s).color(color::WARN).build();
+    let todo_v2 = |s: &str| Text::new(s).color(color::HINT).weight(TextWeight::Dim).build();
+
     // ── L1 Foundation ────────────────────────────────────────
     let l1 = vstack(vec![
         h1("L1 — Foundation"),
-        body("Length:  Pt(N) | Pct(F) | Ch(N)"),
+        hstack(vec![
+            ok("[✓]"),
+            body("Length:  Pt(N) | Pct(F) | Ch(N)"),
+        ]).hstack_gap(Length::Pt(6.0)),
         hint("    Pt(1) ≡ CSS 1px   scale-independent"),
         hint("    Pct(0.5) ≡ 50%    of parent axis"),
         hint("    Ch(3) = 3 chrome cells   terminal-domain"),
-        body("Color:   Color::rgba(r, g, b, a)   ≡ CSS rgba()"),
-        // Mini palette demo using View::Filled.
         hstack(vec![
+            ok("[✓]"),
+            body("Color:   Color::rgba(r, g, b, a)   ≡ CSS rgba()"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            ok("[✓]"),
             mono("Tokens:"),
             mk_swatch(color::FG),
             mk_swatch(color::ACCENT),
             mk_swatch(color::SUCCESS),
             mk_swatch(color::WARN),
             mk_swatch(color::DANGER),
-            hint("color::FG/ACCENT/SUCCESS/WARN/DANGER"),
+            hint("FG/ACCENT/SUCCESS/WARN/DANGER"),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        hint("    space::XS(4) SM(8) MD(12) LG(16) XL(24)"),
-        hint("    radius::SM(3) MD(6) LG(10) PILL(9999)"),
+        hint("    space:: XS(4) SM(8) MD(12) LG(16) XL(24)"),
+        hint("    radius:: SM(3) MD(6) LG(10) PILL(9999)"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Identity / HostState map"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    ViewId → Box<dyn Any> 状态映射;Lifecycle on_appear / on_disappear"),
+        hint("    现 ScrollView/TextField 等 stateful view 无处寄存"),
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── L2 Box Model — actual box demo ───────────────────────
@@ -491,9 +509,23 @@ fn build_model_view() -> crate::ui::view::View {
             box_demo,
             spacer(),
             vstack(vec![
-                hint("box-sizing: border-box   .size() 量外缘"),
-                hint("inside-stroke border   不撑大尺寸"),
-                hint("NO margin   父级 padding / gap"),
+                hstack(vec![
+                    ok("[✓]"),
+                    hint("padding / border / radius / shadow"),
+                ]).hstack_gap(Length::Pt(6.0)),
+                hint("    box-sizing: border-box   inside-stroke   NO margin"),
+                hstack(vec![
+                    todo_v1("[v1 待补]"),
+                    hint("opacity / clip / aspect_ratio"),
+                ]).hstack_gap(Length::Pt(6.0)),
+                hstack(vec![
+                    todo_v1("[v1 待补]"),
+                    hint("Material backdrop (macOS vibrancy)"),
+                ]).hstack_gap(Length::Pt(6.0)),
+                hstack(vec![
+                    todo_v2("[v2+]"),
+                    hint("mask / transform / blend mode"),
+                ]).hstack_gap(Length::Pt(6.0)),
             ]).vstack_gap(Length::Pt(2.0)),
         ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
     ]).vstack_gap(Length::Pt(4.0));
@@ -501,8 +533,16 @@ fn build_model_view() -> crate::ui::view::View {
     // ── L3 Primitives ────────────────────────────────────────
     let l3 = vstack(vec![
         h1("L3 — Primitives (Canvas)"),
-        hint("    rect / line / text   builders chain .fill/.border/.radius/.shadow"),
-        hint("    submission order = z order   no z-index needed"),
+        hstack(vec![
+            ok("[✓]"),
+            body("rect / line / text"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    .fill/.border/.radius/.shadow chain;submission order = z order"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Image / Gradient (Linear) / Shape (Circle / Capsule / Path)"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    toolbar 图标走 Image,chrome polish 走 Gradient fill"),
         hint("    this entire panel IS Canvas — what you see, you can build"),
     ]).vstack_gap(Length::Pt(2.0));
 
@@ -534,12 +574,20 @@ fn build_model_view() -> crate::ui::view::View {
     ]);
 
     let l4 = vstack(vec![
-        h1("L4 — View Tree + Modifiers (new)"),
-        hint("    Atoms:        Text / Spacer / Filled / Hairline"),
-        hint("    Containers:   VStack / HStack / ZStack"),
-        hint("    Modifiers:    .padding / .background / .border / .corner_radius"),
-        hint("                  .shadow / .frame / .offset / .z_index / .hidden"),
-        hint("                  .on_hover / .on_click / .id"),
+        h1("L4 — View Tree + Layout"),
+        hstack(vec![
+            ok("[✓]"),
+            body("Atoms: Text / Spacer / Filled / Hairline"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            ok("[✓]"),
+            body("Containers: VStack / HStack / ZStack"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            ok("[✓]"),
+            body("Modifiers: .padding/.background/.border/.corner_radius"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("              .shadow/.frame/.offset/.on_click/.id"),
         // Three mini demos in a row.
         hstack(vec![
             vstack(vec![hint("VStack"), vstack_demo]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
@@ -549,17 +597,82 @@ fn build_model_view() -> crate::ui::view::View {
             vstack(vec![hint("ZStack"), zstack_demo]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
             spacer(),
         ]).align_cross_start(),
-        hint("    Constraints two-pass:   parent → constraints → child returns size"),
-        hint("    AlignCross:   Start / Center / End / Stretch"),
-        hint("    Distribute:   Start / Center / End / Spaced / Between"),
-        hint("    Anchor (9):   TopLeading … BottomTrailing"),
+        hint("    Constraints two-pass / AlignCross / Distribute / Anchor (9)"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Containers: ScrollView / LazyVStack / LazyHStack / Grid"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    process panel / sidebar / table / search overlay 都得滚"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Gesture: Drag / DoubleClick / RightClick / Hover / Scroll"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    + InputEvent enum + DragInProgress 状态机 + hit_test_event router"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Stateful views: TextField / Toggle / Picker"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    依赖 §L1 HostState map;重命名/输入/segmented control"),
+        hstack(vec![
+            todo_v2("[v2+]"),
+            body("Keyboard shortcut + Focus chain"),
+        ]).hstack_gap(Length::Pt(6.0)),
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── L5 Components ────────────────────────────────────────
     let l5 = vstack(vec![
         h1("L5 — Components"),
-        hint("    ContextMenu / LayoutModal / DevPanel / Table / Sidebar / TabStrip"),
-        hint("    Built on L4 in P3i (migration pending — this panel is the first)"),
+        hstack(vec![
+            ok("[✓]"),
+            body("DevPanel.Model section (this panel)"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("TabStrip / ContextMenu / Tooltip / Card / Panel"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Sidebar / Table / LayoutModal / SearchOverlay / ProcessMonitor"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("DevPanel 主框架(tab + menu + content area)"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    完后 P3j ViewPainter 退役 — 净 -400 LOC"),
+    ]).vstack_gap(Length::Pt(2.0));
+
+    // ── L6 Cross-cutting ─────────────────────────────────────
+    let l6 = vstack(vec![
+        h1("L6 — Cross-cutting"),
+        hstack(vec![
+            todo_v1("[v1 待补]"),
+            body("Lifecycle: on_appear / on_disappear / reconcile_state"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    每帧 build 完 framework 自动跑 appear/disappear hook"),
+        hstack(vec![
+            todo_v1("[v1 slot]"),
+            body("Accessibility: .accessibility_label / role / traits"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    bake 进 LaidOut.deco;真接 NSAccessibility 留 v2+"),
+        hstack(vec![
+            todo_v2("[v2+]"),
+            body("Animation: Anim<T> + .transition()"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    time-based 插值;不破坏 idle CPU=0(无 anim 时不 schedule)"),
+        hstack(vec![
+            todo_v2("[v2+]"),
+            body("Theme: ThemeId enum + set_theme() + Light theme"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hstack(vec![
+            todo_v2("[v2+]"),
+            body("i18n / RTL  (Leading/Trailing 命名已留 RTL 接口)"),
+        ]).hstack_gap(Length::Pt(6.0)),
+    ]).vstack_gap(Length::Pt(2.0));
+
+    // ── Footer — link to doc ─────────────────────────────────
+    let footer = vstack(vec![
+        hint("docs/ui-system-model.md — 完整设计 v3"),
+        hint("18 章 + 完整 LOC roadmap + SOTA self-assessment"),
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── Hairline separators between layers ───────────────────
@@ -580,6 +693,10 @@ fn build_model_view() -> crate::ui::view::View {
         l4,
         sep(),
         l5,
+        sep(),
+        l6,
+        sep(),
+        footer,
     ]).vstack_gap(Length::Pt(8.0))
     .frame(FrameSpec {
         width: Some(Length::Pct(1.0)),

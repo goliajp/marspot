@@ -17,7 +17,28 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.14**
+Current: **0.6.15**
+
+### 0.6.15
+
+UI 模型 v3 + DevPanel Model section 补完整.
+
+v2 doc 自查发现 SOTA framework 的常用 primitive 缺了不少:
+- ScrollView / LazyVStack / Grid 等容器
+- Image / Gradient / Shape / Material backdrop
+- 真实 Gesture model(Drag / DoubleClick / RightClick / Hover state / Scroll)
+- Stateful views(TextField / Toggle / Picker)
+- Identity-state map(`Modifier::Id(ViewId)` 之前没 host 接)
+- Lifecycle(on_appear / on_disappear)
+- Accessibility 接口
+- TextStyle 形式化(代替散的 size+weight+color)
+- `TextWeight::Dim = alpha × 0.6` / `ZIndex` modifier 不读 等 v2 hack 该明确
+
+`docs/ui-system-model.md` 重写为 v3(18 章 + 完整 implementation roadmap P3a-v + 11 个 component 迁移 + SOTA self-assessment).写明哪些 ✓ / v1 待补 / v2+,以及为什么.
+
+DevPanel.Model section 同步:每条 model 加状态标 `[✓]`(绿)/ `[v1 待补]`(黄)/ `[v2+]`(灰).新增 L6 "Cross-cutting" 列 Lifecycle / Accessibility / Animation / Theme / i18n.footer 指向 doc.
+
+shell 0.6.14 → 0.6.15.9/9 dev_panel tests PASS,无回归.
 
 ### 0.6.14
 

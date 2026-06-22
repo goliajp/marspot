@@ -1,58 +1,71 @@
-# marspot UI 模型 — 完整设计 v2
+# marspot UI 模型 — 完整设计 v3
 
-> 2026-06-23 起草,polish 一遍把 v1 hand-wavy 的地方顶到现代框架
-> 的 state-of-art。
->
-> 这是 marspot UI 系统的**唯一**长期设计 doc。一个 1500-2000 LOC
-> 的 framework,够 chrome 类 UI(title strip / sidebar / modal /
-> tab strip / dev panel)长期用,不奢望做通用 GUI。
->
-> 参照系:CSS / SwiftUI / Jetpack Compose / Flutter / iced。每条
-> 都标注**抄了谁、砍了谁、为什么**。
+> 2026-06-23 v3.  v2 自查发现 SOTA framework 的常用 primitive 缺了
+> 不少(ScrollView / Image / Gesture 模型 / Identity-state 接通 /
+> Lifecycle / Accessibility / ...).v3 补齐设计、明确每条的 v1 vs
+> deferred 标记、给 implementation roadmap.
 
 ---
 
-## 0. 设计原则(总纲)
+## 目录
 
-1. **够 chrome 用就停**。砍掉的比留下的重要,见 §19。
-2. **CSS 心智 + SwiftUI 命名 + Flutter 算法**。各取最强一面,
-   不重新发明术语。
-3. **声明式 View 树 + Modifier chain + immediate-mode 渲染**。
-   View 树是 build 时的临时结构,每帧重建,不 retained,无 diff。
-4. **submission order = z order**(已建立的不变量)。
-5. **统一长度类型 `Length`**,统一容器形态 `View`,统一附加属性形态
-   `Modifier`。**没有第二套**。
-6. **Two-pass constraint layout**(参 Flutter / Compose)—— 父往下
-   传 constraints,子往上返 size。
-7. **不发明新名词**。`VStack`/`HStack`/`Spacer`/`Padding` 这些
-   词已经统一,直接用。
+- §0 设计原则
+- §1 五层结构概览
+- §2 L1 Foundation  — Length / Color / Tokens / Identity
+- §3 L2 Box Model — padding / border / radius / shadow / opacity / clip
+- §4 L3 Primitives — Canvas atoms (rect / line / text / image / gradient)
+- §5 L4 Layout — View tree + Modifier chain + Containers
+- §6 Constraints two-pass algorithm
+- §7 Gesture model
+- §8 Lifecycle + Stateful views
+- §9 Accessibility
+- §10 Animation (v2+)
+- §11 Theme + Tokens
+- §12 Rendering pipeline
+- §13 L5 Components
+- §14 Out of scope
+- §15 Implementation roadmap
+- §16 File structure
+- §17 SOTA self-assessment
+- §18 Reference comparison
 
 ---
 
-## 1. 五层概览
+## 0. 设计原则
+
+1. **够 chrome 用就停**.marspot 不是浏览器,不需要完整 CSS.
+2. **CSS 心智 + SwiftUI 命名 + Flutter 算法 + elm 状态流**.各取最强一面,不发明新词.
+3. **声明式 View 树 + Modifier chain + immediate-mode 渲染**.每帧重建 View 树,无 retained,无 diff.
+4. **submission order = z order**(已建立的不变量).
+5. **统一 `Length`,统一 `View`,统一 `Modifier`**.没有第二套.
+6. **Two-pass constraint layout**(Flutter / Compose 同形).
+7. **ActionId-based interaction**(elm-y / serializable),不 closure-based.
+
+---
+
+## 1. 五层结构概览
 
 ```
-┌──────────────────────────────────────────────────┐
-│  L5  Components    Tabs, Modal, Menu, Panel, ... │
-├──────────────────────────────────────────────────┤
-│  L4  Layout        View tree + Modifiers +       │
-│                    Constraints two-pass          │
-├──────────────────────────────────────────────────┤
-│  L3  Primitives    Canvas: rect / line / text    │
-├──────────────────────────────────────────────────┤
-│  L2  Box model     fill / border / radius /      │
-│                    shadow / padding              │
-├──────────────────────────────────────────────────┤
-│  L1  Foundation    Length / Color / Tokens       │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  L5  Components    Card, Sheet, Modal, ContextMenu,  │
+│                    Sidebar, Table, Panel, TabStrip,  │
+│                    DevPanel, Tooltip, …              │
+├──────────────────────────────────────────────────────┤
+│  L4  Layout        View tree + Modifier chain +      │
+│                    Containers + Gesture model        │
+├──────────────────────────────────────────────────────┤
+│  L3  Primitives    Canvas atoms: rect / line / text /│
+│                    image / gradient / path           │
+├──────────────────────────────────────────────────────┤
+│  L2  Box Model     padding / border / radius /       │
+│                    shadow / opacity / clip / mask    │
+├──────────────────────────────────────────────────────┤
+│  L1  Foundation    Length / Color / Tokens /         │
+│                    Identity / State map              │
+└──────────────────────────────────────────────────────┘
 ```
 
-L1-L3 已落地。**L4 是这份 doc 的新区**,L5 在 L4 落地后整体重写。
-明确分工:
-- L3 (Canvas) 是**绘画**层,接 GPU。
-- L4 (Layout) 是**摆位**层,纯几何计算,不画。
-- L4 落到 L3 的唯一方式 = layout 树跑完后 paint pass 把每个节点
-  对应的 primitives 提交进 Canvas。
+每层依赖下层,不反向.L4 是这份 doc 的新加点;L1-L3 已有基础需补.L5 在 L4 完备后整体重写.
 
 ---
 
@@ -61,763 +74,663 @@ L1-L3 已落地。**L4 是这份 doc 的新区**,L5 在 L4 落地后整体重写
 ### 2.1 `Length` — 单位
 
 ```rust
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Length {
-    /// 绝对逻辑 pt(scale-independent).Pt(1.0) ≡ CSS 1px.
-    Pt(f64),
-    /// 父轴的小数比例(0.0..1.0).Pct(0.5) ≡ CSS 50%.
-    Pct(f64),
-    /// chrome cell 宽度的 N 倍.Ch(1) ≡ CSS 1ch.终端域专用.
-    Ch(f64),
+    Pt(f64),     // 绝对逻辑 pt(scale-independent)
+    Pct(f64),    // 父轴小数比例(0.0..1.0)
+    Ch(f64),     // chrome cell 宽倍数(terminal-domain)
 }
 ```
 
 | | CSS | SwiftUI | Flutter | marspot |
 |---|---|---|---|---|
-| 绝对 | `px` | `Length` literal | logical px | `Pt(N)` |
-| 相对 | `%` | `Length::flexible` | `FractionallySizedBox` | `Pct(F)` |
-| 字符宽 | `ch` | n/a | n/a | `Ch(N)` |
-| viewport | `vw/vh` | `GeometryReader` | `MediaQuery` | n/a(走 Pct,只一个 window)|
-| em / rem | font-relative | `@ScaledMetric` | textScaleFactor | n/a(单 font cell)|
+| 绝对 | `px` | `Length` literal | logical px | `Pt(N)` ✓ |
+| 相对 | `%` | `Length::flexible` | `FractionallySizedBox` | `Pct(F)` ✓ |
+| 字符宽 | `ch` | n/a | n/a | `Ch(N)` ✓ |
 
-**v1 取消 `Length::Auto`** —— hug-content 走 `Option<Length>::None`,
-不在 Length 内部表达。Length 是**值**(resolve 出一个 f64),Auto
-是**意图**(让 layout 自己决定),两个层级不该混。
+**v1 已落.** `Ch` 在 mono 字体下 = cell width,CSS `ch` 在比例字体下 = "0" 字符宽度 —— 终端域两者等价.
 
-### 2.2 `Color`(已落)
+**砍** `Length::Auto` —— hug-content 走 `Option<Length>::None`(在 `FrameSpec.width` 等位置),不在 Length enum 里.viewport / em / rem 单位 marspot 不需要(单 NSWindow,单 font).
 
-`Color::rgba(r: u8, g: u8, b: u8, a: f32)`,等价 CSS `rgba(...)`。
-**不加**:HSL / OKLCH / color-mix / named-colors。
+### 2.2 `Color`
 
-### 2.3 Tokens — 语义层
+```rust
+pub struct Color { r: u8, g: u8, b: u8, a: f32 }
+```
+
+跟 CSS `rgba(r,g,b,a)` 一对一.**v1 已落.**
+
+**砍**:HSL / OKLCH / color-mix / named-colors / system colors.
+
+### 2.3 Tokens — 语义层(v1 部分落)
 
 ```rust
 pub mod token {
-    pub mod color {
-        pub const fg:           Color = …;  // 主前景
-        pub const fg_muted:     Color = …;  // 次前景
-        pub const fg_disabled:  Color = …;
-        pub const bg:           Color = …;
-        pub const bg_raised:    Color = …;  // panel / modal 背景
-        pub const bg_selected:  Color = …;  // 选中态
-        pub const bg_hover:     Color = …;
-        pub const border:       Color = …;
-        pub const divider:      Color = …;
-        pub const accent:       Color = …;
-        pub const danger:       Color = …;
-        pub const shadow:       Color = …;
-    }
-    pub mod space {
-        pub const XS: Length = Length::Pt(4.0);
-        pub const SM: Length = Length::Pt(8.0);
-        pub const MD: Length = Length::Pt(12.0);
-        pub const LG: Length = Length::Pt(16.0);
-        pub const XL: Length = Length::Pt(24.0);
-        pub const XXL:Length = Length::Pt(32.0);
-    }
-    pub mod radius {
-        pub const SM: Length = Length::Pt(3.0);
-        pub const MD: Length = Length::Pt(6.0);
-        pub const LG: Length = Length::Pt(10.0);
-        pub const PILL: Length = Length::Pt(9999.0); // 等价 9999px
-    }
+    pub mod color  { /* fg / fg_muted / bg / bg_raised / accent / danger / ... */ }
+    pub mod space  { pub const XS..XXL: Length }
+    pub mod radius { pub const NONE / SM / MD / LG / PILL: Length }
+    pub mod elev   { pub const E0 / E1 / E2 / E3: Shadow }      // 新加 §3.5
+    pub mod text   { pub const Caption / Body / Header / LargeHeader: TextStyle }   // 新加 §5.4
+    pub mod motion { pub const FAST / NORMAL / SLOW: Duration } // v2+
 }
 ```
 
-**规则**:组件代码用 `token::color::accent`,**不**直接写
-`Color::rgba(91, 162, 250, 1.0)`。
+**已落**: `color::*` (18 项), `space::*` (6 档), `radius::*` (4 档).
+**v1 应补**: `elev::*`(语义 elevation 阴影档,Material 风),`text::*`(语义文字 style 档).
+**v2+**: `motion::*` 时长 token,配合 §10 Animation.
 
-参照:CSS Custom Properties / Tailwind Theme / Material Design Tokens
-/ SwiftUI Semantic Colors。这是现代设计系统的最低标准,不做就跟
-不上。
+### 2.4 Identity / State map — **v1 必须接通**
+
+```rust
+#[derive(Copy, Clone, PartialEq, Eq, Hash)] pub struct ViewId(pub u32);
+
+pub trait HostState {
+    /// 拿 ViewId 对应的 stateful view 的 owned state(scroll
+    /// offset / cursor pos / 选中索引 / 展开状态 / hover bit /
+    /// focus bit / animation progress / ...).
+    fn get<T: 'static>(&self, id: ViewId) -> Option<&T>;
+    fn get_mut<T: 'static>(&mut self, id: ViewId) -> Option<&mut T>;
+    fn insert<T: 'static>(&mut self, id: ViewId, v: T);
+}
+```
+
+**v2 漏了什么**: `Modifier::Id(ViewId)` 只声明了,host 没 state map.于是 ScrollView / TextField / Toggle 这类 stateful view 无处寄存状态.
+
+**v1 必须做**:
+- ShellApp 持 `view_state: HashMap<ViewId, Box<dyn Any>>`
+- View 类型(下方提的 ScrollView / TextField 等)layout 时按 `id` 读 state,生 view 时按 state 决定渲染
+- ActionId 路由的事件 reducer 可以 `host.state.get_mut<ScrollState>(id).offset_y = ...`
+
+参照: SwiftUI `@State`(隐式 id 绑 parent)/ Compose `remember{}`(slot table)/ React `useState`(hook).我们走显式 `ViewId` —— 显式 = 可序列化 / 可单测 / 没 hidden magic.
 
 ---
 
 ## 3. L2 Box Model
 
-### 3.1 Border-box,永远
+### 3.1 Border-box 永远(已落)
 
-```
-┌─ size(w, h) ────────────────────────┐
-│  ┌─ border ────────────────────┐    │
-│  │  ┌─ padding ──────────────┐ │    │
-│  │  │     content rect       │ │    │
-│  │  └────────────────────────┘ │    │
-│  └─────────────────────────────┘    │
-└─────────────────────────────────────┘
-```
+`.size(w, h)` 量外缘.跟 CSS `box-sizing: border-box` 一致.
 
-`.size(w, h)` 量的永远是**外缘**(等价 CSS `box-sizing: border-box`)。
-**不支持 content-box**(CSS 原始默认,太容易踩坑,现代工具链全
-border-box)。
+### 3.2 没有 margin(已落)
 
-### 3.2 没有 margin
+margin collapse 是公认设计错误,SwiftUI/Compose/Flutter 都没.我们继承.
 
-`margin` 是 CSS 的历史包袱(margin collapse 是公认设计错误)。
-现代框架(SwiftUI / Compose / Flutter)都**没有 margin**,只有
-父级容器的 padding 或 `gap`。我们继承这条:
+### 3.3 Inside-stroke border(已落)
 
-| 想做的事 | 怎么做 |
-|---|---|
-| 元素自己有外间距 | 父容器加 `padding` 或 `gap` |
-| 单边外间距 | 父用 HStack/VStack + `Spacer` |
-| 全屏 padding | 父级 `Pad` 包一层 |
+border 内描边,不撑大尺寸.
 
-### 3.3 Inside-stroke border
+### 3.4 完整 modifier 表 — 补齐版
 
-已实现:`border(width, color)` 是从内侧吃掉 width 像素,size 不变。
-跟 web / SwiftUI / Compose 现代行为一致(CSS 默认 outside-stroke
-是历史遗留,box-sizing: border-box 之后等价 inside)。
+| Modifier | 现状 | v1 必须 | 说明 |
+|---|---|---|---|
+| `.padding(Edges)` | ✓ 已落 | ✓ | inset content |
+| `.background(Color)` | ✓ 已落 | ✓ | solid fill |
+| `.background(Gradient)` | ✗ | **v1 补** | 线性渐变;chrome polish |
+| `.background_material(Material)` | ✗ | **v1 补** | macOS NSVisualEffectView 包裹(vibrancy) |
+| `.border(Length, Color)` | ✓ 已落 | ✓ | inside-stroke |
+| `.corner_radius(Length)` | ✓ 已落 | ✓ | |
+| `.shadow(Shadow)` | ✓ 已落 | ✓ | 单 shadow;多层走 token `elev::E*` |
+| `.opacity(f64)` | ✗ | **v1 补** | 子树整体透明度(乘所有 child alpha) |
+| `.clip(ClipShape)` | ✗ | **v1 补** | rect / 圆角 rect 裁剪(用于 ScrollView / image fit) |
+| `.mask(View)` | ✗ | v2+ | 用 view 作 alpha mask;少用,留 slot |
+| `.frame(FrameSpec)` | ✓ 已落 | ✓ | width / height / min / max / aspect / align |
+| `.aspect_ratio(f64, ContentMode)` | △ 声明未实施 | **v1 补** | 保持 w/h 比;ContentMode = Fit | Fill |
+| `.offset(Length, Length)` | ✓ 已落 | ✓ | 主要给 ZStack 用 |
+| `.z_index(i32)` | △ 声明未读 | **v1 补** | ZStack 内重排 z 顺序;否则跟 submission order |
+| `.hidden(bool)` | △ 部分 | **v1 补** | 区分两种:`.hidden(true)` = 占空间不画(visibility:hidden);`.collapsed(true)` = 不占空间(display:none) |
+| `.on_hover(HoverId)` | △ 注册未驱动 | **v1 补** | 配合 §7 Gesture |
+| `.on_click(ActionId)` | ✓ 已落 | ✓ | |
+| `.on_double_click(ActionId)` | ✗ | **v1 补** | |
+| `.on_right_click(ActionId)` | ✗ | **v1 补** | |
+| `.on_drag(DragHandler)` | ✗ | **v1 补** | begin / move / end 三阶段 — §7 |
+| `.on_scroll(ScrollHandler)` | ✗ | **v1 补** | 滚轮事件落到当前 view |
+| `.on_key(KeyHandler)` | ✗ | v2+ | view 局部键盘事件 |
+| `.shortcut(KeyEquivalent, ActionId)` | ✗ | v2+ | Cmd-shortcut 注册 |
+| `.focusable(FocusId)` | ✗ | v2+ | 加入 Tab 导航环 |
+| `.accessibility_label(&str)` | ✗ | **v1 留 slot** | 不实施但声明,AX 后续补 |
+| `.id(ViewId)` | △ 声明未接 | **v1 补**(配合 §2.4 state map) | 稳定身份 |
+| `.transition(Transition)` | ✗ | v2+ | 进入 / 离开过渡(配合 §10 Animation) |
+
+**应用顺序**:modifier chain 从内到外 wrap.`.padding().background()` —— 背景 outside padding;`.background().padding()` —— 背景 inside padding.SwiftUI / Compose 都这样.
 
 ---
 
-## 4. L3 Primitives — Canvas(已落)
+## 4. L3 Primitives — Canvas atoms
 
-不重复 RFC。只补一点:**Canvas 不再是组件的 public API**。
-组件返 View 树,framework 走 layout + paint 两阶段把 View 翻译
-成 Canvas primitives。Canvas 退到**底层接口**,组件代码大多不直
-接见 Canvas。
+### 4.1 现有(已落)
+
+`Canvas` 内部 `Primitive` 队列:`Rect / Line / Text`,提交顺序 = z 顺序.
+
+### 4.2 v1 必须补
+
+**`Image`** —— 现在 chrome 图标是 hard-coded SDF,toolbar / icon button 没法用 view 树声明.
+
+```rust
+pub enum ImageSource {
+    /// Glyph atlas entry (renderer 现有 path)
+    Glyph(GlyphRef),
+    /// Inline RGBA bytes (PNG 解码后);Cache by Rc<...> id 避免重传 GPU
+    Raw(Rc<RawImage>),
+    /// IOSurface ref(将来支持外部图像)
+    IOSurface(u32),
+}
+
+pub struct Image {
+    pub source: ImageSource,
+    pub content_mode: ContentMode,   // Fit / Fill / Center
+    pub tint: Option<Color>,
+}
+```
+
+**`Gradient`** —— LinearGradient + 后续 RadialGradient.填充 / 背景用,chrome polish 关键.
+
+```rust
+pub enum Fill { Solid(Color), Linear(LinearGradient) }
+pub struct LinearGradient {
+    pub stops: Vec<(f64, Color)>,    // (0.0..1.0, color)
+    pub direction: GradientDir,      // TopBottom / LeftRight / 自定义 angle
+}
+```
+
+**`Shape`** primitive — 自定义 path(SVG-like beziers).chrome icon 用 SDF 或 path 走这条.声明 enum,实现可以后续(v1 先支持 Rect / RoundedRect / Circle / Capsule;复杂 path 留 v2+).
+
+### 4.3 v2+
+
+- **Path** — 任意 bezier
+- **Blur backdrop** — Metal pipeline 加 blur kernel,跑 vibrancy
+- **Mask compose** — view as alpha mask
 
 ---
 
 ## 5. L4 — View 树
 
-### 5.1 `View` 是什么
+### 5.1 View enum — 完整版
 
 ```rust
 pub enum View {
-    // ─── Atoms (叶子) ───
+    // ─── Atoms ─────────────────────────────────────
     Text(Text),
     Spacer(Spacer),
-    Filled(Filled),    // 纯色矩形(底层)
-    Hairline(Hairline),// 单像素分隔线
-    Canvas(CanvasRef), // 逃生舱:直接画 Canvas primitives
+    Filled(Filled),
+    Hairline(Hairline),
+    Divider(Divider),       // ← 新:semantic;比 Hairline 多 padding / style
+    Image(Image),           // ← 新
+    Shape(Shape),           // ← 新:Circle / Capsule / RoundedRect / Path
+    Canvas(CanvasRef),      // 逃生舱
 
-    // ─── Containers (有 children) ───
+    // ─── Containers ────────────────────────────────
     VStack(VStack),
     HStack(HStack),
     ZStack(ZStack),
+    Grid(Grid),             // ← 新:m×n;不夸张实现,Track auto/fixed/flex
+    ScrollView(ScrollView), // ← 新:clip + offset + 滚动
+    LazyVStack(LazyVStack), // ← 新:虚拟化长列表
+    LazyHStack(LazyHStack), // ← 新
 
-    // ─── Modified (modifier chain 内部表示) ───
-    Modified(Modified),
+    // ─── Stateful (需要 ViewId state map) ──────────
+    TextField(TextField),   // ← 新:文本输入
+    Toggle(Toggle),         // ← 新:on/off switch
+    Picker(Picker),         // ← 新:dropdown / segmented control
+
+    // ─── Modified (modifier chain 内部表示) ────────
+    Modified { child: Box<View>, mods: Vec<Modifier> },
 }
 ```
 
-View 树是**临时数据结构**,每帧 build 一次,layout + paint 完就丢。
-不 retained,没有 lifecycle。这点跟 SwiftUI / Compose 不同(它们
-都 retained + diff);跟 iced / egui 一致。
+### 5.2 容器细节 — 新加的
 
-**命名**取 SwiftUI 的 `View`(不是 Flutter 的 `Widget`,也不是
-CSS 的 `Element`)——
-- `View` 跨语义:既能是叶子也能是容器
-- SwiftUI 是当前桌面 / iOS UI 的事实标准,术语普及度最高
-- 我们继承命名 → 学习曲线 = 0
-
-### 5.2 Modifier chain
-
-API 形态走 SwiftUI / Compose fluent chain:
+**`ScrollView`** ——
 
 ```rust
-Text::new("hello")
-    .color(token::color::accent)
-    .size(TextSize::Header)
-    .padding(token::space::MD)
-    .background(token::color::bg_raised)
-    .border(Length::Pt(1.0), token::color::border)
-    .corner_radius(token::radius::MD)
-    .frame(width = Length::Pct(1.0))
-```
-
-**绝对不写**:
-
-```rust
-// ❌ wrapper struct 嵌套 — 2010-era 形态
-Sized {
-    width: Some(Length::Pct(1.0)),
-    child: Box::new(Pad {
-        padding: Edges::all(12.0),
-        child: Box::new(Bordered {
-            ...
-            child: Box::new(Text { ... })
-        })
-    })
-}
-```
-
-Modifier chain 内部还是返 `View::Modified(...)`,但 API 用户不直
-接见。这是 SwiftUI / Compose / Flutter modifiers 走了 8 年验过
-的形态,我们直接抄结论。
-
-### 5.3 Modifier 是什么
-
-```rust
-pub enum Modifier {
-    Padding(Edges),
-    Background(Color),
-    Border(Length, Color),
-    CornerRadius(Length),
-    Shadow(Shadow),
-    Frame(FrameSpec),     // width / height / min / max / aspect / alignment
-    Offset(Length, Length),
-    ZIndex(i32),          // 跟同 ZStack 内同级 view 排 z;不夸 ZStack 边界
-    Hidden(bool),
-    OnHover(HoverId),     // 注册 hit region 用
-    OnClick(ActionId),
-    Id(ViewId),           // 稳定 identity,见 §10
-}
-
-pub struct Modified {
+pub struct ScrollView {
     pub child: Box<View>,
-    pub mods: Vec<Modifier>,   // 顺序敏感:Padding 套 Border 套 BG 跟反过来,效果不同
+    pub direction: ScrollDir,       // Vertical / Horizontal / Both
+    pub id: ViewId,                 // ⚠ stateful — host 持 ScrollState
+    pub shows_indicators: bool,
+}
+
+pub struct ScrollState {            // host map 里
+    pub offset: (f64, f64),         // 当前 scroll 偏移(phys)
+    pub content_size: (f64, f64),   // 上次 layout 报的 content 总尺寸
 }
 ```
 
-应用顺序 = 数组里的顺序。**外侧后加的 modifier 包外侧** —— 跟
-SwiftUI / Compose 一致(modifier order matters)。
+Layout: child 在 unbounded 主轴上 layout,实际显示走 clip + offset.滚轮事件改 offset.
+Paint: 渲染前 push clip rect,paint child,pop clip.
 
-### 5.4 `Edges` / `FrameSpec` / `Anchor`(明确定义,不再 hand-wavy)
+**`LazyVStack` / `LazyHStack`** ——
 
 ```rust
-#[derive(Clone, Copy, Debug)]
-pub struct Edges {
-    pub top: Length,
-    pub right: Length,
-    pub bottom: Length,
-    pub left: Length,
-}
-impl Edges {
-    pub fn all(l: Length) -> Self;
-    pub fn xy(x: Length, y: Length) -> Self;  // 水平 / 垂直对称
-    pub fn only(top: Option<Length>, right: ..., bottom: ..., left: ...) -> Self;
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct FrameSpec {
-    pub width:  Option<Length>,   // None = hug
-    pub height: Option<Length>,
-    pub min_w: Option<Length>,
-    pub max_w: Option<Length>,
-    pub min_h: Option<Length>,
-    pub max_h: Option<Length>,
-    pub aspect: Option<f64>,      // w / h
-    pub align: Anchor,            // 子在自己 frame 里的对齐
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Anchor {
-    TopLeading,  Top,    TopTrailing,
-    Leading,     Center, Trailing,
-    BottomLeading, Bottom, BottomTrailing,
+pub struct LazyVStack {
+    pub items: Vec<View>,   // 调用方先准备好 — v1 不做真懒(lazy fn)
+    pub estimated_height: Length,
+    pub gap: Length,
+    pub id: ViewId,
 }
 ```
 
-`Anchor` 用 SwiftUI 的 Leading/Trailing(I18N-aware) — 即便我们 v1
-不做 RTL,这个命名让未来加 RTL 不破坏接口。Flutter 也是同套
-(`AlignmentDirectional`)。
+v1 取巧:items 仍预生成,但 layout 只跑可见区(基于 ScrollState offset).真"lazy fn" 留 v2+(需要 dyn trait 或 macro).
+
+**`Grid`** —— 简化 CSS Grid,只支持 fixed track + auto track:
+
+```rust
+pub struct Grid {
+    pub children: Vec<View>,
+    pub rows: Vec<GridTrack>,        // Pt(L) | Auto | Flex(N)
+    pub cols: Vec<GridTrack>,
+    pub gap: (Length, Length),       // (col_gap, row_gap)
+}
+```
+
+放弃 row-span / col-span(用 nested stack 替代);放弃 line-names / template-areas.
+
+### 5.3 Modifier chain(已落 + v1 补)
+
+见 §3.4.
+
+### 5.4 `Text` 完整 — 形式化字型 token
+
+```rust
+pub struct Text {
+    pub content: String,
+    pub style: TextStyle,    // ← 形式化,不再 size+weight+color 散
+    pub align: TextAlign,
+    pub lines: TextLines,
+}
+
+pub struct TextStyle {
+    pub size: TextSize,
+    pub weight: TextWeight,
+    pub color: Color,
+    pub italic: bool,
+}
+```
+
+`TextStyle` 提到 `token::text::*`:
+```rust
+pub mod text {
+    pub const Caption:     TextStyle = TextStyle { size: Caption, weight: Regular, color: FG_MUTED, ... };
+    pub const Body:        TextStyle = ...;
+    pub const Header:      TextStyle = ...;
+    pub const LargeHeader: TextStyle = ...;
+    pub const Code:        TextStyle = TextStyle { size: Body, weight: Regular, color: ACCENT_DIM, ... }; // 等宽强调
+}
+```
+
+调用方写 `Text::new("hi").style(token::text::Header)`,不再每次组合 size + weight + color.
+
+**修 v2 hack**:`TextWeight::Dim = alpha × 0.6` 退掉.Dim 改成 `style: text::Caption`(用 FG_MUTED color)或显式 `.color(...)`.
 
 ---
 
-## 6. Layout 算法 — Constraints two-pass
+## 6. Constraints two-pass algorithm
 
-抄 Flutter 的算法(也是 Compose / SwiftUI 内部用的),给具体伪码:
+(同 v2,已落.补一个之前漏说的不变量)
 
-### 6.1 数据结构
+### 6.1 新加不变量
 
-```rust
-#[derive(Clone, Copy)]
-pub struct Constraints {
-    pub min: (f64, f64),  // (w, h),逻辑 pt
-    pub max: (f64, f64),  // 可以是 INFINITY 表示"想多大都行"
-}
+- **Aspect ratio 优先级**:同时给 `width` + `height` + `aspect_ratio` 时,aspect_ratio 被忽略(显式 size 赢).只给 aspect_ratio + 一个维度时,推算另一维.
+- **Lazy 容器特例**:LazyVStack 的 layout 只跑当前 visible window 的 children,其余按 `estimated_height` 占位.
+- **Stateful view 特例**:layout 前从 `HostState` 读 ScrollState / TextField cursor / ...,把它们参与 layout 计算.
 
-#[derive(Clone, Copy)]
-pub struct Size { pub w: f64, pub h: f64 }
-```
+### 6.2 Intrinsic size queries(v1 补)
 
-### 6.2 算法
-
-```
-layout(view, constraints) -> Size:
-    match view:
-        Text(t):
-            text_w = chars * cell_w
-            text_h = lines * line_h
-            return clamp((text_w, text_h), constraints)
-
-        Filled(_) | Hairline(_):
-            return constraints.max  // 吃满给的
-
-        Spacer(s):
-            // Spacer 在 Stack 外不应出现;Stack 自己处理
-            return constraints.min
-
-        VStack(children, gap, align, distribute):
-            // ── Pass A: 量 non-Spacer children 的 intrinsic h ──
-            child_sizes = []
-            total_intrinsic_h = 0
-            n_flex = 0
-            sum_flex_weight = 0
-            cross_w = 0
-            for c in children:
-                if c is Spacer(flex):
-                    n_flex += 1
-                    sum_flex_weight += flex
-                    continue
-                // 给非 Spacer 子 unbounded h(它能多高就多高)
-                c_size = layout(c, Constraints {
-                    min: (cross_min, 0),
-                    max: (cross_max, INFINITY),
-                })
-                child_sizes[i] = c_size
-                total_intrinsic_h += c_size.h
-                cross_w = max(cross_w, c_size.w)
-
-            // ── Pass B: 剩余 height 分给 Spacers ──
-            usable_h = constraints.max.h
-            gap_total = gap * (children.len() - 1)
-            leftover_h = max(0, usable_h - total_intrinsic_h - gap_total)
-            // distribute: spaced / between 用 leftover 当 gap;
-            // start / center / end 不给 Spacer flex,Spacer 不存在时
-            // leftover 直接按 distribute 摆放
-            for s in spacers:
-                s_h = leftover_h * (s.flex / sum_flex_weight)
-
-            // ── Pass C: 算每个 child 的 y 位置 ──
-            ...(按 distribute / align)
-
-            return Size { w: cross_w (或 cross constraint), h: ... }
-
-        HStack: 同 VStack 轴对调
-
-        ZStack(children):
-            max_w = max_h = 0
-            for c in children:
-                c_size = layout(c, constraints)
-                max_w = max(max_w, c_size.w)
-                max_h = max(max_h, c_size.h)
-            return clamp((max_w, max_h), constraints)
-
-        Modified(child, mods):
-            // 应用 modifier 链:倒序还原 constraints,然后正序应用 size 包装
-            inner_c = constraints
-            for m in mods.reverse():
-                if m is Padding(e): inner_c = shrink(inner_c, e)
-                if m is Frame(f):   inner_c = clamp_to_frame(inner_c, f)
-                ...
-            inner_size = layout(child, inner_c)
-            outer_size = inner_size
-            for m in mods:
-                if m is Padding(e): outer_size = expand(outer_size, e)
-                if m is Frame(f):   outer_size = enforce(outer_size, f, constraints)
-                ...
-            return outer_size
-```
-
-复杂度 = O(N) 节点遍历两遍,跟 Flutter / Compose 同阶。
-
-### 6.3 关键不变量
-
-1. **Constraints 单调** — child 拿到的 max 永远 ≤ parent 拿到的 max
-   减去同级开销(gap / padding)
-2. **child 永远满足 parent 给的 constraints** — clamp 在 child 自己
-   的 layout 里完成;parent 信任 child 返回的 size 已 clamped
-3. **Pct 在 unbounded 轴上 = 0**(没法 100% 一个 infinity)— 调用者
-   需要显式 frame 才能让 Pct 工作
-
----
-
-## 7. Layout primitives
-
-| Primitive | 等价 |
-|---|---|
-| `VStack { gap, align, distribute }` | CSS `flex-direction: column` |
-| `HStack { gap, align, distribute }` | CSS `flex-direction: row` |
-| `ZStack { align }` | CSS `position: absolute` 叠 |
-| `Spacer { flex }` | CSS `flex: N` |
-| `Text` modifier `.frame()` | CSS `width / height` |
-| `Text` modifier `.padding()` | CSS `padding` |
-
-### 7.1 没有这些
-
-- **CSS Grid 完整规范** — chrome 用例少;Grid 类布局用 nested
-  V/HStack 替代,丢一点表达力换实现简单。需要时再加。
-- **Flexbox 完整** — 我们只取 row/column + spacer + gap + alignment
-  + distribute。`flex-wrap` / `order` / `flex-basis vs flex-grow vs
-  flex-shrink` 三件套全砍。
-- **Float / 文字环绕** — 不做。
-- **绝对定位 `position: absolute`** — 用 ZStack 替代;我们没 fixed /
-  sticky 概念。
-
----
-
-## 8. Hit Testing
-
-### 8.1 设计
-
-View 树跑完 layout 后,**每个 view 知道自己的 rect**。Hit testing
-= 从 root 往下走,后序遍历找最深的命中:
+Flutter 有 `IntrinsicWidth` / `IntrinsicHeight`,query child 的 preferred 尺寸.我们 v1 加一个简化版:
 
 ```rust
-fn hit(laid_out: &LaidOutTree, p: (f64, f64)) -> Option<HitTarget> {
-    // 后序 = 子 → 父,后画的(submission order 在上)优先命中
-    for child in laid_out.children.iter().rev() {
-        if let Some(h) = hit(child, p) { return Some(h); }
-    }
-    if laid_out.rect.contains(p) {
-        if let Some(action) = laid_out.on_click { return Some(action); }
-    }
-    None
+impl View {
+    /// 在不绑定 layout pass 的情况下查 self 的 intrinsic size.
+    /// 用于 parent 在算 main / cross 时不影响 child 真正 layout 的 query.
+    pub fn intrinsic_size(&self, ctx: LayoutCtx) -> Size;
 }
 ```
 
-`OnClick(action_id)` 是个 modifier:
+实现 = 跑一次 `layout(self, ctx, (0,0), Constraints::loose(INF, INF))`,记录 rect.
+
+---
+
+## 7. Gesture model — 新章
+
+### 7.1 事件类型
 
 ```rust
-HStack { ... }
-    .padding(token::space::MD)
-    .on_click(ActionId::ToolbarSidebar)
+pub enum InputEvent {
+    Click(Point),
+    DoubleClick(Point),
+    RightClick(Point),
+    DragBegin(Point),
+    DragMove { from: Point, to: Point, delta: (f64, f64) },
+    DragEnd { from: Point, to: Point },
+    Hover { at: Point, entered: bool },
+    Scroll { at: Point, delta: (f64, f64), precise: bool },
+    KeyDown(KeyCode, Modifiers),
+    KeyUp(KeyCode, Modifiers),
+}
 ```
 
-`ActionId` 是项目枚举(`marspot::ActionId`),不是 closure。事件
-循环捕到 click → hit_test → action_id → 路由到 reducer。这是 elm
-/ redux 套路 —— **完全可序列化**(testable / debuggable),好过
-closure-based。
+### 7.2 路由
 
-### 8.2 跟 SwiftUI / Compose / iced 对比
+view 树 hit_test 走 §8 同形(post-order, deepest+topmost wins).每个 InputEvent → ActionId → reducer.
 
-| | Closure-based(SwiftUI/Compose/iced) | ActionId-based(marspot) |
+```rust
+fn hit_test_event(laid: &LaidOut, ev: &InputEvent) -> Option<ActionId>;
+```
+
+Modifier 注册:
+- `.on_click(id)` — 普通 click
+- `.on_double_click(id)` — 双击
+- `.on_right_click(id)` — 右键(已有 marspot ContextMenu 路径)
+- `.on_drag(DragHandler)` — drag 三阶段;返三个 ActionId(begin/move/end)
+- `.on_scroll(handler)` — 滚轮在 view 上时触发
+- `.on_hover(hover_id)` — 跟 mouse-move 路径联动,host 持 `hover_id: Option<HoverId>`
+
+### 7.3 drag 状态机
+
+drag 跨多个 event(down + move × N + up).host 持 `drag_state: Option<DragInProgress>`.layout 期间 hit_test 锁定 begin 的 view,后续 move/up 不重 hit_test —— 这是 standard drag behavior(SwiftUI / AppKit / browser DOM 都这样).
+
+### 7.4 Keyboard
+
+**v1 不做** view 局部键盘事件;主窗口 key dispatch 仍在 `app::EventKind::Key` 这条主路径.modal/input field 这种需要 view 局部 key 的,等真做 TextField 时一起补.
+
+---
+
+## 8. Lifecycle + Stateful views — 新章
+
+### 8.1 Lifecycle hooks
+
+immediate mode + retained state map 需要"view 何时存在 / 何时消失"信号:
+
+- **首次出现** — host state map 里没有这个 ViewId,但本帧 view 树有
+- **持续存在** — id 在 map 跟 tree 都有
+- **消失** — id 在 map 有,但本帧 tree 没
+
+```rust
+pub trait LifecycleHook {
+    fn on_appear(&mut self, ctx: &mut HostState);
+    fn on_disappear(&mut self, ctx: &mut HostState);
+}
+
+// 每帧 build_view 跑完,framework 自动 reconcile:
+//   new_ids = tree.collect_ids()
+//   for id in old_ids - new_ids: state.on_disappear(); state.remove(id);
+//   for id in new_ids - old_ids: state.on_appear();
+```
+
+**v1 必须做** —— ScrollView / TextField 状态需要在 disappear 时清掉,否则 memory leak.
+
+### 8.2 Stateful Views — v1 加哪些
+
+| View | 状态 | 用例 |
 |---|---|---|
-| 写法 | `.onTapGesture { state.toggle() }` | `.on_click(ActionId::ToggleSidebar)` |
-| state 来源 | closure capture | reducer 拿 ActionId 改 state |
-| testable | closure 难 unit-test | reducer 纯函数 |
-| serializable | 否 | 是(可以日志 / 回放) |
-| 写法噪声 | 短 | 长一行(需要 enum 定义) |
+| `ScrollView` | offset, content_size | 任何长列表 |
+| `LazyVStack` | offset(继承 parent ScrollView)| 长列表虚拟化 |
+| `TextField` | text, cursor_pos, selection, focused | 重命名 / 输入 |
+| `Toggle` | on (bool) | settings |
+| `Picker` | selected_idx | dropdown / segmented |
 
-closure-based 是更"看起来熟"的现代风。**marspot 反其道,选 ActionId**
-理由:
-- marspot 已经走 elm-ish 架构(`CoreEvent` enum → main loop dispatch)
-- closure 在 immediate-mode 里管 lifetime 痛(每帧重建 closure 还
-  要持有什么?)
-- 日志 / 回放 / debug 完整可序列化的事件链 = 长期债务大幅降低
+**只做 v1 真用得到的**:ScrollView + TextField.其余先声明,实施按 demand.
 
----
+### 8.3 上游 host 集成
 
-## 9. State + Interaction
-
-### 9.1 单向数据流
-
-```
-        host state (DevPanelState / ContextMenuState / ...)
-              │
-              ▼
-        build_view(state) -> View tree
-              │
-              ▼
-        layout(View, Constraints) -> LaidOut tree
-              │
-              ├─→ paint → Canvas → encode_canvas → GPU
-              │
-              └─→ hit_test(LaidOut, pointer) -> Option<ActionId>
-                              │
-                              ▼
-                       reducer(state, ActionId) (改 host state)
-                              │
-                              ▼
-                  request_redraw() → 回到 build_view
+ShellApp 加:
+```rust
+view_state: HashMap<ViewId, Box<dyn ViewState>>,
+hover: Option<HoverId>,
+focus: Option<FocusId>,
+drag: Option<DragInProgress>,
 ```
 
-跟 elm / redux 完全一致。**没有响应式信号(SolidJS / Leptos),没有
-virtual DOM(React),没有双向绑定(Vue)。**
-
-### 9.2 Hover / Focus
-
-- **Hover** = host 持 `hover_id: Option<HoverId>`,pointer move 命中
-  hit_test 改 hover_id,redraw。`.on_hover(HoverId)` modifier 注册
-  hit region。
-- **Focus** = host 持 `focus_id: Option<FocusId>`,Tab / Shift+Tab
-  在 focusable 环里走。`.focusable(FocusId)` modifier 加入环。
-
-跟 click 同 ActionId 模式,只是 enum 改名。
+每帧:
+1. `build_view(&host_state)` → View tree
+2. `layout(tree, ctx, ...)` → LaidOut tree(从 state map 读 ScrollState 等)
+3. paint
+4. event-loop 进来 event → `hit_test_event(laid, ev)` → ActionId → reducer 改 host state
+5. `reconcile_state(laid, &mut host_state)`(跑 appear/disappear)
+6. `request_redraw()`
 
 ---
 
-## 10. Identity / Keys(动画铺垫)
+## 9. Accessibility — 新章(留 v2 接口)
 
-**问题**:无 retained tree 时,怎么让 "同一个" view 跨帧保持身份?
-两种场景需要:
-- **未来动画**:某 row 从 y=20 → y=40 平移,需要知道这是同一个 row
-- **现在文本输入框**:光标 / 选区状态附着在某个 view 上,view 重
-  build 之后状态不能丢
+**v1 不实施**,但接口 reserve:
 
-**SwiftUI / Compose 解法**:用 view 在树里的**结构位置**作隐式
-identity(`ForEach` 提供显式 id 时用显式)。Flutter 用 `Key`。
+- `.accessibility_label(&str)` modifier — view 给出的 AX 文本
+- `.accessibility_role(AxRole)` — Button / Heading / ListItem / TextField / Image / ...
+- `.accessibility_traits(AxTraits)` — Selected / Disabled / FocusedSection / ...
 
-**marspot 解法**:`Modifier::Id(ViewId)` —— 显式 view id。host 持
-一个 `Map<ViewId, ViewState>`,每帧 build 时不变;view 内部状态
-通过这个 map 访问。
-
-v1 暂不需要 stateful view(我们只有 chrome,所有 state 都在
-host),但 modifier 留 slot,未来加 input field 直接用。
+实施时绑 `objc2-app-kit::NSAccessibility`,把 LaidOut tree 翻译成 AX tree.v1 写 `Modifier::AccessibilityLabel(String)` enum,layout 时 bake 进 LaidOut,paint 时忽略.AX dispatch 路径整个留 v2+.
 
 ---
 
-## 11. Typography
+## 10. Animation(v2+)
 
-### 11.1 v1
+(同 v2)
 
-- 单一 monospace chrome font(跟 terminal grid 用的字体)
-- `TextSize` enum:`Caption(0.85)` / `Body(1.0)` / `Header(1.2)` /
-  `LargeHeader(1.5)`,各乘 cell_h 得 line height
-- `.weight(Regular | Bold | Dim)` — Dim = alpha 模糊化
-- `.align(Leading | Center | Trailing)`
-- `.lines(Single { truncate: End | Middle | None } | Wrap { max: u32 })`
-
-### 11.2 不做
-
-- 字符级 span / rich text(terminal grid 自己 cell-level 着色,
-  chrome 用不上)
-- 多 font-family(增加 font cache / glyph atlas 复杂度,marspot
-  chrome 不需要)
-- 字间距 / 行间距单独可调(跟 size 绑死即可)
-
-参照:CSS `font-size` / SwiftUI `Font.Style` / Compose `Typography`
-都比这复杂一个量级;我们故意收窄。
-
----
-
-## 12. Theme
-
-v1 = 一个 `Dark` theme 跑天下。Token module 是单一 source of
-truth,组件代码引用 token 名,不引用字面值。
-
-**架构上预留**(不实施):
+v1 完全不做.架构留空间走 time-based Anim<T>:
 
 ```rust
-pub enum ThemeId { Dark, Light, HighContrast, /* future user themes */ }
-pub fn theme() -> &'static Theme  // 全局
-pub fn set_theme(id: ThemeId)
+pub struct Anim<T> { from: T, to: T, started_at: Instant, duration: Duration, curve: Curve }
 ```
 
-切 theme = 改全局 + 全 redraw。简单粗暴,够用。
+加 `.transition(t: Transition)` modifier —— 控制 view 进入 / 离开时的视觉 transition.implement 时,host 持有 anim 列表,layout / paint 看是否要插值.
 
 ---
 
-## 13. 渲染管线
+## 11. Theme + Tokens
+
+### 11.1 v1 加 ThemeId 全局
+
+```rust
+pub enum ThemeId { Dark, Light, HighContrast }
+
+pub fn theme() -> &'static Theme;
+pub fn set_theme(id: ThemeId);
+```
+
+v1 只实现 Dark.token module 内部根据 active ThemeId 切换常量.set_theme 触发全 redraw.
+
+### 11.2 token 完整清单
+
+跟 §2.3 一致.关键加:
+- `elev::E0..E3` — Material 风 elevation shadow 档
+- `text::*` — TextStyle 语义档(§5.4)
+- `motion::FAST/NORMAL/SLOW` — duration 档(v2+)
+
+---
+
+## 12. Rendering pipeline
 
 ```
 host state
-   │
-   ▼
-[build_view(state)]    ← 每帧调,纯计算,返 View tree
-   │
-   ▼ View tree
-[layout(view, root_constraints)]    ← Constraints two-pass
-   │
-   ▼ LaidOut tree (每节点有 rect)
-[paint(laid_out)]    ← 后序 traversal,push 进 Canvas
-   │
-   ▼ Canvas (Primitive queue)
-[encode_canvas(canvas, encoder)]    ← 已落,GPU 提交
-   │
-   ▼ Metal pipeline
-   pixels
+   ↓
+build_view(state)              ← 每帧调,返 View tree
+   ↓
+layout(view, ctx, constraints) ← Constraints two-pass
+   ↓ LaidOut tree (rect / deco / hit_regions)
+reconcile_state(laid)          ← appear / disappear hook
+   ↓
+paint(laid) → Canvas           ← submission order = z order
+   ↓
+encode_canvas(canvas, encoder) ← GPU
 ```
 
-**每帧重建整树,不复用**。代价:O(N) build + O(N) layout + O(N)
-paint。在 marspot chrome 规模(几十到几百节点)下完全免费(<0.5ms)。
-省下来不要 retained tree / diff / reconciliation 的复杂度,**净
-赚**。
+**每帧重建整树**,O(N) build + O(N) layout + O(N) paint + O(N) reconcile.marspot chrome 规模(几百节点)< 1ms.省 retained tree / diff / reconciliation 的复杂度,净赚.
 
 ---
 
-## 14. Animation(v2+)
+## 13. L5 Components
 
-**v1 完全不做**。理由:
-- marspot 核心 perf 红线 = `idle CPU = 0`。Animation 要么持续
-  redraw,要么事件驱动 schedule 下一帧 —— 都跟 idle 0 冲突
-- 没有真用户报"动画不够顺滑"
-- chrome UI 用静态切换体验已经够
+V1 必有(在重写顺序上从浅到深):
 
-**v2+ 路径**(留架构空间):
-
-```rust
-pub struct Anim<T> {
-    pub from: T,
-    pub to: T,
-    pub started_at: Instant,
-    pub duration: Duration,
-    pub curve: Curve,
-}
-```
-
-redraw 时 host 检查活跃 Anim,有 → schedule 下一帧 → 按 t 插值;
-无 → 0 redraw。**不引入 retained tree**,依然是 immediate mode +
-插值 state。
-
-参照:SwiftUI `withAnimation` 是这模型;CSS transitions 也是
-(只是声明在 stylesheet)。
-
----
-
-## 15. Accessibility / i18n(v2+)
-
-- v1 不做 VoiceOver / NSAccessibility tree
-- v1 不做 RTL
-- 必须留接口:每个 actionable view 至少有 `ViewId`,将来 AX label
-  能挂上去
-
----
-
-## 16. 实施 roadmap
-
-按 effort × 收益:
-
-| 阶段 | 内容 | LOC | 阻塞 |
+| Component | 何时迁 | 难度 | 状态 |
 |---|---|---|---|
-| **P3a** | `token` module 收口,各 component 改用 token | ~200 | — |
-| **P3b** | `Length::Ch(N)` + Canvas builder 支持 | ~80 | — |
-| **P3c** | `View` enum + `Modified` + Modifier 链 + `Edges` / `FrameSpec` / `Anchor` 类型 | ~250 | P3a |
-| **P3d** | `Constraints` + `layout(view, c)` two-pass | ~400 | P3c |
-| **P3e** | `VStack` / `HStack` / `Spacer` 实现 | ~250 | P3d |
-| **P3f** | `ZStack` 实现 | ~100 | P3e |
-| **P3g** | Text 上 `.size` / `.weight` / `.align` / `.truncate` | ~200 | P3c |
-| **P3h** | Hit testing tree-walk + `ActionId` 路由 | ~150 | P3e |
-| **P3i** | Migrate ContextMenu / LayoutModal / DevPanel / Table / Sidebar 上 View 树 | ~600 | P3g + P3h |
-| **P3j** | `ViewPainter` 退役 | ~−400(净删) | P3i |
-| **P3k** | `theme()` global + ThemeId(Dark only impl)| ~120 | P3a |
+| **DevPanel.Model section** | now | ★ | ✓ 已迁(0.6.13)|
+| **TabStrip** | P3i.1 | ★ | 待 |
+| **ContextMenu** | P3i.2 | ★★ | 已用 Canvas,待迁 View 树 |
+| **Tooltip**(新)| P3i.3 | ★★ | hover-trigger popup |
+| **Card** / **Panel**(新 preset)| P3i.4 | ★ | 单纯 modifier 组合 |
+| **Sidebar** | P3i.5 | ★★ | ScrollView + 行 click |
+| **Table** | P3i.6 | ★★★ | LazyVStack + 列定义 |
+| **LayoutModal** | P3i.7 | ★★ | Modal + card grid + drag |
+| **DevPanel 主框架** | P3i.8 | ★★ | tab strip + menu + content area |
+| **ProcessMonitor** | P3i.9 | ★★★ | Table + 实时数据 |
+| **SearchOverlay** | P3i.10 | ★★ | TextField + LazyVStack |
 
-总:~2150 LOC 加,~400 删,**净 +1750 LOC**。可分 1-2 周完成,
-P3a → P3k 串行 / 部分可并行。
+ViewPainter 退役 = 上面全迁完之后顺手做的事.
 
 ---
 
-## 17. 文件结构(实施后)
+## 14. 明确不做
+
+| 不做 | 原因 |
+|---|---|
+| 完整 CSS Grid(template-areas / line-names / span)| 用嵌套 stack 替代 |
+| `flex-wrap` / `order` / `flex-basis` | 增 layout 复杂度,chrome 用例少 |
+| `margin`(含 negative) | margin collapse 公认错误 |
+| `position: sticky / fixed` | 终端 chrome 没用 |
+| CSS animation / transition / keyframes | v2+ Anim<T> 路径 |
+| CSS transform / matrix3d | 没场景 |
+| Pseudo-classes / -elements | host state + modifier 模拟 |
+| Media queries | 单 NSWindow,直接 Pct |
+| 响应式 / signals / observable | immediate 够 |
+| Virtual DOM / diff / reconciliation | 每帧重建,N 小,免费 |
+| 多 font-family / icon font | SDF + glyph atlas 已覆盖 |
+| 多 theme JSON / TOML | 自用阶段没人配 |
+| 多语言 / RTL / unicode bidi | v1 中英文 LTR 够;Leading/Trailing 命名留 RTL 接口 |
+| Subpixel font hinting | macOS 默认 grayscale |
+| Print stylesheet | (笑)|
+| 3D transform / perspective | 没场景 |
+| Custom GLSL shader per view | 渲染层粒度对不上 |
+
+---
+
+## 15. Implementation roadmap
+
+按 effort × 收益,P3a-h+k 已落 (~1500 LOC);v3 新加阶段:
+
+| 阶段 | 内容 | LOC | 阻塞 | 状态 |
+|---|---|---|---|---|
+| **P3a** | token module | ~200 | — | ✓ |
+| **P3b** | Length::Ch | ~80 | — | ✓ |
+| **P3c** | View enum + Modifier 基础 + Edges/Anchor/FrameSpec | ~250 | P3a | ✓ |
+| **P3d-f** | Constraints + VStack/HStack/ZStack + Spacer | ~750 | P3c | ✓ |
+| **P3g-h** | paint pass + hit_test_click | ~290 | P3d | ✓ |
+| **P3k** | theme entrypoint | ~50 | P3a | ✓(基础) |
+| **P3l** | TextStyle 形式化 + token::text::* | ~120 | P3c | 待 |
+| **P3m** | Opacity / Clip / Aspect ratio modifier 实施 | ~200 | P3d | 待 |
+| **P3n** | Gesture model — DragBegin/Move/End + Hover state | ~280 | P3h | 待 |
+| **P3o** | HostState `view_state` map + reconcile | ~200 | P3c | 待 |
+| **P3p** | ScrollView + ScrollState + scroll event 路由 | ~350 | P3n+o | 待 |
+| **P3q** | Image / Gradient fill / Material(macOS vibrancy) | ~400 | P3c | 待 |
+| **P3r** | LazyVStack/HStack(简版,基于 ScrollView) | ~250 | P3p | 待 |
+| **P3s** | TextField + Toggle + Picker(stateful)| ~500 | P3o+n | 待 |
+| **P3t** | Lifecycle on_appear / on_disappear | ~150 | P3o | 待 |
+| **P3u** | Accessibility label / role / traits stub(留 v2 接口) | ~100 | P3c | 待 |
+| **P3v** | ThemeId 全局 + Light theme tokens | ~150 | P3k | 待 |
+| **P3i.1-10** | 10 个 component 迁到 View 树 | ~1500 | 上面足够多落 | 待 |
+| **P3j** | ViewPainter 退役 | -400 净删 | P3i 完 | 待 |
+
+**总 v3 新加**:~3000 LOC + ~1500 LOC component 迁移 - 400 LOC 删 = 净 +4100 LOC.分批 2-3 周完成.
+
+**优先级**:P3l-o 是"完整 stateful view + state map"的核心,必须打通;P3p (ScrollView) 是马上要用的;P3q (Image / Material) 是 chrome polish 必须;P3r-s 按 demand 跟 component 迁移.
+
+---
+
+## 16. 文件结构(v3)
 
 ```
 src/ui/
 ├── core/                       ← L1 + L3
 │   ├── units.rs                Length (Pt / Pct / Ch)
 │   ├── color.rs                Color
-│   ├── canvas.rs               Canvas (lower-level than View, paint backend)
+│   ├── canvas.rs               Canvas (Primitive: Rect/Line/Text/Image/Gradient/Shape)
+│   ├── image.rs                ← 新:ImageSource / ContentMode
+│   ├── gradient.rs             ← 新:LinearGradient / RadialGradient
+│   ├── shape.rs                ← 新:Circle / Capsule / RoundedRect / Path
 │   └── mod.rs
-├── theme/                      ← L1 token (P3a / P3k)
-│   ├── token.rs                color / space / radius / typography
-│   ├── dark.rs                 Dark theme 实例
+├── theme/                      ← L1 token
+│   ├── token.rs                color / space / radius / elev / text / motion
+│   ├── dark.rs                 Dark theme(v1)
+│   ├── light.rs                Light theme(v2+)
 │   └── mod.rs
-├── view/                       ← L4 (P3c-h)
-│   ├── view.rs                 enum View + trait helpers
-│   ├── modifier.rs             Modifier enum + Edges / FrameSpec / Anchor
+├── view/                       ← L4
+│   ├── view.rs                 enum View + fluent helpers
+│   ├── modifier.rs             Modifier enum
+│   ├── types.rs                Edges / FrameSpec / Anchor / AlignCross / Distribute / Shadow
+│   ├── ids.rs                  ActionId / HoverId / FocusId / ViewId
 │   ├── stack.rs                VStack / HStack / ZStack
-│   ├── spacer.rs               Spacer
-│   ├── text.rs                 Text view + 字号 / weight / align / truncate
+│   ├── grid.rs                 ← 新:Grid 简化版
+│   ├── scroll.rs               ← 新:ScrollView + ScrollState
+│   ├── lazy.rs                 ← 新:LazyVStack / LazyHStack
+│   ├── text.rs                 Text + TextStyle
+│   ├── image.rs                ← 新:Image view
+│   ├── input.rs                ← 新:TextField / Toggle / Picker
+│   ├── divider.rs              ← 新:semantic Divider
 │   ├── constraints.rs          Constraints + layout pass
-│   ├── paint.rs                paint pass (LaidOut tree → Canvas)
-│   ├── hit_test.rs             Hit testing
+│   ├── paint.rs                paint pass
+│   ├── hit_test.rs             hit-test (click / right_click / drag / hover / scroll)
+│   ├── gesture.rs              ← 新:InputEvent / DragInProgress / 状态机
+│   ├── lifecycle.rs            ← 新:reconcile_state(LaidOut, &mut HostState)
 │   └── mod.rs
-├── components/                 ← L5 (P3i — 整体重写)
-│   ├── dev_panel.rs
+├── components/                 ← L5(P3i 整体重写)
+│   ├── dev_panel.rs            ✓ Model section 已迁,主框架 P3i.8
 │   ├── context_menu.rs
 │   ├── layout_modal.rs
 │   ├── table.rs
 │   ├── sidebar.rs
+│   ├── tab_strip.rs
+│   ├── tooltip.rs              ← 新
+│   ├── card.rs                 ← 新 preset
 │   └── mod.rs
-└── system/macos/               ← AppKit 桥(不在本 doc 范围)
+└── system/macos/               ← AppKit 桥
+    ├── accessibility.rs        ← 新:NSAccessibility 绑定(v2+)
+    ├── material.rs             ← 新:NSVisualEffectView 绑定(P3q)
+    ├── traffic_lights.rs       (现有)
+    └── ...
 ```
 
 ---
 
-## 18. State of the Art Check — 这是最先进的模型吗?
+## 17. SOTA self-assessment(更新版)
 
-**Yes, for our scope**。逐家对比:
+| 维度 | SwiftUI | Compose | Flutter | iced | egui | marspot v3 plan |
+|---|---|---|---|---|---|---|
+| API 形态 | View struct + modifier | Composable + modifier | Widget + 嵌套 | fluent + closure | imperative | ✓ View enum + modifier chain |
+| 树形 | retained + diff | retained + diff | retained + diff | immediate | immediate | immediate(取舍:简单 + serializable) |
+| 状态 | @State property | remember{} slot table | InheritedWidget | closure capture | id-scoped | ✓ ActionId reducer + HostState map(elm-y) |
+| 动画 | withAnimation 自动 | animateAsState | AnimationController | n/a 弱 | n/a | v2+ Anim<T> |
+| Layout | Constraint propagation | Constraints two-pass | Constraints two-pass | flexbox-y | layout fn | ✓ Constraints two-pass(Flutter 同) |
+| Scroll | ScrollView | LazyColumn | ListView | scrollable | ScrollArea | **P3p 待补** |
+| Image | Image / SF Symbol | painterResource | Image.asset | n/a 弱 | image | **P3q 待补** |
+| Gesture | gesture modifiers | Modifier.pointerInput | GestureDetector | Subscription | InputState | **P3n 待补**(本框架最弱处) |
+| AX | 自动 + manual | 自动 + manual | 自动 + manual | 弱 | 弱 | **stub 留 slot,v2+ 实施** |
+| Theme | ColorScheme env | MaterialTheme | Theme | wgpu palette | Visuals | ✓ token + ThemeId |
+| Material backdrop | .background(.regularMaterial) | n/a iOS-only | n/a | n/a | n/a | **P3q 必须**(macOS chrome 关键) |
 
-### vs SwiftUI(2019-now)
+**结论 v3**:
+- **Layout 算法 / View 树 / Modifier chain / State 流** —— 跟 SwiftUI/Compose/Flutter 持平
+- **Scroll / Image / Gesture** —— v2 缺,v3 补,补齐后跟它们持平
+- **Animation / Accessibility** —— v2+;留接口
+- **immediate-mode + 每帧重建** —— 跟 iced/egui 同;放弃自动 state 延续 + 自动动画 = 有意识取舍
+- **跟 CSS / DOM** —— 拿心智,砍实现复杂度;现代框架共识方向
 
-| 维度 | SwiftUI | marspot | 差异 |
-|---|---|---|---|
-| API 形态 | View struct + modifier chain | View enum + modifier chain | **持平** |
-| 树形 | retained + diff | immediate(每帧重建) | 取舍:我们简单,SwiftUI 自动状态延续 |
-| 状态 | `@State` / `@Binding` property wrapper | host state + ActionId reducer | 取舍:我们 testable + serializable,SwiftUI 写法短 |
-| 动画 | `withAnimation` 自动插值 | **v1 没有** | SwiftUI 赢,但 v2+ 我们能补 |
-| Layout | Constraint propagation | Constraints two-pass | **持平** |
-| AX | 自动 + 手动 hint | **v1 没有** | SwiftUI 赢,但接口 reservation 留好 |
-
-**结论:核心 API 持平,生态 / 自动化少一截 —— 但这是 marspot
-scope 的合理取舍,不是技术债**。
-
-### vs Jetpack Compose(2021-now)
-
-跟 SwiftUI 一样的模型(retained + modifier chain),实现细节差。
-Compose 用 Kotlin coroutines / Recomposer 做 incremental update,
-marspot 不需要(immediate rebuild 已够)。**持平**。
-
-### vs Flutter(2018-now)
-
-- Layout 算法:**完全一致**(Constraints two-pass)
-- Widget tree:Flutter retained,marspot immediate — 同上取舍
-- Rendering:Flutter Skia,marspot Metal + Canvas — 持平
-- State:Flutter `InheritedWidget` / `Provider`,marspot host state —
-  marspot 简单
-
-### vs iced(Rust)
-
-- API:iced fluent + closure-based 事件,marspot fluent + ActionId
-  enum — marspot 更 redux-y / serializable
-- Layout:iced 内部也 constraints,但封装不如 Compose 干净 — **持平**
-- 渲染:iced wgpu 多后端,marspot Metal 单后端 — 跨平台 iced 赢
-  但 marspot 不要跨平台
-
-### vs egui(Rust immediate-mode)
-
-- API:egui 还是 imperative `ui.button("hi")` 风;marspot declarative
-  View 树 — **marspot 更现代**
-- Layout:egui 顺序流式简陋;marspot constraints 算法完整 —
-  **marspot 赢**
-- 状态:egui 内部状态藏 widget id 里,marspot host state 显式 —
-  **marspot 干净**
-
-### vs CSS + DOM(浏览器栈)
-
-不在同一量级。浏览器栈是 30 年技术债 + ergonomic 沼泽。marspot
-取 CSS 的**心智模型**(box-sizing / px / % / rgba),砍掉**实现复
-杂度**(cascading / specificity / pseudo-classes / @media / flex-wrap
-spec 等)。**这是现代 UI 框架的共识**(SwiftUI / Compose / Flutter
-都这么做)。
+**For our scope, SOTA.** 唯一未到 SOTA 的是 Gesture(P3n 补)、ScrollView(P3p 补)、Image(P3q 补);这些不是创新空白,是抄结论的事.
 
 ---
 
-## 19. 明确不做(避免范围蠕变)
+## 18. Reference comparison
 
-| 不做 | 原因 |
-|---|---|
-| 完整 CSS Grid | nested Stack 够 |
-| `flex-wrap` / `order` / `flex-basis` | 增加 layout pass 复杂度,chrome 用例少 |
-| margin(包括 negative margin) | margin collapse 是公认设计错误,SwiftUI/Compose/Flutter 都没 |
-| `position: sticky / fixed` | 终端 chrome 没用 |
-| CSS animation / transition / keyframes | v1 不做,v2+ 走 Anim<T> 路径 |
-| CSS transform / matrix3d | 没场景 |
-| Pseudo-classes(`:hover` / `:focus`)| 走 host state + modifier(`.on_hover`) |
-| Media queries / 响应式 | 只有 dev panel + 主窗 两个 NSWindow,直接 Pct |
-| 响应式 / signals / observable | immediate-mode 够 |
-| Virtual DOM / diff / reconciliation | 每帧重建,N 小,免费 |
-| 多 font-family / icon font | SDF + glyph atlas 已经覆盖 |
-| 多 theme JSON / TOML | 自用阶段没人配 |
-| 多语言 / RTL / unicode bidi | v1 中英文 LTR 够 |
-| Subpixel font hinting | macOS 已默认走 grayscale,我们跟 |
-| Print stylesheet | (笑)|
+| 系统 | 抄了 | 没抄 |
+|---|---|---|
+| CSS | 单位 / box model / rgba / 心智 | 完整 spec / Grid / animation / 选择器 / cascading / 伪类 |
+| SwiftUI | View enum + modifier chain / Anchor / @State 概念(改 elm)/ Frame / Padding 命名 | property wrapper / Combine / 自动状态绑定 / 自动动画 |
+| Jetpack Compose | Modifier 链 / Constraints / LazyColumn 概念 | Recomposer / Kotlin coroutines / Slot table |
+| Flutter | Constraints two-pass / Widget 命名(改 View)/ Spacer / Expanded | Widget retained tree / RenderObject / GestureDetector closure / Provider |
+| iced / egui | 立即模式精神 | message-bus / 完整 widget 库 |
 
 ---
 
-## 20. 一句话
+## 19. 一句话(updated)
 
-**marspot UI v1 = CSS 心智 + SwiftUI 命名 + Flutter Constraints
-two-pass + immediate-mode 渲染 + elm/redux 状态流。** 砍掉
-reactivity / 完整 CSS / animation / 多 theme / i18n / AX,留下
-View tree + Modifier chain + token system 三件套,做 chrome 类
-UI 长期最简最稳的形态。
+**marspot UI v3 = CSS 心智 + SwiftUI 命名 + Flutter Constraints 算法 + immediate-mode 渲染 + elm/redux 状态流 + 完整 stateful view 集(ScrollView / TextField / Toggle / Picker / LazyVStack)+ 完整 gesture(Click/Drag/Hover/Scroll/Shortcut)+ macOS Material backdrop + Accessibility stub 留 v2 接口.**
 
-**Is this the most advanced model for our scope?** 是。跟 SwiftUI /
-Compose / Flutter 的 layout 算法持平,跟它们的 retained tree 取
-舍我们选 immediate(代价:无自动 state 延续 / 无自动动画 — 用
-ActionId + Anim<T> v2+ 补)。比 iced / egui 的 API 形态更现代。
-比 CSS / DOM 的实现复杂度低两个数量级 —— 这是 SOTA 的共识方向,
-我们站在这条线的最右侧。
+跟所有现代 UI framework 的 SOTA 取舍 align;砍掉不适用 marspot scope 的 reactivity / 完整 CSS / 自动动画 / 多 theme / i18n / AX 实施.最终 ~5000 LOC framework 长期养 marspot 所有 chrome.
