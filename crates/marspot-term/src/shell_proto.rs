@@ -290,6 +290,11 @@ pub enum MsgType {
     // discriminant is left as a hole so a future L3 (briefly on the
     // old binary across an install) sending a PaneCwd frame just
     // falls into the unknown-msg-type silent-skip path.
+    /// L2 → L1: user clicked the toolbar's dev-panel toggle icon.
+    /// Empty payload.  L1 owns the dev panel's NSWindow (built in
+    /// `run_app`), L2 just routes the click — L2 doesn't keep its
+    /// own visibility state, L1 is the single source of truth.
+    DevPanelToggle = 55,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -333,6 +338,7 @@ impl MsgType {
             51 => MsgType::SearchResults,
             52 => MsgType::SearchMore,
             53 => MsgType::SearchCancel,
+            55 => MsgType::DevPanelToggle,
             200 => MsgType::Error,
             _ => return None,
         })

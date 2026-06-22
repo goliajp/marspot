@@ -897,11 +897,6 @@ struct CoreApp {
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
     context_menu: Option<ContextMenuState>,
-    /// UI-system dev panel — the workbench where tokens, primitives
-    /// and components are exercised in isolation.  Default-open so
-    /// fresh installs see it; toggle via toolbar button (added in a
-    /// later commit) or persistence (also coming).
-    dev_panel: marspot::ui::components::DevPanelState,
     /// Modal-staged cols / rows.  Updated by clicks on the modal's
     /// +/- steppers; committed to `grid_cols` / `grid_rows` on Apply.
     /// Initialised from grid_* every time the modal opens.
@@ -3073,10 +3068,12 @@ impl CoreApp {
             self.needs_render = true;
             return;
         }
-        // UI-system dev panel toggle.
+        // UI-system dev panel toggle.  L2 doesn't own dev panel
+        // visibility — L1 (marspot-shell) hosts the NSWindow.  Route
+        // the click via `DevPanelToggle` wire frame; L1 flips state
+        // + drives the AppKit show/hide on its main loop.
         if self.layout.hit_test_dev_panel_button(x_phys, y_phys) {
-            self.dev_panel.visible = !self.dev_panel.visible;
-            self.needs_render = true;
+            self.pending_to_shell.push((MsgType::DevPanelToggle, Vec::new()));
             return;
         }
         // F3+3.0 — when the LayoutModal is open, intercept ALL
@@ -3682,16 +3679,12 @@ impl CoreApp {
         let panel_data = self.build_process_panel_render();
         self.renderer.set_process_panel(panel_data);
         // F3+9 — publish ContextMenu render state every frame.
-        // Dev panel renders into its own NSWindow now, not into
-        // the main grid render.  Keep set_dev_panel(None) so any
-        // residual in-main-window paint is suppressed.
+        // Dev panel renders into its own NSWindow, owned by L1
+        // (marspot-shell), not by L2.  L2's only job re: dev panel
+        // is to (a) hit-test the toolbar toggle icon and (b) emit
+        // a `DevPanelToggle` wire frame on click; L1 takes it from
+        // there.  No call here.
         self.renderer.set_dev_panel(None);
-        marspot::dev_window::with_dev_window(|w| {
-            w.set_visible_deferred(self.dev_panel.visible);
-            if self.dev_panel.visible {
-                w.render(&self.dev_panel);
-            }
-        });
 
         self.renderer.set_context_menu(self.context_menu.as_ref().map(|state| {
             use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
@@ -4218,7 +4211,6 @@ fn main() {
         grid_rows,
         layout_modal_open: false,
         context_menu: None,
-        dev_panel: marspot::ui::components::DevPanelState::default(),
         pending_grid_cols: grid_cols,
         pending_grid_rows: grid_rows,
         card_slots: (0..(grid_cols * grid_rows)).collect(),

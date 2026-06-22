@@ -17,7 +17,20 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.5**
+Current: **0.6.6**
+
+### 0.6.6
+
+UI-system dev panel 接入 installed 环境(从 sandbox 搬过来).在 toolbar 第 4 个 chrome icon 点一下,独立的 dev panel NSWindow 显示/隐藏;位置、尺寸、可见性都持久化到 `~/Library/Caches/marspot/dev-window-state.bin`(MAGIC 0xA5505012),L1 self-execv / 重启都保留.
+
+实现拆三块:
+- 新 `MsgType::DevPanelToggle = 55` wire frame(L2 → L1,空 payload).
+- L2 (`marspot-core`):删掉 L2 那份死代码的 `dev_panel: DevPanelState` 字段;icon click 改成 push `DevPanelToggle` 帧.L2 不再保留可见性,L1 是 single source of truth.
+- L1 (`marspot-shell`):接管 `dev_panel: DevPanelState`,接收 `DevPanelToggle` 帧 → 翻 visible + 保存状态.`MarspotApp` trait 加 `dev_window_changed` 默认 no-op hook,`dev_window` 自己的 `NSWindowDelegate` 触发的 `DevWindowChanged` event 现在跑过 app 回调,L1 借此 dedup 写盘(round 到 pt + cache last_saved_dev_window).redraw 路径每帧调 `dev_window::with_dev_window` 同步 AppKit 可见性 + render.
+
+新加 `state::SavedDevWindow { display_id, x, y, w, h, visible }` + `read_dev_window` / `write_dev_window`(跟 main 的 `SavedWindow` 同布局多一个 visible bit).`dev_window::apply_saved_frame` 用来 boot 时 restore;`display_id` 跟 main 同 NSScreenNumber 取法.
+
+工作流变更:`bin/run.sh` sandbox 不再做 UI 迭代,直接 `bin/install-local.sh` 在 installed 环境跑.
 
 ### 0.6.5
 
@@ -41,7 +54,13 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.67**
+Current: **0.10.68**
+
+### 0.10.68
+
+toolbar 的 dev panel icon click 改 fire 新 wire(`MsgType::DevPanelToggle = 55`),路由到 L1.L2 删掉自己那份 `dev_panel: DevPanelState`(本来就是 no-op 死代码 —— `dev_window::with_dev_window` 在 L2 进程里永远是 None),也删掉 redraw 路径里那段 dead `dev_window::with_dev_window(|w| w.render(...))` 调用.L2 在 dev panel 这件事上只负责"hit-test 那个 icon 矩形 + 发 wire 帧",其余全在 L1.
+
+详细见 L1 shell 0.6.6 同期条目.
 
 ### 0.10.67
 

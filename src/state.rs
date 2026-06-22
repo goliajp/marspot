@@ -124,6 +124,78 @@ pub fn write_window(s: &SavedWindow) -> io::Result<()> {
     Ok(())
 }
 
+// ─── Dev window persistence ───────────────────────────────────────
+// Separate file from the main window's state so writes don't race
+// against each other (each AppKit window writes its own state
+// independently).  Same file-format style as `SavedWindow`.
+
+/// Persisted frame for the UI-system dev panel's independent NSWindow.
+/// Includes a `visible` bit so the user's "dev window open / closed"
+/// preference also survives across launches.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedDevWindow {
+    pub display_id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// True = open on next launch, false = hidden.
+    pub visible: bool,
+}
+
+const DEV_WINDOW_MAGIC: u32 = 0xA5505012;
+const DEV_WINDOW_VERSION: u32 = 1;
+
+pub fn dev_window_state_file_path() -> PathBuf {
+    let base: PathBuf = match std::env::var_os("MARSPOT_STATE_DIR") {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(home).join("Library/Caches/marspot")
+        }
+    };
+    base.join("dev-window-state.bin")
+}
+
+pub fn read_dev_window() -> Option<SavedDevWindow> {
+    let body = std::fs::read(dev_window_state_file_path()).ok()?;
+    let mut cur = Cursor::new(body.as_slice());
+    if read_u32(&mut cur)? != DEV_WINDOW_MAGIC { return None; }
+    if read_u32(&mut cur)? != DEV_WINDOW_VERSION { return None; }
+    let display_id = read_u32(&mut cur)?;
+    let x = read_f64(&mut cur)?;
+    let y = read_f64(&mut cur)?;
+    let w = read_f64(&mut cur)?;
+    let h = read_f64(&mut cur)?;
+    let visible = read_u8(&mut cur)? != 0;
+    Some(SavedDevWindow { display_id, x, y, w, h, visible })
+}
+
+pub fn write_dev_window(s: &SavedDevWindow) -> io::Result<()> {
+    let path = dev_window_state_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body: Vec<u8> = Vec::with_capacity(48);
+    body.extend_from_slice(&DEV_WINDOW_MAGIC.to_le_bytes());
+    body.extend_from_slice(&DEV_WINDOW_VERSION.to_le_bytes());
+    body.extend_from_slice(&s.display_id.to_le_bytes());
+    body.extend_from_slice(&s.x.to_le_bytes());
+    body.extend_from_slice(&s.y.to_le_bytes());
+    body.extend_from_slice(&s.w.to_le_bytes());
+    body.extend_from_slice(&s.h.to_le_bytes());
+    body.push(s.visible as u8);
+    let mut tmp = path.clone();
+    tmp.set_extension("bin.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&body)?;
+        f.sync_all().ok();
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 /// Resolve `~/Library/Caches/marspot/shell-state.bin`, respecting
 /// `MARSPOT_STATE_DIR` for dev sandbox / test paths.
 pub fn state_file_path() -> PathBuf {

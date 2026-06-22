@@ -476,6 +476,10 @@ enum ShellInbox {
     /// L2 → L1: user pressed Esc 3× in 5 s; force-end the session
     /// regardless of plugin opinion.
     PaneSessionUserEscape(u64),
+    /// L2 → L1: user clicked the toolbar's dev-panel toggle icon.
+    /// L1 owns the dev panel's NSWindow visibility; the click here
+    /// just flips that bit and the redraw cycle picks it up.
+    DevPanelToggle,
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -749,6 +753,16 @@ struct ShellApp {
     /// session_id.  At most one per pane.
     active_pane_sessions:
         std::collections::HashMap<u64, ActivePaneSession>,
+    /// UI-system dev panel state.  L1 owns this because L1 hosts the
+    /// dev panel's independent NSWindow (built in `run_app` →
+    /// `dev_window::ensure_built`).  L2 sends `DevPanelToggle`
+    /// wire frames on icon click; L1 flips `visible` and the redraw
+    /// path drives the AppKit show/hide.
+    dev_panel: marspot::ui::components::DevPanelState,
+    /// Last persisted dev-window geometry, used to dedup writes the
+    /// same way `last_saved_window` does for the main window.
+    last_saved_dev_window:
+        Option<(f64, f64, f64, f64, u32, bool)>,
 }
 
 /// Bundle: the plugin's session object + the metadata we need to log
@@ -832,6 +846,8 @@ impl ShellApp {
             inject_input_rx,
             pane_badge_tx_clone,
             active_pane_sessions: std::collections::HashMap::new(),
+            dev_panel: marspot::ui::components::DevPanelState::default(),
+            last_saved_dev_window: None,
         }
     }
 
@@ -1760,6 +1776,15 @@ impl ShellApp {
             ShellInbox::PaneSessionUserEscape(sid) => {
                 self.end_pane_session(sid, plugins::EndReason::UserEscape);
             }
+            ShellInbox::DevPanelToggle => {
+                self.dev_panel.visible = !self.dev_panel.visible;
+                // Save state now so the user's preference survives
+                // any subsequent L1 self-execv (silent update) or
+                // crash — the redraw path drives the AppKit-side
+                // show/hide separately.
+                self.save_dev_window_state_if_changed(ctx);
+                ctx.request_redraw();
+            }
         }
     }
 
@@ -1901,6 +1926,40 @@ impl ShellApp {
             );
         }
     }
+
+    /// Mirror of `save_window_state_if_changed` for the dev panel's
+    /// independent NSWindow.  Same dedup + atomic-write strategy.
+    /// `_ctx` is unused for now (dev window is queried directly via
+    /// `dev_window::with_dev_window`), but kept on the signature to
+    /// mirror the main-window helper and leave room for future
+    /// MarspotAppCtx integration.
+    fn save_dev_window_state_if_changed(&mut self, _ctx: &MarspotAppCtx) {
+        let frame = marspot::dev_window::with_dev_window(|w| {
+            (w.frame_pt(), w.display_id().unwrap_or(0))
+        });
+        let ((x, y, w, h), display_id) = match frame {
+            Some(v) => v,
+            None => return, // dev window not built yet
+        };
+        let visible = self.dev_panel.visible;
+        let cur = (
+            x.round(), y.round(), w.round(), h.round(),
+            display_id, visible,
+        );
+        if self.last_saved_dev_window == Some(cur) {
+            return;
+        }
+        self.last_saved_dev_window = Some(cur);
+        let saved = marspot::state::SavedDevWindow {
+            display_id, x, y, w, h, visible,
+        };
+        if let Err(e) = marspot::state::write_dev_window(&saved) {
+            marspot::lx_warn!(
+                "shell.dev_window_state.write_failed",
+                &format!("{e}")
+            );
+        }
+    }
 }
 
 impl MarspotApp for ShellApp {
@@ -1919,6 +1978,23 @@ impl MarspotApp for ShellApp {
                 .register(Box::new(plugins::claudecode::ClaudecodePlugin::new()));
             self.plugin_registry.init_all_with(&self.plugin_host);
             self.plugin_registry.start_all_with(&self.plugin_host);
+        }
+
+        // Restore the dev panel's saved frame + visibility, if any.
+        // `dev_window::ensure_built` already ran via `run_app`, so the
+        // NSWindow exists but starts hidden at its default geometry.
+        if let Some(saved) = marspot::state::read_dev_window() {
+            marspot::dev_window::with_dev_window(|w| {
+                w.apply_saved_frame(saved.x, saved.y, saved.w, saved.h);
+            });
+            self.dev_panel.visible = saved.visible;
+            // Seed the dedup tuple so the first `dev_window_changed`
+            // tick doesn't trip a save with the same values.
+            self.last_saved_dev_window = Some((
+                saved.x.round(), saved.y.round(),
+                saved.w.round(), saved.h.round(),
+                saved.display_id, saved.visible,
+            ));
         }
 
         let pair = match SurfacePair::create(w_px, h_px) {
@@ -2196,7 +2272,30 @@ impl MarspotApp for ShellApp {
         ctx.exit();
     }
 
+    fn dev_window_changed(&mut self, ctx: &MarspotAppCtx) {
+        // User dragged / resized the dev window or moved it between
+        // displays.  Persist the new geometry (dedup'd internally so
+        // a live-drag's 60+/s notifications collapse to one write
+        // per pt change).
+        self.save_dev_window_state_if_changed(ctx);
+    }
+
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
+        // Sync the dev panel's NSWindow visibility against the L1
+        // state bit, and render its contents when visible.  Cheap
+        // when nothing changed: `set_visible_deferred` only writes
+        // a thread-local; AppKit show/hide runs in
+        // `drain_pending_actions` after `dispatch_event`.  `render`
+        // is a no-op when the window isn't visible.
+        let dp_visible = self.dev_panel.visible;
+        let dp_state = self.dev_panel.clone();
+        marspot::dev_window::with_dev_window(|w| {
+            w.set_visible_deferred(dp_visible);
+            if dp_visible {
+                w.render(&dp_state);
+            }
+        });
+
         // Hold off until the core has written real content.  Without
         // this gate the user sees an uninitialised IOSurface for
         // ~50-100 ms at startup, then a hard snap to content — reads
@@ -2271,6 +2370,12 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         marspot::shell_proto::decode_pane_session_user_escape(&frame.payload)
                             .ok()
                             .map(ShellInbox::PaneSessionUserEscape)
+                    }
+                    MsgType::DevPanelToggle => {
+                        // Empty payload by design; the message itself is
+                        // the signal.  L1 is the single source of truth
+                        // for dev-panel visibility.
+                        Some(ShellInbox::DevPanelToggle)
                     }
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.

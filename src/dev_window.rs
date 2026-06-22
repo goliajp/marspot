@@ -255,11 +255,43 @@ impl DevWindow {
         self.nswindow.isVisible()
     }
 
-    /// Logical-pt frame of the dev window (x, y, w, h).
-    /// Persists for later commits; not yet read by the renderer.
+    /// Logical-pt frame of the dev window (x, y, w, h).  Used by L1
+    /// to persist the window's geometry to `dev-window-state.bin`.
     pub fn frame_pt(&self) -> (f64, f64, f64, f64) {
         let f = self.nswindow.frame();
         (f.origin.x, f.origin.y, f.size.width, f.size.height)
+    }
+
+    /// `CGDirectDisplayID` (u32) of the screen this window is on.
+    /// Mirrors `MarspotAppCtx::window_display_id` so the persistence
+    /// record round-trips identically to the main window's record.
+    pub fn display_id(&self) -> Option<u32> {
+        unsafe {
+            let screen = self.nswindow.screen()?;
+            let desc = screen.deviceDescription();
+            use objc2_foundation::{NSNumber, NSString};
+            let key = NSString::from_str("NSScreenNumber");
+            let val = desc.objectForKey(key.as_ref())?;
+            let ptr: *const objc2::runtime::AnyObject = &*val;
+            let num: &NSNumber = &*(ptr as *const NSNumber);
+            Some(num.unsignedIntValue())
+        }
+    }
+
+    /// Restore a previously-saved geometry.  Logical pt, screen
+    /// coordinates (bottom-left origin per NSWindow).  `set_frame`
+    /// silently clamps to a usable region — off-screen geometry from
+    /// a now-disconnected display is dealt with by AppKit, not us.
+    pub fn apply_saved_frame(&self, x: f64, y: f64, w: f64, h: f64) {
+        if w < 50.0 || h < 50.0 {
+            // Corrupt persistence — refuse rather than draw a slit.
+            return;
+        }
+        let r = NSRect::new(
+            NSPoint::new(x, y),
+            NSSize::new(w, h),
+        );
+        unsafe { self.nswindow.setFrame_display(r, true); }
     }
 
     /// Render the dev panel state into our own Metal layer.  No-op

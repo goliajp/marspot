@@ -135,6 +135,13 @@ pub trait MarspotApp: 'static {
     /// Fired when a previous `ctx.request_redraw()` is being honoured.
     /// Repaint the window here.
     fn redraw(&mut self, ctx: &MarspotAppCtx);
+
+    /// The dev panel's independent `NSWindow` was moved / resized /
+    /// changed displays.  Apps that persist dev-window geometry hook
+    /// this to save state.  Default no-op so non-dev-panel apps don't
+    /// have to care.  The `dev_window` module is the data source —
+    /// query `dev_window::with_dev_window(|w| w.frame_pt())` etc.
+    fn dev_window_changed(&mut self, _ctx: &MarspotAppCtx) {}
 }
 
 /// Handle passed to every `MarspotApp` callback.  Owns the NSWindow /
@@ -953,8 +960,11 @@ fn dispatch_event(kind: EventKind) {
             EventKind::CloseRequested => app.close_requested(ctx),
             EventKind::DevWindowChanged => {
                 // The dev window's NSWindowDelegate noticed a resize
-                // / move / etc.  Drive a redraw so the dev panel
-                // recomputes against the new content area.
+                // / move / etc.  Hand the event to the App impl so
+                // L1 can persist the new geometry, then drive a
+                // redraw so the dev panel recomputes against the
+                // new content area.
+                app.dev_window_changed(ctx);
                 ctx.request_redraw();
             }
         }
