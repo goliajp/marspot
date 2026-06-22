@@ -1411,9 +1411,11 @@ impl CoreApp {
             // safe in case the filter shape ever changes.
             LinkKind::Email => return Vec::new(),
         };
+        // Copy on top — primary intent in a terminal context is
+        // "grab this URL/path", not "launch the browser".
         vec![
-            MenuItem::entry(open_label, ContextMenuAction::OpenLink.tag()),
             MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
+            MenuItem::entry(open_label, ContextMenuAction::OpenLink.tag()),
         ]
     }
 
