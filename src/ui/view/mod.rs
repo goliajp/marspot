@@ -13,6 +13,8 @@
 pub mod types;
 pub mod view;
 pub mod layout;
+pub mod paint;
+pub mod hit_test;
 
 pub use types::{
     AlignCross, Anchor, Distribute, Edges, FrameSpec, Shadow,
@@ -27,3 +29,5 @@ pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,
 };
+pub use paint::{paint, paint_into};
+pub use hit_test::{hit_test_click, hit_test_hover, HitTarget};
