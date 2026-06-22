@@ -283,3 +283,56 @@ User sees nothing until step 11.
 I will answer 1+2 by reading shader / pipeline setup BEFORE
 writing P2.  Answer 3 by writing both and seeing which the
 migration sweep prefers.
+
+## Answers to open questions (read-the-source pass)
+
+### Q1: cells pipeline blend state
+
+ANSWER: **already enabled.**  `src/render_metal.rs::build_bg_pipeline`
+sets the standard SrcAlpha / (1-SrcAlpha) blend:
+- line 4341: `attachment.setBlendingEnabled(true);`
+- line 4344-4347: `SourceAlpha` → `OneMinusSourceAlpha`.
+
+My F3+12.5 debug note "cells doesn't blend, that's why red was
+invisible" was the **fourth fabrication** in this branch.  Logged
+in [[feedback-no-invented-technical-claims]].  The actual cause
+the red didn't show was encode order:  overlay_cells encodes
+BEFORE overlay_ui_rects, and the menu frame (ui_rects, opaque
+SrcAlpha=1.0) covered the red regardless of cells-side blend.
+
+P2 implication: cells pipeline already does what we need —
+unified queue can route to cells without changing the pipeline
+state.  Z-order is the only thing to fix.
+
+### Q2: submission-z-order vs existing pass order
+
+Main render pass order (`render_metal.rs` line 1346-1507):
+1. BG cells (Clear)
+2. Dots (Load)
+3. UI rects SDF (Load)
+4. Mono glyphs (Load)
+5. Colour glyphs (Load)
+
+Overlay pass order (line 1516-1594, repeated):
+1. overlay_cells
+2. overlay_ui_rects
+3. overlay_mono_glyphs
+4. overlay_colour_glyphs
+
+So both main and overlay are "BG → UI → glyphs"; my divider
+red rect went into overlay_cells = drawn before menu frame.
+
+P2 strategy: SAME unified queue carries Primitive { z, payload }
+for both main and overlay.  Encoder walks the queue in z-order,
+switching pipelines on payload type change.  Roughly 4-8 extra
+encoder objects per overlay frame (cheap).
+
+For text-vs-rect interaction: a later-submitted rect WILL cover
+earlier-submitted text in the same Z bracket — this is the
+new contract, callers stack accordingly.  Existing components
+all submit "frame first, then content" so the migration is a
+direct mapping.
+
+### Q3: layout primitive shape (Box vs typed builder)
+
+Deferred to P3 prototype.  Will write both and pick.
