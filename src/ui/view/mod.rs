@@ -13,6 +13,7 @@
 pub mod types;
 pub mod view;
 pub mod scroll;
+pub mod state;
 pub mod layout;
 pub mod paint;
 pub mod hit_test;
@@ -42,3 +43,7 @@ pub use scroll::{
     forget as forget_scroll_state,
 };
 pub use view::scroll_view;
+pub use state::{
+    HostState, HOST_STATE, with_host_state, with_host_state_mut,
+    reconcile,
+};

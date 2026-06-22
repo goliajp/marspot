@@ -3708,10 +3708,14 @@ pub(crate) fn push_text_run(
     };
     let mut x = x_start;
     for ch in text.chars() {
+        // Wide-char(CJK ideographs / fullwidth / opt-in ambiguous) = 2
+        // cells.  Advance x by the same n_cells used for rasterisation —
+        // otherwise the next glyph overlaps the wide one by 1 cell, which
+        // is the 2026-06-23 "中文乱麻" report.
+        let n_cells = crate::grid::char_width(ch).max(1) as u16;
         let (font_idx, glyph) = font.resolve_char(ch, false, false);
         if glyph != 0 {
             let ct_font = font.font(font_idx).clone();
-            let n_cells = crate::grid::char_width(ch).max(1) as u16;
             if let Some(entry) = atlas.get_or_rasterize(
                 GlyphKey { font_id: font_idx as u32, glyph },
                 &ct_font,
@@ -3729,7 +3733,7 @@ pub(crate) fn push_text_run(
                 });
             }
         }
-        x += cell_w;
+        x += cell_w * n_cells as f32;
     }
 }
 

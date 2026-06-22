@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.17"  # P3l TextStyle 形式化 + P3m Opacity/Clip/AspectRatio/Collapsed 真实施 + P3n Gesture modifier 完整化(DoubleClick/RightClick/Scroll/DragBegin + hit_test_*)
-core    = "0.10.68" # toolbar dev icon click → DevPanelToggle wire → L1
+shell   = "0.6.18"  # P3o HostState 通用 + P3t lifecycle reconcile 骨架
+core    = "0.10.69" # 修 push_text_run x 推进不按 char_width — CJK 真正乱码根因 + lifecycle reconcile / HostState 跟着
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

@@ -17,7 +17,23 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.17**
+Current: **0.6.18**
+
+### 0.6.18
+
+P3o HostState 通用 + P3t lifecycle reconcile 骨架.
+
+新 `src/ui/view/state.rs`:
+- `HostState` — `HashMap<(ViewId, TypeId), Box<dyn Any>>` 按 (id, T) 双键存,同一 ViewId 可挂多种 stateful 类型(eg 一个 view 同时有 ScrollState 和 TextFieldState 不冲突)
+- `get<T> / get_mut<T> / insert<T> / entry_or_default<T> / remove<T> / retain_ids` 6 个公开 API
+- thread_local `HOST_STATE` + `with_host_state` / `with_host_state_mut` 闭包入口
+- `reconcile(&laid)` — 遍历 LaidOut 树收集所有 ViewId (Modifier::Id + ScrollView 自带 id),retain HOST_STATE 中存在的 keys,其他丢掉(on_disappear)
+
+老 `scroll::SCROLL_STATES` thread_local 暂保留(P3o 第二步迁过去再删,API 兼容).
+
+未来 stateful view(TextField / Toggle / Picker / LazyVStack offset)按统一 pattern 走 HOST_STATE.
+
+4 个 state unit tests PASS.无 lib 回归.
 
 ### 0.6.17
 
@@ -257,7 +273,15 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.68**
+Current: **0.10.69**
+
+### 0.10.69
+
+修 `push_text_run` x 推进 — CJK 乱码真根因.0.6.16 用户报"中文还是乱麻",但我以为只是 layout 端 chars().count() 算窄了.其实 renderer 端 `push_text_run` 在 `render_metal.rs:3732` `x += cell_w` 无条件前进 1 cell,但 glyph 按 `n_cells = char_width(ch)` 画到 2 cell 槽里.结果 CJK 字按 2 cell 宽渲染,但下一个字 x 只往前 1 cell → 下一字跟前一字的右半边撞.
+
+修:`x += cell_w * n_cells as f32`.跟 `entry.n_cells` 用同一张 char_width 表的结果保持一致.
+
+shell 0.6.17 → 0.6.18 (HostState 通用).无 lib 回归.
 
 ### 0.10.68
 
