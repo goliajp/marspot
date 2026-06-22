@@ -40,7 +40,7 @@ use objc2::runtime::ProtocolObject;
 use objc2::ClassType;
 use objc2::DeclaredClass;
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSView, NSWindow, NSWindowDelegate,
+    NSBackingStoreType, NSColor, NSEvent, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
@@ -88,6 +88,65 @@ declare_class!(
             // DPI.  Re-render so the next frame picks up the new
             // backingScaleFactor.
             crate::app::dispatch_event_pub(crate::app::EventKind::DevWindowChanged);
+        }
+    }
+);
+
+// ─── Custom NSView with mouseDown routing ─────────────────────
+// Without this, AppKit swallows clicks inside the dev window's
+// content area — the user can drag the title bar but the menu /
+// tab strip in our canvas are inert.  DevPanelView captures the
+// mouseDown event, converts to logical pt in view-local coords
+// (isFlipped=true so y=0 is at top, matching Canvas), and
+// dispatches `EventKind::DevPanelClick`.
+
+struct DevPanelViewIvars;
+
+declare_class!(
+    struct DevPanelView;
+
+    unsafe impl ClassType for DevPanelView {
+        #[inherits(objc2_app_kit::NSResponder, objc2::runtime::NSObject)]
+        type Super = NSView;
+        type Mutability = mutability::MainThreadOnly;
+        const NAME: &'static str = "MarspotDevPanelView";
+    }
+
+    impl DeclaredClass for DevPanelView {
+        type Ivars = DevPanelViewIvars;
+    }
+
+    unsafe impl NSObjectProtocol for DevPanelView {}
+
+    unsafe impl DevPanelView {
+        #[method(acceptsFirstResponder)]
+        fn accepts_first_responder(&self) -> bool { true }
+
+        // First click on a non-key window lands AS a click (vs just
+        // activating the window).  Without this the user has to click
+        // twice when switching from main marspot window to dev panel.
+        #[method(acceptsFirstMouse:)]
+        fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool { true }
+
+        // y=0 at top, matching Canvas's coord convention.
+        #[method(isFlipped)]
+        fn is_flipped(&self) -> bool { true }
+
+        #[method(mouseDown:)]
+        fn mouse_down(&self, event: &NSEvent) {
+            let loc_window = unsafe { event.locationInWindow() };
+            // convertPoint:fromView:nil = window coords → view coords;
+            // with isFlipped=true this yields top-down y in logical pt.
+            let loc_view = self.convertPoint_fromView(loc_window, None);
+            // Canvas / dev panel layout are in logical pt — pass them
+            // straight through, no scaling.  L1's `dev_panel_click`
+            // hit-tests against the same `Pt` constants.
+            crate::app::dispatch_event_pub(
+                crate::app::EventKind::DevPanelClick {
+                    x_pt: loc_view.x,
+                    y_pt: loc_view.y,
+                },
+            );
         }
     }
 );
@@ -143,9 +202,21 @@ impl DevWindow {
             NSPoint::new(0.0, 0.0),
             NSSize::new(initial_w, initial_h),
         );
+        // Custom NSView subclass so mouseDown / acceptsFirstMouse
+        // wire up — vanilla NSView swallows clicks.  Keep the
+        // subclass type alive in `dpv` and use a raw-ptr upcast
+        // when handing to NSWindow / storing in the struct's
+        // `Retained<NSView>` field (same trick as `app.rs::setContentView`).
+        let dpv: Retained<DevPanelView> = {
+            let alloc = mtm.alloc::<DevPanelView>().set_ivars(DevPanelViewIvars);
+            unsafe { msg_send_id![super(alloc), initWithFrame: frame] }
+        };
         let view: Retained<NSView> = unsafe {
-            let alloc = mtm.alloc::<NSView>();
-            msg_send_id![alloc, initWithFrame: frame]
+            // DevPanelView ⊆ NSView (declared via inherits).  Bump
+            // the retain count for the second handle; both refs will
+            // release on drop.
+            let raw: *const NSView = Retained::as_ptr(&dpv) as *const NSView;
+            Retained::retain(raw as *mut NSView).expect("DevPanelView -> NSView")
         };
         // Autoresize so the view always matches the NSWindow's
         // content area as the user drag-resizes the window.
@@ -383,6 +454,14 @@ impl DevWindow {
     fn renderer_font_metrics(&self) -> (f64, f64, f64) {
         let f = self.renderer.chrome_font_metrics();
         (f.0 as f64, f.1 as f64, f.2 as f64)
+    }
+
+    /// Public-API wrapper around the renderer's chrome cell metrics
+    /// (physical px).  Used by L1's `dev_panel_click` hit-test to
+    /// recover the same logical-pt tab widths the canvas painted.
+    pub fn chrome_cell_dims_phys(&self) -> (f64, f64) {
+        let f = self.renderer.chrome_font_metrics();
+        (f.0 as f64, f.1 as f64)
     }
 }
 

@@ -32,6 +32,69 @@
 
 use crate::ui::core::{Canvas, Color, Length, ParentRect, Pt};
 
+// ─── Shared layout constants ──────────────────────────────────
+// Both `build_dev_panel_canvas` and `hit_test` reference these,
+// so click hit-boxes line up with painted rects to the pixel.
+pub const TAB_BAR_H_PT: f64 = 36.0;
+pub const MENU_W_PT: f64 = 140.0;
+pub const TAB_PAD_X_PT: f64 = 16.0;
+pub const TAB_TEXT_Y_PT: f64 = 11.0;
+pub const MENU_ROW_H_PT: f64 = 28.0;
+pub const MENU_TEXT_PAD_X_PT: f64 = 14.0;
+pub const MENU_TOP_PAD_PT: f64 = 8.0;
+pub const CONTENT_X_PAD_PT: f64 = 20.0;
+pub const SECTION_GAP_PT: f64 = 24.0;
+
+/// Hit-test result.  Click landed on a tab strip entry or a left-menu
+/// row, or nowhere actionable (content area / outside).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevPanelHit {
+    Tab(usize),
+    Section(usize),
+}
+
+/// Compute which tab / section row the click at logical-pt (x_pt, y_pt)
+/// hit, or None.  `chrome_cell_w_pt` is the chrome font's cell width
+/// in logical pt (same value `build_dev_panel_canvas` uses for tab
+/// width math), needed because tab x ranges depend on label widths.
+pub fn hit_test(
+    state: &DevPanelState,
+    chrome_cell_w_pt: f64,
+    x_pt: f64,
+    y_pt: f64,
+) -> Option<DevPanelHit> {
+    // Tab strip — full width, 0..TAB_BAR_H_PT vertically.
+    if y_pt < TAB_BAR_H_PT && y_pt >= 0.0 {
+        let mut tab_x: f64 = 0.0;
+        for (label, id) in TAB_LABELS.iter() {
+            let text_w = label.chars().count() as f64 * chrome_cell_w_pt;
+            let tab_w = text_w + TAB_PAD_X_PT * 2.0;
+            if x_pt >= tab_x && x_pt < tab_x + tab_w {
+                return Some(DevPanelHit::Tab(*id));
+            }
+            tab_x += tab_w;
+        }
+        return None;
+    }
+    // Left menu — only when we're on the UI tab; other tabs don't
+    // render the menu so a click there shouldn't switch sections.
+    if state.active_tab != TAB_UI {
+        return None;
+    }
+    if x_pt < MENU_W_PT && y_pt >= TAB_BAR_H_PT {
+        let body_y = TAB_BAR_H_PT;
+        let local_y = y_pt - body_y - MENU_TOP_PAD_PT;
+        if local_y < 0.0 {
+            return None;
+        }
+        let idx = (local_y / MENU_ROW_H_PT).floor() as usize;
+        if idx < SECTION_LABELS.len() {
+            return Some(DevPanelHit::Section(SECTION_LABELS[idx].1));
+        }
+    }
+    None
+}
+
 /// Tab identifiers — used by `state.active_tab` as an integer.
 /// Keep this list small; "UI" is the only one actually populated
 /// in this commit, the others are placeholders so the tab strip
@@ -150,13 +213,15 @@ pub fn build_dev_panel_canvas(
         .fill(tokens::PANEL_BG)
         .draw();
 
-    // Layout constants (logical pt).
-    const TAB_BAR_H: f64 = 36.0;
-    const MENU_W: f64 = 140.0;
-    const TAB_PAD_X: f64 = 16.0;
-    const TAB_TEXT_Y: f64 = 11.0;
-    const MENU_ROW_H: f64 = 28.0;
-    const MENU_TEXT_PAD_X: f64 = 14.0;
+    // Layout constants come from module-level `pub const`s so
+    // `hit_test` references the same values.  Re-bound here to short
+    // local names so the rest of the function reads cleanly.
+    let tab_bar_h = TAB_BAR_H_PT;
+    let menu_w = MENU_W_PT;
+    let tab_pad_x = TAB_PAD_X_PT;
+    let tab_text_y = TAB_TEXT_Y_PT;
+    let menu_row_h = MENU_ROW_H_PT;
+    let menu_text_pad_x = MENU_TEXT_PAD_X_PT;
 
     // Cell metrics translated to logical pt — text width math.
     let cell_w_pt = chrome_cell_w as f64 / scale;
@@ -165,31 +230,31 @@ pub fn build_dev_panel_canvas(
     // ─── Tab strip ─────────────────────────────────────────────
     canvas.rect()
         .at(Length::Pt(0.0), Length::Pt(0.0))
-        .size(Length::Pct(1.0), Length::Pt(TAB_BAR_H))
+        .size(Length::Pct(1.0), Length::Pt(tab_bar_h))
         .fill(tokens::TAB_BAR_BG)
         .draw();
 
     let mut tab_x: f64 = 0.0;
     for (label, id) in TAB_LABELS.iter() {
         let text_w = label.chars().count() as f64 * cell_w_pt;
-        let tab_w = text_w + TAB_PAD_X * 2.0;
+        let tab_w = text_w + tab_pad_x * 2.0;
         let is_active = *id == state.active_tab;
         if is_active {
             // Slight lift via different BG + bottom accent stroke.
             canvas.rect()
                 .at(Length::Pt(tab_x), Length::Pt(0.0))
-                .size(Length::Pt(tab_w), Length::Pt(TAB_BAR_H))
+                .size(Length::Pt(tab_w), Length::Pt(tab_bar_h))
                 .fill(tokens::TAB_ACTIVE_BG)
                 .draw();
             canvas.rect()
-                .at(Length::Pt(tab_x), Length::Pt(TAB_BAR_H - 2.0))
+                .at(Length::Pt(tab_x), Length::Pt(tab_bar_h - 2.0))
                 .size(Length::Pt(tab_w), Length::Pt(2.0))
                 .fill(tokens::TAB_ACTIVE_ACCENT)
                 .draw();
         }
         canvas.text(
-            Length::Pt(tab_x + TAB_PAD_X),
-            Length::Pt(TAB_TEXT_Y),
+            Length::Pt(tab_x + tab_pad_x),
+            Length::Pt(tab_text_y),
             label,
         )
         .color(if is_active { tokens::TAB_ACTIVE_FG } else { tokens::TAB_INACTIVE_FG })
@@ -198,8 +263,8 @@ pub fn build_dev_panel_canvas(
     }
     // Hairline below the tab strip.
     canvas.line(
-        (Length::Pt(0.0), Length::Pt(TAB_BAR_H)),
-        (Length::Pct(1.0), Length::Pt(TAB_BAR_H)),
+        (Length::Pt(0.0), Length::Pt(tab_bar_h)),
+        (Length::Pct(1.0), Length::Pt(tab_bar_h)),
     )
     .stroke(Pt(1.0), tokens::DIVIDER)
     .draw();
@@ -209,7 +274,7 @@ pub fn build_dev_panel_canvas(
     if state.active_tab != TAB_UI {
         canvas.text(
             Length::Pt(20.0),
-            Length::Pt(TAB_BAR_H + 24.0),
+            Length::Pt(tab_bar_h + 24.0),
             "(placeholder — coming next)",
         )
         .color(tokens::SAMPLE_HINT_FG)
@@ -218,36 +283,36 @@ pub fn build_dev_panel_canvas(
     }
 
     // ─── UI tab: left menu + right content ─────────────────────
-    let body_y = TAB_BAR_H;
+    let body_y = tab_bar_h;
 
     // Left menu BG.
     canvas.rect()
         .at(Length::Pt(0.0), Length::Pt(body_y))
-        .size(Length::Pt(MENU_W), Length::Pct(1.0))
+        .size(Length::Pt(menu_w), Length::Pct(1.0))
         .fill(tokens::MENU_BG)
         .draw();
     // Menu / content divider.
     canvas.line(
-        (Length::Pt(MENU_W), Length::Pt(body_y)),
-        (Length::Pt(MENU_W), Length::Pct(1.0)),
+        (Length::Pt(menu_w), Length::Pt(body_y)),
+        (Length::Pt(menu_w), Length::Pct(1.0)),
     )
     .stroke(Pt(1.0), tokens::DIVIDER)
     .draw();
 
     // Menu rows.
     for (i, (label, id)) in SECTION_LABELS.iter().enumerate() {
-        let row_y = body_y + 8.0 + (i as f64) * MENU_ROW_H;
+        let row_y = body_y + MENU_TOP_PAD_PT + (i as f64) * menu_row_h;
         let is_active = *id == state.active_section;
         if is_active {
             canvas.rect()
                 .at(Length::Pt(6.0), Length::Pt(row_y))
-                .size(Length::Pt(MENU_W - 12.0), Length::Pt(MENU_ROW_H - 4.0))
+                .size(Length::Pt(menu_w - 12.0), Length::Pt(menu_row_h - 4.0))
                 .fill(tokens::MENU_ROW_ACTIVE_BG)
                 .radius(Pt(4.0))
                 .draw();
         }
         canvas.text(
-            Length::Pt(MENU_TEXT_PAD_X),
+            Length::Pt(menu_text_pad_x),
             Length::Pt(row_y + 6.0),
             label,
         )
@@ -255,29 +320,41 @@ pub fn build_dev_panel_canvas(
         .draw();
     }
 
-    // ─── Right content: stack all sections ─────────────────────
-    let content_x = MENU_W + 20.0;
-    let mut y = body_y + 16.0;
-    let section_gap = 24.0;
+    // ─── Right content: only the active section ─────────────────
+    // Mouse routing into the dev window lets the menu pick a single
+    // section — show just that one in the content column so the
+    // canvas isn't a 5-section scroll the user can't navigate.
+    let content_x = menu_w + CONTENT_X_PAD_PT;
+    let y = body_y + 16.0;
 
-    y = draw_section_header(&mut canvas, content_x, y, "Colors");
-    y = draw_colors_sample(&mut canvas, content_x, y, cell_w_pt);
-    y += section_gap;
-
-    y = draw_section_header(&mut canvas, content_x, y, "Units");
-    y = draw_units_sample(&mut canvas, content_x, y);
-    y += section_gap;
-
-    y = draw_section_header(&mut canvas, content_x, y, "Rects");
-    y = draw_rects_sample(&mut canvas, content_x, y);
-    y += section_gap;
-
-    y = draw_section_header(&mut canvas, content_x, y, "Lines");
-    y = draw_lines_sample(&mut canvas, content_x, y);
-    y += section_gap;
-
-    y = draw_section_header(&mut canvas, content_x, y, "Text");
-    let _ = draw_text_sample(&mut canvas, content_x, y);
+    match state.active_section {
+        SECTION_COLORS => {
+            let y = draw_section_header(&mut canvas, content_x, y, "Colors");
+            let _ = draw_colors_sample(&mut canvas, content_x, y, cell_w_pt);
+        }
+        SECTION_UNITS => {
+            let y = draw_section_header(&mut canvas, content_x, y, "Units");
+            let _ = draw_units_sample(&mut canvas, content_x, y);
+        }
+        SECTION_RECTS => {
+            let y = draw_section_header(&mut canvas, content_x, y, "Rects");
+            let _ = draw_rects_sample(&mut canvas, content_x, y);
+        }
+        SECTION_LINES => {
+            let y = draw_section_header(&mut canvas, content_x, y, "Lines");
+            let _ = draw_lines_sample(&mut canvas, content_x, y);
+        }
+        SECTION_TEXT => {
+            let y = draw_section_header(&mut canvas, content_x, y, "Text");
+            let _ = draw_text_sample(&mut canvas, content_x, y);
+        }
+        _ => {
+            canvas.text(Length::Pt(content_x), Length::Pt(y),
+                "(unknown section — internal active_section out of range)")
+                .color(tokens::SAMPLE_HINT_FG)
+                .draw();
+        }
+    }
 
     canvas
 }
@@ -501,13 +578,12 @@ mod tests {
         let s = DevPanelState::default();
         let c = build_dev_panel_canvas(&s, 1920.0, 1080.0, 16.0, 32.0);
         let prims = c.primitives();
-        // Substantial output — at minimum the BG, the tab strip BG,
-        // active tab BG + accent, hairline, menu BG, divider, 5 menu
-        // rows, 5 section headers + dividers, 7 color swatches + labels,
-        // 5 units rows, 4 rect samples, 4+1 line rows, 5 text rows.
-        // Conservative lower bound just guards against catastrophic
-        // regression to the placeholder.
-        assert!(prims.len() > 40, "got {} primitives, expected > 40", prims.len());
+        // Substantial output — BG, tab strip BG, active tab + accent,
+        // tab labels, hairline, menu BG, divider, 5 menu rows + 1
+        // active highlight, "Colors" section header + divider, 7
+        // swatches + 7 labels.  Conservative lower bound guards
+        // against catastrophic regression to the placeholder.
+        assert!(prims.len() > 20, "got {} primitives, expected > 20", prims.len());
         // First primitive must be the full-window BG rect (so the dev
         // window isn't a transparent slit).
         match &prims[0] {
@@ -528,6 +604,49 @@ mod tests {
         let prims = c.primitives();
         let has_placeholder = prims.iter().any(|p| matches!(p, Primitive::Text(t) if t.content.contains("placeholder")));
         assert!(has_placeholder, "expected placeholder text on non-UI tab");
+    }
+
+    #[test]
+    fn hit_test_lands_on_tab_strip() {
+        let s = DevPanelState::default();
+        // y inside the tab strip; x at left edge → first tab "UI".
+        // chrome_cell_w_pt=8 matches the test renderer dim.
+        let h = hit_test(&s, 8.0, 5.0, 10.0).expect("expected hit");
+        assert_eq!(h, DevPanelHit::Tab(TAB_UI));
+        // Click further right — past UI tab → Tokens.
+        // UI width = 2 chars * 8 + 32 = 48 ; Tokens starts at x=48.
+        let h2 = hit_test(&s, 8.0, 60.0, 10.0).expect("expected hit");
+        assert_eq!(h2, DevPanelHit::Tab(TAB_TOKENS));
+    }
+
+    #[test]
+    fn hit_test_lands_on_menu_row() {
+        let s = DevPanelState::default();
+        // y just past the tab strip + menu top pad → first row "Colors".
+        let h = hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0)
+            .expect("expected hit");
+        assert_eq!(h, DevPanelHit::Section(SECTION_COLORS));
+        // Two rows down → "Rects".
+        let h2 = hit_test(
+            &s, 8.0, 20.0,
+            TAB_BAR_H_PT + MENU_TOP_PAD_PT + 2.0 * MENU_ROW_H_PT + 5.0,
+        ).expect("expected hit");
+        assert_eq!(h2, DevPanelHit::Section(SECTION_RECTS));
+    }
+
+    #[test]
+    fn hit_test_returns_none_in_content_area() {
+        let s = DevPanelState::default();
+        // x past menu_w, y past tab strip — no actionable region here.
+        assert_eq!(hit_test(&s, 8.0, MENU_W_PT + 50.0, TAB_BAR_H_PT + 100.0), None);
+    }
+
+    #[test]
+    fn hit_test_skips_menu_when_not_on_ui_tab() {
+        // Even if y is in the menu row band, hit-test must not return
+        // a Section when active_tab != UI (other tabs don't render menu).
+        let s = DevPanelState { active_tab: TAB_TOKENS, ..Default::default() };
+        assert_eq!(hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + 30.0), None);
     }
 
     #[test]

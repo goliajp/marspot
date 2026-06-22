@@ -17,7 +17,21 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.9**
+Current: **0.6.10**
+
+### 0.6.10
+
+dev panel mouse routing 接通,tab strip + 左 menu 终于真能点.0.6.9 把 sample 都画上但所有 click 都打不动 —— 因为 dev window 只有原生 NSView,AppKit 把内容区 click 都吃了.
+
+实现:
+- `dev_window.rs` 新 `DevPanelView`:NSView 子类,acceptsFirstMouse / acceptsFirstResponder / isFlipped 都开,`mouseDown:` 转 logical-pt(view-local,y=0 顶)走 `dispatch_event_pub(EventKind::DevPanelClick { x_pt, y_pt })`.NSWindow contentView 换成这个子类.
+- `app.rs`:新 `EventKind::DevPanelClick { x_pt, y_pt }` + `MarspotApp::dev_panel_click(_ctx, _x_pt, _y_pt)` 默认 no-op + dispatcher hook.
+- `ui/components/dev_panel.rs`:layout 常量提到 `pub const TAB_BAR_H_PT / MENU_W_PT / TAB_PAD_X_PT / ...`,渲染跟 hit_test 共用同一组数,click 落到的矩形跟画的矩形按 pixel 对齐.新 `hit_test(state, chrome_cell_w_pt, x_pt, y_pt) -> Option<DevPanelHit>`,返 `Tab(usize)` 或 `Section(usize)` 或 None.4 个新 hit_test 测试覆盖 tab / menu / 内容空区 / 非 UI tab 不映射 menu 四种 case.
+- `ShellApp::dev_panel_click`:查 dev window 的 chrome cell metrics(新 `DevWindow::chrome_cell_dims_phys` API)算 logical-pt cell width,call hit_test,改 `active_tab` / `active_section`,redraw 同步进窗.
+
+渲染层同步改:UI tab 不再 stack 全部 5 段 sample,改成 `match state.active_section` 只画当前选中那一段.menu 一点就切.
+
+shell 0.6.9 → 0.6.10.9/9 dev_panel tests + 189/189 lib tests PASS.
 
 ### 0.6.9
 

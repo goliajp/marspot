@@ -2280,6 +2280,26 @@ impl MarspotApp for ShellApp {
         self.save_dev_window_state_if_changed(ctx);
     }
 
+    fn dev_panel_click(&mut self, _ctx: &MarspotAppCtx, x_pt: f64, y_pt: f64) {
+        // Hit-test against the dev panel's logical-pt layout.  Pass
+        // the chrome font cell width (logical pt) so tab x ranges
+        // line up with what `build_dev_panel_canvas` actually painted.
+        use marspot::ui::components::{hit_test, DevPanelHit};
+        let chrome_cell_w_pt = marspot::dev_window::with_dev_window(|w| {
+            let (cw_phys, _ch_phys) = w.chrome_cell_dims_phys();
+            cw_phys / self.dev_panel.scale.max(0.1)
+        }).unwrap_or(8.0);
+        match hit_test(&self.dev_panel, chrome_cell_w_pt, x_pt, y_pt) {
+            Some(DevPanelHit::Tab(t)) => {
+                self.dev_panel.active_tab = t;
+            }
+            Some(DevPanelHit::Section(s)) => {
+                self.dev_panel.active_section = s;
+            }
+            None => {}
+        }
+    }
+
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
         // Sync the dev panel's NSWindow visibility against the L1
         // state bit, and render its contents when visible.  Cheap

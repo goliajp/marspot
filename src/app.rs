@@ -142,6 +142,12 @@ pub trait MarspotApp: 'static {
     /// have to care.  The `dev_window` module is the data source —
     /// query `dev_window::with_dev_window(|w| w.frame_pt())` etc.
     fn dev_window_changed(&mut self, _ctx: &MarspotAppCtx) {}
+
+    /// User clicked inside the dev panel NSWindow's content area.
+    /// Coords are logical pt (view-local, `isFlipped` → y=0 top).
+    /// Default no-op; L1 overrides to hit-test against tab strip /
+    /// menu and mutate `DevPanelState`.
+    fn dev_panel_click(&mut self, _ctx: &MarspotAppCtx, _x_pt: f64, _y_pt: f64) {}
 }
 
 /// Handle passed to every `MarspotApp` callback.  Owns the NSWindow /
@@ -918,6 +924,11 @@ pub enum EventKind {
     /// Signals that the next redraw needs to recompute dev panel
     /// dimensions and re-paint into the new layer size.
     DevWindowChanged,
+    /// User clicked inside the dev panel NSWindow's content area.
+    /// Coords are logical pt in view-local (`isFlipped` so y=0 at top).
+    /// L1 hit-tests against the dev panel layout to update active
+    /// tab / section, then re-draws.
+    DevPanelClick { x_pt: f64, y_pt: f64 },
 }
 
 struct AppState {
@@ -965,6 +976,10 @@ fn dispatch_event(kind: EventKind) {
                 // redraw so the dev panel recomputes against the
                 // new content area.
                 app.dev_window_changed(ctx);
+                ctx.request_redraw();
+            }
+            EventKind::DevPanelClick { x_pt, y_pt } => {
+                app.dev_panel_click(ctx, x_pt, y_pt);
                 ctx.request_redraw();
             }
         }
