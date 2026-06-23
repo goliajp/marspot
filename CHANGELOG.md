@@ -17,7 +17,17 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.28**
+Current: **0.6.29**
+
+### 0.6.29
+
+User 反馈 "现在 sfpro 这样太丑了" — 撤 B0.7 chrome SF Pro,回到 Monaco 统一字体.
+
+0.6.28 修了拉伸变形,但代价是 SF Pro 走 mono-aligned advance(每字符占 cell_w 等宽,字距不自然),视觉比 Monaco 还丑.
+
+修法:`dev_window` + render_metal 4 个 chrome 渲染点(dev_panel × 2 + context_menu × 2)`encode_canvas_into` 的 `ui_font` 参数全部传 `false`.framework 端 `FontKind::Ui` 路径 + ui_font_metrics + resolve_char_ui 保留(隐性,不再走),将来 atlas refactor 完成后单独 commit 重新接通.
+
+shell 0.6.28 → 0.6.29;core 0.10.78 → 0.10.79.
 
 ### 0.6.28
 
@@ -612,7 +622,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.78**
+Current: **0.10.79**
+
+### 0.10.79
+
+4 chrome 调用点(dev_panel × 2 + context_menu × 2)`encode_canvas_into(..., ui_font: false)` 改回 — chrome 走 Monaco.framework 路径 land 不变.
 
 ### 0.10.78
 

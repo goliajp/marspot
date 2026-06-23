@@ -1277,7 +1277,7 @@ impl MetalRenderer {
                     atlas, device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
-                    true,
+                    false,
                 );
             }
         }
@@ -1307,7 +1307,7 @@ impl MetalRenderer {
                 None, // Load — preserve everything below
                 &viewport_px,
                 chrome_cell_w, chrome_cell_h, chrome_ascent,
-                true,
+                false,
             );
         }
 
@@ -1475,7 +1475,7 @@ impl MetalRenderer {
                     atlas, device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
-                    true,
+                    false,
                 );
             }
         }
@@ -1490,7 +1490,7 @@ impl MetalRenderer {
                 atlas, device, font,
                 None, &viewport_px,
                 chrome_cell_w, chrome_cell_h, chrome_ascent,
-                true,
+                false,
             );
         }
         cmd.commit();

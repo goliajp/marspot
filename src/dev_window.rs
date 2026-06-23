@@ -469,15 +469,18 @@ impl DevWindow {
             &s, width_phys, height_phys,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
         );
-        // Dev panel chrome — switch glyph rendering to the system UI
-        // font (SF Pro on macOS) for any Canvas Text primitive.  PTY
-        // grid still uses the mono font path.
+        // Dev panel chrome — keep terminal mono font for now.  The
+        // 0.6.27/0.6.28 SF Pro split looked off without the atlas
+        // refactor (per-glyph slot) that proper proportional needs.
+        // Mono SF Pro mono-aligned was visually ugly; revert to
+        // Monaco for all chrome until atlas can support real
+        // proportional glyph bounds.
         self.renderer.render_canvas_into_layer(
             &canvas,
             width_phys as f32,
             height_phys as f32,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
-            true,
+            false,
         );
     }
 

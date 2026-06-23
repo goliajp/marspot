@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.28"  # 修 0.6.27 chrome 字变形 — atlas slot 用 ui_cell_w 但 GlyphInstance size 用 per-glyph advance 导致拉伸;v1 回到 uniform cell_w(mono-like SF Pro)直到 atlas 改造支持 per-glyph slot
-core    = "0.10.78"
+shell   = "0.6.29"  # 撤 B0.7 chrome SF Pro — mono-aligned 视觉太丑,dev_window + 4 chrome 渲染点全部回到 false(走 Monaco)直到 atlas 真 proportional 改造完
+core    = "0.10.79"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
