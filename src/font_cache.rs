@@ -39,6 +39,19 @@ use std::collections::HashMap;
 pub const FONT_NAME: &str = "Monaco";
 pub const FONT_POINT: f64 = 12.0;
 
+/// UI font — used for chrome (dev panel, tab strip, sidebar, etc.).
+/// PTY/terminal grid keeps `FONT_NAME` mono.  System default on
+/// macOS is SF Pro (introduced 10.11) — when absent we fall back
+/// through Helvetica Neue → terminal font.
+pub const UI_FONT_NAMES: &[&str] = &[
+    ".AppleSystemUIFont",   // dynamic system UI font (SF Pro) — preferred
+    "SFPro-Regular",
+    "SF Pro Text",
+    "HelveticaNeue",
+    "Helvetica",
+];
+pub const UI_FONT_POINT: f64 = 13.0;
+
 /// Background color for the terminal.  Near-pure-black with a
 /// near-imperceptible navy tint — the user's preferred direction
 /// after seeing iTerm2's #14191e default felt too grey in marspot's
@@ -218,6 +231,17 @@ pub struct FontCache {
     pub cell_w: f64,
     pub cell_h: f64,
     pub ascent: f64,
+    /// UI font — used by chrome (dev panel etc.).  Different family
+    /// + size from the mono terminal font.  Falls back to terminal
+    /// font (= same as base) when the system UI font fails to load.
+    pub ui_font_idx: usize,
+    /// UI font metrics — width of '0' glyph as approximate cell_w;
+    /// ascent + descent + leading for cell_h.  Proportional fonts
+    /// have variable advance, so this is an approximation used by
+    /// the v3 layout system.
+    pub ui_cell_w: f64,
+    pub ui_cell_h: f64,
+    pub ui_ascent: f64,
     /// Curated text-font cascade consulted BEFORE letting CoreText's
     /// automatic discovery (`CTFontCreateForString`) pick a fallback
     /// for codepoints the base font lacks.  Without this, CT happily
@@ -298,6 +322,45 @@ impl FontCache {
             }
         }
 
+        // ─── UI font — system default for chrome ─────────────
+        // Try the cascade in UI_FONT_NAMES.  First successful load
+        // wins.  When all fail (eg older macOS), fall back to the
+        // terminal font so UI still renders (with mono spacing).
+        let mut ui_font_opt: Option<CTFont> = None;
+        for name in UI_FONT_NAMES {
+            if let Ok(f) = new_from_name(name, UI_FONT_POINT) {
+                ui_font_opt = Some(f);
+                break;
+            }
+        }
+        let (ui_font_idx, ui_cell_w, ui_cell_h, ui_ascent) = match ui_font_opt {
+            Some(uf) => {
+                // Width-of-'0' approximation — actual glyph advance.
+                let mut g: CGGlyph = 0;
+                let zero: u16 = b'0' as u16;
+                unsafe { uf.get_glyphs_for_characters(&zero, &mut g, 1); }
+                let ua = uf.ascent();
+                let uh = ua + uf.descent() + uf.leading();
+                let uw = if g != 0 {
+                    let mut adv = core_graphics::geometry::CGSize::new(0.0, 0.0);
+                    unsafe {
+                        uf.get_advances_for_glyphs(
+                            core_text::font_descriptor::kCTFontOrientationDefault,
+                            &g,
+                            &mut adv,
+                            1,
+                        );
+                    }
+                    adv.width
+                } else {
+                    UI_FONT_POINT * 0.55  // crude fallback
+                };
+                let idx = fonts.intern(uf);
+                (idx, uw, uh, ua)
+            }
+            None => (0, cell_w, cell_h, ascent),
+        };
+
         Ok(Self {
             fonts,
             char_cache: FxHashMap::default(),
@@ -306,6 +369,10 @@ impl FontCache {
             cell_w,
             cell_h,
             ascent,
+            ui_font_idx,
+            ui_cell_w,
+            ui_cell_h,
+            ui_ascent,
             text_fallback_idxs,
         })
     }
@@ -378,6 +445,23 @@ impl FontCache {
 
     pub fn font(&self, idx: usize) -> &CTFont {
         &self.fonts.fonts[idx]
+    }
+
+    /// Resolve `ch` against the UI font first (system default).  If
+    /// the UI font lacks coverage (eg CJK characters), falls through
+    /// to the standard `resolve_char` cascade (returns chars from
+    /// the mono fallback chain).  Chrome rendering paths use this.
+    pub fn resolve_char_ui(&mut self, ch: char) -> (usize, CGGlyph) {
+        if self.ui_font_idx > 0 {
+            let g = {
+                let ui_font = &self.fonts.fonts[self.ui_font_idx];
+                lookup_glyph(ui_font, ch)
+            };
+            if g != 0 {
+                return (self.ui_font_idx, g);
+            }
+        }
+        self.resolve_char(ch, false, false)
     }
 
     /// Whether font `idx` carries colour glyphs (Apple Color Emoji).

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.26"  # PERF 修 — dev panel render 加 dirty flag,从每帧 re-layout ~580 节点(idle 12%+ CPU)改成仅当 state 变(click/scroll/visibility flip/window changed/theme swap)才 re-render
-core    = "0.10.76"
+shell   = "0.6.27"  # B0.7 真 font 分离 — chrome 走系统 UI font(SF Pro),PTY 仍 mono;FontCache 加 ui_font_idx + ui_cell_w/h/ascent,resolve_char_ui CJK fallback,push_text_run_kind(FontKind::Terminal|Ui)per-glyph CT advance
+core    = "0.10.77" # encode_canvas_into 加 ui_font: bool 参数,dev_window + main 渲染 chrome path 都传 true
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

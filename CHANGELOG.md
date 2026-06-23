@@ -17,7 +17,49 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.26**
+Current: **0.6.27**
+
+### 0.6.27
+
+**B0.7 真 PTY / UI font 分离 — chrome 走系统 UI font(SF Pro on macOS).**
+
+User 报"现在除了 pty 内,其他的都不设置字体,系统默认".
+
+`font_cache.rs`:
+- 新 const `UI_FONT_NAMES` cascade:`.AppleSystemUIFont`(动态 SF Pro)→ `SFPro-Regular` → `SF Pro Text` → `HelveticaNeue` → `Helvetica`
+- 新 const `UI_FONT_POINT = 13.0`(macOS 标准 UI size)
+- `FontCache` 加字段:`ui_font_idx / ui_cell_w / ui_cell_h / ui_ascent`
+- `build()` 加载 UI font 并 intern 到 registry,用 `0` 字符的 CT advance 算 `ui_cell_w`(proportional 字体的近似)
+- 新 `resolve_char_ui(ch)` — UI font 优先,glyph=0 时降级到 `resolve_char` 老 cascade(CJK / emoji fallback)
+
+`render_metal.rs`:
+- 新 enum `FontKind { Terminal, Ui }`
+- `push_text_run_kind(...)` 替代 push_text_run 共享代码 — 按 kind 走不同分支:
+  * Terminal:`resolve_char` + 均匀 `cell_w × n_cells` 推进(mono 格子)
+  * Ui:`resolve_char_ui` + per-glyph **真实 advance**(`CTFontGetAdvancesForGlyphs`),proportional 排版
+- `push_text_run()` 老 API 保留为 Terminal kind wrapper
+- `encode_canvas_into()` 加 `ui_font: bool` 参数 → 传给 `build_canvas_runs` → `push_text_run_kind`
+- `render_canvas_into_layer()` 加 `ui_font: bool`
+- `ui_font_metrics()` 现在返回真实 UI font 的 `(ui_cell_w, ui_cell_h, ui_ascent) × MARSPOT_UI_FONT_SCALE`
+
+`dev_window.rs`:render path 传 `ui_font: true` — dev panel chrome 整套 SF Pro 渲染.
+
+5 个 `encode_canvas_into` 调用站点:
+- `render_canvas_into_layer`(dev_window)→ `true`
+- 2× dev_panel build path(主窗内,旧路径)→ `true`
+- 2× context_menu path → `true`
+- 1× test helper → `false`(测试 mono)
+
+预期视觉效果:
+- Dev panel / tab strip / sidebar / context menu / dev panel — SF Pro 渲染(细更现代,proportional spacing)
+- PTY/terminal grid — Monaco 12pt mono 不变
+- CJK 等 UI font 不覆盖的字符 — fallback 到 mono cascade(CJK font),保证显示
+
+留 caveat:
+- v3 framework 的 `Text` layout 用 `cell_w × char_count` 算宽,UI font 是 proportional → layout 估算 vs 真实渲染宽度有偏差(单字符 ±20% 范围),text rect 可能略宽于实际渲染.
+- 实际 paint 用 per-glyph advance 是对的,所以视觉位置准确,只是 layout 计算的容器宽度可能略宽 — 单行内 OK,wrap 计算可能略偏.
+
+shell 0.6.26 → 0.6.27;core 0.10.76 → 0.10.77.
 
 ### 0.6.26
 
@@ -553,7 +595,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.76**
+Current: **0.10.77**
+
+### 0.10.77
+
+renderer 完整 font 分离:`FontKind { Terminal, Ui }` + `push_text_run_kind()` 共享代码;`encode_canvas_into` 全签名加 `ui_font: bool` 参数路由到 UI font 渲染.5 调用点同步.
 
 ### 0.10.76
 

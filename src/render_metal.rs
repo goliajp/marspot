@@ -1061,21 +1061,22 @@ impl MetalRenderer {
     }
 
     /// UI font metrics — the font used for chrome / dev panel / UI
-    /// primitives via the View tree framework.  Defaults to the same
-    /// as `chrome_font_metrics()`;  when env var `MARSPOT_UI_FONT_SCALE`
-    /// is set (eg `0.88`), the metrics report a scaled cell width/
-    /// height (layout adapts;  actual glyph rasterization at the new
-    /// size is a B0.7 follow-up requiring `FontCache` extension).
-    ///
-    /// Long-term: this is where a real separate UI font (eg SF Pro
-    /// over a coding mono) gets returned.
+    /// primitives via the View tree framework.  Reports the system
+    /// UI font(`.AppleSystemUIFont` cascade)cell w/h/ascent when
+    /// loaded (default);  falls back to terminal font when system UI
+    /// font isn't available.  `MARSPOT_UI_FONT_SCALE` env applies a
+    /// multiplier(0.0..4.0).
     pub fn ui_font_metrics(&self) -> (f32, f32, f32) {
         let scale = std::env::var("MARSPOT_UI_FONT_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|s| *s > 0.0 && *s < 4.0)
             .unwrap_or(1.0);
-        let (w, h, a) = self.chrome_font_metrics();
+        // Read UI metrics straight off the FontCache (separate from
+        // terminal mono metrics).
+        let w = self.font.ui_cell_w as f32;
+        let h = self.font.ui_cell_h as f32;
+        let a = self.font.ui_ascent as f32;
         (w * scale, h * scale, a * scale)
     }
 
@@ -1093,6 +1094,7 @@ impl MetalRenderer {
         chrome_cell_w: f32,
         chrome_cell_h: f32,
         chrome_ascent: f32,
+        ui_font: bool,
     ) {
         let Some(layer) = self.layer.as_ref() else { return };
         // Size the layer to match the view.  drawableSize is in
@@ -1127,6 +1129,7 @@ impl MetalRenderer {
             Some(MTLClearColor { red: 0.078, green: 0.086, blue: 0.110, alpha: 1.0 }),
             &viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
+            ui_font,
         );
         cmd.commit();
         cmd.waitUntilScheduled();
@@ -1274,6 +1277,7 @@ impl MetalRenderer {
                     atlas, device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
+                    true,
                 );
             }
         }
@@ -1303,6 +1307,7 @@ impl MetalRenderer {
                 None, // Load — preserve everything below
                 &viewport_px,
                 chrome_cell_w, chrome_cell_h, chrome_ascent,
+                true,
             );
         }
 
@@ -1470,6 +1475,7 @@ impl MetalRenderer {
                     atlas, device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
+                    true,
                 );
             }
         }
@@ -1484,6 +1490,7 @@ impl MetalRenderer {
                 atlas, device, font,
                 None, &viewport_px,
                 chrome_cell_w, chrome_cell_h, chrome_ascent,
+                true,
             );
         }
         cmd.commit();
@@ -3728,6 +3735,36 @@ pub(crate) fn push_text_run(
     atlas: &mut GlyphAtlas,
     glyphs: &mut Vec<GlyphInstance>,
 ) {
+    push_text_run_kind(
+        text, x_start, baseline_y, color,
+        cell_w, cell_h, ascent, atlas_w, atlas_h,
+        font, atlas, glyphs, FontKind::Terminal,
+    )
+}
+
+/// Which font family/path to use for text rendering.  `Terminal` =
+/// mono cell-aligned (PTY grid).  `Ui` = system UI font (SF Pro on
+/// macOS), proportional;  per-glyph advance via CT, falls back to
+/// mono cascade for chars the UI font lacks (CJK).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontKind { Terminal, Ui }
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_text_run_kind(
+    text: &str,
+    x_start: f32,
+    baseline_y: f32,
+    color: [f32; 4],
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+    kind: FontKind,
+) {
     let metrics = SlotMetrics {
         cell_w: cell_w.round() as u32,
         cell_h: cell_h.round() as u32,
@@ -3735,14 +3772,28 @@ pub(crate) fn push_text_run(
     };
     let mut x = x_start;
     for ch in text.chars() {
-        // Wide-char(CJK ideographs / fullwidth / opt-in ambiguous) = 2
-        // cells.  Advance x by the same n_cells used for rasterisation —
-        // otherwise the next glyph overlaps the wide one by 1 cell, which
-        // is the 2026-06-23 "中文乱麻" report.
         let n_cells = crate::grid::char_width(ch).max(1) as u16;
-        let (font_idx, glyph) = font.resolve_char(ch, false, false);
+        let (font_idx, glyph) = match kind {
+            FontKind::Terminal => font.resolve_char(ch, false, false),
+            FontKind::Ui       => font.resolve_char_ui(ch),
+        };
         if glyph != 0 {
             let ct_font = font.font(font_idx).clone();
+            // UI font is proportional — per-glyph advance via CT.
+            // Terminal uses uniform cell_w × n_cells (mono grid).
+            let advance_px: f32 = match kind {
+                FontKind::Terminal => cell_w * n_cells as f32,
+                FontKind::Ui => {
+                    let mut adv = core_graphics::geometry::CGSize::new(0.0, 0.0);
+                    unsafe {
+                        ct_font.get_advances_for_glyphs(
+                            core_text::font_descriptor::kCTFontOrientationDefault,
+                            &glyph, &mut adv, 1,
+                        );
+                    }
+                    if adv.width > 0.0 { adv.width as f32 } else { cell_w * n_cells as f32 }
+                }
+            };
             if let Some(entry) = atlas.get_or_rasterize(
                 GlyphKey { font_id: font_idx as u32, glyph },
                 &ct_font,
@@ -3750,7 +3801,10 @@ pub(crate) fn push_text_run(
                 n_cells,
             ) {
                 let dest_y = (baseline_y - ascent).round();
-                let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+                let slot_w = match kind {
+                    FontKind::Terminal => (metrics.cell_w * entry.n_cells as u32) as f32,
+                    FontKind::Ui => advance_px.max(metrics.cell_w as f32 * 0.5),
+                };
                 glyphs.push(GlyphInstance {
                     origin: [x.round(), dest_y],
                     size: [slot_w, metrics.cell_h as f32],
@@ -3759,8 +3813,10 @@ pub(crate) fn push_text_run(
                     color,
                 });
             }
+            x += advance_px;
+        } else {
+            x += cell_w * n_cells as f32;
         }
-        x += cell_w * n_cells as f32;
     }
 }
 
@@ -5056,6 +5112,7 @@ fn build_canvas_runs(
     atlas: &mut GlyphAtlas,
     out_ui: &mut Vec<UiRectInstance>,
     out_glyphs: &mut Vec<GlyphInstance>,
+    ui_font: bool,
 ) -> Vec<CanvasRun> {
     use crate::ui::core::canvas::Primitive;
 
@@ -5088,7 +5145,7 @@ fn build_canvas_runs(
                 // top-left.  Convert: baseline_y = anchor_y +
                 // ascent.
                 let baseline_y = t.y as f32 + ascent;
-                push_text_run(
+                push_text_run_kind(
                     &t.content,
                     t.x as f32,
                     baseline_y,
@@ -5096,6 +5153,7 @@ fn build_canvas_runs(
                     cell_w, cell_h, ascent,
                     atlas_w_f, atlas_h_f,
                     font, atlas, out_glyphs,
+                    if ui_font { FontKind::Ui } else { FontKind::Terminal },
                 );
                 let added = out_glyphs.len() - before;
                 if added > 0 {
@@ -5128,6 +5186,7 @@ pub fn encode_canvas_into(
     chrome_cell_w: f32,
     chrome_cell_h: f32,
     chrome_ascent: f32,
+    ui_font: bool,
 ) {
     let (aw, ah) = atlas.dims();
     let atlas_w_f = aw as f32;
@@ -5140,6 +5199,7 @@ pub fn encode_canvas_into(
         atlas_w_f, atlas_h_f,
         font, atlas,
         &mut ui_buf, &mut gl_buf,
+        ui_font,
     );
 
     let mut ui_cursor = 0usize;
@@ -5241,6 +5301,7 @@ impl MetalRenderer {
             &mut self.atlas, &self.device, &mut self.font,
             clear_color, viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
+            false,
         );
     }
 
@@ -6094,6 +6155,7 @@ mod tests {
             &canvas, 48.0, 12.0, 9.0, 256.0, 256.0,
             &mut renderer.font, &mut renderer.atlas,
             &mut ui, &mut gl,
+            false,
         );
         // Expected sequence: UiRect (2 rects) → Glyph (text) →
         // UiRect (final rect).  Text may produce 0 or 1+ glyphs

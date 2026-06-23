@@ -469,11 +469,15 @@ impl DevWindow {
             &s, width_phys, height_phys,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
         );
+        // Dev panel chrome — switch glyph rendering to the system UI
+        // font (SF Pro on macOS) for any Canvas Text primitive.  PTY
+        // grid still uses the mono font path.
         self.renderer.render_canvas_into_layer(
             &canvas,
             width_phys as f32,
             height_phys as f32,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
+            true,
         );
     }
 
