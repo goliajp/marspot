@@ -763,6 +763,11 @@ struct ShellApp {
     /// same way `last_saved_window` does for the main window.
     last_saved_dev_window:
         Option<(f64, f64, f64, f64, u32, bool)>,
+    /// Last observed `marspot::ui::theme::version()` value.  When
+    /// the theme is swapped via `set_current()`, the framework bumps
+    /// this counter; we compare each `redraw()` to invalidate cached
+    /// state and trigger an additional repaint.
+    last_theme_version: u64,
 }
 
 /// Bundle: the plugin's session object + the metadata we need to log
@@ -848,6 +853,7 @@ impl ShellApp {
             active_pane_sessions: std::collections::HashMap::new(),
             dev_panel: marspot::ui::components::DevPanelState::default(),
             last_saved_dev_window: None,
+            last_theme_version: marspot::ui::theme::version(),
         }
     }
 
@@ -2313,7 +2319,24 @@ impl MarspotApp for ShellApp {
         let _ = marspot::ui::view::apply_scroll_delta(target_id, delta_y_phys);
     }
 
-    fn redraw(&mut self, _ctx: &MarspotAppCtx) {
+    fn redraw(&mut self, ctx: &MarspotAppCtx) {
+        // [A1] HighContrast theme swap hook.  When `theme::set_current()`
+        // bumps the version counter, take note + force a redraw of all
+        // surfaces so themed views pick up the new palette.
+        let cur_v = marspot::ui::theme::version();
+        if cur_v != self.last_theme_version {
+            self.last_theme_version = cur_v;
+            ctx.request_redraw();
+        }
+        // [A3] Animation frame schedule — advance any active anims
+        // by elapsed wall-clock, GC finished ones, and request the
+        // next vsync redraw while any anim is still running.  Idle
+        // CPU = 0 is preserved when nothing's running.
+        marspot::ui::view::anim_tick(std::time::Instant::now());
+        marspot::ui::view::anim_gc();
+        if marspot::ui::view::anim_any_active() {
+            ctx.request_redraw();
+        }
         // Sync the dev panel's NSWindow visibility against the L1
         // state bit, and render its contents when visible.  Cheap
         // when nothing changed: `set_visible_deferred` only writes

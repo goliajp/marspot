@@ -130,6 +130,13 @@ pub struct Decoration {
     /// Lifecycle hooks — emitted by reconcile() on appear/disappear.
     pub on_appear: Option<super::types::ActionId>,
     pub on_disappear: Option<super::types::ActionId>,
+    /// Declarative enter / exit anim spec.
+    pub transition: Option<super::types::Transition>,
+    /// Transform applied at paint time.  Translate goes through
+    /// offset accumulator already;  scale/rotate held for v2+.
+    pub transform: Option<super::types::Transform>,
+    /// Blend mode held for paint side (v2+ paint applies it).
+    pub blend_mode: Option<super::types::BlendMode>,
 }
 
 impl Default for Decoration {
@@ -158,6 +165,9 @@ impl Default for Decoration {
             auto_focus: false,
             on_appear: None,
             on_disappear: None,
+            transition: None,
+            transform: None,
+            blend_mode: None,
         }
     }
 }
@@ -269,6 +279,8 @@ pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -
             layout_lazy_hstack(items, *gap, *item_width, *id, ctx, origin, c, view),
         View::Grid { items, cols, gap, cell_w, cell_h } =>
             layout_grid(items, *cols, *gap, *cell_w, *cell_h, ctx, origin, c, view),
+        View::VariableGrid { items, tracks_w, tracks_h, gap } =>
+            layout_variable_grid(items, tracks_w, tracks_h, *gap, ctx, origin, c, view),
         View::Toggle { id: _ } => {
             // Fixed visual size for the switch: 36 × 18 logical pt.
             let w_pt = 36.0 * ctx.scale;
@@ -470,6 +482,124 @@ fn layout_grid(
     let total_w = cols as f64 * cell_w_phys + cols.saturating_sub(1) as f64 * gap_phys;
     let total_h = rows as f64 * cell_h_phys + rows.saturating_sub(1) as f64 * gap_phys;
 
+    LaidOut {
+        view: self_view.clone(),
+        rect: Rect { x: origin.0, y: origin.1, w: total_w, h: total_h },
+        deco: Decoration::default(),
+        children: laid_children,
+    }
+}
+
+/// Resolve `GridTrack` list against a total axis length.  Fixed
+/// tracks claim their stated size, Flex tracks split leftover by
+/// weight, Auto = 32pt × scale fallback for v1.
+fn resolve_tracks(tracks: &[super::view::GridTrack], total: f64, gap: f64, ctx: LayoutCtx) -> Vec<f64> {
+    let n = tracks.len();
+    if n == 0 { return Vec::new(); }
+    let gap_total = (n.saturating_sub(1)) as f64 * gap;
+    let mut sizes: Vec<f64> = vec![0.0; n];
+    let mut flex_weight: u32 = 0;
+    let mut fixed_used = 0.0;
+    for (i, t) in tracks.iter().enumerate() {
+        match t {
+            super::view::GridTrack::Fixed(l) => {
+                let v = l.resolve_for_axis_with_cell(total, ctx.scale, ctx.cell_w_phys);
+                sizes[i] = v;
+                fixed_used += v;
+            }
+            super::view::GridTrack::Auto => {
+                // v1: 32pt fallback.
+                let v = 32.0 * ctx.scale;
+                sizes[i] = v;
+                fixed_used += v;
+            }
+            super::view::GridTrack::Flex(w) => { flex_weight += *w; }
+        }
+    }
+    let leftover = (total - fixed_used - gap_total).max(0.0);
+    if flex_weight > 0 {
+        for (i, t) in tracks.iter().enumerate() {
+            if let super::view::GridTrack::Flex(w) = t {
+                sizes[i] = leftover * (*w as f64) / (flex_weight as f64);
+            }
+        }
+    }
+    sizes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_variable_grid(
+    items: &[View],
+    tracks_w: &[super::view::GridTrack],
+    tracks_h: &[super::view::GridTrack],
+    gap: (Length, Length),
+    ctx: LayoutCtx,
+    origin: (f64, f64),
+    c: Constraints,
+    self_view: &View,
+) -> LaidOut {
+    let cols = tracks_w.len();
+    if cols == 0 {
+        return LaidOut {
+            view: self_view.clone(),
+            rect: Rect { x: origin.0, y: origin.1, w: 0.0, h: 0.0 },
+            deco: Decoration::default(),
+            children: Vec::new(),
+        };
+    }
+    let col_gap_phys = gap.0.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let row_gap_phys = gap.1.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let track_widths  = resolve_tracks(tracks_w, c.max_w, col_gap_phys, ctx);
+    let needed_rows = (items.len() + cols - 1).max(1) / cols.max(1);
+
+    // tracks_h cycles if underspecified.
+    let track_heights: Vec<f64> = (0..needed_rows).map(|r| {
+        let t = &tracks_h[r % tracks_h.len().max(1).min(tracks_h.len()).max(1)];
+        match t {
+            super::view::GridTrack::Fixed(l) =>
+                l.resolve_for_axis_with_cell(c.max_h, ctx.scale, ctx.cell_w_phys),
+            super::view::GridTrack::Auto    => 32.0 * ctx.scale,
+            super::view::GridTrack::Flex(_) => 32.0 * ctx.scale,  // simplified
+        }
+    }).collect();
+
+    let mut col_offsets = vec![0.0; cols];
+    {
+        let mut acc = 0.0;
+        for i in 0..cols {
+            col_offsets[i] = acc;
+            acc += track_widths[i] + col_gap_phys;
+        }
+    }
+    let mut row_offsets = vec![0.0; needed_rows];
+    {
+        let mut acc = 0.0;
+        for i in 0..needed_rows {
+            row_offsets[i] = acc;
+            acc += track_heights[i] + row_gap_phys;
+        }
+    }
+
+    let mut laid_children = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let r = idx / cols;
+        let cidx = idx % cols;
+        let cw = track_widths[cidx];
+        let ch = track_heights[r];
+        let cx = origin.0 + col_offsets[cidx];
+        let cy = origin.1 + row_offsets[r];
+        let item_c = Constraints {
+            min_w: cw, max_w: cw,
+            min_h: ch, max_h: ch,
+        };
+        let laid = layout(item, ctx, (cx, cy), item_c);
+        laid_children.push(laid);
+    }
+
+    let total_w: f64 = track_widths.iter().sum::<f64>()
+        + cols.saturating_sub(1) as f64 * col_gap_phys;
+    let total_h: f64 = track_heights.iter().sum::<f64>()
+        + needed_rows.saturating_sub(1) as f64 * row_gap_phys;
     LaidOut {
         view: self_view.clone(),
         rect: Rect { x: origin.0, y: origin.1, w: total_w, h: total_h },
@@ -870,6 +1000,27 @@ fn layout_modified(
             }
             Modifier::OnDisappear(a) => {
                 bake.on_disappear = Some(*a);
+            }
+            Modifier::Transition(t) => {
+                bake.transition = Some(*t);
+            }
+            Modifier::Transform(t) => {
+                // Translate accumulates into offset for v1 paint;
+                // scale / rotate are stored for future Metal vertex
+                // transform support.
+                let tx_phys = t.translate_x * ctx.scale;
+                let ty_phys = t.translate_y * ctx.scale;
+                offset_phys.0 += tx_phys;
+                offset_phys.1 += ty_phys;
+                bake.transform = Some(*t);
+            }
+            Modifier::BlendMode(m) => {
+                bake.blend_mode = Some(*m);
+            }
+            Modifier::Mask(_inner) => {
+                // v1: no-op.  Mask shape rendering requires Metal
+                // stencil pipeline.  Bake stays empty;  modifier
+                // still recorded by hit_test etc. via match.
             }
         }
     }

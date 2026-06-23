@@ -30,12 +30,14 @@ pub use view::{
     LinearGradient, GradientDir, MaterialStyle, AxRole,
     ToggleState, PickerState,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
-    toggle, picker, grid, image_named, shape_circle, shape_capsule, shape_rounded_rect,
+    toggle, picker, grid, variable_grid, GridTrack,
+    image_named, shape_circle, shape_capsule, shape_rounded_rect,
     card, panel, badge, tooltip, tab_strip, context_menu, breadcrumb, list_row,
 };
 pub use types::{
     ScrollWheelId, DragId, Point, Modifiers, InputEvent, DragInProgress,
-    AnimCurve, Anim, Lerp,
+    AnimCurve, Anim, Lerp, Transition, TransitionKind, SlideDirection,
+    Transform, BlendMode,
 };
 pub use lazy::{lazy_vstack, lazy_hstack};
 pub use layout::{
@@ -56,5 +58,6 @@ pub use view::scroll_view;
 pub use state::{
     HostState, HOST_STATE, with_host_state, with_host_state_mut,
     reconcile, LifecycleEvent,
+    AnimRegistry, anim_start, anim_tick, anim_progress, anim_any_active, anim_gc,
 };
 pub use types::{FocusId, Key, KeyEquivalent};

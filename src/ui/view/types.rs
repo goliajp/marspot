@@ -317,6 +317,106 @@ impl<T: Copy + Lerp> Anim<T> {
     pub fn finished(&self) -> bool { self.elapsed >= self.duration }
 }
 
+/// Grid track sizing — one of three modes.  `Auto` not actually
+/// implemented in v1(treated as `Fixed(...)` with a sensible
+/// default 32pt).Real auto-sizing requires intrinsic-content
+/// pass = v2+.
+#[derive(Clone, Copy, Debug)]
+pub enum GridTrack {
+    Fixed(crate::ui::core::Length),
+    /// Take a share of leftover space proportional to `weight`.
+    Flex(u32),
+    /// Hug content (v1: defaults to 32pt fixed; v2+ proper intrinsic).
+    Auto,
+}
+
+/// 2D affine transform — translate / scale / rotate.  v1 only
+/// `translate` actually paints(via offset accumulation);
+/// `scale_x/y` and `rotate_deg` are data-only data until Metal
+/// vertex pipeline can apply them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+    pub translate_x: f64,
+    pub translate_y: f64,
+    pub scale_x:     f64,
+    pub scale_y:     f64,
+    pub rotate_deg:  f64,
+}
+impl Transform {
+    pub const fn identity() -> Self {
+        Self { translate_x: 0.0, translate_y: 0.0, scale_x: 1.0, scale_y: 1.0, rotate_deg: 0.0 }
+    }
+    pub const fn translate(x: f64, y: f64) -> Self {
+        Self { translate_x: x, translate_y: y, ..Self::identity() }
+    }
+    pub const fn scale(s: f64) -> Self {
+        Self { scale_x: s, scale_y: s, ..Self::identity() }
+    }
+    pub const fn rotate(deg: f64) -> Self {
+        Self { rotate_deg: deg, ..Self::identity() }
+    }
+}
+impl Default for Transform {
+    fn default() -> Self { Self::identity() }
+}
+
+/// CSS-flavored blend mode.  v1 data only;  pipeline integration
+/// (Metal `MTLBlendOperation` selection)is v2+.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+}
+
+/// `Transition` — declarative enter / exit animation spec.  Attached
+/// via `.transition()` modifier;  framework reads on `LifecycleEvent
+/// ::Appear / Disappear` to drive `Anim<T>` automatically.
+///
+/// v1 = data type only.  Real driver lands with [A3] frame schedule.
+#[derive(Clone, Copy, Debug)]
+pub struct Transition {
+    pub kind: TransitionKind,
+    pub duration_ms: f64,
+    pub curve: AnimCurve,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TransitionKind {
+    /// Fade alpha from 0 → 1 on appear, 1 → 0 on disappear.
+    Opacity,
+    /// Scale 0.8 → 1 on appear, 1 → 0.8 on disappear (size + opacity).
+    Scale,
+    /// Slide in from a side, slide out to the same side.
+    Slide(SlideDirection),
+    /// Custom combination — caller specifies both.
+    Combined { from_opacity: f64, from_scale: f64, from_offset: (f64, f64) },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlideDirection { FromTop, FromBottom, FromLeading, FromTrailing }
+
+impl Transition {
+    pub const fn fade(duration_ms: f64) -> Self {
+        Self { kind: TransitionKind::Opacity, duration_ms, curve: AnimCurve::EaseOut }
+    }
+    pub const fn scale(duration_ms: f64) -> Self {
+        Self { kind: TransitionKind::Scale, duration_ms, curve: AnimCurve::EaseOut }
+    }
+    pub const fn slide(direction: SlideDirection, duration_ms: f64) -> Self {
+        Self { kind: TransitionKind::Slide(direction), duration_ms, curve: AnimCurve::EaseOut }
+    }
+}
+
 /// Linear interpolation trait — primitive types + Color implement.
 pub trait Lerp: Sized {
     fn lerp(from: Self, to: Self, t: f64) -> Self;

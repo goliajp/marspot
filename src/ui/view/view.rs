@@ -11,6 +11,7 @@ use super::types::{
     AlignCross, Distribute, Edges, FrameSpec, Shadow,
     ActionId, HoverId, ViewId,
 };
+pub use super::types::GridTrack;
 
 /// One node in the view tree.  Authors usually don't construct this
 /// directly — they use builder methods (`Text::new(...)`, `vstack(...)`)
@@ -73,14 +74,23 @@ pub enum View {
         id: ViewId,
     },
     /// Uniform-cell grid — items flow left-to-right, top-to-bottom
-    /// across `cols` columns.  All cells = `cell_w` × `cell_h`;
-    /// variable-track support is v2+.
+    /// across `cols` columns.  All cells = `cell_w` × `cell_h`.
     Grid {
         items: Vec<View>,
         cols: usize,
         gap: Length,
         cell_w: Length,
         cell_h: Length,
+    },
+    /// Variable-track grid — each column track has its own size,
+    /// each row gets its own height too.  Items still flow l-to-r,
+    /// t-to-b across `tracks_w.len()` columns.  Cells = `tracks_w[
+    /// col] × tracks_h[row]` (cycle if rows underspecified).
+    VariableGrid {
+        items: Vec<View>,
+        tracks_w: Vec<GridTrack>,
+        tracks_h: Vec<GridTrack>,
+        gap: (Length, Length),  // (col_gap, row_gap)
     },
     /// Stateful binary switch — visual capsule with circle inside.
     /// `id` keys into `HostState` for the boolean.
@@ -305,6 +315,19 @@ pub enum Modifier {
     OnAppear(ActionId),
     /// Fire when this view leaves the tree.
     OnDisappear(ActionId),
+    /// Declarative enter / exit animation.  Framework drives via
+    /// `LifecycleEvent::Appear/Disappear` once [A3] frame schedule
+    /// lands.  Bake into Decoration so paint can apply during transit.
+    Transition(super::types::Transition),
+    /// Scale / rotate / translate transform applied at paint time.
+    /// v1 = data only(paint applies translate via offset accumulator);
+    /// rotate / scale need Metal vertex transform = v2+.
+    Transform(super::types::Transform),
+    /// Alpha mask using another view's shape.  v1 data only;  paint
+    /// = noop until Metal stencil pipeline lands.
+    Mask(Box<View>),
+    /// Compositing blend mode.  v1 data only;  paint = noop.
+    BlendMode(super::types::BlendMode),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,6 +422,19 @@ pub fn picker(id: ViewId, options: Vec<impl Into<String>>) -> View {
 /// cells are `cell_w` × `cell_h`.
 pub fn grid(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, gap: Length) -> View {
     View::Grid { items, cols, gap, cell_w, cell_h }
+}
+
+/// Variable-track grid: each column / row track gets its own size
+/// spec (Fixed / Flex / Auto).  Items flow l-to-r, t-to-b across
+/// `tracks_w.len()` columns.
+pub fn variable_grid(
+    items: Vec<View>,
+    tracks_w: Vec<GridTrack>,
+    tracks_h: Vec<GridTrack>,
+    col_gap: Length,
+    row_gap: Length,
+) -> View {
+    View::VariableGrid { items, tracks_w, tracks_h, gap: (col_gap, row_gap) }
 }
 
 /// Image built from a `Named` source token.
@@ -681,6 +717,18 @@ impl View {
     pub fn auto_focus(self) -> Self { self.add_mod(Modifier::AutoFocus) }
     pub fn on_appear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnAppear(a)) }
     pub fn on_disappear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnDisappear(a)) }
+    pub fn transition(self, t: super::types::Transition) -> Self {
+        self.add_mod(Modifier::Transition(t))
+    }
+    pub fn transform(self, t: super::types::Transform) -> Self {
+        self.add_mod(Modifier::Transform(t))
+    }
+    pub fn mask(self, m: View) -> Self {
+        self.add_mod(Modifier::Mask(Box::new(m)))
+    }
+    pub fn blend_mode(self, m: super::types::BlendMode) -> Self {
+        self.add_mod(Modifier::BlendMode(m))
+    }
 }
 
 // Text-specific modifiers — different from View modifiers (which

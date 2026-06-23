@@ -1367,8 +1367,10 @@ fn build_l2_view() -> crate::ui::view::View {
         h::done_row(".hidden(true) — 不画但占空间;.collapsed(true) — zero-size + 不画"),
         h::sub("CSS 类比:visibility: hidden;vs display: none"),
 
-        h::v2_row("mask / transform(scale / translate)/ blend mode"),
-        h::sub("transform 用 Metal vertex pipeline 改;mask 走 stencil"),
+        h::done_row(".transform(Transform) — translate v1 已 paint,scale/rotate 数据保留"),
+        h::done_row(".mask(View) / .blend_mode(BlendMode) — modifier API 已落"),
+        h::sub("paint 端:mask 需 Metal stencil;scale/rotate 需 vertex transform — v2+"),
+        h::v2_row("真 Metal scissor pixel-clip(替换 culling)+ mask/transform paint"),
     ])
 }
 
@@ -1521,6 +1523,24 @@ fn build_l4_view() -> crate::ui::view::View {
             4,
             Length::Pt(28.0),
             Length::Pt(28.0),
+            Length::Pt(6.0),
+        ),
+        h::done_row("VariableGrid(Fixed / Flex / Auto tracks)"),
+        h::hint("    VariableGrid Fixed(20) Flex(1) Fixed(40) × 2 rows:"),
+        crate::ui::view::variable_grid(
+            (0..6).map(|i| {
+                let c = match i % 3 {
+                    0 => color::ACCENT, 1 => color::SUCCESS, _ => color::WARN,
+                };
+                filled(c).corner_radius(radius::SM)
+            }).collect(),
+            vec![
+                crate::ui::view::GridTrack::Fixed(Length::Pt(20.0)),
+                crate::ui::view::GridTrack::Flex(1),
+                crate::ui::view::GridTrack::Fixed(Length::Pt(40.0)),
+            ],
+            vec![crate::ui::view::GridTrack::Fixed(Length::Pt(24.0))],
+            Length::Pt(6.0),
             Length::Pt(6.0),
         ),
 
@@ -1732,7 +1752,8 @@ fn build_l6_view() -> crate::ui::view::View {
                 ..Default::default()
             }),
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
-        h::v2_row("真 theme swap redraw hook(改 theme 自动 invalidate)"),
+        h::done_row("真 theme swap redraw hook(theme::version() AtomicU64 counter)"),
+        h::sub("set_current(id) 自动 fetch_add;host redraw() 比对版本号 → request_redraw"),
 
         h::h2("Animation"),
         h::done_row("Anim<T> + Lerp + AnimCurve 5 curves(含 Spring)"),
@@ -1744,8 +1765,11 @@ fn build_l6_view() -> crate::ui::view::View {
             easing_demo(AnimCurve::Spring { bounce: 1.0 },  "Spring"),
         ]).hstack_gap(Length::Pt(14.0)).align_cross_start(),
         h::sub("Spring = damped-cosine 关闭式;真 ODE 弹簧 = v2+"),
-        h::v2_row("真 frame 调度(active anim 触发 redraw_in 16ms,无 anim 时 0 redraw)"),
-        h::sub("跟 idle CPU=0 约束兼容;关键是 App 层接 scheduling hook"),
+        h::done_row("AnimRegistry + tick(now) + any_active() — frame schedule"),
+        h::sub("anim_start(dur) 注册;anim_tick(Instant::now()) 推进;anim_any_active() 触发 request_redraw"),
+        h::sub("ShellApp::redraw 每帧 tick+gc;active 时连续 redraw,idle 时 0(兼容 idle CPU=0)"),
+        h::done_row(".transition(Transition) modifier — declarative enter/exit anim"),
+        h::sub("Opacity / Scale / Slide(4 dir)/ Combined;LifecycleEvent driver 留 P3i 接绑"),
 
         h::h2("Internationalization"),
         h::done_row("text_width_cells 走 char_width(CJK = 2 cells)"),

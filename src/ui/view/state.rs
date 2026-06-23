@@ -89,6 +89,91 @@ pub fn with_host_state_mut<R>(f: impl FnOnce(&mut HostState) -> R) -> R {
     HOST_STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
+/// Anim registry — active animations driven by the host frame
+/// scheduler.  Each animation is keyed by a unique `AnimKey`;
+/// `tick(now)` advances all of them by elapsed time.  Host queries
+/// `any_active()` after build/tick to decide whether to schedule
+/// the next vsync redraw.
+pub struct AnimRegistry {
+    inner: HashMap<u64, AnimSlot>,
+    last_tick: Option<std::time::Instant>,
+    next_key: u64,
+}
+struct AnimSlot {
+    elapsed_ms: f64,
+    duration_ms: f64,
+    /// `true` when elapsed >= duration.
+    finished: bool,
+}
+
+impl AnimRegistry {
+    pub fn new() -> Self {
+        Self { inner: HashMap::new(), last_tick: None, next_key: 1 }
+    }
+    /// Register a new animation, return its key.  Caller can query
+    /// progress via `get(key)` later.
+    pub fn start(&mut self, duration_ms: f64) -> u64 {
+        let key = self.next_key;
+        self.next_key = self.next_key.wrapping_add(1);
+        self.inner.insert(key, AnimSlot { elapsed_ms: 0.0, duration_ms, finished: false });
+        key
+    }
+    /// Advance all anims by the wall-clock since the last tick.
+    pub fn tick(&mut self, now: std::time::Instant) {
+        let dt_ms = match self.last_tick {
+            Some(prev) => (now - prev).as_secs_f64() * 1000.0,
+            None       => 0.0,
+        };
+        self.last_tick = Some(now);
+        for slot in self.inner.values_mut() {
+            if slot.finished { continue; }
+            slot.elapsed_ms += dt_ms;
+            if slot.elapsed_ms >= slot.duration_ms {
+                slot.elapsed_ms = slot.duration_ms;
+                slot.finished = true;
+            }
+        }
+    }
+    /// `t ∈ [0, 1]` for the named anim.  Returns `None` if unknown.
+    pub fn progress(&self, key: u64) -> Option<f64> {
+        self.inner.get(&key).map(|s| {
+            if s.duration_ms <= 0.0 { 1.0 }
+            else { (s.elapsed_ms / s.duration_ms).clamp(0.0, 1.0) }
+        })
+    }
+    /// Has any anim not yet finished?  Host uses this to schedule
+    /// the next vsync (~16ms) — when false, scheduler can park,
+    /// preserving `idle CPU = 0`.
+    pub fn any_active(&self) -> bool {
+        self.inner.values().any(|s| !s.finished)
+    }
+    /// Drop finished anims.  Call after `tick()` to keep map small.
+    pub fn gc(&mut self) {
+        self.inner.retain(|_, s| !s.finished);
+    }
+}
+
+thread_local! {
+    pub static ANIM_REGISTRY: std::cell::RefCell<AnimRegistry> =
+        std::cell::RefCell::new(AnimRegistry::new());
+}
+
+pub fn anim_start(duration_ms: f64) -> u64 {
+    ANIM_REGISTRY.with(|r| r.borrow_mut().start(duration_ms))
+}
+pub fn anim_tick(now: std::time::Instant) {
+    ANIM_REGISTRY.with(|r| r.borrow_mut().tick(now));
+}
+pub fn anim_progress(key: u64) -> Option<f64> {
+    ANIM_REGISTRY.with(|r| r.borrow().progress(key))
+}
+pub fn anim_any_active() -> bool {
+    ANIM_REGISTRY.with(|r| r.borrow().any_active())
+}
+pub fn anim_gc() {
+    ANIM_REGISTRY.with(|r| r.borrow_mut().gc())
+}
+
 /// Lifecycle events emitted by `reconcile()` — the host iterates
 /// these after a build/layout pass to dispatch any `OnAppear` /
 /// `OnDisappear` action reducers.

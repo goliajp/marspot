@@ -12,7 +12,7 @@
 //! ship as additional token data files swapped at lookup time
 //! (P3v-2 follow-up).
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 pub mod token;
 
@@ -27,6 +27,7 @@ pub enum ThemeId {
 }
 
 static CURRENT_THEME: AtomicU8 = AtomicU8::new(ThemeId::Dark as u8);
+static THEME_VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// Read the currently-active theme.
 pub fn current() -> ThemeId {
@@ -37,11 +38,25 @@ pub fn current() -> ThemeId {
     }
 }
 
-/// Set the active theme.  v1 only `Dark` has real token data, so
-/// switching to Light / HighContrast currently produces no visual
-/// change (the `token::color::*` constants are Dark only).  This
-/// API ships now so callers can wire up the menu / preference; the
-/// per-theme color tables ship in P3v-2.
+/// Set the active theme.  Bumps `version()` so observers can
+/// invalidate caches + trigger redraw.  v1 host wiring:
+///
+/// ```ignore
+/// let mut last_theme_v = 0;
+/// fn redraw(&mut self, ctx) {
+///     let v = theme::version();
+///     if v != last_theme_v { ctx.request_redraw(); last_theme_v = v; }
+///     // ... build / layout / paint ...
+/// }
+/// ```
 pub fn set_current(id: ThemeId) {
     CURRENT_THEME.store(id as u8, Ordering::Relaxed);
+    THEME_VERSION.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Theme-data version counter.  Bumped by `set_current()`.  Hosts
+/// poll this to detect a theme swap and invalidate themed caches +
+/// schedule a redraw.
+pub fn version() -> u64 {
+    THEME_VERSION.load(Ordering::Relaxed)
 }

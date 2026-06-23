@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.22"  # 继续推 v3 待补:on_appear / Spring curve / KeyEquivalent+shortcut / Focusable+auto_focus / ContextMenu+Breadcrumb+ListRow preset
-core    = "0.10.73" # framework on_appear lifecycle + Spring + .shortcut/.focusable + 3 个新 preset
+shell   = "0.6.23"  # Checklist Phase A 一发清:[A1] theme version hook + [A2] .transition() + [A3] AnimRegistry frame schedule + [A4] .transform/.mask/.blend_mode + [A5] VariableGrid Fixed/Flex/Auto tracks
+core    = "0.10.74" # AnimRegistry tick / Transform / Mask / BlendMode / GridTrack / VariableGrid layout
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

@@ -17,7 +17,46 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.22**
+Current: **0.6.23**
+
+### 0.6.23
+
+P3 Phase A 整发清(线性 checklist 一个个推):
+
+**[A1] HighContrast theme swap hook** — `theme::version()` AtomicU64 counter,`set_current()` 自动 `fetch_add`;ShellApp::redraw 比对 `last_theme_version`,变了就 `request_redraw()`.
+
+**[A2] `.transition()` modifier** — declarative enter/exit anim spec:
+- `Transition { kind, duration_ms, curve }` data type
+- `TransitionKind::{Opacity, Scale, Slide(SlideDirection), Combined}`
+- `SlideDirection::{FromTop, FromBottom, FromLeading, FromTrailing}`
+- const constructors `Transition::fade / scale / slide`
+- bake 进 `Decoration.transition`
+- Driver(`LifecycleEvent` → 启 Anim<T>)留 P3i 真组件时绑
+
+**[A3] AnimRegistry frame schedule** — 真 anim 调度:
+- `AnimRegistry { inner: HashMap<u64, AnimSlot>, last_tick, next_key }`
+- `anim_start(dur_ms) -> u64`,`anim_tick(Instant::now())`,`anim_progress(key)`,`anim_any_active()`,`anim_gc()`
+- ShellApp::redraw 每帧 tick + gc + active 时 request_redraw
+- idle CPU=0 保留(无 active anim 时 0 redraw)
+
+**[A4] `.transform / .mask / .blend_mode` modifier types**:
+- `Transform { translate_x/y, scale_x/y, rotate_deg }` + `identity/translate/scale/rotate` const ctors
+- `BlendMode` 12 modes(Normal/Multiply/Screen/Overlay/...)
+- `Mask(Box<View>)`
+- bake 进 `Decoration.transform / blend_mode`;Translate 已 paint(走 offset 累加器),Scale/Rotate/Mask/BlendMode 数据 land,真 paint 留 Metal pipeline v2+
+
+**[A5] LazyHStack/Grid variable tracks** — `VariableGrid`:
+- `View::VariableGrid { items, tracks_w, tracks_h, gap }`
+- `GridTrack::{Fixed(L), Flex(N), Auto}` — Fixed claim 尺寸,Flex 按 weight 分 leftover,Auto v1 fallback 32pt
+- `variable_grid(items, tracks_w, tracks_h, col_gap, row_gap)` builder
+- DevPanel L4 加 demo:Fixed(20) Flex(1) Fixed(40) × 2 rows
+
+DevPanel Model 更新:
+- L2: `.transform / .mask / .blend_mode` → [✓](API);真 mask stencil + scale/rotate Metal vertex transform = v2+
+- L4: 加 VariableGrid demo
+- L6: theme swap hook → [✓];AnimRegistry frame schedule → [✓];.transition() → [✓]
+
+shell 0.6.22 → 0.6.23;core 0.10.73 → 0.10.74.
 
 ### 0.6.22
 
@@ -409,7 +448,16 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.73**
+Current: **0.10.74**
+
+### 0.10.74
+
+framework Phase A 5 items 全 land:
+- AnimRegistry tick/gc/any_active 真 frame schedule
+- Transform / Mask / BlendMode modifier + bake
+- GridTrack 三模式 + VariableGrid layout
+- Transition modifier + bake
+- theme version counter
 
 ### 0.10.73
 
