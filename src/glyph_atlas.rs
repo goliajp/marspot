@@ -354,6 +354,34 @@ impl GlyphAtlas {
         } else {
             rasterise_glyph(font, key.glyph, metrics, n_cells)?
         };
+        self.commit_raster(key, raster)
+    }
+
+    /// Phase 3 — chrome (proportional) raster path.  Same as
+    /// `get_or_rasterize` but skips the `n_cells × cell_w` /
+    /// `cell_h` "oversized" check that the PTY path uses as a
+    /// safety net for emoji-sized glyphs landing in a 1-cell
+    /// slot.  Chrome glyphs are sized for whatever advance CT
+    /// reports — there's no cell constraint to honour, so the
+    /// rasteriser always takes the natural Phase 1.1 path
+    /// (`bbox + 2*PAD` bitmap, real bearings, lsb pre-cancelled).
+    pub fn get_or_rasterize_natural(
+        &mut self,
+        key: GlyphKey,
+        font: &CTFont,
+    ) -> Option<AtlasEntry> {
+        if let Some(&entry) = self.cache.get(&key) {
+            return Some(entry);
+        }
+        let raster = if self.bpp == 4 {
+            rasterise_glyph_color_natural(font, key.glyph)?
+        } else {
+            rasterise_glyph_natural(font, key.glyph)?
+        };
+        self.commit_raster(key, raster)
+    }
+
+    fn commit_raster(&mut self, key: GlyphKey, raster: Raster) -> Option<AtlasEntry> {
         let placed = match self.place(raster.px_w, raster.px_h) {
             Some(p) => p,
             None => {
@@ -376,6 +404,7 @@ impl GlyphAtlas {
         self.cache.insert(key, entry);
         Some(entry)
     }
+
 
     /// Insert a caller-rastered 8-bit alpha mask under `key`.  Used
     /// for box-drawing / block-element characters: the font's CT-
@@ -827,6 +856,110 @@ fn rasterise_glyph_color(
         px_w,
         px_h,
         n_cells,
+        bearing_x: -(PAD as i16),
+        bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
+    })
+}
+
+/// Phase 3 — mono raster sized to the glyph's natural bbox + PAD,
+/// with no oversized-cell-fit fallback.  Used by the chrome shaping
+/// path (`font_shape::shape_line` → `GlyphAtlas::get_or_rasterize_natural`)
+/// where there is no cell constraint — CTLine has already laid each
+/// glyph at its proportional advance, so the rasteriser's only job
+/// is to emit a tight bitmap at the natural size.
+fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
+    let bbox = font.get_bounding_rects_for_glyphs(
+        core_text::font_descriptor::kCTFontOrientationDefault,
+        &[glyph],
+    );
+    if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
+        return None;
+    }
+    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD;
+    let px_h = (bbox.size.height.ceil() as u32) + 2 * PAD;
+    let bytes_per_row = px_w as usize;
+    let buf_len = bytes_per_row * px_h as usize;
+    let mut bytes: Vec<u8> = vec![0u8; buf_len];
+    let ctx = unsafe {
+        let raw = CGBitmapContextCreate(
+            bytes.as_mut_ptr() as *mut c_void,
+            px_w as usize,
+            px_h as usize,
+            8,
+            bytes_per_row,
+            std::ptr::null_mut(),
+            KCGIMAGE_ALPHA_ONLY,
+        );
+        if raw.is_null() {
+            return None;
+        }
+        CGContext::from_ptr(raw)
+    };
+    ctx.set_should_antialias(true);
+    ctx.set_allows_antialiasing(true);
+    ctx.set_should_smooth_fonts(true);
+    ctx.set_allows_font_smoothing(true);
+    ctx.set_should_subpixel_position_fonts(true);
+    ctx.set_allows_font_subpixel_positioning(true);
+    ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
+    ctx.set_gray_fill_color(1.0, 1.0);
+    let pen_x = (PAD as f64) - bbox.origin.x;
+    let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
+    font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
+    Some(Raster {
+        bytes,
+        px_w,
+        px_h,
+        n_cells: 1,
+        bearing_x: -(PAD as i16),
+        bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
+    })
+}
+
+/// Phase 3 — colour-glyph natural-size variant of
+/// `rasterise_glyph_natural`.  Same geometry, BGRA pixel format.
+fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
+    let bbox = font.get_bounding_rects_for_glyphs(
+        core_text::font_descriptor::kCTFontOrientationDefault,
+        &[glyph],
+    );
+    if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
+        return None;
+    }
+    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD;
+    let px_h = (bbox.size.height.ceil() as u32) + 2 * PAD;
+    let bytes_per_row = (px_w * 4) as usize;
+    let buf_len = bytes_per_row * px_h as usize;
+    let mut bytes: Vec<u8> = vec![0u8; buf_len];
+    let cs = CGColorSpace::create_device_rgb();
+    let bitmap_info = kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little;
+    let ctx = unsafe {
+        let raw = CGBitmapContextCreate(
+            bytes.as_mut_ptr() as *mut c_void,
+            px_w as usize,
+            px_h as usize,
+            8,
+            bytes_per_row,
+            cs.as_ptr() as *mut c_void,
+            bitmap_info,
+        );
+        if raw.is_null() {
+            return None;
+        }
+        CGContext::from_ptr(raw)
+    };
+    drop(cs);
+    ctx.set_should_antialias(true);
+    ctx.set_allows_antialiasing(true);
+    ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
+    let pen_x = (PAD as f64) - bbox.origin.x;
+    let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
+    font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
+    Some(Raster {
+        bytes,
+        px_w,
+        px_h,
+        n_cells: 1,
         bearing_x: -(PAD as i16),
         bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
     })

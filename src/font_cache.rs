@@ -253,6 +253,10 @@ pub struct FontCache {
     /// Emoji_Presentation=Yes — actual emoji legitimately want the
     /// colour cascade.  Indices into `self.fonts.fonts`.
     text_fallback_idxs: Vec<usize>,
+    /// Phase 3 — chrome CTLine shape cache (text → ShapedGlyphs).
+    /// Lives on `FontCache` so the shape closure can intern fallback
+    /// fonts into the same registry without aliasing-borrow issues.
+    shape_cache: crate::font_shape::ShapeCache,
 }
 
 /// Hard cap on `char_cache` entries.  Realistic terminal use
@@ -374,6 +378,7 @@ impl FontCache {
             ui_cell_h,
             ui_ascent,
             text_fallback_idxs,
+            shape_cache: crate::font_shape::ShapeCache::default(),
         })
     }
 
@@ -445,6 +450,53 @@ impl FontCache {
 
     pub fn font(&self, idx: usize) -> &CTFont {
         &self.fonts.fonts[idx]
+    }
+
+    /// Phase 3 — intern a CTFont produced by CTLine shaping (likely
+    /// a fallback font CT auto-discovered for a CJK / emoji codepoint
+    /// the base UI font lacks).  Returns its `font_id` so the renderer
+    /// can pack it into `GlyphKey` for atlas lookup.  Dedups against
+    /// postscript name, so repeated calls during shaping a long string
+    /// don't grow the registry per-glyph.
+    pub fn intern_ctfont(&mut self, font: CTFont) -> usize {
+        self.fonts.intern(font)
+    }
+
+    /// Phase 3 — shape `text` through CTLine against the UI font,
+    /// caching by `(text, size_q, ui_font_idx)`.  Returns owned Vec
+    /// (clone of the cached slice) so callers can re-borrow
+    /// `&mut FontCache` for `font(font_id)` lookups in the per-glyph
+    /// loop without aliasing the cache's interior.  The cache lives
+    /// on `FontCache` because it's logically font-state — the shape
+    /// output references `font_id`s into the same registry.
+    pub fn shape_ui(&mut self, text: &str) -> Vec<crate::font_shape::ShapedGlyph> {
+        if self.ui_font_idx == 0 || text.is_empty() {
+            return Vec::new();
+        }
+        let base_font = self.fonts.fonts[self.ui_font_idx].clone();
+        let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
+        let ui_id = self.ui_font_idx as u32;
+        // Borrow split: take the shape_cache out, run shape against
+        // a closure that mutably borrows the rest of FontCache, put
+        // it back.  Can't hold &mut self.shape_cache + &mut self
+        // simultaneously through the closure boundary, so we move
+        // the cache into a local for the duration of the call.
+        let mut cache = std::mem::take(&mut self.shape_cache);
+        let result = cache
+            .shape(text, &base_font, ui_id, size_q, |f| {
+                self.fonts.intern(f) as u32
+            })
+            .to_vec();
+        self.shape_cache = cache;
+        result
+    }
+
+    /// Phase 3 — chrome ascent + cell height.  Identical to the PTY
+    /// `ascent` / `cell_h` shape but driven by the UI font's metrics
+    /// so the chrome renderer can position SF Pro glyphs at the right
+    /// baseline regardless of the terminal font.
+    pub fn ui_metrics(&self) -> (f64, f64, f64) {
+        (self.ui_cell_w, self.ui_cell_h, self.ui_ascent)
     }
 
     /// Resolve `ch` against the UI font first (system default).  If

@@ -61,6 +61,7 @@ pub mod app;
 pub mod cc;
 pub mod dev_window;
 pub mod font_cache;
+pub mod font_shape;
 pub mod glyph_atlas;
 pub mod input;
 pub mod iosurface;

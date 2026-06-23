@@ -3810,6 +3810,17 @@ pub(crate) fn push_text_run_kind(
     glyphs: &mut Vec<GlyphInstance>,
     kind: FontKind,
 ) {
+    // Phase 3 — chrome runs go through `FontCache::shape_ui` (CTLine
+    // shaping with cached re-shape, kerning + ligatures + auto font
+    // fallback ON).  PTY runs keep the mono cell loop below.
+    if kind == FontKind::Ui {
+        push_text_run_ui_shaped(
+            text, x_start, baseline_y, color,
+            ascent, atlas_w, atlas_h,
+            font, atlas, glyphs,
+        );
+        return;
+    }
     let metrics = SlotMetrics {
         cell_w: cell_w.round() as u32,
         cell_h: cell_h.round() as u32,
@@ -3818,20 +3829,9 @@ pub(crate) fn push_text_run_kind(
     let mut x = x_start;
     for ch in text.chars() {
         let n_cells = crate::grid::char_width(ch).max(1) as u16;
-        let (font_idx, glyph) = match kind {
-            FontKind::Terminal => font.resolve_char(ch, false, false),
-            FontKind::Ui       => font.resolve_char_ui(ch),
-        };
+        let (font_idx, glyph) = font.resolve_char(ch, false, false);
         if glyph != 0 {
             let ct_font = font.font(font_idx).clone();
-            // v1 — both Terminal and Ui use uniform cell_w × n_cells:
-            // atlas allocates slots of that width and GlyphInstance
-            // size matches.  True proportional UI metrics (per-glyph
-            // advance) needs the atlas slot allocator to size per
-            // glyph too, otherwise the rasterised glyph gets
-            // horizontally stretched into the (wider) advance box —
-            // user-observed "字全变形" report 0.6.27.  Real per-glyph
-            // slots = v2+ atlas refactor.
             if let Some(entry) = atlas.get_or_rasterize(
                 text_glyph_key(font_idx as u32, glyph, &ct_font),
                 &ct_font,
@@ -3855,9 +3855,61 @@ pub(crate) fn push_text_run_kind(
                 });
             }
         }
-        let _ = kind;
         x += cell_w * n_cells as f32;
     }
+}
+
+/// Phase 3 — chrome `Ui` text run.  Shapes the line through CTLine
+/// (cached by `FontCache::shape_ui`), then for each shaped glyph
+/// allocates an atlas slot via `get_or_rasterize_natural` (no
+/// cell-fit fallback — glyph bbox sized) and emits a `GlyphInstance`
+/// at the typographic origin CTLine gave us.  ASCII gets real
+/// kerning (`Ta` reads tight); `fi` / `==>` show ligatures; CJK in a
+/// Latin sentence routes through PingFang / Hiragino automatically.
+#[allow(clippy::too_many_arguments)]
+fn push_text_run_ui_shaped(
+    text: &str,
+    x_start: f32,
+    baseline_y: f32,
+    color: [f32; 4],
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    let shaped = font.shape_ui(text);
+    if shaped.is_empty() {
+        return;
+    }
+    // Pre-round baseline to integer pixel grid so cross-frame chrome
+    // doesn't drift fractionally — matches the mono path's
+    // `baseline_y_q` quantisation.
+    let baseline_y_q = baseline_y.round();
+    for sg in shaped {
+        let ct_font = font.font(sg.font_id as usize).clone();
+        let key = GlyphKey {
+            font_id: sg.font_id,
+            glyph: sg.glyph_id,
+            size_q: GlyphKey::size_q_for(ct_font.pt_size()),
+            subpx_x: 0,
+            flags: GlyphKey::FLAG_SMOOTH,
+        };
+        let Some(entry) = atlas.get_or_rasterize_natural(key, &ct_font) else {
+            continue;
+        };
+        let pen_x = (x_start + sg.x_position).round();
+        let (origin, size) = entry.quad(pen_x, baseline_y_q);
+        glyphs.push(GlyphInstance {
+            origin,
+            size,
+            uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+            uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+            color,
+        });
+    }
+    let _ = ascent;
 }
 
 fn push_session(
