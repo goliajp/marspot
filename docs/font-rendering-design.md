@@ -241,8 +241,8 @@ pub struct GlyphKey {
 ```
 
 - `size_q` —— PTY 12pt 跟 chrome 13pt 各占自己的条目.同 glyph 跨 size 共享不可能(rasterise 不同)
-- `subpx_x` —— v1 = 1(无 subpixel,等同 0);v2 加到 4 或 8
-- `flags` —— rasteriser 模式(hinting / subpixel-AA / synthetic bold).8 bit 足够,扩展性好
+- `subpx_x` —— ship-time **强制 4 buckets**(0.25 px 精度;PTY 路径恒传 0,chrome shape 输出后会带 0..3 任一桶)
+- `flags` —— rasteriser 模式.bit0=smooth(stroke widening),bit1=subpx_aa(关,Apple Silicon grayscale only),bit2=synthetic_bold(fallback 字体无 bold variant 时合成),bit3=synthetic_italic.8 bit 足够
 
 ```rust
 pub struct AtlasEntry {
@@ -430,7 +430,7 @@ for cell in row {
 
 ---
 
-## 9. subpixel 位置(可选)
+## 9. subpixel 位置(强制 4 buckets)
 
 proportional 字体 sub-pixel 位置不对齐时,字符间距看上去抖.正常解:
 
@@ -439,11 +439,12 @@ proportional 字体 sub-pixel 位置不对齐时,字符间距看上去抖.正常
 - raster 时:draw glyph at `bitmap_x + subpx_x`
 - 提交 quad 时:`origin.x = floor(true_x) + subpx_x * 0`(取整,glyph 内部已偏移)
 
-代价:
-- N=4:atlas 用量 ×4
-- N=8:×8
-- v1 默认 N=1(无 subpixel),旧行为
-- v2 升 N=4,跟 chrome SF Pro 配套
+决定:
+- **N = 4**(0.25 px 精度),v5 ship-time 强制开
+- atlas 用量 ×4 —— 在 §16 Phase 2 给 atlas 提升到 4096² 时一并预留
+- shape 输出位置量化:`shape_x_quantized = floor(shape_x) + bucket / 4`,bucket = `round((shape_x - floor(shape_x)) × 4) % 4`
+- raster 时偏移 bitmap 对应 sub-pixel:`draw_glyph_at(x = pad + bucket × 0.25, y = baseline_in_bitmap)`
+- 实测 11-13pt SF Pro chrome 文字密集排版 —— subpx 关 vs 开有可观察的字符黏连差异;关 = ship 不能接受
 
 ---
 
@@ -489,19 +490,34 @@ CTLine shape 默认 ON:
 
 ---
 
-## 13. atlas 驱逐
+## 13. atlas 驱逐(LRU shelf-粒度)
 
-现状:满时 rebuild 全部.cache clear → 下一帧整批 raster → 一帧大 stutter.
+现状:满时 `rebuild` 整个 cache 清 + 下一帧整批 raster → 一帧大 stutter.
 
-v5:
-- 每 AtlasEntry 加 `last_used: u64`(frame_id)
-- get_or_rasterize 命中时更新 last_used
-- 满时:挑 last_used 最小的整个 shelf 驱逐
-- shelf 粒度:简单 + 缓存有效率高(相同高度 glyph 同一 shelf,driven 工作集进退一致)
+v5(Phase 6,ship-time 强制):
+- 每 `AtlasEntry` 加 `last_used: u64`(frame_id)
+- `Shelf` 也维护 `last_used = max(entries.last_used)`
+- `get_or_rasterize` 命中时更新 entry + shelf 的 last_used
+- 满时:挑 last_used 最小的整个 shelf 驱逐,移除 shelf 跟其 entries
+- shelf 粒度:per-entry 太碎(碎片化 + 内存洞洞),shelf 粒度好(相同高度 glyph 工作集进退一致)
+- `begin_frame(frame_id)` —— 每帧开始通知 atlas;driver 用 u64 frame counter(u64 不会 wrap,大概 5000 万年)
+- `rebuild` 方法删除 —— v5 不允许"清光"路径,任何驱逐必走 LRU shelf
+- `rebuild_count` 字段保留 + 永久应 = 0(出现非零 = 红线被破)
 
-进一步:
-- frame_id 每帧递增(u64 不会 wrap 实际)
-- 每帧开始时通知 atlas `begin_frame(frame_id)`(为驱逐统计)
+```rust
+impl GlyphAtlas {
+    pub fn begin_frame(&mut self, frame_id: u64) { self.current_frame = frame_id; }
+    fn evict_oldest_shelf(&mut self) -> bool {
+        let oldest = self.shelves.iter()
+            .min_by_key(|s| s.last_used)?;
+        let oldest_idx = ...; // index of oldest
+        // remove shelf + invalidate cache entries pointing into its y range
+        self.cache.retain(|_, e| !shelf_contains(oldest, e));
+        self.shelves.swap_remove(oldest_idx);
+        true
+    }
+}
+```
 
 ---
 
@@ -526,60 +542,276 @@ trait 是 v3+ 的事 —— marspot v1 macOS only,直接调 CoreText API,trait �
 
 ---
 
-## 15. 4 阶段 migration plan
+## 15. 完整支持矩阵(font v5 ship 后必须全绿)
 
-### Phase 1 — atlas 改 per-glyph 真实 bbox(2-3 commits)
+每行 = 一类字体 / 一类特性,每列 = 渲染场景.✓ = ship-time 必须工作.
 
-- AtlasEntry 加 `bearing_x/y`
-- get_or_rasterize 改:不接 SlotMetrics;raster 输出真实 bbox
-- 不变更 PTY paint —— 上层 PTY 路径强制居中 cell + 用 entry.bearing_y 算 baseline
-- chrome 路径仍走 mono(目前的 0.6.29 状态),但 atlas 已 per-glyph
-- 验证:PTY 视觉无变化;atlas 利用率提高(窄字符不再浪费 cell 宽)
+|  | PTY 终端 | chrome / dev panel | modal / popover | 状态栏 |
+|---|---|---|---|---|
+| **Mono 编程字体**(Monaco / SF Mono / Menlo / Hack / JetBrains Mono / Fira Code / Cascadia Code) | ✓ | ✓ | ✓ | ✓ |
+| **Proportional UI**(SF Pro / Helvetica / Arial / 系统字体) | n/a | ✓ kerning + ligature | ✓ | ✓ |
+| **Variable font**(SF Pro / Inter Variable;weight 100-900 + optical_size 轴) | n/a | ✓ 任意 weight | ✓ | ✓ |
+| **CJK 中日韩**(PingFang / Hiragino / AppleSDGothicNeo / Noto CJK) | ✓(2 cells) | ✓(shape 给真 advance) | ✓ | ✓ |
+| **Italic / Bold 变体** | ✓ | ✓ | ✓ | ✓ |
+| **Color emoji**(Apple Color Emoji) | ✓(2 cells scale fit) | ✓(真尺寸) | ✓ | ✓ |
+| **Emoji ZWJ 序列**(👨‍👩‍👧‍👦) | ✓(单 cluster 2 cells) | ✓(单 atlas entry) | ✓ | ✓ |
+| **Programming ligature**(`==>`、`!=` 连字) | ✗(每 cell 独立,故意关) | ✓(chrome 显示 / docs / hints) | ✓ | ✓ |
+| **Symbol 字体**(SF Symbols / 自定义 ttf) | ✓(per char) | ✓ | ✓ | ✓ |
+| **Bidi**(LTR + RTL 混排,Arabic / Hebrew) | n/a(grid 永远 LTR) | ✓(CTLine 自动处理) | ✓ | ✓ |
+| **Combining marks**(é = e + ◌́;CJK 注音符号) | ✓(单 cluster) | ✓(单 cluster) | ✓ | ✓ |
+| **小字号**(8-11pt) + **大字号**(16-32pt) | n/a(单一 PTY size) | ✓(任意 size_q) | ✓ | ✓ |
+| **Theme / Font 运行时切换**(用户改字体 → 实时换) | ✓(LRU 自然驱逐旧) | ✓ | ✓ | ✓ |
 
-### Phase 2 — chrome 走 CTLine shape(proportional 真接通)
-
-- shape_line_via_ctline 实现
-- push_text_run_kind(Ui) 改:shape 整段 text → 提交 glyph 序列,position 用 shaper 给的 advance(浮点)
-- mono PTY 路径不变(仍 char-by-char + cell 强制)
-- GlyphKey 加 `size_q`(PTY 跟 chrome size 区分)
-- 验证:dev panel SF Pro 正确 proportional 渲染,字符不变形,kerning 自动(eg `Tay` 中 'T' 和 'a' 紧贴)
-
-### Phase 3 — subpixel positioning(可选,视觉精细化)
-
-- GlyphKey.subpx_x 启用(N=4)
-- raster 加 subpx_x 偏移
-- shape 输出量化 quantize 到 1/4 px
-- atlas 4× 用量(注意监控驱逐率)
-- 验证:proportional text 在小字号(11-13pt)下文字粘连感消失
-
-### Phase 4 — LRU 驱逐 + 多 size + variable font
-
-- atlas LRU shelf 驱逐
-- FontRegistry 加 size 维度:`intern_at_size(font, size_pt) -> font_id`
-- variable font:axis descriptor → 多 font_id
-- 验证:atlas 驱逐统计稳定,无 stutter;chrome+PTY+modal 多 size 共存
+**任何一格 ✗ 都不算 v5 完成**.这是 "完整字体支持" 的硬定义.
 
 ---
 
-## 16. 待解问题
+## 16. 10 阶段 mandatory migration plan(无 defer,无 optional)
 
-1. **subpixel AA**(LCD)在 Apple Silicon 上 macOS 10.14+ 已 deprecated —— iTerm2/Terminal.app 都走 grayscale.我们应该跟着走 grayscale.确认.
+每阶段一个 ship-able commit / 一组 commits,独立可回滚.全 10 阶段完成 = font v5 ship.预估总工时 3-4 周(per-phase 1-3 工作日).
 
-2. **font smoothing** 现在 ON(CoreText stroke widening).换 atlas 后是否仍需要,需 visual 验证.
+### Phase 1 — atlas per-glyph 真实 bbox + bearing(基石)
 
-3. **emoji ZWJ 序列**(👨‍👩‍👧‍👦)是 CTLine 输出单 cluster 单 CTRun.atlas 需把整 cluster 作一个"big glyph"还是分子 glyph?CoreText 给的是 base glyph + 多 attachment.建议:第一个 base glyph 是结果 ZWJ glyph,CTLine 已合并.我们查 atlas 时用这个合成 glyph_id.
+**改动**:`src/glyph_atlas.rs` + `src/font_cache.rs`
+- `AtlasEntry` 加 `bearing_x: i16, bearing_y: i16`
+- `RasterOutput` 引入(替代部分 SlotMetrics 职责)
+- `rasterise_glyph` 输出真实 bbox + bearing,不再 force cell_w × cell_h
+- `get_or_rasterize` 闭包形态:`FnOnce() -> Option<RasterOutput>`,cache hit 零开销
+- 兼容:`push_text_run`(PTY 路径)在 paint 时算 `quad_x = cell_x + (cell_w × n - bbox_w) / 2`,`quad_y = baseline - bearing_y`;视觉跟现状一致
 
-4. **CTLine 每帧 shape 全部 chrome text** —— 性能?预估 chrome 共 ~1000 字符,每帧 CTLine 创建 + iterate = ?ms 估算.若超 1ms 加 string-level cache(同 text → 缓存的 ShapedRun 列表).key = (text, size_q, font_id, weight) hash.
+**Acceptance**:
+- PTY 12pt Monaco bench 渲染像素 diff = 0(对照现状基线)
+- atlas 利用率从现 ~60% 提升到 ~85%(窄字符不再撑满)
+- 9 session 终端 grid bench p99 不退化(< 1300µs 维持)
 
-5. **atlas 维度多大够**?现在 1024×1024 ≈ 1MB R8.加 chrome 字号 + subpx → 估算最大工作集 4-8 MB.单 atlas 4096×4096(16 MB)起步.
-
-6. **glyph cluster width 决定权**:现状 char_width(ch) 决定 PTY n_cells.但 CoreText 给的 advance 可能不一致(CJK 字 advance = 2× cell_w,但 emoji 经常是不规则).PTY 路径继续 trust char_width;chrome 路径 trust shape advance.两条不冲突.
-
-7. **fonts re-intern 何时清**?当用户切换 light/dark theme 或换 font 配置,旧 font_id 的 atlas 条目需要驱逐.LRU 自然处理(不再用 = 最先驱逐).
+**Risk + rollback**:atlas 数据结构破坏性变更 — 旧 cache 序列化数据不兼容;atlas 是运行时构造,无持久化,无 rollback 问题
 
 ---
 
-## 17. 性能红线
+### Phase 2 — GlyphKey 加 size_q + flags(多 size 解锁)
+
+**改动**:`src/glyph_atlas.rs`
+- `GlyphKey = (font_id, glyph, size_q: u16, subpx_x: u8, flags: u8)`
+- size_q = `round(size_pt × 4)`(0.25-pt 精度)
+- subpx_x 暂留位(默认 0),Phase 4 启用
+- flags:bit0=smooth, bit1=subpx_aa(off on Apple Silicon)
+- atlas 容量 1024² → 4096²(16 MB R8 + 4 MB BGRA8 emoji)
+
+**Acceptance**:
+- PTY 12pt + chrome 13pt 共存,各自独立 cache,不互踩
+- atlas dim bump 完后 bench 一致 / 无回退
+
+---
+
+### Phase 3 — CTLine shape(chrome 真 proportional 接通)
+
+**改动**:`src/render_metal.rs` + 新 `src/font_shape.rs`
+- 新 module `font_shape`:`shape_line_via_ctline(text, style) -> Vec<ShapedRun>`
+  - 用 `CTFramesetterCreateWithAttributedString` 或更直接的 `CTLineCreateWithAttributedString`
+  - 遍历 CTRun → glyph + position + advance + font + flags
+- `push_text_run_kind(Ui)` 整段 shape 一次,提交 glyph 序列
+- mono PTY 路径不动
+- string-level shape cache(`(text_hash, size_q, font_idx, weight)` → `Vec<ShapedRun>`,LRU 1024 条)
+  - **必须**,不是 optional —— 没 cache 每帧 chrome shape 1000 字符成本高
+
+**Acceptance**:
+- dev panel SF Pro 字符不变形,字距自然(kerning 自动:'Ta' 紧贴)
+- `Tax`/`fi` ligature ON,visible diff vs Phase 2(只字符外形,无 kerning)
+- chrome shape per frame < 1ms(cache hit < 50µs)
+- CJK 中文混排 chrome ↔ fallback 正确(SF Pro 无中文 → PingFang)
+
+---
+
+### Phase 4 — subpixel positioning(强制开,4 buckets)
+
+**改动**:`src/glyph_atlas.rs` + `src/font_shape.rs`
+- `subpx_x: u8 ∈ 0..4`,key 自动包含
+- raster 时 `dx_in_bitmap += subpx_x × 0.25`
+- shape 输出位置量化:`quantized_x = floor(x) + subpx_bucket / 4`
+- atlas 用量 ×4(已在 Phase 2 4096² 预留)
+
+**Acceptance**:
+- proportional text 在小字号(11-13pt)字符**不黏连**:连续 'i'/'l' 不撞
+- subpx 关 vs 开做 visual diff,差异主要在小号 chrome 字
+- atlas 驱逐率监控:仍 < 1 evict / sec idle
+
+---
+
+### Phase 5 — variable font 支持
+
+**改动**:`src/font_cache.rs`
+- `FontRegistry::intern_with_axes(font_name, size, axes)` —— 接 `(kCTFontWeightTrait, 0.0..1.0)` 等
+- 标准 weight 档(100/200/.../900)预 intern + cache
+- `resolve_char_styled(ch, weight, italic, condensed)` 返带 axis 的 font_id
+
+**Acceptance**:
+- SF Pro 任意 weight(100 light → 900 black)可渲染
+- Inter Variable 安装时同样工作
+- chrome dev panel `h1` 用 weight=600,`body` 用 400 —— visible diff
+
+---
+
+### Phase 6 — LRU 驱逐(替代 rebuild_all)
+
+**改动**:`src/glyph_atlas.rs`
+- `AtlasEntry.last_used: u64`
+- atlas 接 `begin_frame(frame_id)` —— 每帧开始通知
+- `get_or_rasterize` 命中更新 last_used
+- full 时:选 last_used 最小的 shelf 整 shelf 驱逐(per-entry 太碎,shelf 粒度好)
+- `rebuild_count` 仍记录(应趋零)
+
+**Acceptance**:
+- 60s 终端高强度输入 + 切 panel 跑下来,`rebuild_count` 增量 = 0
+- 旧 rebuild_all path 删除
+- atlas 满时驱逐 stutter < 5ms(单 shelf eviction)
+
+---
+
+### Phase 7 — color emoji 完整(per-glyph bbox + ZWJ)
+
+**改动**:`src/glyph_atlas.rs` color path
+- `rasterise_glyph_color` 输出真实 bbox(类似 mono path)
+- ZWJ cluster:CTLine 已合并到单 glyph_id,atlas 单 entry 缓存
+- PTY 路径:single emoji glyph_id rendered into 2 cells,quad 强制 cell 大小 + scale fit
+- chrome 路径:emoji 直接真实 bbox 渲染(可能 16×16 px 真大小)
+
+**Acceptance**:
+- 终端 `👨‍👩‍👧‍👦` 单 grapheme(2 cells)
+- chrome `👍🏼` 显示完整 5-glyph ZWJ 序列,无 .notdef
+- 性别 / 肤色 modifier 处理正确
+
+---
+
+### Phase 8 — OpenType feature 控制(per-context 开关)
+
+**改动**:`src/font_shape.rs`
+- `ShapeOptions { kerning: bool, liga: bool, calt: bool, contextual: bool }`
+- PTY: `ShapeOptions::all_off()` — 每 cell 独立,不连
+- chrome body: `ShapeOptions::default()` — 全开
+- code block: `ShapeOptions::code()` — kerning 关 但 liga 开(`==>` 显示连字)
+- 通过 `NSAttributedString` attributes 设置(`kCTLigatureAttributeName` 等)
+
+**Acceptance**:
+- 终端 Fira Code 输入 `==>` 仍三字符独立显示
+- chrome dev panel 中显示同 `==>` 显示连字
+- chrome `Tax` 字距紧凑(kerning ON)
+- PTY `Tax` 三字独立等宽
+
+---
+
+### Phase 9 — visual regression test matrix + bench gate
+
+**改动**:`bench/font-rendering/` + `bin/font-bench.sh`
+- 12 个标杆 string(各 font 类 × 各 场景):
+  - "The quick brown fox jumps over the lazy dog 0123456789"
+  - "你好世界 こんにちは 안녕" CJK 混排
+  - "👨‍👩‍👧‍👦🍕🇯🇵" emoji + ZWJ + flag
+  - "Tax fi fl ff ==> != !==" kerning / ligature
+  - "Bidi: Hello مرحبا עברית" RTL 混排
+- 渲染到 PNG(headless)
+- 对比基线 PNG(SSIM > 0.98)
+- bench:每场景 cold-raster + warm-cache 时延
+
+**Acceptance**:
+- 12/12 visual diff < 2%(允许 AA 噪音)
+- cold raster < 500µs / glyph
+- warm cache lookup < 100ns / glyph
+- shape per frame < 1ms 
+
+---
+
+### Phase 10 — 跨平台抽象 trait 提取
+
+**改动**:`src/render/font/` 新 sub-module
+- `pub trait Rasteriser { fn rasterise(&self, key: GlyphKey) -> Option<RasterOutput>; }`
+- `pub trait Shaper { fn shape(&mut self, text: &str, style: &TextStyle) -> Vec<ShapedRun>; }`
+- macOS impl:`CoreTextRasteriser` + `CoreTextShaper`(从现有 path 抽出)
+- Linux/Windows impl 留接口,实现时再补(rustybuzz + ab_glyph / DirectWrite)
+
+**Acceptance**:
+- 编译 trait + impl,所有调用经 trait
+- 单元测试:headless `MockRasteriser` 可 plug 进 atlas 跑(不实际 raster)
+- 文档:`docs/font-rendering-design.md` §14 跨平台具体化为 trait 签名
+
+---
+
+## 17. 已决定的 trade-off(无遗留问题)
+
+旧版 §16 列了 7 个"待解问题",这里逐一拍板:
+
+| # | 问题 | 决定 |
+|---|---|---|
+| 1 | LCD subpixel AA? | **关**.Apple Silicon macOS 10.14+ 已停 LCD subpx,grayscale AA only. |
+| 2 | font_smoothing(CT stroke widening)? | **保持 ON**.Phase 1 后 visual diff 验证未退化即可. |
+| 3 | emoji ZWJ atlas storage? | **单 cluster 单 atlas entry**.CTLine 合并,glyph_id 是合成 id. |
+| 4 | CTLine 每帧 shape 性能? | **string-level shape cache**(LRU 1024 条).Phase 3 mandatory. |
+| 5 | atlas 维度? | **4096² R8**(16 MB)+ **4096² BGRA8**(64 MB)emoji.Phase 2 一次到位. |
+| 6 | PTY n_cells vs shape advance 冲突? | **PTY 信 `char_width()`,chrome 信 shape advance**.两条不共享决定权. |
+| 7 | font re-intern 清理? | **LRU 自然驱逐**(Phase 6).不需额外 GC. |
+| 8 | subpixel buckets(2/4/8)? | **4 buckets**(0.25 px 精度).平衡 atlas 用量 vs 视觉. |
+| 9 | shape cache key 包含 color/alpha? | **不包含**.color 是 GlyphInstance 属性,跟 glyph 形状无关. |
+| 10 | text cache 命中失效何时清? | **theme version() 变 / set_font() / chrome 字体改时全清**.集成 [A1] theme hook. |
+
+---
+
+## 18. Acceptance 红线(全部满足 = v5 ship)
+
+PTY 视觉:
+- ✓ Monaco 12pt mono 渲染像素 diff = 0(vs 现状)
+- ✓ CJK 中文混排无 baseline 漂移
+- ✓ emoji 在 2 cells 正确缩放
+- ✓ box drawing `┌─┐│└─┘` 接缝无 hairline gap
+
+chrome 视觉:
+- ✓ SF Pro 字符不变形,真 proportional
+- ✓ kerning + ligature 自动(`Tax` / `fi` / `==>`)
+- ✓ subpixel 小字号(11-13pt)无字符黏连
+- ✓ variable font weight 100→900 渐变
+- ✓ CJK chrome 文本 fallback 正确(SF Pro → PingFang),baseline 对齐
+
+跨字体兼容(§15 矩阵):
+- ✓ 12/12 visual regression PNG SSIM > 0.98
+- ✓ 13 类字体特性全部支持
+
+性能:
+- ✓ idle CPU = 0(无 anim 时)
+- ✓ PTY p99 render < 1.3ms(现状基线 + Phase 1 不退化)
+- ✓ chrome shape per frame < 1ms(cache hit < 50µs)
+- ✓ cold raster < 500µs / glyph
+- ✓ warm cache lookup < 100ns / glyph
+
+资源:
+- ✓ 9 session steady-state atlas evict < 1 / 秒
+- ✓ rebuild_count = 0(Phase 6 后)
+- ✓ atlas 总占用 < 32 MB(R8 + BGRA8)
+
+---
+
+## 19. 风险 + rollback
+
+每 Phase ship-able commit,可独立 revert.最大风险节点:
+
+1. **Phase 1**(atlas 数据结构破坏)— 影响所有 raster path.
+   - 风险:PTY 视觉 diff
+   - 防控:visual regression test matrix Phase 9 提前 cherry-pick 出基线 PNG;Phase 1 立刻验证
+   - rollback:`git revert` 一个 commit
+
+2. **Phase 3**(CTLine shape)— chrome 整个渲染路径改写.
+   - 风险:CTLine 用法错 / 性能不达标
+   - 防控:string-level cache 提前实现;cache miss 时 measure
+   - rollback:`encode_canvas_into` ui_font 参数回 false(已是 0.6.29 状态)
+
+3. **Phase 5**(variable font)— 接 CTFontDescriptor axis,旧 macOS 兼容
+   - 风险:macOS 12+ only;旧系统 fallback
+   - 防控:axis 缺失时返默认 weight font,不 panic
+
+4. **Phase 7**(emoji ZWJ)— Unicode 复杂,bug 多
+   - 风险:某些 ZWJ 序列渲染 broken
+   - 防控:测试矩阵覆盖 10 个流行 emoji 组合
+
+---
+
+## 20. 性能红线(无降级保证)
 
 继承 marspot 现有约束:
 
@@ -592,6 +824,6 @@ trait 是 v3+ 的事 —— marspot v1 macOS only,直接调 CoreText API,trait �
 
 ---
 
-## 18. 一句话
+## 21. 一句话
 
-**marspot font v5 = CoreText shaping(chrome 走 CTLine,PTY 走 char-by-char)+ atlas per-glyph 真实 bbox + GlyphKey(font, glyph, size_q, subpx)+ LRU 驱逐 + (v3+)变体跨平台抽象.同 atlas 服务 mono 跟 proportional 不打架.PTY 视觉 0 漂移,chrome 真 proportional 不变形.**
+**marspot font v5 = CoreText shape(chrome CTLine + PTY char-by-char)+ atlas per-glyph 真实 bbox + bearing + GlyphKey(font, glyph, size_q, subpx, flags)+ subpixel 4 buckets + variable font(weight 100-900 + 任意 axis)+ string-level shape cache + LRU shelf 驱逐 + Color emoji ZWJ cluster + OpenType 特性 per-context 开关 + visual regression SSIM gate + Rasteriser/Shaper trait 跨平台抽象.13 类字体特性 × 4 渲染场景全绿,PTY 0 漂移,chrome 真 proportional 不变形,无 defer 无 optional.**
