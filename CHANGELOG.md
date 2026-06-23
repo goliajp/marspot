@@ -17,7 +17,33 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.25**
+Current: **0.6.26**
+
+### 0.6.26
+
+**PERF 修 — dev panel 每帧 re-layout 致 idle 12%+ CPU.**
+
+User 报"用起来这么卡".诊断:
+- shell PID 58907 跑了 16h,占了 39:30 CPU time,12.3% 现 CPU snapshot
+- root cause:`ShellApp::redraw` 每次都无条件 `dev_window.render(&state)` if visible
+- 主窗 redraw 由 PTY traffic 驱动可达 ~60fps
+- dev panel View 树有 ~580 节点(L1 token 扩 + L2-L6 各 30-50 项)
+- 每帧 build + layout + paint 整树 → ~10ms × 60fps = 600ms CPU/s ≈ 60% 单核
+
+修法 — `dev_panel_dirty: bool` 脏标志:
+- init `dev_panel_dirty: true`(首帧 render 一次)
+- 仅当 state 变化时 set true:
+  - visibility flip(toolbar icon click)
+  - DevPanelClick(active_tab / active_section 切换)
+  - DevPanelScroll
+  - DevWindowChanged(window resize / move)
+  - theme::version() 变(theme swap)
+- `redraw()` 中:`if dp_visible && self.dev_panel_dirty { render + clear flag }`
+- 主窗依然每帧 redraw,但 dev_window 跳过(预期 < 1% CPU when dev panel 静止)
+
+注:dev_window 的 NSWindow 本身仍存在,只是不重 paint.PTY traffic 不再波及 dev panel layout.
+
+shell 0.6.25 → 0.6.26;core unchanged.
 
 ### 0.6.25
 

@@ -768,6 +768,13 @@ struct ShellApp {
     /// this counter; we compare each `redraw()` to invalidate cached
     /// state and trigger an additional repaint.
     last_theme_version: u64,
+    /// Dev panel content has changed and the next `redraw()` should
+    /// re-render its NSWindow.  Set on visibility flip / click /
+    /// scroll / window resize / theme swap;  cleared after render.
+    /// Without this every main-window redraw (driven by ~60fps PTY
+    /// traffic) was re-laying out ~580 view-tree nodes, eating ~10%+
+    /// CPU continuously.  See 0.6.26 release note.
+    dev_panel_dirty: bool,
 }
 
 /// Bundle: the plugin's session object + the metadata we need to log
@@ -854,6 +861,7 @@ impl ShellApp {
             dev_panel: marspot::ui::components::DevPanelState::default(),
             last_saved_dev_window: None,
             last_theme_version: marspot::ui::theme::version(),
+            dev_panel_dirty: true,   // 0.6.26 — render once on first frame
         }
     }
 
@@ -1784,6 +1792,7 @@ impl ShellApp {
             }
             ShellInbox::DevPanelToggle => {
                 self.dev_panel.visible = !self.dev_panel.visible;
+                self.dev_panel_dirty = true;
                 // Save state now so the user's preference survives
                 // any subsequent L1 self-execv (silent update) or
                 // crash — the redraw path drives the AppKit-side
@@ -2284,6 +2293,7 @@ impl MarspotApp for ShellApp {
         // a live-drag's 60+/s notifications collapse to one write
         // per pt change).
         self.save_dev_window_state_if_changed(ctx);
+        self.dev_panel_dirty = true;
     }
 
     fn dev_panel_click(&mut self, _ctx: &MarspotAppCtx, x_pt: f64, y_pt: f64) {
@@ -2298,9 +2308,11 @@ impl MarspotApp for ShellApp {
         match hit_test(&self.dev_panel, chrome_cell_w_pt, x_pt, y_pt) {
             Some(DevPanelHit::Tab(t)) => {
                 self.dev_panel.active_tab = t;
+                self.dev_panel_dirty = true;
             }
             Some(DevPanelHit::Section(s)) => {
                 self.dev_panel.active_section = s;
+                self.dev_panel_dirty = true;
             }
             None => {}
         }
@@ -2317,6 +2329,7 @@ impl MarspotApp for ShellApp {
             self.dev_panel.active_section,
         );
         let _ = marspot::ui::view::apply_scroll_delta(target_id, delta_y_phys);
+        self.dev_panel_dirty = true;
     }
 
     fn redraw(&mut self, ctx: &MarspotAppCtx) {
@@ -2326,6 +2339,7 @@ impl MarspotApp for ShellApp {
         let cur_v = marspot::ui::theme::version();
         if cur_v != self.last_theme_version {
             self.last_theme_version = cur_v;
+            self.dev_panel_dirty = true;
             ctx.request_redraw();
         }
         // [A3] Animation frame schedule — advance any active anims
@@ -2345,9 +2359,17 @@ impl MarspotApp for ShellApp {
         // is a no-op when the window isn't visible.
         let dp_visible = self.dev_panel.visible;
         let dp_state = self.dev_panel.clone();
+        // Only re-render the dev panel NSWindow when its state actually
+        // changed.  Main-window redraw is driven by PTY traffic (~60 fps
+        // continuously); without this gate, every frame re-laid out
+        // the ~580-node view tree at ~10%+ CPU steady-state.
+        let should_render_dev = dp_visible && self.dev_panel_dirty;
+        if should_render_dev {
+            self.dev_panel_dirty = false;
+        }
         marspot::dev_window::with_dev_window(|w| {
             w.set_visible_deferred(dp_visible);
-            if dp_visible {
+            if should_render_dev {
                 w.render(&dp_state);
             }
         });
