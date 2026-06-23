@@ -1052,6 +1052,33 @@ impl MetalRenderer {
         (self.font.cell_w as f32, self.font.cell_h as f32, self.font.ascent as f32)
     }
 
+    /// Terminal font metrics — the font used for the actual grid /
+    /// PTY output.  Identical to `chrome_font_metrics` for v1 because
+    /// they currently share a `FontCache`;  reserves the API surface
+    /// for future split where UI chrome can use a different font.
+    pub fn terminal_font_metrics(&self) -> (f32, f32, f32) {
+        self.chrome_font_metrics()
+    }
+
+    /// UI font metrics — the font used for chrome / dev panel / UI
+    /// primitives via the View tree framework.  Defaults to the same
+    /// as `chrome_font_metrics()`;  when env var `MARSPOT_UI_FONT_SCALE`
+    /// is set (eg `0.88`), the metrics report a scaled cell width/
+    /// height (layout adapts;  actual glyph rasterization at the new
+    /// size is a B0.7 follow-up requiring `FontCache` extension).
+    ///
+    /// Long-term: this is where a real separate UI font (eg SF Pro
+    /// over a coding mono) gets returned.
+    pub fn ui_font_metrics(&self) -> (f32, f32, f32) {
+        let scale = std::env::var("MARSPOT_UI_FONT_SCALE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|s| *s > 0.0 && *s < 4.0)
+            .unwrap_or(1.0);
+        let (w, h, a) = self.chrome_font_metrics();
+        (w * scale, h * scale, a * scale)
+    }
+
     /// Render one `Canvas` directly into our CAMetalLayer's next
     /// drawable.  Used by `DevWindow` which owns this renderer
     /// and has no `Layout` / sessions to feed into `render_layout`.

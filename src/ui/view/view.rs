@@ -75,10 +75,14 @@ pub enum View {
     },
     /// Uniform-cell grid — items flow left-to-right, top-to-bottom
     /// across `cols` columns.  All cells = `cell_w` × `cell_h`.
+    /// `col_gap` between columns, `row_gap` between rows;  pass the
+    /// same value for both via `grid(items, cols, cell_w, cell_h,
+    /// gap)` shortcut.
     Grid {
         items: Vec<View>,
         cols: usize,
-        gap: Length,
+        col_gap: Length,
+        row_gap: Length,
         cell_w: Length,
         cell_h: Length,
     },
@@ -418,10 +422,14 @@ pub fn picker(id: ViewId, options: Vec<impl Into<String>>) -> View {
     View::Picker { id, options: options.into_iter().map(Into::into).collect() }
 }
 
-/// Uniform grid: `cols` columns, items flow left-to-right.  All
-/// cells are `cell_w` × `cell_h`.
+/// Uniform grid (single gap value for both col + row).
 pub fn grid(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, gap: Length) -> View {
-    View::Grid { items, cols, gap, cell_w, cell_h }
+    View::Grid { items, cols, col_gap: gap, row_gap: gap, cell_w, cell_h }
+}
+
+/// Uniform grid with separate col_gap / row_gap.
+pub fn grid_with_gaps(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, col_gap: Length, row_gap: Length) -> View {
+    View::Grid { items, cols, col_gap, row_gap, cell_w, cell_h }
 }
 
 /// Variable-track grid: each column / row track gets its own size

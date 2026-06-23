@@ -17,7 +17,38 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.23**
+Current: **0.6.24**
+
+### 0.6.24
+
+Phase B0 — primitive 完善 + font 分离基础(回应 user "grid list 建立在 model 基础 + PTY/UI font 区分").
+
+**[B0.1] Grid col_gap / row_gap 分开**:
+- `View::Grid { ..., col_gap, row_gap }` 替代单一 gap
+- `grid(items, cols, cell_w, cell_h, gap)` 保持 backward compat(col_gap=row_gap)
+- 新 `grid_with_gaps(items, cols, cell_w, cell_h, col_gap, row_gap)` 显式分开
+- VariableGrid 早已支持 `(col_gap, row_gap)` tuple
+
+**[B0.2] lazy_vstack_padded**:
+- `lazy_vstack_padded(id, items, item_h, gap, leading_margin, trailing_margin)`
+- LazyVStack 包一层 Padding(top: leading, bottom: trailing)
+- 用于 sticky-header / 滚动 boundary 留呼吸感
+
+**[B0.4-B0.6] Font 分离基础**:
+- `MetalRenderer::ui_font_metrics()` — UI chrome 用,scaled by `MARSPOT_UI_FONT_SCALE` env(0.0..4.0)
+- `MetalRenderer::terminal_font_metrics()` — terminal grid 用
+- `MetalRenderer::chrome_font_metrics()` 保留作 backward compat
+- v1 三者 = same(共用 FontCache)
+- `dev_window` 切换:`renderer_font_metrics() / chrome_cell_dims_phys()` 改用 `ui_font_metrics`
+- env 试:`MARSPOT_UI_FONT_SCALE=0.88` → dev panel 文本 layout 变小;glyph 仍 terminal size,出现 visual mismatch — 由 B0.7 真 multi-font FontCache 解决
+
+**剩下 B0.7** (v2+):FontCache 扩展支持多 font kind,真不同字体 rasterize.MARSPOT_UI_FONT_NAME env load 独立 CTFont.
+
+DevPanel Model 更新:
+- L1 新加 "Font 分离(PTY vs UI)" 块 — ui_font_metrics/terminal/chrome [✓];真不同 font [v2+]
+- L4 加 lazy_vstack_padded + grid_with_gaps;清掉 Grid 重复行
+
+shell 0.6.23 → 0.6.24;core 0.10.74 → 0.10.75.
 
 ### 0.6.23
 
@@ -448,7 +479,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.74**
+Current: **0.10.75**
+
+### 0.10.75
+
+Phase B0:Grid `(col_gap, row_gap)` 分开,`grid_with_gaps()` 显式 builder.lazy_vstack_padded(leading/trailing margin).MetalRenderer 加 `ui_font_metrics` / `terminal_font_metrics` 分离,`MARSPOT_UI_FONT_SCALE` env 控制 UI 尺寸.
 
 ### 0.10.74
 

@@ -478,15 +478,18 @@ impl DevWindow {
     }
 
     fn renderer_font_metrics(&self) -> (f64, f64, f64) {
-        let f = self.renderer.chrome_font_metrics();
+        // Dev panel is UI chrome — use UI font metrics, NOT terminal
+        // font metrics.  v1 they're equal;  later split lets the dev
+        // panel render with a different font / size from the PTY grid.
+        let f = self.renderer.ui_font_metrics();
         (f.0 as f64, f.1 as f64, f.2 as f64)
     }
 
-    /// Public-API wrapper around the renderer's chrome cell metrics
+    /// Public-API wrapper around the renderer's UI cell metrics
     /// (physical px).  Used by L1's `dev_panel_click` hit-test to
     /// recover the same logical-pt tab widths the canvas painted.
     pub fn chrome_cell_dims_phys(&self) -> (f64, f64) {
-        let f = self.renderer.chrome_font_metrics();
+        let f = self.renderer.ui_font_metrics();
         (f.0 as f64, f.1 as f64)
     }
 }

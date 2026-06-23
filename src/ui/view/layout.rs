@@ -277,8 +277,8 @@ pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -
             layout_lazy_vstack(items, *gap, *item_height, *id, ctx, origin, c, view),
         View::LazyHStack { items, gap, item_width, id } =>
             layout_lazy_hstack(items, *gap, *item_width, *id, ctx, origin, c, view),
-        View::Grid { items, cols, gap, cell_w, cell_h } =>
-            layout_grid(items, *cols, *gap, *cell_w, *cell_h, ctx, origin, c, view),
+        View::Grid { items, cols, col_gap, row_gap, cell_w, cell_h } =>
+            layout_grid(items, *cols, *col_gap, *row_gap, *cell_w, *cell_h, ctx, origin, c, view),
         View::VariableGrid { items, tracks_w, tracks_h, gap } =>
             layout_variable_grid(items, tracks_w, tracks_h, *gap, ctx, origin, c, view),
         View::Toggle { id: _ } => {
@@ -438,7 +438,8 @@ fn layout_lazy_hstack(
 fn layout_grid(
     items: &[View],
     cols: usize,
-    gap: Length,
+    col_gap: Length,
+    row_gap: Length,
     cell_w: Length,
     cell_h: Length,
     ctx: LayoutCtx,
@@ -454,7 +455,8 @@ fn layout_grid(
             children: Vec::new(),
         };
     }
-    let gap_phys = gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let col_gap_phys = col_gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let row_gap_phys = row_gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
     let cell_w_phys = cell_w.resolve_for_axis_with_cell(c.max_w, ctx.scale, ctx.cell_w_phys);
     let cell_h_phys = cell_h.resolve_for_axis_with_cell(c.max_h, ctx.scale, ctx.cell_w_phys);
 
@@ -462,8 +464,8 @@ fn layout_grid(
     let mut row = 0usize;
     let mut col = 0usize;
     for item in items.iter() {
-        let cx = origin.0 + col as f64 * (cell_w_phys + gap_phys);
-        let cy = origin.1 + row as f64 * (cell_h_phys + gap_phys);
+        let cx = origin.0 + col as f64 * (cell_w_phys + col_gap_phys);
+        let cy = origin.1 + row as f64 * (cell_h_phys + row_gap_phys);
         let item_c = Constraints {
             min_w: cell_w_phys, max_w: cell_w_phys,
             min_h: cell_h_phys, max_h: cell_h_phys,
@@ -479,8 +481,8 @@ fn layout_grid(
     let rows = if items.is_empty() { 0 } else {
         ((items.len() + cols - 1) / cols).max(1)
     };
-    let total_w = cols as f64 * cell_w_phys + cols.saturating_sub(1) as f64 * gap_phys;
-    let total_h = rows as f64 * cell_h_phys + rows.saturating_sub(1) as f64 * gap_phys;
+    let total_w = cols as f64 * cell_w_phys + cols.saturating_sub(1) as f64 * col_gap_phys;
+    let total_h = rows as f64 * cell_h_phys + rows.saturating_sub(1) as f64 * row_gap_phys;
 
     LaidOut {
         view: self_view.clone(),

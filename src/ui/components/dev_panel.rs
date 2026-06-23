@@ -1209,6 +1209,13 @@ fn build_l1_view() -> crate::ui::view::View {
             radius_chip(radius::PILL, "PILL"),
         ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
 
+        h::h2("Font 分离(PTY vs UI)"),
+        h::done_row("MetalRenderer::{chrome_font_metrics, terminal_font_metrics, ui_font_metrics}"),
+        h::sub("UI 走 ui_font_metrics;Terminal grid 走 terminal_font_metrics — 当前两者 = chrome"),
+        h::done_row("MARSPOT_UI_FONT_SCALE env var(0.0..4.0,默认 1.0)"),
+        h::sub("layout 端尺寸适配已 land;真 glyph 在 UI size rasterize = B0.7(FontCache 扩展)"),
+        h::v2_row("不同 font 真切换(MARSPOT_UI_FONT_NAME — 加载独立 CTFont)"),
+
         h::h2("Identity / HostState / Lifecycle"),
         h::done_row("HashMap<(ViewId, TypeId), Box<dyn Any>>"),
         h::sub("一个 view id 可挂多种状态类型(Scroll/Toggle/Picker/TextField/...)"),
@@ -1509,8 +1516,10 @@ fn build_l4_view() -> crate::ui::view::View {
         h::h2("Lazy containers + Grid"),
         h::done_row("ScrollView + LazyVStack + LazyHStack"),
         h::sub("uniform-height/width 假设;variable-height = HostState cache,留 v2+"),
-        h::done_row("Grid(uniform-cell m×n)"),
-        h::sub("v1 fixed cell_w × cell_h;variable tracks / span = v2+"),
+        h::done_row("Grid(uniform-cell m×n)+ grid_with_gaps(分 col_gap / row_gap)"),
+        h::done_row("VariableGrid(Fixed / Flex / Auto tracks)"),
+        h::done_row("lazy_vstack_padded(leading_margin, trailing_margin)"),
+        h::sub("Lazy 容器加 top/bottom 滚动 padding;现 lazy_vstack 默认无 margin"),
         h::hint("    Grid 4 cols × 8 cells demo:"),
         grid(
             (0..8).map(|i| {
@@ -1525,7 +1534,6 @@ fn build_l4_view() -> crate::ui::view::View {
             Length::Pt(28.0),
             Length::Pt(6.0),
         ),
-        h::done_row("VariableGrid(Fixed / Flex / Auto tracks)"),
         h::hint("    VariableGrid Fixed(20) Flex(1) Fixed(40) × 2 rows:"),
         crate::ui::view::variable_grid(
             (0..6).map(|i| {

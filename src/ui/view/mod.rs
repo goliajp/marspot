@@ -30,7 +30,7 @@ pub use view::{
     LinearGradient, GradientDir, MaterialStyle, AxRole,
     ToggleState, PickerState,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
-    toggle, picker, grid, variable_grid, GridTrack,
+    toggle, picker, grid, grid_with_gaps, variable_grid, GridTrack,
     image_named, shape_circle, shape_capsule, shape_rounded_rect,
     card, panel, badge, tooltip, tab_strip, context_menu, breadcrumb, list_row,
 };
@@ -39,7 +39,7 @@ pub use types::{
     AnimCurve, Anim, Lerp, Transition, TransitionKind, SlideDirection,
     Transform, BlendMode,
 };
-pub use lazy::{lazy_vstack, lazy_hstack};
+pub use lazy::{lazy_vstack, lazy_vstack_padded, lazy_hstack};
 pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,

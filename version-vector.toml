@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.23"  # Checklist Phase A 一发清:[A1] theme version hook + [A2] .transition() + [A3] AnimRegistry frame schedule + [A4] .transform/.mask/.blend_mode + [A5] VariableGrid Fixed/Flex/Auto tracks
-core    = "0.10.74" # AnimRegistry tick / Transform / Mask / BlendMode / GridTrack / VariableGrid layout
+shell   = "0.6.24"  # Phase B0 primitive 完善 + font 分离:[B0.1] Grid 分 col_gap/row_gap + grid_with_gaps + [B0.2] lazy_vstack_padded + [B0.4-6] ui_font_metrics + terminal_font_metrics 分离 + MARSPOT_UI_FONT_SCALE env
+core    = "0.10.75" # Grid (col_gap, row_gap) + ui_font_metrics(scale env var)+ lazy_vstack_padded layout
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
