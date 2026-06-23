@@ -102,10 +102,50 @@ pub type FontId = u32;
 /// linearly from 0 as fallback fonts are discovered.
 pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
 
+/// Phase 2 — atlas lookup key.
+///
+/// `(font_id, glyph)` no longer suffice once multiple text sizes share
+/// an atlas: 12-pt PTY and 13-pt chrome both ask for `glyph_id = 36`
+/// of Monaco and would stomp each other's bitmap.  Add `size_q`
+/// (round(pt × 4) — 0.25-pt buckets) so each size carries its own
+/// slot.  `subpx_x` is reserved (set 0 in Phase 2; Phase 4 will fill
+/// it with `0..4` to encode sub-pixel x-bucket).  `flags` records the
+/// rasteriser knobs that actually change the bitmap — currently
+/// `FLAG_SMOOTH` for font_smoothing on (default for text) and
+/// `FLAG_SUBPX_AA` reserved for future macOS-Intel paths (off on
+/// Apple Silicon, where the atlas target is `BGRA8Unorm` and CT
+/// emits grayscale-AA).
+///
+/// Key is `font_id (4B) + glyph (2B) + size_q (2B) + subpx_x (1B) +
+/// flags (1B)` = 10 bytes packed — still cheap to hash via FxHash.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct GlyphKey {
     pub font_id: FontId,
     pub glyph: CGGlyph,
+    pub size_q: u16,
+    pub subpx_x: u8,
+    pub flags: u8,
+}
+
+impl GlyphKey {
+    /// Bit 0 — `set_should_smooth_fonts(true)` (CT stroke-widening for
+    /// gamma-correct AA).  Default for text rasters.
+    pub const FLAG_SMOOTH: u8 = 1 << 0;
+
+    /// Bit 1 — true sub-pixel AA (LCD-style RGB stripe ordering).
+    /// Reserved; the atlas target on Apple Silicon is `BGRA8Unorm`
+    /// where CT emits grayscale AA, so this is off in all current
+    /// call paths.  Distinguished from `FLAG_SMOOTH` so a future
+    /// macOS-Intel build can opt in without invalidating the key
+    /// shape.
+    pub const FLAG_SUBPX_AA: u8 = 1 << 1;
+
+    /// Quantise a `pt` size to a 0.25-pt bucket.  Two sizes that
+    /// round to the same `size_q` share an atlas slot.
+    #[inline]
+    pub fn size_q_for(pt: f64) -> u16 {
+        (pt * 4.0).round() as u16
+    }
 }
 
 /// What the renderer needs to draw a cached glyph: where it lives
@@ -833,7 +873,13 @@ mod tests {
         }
         assert!(glyph != 0, "Menlo should have a glyph for 'A'");
 
-        let key = GlyphKey { font_id: 0, glyph };
+        let key = GlyphKey {
+            font_id: 0,
+            glyph,
+            size_q: GlyphKey::size_q_for(13.0),
+            subpx_x: 0,
+            flags: GlyphKey::FLAG_SMOOTH,
+        };
         let entry1 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("first call rasterises");
         assert!(entry1.px_w > 0 && entry1.px_h > 0);
         assert_eq!(atlas.cache_len(), 1);
@@ -867,7 +913,13 @@ mod tests {
             unsafe {
                 font.get_glyphs_for_characters(&cu, &mut glyph, 1);
             }
-            let key = GlyphKey { font_id: 0, glyph };
+            let key = GlyphKey {
+            font_id: 0,
+            glyph,
+            size_q: GlyphKey::size_q_for(13.0),
+            subpx_x: 0,
+            flags: GlyphKey::FLAG_SMOOTH,
+        };
             if atlas.get_or_rasterize(key, &font, test_metrics(), 1).is_some() {
                 placed += 1;
             }

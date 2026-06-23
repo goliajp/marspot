@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.32"  # font v5 Phase 1.1 — raster 切真实 bbox + PAD,renderer 全 8 处 GlyphInstance push 切 `AtlasEntry::quad(pen_x, baseline_y)` bearing formula.PTY/chrome 共用同一公式;mono PTY ink 仍落 cell_x(rasteriser pre-cancel lsb,bearing_x=-PAD);oversized glyph 走 legacy cell-aligned scale-to-fit + Phase 1.0 bearing.atlas 利用率从 ~60% → ~85%(ASCII 占 ~6×10 而非 16×32).
-core    = "0.10.82"
+shell   = "0.6.33"  # font v5 Phase 2 — GlyphKey 加 size_q + subpx_x + flags(多 size 解锁:PTY 12pt + chrome 13pt 不再撞 atlas slot;subpx_x 留 Phase 4 用;flags 当前 = FLAG_SMOOTH).mono atlas 2048² → 4096²(16 MiB R8),色 atlas 1024²(4 MiB BGRA8)不动.6 处 GlyphKey 构造点统一走 `text_glyph_key()` / `box_drawing_key()` 帮手,size_q 取自 ct_font.pt_size()(text)或 cell_h(box-drawing).
+core    = "0.10.83"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

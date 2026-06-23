@@ -83,7 +83,7 @@ fn resolve_cell_glyph(
     if let Some(arms) = box_drawing_arms(ch) {
         let w = metrics.cell_w;
         let h = metrics.cell_h;
-        let key = GlyphKey { font_id: BOX_DRAWING_FONT_ID, glyph: ch as u32 as CGGlyph };
+        let key = box_drawing_key(ch, &metrics);
         return atlas.get_or_insert_custom_raster(key, w, h, metrics.baseline_from_top, 1, |buf| {
             rasterize_arms_into_buf(buf, w as usize, h as usize, arms);
         });
@@ -91,7 +91,7 @@ fn resolve_cell_glyph(
     if let Some(shape) = block_element_rects(ch) {
         let w = metrics.cell_w;
         let h = metrics.cell_h;
-        let key = GlyphKey { font_id: BOX_DRAWING_FONT_ID, glyph: ch as u32 as CGGlyph };
+        let key = box_drawing_key(ch, &metrics);
         return atlas.get_or_insert_custom_raster(key, w, h, metrics.baseline_from_top, 1, |buf| {
             rasterize_block_into_buf(buf, w as usize, h as usize, shape);
         });
@@ -103,11 +103,46 @@ fn resolve_cell_glyph(
     let ct_font = font.font(font_idx).clone();
     let n_cells = crate::grid::char_width(ch).max(1) as u16;
     atlas.get_or_rasterize(
-        GlyphKey { font_id: font_idx as u32, glyph },
+        text_glyph_key(font_idx as u32, glyph, &ct_font),
         &ct_font,
         metrics,
         n_cells,
     )
+}
+
+/// Phase 2 — synthesise an atlas key for a box-drawing / block-element
+/// glyph.  These are rasterised by our own code (not CT), so they have
+/// no `pt_size` — but cell dimensions stand in for "rendering size", so
+/// a glyph rasterised at cell_h = 32 vs cell_h = 24 lands in different
+/// slots.  Pack `cell_h` into `size_q` to keep cross-DPI rasters
+/// separated.  `flags = 0` since the custom rasters don't use the CT
+/// smoothing knobs.
+#[inline]
+fn box_drawing_key(ch: char, metrics: &SlotMetrics) -> GlyphKey {
+    GlyphKey {
+        font_id: BOX_DRAWING_FONT_ID,
+        glyph: ch as u32 as CGGlyph,
+        size_q: metrics.cell_h as u16,
+        subpx_x: 0,
+        flags: 0,
+    }
+}
+
+/// Phase 2 — atlas key for a CT-rasterised text glyph.  `size_q`
+/// quantises the font's pt-size to 0.25-pt buckets so PTY 12pt and
+/// chrome 13pt cache independently.  `subpx_x` reserved for Phase 4.
+/// `flags = FLAG_SMOOTH` because every call into `rasterise_glyph`
+/// runs with font-smoothing on (see the `set_should_smooth_fonts(true)`
+/// line in the rasteriser).
+#[inline]
+fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFont) -> GlyphKey {
+    GlyphKey {
+        font_id,
+        glyph,
+        size_q: GlyphKey::size_q_for(ct_font.pt_size()),
+        subpx_x: 0,
+        flags: GlyphKey::FLAG_SMOOTH,
+    }
 }
 
 /// Like `resolve_cell_glyph`, but routes colour glyphs (Apple Color Emoji)
@@ -131,9 +166,9 @@ fn resolve_cell_glyph_routed(
     if glyph == 0 {
         return None;
     }
-    let key = GlyphKey { font_id: font_idx as u32, glyph };
-    let n_cells = crate::grid::char_width(ch).max(1) as u16;
     let ct_font = font.font(font_idx).clone();
+    let key = text_glyph_key(font_idx as u32, glyph, &ct_font);
+    let n_cells = crate::grid::char_width(ch).max(1) as u16;
     if font.is_color_font(font_idx) {
         color_atlas
             .get_or_rasterize(key, &ct_font, metrics, n_cells)
@@ -633,15 +668,16 @@ impl MetalRenderer {
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let ui_pipeline = build_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
-        // 2048×2048 R8 atlas = 4 MiB.  Fits ~6000 Menlo 13pt 2× glyphs.
-        // 9-grid sessions all feed this single atlas and accumulate
-        // bold/italic/underline variants per ASCII character plus CJK
-        // and emoji over hours, easily clearing the 1500-glyph mark
-        // the original 1024×1024 sized for.  Bounded forever —
-        // `get_or_rasterize` does an atomic rebuild on full (drops
-        // shelves + clears cache, next frame re-rasterises visible
-        // glyphs) so the user never sees silently-blank cells.
-        let atlas = GlyphAtlas::new(&device, 2048, 2048)?;
+        // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
+        // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
+        // multiplexes the atlas across pt-sizes (PTY 12 + chrome 13 +
+        // future variable-weight faces) so each `size_q` bucket
+        // consumes its own working set, and Phase 4 will further ×4
+        // for sub-pixel positioning buckets — 16 MiB pre-pays for both
+        // without forcing rebuilds in steady state.  Still bounded:
+        // `get_or_rasterize` does an atomic rebuild on full so the
+        // user never sees silently-blank cells.
+        let atlas = GlyphAtlas::new(&device, 4096, 4096)?;
         // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
         // (~cell-sized slots) — a small working set, so 1024² is ample
         // and keeps the colour path's footprint to 4 MiB.  Same shelf
@@ -766,15 +802,16 @@ impl MetalRenderer {
         let dot_pipeline = build_dot_pipeline(&device, &library)?;
         let ui_pipeline = build_ui_pipeline(&device, &library)?;
         let font = FontCache::build()?;
-        // 2048×2048 R8 atlas = 4 MiB.  Fits ~6000 Menlo 13pt 2× glyphs.
-        // 9-grid sessions all feed this single atlas and accumulate
-        // bold/italic/underline variants per ASCII character plus CJK
-        // and emoji over hours, easily clearing the 1500-glyph mark
-        // the original 1024×1024 sized for.  Bounded forever —
-        // `get_or_rasterize` does an atomic rebuild on full (drops
-        // shelves + clears cache, next frame re-rasterises visible
-        // glyphs) so the user never sees silently-blank cells.
-        let atlas = GlyphAtlas::new(&device, 2048, 2048)?;
+        // 4096×4096 R8 atlas = 16 MiB (Phase 2 bump from 2048²).
+        // Pre-bump 2048² fit ~6000 Menlo 13pt 2× glyphs; Phase 2
+        // multiplexes the atlas across pt-sizes (PTY 12 + chrome 13 +
+        // future variable-weight faces) so each `size_q` bucket
+        // consumes its own working set, and Phase 4 will further ×4
+        // for sub-pixel positioning buckets — 16 MiB pre-pays for both
+        // without forcing rebuilds in steady state.  Still bounded:
+        // `get_or_rasterize` does an atomic rebuild on full so the
+        // user never sees silently-blank cells.
+        let atlas = GlyphAtlas::new(&device, 4096, 4096)?;
         // 1024×1024 BGRA8 colour atlas = 4 MiB.  Holds full-colour emoji
         // (~cell-sized slots) — a small working set, so 1024² is ample
         // and keeps the colour path's footprint to 4 MiB.  Same shelf
@@ -2414,10 +2451,7 @@ fn push_empty_cell_glyphs(
     }
     let ct_font = font.font(font_idx).clone();
     let entry = match atlas.get_or_rasterize(
-        GlyphKey {
-            font_id: font_idx as u32,
-            glyph,
-        },
+        text_glyph_key(font_idx as u32, glyph, &ct_font),
         &ct_font,
         metrics,
         1,
@@ -2480,10 +2514,7 @@ fn push_add_button_glyph(
     }
     let ct_font = font.font(font_idx).clone();
     let entry = match atlas.get_or_rasterize(
-        GlyphKey {
-            font_id: font_idx as u32,
-            glyph,
-        },
+        text_glyph_key(font_idx as u32, glyph, &ct_font),
         &ct_font,
         metrics,
         1,
@@ -3572,10 +3603,7 @@ fn push_close_glyphs(
     }
     let ct_font = font.font(font_idx).clone();
     let entry = match atlas.get_or_rasterize(
-        GlyphKey {
-            font_id: font_idx as u32,
-            glyph,
-        },
+        text_glyph_key(font_idx as u32, glyph, &ct_font),
         &ct_font,
         metrics,
         1,
@@ -3690,10 +3718,7 @@ fn push_sidebar(
                 let ct_font = font.font(font_idx).clone();
                 let n_cells = crate::grid::char_width(ch).max(1) as u16;
                 if let Some(e) = atlas.get_or_rasterize(
-                    GlyphKey {
-                        font_id: font_idx as u32,
-                        glyph,
-                    },
+                    text_glyph_key(font_idx as u32, glyph, &ct_font),
                     &ct_font,
                     metrics,
                     n_cells,
@@ -3808,7 +3833,7 @@ pub(crate) fn push_text_run_kind(
             // user-observed "字全变形" report 0.6.27.  Real per-glyph
             // slots = v2+ atlas refactor.
             if let Some(entry) = atlas.get_or_rasterize(
-                GlyphKey { font_id: font_idx as u32, glyph },
+                text_glyph_key(font_idx as u32, glyph, &ct_font),
                 &ct_font,
                 metrics,
                 n_cells,
@@ -5458,7 +5483,7 @@ mod tests {
     /// instanced draw + readback.
     #[test]
     fn fg_pass_renders_one_atlas_glyph() {
-        use crate::glyph_atlas::{GlyphAtlas, GlyphKey};
+        use crate::glyph_atlas::GlyphAtlas;
         use core_text::font::new_from_name;
 
         let r = match MetalRenderer::new_headless() {
@@ -5481,7 +5506,7 @@ mod tests {
 
         let entry = atlas
             .get_or_rasterize(
-                GlyphKey { font_id: 0, glyph: cg_glyph },
+                text_glyph_key(0, cg_glyph, &font),
                 &font,
                 SlotMetrics { cell_w: 16, cell_h: 32, baseline_from_top: 24 },
                 1,
