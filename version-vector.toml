@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.24"  # Phase B0 primitive 完善 + font 分离:[B0.1] Grid 分 col_gap/row_gap + grid_with_gaps + [B0.2] lazy_vstack_padded + [B0.4-6] ui_font_metrics + terminal_font_metrics 分离 + MARSPOT_UI_FONT_SCALE env
-core    = "0.10.75" # Grid (col_gap, row_gap) + ui_font_metrics(scale env var)+ lazy_vstack_padded layout
+shell   = "0.6.25"  # P0 Token v4:terminal palette(16 ANSI normal+bright + cursor + selection + link + bold_fg + search.match*) + UI color 扩(SURFACE_0..4 / OVERLAY / TAB_* / SIDEBAR_* / STATUS_BAR_* / DIFF_* / 4-level severity / FOCUS_RING / DISABLED_*) + motion / border / layer / text+elev 补 + themed::{color, terminal::{ansi, search}} 全闭包
+core    = "0.10.76" # token v4 全 const + Dark/Light/HC 三 palette + themed dispatch
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

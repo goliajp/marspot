@@ -17,7 +17,55 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.24**
+Current: **0.6.25**
+
+### 0.6.25
+
+**Component Library v4 — P0 第一步:Token v4 全 land.**
+
+按 `docs/ui-component-library.md` §3 起手,token.rs 从 233 行扩到 ~580 行.
+
+`color::*` 扩(每条都有 Dark + light::* + hc::* 三套):
+- `FG_INVERSE / FG_LINK`(已有 FG/FG_MUTED/FG_DISABLED)
+- `SURFACE_0..4` + `OVERLAY` (5 个 surface 层级 + modal scrim)
+- `INFO / CRITICAL`(配齐 4 级 severity)
+- `FOCUS_RING / DISABLED_BG / DISABLED_FG`
+- `TAB_{ACTIVE,INACTIVE}_{BG,FG} + TAB_HOVER_BG`
+- `SIDEBAR_{BG,FG,ACTIVE_BG,ACTIVE_FG}`
+- `STATUS_BAR_{BG,FG}`
+- `DIFF_{ADD,REMOVE,CHANGE}_BG + DIFF_{ADD,REMOVE}_FG`
+
+`terminal::*` — 全新 namespace(社区 theme 对齐):
+- 核心:BG / FG / CURSOR_BG/FG / SELECTION_BG/FG / LINK / BOLD_FG
+- `terminal::ansi::{BLACK..WHITE}`(8 normal)
+- `terminal::ansi::bright::{BLACK..WHITE}`(8 bright)
+- `terminal::search::{MATCH, MATCH_CURRENT}`
+- 三套 palette:Dark / light::* / hc::*
+
+`motion::*`(全新):INSTANT / FAST(120ms)/ NORMAL(200)/ SLOW(350)/ VERY_SLOW(700)+ `motion::curve::{STANDARD, DECEL, ACCEL, LINEAR, SPRING}` re-export AnimCurve.
+
+`border::*`(全新):NONE / HAIRLINE(0.5pt)/ THIN(1)/ MEDIUM(2)/ THICK(3).
+
+`layer::*`(全新):CONTENT(0)/ STATUS(10)/ STICKY(100)/ TOOLBAR(200)/ POPOVER(1000)/ MODAL(2000)/ TOAST(3000)/ TOOLTIP(4000)/ SYSTEM(9999).
+
+`text::*` 补:LINK / ERROR(已有 CAPTION/BODY/HEADER/LARGE_HEADER/HINT/CODE).
+
+`themed::*` 全闭包覆盖:
+- `themed::color::*` — 49 fn(各 UI token Dark/Light/HC dispatch)
+- `themed::terminal::*` — 8 fn(核心)+ `themed::terminal::ansi::{r,g,b,...}` 8 + `themed::terminal::ansi::bright::*` 8 + `themed::terminal::search::{match, match_current}` 2
+
+实现方式:每个 `themed::xxx::yyy()` 内联 `match current() { Light => ..., HC => ..., _ => Dark }`.helper `fn pick(dark, light, hc) -> Color`.
+
+DevPanel L1 Foundation section "Tokens" 段刷新,10+ done_row 反映全部 token 类目.
+
+dev_panel hit_test 测试 `hit_test_lands_on_menu_row` 修:0.6.21 menu 重构后 idx 2 = SECTION_L2(不再是 SECTION_UNITS).
+
+下一步 P0:
+- ThemeFile TOML schema + load_from_file(`toml` + `serde` 加 dep)
+- iTerm2 / Base16 / Alacritty / Kitty / Warp / WT import adapter
+- 11 built-in themes 数据文件
+
+shell 0.6.24 → 0.6.25;core 0.10.75 → 0.10.76.
 
 ### 0.6.24
 
@@ -479,7 +527,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.75**
+Current: **0.10.76**
+
+### 0.10.76
+
+Token v4 全 land(token.rs 233→580 行)— 6 个新 const 命名空间 + 3 套 palette + themed dispatch 闭包覆盖.详 shell 0.6.25 entry.
 
 ### 0.10.75
 

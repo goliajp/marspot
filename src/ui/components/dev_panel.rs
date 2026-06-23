@@ -1175,8 +1175,18 @@ fn build_l1_view() -> crate::ui::view::View {
         h::done_row("Color::rgba(r, g, b, a) ≡ CSS rgba()"),
         h::sub("u8 通道 + f64 alpha;Lerp impl 已 land 用于 Anim<Color>"),
 
-        h::h2("Tokens"),
-        h::done_row("Semantic palette + space + radius + elev + text style"),
+        h::h2("Tokens v4"),
+        h::done_row("Semantic palette + space + radius + elev + text style + motion + border + layer"),
+        h::done_row("UI color 完整:FG{,_MUTED,_DISABLED,_INVERSE,_LINK} + SURFACE_0..4 + OVERLAY"),
+        h::done_row("Tab/Sidebar/Status/Diff 命名空间(TAB_ACTIVE_BG / SIDEBAR_BG / DIFF_ADD_BG / ...)"),
+        h::done_row("4-level severity(INFO/SUCCESS/WARN/DANGER/CRITICAL)+ FOCUS_RING + DISABLED_*"),
+        h::done_row("Terminal palette terminal::{BG, FG, CURSOR_BG/FG, SELECTION_BG/FG, LINK, BOLD_FG}"),
+        h::done_row("Terminal ansi 16(black/red/green/yellow/blue/magenta/cyan/white × normal+bright)"),
+        h::done_row("Terminal search::{MATCH, MATCH_CURRENT}"),
+        h::done_row("motion::{INSTANT, FAST, NORMAL, SLOW, VERY_SLOW} + motion::curve::*"),
+        h::done_row("border::{NONE, HAIRLINE, THIN, MEDIUM, THICK}"),
+        h::done_row("layer::{CONTENT, STATUS, STICKY, TOOLBAR, POPOVER, MODAL, TOAST, TOOLTIP, SYSTEM}"),
+        h::done_row("themed::{color::*, terminal::{ansi, search}::*} 全闭包覆盖 Dark/Light/HC"),
         hstack(vec![
             h::mono("color::"),
             h::swatch(color::FG),
@@ -2152,12 +2162,14 @@ mod tests {
         let h = hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0)
             .expect("expected hit");
         assert_eq!(h, DevPanelHit::Section(SECTION_MODEL));
-        // Two rows down → 3rd row = "Units".
+        // Two rows down → 3rd row.  Post 0.6.21 restructure the
+        // menu reads:  Model / L1 / L2 / L3 / L4 / L5 / L6 / Colors /
+        // Units / ...  so idx 2 = SECTION_L2 (was SECTION_UNITS).
         let h2 = hit_test(
             &s, 8.0, 20.0,
             TAB_BAR_H_PT + MENU_TOP_PAD_PT + 2.0 * MENU_ROW_H_PT + 5.0,
         ).expect("expected hit");
-        assert_eq!(h2, DevPanelHit::Section(SECTION_UNITS));
+        assert_eq!(h2, DevPanelHit::Section(SECTION_L2));
     }
 
     #[test]
