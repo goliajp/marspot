@@ -151,6 +151,34 @@ pub struct AtlasEntry {
     pub bearing_y: i16,
 }
 
+impl AtlasEntry {
+    /// Per Phase 1.1 bearing formula — given the typographic pen
+    /// position (`pen_x` = slot left edge, `baseline_y` = on-screen
+    /// baseline row, both in physical px), return the quad's
+    /// `(origin, size)`.  Used at every `GlyphInstance` push site so
+    /// every renderer sub-system shares the same geometry.
+    ///
+    /// For Phase 1.0 entries (bearing_x = 0, bearing_y = ascent,
+    /// `px_w`/`px_h` = cell dims) this yields `(pen_x, baseline_y -
+    /// ascent)` with cell-sized quad — bitwise equivalent to the
+    /// pre-Phase-1.1 "draw cell-sized slot at cell origin" formula.
+    ///
+    /// After Phase 1.1 the CT rasteriser produces bbox-sized bitmaps
+    /// with 1-px PAD round each side (lsb pre-cancelled, so
+    /// `bearing_x = -PAD = -1`, `bearing_y = ink_ascent + PAD`).  The
+    /// formula then places the bitmap so the ink interior lands at
+    /// `(pen_x, baseline_y - ink_ascent)` — identical screen position
+    /// to the cell-sized layout for monospace ASCII (Monaco lsb ≈ 0),
+    /// only the surrounding empty space is smaller.
+    #[inline]
+    pub fn quad(self, pen_x: f32, baseline_y: f32) -> ([f32; 2], [f32; 2]) {
+        (
+            [pen_x + self.bearing_x as f32, baseline_y - self.bearing_y as f32],
+            [self.px_w as f32, self.px_h as f32],
+        )
+    }
+}
+
 /// One row in the shelf packer.
 #[derive(Clone, Copy, Debug)]
 struct Shelf {
@@ -500,12 +528,28 @@ struct Raster {
     bearing_y: i16,
 }
 
-/// Rasterise one glyph into a CELL-SIZED alpha-only bitmap.  The
-/// glyph's baseline is positioned at integer canvas y =
-/// `metrics.cell_h - metrics.baseline_from_top` (y-up) — identical
-/// for every glyph at the same font/size, so the renderer can place
-/// every cell-sized slot at the cell origin and every baseline lines
-/// up exactly.
+/// Rasterise one glyph into an **alpha-only bitmap sized to the
+/// glyph's real ink bbox** plus 1 px PAD on every side (Phase 1.1).
+///
+/// Pen position cancels the font's left side bearing, so the ink's
+/// left edge lands at bitmap_x = `PAD` regardless of font.  The pen
+/// y likewise places the ink top at bitmap_y_down = `PAD`.  Reported
+/// `bearing_x = -PAD` and `bearing_y = ceil(ink_ascent) + PAD` carry
+/// the PAD offset, so the renderer's `quad = (pen_x + bearing_x,
+/// baseline_y - bearing_y, px_w, px_h)` formula puts the ink interior
+/// at exactly `(pen_x, baseline_y - ink_ascent)` — i.e. the typographic
+/// position — bit-equivalent (modulo sub-pixel AA rounding) to the
+/// pre-Phase-1.1 layout where the glyph was drawn into a cell-sized
+/// slot with baseline at integer `baseline_from_top`.
+///
+/// Oversized-glyph safety net: if the natural bbox would exceed the
+/// caller's slot (`n_cells × cell_w` by `cell_h`) — e.g. the text-font
+/// cascade falls onto Apple-Color-Emoji-shaped glyphs (`②`, certain
+/// enclosed alphanumerics) — fall back to the cell-aligned scale-to-fit
+/// path so the glyph doesn't spill into neighbouring cells.  This case
+/// reports Phase 1.0 bearing values (`bearing_x = 0`, `bearing_y =
+/// baseline_from_top`) so the renderer paints a cell-sized quad at the
+/// cell origin, matching the legacy behaviour exactly.
 ///
 /// Slot width is `n_cells` × `metrics.cell_w` — caller's responsibility
 /// to pass the correct cell count (1 for ASCII, 2 for East Asian wide /
@@ -532,8 +576,22 @@ fn rasterise_glyph(
     }
 
     let n_cells = n_cells.max(1);
-    let px_w = metrics.cell_w * n_cells as u32;
-    let px_h = metrics.cell_h;
+    let slot_w = metrics.cell_w * n_cells as u32;
+    let slot_h = metrics.cell_h;
+    let glyph_w = bbox.size.width;
+    let glyph_h = bbox.size.height;
+
+    // Pick path: oversized glyph → scale-to-fit cell-sized bitmap
+    // (legacy); otherwise → Phase 1.1 bbox-sized bitmap with PAD.
+    let oversized = glyph_w > slot_w as f64 || glyph_h > slot_h as f64;
+    let (px_w, px_h) = if oversized {
+        (slot_w, slot_h)
+    } else {
+        (
+            glyph_w.ceil() as u32 + 2 * PAD,
+            glyph_h.ceil() as u32 + 2 * PAD,
+        )
+    };
 
     let bytes_per_row = px_w as usize;
     let buf_len = bytes_per_row * px_h as usize;
@@ -572,61 +630,53 @@ fn rasterise_glyph(
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
     ctx.set_gray_fill_color(1.0, 1.0);
 
-    // CGBitmapContext's default CTM is y-up with origin at lower-left.
-    // We want baseline at y-DOWN row `baseline_from_top` from top.
-    // In y-up, that's canvas y = `cell_h - baseline_from_top`.
-    let baseline_canvas_y = (metrics.cell_h as f64) - (metrics.baseline_from_top as f64);
-    // Safety net: if the resolved font hands us a glyph whose natural
-    // bbox is WIDER than the slot we allocated (1 cell wide for chars
-    // grid::char_width says are 1-cell, etc.), scale the CTM to fit.
-    // This catches the same "Apple-Color-Emoji-style em-box glyph in a
-    // 1-cell slot" case that the colour rasteriser handles — but also
-    // hits when the cascade lands on a TEXT font that happens to have
-    // an oversized glyph (Helvetica's ② et al.).  scale==1.0 is a
-    // no-op on the common path; only triggers when bbox > slot.
-    let glyph_w = bbox.size.width;
-    let glyph_h = bbox.size.height;
-    let scale = if glyph_w > 0.0 && glyph_h > 0.0 {
-        ((px_w as f64) / glyph_w)
+    if oversized {
+        // Legacy: scale the CTM so the glyph fits the cell, centre it,
+        // and report Phase 1.0 bearings so the renderer paints a
+        // cell-sized quad at the cell origin.
+        let scale = ((px_w as f64) / glyph_w)
             .min((px_h as f64) / glyph_h)
-            .min(1.0)
-    } else {
-        1.0
-    };
-    let origin = if scale < 1.0 {
+            .min(1.0);
         ctx.scale(scale, scale);
         let user_w = (px_w as f64) / scale;
         let user_h = (px_h as f64) / scale;
-        CGPoint::new(
+        let origin = CGPoint::new(
             (user_w - glyph_w) / 2.0 - bbox.origin.x,
             (user_h - glyph_h) / 2.0 - bbox.origin.y,
-        )
-    } else {
-        // Horizontal: CT's pen position lands at the glyph's logical
-        // start; for a monospace font the ink left edge is at
-        // `bbox.origin.x` from the pen.  We anchor the pen at canvas
-        // x = -bbox.origin.x so the ink left edge falls exactly on
-        // canvas x = 0 (left edge of the slot).
-        CGPoint::new(-bbox.origin.x, baseline_canvas_y)
-    };
-    font.draw_glyphs(&[glyph], &[origin], ctx);
+        );
+        font.draw_glyphs(&[glyph], &[origin], ctx);
+        return Some(Raster {
+            bytes,
+            px_w,
+            px_h,
+            n_cells,
+            bearing_x: 0,
+            bearing_y: metrics.baseline_from_top as i16,
+        });
+    }
 
-    // Phase 1.0 bearing fields — slot is still cell-aligned
-    // (cell_w × n_cells, cell_h), so the renderer's "draw quad at
-    // (cell_x, baseline_y - ascent), size cell_w × cell_h" formula
-    // is exactly equivalent to:
-    //   quad_left = cell_x + bearing_x      (with bearing_x = 0)
-    //   quad_top  = baseline_y - bearing_y  (with bearing_y = baseline_from_top)
-    // Both formulas land in the same place — Phase 1.0 records the
-    // values so renderer can OPT IN to per-glyph placement later;
-    // Phase 1.1 will switch atlas slots themselves to real bbox.
+    // Phase 1.1 natural path.  Pen cancels the font's lsb so the ink
+    // left edge lands at bitmap_x = PAD.  Pen y in canvas (y-up) is
+    // chosen so the ink TOP lands at bitmap_y_down = PAD, i.e.
+    // bitmap_y_up = px_h - PAD.  That makes the in-bitmap baseline
+    // an integer row (`PAD + ceil(ink_ascent)`), so cross-glyph
+    // baselines line up exactly when the renderer aligns origin.y
+    // via the bearing formula.
+    let pen_x = (PAD as f64) - bbox.origin.x;
+    let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
+    font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
+
     Some(Raster {
         bytes,
         px_w,
         px_h,
         n_cells,
-        bearing_x: 0,
-        bearing_y: metrics.baseline_from_top as i16,
+        // lsb pre-cancelled at raster time; `bearing_x = -PAD` slides
+        // the quad 1 px left so the renderer's `pen_x + bearing_x +
+        // ink_left_in_bitmap` lands at `pen_x` exactly.  `bearing_y`
+        // measures baseline up to bitmap TOP (= ink_ascent + PAD).
+        bearing_x: -(PAD as i16),
+        bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
     })
 }
 
@@ -653,8 +703,26 @@ fn rasterise_glyph_color(
     }
 
     let n_cells = n_cells.max(1);
-    let px_w = metrics.cell_w * n_cells as u32;
-    let px_h = metrics.cell_h;
+    let slot_w = metrics.cell_w * n_cells as u32;
+    let slot_h = metrics.cell_h;
+    let glyph_w = bbox.size.width;
+    let glyph_h = bbox.size.height;
+
+    // Mirrors the mono path's split: oversized glyph (the typical
+    // Apple Color Emoji case — em-box bitmap larger than the cell) →
+    // cell-sized + scale-to-fit; otherwise → Phase 1.1 bbox-sized
+    // bitmap with PAD.  Emoji that legitimately occupy 2 cells (true
+    // `Emoji_Presentation` rendering at 16×32 cell × 2 ≈ em box) take
+    // the oversized branch and keep current behaviour.
+    let oversized = glyph_w > slot_w as f64 || glyph_h > slot_h as f64;
+    let (px_w, px_h) = if oversized {
+        (slot_w, slot_h)
+    } else {
+        (
+            glyph_w.ceil() as u32 + 2 * PAD,
+            glyph_h.ceil() as u32 + 2 * PAD,
+        )
+    };
 
     let bytes_per_row = (px_w * 4) as usize;
     let buf_len = bytes_per_row * px_h as usize;
@@ -686,47 +754,41 @@ fn rasterise_glyph_color(
     // pixels; CGTextFill draws the bitmap as-is.
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
 
-    // Scale-to-fit only when the glyph's natural bbox is LARGER than
-    // the canvas (`scale < 1.0`).  This handles the case where a
-    // non-Emoji_Presentation codepoint (① ②, certain Enclosed
-    // Alphanumerics, etc.) fell through the text-font cascade to
-    // CoreText's auto-discovery and landed on Apple Color Emoji,
-    // which rasterises at em-box width — without scaling, the
-    // 13.4pt-wide glyph clips into the 7pt-wide 1-cell canvas and
-    // the user sees half a glyph.  For TRUE emoji (Emoji_Presentation
-    // = Yes) `cluster_width` correctly assigns 2 cells, canvas is
-    // ~14pt wide, ratio ≥ 1.0 and we don't scale.  Same for any
-    // glyph that already fits — `scale == 1.0` is a no-op.
-    let scale = ((px_w as f64) / bbox.size.width)
-        .min((px_h as f64) / bbox.size.height)
-        .min(1.0);
-    let baseline_canvas_y = (metrics.cell_h as f64) - (metrics.baseline_from_top as f64);
-    let origin = if scale < 1.0 {
+    if oversized {
+        let scale = ((px_w as f64) / glyph_w)
+            .min((px_h as f64) / glyph_h)
+            .min(1.0);
         ctx.scale(scale, scale);
-        // After CTM scale, the canvas occupies (px_w/scale, px_h/scale)
-        // in user space.  Centre the glyph inside it so it reads as
-        // "a smaller version of the same character", not pinned to
-        // a corner.
         let user_w = (px_w as f64) / scale;
         let user_h = (px_h as f64) / scale;
-        CGPoint::new(
-            (user_w - bbox.size.width) / 2.0 - bbox.origin.x,
-            (user_h - bbox.size.height) / 2.0 - bbox.origin.y,
-        )
-    } else {
-        CGPoint::new(-bbox.origin.x, baseline_canvas_y)
-    };
-    font.draw_glyphs(&[glyph], &[origin], ctx);
+        let origin = CGPoint::new(
+            (user_w - glyph_w) / 2.0 - bbox.origin.x,
+            (user_h - glyph_h) / 2.0 - bbox.origin.y,
+        );
+        font.draw_glyphs(&[glyph], &[origin], ctx);
+        return Some(Raster {
+            bytes,
+            px_w,
+            px_h,
+            n_cells,
+            bearing_x: 0,
+            bearing_y: metrics.baseline_from_top as i16,
+        });
+    }
 
-    // Phase 1.0 bearing fields — see `rasterise_glyph` doc.  Color
-    // emoji slot is also cell-aligned, so same constants apply.
+    // Phase 1.1 natural path — see `rasterise_glyph` for the geometry
+    // derivation; identical placement, different bitmap pixel format.
+    let pen_x = (PAD as f64) - bbox.origin.x;
+    let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
+    font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
+
     Some(Raster {
         bytes,
         px_w,
         px_h,
         n_cells,
-        bearing_x: 0,
-        bearing_y: metrics.baseline_from_top as i16,
+        bearing_x: -(PAD as i16),
+        bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
     })
 }
 
@@ -787,16 +849,14 @@ mod tests {
             Ok(d) => d,
             Err(_) => return,
         };
-        // Atlas just big enough for ~8 cell-sized slots (4 wide × 2
-        // tall, given test_metrics cell_w=16, cell_h=32, PAD=1).
-        // Feeding 10 chars therefore forces a rebuild + a couple of
-        // post-rebuild placements.  The contract is "every
-        // individually-fit glyph eventually places successfully" —
+        // Sized to force at least one shelf rebuild with Phase-1.1
+        // bbox-sized bitmaps (ASCII glyphs at Menlo 13 are ~6×10 px
+        // including PAD instead of 16×32 cell-sized).  A 32×32 atlas
+        // fits a handful of small ASCII shelves; 10 chars overflow
+        // the height once shelves close — the contract is "every
+        // individually-fit glyph eventually places successfully", so
         // silent skip would leave gaps in the cache.
-        let m = test_metrics();
-        let atlas_w = (m.cell_w + 2 * PAD) * 4;
-        let atlas_h = (m.cell_h + 2 * PAD) * 2;
-        let mut atlas = GlyphAtlas::new(&device, atlas_w, atlas_h).expect("atlas");
+        let mut atlas = GlyphAtlas::new(&device, 32, 32).expect("atlas");
         let font = make_font();
 
         let chars = b"abcdefghij";

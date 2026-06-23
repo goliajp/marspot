@@ -2432,9 +2432,16 @@ fn push_empty_cell_glyphs(
         let inner_h = (rect.h - layout.cell_title_h).max(0.0);
         let cx = rect.x as f32 + rect.w as f32 / 2.0;
         let cy = (inner_top + inner_h / 2.0) as f32;
+        // Phase 1.1 bearing formula — pen at slot left; baseline_y =
+        // slot_top + baseline_from_top so Phase 1.0 entries collapse to
+        // the original `origin: [pen_x, slot_top]`.
+        let pen_x = (cx - slot_w / 2.0).round();
+        let slot_top = (cy - slot_h / 2.0).round();
+        let baseline_y = slot_top + metrics.baseline_from_top as f32;
+        let (origin, size) = entry.quad(pen_x, baseline_y);
         glyphs.push(GlyphInstance {
-            origin: [(cx - slot_w / 2.0).round(), (cy - slot_h / 2.0).round()],
-            size: [slot_w, slot_h],
+            origin,
+            size,
             uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
             uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
             color: EMPTY_CELL_GLYPH_FG,
@@ -2491,9 +2498,14 @@ fn push_add_button_glyph(
     let color = if disabled { ADD_BTN_FG_DISABLED } else { ADD_BTN_FG };
     let cx = rect.x as f32 + rect.w as f32 / 2.0;
     let cy = rect.y_top as f32 + rect.h as f32 / 2.0;
+    // Phase 1.1 bearing formula.
+    let pen_x = (cx - slot_w / 2.0).round();
+    let slot_top = (cy - slot_h / 2.0).round();
+    let baseline_y = slot_top + metrics.baseline_from_top as f32;
+    let (origin, size) = entry.quad(pen_x, baseline_y);
     glyphs.push(GlyphInstance {
-        origin: [(cx - slot_w / 2.0).round(), (cy - slot_h / 2.0).round()],
-        size: [slot_w, slot_h],
+        origin,
+        size,
         uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
         uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
         color,
@@ -3578,9 +3590,14 @@ fn push_close_glyphs(
     for rect in &layout.close_session_rects {
         let cx = rect.x as f32 + rect.w as f32 / 2.0;
         let cy = rect.y_top as f32 + rect.h as f32 / 2.0;
+        // Phase 1.1 bearing formula.
+        let pen_x = (cx - slot_w / 2.0).round();
+        let slot_top = (cy - slot_h / 2.0).round();
+        let baseline_y = slot_top + metrics.baseline_from_top as f32;
+        let (origin, size) = entry.quad(pen_x, baseline_y);
         glyphs.push(GlyphInstance {
-            origin: [(cx - slot_w / 2.0).round(), (cy - slot_h / 2.0).round()],
-            size: [slot_w, slot_h],
+            origin,
+            size,
             uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
             uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
             color,
@@ -3660,10 +3677,12 @@ fn push_sidebar(
         // Where the digit's BASELINE should land on screen.  Aligns the
         // visual centre of an ASCII digit with the dot's centre:
         // cap_height ≈ 0.65 × ascent, so half of cap-height ≈ 0.30 ×
-        // ascent below dot_cy (y-down).
-        let baseline_y = dot_cy + ascent * 0.30;
-        // Slot top = baseline minus baseline_from_top.
-        let slot_top_y = baseline_y - metrics.baseline_from_top as f32;
+        // ascent below dot_cy (y-down).  Round the SLOT TOP (not the
+        // baseline itself) so Phase 1.0 entries yield the same integer
+        // origin.y the pre-Phase-1.1 code produced via `slot_top_y.round()`.
+        let baseline_from_top_f = metrics.baseline_from_top as f32;
+        let baseline_y =
+            (dot_cy + ascent * 0.30 - baseline_from_top_f).round() + baseline_from_top_f;
         let mut x = label_x;
         for ch in entry.label.chars() {
             let (font_idx, glyph) = font.resolve_char(ch, false, false);
@@ -3679,10 +3698,11 @@ fn push_sidebar(
                     metrics,
                     n_cells,
                 ) {
-                    let slot_w = (metrics.cell_w * e.n_cells as u32) as f32;
+                    // Phase 1.1 bearing formula — sidebar label run.
+                    let (origin, size) = e.quad(x.round(), baseline_y);
                     glyphs.push(GlyphInstance {
-                        origin: [x.round(), slot_top_y.round()],
-                        size: [slot_w, metrics.cell_h as f32],
+                        origin,
+                        size,
                         uv0: [e.u0 as f32 / atlas_w, e.v0 as f32 / atlas_h],
                         uv1: [e.u1 as f32 / atlas_w, e.v1 as f32 / atlas_h],
                         color: [
@@ -3793,11 +3813,17 @@ pub(crate) fn push_text_run_kind(
                 metrics,
                 n_cells,
             ) {
-                let dest_y = (baseline_y - ascent).round();
-                let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+                // Phase 1.1 bearing formula.  Pre-round to the integer
+                // slot-top grid the pre-Phase-1.1 code used (so Phase 1.0
+                // entries are bit-equivalent to the old `dest_y =
+                // (baseline_y - ascent).round()` formula).
+                let baseline_from_top_f = metrics.baseline_from_top as f32;
+                let baseline_y_q =
+                    (baseline_y - baseline_from_top_f).round() + baseline_from_top_f;
+                let (origin, size) = entry.quad(x.round(), baseline_y_q);
                 glyphs.push(GlyphInstance {
-                    origin: [x.round(), dest_y],
-                    size: [slot_w, metrics.cell_h as f32],
+                    origin,
+                    size,
                     uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                     uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
                     color,
@@ -4160,16 +4186,15 @@ fn push_session(
             } else {
                 resolve_attrs(cell.attrs).0
             };
-            // Cell-sized slot: place the WHOLE slot at the cell
-            // origin.  The glyph's baseline is at integer row
-            // `baseline_from_top` inside the slot, identical for
-            // every glyph at this font/size — so every glyph's
-            // baseline lands on screen row `row_y + baseline_from_top`
-            // exactly.  No bearing maths, no fractional dest_y, no
-            // sub-pixel inter-glyph drift.
-            let dest_x = (inner_x + c as f32 * cell_w).round();
-            let dest_y = row_y.round();
-            let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+            // Phase 1.1 bearing formula — see `AtlasEntry::quad`.
+            // pen_x = cell origin; baseline_y = slot top + ascent (use
+            // the same integer `baseline_from_top` that drove the
+            // rasteriser so origin.y reduces to row_y.round() for
+            // Phase 1.0 entries — bit-equivalent to the pre-Phase-1.1
+            // cell-aligned formula).
+            let pen_x = (inner_x + c as f32 * cell_w).round();
+            let baseline_y = row_y.round() + metrics.baseline_from_top as f32;
+            let (origin, size) = entry.quad(pen_x, baseline_y);
             // Colour glyphs (emoji) go to the colour buffer + atlas; the
             // colour shader samples their real pixels and ignores `color`
             // (except its alpha, used for pane-dim).  Mono glyphs are
@@ -4180,8 +4205,8 @@ fn push_session(
                 (atlas_w, atlas_h, &mut *glyphs)
             };
             sink.push(GlyphInstance {
-                origin: [dest_x, dest_y],
-                size: [slot_w, metrics.cell_h as f32],
+                origin,
+                size,
                 uv0: [entry.u0 as f32 / aw, entry.v0 as f32 / ah],
                 uv1: [entry.u1 as f32 / aw, entry.v1 as f32 / ah],
                 color: [fg.0 as f32, fg.1 as f32, fg.2 as f32, 1.0],
@@ -4340,14 +4365,14 @@ fn push_session(
                 cell.attrs.italic,
                 metrics,
             ) {
-                // Cell-sized slot — place at cell origin (see
-                // comment in main glyph push).
-                let dest_x = (inner_x + col as f32 * cell_w).round();
+                // Phase 1.1 bearing formula (cursor BG re-emit).
+                let pen_x = (inner_x + col as f32 * cell_w).round();
                 let dest_y = (inner_y + (row as f32) * cell_h).round();
-                let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
+                let baseline_y = dest_y + metrics.baseline_from_top as f32;
+                let (origin, size) = entry.quad(pen_x, baseline_y);
                 glyphs.push(GlyphInstance {
-                    origin: [dest_x, dest_y],
-                    size: [slot_w, metrics.cell_h as f32],
+                    origin,
+                    size,
                     uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                     uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
                     color: [BG.0 as f32, BG.1 as f32, BG.2 as f32, 1.0],
@@ -4456,12 +4481,12 @@ fn push_session(
                 if let Some(entry) =
                     resolve_cell_glyph(atlas, font, lead, false, false, metrics)
                 {
+                    // Phase 1.1 bearing formula (IME preedit).
+                    let baseline_y = dest_y + metrics.baseline_from_top as f32;
+                    let (origin, size) = entry.quad(dest_x, baseline_y);
                     glyphs.push(GlyphInstance {
-                        origin: [dest_x, dest_y],
-                        size: [
-                            (metrics.cell_w * entry.n_cells as u32) as f32,
-                            metrics.cell_h as f32,
-                        ],
+                        origin,
+                        size,
                         uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
                         uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
                         color: [IME_PREEDIT_FG.0, IME_PREEDIT_FG.1, IME_PREEDIT_FG.2, 1.0],

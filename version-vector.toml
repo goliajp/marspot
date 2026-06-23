@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.31"  # font v5 Phase 1.0a — 修 box-drawing custom raster bearing_y(原 = h = cell_h,与 baseline+ascent 不对齐;改 = baseline_from_top 让 quad_top = baseline - bearing_y 正好落 cell_top).当前 renderer 还在用旧 cell-aligned formula 没影响,Phase 1.1 切 bearing formula 时会用到正确值.
-core    = "0.10.81"
+shell   = "0.6.32"  # font v5 Phase 1.1 — raster 切真实 bbox + PAD,renderer 全 8 处 GlyphInstance push 切 `AtlasEntry::quad(pen_x, baseline_y)` bearing formula.PTY/chrome 共用同一公式;mono PTY ink 仍落 cell_x(rasteriser pre-cancel lsb,bearing_x=-PAD);oversized glyph 走 legacy cell-aligned scale-to-fit + Phase 1.0 bearing.atlas 利用率从 ~60% → ~85%(ASCII 占 ~6×10 而非 16×32).
+core    = "0.10.82"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
