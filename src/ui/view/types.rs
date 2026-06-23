@@ -164,11 +164,54 @@ pub struct ScrollWheelId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DragId(pub u32);
 
+/// Focus chain target id — `.focusable(FocusId)` adds the view to
+/// the Tab navigation ring keyed by this id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FocusId(pub u32);
+
+/// Logical key code — a small enum covering the keys we route at
+/// view-tree level.  Letter / digit keys come through as their char
+/// (lowercase ASCII);  function/arrow keys use named variants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Key {
+    Char(char),
+    Enter, Escape, Tab, Backspace, Delete, Space,
+    ArrowLeft, ArrowRight, ArrowUp, ArrowDown,
+    Home, End, PageUp, PageDown,
+    F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
+}
+
+/// Keyboard shortcut binding — `.shortcut(KeyEquivalent, ActionId)`
+/// fires when the user types this combination.  Routing happens at
+/// the host level: the App layer collects `.shortcut()` modifiers
+/// from the tree each frame, then on KeyDown matches `(key, mods)`
+/// against the table to dispatch the `ActionId`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KeyEquivalent {
+    pub key: Key,
+    pub mods: Modifiers,
+}
+
+impl KeyEquivalent {
+    pub const fn cmd(key: Key) -> Self {
+        Self { key, mods: Modifiers { command: true, shift: false, control: false, option: false } }
+    }
+    pub const fn cmd_shift(key: Key) -> Self {
+        Self { key, mods: Modifiers { command: true, shift: true, control: false, option: false } }
+    }
+    pub const fn ctrl(key: Key) -> Self {
+        Self { key, mods: Modifiers { command: false, shift: false, control: true, option: false } }
+    }
+    pub const fn plain(key: Key) -> Self {
+        Self { key, mods: Modifiers { command: false, shift: false, control: false, option: false } }
+    }
+}
+
 /// Pointer location in physical pixels (matches LaidOut.rect coords).
 pub type Point = (f64, f64);
 
 /// Modifier-key bitmask — same shape as the main app's input layer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub shift: bool,
     pub control: bool,
@@ -210,12 +253,17 @@ impl DragInProgress {
 /// Animation curve — interpolation easing.  v1 supports linear +
 /// the standard ease-in/out cubics;  spring physics curves are
 /// v2+ when we ship real animation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnimCurve {
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    /// Damped-spring approximation — overshoots slightly past 1.0
+    /// before settling.  Cheap closed-form (real ODE-based spring
+    /// physics is v2+ when frame scheduler lands).  `bounce ∈ [0,
+    /// 1]` controls overshoot amplitude.
+    Spring { bounce: f64 },
 }
 
 impl AnimCurve {
@@ -228,6 +276,16 @@ impl AnimCurve {
             AnimCurve::EaseOut   => 1.0 - (1.0 - t) * (1.0 - t),
             AnimCurve::EaseInOut => {
                 if t < 0.5 { 2.0 * t * t } else { 1.0 - 2.0 * (1.0 - t).powi(2) }
+            }
+            AnimCurve::Spring { bounce } => {
+                // Damped-cosine settling — 1 - e^(-6t) cos(2πt × 2)
+                // × bounce.  Coefficients tuned so overshoot at ~70%
+                // of t lands near 1.05 for bounce=1.0 and the value
+                // settles to 1.0 by t=1.0.
+                let b = bounce.clamp(0.0, 1.0);
+                let damp = (-6.0 * t).exp();
+                let osc = (2.0 * std::f64::consts::PI * t * 2.0).cos();
+                1.0 - damp * (1.0 + b * 0.3 * osc)
             }
         }
     }

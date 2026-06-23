@@ -31,7 +31,7 @@ pub use view::{
     ToggleState, PickerState,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
     toggle, picker, grid, image_named, shape_circle, shape_capsule, shape_rounded_rect,
-    card, panel, badge, tooltip, tab_strip,
+    card, panel, badge, tooltip, tab_strip, context_menu, breadcrumb, list_row,
 };
 pub use types::{
     ScrollWheelId, DragId, Point, Modifiers, InputEvent, DragInProgress,
@@ -55,5 +55,6 @@ pub use scroll::{
 pub use view::scroll_view;
 pub use state::{
     HostState, HOST_STATE, with_host_state, with_host_state_mut,
-    reconcile,
+    reconcile, LifecycleEvent,
 };
+pub use types::{FocusId, Key, KeyEquivalent};

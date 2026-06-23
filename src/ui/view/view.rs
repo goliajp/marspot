@@ -289,6 +289,22 @@ pub enum Modifier {
     AccessibilityLabel(String),
     /// Accessibility role / semantic category.
     AccessibilityRole(AxRole),
+    /// Keyboard shortcut binding — when the user types this
+    /// `KeyEquivalent` while the panel has focus, the reducer
+    /// receives `ActionId`.  Routing is host-level: app collects
+    /// shortcut tables each frame.
+    Shortcut(super::types::KeyEquivalent, ActionId),
+    /// Add to the Tab navigation ring at this `FocusId`.
+    Focusable(super::types::FocusId),
+    /// Mark the view as the initially-focused element.  At most
+    /// one per frame should be set;  framework picks the first if
+    /// multiple appear.
+    AutoFocus,
+    /// Fire when this view first appears in the tree (its
+    /// `ViewId` enters the live set).  Lifecycle reconcile detects.
+    OnAppear(ActionId),
+    /// Fire when this view leaves the tree.
+    OnDisappear(ActionId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -457,6 +473,81 @@ pub fn tooltip(label: &str) -> View {
         .shadow(elev::E2)
 }
 
+/// Context menu — vertical list of clickable items inside a Card.
+/// `divider_after_idx` inserts a hairline divider after the N-th
+/// item (None for no divider).  Each item carries an `ActionId`.
+pub fn context_menu(items: Vec<&str>, divider_after_idx: Option<usize>, action_base: super::types::ActionId) -> View {
+    use crate::ui::theme::{color, space, radius, text, elev};
+    let mut rows: Vec<View> = Vec::with_capacity(items.len() + 1);
+    for (i, label) in items.iter().enumerate() {
+        let row = Text::new(*label).style(text::BODY).build()
+            .padding(Edges::xy(Length::Pt(12.0), Length::Pt(6.0)))
+            .frame(FrameSpec { width: Some(Length::Pct(1.0)), ..Default::default() })
+            .on_click(super::types::ActionId(action_base.0.wrapping_add(i as u32)));
+        rows.push(row);
+        if let Some(d) = divider_after_idx {
+            if i == d {
+                rows.push(hairline_horiz(color::DIVIDER).frame(FrameSpec {
+                    height: Some(Length::Pt(1.0)),
+                    width: Some(Length::Pct(1.0)),
+                    ..Default::default()
+                }));
+            }
+        }
+    }
+    vstack(rows)
+        .vstack_gap(Length::Pt(0.0))
+        .background(color::BG_RAISED)
+        .border(Length::Pt(1.0), color::BORDER)
+        .corner_radius(radius::MD)
+        .shadow(elev::E3)
+}
+
+/// Breadcrumb — `Home > Section > Subsection > Detail` style
+/// navigation trail.  Last item is rendered emphasised (FG colour),
+/// others muted.  Caret separators are unstyled `>` text.
+pub fn breadcrumb(segments: Vec<&str>) -> View {
+    use crate::ui::theme::{color, text};
+    let last_idx = segments.len().saturating_sub(1);
+    let mut items: Vec<View> = Vec::with_capacity(segments.len() * 2);
+    for (i, s) in segments.iter().enumerate() {
+        let color_for = if i == last_idx { color::FG } else { color::FG_MUTED };
+        items.push(
+            Text::new(*s).style(text::CAPTION).color(color_for).build()
+        );
+        if i < last_idx {
+            items.push(Text::new("›").style(text::CAPTION).color(color::FG_DISABLED).build());
+        }
+    }
+    hstack(items).hstack_gap(Length::Pt(6.0)).align_cross_center()
+}
+
+/// List-row preset — typical sidebar/table row pattern: leading
+/// icon-or-empty slot, label, trailing detail.  Selected = accent
+/// background;  click fires `action`.
+pub fn list_row(label: &str, trailing: Option<&str>, selected: bool, action: super::types::ActionId) -> View {
+    use crate::ui::theme::{color, space, radius, text};
+    let bg = if selected { color::BG_SELECTED } else { color::BG };
+    let fg = if selected { color::FG }          else { color::FG };
+    let mut content = vec![
+        Text::new(label).style(text::BODY).color(fg).build(),
+        spacer(),
+    ];
+    if let Some(t) = trailing {
+        content.push(
+            Text::new(t).style(text::CAPTION).color(color::FG_MUTED).build()
+        );
+    }
+    hstack(content)
+        .hstack_gap(Length::Pt(8.0))
+        .align_cross_center()
+        .padding(Edges::xy(Length::Pt(12.0), Length::Pt(6.0)))
+        .background(bg)
+        .corner_radius(radius::SM)
+        .frame(FrameSpec { width: Some(Length::Pct(1.0)), ..Default::default() })
+        .on_click(action)
+}
+
 /// Tab strip — horizontal row of labelled tabs;  `selected` index
 /// highlights one as active.  Each tab carries an `ActionId` so
 /// reducers can pick up clicks.
@@ -581,6 +672,15 @@ impl View {
     pub fn accessibility_role(self, r: AxRole) -> Self {
         self.add_mod(Modifier::AccessibilityRole(r))
     }
+    pub fn shortcut(self, k: super::types::KeyEquivalent, a: ActionId) -> Self {
+        self.add_mod(Modifier::Shortcut(k, a))
+    }
+    pub fn focusable(self, id: super::types::FocusId) -> Self {
+        self.add_mod(Modifier::Focusable(id))
+    }
+    pub fn auto_focus(self) -> Self { self.add_mod(Modifier::AutoFocus) }
+    pub fn on_appear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnAppear(a)) }
+    pub fn on_disappear(self, a: ActionId) -> Self { self.add_mod(Modifier::OnDisappear(a)) }
 }
 
 // Text-specific modifiers — different from View modifiers (which

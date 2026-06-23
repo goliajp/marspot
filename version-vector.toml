@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.21"  # L1-L6 各自 menu submenu + 各 layer 独立 scroll + 详细分页 + L5 加 Card/Panel/Badge/Tooltip/TabStrip preset + L6 加 HighContrast theme + Anim easing demo + 间距加大
-core    = "0.10.72" # tab_strip/card/panel/badge/tooltip preset + HighContrast palette
+shell   = "0.6.22"  # 继续推 v3 待补:on_appear / Spring curve / KeyEquivalent+shortcut / Focusable+auto_focus / ContextMenu+Breadcrumb+ListRow preset
+core    = "0.10.73" # framework on_appear lifecycle + Spring + .shortcut/.focusable + 3 个新 preset
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

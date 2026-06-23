@@ -17,7 +17,44 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.21**
+Current: **0.6.22**
+
+### 0.6.22
+
+继续推 v3 doc 还能 land 的待补项.
+
+framework 新增:
+- `Key` enum (Char / Enter / Esc / Tab / Backspace / Arrows / F1-F12 / ...)
+- `KeyEquivalent { key, mods }` + `KeyEquivalent::{cmd, cmd_shift, ctrl, plain}` const constructors
+- `FocusId(u32)` newtype
+- `Modifier::Shortcut(KeyEquivalent, ActionId)` + `.shortcut()` fluent
+- `Modifier::Focusable(FocusId)` + `.focusable()` fluent
+- `Modifier::AutoFocus` + `.auto_focus()` fluent
+- `Modifier::OnAppear(ActionId) / OnDisappear(ActionId)` + 同名 fluent
+- `Decoration` 加 `shortcut / focus_id / auto_focus / on_appear / on_disappear` 字段
+- `AnimCurve::Spring { bounce }` — damped-cosine 关闭式 (真 ODE 弹簧仍 v2+)
+- `Modifiers` 加 Hash derive(用于 KeyEquivalent 表)
+
+Lifecycle reconcile 升级:
+- 旧:简单 retain HOST_STATE 中 live ids
+- 新:diff `PREV_LIVE_IDS` thread_local vs 当前 frame → 生成
+  `Vec<LifecycleEvent>` = `Appear { id, action }` / `Disappear { id, action }`
+- host 拿 events 调 `OnAppear` / `OnDisappear` 绑定的 ActionId reducer
+- 收集 ScrollView 自带 id 跟 Modifier::Id
+
+新 L5 composable preset:
+- `context_menu(items, divider_after_idx, ActionId)` — Card 容器 + 行 + 可选 divider
+- `breadcrumb(segments)` — Home › Section › 最右 active
+- `list_row(label, trailing, selected, ActionId)` — sidebar/table 通用行
+
+DevPanel Model 反映:
+- L4 加 "Keyboard / Focus / Lifecycle modifiers" 块 — .shortcut/.focusable/.auto_focus/.on_appear/.on_disappear 全 [✓]
+- L5 加 ContextMenu / Breadcrumb / ListRow live demo (各自 visible)
+- L6 Lifecycle 详化:reconcile 返 Vec<LifecycleEvent>;.on_appear/.on_disappear [✓]
+- L6 Animation:Spring curve 加入 easing 阵列(5 curves 视觉对比);v2+ 只剩 "真 frame schedule"
+- L5 真组件迁移 ContextMenu / Sidebar / Table → 标注 "preset 已落,真组件替换 marspot 现存 仍 v1 待补"
+
+shell 0.6.21 → 0.6.22;core 0.10.72 → 0.10.73.
 
 ### 0.6.21
 
@@ -372,7 +409,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.72**
+Current: **0.10.73**
+
+### 0.10.73
+
+framework 加 on_appear lifecycle / Spring anim curve / .shortcut / .focusable / .auto_focus / .on_appear / .on_disappear modifier + 3 个新 preset(context_menu / breadcrumb / list_row).reconcile() 升级返 Vec<LifecycleEvent>.
 
 ### 0.10.72
 

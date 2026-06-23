@@ -1543,7 +1543,14 @@ fn build_l4_view() -> crate::ui::view::View {
         h::v2_row("TextField(NSTextInputClient + IME)"),
         h::sub("HostState API 已就绪;真接 AppKit IME 是单独大工程"),
 
-        h::v2_row("Keyboard shortcut + Focus chain"),
+        h::h2("Keyboard / Focus / Lifecycle modifiers"),
+        h::done_row(".shortcut(KeyEquivalent, ActionId) — Cmd-key 等绑定"),
+        h::sub("KeyEquivalent::{cmd(K), cmd_shift(K), ctrl(K), plain(K)} 构造器"),
+        h::sub("App 层每帧扫 tree 收 shortcut 表;KeyDown 对照 → dispatch"),
+        h::done_row(".focusable(FocusId) — 加入 Tab 导航环"),
+        h::done_row(".auto_focus() — 首帧自动 focus"),
+        h::done_row(".on_appear(ActionId) / .on_disappear(ActionId)"),
+        h::sub("reconcile() diff 前后帧 live ids 生成 LifecycleEvent 列表"),
     ])
 }
 
@@ -1601,13 +1608,35 @@ fn build_l5_view() -> crate::ui::view::View {
             ActionId(0xDE7_2000),
         ),
 
+        h::h3("ContextMenu"),
+        h::sub("context_menu(items, divider_after_idx, ActionId) — card + click row"),
+        crate::ui::view::context_menu(
+            vec!["Copy", "Paste", "Cut", "Select All", "Inspect"],
+            Some(2),
+            ActionId(0xDE7_2100),
+        ).frame(crate::ui::view::FrameSpec {
+            width: Some(Length::Pt(200.0)),
+            ..Default::default()
+        }),
+
+        h::h3("Breadcrumb"),
+        h::sub("breadcrumb(segments) — Home › Section › 最右 active 强色"),
+        crate::ui::view::breadcrumb(vec!["Home", "Settings", "Appearance", "Theme"]),
+
+        h::h3("List row"),
+        h::sub("list_row(label, trailing, selected, ActionId) — sidebar/table row 通用"),
+        vstack(vec![
+            crate::ui::view::list_row("README.md",      Some("12 KB"),  false, ActionId(0xDE7_2200)),
+            crate::ui::view::list_row("src/main.rs",    Some("4.2 KB"), true,  ActionId(0xDE7_2201)),
+            crate::ui::view::list_row("docs/spec.md",   Some("8.7 KB"), false, ActionId(0xDE7_2202)),
+            crate::ui::view::list_row("Cargo.toml",     Some("1.1 KB"), false, ActionId(0xDE7_2203)),
+        ]).vstack_gap(Length::Pt(2.0)),
+
         h::h2("真组件迁移(P3i)"),
-        h::v1_row("ContextMenu / Sidebar / Table / LayoutModal / SearchOverlay / ProcessMonitor"),
-        h::sub("现存 component 走老 canvas builder;迁到 View 树各 1-2 天"),
-        h::v1_row("DevPanel 主框架(tab strip + menu + content area)"),
-        h::sub("现 dev panel 主框架仍走老路径(只 Model section 走新 framework)"),
-        h::v1_row("ViewPainter 退役(P3j)"),
-        h::sub("全部 component 迁完后顺手做;预计 -400 LOC 净删"),
+        h::v1_row("ContextMenu / Sidebar / Table — preset 已落,真组件迁移仍 v1 待补"),
+        h::sub("preset = 可组合的 modifier 链 building block;真组件 = 替换 marspot 现存"),
+        h::v1_row("LayoutModal / SearchOverlay / ProcessMonitor / DevPanel 主框架"),
+        h::v1_row("ViewPainter 退役(P3j)— 全 component 迁完后顺手做"),
     ])
 }
 
@@ -1640,9 +1669,11 @@ fn build_l6_view() -> crate::ui::view::View {
 
     h::scrollable_page(0xDE7_0060, vec![
         h::h2("Lifecycle"),
-        h::done_row("reconcile(&LaidOut) — on_disappear"),
-        h::sub("每帧 build+layout 后,framework 遍历 tree 收 id;drop HostState 中失踪的"),
-        h::v2_row("on_appear hook(view 类型 init 时绑)"),
+        h::done_row("reconcile(&LaidOut) → Vec<LifecycleEvent>"),
+        h::sub("每帧 build+layout 后调,diff prev/live ids 生成 Appear/Disappear 事件"),
+        h::sub("Appear { id, action }/Disappear { id, action } — host 按 action 派发"),
+        h::done_row(".on_appear(ActionId) / .on_disappear(ActionId) modifier"),
+        h::sub("bake 进 Decoration.on_appear / on_disappear;reconcile() 跟踪 prev frame"),
 
         h::h2("Accessibility"),
         h::done_row(".accessibility_label(s) / .accessibility_role(AxRole)"),
@@ -1704,13 +1735,15 @@ fn build_l6_view() -> crate::ui::view::View {
         h::v2_row("真 theme swap redraw hook(改 theme 自动 invalidate)"),
 
         h::h2("Animation"),
-        h::done_row("Anim<T> + Lerp + AnimCurve 4 curve"),
+        h::done_row("Anim<T> + Lerp + AnimCurve 5 curves(含 Spring)"),
         hstack(vec![
-            easing_demo(AnimCurve::Linear,    "Linear"),
-            easing_demo(AnimCurve::EaseIn,    "EaseIn"),
-            easing_demo(AnimCurve::EaseOut,   "EaseOut"),
-            easing_demo(AnimCurve::EaseInOut, "EaseInOut"),
+            easing_demo(AnimCurve::Linear,                  "Linear"),
+            easing_demo(AnimCurve::EaseIn,                  "EaseIn"),
+            easing_demo(AnimCurve::EaseOut,                 "EaseOut"),
+            easing_demo(AnimCurve::EaseInOut,               "EaseInOut"),
+            easing_demo(AnimCurve::Spring { bounce: 1.0 },  "Spring"),
         ]).hstack_gap(Length::Pt(14.0)).align_cross_start(),
+        h::sub("Spring = damped-cosine 关闭式;真 ODE 弹簧 = v2+"),
         h::v2_row("真 frame 调度(active anim 触发 redraw_in 16ms,无 anim 时 0 redraw)"),
         h::sub("跟 idle CPU=0 约束兼容;关键是 App 层接 scheduling hook"),
 

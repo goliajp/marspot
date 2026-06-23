@@ -89,31 +89,78 @@ pub fn with_host_state_mut<R>(f: impl FnOnce(&mut HostState) -> R) -> R {
     HOST_STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
+/// Lifecycle events emitted by `reconcile()` — the host iterates
+/// these after a build/layout pass to dispatch any `OnAppear` /
+/// `OnDisappear` action reducers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LifecycleEvent {
+    Appear { id: ViewId, action: Option<super::types::ActionId> },
+    Disappear { id: ViewId, action: Option<super::types::ActionId> },
+}
+
+thread_local! {
+    /// IDs from the previous frame — used by reconcile() to diff
+    /// what's new vs gone.  Updated on every reconcile call.
+    static PREV_LIVE_IDS: std::cell::RefCell<HashMap<ViewId, Option<super::types::ActionId>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
 /// Lifecycle reconcile — walk the laid-out tree,collect every
 /// ViewId in use this frame,drop any HostState slot whose id
 /// disappeared(on_disappear semantics).
 ///
-/// Currently no on_appear hook(immediate-mode views are pure data
-/// constructors,nothing to invoke at first build).When stateful
-/// view types add init hooks(eg TextField loading saved cursor),
-/// they'll plug in here.
-pub fn reconcile(laid: &LaidOut) {
-    let mut live: HashSet<ViewId> = HashSet::new();
-    collect_ids(laid, &mut live);
-    // Also collect implicit ids — ScrollView etc. carry their own id
-    // in the `View` enum directly,not via `Modifier::Id`.
-    with_host_state_mut(|s| s.retain_ids(&live));
+/// Returns the lifecycle events fired this frame so the host can
+/// dispatch `OnAppear` / `OnDisappear` action reducers.
+pub fn reconcile(laid: &LaidOut) -> Vec<LifecycleEvent> {
+    let mut live: HashMap<ViewId, LiveInfo> = HashMap::new();
+    collect_info(laid, &mut live);
+
+    let live_ids: HashSet<ViewId> = live.keys().copied().collect();
+    with_host_state_mut(|s| s.retain_ids(&live_ids));
+
+    // Diff against the previous frame.
+    let mut events: Vec<LifecycleEvent> = Vec::new();
+    PREV_LIVE_IDS.with(|p| {
+        let mut prev = p.borrow_mut();
+        for (id, info) in &live {
+            if !prev.contains_key(id) {
+                events.push(LifecycleEvent::Appear { id: *id, action: info.on_appear });
+            }
+        }
+        for (id, prev_action) in prev.iter() {
+            if !live.contains_key(id) {
+                events.push(LifecycleEvent::Disappear { id: *id, action: *prev_action });
+            }
+        }
+        // Rewrite prev table for next frame.
+        prev.clear();
+        for (id, info) in live.iter() {
+            prev.insert(*id, info.on_disappear);
+        }
+    });
+    events
 }
 
-fn collect_ids(laid: &LaidOut, out: &mut HashSet<ViewId>) {
+#[derive(Clone, Copy, Debug, Default)]
+struct LiveInfo {
+    on_appear:    Option<super::types::ActionId>,
+    on_disappear: Option<super::types::ActionId>,
+}
+
+fn collect_info(laid: &LaidOut, out: &mut HashMap<ViewId, LiveInfo>) {
+    let record_id = |id: ViewId, out: &mut HashMap<ViewId, LiveInfo>| {
+        let info = out.entry(id).or_default();
+        if laid.deco.on_appear.is_some()    { info.on_appear    = laid.deco.on_appear; }
+        if laid.deco.on_disappear.is_some() { info.on_disappear = laid.deco.on_disappear; }
+    };
     if let Some(id) = laid.deco.id {
-        out.insert(id);
+        record_id(id, out);
     }
     if let View::ScrollView { id, .. } = &laid.view {
-        out.insert(*id);
+        record_id(*id, out);
     }
     for ch in laid.children.iter() {
-        collect_ids(ch, out);
+        collect_info(ch, out);
     }
 }
 

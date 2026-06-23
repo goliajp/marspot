@@ -120,6 +120,16 @@ pub struct Decoration {
     /// future routing.
     pub ax_label: Option<String>,
     pub ax_role: Option<super::view::AxRole>,
+    /// Keyboard shortcut binding — KeyEquivalent → ActionId.  Host
+    /// collects from tree each frame to build a shortcut table.
+    pub shortcut: Option<(super::types::KeyEquivalent, super::types::ActionId)>,
+    /// Focus ring membership — view participates in Tab navigation.
+    pub focus_id: Option<super::types::FocusId>,
+    /// Initial-focus marker (at most one per tree).
+    pub auto_focus: bool,
+    /// Lifecycle hooks — emitted by reconcile() on appear/disappear.
+    pub on_appear: Option<super::types::ActionId>,
+    pub on_disappear: Option<super::types::ActionId>,
 }
 
 impl Default for Decoration {
@@ -143,6 +153,11 @@ impl Default for Decoration {
             bg_gradient: None,
             ax_label: None,
             ax_role: None,
+            shortcut: None,
+            focus_id: None,
+            auto_focus: false,
+            on_appear: None,
+            on_disappear: None,
         }
     }
 }
@@ -840,6 +855,21 @@ fn layout_modified(
             }
             Modifier::AccessibilityRole(r) => {
                 bake.ax_role = Some(*r);
+            }
+            Modifier::Shortcut(k, a) => {
+                bake.shortcut = Some((*k, *a));
+            }
+            Modifier::Focusable(id) => {
+                bake.focus_id = Some(*id);
+            }
+            Modifier::AutoFocus => {
+                bake.auto_focus = true;
+            }
+            Modifier::OnAppear(a) => {
+                bake.on_appear = Some(*a);
+            }
+            Modifier::OnDisappear(a) => {
+                bake.on_disappear = Some(*a);
             }
         }
     }
