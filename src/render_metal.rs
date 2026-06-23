@@ -3887,19 +3887,24 @@ fn push_text_run_ui_shaped(
     // doesn't drift fractionally — matches the mono path's
     // `baseline_y_q` quantisation.
     let baseline_y_q = baseline_y.round();
+    let x_start_floor = x_start.floor() as i32;
     for sg in shaped {
         let ct_font = font.font(sg.font_id as usize).clone();
         let key = GlyphKey {
             font_id: sg.font_id,
             glyph: sg.glyph_id,
             size_q: GlyphKey::size_q_for(ct_font.pt_size()),
-            subpx_x: 0,
+            // Phase 4 — bucket comes from CTLine's float position
+            // (shape_line quantised it).  Atlas hands back a slot
+            // whose ink is pre-shifted by `subpx_x × 0.25 px`, so
+            // origin.x stays integer.
+            subpx_x: sg.subpx_x,
             flags: GlyphKey::FLAG_SMOOTH,
         };
         let Some(entry) = atlas.get_or_rasterize_natural(key, &ct_font) else {
             continue;
         };
-        let pen_x = (x_start + sg.x_position).round();
+        let pen_x = (x_start_floor + sg.pen_x_px) as f32;
         let (origin, size) = entry.quad(pen_x, baseline_y_q);
         glyphs.push(GlyphInstance {
             origin,

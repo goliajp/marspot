@@ -33,13 +33,21 @@ use std::collections::VecDeque;
 /// glyphs from multiple fonts in a single line when fallback fires
 /// — every glyph carries its own `font_id`, so the renderer doesn't
 /// guess which font drew which glyph.
+///
+/// Phase 4 — sub-pixel x position is split:
+/// - `pen_x_px` is the INTEGER pixel-grid pen position relative to
+///   the line's logical start (floor of the float CTLine gave).
+/// - `subpx_x` is the 0.25-px bucket `0..4` that the renderer
+///   forwards into `GlyphKey.subpx_x` so the atlas raster comes back
+///   pre-shifted by `subpx_x × 0.25` pixels.  Together they
+///   reconstruct the float position to 0.25-px precision without
+///   subjecting the renderer to fractional `origin.x`.
 #[derive(Clone, Copy, Debug)]
 pub struct ShapedGlyph {
     pub font_id: u32,
     pub glyph_id: CGGlyph,
-    /// Pen x position relative to the line's logical start, in
-    /// PHYSICAL pixels (Phase 3 callers pre-scale `pt → px`).
-    pub x_position: f32,
+    pub pen_x_px: i32,
+    pub subpx_x: u8,
 }
 
 /// Shape `text` through CTLine against `base_font`, calling `intern`
@@ -92,10 +100,30 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
         let glyphs = run.glyphs();
         let positions = run.positions();
         for i in 0..glyphs.len() {
+            let x_px = (positions[i].x as f32) * px_scale;
+            // Phase 4 — quantise to 0.25-px buckets (`subpx_x` ∈ 0..4).
+            // `pen_x_px = floor(x_px)`; `bucket = round((x_px - floor) × 4)`.
+            // The renderer pushes the quad at `pen_x_px` (integer) and
+            // the atlas raster carries the sub-pixel shift, so two
+            // adjacent glyphs whose float positions differ by 0.25 px
+            // get visually distinct ink even with identical
+            // `(font_id, glyph_id, size_q)` — fixes the 11-13pt
+            // chrome "字黏连" artefact.
+            let floor_px = x_px.floor() as i32;
+            let frac = x_px - x_px.floor();
+            let bucket = (frac * 4.0).round() as i32;
+            // bucket can land at 4 when frac ≈ 1.0 (rounding edge);
+            // carry into next pixel.
+            let (pen_x_px, subpx_x) = if bucket >= 4 {
+                (floor_px + 1, 0u8)
+            } else {
+                (floor_px, bucket.clamp(0, 3) as u8)
+            };
             out.push(ShapedGlyph {
                 font_id,
                 glyph_id: glyphs[i],
-                x_position: (positions[i].x as f32) * px_scale,
+                pen_x_px,
+                subpx_x,
             });
         }
     }
@@ -229,11 +257,34 @@ mod tests {
             id
         });
         assert_eq!(shaped_im.len(), 2, "two glyphs for 'im'");
-        let gap_im = shaped_im[1].x_position - shaped_im[0].x_position;
+        // Reconstruct float position: pen_x_px + subpx_x × 0.25.
+        let pos = |g: &ShapedGlyph| g.pen_x_px as f32 + (g.subpx_x as f32) * 0.25;
+        let gap_im = pos(&shaped_im[1]) - pos(&shaped_im[0]);
         // 'i' is much narrower than 'm' in SF Pro — gap must be
         // notably non-uniform vs the cell-width 12pt mono assumption.
         assert!(gap_im > 0.0 && gap_im < 18.0,
             "gap im should be < 18px at 13pt 2x, got {gap_im}");
+    }
+
+    #[test]
+    fn shape_subpx_buckets_in_range() {
+        let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            return;
+        };
+        let shaped = shape_line("Hello world", &font, |_| 0);
+        // Every glyph's subpx_x must land in 0..4 — the bucket-overflow
+        // carry path inside `shape_line` is the only way to land at 4.
+        for sg in &shaped {
+            assert!(sg.subpx_x < 4, "subpx_x={}; must be 0..3", sg.subpx_x);
+        }
+        // Non-zero buckets should appear in a long-enough string —
+        // CT rarely hits exactly integer positions for all glyphs at
+        // 13pt 2× retina.
+        let nonzero = shaped.iter().filter(|g| g.subpx_x != 0).count();
+        assert!(
+            nonzero > 0,
+            "expected at least one non-zero sub-pixel bucket in 'Hello world'"
+        );
     }
 
     #[test]

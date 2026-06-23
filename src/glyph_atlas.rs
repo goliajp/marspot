@@ -373,10 +373,14 @@ impl GlyphAtlas {
         if let Some(&entry) = self.cache.get(&key) {
             return Some(entry);
         }
+        // Phase 4 — `key.subpx_x` ∈ 0..4 picks the 0.25-px x-bucket;
+        // raster offsets the pen by `subpx_x × 0.25` so the same
+        // glyph at 4 sub-pixel positions caches as 4 distinct entries
+        // and proportional text at 11-13pt doesn't black-clump.
         let raster = if self.bpp == 4 {
-            rasterise_glyph_color_natural(font, key.glyph)?
+            rasterise_glyph_color_natural(font, key.glyph, key.subpx_x)?
         } else {
-            rasterise_glyph_natural(font, key.glyph)?
+            rasterise_glyph_natural(font, key.glyph, key.subpx_x)?
         };
         self.commit_raster(key, raster)
     }
@@ -867,7 +871,14 @@ fn rasterise_glyph_color(
 /// where there is no cell constraint — CTLine has already laid each
 /// glyph at its proportional advance, so the rasteriser's only job
 /// is to emit a tight bitmap at the natural size.
-fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
+///
+/// Phase 4 — `subpx_x ∈ 0..4` offsets the pen horizontally by
+/// `subpx_x × 0.25 px` inside the bitmap so the same glyph at 4
+/// different sub-pixel positions caches as 4 distinct entries.  The
+/// renderer pushes the quad at integer `pen_x`; the AA edge inside
+/// the bitmap carries the fractional offset.  Bitmap gets one extra
+/// column to accommodate the right-edge shift at `subpx_x == 3`.
+fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
         &[glyph],
@@ -875,7 +886,8 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
     if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
         return None;
     }
-    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD;
+    // +1 column right of the natural bbox to fit `subpx_x = 3` shift.
+    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD + 1;
     let px_h = (bbox.size.height.ceil() as u32) + 2 * PAD;
     let bytes_per_row = px_w as usize;
     let buf_len = bytes_per_row * px_h as usize;
@@ -903,7 +915,9 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
     ctx.set_allows_font_subpixel_positioning(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
     ctx.set_gray_fill_color(1.0, 1.0);
-    let pen_x = (PAD as f64) - bbox.origin.x;
+    // Phase 4 — sub-pixel x shift inside the bitmap.
+    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25;
+    let pen_x = (PAD as f64) - bbox.origin.x + subpx_offset;
     let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
     font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
     Some(Raster {
@@ -918,7 +932,11 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
 
 /// Phase 3 — colour-glyph natural-size variant of
 /// `rasterise_glyph_natural`.  Same geometry, BGRA pixel format.
-fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster> {
+/// Phase 4 — accepts the same `subpx_x` shift; emoji rarely cluster
+/// tight enough for sub-pixel positioning to matter visually, but
+/// the path supports it for consistency with the mono path so the
+/// atlas key shape stays uniform.
+fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
         &[glyph],
@@ -926,7 +944,7 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster
     if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
         return None;
     }
-    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD;
+    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD + 1;
     let px_h = (bbox.size.height.ceil() as u32) + 2 * PAD;
     let bytes_per_row = (px_w * 4) as usize;
     let buf_len = bytes_per_row * px_h as usize;
@@ -952,7 +970,8 @@ fn rasterise_glyph_color_natural(font: &CTFont, glyph: CGGlyph) -> Option<Raster
     ctx.set_should_antialias(true);
     ctx.set_allows_antialiasing(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-    let pen_x = (PAD as f64) - bbox.origin.x;
+    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25;
+    let pen_x = (PAD as f64) - bbox.origin.x + subpx_offset;
     let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
     font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
     Some(Raster {

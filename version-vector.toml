@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.34"  # font v5 Phase 3 — chrome 走 CTLine shape(SF Pro 真 proportional).新 `src/font_shape.rs` 模块,ShapeCache LRU(cap 1024).FontCache 加 `intern_ctfont` + `shape_ui` + 内置 shape_cache.GlyphAtlas 加 `get_or_rasterize_natural` 跳过 cell-fit 兜底,raster 走 Phase 1.1 自然 bbox.push_text_run_kind(Ui) 走 `push_text_run_ui_shaped`:CTLine 出 kerning + ligature + auto fallback(CJK 自动 PingFang).Terminal 路径不变.
-core    = "0.10.84"
+shell   = "0.6.35"  # font v5 Phase 4 — subpixel x positioning(4 buckets,0.25 px precision).ShapedGlyph 拆 pen_x_px(i32)+ subpx_x(u8 0..3),shape_line 量化 CTLine float → floor + bucket(round(frac*4)),bucket=4 进位下一像素.rasterise_glyph_natural / _color_natural 收 subpx_x 参数,pen_x += subpx_x*0.25;bitmap 加 1 列右余度.get_or_rasterize_natural 转发 key.subpx_x.atlas 用量 ×4(Phase 2 16 MiB 预留够).chrome 11-13pt 字符不再黏连;Terminal 路径完全不动.
+core    = "0.10.85"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
