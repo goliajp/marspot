@@ -409,6 +409,72 @@ pub fn shape_rounded_rect(radius: Length, fill: Color) -> View {
     View::Shape(ShapeSpec::RoundedRect { radius, fill })
 }
 
+// ─── Composable presets (L5 — Card / Panel / Badge / Tooltip /
+//     TabStrip).  Each is just a modifier-chain shortcut, not a
+//     new View variant.  Migration target for ContextMenu etc.
+
+/// Card preset — raised background + border + radius + soft shadow.
+/// `child` is the content laid inside MD padding.
+pub fn card(child: View) -> View {
+    use crate::ui::theme::{color, space, radius, elev};
+    child
+        .padding(Edges::all(space::MD))
+        .background(color::BG_RAISED)
+        .border(Length::Pt(1.0), color::BORDER)
+        .corner_radius(radius::MD)
+        .shadow(elev::E1)
+}
+
+/// Panel preset — flatter than Card.  Used for sidebars / form
+/// sections / supporting content blocks.
+pub fn panel(child: View) -> View {
+    use crate::ui::theme::{color, space, radius};
+    child
+        .padding(Edges::all(space::MD))
+        .background(color::BG_PANEL)
+        .corner_radius(radius::MD)
+}
+
+/// Pill-shaped status tag.  Color carries the semantic role
+/// (token::color::SUCCESS / WARN / DANGER / ACCENT / ...).
+pub fn badge(label: &str, c: Color) -> View {
+    use crate::ui::theme::{color, radius, text};
+    Text::new(label).style(text::CAPTION).color(color::BG).build()
+        .padding(Edges::xy(Length::Pt(10.0), Length::Pt(2.0)))
+        .background(c)
+        .corner_radius(radius::PILL)
+}
+
+/// Tooltip / hint popup preset.  Use with hover-trigger logic at
+/// the call site;  v1 just emits the visual.
+pub fn tooltip(label: &str) -> View {
+    use crate::ui::theme::{color, radius, text, elev};
+    Text::new(label).style(text::CAPTION).color(color::FG).build()
+        .padding(Edges::xy(Length::Pt(10.0), Length::Pt(6.0)))
+        .background(color::BG)
+        .border(Length::Pt(1.0), color::BORDER)
+        .corner_radius(radius::SM)
+        .shadow(elev::E2)
+}
+
+/// Tab strip — horizontal row of labelled tabs;  `selected` index
+/// highlights one as active.  Each tab carries an `ActionId` so
+/// reducers can pick up clicks.
+pub fn tab_strip(labels: Vec<&str>, selected: usize, action_base: super::types::ActionId) -> View {
+    use crate::ui::theme::{color, radius, text};
+    let tabs: Vec<View> = labels.into_iter().enumerate().map(|(i, lab)| {
+        let is_sel = i == selected;
+        let bg = if is_sel { color::ACCENT } else { color::BG_PANEL };
+        let fg = if is_sel { color::BG }     else { color::FG };
+        Text::new(lab).style(text::BODY).color(fg).build()
+            .padding(Edges::xy(Length::Pt(14.0), Length::Pt(6.0)))
+            .background(bg)
+            .corner_radius(radius::SM)
+            .on_click(super::types::ActionId(action_base.0.wrapping_add(i as u32)))
+    }).collect();
+    hstack(tabs).hstack_gap(Length::Pt(4.0))
+}
+
 /// State for `View::Toggle`.  Lives in `HostState` keyed by ViewId.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ToggleState { pub on: bool }

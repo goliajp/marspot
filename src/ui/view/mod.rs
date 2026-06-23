@@ -31,6 +31,7 @@ pub use view::{
     ToggleState, PickerState,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
     toggle, picker, grid, image_named, shape_circle, shape_capsule, shape_rounded_rect,
+    card, panel, badge, tooltip, tab_strip,
 };
 pub use types::{
     ScrollWheelId, DragId, Point, Modifiers, InputEvent, DragInProgress,

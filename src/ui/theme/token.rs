@@ -42,6 +42,30 @@ pub mod color {
     // ─── Helper hints (used inside dev panel etc) ─────────────
     pub const HINT:         Color = Color::rgba(130, 140, 156, 1.0);
 
+    // ─── High-contrast theme palette ──────────────────────────
+    /// Pure-black / pure-white extreme palette for accessibility.
+    pub mod hc {
+        use super::Color;
+        pub const FG:           Color = Color::rgba(255, 255, 255, 1.0);
+        pub const FG_MUTED:     Color = Color::rgba(200, 200, 200, 1.0);
+        pub const FG_DISABLED:  Color = Color::rgba(140, 140, 140, 1.0);
+        pub const BG:           Color = Color::rgba(  0,   0,   0, 1.0);
+        pub const BG_RAISED:    Color = Color::rgba( 25,  25,  25, 1.0);
+        pub const BG_PANEL:     Color = Color::rgba( 15,  15,  15, 1.0);
+        pub const BG_SELECTED:  Color = Color::rgba(255, 255, 255, 1.0);
+        pub const BG_HOVER:     Color = Color::rgba( 50,  50,  50, 1.0);
+        pub const BORDER:       Color = Color::rgba(255, 255, 255, 1.0);
+        pub const DIVIDER:      Color = Color::rgba(255, 255, 255, 0.40);
+        pub const HAIRLINE:     Color = Color::rgba(255, 255, 255, 0.70);
+        pub const ACCENT:       Color = Color::rgba(255, 220,   0, 1.0);
+        pub const ACCENT_DIM:   Color = Color::rgba(220, 200,   0, 1.0);
+        pub const SUCCESS:      Color = Color::rgba(  0, 255,   0, 1.0);
+        pub const WARN:         Color = Color::rgba(255, 200,   0, 1.0);
+        pub const DANGER:       Color = Color::rgba(255,   0,   0, 1.0);
+        pub const SHADOW:       Color = Color::rgba(  0,   0,   0, 0.95);
+        pub const HINT:         Color = Color::rgba(200, 200, 200, 1.0);
+    }
+
     // ─── Light theme palette (P3v-2) ──────────────────────────
     // Used by `themed::color::*` accessors when `ThemeId::Light` is
     // active.  Raw constants below stay Dark for backward compat

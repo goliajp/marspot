@@ -17,7 +17,47 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.20**
+Current: **0.6.21**
+
+### 0.6.21
+
+回应 user "每一个 Layer 作为左边 menu 的 submenu / 每个 Layer 做细致 / items 垂直间距稍微加大 / L5 L6 还有没做完的做完".
+
+Menu 重构:
+- MENU_W_PT 140 → 170 容纳 "L# Foundation" 等更长 label
+- SECTION_LABELS 加 6 个 sub-item("Model" 之下加 "  L1 Foundation", "  L2 Box Model", ... "  L6 Cross-cutting" 前缀 2 空格 indent)
+- 老 Colors/Units/Rects/Lines/Text 仍在底下保留(legacy canvas builder)
+- 新 SECTION_L1..SECTION_L6 常量(10..15 magic numbers,不跟老 1..5 冲突)
+
+每 layer 独立 scrollable page:
+- 新 build_l1_view ... build_l6_view 6 个 builder fn
+- 每个走自己 scroll_view + ViewId(0xDE7_0010 / 0020 / 0030 / 0040 / 0050 / 0060)
+- 新 `scroll_id_for_section(active_section)` 公开 fn,wheel handler 按当前 active section 路由 scroll delta
+- ShellApp::dev_panel_scroll 改用 `scroll_id_for_section(self.dev_panel.active_section)` 而不是固定 MODEL id
+
+每 layer 详细化:
+- L1 Foundation:Length 3 bar / Color rgba / tokens (10 swatch + 6 ruler + 5 radius chip) / Identity/HostState/Lifecycle
+- L2 Box Model:padding/border/radius/shadow demo box / Opacity 5 阶梯 / Clip status / AspectRatio 2 方向 demo / LinearGradient 2 / Material 3 / Elevation E0..E3 ladder / Hidden vs Collapsed
+- L3 Primitives:Canvas atoms / Shape 3 / Image type / v2+ Path SDF
+- L4 Layout:View atoms / Containers VStack/HStack/ZStack 3 demo / Constraints / AlignCross / Distribute 5 mode / Anchor / ScrollView/LazyVStack/LazyHStack / Grid 4×8 demo / Gesture / Stateful (Toggle + Picker live demo)
+- L5 Components:**新加** card/panel/badge/tooltip/tab_strip preset(modifier chain 组合)+ 真组件 migration roadmap [v1 待补]
+- L6 Cross-cutting:Lifecycle / Accessibility / Theme(Dark+Light+HighContrast 视觉对照,**新加** HighContrast palette)/ Animation Anim<T> + 4 easing curve 视觉 demo / i18n
+
+framework 新增 composable presets:
+- `card(child)` - bg_raised + border + radius + shadow E1
+- `panel(child)` - bg_panel + padding MD + radius MD
+- `badge(label, c)` - pill-shape Text + bg=color + radius PILL
+- `tooltip(label)` - small popup + border + shadow E2
+- `tab_strip(labels, selected, ActionId)` - horizontal tabs + click 派发
+
+theme::color::hc 新调色板(HighContrast):
+- 纯黑/纯白 BG/FG + 鲜黄 accent + 强对比 border = AX 友好
+
+间距加大:
+- scrollable_page vstack_gap 8pt → 12pt
+- 底部 padding 16 → 20pt
+
+shell 0.6.20 → 0.6.21;core 0.10.71 → 0.10.72.45 view 域 tests 维持 PASS.
 
 ### 0.6.20
 
@@ -332,7 +372,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.71**
+Current: **0.10.72**
+
+### 0.10.72
+
+framework 加 composable presets card/panel/badge/tooltip/tab_strip + theme::color::hc(HighContrast)调色板.每个 preset 都是 modifier chain 组合,L5 component migration 用作 building block.
 
 ### 0.10.71
 

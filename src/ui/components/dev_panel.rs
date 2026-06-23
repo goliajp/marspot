@@ -36,7 +36,7 @@ use crate::ui::core::{Canvas, Color, Length, ParentRect, Pt};
 // Both `build_dev_panel_canvas` and `hit_test` reference these,
 // so click hit-boxes line up with painted rects to the pixel.
 pub const TAB_BAR_H_PT: f64 = 36.0;
-pub const MENU_W_PT: f64 = 140.0;
+pub const MENU_W_PT: f64 = 170.0;
 pub const TAB_PAD_X_PT: f64 = 16.0;
 pub const TAB_TEXT_Y_PT: f64 = 11.0;
 pub const MENU_ROW_H_PT: f64 = 28.0;
@@ -44,6 +44,8 @@ pub const MENU_TEXT_PAD_X_PT: f64 = 14.0;
 pub const MENU_TOP_PAD_PT: f64 = 8.0;
 pub const CONTENT_X_PAD_PT: f64 = 20.0;
 pub const SECTION_GAP_PT: f64 = 24.0;
+/// Sub-item indent (rendered with "  " prefix in label).
+pub const MENU_SUB_INDENT_PT: f64 = 10.0;
 
 /// Hit-test result.  Click landed on a tab strip entry or a left-menu
 /// row, or nowhere actionable (content area / outside).
@@ -113,18 +115,30 @@ const TAB_LABELS: &[(&str, usize)] = &[
 /// the top because it's the entry-point explanation — read this
 /// first, the rest are individual primitive demos.
 pub const SECTION_MODEL: usize = 0;
+pub const SECTION_L1: usize = 10;
+pub const SECTION_L2: usize = 11;
+pub const SECTION_L3: usize = 12;
+pub const SECTION_L4: usize = 13;
+pub const SECTION_L5: usize = 14;
+pub const SECTION_L6: usize = 15;
 pub const SECTION_COLORS: usize = 1;
 pub const SECTION_UNITS: usize = 2;
 pub const SECTION_RECTS: usize = 3;
 pub const SECTION_LINES: usize = 4;
 pub const SECTION_TEXT: usize = 5;
 const SECTION_LABELS: &[(&str, usize)] = &[
-    ("Model", SECTION_MODEL),
-    ("Colors", SECTION_COLORS),
-    ("Units", SECTION_UNITS),
-    ("Rects", SECTION_RECTS),
-    ("Lines", SECTION_LINES),
-    ("Text", SECTION_TEXT),
+    ("Model",              SECTION_MODEL),
+    ("  L1 Foundation",    SECTION_L1),
+    ("  L2 Box Model",     SECTION_L2),
+    ("  L3 Primitives",    SECTION_L3),
+    ("  L4 Layout",        SECTION_L4),
+    ("  L5 Components",    SECTION_L5),
+    ("  L6 Cross-cutting", SECTION_L6),
+    ("Colors",             SECTION_COLORS),
+    ("Units",              SECTION_UNITS),
+    ("Rects",              SECTION_RECTS),
+    ("Lines",              SECTION_LINES),
+    ("Text",               SECTION_TEXT),
 ];
 
 /// Live state for the dev panel.  Owned by L1 (`ShellApp`); the
@@ -335,33 +349,38 @@ pub fn build_dev_panel_canvas(
     let content_x = menu_w + CONTENT_X_PAD_PT;
     let y = body_y + 16.0;
 
+    // Render any of the L1..L6 sections OR the overview Model section
+    // through the new View tree pipeline.  Old Colors/Units/Rects/
+    // Lines/Text sections still use legacy canvas builders.
+    let render_view_section = |canvas: &mut Canvas, title: &str, view: crate::ui::view::View| {
+        let y = draw_section_header(canvas, content_x, y, title);
+        let ctx = crate::ui::view::LayoutCtx {
+            scale,
+            cell_w_phys: chrome_cell_w as f64,
+            cell_h_phys: chrome_cell_h as f64,
+            ascent_phys: chrome_ascent as f64,
+        };
+        let avail_w_pt = (window_w_phys / scale) - content_x - 16.0;
+        let avail_h_pt = (window_h_phys / scale) - y;
+        let laid = crate::ui::view::layout_view(
+            &view, ctx,
+            (content_x * scale, y * scale),
+            crate::ui::view::Constraints::loose(
+                avail_w_pt * scale,
+                avail_h_pt * scale,
+            ),
+        );
+        crate::ui::view::paint_into(canvas, &laid, ctx);
+    };
+
     match state.active_section {
-        SECTION_MODEL => {
-            let y = draw_section_header(&mut canvas, content_x, y, "v2 Model");
-            // Drink our own champagne — the Model section is rendered
-            // through the new View tree + Modifier + Constraints layout
-            // + paint pipeline, so the surface you see IS the model
-            // demonstrating itself.  Width-bounded by (window - menu -
-            // padding); height grows by content.
-            let ctx = crate::ui::view::LayoutCtx {
-                scale,
-                cell_w_phys: chrome_cell_w as f64,
-                cell_h_phys: chrome_cell_h as f64,
-                ascent_phys: chrome_ascent as f64,
-            };
-            let avail_w_pt = (window_w_phys / scale) - content_x - 16.0;
-            let avail_h_pt = (window_h_phys / scale) - y;
-            let view = build_model_view();
-            let laid = crate::ui::view::layout_view(
-                &view, ctx,
-                (content_x * scale, y * scale),
-                crate::ui::view::Constraints::loose(
-                    avail_w_pt * scale,
-                    avail_h_pt * scale,
-                ),
-            );
-            crate::ui::view::paint_into(&mut canvas, &laid, ctx);
-        }
+        SECTION_MODEL => render_view_section(&mut canvas, "v3 Model — overview", build_model_view()),
+        SECTION_L1    => render_view_section(&mut canvas, "L1 — Foundation",     build_l1_view()),
+        SECTION_L2    => render_view_section(&mut canvas, "L2 — Box Model",      build_l2_view()),
+        SECTION_L3    => render_view_section(&mut canvas, "L3 — Primitives",     build_l3_view()),
+        SECTION_L4    => render_view_section(&mut canvas, "L4 — Layout",         build_l4_view()),
+        SECTION_L5    => render_view_section(&mut canvas, "L5 — Components",     build_l5_view()),
+        SECTION_L6    => render_view_section(&mut canvas, "L6 — Cross-cutting",  build_l6_view()),
         SECTION_COLORS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Colors");
             let _ = draw_colors_sample(&mut canvas, content_x, y, cell_w_pt);
@@ -995,6 +1014,713 @@ fn build_model_view() -> crate::ui::view::View {
 /// `build_model_view` embeds.
 pub const DEV_PANEL_MODEL_SCROLL_ID: crate::ui::view::ViewId =
     crate::ui::view::ViewId(0xDE7_0001);
+
+/// Map an `active_section` constant to the `ViewId` of its
+/// ScrollView so the wheel handler can deliver to the right page.
+pub fn scroll_id_for_section(active: usize) -> crate::ui::view::ViewId {
+    use crate::ui::view::ViewId;
+    match active {
+        SECTION_L1 => ViewId(0xDE7_0010),
+        SECTION_L2 => ViewId(0xDE7_0020),
+        SECTION_L3 => ViewId(0xDE7_0030),
+        SECTION_L4 => ViewId(0xDE7_0040),
+        SECTION_L5 => ViewId(0xDE7_0050),
+        SECTION_L6 => ViewId(0xDE7_0060),
+        _          => DEV_PANEL_MODEL_SCROLL_ID,
+    }
+}
+
+// ─── Module-level helpers for L1..L6 detailed pages ───────────
+//
+// Each `build_l#_view()` builds its layer's content using these
+// helpers + the public view module surface.  Pages are scrollable.
+
+mod h {
+    use crate::ui::view::{
+        Text, View, Edges, FrameSpec, ToggleState, PickerState,
+        toggle, picker, filled, hstack, vstack, with_host_state_mut,
+        Modifier, ViewId,
+    };
+    use crate::ui::theme::{color, space, radius, text};
+    use crate::ui::core::{Length, Color};
+
+    pub fn h2(s: &str) -> View {
+        Text::new(s).style(text::LARGE_HEADER).build()
+    }
+    pub fn h3(s: &str) -> View {
+        Text::new(s).style(text::HEADER).build()
+    }
+    pub fn body(s: &str) -> View {
+        Text::new(s).style(text::BODY).build()
+    }
+    pub fn mono(s: &str) -> View {
+        Text::new(s).style(text::CODE).build()
+    }
+    pub fn hint(s: &str) -> View {
+        Text::new(s).style(text::HINT).build()
+    }
+    pub fn ok(s: &str) -> View {
+        Text::new(s).color(color::SUCCESS).build()
+    }
+    pub fn todo_v1(s: &str) -> View {
+        Text::new(s).color(color::WARN).build()
+    }
+    pub fn todo_v2(s: &str) -> View {
+        Text::new(s).style(text::HINT).build()
+    }
+
+    /// `[✓] label` row.
+    pub fn done_row(label: &str) -> View {
+        hstack(vec![ok("[✓]"), body(label)]).hstack_gap(Length::Pt(6.0))
+    }
+    /// `[v1 待补] label` row.
+    pub fn v1_row(label: &str) -> View {
+        hstack(vec![todo_v1("[v1 待补]"), body(label)]).hstack_gap(Length::Pt(6.0))
+    }
+    /// `[v2+] label` row.
+    pub fn v2_row(label: &str) -> View {
+        hstack(vec![todo_v2("[v2+]"), body(label)]).hstack_gap(Length::Pt(6.0))
+    }
+    /// Sub-explanation under a status row.
+    pub fn sub(s: &str) -> View {
+        hint(&format!("    {s}"))
+    }
+
+    pub fn swatch(c: Color) -> View {
+        filled(c).corner_radius(radius::SM).frame(FrameSpec {
+            width: Some(Length::Pt(14.0)),
+            height: Some(Length::Pt(14.0)),
+            ..Default::default()
+        })
+    }
+
+    pub fn seed_toggle(id: u32, on: bool) {
+        with_host_state_mut(|s| {
+            if s.get::<ToggleState>(ViewId(id)).is_none() {
+                s.insert(ViewId(id), ToggleState { on });
+            }
+        });
+    }
+    pub fn seed_picker(id: u32, sel: usize) {
+        with_host_state_mut(|s| {
+            if s.get::<PickerState>(ViewId(id)).is_none() {
+                s.insert(ViewId(id), PickerState { selected: sel });
+            }
+        });
+    }
+
+    pub fn scrollable_page(scroll_id: u32, body: Vec<View>) -> View {
+        use crate::ui::view::scroll_view;
+        // 12pt vstack gap = roomy spacing per user request
+        // ("items 垂直间距稍微加大").
+        let content = vstack(body)
+            .vstack_gap(Length::Pt(12.0))
+            .frame(FrameSpec { width: Some(Length::Pct(1.0)), ..Default::default() })
+            .padding(Edges::only(
+                Length::Pt(0.0),
+                Length::Pt(16.0),
+                Length::Pt(20.0),
+                Length::Pt(0.0),
+            ));
+        scroll_view(ViewId(scroll_id), content)
+    }
+}
+
+// ─── L1 Foundation ────────────────────────────────────────────
+
+fn build_l1_view() -> crate::ui::view::View {
+    use crate::ui::view::{Text, FrameSpec, vstack, hstack, filled};
+    use crate::ui::theme::{color, space, radius, text};
+    use crate::ui::core::Length;
+    let len_bar = |w: f64, c, lab: &'static str| {
+        hstack(vec![
+            filled(c).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(w)), height: Some(Length::Pt(10.0)),
+                ..Default::default()
+            }),
+            h::hint(lab),
+        ]).hstack_gap(Length::Pt(8.0)).align_cross_center()
+    };
+    let space_ruler = |w, lab: &'static str| {
+        hstack(vec![
+            filled(color::ACCENT_DIM).frame(FrameSpec {
+                width: Some(w), height: Some(Length::Pt(6.0)),
+                ..Default::default()
+            }),
+            h::hint(lab),
+        ]).hstack_gap(Length::Pt(8.0)).align_cross_center()
+    };
+    let radius_chip = |r, lab: &'static str| {
+        vstack(vec![
+            filled(color::ACCENT).corner_radius(r).frame(FrameSpec {
+                width: Some(Length::Pt(28.0)), height: Some(Length::Pt(28.0)),
+                ..Default::default()
+            }),
+            h::hint(lab),
+        ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
+
+    h::scrollable_page(0xDE7_0010, vec![
+        h::h2("Length"),
+        h::done_row("Pt(N) | Pct(F) | Ch(N)"),
+        h::sub("Pt(1) ≡ CSS 1px (scale-independent;乘 scale 得 phys)"),
+        h::sub("Pct(F) = F × 父轴.scale-independent."),
+        h::sub("Ch(N) = N × chrome cell_w(terminal 域专用)"),
+        h::hint("    实际渲染对比 ↓"),
+        len_bar(40.0,  color::ACCENT,  "Pt(40)"),
+        len_bar(80.0,  color::SUCCESS, "Pt(80)"),
+        len_bar(120.0, color::WARN,    "Pt(120)"),
+
+        h::h2("Color"),
+        h::done_row("Color::rgba(r, g, b, a) ≡ CSS rgba()"),
+        h::sub("u8 通道 + f64 alpha;Lerp impl 已 land 用于 Anim<Color>"),
+
+        h::h2("Tokens"),
+        h::done_row("Semantic palette + space + radius + elev + text style"),
+        hstack(vec![
+            h::mono("color::"),
+            h::swatch(color::FG),
+            h::swatch(color::FG_MUTED),
+            h::swatch(color::BG),
+            h::swatch(color::BG_RAISED),
+            h::swatch(color::BORDER),
+            h::swatch(color::ACCENT),
+            h::swatch(color::ACCENT_DIM),
+            h::swatch(color::SUCCESS),
+            h::swatch(color::WARN),
+            h::swatch(color::DANGER),
+        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
+        h::hint("    FG/FG_MUTED/BG/BG_RAISED/BORDER/ACCENT/ACCENT_DIM/SUCCESS/WARN/DANGER"),
+        hstack(vec![
+            h::mono("space::"),
+            space_ruler(space::XS,  "XS(4)"),
+            space_ruler(space::SM,  "SM(8)"),
+            space_ruler(space::MD,  "MD(12)"),
+            space_ruler(space::LG,  "LG(16)"),
+            space_ruler(space::XL,  "XL(24)"),
+            space_ruler(space::XXL, "XXL(32)"),
+        ]).hstack_gap(Length::Pt(10.0)).align_cross_center(),
+        hstack(vec![
+            h::mono("radius::"),
+            radius_chip(radius::NONE, "NONE"),
+            radius_chip(radius::SM,   "SM(3)"),
+            radius_chip(radius::MD,   "MD(6)"),
+            radius_chip(radius::LG,   "LG(10)"),
+            radius_chip(radius::PILL, "PILL"),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+
+        h::h2("Identity / HostState / Lifecycle"),
+        h::done_row("HashMap<(ViewId, TypeId), Box<dyn Any>>"),
+        h::sub("一个 view id 可挂多种状态类型(Scroll/Toggle/Picker/TextField/...)"),
+        h::sub("HOST_STATE thread_local;with_host_state(_mut) 闭包入口"),
+        h::done_row("reconcile(LaidOut) — on_disappear 实施"),
+        h::sub("遍历 tree 收集 id;retain HOST_STATE 中存在的;drop 失踪"),
+        h::v2_row("on_appear hook"),
+        h::sub("当 stateful view 类型加 init hook 时绑(eg TextField 加载光标位)"),
+    ])
+}
+
+// ─── L2 Box Model ─────────────────────────────────────────────
+
+fn build_l2_view() -> crate::ui::view::View {
+    use crate::ui::view::{
+        Text, Edges, FrameSpec, AspectMode,
+        LinearGradient, GradientDir, MaterialStyle,
+        vstack, hstack, filled,
+    };
+    use crate::ui::theme::{color, space, radius, text, elev};
+    use crate::ui::core::Length;
+    let box_demo = Text::new("content").color(color::FG).build()
+        .padding(Edges::all(space::MD))
+        .background(color::BG_PANEL)
+        .border(Length::Pt(1.0), color::BORDER)
+        .corner_radius(radius::MD)
+        .shadow(elev::E2);
+    let opacity_chip = |o: f64, lab: &'static str| {
+        vstack(vec![
+            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(32.0)), height: Some(Length::Pt(32.0)),
+                ..Default::default()
+            }).opacity(o),
+            h::hint(lab),
+        ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
+    let elev_card = |s, lab: &'static str| {
+        vstack(vec![
+            Text::new("E").style(text::BODY).build()
+                .padding(Edges::all(Length::Pt(8.0)))
+                .background(color::BG_RAISED)
+                .corner_radius(radius::MD)
+                .shadow(s)
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(40.0)),
+                    height: Some(Length::Pt(40.0)),
+                    ..Default::default()
+                }),
+            h::hint(lab),
+        ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
+
+    h::scrollable_page(0xDE7_0020, vec![
+        h::h2("Box decoration"),
+        h::done_row("padding / border / corner_radius / shadow"),
+        h::sub("border-box 永远;inside-stroke border;NO margin(父级 padding/gap)"),
+        box_demo,
+        h::hint("    ↑ padding MD + border 1pt + radius MD + shadow E2"),
+
+        h::h2("Opacity"),
+        h::done_row(".opacity(0.0..=1.0) — alpha 累乘下子树"),
+        hstack(vec![
+            opacity_chip(1.0,  "1.0"),
+            opacity_chip(0.75, "0.75"),
+            opacity_chip(0.5,  "0.5"),
+            opacity_chip(0.25, "0.25"),
+            opacity_chip(0.1,  "0.1"),
+        ]).hstack_gap(Length::Pt(14.0)).align_cross_center(),
+
+        h::h2("Clip"),
+        h::done_row(".clip(ClipShape::Rect | RoundedRect(r))"),
+        h::sub("v1 = viewport culling(rect 完全外 skip);真 Metal scissor = v2+"),
+        h::v2_row("真 pixel-clip(round rect mask / 任意 path)"),
+
+        h::h2("Aspect ratio"),
+        h::done_row(".aspect_ratio(w/h, Fit | Fill)"),
+        hstack(vec![
+            filled(color::ACCENT_DIM).corner_radius(radius::SM)
+                .aspect_ratio(2.0, AspectMode::Fit)
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(80.0)),
+                    height: Some(Length::Pt(60.0)),
+                    ..Default::default()
+                }),
+            h::hint("80×60 + aspect 2:1 Fit → 80×40 实际"),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+        hstack(vec![
+            filled(color::SUCCESS).corner_radius(radius::SM)
+                .aspect_ratio(0.5, AspectMode::Fit)
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(80.0)),
+                    height: Some(Length::Pt(60.0)),
+                    ..Default::default()
+                }),
+            h::hint("80×60 + aspect 1:2 Fit → 30×60 实际"),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+
+        h::h2("Gradient background"),
+        h::done_row(".background_gradient(LinearGradient { stops, direction })"),
+        h::sub("v1 = 16-band approx;真 Gradient primitive = v2+ Metal pipeline"),
+        hstack(vec![
+            filled(color::BG_PANEL).corner_radius(radius::MD)
+                .background_gradient(LinearGradient {
+                    stops: vec![(0.0, color::ACCENT), (1.0, color::SUCCESS)],
+                    direction: GradientDir::TopToBottom,
+                })
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(70.0)),
+                    height: Some(Length::Pt(48.0)),
+                    ..Default::default()
+                }),
+            filled(color::BG_PANEL).corner_radius(radius::MD)
+                .background_gradient(LinearGradient {
+                    stops: vec![
+                        (0.0, color::DANGER),
+                        (0.5, color::WARN),
+                        (1.0, color::SUCCESS),
+                    ],
+                    direction: GradientDir::LeftToRight,
+                })
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(140.0)),
+                    height: Some(Length::Pt(48.0)),
+                    ..Default::default()
+                }),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+
+        h::h2("Material backdrop"),
+        h::done_row(".background_material(Regular | Thick | Thin)"),
+        h::sub("v1 = 半透明 BG_PANEL fallback;真 NSVisualEffectView vibrancy = v2+"),
+        hstack(vec![
+            Text::new("Regular").style(text::CAPTION).build()
+                .padding(Edges::all(space::SM))
+                .background_material(MaterialStyle::Regular)
+                .corner_radius(radius::MD),
+            Text::new("Thick").style(text::CAPTION).build()
+                .padding(Edges::all(space::SM))
+                .background_material(MaterialStyle::Thick)
+                .corner_radius(radius::MD),
+            Text::new("Thin").style(text::CAPTION).build()
+                .padding(Edges::all(space::SM))
+                .background_material(MaterialStyle::Thin)
+                .corner_radius(radius::MD),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+
+        h::h2("Elevation ladder"),
+        h::done_row("token::elev::{E0, E1, E2, E3} — Material-style shadow"),
+        hstack(vec![
+            elev_card(elev::E0, "E0"),
+            elev_card(elev::E1, "E1"),
+            elev_card(elev::E2, "E2"),
+            elev_card(elev::E3, "E3"),
+        ]).hstack_gap(Length::Pt(20.0)).align_cross_center(),
+
+        h::h2("Hidden / Collapsed"),
+        h::done_row(".hidden(true) — 不画但占空间;.collapsed(true) — zero-size + 不画"),
+        h::sub("CSS 类比:visibility: hidden;vs display: none"),
+
+        h::v2_row("mask / transform(scale / translate)/ blend mode"),
+        h::sub("transform 用 Metal vertex pipeline 改;mask 走 stencil"),
+    ])
+}
+
+// ─── L3 Primitives ────────────────────────────────────────────
+
+fn build_l3_view() -> crate::ui::view::View {
+    use crate::ui::view::{
+        FrameSpec,
+        vstack, hstack,
+        shape_circle, shape_capsule, shape_rounded_rect,
+    };
+    use crate::ui::theme::{color, radius};
+    use crate::ui::core::Length;
+
+    h::scrollable_page(0xDE7_0030, vec![
+        h::h2("Canvas atoms"),
+        h::done_row("rect / line / text"),
+        h::sub("submission order = z order;builder chain .fill/.border/.radius/.shadow"),
+        h::sub("整个 dev panel 都是 Canvas primitives — 你看到的就是 builder 链出来的"),
+
+        h::h2("Shape views"),
+        h::done_row("Circle / Capsule / RoundedRect"),
+        h::sub("v1 走 rounded-rect 近似;真 SDF Path = v2+ Metal pipeline"),
+        hstack(vec![
+            vstack(vec![
+                shape_circle(color::DANGER).frame(FrameSpec {
+                    width: Some(Length::Pt(36.0)), height: Some(Length::Pt(36.0)),
+                    ..Default::default()
+                }),
+                h::hint("Circle"),
+            ]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
+            vstack(vec![
+                shape_capsule(color::SUCCESS).frame(FrameSpec {
+                    width: Some(Length::Pt(72.0)), height: Some(Length::Pt(24.0)),
+                    ..Default::default()
+                }),
+                h::hint("Capsule"),
+            ]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
+            vstack(vec![
+                shape_rounded_rect(Length::Pt(8.0), color::ACCENT).frame(FrameSpec {
+                    width: Some(Length::Pt(56.0)), height: Some(Length::Pt(36.0)),
+                    ..Default::default()
+                }),
+                h::hint("RoundedRect"),
+            ]).vstack_gap(Length::Pt(4.0)).align_cross_center(),
+        ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
+
+        h::h2("Image view"),
+        h::done_row("Image { source, mode, tint } API"),
+        h::sub("4 sources: Glyph / Raw(Arc<Vec<u8>>) / IOSurface / Named"),
+        h::sub("v1 paint = tinted rect placeholder;真 Image primitive = v2+"),
+
+        h::v2_row("Path SDF / 任意 vector shape / freeform stroke"),
+        h::sub("需要 Metal pipeline 加 path mesh 或 SDF rendering"),
+    ])
+}
+
+// ─── L4 Layout ────────────────────────────────────────────────
+
+fn build_l4_view() -> crate::ui::view::View {
+    use crate::ui::view::{
+        FrameSpec, Distribute,
+        vstack, hstack, zstack, filled, spacer, grid, toggle, picker,
+        ViewId,
+    };
+    use crate::ui::theme::{color, radius};
+    use crate::ui::core::Length;
+
+    let mini = |c| filled(c).corner_radius(radius::SM).frame(FrameSpec {
+        width:  Some(Length::Pt(16.0)),
+        height: Some(Length::Pt(16.0)),
+        ..Default::default()
+    });
+    let vs_demo = vstack(vec![mini(color::DANGER), mini(color::SUCCESS), mini(color::ACCENT)])
+        .vstack_gap(Length::Pt(4.0));
+    let hs_demo = hstack(vec![mini(color::DANGER), mini(color::SUCCESS), mini(color::ACCENT)])
+        .hstack_gap(Length::Pt(4.0));
+    let zs_demo = zstack(vec![
+        mini(color::DANGER).frame(FrameSpec {
+            width: Some(Length::Pt(28.0)), height: Some(Length::Pt(28.0)),
+            ..Default::default()
+        }),
+        mini(color::SUCCESS).offset(Length::Pt(8.0), Length::Pt(8.0)),
+        mini(color::ACCENT).offset(Length::Pt(16.0), Length::Pt(16.0)),
+    ]);
+    let dist_demo = |d, lab: &'static str| {
+        let small = || filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+            width: Some(Length::Pt(12.0)), height: Some(Length::Pt(12.0)),
+            ..Default::default()
+        });
+        vstack(vec![
+            hstack(vec![small(), small(), small()])
+                .distribute(d)
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(110.0)), height: Some(Length::Pt(16.0)),
+                    ..Default::default()
+                })
+                .background(color::BG_PANEL)
+                .corner_radius(radius::SM),
+            h::hint(lab),
+        ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
+
+    h::seed_toggle(0xDE7_1002, true);
+    h::seed_picker(0xDE7_1003, 1);
+
+    h::scrollable_page(0xDE7_0040, vec![
+        h::h2("View enum + Modifier chain"),
+        h::done_row("Atoms: Text / Spacer / Filled / Hairline / Image / Shape"),
+        h::done_row("Containers: VStack / HStack / ZStack"),
+        hstack(vec![
+            vstack(vec![h::hint("VStack"), vs_demo]).vstack_gap(Length::Pt(6.0)).align_cross_center(),
+            spacer(),
+            vstack(vec![h::hint("HStack"), hs_demo]).vstack_gap(Length::Pt(6.0)).align_cross_center(),
+            spacer(),
+            vstack(vec![h::hint("ZStack"), zs_demo]).vstack_gap(Length::Pt(6.0)).align_cross_center(),
+            spacer(),
+        ]).align_cross_start(),
+
+        h::h2("Constraints two-pass"),
+        h::done_row("parent → constraints → child returns size(Flutter 同形)"),
+        h::sub("Pass A 量 intrinsic;Pass B 算 spacer flex;Pass C 摆位 + tight constraints"),
+
+        h::h2("AlignCross / Distribute / Anchor"),
+        h::done_row("AlignCross: Start / Center / End / Stretch"),
+        h::done_row("Distribute: Start / Center / End / Spaced / Between"),
+        hstack(vec![
+            dist_demo(Distribute::Start,   "Start"),
+            dist_demo(Distribute::Center,  "Center"),
+            dist_demo(Distribute::End,     "End"),
+            dist_demo(Distribute::Spaced,  "Spaced"),
+            dist_demo(Distribute::Between, "Between"),
+        ]).hstack_gap(Length::Pt(10.0)).align_cross_start(),
+        h::done_row("Anchor: 9-point(TopLeading … BottomTrailing)"),
+
+        h::h2("Lazy containers + Grid"),
+        h::done_row("ScrollView + LazyVStack + LazyHStack"),
+        h::sub("uniform-height/width 假设;variable-height = HostState cache,留 v2+"),
+        h::done_row("Grid(uniform-cell m×n)"),
+        h::sub("v1 fixed cell_w × cell_h;variable tracks / span = v2+"),
+        h::hint("    Grid 4 cols × 8 cells demo:"),
+        grid(
+            (0..8).map(|i| {
+                let c = match i % 4 {
+                    0 => color::ACCENT, 1 => color::SUCCESS,
+                    2 => color::WARN,   _ => color::DANGER,
+                };
+                filled(c).corner_radius(radius::SM)
+            }).collect(),
+            4,
+            Length::Pt(28.0),
+            Length::Pt(28.0),
+            Length::Pt(6.0),
+        ),
+
+        h::h2("Gesture model"),
+        h::done_row("InputEvent enum + hit_test_*"),
+        h::sub("Click / DoubleClick / RightClick / DragBegin/Move/End / Hover / Scroll"),
+        h::done_row("DragInProgress 状态机 + delta()"),
+        h::sub("host 持 Option<DragInProgress>;Begin set / Move update / End drop"),
+        h::done_row("ActionId / ScrollWheelId / DragId — elm-y reducer 派发"),
+
+        h::h2("Stateful views"),
+        h::done_row("Toggle / Picker(纯渲染)"),
+        h::hint("    Toggle off / on(seeded HostState):"),
+        hstack(vec![
+            toggle(ViewId(0xDE7_1001)),
+            toggle(ViewId(0xDE7_1002)),
+        ]).hstack_gap(Length::Pt(20.0)).align_cross_center(),
+        h::hint("    Picker(预选 \"Light\"):"),
+        picker(ViewId(0xDE7_1003), vec!["Dark", "Light", "Auto"]),
+        h::v2_row("TextField(NSTextInputClient + IME)"),
+        h::sub("HostState API 已就绪;真接 AppKit IME 是单独大工程"),
+
+        h::v2_row("Keyboard shortcut + Focus chain"),
+    ])
+}
+
+// ─── L5 Components(presets + 真组件)──────────────────────────
+
+fn build_l5_view() -> crate::ui::view::View {
+    use crate::ui::view::{
+        Text, Edges, FrameSpec,
+        vstack, hstack, filled, ActionId,
+    };
+    use crate::ui::theme::{color, space, radius, text, elev};
+    use crate::ui::core::Length;
+
+    h::scrollable_page(0xDE7_0050, vec![
+        h::h2("Composable presets — 已落"),
+        h::sub("Card / Panel / Badge / Tooltip / TabStrip — 由 modifier chain 组合"),
+
+        h::h3("Card"),
+        h::sub("background + border + corner_radius + shadow 组合"),
+        crate::ui::view::card(
+            vstack(vec![
+                h::body("Card title"),
+                h::hint("Card body content — bg_raised + border + radius + shadow E1"),
+            ]).vstack_gap(Length::Pt(4.0)),
+        ),
+
+        h::h3("Panel"),
+        h::sub("bg_panel + padding(MD)+ corner_radius MD"),
+        crate::ui::view::panel(
+            vstack(vec![
+                h::body("Panel"),
+                h::hint("背景灰一阶,不带 shadow.适合 sidebar / form section."),
+            ]).vstack_gap(Length::Pt(4.0)),
+        ),
+
+        h::h3("Badge"),
+        h::sub("pill-shape;color::* 区分语义状态"),
+        hstack(vec![
+            crate::ui::view::badge("New", color::ACCENT),
+            crate::ui::view::badge("Done", color::SUCCESS),
+            crate::ui::view::badge("Warn", color::WARN),
+            crate::ui::view::badge("Fail", color::DANGER),
+            crate::ui::view::badge("v2+", color::FG_MUTED),
+        ]).hstack_gap(Length::Pt(10.0)).align_cross_center(),
+
+        h::h3("Tooltip"),
+        h::sub("v1 渲染样;真 hover-trigger 路径 = host 接 Hover event"),
+        crate::ui::view::tooltip("This is a tooltip ↓"),
+
+        h::h3("TabStrip"),
+        h::sub("tab_strip(labels, selected, ActionId) — click 派发 reducer"),
+        crate::ui::view::tab_strip(
+            vec!["General", "Appearance", "Privacy", "Advanced"],
+            1,
+            ActionId(0xDE7_2000),
+        ),
+
+        h::h2("真组件迁移(P3i)"),
+        h::v1_row("ContextMenu / Sidebar / Table / LayoutModal / SearchOverlay / ProcessMonitor"),
+        h::sub("现存 component 走老 canvas builder;迁到 View 树各 1-2 天"),
+        h::v1_row("DevPanel 主框架(tab strip + menu + content area)"),
+        h::sub("现 dev panel 主框架仍走老路径(只 Model section 走新 framework)"),
+        h::v1_row("ViewPainter 退役(P3j)"),
+        h::sub("全部 component 迁完后顺手做;预计 -400 LOC 净删"),
+    ])
+}
+
+// ─── L6 Cross-cutting ─────────────────────────────────────────
+
+fn build_l6_view() -> crate::ui::view::View {
+    use crate::ui::view::{Text, FrameSpec, vstack, hstack, filled, AnimCurve, Anim};
+    use crate::ui::theme::{color, radius, text, ThemeId};
+    use crate::ui::core::Length;
+
+    let easing_demo = |curve: AnimCurve, lab: &'static str| {
+        // Sample the curve at t=0.5 and use that as a fill percentage
+        // — visual cue of the easing shape.
+        let mid: f64 = curve.ease(0.5);
+        vstack(vec![
+            filled(color::BG_PANEL).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(60.0)),
+                height: Some(Length::Pt(8.0)),
+                ..Default::default()
+            }),
+            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt((60.0 * mid).max(2.0))),
+                height: Some(Length::Pt(8.0)),
+                ..Default::default()
+            }),
+            h::hint(lab),
+            h::hint(&format!("    mid t=0.5 → {:.2}", mid)),
+        ]).vstack_gap(Length::Pt(2.0)).align_cross_start()
+    };
+
+    h::scrollable_page(0xDE7_0060, vec![
+        h::h2("Lifecycle"),
+        h::done_row("reconcile(&LaidOut) — on_disappear"),
+        h::sub("每帧 build+layout 后,framework 遍历 tree 收 id;drop HostState 中失踪的"),
+        h::v2_row("on_appear hook(view 类型 init 时绑)"),
+
+        h::h2("Accessibility"),
+        h::done_row(".accessibility_label(s) / .accessibility_role(AxRole)"),
+        h::sub("bake 进 Decoration.ax_label / ax_role"),
+        h::sub("AxRole: Button / Heading / ListItem / TextField / Image / StaticText /"),
+        h::sub("        Group / Link / Checkbox / Toggle"),
+        h::v2_row("真接 NSAccessibility(VoiceOver / 自动 AX tree)"),
+
+        h::h2("Theme"),
+        h::done_row("ThemeId { Dark, Light, HighContrast }"),
+        h::sub("theme::current() / theme::set_current(id) — AtomicU8 全局"),
+        h::done_row("Dark + Light token data 已 land(themed::color::* 闭包查 active)"),
+        hstack(vec![
+            h::hint("    ThemeId::Dark = "),
+            filled(color::BG).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            filled(color::FG).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
+        hstack(vec![
+            h::hint("    ThemeId::Light = "),
+            filled(crate::ui::theme::color::light::BG).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            filled(crate::ui::theme::color::light::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            filled(crate::ui::theme::color::light::FG).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
+        h::done_row("HighContrast palette(新增,跟 Light 同结构)"),
+        hstack(vec![
+            h::hint("    ThemeId::HighContrast = "),
+            filled(crate::ui::theme::color::hc::BG).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            filled(crate::ui::theme::color::hc::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            filled(crate::ui::theme::color::hc::FG).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(48.0)), height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+        ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
+        h::v2_row("真 theme swap redraw hook(改 theme 自动 invalidate)"),
+
+        h::h2("Animation"),
+        h::done_row("Anim<T> + Lerp + AnimCurve 4 curve"),
+        hstack(vec![
+            easing_demo(AnimCurve::Linear,    "Linear"),
+            easing_demo(AnimCurve::EaseIn,    "EaseIn"),
+            easing_demo(AnimCurve::EaseOut,   "EaseOut"),
+            easing_demo(AnimCurve::EaseInOut, "EaseInOut"),
+        ]).hstack_gap(Length::Pt(14.0)).align_cross_start(),
+        h::v2_row("真 frame 调度(active anim 触发 redraw_in 16ms,无 anim 时 0 redraw)"),
+        h::sub("跟 idle CPU=0 约束兼容;关键是 App 层接 scheduling hook"),
+
+        h::h2("Internationalization"),
+        h::done_row("text_width_cells 走 char_width(CJK = 2 cells)"),
+        h::sub("Layout / paint / truncate 共用一张 East Asian Wide 表"),
+        h::v2_row("RTL(Leading/Trailing 命名已留接口;实际 bidi 走 Unicode UAX#9)"),
+        h::v2_row("Locale-aware 数字 / 日期 / pluralisation"),
+    ])
+}
 
 /// Legacy `draw_model_sample` — kept around as a fallback in case
 /// the View-tree path needs to be bypassed.  Not on the default

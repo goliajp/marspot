@@ -36,4 +36,4 @@ pub use sidebar::{Sidebar, SidebarRow, SidebarStyle};
 pub use table::{Table, TableColumn, TableRow, TableStyle, ColumnWidth, RowKind, SortDir};
 pub use layout_modal::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
 pub use context_menu::{ContextMenu, ContextMenuHit, MenuItem};
-pub use dev_panel::{DevPanelState, DevPanelHit, build_dev_panel_canvas, hit_test, DEV_PANEL_MODEL_SCROLL_ID};
+pub use dev_panel::{DevPanelState, DevPanelHit, build_dev_panel_canvas, hit_test, DEV_PANEL_MODEL_SCROLL_ID, scroll_id_for_section};

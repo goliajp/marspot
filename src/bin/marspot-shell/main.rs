@@ -2302,13 +2302,15 @@ impl MarspotApp for ShellApp {
 
     fn dev_panel_scroll(&mut self, _ctx: &MarspotAppCtx, delta_y_pt: f64) {
         // The wheel delta arrives in logical points; ScrollView state
-        // is in phys.  Multiply by the panel's current scale.
+        // is in phys.  Multiply by the panel's current scale.  Apply
+        // to the currently-active section's ScrollView id so each
+        // L# page scrolls independently.
         let scale = self.dev_panel.scale.max(0.1);
         let delta_y_phys = delta_y_pt * scale * 3.0; // *3 = light "speed" multiplier
-        let _ = marspot::ui::view::apply_scroll_delta(
-            marspot::ui::components::DEV_PANEL_MODEL_SCROLL_ID,
-            delta_y_phys,
+        let target_id = marspot::ui::components::scroll_id_for_section(
+            self.dev_panel.active_section,
         );
+        let _ = marspot::ui::view::apply_scroll_delta(target_id, delta_y_phys);
     }
 
     fn redraw(&mut self, _ctx: &MarspotAppCtx) {
