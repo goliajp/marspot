@@ -250,6 +250,38 @@ pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -
         View::ScrollView { child, id } => layout_scroll(child, *id, ctx, origin, c, view),
         View::LazyVStack { items, gap, item_height, id } =>
             layout_lazy_vstack(items, *gap, *item_height, *id, ctx, origin, c, view),
+        View::LazyHStack { items, gap, item_width, id } =>
+            layout_lazy_hstack(items, *gap, *item_width, *id, ctx, origin, c, view),
+        View::Grid { items, cols, gap, cell_w, cell_h } =>
+            layout_grid(items, *cols, *gap, *cell_w, *cell_h, ctx, origin, c, view),
+        View::Toggle { id: _ } => {
+            // Fixed visual size for the switch: 36 × 18 logical pt.
+            let w_pt = 36.0 * ctx.scale;
+            let h_pt = 18.0 * ctx.scale;
+            let size = c.clamp(w_pt, h_pt);
+            LaidOut {
+                view: view.clone(),
+                rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
+                deco: Decoration::default(),
+                children: Vec::new(),
+            }
+        }
+        View::Picker { options, .. } => {
+            // Width = sum option widths × cell + padding; height = 24 pt
+            let widest = options.iter()
+                .map(|s| text_width_cells(s))
+                .max().unwrap_or(0) as f64;
+            let per_seg_w = (widest + 2.0) * ctx.cell_w_phys + 16.0;
+            let total_w = per_seg_w * options.len().max(1) as f64;
+            let h_pt = 24.0 * ctx.scale;
+            let size = c.clamp(total_w, h_pt);
+            LaidOut {
+                view: view.clone(),
+                rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
+                deco: Decoration::default(),
+                children: Vec::new(),
+            }
+        }
         View::Image(_) => {
             // Hug constraints or full size if unbounded.  Caller is
             // expected to wrap in `.frame(width:, height:)`.
@@ -324,6 +356,108 @@ fn layout_lazy_vstack(
     LaidOut {
         view: self_view.clone(),
         rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
+        deco: Decoration::default(),
+        children: laid_children,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_lazy_hstack(
+    items: &[View],
+    gap: Length,
+    item_width: Length,
+    id: super::types::ViewId,
+    ctx: LayoutCtx,
+    origin: (f64, f64),
+    c: Constraints,
+    self_view: &View,
+) -> LaidOut {
+    let gap_phys = gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let item_w_phys = item_width.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let viewport_h = if c.max_h.is_finite() { c.max_h } else { 32.0 };
+    let viewport_w = if c.max_w.is_finite() { c.max_w } else { 400.0 };
+
+    let mut state = super::scroll::scroll_state(id);
+    state.content_h = super::lazy::total_height(items.len(), item_w_phys, gap_phys);
+    state.viewport_h = viewport_w;
+    state.clamp_offset();
+    super::scroll::set_scroll_state(id, state);
+
+    let (first, last) = super::lazy::visible_range(
+        items.len(), item_w_phys, gap_phys, state.offset_y, viewport_w,
+    );
+
+    let mut laid_children = Vec::with_capacity(last.saturating_sub(first));
+    for i in first..last {
+        let item_x_local = super::lazy::item_y(i, item_w_phys, gap_phys);
+        let item_origin = (origin.0 + item_x_local - state.offset_y, origin.1);
+        let item_c = Constraints {
+            min_w: item_w_phys, max_w: item_w_phys,
+            min_h: 0.0, max_h: viewport_h,
+        };
+        let laid = layout(&items[i], ctx, item_origin, item_c);
+        laid_children.push(laid);
+    }
+
+    LaidOut {
+        view: self_view.clone(),
+        rect: Rect { x: origin.0, y: origin.1, w: viewport_w, h: viewport_h },
+        deco: Decoration::default(),
+        children: laid_children,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_grid(
+    items: &[View],
+    cols: usize,
+    gap: Length,
+    cell_w: Length,
+    cell_h: Length,
+    ctx: LayoutCtx,
+    origin: (f64, f64),
+    c: Constraints,
+    self_view: &View,
+) -> LaidOut {
+    if cols == 0 {
+        return LaidOut {
+            view: self_view.clone(),
+            rect: Rect { x: origin.0, y: origin.1, w: 0.0, h: 0.0 },
+            deco: Decoration::default(),
+            children: Vec::new(),
+        };
+    }
+    let gap_phys = gap.resolve_for_axis_with_cell(0.0, ctx.scale, ctx.cell_w_phys);
+    let cell_w_phys = cell_w.resolve_for_axis_with_cell(c.max_w, ctx.scale, ctx.cell_w_phys);
+    let cell_h_phys = cell_h.resolve_for_axis_with_cell(c.max_h, ctx.scale, ctx.cell_w_phys);
+
+    let mut laid_children = Vec::with_capacity(items.len());
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for item in items.iter() {
+        let cx = origin.0 + col as f64 * (cell_w_phys + gap_phys);
+        let cy = origin.1 + row as f64 * (cell_h_phys + gap_phys);
+        let item_c = Constraints {
+            min_w: cell_w_phys, max_w: cell_w_phys,
+            min_h: cell_h_phys, max_h: cell_h_phys,
+        };
+        let laid = layout(item, ctx, (cx, cy), item_c);
+        laid_children.push(laid);
+        col += 1;
+        if col >= cols {
+            col = 0;
+            row += 1;
+        }
+    }
+    let rows = if items.is_empty() { 0 } else {
+        ((items.len() + cols - 1) / cols).max(1)
+    };
+    let total_w = cols as f64 * cell_w_phys + cols.saturating_sub(1) as f64 * gap_phys;
+    let total_h = rows as f64 * cell_h_phys + rows.saturating_sub(1) as f64 * gap_phys;
+
+    LaidOut {
+        view: self_view.clone(),
+        rect: Rect { x: origin.0, y: origin.1, w: total_w, h: total_h },
         deco: Decoration::default(),
         children: laid_children,
     }

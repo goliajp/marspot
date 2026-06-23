@@ -17,7 +17,34 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.19**
+Current: **0.6.20**
+
+### 0.6.20
+
+把 v3 doc 剩下能纯 Rust land 的都落地 + DevPanel Model section 大幅扩 visual sample(用户报 "sample 内容很少").
+
+framework 新增:
+- `View::LazyHStack { items, gap, item_width, id }` + `lazy_hstack()` builder
+- `View::Grid { items, cols, gap, cell_w, cell_h }` + `grid()` builder — uniform-cell grid 简版,variable tracks 留 v2+
+- `View::Toggle { id }` + `toggle(id)` builder + `ToggleState { on: bool }`
+- `View::Picker { id, options }` + `picker(id, options)` builder + `PickerState { selected }`
+- 视觉:Toggle = capsule + circle knob(state-driven 位置),Picker = 横向 segment + 选中高亮 + label
+- `InputEvent` enum:Click/DoubleClick/RightClick/DragBegin/Move/End/Hover/Scroll
+- `DragInProgress { drag_id, started_at, current, modifiers }` + `delta()`
+- `Anim<T> { from, to, elapsed, duration, curve }` + `Lerp` trait(`Color` / `f64` 已 impl)+ `AnimCurve::{Linear, EaseIn, EaseOut, EaseInOut}` + `.ease(t)`
+- `Point` / `Modifiers` 类型
+- Light theme token data — `color::light::*` 调色板 + `themed::color::*` 闭包查 active 主题
+
+DevPanel Model section 视觉扩张:
+- L1: Length 三 bar 渲染对比 + space 标尺(XS/SM/MD/LG/XL/XXL 实际宽度)+ radius chip(5 档圆角实例)
+- L2: opacity chip ladder(1.0/0.75/0.5/0.25/0.1)+ LinearGradient 两种方向 demo + Material 3 styles + elev::E0..E3 shadow ladder + aspect_ratio 2:1 demo
+- L3: Shape 三个 demo(Circle / Capsule / RoundedRect)
+- L4: Distribute 5 mode 横向并排迷你示意 + Grid 4×2 颜色方块 demo + Toggle on/off 两个 + Picker 实例(预设选中 "Light")
+- L4 Gesture 行 → [✓] 不再 v1 待补
+- L6 Animation → [✓](数据类型 + Lerp + AnimCurve)真 frame 调度仍 v2+
+- L6 Theme → 加 Light 数据已落
+
+shell 0.6.19 → 0.6.20;core 0.10.70 → 0.10.71.45 view tests PASS.
 
 ### 0.6.19
 
@@ -305,7 +332,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.70**
+Current: **0.10.71**
+
+### 0.10.71
+
+framework 加 LazyHStack / Grid / Toggle / Picker layout + paint(纯渲染层 — host state 从 HostState 读).Toggle 渲染按 ToggleState.on 切 capsule 颜色 + circle knob 左右位置;Picker 渲染高亮选中 segment.
 
 ### 0.10.70
 

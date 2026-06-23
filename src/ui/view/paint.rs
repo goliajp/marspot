@@ -239,6 +239,12 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
                 .stroke(crate::ui::core::Pt(1.0), mul_alpha(*color, opacity))
                 .draw();
         }
+        View::Toggle { id } => {
+            paint_toggle(canvas, rect, *id, ctx, opacity);
+        }
+        View::Picker { id, options } => {
+            paint_picker(canvas, rect, *id, options, ctx, opacity);
+        }
         View::Image(img) => {
             // v1 stub: paint a tinted placeholder rect.  Real Image
             // primitive support lands when renderer adds it.
@@ -257,6 +263,83 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
         // paint anything on their own — decoration is already painted
         // above, children come next in the recursion.
         _ => {}
+    }
+}
+
+/// Toggle = capsule with a circle inside.  Visual state derived
+/// from `HostState[id]::ToggleState` via `with_host_state`.  If no
+/// state, defaults to off.
+fn paint_toggle(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::types::ViewId, ctx: LayoutCtx, opacity: f64) {
+    let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
+    let on = super::state::with_host_state(|s| {
+        s.get::<super::ToggleState>(id).map(|t| t.on).unwrap_or(false)
+    });
+    let track_color = if on {
+        crate::ui::theme::color::ACCENT
+    } else {
+        crate::ui::theme::color::BG_HOVER
+    };
+    let knob_color = crate::ui::theme::color::FG;
+    let r = rect.h * 0.5;
+    canvas.rect()
+        .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
+        .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
+        .fill(mul_alpha(track_color, opacity))
+        .radius(crate::ui::core::Pt(r / ctx.scale))
+        .draw();
+    let knob_d = rect.h * 0.8;
+    let knob_inset = (rect.h - knob_d) * 0.5;
+    let knob_x = if on { rect.x + rect.w - knob_d - knob_inset } else { rect.x + knob_inset };
+    let knob_y = rect.y + knob_inset;
+    canvas.rect()
+        .at(phys_to_pt(knob_x), phys_to_pt(knob_y))
+        .size(phys_to_pt(knob_d), phys_to_pt(knob_d))
+        .fill(mul_alpha(knob_color, opacity))
+        .radius(crate::ui::core::Pt(knob_d * 0.5 / ctx.scale))
+        .draw();
+}
+
+/// Picker = horizontal segmented control.  Highlights the slot
+/// currently in `HostState[id]::PickerState`.
+fn paint_picker(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::types::ViewId, options: &[String], ctx: LayoutCtx, opacity: f64) {
+    let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
+    if options.is_empty() { return; }
+    let n = options.len() as f64;
+    let seg_w = rect.w / n;
+    let selected = super::state::with_host_state(|s| {
+        s.get::<super::PickerState>(id).map(|p| p.selected).unwrap_or(0)
+    });
+    // Track BG.
+    canvas.rect()
+        .at(phys_to_pt(rect.x), phys_to_pt(rect.y))
+        .size(phys_to_pt(rect.w), phys_to_pt(rect.h))
+        .fill(mul_alpha(crate::ui::theme::color::BG_PANEL, opacity))
+        .radius(crate::ui::core::Pt(4.0))
+        .draw();
+    // Selected segment highlight.
+    if selected < options.len() {
+        canvas.rect()
+            .at(phys_to_pt(rect.x + selected as f64 * seg_w), phys_to_pt(rect.y))
+            .size(phys_to_pt(seg_w), phys_to_pt(rect.h))
+            .fill(mul_alpha(crate::ui::theme::color::ACCENT, opacity))
+            .radius(crate::ui::core::Pt(4.0))
+            .draw();
+    }
+    // Labels — naive center placement.  Real text alignment lands
+    // when picker has its own layout pass; v1 quick-and-clean.
+    for (i, label) in options.iter().enumerate() {
+        let w = super::layout::text_width_cells(label) as f64 * ctx.cell_w_phys;
+        let seg_left = rect.x + i as f64 * seg_w;
+        let tx = seg_left + (seg_w - w) * 0.5;
+        let ty = rect.y + (rect.h - ctx.cell_h_phys) * 0.5;
+        let color = if i == selected {
+            crate::ui::theme::color::BG
+        } else {
+            crate::ui::theme::color::FG
+        };
+        canvas.text(phys_to_pt(tx), phys_to_pt(ty), label)
+            .color(mul_alpha(color, opacity))
+            .draw();
     }
 }
 

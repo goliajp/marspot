@@ -28,10 +28,15 @@ pub use view::{
     TextLines, Truncate, ClipShape, AspectMode,
     Image, ImageSource, ContentMode, ShapeSpec,
     LinearGradient, GradientDir, MaterialStyle, AxRole,
+    ToggleState, PickerState,
     vstack, hstack, zstack, spacer, filled, hairline_horiz, hairline_vert,
+    toggle, picker, grid, image_named, shape_circle, shape_capsule, shape_rounded_rect,
 };
-pub use types::{ScrollWheelId, DragId};
-pub use lazy::lazy_vstack;
+pub use types::{
+    ScrollWheelId, DragId, Point, Modifiers, InputEvent, DragInProgress,
+    AnimCurve, Anim, Lerp,
+};
+pub use lazy::{lazy_vstack, lazy_hstack};
 pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,

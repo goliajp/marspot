@@ -33,6 +33,11 @@ pub fn lazy_vstack(id: ViewId, items: Vec<View>, item_height: Length, gap: Lengt
     View::LazyVStack { id, items, item_height, gap }
 }
 
+/// Horizontal mirror — uniform-width virtualised list.
+pub fn lazy_hstack(id: ViewId, items: Vec<View>, item_width: Length, gap: Length) -> View {
+    View::LazyHStack { id, items, item_width, gap }
+}
+
 /// Compute the visible-item index range for a given scroll offset
 /// + viewport.  Returns `(first, last)` where `first <= last <=
 /// items_len`.  Both indices are inclusive on first, exclusive on

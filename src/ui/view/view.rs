@@ -65,6 +65,34 @@ pub enum View {
         item_height: Length,
         id: ViewId,
     },
+    /// Uniform-width horizontal mirror of `LazyVStack`.
+    LazyHStack {
+        items: Vec<View>,
+        gap: Length,
+        item_width: Length,
+        id: ViewId,
+    },
+    /// Uniform-cell grid — items flow left-to-right, top-to-bottom
+    /// across `cols` columns.  All cells = `cell_w` × `cell_h`;
+    /// variable-track support is v2+.
+    Grid {
+        items: Vec<View>,
+        cols: usize,
+        gap: Length,
+        cell_w: Length,
+        cell_h: Length,
+    },
+    /// Stateful binary switch — visual capsule with circle inside.
+    /// `id` keys into `HostState` for the boolean.
+    Toggle {
+        id: ViewId,
+    },
+    /// Segmented picker — horizontal bar of mutually-exclusive
+    /// options.  Selection index stored under `id` in `HostState`.
+    Picker {
+        id: ViewId,
+        options: Vec<String>,
+    },
     /// Image primitive — type defined; real renderer Image
     /// primitive support is a v2+ follow-up (currently paints as
     /// a tinted placeholder rect).  Always wrap in `.frame(width:,
@@ -339,6 +367,55 @@ pub fn hairline_vert(color: Color) -> View {
 pub fn scroll_view(id: ViewId, child: View) -> View {
     View::ScrollView { child: Box::new(child), id }
 }
+
+/// Toggle switch keyed by `id` — state stored in `HostState`.
+pub fn toggle(id: ViewId) -> View {
+    View::Toggle { id }
+}
+
+/// Segmented picker keyed by `id`.  `options` is the label list;
+/// selection index lives in `HostState::PickerState`.
+pub fn picker(id: ViewId, options: Vec<impl Into<String>>) -> View {
+    View::Picker { id, options: options.into_iter().map(Into::into).collect() }
+}
+
+/// Uniform grid: `cols` columns, items flow left-to-right.  All
+/// cells are `cell_w` × `cell_h`.
+pub fn grid(items: Vec<View>, cols: usize, cell_w: Length, cell_h: Length, gap: Length) -> View {
+    View::Grid { items, cols, gap, cell_w, cell_h }
+}
+
+/// Image built from a `Named` source token.
+pub fn image_named(name: &'static str, tint: Option<Color>) -> View {
+    View::Image(Image {
+        source: ImageSource::Named(name),
+        mode: ContentMode::Fit,
+        tint,
+    })
+}
+
+/// Filled circle.
+pub fn shape_circle(fill: Color) -> View {
+    View::Shape(ShapeSpec::Circle { fill })
+}
+
+/// Filled capsule(pill — h × any-w).
+pub fn shape_capsule(fill: Color) -> View {
+    View::Shape(ShapeSpec::Capsule { fill })
+}
+
+/// Rounded-corner rect.
+pub fn shape_rounded_rect(radius: Length, fill: Color) -> View {
+    View::Shape(ShapeSpec::RoundedRect { radius, fill })
+}
+
+/// State for `View::Toggle`.  Lives in `HostState` keyed by ViewId.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ToggleState { pub on: bool }
+
+/// State for `View::Picker`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PickerState { pub selected: usize }
 
 // ─── Modifier chain (extension methods) ───────────────────────
 //

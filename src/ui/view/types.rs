@@ -164,6 +164,120 @@ pub struct ScrollWheelId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DragId(pub u32);
 
+/// Pointer location in physical pixels (matches LaidOut.rect coords).
+pub type Point = (f64, f64);
+
+/// Modifier-key bitmask — same shape as the main app's input layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub option: bool,
+    pub command: bool,
+}
+
+/// Unified input event surface for the View tree's gesture model.
+/// Hit-test routes events to `ActionId` / `ScrollWheelId` / etc.
+/// via the existing `hit_test_*` functions.
+#[derive(Clone, Debug)]
+pub enum InputEvent {
+    Click(Point, Modifiers),
+    DoubleClick(Point, Modifiers),
+    RightClick(Point, Modifiers),
+    DragBegin { at: Point, mods: Modifiers, drag_id: DragId },
+    DragMove  { from: Point, to: Point, drag_id: DragId },
+    DragEnd   { from: Point, to: Point, drag_id: DragId },
+    Hover { at: Point, entered: bool, hover_id: HoverId },
+    Scroll { at: Point, delta: (f64, f64), precise: bool, target: ScrollWheelId },
+}
+
+/// In-progress drag — kept by host across move events.  Established
+/// at DragBegin, mutated on DragMove, dropped on DragEnd.
+#[derive(Clone, Debug)]
+pub struct DragInProgress {
+    pub drag_id: DragId,
+    pub started_at: Point,
+    pub current: Point,
+    pub modifiers: Modifiers,
+}
+
+impl DragInProgress {
+    pub fn delta(&self) -> (f64, f64) {
+        (self.current.0 - self.started_at.0, self.current.1 - self.started_at.1)
+    }
+}
+
+/// Animation curve — interpolation easing.  v1 supports linear +
+/// the standard ease-in/out cubics;  spring physics curves are
+/// v2+ when we ship real animation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimCurve {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+impl AnimCurve {
+    /// Resolve eased fraction at `t ∈ [0.0, 1.0]`.
+    pub fn ease(self, t: f64) -> f64 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            AnimCurve::Linear    => t,
+            AnimCurve::EaseIn    => t * t,
+            AnimCurve::EaseOut   => 1.0 - (1.0 - t) * (1.0 - t),
+            AnimCurve::EaseInOut => {
+                if t < 0.5 { 2.0 * t * t } else { 1.0 - 2.0 * (1.0 - t).powi(2) }
+            }
+        }
+    }
+}
+
+/// Generic time-based animation from `from` to `to`.  `T: Lerp` —
+/// implement for Color / Length / f64 / etc.
+///
+/// v1 = data type only.  Real frame scheduling(`schedule_redraw_in`
+/// + per-frame interpolation)is v2+ animation rollout;  this struct
+/// already gives callers the carrier shape.
+#[derive(Clone, Copy, Debug)]
+pub struct Anim<T: Copy> {
+    pub from: T,
+    pub to: T,
+    pub elapsed: f64,    // ms since started
+    pub duration: f64,   // ms
+    pub curve: AnimCurve,
+}
+
+impl<T: Copy + Lerp> Anim<T> {
+    /// Sample the animation at current elapsed time.
+    pub fn current(&self) -> T {
+        if self.duration <= 0.0 { return self.to; }
+        let t = (self.elapsed / self.duration).clamp(0.0, 1.0);
+        let t = self.curve.ease(t);
+        T::lerp(self.from, self.to, t)
+    }
+    pub fn finished(&self) -> bool { self.elapsed >= self.duration }
+}
+
+/// Linear interpolation trait — primitive types + Color implement.
+pub trait Lerp: Sized {
+    fn lerp(from: Self, to: Self, t: f64) -> Self;
+}
+impl Lerp for f64 {
+    fn lerp(a: f64, b: f64, t: f64) -> f64 { a + (b - a) * t }
+}
+impl Lerp for crate::ui::core::Color {
+    fn lerp(a: Self, b: Self, t: f64) -> Self {
+        use crate::ui::core::Color;
+        Color {
+            r: ((a.r as f64) * (1.0 - t) + (b.r as f64) * t) as u8,
+            g: ((a.g as f64) * (1.0 - t) + (b.g as f64) * t) as u8,
+            b: ((a.b as f64) * (1.0 - t) + (b.b as f64) * t) as u8,
+            a: a.a * (1.0 - t) + b.a * t,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -431,11 +431,15 @@ fn draw_section_header(canvas: &mut Canvas, x: f64, y: f64, label: &str) -> f64 
 /// ```
 fn build_model_view() -> crate::ui::view::View {
     use crate::ui::view::{
-        Text, Edges, FrameSpec,
+        Text, Edges, FrameSpec, AspectMode,
+        LinearGradient, GradientDir, MaterialStyle,
         vstack, hstack, zstack, filled, hairline_horiz, spacer,
+        toggle, picker, grid,
+        shape_circle, shape_capsule, shape_rounded_rect,
+        scroll_view, ViewId,
     };
-    use crate::ui::theme::{color, space, radius, text};
-    use crate::ui::core::Length;
+    use crate::ui::theme::{color, space, radius, text, elev};
+    use crate::ui::core::{Length, Color};
 
     // Helpers using TextStyle tokens (P3l) ----------------------
     let h1   = |s: &str| Text::new(s).style(text::HEADER).build();
@@ -456,6 +460,89 @@ fn build_model_view() -> crate::ui::view::View {
     let ok      = |s: &str| Text::new(s).color(color::SUCCESS).build();
     let todo_v1 = |s: &str| Text::new(s).color(color::WARN).build();
     let todo_v2 = |s: &str| Text::new(s).style(text::HINT).build();
+
+    // ── Visual demo helpers — used multiple times below ──────
+    // Length demo bar of given width pt + label.
+    let len_bar = |w_pt: f64, c: Color, label: &'static str| -> crate::ui::view::View {
+        hstack(vec![
+            filled(c).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(w_pt)),
+                height: Some(Length::Pt(10.0)),
+                ..Default::default()
+            }),
+            hint(label),
+        ]).hstack_gap(Length::Pt(8.0)).align_cross_center()
+    };
+    // Space ruler at the given pt width.
+    let space_ruler = |w: Length, label: &'static str| {
+        hstack(vec![
+            filled(color::ACCENT_DIM).frame(FrameSpec {
+                width: Some(w),
+                height: Some(Length::Pt(6.0)),
+                ..Default::default()
+            }),
+            hint(label),
+        ]).hstack_gap(Length::Pt(8.0)).align_cross_center()
+    };
+    // Radius demo dot.
+    let radius_chip = |r: Length, label: &'static str| {
+        hstack(vec![
+            filled(color::ACCENT).corner_radius(r).frame(FrameSpec {
+                width: Some(Length::Pt(24.0)),
+                height: Some(Length::Pt(24.0)),
+                ..Default::default()
+            }),
+            hint(label),
+        ]).hstack_gap(Length::Pt(6.0)).align_cross_center()
+    };
+    // Opacity demo column.
+    let opacity_chip = |o: f64, label: &'static str| {
+        vstack(vec![
+            filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+                width: Some(Length::Pt(28.0)),
+                height: Some(Length::Pt(28.0)),
+                ..Default::default()
+            }).opacity(o),
+            hint(label),
+        ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
+    // Elevation card.
+    let elev_card = |s, label: &'static str| {
+        vstack(vec![
+            Text::new("E").style(text::BODY).build()
+                .padding(Edges::all(Length::Pt(8.0)))
+                .background(color::BG_RAISED)
+                .corner_radius(radius::MD)
+                .shadow(s)
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(36.0)),
+                    height: Some(Length::Pt(36.0)),
+                    ..Default::default()
+                }),
+            hint(label),
+        ]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
+    // Distribute demo.
+    let dist_demo = |d, label: &'static str| {
+        use crate::ui::view::Distribute;
+        let _ = d;
+        let _ = Distribute::Start;
+        let small = || filled(color::ACCENT).corner_radius(radius::SM).frame(FrameSpec {
+            width: Some(Length::Pt(12.0)),
+            height: Some(Length::Pt(12.0)),
+            ..Default::default()
+        });
+        let row = hstack(vec![small(), small(), small()])
+            .distribute(d)
+            .frame(FrameSpec {
+                width: Some(Length::Pt(96.0)),
+                height: Some(Length::Pt(14.0)),
+                ..Default::default()
+            })
+            .background(color::BG_PANEL)
+            .corner_radius(radius::SM);
+        vstack(vec![row, hint(label)]).vstack_gap(Length::Pt(4.0)).align_cross_center()
+    };
 
     // ── L1 Foundation ────────────────────────────────────────
     let l1 = vstack(vec![
@@ -483,6 +570,31 @@ fn build_model_view() -> crate::ui::view::View {
         ]).hstack_gap(Length::Pt(6.0)).align_cross_center(),
         hint("    space:: XS(4) SM(8) MD(12) LG(16) XL(24)"),
         hint("    radius:: SM(3) MD(6) LG(10) PILL(9999)"),
+        // Length 视觉 demo —— 三种单位实际宽度对比.
+        hint("    实际 Length 渲染对比 ↓"),
+        len_bar(40.0, color::ACCENT, "Pt(40)"),
+        len_bar(80.0, color::SUCCESS, "Pt(80)"),
+        len_bar(120.0, color::WARN,   "Pt(120)"),
+        hint("    Pct(F) 跟容器宽自动算,Ch(N) = N × cell_w"),
+        // space 标尺
+        hint("    space 标尺(横条宽 = 标记尺度):"),
+        hstack(vec![
+            space_ruler(space::XS,  "XS(4)"),
+            space_ruler(space::SM,  "SM(8)"),
+            space_ruler(space::MD,  "MD(12)"),
+            space_ruler(space::LG,  "LG(16)"),
+            space_ruler(space::XL,  "XL(24)"),
+            space_ruler(space::XXL, "XXL(32)"),
+        ]).hstack_gap(Length::Pt(8.0)).align_cross_center(),
+        // radius chip
+        hint("    radius chip(同尺寸方块不同 corner_radius):"),
+        hstack(vec![
+            radius_chip(radius::NONE, "NONE"),
+            radius_chip(radius::SM,   "SM(3)"),
+            radius_chip(radius::MD,   "MD(6)"),
+            radius_chip(radius::LG,   "LG(10)"),
+            radius_chip(radius::PILL, "PILL"),
+        ]).hstack_gap(Length::Pt(10.0)).align_cross_center(),
         hstack(vec![
             ok("[✓]"),
             body("Identity / HostState map + Lifecycle reconcile"),
@@ -532,6 +644,75 @@ fn build_model_view() -> crate::ui::view::View {
                 ]).hstack_gap(Length::Pt(6.0)),
             ]).vstack_gap(Length::Pt(2.0)),
         ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
+        // Opacity 视觉 demo
+        hint("    .opacity(x) — alpha 累乘下:"),
+        hstack(vec![
+            opacity_chip(1.0,  "1.0"),
+            opacity_chip(0.75, "0.75"),
+            opacity_chip(0.5,  "0.5"),
+            opacity_chip(0.25, "0.25"),
+            opacity_chip(0.1,  "0.1"),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+        // Gradient demo
+        hint("    LinearGradient(TopToBottom + LeftToRight, 16 bands):"),
+        hstack(vec![
+            filled(color::BG_PANEL).corner_radius(radius::MD)
+                .background_gradient(LinearGradient {
+                    stops: vec![(0.0, color::ACCENT), (1.0, color::SUCCESS)],
+                    direction: GradientDir::TopToBottom,
+                })
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(60.0)),
+                    height: Some(Length::Pt(40.0)),
+                    ..Default::default()
+                }),
+            filled(color::BG_PANEL).corner_radius(radius::MD)
+                .background_gradient(LinearGradient {
+                    stops: vec![(0.0, color::DANGER), (0.5, color::WARN), (1.0, color::SUCCESS)],
+                    direction: GradientDir::LeftToRight,
+                })
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(120.0)),
+                    height: Some(Length::Pt(40.0)),
+                    ..Default::default()
+                }),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+        // Material demo (placeholder)
+        hint("    Material backdrop(v1 半透明 BG;真 vibrancy = v2+):"),
+        hstack(vec![
+            Text::new("Regular").style(text::CAPTION).build()
+                .padding(Edges::all(space::SM))
+                .background_material(MaterialStyle::Regular)
+                .corner_radius(radius::MD),
+            Text::new("Thick").style(text::CAPTION).build()
+                .padding(Edges::all(space::SM))
+                .background_material(MaterialStyle::Thick)
+                .corner_radius(radius::MD),
+            Text::new("Thin").style(text::CAPTION).build()
+                .padding(Edges::all(space::SM))
+                .background_material(MaterialStyle::Thin)
+                .corner_radius(radius::MD),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
+        // Elevation ladder
+        hint("    Elevation(elev::E0..E3 token shadow ladder):"),
+        hstack(vec![
+            elev_card(elev::E0, "E0"),
+            elev_card(elev::E1, "E1"),
+            elev_card(elev::E2, "E2"),
+            elev_card(elev::E3, "E3"),
+        ]).hstack_gap(Length::Pt(20.0)).align_cross_center(),
+        // AspectRatio demo
+        hint("    .aspect_ratio(2.0, Fit) — 2:1 比:"),
+        hstack(vec![
+            filled(color::ACCENT_DIM).corner_radius(radius::SM)
+                .aspect_ratio(2.0, AspectMode::Fit)
+                .frame(FrameSpec {
+                    width: Some(Length::Pt(80.0)),
+                    height: Some(Length::Pt(60.0)),
+                    ..Default::default()
+                }),
+            hint("80×60 frame + aspect 2:1 = 80×40 实际"),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
     ]).vstack_gap(Length::Pt(4.0));
 
     // ── L3 Primitives ────────────────────────────────────────
@@ -549,6 +730,25 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    type 定义全 land,Shape paint 通过 rounded-rect 近似"),
         hint("    real Image primitive + Path = v2+ Metal pipeline 工作"),
         hint("    this entire panel IS Canvas — what you see, you can build"),
+        // Shape 视觉 demo
+        hint("    Shape views(Circle / Capsule / RoundedRect):"),
+        hstack(vec![
+            shape_circle(color::DANGER).frame(FrameSpec {
+                width: Some(Length::Pt(28.0)),
+                height: Some(Length::Pt(28.0)),
+                ..Default::default()
+            }),
+            shape_capsule(color::SUCCESS).frame(FrameSpec {
+                width: Some(Length::Pt(56.0)),
+                height: Some(Length::Pt(20.0)),
+                ..Default::default()
+            }),
+            shape_rounded_rect(Length::Pt(8.0), color::ACCENT).frame(FrameSpec {
+                width: Some(Length::Pt(40.0)),
+                height: Some(Length::Pt(28.0)),
+                ..Default::default()
+            }),
+        ]).hstack_gap(Length::Pt(12.0)).align_cross_center(),
     ]).vstack_gap(Length::Pt(2.0));
 
     // ── L4 View Tree — text + 3 mini stack demos side-by-side ─
@@ -603,30 +803,65 @@ fn build_model_view() -> crate::ui::view::View {
             spacer(),
         ]).align_cross_start(),
         hint("    Constraints two-pass / AlignCross / Distribute / Anchor (9)"),
+        // Distribute 5 mode demo
+        hint("    Distribute(主轴分布 5 mode):"),
+        hstack(vec![
+            dist_demo(crate::ui::view::Distribute::Start,   "Start"),
+            dist_demo(crate::ui::view::Distribute::Center,  "Center"),
+            dist_demo(crate::ui::view::Distribute::End,     "End"),
+            dist_demo(crate::ui::view::Distribute::Spaced,  "Spaced"),
+            dist_demo(crate::ui::view::Distribute::Between, "Between"),
+        ]).hstack_gap(Length::Pt(10.0)).align_cross_start(),
         hstack(vec![
             ok("[✓]"),
-            body("Containers: ScrollView / LazyVStack"),
+            body("Containers: ScrollView / LazyVStack / LazyHStack / Grid(均匀)"),
         ]).hstack_gap(Length::Pt(6.0)),
         hint("    sidebar / process panel / search overlay 长列表都可虚拟化"),
+        // Grid demo - 4x2 colored squares
+        hint("    Grid 4 cols × 8 cells uniform demo:"),
+        grid(
+            (0..8).map(|i| {
+                let c = match i % 4 {
+                    0 => color::ACCENT,
+                    1 => color::SUCCESS,
+                    2 => color::WARN,
+                    _ => color::DANGER,
+                };
+                filled(c).corner_radius(radius::SM)
+            }).collect(),
+            4,
+            Length::Pt(20.0),
+            Length::Pt(20.0),
+            Length::Pt(4.0),
+        ),
         hstack(vec![
             todo_v2("[v2+]"),
-            hint("    LazyHStack / Grid 真完整 spec"),
+            hint("    Grid 真完整 spec(variable tracks / span / template-areas)"),
         ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             ok("[✓]"),
-            body("Gesture hit-test: DoubleClick / RightClick / Scroll / DragBegin"),
+            body("Gesture: hit_test_* + InputEvent + DragInProgress 状态机"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    Modifier + hit_test_* + ActionId/ScrollWheelId/DragId enum"),
+        hint("    InputEvent enum(Click/DoubleClick/RightClick/DragBegin/Move/End/Hover/Scroll)"),
+        hint("    DragInProgress { drag_id, started_at, current, modifiers, delta() }"),
+        hint("    ActionId / ScrollWheelId / DragId 跟 host reducer 派发(elm-y)"),
         hstack(vec![
-            todo_v1("[v1 待补]"),
-            hint("    完整 InputEvent + DragInProgress 状态机 + reducer 派发"),
+            ok("[✓]"),
+            body("Stateful views: Toggle / Picker(纯渲染)"),
         ]).hstack_gap(Length::Pt(6.0)),
+        hint("    state 存 HostState[ViewId]::ToggleState / PickerState"),
+        // Visual Toggle / Picker — 注意是真渲染,如要切要先有 click 派发
+        hint("    Toggle 渲染演示(默认 off / on 看不同视觉);Picker 选 1):"),
+        hstack(vec![
+            toggle(ViewId(0xDE7_1001)),  // default off
+            toggle(ViewId(0xDE7_1002)),
+            picker(ViewId(0xDE7_1003), vec!["Dark", "Light", "Auto"]),
+        ]).hstack_gap(Length::Pt(16.0)).align_cross_center(),
+        hint("    Anim<T> + Lerp trait + AnimCurve(Linear/EaseIn/Out/InOut)"),
         hstack(vec![
             todo_v2("[v2+]"),
-            body("Stateful views: TextField / Toggle / Picker"),
+            body("TextField (NSTextInputClient + IME) / 真 frame schedule"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    Toggle/Picker 纯 Rust 易接;TextField 需 NSTextInputClient/IME 工作"),
-        hint("    HostState API 已就绪,接进来无 framework 改动"),
         hstack(vec![
             todo_v2("[v2+]"),
             body("Keyboard shortcut + Focus chain"),
@@ -670,14 +905,22 @@ fn build_model_view() -> crate::ui::view::View {
         hint("    bake 进 LaidOut.deco;真接 NSAccessibility 留 v2+"),
         hstack(vec![
             ok("[✓]"),
-            body("Theme: ThemeId enum + theme::current() / set_current()"),
+            body("Theme: ThemeId + theme::current() + Light token 数据"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    AtomicU8 全局;Light/HighContrast token 数据留 v2+"),
+        hint("    AtomicU8 全局;Dark + Light 调色板;themed::color::* 闭包查"),
         hstack(vec![
             todo_v2("[v2+]"),
-            body("Animation: Anim<T> + .transition()"),
+            hint("    HighContrast + 真 theme swap redraw 钩子"),
         ]).hstack_gap(Length::Pt(6.0)),
-        hint("    time-based 插值;不破坏 idle CPU=0(无 anim 时不 schedule)"),
+        hstack(vec![
+            ok("[✓]"),
+            body("Animation data: Anim<T> + Lerp trait + AnimCurve"),
+        ]).hstack_gap(Length::Pt(6.0)),
+        hint("    Linear / EaseIn / EaseOut / EaseInOut 4 curves;Color/f64 已实 Lerp"),
+        hstack(vec![
+            todo_v2("[v2+]"),
+            body("    真 frame 调度 + .transition() + 不破坏 idle CPU=0"),
+        ]).hstack_gap(Length::Pt(6.0)),
         hstack(vec![
             todo_v2("[v2+]"),
             body("i18n / RTL  (Leading/Trailing 命名已留 RTL 接口)"),
@@ -698,11 +941,25 @@ fn build_model_view() -> crate::ui::view::View {
             ..Default::default()
         });
 
-    use crate::ui::view::{scroll_view, ViewId};
     // ViewId 给 dev panel Model section 的 ScrollView.  arbitrary
     // u32,只要全局唯一即可 — 这里用 magic number 标 dev-panel/
     // model 路径(便于 grep).
     let model_scroll_id = ViewId(0xDE7_0001);
+
+    // Seed Toggle / Picker demo state so the visual differs from
+    // default-off / index-0.  Inserted once into HostState;  no
+    // visual logic depends on them being "live" — just illustrative.
+    use crate::ui::view::{ToggleState, PickerState, with_host_state_mut};
+    with_host_state_mut(|s| {
+        // The second Toggle in the demo row appears "on".
+        if s.get::<ToggleState>(ViewId(0xDE7_1002)).is_none() {
+            s.insert(ViewId(0xDE7_1002), ToggleState { on: true });
+        }
+        // Picker selects "Light"(index 1)by default to be visible.
+        if s.get::<PickerState>(ViewId(0xDE7_1003)).is_none() {
+            s.insert(ViewId(0xDE7_1003), PickerState { selected: 1 });
+        }
+    });
 
     let content = vstack(vec![
         l1,

@@ -41,6 +41,74 @@ pub mod color {
 
     // ─── Helper hints (used inside dev panel etc) ─────────────
     pub const HINT:         Color = Color::rgba(130, 140, 156, 1.0);
+
+    // ─── Light theme palette (P3v-2) ──────────────────────────
+    // Used by `themed::color::*` accessors when `ThemeId::Light` is
+    // active.  Raw constants below stay Dark for backward compat
+    // until callers migrate to themed::*.
+    pub mod light {
+        use super::Color;
+        pub const FG:           Color = Color::rgba( 30,  35,  45, 1.0);
+        pub const FG_MUTED:     Color = Color::rgba( 95, 105, 120, 1.0);
+        pub const FG_DISABLED:  Color = Color::rgba(170, 178, 188, 1.0);
+        pub const BG:           Color = Color::rgba(248, 249, 251, 1.0);
+        pub const BG_RAISED:    Color = Color::rgba(255, 255, 255, 1.0);
+        pub const BG_PANEL:     Color = Color::rgba(242, 244, 247, 1.0);
+        pub const BG_SELECTED:  Color = Color::rgba( 51, 107, 173, 1.0);
+        pub const BG_HOVER:     Color = Color::rgba(232, 235, 240, 1.0);
+        pub const BORDER:       Color = Color::rgba(205, 210, 218, 1.0);
+        pub const DIVIDER:      Color = Color::rgba(  0,   0,   0, 0.06);
+        pub const HAIRLINE:     Color = Color::rgba(  0,   0,   0, 0.15);
+        pub const ACCENT:       Color = Color::rgba( 51, 107, 220, 1.0);
+        pub const ACCENT_DIM:   Color = Color::rgba(120, 145, 210, 1.0);
+        pub const SUCCESS:      Color = Color::rgba( 50, 160,  80, 1.0);
+        pub const WARN:         Color = Color::rgba(200, 150,  20, 1.0);
+        pub const DANGER:       Color = Color::rgba(200,  50,  50, 1.0);
+        pub const SHADOW:       Color = Color::rgba(  0,   0,   0, 0.18);
+        pub const HINT:         Color = Color::rgba(110, 120, 138, 1.0);
+    }
+}
+
+/// Themed-aware color lookup — checks `super::current()` then
+/// selects from the matching palette.  Components reach for
+/// `themed::color::fg()` when they want a theme-switchable color;
+/// `color::FG` (const) stays Dark forever for backward compat.
+pub mod themed {
+    use super::{Color, color};
+
+    pub mod color_fns {
+        use super::*;
+        pub fn fg() -> Color {
+            match super::super::super::current() {
+                super::super::super::ThemeId::Light => color::light::FG,
+                _ => color::FG,
+            }
+        }
+        pub fn bg() -> Color {
+            match super::super::super::current() {
+                super::super::super::ThemeId::Light => color::light::BG,
+                _ => color::BG,
+            }
+        }
+        pub fn accent() -> Color {
+            match super::super::super::current() {
+                super::super::super::ThemeId::Light => color::light::ACCENT,
+                _ => color::ACCENT,
+            }
+        }
+        pub fn bg_panel() -> Color {
+            match super::super::super::current() {
+                super::super::super::ThemeId::Light => color::light::BG_PANEL,
+                _ => color::BG_PANEL,
+            }
+        }
+        pub fn border() -> Color {
+            match super::super::super::current() {
+                super::super::super::ThemeId::Light => color::light::BORDER,
+                _ => color::BORDER,
+            }
+        }
+    }
 }
 
 pub mod space {
