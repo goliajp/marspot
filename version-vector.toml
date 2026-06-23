@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.29"  # 撤 B0.7 chrome SF Pro — mono-aligned 视觉太丑,dev_window + 4 chrome 渲染点全部回到 false(走 Monaco)直到 atlas 真 proportional 改造完
-core    = "0.10.79"
+shell   = "0.6.30"  # font v5 Phase 1.0 — AtlasEntry/Raster 加 bearing_x/y 字段;raster fn 暂填 (0, ascent) 匹配现有 cell-aligned slot 行为;PTY 视觉无变化;API 准备好让 Phase 1.1 真切到 per-glyph bbox
+core    = "0.10.80"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

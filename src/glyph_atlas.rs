@@ -128,6 +128,27 @@ pub struct AtlasEntry {
     /// How many terminal cells wide this slot is (1 for ASCII /
     /// most BMP, 2 for East Asian wide / emoji).
     pub n_cells: u16,
+    /// font v5 (Phase 1) — per-glyph bearing from the typographic
+    /// origin to the **ink box top-left** in pixel units, with the
+    /// `PAD` left/top padding included in the bitmap.
+    ///
+    /// - `bearing_x` = `bbox.origin.x.floor()`.  For a typical
+    ///   monospace cell-aligned glyph this is `0..3px`; for chrome
+    ///   proportional glyphs it can swing.
+    /// - `bearing_y` = `(bbox.origin.y + bbox.size.height).ceil()`.
+    ///   Distance from baseline UP to ink top (positive = ink lives
+    ///   above baseline, the normal case).  Descenders mean the
+    ///   bitmap extends `px_h - bearing_y - 2*PAD` below baseline.
+    ///
+    /// Renderer formula:
+    /// - chrome / proportional: ink_left = pen_x + bearing_x;
+    ///   ink_top = baseline_y - bearing_y; quad = (ink_left - PAD,
+    ///   ink_top - PAD, px_w, px_h)
+    /// - mono PTY: ink_left forced to `cell_x` (typesetter
+    ///   pre-balanced left bearing inside the cell); quad =
+    ///   (cell_x - PAD, baseline_y - bearing_y - PAD, px_w, px_h)
+    pub bearing_x: i16,
+    pub bearing_y: i16,
 }
 
 /// One row in the shelf packer.
@@ -281,6 +302,8 @@ impl GlyphAtlas {
             px_w: raster.px_w as u16,
             px_h: raster.px_h as u16,
             n_cells: raster.n_cells,
+            bearing_x: raster.bearing_x,
+            bearing_y: raster.bearing_y,
         };
         self.cache.insert(key, entry);
         Some(entry)
@@ -324,6 +347,14 @@ impl GlyphAtlas {
             }
         };
         self.upload(&buf, w, h, placed.0, placed.1);
+        // Box-drawing / block-element rasters are designed to TILE
+        // the entire cell — caller fills (0,0)..(w,h) with the ink.
+        // So the ink "origin" matches the slot top-left:
+        //   bearing_x = 0  (ink left coincides with quad left)
+        //   bearing_y = h  (ink top coincides with quad top — full
+        //                   cell tall, no descender);  baseline math
+        //                   becomes: quad_top = baseline - h, i.e.
+        //                   the cell top.
         let entry = AtlasEntry {
             u0: placed.0 as u16,
             v0: placed.1 as u16,
@@ -332,6 +363,8 @@ impl GlyphAtlas {
             px_w: w as u16,
             px_h: h as u16,
             n_cells,
+            bearing_x: 0,
+            bearing_y: h as i16,
         };
         self.cache.insert(key, entry);
         Some(entry)
@@ -461,6 +494,10 @@ struct Raster {
     px_w: u32,
     px_h: u32,
     n_cells: u16,
+    /// Per-glyph bearing — see [`AtlasEntry::bearing_x`].  Includes
+    /// PAD offset bookkeeping so renderer can do a single subtract.
+    bearing_x: i16,
+    bearing_y: i16,
 }
 
 /// Rasterise one glyph into a CELL-SIZED alpha-only bitmap.  The
@@ -574,11 +611,22 @@ fn rasterise_glyph(
     };
     font.draw_glyphs(&[glyph], &[origin], ctx);
 
+    // Phase 1.0 bearing fields — slot is still cell-aligned
+    // (cell_w × n_cells, cell_h), so the renderer's "draw quad at
+    // (cell_x, baseline_y - ascent), size cell_w × cell_h" formula
+    // is exactly equivalent to:
+    //   quad_left = cell_x + bearing_x      (with bearing_x = 0)
+    //   quad_top  = baseline_y - bearing_y  (with bearing_y = baseline_from_top)
+    // Both formulas land in the same place — Phase 1.0 records the
+    // values so renderer can OPT IN to per-glyph placement later;
+    // Phase 1.1 will switch atlas slots themselves to real bbox.
     Some(Raster {
         bytes,
         px_w,
         px_h,
         n_cells,
+        bearing_x: 0,
+        bearing_y: metrics.baseline_from_top as i16,
     })
 }
 
@@ -670,11 +718,15 @@ fn rasterise_glyph_color(
     };
     font.draw_glyphs(&[glyph], &[origin], ctx);
 
+    // Phase 1.0 bearing fields — see `rasterise_glyph` doc.  Color
+    // emoji slot is also cell-aligned, so same constants apply.
     Some(Raster {
         bytes,
         px_w,
         px_h,
         n_cells,
+        bearing_x: 0,
+        bearing_y: metrics.baseline_from_top as i16,
     })
 }
 
