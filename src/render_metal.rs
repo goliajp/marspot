@@ -84,7 +84,7 @@ fn resolve_cell_glyph(
         let w = metrics.cell_w;
         let h = metrics.cell_h;
         let key = GlyphKey { font_id: BOX_DRAWING_FONT_ID, glyph: ch as u32 as CGGlyph };
-        return atlas.get_or_insert_custom_raster(key, w, h, 1, |buf| {
+        return atlas.get_or_insert_custom_raster(key, w, h, metrics.baseline_from_top, 1, |buf| {
             rasterize_arms_into_buf(buf, w as usize, h as usize, arms);
         });
     }
@@ -92,7 +92,7 @@ fn resolve_cell_glyph(
         let w = metrics.cell_w;
         let h = metrics.cell_h;
         let key = GlyphKey { font_id: BOX_DRAWING_FONT_ID, glyph: ch as u32 as CGGlyph };
-        return atlas.get_or_insert_custom_raster(key, w, h, 1, |buf| {
+        return atlas.get_or_insert_custom_raster(key, w, h, metrics.baseline_from_top, 1, |buf| {
             rasterize_block_into_buf(buf, w as usize, h as usize, shape);
         });
     }

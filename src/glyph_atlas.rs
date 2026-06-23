@@ -328,6 +328,7 @@ impl GlyphAtlas {
         key: GlyphKey,
         w: u32,
         h: u32,
+        baseline_from_top: u32,
         n_cells: u16,
         rasterise: F,
     ) -> Option<AtlasEntry>
@@ -347,14 +348,13 @@ impl GlyphAtlas {
             }
         };
         self.upload(&buf, w, h, placed.0, placed.1);
-        // Box-drawing / block-element rasters are designed to TILE
-        // the entire cell — caller fills (0,0)..(w,h) with the ink.
-        // So the ink "origin" matches the slot top-left:
-        //   bearing_x = 0  (ink left coincides with quad left)
-        //   bearing_y = h  (ink top coincides with quad top — full
-        //                   cell tall, no descender);  baseline math
-        //                   becomes: quad_top = baseline - h, i.e.
-        //                   the cell top.
+        // Box-drawing / block-element rasters TILE the entire cell —
+        // caller fills (0,0)..(w,h) with ink.  The slot is meant to
+        // land at (cell_x, cell_top) with no padding.
+        //   bearing_x = 0          — slot left  = cell_x  = pen_x
+        //   bearing_y = ascent     — slot top   = cell_top = baseline_y - ascent
+        // Renderer formula `quad_top = baseline_y - bearing_y` then
+        // yields quad_top = cell_top exactly.
         let entry = AtlasEntry {
             u0: placed.0 as u16,
             v0: placed.1 as u16,
@@ -364,7 +364,7 @@ impl GlyphAtlas {
             px_h: h as u16,
             n_cells,
             bearing_x: 0,
-            bearing_y: h as i16,
+            bearing_y: baseline_from_top as i16,
         };
         self.cache.insert(key, entry);
         Some(entry)
