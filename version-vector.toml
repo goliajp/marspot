@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.27"  # B0.7 真 font 分离 — chrome 走系统 UI font(SF Pro),PTY 仍 mono;FontCache 加 ui_font_idx + ui_cell_w/h/ascent,resolve_char_ui CJK fallback,push_text_run_kind(FontKind::Terminal|Ui)per-glyph CT advance
-core    = "0.10.77" # encode_canvas_into 加 ui_font: bool 参数,dev_window + main 渲染 chrome path 都传 true
+shell   = "0.6.28"  # 修 0.6.27 chrome 字变形 — atlas slot 用 ui_cell_w 但 GlyphInstance size 用 per-glyph advance 导致拉伸;v1 回到 uniform cell_w(mono-like SF Pro)直到 atlas 改造支持 per-glyph slot
+core    = "0.10.78"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

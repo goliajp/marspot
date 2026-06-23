@@ -3779,21 +3779,14 @@ pub(crate) fn push_text_run_kind(
         };
         if glyph != 0 {
             let ct_font = font.font(font_idx).clone();
-            // UI font is proportional — per-glyph advance via CT.
-            // Terminal uses uniform cell_w × n_cells (mono grid).
-            let advance_px: f32 = match kind {
-                FontKind::Terminal => cell_w * n_cells as f32,
-                FontKind::Ui => {
-                    let mut adv = core_graphics::geometry::CGSize::new(0.0, 0.0);
-                    unsafe {
-                        ct_font.get_advances_for_glyphs(
-                            core_text::font_descriptor::kCTFontOrientationDefault,
-                            &glyph, &mut adv, 1,
-                        );
-                    }
-                    if adv.width > 0.0 { adv.width as f32 } else { cell_w * n_cells as f32 }
-                }
-            };
+            // v1 — both Terminal and Ui use uniform cell_w × n_cells:
+            // atlas allocates slots of that width and GlyphInstance
+            // size matches.  True proportional UI metrics (per-glyph
+            // advance) needs the atlas slot allocator to size per
+            // glyph too, otherwise the rasterised glyph gets
+            // horizontally stretched into the (wider) advance box —
+            // user-observed "字全变形" report 0.6.27.  Real per-glyph
+            // slots = v2+ atlas refactor.
             if let Some(entry) = atlas.get_or_rasterize(
                 GlyphKey { font_id: font_idx as u32, glyph },
                 &ct_font,
@@ -3801,10 +3794,7 @@ pub(crate) fn push_text_run_kind(
                 n_cells,
             ) {
                 let dest_y = (baseline_y - ascent).round();
-                let slot_w = match kind {
-                    FontKind::Terminal => (metrics.cell_w * entry.n_cells as u32) as f32,
-                    FontKind::Ui => advance_px.max(metrics.cell_w as f32 * 0.5),
-                };
+                let slot_w = (metrics.cell_w * entry.n_cells as u32) as f32;
                 glyphs.push(GlyphInstance {
                     origin: [x.round(), dest_y],
                     size: [slot_w, metrics.cell_h as f32],
@@ -3813,10 +3803,9 @@ pub(crate) fn push_text_run_kind(
                     color,
                 });
             }
-            x += advance_px;
-        } else {
-            x += cell_w * n_cells as f32;
         }
+        let _ = kind;
+        x += cell_w * n_cells as f32;
     }
 }
 

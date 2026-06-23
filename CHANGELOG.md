@@ -17,7 +17,24 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.27**
+Current: **0.6.28**
+
+### 0.6.28
+
+**修 0.6.27 chrome 字"全变形"** — atlas slot 跟 GlyphInstance size 不一致导致字符被横向拉伸.
+
+User 截图显示 SF Pro 渲染后 'm' / 'o' / 'a' 等被拉成奇怪的扁平字符,字符之间有 5pt+ 空白(看起来像 "L a y o u t").
+
+根因:
+- `atlas.get_or_rasterize` 用 `SlotMetrics { cell_w: ui_cell_w }` rasterize 所有 glyph,所有字符都画进 ui_cell_w 宽的 slot
+- `GlyphInstance.size = [advance_px, ...]` — 每个 glyph 显示用真实 advance
+- 宽字符 'm' (advance ~14pt) 被画在 8pt 宽的 atlas slot,然后 stretch 到 14pt 显示 → 横向拉伸 1.75x → 变形
+
+修法 v1:回到 **uniform cell_w 推进**(mono-like).Both kind 共用 `cell_w × n_cells` 作为 advance + slot 宽 — 字符不变形,字距统一.SF Pro 看起来像 SF Pro mono.
+
+真 proportional 需要重写 atlas:per-glyph slot 大小,GlyphInstance size 匹配真 bounding box.留 v2+ atlas refactor.
+
+shell 0.6.27 → 0.6.28;core 0.10.77 → 0.10.78.
 
 ### 0.6.27
 
@@ -595,7 +612,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.77**
+Current: **0.10.78**
+
+### 0.10.78
+
+push_text_run_kind 字符 advance / GlyphInstance slot 回到统一 cell_w(不拉伸).proportional per-glyph 留 v2+ atlas 重写.
 
 ### 0.10.77
 
