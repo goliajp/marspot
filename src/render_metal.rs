@@ -6346,6 +6346,170 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — chrome decoration composite (rounded
+    /// rect + shadow + border).  F3+1.7 fixed the process panel
+    /// modal's BG shadow + border path; lock the rendering so a
+    /// regression(shadow blur clamped / radius drift / border
+    /// over-paint)surfaces on the next snapshot run instead of
+    /// being noticed weeks later as "the panel chrome looks off".
+    ///
+    /// 4 columns × 1 row showcase:
+    ///   1.  Solid rounded rect — minimal modal frame
+    ///   2.  + Shadow blur 12 / offset (0, 4) — F3+1.7 modal
+    ///   3.  + Hairline border on top of shadow — dev panel card
+    ///   4.  Stacked depth — three layered rects with progressive
+    ///       shadow blur (modal-on-modal, popover-on-popover)
+    #[test]
+    fn font_v5_chrome_decoration_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1400;
+        let h_px: u32 = 500;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        use crate::ui::core::{Color, Length, Pt};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        let mut canvas = Canvas::new(
+            2.0,
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        // Page BG — neutral mid so shadows show.
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(28, 30, 36, 1.0))
+            .draw();
+        let panel_fill = Color::rgba(35, 38, 46, 1.0);
+        let border_color = Color::rgba(80, 86, 100, 1.0);
+        let shadow_color = Color::rgba(0, 0, 0, 0.55);
+        let col_w = 140.0;
+        let col_h = 100.0;
+        let col_gap = 30.0;
+        let top_y = 40.0;
+        let label_y = 170.0;
+        let label_color = Color::rgba(170, 178, 195, 1.0);
+        // Col 1 — solid rounded rect.
+        canvas
+            .rect()
+            .at(Length::Pt(40.0), Length::Pt(top_y))
+            .size(Length::Pt(col_w), Length::Pt(col_h))
+            .fill(panel_fill)
+            .radius(Pt(10.0))
+            .draw();
+        canvas
+            .text(Length::Pt(40.0), Length::Pt(label_y), "1. radius")
+            .color(label_color)
+            .draw();
+        // Col 2 — rounded rect with shadow blur.
+        let col2_x = 40.0 + col_w + col_gap;
+        canvas
+            .rect()
+            .at(Length::Pt(col2_x), Length::Pt(top_y))
+            .size(Length::Pt(col_w), Length::Pt(col_h))
+            .fill(panel_fill)
+            .radius(Pt(10.0))
+            .shadow(Pt(12.0), (Pt(0.0), Pt(4.0)), shadow_color)
+            .draw();
+        canvas
+            .text(Length::Pt(col2_x), Length::Pt(label_y), "2. + shadow")
+            .color(label_color)
+            .draw();
+        // Col 3 — rounded rect with shadow AND border (F3+1.7 modal).
+        let col3_x = col2_x + col_w + col_gap;
+        canvas
+            .rect()
+            .at(Length::Pt(col3_x), Length::Pt(top_y))
+            .size(Length::Pt(col_w), Length::Pt(col_h))
+            .fill(panel_fill)
+            .radius(Pt(10.0))
+            .border(Pt(1.0), border_color)
+            .shadow(Pt(12.0), (Pt(0.0), Pt(4.0)), shadow_color)
+            .draw();
+        canvas
+            .text(Length::Pt(col3_x), Length::Pt(label_y), "3. + border")
+            .color(label_color)
+            .draw();
+        // Col 4 — stacked depth (3 rects layered with growing shadow).
+        let col4_x = col3_x + col_w + col_gap;
+        // Back layer — biggest shadow blur,offset down.
+        canvas
+            .rect()
+            .at(Length::Pt(col4_x + 20.0), Length::Pt(top_y))
+            .size(Length::Pt(col_w - 20.0), Length::Pt(col_h - 30.0))
+            .fill(Color::rgba(25, 28, 35, 1.0))
+            .radius(Pt(8.0))
+            .shadow(Pt(20.0), (Pt(0.0), Pt(8.0)), shadow_color)
+            .draw();
+        // Middle layer.
+        canvas
+            .rect()
+            .at(Length::Pt(col4_x + 12.0), Length::Pt(top_y + 12.0))
+            .size(Length::Pt(col_w - 20.0), Length::Pt(col_h - 30.0))
+            .fill(Color::rgba(30, 33, 41, 1.0))
+            .radius(Pt(8.0))
+            .shadow(Pt(14.0), (Pt(0.0), Pt(5.0)), shadow_color)
+            .draw();
+        // Top layer.
+        canvas
+            .rect()
+            .at(Length::Pt(col4_x + 4.0), Length::Pt(top_y + 24.0))
+            .size(Length::Pt(col_w - 20.0), Length::Pt(col_h - 30.0))
+            .fill(Color::rgba(38, 42, 52, 1.0))
+            .radius(Pt(8.0))
+            .border(Pt(1.0), border_color)
+            .shadow(Pt(8.0), (Pt(0.0), Pt(2.0)), shadow_color)
+            .draw();
+        canvas
+            .text(Length::Pt(col4_x), Length::Pt(label_y), "4. depth stack")
+            .color(label_color)
+            .draw();
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                false,
+            )
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_chrome_decoration.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 chrome decoration] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
