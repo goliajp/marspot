@@ -1167,8 +1167,10 @@ impl MetalRenderer {
             &cmd,
             &self.ui_pipeline,
             &self.fg_pipeline,
+            &self.fg_color_pipeline,
             &self.fg_sampler,
             &mut self.atlas,
+            &mut self.color_atlas,
             &self.device,
             &mut self.font,
             Some(MTLClearColor { red: 0.078, green: 0.086, blue: 0.110, alpha: 1.0 }),
@@ -1324,8 +1326,8 @@ impl MetalRenderer {
                 );
                 encode_canvas_into(
                     &canvas, &texture, &cmd,
-                    ui_pipeline, fg_pipeline, fg_sampler,
-                    atlas, device, font,
+                    ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
+                    atlas, color_atlas, device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
                     false,
@@ -1351,8 +1353,10 @@ impl MetalRenderer {
                 &cmd,
                 ui_pipeline,
                 fg_pipeline,
+                fg_color_pipeline,
                 fg_sampler,
                 atlas,
+                color_atlas,
                 device,
                 font,
                 None, // Load — preserve everything below
@@ -1522,8 +1526,8 @@ impl MetalRenderer {
                 );
                 encode_canvas_into(
                     &canvas, target, &cmd,
-                    ui_pipeline, fg_pipeline, fg_sampler,
-                    atlas, device, font,
+                    ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
+                    atlas, color_atlas, device, font,
                     None, &viewport_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
                     false,
@@ -1537,8 +1541,8 @@ impl MetalRenderer {
             );
             encode_canvas_into(
                 &canvas, target, &cmd,
-                ui_pipeline, fg_pipeline, fg_sampler,
-                atlas, device, font,
+                ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
+                atlas, color_atlas, device, font,
                 None, &viewport_px,
                 chrome_cell_w, chrome_cell_h, chrome_ascent,
                 false,
@@ -3831,7 +3835,11 @@ pub(crate) fn push_text_run_kind(
     // legacy entry point keeps the regular-weight (400) default for
     // back-compat callers.
     if kind == FontKind::Ui {
-        push_text_run_ui_shaped(
+        // Legacy entry: no colour atlas / sink in scope, so colour
+        // emoji glyphs fall back to mono alpha silhouettes (the
+        // pre-Phase-7 behaviour).  Chrome calls
+        // `push_text_run_ui_shaped` directly with both atlases.
+        push_text_run_ui_shaped_mono(
             text, x_start, baseline_y, color,
             ascent, atlas_w, atlas_h, 400,
             font, atlas, glyphs,
@@ -3887,8 +3895,13 @@ pub(crate) fn push_text_run_kind(
 /// Phase 5 — `weight` carries the CSS weight (100..900); `400` reuses
 /// the base UI font, other values materialise the variable-font
 /// weight variant on first call.
+/// Phase 7 — mono-only chrome shape path.  Same as
+/// `push_text_run_ui_shaped` but no colour atlas / sink in scope, so
+/// colour-emoji glyphs fall back to the mono atlas (alpha silhouette
+/// — pre-Phase-7 visual).  Used by the legacy `push_text_run_kind`
+/// entry point that pre-dates the canvas colour glyph plumbing.
 #[allow(clippy::too_many_arguments)]
-fn push_text_run_ui_shaped(
+fn push_text_run_ui_shaped_mono(
     text: &str,
     x_start: f32,
     baseline_y: f32,
@@ -3905,9 +3918,6 @@ fn push_text_run_ui_shaped(
     if shaped.is_empty() {
         return;
     }
-    // Pre-round baseline to integer pixel grid so cross-frame chrome
-    // doesn't drift fractionally — matches the mono path's
-    // `baseline_y_q` quantisation.
     let baseline_y_q = baseline_y.round();
     let x_start_floor = x_start.floor() as i32;
     for sg in shaped {
@@ -3916,10 +3926,6 @@ fn push_text_run_ui_shaped(
             font_id: sg.font_id,
             glyph: sg.glyph_id,
             size_q: GlyphKey::size_q_for(ct_font.pt_size()),
-            // Phase 4 — bucket comes from CTLine's float position
-            // (shape_line quantised it).  Atlas hands back a slot
-            // whose ink is pre-shifted by `subpx_x × 0.25 px`, so
-            // origin.x stays integer.
             subpx_x: sg.subpx_x,
             flags: GlyphKey::FLAG_SMOOTH,
         };
@@ -3933,6 +3939,86 @@ fn push_text_run_ui_shaped(
             size,
             uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
             uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+            color,
+        });
+    }
+    let _ = ascent;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_text_run_ui_shaped(
+    text: &str,
+    x_start: f32,
+    baseline_y: f32,
+    color: [f32; 4],
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    color_atlas_w: f32,
+    color_atlas_h: f32,
+    weight: u16,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+    color_glyphs: &mut Vec<GlyphInstance>,
+) {
+    let shaped = font.shape_ui_weighted(text, weight);
+    if shaped.is_empty() {
+        return;
+    }
+    // Pre-round baseline to integer pixel grid so cross-frame chrome
+    // doesn't drift fractionally — matches the mono path's
+    // `baseline_y_q` quantisation.
+    let baseline_y_q = baseline_y.round();
+    let x_start_floor = x_start.floor() as i32;
+    for sg in shaped {
+        // Phase 7 — colour vs mono routing.  CT may have fallen back
+        // to Apple Color Emoji for any glyph in the run; rasterising
+        // those into the R8 atlas would emit an alpha silhouette
+        // (no colour) so the caller would see a black emoji shape.
+        // Routing to `color_atlas` (BGRA8) emits real colours, and
+        // the matching `fg_color_pipeline` pass blends them in
+        // submission order with the mono runs.
+        let is_color = font.is_color_font(sg.font_id as usize);
+        let ct_font = font.font(sg.font_id as usize).clone();
+        let key = GlyphKey {
+            font_id: sg.font_id,
+            glyph: sg.glyph_id,
+            size_q: GlyphKey::size_q_for(ct_font.pt_size()),
+            // Phase 4 — bucket comes from CTLine's float position
+            // (shape_line quantised it).  Atlas hands back a slot
+            // whose ink is pre-shifted by `subpx_x × 0.25 px`, so
+            // origin.x stays integer.
+            subpx_x: sg.subpx_x,
+            flags: GlyphKey::FLAG_SMOOTH,
+        };
+        let (entry_opt, aw, ah, sink): (Option<AtlasEntry>, f32, f32, &mut Vec<GlyphInstance>) =
+            if is_color {
+                (
+                    color_atlas.get_or_rasterize_natural(key, &ct_font),
+                    color_atlas_w,
+                    color_atlas_h,
+                    color_glyphs,
+                )
+            } else {
+                (
+                    atlas.get_or_rasterize_natural(key, &ct_font),
+                    atlas_w,
+                    atlas_h,
+                    glyphs,
+                )
+            };
+        let Some(entry) = entry_opt else {
+            continue;
+        };
+        let pen_x = (x_start_floor + sg.pen_x_px) as f32;
+        let (origin, size) = entry.quad(pen_x, baseline_y_q);
+        sink.push(GlyphInstance {
+            origin,
+            size,
+            uv0: [entry.u0 as f32 / aw, entry.v0 as f32 / ah],
+            uv1: [entry.u1 as f32 / aw, entry.v1 as f32 / ah],
             color,
         });
     }
@@ -5203,6 +5289,10 @@ fn ui_rect_instance_from_line(l: &crate::ui::core::canvas::LinePrim) -> UiRectIn
 enum CanvasRunKind {
     UiRect,
     Glyph,
+    /// Phase 7 — colour-emoji glyph run.  Drawn through the
+    /// `fg_color_pipeline` sampling the BGRA `color_atlas` so the
+    /// glyph emits real colours rather than alpha-only silhouette.
+    ColorGlyph,
 }
 
 struct CanvasRun {
@@ -5226,10 +5316,14 @@ fn build_canvas_runs(
     ascent: f32,
     atlas_w_f: f32,
     atlas_h_f: f32,
+    color_atlas_w_f: f32,
+    color_atlas_h_f: f32,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
     out_ui: &mut Vec<UiRectInstance>,
     out_glyphs: &mut Vec<GlyphInstance>,
+    out_color_glyphs: &mut Vec<GlyphInstance>,
     ui_font: bool,
 ) -> Vec<CanvasRun> {
     use crate::ui::core::canvas::Primitive;
@@ -5257,14 +5351,10 @@ fn build_canvas_runs(
                 cur = Some(CanvasRunKind::UiRect);
             }
             Primitive::Text(t) => {
-                let before = out_glyphs.len();
-                // The renderer's existing chrome-text path puts the
-                // anchor at the BASELINE; canvas treats it as
-                // top-left.  Convert: baseline_y = anchor_y +
-                // ascent.
+                let mono_before = out_glyphs.len();
+                let color_before = out_color_glyphs.len();
                 let baseline_y = t.y as f32 + ascent;
                 if ui_font {
-                    // Phase 5 — chrome path honours TextPrim.weight.
                     push_text_run_ui_shaped(
                         &t.content,
                         t.x as f32,
@@ -5272,8 +5362,9 @@ fn build_canvas_runs(
                         t.color.to_rgba_f32(),
                         ascent,
                         atlas_w_f, atlas_h_f,
+                        color_atlas_w_f, color_atlas_h_f,
                         t.weight,
-                        font, atlas, out_glyphs,
+                        font, atlas, color_atlas, out_glyphs, out_color_glyphs,
                     );
                 } else {
                     push_text_run_kind(
@@ -5287,10 +5378,25 @@ fn build_canvas_runs(
                         FontKind::Terminal,
                     );
                 }
-                let added = out_glyphs.len() - before;
-                if added > 0 {
-                    bump(&mut runs, CanvasRunKind::Glyph, added);
+                // Phase 7 — the shape path can interleave mono +
+                // colour glyphs in a single TextPrim (LTR Latin then
+                // a fallback 👍 then more Latin).  We collapse to ONE
+                // run per kind here: all of this text's mono glyphs
+                // go in a `Glyph` run, all of its colour glyphs go in
+                // a `ColorGlyph` run.  Submission-order within each
+                // sink is preserved, and visually identical pixels
+                // because the mono FG pass and the colour FG pass
+                // composite to the same target with the same
+                // pre-multiplied blend.
+                let mono_added = out_glyphs.len() - mono_before;
+                if mono_added > 0 {
+                    bump(&mut runs, CanvasRunKind::Glyph, mono_added);
                     cur = Some(CanvasRunKind::Glyph);
+                }
+                let color_added = out_color_glyphs.len() - color_before;
+                if color_added > 0 {
+                    bump(&mut runs, CanvasRunKind::ColorGlyph, color_added);
+                    cur = Some(CanvasRunKind::ColorGlyph);
                 }
             }
         }
@@ -5309,8 +5415,10 @@ pub fn encode_canvas_into(
     cmd: &ProtocolObject<dyn MTLCommandBuffer>,
     ui_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+    fg_color_pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
     fg_sampler: &ProtocolObject<dyn MTLSamplerState>,
     atlas: &mut GlyphAtlas,
+    color_atlas: &mut GlyphAtlas,
     device: &ProtocolObject<dyn MTLDevice>,
     font: &mut FontCache,
     clear_color: Option<MTLClearColor>,
@@ -5323,19 +5431,25 @@ pub fn encode_canvas_into(
     let (aw, ah) = atlas.dims();
     let atlas_w_f = aw as f32;
     let atlas_h_f = ah as f32;
+    let (caw, cah) = color_atlas.dims();
+    let color_atlas_w_f = caw as f32;
+    let color_atlas_h_f = cah as f32;
     let mut ui_buf: Vec<UiRectInstance> = Vec::new();
     let mut gl_buf: Vec<GlyphInstance> = Vec::new();
+    let mut color_gl_buf: Vec<GlyphInstance> = Vec::new();
     let runs = build_canvas_runs(
         canvas,
         chrome_cell_w, chrome_cell_h, chrome_ascent,
         atlas_w_f, atlas_h_f,
-        font, atlas,
-        &mut ui_buf, &mut gl_buf,
+        color_atlas_w_f, color_atlas_h_f,
+        font, atlas, color_atlas,
+        &mut ui_buf, &mut gl_buf, &mut color_gl_buf,
         ui_font,
     );
 
     let mut ui_cursor = 0usize;
     let mut gl_cursor = 0usize;
+    let mut color_gl_cursor = 0usize;
     let mut first_pass = true;
     let viewport_ptr = NonNull::new(viewport_px.as_ptr() as *mut c_void).unwrap();
     let viewport_len = std::mem::size_of::<[f32; 2]>();
@@ -5393,6 +5507,27 @@ pub fn encode_canvas_into(
                 }
                 gl_cursor += run.count;
             }
+            CanvasRunKind::ColorGlyph => {
+                // Phase 7 — colour-emoji pass: same vertex shader as
+                // mono, different pipeline (`fg_color_pipeline`) so
+                // the fragment shader samples the BGRA atlas and
+                // outputs premultiplied colour instead of tinting
+                // by the per-cell `color` field.
+                enc.setRenderPipelineState(fg_color_pipeline);
+                let slice = &color_gl_buf[color_gl_cursor..color_gl_cursor + run.count];
+                let buf = make_instance_buffer(device, glyphs_as_bytes(slice));
+                if let Some(b) = &buf {
+                    unsafe { enc.setVertexBuffer_offset_atIndex(Some(b), 0, 0) };
+                }
+                unsafe {
+                    enc.setFragmentTexture_atIndex(Some(color_atlas.texture()), 0);
+                    enc.setFragmentSamplerState_atIndex(Some(fg_sampler), 0);
+                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                        MTLPrimitiveType::Triangle, 0, 6, run.count,
+                    );
+                }
+                color_gl_cursor += run.count;
+            }
         }
         enc.endEncoding();
     }
@@ -5429,8 +5564,8 @@ impl MetalRenderer {
     ) {
         encode_canvas_into(
             canvas, target, cmd,
-            &self.ui_pipeline, &self.fg_pipeline, &self.fg_sampler,
-            &mut self.atlas, &self.device, &mut self.font,
+            &self.ui_pipeline, &self.fg_pipeline, &self.fg_color_pipeline, &self.fg_sampler,
+            &mut self.atlas, &mut self.color_atlas, &self.device, &mut self.font,
             clear_color, viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
             false,
@@ -6283,10 +6418,12 @@ mod tests {
         };
         let mut ui = Vec::new();
         let mut gl = Vec::new();
+        let mut color_gl = Vec::new();
         let runs = build_canvas_runs(
-            &canvas, 48.0, 12.0, 9.0, 256.0, 256.0,
-            &mut renderer.font, &mut renderer.atlas,
-            &mut ui, &mut gl,
+            &canvas, 48.0, 12.0, 9.0,
+            256.0, 256.0, 256.0, 256.0,
+            &mut renderer.font, &mut renderer.atlas, &mut renderer.color_atlas,
+            &mut ui, &mut gl, &mut color_gl,
             false,
         );
         // Expected sequence: UiRect (2 rects) → Glyph (text) →
