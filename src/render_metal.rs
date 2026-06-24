@@ -5844,6 +5844,118 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — chrome CJK fallback baseline alignment.
+    /// SF Pro doesn't ship CJK glyphs;  CoreText falls back through
+    /// `PingFang SC` (Simplified Chinese) → `Hiragino Sans` /
+    /// `Hiragino Mincho` (Japanese) → `Apple SD Gothic Neo` (Korean)
+    /// per-cluster.  When per-glyph baseline / ascent differ across
+    /// fonts, mixed-script lines drift — Latin + CJK on the same row
+    /// no longer share the same writing baseline, and the eye reads
+    /// it as "this looks wonky".  At chrome small sizes (11-13pt) the
+    /// drift is sub-pixel and easy to miss;  at large sizes the drift
+    /// scales linearly with size.  Lock the alignment fingerprint at
+    /// 24pt + 36pt so any future fallback-chain reorder or font
+    /// metrics re-sync surfaces as an SSIM hit.
+    #[test]
+    fn font_v5_cjk_fallback_baseline_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1400;
+        let h_px: u32 = 600;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        // Each row mixes Latin (SF Pro) with the three CJK regions
+        // back-to-back.  Vertical scan tells you whether the four
+        // baselines stay aligned across the size + weight combo.
+        // 36pt locks coarse drift;  24pt + 18pt covers the rest of
+        // the body-text range.
+        let rows: &[(f64, u16, &str)] = &[
+            (36.0, 600, "Hello 你好 こんにちは 안녕"),
+            (24.0, 400, "Hello 你好 こんにちは 안녕 — mixed baseline"),
+            (24.0, 700, "Bold 你好 こんにちは 안녕 — bold mix"),
+            (18.0, 400, "18pt mixed 中文 + English + 日本語 + 한국어"),
+            (18.0, 400, "Mac 偏好设定 · Mac の環境設定 · Mac 환경설정"),
+        ];
+        use crate::ui::core::{Color, Length};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::font_shape::ShapeOptions;
+        let mut canvas = Canvas::new(
+            2.0,
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        let pad_x_pt = 20.0;
+        // First row is 36 pt — ascent eats ~30 pt above the baseline,
+        // so start the cursor ~36 pt down or the top of "Hello" gets
+        // clipped at the image edge.
+        let mut y_pt = 36.0;
+        let opts = ShapeOptions::full();
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(15, 18, 23, 1.0))
+            .draw();
+        let fg = Color::rgba(220, 224, 235, 1.0);
+        for (pt, weight, line) in rows.iter() {
+            let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .color(fg)
+                .ui()
+                .ui_size_q(size_q)
+                .weight(*weight)
+                .opts(opts)
+                .draw();
+            // Row gap proportional to size so 36pt + 24pt + 18pt
+            // pack into 600 px without overlap.
+            y_pt += pt * 1.4;
+        }
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                true, // ui_font=true — SF Pro path
+            )
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_cjk_fallback_baseline.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 cjk fallback baseline] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
