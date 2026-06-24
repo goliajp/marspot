@@ -28,4 +28,5 @@ MARSPOT_FONT_SNAPSHOT=check cargo nextest run -p marspot --lib \
   font_v5_chrome_small_sizes_snapshot \
   font_v5_cjk_fallback_baseline_snapshot \
   font_v5_emoji_color_snapshot \
+  font_v5_opentype_opts_snapshot \
   2>&1 | grep -E "^\[ssim\]|^\[font v5|PASS|FAIL|Summary|error"
