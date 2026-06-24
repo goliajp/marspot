@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.39"  # font v5 Phase 8 — ShapeOptions per-context OpenType 开关.font_shape 加 ShapeOptions { kerning, liga, calt, contextual } + 3 presets(full/code/all_off).shape_line 加 opts 参,liga=false → kCTLigatureAttributeName=0(其他三 bit 占位,需 font-feature-settings dict,Phase 8 不动).ShapeCache.ShapeKey 加 opts_bits(u8),让同字体同 size 不同 opts 各占缓存槽.FontCache 加 `shape_ui_weighted_opts(text, weight, opts)`,旧 shape_ui / shape_ui_weighted 改 wrap full().新测 shape_opts_off_drops_ligature(fi/fl liga off 不减少 glyph) + shape_cache_distinguishes_opts(同字符不同 opts 各 miss 一次).chrome path 默认 full(行为不变),PTY mono path 不走 shape_line(等效 all_off).全 237 lib 测试 PASS(+2).
-core    = "0.10.89"
+shell   = "0.6.40"  # font v5 Phase 9 (minimal) — 性能特征化测试.新 2 个 Phase 9 perf 测试:`shape_warm_cache_beats_cold_shape`(6 chrome strings 冷 / 暖 ShapeCache 时延 median,松紧 5 ms / 1 ms 兜底)+ `raster_warm_cache_beats_cold_raster`(16 ASCII 冷 / 暖 atlas raster 时延 median,5 ms / 50 µs 兜底).实测远低 spec 红线(spec: 冷 raster < 500 µs/字 / 暖 cache < 100 ns/字 / shape/frame < 1 ms),本机实测 shape 冷 32 µs / 暖 0 µs;atlas 冷 19 µs / 暖 125 ns.新 `bin/font-bench.sh` grep `[font v5]` tag 让 dev 看 median 不打开测试输出.12-string × PNG × SSIM ≥ 0.98 视觉回归矩阵延后(需 baseline PNG store + 跨机复现方案).全 239 lib 测试 PASS(+2).
+core    = "0.10.90"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

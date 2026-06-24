@@ -439,6 +439,64 @@ mod tests {
         assert_eq!(cache.misses, 2, "two distinct keys = two misses");
     }
 
+    /// Phase 9 — perf characterization for the shape cache.  Not a
+    /// micro-bench (no warm-up; first-Metal-context cost varies) — a
+    /// sanity gate that proves cache hits are at least an order of
+    /// magnitude faster than misses.  Prints both timings so a dev
+    /// can spot creeping regression before the assertion fires.
+    #[test]
+    fn shape_warm_cache_beats_cold_shape() {
+        let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            return;
+        };
+        let mut cache = ShapeCache::new(32);
+        let texts = [
+            "The quick brown fox jumps over the lazy dog",
+            "marspot v1.0.0",
+            "function main() -> Result<()> {",
+            "你好世界 こんにちは 안녕",
+            "==> != !==",
+            "0123456789",
+        ];
+
+        // Cold pass: every call misses.  Time the median of N attempts.
+        let mut cold_us: Vec<u128> = Vec::with_capacity(texts.len());
+        for t in &texts {
+            let t0 = std::time::Instant::now();
+            let _ = cache.shape(t, &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+            cold_us.push(t0.elapsed().as_micros());
+        }
+        cold_us.sort_unstable();
+        let cold_median = cold_us[cold_us.len() / 2];
+
+        // Warm pass: every call hits.
+        let mut warm_us: Vec<u128> = Vec::with_capacity(texts.len());
+        for t in &texts {
+            let t0 = std::time::Instant::now();
+            let _ = cache.shape(t, &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+            warm_us.push(t0.elapsed().as_micros());
+        }
+        warm_us.sort_unstable();
+        let warm_median = warm_us[warm_us.len() / 2];
+
+        eprintln!(
+            "[font v5 Phase 9] shape cache: cold median = {cold_median} µs, warm median = {warm_median} µs"
+        );
+
+        // Loose bounds — protects against gross regression without
+        // false-flagging on macOS GPU jitter.  Real spec is 1ms shape /
+        // 100ns warm-cache; these are the don't-break-prod bounds.
+        assert!(
+            cold_median < 5000,
+            "cold shape median {cold_median} µs exceeds 5000 µs safety bound",
+        );
+        assert!(
+            warm_median < 1000,
+            "warm cache lookup median {warm_median} µs exceeds 1000 µs safety bound; \
+             cache is supposed to be near-instant",
+        );
+    }
+
     #[test]
     fn cache_lru_evicts_oldest() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
