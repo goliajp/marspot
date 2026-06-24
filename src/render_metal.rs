@@ -5602,6 +5602,116 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — sub-pixel positioning fingerprint.
+    /// Phase 4 quantises every CTLine pen-x to one of 4 buckets
+    /// (`subpx_x ∈ 0..4`) so the atlas can reuse a single bitmap
+    /// across pixel-aligned and 0.25/0.5/0.75-shifted positions.
+    /// A regression on either side of that quantisation (bucket
+    /// miscalc → wrong slot, or atlas slot wrong-shifted) shows up
+    /// as character bleed on dense glyph runs:  `iiii` smears,
+    /// `lll` blends, `AVAV` kerning floats.  Lock the rendered
+    /// fingerprint here so the regression surfaces as an SSIM drop
+    /// at `bin/font-snapshot-check.sh` instead of a user-reported
+    /// "fonts look slightly off" two months later.
+    ///
+    /// Mono Monaco only — chrome SF Pro path's subpx fingerprint is
+    /// covered as a row inside `font_v5_showcase_snapshot`.
+    #[test]
+    fn font_v5_subpx_fingerprint_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1000;
+        let h_px: u32 = 500;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        // Each line stresses a different sub-pixel scenario:
+        //   L1 — dense vertical-stem runs (`iiii lll`): atlas slot
+        //        x-shift errors show up as inter-glyph bleed.
+        //   L2 — wide-kerned letter pairs that ride sub-pixel
+        //        boundaries (`AV WA Yo Ta`).
+        //   L3 — narrow latin + punctuation (`!?,.;:`) — typical
+        //        dense punctuation in code / log output.
+        //   L4 — same letters repeated at varying counts to exercise
+        //        every bucket cell-by-cell (`a aa aaa aaaa`).
+        //   L5 — mixed slot widths via CJK fullwidth (`你好` ≡ 2
+        //        cells each), pinning bucket transitions across the
+        //        cluster boundary.
+        let lines = [
+            "iiiiii  lllll  IIIIII  !!!!!!",
+            "AVAVAV  WAWA  YoYoYo  TaTa  fifi",
+            "Code: foo(bar, baz);  !?,.;:  /* x */",
+            "a aa aaa aaaa aaaaa aaaaaa aaaaaaa",
+            "你好 世界 こんにちは 안녕 a b c",
+        ];
+        use crate::ui::core::{Color, Length};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        let mut canvas = Canvas::new(
+            2.0,
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        let line_h_pt = (chrome_cell_h as f64 * 1.6) / 2.0;
+        let pad_x_pt = 20.0;
+        let pad_y_pt = 16.0;
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(15, 18, 23, 1.0))
+            .draw();
+        let fg = Color::rgba(220, 224, 235, 1.0);
+        for (i, line) in lines.iter().enumerate() {
+            let y_pt = pad_y_pt + (i as f64) * line_h_pt;
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .color(fg)
+                .draw();
+        }
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                false,
+            )
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_subpx_fingerprint.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 subpx fingerprint] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
