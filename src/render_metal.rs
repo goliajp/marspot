@@ -5328,8 +5328,12 @@ mod tests {
             visible: true,
             origin_pt: (0.0, 0.0),
             size_pt: (420.0, 520.0),
-            active_tab: crate::ui::components::dev_panel::TAB_UI,
-            active_section: crate::ui::components::dev_panel::SECTION_FONT_V5,
+            // Post-2026-06-25 hierarchy:Font v5 moved out of UI tab
+            // into its own Font tab.  Snapshot renders the Font tab
+            // with showcase active so the menu highlight + content
+            // both line up on the same section.
+            active_tab: crate::ui::components::dev_panel::TAB_FONT,
+            active_section: crate::ui::components::dev_panel::SECTION_FONT_V5_SHOWCASE,
             scale: 2.0,
         };
         let measure = crate::chrome_measure::ChromeMeasure::new(

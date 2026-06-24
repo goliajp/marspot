@@ -78,11 +78,9 @@ pub fn hit_test(
         }
         return None;
     }
-    // Left menu — only when we're on the UI tab; other tabs don't
-    // render the menu so a click there shouldn't switch sections.
-    if state.active_tab != TAB_UI {
-        return None;
-    }
+    // Left menu — data-driven from `TAB_MENUS`.  Tabs whose menu has
+    // no `Item` rows skip the menu render (placeholder fallback), so
+    // a click in the menu band on such a tab returns None.
     if x_pt < MENU_W_PT && y_pt >= TAB_BAR_H_PT {
         let body_y = TAB_BAR_H_PT;
         let local_y = y_pt - body_y - MENU_TOP_PAD_PT;
@@ -164,24 +162,6 @@ pub const SECTION_UI_PRIMITIVES_TEXT:  usize = 0x00_03_03;
 
 // ──────────────────── Font tab ────────────────────
 pub const SECTION_FONT_V5_SHOWCASE: usize = 0x01_01_01;
-
-// ──────────────────── Back-compat aliases ────────────────────
-//
-// 旧名字 → 新名字.外部 hit-test / persistence 还可能用老 id,
-// 保留别名让升级路径无声(下一轮 review 把 caller 全换后再删).
-pub const SECTION_MODEL: usize    = SECTION_UI_FOUNDATION_MODEL;
-pub const SECTION_L1: usize       = SECTION_UI_FOUNDATION_L1;
-pub const SECTION_L2: usize       = SECTION_UI_FOUNDATION_L2;
-pub const SECTION_L3: usize       = SECTION_UI_FOUNDATION_L3;
-pub const SECTION_L4: usize       = SECTION_UI_FOUNDATION_L4;
-pub const SECTION_L5: usize       = SECTION_UI_FOUNDATION_L5;
-pub const SECTION_L6: usize       = SECTION_UI_FOUNDATION_L6;
-pub const SECTION_COLORS: usize   = SECTION_UI_TOKENS_COLORS;
-pub const SECTION_UNITS: usize    = SECTION_UI_TOKENS_UNITS;
-pub const SECTION_RECTS: usize    = SECTION_UI_PRIMITIVES_RECTS;
-pub const SECTION_LINES: usize    = SECTION_UI_PRIMITIVES_LINES;
-pub const SECTION_TEXT: usize     = SECTION_UI_PRIMITIVES_TEXT;
-pub const SECTION_FONT_V5: usize  = SECTION_FONT_V5_SHOWCASE;
 
 // ──────────────────── Menu structure ────────────────────
 //
@@ -275,7 +255,7 @@ impl Default for DevPanelState {
             // Model first — it's the mental-model overview the rest
             // of the sections individually demo.  Fresh open reads as
             // "what is this thing" rather than "here are some swatches".
-            active_section: SECTION_MODEL,
+            active_section: SECTION_UI_FOUNDATION_MODEL,
             scale: 2.0,
         }
     }
@@ -390,9 +370,17 @@ pub fn build_dev_panel_canvas(
     .stroke(Pt(1.0), tokens::DIVIDER)
     .draw();
 
-    // Only the UI tab is populated for now — Tokens / Components are
-    // placeholder labels showing the strip's shape.
-    if state.active_tab != TAB_UI {
+    // Tabs that have at least one clickable `Item` render the
+    // menu + content path;  tabs with only a `Header`(or empty)
+    // fall through to a placeholder so the strip's shape stays
+    // visible without random empty space lying about emptiness.
+    let active_tab_rows: &[MenuRow] = TAB_MENUS
+        .iter()
+        .find(|(tab, _)| *tab == state.active_tab)
+        .map(|(_, r)| *r)
+        .unwrap_or(&[]);
+    let has_items = active_tab_rows.iter().any(|r| matches!(r, MenuRow::Item(_, _)));
+    if !has_items {
         canvas.text(
             Length::Pt(20.0),
             Length::Pt(tab_bar_h + 24.0),
@@ -403,7 +391,7 @@ pub fn build_dev_panel_canvas(
         return canvas;
     }
 
-    // ─── UI tab: left menu + right content ─────────────────────
+    // ─── Tab body: left menu + right content ───────────────────
     let body_y = tab_bar_h;
 
     // Left menu BG.
@@ -496,34 +484,34 @@ pub fn build_dev_panel_canvas(
     };
 
     match state.active_section {
-        SECTION_MODEL => render_view_section(&mut canvas, "v3 Model — overview", build_model_view()),
-        SECTION_L1    => render_view_section(&mut canvas, "L1 — Foundation",     build_l1_view()),
-        SECTION_L2    => render_view_section(&mut canvas, "L2 — Box Model",      build_l2_view()),
-        SECTION_L3    => render_view_section(&mut canvas, "L3 — Primitives",     build_l3_view()),
-        SECTION_L4    => render_view_section(&mut canvas, "L4 — Layout",         build_l4_view()),
-        SECTION_L5    => render_view_section(&mut canvas, "L5 — Components",     build_l5_view()),
-        SECTION_L6    => render_view_section(&mut canvas, "L6 — Cross-cutting",  build_l6_view()),
-        SECTION_COLORS => {
+        SECTION_UI_FOUNDATION_MODEL => render_view_section(&mut canvas, "v3 Model — overview", build_model_view()),
+        SECTION_UI_FOUNDATION_L1    => render_view_section(&mut canvas, "L1 — Foundation",     build_l1_view()),
+        SECTION_UI_FOUNDATION_L2    => render_view_section(&mut canvas, "L2 — Box Model",      build_l2_view()),
+        SECTION_UI_FOUNDATION_L3    => render_view_section(&mut canvas, "L3 — Primitives",     build_l3_view()),
+        SECTION_UI_FOUNDATION_L4    => render_view_section(&mut canvas, "L4 — Layout",         build_l4_view()),
+        SECTION_UI_FOUNDATION_L5    => render_view_section(&mut canvas, "L5 — Components",     build_l5_view()),
+        SECTION_UI_FOUNDATION_L6    => render_view_section(&mut canvas, "L6 — Cross-cutting",  build_l6_view()),
+        SECTION_UI_TOKENS_COLORS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Colors");
             let _ = draw_colors_sample(&mut canvas, content_x, y, cell_w_pt);
         }
-        SECTION_UNITS => {
+        SECTION_UI_TOKENS_UNITS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Units");
             let _ = draw_units_sample(&mut canvas, content_x, y);
         }
-        SECTION_RECTS => {
+        SECTION_UI_PRIMITIVES_RECTS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Rects");
             let _ = draw_rects_sample(&mut canvas, content_x, y);
         }
-        SECTION_LINES => {
+        SECTION_UI_PRIMITIVES_LINES => {
             let y = draw_section_header(&mut canvas, content_x, y, "Lines");
             let _ = draw_lines_sample(&mut canvas, content_x, y);
         }
-        SECTION_TEXT => {
+        SECTION_UI_PRIMITIVES_TEXT => {
             let y = draw_section_header(&mut canvas, content_x, y, "Text");
             let _ = draw_text_sample(&mut canvas, content_x, y);
         }
-        SECTION_FONT_V5 => {
+        SECTION_FONT_V5_SHOWCASE => {
             // Skip the legacy Monaco-mono `draw_section_header` —
             // `build_font_v5_view` ships its own SF Pro title so the
             // whole section reads as one font hierarchy.
@@ -1166,13 +1154,13 @@ pub const DEV_PANEL_MODEL_SCROLL_ID: crate::ui::view::ViewId =
 pub fn scroll_id_for_section(active: usize) -> crate::ui::view::ViewId {
     use crate::ui::view::ViewId;
     match active {
-        SECTION_L1 => ViewId(0xDE7_0010),
-        SECTION_L2 => ViewId(0xDE7_0020),
-        SECTION_L3 => ViewId(0xDE7_0030),
-        SECTION_L4 => ViewId(0xDE7_0040),
-        SECTION_L5 => ViewId(0xDE7_0050),
-        SECTION_L6 => ViewId(0xDE7_0060),
-        _          => DEV_PANEL_MODEL_SCROLL_ID,
+        SECTION_UI_FOUNDATION_L1 => ViewId(0xDE7_0010),
+        SECTION_UI_FOUNDATION_L2 => ViewId(0xDE7_0020),
+        SECTION_UI_FOUNDATION_L3 => ViewId(0xDE7_0030),
+        SECTION_UI_FOUNDATION_L4 => ViewId(0xDE7_0040),
+        SECTION_UI_FOUNDATION_L5 => ViewId(0xDE7_0050),
+        SECTION_UI_FOUNDATION_L6 => ViewId(0xDE7_0060),
+        _ => DEV_PANEL_MODEL_SCROLL_ID,
     }
 }
 
@@ -2340,7 +2328,7 @@ mod tests {
         let s = DevPanelState::default();
         assert!(s.visible);
         assert_eq!(s.active_tab, TAB_UI);
-        assert_eq!(s.active_section, SECTION_MODEL);
+        assert_eq!(s.active_section, SECTION_UI_FOUNDATION_MODEL);
         assert!(s.size_pt.0 > 200.0);
         assert!(s.size_pt.1 > 200.0);
     }
