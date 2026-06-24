@@ -5712,6 +5712,138 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — chrome SF Pro at small point sizes.
+    /// `font_v5_showcase_snapshot` already covers the SF Pro path
+    /// at production sizes (TITLE=22 / H=15 / BODY=13 / EMOJI=20),
+    /// but the riskiest regressions in chrome rendering hit small
+    /// type:  11–13 pt is where sub-pixel AA, hinting, and the
+    /// Monaco fallback for tiny ASCII all sit on knife edges.  Tab
+    /// strips, sidebar labels, status badges all live here, and a
+    /// silent drift surfaces as "fonts feel off" weeks after the
+    /// fact — exactly the regression class an SSIM gate catches
+    /// for free.
+    ///
+    /// One column per size (11 / 12 / 13 / 14 pt), each rendering
+    /// the same ASCII + CJK + emoji line so the eye can scan
+    /// vertically for cell-pitch / x-height drift.
+    #[test]
+    fn font_v5_chrome_small_sizes_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1200;
+        let h_px: u32 = 600;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        // For each row we render at a different sub-13-pt size via
+        // `Text::ui(size_pt, weight, opts)` so the SF Pro variable-
+        // weight pipeline + CTLine shape + GlyphAtlas natural-bbox
+        // raster all line up against the size_q bucket.  Sample
+        // string mixes ASCII + CJK + ligature pair so each row
+        // probes a different worry per size:
+        let lines: &[(f64, &str)] = &[
+            (11.0, "11pt  The quick brown fox jumps  你好  fi fl  ⌘C"),
+            (12.0, "12pt  The quick brown fox jumps  你好  fi fl  ⌘C"),
+            (13.0, "13pt  The quick brown fox jumps  你好  fi fl  ⌘C"),
+            (14.0, "14pt  The quick brown fox jumps  你好  fi fl  ⌘C"),
+        ];
+        use crate::ui::core::{Color, Length};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::font_shape::ShapeOptions;
+        let mut canvas = Canvas::new(
+            2.0,
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        let pad_x_pt = 20.0;
+        let pad_y_pt = 16.0;
+        let line_gap_pt = 28.0;
+        let opts = ShapeOptions::full();
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(15, 18, 23, 1.0))
+            .draw();
+        let fg = Color::rgba(220, 224, 235, 1.0);
+        for (i, (pt, line)) in lines.iter().enumerate() {
+            let y_pt = pad_y_pt + (i as f64) * line_gap_pt;
+            let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .color(fg)
+                .ui()
+                .ui_size_q(size_q)
+                .weight(400)
+                .opts(opts)
+                .draw();
+        }
+        // Trailing block: 100/400/700/900 weight stack at 12pt so
+        // variable-weight drift (one variant slipped out of cache)
+        // also shows up here, not just in the big showcase.
+        let weight_rows: &[(u16, &str)] = &[
+            (100, "12pt w100  The quick brown fox jumps"),
+            (400, "12pt w400  The quick brown fox jumps"),
+            (700, "12pt w700  The quick brown fox jumps"),
+            (900, "12pt w900  The quick brown fox jumps"),
+        ];
+        let weight_size_q = crate::glyph_atlas::GlyphKey::size_q_for(12.0);
+        let weight_pad_y_pt = pad_y_pt + (lines.len() as f64) * line_gap_pt + 16.0;
+        for (i, (w, line)) in weight_rows.iter().enumerate() {
+            let y_pt = weight_pad_y_pt + (i as f64) * 22.0;
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .color(fg)
+                .ui()
+                .ui_size_q(weight_size_q)
+                .weight(*w)
+                .opts(opts)
+                .draw();
+        }
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                true, // ui_font=true — emit SF Pro path
+            )
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_chrome_small_sizes.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 chrome small sizes] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
