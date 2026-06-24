@@ -90,58 +90,149 @@ pub fn hit_test(
             return None;
         }
         let idx = (local_y / MENU_ROW_H_PT).floor() as usize;
-        if idx < SECTION_LABELS.len() {
-            return Some(DevPanelHit::Section(SECTION_LABELS[idx].1));
+        // Iterate the active tab's menu and pick the idx-th *Item*
+        // (Header rows occupy display rows but aren't clickable).
+        let rows = TAB_MENUS
+            .iter()
+            .find(|(tab, _)| *tab == state.active_tab)
+            .map(|(_, r)| *r)
+            .unwrap_or(&[]);
+        if let Some(MenuRow::Item(_, sid)) = rows.get(idx) {
+            return Some(DevPanelHit::Section(*sid));
         }
     }
     None
 }
 
-/// Tab identifiers — used by `state.active_tab` as an integer.
-/// Keep this list small; "UI" is the only one actually populated
-/// in this commit, the others are placeholders so the tab strip
-/// renders a realistic shape.
-pub const TAB_UI: usize = 0;
-pub const TAB_TOKENS: usize = 1;
-pub const TAB_COMPONENTS: usize = 2;
+/// ## DevPanel 层级模型(2026-06-25 重写)
+///
+/// 3-level strict hierarchy:
+///   DevPanel(root)
+///     └── Tab(top horizontal strip,e.g. UI / Font / Render / Sessions)
+///         └── SubGroup(left menu 标签头,e.g. Foundation / Tokens / Primitives)
+///             └── Item(可点的内容入口,e.g. Colors / Rects / Font v5)
+///
+/// 之前 `Tokens` / `Components` 是平级 top Tab,但二者都是 UI 系统
+/// 内部的产物 — 现在降级成 UI Tab 内的 SubGroup.Font v5 之前在
+/// UI/Items 里挤着,现独立成 Font Tab 因为字体系统是与 UI 系统
+/// 平行的 concern(影响 PTY render path,不只是 chrome).
+///
+/// `state.active_tab` 是 Tab id;`state.active_section` 是 Item id
+/// (跨 Tab 全局唯一,Item id 编码:`(tab_id << 16) | (subgroup_id << 8) | item_id`).
+///
+/// 实际 SECTION_* 常量为了 readability 直接列出有意义的数值;
+/// SubGroup id 都是 `(tab_id << 16) | (subgroup_id << 8)`(item_id=0
+/// 标示"SubGroup 头",不直接 select).
+
+// ──────────────────── Top Tab ids ────────────────────
+pub const TAB_UI: usize        = 0x00;
+pub const TAB_FONT: usize      = 0x01;
+pub const TAB_RENDER: usize    = 0x02;
+pub const TAB_SESSIONS: usize  = 0x03;
 const TAB_LABELS: &[(&str, usize)] = &[
-    ("UI", TAB_UI),
-    ("Tokens", TAB_TOKENS),
-    ("Components", TAB_COMPONENTS),
+    ("UI",        TAB_UI),
+    ("Font",      TAB_FONT),
+    ("Render",    TAB_RENDER),
+    ("Sessions",  TAB_SESSIONS),
 ];
 
-/// Section anchors within the UI tab's left menu.  Same role as
-/// `active_tab` but for the menu's vertical list.  "Model" sits at
-/// the top because it's the entry-point explanation — read this
-/// first, the rest are individual primitive demos.
-pub const SECTION_MODEL: usize = 0;
-pub const SECTION_L1: usize = 10;
-pub const SECTION_L2: usize = 11;
-pub const SECTION_L3: usize = 12;
-pub const SECTION_L4: usize = 13;
-pub const SECTION_L5: usize = 14;
-pub const SECTION_L6: usize = 15;
-pub const SECTION_COLORS: usize = 1;
-pub const SECTION_UNITS: usize = 2;
-pub const SECTION_RECTS: usize = 3;
-pub const SECTION_LINES: usize = 4;
-pub const SECTION_TEXT: usize = 5;
-pub const SECTION_FONT_V5: usize = 6;
-const SECTION_LABELS: &[(&str, usize)] = &[
-    ("Model",              SECTION_MODEL),
-    ("  L1 Foundation",    SECTION_L1),
-    ("  L2 Box Model",     SECTION_L2),
-    ("  L3 Primitives",    SECTION_L3),
-    ("  L4 Layout",        SECTION_L4),
-    ("  L5 Components",    SECTION_L5),
-    ("  L6 Cross-cutting", SECTION_L6),
-    ("Colors",             SECTION_COLORS),
-    ("Units",              SECTION_UNITS),
-    ("Rects",              SECTION_RECTS),
-    ("Lines",              SECTION_LINES),
-    ("Text",               SECTION_TEXT),
-    ("Font v5",            SECTION_FONT_V5),
+// ──────────────────── UI tab — 4 SubGroups ────────────────────
+//
+// Encoding: tab=UI(0x00) << 16 | subgroup_id << 8 | item_id
+//
+// Foundation: design system architecture(读 first,intro 层)
+pub const SECTION_UI_FOUNDATION_MODEL: usize = 0x00_01_00;
+pub const SECTION_UI_FOUNDATION_L1:    usize = 0x00_01_01;
+pub const SECTION_UI_FOUNDATION_L2:    usize = 0x00_01_02;
+pub const SECTION_UI_FOUNDATION_L3:    usize = 0x00_01_03;
+pub const SECTION_UI_FOUNDATION_L4:    usize = 0x00_01_04;
+pub const SECTION_UI_FOUNDATION_L5:    usize = 0x00_01_05;
+pub const SECTION_UI_FOUNDATION_L6:    usize = 0x00_01_06;
+
+// Tokens: design tokens(color / typography / spacing)
+pub const SECTION_UI_TOKENS_COLORS:    usize = 0x00_02_01;
+pub const SECTION_UI_TOKENS_UNITS:     usize = 0x00_02_02;
+pub const SECTION_UI_TOKENS_TYPOGRAPHY:usize = 0x00_02_03;
+
+// Primitives: atomic 渲染单元(canvas-layer demos)
+pub const SECTION_UI_PRIMITIVES_RECTS: usize = 0x00_03_01;
+pub const SECTION_UI_PRIMITIVES_LINES: usize = 0x00_03_02;
+pub const SECTION_UI_PRIMITIVES_TEXT:  usize = 0x00_03_03;
+
+// Components: 复合 UI 模式(卡片 / toggle / picker / menu)
+//   预留,本轮未填.
+
+// ──────────────────── Font tab ────────────────────
+pub const SECTION_FONT_V5_SHOWCASE: usize = 0x01_01_01;
+
+// ──────────────────── Back-compat aliases ────────────────────
+//
+// 旧名字 → 新名字.外部 hit-test / persistence 还可能用老 id,
+// 保留别名让升级路径无声(下一轮 review 把 caller 全换后再删).
+pub const SECTION_MODEL: usize    = SECTION_UI_FOUNDATION_MODEL;
+pub const SECTION_L1: usize       = SECTION_UI_FOUNDATION_L1;
+pub const SECTION_L2: usize       = SECTION_UI_FOUNDATION_L2;
+pub const SECTION_L3: usize       = SECTION_UI_FOUNDATION_L3;
+pub const SECTION_L4: usize       = SECTION_UI_FOUNDATION_L4;
+pub const SECTION_L5: usize       = SECTION_UI_FOUNDATION_L5;
+pub const SECTION_L6: usize       = SECTION_UI_FOUNDATION_L6;
+pub const SECTION_COLORS: usize   = SECTION_UI_TOKENS_COLORS;
+pub const SECTION_UNITS: usize    = SECTION_UI_TOKENS_UNITS;
+pub const SECTION_RECTS: usize    = SECTION_UI_PRIMITIVES_RECTS;
+pub const SECTION_LINES: usize    = SECTION_UI_PRIMITIVES_LINES;
+pub const SECTION_TEXT: usize     = SECTION_UI_PRIMITIVES_TEXT;
+pub const SECTION_FONT_V5: usize  = SECTION_FONT_V5_SHOWCASE;
+
+// ──────────────────── Menu structure ────────────────────
+//
+// `MenuRow` 是 left menu 一行;Header 不可点,只画 SubGroup 标签;
+// Item 可点,active 行高亮.每个 Tab 的菜单结构在 `TAB_MENUS` 内.
+//
+// 缩进:Header 0 缩进,Item 2 空格缩进(同 SubGroup 内对齐).
+#[derive(Clone, Copy, Debug)]
+pub enum MenuRow {
+    /// SubGroup 标签头,不可点击.
+    Header(&'static str),
+    /// 可点 Item,active 时高亮.
+    Item(&'static str, usize),
+}
+
+/// 每个 Tab 的菜单结构.使用 `(tab_id, &[MenuRow])` 配对.
+const TAB_MENUS: &[(usize, &[MenuRow])] = &[
+    (TAB_UI, &[
+        MenuRow::Header("Foundation"),
+        MenuRow::Item("  Model",            SECTION_UI_FOUNDATION_MODEL),
+        MenuRow::Item("  L1 Foundation",    SECTION_UI_FOUNDATION_L1),
+        MenuRow::Item("  L2 Box Model",     SECTION_UI_FOUNDATION_L2),
+        MenuRow::Item("  L3 Primitives",    SECTION_UI_FOUNDATION_L3),
+        MenuRow::Item("  L4 Layout",        SECTION_UI_FOUNDATION_L4),
+        MenuRow::Item("  L5 Components",    SECTION_UI_FOUNDATION_L5),
+        MenuRow::Item("  L6 Cross-cutting", SECTION_UI_FOUNDATION_L6),
+        MenuRow::Header("Tokens"),
+        MenuRow::Item("  Colors",       SECTION_UI_TOKENS_COLORS),
+        MenuRow::Item("  Units",        SECTION_UI_TOKENS_UNITS),
+        // Typography 预留:用 Text item 占位
+        MenuRow::Header("Primitives"),
+        MenuRow::Item("  Rects",        SECTION_UI_PRIMITIVES_RECTS),
+        MenuRow::Item("  Lines",        SECTION_UI_PRIMITIVES_LINES),
+        MenuRow::Item("  Text",         SECTION_UI_PRIMITIVES_TEXT),
+        MenuRow::Header("Components"),
+        // 留空,future commit 填.
+    ]),
+    (TAB_FONT, &[
+        MenuRow::Header("Font v5"),
+        MenuRow::Item("  Showcase",     SECTION_FONT_V5_SHOWCASE),
+    ]),
+    (TAB_RENDER, &[
+        MenuRow::Header("Render"),
+        // 留空,future commit 填(frame timing / instance counts / atlas usage).
+    ]),
+    (TAB_SESSIONS, &[
+        MenuRow::Header("Sessions"),
+        // 留空,future commit 填(L3 sessions / plugins / bytelog).
+    ]),
 ];
+
 
 /// Live state for the dev panel.  Owned by L1 (`ShellApp`); the
 /// renderer side (dev window) reads it each frame to build a Canvas.
@@ -206,6 +297,11 @@ pub mod tokens {
     pub const MENU_ROW_ACTIVE_BG: Color = Color::rgba(51, 107, 173, 1.0);
     pub const MENU_ROW_FG: Color = Color::rgba(180, 190, 205, 1.0);
     pub const MENU_ROW_ACTIVE_FG: Color = Color::rgba(245, 248, 252, 1.0);
+    /// SubGroup header row(non-clickable label sitting above its
+    /// Item rows).  Lower contrast than `MENU_ROW_FG` so the eye
+    /// reads the Item rows as "the things you can pick" and the
+    /// Headers as "what they're grouped under".
+    pub const MENU_HEADER_FG: Color = Color::rgba(140, 153, 168, 1.0);
     pub const DIVIDER: Color = Color::rgba(255, 255, 255, 0.08);
     pub const SECTION_HEADER_FG: Color = Color::rgba(170, 190, 230, 1.0);
     pub const SECTION_BODY_FG: Color = Color::rgba(200, 208, 220, 1.0);
@@ -324,25 +420,47 @@ pub fn build_dev_panel_canvas(
     .stroke(Pt(1.0), tokens::DIVIDER)
     .draw();
 
-    // Menu rows.
-    for (i, (label, id)) in SECTION_LABELS.iter().enumerate() {
+    // Menu rows — Header vs Item per `MenuRow` enum.  Header rows are
+    // non-clickable section labels (FG_MUTED, slight uppercase);  Item
+    // rows are the clickable destinations (BG hi when active).
+    let active_tab_rows: &[MenuRow] = TAB_MENUS
+        .iter()
+        .find(|(tab, _)| *tab == state.active_tab)
+        .map(|(_, r)| *r)
+        .unwrap_or(&[]);
+    for (i, row) in active_tab_rows.iter().enumerate() {
         let row_y = body_y + MENU_TOP_PAD_PT + (i as f64) * menu_row_h;
-        let is_active = *id == state.active_section;
-        if is_active {
-            canvas.rect()
-                .at(Length::Pt(6.0), Length::Pt(row_y))
-                .size(Length::Pt(menu_w - 12.0), Length::Pt(menu_row_h - 4.0))
-                .fill(tokens::MENU_ROW_ACTIVE_BG)
-                .radius(Pt(4.0))
+        match row {
+            MenuRow::Header(label) => {
+                // Headers sit at row_y with a slight top pad so they
+                // separate visually from the Item row above; no BG.
+                canvas.text(
+                    Length::Pt(menu_text_pad_x - 4.0),
+                    Length::Pt(row_y + 6.0),
+                    *label,
+                )
+                .color(tokens::MENU_HEADER_FG)
                 .draw();
+            }
+            MenuRow::Item(label, id) => {
+                let is_active = *id == state.active_section;
+                if is_active {
+                    canvas.rect()
+                        .at(Length::Pt(6.0), Length::Pt(row_y))
+                        .size(Length::Pt(menu_w - 12.0), Length::Pt(menu_row_h - 4.0))
+                        .fill(tokens::MENU_ROW_ACTIVE_BG)
+                        .radius(Pt(4.0))
+                        .draw();
+                }
+                canvas.text(
+                    Length::Pt(menu_text_pad_x),
+                    Length::Pt(row_y + 6.0),
+                    *label,
+                )
+                .color(if is_active { tokens::MENU_ROW_ACTIVE_FG } else { tokens::MENU_ROW_FG })
+                .draw();
+            }
         }
-        canvas.text(
-            Length::Pt(menu_text_pad_x),
-            Length::Pt(row_y + 6.0),
-            label,
-        )
-        .color(if is_active { tokens::MENU_ROW_ACTIVE_FG } else { tokens::MENU_ROW_FG })
-        .draw();
     }
 
     // ─── Right content: only the active section ─────────────────
@@ -2249,17 +2367,16 @@ mod tests {
 
     #[test]
     fn non_ui_tab_renders_placeholder() {
-        let s = DevPanelState { active_tab: TAB_TOKENS, ..Default::default() };
+        // TAB_RENDER 当前 menu 只有一个 SubGroup header,无 Item +
+        // 无 content,所以 right column 应该出 "(future)" placeholder
+        // text — 这条 test 既验证 menu 数据驱动正确,也验证 empty
+        // tab fallback path 没漂.
+        let s = DevPanelState { active_tab: TAB_RENDER, ..Default::default() };
         let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0, cell_h_phys: 16.0 };
         let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0, &fonts);
-        // Just BG + tab strip BG + active tab BG + accent + a few tab
-        // labels + divider hairline + placeholder text.  Don't pin
-        // the exact count (it shifts as tab list grows) — just check
-        // we got something coherent and the placeholder text is in
-        // there.
         let prims = c.primitives();
         let has_placeholder = prims.iter().any(|p| matches!(p, Primitive::Text(t) if t.content.contains("placeholder")));
-        assert!(has_placeholder, "expected placeholder text on non-UI tab");
+        assert!(has_placeholder, "expected placeholder text on empty tab");
     }
 
     #[test]
@@ -2269,27 +2386,34 @@ mod tests {
         // chrome_cell_w_pt=8 matches the test renderer dim.
         let h = hit_test(&s, 8.0, 5.0, 10.0).expect("expected hit");
         assert_eq!(h, DevPanelHit::Tab(TAB_UI));
-        // Click further right — past UI tab → Tokens.
-        // UI width = 2 chars * 8 + 32 = 48 ; Tokens starts at x=48.
+        // Click further right — past UI tab → Font(2nd tab post-rename).
+        // UI label width: 2 chars * 8 + TAB_PAD_X*2 = 16 + 32 = 48,
+        // so Font starts at x=48.  Click at x=60 lands on Font.
         let h2 = hit_test(&s, 8.0, 60.0, 10.0).expect("expected hit");
-        assert_eq!(h2, DevPanelHit::Tab(TAB_TOKENS));
+        assert_eq!(h2, DevPanelHit::Tab(TAB_FONT));
     }
 
     #[test]
     fn hit_test_lands_on_menu_row() {
         let s = DevPanelState::default();
-        // y just past the tab strip + menu top pad → first row "Model".
-        let h = hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0)
-            .expect("expected hit");
-        assert_eq!(h, DevPanelHit::Section(SECTION_MODEL));
-        // Two rows down → 3rd row.  Post 0.6.21 restructure the
-        // menu reads:  Model / L1 / L2 / L3 / L4 / L5 / L6 / Colors /
-        // Units / ...  so idx 2 = SECTION_L2 (was SECTION_UNITS).
+        // Post-2026-06-25 hierarchical rewrite, UI tab rows are:
+        //   0  Header("Foundation")
+        //   1  Item Model
+        //   2  Item L1
+        //   3  Item L2
+        //   ...
+        // hit_test counts Header as a visible row too(it occupies a
+        // display slot)but returns None on click(Header.is_none in
+        // Item enum match).  So row 0 click = no hit, row 1 = Model.
+        let h = hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + MENU_TOP_PAD_PT + MENU_ROW_H_PT + 5.0)
+            .expect("expected hit on Model");
+        assert_eq!(h, DevPanelHit::Section(SECTION_UI_FOUNDATION_MODEL));
+        // Row 3 → L2.
         let h2 = hit_test(
             &s, 8.0, 20.0,
-            TAB_BAR_H_PT + MENU_TOP_PAD_PT + 2.0 * MENU_ROW_H_PT + 5.0,
-        ).expect("expected hit");
-        assert_eq!(h2, DevPanelHit::Section(SECTION_L2));
+            TAB_BAR_H_PT + MENU_TOP_PAD_PT + 3.0 * MENU_ROW_H_PT + 5.0,
+        ).expect("expected hit on L2");
+        assert_eq!(h2, DevPanelHit::Section(SECTION_UI_FOUNDATION_L2));
     }
 
     #[test]
@@ -2300,11 +2424,21 @@ mod tests {
     }
 
     #[test]
-    fn hit_test_skips_menu_when_not_on_ui_tab() {
-        // Even if y is in the menu row band, hit-test must not return
-        // a Section when active_tab != UI (other tabs don't render menu).
-        let s = DevPanelState { active_tab: TAB_TOKENS, ..Default::default() };
-        assert_eq!(hit_test(&s, 8.0, 20.0, TAB_BAR_H_PT + 30.0), None);
+    fn hit_test_skips_menu_header_rows() {
+        // Header row(idx 0 = "Foundation")is non-clickable: hit-test
+        // returns None even though y is inside that row's band.
+        let s = DevPanelState::default();
+        let header_y = TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0;
+        assert_eq!(hit_test(&s, 8.0, 20.0, header_y), None);
+    }
+
+    #[test]
+    fn hit_test_skips_menu_on_empty_tab() {
+        // TAB_RENDER 当前菜单只有一行 Header("Render"),无 Item.
+        // 任何 menu 行 y 都不应该返回 Section.
+        let s = DevPanelState { active_tab: TAB_RENDER, ..Default::default() };
+        let any_menu_y = TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0;
+        assert_eq!(hit_test(&s, 8.0, 20.0, any_menu_y), None);
     }
 
     #[test]
