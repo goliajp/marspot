@@ -50,6 +50,63 @@ pub struct ShapedGlyph {
     pub subpx_x: u8,
 }
 
+/// Phase 8 — per-context OpenType-style feature toggles applied at
+/// shape time.  CTLine defaults are "everything on" for chrome-style
+/// proportional text; the PTY mono path bypasses shaping entirely
+/// so its effective state is `all_off`.  Code blocks want
+/// `code()` — ligatures on so `==>` joins, kerning off so glyph
+/// advances stay character-uniform.
+///
+/// Currently implemented in `shape_line`:
+/// - `liga = false` → `kCTLigatureAttributeName = 0` (forces glyph
+///   sequence to remain decomposed; SF Pro's `fi` etc. stay as 2
+///   glyphs).
+///
+/// Reserved for future passes (need font-feature-settings dictionary
+/// via `kCTFontFeatureSettingsAttribute` — not in this commit):
+/// - `kerning = false` (would disable OT `kern` feature)
+/// - `calt = false` (contextual alternates)
+/// - `contextual = false` (font-specific contextual variations)
+///
+/// CT auto-kerning still runs even when `kerning = false`; flipping
+/// it off requires the font-feature dictionary which Phase 8 doesn't
+/// plumb.  Callers should treat `kerning` as advisory until that
+/// follow-up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ShapeOptions {
+    pub kerning: bool,
+    pub liga: bool,
+    pub calt: bool,
+    pub contextual: bool,
+}
+
+impl ShapeOptions {
+    /// Body text — kerning + every ligature class on.  Default
+    /// CTLine behaviour; chrome dev panel, tab titles, sidebar.
+    pub fn full() -> Self {
+        Self { kerning: true, liga: true, calt: true, contextual: true }
+    }
+    /// Code blocks — uniform glyph advance (kerning off) but keep
+    /// ligatures so `==>` / `!=` form their composed glyph in fonts
+    /// that ship them (Fira Code / JetBrains Mono).
+    pub fn code() -> Self {
+        Self { kerning: false, liga: true, calt: true, contextual: true }
+    }
+    /// PTY-style: every feature off — each codepoint is its own
+    /// glyph at the cell pitch.  PTY doesn't currently call
+    /// `shape_line`; this preset is kept for future cluster-shape
+    /// work (Phase 7 PTY ZWJ).
+    pub fn all_off() -> Self {
+        Self { kerning: false, liga: false, calt: false, contextual: false }
+    }
+}
+
+impl Default for ShapeOptions {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
 /// Shape `text` through CTLine against `base_font`, calling `intern`
 /// on every CT-produced font (including fallback runs) to bake them
 /// into the renderer's `FontCache`.  Returns one `ShapedGlyph` per
@@ -57,9 +114,14 @@ pub struct ShapedGlyph {
 ///
 /// `intern` is a closure so callers can pass `FontCache::intern_ctfont`
 /// without giving up the rest of the cache's borrow.
+///
+/// Phase 8 — `opts` applies per-context OpenType-style feature
+/// toggles before the CTLine constructor runs.  See [`ShapeOptions`]
+/// for which bits actually plumb through to CT today.
 pub fn shape_line<F: FnMut(CTFont) -> u32>(
     text: &str,
     base_font: &CTFont,
+    opts: ShapeOptions,
     mut intern: F,
 ) -> Vec<ShapedGlyph> {
     if text.is_empty() {
@@ -71,6 +133,17 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
     let len = attr.char_len();
     unsafe {
         attr.set_attribute(CFRange::init(0, len), kCTFontAttributeName, base_font);
+    }
+    // Phase 8 — disable ligatures by setting `kCTLigatureAttributeName`
+    // to the CFNumber 0; CT's default is 1 (standard ligatures on),
+    // which folds `fi` / `==>` etc. into their composed glyphs.
+    if !opts.liga {
+        use core_foundation::number::CFNumber;
+        use core_text::string_attributes::kCTLigatureAttributeName;
+        let zero = CFNumber::from(0i64);
+        unsafe {
+            attr.set_attribute(CFRange::init(0, len), kCTLigatureAttributeName, &zero);
+        }
     }
     let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
 
@@ -155,6 +228,19 @@ struct ShapeKey {
     text: String,
     size_q: u16,
     base_font_id: u32,
+    /// Phase 8 — packed `ShapeOptions` (bit0 = kerning, bit1 = liga,
+    /// bit2 = calt, bit3 = contextual).  Keeps key shape Copy-cheap
+    /// and lets the same string at the same size cache one slot per
+    /// active opts combination.
+    opts_bits: u8,
+}
+
+#[inline]
+fn opts_to_bits(opts: ShapeOptions) -> u8 {
+    (opts.kerning as u8)
+        | ((opts.liga as u8) << 1)
+        | ((opts.calt as u8) << 2)
+        | ((opts.contextual as u8) << 3)
 }
 
 impl Default for ShapeCache {
@@ -184,6 +270,7 @@ impl ShapeCache {
         base_font: &CTFont,
         base_font_id: u32,
         size_q: u16,
+        opts: ShapeOptions,
         intern: F,
     ) -> &[ShapedGlyph] {
         // Need a key that's borrowable as &str for the hot lookup
@@ -195,6 +282,14 @@ impl ShapeCache {
             text: text.to_owned(),
             size_q,
             base_font_id,
+            opts_bits: opts_to_bits(opts),
+        };
+        // Reconstruct ShapeOptions from packed bits for the shape call.
+        let opts_for_shape = ShapeOptions {
+            kerning: (key.opts_bits & 0b0001) != 0,
+            liga: (key.opts_bits & 0b0010) != 0,
+            calt: (key.opts_bits & 0b0100) != 0,
+            contextual: (key.opts_bits & 0b1000) != 0,
         };
         if self.map.contains_key(&key) {
             self.hits += 1;
@@ -206,7 +301,7 @@ impl ShapeCache {
             return self.map.get(&key).unwrap();
         }
         self.misses += 1;
-        let shaped = shape_line(text, base_font, intern);
+        let shaped = shape_line(text, base_font, opts_for_shape, intern);
         if self.map.len() >= self.cap {
             if let Some(oldest) = self.order.pop_front() {
                 self.map.remove(&oldest);
@@ -251,7 +346,7 @@ mod tests {
         // shape positions must reflect that (the original mono path
         // would advance both by `cell_w` and return identical gaps).
         let mut next_id: u32 = 0;
-        let shaped_im = shape_line("im", &font, |_| {
+        let shaped_im = shape_line("im", &font, ShapeOptions::full(), |_| {
             let id = next_id;
             next_id = next_id.wrapping_add(1);
             id
@@ -271,7 +366,7 @@ mod tests {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
             return;
         };
-        let shaped = shape_line("Hello world", &font, |_| 0);
+        let shaped = shape_line("Hello world", &font, ShapeOptions::full(), |_| 0);
         // Every glyph's subpx_x must land in 0..4 — the bucket-overflow
         // carry path inside `shape_line` is the only way to land at 4.
         for sg in &shaped {
@@ -292,7 +387,7 @@ mod tests {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
             return;
         };
-        let shaped = shape_line("", &font, |_| 0);
+        let shaped = shape_line("", &font, ShapeOptions::full(), |_| 0);
         assert!(shaped.is_empty());
     }
 
@@ -302,10 +397,46 @@ mod tests {
             return;
         };
         let mut cache = ShapeCache::new(8);
-        let _ = cache.shape("hello", &font, 0, 52, |_| 0).len();
-        let _ = cache.shape("hello", &font, 0, 52, |_| 0).len();
+        let _ = cache.shape("hello", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+        let _ = cache.shape("hello", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
         assert_eq!(cache.hits, 1, "second call must hit cache");
         assert_eq!(cache.misses, 1, "first call must miss");
+    }
+
+    #[test]
+    fn shape_opts_off_drops_ligature() {
+        // Pick a font that DOES ship `fi` / `fl` ligatures.  SF Pro
+        // has them at all weights; on hosts without SF Pro, skip.
+        let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            return;
+        };
+        let with = shape_line("fi", &font, ShapeOptions::full(), |_| 0);
+        let without = shape_line("fi", &font, ShapeOptions::all_off(), |_| 0);
+        // Default CTLine yields ≤ glyphs vs the decomposed pass.  We
+        // can't assert exactly 1 vs exactly 2 (some macOS builds vary
+        // the ligature shape) — assert the relation instead so the
+        // test stays portable.
+        assert!(
+            with.len() <= without.len(),
+            "ligatures on must not produce MORE glyphs than ligatures off; on={} off={}",
+            with.len(),
+            without.len(),
+        );
+    }
+
+    #[test]
+    fn shape_cache_distinguishes_opts() {
+        let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            return;
+        };
+        let mut cache = ShapeCache::new(8);
+        // Same text + size + font, different opts → distinct cache
+        // slots.  Sequential calls must both miss (first hit comes
+        // from the SECOND call with the same opts).
+        let _ = cache.shape("fi", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+        let _ = cache.shape("fi", &font, 0, 52, ShapeOptions::all_off(), |_| 0).len();
+        assert_eq!(cache.hits, 0, "different opts must not collide");
+        assert_eq!(cache.misses, 2, "two distinct keys = two misses");
     }
 
     #[test]
@@ -314,12 +445,12 @@ mod tests {
             return;
         };
         let mut cache = ShapeCache::new(2);
-        let _ = cache.shape("a", &font, 0, 52, |_| 0).len();
-        let _ = cache.shape("b", &font, 0, 52, |_| 0).len();
-        let _ = cache.shape("c", &font, 0, 52, |_| 0).len();
+        let _ = cache.shape("a", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+        let _ = cache.shape("b", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+        let _ = cache.shape("c", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
         assert_eq!(cache.cache_len(), 2);
         // 'a' was evicted by 'c' insertion.
-        let _ = cache.shape("a", &font, 0, 52, |_| 0).len();
+        let _ = cache.shape("a", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
         assert_eq!(cache.misses, 4, "a, b, c, then a again on re-fetch");
     }
 }

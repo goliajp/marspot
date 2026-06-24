@@ -489,7 +489,7 @@ impl FontCache {
     /// on `FontCache` because it's logically font-state — the shape
     /// output references `font_id`s into the same registry.
     pub fn shape_ui(&mut self, text: &str) -> Vec<crate::font_shape::ShapedGlyph> {
-        self.shape_ui_weighted(text, 400)
+        self.shape_ui_weighted_opts(text, 400, crate::font_shape::ShapeOptions::full())
     }
 
     /// Phase 5 — shape `text` through CTLine against the UI font at
@@ -502,6 +502,19 @@ impl FontCache {
         &mut self,
         text: &str,
         weight_q: u16,
+    ) -> Vec<crate::font_shape::ShapedGlyph> {
+        self.shape_ui_weighted_opts(text, weight_q, crate::font_shape::ShapeOptions::full())
+    }
+
+    /// Phase 8 — shape with explicit per-context OpenType feature
+    /// options.  Calls with the same `(text, weight_q, opts)` hit the
+    /// underlying ShapeCache; differing `opts` cache as separate
+    /// entries so `default()` vs `code()` vs `all_off()` don't stomp.
+    pub fn shape_ui_weighted_opts(
+        &mut self,
+        text: &str,
+        weight_q: u16,
+        opts: crate::font_shape::ShapeOptions,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
         if self.ui_font_idx == 0 || text.is_empty() {
             return Vec::new();
@@ -517,7 +530,7 @@ impl FontCache {
         let ui_id = base_idx as u32;
         let mut cache = std::mem::take(&mut self.shape_cache);
         let result = cache
-            .shape(text, &base_font, ui_id, size_q, |f| {
+            .shape(text, &base_font, ui_id, size_q, opts, |f| {
                 self.fonts.intern(f) as u32
             })
             .to_vec();

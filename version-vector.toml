@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.38"  # font v5 Phase 7 (chrome 部分) — canvas color emoji 真彩路由.CanvasRunKind 加 ColorGlyph,build_canvas_runs / encode_canvas_into 加 color_atlas + fg_color_pipeline + out_color_glyphs 参,push_text_run_ui_shaped 按 font.is_color_font 路由(mono → atlas/glyphs,color → color_atlas/color_glyphs).新 push_text_run_ui_shaped_mono 给 legacy push_text_run_kind(Ui) 入口走原 mono 路径.encoder 加 ColorGlyph 分支(fg_color_pipeline + color_atlas.texture).PTY ZWJ cluster pool 延后(需 Cell+cluster_id + parser 改造).当前 chrome 文字基本是 ASCII/Latin 无 emoji,新路径就位待 future 用.全 235 lib 测试 PASS.
-core    = "0.10.88"
+shell   = "0.6.39"  # font v5 Phase 8 — ShapeOptions per-context OpenType 开关.font_shape 加 ShapeOptions { kerning, liga, calt, contextual } + 3 presets(full/code/all_off).shape_line 加 opts 参,liga=false → kCTLigatureAttributeName=0(其他三 bit 占位,需 font-feature-settings dict,Phase 8 不动).ShapeCache.ShapeKey 加 opts_bits(u8),让同字体同 size 不同 opts 各占缓存槽.FontCache 加 `shape_ui_weighted_opts(text, weight, opts)`,旧 shape_ui / shape_ui_weighted 改 wrap full().新测 shape_opts_off_drops_ligature(fi/fl liga off 不减少 glyph) + shape_cache_distinguishes_opts(同字符不同 opts 各 miss 一次).chrome path 默认 full(行为不变),PTY mono path 不走 shape_line(等效 all_off).全 237 lib 测试 PASS(+2).
+core    = "0.10.89"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
