@@ -5565,6 +5565,7 @@ impl MetalRenderer {
         chrome_cell_w: f32,
         chrome_cell_h: f32,
         chrome_ascent: f32,
+        ui_font: bool,
     ) {
         encode_canvas_into(
             canvas, target, cmd,
@@ -5572,7 +5573,7 @@ impl MetalRenderer {
             &mut self.atlas, &mut self.color_atlas, &self.device, &mut self.font,
             clear_color, viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
-            false,
+            ui_font,
         );
     }
 
@@ -5589,6 +5590,7 @@ impl MetalRenderer {
         chrome_cell_w: f32,
         chrome_cell_h: f32,
         chrome_ascent: f32,
+        ui_font: bool,
     ) -> Result<Vec<u8>, String> {
         let descriptor = unsafe {
             objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
@@ -5612,6 +5614,7 @@ impl MetalRenderer {
             Some(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 }),
             &viewport_px,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
+            ui_font,
         );
 
         let blit = cmd.blitCommandEncoder()
@@ -5642,6 +5645,83 @@ impl MetalRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Font v5 snapshot — renders the dev-panel canvas with the
+    /// `Font v5` section active, encodes the BGRA framebuffer to a
+    /// PNG, and writes it to disk for manual eyeball.  Opt-in via
+    /// the `MARSPOT_FONT_SNAPSHOT` env var so the suite still runs
+    /// quickly when nobody asks for a snapshot.
+    ///
+    /// Workflow:
+    ///   MARSPOT_FONT_SNAPSHOT=1 cargo nextest run -p marspot --lib \
+    ///     font_v5_showcase_snapshot
+    ///   open bench/font-rendering/snapshots/font_v5_showcase.png
+    ///
+    /// `bin/font-snapshot.sh` wraps both steps.  Falling back to the
+    /// project default location keeps the workflow muscle-memory
+    /// match the other bench scripts (`bin/bench-remote.sh` writes
+    /// under `bench/remote-runs/`).
+    #[test]
+    fn font_v5_showcase_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        // 2× retina target: 700 × 1000 logical pt → 1400 × 2000 px.
+        let w_px: u32 = 1400;
+        let h_px: u32 = 2000;
+        let state = crate::ui::components::DevPanelState {
+            visible: true,
+            origin_pt: (0.0, 0.0),
+            size_pt: (700.0, 1000.0),
+            active_tab: crate::ui::components::dev_panel::TAB_UI,
+            active_section: crate::ui::components::dev_panel::SECTION_FONT_V5,
+            scale: 2.0,
+        };
+        let canvas = crate::ui::components::build_dev_panel_canvas(
+            &state,
+            w_px as f64,
+            h_px as f64,
+            16.0, // chrome_cell_w (px) — Monaco 12pt 2×
+            32.0, // chrome_cell_h
+            24.0, // chrome_ascent
+        );
+        let bytes = renderer
+            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, true)
+            .expect("canvas render");
+
+        // BGRA → RGBA channel swap for PNG.
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];     // R
+            rgba[i + 1] = bytes[i + 1]; // G
+            rgba[i + 2] = bytes[i];     // B
+            rgba[i + 3] = bytes[i + 3]; // A
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_showcase.png");
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 snapshot] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
 
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
@@ -6390,7 +6470,7 @@ mod tests {
             .fill(Color::rgb(0, 0, 255))
             .draw();
 
-        let bytes = renderer.render_canvas_to_bitmap(w, h, &canvas, 48.0, 12.0, 9.0)
+        let bytes = renderer.render_canvas_to_bitmap(w, h, &canvas, 48.0, 12.0, 9.0, false)
             .expect("render");
         // Sample the centre pixel.  BGRA8: bytes are B, G, R, A.
         let px = w as usize / 2 + (h as usize / 2) * w as usize;

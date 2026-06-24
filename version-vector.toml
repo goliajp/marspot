@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.43"  # font v5 dev panel showcase — UI tab 加 `Font v5` section,canvas TextPrim + TextBuilder 加 `opts: ShapeOptions` 字段(默认 full()),`.opts(...)` 链式 API,push_text_run_ui_shaped 加 opts 参,Text 分支路由 t.opts.新 `draw_font_v5_sample` 展示 Phase 5 6 档 weight(Thin/Light/Regular/Semibold/Bold/Black)、Phase 8 connect/no-connect 对比(`fi fl ffi -> => >= !=` full vs all_off)、Phase 3 kerning(`Ta AV LT WA — Yes`)、Phase 7 chrome 真彩 emoji(`👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎 🐙 🍣`)、Phase 3 CJK 自动 fallback(`Hello 你好世界 こんにちは 안녕하세요`)、Phase 4 subpixel(`iiiiiii lllllll mmmmm AVAVAV WAWAWA`).全 245 lib 测试 PASS.
-core    = "0.10.93"
+shell   = "0.6.44"  # font v5 dev panel SF Pro 启用 + showcase PNG snapshot.dev_window 把 `render_canvas_into_layer` 的 ui_font 从 false 改 true,dev panel chrome 现走 SF Pro proportional 而非 Monaco mono;原 0.6.27/0.6.28 SF Pro flip 的"mono-aligned 太丑"问题已被 Phase 1.1+3+4 解(per-glyph bbox + CTLine shape + subpx).render_canvas_to_bitmap / encode_canvas 加 ui_font 参.新 `font_v5_showcase_snapshot` 测(env MARSPOT_FONT_SNAPSHOT=1 opt-in),渲染 1400×2000 PNG 到 bench/font-rendering/snapshots/,直接看 6 demo 真实输出(Phase 5 weight 真显粗细差、Phase 7 emoji 真彩、Phase 3 CJK + Phase 4 subpx 全 OK).新 bin/font-snapshot.sh 跑测试+ open PNG.全 246 lib 测试 PASS(+1 snapshot).
+core    = "0.10.94"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
