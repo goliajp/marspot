@@ -157,8 +157,8 @@ pub const SECTION_UI_PRIMITIVES_RECTS: usize = 0x00_03_01;
 pub const SECTION_UI_PRIMITIVES_LINES: usize = 0x00_03_02;
 pub const SECTION_UI_PRIMITIVES_TEXT:  usize = 0x00_03_03;
 
-// Components: 复合 UI 模式(卡片 / toggle / picker / menu)
-//   预留,本轮未填.
+// Components: 复合 UI 模式(catalog 集中 showcase 全部 view-tree 组件)
+pub const SECTION_UI_COMPONENTS_CATALOG: usize = 0x00_04_01;
 
 // ──────────────────── Font tab ────────────────────
 pub const SECTION_FONT_V5_SHOWCASE: usize = 0x01_01_01;
@@ -197,7 +197,7 @@ const TAB_MENUS: &[(usize, &[MenuRow])] = &[
         MenuRow::Item("  Lines",        SECTION_UI_PRIMITIVES_LINES),
         MenuRow::Item("  Text",         SECTION_UI_PRIMITIVES_TEXT),
         MenuRow::Header("Components"),
-        // 留空,future commit 填.
+        MenuRow::Item("  Catalog",      SECTION_UI_COMPONENTS_CATALOG),
     ]),
     (TAB_FONT, &[
         MenuRow::Header("Font v5"),
@@ -500,6 +500,7 @@ pub fn build_dev_panel_canvas(
             let _ = draw_units_sample(&mut canvas, content_x, y);
         }
         SECTION_UI_TOKENS_TYPOGRAPHY => render_view_section(&mut canvas, "Typography", build_typography_view()),
+        SECTION_UI_COMPONENTS_CATALOG => render_view_section(&mut canvas, "Component Catalog", build_components_catalog_view()),
         SECTION_UI_PRIMITIVES_RECTS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Rects");
             let _ = draw_rects_sample(&mut canvas, content_x, y);
@@ -2308,6 +2309,87 @@ fn build_typography_view() -> crate::ui::view::View {
         token_row("ERROR       ", text_token::ERROR,        "Sample error message"),
     ])
     .vstack_gap(Length::Pt(8.0))
+}
+
+/// Components Catalog — visual reference for every view-tree
+/// component preset(`card / panel / badge / tooltip / toggle /
+/// picker / list_row / context_menu / breadcrumb`).Each group
+/// is one row(label + live instance)so a designer or future
+/// maintainer can scan the catalogue in one screen.
+fn build_components_catalog_view() -> crate::ui::view::View {
+    use crate::ui::view::{vstack, hstack, Text, View};
+    use crate::ui::core::Length;
+    use crate::ui::theme::{color, text as text_token};
+
+    let group_header = |label: &'static str| {
+        Text::new(label)
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build()
+    };
+
+    let row = |label: &'static str, sample: View| {
+        hstack(vec![
+            Text::new(label)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            sample,
+        ])
+        .hstack_gap(Length::Pt(16.0))
+        .align_cross_center()
+    };
+
+    let toggle_id_off = crate::ui::view::ViewId(0xDE7_C001);
+    let toggle_id_on  = crate::ui::view::ViewId(0xDE7_C002);
+    let picker_id     = crate::ui::view::ViewId(0xDE7_C003);
+    let list_action_a = crate::ui::view::ActionId(0xDE7_C010);
+    let list_action_b = crate::ui::view::ActionId(0xDE7_C011);
+    let menu_action_base = crate::ui::view::ActionId(0xDE7_C020);
+
+    vstack(vec![
+        group_header("Status badges"),
+        row("Success",   crate::ui::view::badge("OK",     color::SUCCESS)),
+        row("Warning",   crate::ui::view::badge("WARN",   color::WARN)),
+        row("Danger",    crate::ui::view::badge("FAIL",   color::DANGER)),
+        row("Accent",    crate::ui::view::badge("v0.11",  color::ACCENT)),
+
+        group_header("Interactive"),
+        row("Toggle (off)", crate::ui::view::toggle(toggle_id_off)),
+        row("Toggle (on)",  crate::ui::view::toggle(toggle_id_on)),
+        row("Picker",       crate::ui::view::picker(
+            picker_id,
+            vec!["Light", "Dark", "Auto"],
+        )),
+
+        group_header("Containers"),
+        row("Card",   crate::ui::view::card(
+            Text::new("Card body — Edges::all(MD), BG_RAISED, BORDER, MD radius, E1 shadow")
+                .style(text_token::BODY).build(),
+        )),
+        row("Panel",  crate::ui::view::panel(
+            Text::new("Panel body — flatter than Card.  BG_PANEL.")
+                .style(text_token::BODY).build(),
+        )),
+        row("Tooltip", crate::ui::view::tooltip("Tooltip hint")),
+
+        group_header("Lists & navigation"),
+        row("List row (idle)",     crate::ui::view::list_row(
+            "Settings",    Some("⌘,"), false, list_action_a,
+        )),
+        row("List row (selected)", crate::ui::view::list_row(
+            "About Marspot", None,      true,  list_action_b,
+        )),
+        row("Context menu",        crate::ui::view::context_menu(
+            vec!["Copy", "Paste", "Delete"],
+            Some(1),
+            menu_action_base,
+        )),
+        row("Breadcrumb",          crate::ui::view::breadcrumb(
+            vec!["DevPanel", "UI", "Components", "Catalog"],
+        )),
+    ])
+    .vstack_gap(Length::Pt(10.0))
 }
 
 /// Phase 10c — Font v5 showcase rebuilt as a view tree.  Layout
