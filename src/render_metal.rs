@@ -5956,6 +5956,116 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — emoji ZWJ + color cluster fingerprint.
+    /// Phase 7 promises chrome color-emoji (BGRA atlas + dedicated
+    /// `fg_color_pipeline`).  The color path is independent of the
+    /// alpha mono path — a regression here usually surfaces as
+    /// "emoji come out gray silhouettes" (the pre-Phase-7 fall-back
+    /// when the colour atlas wasn't wired).  Lock the colour bytes
+    /// so any silent fall-off back to silhouette / wrong glyph
+    /// substitution / ZWJ cluster split surfaces as an SSIM drop.
+    ///
+    /// Family ZWJ (`👨‍👩‍👧‍👦`) is the canonical ZWJ-cluster stress
+    /// — drop a single ZWJ join and it explodes into 4 separate
+    /// glyphs.  Flag (`🇯🇵` `🇰🇷` `🇺🇸` `🇨🇳`) is the regional
+    /// indicator path.  The third row mixes mono + emoji so chrome
+    /// switching between alpha + colour atlas mid-line is exercised.
+    #[test]
+    fn font_v5_emoji_color_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1200;
+        let h_px: u32 = 600;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        // 4 rows × ~28pt — each pushes a different colour-emoji axis:
+        //   L1  base emoji palette — single codepoint colour glyphs
+        //   L2  ZWJ family clusters — multi-codepoint joined sequences
+        //   L3  flag (regional indicator) pairs — 2 codepoint → 1 glyph
+        //   L4  mixed alpha + colour line — atlas switching pressure
+        let rows: &[(f64, &str)] = &[
+            (28.0, "❤️  ⭐  🌈  🍕  🚀  🎉  🍎  ⚡  🦄  💎"),
+            (28.0, "👨‍👩‍👧‍👦  👨‍👨‍👧  👩‍👩‍👦  🧑‍🚀  👨‍💻  👩‍🎨"),
+            (28.0, "🇯🇵  🇰🇷  🇺🇸  🇨🇳  🇬🇧  🇩🇪  🇫🇷  🇮🇹  🇧🇷  🇮🇳"),
+            (22.0, "Hello 👋 World 🌍, deploy 🚀 the 🏗️ build ✅"),
+        ];
+        use crate::ui::core::{Color, Length};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        use crate::font_shape::ShapeOptions;
+        let mut canvas = Canvas::new(
+            2.0,
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        let pad_x_pt = 20.0;
+        // 28pt cap-height is ~22pt;  start the cursor far enough
+        // down that the colour atlas slot doesn't run off the top.
+        let mut y_pt = 36.0;
+        let opts = ShapeOptions::full();
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(15, 18, 23, 1.0))
+            .draw();
+        let fg = Color::rgba(220, 224, 235, 1.0);
+        for (pt, line) in rows.iter() {
+            let size_q = crate::glyph_atlas::GlyphKey::size_q_for(*pt);
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .color(fg)
+                .ui()
+                .ui_size_q(size_q)
+                .weight(400)
+                .opts(opts)
+                .draw();
+            y_pt += pt * 1.55;
+        }
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                true,
+            )
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_emoji_color.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 emoji color] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
