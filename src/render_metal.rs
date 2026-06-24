@@ -3812,11 +3812,14 @@ pub(crate) fn push_text_run_kind(
 ) {
     // Phase 3 — chrome runs go through `FontCache::shape_ui` (CTLine
     // shaping with cached re-shape, kerning + ligatures + auto font
-    // fallback ON).  PTY runs keep the mono cell loop below.
+    // fallback ON).  PTY runs keep the mono cell loop below.  Phase 5
+    // weight is plumbed via `push_text_run_kind_weighted` — this
+    // legacy entry point keeps the regular-weight (400) default for
+    // back-compat callers.
     if kind == FontKind::Ui {
         push_text_run_ui_shaped(
             text, x_start, baseline_y, color,
-            ascent, atlas_w, atlas_h,
+            ascent, atlas_w, atlas_h, 400,
             font, atlas, glyphs,
         );
         return;
@@ -3860,12 +3863,16 @@ pub(crate) fn push_text_run_kind(
 }
 
 /// Phase 3 — chrome `Ui` text run.  Shapes the line through CTLine
-/// (cached by `FontCache::shape_ui`), then for each shaped glyph
-/// allocates an atlas slot via `get_or_rasterize_natural` (no
+/// (cached by `FontCache::shape_ui_weighted`), then for each shaped
+/// glyph allocates an atlas slot via `get_or_rasterize_natural` (no
 /// cell-fit fallback — glyph bbox sized) and emits a `GlyphInstance`
 /// at the typographic origin CTLine gave us.  ASCII gets real
 /// kerning (`Ta` reads tight); `fi` / `==>` show ligatures; CJK in a
 /// Latin sentence routes through PingFang / Hiragino automatically.
+///
+/// Phase 5 — `weight` carries the CSS weight (100..900); `400` reuses
+/// the base UI font, other values materialise the variable-font
+/// weight variant on first call.
 #[allow(clippy::too_many_arguments)]
 fn push_text_run_ui_shaped(
     text: &str,
@@ -3875,11 +3882,12 @@ fn push_text_run_ui_shaped(
     ascent: f32,
     atlas_w: f32,
     atlas_h: f32,
+    weight: u16,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     glyphs: &mut Vec<GlyphInstance>,
 ) {
-    let shaped = font.shape_ui(text);
+    let shaped = font.shape_ui_weighted(text, weight);
     if shaped.is_empty() {
         return;
     }
@@ -5241,16 +5249,30 @@ fn build_canvas_runs(
                 // top-left.  Convert: baseline_y = anchor_y +
                 // ascent.
                 let baseline_y = t.y as f32 + ascent;
-                push_text_run_kind(
-                    &t.content,
-                    t.x as f32,
-                    baseline_y,
-                    t.color.to_rgba_f32(),
-                    cell_w, cell_h, ascent,
-                    atlas_w_f, atlas_h_f,
-                    font, atlas, out_glyphs,
-                    if ui_font { FontKind::Ui } else { FontKind::Terminal },
-                );
+                if ui_font {
+                    // Phase 5 — chrome path honours TextPrim.weight.
+                    push_text_run_ui_shaped(
+                        &t.content,
+                        t.x as f32,
+                        baseline_y,
+                        t.color.to_rgba_f32(),
+                        ascent,
+                        atlas_w_f, atlas_h_f,
+                        t.weight,
+                        font, atlas, out_glyphs,
+                    );
+                } else {
+                    push_text_run_kind(
+                        &t.content,
+                        t.x as f32,
+                        baseline_y,
+                        t.color.to_rgba_f32(),
+                        cell_w, cell_h, ascent,
+                        atlas_w_f, atlas_h_f,
+                        font, atlas, out_glyphs,
+                        FontKind::Terminal,
+                    );
+                }
                 let added = out_glyphs.len() - before;
                 if added > 0 {
                     bump(&mut runs, CanvasRunKind::Glyph, added);

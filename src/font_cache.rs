@@ -200,6 +200,25 @@ impl FontRegistry {
         self.fonts.push(font);
         idx
     }
+
+    /// Phase 5 — register a font under a caller-provided unique key
+    /// instead of the natural postscript name.  Used by weight-axis
+    /// variants of SF Pro, where `CTFontDescriptor::create_copy_with_attributes`
+    /// returns a font whose postscript name CT reports as identical
+    /// to the base (`AppleSystemUIFont` regardless of the requested
+    /// weight) — the natural dedup would collapse all weights to one
+    /// slot.  The caller threads `"AppleSystemUIFont@w<weight>"` (or
+    /// similar) so each variant keeps its own font_id.
+    fn intern_with_key(&mut self, key: String, font: CTFont) -> usize {
+        if let Some(&idx) = self.by_name.get(&key) {
+            return idx;
+        }
+        let idx = self.fonts.len();
+        self.by_name.insert(key, idx);
+        self.color.push(font_has_color_glyphs(&font));
+        self.fonts.push(font);
+        idx
+    }
 }
 
 /// Shared font handling for both renderers.  Owns the font registry,
@@ -470,17 +489,32 @@ impl FontCache {
     /// on `FontCache` because it's logically font-state — the shape
     /// output references `font_id`s into the same registry.
     pub fn shape_ui(&mut self, text: &str) -> Vec<crate::font_shape::ShapedGlyph> {
+        self.shape_ui_weighted(text, 400)
+    }
+
+    /// Phase 5 — shape `text` through CTLine against the UI font at
+    /// the requested CSS weight (100..900, step 100).  `weight_q == 400`
+    /// short-circuits to the base UI font (no variant build).  Other
+    /// weights lazily build + intern the variable-font variant; the
+    /// shape cache keys on `(text, size_q, weighted_font_idx)` so
+    /// `h1@600` and `body@400` cache independently.
+    pub fn shape_ui_weighted(
+        &mut self,
+        text: &str,
+        weight_q: u16,
+    ) -> Vec<crate::font_shape::ShapedGlyph> {
         if self.ui_font_idx == 0 || text.is_empty() {
             return Vec::new();
         }
-        let base_font = self.fonts.fonts[self.ui_font_idx].clone();
+        let base_idx = match weight_q {
+            400 => self.ui_font_idx,
+            _ => self
+                .intern_ui_weighted(weight_q)
+                .unwrap_or(self.ui_font_idx),
+        };
+        let base_font = self.fonts.fonts[base_idx].clone();
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
-        let ui_id = self.ui_font_idx as u32;
-        // Borrow split: take the shape_cache out, run shape against
-        // a closure that mutably borrows the rest of FontCache, put
-        // it back.  Can't hold &mut self.shape_cache + &mut self
-        // simultaneously through the closure boundary, so we move
-        // the cache into a local for the duration of the call.
+        let ui_id = base_idx as u32;
         let mut cache = std::mem::take(&mut self.shape_cache);
         let result = cache
             .shape(text, &base_font, ui_id, size_q, |f| {
@@ -489,6 +523,37 @@ impl FontCache {
             .to_vec();
         self.shape_cache = cache;
         result
+    }
+
+    /// Phase 5 — intern (or fetch from cache) the SF Pro variant at
+    /// `weight_q` CSS weight (100, 200, …, 900).  Builds the
+    /// CT weight-trait variant via the font's descriptor + the
+    /// `kCTFontTraitsAttribute` / `kCTFontWeightTrait` keys.  Returns
+    /// `None` only when the UI font wasn't loaded at startup (older
+    /// macOS / system font failure) — caller falls back to the
+    /// regular UI font.
+    pub fn intern_ui_weighted(&mut self, weight_q: u16) -> Option<usize> {
+        if self.ui_font_idx == 0 {
+            return None;
+        }
+        let bucket = match weight_q {
+            100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900 => weight_q,
+            // Off-step values: round to the nearest 100 (mirrors CSS
+            // semantics for "what does font-weight: 550 actually do?").
+            other => ((other as i32).clamp(100, 900) as u16 + 50) / 100 * 100,
+        };
+        if bucket == 400 {
+            return Some(self.ui_font_idx);
+        }
+        let unique_key = format!("__marspot_ui@w{}", bucket);
+        if let Some(&idx) = self.fonts.by_name.get(&unique_key) {
+            return Some(idx);
+        }
+        let base = self.fonts.fonts[self.ui_font_idx].clone();
+        let pt_size = base.pt_size();
+        let weight_ct = css_weight_to_ct_trait(bucket);
+        let weighted = build_weight_variant(&base, pt_size, weight_ct)?;
+        Some(self.fonts.intern_with_key(unique_key, weighted))
     }
 
     /// Phase 3 — chrome ascent + cell height.  Identical to the PTY
@@ -612,6 +677,52 @@ pub fn compute_cell_width(font: &CTFont) -> f64 {
     size.width
 }
 
+/// Phase 5 — map a CSS weight (100..900) to the CT
+/// `kCTFontWeightTrait` value in `[-1.0, 1.0]`.  Anchored to Apple's
+/// documented mapping: Ultra Light = -0.8, Regular = 0.0, Bold = 0.4,
+/// Black = 0.62 (https://developer.apple.com/documentation/coretext/kctfontweighttrait).
+/// Intermediate steps interpolate linearly between the table points.
+fn css_weight_to_ct_trait(weight: u16) -> f64 {
+    match weight {
+        100 => -0.80,
+        200 => -0.60,
+        300 => -0.40,
+        400 => 0.00,
+        500 => 0.23,
+        600 => 0.30,
+        700 => 0.40,
+        800 => 0.56,
+        900 => 0.62,
+        _ => 0.00,
+    }
+}
+
+/// Phase 5 — build a variant of `base` at `weight_ct` ∈ [-1, 1] via
+/// the CT descriptor + `kCTFontTraitsAttribute` + `kCTFontWeightTrait`
+/// pipeline.  Returns `None` if CT refuses the attribute combination
+/// (rare — typically only when the font has no variable axes).
+fn build_weight_variant(base: &CTFont, pt_size: f64, weight_ct: f64) -> Option<CTFont> {
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
+    use core_text::font_descriptor::{kCTFontTraitsAttribute, kCTFontWeightTrait};
+
+    let weight_key = unsafe { CFString::wrap_under_get_rule(kCTFontWeightTrait) };
+    let traits_attr = unsafe { CFString::wrap_under_get_rule(kCTFontTraitsAttribute) };
+
+    let traits_dict =
+        CFDictionary::from_CFType_pairs(&[(weight_key, CFNumber::from(weight_ct))]);
+    let attrs_dict =
+        CFDictionary::from_CFType_pairs(&[(traits_attr, traits_dict.to_untyped())]);
+
+    let base_desc = base.copy_descriptor();
+    let new_desc = base_desc
+        .create_copy_with_attributes(attrs_dict.to_untyped())
+        .ok()?;
+    Some(core_text::font::new_from_descriptor(&new_desc, pt_size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,5 +759,57 @@ mod tests {
         // break the public contract.
         let (_idx, glyph) = fc.resolve_char('A', false, false);
         assert!(glyph != 0, "resolve still works post-rebuild");
+    }
+
+    /// Phase 5 — weight=400 must reuse the base UI font_idx; weight=700
+    /// must materialise a distinct font_id (variable-font variant) so
+    /// the renderer's atlas keys don't collide between weights.
+    #[test]
+    fn weighted_variant_distinct_from_base() {
+        let mut fc = match FontCache::build() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if fc.ui_font_idx == 0 {
+            // No system UI font on this host — Phase 5 is a no-op,
+            // not a failure.
+            return;
+        }
+        let base_idx = fc.ui_font_idx;
+        // weight=400 is the base — same idx.
+        assert_eq!(fc.intern_ui_weighted(400), Some(base_idx));
+        // weight=700 must produce a distinct slot.
+        let bold_idx = fc.intern_ui_weighted(700).expect("700 variant builds");
+        assert_ne!(bold_idx, base_idx, "weight=700 must intern a fresh font_id");
+        // Subsequent calls hit the cache (same idx).
+        let bold_idx_again = fc.intern_ui_weighted(700).expect("700 cached");
+        assert_eq!(bold_idx, bold_idx_again, "cache must dedupe by weight");
+    }
+
+    /// Phase 5 — shape_ui_weighted at 700 returns a glyph sequence
+    /// keyed against the bold font, so the renderer's atlas slot
+    /// keys differ from 400.  We can't easily assert visual diff
+    /// without rasterising; covering the font_id divergence proves
+    /// the pipeline routed through the variant.
+    #[test]
+    fn shape_weighted_routes_to_variant_font() {
+        let mut fc = match FontCache::build() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if fc.ui_font_idx == 0 {
+            return;
+        }
+        let regular = fc.shape_ui_weighted("Hi", 400);
+        let bold = fc.shape_ui_weighted("Hi", 700);
+        if regular.is_empty() || bold.is_empty() {
+            return; // shape returned nothing — likely no UI font
+        }
+        // First glyph's font_id must differ — the variant has its own
+        // FontRegistry slot, so shape's intern callback returned it.
+        assert_ne!(
+            regular[0].font_id, bold[0].font_id,
+            "weight=400 vs weight=700 must yield distinct font_id"
+        );
     }
 }

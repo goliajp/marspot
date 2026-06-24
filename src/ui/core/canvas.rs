@@ -115,6 +115,7 @@ impl Canvas {
             y,
             content: content.to_string(),
             color: Color::TRANSPARENT,
+            weight: 400,
         }
     }
 
@@ -186,6 +187,11 @@ pub struct TextPrim {
     pub y: f64,
     pub content: String,
     pub color: Color,
+    /// Phase 5 — CSS weight (100..900, step 100).  Default 400 maps
+    /// to the base UI font; other values request a variable-font
+    /// variant the renderer materialises lazily.  Ignored for
+    /// terminal (mono) text — Monaco has no weight axis to vary.
+    pub weight: u16,
 }
 
 // ─── Builders ──────────────────────────────────────────────
@@ -291,6 +297,7 @@ pub struct TextBuilder<'c> {
     y: Length,
     content: String,
     color: Color,
+    weight: u16,
 }
 
 impl<'c> TextBuilder<'c> {
@@ -298,8 +305,16 @@ impl<'c> TextBuilder<'c> {
         self.color = c;
         self
     }
+    /// Phase 5 — set the CSS weight for this text run (100..900 in
+    /// steps of 100).  `400` is regular; `600` semi-bold; `700`
+    /// bold.  Off-step values round to the nearest step.  Only takes
+    /// effect for the chrome UI font path (PTY ignores).
+    pub fn weight(mut self, weight: u16) -> Self {
+        self.weight = weight;
+        self
+    }
     pub fn draw(self) {
-        let TextBuilder { canvas, x, y, content, color } = self;
+        let TextBuilder { canvas, x, y, content, color, weight } = self;
         let parent = canvas.parent;
         let x_p = parent.x + x.resolve_for_axis(parent.w, canvas.scale);
         let y_p = parent.y + y.resolve_for_axis(parent.h, canvas.scale);
@@ -308,6 +323,7 @@ impl<'c> TextBuilder<'c> {
             y: y_p,
             content,
             color,
+            weight,
         }));
     }
 }
