@@ -6590,6 +6590,81 @@ mod tests {
         );
     }
 
+    /// DevPanel UI > Tokens > Typography snapshot.  Locks the Size
+    /// scale(Caption / Body / Header / LargeHeader)+ Weight pair
+    /// (Regular / Bold)+ 8 named TextStyle tokens (CAPTION / BODY /
+    /// HEADER / LARGE_HEADER / HINT / CODE / LINK / ERROR).Future
+    /// drift in the Mono Monaco font metrics(advance / line-height /
+    /// cap-height ratio)or theme token registry shows up as an SSIM
+    /// hit instead of going unnoticed for weeks.
+    #[test]
+    fn devpanel_typography_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 840;
+        let h_px: u32 = 1040;
+        let state = crate::ui::components::DevPanelState {
+            visible: true,
+            origin_pt: (0.0, 0.0),
+            size_pt: (420.0, 520.0),
+            active_tab: crate::ui::components::dev_panel::TAB_UI,
+            active_section: crate::ui::components::dev_panel::SECTION_UI_TOKENS_TYPOGRAPHY,
+            scale: 2.0,
+        };
+        let measure = crate::chrome_measure::ChromeMeasure::new(
+            renderer.font_mut(),
+            16.0,
+            32.0,
+        );
+        let canvas = crate::ui::components::build_dev_panel_canvas(
+            &state,
+            w_px as f64,
+            h_px as f64,
+            16.0,
+            32.0,
+            24.0,
+            &measure,
+        );
+        drop(measure);
+        let bytes = renderer
+            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("devpanel_typography.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[devpanel typography] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
