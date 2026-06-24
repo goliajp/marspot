@@ -5149,6 +5149,149 @@ impl MetalRenderer {
 mod tests {
     use super::*;
 
+    /// Phase 9 (extended) — pure-Rust SSIM (Structural Similarity
+    /// Index) over the luma channel.  No new deps — `png` is already
+    /// in the workspace, the rest is arithmetic over RGBA bytes.
+    ///
+    /// 8×8 non-overlapping windows; standard SSIM weights
+    /// (`k1 = 0.01`, `k2 = 0.03`, `L = 255`).  Luma per pixel uses
+    /// BT.709 weights (`0.2126 R + 0.7152 G + 0.0722 B`).  Returns
+    /// the unweighted mean SSIM across every window — 1.0 = identical,
+    /// `< 0.98` (per `docs/font-rendering-design.md` §9) is the
+    /// project's visual-regression gate.
+    ///
+    /// Input bytes are RGBA (the snapshot harness already does the
+    /// BGRA→RGBA swap before calling this).  Sizes must agree;
+    /// caller checks dims via the `png::Decoder` header.
+    fn ssim_luma(a: &[u8], b: &[u8], w: u32, h: u32) -> f64 {
+        const W: usize = 8;
+        let stride = (w as usize) * 4;
+        let luma = |bytes: &[u8], x: usize, y: usize| -> f64 {
+            let i = y * stride + x * 4;
+            0.2126 * bytes[i] as f64
+                + 0.7152 * bytes[i + 1] as f64
+                + 0.0722 * bytes[i + 2] as f64
+        };
+        const C1: f64 = (0.01 * 255.0) * (0.01 * 255.0);
+        const C2: f64 = (0.03 * 255.0) * (0.03 * 255.0);
+        let mut total: f64 = 0.0;
+        let mut count: usize = 0;
+        let mut y = 0;
+        while y + W <= h as usize {
+            let mut x = 0;
+            while x + W <= w as usize {
+                let mut mu_a = 0.0;
+                let mut mu_b = 0.0;
+                for dy in 0..W {
+                    for dx in 0..W {
+                        mu_a += luma(a, x + dx, y + dy);
+                        mu_b += luma(b, x + dx, y + dy);
+                    }
+                }
+                let n = (W * W) as f64;
+                mu_a /= n;
+                mu_b /= n;
+                let mut var_a = 0.0;
+                let mut var_b = 0.0;
+                let mut cov = 0.0;
+                for dy in 0..W {
+                    for dx in 0..W {
+                        let da = luma(a, x + dx, y + dy) - mu_a;
+                        let db = luma(b, x + dx, y + dy) - mu_b;
+                        var_a += da * da;
+                        var_b += db * db;
+                        cov += da * db;
+                    }
+                }
+                var_a /= n;
+                var_b /= n;
+                cov /= n;
+                let s = ((2.0 * mu_a * mu_b + C1) * (2.0 * cov + C2))
+                    / ((mu_a * mu_a + mu_b * mu_b + C1) * (var_a + var_b + C2));
+                total += s;
+                count += 1;
+                x += W;
+            }
+            y += W;
+        }
+        if count == 0 { 1.0 } else { total / count as f64 }
+    }
+
+    /// Phase 9 — load a baseline PNG as raw RGBA bytes (matches what
+    /// the snapshot harness produces post-channel-swap).  Returns
+    /// `None` if the file doesn't exist or its dims disagree — caller
+    /// treats a missing baseline as "first-time lock, write only".
+    fn load_baseline_rgba(
+        path: &std::path::Path,
+        expected_w: u32,
+        expected_h: u32,
+    ) -> Option<Vec<u8>> {
+        let file = std::fs::File::open(path).ok()?;
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
+        let mut reader = decoder.read_info().ok()?;
+        let info = reader.info();
+        if info.width != expected_w || info.height != expected_h {
+            return None;
+        }
+        let mut buf = vec![0u8; reader.output_buffer_size()?];
+        let frame = reader.next_frame(&mut buf).ok()?;
+        buf.truncate(frame.buffer_size());
+        // Force RGBA shape — decoder honours the encoder's RGBA8
+        // setup from `write_snapshot_png` below.  Other shapes would
+        // need a channel pad / expand here; for now reject by None.
+        if frame.color_type != png::ColorType::Rgba {
+            return None;
+        }
+        Some(buf)
+    }
+
+    /// Phase 9 — SSIM gate per `docs/font-rendering-design.md` §9.
+    /// Snapshot tests call this after producing fresh RGBA bytes:
+    ///   - if `MARSPOT_FONT_SNAPSHOT=check` and a baseline exists,
+    ///     compute SSIM and `assert! > 0.98` — failing means a real
+    ///     visual drift slipped in.
+    ///   - otherwise no-op (writes happen in the caller).
+    ///
+    /// The `check` mode is opt-in so default `cargo nextest` stays
+    /// fast and host-portable (no Metal device → snapshot tests skip
+    /// entirely upstream).  `bin/font-snapshot-check.sh` is the
+    /// wrapper that flips the env and runs the matrix.
+    fn assert_snapshot_ssim(
+        rgba: &[u8],
+        baseline_path: &std::path::Path,
+        w_px: u32,
+        h_px: u32,
+        threshold: f64,
+    ) {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").as_deref() != Ok("check") {
+            return;
+        }
+        let baseline = match load_baseline_rgba(baseline_path, w_px, h_px) {
+            Some(b) => b,
+            None => {
+                eprintln!(
+                    "[ssim] no baseline at {} (or dim mismatch) — skipping check",
+                    baseline_path.display()
+                );
+                return;
+            }
+        };
+        let s = ssim_luma(rgba, &baseline, w_px, h_px);
+        eprintln!(
+            "[ssim] {} = {:.4} (threshold {:.4})",
+            baseline_path.display(),
+            s,
+            threshold,
+        );
+        assert!(
+            s >= threshold,
+            "SSIM {:.4} < {:.4} — visual regression vs {}",
+            s,
+            threshold,
+            baseline_path.display(),
+        );
+    }
+
     /// Font v5 snapshot — renders the dev-panel canvas with the
     /// `Font v5` section active, encodes the BGRA framebuffer to a
     /// PNG, and writes it to disk for manual eyeball.  Opt-in via
@@ -5225,6 +5368,10 @@ mod tests {
         let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_showcase.png");
+        // Phase 9 — `=check` runs SSIM vs the committed baseline BEFORE
+        // we overwrite the on-disk PNG; otherwise the on-disk PNG IS
+        // the fresh render and SSIM would be 1.0 by definition.
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
         let file = std::fs::File::create(&out_path).expect("create png");
         let buf = std::io::BufWriter::new(file);
         let mut encoder = png::Encoder::new(buf, w_px, h_px);
@@ -5333,6 +5480,8 @@ mod tests {
         let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
         std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
         let out_path = out_dir.join("font_v5_mono_grid.png");
+        // Phase 9 — SSIM gate (see assert_snapshot_ssim doc).
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
         let file = std::fs::File::create(&out_path).expect("create png");
         let buf = std::io::BufWriter::new(file);
         let mut encoder = png::Encoder::new(buf, w_px, h_px);
