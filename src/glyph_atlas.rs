@@ -275,6 +275,13 @@ pub struct GlyphAtlas {
     /// frame; cache hits then set `entry.last_used = current_frame`,
     /// and eviction picks the shelf whose newest entry is oldest.
     current_frame: u64,
+    /// Phase 10 — natural-bbox rasteriser.  CoreText impls in
+    /// `font_trait` delegate to the existing free functions; tests
+    /// can plug a `MockRasteriser` to exercise the atlas without a
+    /// CoreText font.  The PTY `get_or_rasterize` path still calls
+    /// CoreText directly — Phase 10 plumbs only the chrome / natural
+    /// path.
+    rasteriser: Box<dyn crate::font_trait::Rasteriser>,
 }
 
 /// 1-px padding on every side of every glyph; prevents linear
@@ -303,11 +310,40 @@ impl GlyphAtlas {
         Self::with_format(device, width, height, true)
     }
 
+    /// Phase 10 — same as `new` / `new_color` but plugs a caller-
+    /// supplied rasteriser.  Headless tests use this with
+    /// `MockRasteriser` to exercise shelf packing / LRU eviction
+    /// without a CoreText font.
+    pub fn new_with_rasteriser(
+        device: &ProtocolObject<dyn MTLDevice>,
+        width: u32,
+        height: u32,
+        color: bool,
+        rasteriser: Box<dyn crate::font_trait::Rasteriser>,
+    ) -> Result<Self, String> {
+        Self::with_format_and_rasteriser(device, width, height, color, rasteriser)
+    }
+
     fn with_format(
         device: &ProtocolObject<dyn MTLDevice>,
         width: u32,
         height: u32,
         color: bool,
+    ) -> Result<Self, String> {
+        let rasteriser: Box<dyn crate::font_trait::Rasteriser> = if color {
+            Box::new(crate::font_trait::CoreTextColorRasteriser)
+        } else {
+            Box::new(crate::font_trait::CoreTextMonoRasteriser)
+        };
+        Self::with_format_and_rasteriser(device, width, height, color, rasteriser)
+    }
+
+    fn with_format_and_rasteriser(
+        device: &ProtocolObject<dyn MTLDevice>,
+        width: u32,
+        height: u32,
+        color: bool,
+        rasteriser: Box<dyn crate::font_trait::Rasteriser>,
     ) -> Result<Self, String> {
         let (format, bpp) = if color {
             (MTLPixelFormat::BGRA8Unorm, 4u32)
@@ -343,6 +379,7 @@ impl GlyphAtlas {
             rebuild_count: 0,
             evict_count: 0,
             current_frame: 0,
+            rasteriser,
         })
     }
 
@@ -413,14 +450,19 @@ impl GlyphAtlas {
             entry.last_used = self.current_frame;
             return Some(*entry);
         }
-        // Phase 4 — `key.subpx_x` ∈ 0..4 picks the 0.25-px x-bucket;
-        // raster offsets the pen by `subpx_x × 0.25` so the same
-        // glyph at 4 sub-pixel positions caches as 4 distinct entries
-        // and proportional text at 11-13pt doesn't black-clump.
-        let raster = if self.bpp == 4 {
-            rasterise_glyph_color_natural(font, key.glyph, key.subpx_x)?
-        } else {
-            rasterise_glyph_natural(font, key.glyph, key.subpx_x)?
+        // Phase 10 — dispatch through the trait (`CoreText*Rasteriser`
+        // by default; tests can plug `MockRasteriser`).  The
+        // `key.subpx_x` ∈ 0..4 sub-pixel bucket (Phase 4) is part of
+        // the contract so the trait impl rasterises the correct
+        // variant.
+        let out = self.rasteriser.rasterise(font, key.glyph, key.subpx_x)?;
+        let raster = Raster {
+            bytes: out.bytes,
+            px_w: out.px_w,
+            px_h: out.px_h,
+            n_cells: 1,
+            bearing_x: out.bearing_x,
+            bearing_y: out.bearing_y,
         };
         self.commit_raster(key, raster)
     }
@@ -978,6 +1020,39 @@ fn rasterise_glyph_color(
 /// renderer pushes the quad at integer `pen_x`; the AA edge inside
 /// the bitmap carries the fractional offset.  Bitmap gets one extra
 /// column to accommodate the right-edge shift at `subpx_x == 3`.
+/// Phase 10 — thin trait-shaped wrapper around the internal mono
+/// natural rasteriser.  `CoreTextMonoRasteriser` in `font_trait` calls
+/// this so its impl doesn't need access to the private `Raster` type.
+pub fn raster_natural_mono(
+    font: &CTFont,
+    glyph: CGGlyph,
+    subpx_x: u8,
+) -> Option<crate::font_trait::RasterOutput> {
+    rasterise_glyph_natural(font, glyph, subpx_x).map(|r| crate::font_trait::RasterOutput {
+        bytes: r.bytes,
+        px_w: r.px_w,
+        px_h: r.px_h,
+        bearing_x: r.bearing_x,
+        bearing_y: r.bearing_y,
+    })
+}
+
+/// Phase 10 — companion to `raster_natural_mono`, for the BGRA8 colour
+/// path used by `CoreTextColorRasteriser`.
+pub fn raster_natural_color(
+    font: &CTFont,
+    glyph: CGGlyph,
+    subpx_x: u8,
+) -> Option<crate::font_trait::RasterOutput> {
+    rasterise_glyph_color_natural(font, glyph, subpx_x).map(|r| crate::font_trait::RasterOutput {
+        bytes: r.bytes,
+        px_w: r.px_w,
+        px_h: r.px_h,
+        bearing_x: r.bearing_x,
+        bearing_y: r.bearing_y,
+    })
+}
+
 fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option<Raster> {
     let bbox = font.get_bounding_rects_for_glyphs(
         core_text::font_descriptor::kCTFontOrientationDefault,
@@ -1139,6 +1214,51 @@ mod tests {
         let entry2 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("second call from cache");
         assert_eq!(entry1.u0, entry2.u0, "second call must return the same UV");
         assert_eq!(atlas.cache_len(), 1, "cache must not grow on hit");
+    }
+
+    /// Phase 10 — atlas pumps glyphs through a `MockRasteriser`
+    /// without ever calling CoreText.  Validates that the trait
+    /// dispatch in `get_or_rasterize_natural` is wired correctly:
+    /// the returned `AtlasEntry` dims must match what the mock
+    /// emitted, and the cache-hit path stamps `last_used` the same
+    /// way it does for the real rasteriser.
+    #[test]
+    fn mock_rasteriser_drives_natural_path() {
+        use crate::font_trait::MockRasteriser;
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut atlas = GlyphAtlas::new_with_rasteriser(
+            &device,
+            128,
+            128,
+            false,
+            Box::new(MockRasteriser::mono(4, 6)),
+        )
+        .expect("atlas with mock rasteriser");
+        let font = make_font(); // unused by MockRasteriser
+        let key = GlyphKey {
+            font_id: 7,
+            glyph: 42,
+            size_q: 100,
+            subpx_x: 0,
+            flags: GlyphKey::FLAG_SMOOTH,
+        };
+        atlas.begin_frame(11);
+        let e1 = atlas
+            .get_or_rasterize_natural(key, &font)
+            .expect("mock raster places");
+        assert_eq!(e1.px_w, 4);
+        assert_eq!(e1.px_h, 6);
+        assert_eq!(e1.last_used, 11);
+
+        atlas.begin_frame(12);
+        let e2 = atlas
+            .get_or_rasterize_natural(key, &font)
+            .expect("cache hit");
+        assert_eq!(e1.u0, e2.u0, "cache hit must reuse UV");
+        assert_eq!(e2.last_used, 12, "cache hit must update LRU stamp");
     }
 
     /// Phase 9 — atlas raster perf characterization.  Same idea as

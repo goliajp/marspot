@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.40"  # font v5 Phase 9 (minimal) — 性能特征化测试.新 2 个 Phase 9 perf 测试:`shape_warm_cache_beats_cold_shape`(6 chrome strings 冷 / 暖 ShapeCache 时延 median,松紧 5 ms / 1 ms 兜底)+ `raster_warm_cache_beats_cold_raster`(16 ASCII 冷 / 暖 atlas raster 时延 median,5 ms / 50 µs 兜底).实测远低 spec 红线(spec: 冷 raster < 500 µs/字 / 暖 cache < 100 ns/字 / shape/frame < 1 ms),本机实测 shape 冷 32 µs / 暖 0 µs;atlas 冷 19 µs / 暖 125 ns.新 `bin/font-bench.sh` grep `[font v5]` tag 让 dev 看 median 不打开测试输出.12-string × PNG × SSIM ≥ 0.98 视觉回归矩阵延后(需 baseline PNG store + 跨机复现方案).全 239 lib 测试 PASS(+2).
-core    = "0.10.90"
+shell   = "0.6.41"  # font v5 Phase 10 — Rasteriser trait + CoreText/Mock impls + atlas natural-path plumbing.新 `src/font_trait.rs`:`Rasteriser` trait(Send+Sync+'static),`RasterOutput` 值类型,`CoreTextMonoRasteriser` + `CoreTextColorRasteriser`(delegates to existing fns),`MockRasteriser::mono/color(w, h)` 给 headless 测试.glyph_atlas 加 `raster_natural_mono/_color` 公开 helper 让 trait impl 不碰私有 Raster.GlyphAtlas 加 `rasteriser: Box<dyn Rasteriser>` 字段 + `new_with_rasteriser(...)` 构造器(test plug Mock);`new/new_color` 默认装 CoreText 对应 variant.`get_or_rasterize_natural` 改 `self.rasteriser.rasterise()` 走 trait;PTY `get_or_rasterize` (n_cells + cell-fit 安全网)仍直调 CoreText,等 cross-platform PTY 渲染时再 trait 化.新测 `coretext_mono_returns_raster` + `mock_rasteriser_emits_canned_bytes` + `mock_rasteriser_drives_natural_path`(MockRasteriser plug atlas 验 dims + last_used 更新).全 242 lib 测试 PASS(+3).Shaper trait 延后(需 FontCache.shaper plumbing).
+core    = "0.10.91"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3
