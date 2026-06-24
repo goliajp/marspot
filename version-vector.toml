@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.42"  # font v5 Phase 10b — Shaper trait + CoreText/Mock impls + FontCache plumbing.font_trait.rs 加 `Shaper` trait(Send+Sync+'static,方法收 `&mut dyn FnMut(CTFont) -> u32` intern 回调让 object-safe)+ `CoreTextShaper`(delegates `shape_line`) + `MockShaper { canned: Vec<ShapedGlyph> }`(headless 测试).ShapeCache 加 `shape_with(text, base_font, ..., shape_fn, intern)` —— 让 cache miss 走 caller 提供的闭包(默认 shape 仍调 shape_line).FontCache 加 `shaper: Box<dyn Shaper>` + `set_shaper(box)` 返旧 shaper(scoped override).`shape_ui_weighted_opts` take 双 mem::replace 把 shape_cache + shaper 都拿出来,通过 shape_with + shaper.shape() 走 trait,执行完放回.新测 `mock_shaper_emits_canned_glyphs` + `coretext_shaper_matches_shape_line` + `shape_ui_routes_through_shaper_trait`(plug MockShaper 验 canned glyphs 原样返).全 245 lib 测试 PASS(+3).
-core    = "0.10.92"
+shell   = "0.6.43"  # font v5 dev panel showcase — UI tab 加 `Font v5` section,canvas TextPrim + TextBuilder 加 `opts: ShapeOptions` 字段(默认 full()),`.opts(...)` 链式 API,push_text_run_ui_shaped 加 opts 参,Text 分支路由 t.opts.新 `draw_font_v5_sample` 展示 Phase 5 6 档 weight(Thin/Light/Regular/Semibold/Bold/Black)、Phase 8 connect/no-connect 对比(`fi fl ffi -> => >= !=` full vs all_off)、Phase 3 kerning(`Ta AV LT WA — Yes`)、Phase 7 chrome 真彩 emoji(`👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎 🐙 🍣`)、Phase 3 CJK 自动 fallback(`Hello 你好世界 こんにちは 안녕하세요`)、Phase 4 subpixel(`iiiiiii lllllll mmmmm AVAVAV WAWAWA`).全 245 lib 测试 PASS.
+core    = "0.10.93"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

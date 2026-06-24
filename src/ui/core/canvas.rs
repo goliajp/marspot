@@ -116,6 +116,7 @@ impl Canvas {
             content: content.to_string(),
             color: Color::TRANSPARENT,
             weight: 400,
+            opts: crate::font_shape::ShapeOptions::full(),
         }
     }
 
@@ -192,6 +193,13 @@ pub struct TextPrim {
     /// variant the renderer materialises lazily.  Ignored for
     /// terminal (mono) text — Monaco has no weight axis to vary.
     pub weight: u16,
+    /// Phase 8 — per-context OpenType feature toggles.  Default
+    /// `ShapeOptions::full()` matches CTLine's defaults (kerning +
+    /// ligatures on); chrome `code` blocks pass `ShapeOptions::code()`
+    /// to force uniform glyph advance while keeping ligatures.  PTY
+    /// text never reaches this field — the mono renderer doesn't
+    /// shape.
+    pub opts: crate::font_shape::ShapeOptions,
 }
 
 // ─── Builders ──────────────────────────────────────────────
@@ -298,6 +306,7 @@ pub struct TextBuilder<'c> {
     content: String,
     color: Color,
     weight: u16,
+    opts: crate::font_shape::ShapeOptions,
 }
 
 impl<'c> TextBuilder<'c> {
@@ -313,8 +322,18 @@ impl<'c> TextBuilder<'c> {
         self.weight = weight;
         self
     }
+    /// Phase 8 — set the OpenType feature toggles for this run.
+    /// Pass `ShapeOptions::all_off()` to suppress ligatures (default
+    /// CTLine combines `fi`/`fl`/`==>` etc.) so the dev showcase can
+    /// demonstrate the on-vs-off difference; `ShapeOptions::code()`
+    /// keeps ligatures but turns kerning off for code-block-style
+    /// layout.
+    pub fn opts(mut self, opts: crate::font_shape::ShapeOptions) -> Self {
+        self.opts = opts;
+        self
+    }
     pub fn draw(self) {
-        let TextBuilder { canvas, x, y, content, color, weight } = self;
+        let TextBuilder { canvas, x, y, content, color, weight, opts } = self;
         let parent = canvas.parent;
         let x_p = parent.x + x.resolve_for_axis(parent.w, canvas.scale);
         let y_p = parent.y + y.resolve_for_axis(parent.h, canvas.scale);
@@ -324,6 +343,7 @@ impl<'c> TextBuilder<'c> {
             content,
             color,
             weight,
+            opts,
         }));
     }
 }

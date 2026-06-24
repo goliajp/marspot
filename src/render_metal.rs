@@ -3839,6 +3839,8 @@ pub(crate) fn push_text_run_kind(
         // emoji glyphs fall back to mono alpha silhouettes (the
         // pre-Phase-7 behaviour).  Chrome calls
         // `push_text_run_ui_shaped` directly with both atlases.
+        // Phase 8 — legacy entry has no `opts` either; default to
+        // `full()` so existing callers preserve CTLine defaults.
         push_text_run_ui_shaped_mono(
             text, x_start, baseline_y, color,
             ascent, atlas_w, atlas_h, 400,
@@ -3957,13 +3959,14 @@ fn push_text_run_ui_shaped(
     color_atlas_w: f32,
     color_atlas_h: f32,
     weight: u16,
+    opts: crate::font_shape::ShapeOptions,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
 ) {
-    let shaped = font.shape_ui_weighted(text, weight);
+    let shaped = font.shape_ui_weighted_opts(text, weight, opts);
     if shaped.is_empty() {
         return;
     }
@@ -5364,6 +5367,7 @@ fn build_canvas_runs(
                         atlas_w_f, atlas_h_f,
                         color_atlas_w_f, color_atlas_h_f,
                         t.weight,
+                        t.opts,
                         font, atlas, color_atlas, out_glyphs, out_color_glyphs,
                     );
                 } else {
