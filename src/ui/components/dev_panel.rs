@@ -1066,10 +1066,10 @@ pub fn scroll_id_for_section(active: usize) -> crate::ui::view::ViewId {
 mod h {
     use crate::ui::view::{
         Text, View, Edges, FrameSpec, ToggleState, PickerState,
-        toggle, picker, filled, hstack, vstack, with_host_state_mut,
-        Modifier, ViewId,
+        filled, hstack, vstack, with_host_state_mut,
+        ViewId,
     };
-    use crate::ui::theme::{color, space, radius, text};
+    use crate::ui::theme::{color, radius, text};
     use crate::ui::core::{Length, Color};
 
     pub fn h2(s: &str) -> View {
@@ -1157,8 +1157,8 @@ mod h {
 // ─── L1 Foundation ────────────────────────────────────────────
 
 fn build_l1_view() -> crate::ui::view::View {
-    use crate::ui::view::{Text, FrameSpec, vstack, hstack, filled};
-    use crate::ui::theme::{color, space, radius, text};
+    use crate::ui::view::{FrameSpec, vstack, hstack, filled};
+    use crate::ui::theme::{color, space, radius};
     use crate::ui::core::Length;
     let len_bar = |w: f64, c, lab: &'static str| {
         hstack(vec![
@@ -1427,7 +1427,7 @@ fn build_l3_view() -> crate::ui::view::View {
         vstack, hstack,
         shape_circle, shape_capsule, shape_rounded_rect,
     };
-    use crate::ui::theme::{color, radius};
+    use crate::ui::theme::color;
     use crate::ui::core::Length;
 
     h::scrollable_page(0xDE7_0030, vec![
@@ -1623,11 +1623,8 @@ fn build_l4_view() -> crate::ui::view::View {
 // ─── L5 Components(presets + 真组件)──────────────────────────
 
 fn build_l5_view() -> crate::ui::view::View {
-    use crate::ui::view::{
-        Text, Edges, FrameSpec,
-        vstack, hstack, filled, ActionId,
-    };
-    use crate::ui::theme::{color, space, radius, text, elev};
+    use crate::ui::view::{vstack, hstack, ActionId};
+    use crate::ui::theme::color;
     use crate::ui::core::Length;
 
     h::scrollable_page(0xDE7_0050, vec![
@@ -1709,8 +1706,8 @@ fn build_l5_view() -> crate::ui::view::View {
 // ─── L6 Cross-cutting ─────────────────────────────────────────
 
 fn build_l6_view() -> crate::ui::view::View {
-    use crate::ui::view::{Text, FrameSpec, vstack, hstack, filled, AnimCurve, Anim};
-    use crate::ui::theme::{color, radius, text, ThemeId};
+    use crate::ui::view::{FrameSpec, vstack, hstack, filled, AnimCurve};
+    use crate::ui::theme::{color, radius};
     use crate::ui::core::Length;
 
     let easing_demo = |curve: AnimCurve, lab: &'static str| {
@@ -2214,141 +2211,6 @@ fn build_font_v5_view() -> crate::ui::view::View {
     ]).vstack_gap(Length::Pt(22.0))
 }
 
-/// Font v5 showcase — each Phase's headline capability rendered side
-/// by side so the user can SEE the difference between off and on.
-/// Every text run inside this section calls `.ui()` to opt INTO SF
-/// Pro proportional shape, so the rest of the dev panel (which laid
-/// itself out against Monaco mono cell metrics) keeps its original
-/// look unaffected by the showcase.
-fn draw_font_v5_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
-    use crate::font_shape::ShapeOptions;
-
-    let fg = tokens::SECTION_BODY_FG;
-    let hint = tokens::SAMPLE_HINT_FG;
-    let row_h = 22.0;
-    let label_w = 96.0;
-    let mut cursor_y = y;
-
-    // ─── Phase 5 — variable font weights ─────────────────────
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 5 — variable weight")
-        .color(tokens::SECTION_HEADER_FG)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    let weights: &[(u16, &str)] = &[
-        (100, "Thin 100"),
-        (300, "Light 300"),
-        (400, "Regular 400"),
-        (600, "Semibold 600"),
-        (700, "Bold 700"),
-        (900, "Black 900"),
-    ];
-    let mut col_x = x;
-    for (w, label) in weights {
-        canvas.text(Length::Pt(col_x), Length::Pt(cursor_y), label)
-            .color(fg)
-            .weight(*w)
-            .ui()
-            .draw();
-        col_x += 105.0;
-    }
-    cursor_y += row_h * 1.4;
-
-    // ─── Phase 8 — ShapeOptions liga off vs default ──────────
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 8 — ligatures (CTLine default vs all_off)")
-        .color(tokens::SECTION_HEADER_FG)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "default:")
-        .color(hint)
-        .ui()
-        .draw();
-    canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "fi fl ffi -> => >= !=")
-        .color(fg)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "all_off:")
-        .color(hint)
-        .ui()
-        .draw();
-    canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "fi fl ffi -> => >= !=")
-        .color(fg)
-        .opts(ShapeOptions::all_off())
-        .ui()
-        .draw();
-    cursor_y += row_h * 1.4;
-
-    // ─── Phase 3 — kerning (Ta AV LT) at the chrome size ─────
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 3 — kerning + proportional advance")
-        .color(tokens::SECTION_HEADER_FG)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "kerned:")
-        .color(hint)
-        .ui()
-        .draw();
-    canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "Ta AV LT WA — Yes")
-        .color(fg)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    // CT auto-kerning still runs even with `kerning=false` in
-    // ShapeOptions (Phase 8 left that toggle as TODO), but liga
-    // off + the integer-position pen shows visibly looser spacing.
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "raw shape:")
-        .color(hint)
-        .ui()
-        .draw();
-    canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "Ta AV LT WA — Yes")
-        .color(fg)
-        .opts(ShapeOptions::all_off())
-        .ui()
-        .draw();
-    cursor_y += row_h * 1.4;
-
-    // ─── Phase 7 — chrome colour emoji ───────────────────────
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 7 — chrome colour emoji")
-        .color(tokens::SECTION_HEADER_FG)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎 🐙 🍣")
-        .color(fg)
-        .ui()
-        .draw();
-    cursor_y += row_h * 1.4;
-
-    // ─── Phase 3 — automatic CJK fallback ────────────────────
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 3 — CJK auto-fallback (SF Pro → PingFang / Hiragino)")
-        .color(tokens::SECTION_HEADER_FG)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Hello 你好世界 こんにちは 안녕하세요")
-        .color(fg)
-        .ui()
-        .draw();
-    cursor_y += row_h * 1.4;
-
-    // ─── Phase 4 — subpixel positioning at small sizes ───────
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 4 — sub-pixel x (0.25-px buckets)")
-        .color(tokens::SECTION_HEADER_FG)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-    // Repeated narrow glyphs — the pre-Phase-4 chrome path would
-    // black-clump the column of `i`s; Phase 4 yields visible spacing.
-    canvas.text(Length::Pt(x), Length::Pt(cursor_y), "iiiiiiiiiiiiii  lllllllllll  mmmmmm  AVAVAV  WAWAWA")
-        .color(fg)
-        .ui()
-        .draw();
-    cursor_y += row_h;
-
-    cursor_y
-}
 
 #[cfg(test)]
 mod tests {
