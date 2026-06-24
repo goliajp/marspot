@@ -304,6 +304,101 @@ struct LinkContext {
     kind: marspot::grid_links::LinkKind,
 }
 
+/// Build the right-click menu items shown when the user clicks (left
+/// or right) on an underlined URL / file-path span.  Returns Open +
+/// Copy entries (Copy on top — primary intent in a terminal context
+/// is "grab this URL/path", not "launch the browser").  Email is
+/// recognised at scan time but inert here — caller filters it via
+/// `hit_test_link_at_xy`; the empty Vec stays as the safety net.
+///
+/// **Regression-gate**: this is the contract behind the "click a URL,
+/// get a panel" feature (`/Users/doracawl/workspace/goliajp/marspot/src/bin/marspot-core.rs:3282` for the
+/// left-click entry; `mouse_right_down` line 1297 for the right-click
+/// entry).  The tail of the click chain is:
+///
+///   AppKit `(rightM|m)ouseDown:` → L1 shell → MsgType wire → L2
+///   `CoreApp::mouse_(right_)down` → `hit_test_link_at_xy` (`grid_links::scan_visible_links`)
+///   → `link_menu_items_for` → `ContextMenuState` set → renderer
+///   `set_context_menu` → ContextMenu paint over grid.
+///
+/// User noted a transient regression of this feature on 2026-06-25
+/// without a root cause; the unit tests below pin the contract on
+/// each LinkKind so a future drift surfaces at `cargo nextest`.
+fn link_menu_items_for(
+    link: &LinkContext,
+) -> Vec<marspot::ui::components::MenuItem> {
+    use marspot::grid_links::LinkKind;
+    use marspot::ui::components::MenuItem;
+    let (open_label, copy_label) = match link.kind {
+        LinkKind::Url => ("Open URL", "Copy URL"),
+        LinkKind::File => ("Open file", "Copy path"),
+        LinkKind::Email => return Vec::new(),
+    };
+    vec![
+        MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
+        MenuItem::entry(open_label, ContextMenuAction::OpenLink.tag()),
+    ]
+}
+
+#[cfg(test)]
+mod link_menu_tests {
+    use super::*;
+    use marspot::grid_links::LinkKind;
+
+    fn ctx(kind: LinkKind) -> LinkContext {
+        LinkContext { text: "https://example.com".into(), kind }
+    }
+
+    #[test]
+    fn url_yields_copy_then_open() {
+        let items = link_menu_items_for(&ctx(LinkKind::Url));
+        assert_eq!(items.len(), 2, "URL must surface Copy + Open");
+        assert_eq!(items[0].label, "Copy URL");
+        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
+        assert_eq!(items[1].label, "Open URL");
+        assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
+    }
+
+    #[test]
+    fn file_yields_copy_path_then_open_file() {
+        let items = link_menu_items_for(&ctx(LinkKind::File));
+        assert_eq!(items.len(), 2, "File must surface Copy + Open");
+        assert_eq!(items[0].label, "Copy path");
+        assert_eq!(items[1].label, "Open file");
+    }
+
+    #[test]
+    fn email_yields_empty_menu() {
+        // Email is recognised but inert (per user request).  Empty
+        // menu = "do nothing" — mouse_(right_)down treats len()==0 as
+        // a no-op and the click falls through to selection / focus.
+        let items = link_menu_items_for(&ctx(LinkKind::Email));
+        assert!(items.is_empty(), "Email kind must yield no items");
+    }
+
+    /// Belt-and-braces: a NEW LinkKind variant (e.g. a future
+    /// `Anchor` for HTTP fragment links) must not silently produce
+    /// an empty menu without an explicit `return Vec::new()` — the
+    /// `match` above is non-exhaustive-by-design and a new variant
+    /// would force a compile-time decision.  This test fails to
+    /// compile (not just fails to pass) if the variant is missed —
+    /// listing each known variant pins the surface.
+    #[test]
+    fn every_known_linkkind_is_handled() {
+        for kind in [LinkKind::Url, LinkKind::File, LinkKind::Email] {
+            let items = link_menu_items_for(&ctx(kind));
+            match kind {
+                LinkKind::Url | LinkKind::File => {
+                    assert_eq!(items.len(), 2, "{kind:?} must be actionable");
+                }
+                LinkKind::Email => {
+                    assert!(items.is_empty(), "Email stays inert");
+                }
+            }
+        }
+    }
+}
+
 struct ContextMenuState {
     items: Vec<marspot::ui::components::MenuItem>,
     anchor_x: f64,
@@ -1405,21 +1500,7 @@ impl CoreApp {
         &self,
         link: &LinkContext,
     ) -> Vec<marspot::ui::components::MenuItem> {
-        use marspot::grid_links::LinkKind;
-        use marspot::ui::components::MenuItem;
-        let (open_label, copy_label) = match link.kind {
-            LinkKind::Url => ("Open URL", "Copy URL"),
-            LinkKind::File => ("Open file", "Copy path"),
-            // Email is filtered at `hit_test_link_at_xy`, but stay
-            // safe in case the filter shape ever changes.
-            LinkKind::Email => return Vec::new(),
-        };
-        // Copy on top — primary intent in a terminal context is
-        // "grab this URL/path", not "launch the browser".
-        vec![
-            MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
-            MenuItem::entry(open_label, ContextMenuAction::OpenLink.tag()),
-        ]
+        link_menu_items_for(link)
     }
 
     fn dispatch_context_action(
