@@ -6513,6 +6513,83 @@ mod tests {
         );
     }
 
+    /// DevPanel UI > Components > Catalog snapshot.  Locks the
+    /// rendered bytes for the entire view-tree component preset
+    /// catalogue(`card / panel / badge / tooltip / toggle / picker /
+    /// list_row / context_menu / breadcrumb`)so any silent regression
+    /// in a single primitive(corner radius drift, shadow blur change,
+    /// border colour drift, glyph baseline漂)surfaces as an SSIM hit
+    /// across the 14-component column.  Pairs with the showcase /
+    /// chrome_decoration baselines — those cover the visual atoms,
+    /// this covers the composed surface that components live in.
+    #[test]
+    fn devpanel_components_catalog_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 840;
+        let h_px: u32 = 1040;
+        let state = crate::ui::components::DevPanelState {
+            visible: true,
+            origin_pt: (0.0, 0.0),
+            size_pt: (420.0, 520.0),
+            active_tab: crate::ui::components::dev_panel::TAB_UI,
+            active_section: crate::ui::components::dev_panel::SECTION_UI_COMPONENTS_CATALOG,
+            scale: 2.0,
+        };
+        let measure = crate::chrome_measure::ChromeMeasure::new(
+            renderer.font_mut(),
+            16.0,
+            32.0,
+        );
+        let canvas = crate::ui::components::build_dev_panel_canvas(
+            &state,
+            w_px as f64,
+            h_px as f64,
+            16.0,
+            32.0,
+            24.0,
+            &measure,
+        );
+        drop(measure);
+        let bytes = renderer
+            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("devpanel_components_catalog.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[devpanel components catalog] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
