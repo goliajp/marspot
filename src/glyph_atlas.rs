@@ -361,6 +361,22 @@ pub struct GlyphAtlas {
 /// filtering from sampling the neighbour above / left.
 const PAD: u32 = 1;
 
+/// Phase B v2 attack #2 — LRU `last_used` decay-store resolution
+/// (in frames).  Cache hits write `entry.last_used = current_frame`
+/// **only when the stamp is older than this window**, instead of
+/// every hit.  The hot render loop sees ~1–10 K cache hits per
+/// frame; at 120 Hz the previous "store-every-hit" policy spent
+/// ~5–10 µs/frame on memory writes that were redundant — every
+/// hit within the same frame already wrote the same value, and the
+/// LRU eviction path only cares about coarse age (which shelf is
+/// stalest, not which entry on it is N-frame fresher than another).
+///
+/// `8` keeps eviction order stable on a 120 Hz render budget: a
+/// shelf that hasn't been hit for 8+ frames (~67 ms) is genuinely
+/// stale, while still suppressing 7-of-8 stores on the steady-state
+/// hit path.
+const LAST_USED_RESOLUTION: u64 = 8;
+
 impl GlyphAtlas {
     /// Alpha-only (`R8Unorm`) atlas — the mono path for all text glyphs,
     /// tinted by the per-cell foreground colour in the FG shader.
@@ -494,8 +510,15 @@ impl GlyphAtlas {
         if let Some(entry) = self.cache.get_mut(&key) {
             // Phase 6 — touch on hit so the LRU eviction path keeps
             // this glyph alive for as long as the current working set
-            // references it.
-            entry.last_used = self.current_frame;
+            // references it.  Phase B v2 attack #2 — decay-store: skip
+            // the write when the stamp is already within
+            // `LAST_USED_RESOLUTION` frames of `current_frame`, which
+            // collapses ~7/8 store-buffer ops on the hot lookup path
+            // without disturbing eviction's coarse age ordering.
+            let cf = self.current_frame;
+            if cf.wrapping_sub(entry.last_used) >= LAST_USED_RESOLUTION {
+                entry.last_used = cf;
+            }
             return Some(*entry);
         }
         let raster = if self.bpp == 4 {
@@ -520,7 +543,12 @@ impl GlyphAtlas {
         font: &CTFont,
     ) -> Option<AtlasEntry> {
         if let Some(entry) = self.cache.get_mut(&key) {
-            entry.last_used = self.current_frame;
+            // Phase B v2 attack #2 — decay-store (see comment on
+            // `LAST_USED_RESOLUTION`).
+            let cf = self.current_frame;
+            if cf.wrapping_sub(entry.last_used) >= LAST_USED_RESOLUTION {
+                entry.last_used = cf;
+            }
             return Some(*entry);
         }
         // Phase 10 — dispatch through the trait (`CoreText*Rasteriser`
@@ -653,7 +681,12 @@ impl GlyphAtlas {
         F: FnOnce(&mut [u8]),
     {
         if let Some(entry) = self.cache.get_mut(&key) {
-            entry.last_used = self.current_frame;
+            // Phase B v2 attack #2 — decay-store (see comment on
+            // `LAST_USED_RESOLUTION`).
+            let cf = self.current_frame;
+            if cf.wrapping_sub(entry.last_used) >= LAST_USED_RESOLUTION {
+                entry.last_used = cf;
+            }
             return Some(*entry);
         }
         let mut buf = vec![0u8; (w as usize) * (h as usize)];
@@ -1337,12 +1370,30 @@ mod tests {
         assert_eq!(e1.px_h, 6);
         assert_eq!(e1.last_used, 11);
 
+        // Attack #2 — decay-store: a hit within
+        // `LAST_USED_RESOLUTION` frames must NOT rewrite the stamp.
         atlas.begin_frame(12);
         let e2 = atlas
             .get_or_rasterize_natural(key, &font)
             .expect("cache hit");
         assert_eq!(e1.u0, e2.u0, "cache hit must reuse UV");
-        assert_eq!(e2.last_used, 12, "cache hit must update LRU stamp");
+        assert_eq!(
+            e2.last_used, 11,
+            "decay-store: hit within resolution window must not rewrite stamp"
+        );
+
+        // After crossing the resolution window the stamp must
+        // advance — that's how the LRU eviction path still sees
+        // coarse-grained age progress.
+        atlas.begin_frame(11 + LAST_USED_RESOLUTION);
+        let e3 = atlas
+            .get_or_rasterize_natural(key, &font)
+            .expect("cache hit past resolution");
+        assert_eq!(
+            e3.last_used,
+            11 + LAST_USED_RESOLUTION,
+            "hit past resolution window must rewrite stamp"
+        );
     }
 
     /// Phase 9 — atlas raster perf characterization.  Same idea as
