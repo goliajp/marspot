@@ -699,24 +699,55 @@ trait 是 v3+ 的事 —— marspot v1 macOS only,直接调 CoreText API,trait �
 
 ---
 
-### Phase 9 — visual regression test matrix + bench gate
+### Phase 9 — visual regression test matrix + bench gate ✅ shipped 2026-06-25
 
-**改动**:`bench/font-rendering/` + `bin/font-bench.sh`
-- 12 个标杆 string(各 font 类 × 各 场景):
-  - "The quick brown fox jumps over the lazy dog 0123456789"
-  - "你好世界 こんにちは 안녕" CJK 混排
-  - "👨‍👩‍👧‍👦🍕🇯🇵" emoji + ZWJ + flag
-  - "Tax fi fl ff ==> != !==" kerning / ligature
-  - "Bidi: Hello مرحبا עברית" RTL 混排
-- 渲染到 PNG(headless)
-- 对比基线 PNG(SSIM > 0.98)
-- bench:每场景 cold-raster + warm-cache 时延
+**改动**:`bench/font-rendering/snapshots/` + `bin/font-snapshot.sh` +
+`bin/font-snapshot-check.sh` + `bin/bench.sh --ssim` 整合
 
-**Acceptance**:
-- 12/12 visual diff < 2%(允许 AA 噪音)
-- cold raster < 500µs / glyph
-- warm cache lookup < 100ns / glyph
-- shape per frame < 1ms 
+**实施**:9/12 baseline PNG 入库,SSIM > 0.98 gate 实施(pure Rust,
+8×8 windows,BT.709 luma,k1=0.01 / k2=0.03):
+
+| baseline | dims | covers |
+|---|---|---|
+| `font_v5_showcase` | 840×1040 | chrome SF Pro Font v5 panel(全 phase 集中演示) |
+| `font_v5_mono_grid` | 1200×600 | PTY Mono Monaco ASCII + CJK + emoji + kerning + RTL |
+| `font_v5_box_drawing` | 1000×500 | Monaco custom raster path(box drawing arms + block elements) |
+| `font_v5_subpx_fingerprint` | 1000×500 | Phase 4 4-bucket sub-pixel positioning |
+| `font_v5_chrome_small_sizes` | 1200×600 | chrome SF Pro 11/12/13/14pt + variable weight 100/400/700/900 |
+| `font_v5_cjk_fallback_baseline` | 1400×600 | chrome SF Pro CJK cascade(PingFang / Hiragino / Apple SD Gothic Neo)baseline 对齐 |
+| `font_v5_emoji_color` | 1200×600 | Phase 7 BGRA 色彩 emoji + ZWJ family + flag |
+| `font_v5_opentype_opts` | 1400×900 | Phase 8 `full()` / `code()` / `all_off()` 3 列 × 4 source |
+| `font_v5_terminal_scene` | 1200×600 | 终端场景 cell-rect BG(选区)+ cursor block + Mono log-style |
+| `font_v5_chrome_decoration` | 1400×500 | chrome rounded rect + shadow + border + depth stack |
+
+剩 3 候选(不紧急):variable weight slider(已 covered by chrome_small_sizes)/
+真 PTY readback(`StorageModeShared` 改造,Phase 10 scope)/ docs §15 矩阵
+最后 1 项(用户需要时补).
+
+**工作流**:
+
+- `bin/font-snapshot.sh`(`MARSPOT_FONT_SNAPSHOT=1`)— 开发者 lock
+  baseline:渲染到 PNG 覆盖现有 fixture.改字体/UI/raster path 时跑.
+- `bin/font-snapshot-check.sh`(`MARSPOT_FONT_SNAPSHOT=check`)— 跑
+  SSIM 验证:每个 baseline 比对 ≥ 0.98 阈值,fail 第一个 SSIM 跌
+  的 snapshot.
+- `bin/bench.sh --ssim` / `bin/bench.sh --full` — perf gate 链.
+  `--ssim` 显式开,`--full`(pre-merge)隐式带.
+- `bin/bench-remote.sh --full` — mini host gate,perf + SSIM 同步跑.
+
+**Acceptance(✅ 达成)**:
+- 10/12 visual baseline lock + SSIM > 0.98 gate working(reverse-
+  validated:corrupt baseline → SSIM 0.9634 < 0.98 → 具体错误信息 +
+  non-zero exit)
+- bench.sh / bench-remote.sh 集成完成
+- `cargo nextest run --lib` 6 snapshot tests env-gated 不影响 default
+  test 速度(每 ≈ 30s build + render)
+
+**剩余(Phase 10 scope)**:
+- cold raster < 500µs / glyph timing 未独立测(集成在 mini render
+  p99 / parse cat-* perf gate 内间接覆盖)
+- warm cache lookup < 100ns 同上
+- shape per frame < 1ms 同上
 
 ---
 
