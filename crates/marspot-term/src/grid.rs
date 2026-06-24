@@ -366,9 +366,9 @@ impl Grid {
         )
     }
 
-    /// Construct with a caller-supplied scrollback (memory or disk).
-    /// `Terminal::new` calls this so it can pick the disk variant
-    /// when `MARSPOT_DISK_SCROLLBACK` is set without dragging the env
+    /// Construct with a caller-supplied scrollback (Memory or File).
+    /// `Terminal::new` calls this so it can pick the File variant
+    /// when `MARSPOT_SESSION_ID` is set without dragging the env
     /// check through the Grid API.
     pub fn with_scrollback_kind(cols: u16, rows: u16, scrollback: Scrollback) -> Self {
         assert!(cols > 0 && rows > 0, "grid dimensions must be positive");
@@ -757,11 +757,6 @@ impl Grid {
     pub fn clear_scrollback(&mut self) {
         self.scrollback.clear();
         self.sb_wrapped.clear();
-    }
-
-    /// Bench-harness escape hatch — see `Scrollback::evict_disk_pages_for_bench`.
-    pub fn evict_disk_scrollback_pages_for_bench(&self) {
-        self.scrollback.evict_disk_pages_for_bench();
     }
 
     /// Resize the visible grid **without losing content**.

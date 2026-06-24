@@ -1737,14 +1737,6 @@ impl CoreApp {
 
     // ─── C5: scrollback search overlay ────────────────────────────
 
-    /// F1 — scrollback search is default-on.  `MARSPOT_SEARCH=0` is
-    /// the kill-switch for users who need to disable Cmd+F (e.g.
-    /// because a keystroke conflict surfaced).  Removed entirely
-    /// in a later cleanup once the default has settled.
-    fn search_enabled() -> bool {
-        std::env::var("MARSPOT_SEARCH").as_deref() != Ok("0")
-    }
-
     /// Minimum pane width (in cell cols) below which Cmd+F is a no-op
     /// per §6.7.  The search bar is 40 cols wide; a 24-col floor leaves
     /// headroom for narrow PaneSession dialogs that legitimately use
@@ -1755,9 +1747,6 @@ impl CoreApp {
     /// When already open → re-focus + select-all (browser convention
     /// per §6.9).  Narrow-pane fallback skips the open entirely.
     fn handle_cmd_f(&mut self) -> bool {
-        if !Self::search_enabled() {
-            return false;
-        }
         let idx = self.focused_idx;
         let Some(pane) = self.panes.get_mut(idx) else { return false };
         // Width gate (§6.7).
@@ -1866,9 +1855,6 @@ impl CoreApp {
         mods: Modifiers,
     ) -> bool {
         use marspot::input::{LogicalKey, NamedKey};
-        if !Self::search_enabled() {
-            return false;
-        }
         let idx = self.focused_idx;
         // Decision: list vs bar.  Done in a scope so the mutable
         // borrow of `self.panes` ends before we call

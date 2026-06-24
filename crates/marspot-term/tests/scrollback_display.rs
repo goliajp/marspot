@@ -63,7 +63,6 @@ impl ScenarioState {
     fn apply_env(&self) {
         unsafe {
             std::env::set_var("MARSPOT_STATE_DIR", &self.state_dir);
-            std::env::set_var("MARSPOT_FILE_SCROLLBACK", "1");
             std::env::set_var("MARSPOT_SESSION_ID", self.sid.to_string());
         }
     }

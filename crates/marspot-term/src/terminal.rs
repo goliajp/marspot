@@ -18,81 +18,27 @@ use crate::scrollback::Scrollback;
 use crate::{lx_debug, lx_debug_sampled, lx_info, lx_warn};
 use std::collections::VecDeque;
 use std::io;
-use std::sync::OnceLock;
 use std::time::Instant;
 
-/// Whether disk-backed scrollback is on for this process.  Resolved
-/// once on first call.  `MARSPOT_DISK_SCROLLBACK=0` opts out (RAM-only,
-/// kept for regression bisects); any other value (or unset) gives
-/// disk-on, the default since the anon-mmap rewrite landed.
-///
-/// The pre-anon-mmap implementation accepted a path here so the
-/// scratch file's location was configurable; with anonymous mmap
-/// there's no file, so the env var is binary now.  Old custom
-/// paths are silently treated as "on".
-fn disk_scrollback_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("MARSPOT_DISK_SCROLLBACK").as_deref() != Ok("0"))
-}
-
-/// F1 — file-backed scrollback is the default whenever a session id
-/// is present (i.e. inside an L3 `marspot-session` process; tests /
-/// mcli / `--snapshot` don't set MARSPOT_SESSION_ID and so fall
-/// through to Disk/Memory, preserving their behaviour).
-/// `MARSPOT_FILE_SCROLLBACK=0` is the kill-switch for users who want
-/// to opt OUT in case of a regression.  Removed entirely in a later
-/// cleanup once the default has settled.
-fn fallback_disk_or_memory(cols: u16) -> Scrollback {
-    Scrollback::disk(
-        DISK_SCROLLBACK_RAM_LINES,
-        DISK_SCROLLBACK_PAGES,
-        cols as usize,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!(
-            "[marspot] disk scrollback init failed ({e}); falling back to RAM-only"
-        );
-        Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
-    })
-}
-
+/// F2 — file-backed scrollback is on whenever a session id is present
+/// (L3 `marspot-session` process).  mcli / `--snapshot` / tests don't
+/// set `MARSPOT_SESSION_ID` and so fall through to in-RAM Memory.  The
+/// old `MARSPOT_FILE_SCROLLBACK` / `MARSPOT_DISK_SCROLLBACK` opt-out
+/// gates were removed after F1 soaked; both were no-ops for the live
+/// app and only existed for bisect rollback.
 fn file_scrollback_session_id() -> Option<u64> {
-    // F1 — file scrollback is now default-on whenever a session id is
-    // present.  `MARSPOT_FILE_SCROLLBACK=0` is the kill-switch (e.g.
-    // a user hits a regression and wants the Disk/Memory fallback);
-    // anything else (unset / "1" / etc.) activates File.
-    if std::env::var("MARSPOT_FILE_SCROLLBACK").as_deref() == Ok("0") {
-        return None;
-    }
     std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
 }
 
-/// In-RAM ring size when disk scrollback is active.  Front-line
-/// cache for the most-recent N lines; older history goes through
-/// the mmap'd ring.  Kept at 1024 deliberately:
-///
-/// Tried 4096 (Phase 3 of disk-scrollback default-on roadmap, see
-/// `--bench scroll`) — the larger lazy-allocated `ram_cells` Vec
-/// pays first-touch page faults on the parse hot path, costing
-/// ~3 % cat-ascii throughput.  Scroll p99 didn't improve (mmap
-/// region access is already as fast as Vec index), so the trade
-/// failed: small idle-resident upside, measurable burst-output
-/// downside.  Data on `feature/disk-scrollback-mmap` 2026-05-04.
-/// F1+13 — reduced from 1024 → 256 (each session was sitting on
-/// ~1024 × cols × 24 B ≈ 3 MB of RAM ring per L3, and with 9
-/// claudecode panes that's ~30 MB just for the hot ring).  The
-/// earlier 1024 figure was chosen against a 4096 alternative that
-/// faulted into the parse hot path — 256 keeps the recent-line
-/// fast path (search worker + mid-burst scrollback reads) cheap on
-/// the same machinery while halving steady-state L3 RSS.
-const DISK_SCROLLBACK_RAM_LINES: usize = 256;
-
-/// Disk pages cap (each = 256 lines).  100 pages × 256 lines × 80
-/// cols × 24 B/cell ≈ 50 MiB on-disk per session.  At 9 sessions
-/// that's ~450 MiB on disk, well under macOS's reasonable cache
-/// budget.  Bounded — file is fixed-size; oldest pages get
-/// overwritten in place.
-const DISK_SCROLLBACK_PAGES: usize = 100;
+/// In-RAM ring size used as the front-line cache by `FileScrollback`.
+/// Sized at 256 lines: each session sits on ~256 × cols × 24 B ≈ 750 KiB
+/// of RAM ring; at 9 panes that's ~7 MiB total — a fraction of the
+/// 1024-line predecessor.  Larger rings faulted into the parse hot
+/// path (4096-line variant cost ~3% cat-ascii throughput); smaller
+/// rings lost the recent-line fast path for search worker /
+/// mid-burst scrollback reads.  Data on
+/// `feature/disk-scrollback-mmap` 2026-05-04.
+const FILE_SCROLLBACK_RAM_LINES: usize = 256;
 
 /// One outstanding local-echo prediction: a byte we expect the PTY
 /// to echo back, plus the grid state we need to restore if it
@@ -233,31 +179,26 @@ struct SavedCursor {
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
-        // A3 (env-gated until F1): file-backed scrollback wins when
-        // MARSPOT_FILE_SCROLLBACK=1 AND MARSPOT_SESSION_ID is set.
-        // Falls through to Disk on any open error so a missing
-        // sessions dir / permission issue doesn't kill the session.
+        // F2 — file-backed scrollback wins inside an L3 session
+        // (MARSPOT_SESSION_ID set).  Falls back to in-RAM Memory on
+        // any open error so a missing sessions dir / permission issue
+        // doesn't kill the session.  Tests / mcli / --snapshot don't
+        // set the env and so go straight to Memory.
         let scrollback = if let Some(sid) = file_scrollback_session_id() {
             match crate::scrollback::Scrollback::file(
                 crate::session_registry::scrollback_bin_path(sid),
                 crate::session_registry::scrollback_idx_path(sid),
                 cols as usize,
-                DISK_SCROLLBACK_RAM_LINES,
+                FILE_SCROLLBACK_RAM_LINES,
             ) {
                 Ok(sb) => sb,
                 Err(e) => {
                     eprintln!(
-                        "[marspot] file scrollback init failed (sid={sid}): {e}; falling back to disk variant"
+                        "[marspot] file scrollback init failed (sid={sid}): {e}; falling back to RAM-only"
                     );
-                    fallback_disk_or_memory(cols)
+                    Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
                 }
             }
-        } else if disk_scrollback_enabled() {
-            // Disk-backed scrollback is default-on; set
-            // MARSPOT_DISK_SCROLLBACK=0 to opt out.  Falls back to
-            // the in-RAM ring on any mmap-init error (no panic —
-            // the user just gets the bounded-RAM history).
-            fallback_disk_or_memory(cols)
         } else {
             Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
         };
@@ -3302,11 +3243,9 @@ mod tests {
         // F1 — File scrollback deliberately preserves `total_lines`
         // across CSI 3 J (the .bin file IS the user's history; CSI
         // 3 J just drops the in-RAM view).  This test asserts the
-        // pre-F1 Memory/Disk semantics where `len()` returns 0, so
-        // explicitly opt into that variant via the kill-switch.
-        // SAFETY: tests mutate process env; restored at the end.
-        let prev = std::env::var("MARSPOT_FILE_SCROLLBACK").ok();
-        unsafe { std::env::set_var("MARSPOT_FILE_SCROLLBACK", "0"); }
+        // Memory variant semantics where `len()` returns 0 after
+        // ESC[3J.  Tests run without `MARSPOT_SESSION_ID`, so
+        // `Terminal::new` lands on Memory automatically.
         let mut t = Terminal::new(3, 2);
         // Build some scrollback by feeding many lines.
         for _ in 0..5 {
@@ -3318,12 +3257,6 @@ mod tests {
         assert_eq!(t.grid().scrollback_len(), 0);
         // Visible row 0 should still hold what was there.
         assert_eq!(t.grid().cell(0, 0).ch, 'x');
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MARSPOT_FILE_SCROLLBACK", v),
-                None => std::env::remove_var("MARSPOT_FILE_SCROLLBACK"),
-            }
-        }
     }
 
     // ----- soak: long-running scroll must not grow memory -----
@@ -3350,14 +3283,13 @@ mod tests {
     #[ignore = "soak; run via bin/soak.sh"]
     fn soak_scrollback_bounded_under_ten_million_lines() {
         let mut t = Terminal::new(80, 24);
-        // Warm up enough to fully wrap the ring once so all anon-mmap
-        // pages have been faulted in before we baseline.  Default
-        // Terminal uses the disk variant (DISK_SCROLLBACK_RAM_LINES +
-        // DISK_SCROLLBACK_PAGES × LINES_PER_PAGE = 26 624 slots);
-        // 40 000 warmup lines covers that with ~1.5x margin and
-        // also fully wraps the 10 000-slot Memory variant.  Without
-        // this the test's "baseline" lands mid-fill and the next
-        // burst's lazy faults look like a leak.
+        // Warm up enough to fully wrap the ring once so all backing
+        // pages have been faulted in before we baseline.  Tests run
+        // without `MARSPOT_SESSION_ID` so `Terminal::new` lands on
+        // the Memory variant (DEFAULT_SCROLLBACK_LINES = 10 000
+        // slots); 40 000 warmup lines covers that with ~4x margin.
+        // Without this the test's "baseline" lands mid-fill and
+        // the next burst's lazy faults look like a leak.
         let warmup = b"\x1B[24;80H\n".repeat(40_000);
         t.feed(&warmup);
 
@@ -3397,98 +3329,6 @@ mod tests {
         );
     }
 
-    /// Sister of the in-RAM soak: build a Terminal with a disk-backed
-    /// (anon-mmap) scrollback and feed millions of scrolled lines.
-    /// Asserts:
-    ///
-    ///   1. RSS stays bounded — anon-mmap region is fixed-size, page
-    ///      writes after warm-up reuse already-faulted pages, no leak
-    ///      per scrolled line.
-    ///   2. The ring's logical capacity stays at the configured cap
-    ///      (RAM cap + disk cap) — wrap-around overwrites in place,
-    ///      `len` never exceeds capacity.
-    ///
-    /// 10 M lines = ~7800 ring wraps at the small test-cap of ~1280
-    /// total lines.  Catches drift from cumulative state that
-    /// 1 M-line tests can hide (e.g. if a per-wrap operation
-    /// allocates O(1) but with leaked drop, 10 M wraps shows it).
-    ///
-    /// Run via `bin/soak.sh`.
-    #[test]
-    #[ignore = "soak; run via bin/soak.sh"]
-    fn soak_disk_scrollback_bounded_under_ten_million_lines() {
-        use crate::scrollback::{Scrollback, LINES_PER_PAGE};
-
-        let cols: u16 = 80;
-        // Tight caps so we exercise the ring overwrite path heavily.
-        let ram_cap = 256;
-        let max_pages = 4; // 4 × 256 = 1024 lines on disk
-        let scrollback = Scrollback::disk(ram_cap, max_pages, cols as usize)
-            .expect("disk scrollback");
-
-        let grid = Grid::with_scrollback_kind(cols, 24, scrollback);
-        let mut t = Terminal {
-            grid,
-            saved_main: None,
-            parser: Parser::new(),
-            attrs: CellAttrs::default(),
-            saved_cursor: None,
-            scroll_top: 0,
-            scroll_bot: 23, // grid is 24 rows here
-            pending_response: Vec::new(),
-            response_window: VecDeque::new(),
-            response_burst_last_warn: None,
-            cursor_key_application_mode: false,
-            bracketed_paste_mode: false,
-            cursor_visible: true,
-            pending_wrap: false,
-            predictions: VecDeque::new(),
-            cluster_buf: String::new(),
-            grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
-            predictions_hit: 0,
-            predictions_miss: 0,
-            generation: 0,
-        };
-
-        // Warm up: prime the ring + write a couple of disk pages.
-        let warmup_lines = ram_cap + 2 * LINES_PER_PAGE;
-        let park = b"\x1B[24;80H";
-        let line = b"this is a fairly typical 50-character log line!\n";
-        for _ in 0..warmup_lines {
-            t.feed(line);
-            t.feed(park);
-        }
-        let baseline_rss = current_rss_bytes();
-
-        // Push 10 M more lines — ~7800 wraps of the test ring.
-        for _ in 0..10_000_000 {
-            t.feed(line);
-            t.feed(park);
-        }
-
-        let after_rss = current_rss_bytes();
-        let rss_growth = after_rss.saturating_sub(baseline_rss);
-
-        // RSS tolerance: 5 MB.  Anon-mmap ring is fixed-size so
-        // RSS shouldn't grow with line count past warm-up — under
-        // memory pressure the kernel pages dirty regions out to swap
-        // rather than to a named file, but the test machine has
-        // plenty of RAM so no eviction is expected here either way.
-        const RSS_TOL: u64 = 5 * 1024 * 1024;
-        assert!(
-            rss_growth < RSS_TOL,
-            "RSS grew {rss_growth} bytes after 10M lines (baseline {baseline_rss}, after {after_rss})"
-        );
-
-        // Capacity-cap sanity: total stored == RAM cap + disk cap.
-        let expected_cap = ram_cap + max_pages * LINES_PER_PAGE;
-        assert_eq!(
-            t.grid().scrollback_len(),
-            expected_cap,
-            "scrollback should be capped at RAM + disk cap"
-        );
-        assert_eq!(t.grid().scrollback_capacity(), expected_cap);
-    }
 
     // ----- alt screen (?1049) ---------------------------------------------
 

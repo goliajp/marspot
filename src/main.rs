@@ -2020,8 +2020,9 @@ fn run_snapshot(path: &str) {
 ///                  in `step`-line decrements (default 3 — one wheel
 ///                  detent) and time each viewport repaint via
 ///                  `Grid::cell_at_view`.  Reports per-tick p50/p95/p99
-///                  nanoseconds.  Picks up `MARSPOT_DISK_SCROLLBACK` so
-///                  the same harness can probe both storage variants.
+///                  nanoseconds.  Runs against the Memory variant
+///                  (the bench's default Terminal without
+///                  `MARSPOT_SESSION_ID`).
 ///
 /// All modes write a single line of JSON to stdout so harness scripts
 /// can grep / parse without depending on prose formatting.
@@ -2093,8 +2094,7 @@ fn run_bench(spec: &str) {
 /// `scrollback_cell(idx: usize, …)` — the O(1) ring primitive — NOT
 /// `cell_at_view`, whose `view_offset: u16` caps the *viewport scroll* at
 /// 65 535 lines (a UI-scroll limit; the data underneath is addressable to
-/// the full `scrollback_len()`).  Requires `MARSPOT_DISK_SCROLLBACK=1` to
-/// exceed the in-memory ring cap.  Reports per-depth cold ns + resident
+/// the full `scrollback_len()`).  Reports per-depth cold ns + resident
 /// RSS so the gate can assert flatness (max/min small) + bounded memory.
 fn bench_scrollaccess(arg: &str) {
     let target_lines: usize = arg.parse().unwrap_or(2_000_000).max(GRID_ROWS as usize + 1);
@@ -2144,9 +2144,11 @@ fn bench_scrollaccess(arg: &str) {
         // Newest scrollback line is index sb_len-1; depth d sits d lines
         // older. Read a viewport-worth of lines going older from there.
         let top = max_idx.saturating_sub(d);
-        // Cold: drop the ring's resident pages so the read faults from disk
-        // — the realistic "scroll back hours later" case.
-        terminal.grid().evict_disk_scrollback_pages_for_bench();
+        // F2 — the historical Disk variant let bench drop ring pages
+        // to simulate a cold cache; with Memory as the bench default
+        // there is no page cache to drop.  Real cold-cache behaviour
+        // lives in production File scrollback's pread fallback path
+        // and is bench-validated via mini live runs instead.
         let t0 = std::time::Instant::now();
         for r in 0..rows {
             let idx = top.saturating_sub(r);
@@ -2421,14 +2423,15 @@ fn bench_metal_render(arg: &str) {
 /// feed and walk: it asks the kernel to evict the disk-backed
 /// scrollback's resident pages (`MADV_DONTNEED`) so the walk
 /// measures cold-page page-fault cost — the realistic experience of
-/// a user who returns to scrollback hours after the writes.  No-op
-/// on the Memory variant.
+/// a user who returns to scrollback hours after the writes.  F2:
+/// the bench now runs against the Memory variant only; `cold` is
+/// accepted for CLI compatibility but is a no-op.
 ///
 /// Lifecycle:
-///   1. Construct `Terminal` (honours `MARSPOT_DISK_SCROLLBACK` so the
-///      same bench probes memory and disk paths).
+///   1. Construct `Terminal` (Memory variant — bench has no
+///      `MARSPOT_SESSION_ID`).
 ///   2. Feed the scenario file to populate scrollback.
-///   3. (cold only) madvise(DONTNEED) on the disk region.
+///   3. (cold) no-op on Memory; retained for CLI compatibility.
 ///   4. Starting at `view_offset = start` (clamped to scrollback len),
 ///      walk every cell in the viewport via `Grid::cell_at_view` and
 ///      time the walk.  Decrement `view_offset` by `step` and repeat
@@ -2455,9 +2458,13 @@ fn bench_scroll(arg: &str, cold: bool) {
 
     let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
     terminal.feed(&bytes);
-    if cold {
-        terminal.grid().evict_disk_scrollback_pages_for_bench();
-    }
+    // F2 — `cold` previously dropped Disk variant ring pages to
+    // simulate page-faulting scrollback reads.  Memory variant has
+    // no pageable backing; flag retained on the CLI surface so the
+    // bench-scripts contract stays compatible but the body is a
+    // no-op now.  Production cold-read perf is validated via mini
+    // live runs against the File variant's pread fallback.
+    let _ = cold;
 
     // Clamp start to the actual scrollback depth — for memory storage
     // (10 K-line ring) feeding 100 K lines leaves only the most recent
