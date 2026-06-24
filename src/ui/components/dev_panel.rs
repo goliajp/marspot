@@ -406,7 +406,28 @@ pub fn build_dev_panel_canvas(
             let _ = draw_text_sample(&mut canvas, content_x, y);
         }
         SECTION_FONT_V5 => {
-            render_view_section(&mut canvas, "Font v5 showcase", build_font_v5_view());
+            // Skip the legacy Monaco-mono `draw_section_header` —
+            // `build_font_v5_view` ships its own SF Pro title so the
+            // whole section reads as one font hierarchy.
+            let ctx = crate::ui::view::LayoutCtx {
+                scale,
+                cell_w_phys: chrome_cell_w as f64,
+                cell_h_phys: chrome_cell_h as f64,
+                ascent_phys: chrome_ascent as f64,
+                fonts,
+            };
+            let avail_w_pt = (window_w_phys / scale) - content_x - 16.0;
+            let avail_h_pt = (window_h_phys / scale) - y;
+            let view = build_font_v5_view();
+            let laid = crate::ui::view::layout_view(
+                &view, ctx,
+                (content_x * scale, y * scale),
+                crate::ui::view::Constraints::loose(
+                    avail_w_pt * scale,
+                    avail_h_pt * scale,
+                ),
+            );
+            crate::ui::view::paint_into(&mut canvas, &laid, ctx);
         }
         _ => {
             canvas.text(Length::Pt(content_x), Length::Pt(y),
@@ -2111,66 +2132,76 @@ fn build_font_v5_view() -> crate::ui::view::View {
     use crate::ui::view::{vstack, hstack, Text};
     use crate::ui::core::Length;
     use crate::font_shape::ShapeOptions;
-    use crate::ui::theme::{color, text as text_tok};
+    use crate::ui::theme::color;
 
-    // SF Pro at chrome scale.  13pt matches `FontCache::UI_FONT_POINT`
-    // so the showcase is laid out against the same font instance the
-    // renderer will paint with — no chance of layout / paint width
-    // mismatch.
-    const SF: f64 = 13.0;
+    // Phase 10c — chrome-realistic sizes.  Title is the section
+    // title (Bold display weight), header tags individual phases
+    // (regular bold), body is the actual showcase content + labels.
+    // Emoji bumped a little so the glyph cell isn't squashed.
+    const TITLE: f64 = 22.0;
+    const H: f64 = 15.0;
+    const BODY: f64 = 13.0;
+    const EMOJI: f64 = 20.0;
     let full = ShapeOptions::full();
     let off = ShapeOptions::all_off();
 
-    let header = |s: &str| Text::new(s).style(text_tok::HEADER).ui(SF, 600, full).build();
-    let hint = |s: &str| Text::new(s).style(text_tok::HINT).ui(SF, 400, full).build();
-    let body = |s: &str| Text::new(s).color(color::FG).ui(SF, 400, full).build();
-    let body_w = |s: &str, w: u16| Text::new(s).color(color::FG).ui(SF, w, full).build();
-    let body_off = |s: &str| Text::new(s).color(color::FG).ui(SF, 400, off).build();
+    let title = |s: &str| Text::new(s).color(color::FG).ui(TITLE, 700, full).build();
+    let header = |s: &str| Text::new(s).color(color::ACCENT_DIM).ui(H, 600, full).build();
+    let hint = |s: &str| Text::new(s).color(color::FG_MUTED).ui(BODY, 400, full).build();
+    let body = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, full).build();
+    let body_w = |s: &str, w: u16| Text::new(s).color(color::FG).ui(BODY, w, full).build();
+    let body_off = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, off).build();
+    let emoji = |s: &str| Text::new(s).color(color::FG).ui(EMOJI, 400, full).build();
 
     let kv = |label: &str, content: crate::ui::view::View| -> crate::ui::view::View {
-        hstack(vec![hint(label), content]).hstack_gap(Length::Pt(8.0))
+        hstack(vec![hint(label), content]).hstack_gap(Length::Pt(10.0))
     };
 
-    // Labels kept short so headers fit the ~250-pt content area at
-    // default panel width.  Long demo strings (subpx, kerning, etc.)
-    // intentionally exceed and rely on the truncate path to clip
-    // gracefully — visible "…" reads as "longer than panel".
+    // Each Phase wrapped in a small VStack so the per-Phase content
+    // sits closer (header + rows = 6pt gap) than the gap BETWEEN
+    // Phases (vstack_gap on the outer stack = 22pt).  Reads as
+    // grouped sections, not a uniform paragraph.
+    let phase = |children: Vec<crate::ui::view::View>| {
+        vstack(children).vstack_gap(Length::Pt(6.0))
+    };
+
     vstack(vec![
-        // ── Phase 5 — variable weight ─────────────────────────
-        header("P5 weight"),
-        hstack(vec![
-            body_w("Thin", 100),
-            body_w("Light", 300),
-            body_w("Regular", 400),
-        ]).hstack_gap(Length::Pt(12.0)),
-        hstack(vec![
-            body_w("Semibold", 600),
-            body_w("Bold", 700),
-            body_w("Black", 900),
-        ]).hstack_gap(Length::Pt(12.0)),
+        title("Font v5 — proportional + variable weight"),
+        phase(vec![
+            header("P5 — variable weight (single SF Pro file)"),
+            kv("100", body_w("The quick brown fox jumps", 100)),
+            kv("400", body_w("The quick brown fox jumps", 400)),
+            kv("700", body_w("The quick brown fox jumps", 700)),
+            kv("900", body_w("The quick brown fox jumps", 900)),
+        ]),
 
-        // ── Phase 8 — ligatures default vs all_off ────────────
-        header("P8 liga: default vs all_off"),
-        kv("on:", body("fi fl ffi ->")),
-        kv("off:", body_off("fi fl ffi ->")),
+        phase(vec![
+            header("P8 — ligatures default vs all_off"),
+            kv("on:", body("fi fl ffi ->")),
+            kv("off:", body_off("fi fl ffi ->")),
+        ]),
 
-        // ── Phase 3 — kerning + proportional advance ──────────
-        header("P3 kerning"),
-        kv("kerned:", body("Ta AV LT WA")),
-        kv("raw:", body_off("Ta AV LT WA")),
+        phase(vec![
+            header("P3 — kerning + proportional"),
+            kv("kerned:", body("Ta AV LT WA")),
+            kv("raw:", body_off("Ta AV LT WA")),
+        ]),
 
-        // ── Phase 7 — chrome colour emoji ─────────────────────
-        header("P7 colour emoji"),
-        body("👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎"),
+        phase(vec![
+            header("P7 — chrome colour emoji"),
+            emoji("👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎"),
+        ]),
 
-        // ── Phase 3 — CJK auto-fallback ───────────────────────
-        header("P3 CJK fallback"),
-        body("Hello 你好 こんにちは 안녕"),
+        phase(vec![
+            header("P3 — CJK auto-fallback"),
+            body("Hello 你好 こんにちは 안녕"),
+        ]),
 
-        // ── Phase 4 — subpixel x positioning ──────────────────
-        header("P4 sub-pixel x"),
-        body("iiiiii lllll AVAVAV"),
-    ]).vstack_gap(Length::Pt(12.0))
+        phase(vec![
+            header("P4 — sub-pixel x"),
+            body("iiiiii lllll AVAVAV"),
+        ]),
+    ]).vstack_gap(Length::Pt(22.0))
 }
 
 /// Font v5 showcase — each Phase's headline capability rendered side

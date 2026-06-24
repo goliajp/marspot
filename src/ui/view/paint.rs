@@ -220,9 +220,10 @@ fn paint_atom<'a>(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, 
             // = None → inherit encoder's global `ui_font`).
             let mut builder = canvas.text(phys_to_pt(rect.x + x_pad), top_pt, &drawn)
                 .color(color);
-            if let super::view::TextFontSpec::Ui { size_q: _, weight, opts_bits } = t.font {
+            if let super::view::TextFontSpec::Ui { size_q, weight, opts_bits } = t.font {
                 builder = builder
                     .ui()
+                    .ui_size_q(size_q)
                     .weight(weight)
                     .opts(super::view::unpack_shape_opts(opts_bits));
             }

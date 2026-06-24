@@ -1061,9 +1061,19 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option
     if bbox.size.width <= 0.0 || bbox.size.height <= 0.0 {
         return None;
     }
+    // Phase 10c — CTFont's bbox is in user-space pt; shape_line bakes
+    // a 2× retina scale into glyph pen positions, so the raster must
+    // bake the same scale into the bitmap dims and the CGContext
+    // CTM.  Without this scale the bitmap was sized in pt while the
+    // pen advance was in phys px — Bold 24pt looked OK (glyph and
+    // gap roughly matched) but Regular 24pt rendered at half the
+    // expected width, reading as evenly-spaced "mono cell" layout.
+    const RETINA_SCALE: f64 = 2.0;
+    let scaled_w = bbox.size.width * RETINA_SCALE;
+    let scaled_h = bbox.size.height * RETINA_SCALE;
     // +1 column right of the natural bbox to fit `subpx_x = 3` shift.
-    let px_w = (bbox.size.width.ceil() as u32) + 2 * PAD + 1;
-    let px_h = (bbox.size.height.ceil() as u32) + 2 * PAD;
+    let px_w = (scaled_w.ceil() as u32) + 2 * PAD + 1;
+    let px_h = (scaled_h.ceil() as u32) + 2 * PAD;
     let bytes_per_row = px_w as usize;
     let buf_len = bytes_per_row * px_h as usize;
     let mut bytes: Vec<u8> = vec![0u8; buf_len];
@@ -1090,18 +1100,25 @@ fn rasterise_glyph_natural(font: &CTFont, glyph: CGGlyph, subpx_x: u8) -> Option
     ctx.set_allows_font_subpixel_positioning(true);
     ctx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
     ctx.set_gray_fill_color(1.0, 1.0);
-    // Phase 4 — sub-pixel x shift inside the bitmap.
-    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25;
-    let pen_x = (PAD as f64) - bbox.origin.x + subpx_offset;
-    let pen_y = (px_h as f64) - (PAD as f64) - bbox.origin.y - bbox.size.height;
+    // Scale CTM so `draw_glyphs` (pt-space) rasterises at retina dims.
+    ctx.scale(RETINA_SCALE, RETINA_SCALE);
+    // Phase 4 — sub-pixel x shift inside the bitmap.  pen coords are
+    // now in USER (pre-scale) space; PAD is phys px, so divide by
+    // scale to get the equivalent pt offset.
+    let subpx_offset = (subpx_x as f64).min(3.0) * 0.25 / RETINA_SCALE;
+    let pen_x = (PAD as f64) / RETINA_SCALE - bbox.origin.x + subpx_offset;
+    let pen_y = (px_h as f64) / RETINA_SCALE - (PAD as f64) / RETINA_SCALE
+        - bbox.origin.y - bbox.size.height;
     font.draw_glyphs(&[glyph], &[CGPoint::new(pen_x, pen_y)], ctx);
+    // bearings stay in phys px (renderer's quad formula is phys px).
     Some(Raster {
         bytes,
         px_w,
         px_h,
         n_cells: 1,
         bearing_x: -(PAD as i16),
-        bearing_y: ((bbox.origin.y + bbox.size.height).ceil() as i16) + (PAD as i16),
+        bearing_y: ((bbox.origin.y + bbox.size.height) * RETINA_SCALE).ceil() as i16
+            + (PAD as i16),
     })
 }
 

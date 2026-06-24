@@ -3981,13 +3981,19 @@ fn push_text_run_ui_shaped(
     color_atlas_h: f32,
     weight: u16,
     opts: crate::font_shape::ShapeOptions,
+    // Phase 10c — `None` = use FontCache's default UI_FONT_POINT;
+    // `Some(q)` = use SF Pro at `q / 4.0` pt.
+    ui_size_q: Option<u16>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
 ) {
-    let shaped = font.shape_ui_weighted_opts(text, weight, opts);
+    let shaped = match ui_size_q {
+        Some(q) => font.shape_ui_weighted_opts_at_size(text, weight, opts, (q as f64) / 4.0),
+        None => font.shape_ui_weighted_opts(text, weight, opts),
+    };
     if shaped.is_empty() {
         return;
     }
@@ -5399,6 +5405,7 @@ fn build_canvas_runs(
                         color_atlas_w_f, color_atlas_h_f,
                         t.weight,
                         t.opts,
+                        t.ui_size_q,
                         font, atlas, color_atlas, out_glyphs, out_color_glyphs,
                     );
                 } else {

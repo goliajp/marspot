@@ -534,24 +534,52 @@ impl FontCache {
         weight_q: u16,
         opts: crate::font_shape::ShapeOptions,
     ) -> f64 {
+        self.measure_ui_text_at_size(text, weight_q, opts, UI_FONT_POINT)
+    }
+
+    /// Phase 10c — measure at an explicit pt size.  Used by
+    /// `chrome_measure::ChromeMeasure` to give the view layout pass
+    /// the right advance for SF Pro at any requested size.
+    pub fn measure_ui_text_at_size(
+        &mut self,
+        text: &str,
+        weight_q: u16,
+        opts: crate::font_shape::ShapeOptions,
+        size_pt: f64,
+    ) -> f64 {
         if self.ui_font_idx == 0 || text.is_empty() {
             return 0.0;
         }
-        let base_idx = match weight_q {
-            400 => self.ui_font_idx,
-            _ => self
-                .intern_ui_weighted(weight_q)
-                .unwrap_or(self.ui_font_idx),
-        };
+        let base_idx = self
+            .intern_ui_weighted_at_size(weight_q, size_pt)
+            .unwrap_or(self.ui_font_idx);
         let base_font = self.fonts.fonts[base_idx].clone();
         crate::font_shape::measure_line(text, &base_font, opts)
     }
 
     /// Phase 10c — chrome line-height in physical pixels for the
-    /// current UI font.  CTFont reports metrics in pt; we bake the
-    /// 2× retina scale here to match `measure_ui_text`.
+    /// current UI font at the startup-interned pt size.
     pub fn ui_line_h_phys(&self) -> f64 {
         self.ui_cell_h * 2.0
+    }
+
+    /// Phase 10c — line-height at an arbitrary SF Pro pt size.
+    /// Materialises the variant if not already interned, reads
+    /// `bounding_box().size.height + leading`, then bakes the 2×
+    /// retina scale so callers can compare directly to physical
+    /// pixel rect heights.
+    pub fn ui_line_h_phys_at_size(&mut self, size_pt: f64) -> f64 {
+        if self.ui_font_idx == 0 {
+            return self.ui_cell_h * 2.0;
+        }
+        // Same intern path as measure / shape so the variant key is
+        // identical and we reuse cached fonts.
+        let idx = self
+            .intern_ui_weighted_at_size(400, size_pt)
+            .unwrap_or(self.ui_font_idx);
+        let f = &self.fonts.fonts[idx];
+        let line_h_pt = f.ascent() + f.descent() + f.leading();
+        line_h_pt * 2.0
     }
 
     /// Phase 8 — shape with explicit per-context OpenType feature
@@ -564,18 +592,43 @@ impl FontCache {
         weight_q: u16,
         opts: crate::font_shape::ShapeOptions,
     ) -> Vec<crate::font_shape::ShapedGlyph> {
+        self.shape_ui_weighted_opts_at_size(text, weight_q, opts, UI_FONT_POINT)
+    }
+
+    /// Phase 10c — shape at an explicit pt size, not just the
+    /// startup-time `UI_FONT_POINT`.  Lets the view system request
+    /// "SF Pro Bold at 28pt" for headers, "Body at 16pt" for demos,
+    /// etc.;  the chrome path used to be locked to 13pt because
+    /// `shape_ui_weighted_opts` always read `base_font.pt_size()`
+    /// from the startup-interned font, ignoring per-run requested
+    /// sizes.  Each `(weight, size_pt)` pair gets its own font_id +
+    /// atlas slot via `intern_ui_weighted_at_size`.
+    pub fn shape_ui_weighted_opts_at_size(
+        &mut self,
+        text: &str,
+        weight_q: u16,
+        opts: crate::font_shape::ShapeOptions,
+        size_pt: f64,
+    ) -> Vec<crate::font_shape::ShapedGlyph> {
         if self.ui_font_idx == 0 || text.is_empty() {
             return Vec::new();
         }
-        let base_idx = match weight_q {
-            400 => self.ui_font_idx,
-            _ => self
-                .intern_ui_weighted(weight_q)
-                .unwrap_or(self.ui_font_idx),
-        };
+        let base_idx = self
+            .intern_ui_weighted_at_size(weight_q, size_pt)
+            .unwrap_or(self.ui_font_idx);
         let base_font = self.fonts.fonts[base_idx].clone();
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
         let ui_id = base_idx as u32;
+        // Phase 10c bug fix — shape's intern callback de-dupes
+        // fallback fonts by postscript_name.  But our size+weight
+        // variants share postscript_name with the base UI font, so
+        // a postscript-name lookup hits the first-interned variant
+        // and returns its idx — Bold 24pt would shape with the Bold
+        // 40pt CTFont (whichever was interned first), Regular 24pt
+        // with the startup 13pt one.  Fix: when the CTRun's font
+        // postscript-name matches the base we just chose, return
+        // `base_idx` directly instead of asking the registry.
+        let base_postscript: String = base_font.postscript_name();
         // Phase 10b — take both cache and shaper out so the closure
         // can mutably borrow the rest of FontCache (specifically
         // `self.fonts`) without aliasing.  Restore both after the
@@ -592,7 +645,13 @@ impl FontCache {
                 size_q,
                 opts,
                 |t, bf, o, intern| shaper.shape(t, bf, o, intern),
-                |f| self.fonts.intern(f) as u32,
+                |f| {
+                    if f.postscript_name() == base_postscript {
+                        base_idx as u32
+                    } else {
+                        self.fonts.intern(f) as u32
+                    }
+                },
             )
             .to_vec();
         self.shape_cache = cache;
@@ -608,26 +667,51 @@ impl FontCache {
     /// macOS / system font failure) — caller falls back to the
     /// regular UI font.
     pub fn intern_ui_weighted(&mut self, weight_q: u16) -> Option<usize> {
+        self.intern_ui_weighted_at_size(weight_q, UI_FONT_POINT)
+    }
+
+    /// Phase 10c — intern (or fetch from cache) the SF Pro variant
+    /// at a specific `(weight, size_pt)` pair.  Cache key encodes
+    /// both axes so the showcase title at 40pt-Bold and body at
+    /// 16pt-Regular get distinct font_ids (and distinct atlas slots
+    /// — different `size_q` in the GlyphKey).  Falls back to the
+    /// base UI font_idx on intern failure or when (weight, size_pt)
+    /// matches the startup-interned variant.
+    pub fn intern_ui_weighted_at_size(
+        &mut self,
+        weight_q: u16,
+        size_pt: f64,
+    ) -> Option<usize> {
         if self.ui_font_idx == 0 {
             return None;
         }
         let bucket = match weight_q {
             100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900 => weight_q,
-            // Off-step values: round to the nearest 100 (mirrors CSS
-            // semantics for "what does font-weight: 550 actually do?").
             other => ((other as i32).clamp(100, 900) as u16 + 50) / 100 * 100,
         };
-        if bucket == 400 {
+        let size_q = crate::glyph_atlas::GlyphKey::size_q_for(size_pt);
+        // Short-circuit only for the EXACT startup-interned pair
+        // (weight 400 at UI_FONT_POINT).
+        let base_size_q = crate::glyph_atlas::GlyphKey::size_q_for(UI_FONT_POINT);
+        if bucket == 400 && size_q == base_size_q {
             return Some(self.ui_font_idx);
         }
-        let unique_key = format!("__marspot_ui@w{}", bucket);
+        let unique_key = format!("__marspot_ui@w{}@s{}", bucket, size_q);
         if let Some(&idx) = self.fonts.by_name.get(&unique_key) {
             return Some(idx);
         }
         let base = self.fonts.fonts[self.ui_font_idx].clone();
-        let pt_size = base.pt_size();
+        // Always go through `build_weight_variant` (CTFontDescriptor
+        // + kCTFontTraitsAttribute + kCTFontWeightTrait + size) so
+        // weight = 400 and weight = 700 hit identical CT machinery.
+        // Previously weight=400 short-circuited to
+        // `clone_with_font_size`, which on macOS sometimes lost the
+        // SF Pro optical-size variant and rendered with looser
+        // tracking that visually read as mono cell-aligned at large
+        // sizes — root cause of the "Same string regular looks mono,
+        // Same string bold looks proportional" symptom.
         let weight_ct = css_weight_to_ct_trait(bucket);
-        let weighted = build_weight_variant(&base, pt_size, weight_ct)?;
+        let weighted = build_weight_variant(&base, size_pt, weight_ct)?;
         Some(self.fonts.intern_with_key(unique_key, weighted))
     }
 

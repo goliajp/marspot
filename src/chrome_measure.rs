@@ -54,13 +54,12 @@ impl<'a> FontMetricsProvider for ChromeMeasure<'a> {
     fn line_h_phys(&self, font: TextFontSpec) -> f64 {
         match font {
             TextFontSpec::Mono { size } => self.mono_cell_h_phys * mono_size_mult(size),
-            TextFontSpec::Ui { .. } => {
-                // SF Pro line-height — `FontCache::ui_line_h_phys`
-                // bakes the 2× retina scale.  size_q is currently
-                // ignored because we only intern SF Pro at one pt
-                // size (UI_FONT_POINT); when Phase 5+ adds true
-                // multi-size SF Pro this branch must vary.
-                self.font.borrow().ui_line_h_phys()
+            TextFontSpec::Ui { size_q, .. } => {
+                // Phase 10c — `size_q` honoured.  Convert back to pt
+                // (size_q = round(pt × 4)) and ask the cache for the
+                // SF Pro variant's real line-height at that size.
+                let pt = (size_q as f64) / 4.0;
+                self.font.borrow_mut().ui_line_h_phys_at_size(pt)
             }
         }
     }
@@ -70,9 +69,12 @@ impl<'a> FontMetricsProvider for ChromeMeasure<'a> {
             TextFontSpec::Mono { .. } => {
                 crate::ui::view::layout::text_width_cells(text) as f64 * self.mono_cell_w_phys
             }
-            TextFontSpec::Ui { weight, opts_bits, .. } => {
+            TextFontSpec::Ui { size_q, weight, opts_bits } => {
+                let pt = (size_q as f64) / 4.0;
                 let opts = unpack_shape_opts(opts_bits);
-                self.font.borrow_mut().measure_ui_text(text, weight, opts)
+                self.font
+                    .borrow_mut()
+                    .measure_ui_text_at_size(text, weight, opts, pt)
             }
         }
     }

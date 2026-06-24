@@ -118,6 +118,7 @@ impl Canvas {
             weight: 400,
             opts: crate::font_shape::ShapeOptions::full(),
             font_kind: None,
+            ui_size_q: None,
         }
     }
 
@@ -223,6 +224,13 @@ pub struct TextPrim {
     /// `Some(Ui)` switches just this run through SF Pro shape —
     /// used by the Font v5 showcase rows.
     pub font_kind: Option<TextFontKind>,
+    /// Phase 10c — quantised SF Pro pt size (`round(pt × 4)`,
+    /// matches `GlyphKey::size_q`).  `None` = use the renderer's
+    /// default `UI_FONT_POINT` (13pt) — preserves legacy chrome
+    /// behaviour.  `Some(s)` lets callers render SF Pro at any pt
+    /// size (showcase title at 40pt, body at 24pt, etc.).  Only
+    /// honoured when `font_kind = Some(Ui)`.
+    pub ui_size_q: Option<u16>,
 }
 
 // ─── Builders ──────────────────────────────────────────────
@@ -331,6 +339,7 @@ pub struct TextBuilder<'c> {
     weight: u16,
     opts: crate::font_shape::ShapeOptions,
     font_kind: Option<TextFontKind>,
+    ui_size_q: Option<u16>,
 }
 
 impl<'c> TextBuilder<'c> {
@@ -370,8 +379,16 @@ impl<'c> TextBuilder<'c> {
         self.font_kind = Some(TextFontKind::Mono);
         self
     }
+    /// Phase 10c — set the SF Pro pt size for this run.  `size_q`
+    /// is the quantised pt × 4 bucket matching `GlyphKey::size_q`.
+    /// Only honoured when `.ui()` is also set.  Default `None` =
+    /// renderer's `UI_FONT_POINT` (13pt).
+    pub fn ui_size_q(mut self, size_q: u16) -> Self {
+        self.ui_size_q = Some(size_q);
+        self
+    }
     pub fn draw(self) {
-        let TextBuilder { canvas, x, y, content, color, weight, opts, font_kind } = self;
+        let TextBuilder { canvas, x, y, content, color, weight, opts, font_kind, ui_size_q } = self;
         let parent = canvas.parent;
         let x_p = parent.x + x.resolve_for_axis(parent.w, canvas.scale);
         let y_p = parent.y + y.resolve_for_axis(parent.h, canvas.scale);
@@ -383,6 +400,7 @@ impl<'c> TextBuilder<'c> {
             weight,
             opts,
             font_kind,
+            ui_size_q,
         }));
     }
 }
