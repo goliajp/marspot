@@ -13,7 +13,7 @@ use super::view::View;
 
 /// Build a Canvas covering the laid-out subtree.  Caller hands
 /// the result to `MetalRenderer::encode_canvas_into` or similar.
-pub fn paint(laid: &LaidOut, ctx: LayoutCtx, parent_w: f64, parent_h: f64) -> Canvas {
+pub fn paint<'a>(laid: &LaidOut, ctx: LayoutCtx<'a>, parent_w: f64, parent_h: f64) -> Canvas {
     let mut canvas = Canvas::new(ctx.scale, crate::ui::core::ParentRect::window(parent_w, parent_h));
     paint_into(&mut canvas, laid, ctx);
     canvas
@@ -22,7 +22,7 @@ pub fn paint(laid: &LaidOut, ctx: LayoutCtx, parent_w: f64, parent_h: f64) -> Ca
 /// Paint into an existing canvas — used when a higher-level
 /// driver(eg dev panel renderer)wants ONE canvas for the whole
 /// frame instead of one per subtree.
-pub fn paint_into(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx) {
+pub fn paint_into<'a>(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx<'a>) {
     paint_into_inner(canvas, laid, ctx, None, 1.0);
 }
 
@@ -31,10 +31,10 @@ pub fn paint_into(canvas: &mut Canvas, laid: &LaidOut, ctx: LayoutCtx) {
 /// whose rect lies fully outside the clip are skipped(viewport
 /// culling).  `opacity_mult` multiplies down through subtrees so
 /// `.opacity(0.5)` on a parent darkens every descendant proportional.
-fn paint_into_inner(
+fn paint_into_inner<'a>(
     canvas: &mut Canvas,
     laid: &LaidOut,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     clip: Option<&super::layout::Rect>,
     opacity_mult: f64,
 ) {
@@ -78,7 +78,7 @@ fn mul_alpha(c: Color, m: f64) -> Color {
 /// Approximate a linear gradient as N solid bands.  Cheap, OK-looking
 /// for chrome polish use cases.  Real gradient primitive needs Metal
 /// pipeline support — v3 follow-up.
-fn paint_gradient_bands(canvas: &mut Canvas, rect: &super::layout::Rect, g: &super::view::LinearGradient, ctx: LayoutCtx, opacity: f64) {
+fn paint_gradient_bands<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, g: &super::view::LinearGradient, ctx: LayoutCtx<'a>, opacity: f64) {
     if g.stops.is_empty() { return; }
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     const BANDS: usize = 16;
@@ -131,7 +131,7 @@ fn sample_gradient(stops: &[(f64, Color)], t: f64) -> Color {
     stops[0].1
 }
 
-fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Decoration, ctx: LayoutCtx, opacity: f64) {
+fn paint_decoration<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Decoration, ctx: LayoutCtx<'a>, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     let r_x = phys_to_pt(rect.x);
     let r_y = phys_to_pt(rect.y);
@@ -171,7 +171,7 @@ fn paint_decoration(canvas: &mut Canvas, rect: &super::layout::Rect, deco: &Deco
     b.draw();
 }
 
-fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx: LayoutCtx, opacity: f64) {
+fn paint_atom<'a>(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx: LayoutCtx<'a>, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     match view {
         View::Text(t) => {
@@ -183,40 +183,50 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
             // each other (real bug, observed 2026-06-23 dev panel
             // overlap on L1 / L4).
             let top_pt = phys_to_pt(rect.y);
-            // Truncate to fit rect width if Single-line.  Width
-            // measured in cells (CJK = 2) via the same shared
-            // helper as layout, so widths agree.
-            let max_cells = (rect.w / ctx.cell_w_phys).floor().max(0.0) as usize;
+            // Phase 10c — measure for truncation + alignment via the
+            // SAME provider the layout pass used, so widths agree
+            // regardless of which font this text runs through.
+            let measured_w_phys = ctx.fonts.advance_phys(&t.content, t.font);
             let drawn: String = match &t.lines {
                 super::view::TextLines::Single { truncate } => {
-                    if super::layout::text_width_cells(&t.content) <= max_cells {
+                    if measured_w_phys <= rect.w {
                         t.content.clone()
                     } else {
+                        // Truncate by cells — good enough for mono;
+                        // for Ui (proportional) it's an approximation
+                        // (avg cell pitch) that won't catch every
+                        // case but stays simpler than per-glyph
+                        // binary search.  Wrap will get the careful
+                        // path in v2.
+                        let max_cells = (rect.w / ctx.cell_w_phys).floor().max(0.0) as usize;
                         truncate_text(&t.content, max_cells, *truncate)
                     }
                 }
-                super::view::TextLines::Wrap { .. } => {
-                    // v1: wrap not implemented, treat as single-line.
-                    t.content.clone()
-                }
+                super::view::TextLines::Wrap { .. } => t.content.clone(),
             };
-            // Weight is currently a no-op in the renderer (chrome font
-            // has no bold cut).  v2+ will swap glyph variants per
-            // weight when SDF supports it.  Color is the source of
-            // visual differentiation — callers use tokens like
-            // `theme::text::HINT` / `CAPTION` to vary perceived weight.
-            // Multiply alpha by opacity for Opacity-modified subtrees.
             let color = mul_alpha(t.color, opacity);
-            // Horizontal align — compute x_offset from rect.x.
-            let content_w_phys = super::layout::text_width_cells(&drawn) as f64 * ctx.cell_w_phys;
+            // Re-measure the (potentially truncated) string for align.
+            let drawn_w_phys = ctx.fonts.advance_phys(&drawn, t.font);
             let x_pad = match t.align {
                 super::view::TextAlign::Leading  => 0.0,
-                super::view::TextAlign::Center   => (rect.w - content_w_phys) * 0.5,
-                super::view::TextAlign::Trailing => rect.w - content_w_phys,
+                super::view::TextAlign::Center   => (rect.w - drawn_w_phys) * 0.5,
+                super::view::TextAlign::Trailing => rect.w - drawn_w_phys,
             };
-            canvas.text(phys_to_pt(rect.x + x_pad), top_pt, &drawn)
-                .color(color)
-                .draw();
+            // Phase 10c — map view's `TextFontSpec` onto the canvas
+            // TextPrim's per-run override fields so the renderer's
+            // chrome path knows whether to take the SF Pro shape +
+            // colour-emoji route or stay on Monaco mono.  Mono runs
+            // emit through the default `text(...)` path (font_kind
+            // = None → inherit encoder's global `ui_font`).
+            let mut builder = canvas.text(phys_to_pt(rect.x + x_pad), top_pt, &drawn)
+                .color(color);
+            if let super::view::TextFontSpec::Ui { size_q: _, weight, opts_bits } = t.font {
+                builder = builder
+                    .ui()
+                    .weight(weight)
+                    .opts(super::view::unpack_shape_opts(opts_bits));
+            }
+            builder.draw();
         }
         View::Filled { color, radius } => {
             let r_pt = match radius {
@@ -269,7 +279,7 @@ fn paint_atom(canvas: &mut Canvas, view: &View, rect: &super::layout::Rect, ctx:
 /// Toggle = capsule with a circle inside.  Visual state derived
 /// from `HostState[id]::ToggleState` via `with_host_state`.  If no
 /// state, defaults to off.
-fn paint_toggle(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::types::ViewId, ctx: LayoutCtx, opacity: f64) {
+fn paint_toggle<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::types::ViewId, ctx: LayoutCtx<'a>, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     let on = super::state::with_host_state(|s| {
         s.get::<super::ToggleState>(id).map(|t| t.on).unwrap_or(false)
@@ -301,7 +311,7 @@ fn paint_toggle(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::type
 
 /// Picker = horizontal segmented control.  Highlights the slot
 /// currently in `HostState[id]::PickerState`.
-fn paint_picker(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::types::ViewId, options: &[String], ctx: LayoutCtx, opacity: f64) {
+fn paint_picker<'a>(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::types::ViewId, options: &[String], ctx: LayoutCtx<'a>, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     if options.is_empty() { return; }
     let n = options.len() as f64;
@@ -343,7 +353,7 @@ fn paint_picker(canvas: &mut Canvas, rect: &super::layout::Rect, id: super::type
     }
 }
 
-fn paint_shape(canvas: &mut Canvas, spec: &super::view::ShapeSpec, rect: &super::layout::Rect, ctx: LayoutCtx, opacity: f64) {
+fn paint_shape<'a>(canvas: &mut Canvas, spec: &super::view::ShapeSpec, rect: &super::layout::Rect, ctx: LayoutCtx<'a>, opacity: f64) {
     let phys_to_pt = |phys: f64| Length::Pt(phys / ctx.scale);
     use super::view::ShapeSpec::*;
     match spec {

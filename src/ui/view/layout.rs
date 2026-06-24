@@ -9,7 +9,7 @@
 
 use crate::ui::core::Length;
 use super::types::{AlignCross, Anchor, Distribute, Edges, FrameSpec};
-use super::view::{Modifier, View, TextSize};
+use super::view::{Modifier, View, TextSize, TextFontSpec};
 
 /// Two-axis (min, max) constraints handed down to a node.
 /// Equivalent to Flutter's `BoxConstraints`.
@@ -187,19 +187,54 @@ pub struct EdgesPhys {
     pub left: f64,
 }
 
-/// Resolution context — everything `Length::resolve_*` needs.
-#[derive(Clone, Copy, Debug)]
-pub struct LayoutCtx {
-    /// Device pixel ratio (NSWindow backingScaleFactor).
-    pub scale: f64,
-    /// Chrome font cell metrics in physical pixels.
-    pub cell_w_phys: f64,
-    pub cell_h_phys: f64,
-    /// Chrome font ascent — used for text baseline placement.
-    pub ascent_phys: f64,
+/// Asks the renderer for real per-font metrics during layout.
+///
+/// The Monaco / mono path's metrics are constant for the run so we
+/// derive them from `LayoutCtx.cell_w_phys` / `cell_h_phys`; the
+/// SF Pro / proportional path's depend on weight + opts + actual
+/// string, so layout has to query.  Renderer impl reaches into
+/// `FontCache::shape_ui_weighted_opts` (Phase 3 cache) which makes
+/// these queries free after first warm-up.
+pub trait FontMetricsProvider {
+    /// Line height in physical pixels for one row of this font /
+    /// size.  Independent of content; cached per `font` variant by
+    /// the implementor.
+    fn line_h_phys<'a>(&self, font: TextFontSpec) -> f64;
+    /// Total advance (physical pixels) the renderer will paint for
+    /// `text` in this font.  For Mono this is just
+    /// `text_width_cells × cell_w_phys`; for Ui this is the sum of
+    /// CTLine-shaped glyph advances.
+    fn advance_phys<'a>(&self, text: &str, font: TextFontSpec) -> f64;
 }
 
-impl LayoutCtx {
+/// Resolution context — everything `Length::resolve_*` needs PLUS a
+/// `FontMetricsProvider` reference so `View::Text` can ask for real
+/// per-font sizes during layout.  `Copy` + `'a` lifetime: the
+/// provider is borrowed for the lifetime of the layout call;
+/// internal layout helpers all take `LayoutCtx<'a>` by value.
+#[derive(Clone, Copy)]
+pub struct LayoutCtx<'a> {
+    /// Device pixel ratio (NSWindow backingScaleFactor).
+    pub scale: f64,
+    /// Chrome MONO font cell metrics in physical pixels — used as
+    /// the Monaco baseline; SF Pro / Ui font metrics come from
+    /// `fonts.advance_phys` / `line_h_phys`.
+    pub cell_w_phys: f64,
+    pub cell_h_phys: f64,
+    /// Chrome MONO font ascent — used for text baseline placement.
+    pub ascent_phys: f64,
+    /// Provider that knows real per-font line-heights and advances.
+    /// `MockFontMetrics` lets unit tests run without a CoreText
+    /// device.
+    pub fonts: &'a dyn FontMetricsProvider,
+}
+
+impl<'a> LayoutCtx<'a> {
+    /// Convenience: line-height for the abstract `TextSize` bucket
+    /// in the Monaco mono path.  `View::Text` uses
+    /// `self.fonts.line_h_phys(t.font)` instead so the SF Pro path
+    /// is honoured; this method is kept as a back-compat helper for
+    /// non-Text views that scale against cell rows.
     pub fn line_h_phys(&self, size: TextSize) -> f64 {
         let mult = match size {
             TextSize::Caption     => 0.85,
@@ -208,6 +243,51 @@ impl LayoutCtx {
             TextSize::LargeHeader => 1.50,
         };
         self.cell_h_phys * mult
+    }
+}
+
+/// Headless / test impl of `FontMetricsProvider`.  Mono works off
+/// the cell metrics the test ctx passes in; Ui assumes a fictional
+/// `0.5 × cell_w` per ASCII char (so unit tests can compare against
+/// hand-computed bounds without dragging CoreText in).  Production
+/// `MetalRenderer` provides the real impl.
+#[derive(Clone, Copy)]
+pub struct MockFontMetrics {
+    pub cell_w_phys: f64,
+    pub cell_h_phys: f64,
+}
+
+impl FontMetricsProvider for MockFontMetrics {
+    fn line_h_phys(&self, font: TextFontSpec) -> f64 {
+        match font {
+            TextFontSpec::Mono { size } => {
+                let mult = match size {
+                    TextSize::Caption => 0.85,
+                    TextSize::Body => 1.00,
+                    TextSize::Header => 1.20,
+                    TextSize::LargeHeader => 1.50,
+                };
+                self.cell_h_phys * mult
+            }
+            TextFontSpec::Ui { size_q, .. } => {
+                // Convert size_q → pt → phys, treating Ui line as
+                // ~1.6 × pt (typical SF Pro extent).
+                let pt = (size_q as f64) / 4.0;
+                pt * 1.6 * 2.0 // assume 2× scale; tests pass scale=2
+            }
+        }
+    }
+    fn advance_phys(&self, text: &str, font: TextFontSpec) -> f64 {
+        match font {
+            TextFontSpec::Mono { .. } => {
+                text_width_cells(text) as f64 * self.cell_w_phys
+            }
+            TextFontSpec::Ui { size_q, .. } => {
+                let pt = (size_q as f64) / 4.0;
+                // ASCII proxy advance — `n × 0.5 × pt × scale`.
+                text.chars().count() as f64 * pt * 0.5 * 2.0
+            }
+        }
     }
 }
 
@@ -225,13 +305,17 @@ pub fn text_width_cells(s: &str) -> usize {
 /// Run the layout pass.  `origin` is the parent's top-left in phys;
 /// `constraints` bounds this node's size.  Returns the laid-out
 /// subtree with all rects in phys.
-pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -> LaidOut {
+pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constraints) -> LaidOut {
     match view {
         View::Text(t) => {
-            // Width = display-cells × cell_w (CJK = 2 cells).
-            // Height = line_h.  Wrap = single-line for v1.
-            let line_h = ctx.line_h_phys(t.size);
-            let raw_w = text_width_cells(&t.content) as f64 * ctx.cell_w_phys;
+            // Phase 10c — ask the font-metrics provider for the
+            // real per-string advance + line-height under this
+            // run's `font` variant.  Mono path stays cell-aligned
+            // (provider derives it from `cell_w_phys`); Ui path goes
+            // through `FontCache::shape_ui_weighted_opts` to get
+            // CTLine-shaped advance for SF Pro weight + opts.
+            let line_h = ctx.fonts.line_h_phys(t.font);
+            let raw_w = ctx.fonts.advance_phys(&t.content, t.font);
             let size = c.clamp(raw_w, line_h);
             LaidOut {
                 view: view.clone(),
@@ -341,12 +425,12 @@ pub fn layout(view: &View, ctx: LayoutCtx, origin: (f64, f64), c: Constraints) -
 // ─── LazyVStack ───────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn layout_lazy_vstack(
+fn layout_lazy_vstack<'a>(
     items: &[View],
     gap: Length,
     item_height: Length,
     id: super::types::ViewId,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -389,12 +473,12 @@ fn layout_lazy_vstack(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_lazy_hstack(
+fn layout_lazy_hstack<'a>(
     items: &[View],
     gap: Length,
     item_width: Length,
     id: super::types::ViewId,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -435,14 +519,14 @@ fn layout_lazy_hstack(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_grid(
+fn layout_grid<'a>(
     items: &[View],
     cols: usize,
     col_gap: Length,
     row_gap: Length,
     cell_w: Length,
     cell_h: Length,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -495,7 +579,7 @@ fn layout_grid(
 /// Resolve `GridTrack` list against a total axis length.  Fixed
 /// tracks claim their stated size, Flex tracks split leftover by
 /// weight, Auto = 32pt × scale fallback for v1.
-fn resolve_tracks(tracks: &[super::view::GridTrack], total: f64, gap: f64, ctx: LayoutCtx) -> Vec<f64> {
+fn resolve_tracks<'a>(tracks: &[super::view::GridTrack], total: f64, gap: f64, ctx: LayoutCtx<'a>) -> Vec<f64> {
     let n = tracks.len();
     if n == 0 { return Vec::new(); }
     let gap_total = (n.saturating_sub(1)) as f64 * gap;
@@ -530,12 +614,12 @@ fn resolve_tracks(tracks: &[super::view::GridTrack], total: f64, gap: f64, ctx: 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_variable_grid(
+fn layout_variable_grid<'a>(
     items: &[View],
     tracks_w: &[super::view::GridTrack],
     tracks_h: &[super::view::GridTrack],
     gap: (Length, Length),
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -612,10 +696,10 @@ fn layout_variable_grid(
 
 // ─── ScrollView ───────────────────────────────────────────────
 
-fn layout_scroll(
+fn layout_scroll<'a>(
     child: &View,
     id: super::types::ViewId,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -663,13 +747,13 @@ fn layout_scroll(
 // ─── VStack / HStack ──────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
-fn layout_stack(
+fn layout_stack<'a>(
     children: &[View],
     gap: Length,
     align: AlignCross,
     distribute: Distribute,
     vertical: bool,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -824,10 +908,10 @@ fn layout_stack(
 
 // ─── ZStack ───────────────────────────────────────────────────
 
-fn layout_zstack(
+fn layout_zstack<'a>(
     children: &[View],
     align: Anchor,
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -858,10 +942,10 @@ fn layout_zstack(
 
 // ─── Modified — modifier chain ────────────────────────────────
 
-fn layout_modified(
+fn layout_modified<'a>(
     child: &View,
     mods: &[Modifier],
-    ctx: LayoutCtx,
+    ctx: LayoutCtx<'a>,
     origin: (f64, f64),
     c: Constraints,
     self_view: &View,
@@ -1135,8 +1219,22 @@ mod tests {
     use crate::ui::view::types::Distribute;
     use crate::ui::core::Length;
 
-    fn ctx() -> LayoutCtx {
-        LayoutCtx { scale: 2.0, cell_w_phys: 16.0, cell_h_phys: 32.0, ascent_phys: 24.0 }
+    /// Process-static mock provider so tests can return a
+    /// `LayoutCtx<'static>` from a plain `ctx()` fn without
+    /// threading provider lifetimes through every test body.
+    static TEST_FONTS: MockFontMetrics = MockFontMetrics {
+        cell_w_phys: 16.0,
+        cell_h_phys: 32.0,
+    };
+
+    fn ctx() -> LayoutCtx<'static> {
+        LayoutCtx {
+            scale: 2.0,
+            cell_w_phys: 16.0,
+            cell_h_phys: 32.0,
+            ascent_phys: 24.0,
+            fonts: &TEST_FONTS,
+        }
     }
 
     #[test]

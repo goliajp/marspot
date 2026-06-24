@@ -24,6 +24,9 @@ pub use types::{
     ActionId, HoverId, ViewId,
 };
 pub use view::{
+    TextFontSpec, pack_shape_opts, unpack_shape_opts,
+};
+pub use view::{
     View, Modifier, Text, TextSize, TextWeight, TextStyle, TextAlign,
     TextLines, Truncate, ClipShape, AspectMode,
     Image, ImageSource, ContentMode, ShapeSpec,
@@ -43,6 +46,7 @@ pub use lazy::{lazy_vstack, lazy_vstack_padded, lazy_hstack};
 pub use layout::{
     layout as layout_view, Constraints, Size, Rect, LaidOut,
     Decoration, DecoShadow, EdgesPhys, LayoutCtx,
+    FontMetricsProvider, MockFontMetrics,
 };
 pub use paint::{paint, paint_into};
 pub use hit_test::{

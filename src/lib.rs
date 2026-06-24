@@ -60,6 +60,7 @@ pub static MARSPOT_LAYER_VERS: &str = concat!(
 pub mod app;
 pub mod cc;
 pub mod dev_window;
+pub mod chrome_measure;
 pub mod font_cache;
 pub mod font_shape;
 pub mod font_trait;

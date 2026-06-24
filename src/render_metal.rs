@@ -963,6 +963,13 @@ impl MetalRenderer {
         self.font.cell_dims()
     }
 
+    /// Phase 10c — borrow the `FontCache` mutably for chrome
+    /// measurement.  Used by `chrome_measure::ChromeMeasure::new`
+    /// to wrap the cache in a `RefCell` for the view layout pass.
+    pub fn font_mut(&mut self) -> &mut FontCache {
+        &mut self.font
+    }
+
     /// Caret rect for a single-session render (mcli's path).  Builds
     /// the same 1×1 Layout `render()` uses, then asks the layout where
     /// the focused session's `(col, row)` maps in view-local physical
@@ -1319,11 +1326,18 @@ impl MetalRenderer {
         let viewport_px = [width_px as f32, height_px as f32];
         if let Some(dev_state) = self.dev_panel_state.as_ref() {
             if dev_state.visible {
+                let measure = crate::chrome_measure::ChromeMeasure::new(
+                    font,
+                    chrome_cell_w as f64,
+                    chrome_cell_h as f64,
+                );
                 let canvas = crate::ui::components::build_dev_panel_canvas(
                     dev_state,
                     width_px, height_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
+                    &measure,
                 );
+                drop(measure);
                 encode_canvas_into(
                     &canvas, &texture, &cmd,
                     ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
@@ -1520,10 +1534,17 @@ impl MetalRenderer {
         let viewport_px = [width_px as f32, height_px as f32];
         if let Some(dev_state) = self.dev_panel_state.as_ref() {
             if dev_state.visible {
+                let measure = crate::chrome_measure::ChromeMeasure::new(
+                    font,
+                    chrome_cell_w as f64,
+                    chrome_cell_h as f64,
+                );
                 let canvas = crate::ui::components::build_dev_panel_canvas(
                     dev_state, width_px, height_px,
                     chrome_cell_w, chrome_cell_h, chrome_ascent,
+                    &measure,
                 );
+                drop(measure);
                 encode_canvas_into(
                     &canvas, target, &cmd,
                     ui_pipeline, fg_pipeline, fg_color_pipeline, fg_sampler,
@@ -5683,17 +5704,25 @@ mod tests {
                 return;
             }
         };
-        // 2× retina target: 700 × 1000 logical pt → 1400 × 2000 px.
-        let w_px: u32 = 1400;
-        let h_px: u32 = 2000;
+        // Production default size: 420 × 520 logical pt → 840 × 1040
+        // px at 2× retina.  Matches what `DevPanelState::default()`
+        // gives the real dev window, so the snapshot reflects the
+        // exact pixels the user sees when they open the panel.
+        let w_px: u32 = 840;
+        let h_px: u32 = 1040;
         let state = crate::ui::components::DevPanelState {
             visible: true,
             origin_pt: (0.0, 0.0),
-            size_pt: (700.0, 1000.0),
+            size_pt: (420.0, 520.0),
             active_tab: crate::ui::components::dev_panel::TAB_UI,
             active_section: crate::ui::components::dev_panel::SECTION_FONT_V5,
             scale: 2.0,
         };
+        let measure = crate::chrome_measure::ChromeMeasure::new(
+            renderer.font_mut(),
+            16.0,
+            32.0,
+        );
         let canvas = crate::ui::components::build_dev_panel_canvas(
             &state,
             w_px as f64,
@@ -5701,7 +5730,9 @@ mod tests {
             16.0, // chrome_cell_w (px) — Monaco 12pt 2×
             32.0, // chrome_cell_h
             24.0, // chrome_ascent
+            &measure,
         );
+        drop(measure);
         // ui_font = false matches the live dev panel: chrome stays
         // Monaco mono by default, the showcase rows opt INTO SF Pro
         // via `.ui()` per text run.  This snapshot is therefore

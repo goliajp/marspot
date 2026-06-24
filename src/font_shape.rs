@@ -118,6 +118,35 @@ impl Default for ShapeOptions {
 /// Phase 8 — `opts` applies per-context OpenType-style feature
 /// toggles before the CTLine constructor runs.  See [`ShapeOptions`]
 /// for which bits actually plumb through to CT today.
+/// Phase 10c — measure CTLine width without building a full
+/// `ShapedGlyph` list.  The layout pass calls this to size text
+/// nodes before render;  the renderer's `shape_line` will run
+/// again at paint time (warm cache, sub-µs) so this measure is
+/// pure-overhead-free in steady state.  Returns physical px width
+/// (same `× 2.0` retina scale convention `shape_line` uses).
+pub fn measure_line(text: &str, base_font: &CTFont, opts: ShapeOptions) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let cf_text = CFString::new(text);
+    let mut attr = CFMutableAttributedString::new();
+    attr.replace_str(&cf_text, CFRange::init(0, 0));
+    let len = attr.char_len();
+    unsafe {
+        attr.set_attribute(CFRange::init(0, len), kCTFontAttributeName, base_font);
+    }
+    if !opts.liga {
+        use core_foundation::number::CFNumber;
+        use core_text::string_attributes::kCTLigatureAttributeName;
+        let zero = CFNumber::from(0i64);
+        unsafe {
+            attr.set_attribute(CFRange::init(0, len), kCTLigatureAttributeName, &zero);
+        }
+    }
+    let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
+    line.get_typographic_bounds().width * 2.0
+}
+
 pub fn shape_line<F: FnMut(CTFont) -> u32>(
     text: &str,
     base_font: &CTFont,

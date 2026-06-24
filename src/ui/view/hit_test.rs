@@ -98,13 +98,24 @@ mod tests {
     use super::*;
     use crate::ui::view::{
         Text, vstack,
-        Constraints, LayoutCtx, layout_view,
+        Constraints, LayoutCtx, layout_view, MockFontMetrics,
         Edges,
     };
     use crate::ui::core::Length;
 
-    fn ctx() -> LayoutCtx {
-        LayoutCtx { scale: 2.0, cell_w_phys: 16.0, cell_h_phys: 32.0, ascent_phys: 24.0 }
+    static TEST_FONTS: MockFontMetrics = MockFontMetrics {
+        cell_w_phys: 16.0,
+        cell_h_phys: 32.0,
+    };
+
+    fn ctx() -> LayoutCtx<'static> {
+        LayoutCtx {
+            scale: 2.0,
+            cell_w_phys: 16.0,
+            cell_h_phys: 32.0,
+            ascent_phys: 24.0,
+            fonts: &TEST_FONTS,
+        }
     }
 
     #[test]

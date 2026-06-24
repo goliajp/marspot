@@ -524,6 +524,36 @@ impl FontCache {
         self.shape_ui_weighted_opts(text, weight_q, crate::font_shape::ShapeOptions::full())
     }
 
+    /// Phase 10c — measure SF Pro advance width in physical px for
+    /// the given (text, weight, opts) tuple.  Used by the view
+    /// system's `FontMetricsProvider` impl during layout so chrome
+    /// proportional text gets a real width before paint.
+    pub fn measure_ui_text(
+        &mut self,
+        text: &str,
+        weight_q: u16,
+        opts: crate::font_shape::ShapeOptions,
+    ) -> f64 {
+        if self.ui_font_idx == 0 || text.is_empty() {
+            return 0.0;
+        }
+        let base_idx = match weight_q {
+            400 => self.ui_font_idx,
+            _ => self
+                .intern_ui_weighted(weight_q)
+                .unwrap_or(self.ui_font_idx),
+        };
+        let base_font = self.fonts.fonts[base_idx].clone();
+        crate::font_shape::measure_line(text, &base_font, opts)
+    }
+
+    /// Phase 10c — chrome line-height in physical pixels for the
+    /// current UI font.  CTFont reports metrics in pt; we bake the
+    /// 2× retina scale here to match `measure_ui_text`.
+    pub fn ui_line_h_phys(&self) -> f64 {
+        self.ui_cell_h * 2.0
+    }
+
     /// Phase 8 — shape with explicit per-context OpenType feature
     /// options.  Calls with the same `(text, weight_q, opts)` hit the
     /// underlying ShapeCache; differing `opts` cache as separate

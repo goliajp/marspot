@@ -226,6 +226,7 @@ pub fn build_dev_panel_canvas(
     chrome_cell_w: f32,
     chrome_cell_h: f32,
     chrome_ascent: f32,
+    fonts: &dyn crate::ui::view::FontMetricsProvider,
 ) -> Canvas {
     let scale = state.scale;
     let mut canvas = Canvas::new(scale, ParentRect::window(window_w_phys, window_h_phys));
@@ -361,6 +362,7 @@ pub fn build_dev_panel_canvas(
             cell_w_phys: chrome_cell_w as f64,
             cell_h_phys: chrome_cell_h as f64,
             ascent_phys: chrome_ascent as f64,
+            fonts,
         };
         let avail_w_pt = (window_w_phys / scale) - content_x - 16.0;
         let avail_h_pt = (window_h_phys / scale) - y;
@@ -404,8 +406,7 @@ pub fn build_dev_panel_canvas(
             let _ = draw_text_sample(&mut canvas, content_x, y);
         }
         SECTION_FONT_V5 => {
-            let y = draw_section_header(&mut canvas, content_x, y, "Font v5 showcase");
-            let _ = draw_font_v5_sample(&mut canvas, content_x, y);
+            render_view_section(&mut canvas, "Font v5 showcase", build_font_v5_view());
         }
         _ => {
             canvas.text(Length::Pt(content_x), Length::Pt(y),
@@ -2100,6 +2101,78 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     y + (entries.len() as f64) * row_h
 }
 
+/// Phase 10c — Font v5 showcase rebuilt as a view tree.  Layout
+/// queries `FontMetricsProvider::advance_phys` for every SF Pro
+/// run, so column gaps + line heights track the real font metrics
+/// instead of hand-tuned Pt magic numbers.  Returns a `View` that
+/// `render_view_section` lays out + paints into the dev-panel
+/// content area at whatever width the panel is sized to.
+fn build_font_v5_view() -> crate::ui::view::View {
+    use crate::ui::view::{vstack, hstack, Text};
+    use crate::ui::core::Length;
+    use crate::font_shape::ShapeOptions;
+    use crate::ui::theme::{color, text as text_tok};
+
+    // SF Pro at chrome scale.  13pt matches `FontCache::UI_FONT_POINT`
+    // so the showcase is laid out against the same font instance the
+    // renderer will paint with — no chance of layout / paint width
+    // mismatch.
+    const SF: f64 = 13.0;
+    let full = ShapeOptions::full();
+    let off = ShapeOptions::all_off();
+
+    let header = |s: &str| Text::new(s).style(text_tok::HEADER).ui(SF, 600, full).build();
+    let hint = |s: &str| Text::new(s).style(text_tok::HINT).ui(SF, 400, full).build();
+    let body = |s: &str| Text::new(s).color(color::FG).ui(SF, 400, full).build();
+    let body_w = |s: &str, w: u16| Text::new(s).color(color::FG).ui(SF, w, full).build();
+    let body_off = |s: &str| Text::new(s).color(color::FG).ui(SF, 400, off).build();
+
+    let kv = |label: &str, content: crate::ui::view::View| -> crate::ui::view::View {
+        hstack(vec![hint(label), content]).hstack_gap(Length::Pt(8.0))
+    };
+
+    // Labels kept short so headers fit the ~250-pt content area at
+    // default panel width.  Long demo strings (subpx, kerning, etc.)
+    // intentionally exceed and rely on the truncate path to clip
+    // gracefully — visible "…" reads as "longer than panel".
+    vstack(vec![
+        // ── Phase 5 — variable weight ─────────────────────────
+        header("P5 weight"),
+        hstack(vec![
+            body_w("Thin", 100),
+            body_w("Light", 300),
+            body_w("Regular", 400),
+        ]).hstack_gap(Length::Pt(12.0)),
+        hstack(vec![
+            body_w("Semibold", 600),
+            body_w("Bold", 700),
+            body_w("Black", 900),
+        ]).hstack_gap(Length::Pt(12.0)),
+
+        // ── Phase 8 — ligatures default vs all_off ────────────
+        header("P8 liga: default vs all_off"),
+        kv("on:", body("fi fl ffi ->")),
+        kv("off:", body_off("fi fl ffi ->")),
+
+        // ── Phase 3 — kerning + proportional advance ──────────
+        header("P3 kerning"),
+        kv("kerned:", body("Ta AV LT WA")),
+        kv("raw:", body_off("Ta AV LT WA")),
+
+        // ── Phase 7 — chrome colour emoji ─────────────────────
+        header("P7 colour emoji"),
+        body("👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎"),
+
+        // ── Phase 3 — CJK auto-fallback ───────────────────────
+        header("P3 CJK fallback"),
+        body("Hello 你好 こんにちは 안녕"),
+
+        // ── Phase 4 — subpixel x positioning ──────────────────
+        header("P4 sub-pixel x"),
+        body("iiiiii lllll AVAVAV"),
+    ]).vstack_gap(Length::Pt(12.0))
+}
+
 /// Font v5 showcase — each Phase's headline capability rendered side
 /// by side so the user can SEE the difference between off and on.
 /// Every text run inside this section calls `.ui()` to opt INTO SF
@@ -2254,7 +2327,8 @@ mod tests {
     #[test]
     fn ui_tab_canvas_emits_bg_tab_strip_and_samples() {
         let s = DevPanelState::default();
-        let c = build_dev_panel_canvas(&s, 1920.0, 1080.0, 16.0, 32.0, 24.0);
+        let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 16.0, cell_h_phys: 32.0 };
+        let c = build_dev_panel_canvas(&s, 1920.0, 1080.0, 16.0, 32.0, 24.0, &fonts);
         let prims = c.primitives();
         // Substantial output — BG, tab strip BG, active tab + accent,
         // tab labels, hairline, menu BG, divider, 5 menu rows + 1
@@ -2273,7 +2347,8 @@ mod tests {
     #[test]
     fn non_ui_tab_renders_placeholder() {
         let s = DevPanelState { active_tab: TAB_TOKENS, ..Default::default() };
-        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0);
+        let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0, cell_h_phys: 16.0 };
+        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0, &fonts);
         // Just BG + tab strip BG + active tab BG + accent + a few tab
         // labels + divider hairline + placeholder text.  Don't pin
         // the exact count (it shifts as tab list grows) — just check
@@ -2336,7 +2411,8 @@ mod tests {
         // builder mustn't panic when called — defensive lower bound
         // for the input space.
         let s = DevPanelState { visible: false, ..Default::default() };
-        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0);
+        let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0, cell_h_phys: 16.0 };
+        let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0, &fonts);
         assert!(c.len() > 0);
     }
 }

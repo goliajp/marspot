@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.45"  # font v5 showcase 局部化 — TextPrim 加 `font_kind: Option<TextFontKind>` per-prim 字体覆盖,TextBuilder `.ui()` / `.mono()` 链式 API.canvas Text 分支 use_ui = font_kind 优先,None 则 fallback 全局 ui_font.dev_window 全局 ui_font 改回 false 让 chrome 其它 section(Model/L1-L6/Colors/Units 等)恢复 Monaco mono cell-aligned layout(0.6.44 的 SF Pro 全局让所有 section 乱套);Font v5 section 内每个 `.text(...)` 加 `.ui()` 显式 opt-in SF Pro proportional.snapshot test 同步改 ui_font=false 跟 production 行为一致.全 246 lib 测试 PASS.
-core    = "0.10.95"
+shell   = "0.6.46"  # font v5 Phase 10c — view layout 用真实字体 metrics.正确架构:`view::TextFontSpec` (Mono { size } / Ui { size_q, weight, opts_bits }),`View::Text` 加 `font` 字段(默认 Mono);`Text::ui(pt, weight, opts)` 链式 API 切 SF Pro path.新 `FontMetricsProvider` trait + `MockFontMetrics`;`LayoutCtx<'a>` 加 `fonts: &'a dyn FontMetricsProvider`,View::Text 分支用 `ctx.fonts.advance_phys` / `line_h_phys` 拿真实尺寸.font_shape 加 `measure_line(text, font, opts) -> f64` 经 CTLine typographic-bounds.FontCache 加 `measure_ui_text(text, weight, opts) -> f64` + `ui_line_h_phys()`.新 `src/chrome_measure.rs::ChromeMeasure<'a>` 用 RefCell<&'a mut FontCache> 实现 trait —— Mono → cell metrics,Ui → 真 SF Pro shape.paint 把 view::Text.font 映射到 canvas TextPrim 已有 font_kind/weight/opts.dev_window + render_metal 4 处 build_dev_panel_canvas caller 同步 pass `ChromeMeasure::new(font_mut, w, h)`.`build_font_v5_view()` 返完整 view 树(vstack + hstack + Text.ui()),`draw_font_v5_sample` 退役.snapshot test size 改 production default 420×520 (840×1040 px).全 246 lib 测试 PASS.
+core    = "0.10.96"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

@@ -175,6 +175,61 @@ pub enum GradientDir {
     RightToLeft,
 }
 
+/// Which physical font to lay this text run out against.
+///
+/// The layout pass asks a `FontMetricsProvider` for line-height and
+/// per-string advance based on the variant — Mono uses Monaco cell
+/// metrics (current behaviour, preserves all existing chrome that
+/// laid itself out against cell pitch), Ui asks SF Pro via the
+/// Phase 3 shape cache so weight + OT options participate in the
+/// real advance calculation.
+///
+/// Same packed shape as `GlyphKey::size_q` / `ShapeOptions` so the
+/// layout-side measure cache and the render-side shape cache key
+/// against compatible buckets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextFontSpec {
+    /// Monaco mono.  `size` selects a coarse height bucket (Caption /
+    /// Body / Header / LargeHeader).  Weight is ignored (Monaco has
+    /// no weight axis on macOS); we keep the field on `Text` so
+    /// callers can request bold even when the resolved font won't
+    /// honour it — Phase 5+ font variants will.
+    Mono { size: TextSize },
+    /// SF Pro proportional.  `size_q = round(pt × 4)` matches Phase
+    /// 2's `GlyphKey::size_q_for`; `weight` is CSS 100..900 (Phase
+    /// 5 variable font axis); `opts_bits` packs Phase 8 ShapeOptions
+    /// (bit0 kerning / bit1 liga / bit2 calt / bit3 contextual) so
+    /// the same string at the same size with different opts caches
+    /// independently.
+    Ui { size_q: u16, weight: u16, opts_bits: u8 },
+}
+
+impl Default for TextFontSpec {
+    fn default() -> Self {
+        Self::Mono { size: TextSize::Body }
+    }
+}
+
+/// Pack a `ShapeOptions` into the 4 bits the `TextFontSpec::Ui`
+/// variant carries.  Layout-side measure cache + render-side
+/// shape cache key against the same bit pattern.
+pub fn pack_shape_opts(opts: crate::font_shape::ShapeOptions) -> u8 {
+    (opts.kerning as u8)
+        | ((opts.liga as u8) << 1)
+        | ((opts.calt as u8) << 2)
+        | ((opts.contextual as u8) << 3)
+}
+
+/// Reverse of [`pack_shape_opts`].
+pub fn unpack_shape_opts(bits: u8) -> crate::font_shape::ShapeOptions {
+    crate::font_shape::ShapeOptions {
+        kerning: (bits & 0b0001) != 0,
+        liga: (bits & 0b0010) != 0,
+        calt: (bits & 0b0100) != 0,
+        contextual: (bits & 0b1000) != 0,
+    }
+}
+
 /// Text view payload.
 #[derive(Clone, Debug)]
 pub struct Text {
@@ -184,9 +239,14 @@ pub struct Text {
     pub weight: TextWeight,
     pub align: TextAlign,
     pub lines: TextLines,
+    /// Which font path lays this run out.  Default
+    /// `Mono { size: Body }` preserves the current Monaco cell
+    /// behaviour for every existing caller; `Text::ui(pt, weight,
+    /// opts)` switches the run onto the SF Pro shape + atlas path.
+    pub font: TextFontSpec,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextSize { Caption, Body, Header, LargeHeader }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,13 +282,15 @@ pub enum Truncate { End, Middle, None }
 
 impl Text {
     pub fn new(content: impl Into<String>) -> Self {
+        let size = TextSize::Body;
         Self {
             content: content.into(),
             color: crate::ui::theme::color::FG,
-            size: TextSize::Body,
+            size,
             weight: TextWeight::Regular,
             align: TextAlign::Leading,
             lines: TextLines::Single { truncate: Truncate::End },
+            font: TextFontSpec::Mono { size },
         }
     }
 }
@@ -744,17 +806,56 @@ impl View {
 
 impl Text {
     pub fn color(mut self, c: Color) -> Self { self.color = c; self }
-    pub fn size(mut self, s: TextSize) -> Self { self.size = s; self }
+    pub fn size(mut self, s: TextSize) -> Self {
+        self.size = s;
+        // Keep `font` in sync when the caller hasn't switched to a
+        // Ui font — Mono variants must reflect the chosen bucket so
+        // layout picks the right line-height.
+        if let TextFontSpec::Mono { size } = &mut self.font {
+            *size = s;
+        }
+        self
+    }
     pub fn weight(mut self, w: TextWeight) -> Self { self.weight = w; self }
     pub fn text_align(mut self, a: TextAlign) -> Self { self.align = a; self }
     pub fn lines(mut self, l: TextLines) -> Self { self.lines = l; self }
 
+    /// Switch this run to the SF Pro proportional shape path (Phase
+    /// 3 + 4 + 5 + 7 + 8).  `size_pt` is logical points (matches
+    /// `Length::Pt` semantics); `weight` is CSS 100..900 (Phase 5
+    /// variable axis); `opts` is the Phase 8 OT toggle set
+    /// (`ShapeOptions::full()` for normal chrome, `::code()` for
+    /// code blocks, `::all_off()` to demo ligature-off).  The
+    /// layout pass asks the `FontMetricsProvider` for real per-
+    /// string advance using these fields instead of monospaced
+    /// cell math.
+    pub fn ui(
+        mut self,
+        size_pt: f64,
+        weight: u16,
+        opts: crate::font_shape::ShapeOptions,
+    ) -> Self {
+        self.font = TextFontSpec::Ui {
+            size_q: crate::glyph_atlas::GlyphKey::size_q_for(size_pt),
+            weight,
+            opts_bits: pack_shape_opts(opts),
+        };
+        self
+    }
+
     /// Apply a `TextStyle` preset — sets size + weight + color in
     /// one go.  Subsequent `.color()` / `.size()` calls override.
+    /// `.style()` does NOT change `font`; the caller chains `.ui(...)`
+    /// after `.style(...)` when they want SF Pro.
     pub fn style(mut self, s: TextStyle) -> Self {
         self.size = s.size;
         self.weight = s.weight;
         self.color = s.color;
+        // Keep Mono font's bucket in sync (so the layout pass
+        // measures against the bucket the style picked).
+        if let TextFontSpec::Mono { size } = &mut self.font {
+            *size = s.size;
+        }
         self
     }
 

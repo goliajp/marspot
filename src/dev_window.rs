@@ -465,10 +465,17 @@ impl DevWindow {
         let chrome_cell_w = self.renderer_font_metrics().0 as f32;
         let chrome_cell_h = self.renderer_font_metrics().1 as f32;
         let chrome_ascent = self.renderer_font_metrics().2 as f32;
+        let measure = crate::chrome_measure::ChromeMeasure::new(
+            self.renderer.font_mut(),
+            chrome_cell_w as f64,
+            chrome_cell_h as f64,
+        );
         let canvas = crate::ui::components::build_dev_panel_canvas(
             &s, width_phys, height_phys,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
+            &measure,
         );
+        drop(measure);
         // Dev panel chrome — keep the global default Monaco mono so
         // every section that built its layout against cell metrics
         // (Model / Tokens / Components etc.) lays out the same way
