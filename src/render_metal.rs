@@ -6196,6 +6196,156 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — terminal scene composite.  Approximates
+    /// the production PTY render path through the canvas:  cell BG
+    /// rect runs for the selection band, a brighter rect for the
+    /// cursor block, plus multi-line mono Monaco text on top.  Tests
+    /// the same primitive composition (`Rect` BG → `Text` FG) the
+    /// real PTY frame uses, just driven by hand instead of from a
+    /// live `Grid`.  Real `Grid` → `render_layout_to_texture` readback
+    /// needs a `StorageModeShared` target texture that the renderer
+    /// doesn't currently expose;  threading that through is a
+    /// separate refactor.  This canvas approximation locks the
+    /// visual composition contract:  no overflow between cells, no
+    /// glyph bleed across the selection edge, BG layering preserved.
+    #[test]
+    fn font_v5_terminal_scene_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1200;
+        let h_px: u32 = 600;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        // Each "cell" in the canvas-pt space is half the phys cell
+        // (because Canvas is 2× retina).  Use Monaco cell width via
+        // chrome_font_metrics so the simulated grid sits on the same
+        // pitch as the real terminal.
+        let cell_w_pt = (chrome_cell_w as f64) / 2.0;
+        let cell_h_pt = (chrome_cell_h as f64) / 2.0;
+        use crate::ui::core::{Color, Length};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        let mut canvas = Canvas::new(
+            2.0,
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        let pad_x_pt = 16.0;
+        let pad_y_pt = 16.0;
+        // Page BG — production terminal dark.
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(15, 18, 23, 1.0))
+            .draw();
+        // Simulated terminal lines — log-style output with prompts.
+        let lines = [
+            "$ git status",
+            "On branch develop",
+            "Your branch is up to date with 'origin/develop'.",
+            "",
+            "Changes not staged for commit:",
+            "  (use \"git add <file>...\" to update what will be committed)",
+            "  (use \"git restore <file>...\" to discard changes)",
+            "",
+            "    modified:   src/render_metal.rs",
+            "    modified:   bench/font-rendering/snapshots/...",
+            "",
+            "$ cargo nextest run --lib",
+            "    Finished `test` profile [unoptimized + debuginfo]",
+            "        PASS [  0.018s] (1/2) marspot tests::...",
+            "        PASS [  0.018s] (2/2) marspot tests::...",
+        ];
+        // Selection band — rows 3..5 (0-indexed), cols 4..50.
+        // Match iTerm2 default selection blue (sub-1.0 alpha so the
+        // cell BG underneath still shows through faintly).
+        let sel_color = Color::rgba(46, 92, 158, 0.78);
+        for row in 3..=5usize {
+            let y = pad_y_pt + (row as f64) * cell_h_pt;
+            let (col_start, col_end) = if row == 3 {
+                (4.0, lines.get(row).map(|l| l.len() as f64).unwrap_or(0.0))
+            } else if row == 5 {
+                (0.0, 30.0)
+            } else {
+                (0.0, lines.get(row).map(|l| l.len() as f64).unwrap_or(0.0))
+            };
+            let w = (col_end - col_start) * cell_w_pt;
+            if w > 0.0 {
+                canvas
+                    .rect()
+                    .at(Length::Pt(pad_x_pt + col_start * cell_w_pt), Length::Pt(y))
+                    .size(Length::Pt(w), Length::Pt(cell_h_pt))
+                    .fill(sel_color)
+                    .draw();
+            }
+        }
+        // Cursor cell — block at end of last log line (focused/live).
+        let cursor_row = lines.len() - 1;
+        let cursor_col = lines[cursor_row].len();
+        let cursor_color = Color::rgba(220, 224, 235, 0.90);
+        canvas
+            .rect()
+            .at(
+                Length::Pt(pad_x_pt + (cursor_col as f64) * cell_w_pt),
+                Length::Pt(pad_y_pt + (cursor_row as f64) * cell_h_pt),
+            )
+            .size(Length::Pt(cell_w_pt), Length::Pt(cell_h_pt))
+            .fill(cursor_color)
+            .draw();
+        // Text layer last so glyphs ride on top of BG rects.
+        let fg = Color::rgba(220, 224, 235, 1.0);
+        for (i, line) in lines.iter().enumerate() {
+            let y = pad_y_pt + (i as f64) * cell_h_pt;
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y), *line)
+                .color(fg)
+                .draw();
+        }
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                false, // Mono path
+            )
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_terminal_scene.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 terminal scene] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
