@@ -117,15 +117,24 @@ pub const BOX_DRAWING_FONT_ID: FontId = u32::MAX;
 /// emits grayscale-AA).
 ///
 /// Key is `font_id (4B) + glyph (2B) + size_q (2B) + subpx_x (1B) +
-/// flags (1B)` = 10 bytes packed — still cheap to hash via FxHash.
+/// flags (1B)` = 10 bytes logical, **8 bytes physical** after the
+/// perf-render-p99 attack — packed into a single `u64` newtype so:
+/// (1) Rust struct align padding goes away (the 5-field struct landed
+///     at sizeof=12B / align=4 before packing);
+/// (2) FxHash collapses to a single `u64` mul+rotate (no 5-field
+///     chain);
+/// (3) the cache `FxHashMap<GlyphKey, AtlasEntry>` shrinks 12→8 per
+///     entry, lifting L1d density at the hot lookup site.
+///
+/// Bit layout (LSB → MSB):
+/// - `[0..32)`  font_id (FontId = u32; full range)
+/// - `[32..48)` glyph (CGGlyph = u16; full range)
+/// - `[48..60)` size_q (12 bits = 4096 max, room for 1024 pt × 4
+///               buckets; current PTY/chrome usage stays under 80)
+/// - `[60..62)` subpx_x (2 bits, 0..4 — Phase 4 sub-pixel bucket)
+/// - `[62..64)` flags (2 bits — `FLAG_SMOOTH` + `FLAG_SUBPX_AA`)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct GlyphKey {
-    pub font_id: FontId,
-    pub glyph: CGGlyph,
-    pub size_q: u16,
-    pub subpx_x: u8,
-    pub flags: u8,
-}
+pub struct GlyphKey(u64);
 
 impl GlyphKey {
     /// Bit 0 — `set_should_smooth_fonts(true)` (CT stroke-widening for
@@ -139,6 +148,70 @@ impl GlyphKey {
     /// macOS-Intel build can opt in without invalidating the key
     /// shape.
     pub const FLAG_SUBPX_AA: u8 = 1 << 1;
+
+    // Bit layout constants — keep colocated with `new()` / accessors
+    // so the packing scheme is one block to audit.
+    const FONT_ID_SHIFT: u32 = 0;
+    const GLYPH_SHIFT: u32 = 32;
+    const SIZE_Q_SHIFT: u32 = 48;
+    const SUBPX_X_SHIFT: u32 = 60;
+    const FLAGS_SHIFT: u32 = 62;
+
+    const SIZE_Q_MASK: u64 = 0x0FFF; // 12 bits
+    const SUBPX_X_MASK: u64 = 0x03; //  2 bits
+    const FLAGS_MASK: u64 = 0x03; //  2 bits
+
+    /// Pack the 5 logical fields into the 64-bit key.  Debug builds
+    /// assert no field exceeds its allotted bit width — production
+    /// callers always pass values within range (size_q ≤ ~100,
+    /// subpx_x ∈ 0..4, flags ∈ {0, FLAG_SMOOTH}), so the asserts only
+    /// fire on a regression.
+    #[inline]
+    pub fn new(font_id: FontId, glyph: CGGlyph, size_q: u16, subpx_x: u8, flags: u8) -> Self {
+        debug_assert!(
+            (size_q as u64) <= Self::SIZE_Q_MASK,
+            "size_q {size_q} > 4095 — packing scheme overflow"
+        );
+        debug_assert!(
+            (subpx_x as u64) <= Self::SUBPX_X_MASK,
+            "subpx_x {subpx_x} > 3 — packing scheme overflow"
+        );
+        debug_assert!(
+            (flags as u64) <= Self::FLAGS_MASK,
+            "flags {flags:#x} > 0x3 — packing scheme overflow"
+        );
+        let packed = ((font_id as u64) << Self::FONT_ID_SHIFT)
+            | ((glyph as u64) << Self::GLYPH_SHIFT)
+            | (((size_q as u64) & Self::SIZE_Q_MASK) << Self::SIZE_Q_SHIFT)
+            | (((subpx_x as u64) & Self::SUBPX_X_MASK) << Self::SUBPX_X_SHIFT)
+            | (((flags as u64) & Self::FLAGS_MASK) << Self::FLAGS_SHIFT);
+        GlyphKey(packed)
+    }
+
+    #[inline]
+    pub fn font_id(self) -> FontId {
+        (self.0 >> Self::FONT_ID_SHIFT) as u32
+    }
+
+    #[inline]
+    pub fn glyph(self) -> CGGlyph {
+        (self.0 >> Self::GLYPH_SHIFT) as u16
+    }
+
+    #[inline]
+    pub fn size_q(self) -> u16 {
+        ((self.0 >> Self::SIZE_Q_SHIFT) & Self::SIZE_Q_MASK) as u16
+    }
+
+    #[inline]
+    pub fn subpx_x(self) -> u8 {
+        ((self.0 >> Self::SUBPX_X_SHIFT) & Self::SUBPX_X_MASK) as u8
+    }
+
+    #[inline]
+    pub fn flags(self) -> u8 {
+        ((self.0 >> Self::FLAGS_SHIFT) & Self::FLAGS_MASK) as u8
+    }
 
     /// Quantise a `pt` size to a 0.25-pt bucket.  Two sizes that
     /// round to the same `size_q` share an atlas slot.
@@ -426,9 +499,9 @@ impl GlyphAtlas {
             return Some(*entry);
         }
         let raster = if self.bpp == 4 {
-            rasterise_glyph_color(font, key.glyph, metrics, n_cells)?
+            rasterise_glyph_color(font, key.glyph(), metrics, n_cells)?
         } else {
-            rasterise_glyph(font, key.glyph, metrics, n_cells)?
+            rasterise_glyph(font, key.glyph(), metrics, n_cells)?
         };
         self.commit_raster(key, raster)
     }
@@ -455,7 +528,7 @@ impl GlyphAtlas {
         // `key.subpx_x` ∈ 0..4 sub-pixel bucket (Phase 4) is part of
         // the contract so the trait impl rasterises the correct
         // variant.
-        let out = self.rasteriser.rasterise(font, key.glyph, key.subpx_x)?;
+        let out = self.rasteriser.rasterise(font, key.glyph(), key.subpx_x())?;
         let raster = Raster {
             bytes: out.bytes,
             px_w: out.px_w,
@@ -1217,13 +1290,13 @@ mod tests {
         }
         assert!(glyph != 0, "Menlo should have a glyph for 'A'");
 
-        let key = GlyphKey {
-            font_id: 0,
+        let key = GlyphKey::new(
+            0,
             glyph,
-            size_q: GlyphKey::size_q_for(13.0),
-            subpx_x: 0,
-            flags: GlyphKey::FLAG_SMOOTH,
-        };
+            GlyphKey::size_q_for(13.0),
+            0,
+            GlyphKey::FLAG_SMOOTH,
+        );
         let entry1 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("first call rasterises");
         assert!(entry1.px_w > 0 && entry1.px_h > 0);
         assert_eq!(atlas.cache_len(), 1);
@@ -1255,13 +1328,7 @@ mod tests {
         )
         .expect("atlas with mock rasteriser");
         let font = make_font(); // unused by MockRasteriser
-        let key = GlyphKey {
-            font_id: 7,
-            glyph: 42,
-            size_q: 100,
-            subpx_x: 0,
-            flags: GlyphKey::FLAG_SMOOTH,
-        };
+        let key = GlyphKey::new(7, 42, 100, 0, GlyphKey::FLAG_SMOOTH);
         atlas.begin_frame(11);
         let e1 = atlas
             .get_or_rasterize_natural(key, &font)
@@ -1298,13 +1365,7 @@ mod tests {
             unsafe {
                 font.get_glyphs_for_characters(&cu, &mut g, 1);
             }
-            GlyphKey {
-                font_id: 0,
-                glyph: g,
-                size_q: GlyphKey::size_q_for(13.0),
-                subpx_x: 0,
-                flags: GlyphKey::FLAG_SMOOTH,
-            }
+            GlyphKey::new(0, g, GlyphKey::size_q_for(13.0), 0, GlyphKey::FLAG_SMOOTH)
         };
 
         let chars: &[u8] = b"abcdefghijklmnop";
@@ -1361,13 +1422,7 @@ mod tests {
             unsafe {
                 font.get_glyphs_for_characters(&cu, &mut g, 1);
             }
-            GlyphKey {
-                font_id: 0,
-                glyph: g,
-                size_q,
-                subpx_x: 0,
-                flags: GlyphKey::FLAG_SMOOTH,
-            }
+            GlyphKey::new(0, g, size_q, 0, GlyphKey::FLAG_SMOOTH)
         };
 
         // Probe: render one 'a' into an oversized atlas first to learn
@@ -1442,13 +1497,13 @@ mod tests {
             unsafe {
                 font.get_glyphs_for_characters(&cu, &mut glyph, 1);
             }
-            let key = GlyphKey {
-            font_id: 0,
-            glyph,
-            size_q: GlyphKey::size_q_for(13.0),
-            subpx_x: 0,
-            flags: GlyphKey::FLAG_SMOOTH,
-        };
+            let key = GlyphKey::new(
+                0,
+                glyph,
+                GlyphKey::size_q_for(13.0),
+                0,
+                GlyphKey::FLAG_SMOOTH,
+            );
             if atlas.get_or_rasterize(key, &font, test_metrics(), 1).is_some() {
                 placed += 1;
             }

@@ -119,13 +119,13 @@ fn resolve_cell_glyph(
 /// smoothing knobs.
 #[inline]
 fn box_drawing_key(ch: char, metrics: &SlotMetrics) -> GlyphKey {
-    GlyphKey {
-        font_id: BOX_DRAWING_FONT_ID,
-        glyph: ch as u32 as CGGlyph,
-        size_q: metrics.cell_h as u16,
-        subpx_x: 0,
-        flags: 0,
-    }
+    GlyphKey::new(
+        BOX_DRAWING_FONT_ID,
+        ch as u32 as CGGlyph,
+        metrics.cell_h as u16,
+        0,
+        0,
+    )
 }
 
 /// Phase 2 — atlas key for a CT-rasterised text glyph.  `size_q`
@@ -136,13 +136,13 @@ fn box_drawing_key(ch: char, metrics: &SlotMetrics) -> GlyphKey {
 /// line in the rasteriser).
 #[inline]
 fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFont) -> GlyphKey {
-    GlyphKey {
+    GlyphKey::new(
         font_id,
         glyph,
-        size_q: GlyphKey::size_q_for(ct_font.pt_size()),
-        subpx_x: 0,
-        flags: GlyphKey::FLAG_SMOOTH,
-    }
+        GlyphKey::size_q_for(ct_font.pt_size()),
+        0,
+        GlyphKey::FLAG_SMOOTH,
+    )
 }
 
 /// Like `resolve_cell_glyph`, but routes colour glyphs (Apple Color Emoji)
@@ -3945,13 +3945,13 @@ fn push_text_run_ui_shaped_mono(
     let x_start_floor = x_start.floor() as i32;
     for sg in shaped {
         let ct_font = font.font(sg.font_id as usize).clone();
-        let key = GlyphKey {
-            font_id: sg.font_id,
-            glyph: sg.glyph_id,
-            size_q: GlyphKey::size_q_for(ct_font.pt_size()),
-            subpx_x: sg.subpx_x,
-            flags: GlyphKey::FLAG_SMOOTH,
-        };
+        let key = GlyphKey::new(
+            sg.font_id,
+            sg.glyph_id,
+            GlyphKey::size_q_for(ct_font.pt_size()),
+            sg.subpx_x,
+            GlyphKey::FLAG_SMOOTH,
+        );
         let Some(entry) = atlas.get_or_rasterize_natural(key, &ct_font) else {
             continue;
         };
@@ -4012,17 +4012,17 @@ fn push_text_run_ui_shaped(
         // submission order with the mono runs.
         let is_color = font.is_color_font(sg.font_id as usize);
         let ct_font = font.font(sg.font_id as usize).clone();
-        let key = GlyphKey {
-            font_id: sg.font_id,
-            glyph: sg.glyph_id,
-            size_q: GlyphKey::size_q_for(ct_font.pt_size()),
-            // Phase 4 — bucket comes from CTLine's float position
-            // (shape_line quantised it).  Atlas hands back a slot
-            // whose ink is pre-shifted by `subpx_x × 0.25 px`, so
-            // origin.x stays integer.
-            subpx_x: sg.subpx_x,
-            flags: GlyphKey::FLAG_SMOOTH,
-        };
+        // Phase 4 — `sg.subpx_x` bucket comes from CTLine's float
+        // position (shape_line quantised it).  Atlas hands back a slot
+        // whose ink is pre-shifted by `subpx_x × 0.25 px`, so
+        // origin.x stays integer.
+        let key = GlyphKey::new(
+            sg.font_id,
+            sg.glyph_id,
+            GlyphKey::size_q_for(ct_font.pt_size()),
+            sg.subpx_x,
+            GlyphKey::FLAG_SMOOTH,
+        );
         let (entry_opt, aw, ah, sink): (Option<AtlasEntry>, f32, f32, &mut Vec<GlyphInstance>) =
             if is_color {
                 (
