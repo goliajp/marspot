@@ -439,10 +439,6 @@ enum CoreEvent {
     /// at the same dims after a restart.
     SurfaceAttach(u32, u32, f64, f64, f64),
     Preedit(String),
-    /// Shelld wake — some pane has new bytes to pump (PTY → bytelog
-    /// → broadcast).  Sent by the shelld client's wake callback so
-    /// the main loop is event-driven instead of polling.
-    PumpShelld,
     /// Shell sent HELLO with its protocol version.  We reply with
     /// HELLO_ACK echoing the version we agree on.
     Hello(u32),
@@ -1074,14 +1070,6 @@ impl CoreApp {
     /// the key/render branches.
     fn pane_session_for(&self, shelld_session_id: u64) -> Option<&PaneSessionState> {
         self.pane_sessions.get(&shelld_session_id)
-    }
-
-    /// True iff the *focused* pane is currently held by a plugin with
-    /// the given capability.
-    fn focused_pane_has_cap(&self, cap: u32) -> bool {
-        let Some(p) = self.panes.get(self.focused_idx) else { return false; };
-        let Some(sid) = p.shelld_session_id() else { return false; };
-        self.pane_session_for(sid).is_some_and(|s| s.has(cap))
     }
 
     /// Returns the focused pane's shelld_session_id if it currently
@@ -3937,9 +3925,11 @@ fn main() {
     let mut writing_idx: usize = 0;
 
     // Unified event channel: the control-socket reader pushes
-    // CoreEvents; the shelld wake callback pushes `PumpShelld`.
-    // Main loop blocks on `recv_timeout` so it sleeps until *any*
-    // event arrives — idle CPU = 0.
+    // CoreEvents; the main loop blocks on `recv_timeout` so it
+    // sleeps until *any* event arrives — idle CPU = 0.  RFC-003
+    // retired the shelld wake callback (used to push `PumpShelld`);
+    // L3 reattach + dual-pump bytelog already drives the event loop
+    // through the same channel.
     let (event_tx, event_rx): (Sender<CoreEvent>, Receiver<CoreEvent>) = mpsc::channel();
 
     // Bootstrap the full 9-grid: reattach every surviving shelld
@@ -4448,9 +4438,6 @@ fn main() {
                 }
                 CoreEvent::SurfaceAttach(f_id, b_id, new_w, new_h, new_scale) => {
                     *pending_attach = Some((f_id, b_id, new_w, new_h, new_scale));
-                }
-                CoreEvent::PumpShelld => {
-                    app.needs_render = true;
                 }
                 CoreEvent::L3ControlEof(sid) => {
                     // L3's reader EOF'd — typically silent-update

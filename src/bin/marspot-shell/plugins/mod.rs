@@ -1,5 +1,20 @@
 //! marspot plugin system — see RFC-001.
 //!
+//! ## Why module-wide `#[allow(dead_code)]`
+//!
+//! This module is the RFC-001 protocol surface.  Most items
+//! (`Capabilities` bit constants, `PluginMetadata.version`, `PtyChild`
+//! fields, `EndReason::{Timeout, PaneClosed}`, `LogLevel::Error`,
+//! `on_pty_bytes` default trait method, `PaneSessionHost`'s
+//! `pane_count` / `pane_pty_device` / `pane_pty_pid_tree` /
+//! `pane_focused`) aren't reached by the in-tree plugins (claudecode +
+//! pidtree) today but are part of the public ABI a future plugin may
+//! rely on.  Deleting them would be a silent protocol break; warning
+//! on each is noise.  Suppress at the module level so the surface
+//! stays loud-by-RFC and silent-by-compiler.
+#![allow(dead_code)]
+
+//!
 //! ## Design
 //!
 //! - Plugins run **in the L1 shell process**.  GUI / status / notify

@@ -140,9 +140,6 @@ impl SearchSource for InMemorySource {
 
 /// One logical line, materialised lazily by the iterator.
 struct LogicalLine {
-    /// Physical row range (inclusive on both ends).
-    first_phys: u64,
-    last_phys: u64,
     /// Char-by-char text after normalisation (hanging-indent strip,
     /// wrap merge).  This is what queries match against.
     norm_text: String,
@@ -301,9 +298,11 @@ impl<S: SearchSource> SearchIter<S> {
         // Advance the cursor: next logical line is the one ending at
         // `first - 1` (i.e. directly above `first`).
         self.next_phys_back = first as i64 - 1;
+        // `first` / `last` go uncomsumed here today; the row range
+        // can be reconstructed from `norm_to_phys` if a future call
+        // path needs it.
+        let _ = (first, last);
         Some(LogicalLine {
-            first_phys: first,
-            last_phys: last,
             norm_text,
             norm_to_phys,
             logical_idx,

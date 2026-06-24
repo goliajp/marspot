@@ -202,32 +202,6 @@ impl LocalSession {
         self.child_pid
     }
 
-    /// RFC-003 §6 Amendment 15 — PTY master fd (raw).  Exposed so L3
-    /// boot can `Deposit` it into L1's fd-vault while still keeping
-    /// the local Arc<Pty> for reading.  The vault dup()s on its side,
-    /// so the kernel object outlives whichever holder closes first.
-    pub fn master_raw_fd(&self) -> RawFd {
-        self.pty.raw_master()
-    }
-
-    /// RFC-003 §6 Amendment 15 — best-effort try to detach the shell
-    /// child from this LocalSession's `Pty` so the eventual Drop does
-    /// not SIGHUP the shell.  Only works when no other Arc<Pty> still
-    /// owns the same reference (typically: when the reader thread has
-    /// died and we hold the last Arc).  When the Arc still has
-    /// siblings — most of the time — this is a silent no-op; in that
-    /// case the SIGTERM handler should `mem::forget(self)` instead.
-    /// Returns `true` if the detach actually took effect.
-    pub fn try_release_for_handoff(&mut self) -> bool {
-        match Arc::get_mut(&mut self.pty) {
-            Some(pty) => {
-                pty.release_for_handoff();
-                true
-            }
-            None => false,
-        }
-    }
-
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
     }
