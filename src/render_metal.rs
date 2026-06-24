@@ -44,7 +44,6 @@ use objc2_metal::{
 };
 use core_graphics::color_space::{kCGColorSpaceSRGB, CGColorSpace};
 use foreign_types::ForeignType;
-use objc2::msg_send;
 use objc2_app_kit::NSColor;
 use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
@@ -2064,7 +2063,7 @@ fn build_instances(
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
-    dots: &mut Vec<CellInstance>,
+    _dots: &mut Vec<CellInstance>,
     ui_rects: &mut Vec<UiRectInstance>,
     pane_caches: &mut Vec<PaneInstanceCache>,
     overlay_cells: &mut Vec<CellInstance>,
@@ -2892,7 +2891,7 @@ fn paint_process_panel_content(
     // keep that heuristic so glyph sizes stay in proportion.
     let scale_hint = (p.cell_h / 20.0).max(0.5);
     let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
-    let tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
+    let _tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
     let traffic = PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL * scale_hint;
     let traffic_gap = PROCESS_PANEL_TRAFFIC_GAP_LOGICAL * scale_hint;
     let traffic_left_pad = PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL * scale_hint;
@@ -3535,7 +3534,7 @@ fn push_session(
     cells: &mut Vec<CellInstance>,
     glyphs: &mut Vec<GlyphInstance>,
     color_glyphs: &mut Vec<GlyphInstance>,
-    ui_rects: &mut Vec<UiRectInstance>,
+    _ui_rects: &mut Vec<UiRectInstance>,
     gutter: f32,
     padding: f32,
     title_h: f32,
@@ -4825,7 +4824,7 @@ fn build_canvas_runs(
 
     let mut runs: Vec<CanvasRun> = Vec::new();
     let mut cur: Option<CanvasRunKind> = None;
-    let mut bump = |runs: &mut Vec<CanvasRun>, k: CanvasRunKind, n: usize| {
+    let bump = |runs: &mut Vec<CanvasRun>, k: CanvasRunKind, n: usize| {
         if runs.last().map(|r| r.kind == k).unwrap_or(false) {
             runs.last_mut().unwrap().count += n;
         } else {
@@ -6957,7 +6956,7 @@ mod tests {
     /// `CellInstance` per spanned row).
     #[test]
     fn c4_highlight_two_row_span_emits_two_cells() {
-        use crate::grid::{Cell, Grid};
+        use crate::grid::Grid;
         use crate::layout::Layout;
         if system_default_device().is_err() {
             return;

@@ -583,7 +583,7 @@ pub fn tooltip(label: &str) -> View {
 /// `divider_after_idx` inserts a hairline divider after the N-th
 /// item (None for no divider).  Each item carries an `ActionId`.
 pub fn context_menu(items: Vec<&str>, divider_after_idx: Option<usize>, action_base: super::types::ActionId) -> View {
-    use crate::ui::theme::{color, space, radius, text, elev};
+    use crate::ui::theme::{color, radius, text, elev};
     let mut rows: Vec<View> = Vec::with_capacity(items.len() + 1);
     for (i, label) in items.iter().enumerate() {
         let row = Text::new(*label).style(text::BODY).build()
@@ -632,7 +632,7 @@ pub fn breadcrumb(segments: Vec<&str>) -> View {
 /// icon-or-empty slot, label, trailing detail.  Selected = accent
 /// background;  click fires `action`.
 pub fn list_row(label: &str, trailing: Option<&str>, selected: bool, action: super::types::ActionId) -> View {
-    use crate::ui::theme::{color, space, radius, text};
+    use crate::ui::theme::{color, radius, text};
     let bg = if selected { color::BG_SELECTED } else { color::BG };
     let fg = if selected { color::FG }          else { color::FG };
     let mut content = vec![

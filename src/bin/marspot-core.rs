@@ -2632,7 +2632,7 @@ impl CoreApp {
             orig.sort_by(|&a, &b| {
                 panel_ref.panes[b].cpu_pct.total_cmp(&panel_ref.panes[a].cpu_pct)
             });
-            sorted_to_orig = orig.clone();
+            sorted_to_orig.clone_from(&orig);
             for &i in &orig {
                 let pane = &panel_ref.panes[i];
                 pane_rows.push(ProcessPanelPaneRow {

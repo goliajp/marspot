@@ -177,8 +177,8 @@ declare_class!(
     }
 );
 
-/// Marker so we don't repeat-build (NSWindow construction must be
-/// idempotent — first build wins, subsequent shows just orderFront).
+// Marker so we don't repeat-build (NSWindow construction must be
+// idempotent — first build wins, subsequent shows just orderFront).
 thread_local! {
     static DEV_WINDOW_HANDLE: RefCell<Option<DevWindow>> = const { RefCell::new(None) };
     /// Hold the delegate Retained so NSWindow's weak ref stays
@@ -289,7 +289,7 @@ impl DevWindow {
         // user explicitly orders main to front).  Comments below
         // explain the level choice — we want "above normal docs"
         // without becoming "always-on-top of all apps."
-        unsafe {
+        {
             use objc2_app_kit::NSWindowLevel;
             // NSFloatingWindowLevel = floating panel, above normal.
             const NS_FLOATING_LEVEL: NSWindowLevel = 3;
@@ -300,11 +300,9 @@ impl DevWindow {
         // view.  Same code path the main window uses.  Scale is
         // the device pixel ratio at construction; later commits
         // will track the window's backingScaleFactor live.
-        let scale = unsafe {
-            nswindow.screen()
-                .map(|s| s.backingScaleFactor() as f32)
-                .unwrap_or(2.0)
-        };
+        let scale = nswindow.screen()
+            .map(|s| s.backingScaleFactor() as f32)
+            .unwrap_or(2.0);
         let renderer = MetalRenderer::new(&view, scale)
             .map_err(|e| format!("dev window renderer init: {e}"))?;
 
@@ -411,11 +409,9 @@ impl DevWindow {
         if !self.is_visible() {
             return;
         }
-        let scale = unsafe {
-            self.nswindow.screen()
-                .map(|s| s.backingScaleFactor() as f64)
-                .unwrap_or(2.0)
-        };
+        let scale = self.nswindow.screen()
+            .map(|s| s.backingScaleFactor() as f64)
+            .unwrap_or(2.0);
         // Pull the actual content-area size off the NSWindow each
         // frame.  Autoresizing on the content view is unreliable in
         // some macOS configs (especially when the window starts
@@ -554,7 +550,7 @@ pub fn drain_pending_actions() {
         });
         if let Some(window) = nswindow {
             let r = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-            unsafe { window.setFrame_display(r, true); }
+            window.setFrame_display(r, true);
         }
     }
 

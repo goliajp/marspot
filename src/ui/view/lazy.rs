@@ -44,7 +44,6 @@ pub fn lazy_vstack_padded(
     leading_margin: Length,
     trailing_margin: Length,
 ) -> View {
-    use super::view::Modifier;
     use super::types::Edges;
     let base = View::LazyVStack { id, items, item_height, gap };
     let lm = leading_margin;

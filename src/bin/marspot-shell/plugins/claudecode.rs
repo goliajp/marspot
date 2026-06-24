@@ -648,7 +648,10 @@ impl ClaudecodePlugin {
             .collect();
         for sid in stale {
             self.monitors.remove(&sid);
-            client.detach_raw(sid);
+            // detach_raw returns Result; ignore the error here — the
+            // pane is going away regardless, and a stale ATTACH that
+            // failed to clean up is harmless (next L3 reattach overrides).
+            let _ = client.detach_raw(sid);
             host.log(
                 LogLevel::Info,
                 "monitor.stop",
