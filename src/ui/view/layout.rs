@@ -9,7 +9,7 @@
 
 use crate::ui::core::Length;
 use super::types::{AlignCross, Anchor, Distribute, Edges, FrameSpec};
-use super::view::{Modifier, View, TextSize, TextFontSpec};
+use super::view::{Modifier, View, TextSize, TextFontSpec, TextLines, Truncate};
 
 /// Two-axis (min, max) constraints handed down to a node.
 /// Equivalent to Flutter's `BoxConstraints`.
@@ -302,6 +302,51 @@ pub fn text_width_cells(s: &str) -> usize {
     s.chars().map(|c| marspot_term::grid::char_width(c) as usize).sum()
 }
 
+/// Phase 10d — greedy word-break wrap.  Splits `content` on whitespace
+/// and packs each `word` (with a single space separator between
+/// adjacent words) into successive lines such that every line's
+/// measured advance ≤ `max_w`.  Words longer than `max_w` go on
+/// their own line and overflow horizontally — character-level break
+/// is a v2 follow-up (rare in chrome copy).  Returns at least one
+/// line (empty string if `content` is empty).
+pub(super) fn wrap_text_greedy<F: Fn(&str) -> f64>(
+    content: &str,
+    max_w: f64,
+    advance: F,
+) -> Vec<String> {
+    if content.is_empty() {
+        return vec![String::new()];
+    }
+    let space_w = advance(" ");
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w: f64 = 0.0;
+    for word in content.split_whitespace() {
+        let word_w = advance(word);
+        if cur.is_empty() {
+            cur.push_str(word);
+            cur_w = word_w;
+            continue;
+        }
+        if cur_w + space_w + word_w <= max_w {
+            cur.push(' ');
+            cur.push_str(word);
+            cur_w += space_w + word_w;
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_w = word_w;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// Run the layout pass.  `origin` is the parent's top-left in phys;
 /// `constraints` bounds this node's size.  Returns the laid-out
 /// subtree with all rects in phys.
@@ -316,6 +361,48 @@ pub fn layout<'a>(view: &View, ctx: LayoutCtx<'a>, origin: (f64, f64), c: Constr
             // CTLine-shaped advance for SF Pro weight + opts.
             let line_h = ctx.fonts.line_h_phys(t.font);
             let raw_w = ctx.fonts.advance_phys(&t.content, t.font);
+            // Phase 10d — TextLines::Wrap actually wraps now.  Greedy
+            // word-break against `c.max_w`; each line becomes a
+            // single-line child Text LaidOut so paint can re-use the
+            // existing TextPrim path without learning multi-line.
+            if let TextLines::Wrap { max } = t.lines {
+                if raw_w > c.max_w && c.max_w > 0.0 {
+                    let lines = wrap_text_greedy(&t.content, c.max_w, |s| {
+                        ctx.fonts.advance_phys(s, t.font)
+                    });
+                    let lines: Vec<String> = if max > 0 && lines.len() > max as usize {
+                        lines.into_iter().take(max as usize).collect()
+                    } else {
+                        lines
+                    };
+                    let total_h = (lines.len() as f64) * line_h;
+                    let mut children = Vec::with_capacity(lines.len());
+                    for (i, line) in lines.iter().enumerate() {
+                        let mut child = t.clone();
+                        child.content = line.clone();
+                        child.lines = TextLines::Single { truncate: Truncate::None };
+                        let line_w = ctx.fonts.advance_phys(line, t.font).min(c.max_w);
+                        children.push(LaidOut {
+                            view: View::Text(child),
+                            rect: Rect {
+                                x: origin.0,
+                                y: origin.1 + (i as f64) * line_h,
+                                w: line_w,
+                                h: line_h,
+                            },
+                            deco: Decoration::default(),
+                            children: Vec::new(),
+                        });
+                    }
+                    let size = c.clamp(c.max_w, total_h);
+                    return LaidOut {
+                        view: view.clone(),
+                        rect: Rect { x: origin.0, y: origin.1, w: size.w, h: size.h },
+                        deco: Decoration::default(),
+                        children,
+                    };
+                }
+            }
             let size = c.clamp(raw_w, line_h);
             LaidOut {
                 view: view.clone(),

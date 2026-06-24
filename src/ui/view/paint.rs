@@ -59,7 +59,14 @@ fn paint_into_inner<'a>(
     paint_decoration(canvas, &laid.rect, &laid.deco, ctx, local_opacity);
 
     // 2. Self primitive(if this node is an atom).
-    paint_atom(canvas, &laid.view, &laid.rect, ctx, local_opacity);
+    //    Phase 10d — `Text` with non-empty children is a wrap parent:
+    //    each child carries one line and emits its own TextPrim, so
+    //    self-emit would draw the un-wrapped string on top.  Skip.
+    let is_wrap_parent =
+        matches!(&laid.view, View::Text(_)) && !laid.children.is_empty();
+    if !is_wrap_parent {
+        paint_atom(canvas, &laid.view, &laid.rect, ctx, local_opacity);
+    }
 
     // 3. Children — submission order = z order.  ScrollView OR a
     //    `.clip()` modifier establishes a clip for descendants.

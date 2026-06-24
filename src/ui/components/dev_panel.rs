@@ -2145,12 +2145,17 @@ fn build_font_v5_view() -> crate::ui::view::View {
     let full = ShapeOptions::full();
     let off = ShapeOptions::all_off();
 
-    let title = |s: &str| Text::new(s).color(color::FG).ui(TITLE, 700, full).build();
-    let header = |s: &str| Text::new(s).color(color::ACCENT_DIM).ui(H, 600, full).build();
-    let hint = |s: &str| Text::new(s).color(color::FG_MUTED).ui(BODY, 400, full).build();
-    let body = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, full).build();
-    let body_w = |s: &str, w: u16| Text::new(s).color(color::FG).ui(BODY, w, full).build();
-    let body_off = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, off).build();
+    // Phase 10d — every chrome run wraps to the available width.
+    // `.wrap(0)` = unlimited line count; the layout pass measures
+    // each line via `FontMetricsProvider` so the break points track
+    // the SF Pro variant + weight in use.  Emoji stays single-line
+    // because the glyphs are already cell-pitched.
+    let title = |s: &str| Text::new(s).color(color::FG).ui(TITLE, 700, full).wrap(0).build();
+    let header = |s: &str| Text::new(s).color(color::ACCENT_DIM).ui(H, 600, full).wrap(0).build();
+    let hint = |s: &str| Text::new(s).color(color::FG_MUTED).ui(BODY, 400, full).wrap(0).build();
+    let body = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, full).wrap(0).build();
+    let body_w = |s: &str, w: u16| Text::new(s).color(color::FG).ui(BODY, w, full).wrap(0).build();
+    let body_off = |s: &str| Text::new(s).color(color::FG).ui(BODY, 400, off).wrap(0).build();
     let emoji = |s: &str| Text::new(s).color(color::FG).ui(EMOJI, 400, full).build();
 
     let kv = |label: &str, content: crate::ui::view::View| -> crate::ui::view::View {
@@ -2200,6 +2205,11 @@ fn build_font_v5_view() -> crate::ui::view::View {
         phase(vec![
             header("P4 — sub-pixel x"),
             body("iiiiii lllll AVAVAV"),
+        ]),
+
+        phase(vec![
+            header("P10d — soft wrap (greedy word-break)"),
+            body("This paragraph wraps to the dev panel's current width via Text::wrap(0).  Resize the panel and watch the line breaks follow the real SF Pro advance, not a mono-cell estimate.  Each new line is a fresh single-line Text laid out beneath the previous one."),
         ]),
     ]).vstack_gap(Length::Pt(22.0))
 }
