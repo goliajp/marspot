@@ -124,6 +124,59 @@ impl Rasteriser for MockRasteriser {
     }
 }
 
+/// Phase 10b — line shaper.  Same scope as `Rasteriser`: macOS impl
+/// wraps `font_shape::shape_line`; tests can plug `MockShaper` to
+/// drive the `FontCache.shape_cache` without spinning up CoreText.
+///
+/// The trait method takes a `&mut dyn FnMut(CTFont) -> u32` for the
+/// fallback-font intern callback, so callers (FontCache) can hand
+/// the closure their `FontRegistry::intern` without committing to a
+/// generic type parameter on the trait.  `&dyn` keeps the trait
+/// object-safe.
+pub trait Shaper: Send + Sync + 'static {
+    fn shape(
+        &self,
+        text: &str,
+        base_font: &CTFont,
+        opts: crate::font_shape::ShapeOptions,
+        intern: &mut dyn FnMut(CTFont) -> u32,
+    ) -> Vec<crate::font_shape::ShapedGlyph>;
+}
+
+/// macOS-native shaper: thin wrapper around `font_shape::shape_line`.
+pub struct CoreTextShaper;
+
+impl Shaper for CoreTextShaper {
+    fn shape(
+        &self,
+        text: &str,
+        base_font: &CTFont,
+        opts: crate::font_shape::ShapeOptions,
+        intern: &mut dyn FnMut(CTFont) -> u32,
+    ) -> Vec<crate::font_shape::ShapedGlyph> {
+        crate::font_shape::shape_line(text, base_font, opts, |f| intern(f))
+    }
+}
+
+/// Headless test shaper.  Returns the pre-built `canned` glyphs
+/// regardless of input — useful for testing the chrome pipeline's
+/// glyph-pushing path without depending on a real font.
+pub struct MockShaper {
+    pub canned: Vec<crate::font_shape::ShapedGlyph>,
+}
+
+impl Shaper for MockShaper {
+    fn shape(
+        &self,
+        _text: &str,
+        _base_font: &CTFont,
+        _opts: crate::font_shape::ShapeOptions,
+        _intern: &mut dyn FnMut(CTFont) -> u32,
+    ) -> Vec<crate::font_shape::ShapedGlyph> {
+        self.canned.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +203,65 @@ mod tests {
             .expect("raster A");
         assert!(r.px_w > 0 && r.px_h > 0);
         assert_eq!(r.bytes.len(), (r.px_w * r.px_h) as usize, "mono is R8");
+    }
+
+    /// MockShaper returns its canned glyphs regardless of input.
+    /// Verifies the trait dispatch shape so FontCache can plug a
+    /// custom shaper for headless tests.
+    #[test]
+    fn mock_shaper_emits_canned_glyphs() {
+        let Ok(font) = new_from_name("Menlo", 13.0) else {
+            return;
+        };
+        let canned = vec![
+            crate::font_shape::ShapedGlyph {
+                font_id: 99,
+                glyph_id: 7,
+                pen_x_px: 0,
+                subpx_x: 0,
+            },
+            crate::font_shape::ShapedGlyph {
+                font_id: 99,
+                glyph_id: 8,
+                pen_x_px: 12,
+                subpx_x: 2,
+            },
+        ];
+        let shaper = MockShaper { canned: canned.clone() };
+        let mut intern_calls = 0;
+        let mut intern = |_f: CTFont| -> u32 {
+            intern_calls += 1;
+            0
+        };
+        let out = shaper.shape(
+            "ignored",
+            &font,
+            crate::font_shape::ShapeOptions::full(),
+            &mut intern,
+        );
+        assert_eq!(out.len(), canned.len());
+        assert_eq!(out[0].glyph_id, canned[0].glyph_id);
+        assert_eq!(out[1].pen_x_px, canned[1].pen_x_px);
+        assert_eq!(intern_calls, 0, "mock should not call intern");
+    }
+
+    /// CoreTextShaper just delegates — calling `shape_line` directly
+    /// vs through the trait must produce identical glyph sequences
+    /// for the same input.
+    #[test]
+    fn coretext_shaper_matches_shape_line() {
+        let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
+            return;
+        };
+        let opts = crate::font_shape::ShapeOptions::full();
+        let direct = crate::font_shape::shape_line("Hi!", &font, opts, |_| 0);
+        let mut via_trait_intern = |_f: CTFont| -> u32 { 0 };
+        let via_trait = CoreTextShaper.shape("Hi!", &font, opts, &mut via_trait_intern);
+        assert_eq!(direct.len(), via_trait.len(), "trait must match free fn");
+        for i in 0..direct.len() {
+            assert_eq!(direct[i].glyph_id, via_trait[i].glyph_id);
+            assert_eq!(direct[i].pen_x_px, via_trait[i].pen_x_px);
+        }
     }
 
     /// MockRasteriser produces the expected fixed-size buffer with

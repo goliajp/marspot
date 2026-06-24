@@ -276,6 +276,12 @@ pub struct FontCache {
     /// Lives on `FontCache` so the shape closure can intern fallback
     /// fonts into the same registry without aliasing-borrow issues.
     shape_cache: crate::font_shape::ShapeCache,
+    /// Phase 10b — Shaper trait dispatch.  Default `CoreTextShaper`
+    /// delegates to `font_shape::shape_line`; tests / future Linux
+    /// or Windows builds can plug a different impl via
+    /// [`FontCache::set_shaper`].  Same Send+Sync+'static bound as
+    /// `Rasteriser`; lets FontCache stay clonable / movable.
+    shaper: Box<dyn crate::font_trait::Shaper>,
 }
 
 /// Hard cap on `char_cache` entries.  Realistic terminal use
@@ -398,7 +404,19 @@ impl FontCache {
             ui_ascent,
             text_fallback_idxs,
             shape_cache: crate::font_shape::ShapeCache::default(),
+            shaper: Box::new(crate::font_trait::CoreTextShaper),
         })
+    }
+
+    /// Phase 10b — swap in a custom Shaper.  Headless tests use this
+    /// with `MockShaper`; future cross-platform builds substitute
+    /// their own.  Returns the prior shaper so the caller can restore
+    /// it (scoped override).
+    pub fn set_shaper(
+        &mut self,
+        shaper: Box<dyn crate::font_trait::Shaper>,
+    ) -> Box<dyn crate::font_trait::Shaper> {
+        std::mem::replace(&mut self.shaper, shaper)
     }
 
     /// Resolve a `(char, bold, italic)` triple to `(font_idx, glyph)`.
@@ -528,13 +546,27 @@ impl FontCache {
         let base_font = self.fonts.fonts[base_idx].clone();
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(base_font.pt_size());
         let ui_id = base_idx as u32;
+        // Phase 10b — take both cache and shaper out so the closure
+        // can mutably borrow the rest of FontCache (specifically
+        // `self.fonts`) without aliasing.  Restore both after the
+        // call — even on panic the shaper is the default CoreText
+        // impl so the swap is non-destructive.
         let mut cache = std::mem::take(&mut self.shape_cache);
+        let shaper =
+            std::mem::replace(&mut self.shaper, Box::new(crate::font_trait::CoreTextShaper));
         let result = cache
-            .shape(text, &base_font, ui_id, size_q, opts, |f| {
-                self.fonts.intern(f) as u32
-            })
+            .shape_with(
+                text,
+                &base_font,
+                ui_id,
+                size_q,
+                opts,
+                |t, bf, o, intern| shaper.shape(t, bf, o, intern),
+                |f| self.fonts.intern(f) as u32,
+            )
             .to_vec();
         self.shape_cache = cache;
+        self.shaper = shaper;
         result
     }
 
@@ -772,6 +804,51 @@ mod tests {
         // break the public contract.
         let (_idx, glyph) = fc.resolve_char('A', false, false);
         assert!(glyph != 0, "resolve still works post-rebuild");
+    }
+
+    /// Phase 10b — FontCache uses its Shaper trait for the shape path.
+    /// Swap in a `MockShaper` with known canned glyphs; verify
+    /// `shape_ui_weighted_opts` returns them verbatim.  Proves the
+    /// trait dispatch in `shape_with` is wired and that scoped
+    /// override via `set_shaper` works.
+    #[test]
+    fn shape_ui_routes_through_shaper_trait() {
+        let mut fc = match FontCache::build() {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if fc.ui_font_idx == 0 {
+            return;
+        }
+        let canned = vec![
+            crate::font_shape::ShapedGlyph {
+                font_id: 0,
+                glyph_id: 111,
+                pen_x_px: 0,
+                subpx_x: 0,
+            },
+            crate::font_shape::ShapedGlyph {
+                font_id: 0,
+                glyph_id: 222,
+                pen_x_px: 9,
+                subpx_x: 1,
+            },
+        ];
+        let prev = fc.set_shaper(Box::new(crate::font_trait::MockShaper {
+            canned: canned.clone(),
+        }));
+        let result = fc.shape_ui_weighted_opts(
+            "anything",
+            400,
+            crate::font_shape::ShapeOptions::full(),
+        );
+        // Restore the real shaper so subsequent tests aren't poisoned.
+        fc.set_shaper(prev);
+
+        assert_eq!(result.len(), canned.len());
+        assert_eq!(result[0].glyph_id, 111);
+        assert_eq!(result[1].pen_x_px, 9);
+        assert_eq!(result[1].subpx_x, 1);
     }
 
     /// Phase 5 — weight=400 must reuse the base UI font_idx; weight=700

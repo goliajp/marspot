@@ -273,18 +273,37 @@ impl ShapeCache {
         opts: ShapeOptions,
         intern: F,
     ) -> &[ShapedGlyph] {
-        // Need a key that's borrowable as &str for the hot lookup
-        // path.  Hashbrown's raw_entry would let us avoid the alloc;
-        // for now eat the small allocation on every call (chrome
-        // path runs ~100 strings/frame, ~100 × 50-char alloc =
-        // ~5 KB/frame, negligible vs ~1 ms shape budget).
+        // Default cache path — use the macOS `shape_line` directly.
+        // Phase 10b callers that need to plug a custom Shaper go
+        // through `shape_with(...)` instead.
+        self.shape_with(text, base_font, base_font_id, size_q, opts, |t, bf, o, mut i| {
+            shape_line(t, bf, o, &mut i)
+        }, intern)
+    }
+
+    /// Phase 10b — same as `shape`, but the miss path goes through
+    /// `shape_fn` instead of calling `shape_line` directly.  Lets
+    /// FontCache route via its `Shaper` trait without the cache
+    /// having a dependency on the trait type.
+    pub fn shape_with<
+        S: FnOnce(&str, &CTFont, ShapeOptions, &mut dyn FnMut(CTFont) -> u32) -> Vec<ShapedGlyph>,
+        F: FnMut(CTFont) -> u32,
+    >(
+        &mut self,
+        text: &str,
+        base_font: &CTFont,
+        base_font_id: u32,
+        size_q: u16,
+        opts: ShapeOptions,
+        shape_fn: S,
+        mut intern: F,
+    ) -> &[ShapedGlyph] {
         let key = ShapeKey {
             text: text.to_owned(),
             size_q,
             base_font_id,
             opts_bits: opts_to_bits(opts),
         };
-        // Reconstruct ShapeOptions from packed bits for the shape call.
         let opts_for_shape = ShapeOptions {
             kerning: (key.opts_bits & 0b0001) != 0,
             liga: (key.opts_bits & 0b0010) != 0,
@@ -293,7 +312,6 @@ impl ShapeCache {
         };
         if self.map.contains_key(&key) {
             self.hits += 1;
-            // Promote to MRU end — drop from the queue and re-push.
             if let Some(pos) = self.order.iter().position(|k| k == &key) {
                 self.order.remove(pos);
             }
@@ -301,7 +319,7 @@ impl ShapeCache {
             return self.map.get(&key).unwrap();
         }
         self.misses += 1;
-        let shaped = shape_line(text, base_font, opts_for_shape, intern);
+        let shaped = shape_fn(text, base_font, opts_for_shape, &mut intern);
         if self.map.len() >= self.cap {
             if let Some(oldest) = self.order.pop_front() {
                 self.map.remove(&oldest);
