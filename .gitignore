@@ -4,6 +4,11 @@
 # Local build logs (run.sh output)
 /build/
 
+# Internal perf decomposition / research docs — local-only.  Phase A
+# read-only ground-truth that informs Phase B attacks; not meant to
+# travel through main-branch history.
+/.dev/
+
 # Reference open-source projects and specs — local-only, not committed.
 # Pinned versions tracked in references/README.md.
 /references/*
