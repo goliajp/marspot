@@ -147,10 +147,10 @@ pub const SECTION_UI_FOUNDATION_L4:    usize = 0x00_01_04;
 pub const SECTION_UI_FOUNDATION_L5:    usize = 0x00_01_05;
 pub const SECTION_UI_FOUNDATION_L6:    usize = 0x00_01_06;
 
-// Tokens: design tokens(color / typography / spacing)
-pub const SECTION_UI_TOKENS_COLORS:    usize = 0x00_02_01;
-pub const SECTION_UI_TOKENS_UNITS:     usize = 0x00_02_02;
-pub const SECTION_UI_TOKENS_TYPOGRAPHY:usize = 0x00_02_03;
+// Tokens: design tokens(color / units / typography)
+pub const SECTION_UI_TOKENS_COLORS:     usize = 0x00_02_01;
+pub const SECTION_UI_TOKENS_UNITS:      usize = 0x00_02_02;
+pub const SECTION_UI_TOKENS_TYPOGRAPHY: usize = 0x00_02_03;
 
 // Primitives: atomic 渲染单元(canvas-layer demos)
 pub const SECTION_UI_PRIMITIVES_RECTS: usize = 0x00_03_01;
@@ -191,7 +191,7 @@ const TAB_MENUS: &[(usize, &[MenuRow])] = &[
         MenuRow::Header("Tokens"),
         MenuRow::Item("  Colors",       SECTION_UI_TOKENS_COLORS),
         MenuRow::Item("  Units",        SECTION_UI_TOKENS_UNITS),
-        // Typography 预留:用 Text item 占位
+        MenuRow::Item("  Typography",   SECTION_UI_TOKENS_TYPOGRAPHY),
         MenuRow::Header("Primitives"),
         MenuRow::Item("  Rects",        SECTION_UI_PRIMITIVES_RECTS),
         MenuRow::Item("  Lines",        SECTION_UI_PRIMITIVES_LINES),
@@ -499,6 +499,7 @@ pub fn build_dev_panel_canvas(
             let y = draw_section_header(&mut canvas, content_x, y, "Units");
             let _ = draw_units_sample(&mut canvas, content_x, y);
         }
+        SECTION_UI_TOKENS_TYPOGRAPHY => render_view_section(&mut canvas, "Typography", build_typography_view()),
         SECTION_UI_PRIMITIVES_RECTS => {
             let y = draw_section_header(&mut canvas, content_x, y, "Rects");
             let _ = draw_rects_sample(&mut canvas, content_x, y);
@@ -2223,6 +2224,90 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
             .draw();
     }
     y + (entries.len() as f64) * row_h
+}
+
+/// Phase 10c — Font v5 showcase rebuilt as a view tree.  Layout
+/// Typography token scale — Caption / Body / Header / LargeHeader.
+/// The view tree's `TextSize` enum is the canonical type scale (every
+/// `Text` carries a `TextSize`),and `theme::text::*` constants compose
+/// `TextStyle = size + weight + color` for catalogued styles.  This
+/// section catalogues them visually so a designer can scan the size
+/// hierarchy at-a-glance plus pin the named styles in muscle memory.
+fn build_typography_view() -> crate::ui::view::View {
+    use crate::ui::view::{vstack, hstack, Text, TextSize, TextWeight};
+    use crate::ui::core::Length;
+    use crate::ui::theme::{color, text as text_token};
+
+    // Size scale label + sample, side by side per row.
+    let size_row = |name: &'static str, size: TextSize, sample: &'static str| {
+        hstack(vec![
+            Text::new(name)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            Text::new(sample).size(size).color(color::FG).build(),
+        ])
+        .hstack_gap(Length::Pt(16.0))
+        .align_cross_end()
+    };
+
+    // Weight row — same body size, varying weight token.
+    let weight_row = |name: &'static str, weight: TextWeight, sample: &'static str| {
+        hstack(vec![
+            Text::new(name)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            Text::new(sample).size(TextSize::Body).weight(weight).color(color::FG).build(),
+        ])
+        .hstack_gap(Length::Pt(16.0))
+        .align_cross_end()
+    };
+
+    // Token-style row — applies a `TextStyle` constant from the theme.
+    let token_row = |name: &'static str, style: crate::ui::view::TextStyle, sample: &'static str| {
+        hstack(vec![
+            Text::new(name)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            Text::new(sample).style(style).build(),
+        ])
+        .hstack_gap(Length::Pt(16.0))
+        .align_cross_end()
+    };
+
+    vstack(vec![
+        Text::new("Size scale")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        size_row("Caption    ",     TextSize::Caption,     "The quick brown fox jumps"),
+        size_row("Body       ",     TextSize::Body,        "The quick brown fox jumps"),
+        size_row("Header     ",     TextSize::Header,      "The quick brown fox jumps"),
+        size_row("LargeHeader",     TextSize::LargeHeader, "The quick brown fox jumps"),
+
+        Text::new("Weight")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        weight_row("Regular", TextWeight::Regular, "The quick brown fox jumps"),
+        weight_row("Bold   ", TextWeight::Bold,    "The quick brown fox jumps"),
+
+        Text::new("Style tokens(`theme::text::*`)")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        token_row("CAPTION     ", text_token::CAPTION,      "Sample sentence"),
+        token_row("BODY        ", text_token::BODY,         "Sample sentence"),
+        token_row("HEADER      ", text_token::HEADER,       "Sample sentence"),
+        token_row("LARGE_HEADER", text_token::LARGE_HEADER, "Sample sentence"),
+        token_row("HINT        ", text_token::HINT,         "Sample sentence"),
+        token_row("CODE        ", text_token::CODE,         "fn quick_fox()"),
+        token_row("LINK        ", text_token::LINK,         "https://marspot.com"),
+        token_row("ERROR       ", text_token::ERROR,        "Sample error message"),
+    ])
+    .vstack_gap(Length::Pt(8.0))
 }
 
 /// Phase 10c — Font v5 showcase rebuilt as a view tree.  Layout
