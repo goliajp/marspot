@@ -162,6 +162,7 @@ pub const SECTION_UI_COMPONENTS_CATALOG: usize = 0x00_04_01;
 
 // ──────────────────── Font tab ────────────────────
 pub const SECTION_FONT_V5_SHOWCASE: usize = 0x01_01_01;
+pub const SECTION_FONT_BASELINES:   usize = 0x01_02_01;
 
 // ──────────────────── Menu structure ────────────────────
 //
@@ -202,6 +203,8 @@ const TAB_MENUS: &[(usize, &[MenuRow])] = &[
     (TAB_FONT, &[
         MenuRow::Header("Font v5"),
         MenuRow::Item("  Showcase",     SECTION_FONT_V5_SHOWCASE),
+        MenuRow::Header("Visual gates"),
+        MenuRow::Item("  Baselines",    SECTION_FONT_BASELINES),
     ]),
     (TAB_RENDER, &[
         MenuRow::Header("Render"),
@@ -513,6 +516,7 @@ pub fn build_dev_panel_canvas(
             let y = draw_section_header(&mut canvas, content_x, y, "Text");
             let _ = draw_text_sample(&mut canvas, content_x, y);
         }
+        SECTION_FONT_BASELINES => render_view_section(&mut canvas, "Phase 9 SSIM Baselines", build_baselines_view()),
         SECTION_FONT_V5_SHOWCASE => {
             // Skip the legacy Monaco-mono `draw_section_header` —
             // `build_font_v5_view` ships its own SF Pro title so the
@@ -2307,6 +2311,78 @@ fn build_typography_view() -> crate::ui::view::View {
         token_row("CODE        ", text_token::CODE,         "fn quick_fox()"),
         token_row("LINK        ", text_token::LINK,         "https://marspot.com"),
         token_row("ERROR       ", text_token::ERROR,        "Sample error message"),
+    ])
+    .vstack_gap(Length::Pt(8.0))
+}
+
+/// Phase 9 SSIM baseline manifest — hardcoded mirror of the snapshot
+/// tests in `src/render_metal.rs::tests`.  Each row carries:
+///   - PNG fixture name
+///   - rendered dimensions (px)
+///   - coverage(short tag,what the baseline guards against)
+///
+/// Lives in the dev panel so a designer can scan "what does the SSIM
+/// gate currently cover" without grepping the source.  Hardcoded
+/// keeps the path zero-IO at render time — no filesystem scan, no
+/// runtime tax.  Adding a new baseline?  Add the row here + the
+/// snapshot test + the `bin/font-snapshot-check.sh` entry.
+fn build_baselines_view() -> crate::ui::view::View {
+    use crate::ui::view::{vstack, hstack, Text};
+    use crate::ui::core::Length;
+    use crate::ui::theme::{color, text as text_token};
+
+    // Three-column row: name / dims / coverage tag.
+    let baseline_row = |name: &'static str, dims: &'static str, tag: &'static str| {
+        hstack(vec![
+            Text::new(name).style(text_token::BODY).color(color::FG).build(),
+            Text::new(dims)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            Text::new(tag)
+                .style(text_token::CAPTION)
+                .color(color::ACCENT_DIM)
+                .build(),
+        ])
+        .hstack_gap(Length::Pt(20.0))
+        .align_cross_center()
+    };
+
+    vstack(vec![
+        Text::new("threshold ≥ 0.98")
+            .style(text_token::CAPTION)
+            .color(color::FG_MUTED)
+            .build(),
+
+        baseline_row("font_v5_showcase",
+                     "840×1040",  "chrome SF Pro full Font v5 panel"),
+        baseline_row("font_v5_mono_grid",
+                     "1200×600",  "PTY mono ASCII / CJK / emoji / kerning / RTL"),
+        baseline_row("font_v5_box_drawing",
+                     "1000×500",  "Monaco custom raster (box arms + block elements)"),
+        baseline_row("font_v5_subpx_fingerprint",
+                     "1000×500",  "Phase 4 4-bucket sub-pixel quantisation"),
+        baseline_row("font_v5_chrome_small_sizes",
+                     "1200×600",  "SF Pro 11-14pt + variable weight 100/400/700/900"),
+        baseline_row("font_v5_cjk_fallback_baseline",
+                     "1400×600",  "SF Pro CJK cascade(PingFang / Hiragino / AppleSDGothic)"),
+        baseline_row("font_v5_emoji_color",
+                     "1200×600",  "Phase 7 BGRA emoji + ZWJ family + flag"),
+        baseline_row("font_v5_opentype_opts",
+                     "1400×900",  "Phase 8 `full` / `code` / `all_off` opts 3×4 grid"),
+        baseline_row("font_v5_terminal_scene",
+                     "1200×600",  "终端场景 cell-rect BG + cursor + mono log lines"),
+        baseline_row("font_v5_chrome_decoration",
+                     "1400×500",  "rounded rect + shadow + border + depth stack"),
+
+        Text::new("10/12 baseline locked.  Remaining 2 待补.")
+            .style(text_token::CAPTION)
+            .color(color::FG_MUTED)
+            .build(),
+        Text::new("Workflow: `bin/font-snapshot.sh` 锁基线;`bin/font-snapshot-check.sh` 跑 SSIM check.")
+            .style(text_token::HINT)
+            .color(color::FG_MUTED)
+            .build(),
     ])
     .vstack_gap(Length::Pt(8.0))
 }
