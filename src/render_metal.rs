@@ -5240,6 +5240,114 @@ mod tests {
         );
     }
 
+    /// Phase 9 (extended) — visual-regression strings.  Renders the
+    /// canonical Mono Monaco workload (ASCII + CJK cascade + emoji
+    /// + kerning/ligature lines) as a single PNG so a reviewer can
+    /// eyeball it AND a future SSIM gate can diff it byte-for-byte
+    /// against a frozen baseline.  Same opt-in shape as
+    /// `font_v5_showcase_snapshot` (env-gated so default test runs
+    /// stay fast).  Output:
+    ///   bench/font-rendering/snapshots/font_v5_mono_grid.png
+    ///
+    /// Workflow:
+    ///   MARSPOT_FONT_SNAPSHOT=1 cargo nextest run -p marspot --lib \
+    ///     font_v5_mono_grid_snapshot
+    ///
+    /// SSIM > 0.98 gate per `docs/font-rendering-design.md` §9 lives
+    /// in a follow-up — this commit only fixes the rendered bytes.
+    #[test]
+    fn font_v5_mono_grid_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 1200;
+        let h_px: u32 = 600;
+        let (chrome_cell_w, chrome_cell_h, chrome_ascent) = renderer.chrome_font_metrics();
+        // Five lines, one per font-feature axis the design doc §15
+        // pins as a v5 acceptance test:
+        //   L1 ASCII alphabet  — Monaco cell-pitch sanity
+        //   L2 CJK cascade     — fallback chain into PingFang/Hiragino/AppleSDGothic
+        //   L3 emoji + ZWJ     — colour atlas + ZWJ cluster
+        //   L4 kerning/ligature — `Ta` / `fi` / `==>` shaping in mono context
+        //   L5 mixed RTL hello — bidi placeholder (RTL routing comes later)
+        let lines = [
+            "The quick brown fox jumps over the lazy dog 0123456789",
+            "你好世界  こんにちは  안녕하세요",
+            "👨‍👩‍👧‍👦  🍕  🇯🇵  🌈  ⭐  ❤️",
+            "Tax  fi  fl  ff  ==>  !=  !==",
+            "Bidi placeholder: Hello مرحبا עברית",
+        ];
+        use crate::ui::core::{Color, Length};
+        use crate::ui::core::canvas::{Canvas, ParentRect};
+        let mut canvas = Canvas::new(
+            2.0, // 2× retina scale matches the dev-panel snapshot
+            ParentRect::window(w_px as f64, h_px as f64),
+        );
+        let line_h_pt = (chrome_cell_h as f64 * 1.6) / 2.0;
+        let pad_x_pt = 20.0;
+        let pad_y_pt = 16.0;
+        // Solid dark BG matches the production terminal BG so the
+        // glyphs read at a glance.
+        canvas
+            .rect()
+            .at(Length::Pt(0.0), Length::Pt(0.0))
+            .size(Length::Pt(w_px as f64 / 2.0), Length::Pt(h_px as f64 / 2.0))
+            .fill(Color::rgba(15, 18, 23, 1.0))
+            .draw();
+        let fg = Color::rgba(220, 224, 235, 1.0);
+        for (i, line) in lines.iter().enumerate() {
+            let y_pt = pad_y_pt + (i as f64) * line_h_pt;
+            canvas
+                .text(Length::Pt(pad_x_pt), Length::Pt(y_pt), *line)
+                .color(fg)
+                .draw();
+        }
+        let bytes = renderer
+            .render_canvas_to_bitmap(
+                w_px,
+                h_px,
+                &canvas,
+                chrome_cell_w,
+                chrome_cell_h,
+                chrome_ascent,
+                false, // Mono path (Monaco)
+            )
+            .expect("canvas render");
+
+        // BGRA → RGBA channel swap for PNG.
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("font_v5_mono_grid.png");
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[font v5 mono grid] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
