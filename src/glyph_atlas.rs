@@ -189,6 +189,14 @@ pub struct AtlasEntry {
     ///   (cell_x - PAD, baseline_y - bearing_y - PAD, px_w, px_h)
     pub bearing_x: i16,
     pub bearing_y: i16,
+    /// Phase 6 — LRU stamp: the most recent `frame_id` value at the
+    /// time this entry was last looked up (or first placed).  Atlas
+    /// `evict()` picks the shelf whose `max(entry.last_used)` is
+    /// oldest and recycles it, so frames of work that referenced
+    /// every entry recently keep them all alive.  64 bits never
+    /// wraps in practice (at 120 fps, `u64::MAX` frames ≈ 5 × 10⁹
+    /// years).
+    pub last_used: u64,
 }
 
 impl AtlasEntry {
@@ -220,7 +228,7 @@ impl AtlasEntry {
 }
 
 /// One row in the shelf packer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Shelf {
     /// Top of the shelf in atlas pixel space (0 = top).
     y: u32,
@@ -228,6 +236,11 @@ struct Shelf {
     h: u32,
     /// Pixels consumed from the left.
     x_used: u32,
+    /// Phase 6 — keys of every entry currently placed on this shelf.
+    /// Used by the eviction path to walk + remove cache entries when
+    /// the shelf is recycled.  Order is placement order; the renderer
+    /// never iterates this directly.
+    entries: Vec<GlyphKey>,
 }
 
 pub struct GlyphAtlas {
@@ -246,12 +259,22 @@ pub struct GlyphAtlas {
     /// derived from grid contents — never adversarial — so no DoS
     /// resistance is needed.
     cache: FxHashMap<GlyphKey, AtlasEntry>,
-    /// Number of times the atlas filled up and was rebuilt.  Each
-    /// rebuild costs one stutter frame to re-rasterise visible glyphs.
-    /// In steady-state terminal use this should stay at 0; non-zero
-    /// after settling means working set exceeds atlas capacity (bump
-    /// the atlas dims).
+    /// Phase 6 — counts of legacy whole-atlas rebuilds (kept as a
+    /// safety net: triggered when even single-shelf eviction can't
+    /// place the requested glyph, e.g. the glyph is wider than any
+    /// existing shelf).  Should stay 0 in steady state.
     pub rebuild_count: u64,
+    /// Phase 6 — per-shelf evictions.  Each LRU eviction recycles
+    /// one shelf's slot space (without dropping the rest of the
+    /// atlas), so this number can climb harmlessly while the working
+    /// set rotates — observable proof the LRU path is doing work
+    /// instead of the legacy whole-atlas reset.
+    pub evict_count: u64,
+    /// Phase 6 — current frame stamp used to tag entries on access.
+    /// Renderer calls `begin_frame(frame_id)` at the start of each
+    /// frame; cache hits then set `entry.last_used = current_frame`,
+    /// and eviction picks the shelf whose newest entry is oldest.
+    current_frame: u64,
 }
 
 /// 1-px padding on every side of every glyph; prevents linear
@@ -318,7 +341,19 @@ impl GlyphAtlas {
             shelves: Vec::new(),
             cache: FxHashMap::default(),
             rebuild_count: 0,
+            evict_count: 0,
+            current_frame: 0,
         })
+    }
+
+    /// Phase 6 — renderer call at the start of every frame.  The
+    /// `frame_id` should monotonically increase; entries looked up
+    /// during the frame stamp themselves with it, and the LRU
+    /// eviction path picks the shelf with the oldest newest stamp.
+    /// Call from `MetalRenderer::render` (and the headless test
+    /// harness when the test cares about eviction order).
+    pub fn begin_frame(&mut self, frame_id: u64) {
+        self.current_frame = frame_id;
     }
 
     pub fn texture(&self) -> &ProtocolObject<dyn MTLTexture> {
@@ -346,8 +381,12 @@ impl GlyphAtlas {
         metrics: SlotMetrics,
         n_cells: u16,
     ) -> Option<AtlasEntry> {
-        if let Some(&entry) = self.cache.get(&key) {
-            return Some(entry);
+        if let Some(entry) = self.cache.get_mut(&key) {
+            // Phase 6 — touch on hit so the LRU eviction path keeps
+            // this glyph alive for as long as the current working set
+            // references it.
+            entry.last_used = self.current_frame;
+            return Some(*entry);
         }
         let raster = if self.bpp == 4 {
             rasterise_glyph_color(font, key.glyph, metrics, n_cells)?
@@ -370,8 +409,9 @@ impl GlyphAtlas {
         key: GlyphKey,
         font: &CTFont,
     ) -> Option<AtlasEntry> {
-        if let Some(&entry) = self.cache.get(&key) {
-            return Some(entry);
+        if let Some(entry) = self.cache.get_mut(&key) {
+            entry.last_used = self.current_frame;
+            return Some(*entry);
         }
         // Phase 4 — `key.subpx_x` ∈ 0..4 picks the 0.25-px x-bucket;
         // raster offsets the pen by `subpx_x × 0.25` so the same
@@ -386,27 +426,88 @@ impl GlyphAtlas {
     }
 
     fn commit_raster(&mut self, key: GlyphKey, raster: Raster) -> Option<AtlasEntry> {
-        let placed = match self.place(raster.px_w, raster.px_h) {
-            Some(p) => p,
-            None => {
-                self.rebuild();
-                self.place(raster.px_w, raster.px_h)?
-            }
-        };
-        self.upload(&raster.bytes, raster.px_w, raster.px_h, placed.0, placed.1);
+        let (x, y, shelf_idx) = self.place_or_evict(raster.px_w, raster.px_h)?;
+        self.upload(&raster.bytes, raster.px_w, raster.px_h, x, y);
         let entry = AtlasEntry {
-            u0: placed.0 as u16,
-            v0: placed.1 as u16,
-            u1: (placed.0 + raster.px_w) as u16,
-            v1: (placed.1 + raster.px_h) as u16,
+            u0: x as u16,
+            v0: y as u16,
+            u1: (x + raster.px_w) as u16,
+            v1: (y + raster.px_h) as u16,
             px_w: raster.px_w as u16,
             px_h: raster.px_h as u16,
             n_cells: raster.n_cells,
             bearing_x: raster.bearing_x,
             bearing_y: raster.bearing_y,
+            last_used: self.current_frame,
         };
         self.cache.insert(key, entry);
+        self.shelves[shelf_idx].entries.push(key);
         Some(entry)
+    }
+
+    /// Phase 6 — try `place()` first; on failure, evict the LRU shelf
+    /// that can hold `(w, h)` and retry; on still-failure, fall back to
+    /// the legacy whole-atlas rebuild.  Returns `(x, y, shelf_idx)` on
+    /// success so the caller can record the new entry on its shelf.
+    fn place_or_evict(&mut self, w: u32, h: u32) -> Option<(u32, u32, usize)> {
+        if let Some(p) = self.place(w, h) {
+            return Some(p);
+        }
+        if self.evict_lru_shelf(w + 2 * PAD, h + 2 * PAD) {
+            if let Some(p) = self.place(w, h) {
+                return Some(p);
+            }
+        }
+        self.rebuild();
+        self.place(w, h)
+    }
+
+    /// Phase 6 — recycle the shelf whose newest entry is the oldest
+    /// (= the shelf least recently touched).  Drops every cached
+    /// entry that lives on it and resets its `x_used` so the packer
+    /// fills it back from the left.  Texture pixel data is left
+    /// in place — UV coords get reassigned, the abandoned regions
+    /// are simply never sampled again.
+    ///
+    /// Returns `true` when a shelf was found that can hold the
+    /// requested padded `(needed_w, needed_h)`; `false` when no
+    /// existing shelf has the right height, so the caller falls back
+    /// to whole-atlas rebuild.
+    fn evict_lru_shelf(&mut self, needed_w: u32, needed_h: u32) -> bool {
+        if needed_w > self.width {
+            return false;
+        }
+        let mut best: Option<(usize, u64)> = None;
+        for (idx, shelf) in self.shelves.iter().enumerate() {
+            if shelf.h < needed_h {
+                continue;
+            }
+            // The shelf's "age" is the youngest entry it holds:
+            // recycling it discards everything, so the cost is the
+            // freshest stamp we'd lose.  An empty shelf has age 0
+            // and is always the best candidate.
+            let youngest = shelf
+                .entries
+                .iter()
+                .filter_map(|k| self.cache.get(k).map(|e| e.last_used))
+                .max()
+                .unwrap_or(0);
+            match best {
+                None => best = Some((idx, youngest)),
+                Some((_, prev)) if youngest < prev => best = Some((idx, youngest)),
+                _ => {}
+            }
+        }
+        let Some((idx, _)) = best else {
+            return false;
+        };
+        let keys = std::mem::take(&mut self.shelves[idx].entries);
+        for k in &keys {
+            self.cache.remove(k);
+        }
+        self.shelves[idx].x_used = 0;
+        self.evict_count += 1;
+        true
     }
 
 
@@ -436,19 +537,14 @@ impl GlyphAtlas {
     where
         F: FnOnce(&mut [u8]),
     {
-        if let Some(&entry) = self.cache.get(&key) {
-            return Some(entry);
+        if let Some(entry) = self.cache.get_mut(&key) {
+            entry.last_used = self.current_frame;
+            return Some(*entry);
         }
         let mut buf = vec![0u8; (w as usize) * (h as usize)];
         rasterise(&mut buf);
-        let placed = match self.place(w, h) {
-            Some(p) => p,
-            None => {
-                self.rebuild();
-                self.place(w, h)?
-            }
-        };
-        self.upload(&buf, w, h, placed.0, placed.1);
+        let (x, y, shelf_idx) = self.place_or_evict(w, h)?;
+        self.upload(&buf, w, h, x, y);
         // Box-drawing / block-element rasters TILE the entire cell —
         // caller fills (0,0)..(w,h) with ink.  The slot is meant to
         // land at (cell_x, cell_top) with no padding.
@@ -457,17 +553,19 @@ impl GlyphAtlas {
         // Renderer formula `quad_top = baseline_y - bearing_y` then
         // yields quad_top = cell_top exactly.
         let entry = AtlasEntry {
-            u0: placed.0 as u16,
-            v0: placed.1 as u16,
-            u1: (placed.0 + w) as u16,
-            v1: (placed.1 + h) as u16,
+            u0: x as u16,
+            v0: y as u16,
+            u1: (x + w) as u16,
+            v1: (y + h) as u16,
             px_w: w as u16,
             px_h: h as u16,
             n_cells,
             bearing_x: 0,
             bearing_y: baseline_from_top as i16,
+            last_used: self.current_frame,
         };
         self.cache.insert(key, entry);
+        self.shelves[shelf_idx].entries.push(key);
         Some(entry)
     }
 
@@ -483,9 +581,9 @@ impl GlyphAtlas {
     }
 
     /// Find a position for a `(w, h)` glyph using the shelf packer.
-    /// Returns the top-left pixel coords inside the atlas, or `None`
-    /// when there's no room.
-    fn place(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+    /// Returns `(x, y, shelf_idx)` — the latter so the caller can
+    /// record the placed entry's key on its shelf for LRU eviction.
+    fn place(&mut self, w: u32, h: u32) -> Option<(u32, u32, usize)> {
         let pad_w = w + 2 * PAD;
         let pad_h = h + 2 * PAD;
         if pad_w > self.width {
@@ -496,14 +594,14 @@ impl GlyphAtlas {
         // Try to place on an existing shelf whose height fits.  We
         // accept up to 25 % wasted vertical space — past that, open
         // a new shelf so glyphs of similar height cluster together.
-        for shelf in &mut self.shelves {
+        for (idx, shelf) in self.shelves.iter_mut().enumerate() {
             if shelf.h >= pad_h && (shelf.h as f64 - pad_h as f64) / shelf.h as f64 <= 0.25
                 && shelf.x_used + pad_w <= self.width
             {
                 let x = shelf.x_used + PAD;
                 let y = shelf.y + PAD;
                 shelf.x_used += pad_w;
-                return Some((x, y));
+                return Some((x, y, idx));
             }
         }
 
@@ -512,12 +610,14 @@ impl GlyphAtlas {
         if y_top + pad_h > self.height {
             return None;
         }
+        let new_idx = self.shelves.len();
         self.shelves.push(Shelf {
             y: y_top,
             h: pad_h,
             x_used: pad_w,
+            entries: Vec::new(),
         });
-        Some((PAD, y_top + PAD))
+        Some((PAD, y_top + PAD, new_idx))
     }
 
     fn upload(&self, bytes: &[u8], w: u32, h: u32, dst_x: u32, dst_y: u32) {
@@ -1039,6 +1139,76 @@ mod tests {
         let entry2 = atlas.get_or_rasterize(key, &font, test_metrics(), 1).expect("second call from cache");
         assert_eq!(entry1.u0, entry2.u0, "second call must return the same UV");
         assert_eq!(atlas.cache_len(), 1, "cache must not grow on hit");
+    }
+
+    #[test]
+    fn lru_evicts_oldest_shelf_when_full() {
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let font = make_font();
+        let make_key = |ch: u8, size_q: u16| -> GlyphKey {
+            let mut g: CGGlyph = 0;
+            let cu: u16 = ch as u16;
+            unsafe {
+                font.get_glyphs_for_characters(&cu, &mut g, 1);
+            }
+            GlyphKey {
+                font_id: 0,
+                glyph: g,
+                size_q,
+                subpx_x: 0,
+                flags: GlyphKey::FLAG_SMOOTH,
+            }
+        };
+
+        // Probe: render one 'a' into an oversized atlas first to learn
+        // its packed dimensions, then size a real test atlas around
+        // it.  Real Menlo glyph metrics shift between macOS releases,
+        // so hard-coding a tiny atlas is brittle — derive it.
+        let mut probe = GlyphAtlas::new(&device, 64, 64).expect("probe atlas");
+        let entry_a = probe
+            .get_or_rasterize(make_key(b'a', 52), &font, test_metrics(), 1)
+            .expect("probe rasterise");
+        let probe_w = entry_a.px_w as u32 + 2 * PAD;
+        let probe_h = entry_a.px_h as u32 + 2 * PAD;
+        drop(probe);
+
+        // Atlas sized to fit exactly one ASCII glyph at size_q=52 in a
+        // single shelf — that way the second placement must trigger
+        // LRU shelf recycling.
+        let mut atlas = GlyphAtlas::new(&device, probe_w, probe_h).expect("atlas");
+
+        atlas.begin_frame(1);
+        atlas
+            .get_or_rasterize(make_key(b'a', 52), &font, test_metrics(), 1)
+            .expect("place a@52 on frame 1");
+
+        atlas.begin_frame(2);
+        atlas
+            .get_or_rasterize(make_key(b'a', 52), &font, test_metrics(), 1)
+            .expect("hit a@52 on frame 2");
+
+        atlas.begin_frame(3);
+        // Same char, different size_q → distinct atlas key, same
+        // dimensions (Phase 1.1 raster doesn't read size_q).  Forces
+        // place() failure on the (now full) shelf; LRU eviction
+        // recycles it (NOT the legacy whole-atlas rebuild), so the
+        // new entry lands and `evict_count` ticks while
+        // `rebuild_count` stays 0 — the Phase 6 contract.
+        atlas
+            .get_or_rasterize(make_key(b'a', 53), &font, test_metrics(), 1)
+            .expect("place a@53 on frame 3 via shelf eviction");
+        assert!(
+            atlas.evict_count >= 1,
+            "expected at least one shelf eviction; got evict_count={}",
+            atlas.evict_count
+        );
+        assert_eq!(
+            atlas.rebuild_count, 0,
+            "shelf eviction must beat the legacy whole-atlas rebuild path"
+        );
     }
 
     #[test]

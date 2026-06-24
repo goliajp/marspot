@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.36"  # font v5 Phase 5 — variable font weight axis(CSS 100..900).FontRegistry 加 `intern_with_key` 跳过 postscript-name dedup(SF Pro 各权重共名 AppleSystemUIFont).FontCache 加 `intern_ui_weighted(weight_q)` 经 CT 描述符 + kCTFontTraitsAttribute/kCTFontWeightTrait 构造 variant,unique_key = `__marspot_ui@w{weight}` 让每权重独立 font_id.`shape_ui_weighted(text, weight)` 路由对应权重;原 `shape_ui` = wrap weight=400.`TextPrim` + `TextBuilder` 加 `weight: u16`(默认 400),`.weight(n)` 链式 API.canvas Text 分支 ui_font 路径调 push_text_run_ui_shaped + 自带 weight.PTY 路径不动(monocell 不变).下层 acceptance OK:weight=400 vs 700 ShapedGlyph.font_id 一定不同(测试已断言).chrome 现在可走 h1=600 / body=400 真粗细差.
-core    = "0.10.86"
+shell   = "0.6.37"  # font v5 Phase 6 — LRU shelf eviction 取代 rebuild_all.AtlasEntry 加 `last_used: u64`,Shelf 加 `entries: Vec<GlyphKey>`,GlyphAtlas 加 `current_frame + evict_count` + `begin_frame(frame_id)` API.cache 命中 → 更新 entry.last_used = current_frame.place() 改 `(x, y, shelf_idx)` 让 commit_raster 记录条目所在 shelf.新 `place_or_evict` 先 place → 失败则 `evict_lru_shelf(needed_w+2*PAD, needed_h+2*PAD)`(选 max(last_used) 最小的能容纳新槽的 shelf,清条目 + 重置 x_used),仍失败才 rebuild 兜底.MetalRenderer 加 `frame_id` 字段,render_layout 起手 wrapping_add 1 后 begin_frame 两 atlas.新测 `lru_evicts_oldest_shelf_when_full` 验证 evict_count ≥ 1 且 rebuild_count = 0.
+core    = "0.10.87"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

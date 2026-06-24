@@ -630,6 +630,12 @@ pub struct MetalRenderer {
     /// path forwards it into Layout::build's `top_inset` parameter.
     /// Multi-session callers build their own Layout and ignore this.
     top_inset_phys: f64,
+    /// Phase 6 — monotonically-increasing frame stamp.  Bumped at the
+    /// start of `render_layout` and forwarded into both atlases'
+    /// `begin_frame(...)` so cache hits during the frame mark
+    /// themselves and the LRU eviction path picks the oldest
+    /// non-recent shelf instead of the legacy whole-atlas reset.
+    frame_id: u64,
     /// Should the next render to an IOSurface target start with a
     /// hard Clear, or load the previous frame's pixels?  Clear is
     /// only ever needed when the SHAPE of what gets painted changes
@@ -781,6 +787,7 @@ impl MetalRenderer {
             hover_chrome_btn: None,
             process_panel: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
+            frame_id: 0,
             clear_bg_required: true,
         })
     }
@@ -846,6 +853,7 @@ impl MetalRenderer {
             hover_chrome_btn: None,
             process_panel: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
+            frame_id: 0,
             clear_bg_required: true,
         })
     }
@@ -1189,6 +1197,12 @@ impl MetalRenderer {
         if self.width_px < 1.0 || self.height_px < 1.0 {
             return;
         }
+        // Phase 6 — stamp the frame so atlases can LRU-touch entries
+        // they serve this render.
+        self.frame_id = self.frame_id.wrapping_add(1);
+        let frame_id = self.frame_id;
+        self.atlas.begin_frame(frame_id);
+        self.color_atlas.begin_frame(frame_id);
 
         // Disjoint borrow so build_instances can mutate font + atlas
         // + scratch while we still hold &references to the GPU bits.
