@@ -5357,7 +5357,17 @@ fn build_canvas_runs(
                 let mono_before = out_glyphs.len();
                 let color_before = out_color_glyphs.len();
                 let baseline_y = t.y as f32 + ascent;
-                if ui_font {
+                // Per-prim font_kind overrides the encoder's global
+                // `ui_font`.  `None` (the default for every `text(...)`
+                // call) inherits, so chrome that laid itself out
+                // against mono cell metrics keeps that font without
+                // having to grow `.mono()` annotations everywhere.
+                let use_ui = match t.font_kind {
+                    Some(crate::ui::core::canvas::TextFontKind::Ui) => true,
+                    Some(crate::ui::core::canvas::TextFontKind::Mono) => false,
+                    None => ui_font,
+                };
+                if use_ui {
                     push_text_run_ui_shaped(
                         &t.content,
                         t.x as f32,
@@ -5692,8 +5702,12 @@ mod tests {
             32.0, // chrome_cell_h
             24.0, // chrome_ascent
         );
+        // ui_font = false matches the live dev panel: chrome stays
+        // Monaco mono by default, the showcase rows opt INTO SF Pro
+        // via `.ui()` per text run.  This snapshot is therefore
+        // exactly what a user sees when they navigate to "Font v5".
         let bytes = renderer
-            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, true)
+            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
             .expect("canvas render");
 
         // BGRA → RGBA channel swap for PNG.

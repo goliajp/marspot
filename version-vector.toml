@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.44"  # font v5 dev panel SF Pro 启用 + showcase PNG snapshot.dev_window 把 `render_canvas_into_layer` 的 ui_font 从 false 改 true,dev panel chrome 现走 SF Pro proportional 而非 Monaco mono;原 0.6.27/0.6.28 SF Pro flip 的"mono-aligned 太丑"问题已被 Phase 1.1+3+4 解(per-glyph bbox + CTLine shape + subpx).render_canvas_to_bitmap / encode_canvas 加 ui_font 参.新 `font_v5_showcase_snapshot` 测(env MARSPOT_FONT_SNAPSHOT=1 opt-in),渲染 1400×2000 PNG 到 bench/font-rendering/snapshots/,直接看 6 demo 真实输出(Phase 5 weight 真显粗细差、Phase 7 emoji 真彩、Phase 3 CJK + Phase 4 subpx 全 OK).新 bin/font-snapshot.sh 跑测试+ open PNG.全 246 lib 测试 PASS(+1 snapshot).
-core    = "0.10.94"
+shell   = "0.6.45"  # font v5 showcase 局部化 — TextPrim 加 `font_kind: Option<TextFontKind>` per-prim 字体覆盖,TextBuilder `.ui()` / `.mono()` 链式 API.canvas Text 分支 use_ui = font_kind 优先,None 则 fallback 全局 ui_font.dev_window 全局 ui_font 改回 false 让 chrome 其它 section(Model/L1-L6/Colors/Units 等)恢复 Monaco mono cell-aligned layout(0.6.44 的 SF Pro 全局让所有 section 乱套);Font v5 section 内每个 `.text(...)` 加 `.ui()` 显式 opt-in SF Pro proportional.snapshot test 同步改 ui_font=false 跟 production 行为一致.全 246 lib 测试 PASS.
+core    = "0.10.95"
 session = "0.9.23"  # marspot-term 撤 blank-skip 一并进 L3

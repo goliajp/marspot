@@ -469,19 +469,17 @@ impl DevWindow {
             &s, width_phys, height_phys,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
         );
-        // Dev panel chrome — font v5 (Phases 1.1–10b) brings real
-        // proportional shape via CTLine + bbox-sized atlas slots +
-        // sub-pixel positioning + variable weight.  The 0.6.27/0.6.28
-        // SF Pro flip was reverted because the cell-aligned atlas at
-        // the time stretched every glyph; that constraint is gone.
-        // Pass `ui_font = true` so chrome runs through SF Pro with
-        // real kerning, ligatures, weight variants, and colour emoji.
+        // Dev panel chrome — keep the global default Monaco mono so
+        // every section that built its layout against cell metrics
+        // (Model / Tokens / Components etc.) lays out the same way
+        // it always did.  The Font v5 showcase opts INTO SF Pro per
+        // text run via `TextBuilder::ui()`, scoped to that section.
         self.renderer.render_canvas_into_layer(
             &canvas,
             width_phys as f32,
             height_phys as f32,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
-            true,
+            false,
         );
     }
 

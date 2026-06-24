@@ -117,6 +117,7 @@ impl Canvas {
             color: Color::TRANSPARENT,
             weight: 400,
             opts: crate::font_shape::ShapeOptions::full(),
+            font_kind: None,
         }
     }
 
@@ -181,6 +182,21 @@ pub struct LinePrim {
     pub color: Color,
 }
 
+/// Per-`TextPrim` font selection.  `None` means "follow the
+/// encoder's global `ui_font` flag" — the legacy behaviour where
+/// every chrome `text(...)` call ran through the same font path.
+/// `Some(Ui)` opts into SF Pro proportional shaping for ONE text
+/// run regardless of the global setting, used by the Font v5
+/// showcase to demo chrome rendering while the rest of the dev
+/// panel still lays itself out against Monaco cell metrics.
+/// `Some(Mono)` does the inverse (forces the mono terminal font)
+/// — useful for fixed-pitch demos inside an otherwise SF-Pro page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFontKind {
+    Mono,
+    Ui,
+}
+
 #[derive(Clone, Debug)]
 pub struct TextPrim {
     /// Top-left in physical pixels.
@@ -200,6 +216,13 @@ pub struct TextPrim {
     /// text never reaches this field — the mono renderer doesn't
     /// shape.
     pub opts: crate::font_shape::ShapeOptions,
+    /// Per-prim override of the encoder's global `ui_font` flag.
+    /// `None` (default) inherits, so existing chrome that built its
+    /// layout against Monaco cell widths keeps that font without
+    /// every `text(...)` call growing a `.mono()` annotation.
+    /// `Some(Ui)` switches just this run through SF Pro shape —
+    /// used by the Font v5 showcase rows.
+    pub font_kind: Option<TextFontKind>,
 }
 
 // ─── Builders ──────────────────────────────────────────────
@@ -307,6 +330,7 @@ pub struct TextBuilder<'c> {
     color: Color,
     weight: u16,
     opts: crate::font_shape::ShapeOptions,
+    font_kind: Option<TextFontKind>,
 }
 
 impl<'c> TextBuilder<'c> {
@@ -332,8 +356,22 @@ impl<'c> TextBuilder<'c> {
         self.opts = opts;
         self
     }
+    /// Force this run through the SF Pro proportional shape path
+    /// (`TextFontKind::Ui`), overriding the encoder's global default.
+    /// Used by the Font v5 showcase rows so the rest of the dev panel
+    /// can still render with mono cell metrics.
+    pub fn ui(mut self) -> Self {
+        self.font_kind = Some(TextFontKind::Ui);
+        self
+    }
+    /// Force this run through the mono terminal font, regardless of
+    /// the encoder's global flag.  Symmetric counterpart to `.ui()`.
+    pub fn mono(mut self) -> Self {
+        self.font_kind = Some(TextFontKind::Mono);
+        self
+    }
     pub fn draw(self) {
-        let TextBuilder { canvas, x, y, content, color, weight, opts } = self;
+        let TextBuilder { canvas, x, y, content, color, weight, opts, font_kind } = self;
         let parent = canvas.parent;
         let x_p = parent.x + x.resolve_for_axis(parent.w, canvas.scale);
         let y_p = parent.y + y.resolve_for_axis(parent.h, canvas.scale);
@@ -344,6 +382,7 @@ impl<'c> TextBuilder<'c> {
             color,
             weight,
             opts,
+            font_kind,
         }));
     }
 }

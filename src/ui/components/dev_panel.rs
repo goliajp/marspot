@@ -2102,9 +2102,10 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
 
 /// Font v5 showcase — each Phase's headline capability rendered side
 /// by side so the user can SEE the difference between off and on.
-/// All rows share the same chrome canvas → all go through
-/// `push_text_run_ui_shaped`, so what's on screen reflects the
-/// production chrome path exactly.
+/// Every text run inside this section calls `.ui()` to opt INTO SF
+/// Pro proportional shape, so the rest of the dev panel (which laid
+/// itself out against Monaco mono cell metrics) keeps its original
+/// look unaffected by the showcase.
 fn draw_font_v5_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     use crate::font_shape::ShapeOptions;
 
@@ -2117,6 +2118,7 @@ fn draw_font_v5_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     // ─── Phase 5 — variable font weights ─────────────────────
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 5 — variable weight")
         .color(tokens::SECTION_HEADER_FG)
+        .ui()
         .draw();
     cursor_y += row_h;
     let weights: &[(u16, &str)] = &[
@@ -2132,6 +2134,7 @@ fn draw_font_v5_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
         canvas.text(Length::Pt(col_x), Length::Pt(cursor_y), label)
             .color(fg)
             .weight(*w)
+            .ui()
             .draw();
         col_x += 105.0;
     }
@@ -2140,34 +2143,42 @@ fn draw_font_v5_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     // ─── Phase 8 — ShapeOptions liga off vs default ──────────
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 8 — ligatures (CTLine default vs all_off)")
         .color(tokens::SECTION_HEADER_FG)
+        .ui()
         .draw();
     cursor_y += row_h;
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "default:")
         .color(hint)
+        .ui()
         .draw();
     canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "fi fl ffi -> => >= !=")
         .color(fg)
+        .ui()
         .draw();
     cursor_y += row_h;
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "all_off:")
         .color(hint)
+        .ui()
         .draw();
     canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "fi fl ffi -> => >= !=")
         .color(fg)
         .opts(ShapeOptions::all_off())
+        .ui()
         .draw();
     cursor_y += row_h * 1.4;
 
     // ─── Phase 3 — kerning (Ta AV LT) at the chrome size ─────
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 3 — kerning + proportional advance")
         .color(tokens::SECTION_HEADER_FG)
+        .ui()
         .draw();
     cursor_y += row_h;
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "kerned:")
         .color(hint)
+        .ui()
         .draw();
     canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "Ta AV LT WA — Yes")
         .color(fg)
+        .ui()
         .draw();
     cursor_y += row_h;
     // CT auto-kerning still runs even with `kerning=false` in
@@ -2175,42 +2186,50 @@ fn draw_font_v5_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     // off + the integer-position pen shows visibly looser spacing.
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "raw shape:")
         .color(hint)
+        .ui()
         .draw();
     canvas.text(Length::Pt(x + label_w), Length::Pt(cursor_y), "Ta AV LT WA — Yes")
         .color(fg)
         .opts(ShapeOptions::all_off())
+        .ui()
         .draw();
     cursor_y += row_h * 1.4;
 
     // ─── Phase 7 — chrome colour emoji ───────────────────────
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 7 — chrome colour emoji")
         .color(tokens::SECTION_HEADER_FG)
+        .ui()
         .draw();
     cursor_y += row_h;
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "👍 🚀 🎉 ❤️ 🌈 ⭐ 🍎 🐙 🍣")
         .color(fg)
+        .ui()
         .draw();
     cursor_y += row_h * 1.4;
 
     // ─── Phase 3 — automatic CJK fallback ────────────────────
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 3 — CJK auto-fallback (SF Pro → PingFang / Hiragino)")
         .color(tokens::SECTION_HEADER_FG)
+        .ui()
         .draw();
     cursor_y += row_h;
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Hello 你好世界 こんにちは 안녕하세요")
         .color(fg)
+        .ui()
         .draw();
     cursor_y += row_h * 1.4;
 
     // ─── Phase 4 — subpixel positioning at small sizes ───────
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "Phase 4 — sub-pixel x (0.25-px buckets)")
         .color(tokens::SECTION_HEADER_FG)
+        .ui()
         .draw();
     cursor_y += row_h;
     // Repeated narrow glyphs — the pre-Phase-4 chrome path would
     // black-clump the column of `i`s; Phase 4 yields visible spacing.
     canvas.text(Length::Pt(x), Length::Pt(cursor_y), "iiiiiiiiiiiiii  lllllllllll  mmmmmm  AVAVAV  WAWAWA")
         .color(fg)
+        .ui()
         .draw();
     cursor_y += row_h;
 
