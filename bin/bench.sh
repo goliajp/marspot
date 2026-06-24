@@ -6,18 +6,26 @@
 #                          render` only.  ~1-2 seconds, run on every
 #                          commit / before push.
 #   bin/bench.sh --full    also runs the live PTY pipeline through
-#                          bin/measure.sh (1-2 minutes).  Use before
-#                          merging to develop or when chasing a perf
-#                          fix.
+#                          bin/measure.sh (1-2 minutes), AND the
+#                          Phase 9 SSIM gate.  Use before merging to
+#                          develop or when chasing a perf fix.
+#
+#   bin/bench.sh --ssim    add Phase 9 visual-regression SSIM gate
+#                          (per docs/font-rendering-design.md §9).
+#                          Implied by --full;  pass standalone to
+#                          run only the SSIM gate after a fast perf
+#                          run.
 #
 #   bin/bench.sh --update-baseline
 #       Re-write bench/baseline.json with the current measurements'
 #       MBps minus the configured tolerance.  Use after an
-#       intentional perf-affecting change.
+#       intentional perf-affecting change.  Skips the SSIM chain.
 #
-# Reads bench/baseline.json.  Exits non-zero on any regression.
-# Per-line PASS/FAIL / current/floor goes to stdout; a one-line
-# summary at the end says GATE PASSED or GATE FAILED.
+# Reads bench/baseline.json + bench/font-rendering/snapshots/*.png.
+# Exits non-zero on any regression (perf OR SSIM).  Per-line PASS/FAIL
+# / current/floor goes to stdout; one-line summary at the end says
+# GATE PASSED or GATE FAILED for perf, plus SSIM GATE PASSED / FAILED
+# when --ssim is on.
 
 set -euo pipefail
 
@@ -31,16 +39,25 @@ SCENARIOS_DIR="$ROOT/bench/scenarios"
 
 MODE=fast
 UPDATE=0
+WITH_SSIM=0
 for arg in "$@"; do
   case "$arg" in
     --full)              MODE=full ;;
     --update-baseline)   UPDATE=1 ;;
+    --ssim)              WITH_SSIM=1 ;;
     --help|-h)
       sed -n '2,20p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
+
+# --full implies --ssim by default — pre-merge gates are the place
+# the SSIM check belongs.  Skip the implicit chain when the user
+# explicitly passes --update-baseline (which is a write-mode op).
+if [[ "$MODE" == "full" && "$UPDATE" -eq 0 ]]; then
+  WITH_SSIM=1
+fi
 
 if [[ ! -f "$BASELINE" ]]; then
   echo "missing $BASELINE" >&2
@@ -216,6 +233,7 @@ fi
 
 # ---- gate evaluation ---------------------------------------------------
 
+set +e
 python3 - "$BASELINE" "$CUR_DIR" "$MODE" "$UPDATE" <<'PY'
 import json, os, sys, glob
 
@@ -583,3 +601,29 @@ if do_update:
 
 sys.exit(1 if n_fail > 0 else 0)
 PY
+PERF_RC=$?
+set -e
+
+# ---- SSIM gate (opt-in via --ssim or implied by --full) -----------------
+if (( WITH_SSIM )); then
+  echo
+  echo "==> Phase 9 SSIM gate (threshold ≥ 0.98)"
+  set +e
+  "$ROOT/bin/font-snapshot-check.sh"
+  SSIM_RC=$?
+  set -e
+  if (( SSIM_RC == 0 )); then
+    echo "SSIM GATE PASSED"
+  else
+    echo "SSIM GATE FAILED"
+  fi
+else
+  SSIM_RC=0
+fi
+
+# Combined exit: any failure → 1.  Perf gate's row-by-row PASS/FAIL
+# already printed above; SSIM gate prints its own per-snapshot lines.
+if (( PERF_RC != 0 || SSIM_RC != 0 )); then
+  exit 1
+fi
+exit 0
