@@ -17,8 +17,6 @@
 #                                   #   ~100 ms NSWindow flash (sessions
 #                                   #   survive via L3 reattach); known
 #                                   #   cost, by design.
-#   bin/install-local.sh --with-shelld   # also update the daemon
-#                                        #   (in-place execv, sessions survive)
 #   bin/install-local.sh --status   # what's installed + running
 #   bin/install-local.sh --no-build # install the existing target/release
 #
@@ -67,12 +65,13 @@ sup_log() {
 }
 
 BUILD=1
-WITH_SHELLD=0
 MODE=install
 for arg in "$@"; do
   case "$arg" in
     --no-build)    BUILD=0 ;;
-    --with-shelld) WITH_SHELLD=1 ;;
+    # --with-shelld retired 2026-06-25: see section 7 comment + RFC-003.
+    # Accept + ignore so existing user scripts don't error.
+    --with-shelld) ;;
     --status)      MODE=status ;;
     -h|--help)     sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "unknown arg: $arg" >&2; exit 2 ;;
@@ -319,7 +318,6 @@ stage() {
 RUNNING=0; prod_shell_running && RUNNING=1
 SHELL_CHANGED=0; changed marspot-shell  && SHELL_CHANGED=1
 CORE_CHANGED=0;  changed marspot-core   && CORE_CHANGED=1
-SHELLD_CHANGED=0; changed marspot-shelld && SHELLD_CHANGED=1
 SESSION_CHANGED=0; changed marspot-session && SESSION_CHANGED=1
 
 # Print the version vector from version-vector.toml so the operator
@@ -327,10 +325,10 @@ SESSION_CHANGED=0; changed marspot-session && SESSION_CHANGED=1
 # (core) is the headline marspot version.
 print_version_vector() {
   echo "==> version vector (this build):"
-  # L1=shell, L2=core, L3=session, L4=shelld is the canonical ordering
-  # everywhere in the codebase. L2 (core) is the headline marspot
-  # version — what the title bar shows.
-  local sh co se shd
+  # L1=shell, L2=core, L3=session is the canonical ordering everywhere
+  # in the codebase since RFC-003 retired L4 shelld.  L2 (core) is the
+  # headline marspot version — what the title bar shows.
+  local sh co se
   while IFS='=' read -r key value; do
     key="$(echo "$key" | tr -d ' ')"
     # Strip trailing inline comment (`# L1` etc) and surrounding
@@ -341,13 +339,11 @@ print_version_vector() {
       shell)   sh="$value"  ;;
       core)    co="$value"  ;;
       session) se="$value"  ;;
-      shelld)  shd="$value" ;;
     esac
   done < "$ROOT/version-vector.toml"
   printf "      L1 shell   %s\n" "${sh:-?}"
   printf "      L2 core    %s   ← marspot version (title bar)\n" "${co:-?}"
   printf "      L3 session %s\n" "${se:-?}"
-  printf "      L4 shelld  %s\n" "${shd:-?}"
 }
 print_version_vector
 
@@ -521,28 +517,13 @@ else
   echo "==> running app already matches this build"
 fi
 
-# ── 7. shelld update (opt-in; in-place execv preserves sessions) ───
-# Default now: --apply-pending-execv. The shelld supervisor receives
-# SIGUSR1, promotes pending → current internally, and execv's over its
-# own image while preserving the listen fd + every PTY master fd, so
-# the running zsh children at the other end of every session keep
-# living. GUI clients see a sub-second read pause; the ShelldClient
-# supervisor loop reconnects + re-attaches each session via bytelog
-# replay (no "exited" blink, no GUI quit). Falls back to the legacy
-# bootout/bootstrap path (--apply-pending) only when the running
-# shelld is older than the SIGUSR1 handler — install-shelld.sh checks.
-if (( SHELLD_CHANGED )); then
-  if (( WITH_SHELLD )); then
-    echo "==> updating shelld via execv (sessions preserved)"
-    mkdir -p "$TREE/pending"
-    if ! "$ROOT/bin/install-shelld.sh" --apply-pending-execv; then
-      echo "==> execv path declined — falling back to --apply-pending (KILLS sessions)"
-      "$ROOT/bin/install-shelld.sh" --apply-pending
-    fi
-  else
-    echo "==> note: marspot-shelld differs but was NOT updated"
-    echo "    run 'bin/install-local.sh --with-shelld' to apply via execv (session-preserving)"
-  fi
-fi
+# ── 7. (retired) shelld update path ───────────────────────────────
+# Removed 2026-06-25: RFC-003 retired L4 shelld in 2026-06-17
+# (L3 owns its own PTY + UDS listener + registry; nothing dials
+# shelld anymore).  `bin/install-shelld.sh` was deleted at the same
+# time, leaving an unreachable `--with-shelld` flag here that pointed
+# at a missing script.  Section 5 above tears down the LaunchAgent;
+# this section is intentionally empty so the daemon is never
+# resurrected via install-local.
 
 echo "==> done."
