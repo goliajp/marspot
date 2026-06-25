@@ -458,9 +458,13 @@ impl DevWindow {
         // window doesn't have a `Layout` or sessions, so we can't
         // call `render_layout`.  Instead use `render_canvas` to
         // paint just our one Canvas.
-        let chrome_cell_w = self.renderer_font_metrics().0 as f32;
-        let chrome_cell_h = self.renderer_font_metrics().1 as f32;
-        let chrome_ascent = self.renderer_font_metrics().2 as f32;
+        // Dev panel 用比 chrome 默认 UI font 略小的字号:default
+        // ui_font_metrics() = SF Pro 13pt;乘 0.85 ≈ 11pt.dev panel
+        // 信息密度高,稍小一点让 menu + content 一屏放更多内容.
+        const DEV_PANEL_FONT_SCALE: f32 = 0.85;
+        let chrome_cell_w = self.renderer_font_metrics().0 as f32 * DEV_PANEL_FONT_SCALE;
+        let chrome_cell_h = self.renderer_font_metrics().1 as f32 * DEV_PANEL_FONT_SCALE;
+        let chrome_ascent = self.renderer_font_metrics().2 as f32 * DEV_PANEL_FONT_SCALE;
         let measure = crate::chrome_measure::ChromeMeasure::new(
             self.renderer.font_mut(),
             chrome_cell_w as f64,
@@ -477,12 +481,17 @@ impl DevWindow {
         // (Model / Tokens / Components etc.) lays out the same way
         // it always did.  The Font v5 showcase opts INTO SF Pro per
         // text run via `TextBuilder::ui()`, scoped to that section.
+        // ui_font=true 让 dev panel chrome 默认走 SF Pro shape 路径
+        // (proportional + variable weight 全开).Foundation / Tokens /
+        // Primitives / Components / Sessions Architecture 等 view-tree
+        // 内容直接读 `TextFontSpec::Ui` 渲染.少数 legacy `draw_*_sample`
+        // 仍是 Monaco mono 直 emit,view-tree path 改用 SF Pro 不影响.
         self.renderer.render_canvas_into_layer(
             &canvas,
             width_phys as f32,
             height_phys as f32,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
-            false,
+            true,
         );
     }
 
