@@ -704,25 +704,23 @@ trait 是 v3+ 的事 —— marspot v1 macOS only,直接调 CoreText API,trait �
 **改动**:`bench/font-rendering/snapshots/` + `bin/font-snapshot.sh` +
 `bin/font-snapshot-check.sh` + `bin/bench.sh --ssim` 整合
 
-**实施**:9/12 baseline PNG 入库,SSIM > 0.98 gate 实施(pure Rust,
-8×8 windows,BT.709 luma,k1=0.01 / k2=0.03):
+**实施**:12/12 baseline PNG 入库(✅ acceptance 达成),SSIM > 0.98
+gate 实施(pure Rust,8×8 windows,BT.709 luma,k1=0.01 / k2=0.03):
 
-| baseline | dims | covers |
-|---|---|---|
-| `font_v5_showcase` | 840×1040 | chrome SF Pro Font v5 panel(全 phase 集中演示) |
-| `font_v5_mono_grid` | 1200×600 | PTY Mono Monaco ASCII + CJK + emoji + kerning + RTL |
-| `font_v5_box_drawing` | 1000×500 | Monaco custom raster path(box drawing arms + block elements) |
-| `font_v5_subpx_fingerprint` | 1000×500 | Phase 4 4-bucket sub-pixel positioning |
-| `font_v5_chrome_small_sizes` | 1200×600 | chrome SF Pro 11/12/13/14pt + variable weight 100/400/700/900 |
-| `font_v5_cjk_fallback_baseline` | 1400×600 | chrome SF Pro CJK cascade(PingFang / Hiragino / Apple SD Gothic Neo)baseline 对齐 |
-| `font_v5_emoji_color` | 1200×600 | Phase 7 BGRA 色彩 emoji + ZWJ family + flag |
-| `font_v5_opentype_opts` | 1400×900 | Phase 8 `full()` / `code()` / `all_off()` 3 列 × 4 source |
-| `font_v5_terminal_scene` | 1200×600 | 终端场景 cell-rect BG(选区)+ cursor block + Mono log-style |
-| `font_v5_chrome_decoration` | 1400×500 | chrome rounded rect + shadow + border + depth stack |
-
-剩 3 候选(不紧急):variable weight slider(已 covered by chrome_small_sizes)/
-真 PTY readback(`StorageModeShared` 改造,Phase 10 scope)/ docs §15 矩阵
-最后 1 项(用户需要时补).
+| # | baseline | dims | covers |
+|---|---|---|---|
+| 1 | `font_v5_showcase` | 840×1040 | chrome SF Pro Font v5 panel(全 phase 集中演示) |
+| 2 | `font_v5_mono_grid` | 1200×600 | PTY Mono Monaco ASCII + CJK + emoji + kerning + RTL |
+| 3 | `font_v5_box_drawing` | 1000×500 | Monaco custom raster path(box drawing arms + block elements) |
+| 4 | `font_v5_subpx_fingerprint` | 1000×500 | Phase 4 4-bucket sub-pixel positioning |
+| 5 | `font_v5_chrome_small_sizes` | 1200×600 | chrome SF Pro 11/12/13/14pt + variable weight 100/400/700/900 |
+| 6 | `font_v5_cjk_fallback_baseline` | 1400×600 | chrome SF Pro CJK cascade(PingFang / Hiragino / Apple SD Gothic Neo)baseline 对齐 |
+| 7 | `font_v5_emoji_color` | 1200×600 | Phase 7 BGRA 色彩 emoji + ZWJ family + flag |
+| 8 | `font_v5_opentype_opts` | 1400×900 | Phase 8 `full()` / `code()` / `all_off()` 3 列 × 4 source |
+| 9 | `font_v5_terminal_scene` | 1200×600 | 终端场景 cell-rect BG(选区)+ cursor block + Mono log-style |
+| 10 | `font_v5_chrome_decoration` | 1400×500 | chrome rounded rect + shadow + border + depth stack |
+| 11 | `devpanel_components_catalog` | 840×1040 | DevPanel UI > Components Catalog(badge / toggle / picker / card / panel / tooltip / list_row / context_menu / breadcrumb)|
+| 12 | `devpanel_typography` | 840×1040 | DevPanel UI > Tokens > Typography(Size scale + Weight + 8 named TextStyle tokens)|
 
 **工作流**:
 
@@ -735,13 +733,15 @@ trait 是 v3+ 的事 —— marspot v1 macOS only,直接调 CoreText API,trait �
   `--ssim` 显式开,`--full`(pre-merge)隐式带.
 - `bin/bench-remote.sh --full` — mini host gate,perf + SSIM 同步跑.
 
-**Acceptance(✅ 达成)**:
-- 10/12 visual baseline lock + SSIM > 0.98 gate working(reverse-
-  validated:corrupt baseline → SSIM 0.9634 < 0.98 → 具体错误信息 +
-  non-zero exit)
+**Acceptance(✅ 全达成 2026-06-25)**:
+- **12/12 visual baseline lock** + SSIM > 0.98 gate working
+  (reverse-validated:corrupt baseline → SSIM 0.9634 < 0.98 →
+  具体错误信息 + non-zero exit)
 - bench.sh / bench-remote.sh 集成完成
-- `cargo nextest run --lib` 6 snapshot tests env-gated 不影响 default
-  test 速度(每 ≈ 30s build + render)
+- mini host real run:12/12 全 PASS,SSIM 1.0000 × 11 + 0.9948 × 1
+  (showcase 在 mini 跟 dev box 有微小 anti-aliasing 差异但 ≫ 0.98)
+- `cargo nextest run --lib` 12 snapshot tests env-gated 不影响 default
+  test 速度(本机 ≈ 30s build + render;mini host 0.15-0.46s 每个)
 
 **剩余(Phase 10 scope)**:
 - cold raster < 500µs / glyph timing 未独立测(集成在 mini render
