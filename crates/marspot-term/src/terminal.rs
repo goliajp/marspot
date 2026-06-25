@@ -1314,9 +1314,14 @@ impl<'a> Handler<'a> {
         let cols = self.grid.cols();
         let rows = self.grid.rows();
         let cursor = self.grid.cursor();
-        // Alt buffer never needs scrollback — its job is to be discarded
-        // wholesale on `?1049l`.  Skip the allocation.
-        let alt = Grid::with_scrollback(cols, rows, 0);
+        // VT spec says alt buffer has no scrollback,but user-perception
+        // wise iTerm2 / Kitty / Alacritty all let scroll wheel browse
+        // alt-screen history while inside a TUI(claudecode 长对话刷出
+        // 屏顶 ≠ 没法再看).Use the same `DEFAULT_SCROLLBACK_LINES`
+        // ring 主屏用 — claudecode 等 TUI 输出量大,小 ring 装不下
+        // 一次会话.Drop wholesale on `?1049l`(exit_alt_screen 把整
+        // 个 grid 替换回 saved_main).
+        let alt = Grid::with_scrollback(cols, rows, DEFAULT_SCROLLBACK_LINES);
         let main = std::mem::replace(self.grid, alt);
         *self.saved_main = Some(SavedMain { grid: main, cursor });
     }
