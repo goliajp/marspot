@@ -2248,6 +2248,50 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     y + (entries.len() as f64) * row_h
 }
 
+/// Chrome text helpers — view-tree Text built with explicit `.ui()`
+/// so layout(`advance_phys(Ui, …)` 走 CTLine shape)和 paint(canvas
+/// TextPrim font_kind=Ui)同源 SF Pro,proportional 字宽实测.高度
+/// 关联字号:Caption=11pt / Body=13pt / Header=15pt / LargeHeader=18pt
+/// — 跟 `theme::text::*` token 的 TextSize × cell_h 大致对齐,但
+/// SF Pro 走 CTFont 真高度.color 默认 FG / FG_MUTED 各 chrome 角色
+/// 自己 .color() override.
+#[allow(dead_code)]
+mod chrome_text {
+    use crate::ui::view::Text;
+    use crate::font_shape::ShapeOptions;
+    use crate::ui::theme::color;
+
+    #[inline]
+    pub fn body(content: &str) -> Text {
+        Text::new(content).ui(13.0, 400, ShapeOptions::full()).color(color::FG)
+    }
+    #[inline]
+    pub fn body_bold(content: &str) -> Text {
+        Text::new(content).ui(13.0, 600, ShapeOptions::full()).color(color::FG)
+    }
+    #[inline]
+    pub fn caption(content: &str) -> Text {
+        Text::new(content).ui(11.0, 400, ShapeOptions::full()).color(color::FG_MUTED)
+    }
+    #[inline]
+    pub fn header(content: &str) -> Text {
+        Text::new(content).ui(15.0, 600, ShapeOptions::full()).color(color::FG)
+    }
+    #[inline]
+    pub fn hint(content: &str) -> Text {
+        Text::new(content).ui(11.0, 400, ShapeOptions::full()).color(color::FG_MUTED)
+    }
+    /// "Code" style — SF Pro is not a mono font so this isn't true
+    /// monospace,but using `ShapeOptions::code()`(kerning off)gets
+    /// uniform glyph advance which reads code-like enough for
+    /// catalogue purposes.For real code blocks PTY path uses
+    /// Monaco mono and bypasses this helper entirely.
+    #[inline]
+    pub fn code(content: &str) -> Text {
+        Text::new(content).ui(12.0, 400, ShapeOptions::code()).color(color::FG)
+    }
+}
+
 /// Typography token scale — Caption / Body / Header / LargeHeader.
 /// The view tree's `TextSize` enum is the canonical type scale (every
 /// `Text` carries a `TextSize`),and `theme::text::*` constants compose
@@ -2255,78 +2299,64 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
 /// section catalogues them visually so a designer can scan the size
 /// hierarchy at-a-glance plus pin the named styles in muscle memory.
 fn build_typography_view() -> crate::ui::view::View {
-    use crate::ui::view::{vstack, hstack, Text, TextSize, TextWeight};
+    use crate::ui::view::{vstack, hstack, Text};
     use crate::ui::core::Length;
-    use crate::ui::theme::{color, text as text_token};
+    use crate::ui::theme::color;
+    use crate::font_shape::ShapeOptions;
 
-    // Size scale label + sample, side by side per row.
-    let size_row = |name: &'static str, size: TextSize, sample: &'static str| {
+    // Size scale row:left caption + right SF Pro sample at a given
+    // pt.高度关联字号 — line-height 由 CTFont 实测,字宽由 CTLine
+    // shape 实测.
+    let size_row = |name: &'static str, pt: f64, sample: &'static str| {
         hstack(vec![
-            Text::new(name)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
-                .build(),
-            Text::new(sample).size(size).color(color::FG).build(),
+            chrome_text::caption(name).build(),
+            Text::new(sample).ui(pt, 400, ShapeOptions::full()).color(color::FG).build(),
         ])
         .hstack_gap(Length::Pt(16.0))
         .align_cross_end()
     };
 
-    // Weight row — same body size, varying weight token.
-    let weight_row = |name: &'static str, weight: TextWeight, sample: &'static str| {
+    let weight_row = |name: &'static str, weight: u16, sample: &'static str| {
         hstack(vec![
-            Text::new(name)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
-                .build(),
-            Text::new(sample).size(TextSize::Body).weight(weight).color(color::FG).build(),
+            chrome_text::caption(name).build(),
+            Text::new(sample).ui(13.0, weight, ShapeOptions::full()).color(color::FG).build(),
         ])
         .hstack_gap(Length::Pt(16.0))
         .align_cross_end()
     };
 
-    // Token-style row — applies a `TextStyle` constant from the theme.
-    let token_row = |name: &'static str, style: crate::ui::view::TextStyle, sample: &'static str| {
+    let token_row = |name: &'static str, pt: f64, weight: u16, color_c: crate::ui::core::Color, opts: ShapeOptions, sample: &'static str| {
         hstack(vec![
-            Text::new(name)
-                .style(text_token::CAPTION)
-                .color(color::FG_MUTED)
-                .build(),
-            Text::new(sample).style(style).build(),
+            chrome_text::caption(name).build(),
+            Text::new(sample).ui(pt, weight, opts).color(color_c).build(),
         ])
         .hstack_gap(Length::Pt(16.0))
         .align_cross_end()
     };
 
     vstack(vec![
-        Text::new("Size scale")
-            .style(text_token::HEADER)
-            .color(color::FG)
-            .build(),
-        size_row("Caption    ",     TextSize::Caption,     "The quick brown fox jumps"),
-        size_row("Body       ",     TextSize::Body,        "The quick brown fox jumps"),
-        size_row("Header     ",     TextSize::Header,      "The quick brown fox jumps"),
-        size_row("LargeHeader",     TextSize::LargeHeader, "The quick brown fox jumps"),
+        chrome_text::header("Size scale").build(),
+        size_row("Caption    ",     11.0, "The quick brown fox jumps"),
+        size_row("Body       ",     13.0, "The quick brown fox jumps"),
+        size_row("Header     ",     15.0, "The quick brown fox jumps"),
+        size_row("LargeHeader",     20.0, "The quick brown fox jumps"),
 
-        Text::new("Weight")
-            .style(text_token::HEADER)
-            .color(color::FG)
-            .build(),
-        weight_row("Regular", TextWeight::Regular, "The quick brown fox jumps"),
-        weight_row("Bold   ", TextWeight::Bold,    "The quick brown fox jumps"),
+        chrome_text::header("Weight").build(),
+        weight_row("100 ", 100, "The quick brown fox jumps"),
+        weight_row("400 ", 400, "The quick brown fox jumps"),
+        weight_row("600 ", 600, "The quick brown fox jumps"),
+        weight_row("700 ", 700, "The quick brown fox jumps"),
+        weight_row("900 ", 900, "The quick brown fox jumps"),
 
-        Text::new("Style tokens(`theme::text::*`)")
-            .style(text_token::HEADER)
-            .color(color::FG)
-            .build(),
-        token_row("CAPTION     ", text_token::CAPTION,      "Sample sentence"),
-        token_row("BODY        ", text_token::BODY,         "Sample sentence"),
-        token_row("HEADER      ", text_token::HEADER,       "Sample sentence"),
-        token_row("LARGE_HEADER", text_token::LARGE_HEADER, "Sample sentence"),
-        token_row("HINT        ", text_token::HINT,         "Sample sentence"),
-        token_row("CODE        ", text_token::CODE,         "fn quick_fox()"),
-        token_row("LINK        ", text_token::LINK,         "https://marspot.com"),
-        token_row("ERROR       ", text_token::ERROR,        "Sample error message"),
+        chrome_text::header("Style tokens(`theme::text::*` mapping)").build(),
+        token_row("CAPTION     ", 11.0, 400, color::FG_MUTED, ShapeOptions::full(), "Sample sentence"),
+        token_row("BODY        ", 13.0, 400, color::FG,        ShapeOptions::full(), "Sample sentence"),
+        token_row("HEADER      ", 15.0, 600, color::FG,        ShapeOptions::full(), "Sample sentence"),
+        token_row("LARGE_HEADER", 20.0, 700, color::FG,        ShapeOptions::full(), "Sample sentence"),
+        token_row("HINT        ", 11.0, 400, color::FG_MUTED, ShapeOptions::full(), "Sample sentence"),
+        token_row("CODE        ", 12.0, 400, color::FG,        ShapeOptions::code(), "fn quick_fox()"),
+        token_row("LINK        ", 13.0, 400, color::FG_LINK,  ShapeOptions::full(), "https://marspot.com"),
+        token_row("ERROR       ", 13.0, 400, color::DANGER,   ShapeOptions::full(), "Sample error message"),
     ])
     .vstack_gap(Length::Pt(8.0))
 }
