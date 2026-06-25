@@ -582,6 +582,20 @@ impl Terminal {
         if self.cursor_visible              { modes |= 1 << 2; }
         if self.pending_wrap                { modes |= 1 << 3; }
         if self.saved_main.is_some()        { modes |= 1 << 4; }
+        // bits 5-6 = mouse_tracking_mode(0/1/2/3),bit 7 = SGR.
+        // 0.6.66 起加,跨 execv 保留 DECSET 1000/1002/1003/1006 状态.
+        // 之前老 image 跨 execv 不带这些 bits → 新 image 默认 Off,
+        // claudecode 已经在 alt-screen 里,不会重发 ?1000h,wheel 跟
+        // 着滚不动."只有少数 work" 就是这个症状.老 reader 不知道这
+        // 些 bit,自然 default Off — backward-compat 平滑.
+        let mtm_bits: u32 = match self.mouse_tracking_mode {
+            MouseTrackingMode::Off => 0,
+            MouseTrackingMode::X11 => 1,
+            MouseTrackingMode::ButtonEvent => 2,
+            MouseTrackingMode::AnyEvent => 3,
+        };
+        modes |= mtm_bits << 5;
+        if self.mouse_sgr_encoding         { modes |= 1 << 7; }
         out.extend_from_slice(&modes.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         out.extend_from_slice(&serialize_attrs(self.attrs));
@@ -792,6 +806,15 @@ impl Terminal {
         self.bracketed_paste_mode        = (modes & (1 << 1)) != 0;
         self.cursor_visible              = (modes & (1 << 2)) != 0;
         self.pending_wrap                = (modes & (1 << 3)) != 0;
+        // bits 5-6 = mouse_tracking_mode,bit 7 = SGR(0.6.66 起加).
+        // 老 snapshot 不会有这些 bit → 自然 Off,跟老语义一致.
+        self.mouse_tracking_mode = match (modes >> 5) & 0b11 {
+            1 => MouseTrackingMode::X11,
+            2 => MouseTrackingMode::ButtonEvent,
+            3 => MouseTrackingMode::AnyEvent,
+            _ => MouseTrackingMode::Off,
+        };
+        self.mouse_sgr_encoding          = (modes & (1 << 7)) != 0;
         // Bit 4 (in_alt_screen) is informational for the wire format
         // but not actionable here — apply_snapshot replaces the
         // current grid; alt-mode save state is regenerated on the
