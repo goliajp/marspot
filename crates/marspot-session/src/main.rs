@@ -1258,6 +1258,10 @@ fn main() {
     // cancel flag; the old worker exits at its next iteration without
     // delivering its batch.
     let mut current_search: Option<SearchWorker> = None;
+    // Mouse-tracking forwarding(0.6.66+):L2 send 的是 absolute target
+    // view_offset,我要 delta(per-iteration wheel ticks).跨 burst loop
+    // 持久,初始 0 跟 L2 启动时一致.每收到 Scroll(off) 后更新.
+    let mut last_l2_view_offset: u16 = 0;
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1288,12 +1292,14 @@ fn main() {
                     use marspot_term::terminal::MouseTrackingMode;
                     let mtm = session.terminal().mouse_tracking_mode();
                     if mtm != MouseTrackingMode::Off {
-                        // off = absolute target view_offset(L2 已经 clamp).
-                        // 当前 view_offset 从 publish() 拿不到,改用
-                        // SessionEvent::Scroll(off) 跟上次 pending_scroll
-                        // 比较算 delta.delta>0 = 滚向 history(wheel up),
-                        // delta<0 = 滚回 live(wheel down).
-                        let prev = pending_scroll.unwrap_or(0);
+                        // off = absolute target view_offset(L2 累计的).
+                        // delta = off - last_l2_view_offset = 这次 wheel
+                        // 的 tick 数.之前 bug:用每轮 reset 的 pending_scroll
+                        // 当 prev → prev 永远 0 → delta = absolute,每次
+                        // wheel 转发数翻倍增长.持久化 last_l2_view_offset
+                        // 跨 burst 才能算正确 delta.
+                        let prev = last_l2_view_offset;
+                        last_l2_view_offset = off;
                         let delta_i = off as i32 - prev as i32;
                         let (button, count) = if delta_i > 0 {
                             (64u8, delta_i as u32)  // wheel up
@@ -1346,6 +1352,10 @@ fn main() {
                             off = off as u32
                         );
                         pending_scroll = Some(off);
+                        // 同步 last_l2_view_offset 跟 L2 的实际 view_offset
+                        // 走 — 用户来回切 alt-screen / main 时,下次进
+                        // mouse tracking 模式 delta 才对得上.
+                        last_l2_view_offset = off;
                     }
                 }
                 // Each request gets its own reply (don't coalesce — L2 is
