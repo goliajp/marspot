@@ -3433,12 +3433,18 @@ fn push_text_run_ui_shaped_mono(
 }
 
 #[allow(clippy::too_many_arguments)]
+// y_top_phys = top-of-em-box y in PHYSICAL px (raw `t.y` from canvas
+// Length resolution, NOT a pre-baked baseline).  Function derives the
+// baseline from the SF Pro run's own ascent at the requested pt size,
+// so callers don't need to know chrome cell ascent.
+// fallback_ascent = chrome cell ascent (phys px) — used ONLY when
+// ui_size_q.is_none() (pre-Phase-10c default-size callers).
 fn push_text_run_ui_shaped(
     text: &str,
     x_start: f32,
-    baseline_y: f32,
+    y_top_phys: f32,
     color: [f32; 4],
-    ascent: f32,
+    fallback_ascent: f32,
     atlas_w: f32,
     atlas_h: f32,
     color_atlas_w: f32,
@@ -3461,9 +3467,20 @@ fn push_text_run_ui_shaped(
     if shaped.is_empty() {
         return;
     }
-    // Pre-round baseline to integer pixel grid so cross-frame chrome
-    // doesn't drift fractionally — matches the mono path's
-    // `baseline_y_q` quantisation.
+    // SF Pro path uses the run's OWN ascent — derived from the first
+    // shaped glyph's CTFont — so positioning a Body 8.1pt run reads
+    // as 8.1pt top-of-em, not chrome cell pitch.  Bug fix 2026-06-25:
+    // previously `baseline_y` was pre-computed with chrome ascent,
+    // misaligning active-row BG vs SF Pro glyphs.
+    let real_ascent_pt = font.font(shaped[0].font_id as usize).ascent();
+    // CTFont.ascent() returns pt — convert to phys at the 2× retina
+    // baked into the atlas raster path (`RETINA_SCALE = 2.0`).
+    let real_ascent_phys = (real_ascent_pt * 2.0) as f32;
+    let baseline_y = if ui_size_q.is_some() {
+        y_top_phys + real_ascent_phys
+    } else {
+        y_top_phys + fallback_ascent
+    };
     let baseline_y_q = baseline_y.round();
     let x_start_floor = x_start.floor() as i32;
     for sg in shaped {
@@ -3516,7 +3533,7 @@ fn push_text_run_ui_shaped(
             color,
         });
     }
-    let _ = ascent;
+    let _ = fallback_ascent;
 }
 
 fn push_session(
@@ -4859,10 +4876,13 @@ fn build_canvas_runs(
                     None => ui_font,
                 };
                 if use_ui {
+                    // SF Pro path: pass raw y_top_phys (not baseline_y).
+                    // push_text_run_ui_shaped derives baseline from the
+                    // run's own ascent — correct geometry across UiSize.
                     push_text_run_ui_shaped(
                         &t.content,
                         t.x as f32,
-                        baseline_y,
+                        t.y as f32,
                         t.color.to_rgba_f32(),
                         ascent,
                         atlas_w_f, atlas_h_f,

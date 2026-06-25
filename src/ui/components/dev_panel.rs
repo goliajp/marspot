@@ -461,10 +461,16 @@ pub fn build_dev_panel_canvas(
             }
             MenuRow::Item(label, id) => {
                 let is_active = *id == state.active_section;
+                // Active BG vertically centered on the row slot, height
+                // tight to text(SF Pro Small cap-height ~4.5pt +
+                // ~4pt top/bot padding ≈ 12pt).不再撑满整行,跟 text
+                // 视觉对齐由 BG 收窄实现.
+                let bg_h = menu_row_h - 6.0;
+                let bg_y = row_y + (menu_row_h - bg_h) / 2.0;
                 if is_active {
                     canvas.rect()
-                        .at(Length::Pt(6.0), Length::Pt(row_y))
-                        .size(Length::Pt(menu_w - 12.0), Length::Pt(menu_row_h - 4.0))
+                        .at(Length::Pt(6.0), Length::Pt(bg_y))
+                        .size(Length::Pt(menu_w - 12.0), Length::Pt(bg_h))
                         .fill(tokens::MENU_ROW_ACTIVE_BG)
                         .radius(Pt(4.0))
                         .draw();
