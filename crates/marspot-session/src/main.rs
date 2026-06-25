@@ -1093,11 +1093,54 @@ fn main() {
             // user's saved working directory (cold restart from
             // shell-state.bin path).  Empty / unset = $HOME fallback.
             let initial_cwd = std::env::var("MARSPOT_INITIAL_CWD").unwrap_or_default();
-            let local = LocalSession::spawn(id, cols, rows, &initial_cwd, wake)
+            let mut local = LocalSession::spawn(id, cols, rows, &initial_cwd, wake)
                 .unwrap_or_else(|e| {
                     lx_error!("session.local.spawn_failed", &format!("{e}"));
                     std::process::exit(1);
                 });
+            // Cold-start resurrection:if a state.bin exists for this
+            // session id,it's the dump a previous-life L3 wrote on
+            // SIGTERM clean-exit(user closed window).Apply it to the
+            // fresh Terminal so the user sees their saved scrollback
+            // when they reopen the app.PTY child is brand-new, will
+            // re-render its prompt over the saved screen — the
+            // scrollback survives untouched (only the visible window
+            // gets overwritten by the new shell's first paint).
+            let state_path = session_state_bin_path(id);
+            if state_path.exists() {
+                match std::fs::read(&state_path) {
+                    Ok(body) => {
+                        let body_bytes = body.len();
+                        match local.terminal_mut().apply_snapshot(&body) {
+                            Ok(()) => {
+                                lx_event!(
+                                    "L3_COLD_SNAPSHOT_APPLIED",
+                                    "restored Terminal from state.bin at cold boot — close→reopen resurrection",
+                                    session_id = id,
+                                    body_bytes = body_bytes
+                                );
+                            }
+                            Err(e) => {
+                                lx_warn!(
+                                    "l3.cold.snapshot_apply_failed",
+                                    &format!("{e}"),
+                                    body_bytes = body_bytes
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        lx_warn!(
+                            "l3.cold.snapshot_read_failed",
+                            &format!("{e}"),
+                            path = state_path.display()
+                        );
+                    }
+                }
+                // state.bin is one-shot — drop so a future SIGKILL doesn't
+                // resurrect stale state on top of the new shell's real output.
+                let _ = std::fs::remove_file(&state_path);
+            }
             let cwd = std::env::var("HOME").unwrap_or_default();
             let shm_name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
             let shell_child_pid = local.child_pid();

@@ -4177,6 +4177,19 @@ fn main() {
                 n_reattached = reattached_ids.len()
             );
         }
+        // RFC-003 §6 Amendment 18 — dead L3 resurrection.  user 关窗
+        // → L1 close_requested → SIGTERM 全部 L3 → L3 SIGTERM handler
+        // 写 state.bin + process::exit(0)(Drop 不跑,entry.toml 存活).
+        // reopen → 这些 session 在 raw_list 里 pid 已死 → 落到
+        // dead_ids.之前 prune 把整个 session_dir rm,state.bin 跟着
+        // 没,新 L3 起来空白 — user 失去全 history.
+        //
+        // 现在 dead_ids 是 **resurrect candidates**:
+        //   1. 老 shm 区域死了 → 拆,新 L3 起来会拿到 L2 新发的 shm
+        //   2. session_dir(含 state.bin)留着
+        //   3. 走 fresh-spawn 路径时,优先用 dead_ids 的 id,L3 cold
+        //      boot 看到 state.bin 自动 apply_snapshot —— 用户看到
+        //      原来的 scrollback 完整保留.
         for id in &dead_ids {
             if let Ok(entry) = marspot_term::session_registry::read_session_entry(*id) {
                 if !entry.shm_name.is_empty() {
@@ -4185,7 +4198,8 @@ fn main() {
                     }
                 }
             }
-            let _ = session_registry::delete_session(*id);
+            // 留 session_dir + state.bin;下面 resurrect loop spawn 时
+            // L3 cold boot 看到 state.bin 自动 load + delete.
         }
         lx_event!(
             "core.session_registry.inventory",
@@ -4196,8 +4210,14 @@ fn main() {
             dead = dead,
             want = n_sessions
         );
-        // Allocate fresh ids for the rest.
-        let mut ids: Vec<u64> = Vec::new();
+        // dead_ids 排在前面 — 它们各自的 session_dir 有 state.bin,
+        // 同 id 起 L3 时 L3 cold boot 自动 apply_snapshot 恢复 scrollback.
+        // 之后再用 allocate_next_session_id 给剩下的 slot 拿全新 id.
+        let mut ids: Vec<u64> = dead_ids
+            .iter()
+            .copied()
+            .take(n_sessions.saturating_sub(panes.len()))
+            .collect();
         while panes.len() + ids.len() < n_sessions {
             match allocate_next_session_id() {
                 Ok(id) => ids.push(id),

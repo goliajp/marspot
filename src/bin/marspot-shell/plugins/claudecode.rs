@@ -946,11 +946,12 @@ impl Plugin for ClaudecodePlugin {
                 }
                 if let Some(meta) = result.new_meta.get(sh_sid) {
                     if !meta.project_basename.is_empty() {
-                        let title = match meta.profile_num {
-                            u8::MAX => meta.project_basename.clone(),
-                            n => format!("P{} {}", n, meta.project_basename),
-                        };
-                        if let Err(e) = host.set_pane_title(*sh_sid, &title) {
+                        // Title 只用 project basename — profile 已经在
+                        // badge 里("P3 …"),title 再重复就冗余.
+                        if let Err(e) = host.set_pane_title(
+                            *sh_sid,
+                            &meta.project_basename,
+                        ) {
                             host.log(
                                 LogLevel::Warn,
                                 "pane_title.set_failed",
