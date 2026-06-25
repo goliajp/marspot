@@ -241,12 +241,15 @@ pub struct DevPanelState {
     /// Size in logical points.  Same caveat as `origin_pt` — AppKit
     /// owns the actual window size now.
     pub size_pt: (f64, f64),
-    /// Active tab index (`TAB_UI` / `TAB_TOKENS` / `TAB_COMPONENTS`).
+    /// Active top tab index — `TAB_UI` / `TAB_FONT` / `TAB_RENDER` /
+    /// `TAB_SESSIONS`(post-2026-06-25 hierarchy).
     pub active_tab: usize,
-    /// Active section anchor inside the UI tab's left menu.
-    /// `SECTION_COLORS` by default.  Used for the menu-row highlight;
-    /// the right content column currently stacks ALL sections regardless
-    /// (until mouse routing lets the user actually pick).
+    /// Active Item id inside the current tab's left menu.  Encoded as
+    /// `(tab << 16) | (subgroup << 8) | item`(see `SECTION_*`
+    /// constants).  Defaults to `SECTION_UI_FOUNDATION_MODEL` so a
+    /// fresh open reads as "what is this thing".  Menu render uses
+    /// this for row highlight;  right content column dispatches on
+    /// the same id.
     pub active_section: usize,
     /// Device pixel ratio.  Defaults to 2.0; the host overwrites it
     /// from the live NSWindow each frame so persisted state across
@@ -493,7 +496,7 @@ pub fn build_dev_panel_canvas(
     };
 
     match state.active_section {
-        SECTION_UI_FOUNDATION_MODEL => render_view_section(&mut canvas, "v3 Model — overview", build_model_view()),
+        SECTION_UI_FOUNDATION_MODEL => render_view_section(&mut canvas, "Model — UI system overview", build_model_view()),
         SECTION_UI_FOUNDATION_L1    => render_view_section(&mut canvas, "L1 — Foundation",     build_l1_view()),
         SECTION_UI_FOUNDATION_L2    => render_view_section(&mut canvas, "L2 — Box Model",      build_l2_view()),
         SECTION_UI_FOUNDATION_L3    => render_view_section(&mut canvas, "L3 — Primitives",     build_l3_view()),
@@ -2238,7 +2241,6 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     y + (entries.len() as f64) * row_h
 }
 
-/// Phase 10c — Font v5 showcase rebuilt as a view tree.  Layout
 /// Typography token scale — Caption / Body / Header / LargeHeader.
 /// The view tree's `TextSize` enum is the canonical type scale (every
 /// `Text` carries a `TextSize`),and `theme::text::*` constants compose
