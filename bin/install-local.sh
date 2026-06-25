@@ -171,10 +171,25 @@ if [[ ! -f "$PLIST" ]]; then
   <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
 </dict>
 </plist>
 PLIST
 fi
+# Make sure CFBundleIconFile is wired (idempotent — for old bundles
+# created before the icon landed).
+/usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$PLIST"
+# Install the .icns into Resources/.  iconutil's output isn't in the
+# repo (built from assets/Marspot.iconset/ at gen time);  fall back to
+# the iconset's 512px PNG if .icns isn't available.
+mkdir -p "$MACOS/../Resources"
+if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
+  cp "$ROOT/assets/AppIcon.icns" "$MACOS/../Resources/AppIcon.icns"
+fi
+# macOS aggressively caches icons by bundle identifier.  Touching the
+# bundle root tells Finder/Dock to re-read the icon on next launch.
+touch "$MACOS/.." 2>/dev/null || true
 # No symlinks: a stale `marspot` symlink into target/ would make the
 # installed app track dev builds.  Drop it; the bundle runs the shell.
 if [[ -L "$MACOS/marspot" ]]; then
