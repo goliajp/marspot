@@ -55,6 +55,20 @@ struct Prediction {
     saved_cursor: (u16, u16),
 }
 
+/// DEC mode 1000/1002/1003 — app-level mouse reporting.  `Off` 时
+/// terminal 自己消化 wheel / 鼠标点击;Some 时 marspot 把它们 encode
+/// 成 escape sequence 写回 PTY 让 TUI(claudecode 等)处理.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseTrackingMode {
+    Off,
+    /// `?1000` — press + release only.
+    X11,
+    /// `?1002` — X11 + drag motion(button held)events.
+    ButtonEvent,
+    /// `?1003` — ButtonEvent + plain motion(no button).
+    AnyEvent,
+}
+
 pub struct Terminal {
     grid: Grid,
     /// Saved main grid while the terminal is in alt-screen mode (`?1049h`).
@@ -117,6 +131,17 @@ pub struct Terminal {
     bracketed_paste_mode: bool,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
+    /// DEC mode 1000 (X11) / 1002 (button-event) / 1003 (any-event) —
+    /// TUI 进入 alt-screen 后通常 set;app(claudecode 等)期望从 PTY
+    /// 收到 mouse 事件 escape sequence,marspot 看到后必须 forward
+    /// 而不是按 wheel→scrollback 处理.None = off,Some(mode) = which
+    /// reporting mode.之前(176e4f4 extract 后)全部 stub 成 no-op,
+    /// claudecode 内 wheel 滚不动就是这个原因.
+    mouse_tracking_mode: MouseTrackingMode,
+    /// DEC mode 1006 — SGR encoding(`\x1B[<{btn};{x};{y}M/m`);
+    /// alternative encodings(1015 urxvt、1005 utf-8 deprecated)等
+    /// 现在不支持,claudecode 等现代 TUI 用 1006.
+    mouse_sgr_encoding: bool,
     /// DECAWM "deferred wrap" — set after printing a glyph in the last
     /// column. The cursor visually stays put; the next print first wraps
     /// to a new row, the next non-print op (CR/LF/cursor move) clears
@@ -216,6 +241,8 @@ impl Terminal {
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
             cursor_visible: true,
+            mouse_tracking_mode: MouseTrackingMode::Off,
+            mouse_sgr_encoding: false,
             pending_wrap: false,
             predictions: VecDeque::new(),
             cluster_buf: String::new(),
@@ -232,6 +259,23 @@ impl Terminal {
 
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+
+    /// DEC mode 1000/1002/1003 — app-level mouse reporting state.
+    /// When non-`Off`, marspot must encode mouse wheel / click events
+    /// as escape sequences and forward to the PTY so the TUI(claudecode
+    /// 等)handles them internally instead of marspot trying to scroll
+    /// terminal scrollback(which a TUI 永远没填,因为它 redraws in-
+    /// place).
+    pub fn mouse_tracking_mode(&self) -> MouseTrackingMode {
+        self.mouse_tracking_mode
+    }
+
+    /// DEC mode 1006 — when true, mouse events encode as SGR
+    /// (`\x1B[<{btn};{x};{y}M/m`).False = legacy X11(`\x1B[M btn x y`
+    /// 3-byte payload,只能表达 cell 1-223).
+    pub fn mouse_sgr_encoding(&self) -> bool {
+        self.mouse_sgr_encoding
     }
 
     /// True when the terminal is in DECCKM application cursor key mode.
@@ -396,6 +440,8 @@ impl Terminal {
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let cursor_visible = &mut self.cursor_visible;
+            let mouse_tracking_mode = &mut self.mouse_tracking_mode;
+            let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let grapheme_cursor = &mut self.grapheme_cursor;
@@ -408,6 +454,8 @@ impl Terminal {
                 cursor_key_app_mode,
                 bracketed_paste,
                 cursor_visible,
+                mouse_tracking_mode,
+                mouse_sgr_encoding,
                 pending_wrap,
                 cluster_buf,
                 grapheme_cursor,
@@ -447,6 +495,8 @@ impl Terminal {
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
             let cursor_visible = &mut self.cursor_visible;
+            let mouse_tracking_mode = &mut self.mouse_tracking_mode;
+            let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let grapheme_cursor = &mut self.grapheme_cursor;
@@ -459,6 +509,8 @@ impl Terminal {
                 cursor_key_app_mode,
                 bracketed_paste,
                 cursor_visible,
+                mouse_tracking_mode,
+                mouse_sgr_encoding,
                 pending_wrap,
                 cluster_buf,
                 grapheme_cursor,
@@ -1098,6 +1150,8 @@ struct Handler<'a> {
     cursor_key_app_mode: &'a mut bool,
     bracketed_paste: &'a mut bool,
     cursor_visible: &'a mut bool,
+    mouse_tracking_mode: &'a mut MouseTrackingMode,
+    mouse_sgr_encoding: &'a mut bool,
     pending_wrap: &'a mut bool,
     cluster_buf: &'a mut String,
     grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
@@ -1364,7 +1418,17 @@ impl<'a> Handler<'a> {
             //   1004                — focus reporting in/out events
             //   2026                — synchronized output (begin/end batch)
             //   2031                — color scheme update notifications
-            1000 | 1002 | 1003 | 1006 | 1015 | 1004 | 2026 | 2031 => {}
+            // 1000 / 1002 / 1003 — mouse reporting modes:claudecode 等
+            // TUI 进 alt-screen 后 set 这些 + 1006(SGR encoding),期望
+            // marspot 收到 wheel/click 后 encode 成 escape sequence 写
+            // 回 PTY.之前(commit 176e4f4 extract 起)全部 stub 成
+            // no-op,wheel 在 claudecode 内永远滚不动是这个根因.
+            1000 => *self.mouse_tracking_mode = if set { MouseTrackingMode::X11 } else { MouseTrackingMode::Off },
+            1002 => *self.mouse_tracking_mode = if set { MouseTrackingMode::ButtonEvent } else { MouseTrackingMode::Off },
+            1003 => *self.mouse_tracking_mode = if set { MouseTrackingMode::AnyEvent } else { MouseTrackingMode::Off },
+            1006 => *self.mouse_sgr_encoding = set,
+            // 1015 / 1004 / 2026 / 2031 — silently accept but no-op.
+            1015 | 1004 | 2026 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip
         }
     }
