@@ -89,6 +89,13 @@ pub const FLAG_CURSOR_VISIBLE: u32 = 1 << 0;
 pub const FLAG_APP_CURSOR_KEYS: u32 = 1 << 1;
 /// Bracketed-paste mode (DECSET ?2004).
 pub const FLAG_BRACKETED_PASTE: u32 = 1 << 2;
+/// Mouse tracking active(DECSET 1000/1002/1003).L2 reads this on
+/// scroll wheel decisions:on → L2 bypass scrollback_len clamp 直接
+/// forward 给 L3 当 wheel event(L3 encode mouse escape 写 PTY);
+/// off → 走 scrollback / view_offset 老路径.alt-screen TUI(claudecode)
+/// 关键:scrollback_len 一直 0(redraw in-place 不发 \n),不 bypass
+/// 永远滚不动.
+pub const FLAG_MOUSE_TRACKING: u32 = 1 << 3;
 
 /// Shared-region header. `#[repr(C)]` for a stable cross-process
 /// layout. `seq` is first and accessed only atomically (the seqlock);

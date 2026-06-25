@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
+    FLAG_MOUSE_TRACKING,
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
@@ -194,6 +195,15 @@ impl PaneBackend {
     /// Scrollback depth for an L3 pane (from its last snapshot) — the clamp
     /// bound L2 uses when scrolling it.  `0` for in-process backends, which
     /// clamp against their own grid instead.
+    /// L3-reported mouse tracking active(L3 terminal 设了 DECSET 1000/
+    /// 1002/1003).L2 在 apply_scroll_lines 用来决定 bypass clamp.
+    pub fn l3_mouse_tracking_active(&self) -> bool {
+        match self {
+            PaneBackend::L3(c) => c.mouse_tracking_active(),
+            _ => false,
+        }
+    }
+
     pub fn l3_scrollback_len(&self) -> u16 {
         match self {
             PaneBackend::L3(c) => c.scrollback_len(),
@@ -454,6 +464,12 @@ pub struct L3Conn {
     cursor_visible: bool,
     app_cursor_keys: bool,
     bracketed_paste: bool,
+    /// Mouse tracking active(DECSET 1000/1002/1003)on L3's terminal.
+    /// L2 reads this to bypass scrollback_len clamping for wheel scroll
+    /// — alt-screen TUI(claudecode 等)scrollback_len 永远 0,不 bypass
+    /// L2 apply_scroll_lines short-circuit,L3 mouse forwarding 永远没
+    /// 机会触发.
+    mouse_tracking_active: bool,
     /// Last shm publish seq we mirrored; lets `poll()` skip a re-fill
     /// when nothing changed (so L2's heartbeat doesn't force a render).
     last_seq: u64,
@@ -516,6 +532,7 @@ impl L3Conn {
             grid,
             cursor_visible: true,
             app_cursor_keys: false,
+            mouse_tracking_active: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -545,6 +562,7 @@ impl L3Conn {
             grid,
             cursor_visible: true,
             app_cursor_keys: false,
+            mouse_tracking_active: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -685,6 +703,7 @@ impl L3Conn {
         self.cursor_visible = snap.flags & FLAG_CURSOR_VISIBLE != 0;
         self.app_cursor_keys = snap.flags & FLAG_APP_CURSOR_KEYS != 0;
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
+        self.mouse_tracking_active = snap.flags & FLAG_MOUSE_TRACKING != 0;
         self.snap_scrollback_len = snap.scrollback_len;
         // Re-read the seq after the copy: if L3 republished mid-fill,
         // leave it stale so the next poll re-reads rather than missing a
@@ -790,6 +809,11 @@ impl L3Conn {
     /// for scrolling an L3 pane (it has no scrollback of its own).
     fn scrollback_len(&self) -> u16 {
         self.snap_scrollback_len.min(u16::MAX as u32) as u16
+    }
+
+    /// L3-reported mouse tracking active(from snapshot flags).
+    fn mouse_tracking_active(&self) -> bool {
+        self.mouse_tracking_active
     }
 
     /// Cmd-C round-trip: ask L3 for the text under a selection and block
@@ -1114,6 +1138,20 @@ impl Pane {
     pub fn apply_scroll_lines(&mut self, delta: i32) -> bool {
         if delta == 0 {
             return false;
+        }
+        // alt-screen TUI(claudecode)mouse tracking 模式下 bypass:
+        // L3 terminal scrollback_len 一直 0(TUI redraw in-place,从不
+        // 推 \n),如果走 scrollback clamp 永远 new=0=view_offset,直接
+        // return false,L3 收不到 Scroll,我加的 mouse forwarding 永远
+        // 没机会触发.bypass = 直接 forward 当前 view_offset + delta,
+        // L3 收到后看 mouse tracking on,encode 成 mouse event 写 PTY.
+        // 这里 view_offset 用单调累加(不 reset),L3 端 last_l2_view_offset
+        // 跟得上;实际显示 L3 publish 时仍 publish view_offset=0.
+        if self.session.is_l3() && self.session.l3_mouse_tracking_active() {
+            let new = self.view_offset.saturating_add_signed(delta as i16);
+            self.view_offset = new;
+            self.session.forward_scroll(new);
+            return true;
         }
         // L3 owns its scrollback; L2 has only the visible-window mirror, so
         // it clamps against the depth the snapshot reported and asks L3 to
