@@ -382,7 +382,7 @@ pub fn build_dev_panel_canvas(
         .color(if is_active { tokens::TAB_ACTIVE_FG } else { tokens::TAB_INACTIVE_FG })
         .ui()
         .ui_size(crate::ui::view::UiSize::Body)
-        .weight(if is_active { 600 } else { 500 })
+        .weight(400)
         .opts(crate::font_shape::ShapeOptions::full())
         .draw();
         tab_x += tab_w;
@@ -465,7 +465,7 @@ pub fn build_dev_panel_canvas(
                 MenuRow::Header(label) => {
                     Text::new(*label)
                         .ui_size(UiSize::Mini)
-                        .ui_weight(600)
+                        .ui_weight(400)
                         .color(tokens::MENU_HEADER_FG)
                         .build()
                         .padding(Edges::xy(header_pad_x, L::Pt(0.0)))
@@ -483,7 +483,10 @@ pub fn build_dev_panel_canvas(
                     } else {
                         tokens::MENU_ROW_FG
                     };
-                    let weight = if is_active { 600 } else { 400 };
+                    // Menu 全用 Regular(400)— user 2026-06-25 反馈
+                    // 粗体看着不舒服.active 状态靠 BG + FG 颜色区分,
+                    // 不用 weight 区分.
+                    let weight = 400u16;
                     let bg = if is_active {
                         tokens::MENU_ROW_ACTIVE_BG
                     } else {
