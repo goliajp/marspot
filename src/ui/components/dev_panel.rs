@@ -164,6 +164,9 @@ pub const SECTION_UI_COMPONENTS_CATALOG: usize = 0x00_04_01;
 pub const SECTION_FONT_V5_SHOWCASE: usize = 0x01_01_01;
 pub const SECTION_FONT_BASELINES:   usize = 0x01_02_01;
 
+// ──────────────────── Render tab ────────────────────
+pub const SECTION_RENDER_BUILD_IDENTITY: usize = 0x02_01_01;
+
 // ──────────────────── Menu structure ────────────────────
 //
 // `MenuRow` 是 left menu 一行;Header 不可点,只画 SubGroup 标签;
@@ -207,8 +210,11 @@ const TAB_MENUS: &[(usize, &[MenuRow])] = &[
         MenuRow::Item("  Baselines",    SECTION_FONT_BASELINES),
     ]),
     (TAB_RENDER, &[
-        MenuRow::Header("Render"),
-        // 留空,future commit 填(frame timing / instance counts / atlas usage).
+        MenuRow::Header("Build"),
+        MenuRow::Item("  Identity",     SECTION_RENDER_BUILD_IDENTITY),
+        MenuRow::Header("Render(待 wire)"),
+        // frame timing / instance counts / atlas usage 等需要 renderer
+        // state pipe 进 DevPanelState,留下轮做.
     ]),
     (TAB_SESSIONS, &[
         MenuRow::Header("Sessions"),
@@ -517,6 +523,7 @@ pub fn build_dev_panel_canvas(
             let _ = draw_text_sample(&mut canvas, content_x, y);
         }
         SECTION_FONT_BASELINES => render_view_section(&mut canvas, "Phase 9 SSIM Baselines", build_baselines_view()),
+        SECTION_RENDER_BUILD_IDENTITY => render_view_section(&mut canvas, "Build Identity", build_build_identity_view()),
         SECTION_FONT_V5_SHOWCASE => {
             // Skip the legacy Monaco-mono `draw_section_header` —
             // `build_font_v5_view` ships its own SF Pro title so the
@@ -2315,6 +2322,72 @@ fn build_typography_view() -> crate::ui::view::View {
     .vstack_gap(Length::Pt(8.0))
 }
 
+/// Build identity — version-vector + git SHA + build timestamp + cargo
+/// profile + state dir.  All values come from env baked at compile
+/// time(`build.rs` + `MARSPOT_*` rustc-env)or env at runtime
+/// (`MARSPOT_STATE_DIR`).  No fs walk, no runtime IO, no backend
+/// wiring.  Lives in `Render > Build` so a tester can confirm "is
+/// the new build actually running?" without exiting the app to
+/// check the title bar version.
+fn build_build_identity_view() -> crate::ui::view::View {
+    use crate::ui::view::{vstack, hstack, Text};
+    use crate::ui::core::Length;
+    use crate::ui::theme::{color, text as text_token};
+
+    // Two-column row: muted label + mono value.
+    let kv = |label: &'static str, value: String| {
+        hstack(vec![
+            Text::new(label)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            Text::new(value)
+                .style(text_token::CODE)
+                .color(color::FG)
+                .build(),
+        ])
+        .hstack_gap(Length::Pt(16.0))
+        .align_cross_center()
+    };
+
+    let cargo_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let state_dir = std::env::var("MARSPOT_STATE_DIR")
+        .unwrap_or_else(|_| "(default: ~/Library/Caches/marspot)".into());
+    let session_id = std::env::var("MARSPOT_SESSION_ID")
+        .unwrap_or_else(|_| "(not in L3)".into());
+
+    vstack(vec![
+        Text::new("Layer versions")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        kv("L1 shell  ", env!("MARSPOT_VERSION_SHELL").into()),
+        kv("L2 core   ", env!("MARSPOT_VERSION_CORE").into()),
+        kv("L3 session", env!("MARSPOT_VERSION_SESSION").into()),
+
+        Text::new("Build provenance")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        kv("git sha   ", env!("MARSPOT_GIT_SHA").into()),
+        kv("build ts  ", env!("MARSPOT_BUILD_TS").into()),
+        kv("profile   ", cargo_profile.into()),
+
+        Text::new("Runtime")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        kv("state dir ", state_dir),
+        kv("session id", session_id),
+
+        Text::new("install-local.sh 把这串 git_sha + build_ts 写进\n二进制 rodata 作 fingerprint(`MARSPOT_FP=...|END`),\n供 silent-update 决定要不要 swap.")
+            .style(text_token::HINT)
+            .color(color::FG_MUTED)
+            .build(),
+    ])
+    .vstack_gap(Length::Pt(8.0))
+}
+
 /// Phase 9 SSIM baseline manifest — hardcoded mirror of the snapshot
 /// tests in `src/render_metal.rs::tests`.  Each row carries:
 ///   - PNG fixture name
@@ -2598,11 +2671,11 @@ mod tests {
 
     #[test]
     fn non_ui_tab_renders_placeholder() {
-        // TAB_RENDER 当前 menu 只有一个 SubGroup header,无 Item +
+        // TAB_SESSIONS 当前 menu 只有一个 SubGroup header,无 Item +
         // 无 content,所以 right column 应该出 "(future)" placeholder
         // text — 这条 test 既验证 menu 数据驱动正确,也验证 empty
         // tab fallback path 没漂.
-        let s = DevPanelState { active_tab: TAB_RENDER, ..Default::default() };
+        let s = DevPanelState { active_tab: TAB_SESSIONS, ..Default::default() };
         let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0, cell_h_phys: 16.0 };
         let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0, &fonts);
         let prims = c.primitives();
@@ -2665,9 +2738,9 @@ mod tests {
 
     #[test]
     fn hit_test_skips_menu_on_empty_tab() {
-        // TAB_RENDER 当前菜单只有一行 Header("Render"),无 Item.
+        // TAB_SESSIONS 当前菜单只有一行 Header("Sessions"),无 Item.
         // 任何 menu 行 y 都不应该返回 Section.
-        let s = DevPanelState { active_tab: TAB_RENDER, ..Default::default() };
+        let s = DevPanelState { active_tab: TAB_SESSIONS, ..Default::default() };
         let any_menu_y = TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0;
         assert_eq!(hit_test(&s, 8.0, 20.0, any_menu_y), None);
     }
