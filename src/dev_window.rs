@@ -458,10 +458,13 @@ impl DevWindow {
         // window doesn't have a `Layout` or sessions, so we can't
         // call `render_layout`.  Instead use `render_canvas` to
         // paint just our one Canvas.
-        // Dev panel 用比 chrome 默认 UI font 略小的字号:default
-        // ui_font_metrics() = SF Pro 13pt;乘 0.85 ≈ 11pt.dev panel
-        // 信息密度高,稍小一点让 menu + content 一屏放更多内容.
-        const DEV_PANEL_FONT_SCALE: f32 = 0.85;
+        // Dev panel 用比 chrome 默认 UI font 显著小的字号:default
+        // ui_font_metrics() = SF Pro 13pt;乘 0.72 ≈ 9.4pt cell.dev
+        // panel 信息密度高,对齐 VS Code Devtools / Xcode Inspector
+        // sidebar(10-11px body)的紧凑风格 —— 不是 macOS chrome 标准
+        // body 大小.0.85 → 0.72 是 2026-06-25 user 反复反馈"字大了"
+        // 后的最终落点.
+        const DEV_PANEL_FONT_SCALE: f32 = 0.72;
         let chrome_cell_w = self.renderer_font_metrics().0 as f32 * DEV_PANEL_FONT_SCALE;
         let chrome_cell_h = self.renderer_font_metrics().1 as f32 * DEV_PANEL_FONT_SCALE;
         let chrome_ascent = self.renderer_font_metrics().2 as f32 * DEV_PANEL_FONT_SCALE;

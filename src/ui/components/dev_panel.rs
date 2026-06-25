@@ -2271,12 +2271,13 @@ mod chrome_text {
 
     // ──────────────────── type scale ────────────────────
     //
-    // 5 级紧凑 scale,跟 macOS Source Editor / Inspector 体系对齐:
-    pub const SIZE_FOOTNOTE:   f64 = 9.0;   // 极小注脚 / metadata
-    pub const SIZE_CAPTION:    f64 = 10.0;  // 次要 label / muted hint
-    pub const SIZE_BODY:       f64 = 11.0;  // 默认正文
-    pub const SIZE_EMPHASIZED: f64 = 12.0;  // 行内强调 / 大 caption
-    pub const SIZE_TITLE:      f64 = 14.0;  // section title / panel title
+    // 5 级紧凑 scale,跟 VS Code Devtools / Xcode Inspector 体系对齐
+    // (比 macOS HIG body 体系再小一档):
+    pub const SIZE_FOOTNOTE:   f64 = 8.0;   // 极小注脚 / metadata
+    pub const SIZE_CAPTION:    f64 = 9.0;   // 次要 label / muted hint
+    pub const SIZE_BODY:       f64 = 10.0;  // 默认正文
+    pub const SIZE_EMPHASIZED: f64 = 11.0;  // 行内强调 / 大 caption
+    pub const SIZE_TITLE:      f64 = 13.0;  // section title / panel title
 
     // ──────────────────── vertical rhythm ────────────────────
     pub const VSTACK_GAP:  f64 = 5.0;   // 行间 — 4-pt grid + 1
