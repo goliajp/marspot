@@ -96,6 +96,9 @@ pub const FLAG_BRACKETED_PASTE: u32 = 1 << 2;
 /// 关键:scrollback_len 一直 0(redraw in-place 不发 \n),不 bypass
 /// 永远滚不动.
 pub const FLAG_MOUSE_TRACKING: u32 = 1 << 3;
+/// Mouse SGR encoding(DECSET 1006).L2 mouse-on 时按这个选 SGR
+/// 还是 X11 legacy 字节格式.
+pub const FLAG_MOUSE_SGR: u32 = 1 << 4;
 
 /// Shared-region header. `#[repr(C)]` for a stable cross-process
 /// layout. `seq` is first and accessed only atomically (the seqlock);

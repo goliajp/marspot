@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
-    FLAG_MOUSE_TRACKING,
+    FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
@@ -201,6 +201,39 @@ impl PaneBackend {
         match self {
             PaneBackend::L3(c) => c.mouse_tracking_active(),
             _ => false,
+        }
+    }
+
+    pub fn l3_mouse_sgr_active(&self) -> bool {
+        match self {
+            PaneBackend::L3(c) => c.mouse_sgr_active(),
+            _ => false,
+        }
+    }
+
+    /// Encode a wheel event(`button_64`=wheel up,`button_65`=down,
+    /// `n_ticks` 次)+ forward 到 L3 PTY via InjectInput.viewport
+    /// 中心当 mouse 位置兜底.SGR vs X11 legacy 由 `mouse_sgr_active`
+    /// 决定.cols/rows 由 caller 传(Pane 这层没存,layout 里有).
+    pub fn l3_inject_wheel(&mut self, button_64_or_65: u8, n_ticks: u32, cols: u16, rows: u16) {
+        let x = (cols.max(1) / 2 + 1) as u32;
+        let y = (rows.max(1) / 2 + 1) as u32;
+        let sgr = self.l3_mouse_sgr_active();
+        let mut buf = Vec::with_capacity(n_ticks as usize * 16);
+        for _ in 0..n_ticks {
+            if sgr {
+                buf.extend_from_slice(
+                    format!("\x1b[<{};{};{}M", button_64_or_65, x, y).as_bytes()
+                );
+            } else {
+                buf.extend_from_slice(b"\x1b[M");
+                buf.push(button_64_or_65 + 32);
+                buf.push((x.min(223) as u8) + 32);
+                buf.push((y.min(223) as u8) + 32);
+            }
+        }
+        if let PaneBackend::L3(c) = self {
+            c.forward_inject_input(&buf);
         }
     }
 
@@ -470,6 +503,9 @@ pub struct L3Conn {
     /// L2 apply_scroll_lines short-circuit,L3 mouse forwarding 永远没
     /// 机会触发.
     mouse_tracking_active: bool,
+    /// Mouse SGR encoding(DECSET 1006).L2 mouse-on 时按这个选 SGR
+    /// 字节格式 vs X11 legacy.
+    mouse_sgr_active: bool,
     /// Last shm publish seq we mirrored; lets `poll()` skip a re-fill
     /// when nothing changed (so L2's heartbeat doesn't force a render).
     last_seq: u64,
@@ -533,6 +569,7 @@ impl L3Conn {
             cursor_visible: true,
             app_cursor_keys: false,
             mouse_tracking_active: false,
+            mouse_sgr_active: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -563,6 +600,7 @@ impl L3Conn {
             cursor_visible: true,
             app_cursor_keys: false,
             mouse_tracking_active: false,
+            mouse_sgr_active: false,
             bracketed_paste: false,
             last_seq: 0,
             req_cols: cols,
@@ -704,6 +742,7 @@ impl L3Conn {
         self.app_cursor_keys = snap.flags & FLAG_APP_CURSOR_KEYS != 0;
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
         self.mouse_tracking_active = snap.flags & FLAG_MOUSE_TRACKING != 0;
+        self.mouse_sgr_active = snap.flags & FLAG_MOUSE_SGR != 0;
         self.snap_scrollback_len = snap.scrollback_len;
         // Re-read the seq after the copy: if L3 republished mid-fill,
         // leave it stale so the next poll re-reads rather than missing a
@@ -814,6 +853,10 @@ impl L3Conn {
     /// L3-reported mouse tracking active(from snapshot flags).
     fn mouse_tracking_active(&self) -> bool {
         self.mouse_tracking_active
+    }
+
+    fn mouse_sgr_active(&self) -> bool {
+        self.mouse_sgr_active
     }
 
     /// Cmd-C round-trip: ask L3 for the text under a selection and block
@@ -1139,18 +1182,21 @@ impl Pane {
         if delta == 0 {
             return false;
         }
-        // alt-screen TUI(claudecode)mouse tracking 模式下 bypass:
-        // L3 terminal scrollback_len 一直 0(TUI redraw in-place,从不
-        // 推 \n),如果走 scrollback clamp 永远 new=0=view_offset,直接
-        // return false,L3 收不到 Scroll,我加的 mouse forwarding 永远
-        // 没机会触发.bypass = 直接 forward 当前 view_offset + delta,
-        // L3 收到后看 mouse tracking on,encode 成 mouse event 写 PTY.
-        // 这里 view_offset 用单调累加(不 reset),L3 端 last_l2_view_offset
-        // 跟得上;实际显示 L3 publish 时仍 publish view_offset=0.
+        // alt-screen TUI(claudecode)mouse tracking 模式 — L2 自己
+        // encode wheel 成 SGR mouse event 字节通过 InjectInput 写 PTY.
+        // 不走 view_offset / forward_scroll(view_offset u16 在 0 处会
+        // saturate,wheel-down 滚不到底就是这个 bug;直接 inject 字节
+        // 没这个状态机问题).cols/rows 用 session 当前 grid 尺寸.
         if self.session.is_l3() && self.session.l3_mouse_tracking_active() {
-            let new = self.view_offset.saturating_add_signed(delta as i16);
-            self.view_offset = new;
-            self.session.forward_scroll(new);
+            let (cols, rows) = (self.session.grid().cols(), self.session.grid().rows());
+            let (button, n) = if delta > 0 {
+                (64u8, delta as u32)   // wheel up
+            } else {
+                (65u8, (-delta) as u32) // wheel down
+            };
+            if n > 0 {
+                self.session.l3_inject_wheel(button, n, cols, rows);
+            }
             return true;
         }
         // L3 owns its scrollback; L2 has only the visible-window mirror, so

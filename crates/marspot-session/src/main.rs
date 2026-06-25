@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use marspot_term::{lx_debug, lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::grid_shm::{
     GridShmWriter, ENV_SHM_FD, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
-    FLAG_MOUSE_TRACKING,
+    FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
 };
 use marspot_term::input_core::{MarspotKeyEvent, Modifiers};
 use marspot_term::render::grid_selection_text;
@@ -643,6 +643,9 @@ fn publish(shm: &mut GridShmWriter, session: &SessionImpl, view_offset: u16) -> 
     }
     if term.mouse_tracking_mode() != marspot_term::terminal::MouseTrackingMode::Off {
         flags |= FLAG_MOUSE_TRACKING;
+    }
+    if term.mouse_sgr_encoding() {
+        flags |= FLAG_MOUSE_SGR;
     }
     // Clamp here too: L2 clamps against the scrollback_len it last saw, but
     // scrollback can shrink (alt-screen enter / reset) between L2's request
@@ -1262,10 +1265,6 @@ fn main() {
     // cancel flag; the old worker exits at its next iteration without
     // delivering its batch.
     let mut current_search: Option<SearchWorker> = None;
-    // Mouse-tracking forwarding(0.6.66+):L2 send 的是 absolute target
-    // view_offset,我要 delta(per-iteration wheel ticks).跨 burst loop
-    // 持久,初始 0 跟 L2 启动时一致.每收到 Scroll(off) 后更新.
-    let mut last_l2_view_offset: u16 = 0;
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1288,79 +1287,17 @@ fn main() {
                 SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
                 SessionEvent::Scroll(off) => {
-                    // 关键 fix:当 terminal 在 mouse tracking 模式
-                    // (DECSET 1000/1002/1003),wheel 事件应当转 PTY
-                    // 让 TUI(claudecode 等)自己处理 — TUI 在 alt-
-                    // screen 内 redraw in-place,terminal scrollback
-                    // 永远不会从 TUI 出来,wheel→scrollback 永远滚不动.
-                    use marspot_term::terminal::MouseTrackingMode;
-                    let mtm = session.terminal().mouse_tracking_mode();
-                    if mtm != MouseTrackingMode::Off {
-                        // off = absolute target view_offset(L2 累计的).
-                        // delta = off - last_l2_view_offset = 这次 wheel
-                        // 的 tick 数.之前 bug:用每轮 reset 的 pending_scroll
-                        // 当 prev → prev 永远 0 → delta = absolute,每次
-                        // wheel 转发数翻倍增长.持久化 last_l2_view_offset
-                        // 跨 burst 才能算正确 delta.
-                        let prev = last_l2_view_offset;
-                        last_l2_view_offset = off;
-                        let delta_i = off as i32 - prev as i32;
-                        let (button, count) = if delta_i > 0 {
-                            (64u8, delta_i as u32)  // wheel up
-                        } else if delta_i < 0 {
-                            (65u8, (-delta_i) as u32)
-                        } else {
-                            (0u8, 0u32)
-                        };
-                        if count > 0 {
-                            // SGR:`ESC [ < btn ; x ; y M`(press),wheel
-                            // 不发 release.x/y 是 1-based cell;不知道
-                            // 真实鼠标位置,用 viewport 中心兜底.
-                            let sgr = session.terminal().mouse_sgr_encoding();
-                            let (cols, rows) = (session.terminal().grid().cols() as u32,
-                                                session.terminal().grid().rows() as u32);
-                            let x = cols.max(1) / 2 + 1;
-                            let y = rows.max(1) / 2 + 1;
-                            let mut buf = Vec::with_capacity(count as usize * 16);
-                            for _ in 0..count {
-                                if sgr {
-                                    buf.extend_from_slice(
-                                        format!("\x1b[<{};{};{}M", button, x, y).as_bytes()
-                                    );
-                                } else {
-                                    // X11 legacy: `ESC [ M btn x y` with
-                                    // each byte = value + 32.  Caps at 223.
-                                    buf.extend_from_slice(b"\x1b[M");
-                                    buf.push(button + 32);
-                                    buf.push((x.min(223) as u8) + 32);
-                                    buf.push((y.min(223) as u8) + 32);
-                                }
-                            }
-                            let _ = session.write(&buf);
-                            lx_event!(
-                                "L3_WHEEL_FORWARDED",
-                                "wheel encoded as mouse event + sent to PTY(mouse tracking on)",
-                                session_id = session.id(),
-                                button = button as u32,
-                                count = count,
-                                sgr = sgr
-                            );
-                        }
-                        // Don't pending_scroll — mouse tracking 模式下
-                        // L3 不动 view_offset,TUI 自己渲染.
-                    } else {
-                        lx_event!(
-                            "L3_SCROLL_RECV",
-                            "GridScroll received from L2",
-                            session_id = session.id(),
-                            off = off as u32
-                        );
-                        pending_scroll = Some(off);
-                        // 同步 last_l2_view_offset 跟 L2 的实际 view_offset
-                        // 走 — 用户来回切 alt-screen / main 时,下次进
-                        // mouse tracking 模式 delta 才对得上.
-                        last_l2_view_offset = off;
-                    }
+                    // L2(0.11.42+)mouse tracking on 时直接 encode +
+                    // InjectInput,不再走 Scroll wire.所以这里只剩老
+                    // scrollback path(non-mouse alt-screen 比如 less /
+                    // vim 主屏 history).
+                    lx_event!(
+                        "L3_SCROLL_RECV",
+                        "GridScroll received from L2",
+                        session_id = session.id(),
+                        off = off as u32
+                    );
+                    pending_scroll = Some(off);
                 }
                 // Each request gets its own reply (don't coalesce — L2 is
                 // blocking on a reply per request).
