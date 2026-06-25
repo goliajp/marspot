@@ -387,6 +387,19 @@ impl<'c> TextBuilder<'c> {
         self.ui_size_q = Some(size_q);
         self
     }
+    /// Token-based sizing — sets `.ui()` (SF Pro path) AND `.ui_size_q`
+    /// in one call to the `UiSize`-derived pt.  Caller picks the token
+    /// (Mini / Small / Body / Heading / Title / Display) and per-family
+    /// pt is computed by `UiSize::sf_pro_pt()`.  This is the entry
+    /// point chrome callsites should reach for — no raw pt in the
+    /// canvas chain, no `DEV_PANEL_FONT_SCALE` style hacks.
+    pub fn ui_size(mut self, size: crate::ui::view::UiSize) -> Self {
+        self.font_kind = Some(TextFontKind::Ui);
+        self.ui_size_q = Some(
+            crate::glyph_atlas::GlyphKey::size_q_for(size.sf_pro_pt())
+        );
+        self
+    }
     pub fn draw(self) {
         let TextBuilder { canvas, x, y, content, color, weight, opts, font_kind, ui_size_q } = self;
         let parent = canvas.parent;

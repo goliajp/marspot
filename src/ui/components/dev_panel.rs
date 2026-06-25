@@ -381,7 +381,7 @@ pub fn build_dev_panel_canvas(
         )
         .color(if is_active { tokens::TAB_ACTIVE_FG } else { tokens::TAB_INACTIVE_FG })
         .ui()
-        .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_TAB_LABEL))
+        .ui_size(crate::ui::view::UiSize::Body)
         .weight(if is_active { 600 } else { 500 })
         .opts(crate::font_shape::ShapeOptions::full())
         .draw();
@@ -454,7 +454,7 @@ pub fn build_dev_panel_canvas(
                 )
                 .color(tokens::MENU_HEADER_FG)
                 .ui()
-                .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_MENU_HEADER))
+                .ui_size(crate::ui::view::UiSize::Mini)
                 .weight(600)
                 .opts(crate::font_shape::ShapeOptions::full())
                 .draw();
@@ -476,7 +476,7 @@ pub fn build_dev_panel_canvas(
                 )
                 .color(if is_active { tokens::MENU_ROW_ACTIVE_FG } else { tokens::MENU_ROW_FG })
                 .ui()
-                .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_MENU_ITEM))
+                .ui_size(crate::ui::view::UiSize::Small)
                 .weight(if is_active { 600 } else { 400 })
                 .opts(crate::font_shape::ShapeOptions::full())
                 .draw();
@@ -1209,36 +1209,41 @@ pub fn scroll_id_for_section(active: usize) -> crate::ui::view::ViewId {
 
 mod h {
     use crate::ui::view::{
-        Text, View, Edges, FrameSpec, ToggleState, PickerState,
+        Text, View, Edges, FrameSpec, ToggleState, PickerState, UiSize,
         filled, hstack, vstack, with_host_state_mut,
         ViewId,
     };
-    use crate::ui::theme::{color, radius, text};
+    use crate::ui::theme::{color, radius};
     use crate::ui::core::{Length, Color};
+    use crate::font_shape::ShapeOptions;
+
+    // 全用 SF Pro UiSize 走 chrome 字号系统,跟 menu/tab 同 scale,
+    // 不再混 Monaco mono(view-tree `TextSize` enum 那条路径在 PTY
+    // 文本 still 用,这里 dev panel chrome 内部统一 SF Pro).
 
     pub fn h2(s: &str) -> View {
-        Text::new(s).style(text::LARGE_HEADER).build()
+        Text::new(s).ui_size(UiSize::Heading).ui_weight(700).color(color::FG).build()
     }
     pub fn h3(s: &str) -> View {
-        Text::new(s).style(text::HEADER).build()
+        Text::new(s).ui_size(UiSize::Body).ui_weight(600).color(color::ACCENT_DIM).build()
     }
     pub fn body(s: &str) -> View {
-        Text::new(s).style(text::BODY).build()
+        Text::new(s).ui_size(UiSize::Body).color(color::FG).build()
     }
     pub fn mono(s: &str) -> View {
-        Text::new(s).style(text::CODE).build()
+        Text::new(s).ui_size(UiSize::Body).ui_opts(ShapeOptions::code()).color(color::ACCENT_DIM).build()
     }
     pub fn hint(s: &str) -> View {
-        Text::new(s).style(text::HINT).build()
+        Text::new(s).ui_size(UiSize::Small).color(color::HINT).build()
     }
     pub fn ok(s: &str) -> View {
-        Text::new(s).color(color::SUCCESS).build()
+        Text::new(s).ui_size(UiSize::Body).color(color::SUCCESS).build()
     }
     pub fn todo_v1(s: &str) -> View {
-        Text::new(s).color(color::WARN).build()
+        Text::new(s).ui_size(UiSize::Body).color(color::WARN).build()
     }
     pub fn todo_v2(s: &str) -> View {
-        Text::new(s).style(text::HINT).build()
+        Text::new(s).ui_size(UiSize::Small).color(color::HINT).build()
     }
 
     /// `[✓] label` row.
@@ -2263,78 +2268,68 @@ fn draw_text_sample(canvas: &mut Canvas, x: f64, y: f64) -> f64 {
     y + (entries.len() as f64) * row_h
 }
 
-/// Chrome typography scale — dev-tool compact(VS Code / Xcode 风格,
-/// 信息密度高).统一 type scale + 高度关联字号 + CTLine shape 实测
-/// 字宽 + 4-pt 垂直节奏.详见 mod 内常量 doc.
+/// Chrome typography — pure `UiSize` token wrappers.  No raw pt 常量
+/// (已撤,统一去 [`UiSize`] cap-height 校准 scale).每个 helper 选
+/// 一个 token + weight + 颜色,字号变更走 `UiSize::cap_height_pt` 一处,
+/// 不用 caller 逐个改.
 #[allow(dead_code)]
 mod chrome_text {
-    use crate::ui::view::Text;
+    use crate::ui::view::{Text, UiSize};
     use crate::font_shape::ShapeOptions;
     use crate::ui::theme::color;
 
-    // ──────────────────── type scale ────────────────────
-    //
-    // 5 级语义 scale — 给 content(右侧 build_*_view)用,跟 macOS
-    // HIG body 体系对齐:
-    pub const SIZE_FOOTNOTE:   f64 = 9.0;   // 极小注脚 / metadata
-    pub const SIZE_CAPTION:    f64 = 10.0;  // 次要 label / muted hint
-    pub const SIZE_BODY:       f64 = 11.0;  // 默认正文
-    pub const SIZE_EMPHASIZED: f64 = 12.0;  // 行内强调 / 大 caption
-    pub const SIZE_TITLE:      f64 = 14.0;  // section title
-
-    // Chrome-zone 字号 — menu(左侧)/ tab strip(上方)是导航 chrome,
-    // 不属于 content 阶,字号比 content 再小一档.每个 zone 单独一条
-    // 常量便于精调而不污染语义 scale.
-    pub const SIZE_TAB_LABEL:   f64 = 9.0;   // tab strip(active/inactive 同号,差在 weight)
-    pub const SIZE_MENU_HEADER: f64 = 6.0;   // 左侧 SubGroup 标题(更小 + 600 weight)
-    pub const SIZE_MENU_ITEM:   f64 = 8.0;   // 左侧 Item 行(默认 400,active 600)
-
     // ──────────────────── vertical rhythm ────────────────────
-    pub const VSTACK_GAP:  f64 = 5.0;   // 行间 — 4-pt grid + 1
-    pub const HSTACK_GAP:  f64 = 10.0;  // 列间 — 2.5 × 4-pt
-    pub const SECTION_GAP: f64 = 12.0;  // 段间
-
-    // 高度关联字号:line-height = CTFont(pt).ascent + descent +
-    // leading,自动按 SF Pro 自家 ratio(body ≈ 1.35,header ≈ 1.2).
-    // 无需 caller 算 line_h,layout 走 `ui_line_h_phys_at_size(pt)`.
+    //
+    // 4-pt grid 跟 chrome 的 menu_row_h / tab_bar_h 对齐.改 cap-height
+    // 的同时也建议同比例改这里.
+    pub const VSTACK_GAP:  f64 = 4.0;
+    pub const HSTACK_GAP:  f64 = 8.0;
+    pub const SECTION_GAP: f64 = 10.0;
 
     // ──────────────────── style helpers ────────────────────
+    //
+    // 每个 helper = UiSize token + weight + color.SF Pro 自动校准
+    // 到目标 cap-height,不同 helper 之间的视觉阶差由 UiSize 系统
+    // 保证 monotonic 单增(见 type_scale.rs `scale_is_monotonic`).
+
     #[inline]
-    pub fn footnote(content: &str) -> Text {
-        Text::new(content).ui(SIZE_FOOTNOTE, 400, ShapeOptions::full()).color(color::FG_MUTED)
+    pub fn footnote(s: &str) -> Text {
+        Text::new(s).ui_size(UiSize::Mini).color(color::FG_MUTED)
     }
     #[inline]
-    pub fn caption(content: &str) -> Text {
-        Text::new(content).ui(SIZE_CAPTION, 400, ShapeOptions::full()).color(color::FG_MUTED)
+    pub fn caption(s: &str) -> Text {
+        Text::new(s).ui_size(UiSize::Small).color(color::FG_MUTED)
     }
     #[inline]
-    pub fn body(content: &str) -> Text {
-        Text::new(content).ui(SIZE_BODY, 400, ShapeOptions::full()).color(color::FG)
+    pub fn body(s: &str) -> Text {
+        Text::new(s).ui_size(UiSize::Body).color(color::FG)
     }
     #[inline]
-    pub fn body_bold(content: &str) -> Text {
-        Text::new(content).ui(SIZE_BODY, 600, ShapeOptions::full()).color(color::FG)
+    pub fn body_bold(s: &str) -> Text {
+        Text::new(s).ui_size(UiSize::Body).ui_weight(600).color(color::FG)
     }
     #[inline]
-    pub fn emphasized(content: &str) -> Text {
-        Text::new(content).ui(SIZE_EMPHASIZED, 500, ShapeOptions::full()).color(color::FG)
+    pub fn emphasized(s: &str) -> Text {
+        Text::new(s).ui_size(UiSize::Body).ui_weight(500).color(color::FG)
     }
     #[inline]
-    pub fn title(content: &str) -> Text {
-        Text::new(content).ui(SIZE_TITLE, 600, ShapeOptions::full()).color(color::FG)
+    pub fn title(s: &str) -> Text {
+        Text::new(s).ui_size(UiSize::Heading).ui_weight(600).color(color::FG)
     }
-    /// Backwards-compat alias for `title`.
+    /// Alias for `title` — kept for callers reading "header" intent.
     #[inline]
-    pub fn header(content: &str) -> Text { title(content) }
-    /// Backwards-compat alias for `caption`.
+    pub fn header(s: &str) -> Text { title(s) }
+    /// Alias for `caption` — muted "hint" intent.
     #[inline]
-    pub fn hint(content: &str) -> Text { caption(content) }
-    /// "Code" style — SF Pro 不是真 mono,但 `ShapeOptions::code()`
-    /// (kerning off)+ body size 读起来近似等宽.真代码块走 PTY
-    /// Monaco 直 emit 不经 chrome.
+    pub fn hint(s: &str) -> Text { caption(s) }
+    /// Code-look style: SF Pro Body + `ShapeOptions::code()` (kerning
+    /// off, ligatures off) — 读起来近似 mono,但跟同 UiSize 的其它
+    /// chrome 共享 cap-height,不会出现 mono vs proportional 视觉跳.
     #[inline]
-    pub fn code(content: &str) -> Text {
-        Text::new(content).ui(SIZE_BODY, 400, ShapeOptions::code()).color(color::FG)
+    pub fn code(s: &str) -> Text {
+        Text::new(s)
+            .ui(UiSize::Body.sf_pro_pt(), 400, ShapeOptions::code())
+            .color(color::FG)
     }
 }
 
@@ -2345,18 +2340,17 @@ mod chrome_text {
 /// section catalogues them visually so a designer can scan the size
 /// hierarchy at-a-glance plus pin the named styles in muscle memory.
 fn build_typography_view() -> crate::ui::view::View {
-    use crate::ui::view::{vstack, hstack, Text};
+    use crate::ui::view::{vstack, hstack, Text, UiSize};
     use crate::ui::core::Length;
     use crate::ui::theme::color;
     use crate::font_shape::ShapeOptions;
 
-    // Size scale row:left caption + right SF Pro sample at a given
-    // pt.高度关联字号 — line-height 由 CTFont 实测,字宽由 CTLine
-    // shape 实测.
-    let size_row = |name: &'static str, pt: f64, sample: &'static str| {
+    // Size scale row:left caption + right SF Pro sample at this token.
+    // Cap-height 跨字号 monotonic 单增是 UiSize 系统的契约.
+    let size_row = |name: &'static str, size: UiSize, sample: &'static str| {
         hstack(vec![
             chrome_text::caption(name).build(),
-            Text::new(sample).ui(pt, 400, ShapeOptions::full()).color(color::FG).build(),
+            Text::new(sample).ui_size(size).color(color::FG).build(),
         ])
         .hstack_gap(Length::Pt(chrome_text::HSTACK_GAP))
         .align_cross_end()
@@ -2365,45 +2359,46 @@ fn build_typography_view() -> crate::ui::view::View {
     let weight_row = |name: &'static str, weight: u16, sample: &'static str| {
         hstack(vec![
             chrome_text::caption(name).build(),
-            Text::new(sample).ui(chrome_text::SIZE_BODY, weight, ShapeOptions::full()).color(color::FG).build(),
+            Text::new(sample).ui_size(UiSize::Body).ui_weight(weight).color(color::FG).build(),
         ])
         .hstack_gap(Length::Pt(chrome_text::HSTACK_GAP))
         .align_cross_end()
     };
 
-    let token_row = |name: &'static str, pt: f64, weight: u16, color_c: crate::ui::core::Color, opts: ShapeOptions, sample: &'static str| {
+    let token_row = |name: &'static str, size: UiSize, weight: u16, color_c: crate::ui::core::Color, opts: ShapeOptions, sample: &'static str| {
         hstack(vec![
             chrome_text::caption(name).build(),
-            Text::new(sample).ui(pt, weight, opts).color(color_c).build(),
+            Text::new(sample).ui_size(size).ui_weight(weight).ui_opts(opts).color(color_c).build(),
         ])
         .hstack_gap(Length::Pt(chrome_text::HSTACK_GAP))
         .align_cross_end()
     };
 
     vstack(vec![
-        chrome_text::title("Size scale").build(),
-        size_row("Footnote  ",   chrome_text::SIZE_FOOTNOTE,   "The quick brown fox jumps"),
-        size_row("Caption   ",   chrome_text::SIZE_CAPTION,    "The quick brown fox jumps"),
-        size_row("Body      ",   chrome_text::SIZE_BODY,       "The quick brown fox jumps"),
-        size_row("Emphasized",   chrome_text::SIZE_EMPHASIZED, "The quick brown fox jumps"),
-        size_row("Title     ",   chrome_text::SIZE_TITLE,      "The quick brown fox jumps"),
+        chrome_text::title("Size scale (UiSize tokens)").build(),
+        size_row("Mini    ",  UiSize::Mini,    "The quick brown fox jumps"),
+        size_row("Small   ",  UiSize::Small,   "The quick brown fox jumps"),
+        size_row("Body    ",  UiSize::Body,    "The quick brown fox jumps"),
+        size_row("Heading ",  UiSize::Heading, "The quick brown fox jumps"),
+        size_row("Title   ",  UiSize::Title,   "The quick brown fox jumps"),
+        size_row("Display ",  UiSize::Display, "The quick brown fox jumps"),
 
-        chrome_text::title("Weight").build(),
+        chrome_text::title("Weight (Body size, CSS axis 100..900)").build(),
         weight_row("100 ", 100, "The quick brown fox jumps"),
         weight_row("400 ", 400, "The quick brown fox jumps"),
         weight_row("500 ", 500, "The quick brown fox jumps"),
         weight_row("600 ", 600, "The quick brown fox jumps"),
         weight_row("700 ", 700, "The quick brown fox jumps"),
 
-        chrome_text::title("Style tokens").build(),
-        token_row("FOOTNOTE  ", chrome_text::SIZE_FOOTNOTE,   400, color::FG_MUTED, ShapeOptions::full(), "Footnote sample"),
-        token_row("CAPTION   ", chrome_text::SIZE_CAPTION,    400, color::FG_MUTED, ShapeOptions::full(), "Caption sample"),
-        token_row("BODY      ", chrome_text::SIZE_BODY,       400, color::FG,       ShapeOptions::full(), "Body sample"),
-        token_row("EMPHASIZED", chrome_text::SIZE_EMPHASIZED, 500, color::FG,       ShapeOptions::full(), "Emphasized sample"),
-        token_row("TITLE     ", chrome_text::SIZE_TITLE,      600, color::FG,       ShapeOptions::full(), "Title sample"),
-        token_row("CODE      ", chrome_text::SIZE_BODY,       400, color::FG,       ShapeOptions::code(), "fn quick_fox()"),
-        token_row("LINK      ", chrome_text::SIZE_BODY,       400, color::FG_LINK,  ShapeOptions::full(), "https://marspot.com"),
-        token_row("ERROR     ", chrome_text::SIZE_BODY,       400, color::DANGER,   ShapeOptions::full(), "Sample error"),
+        chrome_text::title("Named chrome tokens").build(),
+        token_row("FOOTNOTE  ", UiSize::Mini,    400, color::FG_MUTED, ShapeOptions::full(), "Footnote sample"),
+        token_row("CAPTION   ", UiSize::Small,   400, color::FG_MUTED, ShapeOptions::full(), "Caption sample"),
+        token_row("BODY      ", UiSize::Body,    400, color::FG,       ShapeOptions::full(), "Body sample"),
+        token_row("EMPHASIZED", UiSize::Body,    500, color::FG,       ShapeOptions::full(), "Emphasized sample"),
+        token_row("TITLE     ", UiSize::Heading, 600, color::FG,       ShapeOptions::full(), "Title sample"),
+        token_row("CODE      ", UiSize::Body,    400, color::FG,       ShapeOptions::code(), "fn quick_fox()"),
+        token_row("LINK      ", UiSize::Body,    400, color::FG_LINK,  ShapeOptions::full(), "https://marspot.com"),
+        token_row("ERROR     ", UiSize::Body,    400, color::DANGER,   ShapeOptions::full(), "Sample error"),
     ])
     .vstack_gap(Length::Pt(chrome_text::VSTACK_GAP))
 }

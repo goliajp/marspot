@@ -11,6 +11,7 @@
 //! Layout algorithm + hit-test land in subsequent commits.
 
 pub mod types;
+pub mod type_scale;
 pub mod view;
 pub mod scroll;
 pub mod state;
@@ -26,6 +27,7 @@ pub use types::{
 pub use view::{
     TextFontSpec, pack_shape_opts, unpack_shape_opts,
 };
+pub use type_scale::UiSize;
 pub use view::{
     View, Modifier, Text, TextSize, TextWeight, TextStyle, TextAlign,
     TextLines, Truncate, ClipShape, AspectMode,

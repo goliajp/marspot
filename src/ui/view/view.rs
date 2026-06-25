@@ -843,6 +843,44 @@ impl Text {
         self
     }
 
+    /// Token-based sizing: `Text::new("…").ui_size(UiSize::Body)`.
+    /// Picks the SF Pro path and the pt that matches the token's
+    /// target cap-height — caller never writes raw pt, so
+    /// adjusting the whole scale = edit `UiSize::cap_height_pt`.
+    /// Defaults weight 400 + `ShapeOptions::full()`;  chain
+    /// `.ui_weight(600)` etc. after to override.
+    pub fn ui_size(mut self, size: super::type_scale::UiSize) -> Self {
+        self.font = TextFontSpec::Ui {
+            size_q: crate::glyph_atlas::GlyphKey::size_q_for(size.sf_pro_pt()),
+            weight: 400,
+            opts_bits: pack_shape_opts(crate::font_shape::ShapeOptions::full()),
+        };
+        self
+    }
+
+    /// Override the CSS variable-weight on a SF Pro run set via
+    /// `.ui_size(...)` / `.ui(...)`.  CSS weight axis 100..900
+    /// (400 = Regular, 600 = Semibold, 700 = Bold).  No-op when
+    /// the run is on Mono path (use `.weight(TextWeight::…)` for
+    /// Mono / theme-token paths).
+    pub fn ui_weight(mut self, css_weight: u16) -> Self {
+        if let TextFontSpec::Ui { weight, .. } = &mut self.font {
+            *weight = css_weight;
+        }
+        self
+    }
+
+    /// Override the OpenType `ShapeOptions` (kerning / liga / calt) on
+    /// a SF Pro run.  Useful for code-look (`ShapeOptions::code()`)
+    /// while keeping the same `UiSize` cap-height as the rest of the
+    /// chrome.  No-op on Mono.
+    pub fn ui_opts(mut self, opts: crate::font_shape::ShapeOptions) -> Self {
+        if let TextFontSpec::Ui { opts_bits, .. } = &mut self.font {
+            *opts_bits = pack_shape_opts(opts);
+        }
+        self
+    }
+
     /// Apply a `TextStyle` preset — sets size + weight + color in
     /// one go.  Subsequent `.color()` / `.size()` calls override.
     /// `.style()` does NOT change `font`; the caller chains `.ui(...)`
