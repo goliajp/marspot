@@ -378,7 +378,7 @@ pub fn build_dev_panel_canvas(
         )
         .color(if is_active { tokens::TAB_ACTIVE_FG } else { tokens::TAB_INACTIVE_FG })
         .ui()
-        .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_EMPHASIZED))
+        .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_TAB_LABEL))
         .weight(if is_active { 600 } else { 500 })
         .opts(crate::font_shape::ShapeOptions::full())
         .draw();
@@ -451,7 +451,7 @@ pub fn build_dev_panel_canvas(
                 )
                 .color(tokens::MENU_HEADER_FG)
                 .ui()
-                .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_FOOTNOTE))
+                .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_MENU_HEADER))
                 .weight(600)
                 .opts(crate::font_shape::ShapeOptions::full())
                 .draw();
@@ -473,7 +473,7 @@ pub fn build_dev_panel_canvas(
                 )
                 .color(if is_active { tokens::MENU_ROW_ACTIVE_FG } else { tokens::MENU_ROW_FG })
                 .ui()
-                .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_BODY))
+                .ui_size_q(crate::glyph_atlas::GlyphKey::size_q_for(chrome_text::SIZE_MENU_ITEM))
                 .weight(if is_active { 600 } else { 400 })
                 .opts(crate::font_shape::ShapeOptions::full())
                 .draw();
@@ -2271,13 +2271,20 @@ mod chrome_text {
 
     // ──────────────────── type scale ────────────────────
     //
-    // 5 级紧凑 scale,跟 VS Code Devtools / Xcode Inspector 体系对齐
-    // (比 macOS HIG body 体系再小一档):
-    pub const SIZE_FOOTNOTE:   f64 = 8.0;   // 极小注脚 / metadata
-    pub const SIZE_CAPTION:    f64 = 9.0;   // 次要 label / muted hint
-    pub const SIZE_BODY:       f64 = 10.0;  // 默认正文
-    pub const SIZE_EMPHASIZED: f64 = 11.0;  // 行内强调 / 大 caption
-    pub const SIZE_TITLE:      f64 = 13.0;  // section title / panel title
+    // 5 级语义 scale — 给 content(右侧 build_*_view)用,跟 macOS
+    // HIG body 体系对齐:
+    pub const SIZE_FOOTNOTE:   f64 = 9.0;   // 极小注脚 / metadata
+    pub const SIZE_CAPTION:    f64 = 10.0;  // 次要 label / muted hint
+    pub const SIZE_BODY:       f64 = 11.0;  // 默认正文
+    pub const SIZE_EMPHASIZED: f64 = 12.0;  // 行内强调 / 大 caption
+    pub const SIZE_TITLE:      f64 = 14.0;  // section title
+
+    // Chrome-zone 字号 — menu(左侧)/ tab strip(上方)是导航 chrome,
+    // 不属于 content 阶,字号比 content 再小一档.每个 zone 单独一条
+    // 常量便于精调而不污染语义 scale.
+    pub const SIZE_TAB_LABEL:   f64 = 11.0;  // tab strip(active/inactive 同号,差在 weight)
+    pub const SIZE_MENU_HEADER: f64 = 8.0;   // 左侧 SubGroup 标题(更小 + 600 weight)
+    pub const SIZE_MENU_ITEM:   f64 = 10.0;  // 左侧 Item 行(默认 400,active 600)
 
     // ──────────────────── vertical rhythm ────────────────────
     pub const VSTACK_GAP:  f64 = 5.0;   // 行间 — 4-pt grid + 1
