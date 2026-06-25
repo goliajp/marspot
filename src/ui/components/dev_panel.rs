@@ -35,13 +35,18 @@ use crate::ui::core::{Canvas, Color, Length, ParentRect, Pt};
 // ─── Shared layout constants ──────────────────────────────────
 // Both `build_dev_panel_canvas` and `hit_test` reference these,
 // so click hit-boxes line up with painted rects to the pixel.
-pub const TAB_BAR_H_PT: f64 = 36.0;
-pub const MENU_W_PT: f64 = 170.0;
-pub const TAB_PAD_X_PT: f64 = 16.0;
-pub const TAB_TEXT_Y_PT: f64 = 11.0;
-pub const MENU_ROW_H_PT: f64 = 28.0;
-pub const MENU_TEXT_PAD_X_PT: f64 = 14.0;
-pub const MENU_TOP_PAD_PT: f64 = 8.0;
+pub const TAB_BAR_H_PT: f64 = 28.0;
+pub const MENU_W_PT: f64 = 150.0;
+pub const TAB_PAD_X_PT: f64 = 10.0;
+pub const TAB_TEXT_Y_PT: f64 = 7.0;
+/// 每个 tab 一律同宽,免去用 Monaco mono cell pitch 估 SF Pro 比例
+/// 字体宽度的错位 bug(窄窗口下 tab BG 会比 text 还窄,绘出
+/// "Font Render Sessions" 挤一起的视觉).84pt 装得下最长 label
+/// "Sessions"(SF Pro 10pt 约 54pt)+ TAB_PAD_X_PT * 2 = 20pt 富余.
+pub const TAB_W_PT: f64 = 84.0;
+pub const MENU_ROW_H_PT: f64 = 22.0;
+pub const MENU_TEXT_PAD_X_PT: f64 = 12.0;
+pub const MENU_TOP_PAD_PT: f64 = 6.0;
 pub const CONTENT_X_PAD_PT: f64 = 20.0;
 pub const SECTION_GAP_PT: f64 = 24.0;
 /// Sub-item indent (rendered with "  " prefix in label).
@@ -67,14 +72,13 @@ pub fn hit_test(
 ) -> Option<DevPanelHit> {
     // Tab strip — full width, 0..TAB_BAR_H_PT vertically.
     if y_pt < TAB_BAR_H_PT && y_pt >= 0.0 {
+        let _ = chrome_cell_w_pt;  // tab 同宽,不再用 cell pitch 估
         let mut tab_x: f64 = 0.0;
-        for (label, id) in TAB_LABELS.iter() {
-            let text_w = label.chars().count() as f64 * chrome_cell_w_pt;
-            let tab_w = text_w + TAB_PAD_X_PT * 2.0;
-            if x_pt >= tab_x && x_pt < tab_x + tab_w {
+        for (_label, id) in TAB_LABELS.iter() {
+            if x_pt >= tab_x && x_pt < tab_x + TAB_W_PT {
                 return Some(DevPanelHit::Tab(*id));
             }
-            tab_x += tab_w;
+            tab_x += TAB_W_PT;
         }
         return None;
     }
@@ -355,8 +359,7 @@ pub fn build_dev_panel_canvas(
 
     let mut tab_x: f64 = 0.0;
     for (label, id) in TAB_LABELS.iter() {
-        let text_w = label.chars().count() as f64 * cell_w_pt;
-        let tab_w = text_w + tab_pad_x * 2.0;
+        let tab_w = TAB_W_PT;
         let is_active = *id == state.active_tab;
         if is_active {
             // Slight lift via different BG + bottom accent stroke.
@@ -2282,9 +2285,9 @@ mod chrome_text {
     // Chrome-zone 字号 — menu(左侧)/ tab strip(上方)是导航 chrome,
     // 不属于 content 阶,字号比 content 再小一档.每个 zone 单独一条
     // 常量便于精调而不污染语义 scale.
-    pub const SIZE_TAB_LABEL:   f64 = 11.0;  // tab strip(active/inactive 同号,差在 weight)
-    pub const SIZE_MENU_HEADER: f64 = 8.0;   // 左侧 SubGroup 标题(更小 + 600 weight)
-    pub const SIZE_MENU_ITEM:   f64 = 10.0;  // 左侧 Item 行(默认 400,active 600)
+    pub const SIZE_TAB_LABEL:   f64 = 10.0;  // tab strip(active/inactive 同号,差在 weight)
+    pub const SIZE_MENU_HEADER: f64 = 7.0;   // 左侧 SubGroup 标题(更小 + 600 weight)
+    pub const SIZE_MENU_ITEM:   f64 = 9.0;   // 左侧 Item 行(默认 400,active 600)
 
     // ──────────────────── vertical rhythm ────────────────────
     pub const VSTACK_GAP:  f64 = 5.0;   // 行间 — 4-pt grid + 1
@@ -2854,13 +2857,11 @@ mod tests {
     fn hit_test_lands_on_tab_strip() {
         let s = DevPanelState::default();
         // y inside the tab strip; x at left edge → first tab "UI".
-        // chrome_cell_w_pt=8 matches the test renderer dim.
+        // Uniform tab width = TAB_W_PT; chrome_cell_w_pt 不再用.
         let h = hit_test(&s, 8.0, 5.0, 10.0).expect("expected hit");
         assert_eq!(h, DevPanelHit::Tab(TAB_UI));
-        // Click further right — past UI tab → Font(2nd tab post-rename).
-        // UI label width: 2 chars * 8 + TAB_PAD_X*2 = 16 + 32 = 48,
-        // so Font starts at x=48.  Click at x=60 lands on Font.
-        let h2 = hit_test(&s, 8.0, 60.0, 10.0).expect("expected hit");
+        // 2nd tab "Font" starts at TAB_W_PT,所以 x=TAB_W_PT+10 命中 Font.
+        let h2 = hit_test(&s, 8.0, TAB_W_PT + 10.0, 10.0).expect("expected hit");
         assert_eq!(h2, DevPanelHit::Tab(TAB_FONT));
     }
 
