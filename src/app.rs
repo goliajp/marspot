@@ -47,7 +47,7 @@ use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSApplicationTerminateReply, NSBackingStoreType, NSColor, NSEvent,
-    NSEventModifierFlags, NSTextInputClient, NSTitlebarSeparatorStyle, NSView, NSWindow,
+    NSEventModifierFlags, NSImage, NSTextInputClient, NSTitlebarSeparatorStyle, NSView, NSWindow,
     NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
@@ -1037,6 +1037,38 @@ fn post_dummy_event(nsapp: &NSApplication) {
     }
 }
 
+/// Read `Resources/AppIcon.icns` off our bundle and force the Dock /
+/// app-switcher to redraw with it.  macOS otherwise caches the icon
+/// at first-launch and won't pick up post-install changes until cold
+/// re-launch — for marspot's silent-update + self-execv design that
+/// means the user sees stale icons after every brand refresh.  Reading
+/// the .icns from disk every startup is cheap (~74 KB) and the install
+/// path keeps it in lockstep with the codebase.
+fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
+    use objc2::rc::Retained;
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    // Resolve to bundle root: <bundle>/Contents/MacOS/marspot-shell.
+    // Walk up two levels;  fail silent when the binary lives outside a
+    // .app (cargo run / dev shell) — Dock icon doesn't matter there.
+    let macos_dir = match exe.parent() { Some(p) => p, None => return };
+    let contents = match macos_dir.parent() { Some(p) => p, None => return };
+    let icon_path = contents.join("Resources").join("AppIcon.icns");
+    if !icon_path.exists() {
+        return;
+    }
+    let path_str = match icon_path.to_str() { Some(s) => s, None => return };
+    let ns_path = NSString::from_str(path_str);
+    let img: Option<Retained<NSImage>> = unsafe {
+        NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_path)
+    };
+    if let Some(img) = img {
+        unsafe { nsapp.setApplicationIconImage(Some(&img)) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // run_app
 // ---------------------------------------------------------------------------
@@ -1048,6 +1080,14 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         .expect("run_app must be called on the main thread");
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Force-refresh the Dock icon from the bundle's `Resources/AppIcon
+    // .icns`.  Without this, a running marspot session shows whichever
+    // icon was cached at first launch — even after `bin/install-local
+    // .sh` lands a new .icns, the live Dock still draws the old one
+    // until next cold launch.  Reading from disk each startup is cheap
+    // (~74 KB) and self-update keeps the icon in lockstep with the
+    // codebase.
+    set_dock_icon_from_bundle(&nsapp);
 
     // 1. Create custom NSView (origin top-left) sized to logical attrs.
     let frame = NSRect::new(
