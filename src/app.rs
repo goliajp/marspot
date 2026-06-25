@@ -1046,19 +1046,32 @@ fn post_dummy_event(nsapp: &NSApplication) {
 /// path keeps it in lockstep with the codebase.
 fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
     use objc2::rc::Retained;
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    // Resolve to bundle root: <bundle>/Contents/MacOS/marspot-shell.
-    // Walk up two levels;  fail silent when the binary lives outside a
-    // .app (cargo run / dev shell) — Dock icon doesn't matter there.
-    let macos_dir = match exe.parent() { Some(p) => p, None => return };
-    let contents = match macos_dir.parent() { Some(p) => p, None => return };
-    let icon_path = contents.join("Resources").join("AppIcon.icns");
-    if !icon_path.exists() {
-        return;
+    use std::path::PathBuf;
+    // Try multiple candidate paths.  First-launch we run as
+    // `<bundle>/Contents/MacOS/marspot-shell` and 2 parents up resolves
+    // to `<bundle>/Contents/`.  After L1 self-execv we run as
+    // `~/Library/Caches/marspot/binaries/current/marspot-shell` and
+    // that walk leads to `~/Library/Caches/marspot/binaries/` — no
+    // Resources there;  fall through to the known install path so
+    // post-execv L1 still updates the Dock.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents) = macos_dir.parent() {
+                candidates.push(contents.join("Resources").join("AppIcon.icns"));
+            }
+        }
     }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join(".local/Marspot.app/Contents/Resources/AppIcon.icns"),
+        );
+    }
+    let icon_path = match candidates.into_iter().find(|p| p.exists()) {
+        Some(p) => p,
+        None => return,
+    };
     let path_str = match icon_path.to_str() { Some(s) => s, None => return };
     let ns_path = NSString::from_str(path_str);
     let img: Option<Retained<NSImage>> = unsafe {
