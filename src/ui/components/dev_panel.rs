@@ -35,18 +35,18 @@ use crate::ui::core::{Canvas, Color, Length, ParentRect, Pt};
 // ─── Shared layout constants ──────────────────────────────────
 // Both `build_dev_panel_canvas` and `hit_test` reference these,
 // so click hit-boxes line up with painted rects to the pixel.
-pub const TAB_BAR_H_PT: f64 = 28.0;
-pub const MENU_W_PT: f64 = 150.0;
-pub const TAB_PAD_X_PT: f64 = 10.0;
-pub const TAB_TEXT_Y_PT: f64 = 7.0;
+pub const TAB_BAR_H_PT: f64 = 24.0;
+pub const MENU_W_PT: f64 = 140.0;
+pub const TAB_PAD_X_PT: f64 = 8.0;
+pub const TAB_TEXT_Y_PT: f64 = 5.0;
 /// 每个 tab 一律同宽,免去用 Monaco mono cell pitch 估 SF Pro 比例
 /// 字体宽度的错位 bug(窄窗口下 tab BG 会比 text 还窄,绘出
-/// "Font Render Sessions" 挤一起的视觉).84pt 装得下最长 label
-/// "Sessions"(SF Pro 10pt 约 54pt)+ TAB_PAD_X_PT * 2 = 20pt 富余.
-pub const TAB_W_PT: f64 = 84.0;
-pub const MENU_ROW_H_PT: f64 = 22.0;
-pub const MENU_TEXT_PAD_X_PT: f64 = 12.0;
-pub const MENU_TOP_PAD_PT: f64 = 6.0;
+/// "Font Render Sessions" 挤一起的视觉).72pt 装得下最长 label
+/// "Sessions"(SF Pro 9pt 约 48pt)+ TAB_PAD_X_PT * 2 = 16pt 富余.
+pub const TAB_W_PT: f64 = 72.0;
+pub const MENU_ROW_H_PT: f64 = 18.0;
+pub const MENU_TEXT_PAD_X_PT: f64 = 10.0;
+pub const MENU_TOP_PAD_PT: f64 = 4.0;
 pub const CONTENT_X_PAD_PT: f64 = 20.0;
 pub const SECTION_GAP_PT: f64 = 24.0;
 /// Sub-item indent (rendered with "  " prefix in label).
@@ -2285,9 +2285,9 @@ mod chrome_text {
     // Chrome-zone 字号 — menu(左侧)/ tab strip(上方)是导航 chrome,
     // 不属于 content 阶,字号比 content 再小一档.每个 zone 单独一条
     // 常量便于精调而不污染语义 scale.
-    pub const SIZE_TAB_LABEL:   f64 = 10.0;  // tab strip(active/inactive 同号,差在 weight)
-    pub const SIZE_MENU_HEADER: f64 = 7.0;   // 左侧 SubGroup 标题(更小 + 600 weight)
-    pub const SIZE_MENU_ITEM:   f64 = 9.0;   // 左侧 Item 行(默认 400,active 600)
+    pub const SIZE_TAB_LABEL:   f64 = 9.0;   // tab strip(active/inactive 同号,差在 weight)
+    pub const SIZE_MENU_HEADER: f64 = 6.0;   // 左侧 SubGroup 标题(更小 + 600 weight)
+    pub const SIZE_MENU_ITEM:   f64 = 8.0;   // 左侧 Item 行(默认 400,active 600)
 
     // ──────────────────── vertical rhythm ────────────────────
     pub const VSTACK_GAP:  f64 = 5.0;   // 行间 — 4-pt grid + 1
