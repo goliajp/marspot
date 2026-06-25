@@ -275,7 +275,7 @@ impl DevWindow {
                 defer: false
             ]
         };
-        nswindow.setTitle(&NSString::from_str("UI Dev Panel"));
+        nswindow.setTitle(&NSString::from_str("DevPanel"));
         // BG matches the panel's own BG so the title bar reads as
         // one continuous surface with the content beneath it.
         unsafe {
@@ -481,17 +481,22 @@ impl DevWindow {
         // (Model / Tokens / Components etc.) lays out the same way
         // it always did.  The Font v5 showcase opts INTO SF Pro per
         // text run via `TextBuilder::ui()`, scoped to that section.
-        // ui_font=true 让 dev panel chrome 默认走 SF Pro shape 路径
-        // (proportional + variable weight 全开).Foundation / Tokens /
-        // Primitives / Components / Sessions Architecture 等 view-tree
-        // 内容直接读 `TextFontSpec::Ui` 渲染.少数 legacy `draw_*_sample`
-        // 仍是 Monaco mono 直 emit,view-tree path 改用 SF Pro 不影响.
+        // ui_font=false:dev panel 主体走 Monaco mono(layout 跟
+        // emission 都按 mono cell pitch 算,不会 overflow).曾经
+        // 0.6.47 试过 ui_font=true 让 chrome 用 SF Pro,但
+        // view-tree default `TextFontSpec::Mono` 的 layout 用
+        // cell_w 测,paint 经 canvas TextPrim 在 ui_font=true 下
+        // 默认 emit SF Pro,layout 跟 emission 字宽错位 → overlap
+        // (user screenshot 2026-06-25 验证).真要 chrome 全 SF Pro
+        // 得 view-tree default font 改 Ui + 所有 callsite 改写,
+        // 留下轮.Font v5 showcase 段仍通过 `.ui()` 显式走 SF Pro,
+        // 不受这条影响.
         self.renderer.render_canvas_into_layer(
             &canvas,
             width_phys as f32,
             height_phys as f32,
             chrome_cell_w, chrome_cell_h, chrome_ascent,
-            true,
+            false,
         );
     }
 
