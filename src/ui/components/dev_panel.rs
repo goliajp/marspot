@@ -441,53 +441,99 @@ pub fn build_dev_panel_canvas(
         .find(|(tab, _)| *tab == state.active_tab)
         .map(|(_, r)| *r)
         .unwrap_or(&[]);
-    for (i, row) in active_tab_rows.iter().enumerate() {
-        let row_y = body_y + MENU_TOP_PAD_PT + (i as f64) * menu_row_h;
-        match row {
-            MenuRow::Header(label) => {
-                // Headers sit at row_y with a slight top pad so they
-                // separate visually from the Item row above; no BG.
-                canvas.text(
-                    Length::Pt(menu_text_pad_x - 4.0),
-                    Length::Pt(row_y + 6.0),
-                    *label,
-                )
-                .color(tokens::MENU_HEADER_FG)
-                .ui()
-                .ui_size(crate::ui::view::UiSize::Mini)
-                .weight(600)
-                .opts(crate::font_shape::ShapeOptions::full())
-                .draw();
-            }
-            MenuRow::Item(label, id) => {
-                let is_active = *id == state.active_section;
-                // Active BG vertically centered on the row slot, height
-                // tight to text(SF Pro Small cap-height ~4.5pt +
-                // ~4pt top/bot padding ≈ 12pt).不再撑满整行,跟 text
-                // 视觉对齐由 BG 收窄实现.
-                let bg_h = menu_row_h - 6.0;
-                let bg_y = row_y + (menu_row_h - bg_h) / 2.0;
-                if is_active {
-                    canvas.rect()
-                        .at(Length::Pt(6.0), Length::Pt(bg_y))
-                        .size(Length::Pt(menu_w - 12.0), Length::Pt(bg_h))
-                        .fill(tokens::MENU_ROW_ACTIVE_BG)
-                        .radius(Pt(4.0))
-                        .draw();
+    // ─── Menu rows — View tree, vertically centered by Frame ───
+    // 每行一个 View:Frame(固定 row_h + Anchor::Leading 让 Text 垂直
+    // 居中)+ paddingX(Text 跟 BG 左右留 padding)+ active 加 BG.
+    // 之前手算 row_y + 6 + ad-hoc BG offset 已撤,view-tree layout
+    // pass 自带几何对齐.
+    {
+        use crate::ui::view::{
+            Text, UiSize, FrameSpec, Edges, LayoutCtx, Constraints,
+            layout_view, paint_into, vstack,
+        };
+        use crate::ui::core::{Length as L, Color};
+        use crate::ui::view::types::Anchor;
+        use crate::ui::theme::radius;
+
+        let header_pad_x = L::Pt(menu_text_pad_x - 4.0);
+        let item_inner_pad_x = L::Pt(menu_text_pad_x - 6.0);
+        let item_outer_pad_x = L::Pt(6.0);
+
+        let rows_view: Vec<crate::ui::view::View> = active_tab_rows
+            .iter()
+            .map(|row| match row {
+                MenuRow::Header(label) => {
+                    Text::new(*label)
+                        .ui_size(UiSize::Mini)
+                        .ui_weight(600)
+                        .color(tokens::MENU_HEADER_FG)
+                        .build()
+                        .padding(Edges::xy(header_pad_x, L::Pt(0.0)))
+                        .frame(FrameSpec {
+                            width: Some(L::Pct(1.0)),
+                            height: Some(L::Pt(menu_row_h)),
+                            align: Anchor::Leading,
+                            ..Default::default()
+                        })
                 }
-                canvas.text(
-                    Length::Pt(menu_text_pad_x),
-                    Length::Pt(row_y + 6.0),
-                    *label,
-                )
-                .color(if is_active { tokens::MENU_ROW_ACTIVE_FG } else { tokens::MENU_ROW_FG })
-                .ui()
-                .ui_size(crate::ui::view::UiSize::Small)
-                .weight(if is_active { 600 } else { 400 })
-                .opts(crate::font_shape::ShapeOptions::full())
-                .draw();
-            }
-        }
+                MenuRow::Item(label, id) => {
+                    let is_active = *id == state.active_section;
+                    let fg = if is_active {
+                        tokens::MENU_ROW_ACTIVE_FG
+                    } else {
+                        tokens::MENU_ROW_FG
+                    };
+                    let weight = if is_active { 600 } else { 400 };
+                    let bg = if is_active {
+                        tokens::MENU_ROW_ACTIVE_BG
+                    } else {
+                        Color::TRANSPARENT
+                    };
+                    // Text + 内 padding + BG(active 上色,非 active 透明)
+                    // + corner_radius,再用外层 paddingX 留 BG 跟 menu
+                    // 边缘的间距,最外层 Frame 固定 row_h + 垂直居中.
+                    Text::new(*label)
+                        .ui_size(UiSize::Small)
+                        .ui_weight(weight)
+                        .color(fg)
+                        .build()
+                        .padding(Edges::xy(item_inner_pad_x, L::Pt(2.0)))
+                        .background(bg)
+                        .corner_radius(radius::SM)
+                        .padding(Edges::xy(item_outer_pad_x, L::Pt(0.0)))
+                        .frame(FrameSpec {
+                            width: Some(L::Pct(1.0)),
+                            height: Some(L::Pt(menu_row_h)),
+                            align: Anchor::Leading,
+                            ..Default::default()
+                        })
+                }
+            })
+            .collect();
+
+        let menu_view = vstack(rows_view).frame(FrameSpec {
+            width: Some(L::Pt(menu_w)),
+            ..Default::default()
+        });
+
+        let ctx = LayoutCtx {
+            scale,
+            cell_w_phys: chrome_cell_w as f64,
+            cell_h_phys: chrome_cell_h as f64,
+            ascent_phys: chrome_ascent as f64,
+            fonts,
+        };
+        let menu_top_phys = (body_y + MENU_TOP_PAD_PT) * scale;
+        let laid = layout_view(
+            &menu_view,
+            ctx,
+            (0.0, menu_top_phys),
+            Constraints::loose(
+                menu_w * scale,
+                window_h_phys - menu_top_phys,
+            ),
+        );
+        paint_into(&mut canvas, &laid, ctx);
     }
 
     // ─── Right content: only the active section ─────────────────
