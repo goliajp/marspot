@@ -751,18 +751,43 @@ gate 实施(pure Rust,8×8 windows,BT.709 luma,k1=0.01 / k2=0.03):
 
 ---
 
-### Phase 10 — 跨平台抽象 trait 提取
+### Phase 10 — 跨平台抽象 trait 提取 ✅ shipped 2026-06-24
 
-**改动**:`src/render/font/` 新 sub-module
-- `pub trait Rasteriser { fn rasterise(&self, key: GlyphKey) -> Option<RasterOutput>; }`
-- `pub trait Shaper { fn shape(&mut self, text: &str, style: &TextStyle) -> Vec<ShapedRun>; }`
-- macOS impl:`CoreTextRasteriser` + `CoreTextShaper`(从现有 path 抽出)
-- Linux/Windows impl 留接口,实现时再补(rustybuzz + ab_glyph / DirectWrite)
+**实施**:`src/font_trait.rs`
 
-**Acceptance**:
-- 编译 trait + impl,所有调用经 trait
-- 单元测试:headless `MockRasteriser` 可 plug 进 atlas 跑(不实际 raster)
-- 文档:`docs/font-rendering-design.md` §14 跨平台具体化为 trait 签名
+```rust
+pub trait Rasteriser: Send + Sync + 'static {
+    fn rasterise(&self, key: GlyphKey, ct_font: &CTFont) -> Option<RasterOutput>;
+    fn rasterise_color(&self, key: GlyphKey, ct_font: &CTFont) -> Option<RasterOutput>;
+}
+
+pub trait Shaper: Send + Sync + 'static {
+    fn shape(
+        &self,
+        text: &str,
+        base_font: &CTFont,
+        opts: ShapeOptions,
+        intern: &mut dyn FnMut(CTFont) -> u32,
+    ) -> Vec<ShapedGlyph>;
+}
+```
+
+- macOS impl:`CoreTextRasteriser` + `CoreTextShaper`(delegate 到现有
+  `rasterise_glyph_natural` + `font_shape::shape_line`)— 0 改 hot path
+- Headless test impl:`MockRasteriser`(canned bbox + advance)+
+  `MockShaper`(canned glyphs)— FontCache 默认 plug 真 CoreText,test
+  通过 `set_rasteriser` / `set_shaper` swap
+- Linux/Windows impl 留接口,真实施时再补(rustybuzz + ab_glyph /
+  DirectWrite)
+
+**Acceptance(✅ 达成)**:
+- 编译 trait + impl,FontCache.shape 走 trait dispatch
+- MockRasteriser + MockShaper 可 plug 进 GlyphAtlas 跑 headless test
+- §14 跨平台 trait 签名定义在 font_trait.rs(canonical)
+
+shipped 在 commits `285991c`(Phase 10 — Rasteriser trait + CoreText/
+Mock impls + atlas plumbing)+ `86975f1`(Phase 10b — Shaper trait +
+CoreText/Mock impls + FontCache plumbing).
 
 ---
 
