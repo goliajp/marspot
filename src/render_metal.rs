@@ -6665,6 +6665,81 @@ mod tests {
         );
     }
 
+    /// DevPanel Sessions > Architecture snapshot.  Content is fully
+    /// static (process tree text / plugin list / hard caps / wire
+    /// protocol descriptions),so SSIM gate is meaningful — any drift
+    /// surfaces a real visual / text regression instead of just a
+    /// version number bumping.  Pairs with `devpanel_components_catalog`
+    /// (UI Tab visual lock) and `devpanel_typography`(Tokens lock)
+    /// to cover the dev panel design system at 3 different sub-trees.
+    #[test]
+    fn devpanel_architecture_snapshot() {
+        if std::env::var("MARSPOT_FONT_SNAPSHOT").is_err() {
+            return;
+        }
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip (no Metal): {e}");
+                return;
+            }
+        };
+        let w_px: u32 = 840;
+        let h_px: u32 = 1040;
+        let state = crate::ui::components::DevPanelState {
+            visible: true,
+            origin_pt: (0.0, 0.0),
+            size_pt: (420.0, 520.0),
+            active_tab: crate::ui::components::dev_panel::TAB_SESSIONS,
+            active_section: crate::ui::components::dev_panel::SECTION_SESSIONS_ARCHITECTURE,
+            scale: 2.0,
+        };
+        let measure = crate::chrome_measure::ChromeMeasure::new(
+            renderer.font_mut(),
+            16.0,
+            32.0,
+        );
+        let canvas = crate::ui::components::build_dev_panel_canvas(
+            &state,
+            w_px as f64,
+            h_px as f64,
+            16.0,
+            32.0,
+            24.0,
+            &measure,
+        );
+        drop(measure);
+        let bytes = renderer
+            .render_canvas_to_bitmap(w_px, h_px, &canvas, 16.0, 32.0, 24.0, false)
+            .expect("canvas render");
+
+        let mut rgba = vec![0u8; bytes.len()];
+        for i in (0..bytes.len()).step_by(4) {
+            rgba[i] = bytes[i + 2];
+            rgba[i + 1] = bytes[i + 1];
+            rgba[i + 2] = bytes[i];
+            rgba[i + 3] = bytes[i + 3];
+        }
+
+        let out_dir = std::path::PathBuf::from("bench/font-rendering/snapshots");
+        std::fs::create_dir_all(&out_dir).expect("mkdir snapshots");
+        let out_path = out_dir.join("devpanel_architecture.png");
+        assert_snapshot_ssim(&rgba, &out_path, w_px, h_px, 0.98);
+        let file = std::fs::File::create(&out_path).expect("create png");
+        let buf = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(buf, w_px, h_px);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+        eprintln!(
+            "[devpanel architecture] wrote {} ({} × {})",
+            out_path.display(),
+            w_px,
+            h_px,
+        );
+    }
+
     /// Verify the basic Metal plumbing works on this machine — proves
     /// the dep + bindings resolve and we can talk to the GPU.  CI on
     /// non-Metal machines will skip this naturally because
