@@ -23,6 +23,7 @@ into the .icns and install-local.sh deploys it on the next install.
 
 from PIL import Image, ImageDraw, ImageFilter
 from pathlib import Path
+import math
 import subprocess
 import sys
 
@@ -100,14 +101,46 @@ def vertical_gradient(size: int, top, bottom) -> Image.Image:
     return img
 
 
-def draw_bowtie(img: Image.Image, size: int) -> None:
-    """Horizontal hourglass — two triangles meeting at the center.
-
-    Bowtie sits inside the (already-inset) squircle, with another
-    inset so it doesn't crowd the squircle corners.
+def _rounded_polygon(vertices, corner_radii, n_arc=14):
+    """Replace each vertex(parallel `corner_radii` 控制 per-vertex 半径,
+    0 = 尖角)with a quadratic-bezier fillet:沿入/出两边各退 r 距离
+    取两端点 A、B,以原 vertex 作 control point 弯弧.小半径下贴近
+    真圆角,够 dev tool / 小尺寸 icon 用.
     """
-    canvas_inset = size * CANVAS_INSET_RATIO    # squircle outer inset
-    bowtie_inset_inside_squircle = size * 0.21  # bowtie within squircle — 比上一版小一档
+    n = len(vertices)
+    out: list[tuple[float, float]] = []
+    for i in range(n):
+        v = vertices[i]
+        r = corner_radii[i]
+        if r <= 0:
+            out.append(v)
+            continue
+        prev_v = vertices[(i - 1) % n]
+        next_v = vertices[(i + 1) % n]
+
+        def unit(p, q):
+            dx, dy = q[0] - p[0], q[1] - p[1]
+            l = math.hypot(dx, dy) or 1.0
+            return (dx / l, dy / l)
+
+        u_in = unit(v, prev_v)
+        u_out = unit(v, next_v)
+        a = (v[0] + u_in[0] * r, v[1] + u_in[1] * r)
+        b = (v[0] + u_out[0] * r, v[1] + u_out[1] * r)
+        for j in range(n_arc + 1):
+            t = j / n_arc
+            x = (1 - t) ** 2 * a[0] + 2 * (1 - t) * t * v[0] + t ** 2 * b[0]
+            y = (1 - t) ** 2 * a[1] + 2 * (1 - t) * t * v[1] + t ** 2 * b[1]
+            out.append((x, y))
+    return out
+
+
+def draw_bowtie(img: Image.Image, size: int) -> None:
+    """Horizontal hourglass — 两片三角形 cap-to-cap,四个外角小圆角,
+    中心相会点保持尖.圆角半径 BOWTIE_CORNER_RADIUS_RATIO 之于 size.
+    """
+    canvas_inset = size * CANVAS_INSET_RATIO
+    bowtie_inset_inside_squircle = size * 0.21
     inset = canvas_inset + bowtie_inset_inside_squircle
     sx = inset
     sy = inset
@@ -116,17 +149,23 @@ def draw_bowtie(img: Image.Image, size: int) -> None:
     cx = size / 2.0
     cy = size / 2.0
 
+    # 四个外角圆角半径 ≈ size * 0.015 — "有一丁点弧度",刚好够
+    # 16×16 Dock 看得出,32+ 是显著但不抢眼.
+    r_corner = size * 0.015
+
     draw = ImageDraw.Draw(img)
-    # Left triangle: pointing right toward center.
-    draw.polygon(
+    # 左三角:外两顶点圆角,中心点尖.
+    left = _rounded_polygon(
         [(sx, sy), (sx, sy + h), (cx, cy)],
-        fill=GLASS,
+        [r_corner, r_corner, 0.0],
     )
-    # Right triangle: pointing left toward center.
-    draw.polygon(
-        [(sx + w, sy), (sx + w, sy + h), (cx, cy)],
-        fill=GLASS,
+    draw.polygon(left, fill=GLASS)
+    # 右三角:同样.
+    right = _rounded_polygon(
+        [(sx + w, sy), (cx, cy), (sx + w, sy + h)],
+        [r_corner, 0.0, r_corner],
     )
+    draw.polygon(right, fill=GLASS)
 
 
 def render(size: int) -> Image.Image:

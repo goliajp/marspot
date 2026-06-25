@@ -26,6 +26,14 @@ pub struct PaneBadgeUpdate {
     pub text: String,
 }
 
+/// Same channel shape but for the pane's main title (resolution chain
+/// slot ABOVE cwd basename, BELOW user-set custom title).  Empty
+/// `text` clears the plugin-set title for that session.
+pub struct PaneTitleUpdate {
+    pub shelld_session_id: u64,
+    pub text: String,
+}
+
 /// Channel message: a plugin wants to take over a pane.  Main loop
 /// stashes the session in `active_pane_sessions`, emits PaneSessionBegin
 /// to L2, and starts routing key/escape events back here.
@@ -59,6 +67,7 @@ pub struct ShellPluginHost {
     /// Plugin → host → channel → main loop → CoreConn::send.  None
     /// in tests / standalone hosts where no L2 is around.
     pane_badge_tx: Mutex<Option<Sender<PaneBadgeUpdate>>>,
+    pane_title_tx: Mutex<Option<Sender<PaneTitleUpdate>>>,
     /// PaneSession take-over requests bound for the main loop.
     pane_session_begin_tx: Mutex<Option<Sender<PaneSessionBeginRequest>>>,
     /// L1→L2 InjectInput sender — the shell main loop's CoreConn
@@ -90,9 +99,16 @@ impl ShellPluginHost {
             focused: Arc::new(Mutex::new(None)),
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
+            pane_title_tx: Mutex::new(None),
             pane_session_begin_tx: Mutex::new(None),
             inject_input_tx: Mutex::new(None),
         }
+    }
+
+    /// Wire the channel the shell main loop drains for plugin-set
+    /// pane title updates.
+    pub fn attach_pane_title_tx(&self, tx: Sender<PaneTitleUpdate>) {
+        *self.pane_title_tx.lock().unwrap() = Some(tx);
     }
 
     /// Wire the channel the shell main loop will drain for badge
@@ -257,6 +273,22 @@ impl PluginHost for ShellPluginHost {
             return Ok(());
         };
         let _ = tx.send(PaneBadgeUpdate {
+            shelld_session_id,
+            text: text.to_string(),
+        });
+        Ok(())
+    }
+
+    fn set_pane_title(
+        &self,
+        shelld_session_id: u64,
+        text: &str,
+    ) -> Result<(), PluginError> {
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        let Some(tx) = self.pane_title_tx.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let _ = tx.send(PaneTitleUpdate {
             shelld_session_id,
             text: text.to_string(),
         });

@@ -251,6 +251,19 @@ pub trait PluginHost: Send + Sync {
         Ok(())
     }
 
+    /// Set the main title text for the pane backing this shelld
+    /// session.  Inserts into the title resolution chain ABOVE cwd
+    /// basename, BELOW user-set custom title.  Empty `text` clears
+    /// the plugin-set entry.  Requires `SET_STATUS_LINE`.  Default
+    /// no-op for test hosts.
+    fn set_pane_title(
+        &self,
+        _shelld_session_id: u64,
+        _text: &str,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
     /// RFC-003 Amendment 16 cc: hand the plugin a proxy it can use
     /// to forward raw bytes into a pane's PTY via the L1→L2→L3
     /// `InjectInput` wire frame.  Default `None` for test hosts.
@@ -411,6 +424,11 @@ pub trait PaneSessionHost {
     /// Update the pane's right-side badge text (typically a spinner /
     /// progress string while the session runs).  Empty clears.
     fn set_badge(&self, text: &str);
+    /// Update the pane's main title text.  Inserts into the title
+    /// resolution chain ABOVE cwd basename, BELOW user-set custom
+    /// title.  Empty clears the plugin-set entry — chain falls back
+    /// to the underlying basename / ordinal label.
+    fn set_pane_title(&self, text: &str);
     /// Plugin-namespaced log proxy mirroring the regular PluginHost
     /// log so callbacks don't need to thread the outer host through.
     fn log(&self, level: LogLevel, tag: &str, msg: &str);

@@ -293,6 +293,11 @@ struct BindMeta {
     profile_num: u8,
     uuid: String,
     claude_pid: i32,
+    /// Basename of the claude process's cwd — used as the pane title
+    /// so user sees "marspot" instead of "session-3" once cc binds.
+    /// Empty when basename couldn't be resolved (e.g. process exited
+    /// between scan and tick).
+    project_basename: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -922,9 +927,10 @@ impl Plugin for ClaudecodePlugin {
                         ),
                     );
                     let _ = host.set_pane_badge(*sh_sid, "");
+                    let _ = host.set_pane_title(*sh_sid, "");
                 }
             }
-            // Re-push every active badge every tick (idempotent).
+            // Re-push every active badge + title every tick (idempotent).
             // Why not transition-only: L2 core can spawn/crash/
             // respawn between ticks (CORE_BOOT_LOOP, silent update);
             // transition-only would leave the fresh core with no
@@ -937,6 +943,21 @@ impl Plugin for ClaudecodePlugin {
                         "pane_badge.set_failed",
                         &format!("{e}"),
                     );
+                }
+                if let Some(meta) = result.new_meta.get(sh_sid) {
+                    if !meta.project_basename.is_empty() {
+                        let title = match meta.profile_num {
+                            u8::MAX => meta.project_basename.clone(),
+                            n => format!("P{} {}", n, meta.project_basename),
+                        };
+                        if let Err(e) = host.set_pane_title(*sh_sid, &title) {
+                            host.log(
+                                LogLevel::Warn,
+                                "pane_title.set_failed",
+                                &format!("{e}"),
+                            );
+                        }
+                    }
                 }
             }
             self.last_mapping = result.new_mapping;
@@ -1205,6 +1226,11 @@ impl WorkerCtx {
                     Some(t) => format!("{} {}", t, sid_uuid),
                     None => sid_uuid.clone(),
                 };
+                let project_basename = cwd
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
                 new_mapping.insert(s.session_id, badge);
                 new_meta.insert(
                     s.session_id,
@@ -1212,6 +1238,7 @@ impl WorkerCtx {
                         profile_num,
                         uuid: sid_uuid,
                         claude_pid: claude.pid,
+                        project_basename,
                     },
                 );
                 // No log line here on purpose — `session.bound` is

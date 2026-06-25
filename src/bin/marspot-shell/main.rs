@@ -739,6 +739,8 @@ struct ShellApp {
     /// pushes into; drained each `poll_supervisor` tick and forwarded
     /// to the active core as `MsgType::PaneBadge` frames.
     pane_badge_rx: std::sync::mpsc::Receiver<plugins::host::PaneBadgeUpdate>,
+    /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
+    pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
     /// Receiver for `begin_pane_session` requests.
     pane_session_begin_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneSessionBeginRequest>,
@@ -749,6 +751,7 @@ struct ShellApp {
     /// helpers can push set_badge updates without re-importing the
     /// channel from inside ShellApp methods.
     pane_badge_tx_clone: std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
+    pane_title_tx_clone: std::sync::mpsc::Sender<plugins::host::PaneTitleUpdate>,
     /// Active PaneSessions held by L1 plugins, keyed by shelld
     /// session_id.  At most one per pane.
     active_pane_sessions:
@@ -792,6 +795,7 @@ struct ConcretePaneSessionHost<'a> {
     sid: u64,
     plugin_name: &'static str,
     badge_tx: &'a std::sync::mpsc::Sender<plugins::host::PaneBadgeUpdate>,
+    title_tx: &'a std::sync::mpsc::Sender<plugins::host::PaneTitleUpdate>,
     end_requested: &'a std::cell::Cell<bool>,
 }
 
@@ -804,6 +808,12 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
     }
     fn set_badge(&self, text: &str) {
         let _ = self.badge_tx.send(plugins::host::PaneBadgeUpdate {
+            shelld_session_id: self.sid,
+            text: text.to_string(),
+        });
+    }
+    fn set_pane_title(&self, text: &str) {
+        let _ = self.title_tx.send(plugins::host::PaneTitleUpdate {
             shelld_session_id: self.sid,
             text: text.to_string(),
         });
@@ -825,6 +835,8 @@ impl ShellApp {
             .expect("HOME must be set to manage binary slots");
         let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
         let pane_badge_tx_clone = pane_badge_tx.clone();
+        let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
+        let pane_title_tx_clone = pane_title_tx.clone();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
         let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
         Self {
@@ -847,6 +859,7 @@ impl ShellApp {
             plugin_host: {
                 let h = ShellPluginHost::new();
                 h.attach_pane_badge_tx(pane_badge_tx);
+                h.attach_pane_title_tx(pane_title_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
                 h.attach_inject_input_tx(inject_input_tx);
                 h
@@ -854,9 +867,11 @@ impl ShellApp {
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
             pane_badge_rx,
+            pane_title_rx,
             pane_session_begin_rx,
             inject_input_rx,
             pane_badge_tx_clone,
+            pane_title_tx_clone,
             active_pane_sessions: std::collections::HashMap::new(),
             dev_panel: marspot::ui::components::DevPanelState::default(),
             last_saved_dev_window: None,
@@ -1515,6 +1530,19 @@ impl ShellApp {
             // tick so the next valid core will pick it up.
         }
 
+        // Same shape for plugin-set pane titles.
+        while let Ok(upd) = self.pane_title_rx.try_recv() {
+            if let Some(conn) = self.active.as_ref() {
+                conn.send(
+                    MsgType::PaneTitle,
+                    marspot::shell_proto::encode_pane_title(
+                        upd.shelld_session_id,
+                        &upd.text,
+                    ),
+                );
+            }
+        }
+
         // Drain cc inject-input requests onto the active core's
         // control socket as InjectInput frames; L2 routes by
         // session_id to the L3 owning that pane.
@@ -1851,6 +1879,7 @@ impl ShellApp {
                 sid,
                 plugin_name: self.active_pane_sessions[&sid].plugin_name,
                 badge_tx: &self.pane_badge_tx_clone,
+                title_tx: &self.pane_title_tx_clone,
                 end_requested: &end_flag,
             };
             if let Some(active) = self.active_pane_sessions.get_mut(&sid) {
@@ -1876,6 +1905,7 @@ impl ShellApp {
             sid,
             plugin_name,
             badge_tx: &self.pane_badge_tx_clone,
+            title_tx: &self.pane_title_tx_clone,
             end_requested: &end_flag,
         };
         let handling = active.session.on_user_key(&host, &ev);
@@ -1894,6 +1924,7 @@ impl ShellApp {
             sid,
             plugin_name,
             badge_tx: &self.pane_badge_tx_clone,
+            title_tx: &self.pane_title_tx_clone,
             end_requested: &end_flag,
         };
         active.session.on_end(&host, reason);

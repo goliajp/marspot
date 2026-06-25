@@ -295,6 +295,13 @@ pub enum MsgType {
     /// `run_app`), L2 just routes the click — L2 doesn't keep its
     /// own visibility state, L1 is the single source of truth.
     DevPanelToggle = 55,
+    /// L1 plugin → L2: set a pane's title text(insert into the title
+    /// resolution chain ABOVE cwd basename, BELOW user-set custom title
+    /// + edit buffer).Payload mirrors `PaneBadge`:
+    ///   `session_id u64 LE, title_len u16 LE, title_utf8`.
+    /// Empty `title_len` clears the plugin-set title for that pane.
+    /// Used by the claudecode plugin to project-name the pane on bind.
+    PaneTitle = 56,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -339,6 +346,7 @@ impl MsgType {
             52 => MsgType::SearchMore,
             53 => MsgType::SearchCancel,
             55 => MsgType::DevPanelToggle,
+            56 => MsgType::PaneTitle,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1059,6 +1067,46 @@ pub fn decode_pane_badge(payload: &[u8]) -> io::Result<(u64, String)> {
     }
     let badge = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
     Ok((session_id, badge))
+}
+
+/// PaneTitle payload mirrors PaneBadge — `session_id u64 LE,
+/// title_len u16 LE, title_utf8`.  Empty `title_len` clears the
+/// plugin-set title for that session.
+pub const PANE_TITLE_MAX_LEN: u16 = 128;
+
+pub fn encode_pane_title(session_id: u64, title: &str) -> Vec<u8> {
+    let bytes = title.as_bytes();
+    let n = bytes.len().min(PANE_TITLE_MAX_LEN as usize);
+    let mut out = Vec::with_capacity(8 + 2 + n);
+    out.extend_from_slice(&session_id.to_le_bytes());
+    out.extend_from_slice(&(n as u16).to_le_bytes());
+    out.extend_from_slice(&bytes[..n]);
+    out
+}
+
+pub fn decode_pane_title(payload: &[u8]) -> io::Result<(u64, String)> {
+    if payload.len() < 10 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_title payload < 10 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let n = u16::from_le_bytes(payload[8..10].try_into().unwrap()) as usize;
+    if n > PANE_TITLE_MAX_LEN as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("pane_title len {} > cap {}", n, PANE_TITLE_MAX_LEN),
+        ));
+    }
+    if payload.len() < 10 + n {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_title payload truncated before body",
+        ));
+    }
+    let title = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
+    Ok((session_id, title))
 }
 
 /// PaneBadgeClicked payload: `session_id u64 LE`.  Carries which pane

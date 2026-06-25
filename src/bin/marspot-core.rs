@@ -468,6 +468,10 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
+    /// Shell → core: plugin-set pane title.  Inserts into the title
+    /// resolution chain ABOVE cwd basename, BELOW user-set custom
+    /// title.  Empty `String` clears the plugin-set entry.
+    PaneTitle(u64, String),
     /// Shell → core: a plugin took over the pane backing this shelld
     /// session.  Capability bits say what L2 should change while the
     /// session is active (lock keys, freeze grid, accept overlays).
@@ -541,6 +545,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneBadge => marspot::shell_proto::decode_pane_badge(&f.payload)
             .ok()
             .map(|(sid, text)| CoreEvent::PaneBadge(sid, text)),
+        MsgType::PaneTitle => marspot::shell_proto::decode_pane_title(&f.payload)
+            .ok()
+            .map(|(sid, text)| CoreEvent::PaneTitle(sid, text)),
         MsgType::PaneSessionBegin => marspot::shell_proto::decode_pane_session_begin(&f.payload)
             .ok()
             .map(|(sid, caps)| CoreEvent::PaneSessionBegin(sid, caps)),
@@ -949,6 +956,10 @@ struct CoreApp {
     /// Per-shelld-session right-side badge, set by L1 plugins via
     /// `MsgType::PaneBadge`.  Empty string clears via removal.
     pane_badges: std::collections::HashMap<u64, String>,
+    /// Per-shelld-session plugin-set title, set via `MsgType::PaneTitle`.
+    /// Inserts into the title resolution chain ABOVE cwd basename,
+    /// BELOW user-set custom title.  Empty payload removes the entry.
+    pane_titles: std::collections::HashMap<u64, String>,
     /// F3+2.1 — cwd reported by each pane's shell via OSC 7.  Keyed
     /// by shelld_session_id.  Read by the title placeholder chain
     /// (`Path::file_name` of the cached path → basename string).
@@ -1126,6 +1137,21 @@ impl CoreApp {
             self.pane_badges.remove(&shelld_session_id).is_some()
         } else if prev.as_deref() != Some(text.as_str()) {
             self.pane_badges.insert(shelld_session_id, text);
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.needs_render = true;
+        }
+    }
+
+    fn set_pane_title(&mut self, shelld_session_id: u64, text: String) {
+        let prev = self.pane_titles.get(&shelld_session_id).cloned();
+        let changed = if text.is_empty() {
+            self.pane_titles.remove(&shelld_session_id).is_some()
+        } else if prev.as_deref() != Some(text.as_str()) {
+            self.pane_titles.insert(shelld_session_id, text);
             true
         } else {
             false
@@ -1745,6 +1771,7 @@ impl CoreApp {
             self.pane_cwds.remove(&id);
             self.last_cwd_refresh.remove(&id);
             self.pane_badges.remove(&id);
+            self.pane_titles.remove(&id);
         }
         self.panes.remove(idx);
         if idx < self.custom_titles.len() {
@@ -3699,13 +3726,19 @@ impl CoreApp {
             .collect();
 
         // Resolved label per cell: edit-mode buffer → user-set custom
-        // title → cwd basename (dynamic placeholder) → ordinal fallback.
+        // title → plugin-set title (MsgType::PaneTitle, cc/...) →
+        // cwd basename (dynamic placeholder) → ordinal fallback.
         let resolved_labels: Vec<String> = (0..self.panes.len())
             .map(|i| {
                 if self.editing_title == Some(i) {
                     self.title_edit_buffer.clone()
                 } else if let Some(Some(custom)) = self.custom_titles.get(i) {
                     custom.clone()
+                } else if let Some(plugin_title) = self.panes[i]
+                    .shelld_session_id()
+                    .and_then(|sid| self.pane_titles.get(&sid))
+                {
+                    plugin_title.clone()
                 } else if let Some(Some(name)) = cwd_basenames.get(i) {
                     (*name).to_string()
                 } else {
@@ -4258,6 +4291,7 @@ fn main() {
         editing_title: None,
         title_edit_buffer: String::new(),
         pane_badges: std::collections::HashMap::new(),
+        pane_titles: std::collections::HashMap::new(),
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
         pane_sessions: std::collections::HashMap::new(),
@@ -4506,6 +4540,9 @@ fn main() {
                 }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
+                }
+                CoreEvent::PaneTitle(sid, text) => {
+                    app.set_pane_title(sid, text);
                 }
                 CoreEvent::PaneSessionBegin(sid, caps) => {
                     app.pane_session_begin(sid, caps);
