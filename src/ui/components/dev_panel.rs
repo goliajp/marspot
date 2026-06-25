@@ -167,6 +167,9 @@ pub const SECTION_FONT_BASELINES:   usize = 0x01_02_01;
 // ──────────────────── Render tab ────────────────────
 pub const SECTION_RENDER_BUILD_IDENTITY: usize = 0x02_01_01;
 
+// ──────────────────── Sessions tab ────────────────────
+pub const SECTION_SESSIONS_ARCHITECTURE: usize = 0x03_01_01;
+
 // ──────────────────── Menu structure ────────────────────
 //
 // `MenuRow` 是 left menu 一行;Header 不可点,只画 SubGroup 标签;
@@ -217,8 +220,11 @@ const TAB_MENUS: &[(usize, &[MenuRow])] = &[
         // state pipe 进 DevPanelState,留下轮做.
     ]),
     (TAB_SESSIONS, &[
-        MenuRow::Header("Sessions"),
-        // 留空,future commit 填(L3 sessions / plugins / bytelog).
+        MenuRow::Header("Overview"),
+        MenuRow::Item("  Architecture", SECTION_SESSIONS_ARCHITECTURE),
+        MenuRow::Header("Live state(待 wire)"),
+        // Sessions list / plugins / bytelog 等需要 L1+L2 state pipe
+        // 进 DevPanelState,留下轮做.
     ]),
 ];
 
@@ -527,6 +533,7 @@ pub fn build_dev_panel_canvas(
         }
         SECTION_FONT_BASELINES => render_view_section(&mut canvas, "Phase 9 SSIM Baselines", build_baselines_view()),
         SECTION_RENDER_BUILD_IDENTITY => render_view_section(&mut canvas, "Build Identity", build_build_identity_view()),
+        SECTION_SESSIONS_ARCHITECTURE => render_view_section(&mut canvas, "Architecture", build_architecture_view()),
         SECTION_FONT_V5_SHOWCASE => {
             // Skip the legacy Monaco-mono `draw_section_header` —
             // `build_font_v5_view` ships its own SF Pro title so the
@@ -2324,6 +2331,91 @@ fn build_typography_view() -> crate::ui::view::View {
     .vstack_gap(Length::Pt(8.0))
 }
 
+/// Architecture overview — static snapshot of the 3-layer split + the
+/// 2 plugins shipped + a few hard caps.  Nothing runtime here(the
+/// live "10 sessions, 4 of them claudecode" view needs L1/L2 state
+/// pipe and lands in a later round);  this Item is the on-ramp
+/// reference for "what processes does marspot spawn?" without a
+/// trip to RFC-003 / `crates/marspot-session/README.md`.
+fn build_architecture_view() -> crate::ui::view::View {
+    use crate::ui::view::{vstack, hstack, Text};
+    use crate::ui::core::Length;
+    use crate::ui::theme::{color, text as text_token};
+
+    let kv = |label: &'static str, value: &'static str| {
+        hstack(vec![
+            Text::new(label)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+            Text::new(value)
+                .style(text_token::CODE)
+                .color(color::FG)
+                .build(),
+        ])
+        .hstack_gap(Length::Pt(16.0))
+        .align_cross_center()
+    };
+
+    let process = |layer: &'static str, role: &'static str| {
+        hstack(vec![
+            Text::new(layer)
+                .style(text_token::BODY)
+                .color(color::FG)
+                .weight(crate::ui::view::TextWeight::Bold)
+                .build(),
+            Text::new(role)
+                .style(text_token::CAPTION)
+                .color(color::FG_MUTED)
+                .build(),
+        ])
+        .hstack_gap(Length::Pt(12.0))
+        .align_cross_end()
+    };
+
+    vstack(vec![
+        Text::new("Process tree(RFC-003)")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        process("L1 shell  ", "AppKit / NSWindow / Metal layer / IME / clipboard"),
+        process("L2 core   ", "marspot-core — input dispatch / layout / panes / sidebar"),
+        process("L3 session", "marspot-session × N — PTY + Terminal + bytelog + UDS"),
+        Text::new("L4 shelld 由 RFC-003 退役,L3 自持 PTY 与 listener fd + 自 execv.")
+            .style(text_token::HINT)
+            .color(color::FG_MUTED)
+            .build(),
+
+        Text::new("Plugins(RFC-001)")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        process("claudecode", "exit-loop guard + API-error monitor + 状态机 badge"),
+        process("pidtree   ", "pane PID tree + cwd discovery"),
+        Text::new("Static-linked in L1 shell;  capability gates per pane via PaneSession.")
+            .style(text_token::HINT)
+            .color(color::FG_MUTED)
+            .build(),
+
+        Text::new("Hard caps")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        kv("Max sessions  ", "9(L1 SESSION_COUNT_HARD_CAP)"),
+        kv("Default cols  ", "80"),
+        kv("Default rows  ", "24"),
+        kv("Scrollback cap", "Memory: 10 000 lines / File: 不限(per session bin)"),
+
+        Text::new("Wire protocol")
+            .style(text_token::HEADER)
+            .color(color::FG)
+            .build(),
+        kv("L1↔L2", "shell-proto frames over inherited stdin/stdout"),
+        kv("L2↔L3", "control_stream_fd UDS + grid shm + bytelog mmap"),
+    ])
+    .vstack_gap(Length::Pt(8.0))
+}
+
 /// Build identity — version-vector + git SHA + build timestamp + cargo
 /// profile + state dir.  All values come from env baked at compile
 /// time(`build.rs` + `MARSPOT_*` rustc-env)or env at runtime
@@ -2672,17 +2764,16 @@ mod tests {
     }
 
     #[test]
-    fn non_ui_tab_renders_placeholder() {
-        // TAB_SESSIONS 当前 menu 只有一个 SubGroup header,无 Item +
-        // 无 content,所以 right column 应该出 "(future)" placeholder
-        // text — 这条 test 既验证 menu 数据驱动正确,也验证 empty
-        // tab fallback path 没漂.
-        let s = DevPanelState { active_tab: TAB_SESSIONS, ..Default::default() };
+    fn empty_tab_renders_placeholder() {
+        // All real TABs currently have ≥ 1 Item;  use a synthetic
+        // out-of-range tab id to exercise the empty-tab fallback
+        // path without depending on which TAB happens to be empty.
+        let s = DevPanelState { active_tab: usize::MAX, ..Default::default() };
         let fonts = crate::ui::view::MockFontMetrics { cell_w_phys: 8.0, cell_h_phys: 16.0 };
         let c = build_dev_panel_canvas(&s, 800.0, 600.0, 8.0, 16.0, 12.0, &fonts);
         let prims = c.primitives();
         let has_placeholder = prims.iter().any(|p| matches!(p, Primitive::Text(t) if t.content.contains("placeholder")));
-        assert!(has_placeholder, "expected placeholder text on empty tab");
+        assert!(has_placeholder, "expected placeholder text on empty/unknown tab");
     }
 
     #[test]
@@ -2740,9 +2831,9 @@ mod tests {
 
     #[test]
     fn hit_test_skips_menu_on_empty_tab() {
-        // TAB_SESSIONS 当前菜单只有一行 Header("Sessions"),无 Item.
-        // 任何 menu 行 y 都不应该返回 Section.
-        let s = DevPanelState { active_tab: TAB_SESSIONS, ..Default::default() };
+        // 用 synthetic out-of-range tab id 模拟"无 Item 的 tab",
+        // 不依赖某个真实 TAB 当前是否为空(real TABs 可能逐轮被填).
+        let s = DevPanelState { active_tab: usize::MAX, ..Default::default() };
         let any_menu_y = TAB_BAR_H_PT + MENU_TOP_PAD_PT + 5.0;
         assert_eq!(hit_test(&s, 8.0, 20.0, any_menu_y), None);
     }
