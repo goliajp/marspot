@@ -98,14 +98,23 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
     // reuses it across every logical-line scan within this call —
     // amortised allocs per frame ≈ 1 vs O(logical-lines × panes).
     //
-    // Each grid cell contributes exactly one char (NUL / trail-half
-    // become a space, everything else is the cell's `char` 1:1).
+    // Wide-char (CJK / fullwidth / emoji) trail-half cells carry
+    // NUL as a sentinel.  We DROP them entirely from `chars` (the
+    // lead cell already contributes the codepoint) — otherwise the
+    // terminator scan would hit the trail's NUL-as-space and cut
+    // every link the moment it crossed a wide char (e.g. paths like
+    // `~/Downloads/決算明細_2025-2026.xlsx`).  A parallel `col_map`
+    // tracks each kept char's physical column so `locate()` can
+    // still project char_pos → (phys_row, col) for hit-test +
+    // multi-row emit.  Empty cells (genuine blanks, never a wide
+    // lead's trailer) still push as ' ' — they're terminators.
     // In cc-mode a continuation row may contribute fewer than `cols`
     // chars when its leading hanging-indent is stripped — segment
-    // bookkeeping tracks the stripped col count so `locate()` still
-    // maps logical char positions back to the physical col on click.
+    // bookkeeping tracks the stripped col count so `emit_match()`
+    // still picks the right starting col for multi-row spans.
     let line_cap = cols as usize * rows as usize;
     let mut chars: Vec<char> = Vec::with_capacity(line_cap);
+    let mut col_map: Vec<u16> = Vec::with_capacity(line_cap);
     let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
     let mut char_offset: usize = 0;
     for r in 0..rows {
@@ -116,8 +125,9 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
             && is_cc_hard_wrap_continuation(grid, view_offset, r - 1, r, cols);
         let is_continuation = decawm_cont || cc_cont;
         if !is_continuation && !segments.is_empty() {
-            scan_logical_line(&chars, &segments, cols as usize, &mut out);
+            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out);
             chars.clear();
+            col_map.clear();
             segments.clear();
             char_offset = 0;
         }
@@ -131,14 +141,24 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
             char_offset,
             col_skip,
         });
+        let mut prev_was_wide = false;
         for c in col_skip..cols {
             let ch = grid.cell_at_view(view_offset, c, r).ch;
-            chars.push(if ch == '\0' || ch == ' ' { ' ' } else { ch });
+            if prev_was_wide && ch == '\0' {
+                // Trail half of the previous wide char — already
+                // represented by the lead's codepoint; skip.
+                prev_was_wide = false;
+                continue;
+            }
+            let pushed = if ch == '\0' || ch == ' ' { ' ' } else { ch };
+            chars.push(pushed);
+            col_map.push(c);
+            prev_was_wide = ch != '\0' && crate::grid::char_width(ch) == 2;
         }
-        char_offset += (cols - col_skip) as usize;
+        char_offset = chars.len();
     }
     if !segments.is_empty() {
-        scan_logical_line(&chars, &segments, cols as usize, &mut out);
+        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out);
     }
     out
 }
@@ -230,18 +250,19 @@ fn count_leading_ws(grid: &Grid, view_offset: u16, row: u16, cols: u16) -> u16 {
 
 /// One physical row's contribution to a logical (post-soft-wrap-merge)
 /// line.  `phys_row` is the viewport row the chars came from;
-/// `char_offset` is where in the merged `line` String this row's chars
-/// start (in `chars().count()` units, NOT bytes — pattern scanning is
-/// char-indexed throughout).  Each row contributes exactly `cols`
-/// chars (the loop writes one char per grid cell).
+/// `char_offset` is where in the merged `chars` buffer this row's
+/// pushed chars start.  May be smaller than `cols` when the row
+/// contains wide-char trail halves (skipped) or has a stripped
+/// cc-mode hanging indent.  Physical column for a given char_pos is
+/// recovered via the parallel `col_map` slice, NOT linear arithmetic.
 struct LineSegment {
     phys_row: u16,
     char_offset: usize,
     /// Number of leading physical columns that were stripped from
     /// this segment before joining the logical line (cc-mode hanging
-    /// indent removal).  `locate()` adds this back to compute the
-    /// physical click column.  0 for ordinary rows and DECAWM
-    /// continuations.
+    /// indent removal).  Used by `emit_match()` to pick the right
+    /// starting col on continuation rows of a multi-row span; 0 for
+    /// ordinary rows and DECAWM continuations.
     col_skip: u16,
 }
 
@@ -252,6 +273,7 @@ struct LineSegment {
 /// preserving the per-row hit-test + per-row underline model.
 fn scan_logical_line(
     chars: &[char],
+    col_map: &[u16],
     segments: &[LineSegment],
     cols_per_row: usize,
     out: &mut Vec<LinkRange>,
@@ -264,24 +286,31 @@ fn scan_logical_line(
     // showed up as ~250 samples in the input-lag profile (15 s, 9
     // panes typing).  emit_match is the only producer, append-only,
     // so passing `out` straight through is safe and saves the alloc.
-    scan_line_into_matches(chars, out, segments, cols_per_row);
+    scan_line_into_matches(chars, col_map, out, segments, cols_per_row);
 }
 
-/// Char-pos → (phys_row, col) projector.  Assumes each segment has
-/// exactly `cols` chars (true: outer loop always writes one char per
-/// grid cell).  Linear over the small `segments` slice — O(N segments)
-/// per lookup, but in practice N ≤ 4 even for very wrapped URLs.
-fn locate(segments: &[LineSegment], char_pos: usize, cols_per_row: usize) -> Option<(u16, u16)> {
+/// Char-pos → (phys_row, col) projector.  Linear over the small
+/// `segments` slice — O(N segments) per lookup, but in practice
+/// N ≤ 4 even for very wrapped URLs.  Physical column comes from
+/// `col_map[char_pos]` so wide-char trail halves (skipped) and
+/// cc-mode stripped indents don't desync the projection.
+fn locate(
+    segments: &[LineSegment],
+    col_map: &[u16],
+    char_pos: usize,
+    cols_per_row: usize,
+) -> Option<(u16, u16)> {
+    let col = *col_map.get(char_pos)? as usize;
+    if col >= cols_per_row {
+        return None;
+    }
     for (i, seg) in segments.iter().enumerate() {
         let next_off = segments
             .get(i + 1)
             .map(|s| s.char_offset)
             .unwrap_or(usize::MAX);
         if char_pos < next_off {
-            let col = (char_pos - seg.char_offset) + seg.col_skip as usize;
-            if col < cols_per_row {
-                return Some((seg.phys_row, col as u16));
-            }
+            return Some((seg.phys_row, col as u16));
         }
     }
     None
@@ -294,6 +323,7 @@ fn locate(segments: &[LineSegment], char_pos: usize, cols_per_row: usize) -> Opt
 /// across segments).
 fn scan_line_into_matches(
     chars: &[char],
+    col_map: &[u16],
     out: &mut Vec<LinkRange>,
     segments: &[LineSegment],
     cols_per_row: usize,
@@ -312,7 +342,7 @@ fn scan_line_into_matches(
             let span = &chars[i..end];
             if looks_like_url(span) {
                 let text: String = span.iter().collect();
-                emit_match(out, segments, cols_per_row, i, end, LinkKind::Url, text);
+                emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::Url, text);
                 i = end;
                 continue;
             }
@@ -324,7 +354,7 @@ fn scan_line_into_matches(
             if looks_like_path(span) {
                 let text: String = span.iter().collect();
                 if is_real_path(&text) {
-                    emit_match(out, segments, cols_per_row, i, end, LinkKind::File, text);
+                    emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
                     i = end;
                     continue;
                 }
@@ -337,7 +367,7 @@ fn scan_line_into_matches(
             if span.len() >= 3 && looks_like_path(span) {
                 let text: String = span.iter().collect();
                 if is_real_path(&text) {
-                    emit_match(out, segments, cols_per_row, i, end, LinkKind::File, text);
+                    emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
                     i = end;
                     continue;
                 }
@@ -352,6 +382,7 @@ fn scan_line_into_matches(
                 emit_match(
                     out,
                     segments,
+                    col_map,
                     cols_per_row,
                     local_start,
                     host_end,
@@ -375,6 +406,7 @@ fn scan_line_into_matches(
 fn emit_match(
     out: &mut Vec<LinkRange>,
     segments: &[LineSegment],
+    col_map: &[u16],
     cols_per_row: usize,
     char_lo: usize,
     char_hi_exclusive: usize,
@@ -385,12 +417,12 @@ fn emit_match(
         return;
     }
     let (start_row, start_col) =
-        match locate(segments, char_lo, cols_per_row) {
+        match locate(segments, col_map, char_lo, cols_per_row) {
             Some(v) => v,
             None => return,
         };
     let (end_row, end_col) =
-        match locate(segments, char_hi_exclusive - 1, cols_per_row) {
+        match locate(segments, col_map, char_hi_exclusive - 1, cols_per_row) {
             Some(v) => v,
             None => return,
         };
@@ -957,7 +989,10 @@ mod tests {
             },
         ];
         let mut out = Vec::new();
-        super::scan_line_into_matches(&line.chars().collect::<Vec<char>>(), &mut out, &segments, 10);
+        // col_map: chars 0..9 → row-0 cols 0..9; chars 10..12 → row-1 cols 0..2.
+        let col_map: Vec<u16> = (0..10).chain(0..3).collect();
+        let chars: Vec<char> = line.chars().collect();
+        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10);
         // One match, fanned into 2 LinkRanges (one per physical row).
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -983,7 +1018,9 @@ mod tests {
             col_skip: 0,
         }];
         let mut out = Vec::new();
-        super::scan_line_into_matches(&line.chars().collect::<Vec<char>>(), &mut out, &segments, line.chars().count());
+        let chars: Vec<char> = line.chars().collect();
+        let col_map: Vec<u16> = (0..chars.len() as u16).collect();
+        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, chars.len());
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 7);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -1210,6 +1247,60 @@ mod tests {
             "expected multi-row LinkRange (cols=20, url len {}), got {} segments",
             url.chars().count(),
             links.len()
+        );
+    }
+
+    /// Wide-char (CJK) trail-halves used to push as ' ' into the
+    /// scan buffer, causing `scan_until_link_terminator` to cut a
+    /// path on the first CJK boundary.  Regression guard: feed a
+    /// path containing CJK chars through the real parser, stat
+    /// it via a tempfile so `is_real_path` accepts it, and assert
+    /// the FULL path is one contiguous LinkRange covering both the
+    /// lead and trail cells of every wide char.
+    #[test]
+    fn cjk_path_detected_across_wide_char_cells() {
+        use crate::terminal::Terminal;
+        let dir = std::env::temp_dir().join("marspot-link-cjk-test");
+        std::fs::create_dir_all(&dir).expect("mkdir tempdir");
+        let path = dir.join("決算明細_2025-2026.txt");
+        std::fs::write(&path, b"x").expect("write tempfile");
+        let path_str = path.to_string_lossy().into_owned();
+        // Wide enough to keep the whole path on one row; the input
+        // is ASCII `/private/...`-style, no soft-wrap concerns.
+        let cols: u16 = (path_str.chars().count() as u16) + 10;
+        let mut t = Terminal::new(cols, 3);
+        t.feed(format!("see {} for", path_str).as_bytes());
+        let grid = t.grid();
+        let links = scan_visible_links(grid, 0, super::ScanOpts::default());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            links.len(),
+            1,
+            "expected exactly one File LinkRange for the CJK path, got {links:?}"
+        );
+        let link = &links[0];
+        assert_eq!(link.kind, LinkKind::File);
+        assert_eq!(
+            link.text, path_str,
+            "LinkRange text truncated at a CJK boundary"
+        );
+        // col_start = col of '/'; col_end = col of last 't' in `.txt`.
+        // The grid stores each wide char as lead+trail, so col_end -
+        // col_start + 1 = total physical cells covered = path length
+        // in chars + count of wide chars (each contributes one
+        // extra cell vs `.chars().count()`).
+        let wide_count = path_str
+            .chars()
+            .filter(|c| crate::grid::char_width(*c) == 2)
+            .count() as u16;
+        let expected_span = path_str.chars().count() as u16 + wide_count;
+        assert_eq!(
+            (link.col_end - link.col_start + 1),
+            expected_span,
+            "underline span ({}..={}) doesn't cover lead+trail of each wide char (expected {} cells)",
+            link.col_start,
+            link.col_end,
+            expected_span
         );
     }
 }
