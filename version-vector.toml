@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.6.71"  # Finder 拖放文件进 pane — MarspotView 注册 NSPasteboardTypeFileURL,performDragOperation 解析 file URL(percent-encoding 经 NSURL)+ 落点坐标,新 wire msg FileDrop(57) 转发 L2.前 0.6.70 笔记见 git blame.
-core    = "0.11.46"  # FileDrop 处理:落点 hit-test pane(sidebar row 或 cell body,miss 落 focused),focus 切换同 click,路径 shell_quote_path(shlex 风格,CJK 免 quote)+ 尾随空格,经 forward_paste 走 L3 bracketed-paste — claudecode 输入框直接吃到路径.前 0.11.45 笔记见 git blame.
-session = "0.10.7"  # 同 core 0.11.44 — terminal.rs file_scrollback_session_id 测试防护(生产行为不变,cfg!(test) 分支 release 下消除).前 0.10.6 笔记见 git blame.
+core    = "0.11.47"  # 同 session 0.10.8 — pty.rs/session.rs 是共享 crate 源(standalone Session::spawn 同样剥离).前 0.11.46 笔记见 git blame.
+session = "0.10.8"  # PTY spawn 剥离 MARSPOT_* 内部 env — PtyConfig.env_remove_prefixes:fork 前构造过滤 envp,child 里替换 environ 指针(AS-safe)再 execvp;shell 子孙不再继承 MARSPOT_SESSION_ID / SHM_FD / surface 等 12 个 plumbing 变量(2026-07-03 scrollback 覆盖事故根治).L3 自身 env 不动,self-execv 不受影响.前 0.10.7 笔记见 git blame.

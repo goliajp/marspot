@@ -43,6 +43,18 @@ pub struct PtyConfig {
     /// drop the user in the root directory).  Set to `$HOME` so a
     /// freshly-spawned shell opens where the user expects.
     pub cwd: Option<String>,
+    /// Env-var name prefixes to strip from the child's environment.
+    /// Empty (the default) → child inherits the parent env verbatim,
+    /// as before.  Marspot's shell-spawn sites pass `["MARSPOT_"]`:
+    /// the process-plumbing vars L1/L2 set on the way down
+    /// (MARSPOT_SESSION_ID, MARSPOT_SHM_FD, surface ids, …) are
+    /// meaningful only to marspot's own layers, and letting the
+    /// user's shell inherit them caused real damage — a `cargo test`
+    /// run inside a marspot pane picked up MARSPOT_SESSION_ID and
+    /// overwrote that session's on-disk scrollback (2026-07-03).
+    /// Only the parent-side snapshot is filtered; the parent's own
+    /// env is untouched (L3 self-execv still sees its vars).
+    pub env_remove_prefixes: Vec<String>,
 }
 
 /// Owned handle to a spawned child process attached to a pseudo-terminal.
@@ -90,6 +102,47 @@ impl Pty {
         }
         argv.push(ptr::null());
 
+        // Filtered child environment, built pre-fork (allocation is
+        // banned post-fork).  `None` when no prefixes are configured —
+        // the child then inherits the parent env untouched, exactly
+        // the pre-existing behaviour.  The child can't call
+        // `unsetenv` (not async-signal-safe), so instead we swap the
+        // global `environ` POINTER to this snapshot in the child —
+        // a plain store, AS-safe — and let execvp (which reads
+        // `environ` for both the child env and its PATH search) pick
+        // it up.  Parent-side env is never modified.
+        let filtered_env: Option<(Vec<CString>, Vec<*const c_char>)> =
+            if config.env_remove_prefixes.is_empty() {
+                None
+            } else {
+                use std::os::unix::ffi::OsStrExt;
+                let mut kept: Vec<CString> = Vec::new();
+                for (k, v) in std::env::vars_os() {
+                    let kb = k.as_bytes();
+                    if config
+                        .env_remove_prefixes
+                        .iter()
+                        .any(|p| kb.starts_with(p.as_bytes()))
+                    {
+                        continue;
+                    }
+                    let mut kv = Vec::with_capacity(kb.len() + 1 + v.as_bytes().len());
+                    kv.extend_from_slice(kb);
+                    kv.push(b'=');
+                    kv.extend_from_slice(v.as_bytes());
+                    match CString::new(kv) {
+                        Ok(c) => kept.push(c),
+                        // An interior NUL can't be expressed in envp;
+                        // such an entry is already unusable — drop it.
+                        Err(_) => continue,
+                    }
+                }
+                let mut ptrs: Vec<*const c_char> =
+                    kept.iter().map(|c| c.as_ptr()).collect();
+                ptrs.push(ptr::null());
+                Some((kept, ptrs))
+            };
+
         let winsize = libc::winsize {
             ws_row: config.size.rows,
             ws_col: config.size.cols,
@@ -122,6 +175,16 @@ impl Pty {
             unsafe {
                 if let Some(ref c) = cwd_cstring {
                     libc::chdir(c.as_ptr());
+                }
+                // Swap in the filtered env before exec.  A pointer
+                // store into `*_NSGetEnviron()` is async-signal-safe
+                // (no allocation, no locks) — this is why the array
+                // was fully built pre-fork.  execvp reads `environ`
+                // for the child env AND its PATH search, so the
+                // filtered PATH (kept — only configured prefixes are
+                // dropped) still resolves relative program names.
+                if let Some((_, ref ptrs)) = filtered_env {
+                    *libc::_NSGetEnviron() = ptrs.as_ptr() as *mut *mut c_char;
                 }
                 // execvp does PATH search for relative names (e.g. "tmux")
                 // while still matching execv's behaviour for absolute
@@ -391,12 +454,45 @@ mod tests {
             size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /bin/echo");
 
         let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
         let s = String::from_utf8_lossy(&output);
         assert!(s.contains("hello marspot"), "expected 'hello marspot' in output, got: {:?}", s);
+    }
+
+    /// env_remove_prefixes strips matching vars from the child while
+    /// keeping everything else (the child still needs PATH, HOME, …).
+    /// Guards the 2026-07-03 class of bug: MARSPOT_SESSION_ID leaking
+    /// into a pane's shell made descendant `cargo test` runs bind to —
+    /// and overwrite — the session's real on-disk scrollback.
+    #[test]
+    fn spawn_env_remove_prefixes_strips_child_env() {
+        // Safe under nextest (process per test); the var only needs
+        // to exist in THIS process for the child to inherit it.
+        std::env::set_var("MARSPOT_TEST_LEAK_PROBE", "leaked");
+        std::env::set_var("MARSPOT_KEEP_PROBE", "kept");
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                r#"echo "L=${MARSPOT_TEST_LEAK_PROBE:-UNSET} K=${MARSPOT_KEEP_PROBE:-UNSET} P=${PATH:+SET}""#.into(),
+            ],
+            size: TerminalSize::default(),
+            argv0: None,
+            cwd: None,
+            env_remove_prefixes: vec!["MARSPOT_TEST_".into()],
+        })
+        .expect("spawn /bin/sh");
+        let output = drain_until_eof_or_timeout(&mut pty, Duration::from_secs(2));
+        let s = String::from_utf8_lossy(&output);
+        assert!(s.contains("L=UNSET"), "prefixed var must be stripped, got: {s:?}");
+        assert!(s.contains("K=kept"), "non-matching var must survive, got: {s:?}");
+        assert!(s.contains("P=SET"), "PATH must survive the filter, got: {s:?}");
+        // Parent env is untouched — only the child snapshot is filtered.
+        assert_eq!(std::env::var("MARSPOT_TEST_LEAK_PROBE").as_deref(), Ok("leaked"));
     }
 
     #[test]
@@ -407,6 +503,7 @@ mod tests {
             size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /bin/sleep");
 
@@ -445,6 +542,7 @@ mod tests {
             size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /bin/sleep");
 
@@ -481,6 +579,7 @@ mod tests {
             size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /bin/cat");
 
@@ -533,6 +632,7 @@ mod tests {
             size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /usr/bin/true")
     }
@@ -624,6 +724,7 @@ mod tests {
                 size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+                ..Default::default()
             })
             .expect("spawn /bin/sleep");
 
@@ -673,6 +774,7 @@ mod tests {
             size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /bin/sleep");
 
@@ -713,6 +815,7 @@ mod tests {
             size: TerminalSize::default(),
             argv0: None,
             cwd: None,
+            ..Default::default()
         })
         .expect("spawn /usr/bin/true");
 

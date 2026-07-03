@@ -136,6 +136,14 @@ impl LocalSession {
             },
             argv0: Some(argv0),
             cwd,
+            // L2 → L3 plumbing vars (MARSPOT_SESSION_ID, MARSPOT_SHM_FD,
+            // MARSPOT_L3_OWNS_PTY, …) are for THIS process, not the
+            // user's shell.  Leaking them broke real workflows: a
+            // `cargo test` inside a marspot pane inherited
+            // MARSPOT_SESSION_ID and overwrote that session's on-disk
+            // scrollback (2026-07-03).  L3's own env is untouched, so
+            // the self-execv update path still reads them.
+            env_remove_prefixes: vec!["MARSPOT_".into()],
         })?;
         let child_pid = pty.child_pid();
         let pty = Arc::new(pty);
@@ -489,6 +497,7 @@ mod tests {
                     },
                     argv0: None,
                     cwd: None,
+                    ..Default::default()
                 })
                 .expect("spawn /bin/sh"),
             ),
