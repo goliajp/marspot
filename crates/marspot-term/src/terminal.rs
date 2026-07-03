@@ -27,6 +27,20 @@ use std::time::Instant;
 /// gates were removed after F1 soaked; both were no-ops for the live
 /// app and only existed for bisect rollback.
 fn file_scrollback_session_id() -> Option<u64> {
+    // Unit tests must never bind to a real session's scrollback
+    // file.  The var leaks into test processes when the suite runs
+    // inside a marspot terminal (L3 exports it to its shell, every
+    // descendant inherits) — with it set, each `Terminal::new` in a
+    // test opened sessions/<id>/scrollback.bin in the REAL state dir
+    // and overwrote the pane's on-disk history.  Under `cfg!(test)`
+    // the File variant therefore also requires an explicit
+    // MARSPOT_STATE_DIR (the A3/A4 e2e tests set a per-test sandbox
+    // dir; a leaked production env never has it).  bin/test.sh +
+    // bin/bench.sh additionally unset the var for out-of-crate
+    // consumers, where cfg!(test) is false.
+    if cfg!(test) && std::env::var_os("MARSPOT_STATE_DIR").is_none() {
+        return None;
+    }
     std::env::var("MARSPOT_SESSION_ID").ok()?.parse::<u64>().ok()
 }
 
@@ -3336,8 +3350,12 @@ mod tests {
         // across CSI 3 J (the .bin file IS the user's history; CSI
         // 3 J just drops the in-RAM view).  This test asserts the
         // Memory variant semantics where `len()` returns 0 after
-        // ESC[3J.  Tests run without `MARSPOT_SESSION_ID`, so
-        // `Terminal::new` lands on Memory automatically.
+        // ESC[3J — so force Memory by clearing `MARSPOT_SESSION_ID`.
+        // The var IS set when the suite runs inside a marspot
+        // terminal (L3 exports it to the shell); without this
+        // remove_var the test flips to File semantics and fails
+        // (safe under nextest's process-per-test isolation).
+        std::env::remove_var("MARSPOT_SESSION_ID");
         let mut t = Terminal::new(3, 2);
         // Build some scrollback by feeding many lines.
         for _ in 0..5 {
@@ -3374,12 +3392,14 @@ mod tests {
     #[test]
     #[ignore = "soak; run via bin/soak.sh"]
     fn soak_scrollback_bounded_under_ten_million_lines() {
+        // Force the Memory variant — see csi_3_J test for why the
+        // var can be present (suite run inside a marspot terminal).
+        std::env::remove_var("MARSPOT_SESSION_ID");
         let mut t = Terminal::new(80, 24);
         // Warm up enough to fully wrap the ring once so all backing
-        // pages have been faulted in before we baseline.  Tests run
-        // without `MARSPOT_SESSION_ID` so `Terminal::new` lands on
-        // the Memory variant (DEFAULT_SCROLLBACK_LINES = 10 000
-        // slots); 40 000 warmup lines covers that with ~4x margin.
+        // pages have been faulted in before we baseline.  The Memory
+        // variant has DEFAULT_SCROLLBACK_LINES = 10 000 slots;
+        // 40 000 warmup lines covers that with ~4x margin.
         // Without this the test's "baseline" lands mid-fill and
         // the next burst's lazy faults look like a leak.
         let warmup = b"\x1B[24;80H\n".repeat(40_000);

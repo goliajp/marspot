@@ -22,4 +22,12 @@ cd "$ROOT"
 # user-perspective gate that catches scrollback display bugs (blank
 # pushes leaking into scrollback, torn-write history loss, scroll
 # cap mismatches, resize content corruption) BEFORE they ship.
+#
+# Running the suite INSIDE a marspot terminal inherits the pane's
+# MARSPOT_SESSION_ID (L3 exports it to its shell).  With it set,
+# every `Terminal::new` in the tests opens the REAL state dir's
+# sessions/<id>/scrollback.bin and overwrites the pane's on-disk
+# history (bit us 2026-07-03: session 347's scrollback truncated to
+# test residue).  Unset it before any test process spawns.
+unset MARSPOT_SESSION_ID
 exec cargo nextest run --workspace --all-targets "$@"

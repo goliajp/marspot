@@ -29,6 +29,11 @@
 
 set -euo pipefail
 
+# See bin/test.sh — inside a marspot terminal the inherited
+# MARSPOT_SESSION_ID makes every headless-bench `Terminal::new` write
+# the REAL state dir's sessions/<id>/scrollback.bin.  Unset first.
+unset MARSPOT_SESSION_ID
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/bin/_lib.sh"   # marspot_bin resolves CARGO_TARGET_DIR
