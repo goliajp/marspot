@@ -355,6 +355,38 @@ fn encode_named_key(
     }
 }
 
+/// Quote a filesystem path for insertion at a shell prompt (Finder
+/// drag-and-drop → "type the path for me").  shlex-style: paths made
+/// entirely of safe chars pass through untouched; anything else is
+/// wrapped in single quotes with embedded `'` re-spelled as `'\''` —
+/// correct for every byte a filename can contain (spaces, newlines,
+/// `$`, backticks…) under POSIX sh/bash/zsh/fish.
+///
+/// Non-ASCII (CJK filenames are the norm here) counts as safe: POSIX
+/// word-splitting only special-cases ASCII metachars, and leaving
+/// 決算明細.xlsx unquoted keeps the inserted text readable.
+pub fn shell_quote_path(path: &str) -> String {
+    let safe = |c: char| {
+        !c.is_ascii()
+            || c.is_ascii_alphanumeric()
+            || matches!(c, '_' | '-' | '.' | '/' | '+' | '=' | ':' | ',' | '@' | '%')
+    };
+    if !path.is_empty() && path.chars().all(safe) {
+        return path.to_string();
+    }
+    let mut out = String::with_capacity(path.len() + 2);
+    out.push('\'');
+    for c in path.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,5 +625,47 @@ mod tests {
         let out =
             key_event_to_bytes(&ev, mods, false, true, || Some("hi".to_string())).unwrap();
         assert_eq!(&*out, b"\x1b[200~hi\x1b[201~");
+    }
+
+    #[test]
+    fn shell_quote_plain_path_untouched() {
+        assert_eq!(
+            shell_quote_path("/Users/x/file-1.2_3.txt"),
+            "/Users/x/file-1.2_3.txt"
+        );
+    }
+
+    #[test]
+    fn shell_quote_cjk_path_untouched() {
+        // CJK filenames are the everyday case — must stay readable.
+        assert_eq!(
+            shell_quote_path("/Users/x/Downloads/GOLIA-代表取缔役印.png"),
+            "/Users/x/Downloads/GOLIA-代表取缔役印.png"
+        );
+    }
+
+    #[test]
+    fn shell_quote_space_wraps() {
+        assert_eq!(
+            shell_quote_path("/Users/x/My File.txt"),
+            "'/Users/x/My File.txt'"
+        );
+    }
+
+    #[test]
+    fn shell_quote_metachars_wrap() {
+        assert_eq!(shell_quote_path("/tmp/a$b`c"), "'/tmp/a$b`c'");
+        assert_eq!(shell_quote_path("/tmp/(1)"), "'/tmp/(1)'");
+    }
+
+    #[test]
+    fn shell_quote_embedded_single_quote() {
+        assert_eq!(shell_quote_path("/tmp/it's"), "'/tmp/it'\\''s'");
+    }
+
+    #[test]
+    fn shell_quote_empty_is_quoted() {
+        // Degenerate, but "" must stay one (empty) shell word.
+        assert_eq!(shell_quote_path(""), "''");
     }
 }

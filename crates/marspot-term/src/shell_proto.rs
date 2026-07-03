@@ -302,6 +302,16 @@ pub enum MsgType {
     /// Empty `title_len` clears the plugin-set title for that pane.
     /// Used by the claudecode plugin to project-name the pane on bind.
     PaneTitle = 56,
+    /// L1 → L2: user dropped files from Finder onto the terminal
+    /// view.  L1 owns the NSView (only it sees NSDraggingDestination
+    /// callbacks); L2 hit-tests the drop point against the pane
+    /// layout, shell-escapes each path, and forwards the joined text
+    /// into that pane's PTY via the existing `Paste` path (so
+    /// bracketed-paste apps like claudecode see it as a paste).
+    /// Payload: `x f64 LE, y f64 LE` (drop point, physical px,
+    /// top-left origin — same convention as `MouseDown`), `count u16
+    /// LE`, then per path `len u16 LE + UTF-8 bytes`.
+    FileDrop = 57,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -347,6 +357,7 @@ impl MsgType {
             53 => MsgType::SearchCancel,
             55 => MsgType::DevPanelToggle,
             56 => MsgType::PaneTitle,
+            57 => MsgType::FileDrop,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1472,6 +1483,57 @@ pub fn decode_paste(payload: &[u8]) -> io::Result<String> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
+/// Encode a `FileDrop` payload: drop point (physical px, top-left
+/// origin) + the dropped paths.  Layout: `x f64 LE, y f64 LE,
+/// count u16 LE`, then per path `len u16 LE + UTF-8 bytes`.
+pub fn encode_file_drop(x: f64, y: f64, paths: &[String]) -> Vec<u8> {
+    let body: usize = paths.iter().map(|p| 2 + p.len()).sum();
+    let mut out = Vec::with_capacity(18 + body);
+    out.extend_from_slice(&x.to_le_bytes());
+    out.extend_from_slice(&y.to_le_bytes());
+    out.extend_from_slice(&(paths.len() as u16).to_le_bytes());
+    for p in paths {
+        out.extend_from_slice(&(p.len() as u16).to_le_bytes());
+        out.extend_from_slice(p.as_bytes());
+    }
+    out
+}
+
+pub fn decode_file_drop(payload: &[u8]) -> io::Result<(f64, f64, Vec<String>)> {
+    if payload.len() < 18 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file-drop payload < 18 bytes",
+        ));
+    }
+    let x = f64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let y = f64::from_le_bytes(payload[8..16].try_into().unwrap());
+    let count = u16::from_le_bytes(payload[16..18].try_into().unwrap()) as usize;
+    let mut paths = Vec::with_capacity(count);
+    let mut off = 18usize;
+    for _ in 0..count {
+        if payload.len() < off + 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file-drop path header truncated",
+            ));
+        }
+        let len = u16::from_le_bytes(payload[off..off + 2].try_into().unwrap()) as usize;
+        off += 2;
+        if payload.len() < off + len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "file-drop path truncated",
+            ));
+        }
+        let s = std::str::from_utf8(&payload[off..off + len])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        paths.push(s.to_string());
+        off += len;
+    }
+    Ok((x, y, paths))
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Adapters between the wire types and the high-level `input` types.
 // Kept in this module so both bins (shell encodes, core decodes)
@@ -2038,5 +2100,32 @@ mod tests {
         let mut payload = encode_search_results(1, false, 0, &[]);
         payload.push(0xff);
         assert!(decode_search_results(&payload).is_err());
+    }
+
+    #[test]
+    fn file_drop_roundtrip() {
+        let paths = vec![
+            "/Users/x/My File.txt".to_string(),
+            "/tmp/GOLIA-代表取缔役印.png".to_string(),
+        ];
+        let payload = encode_file_drop(123.5, -0.25, &paths);
+        let (x, y, got) = decode_file_drop(&payload).unwrap();
+        assert_eq!(x, 123.5);
+        assert_eq!(y, -0.25);
+        assert_eq!(got, paths);
+    }
+
+    #[test]
+    fn file_drop_empty_paths_roundtrip() {
+        let payload = encode_file_drop(0.0, 0.0, &[]);
+        let (_, _, got) = decode_file_drop(&payload).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn file_drop_truncated_rejected() {
+        let payload = encode_file_drop(1.0, 2.0, &["/tmp/a".to_string()]);
+        assert!(decode_file_drop(&payload[..payload.len() - 1]).is_err());
+        assert!(decode_file_drop(&payload[..10]).is_err());
     }
 }

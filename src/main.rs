@@ -855,6 +855,48 @@ impl MarspotApp for Marspot {
         ctx.request_redraw();
     }
 
+    fn file_drop(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, paths: &[String]) {
+        // Finder file drop → insert shell-quoted path(s) into the
+        // pane under the drop point; chrome/padding drops go to the
+        // focused pane.  Mirrors the L2 (marspot-core) handler.
+        if paths.is_empty() {
+            return;
+        }
+        let idx = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.hit_test(x_phys, y_phys))
+            .filter(|i| *i < self.panes.len())
+            .unwrap_or(self.focused_idx);
+        if idx >= self.panes.len() {
+            return;
+        }
+        if idx != self.focused_idx {
+            self.focused_idx = idx;
+        }
+        let _ = self.panes[idx].snap_to_live();
+        let mut text = String::new();
+        for p in paths {
+            text.push_str(&marspot::input::shell_quote_path(p));
+            text.push(' ');
+        }
+        let bracketed = self.panes[idx]
+            .session()
+            .terminal()
+            .bracketed_paste_mode();
+        let bytes = if bracketed {
+            let mut buf = Vec::with_capacity(text.len() + 12);
+            buf.extend_from_slice(b"\x1b[200~");
+            buf.extend_from_slice(text.as_bytes());
+            buf.extend_from_slice(b"\x1b[201~");
+            buf
+        } else {
+            text.into_bytes()
+        };
+        let _ = self.panes[idx].session_mut().write(&bytes);
+        ctx.request_redraw();
+    }
+
     fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {
         // A click without movement leaves anchor == focus → treat
         // as "no selection" so a stray single-click doesn't ghost

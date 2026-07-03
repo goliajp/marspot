@@ -41,8 +41,8 @@ use marspot::session_registry::{
     self, allocate_next_session_id, list_session_entries,
 };
 use marspot::shell_proto::{
-    decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping, decode_preedit,
-    decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
+    decode_file_drop, decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping,
+    decode_preedit, decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
     encode_caret_rect, encode_hello_ack, encode_pong, encode_surface_ready, mods_to_struct,
     wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT,
     ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
@@ -429,6 +429,10 @@ enum CoreEvent {
     /// `(dy_phys, precise)`; the horizontal delta is dropped at
     /// decode (terminal scrollback is vertical-only).
     Scroll(f64, bool),
+    /// Finder file drop forwarded by L1: `(x, y)` drop point in
+    /// physical px + resolved filesystem paths.  L2 hit-tests the
+    /// pane and inserts shell-quoted paths via the Paste path.
+    FileDrop(f64, f64, Vec<String>),
     Focus(bool),
     /// PROTO_VERSION=1 single-surface resize.  Kept for tolerance; the
     /// PROTO_VERSION=2 path uses `SurfaceAttach` (dual-buffer).
@@ -535,6 +539,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::Scroll => decode_scroll(&f.payload)
             .ok()
             .map(|(_dx, dy, p)| CoreEvent::Scroll(dy, p)),
+        MsgType::FileDrop => decode_file_drop(&f.payload)
+            .ok()
+            .map(|(x, y, paths)| CoreEvent::FileDrop(x, y, paths)),
         MsgType::Focus => decode_focus(&f.payload).ok().map(CoreEvent::Focus),
         MsgType::Resize => decode_resize(&f.payload)
             .ok()
@@ -3456,6 +3463,53 @@ impl CoreApp {
         }
     }
 
+    /// Finder file drop: insert the shell-quoted path(s) into the
+    /// pane under the drop point — the "type the path for me" gesture
+    /// every macOS terminal supports.  Routing goes through the
+    /// existing Paste path (L3 wraps in bracketed-paste when the app
+    /// enabled the mode), so shells insert at the prompt and TUI apps
+    /// like claudecode see a normal paste in their input box.
+    fn file_drop(&mut self, x_phys: f64, y_phys: f64, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        // Target the pane under the drop point (body cells or its
+        // sidebar row); a drop on chrome/padding goes to the focused
+        // pane — dropping "at the terminal" should never be a no-op.
+        let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
+        let top_pad_phys = self.layout.top_inset + self.layout.sidebar_top_pad_phys;
+        let sidebar_hit = self.layout.hit_test_sidebar_row(
+            x_phys, y_phys, top_pad_phys, row_phys, self.panes.len(),
+        );
+        let idx = sidebar_hit
+            .or(self.layout.hit_test(x_phys, y_phys))
+            .filter(|i| *i < self.panes.len())
+            .unwrap_or(self.focused_idx);
+        if idx >= self.panes.len() {
+            return;
+        }
+        // Same focus motion as a click — the pane receiving the text
+        // becomes the pane the user is typing into next.
+        if idx != self.focused_idx {
+            self.resolve_pending_on_defocus(idx);
+            self.focused_idx = idx;
+            self.refresh_pane_cwd_for(idx, false);
+        }
+        if self.panes[idx].snap_to_live() {
+            self.needs_render = true;
+        }
+        // Trailing space after each path so the user can keep typing
+        // (and multiple files arrive space-separated) — matches the
+        // Finder → Terminal.app / iTerm2 convention.
+        let mut text = String::new();
+        for p in paths {
+            text.push_str(&marspot_term::input_core::shell_quote_path(p));
+            text.push(' ');
+        }
+        self.panes[idx].session_mut().forward_paste(&text);
+        self.needs_render = true;
+    }
+
     fn mouse_drag(&mut self, x_phys: f64, y_phys: f64) {
         // F3+3.3 — LayoutModal card drag.  Take priority over the
         // process panel drag so a layout modal session never gets
@@ -4471,6 +4525,7 @@ fn main() {
                 CoreEvent::MouseUp => app.mouse_up(),
                 CoreEvent::MouseMove(x, y) => app.mouse_moved(x, y),
                 CoreEvent::Scroll(dy, precise) => app.scroll(dy, precise),
+                CoreEvent::FileDrop(x, y, paths) => app.file_drop(x, y, &paths),
                 CoreEvent::Focus(focused) => {
                     app.renderer.set_window_focused(focused);
                     // No mouseMoved deliveries while the window

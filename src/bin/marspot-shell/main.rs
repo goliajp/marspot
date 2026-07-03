@@ -423,8 +423,8 @@ use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
-    decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_focus,
-    encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
+    decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_file_drop,
+    encode_focus, encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
     encode_scroll, encode_surface_attach, event_to_wire, struct_to_mods_byte, Frame, MsgType,
     DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID,
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
@@ -2148,6 +2148,12 @@ impl MarspotApp for ShellApp {
 
     fn mouse_up(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
         self.send(MsgType::MouseUp, encode_mouse(x, y, 0));
+    }
+
+    fn file_drop(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64, paths: &[String]) {
+        // L2 owns the pane layout — forward drop point + raw paths;
+        // it hit-tests the pane and shell-quotes before insertion.
+        self.send(MsgType::FileDrop, encode_file_drop(x, y, paths));
     }
 
     fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {

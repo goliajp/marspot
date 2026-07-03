@@ -46,14 +46,15 @@ use objc2::runtime::{ProtocolObject, Sel};
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply, NSBackingStoreType, NSColor, NSEvent,
-    NSEventModifierFlags, NSImage, NSTextInputClient, NSTitlebarSeparatorStyle, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplicationTerminateReply, NSBackingStoreType, NSColor, NSDragOperation, NSDraggingInfo,
+    NSEvent, NSEventModifierFlags, NSImage, NSPasteboardTypeFileURL, NSTextInputClient,
+    NSTitlebarSeparatorStyle, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound,
-    NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
-    NSUInteger,
+    MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
+    NSNotFound, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize,
+    NSString, NSUInteger, NSURL,
 };
 
 use crate::input::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers, NamedKey};
@@ -107,6 +108,12 @@ pub trait MarspotApp: 'static {
 
     /// Mouse-up at physical-pixel `(x, y)`.  Default no-op.
     fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
+
+    /// Finder file drop at physical-pixel `(x, y)` with ≥1 resolved
+    /// filesystem paths.  Default no-op — the terminal apps override
+    /// to insert shell-quoted paths into the pane under the cursor.
+    fn file_drop(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _paths: &[String]) {
+    }
 
     /// Scroll delta in physical pixels (positive Y = scroll content
     /// down).  `precise` is true for trackpad / Magic Mouse, false
@@ -565,6 +572,74 @@ declare_class!(
             dispatch_event(EventKind::MouseMove { x: x_phys, y: y_phys });
         }
 
+        // ── NSDraggingDestination ──
+        // AppKit calls these on any view that registered drag types
+        // (`registerForDraggedTypes` in `run_app`); no protocol
+        // declaration is needed on the class.  Only file URLs are
+        // registered, so a session that reaches performDragOperation
+        // always has file paths to extract.
+
+        #[method(draggingEntered:)]
+        fn dragging_entered(
+            &self,
+            _info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            // Copy arrow (+) — communicates "this inserts the path",
+            // never moves/deletes the dragged file.
+            NSDragOperation::Copy
+        }
+
+        #[method(prepareForDragOperation:)]
+        fn prepare_for_drag_operation(
+            &self,
+            _info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> bool {
+            true
+        }
+
+        #[method(performDragOperation:)]
+        fn perform_drag_operation(
+            &self,
+            info: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> bool {
+            // Resolve dropped file URLs → filesystem paths.  Going
+            // through NSURL (rather than trimming the `file://`
+            // prefix by hand) handles percent-encoding — CJK
+            // filenames arrive percent-encoded in the URL string.
+            let pb = unsafe { info.draggingPasteboard() };
+            let mut paths: Vec<String> = Vec::new();
+            if let Some(items) = unsafe { pb.pasteboardItems() } {
+                for item in items.iter() {
+                    let url_str =
+                        match unsafe { item.stringForType(NSPasteboardTypeFileURL) } {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                    let path = unsafe { NSURL::URLWithString(&url_str) }
+                        .and_then(|u| unsafe { u.path() });
+                    if let Some(p) = path {
+                        paths.push(p.to_string());
+                    }
+                }
+            }
+            if paths.is_empty() {
+                false
+            } else {
+                // Drop point → view-local physical px, same conversion
+                // as mouse_down, so the receiver can pane-hit-test it.
+                let loc_window = unsafe { info.draggingLocation() };
+                let loc_view = self.convertPoint_fromView(loc_window, None);
+                let scale =
+                    self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+                dispatch_event(EventKind::FileDrop {
+                    x: loc_view.x * scale,
+                    y: loc_view.y * scale,
+                    paths,
+                });
+                true
+            }
+        }
+
         #[method(scrollWheel:)]
         fn scroll_wheel(&self, event: &NSEvent) {
             // hasPreciseScrollingDeltas distinguishes trackpads
@@ -917,6 +992,11 @@ pub enum EventKind {
     MouseUp { x: f64, y: f64 },
     MouseMove { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
+    /// Finder file drop on the view.  `(x, y)` is the drop point in
+    /// physical px (top-left origin, same as MouseDown); `paths` are
+    /// the resolved filesystem paths (≥1 — empty drops are rejected
+    /// in performDragOperation).
+    FileDrop { x: f64, y: f64, paths: Vec<String> },
     Resized,
     Moved,
     Focused(bool),
@@ -968,6 +1048,7 @@ fn dispatch_event(kind: EventKind) {
             EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),
             EventKind::MouseMove { x, y } => app.mouse_moved(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),
+            EventKind::FileDrop { x, y, paths } => app.file_drop(ctx, x, y, &paths),
             EventKind::Resized => {
                 let (w, h) = ctx.inner_size_phys();
                 app.resized(ctx, w, h);
@@ -1116,6 +1197,14 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         });
         unsafe { msg_send_id![super(alloc), initWithFrame: frame] }
     };
+    // Accept Finder file drags anywhere on the view — dropping a
+    // file inserts its shell-quoted path into the pane under the
+    // cursor (NSDraggingDestination methods on MarspotView).
+    // (`from_id_slice` + `copy` because NSString's mutable-subclass
+    // mutability blocks the plain `from_slice` retainable bound;
+    // copying an immutable NSString is just a retain.)
+    let drag_types = NSArray::from_id_slice(&[unsafe { NSPasteboardTypeFileURL.copy() }]);
+    unsafe { view.registerForDraggedTypes(&drag_types) };
 
     // 2. Create NSWindow with view as content.
     //
