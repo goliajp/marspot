@@ -1304,3 +1304,35 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tilde_cjk_tests {
+    use super::*;
+    use crate::terminal::Terminal;
+
+    /// The `~/` + CJK combination from the 2026-07-03 field report
+    /// (`~/Downloads/GOLIA-代表取缔役印.png` not underlined): the `~`
+    /// branch + wide-char trail-half handling + `is_real_path`'s
+    /// HOME expansion must compose.  The sibling CJK test uses an
+    /// absolute path, so it never exercises the tilde branch.
+    ///
+    /// `set_var("HOME")` is safe under nextest (process per test);
+    /// under plain multi-threaded `cargo test` it could race other
+    /// tests reading HOME — the project runner is nextest
+    /// (bin/test.sh).
+    #[test]
+    fn tilde_cjk_path_detected() {
+        let home = std::env::temp_dir().join("marspot-link-tilde-cjk");
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::fs::write(home.join("Downloads/GOLIA-代表取缔役印.png"), b"x").unwrap();
+        std::env::set_var("HOME", &home);
+        let s = "~/Downloads/GOLIA-代表取缔役印.png";
+        let cols = (s.chars().count() as u16) * 2 + 20;
+        let mut t = Terminal::new(cols, 3);
+        t.feed(format!("see {s} ok").as_bytes());
+        let links = scan_visible_links(t.grid(), 0, ScanOpts::default());
+        assert_eq!(links.len(), 1, "got {links:?}");
+        assert_eq!(links[0].text, s);
+        assert_eq!(links[0].kind, LinkKind::File);
+    }
+}
