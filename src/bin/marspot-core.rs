@@ -1442,7 +1442,7 @@ impl CoreApp {
         let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
         let top_pad_phys = self.layout.top_inset + self.layout.sidebar_top_pad_phys;
         if let Some(idx) = self.layout.hit_test_sidebar_row(
-            x_phys, y_phys, row_phys, top_pad_phys, self.panes.len(),
+            x_phys, y_phys, top_pad_phys, row_phys, self.panes.len(),
         ) {
             return ContextRegion::SidebarSlot(idx);
         }
