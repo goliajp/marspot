@@ -289,7 +289,7 @@ fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
 
 #[derive(Clone, Debug)]
 struct BindMeta {
-    /// 0 = default `.claude`, 1/2/3 = `.claude-profile-N`, 255 = unknown.
+    /// 0 = default `.claude`, N = `.claude-profile-N`, 255 = unknown.
     profile_num: u8,
     uuid: String,
     claude_pid: i32,
@@ -682,12 +682,31 @@ impl ClaudecodePlugin {
             );
             return;
         };
-        let next_profile = match meta.profile_num {
-            1 => 2,
-            2 => 3,
-            3 => 1,
-            _ => 1,
+        let profiles = discover_profiles();
+        let Some(&lowest) = profiles.first() else {
+            host.log(
+                LogLevel::Warn,
+                "cycle.no_profiles",
+                "no ~/.claude-profile-N dirs; cannot cycle",
+            );
+            return;
         };
+        // Next-highest existing profile, wrapping to the lowest.  P0
+        // (default `.claude`) and unknown (255) both land on the
+        // lowest numbered profile.
+        let next_profile = profiles
+            .iter()
+            .copied()
+            .find(|&n| n > meta.profile_num)
+            .unwrap_or(lowest);
+        host.log(
+            LogLevel::Info,
+            "cycle.profiles",
+            &format!(
+                "discovered={:?} current=P{} next=P{}",
+                profiles, meta.profile_num, next_profile
+            ),
+        );
         let Some(client) = self.shelld.as_ref().cloned() else {
             host.log(
                 LogLevel::Warn,
@@ -714,6 +733,38 @@ impl ClaudecodePlugin {
         }
     }
 
+}
+
+/// Scan `$HOME` for `.claude-profile-N` directories and return the
+/// profile numbers, sorted ascending.  This is the source of truth
+/// for the badge-click cycle — add a `~/.claude-profile-5` dir (plus
+/// its `claude5` shell alias) and the cycle picks it up on the next
+/// click, no code change.  The default `.claude` (P0) is deliberately
+/// not part of the cycle, matching the previous hardcoded 1→2→3 loop.
+fn discover_profiles() -> Vec<u8> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    discover_profiles_in(std::path::Path::new(&home))
+}
+
+fn discover_profiles_in(home: &std::path::Path) -> Vec<u8> {
+    let Ok(rd) = std::fs::read_dir(home) else {
+        return Vec::new();
+    };
+    let mut nums: Vec<u8> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_prefix(".claude-profile-")?
+                .parse::<u8>()
+                .ok()
+        })
+        .collect();
+    nums.sort_unstable();
+    nums
 }
 
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
@@ -1306,6 +1357,53 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    fn tmphome(entries: &[(&str, bool)]) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let home = std::env::temp_dir().join(format!(
+            "claudecode-plugin-home-{}-{}",
+            std::process::id(),
+            n
+        ));
+        fs::create_dir_all(&home).unwrap();
+        for (name, is_dir) in entries {
+            let p = home.join(name);
+            if *is_dir {
+                fs::create_dir(&p).unwrap();
+            } else {
+                fs::File::create(&p).unwrap();
+            }
+        }
+        home
+    }
+
+    #[test]
+    fn discover_profiles_finds_sorted_dirs() {
+        let home = tmphome(&[
+            (".claude-profile-4", true),
+            (".claude-profile-1", true),
+            (".claude-profile-2", true),
+            (".claude", true),
+            (".claude-profile-x", true),   // non-numeric suffix
+            (".claude-profile-3", false),  // a file, not a dir
+            ("Documents", true),
+        ]);
+        assert_eq!(discover_profiles_in(&home), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn discover_profiles_empty_when_none_exist() {
+        let home = tmphome(&[(".claude", true)]);
+        assert!(discover_profiles_in(&home).is_empty());
+    }
+
+    #[test]
+    fn discover_profiles_missing_home_is_empty() {
+        let home = std::env::temp_dir().join("claudecode-plugin-home-nonexistent");
+        assert!(discover_profiles_in(&home).is_empty());
     }
 
     #[test]
