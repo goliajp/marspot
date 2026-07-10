@@ -516,6 +516,29 @@ impl Terminal {
                     i += wide_len;
                     continue;
                 }
+                // Decode lane: a run of structurally-valid 4-byte
+                // UTF-8 sequences (emoji plane).  Unlike the lanes
+                // above this commits NOTHING early — `print` sees
+                // the exact same codepoint stream the per-byte state
+                // machine would deliver (including the same
+                // replacement-char behaviour), so cluster semantics
+                // are untouched; only the 4× per-byte dispatch is
+                // skipped.
+                let quad_len = quad_run_len(&bytes[i..]);
+                if quad_len >= 8 {
+                    for chunk in bytes[i..i + quad_len].chunks_exact(4) {
+                        let cp = (((chunk[0] & 0x07) as u32) << 18)
+                            | (((chunk[1] & 0x3F) as u32) << 12)
+                            | (((chunk[2] & 0x3F) as u32) << 6)
+                            | (chunk[3] & 0x3F) as u32;
+                        match char::from_u32(cp) {
+                            Some(c) => handler.print(c),
+                            None => handler.print(crate::parser::REPLACEMENT_CHAR),
+                        }
+                    }
+                    i += quad_len;
+                    continue;
+                }
             }
             parser.advance(&mut handler, bytes[i]);
             i += 1;
@@ -1275,6 +1298,26 @@ fn wide_boring_run_len(bytes: &[u8]) -> usize {
             Some(c) if fast_width(c) == Some(2) => n += 3,
             _ => break,
         }
+    }
+    n
+}
+
+/// Length (in bytes, multiple of 4) of the longest prefix of `bytes`
+/// consisting of structurally-valid 4-byte UTF-8 sequences (lead
+/// 0xF0-0xF4 + three continuations).  The feed loop's decode lane —
+/// validity of the SCALAR (surrogate-free range) is settled by
+/// `char::from_u32` at decode, mirroring the per-byte path exactly.
+fn quad_run_len(bytes: &[u8]) -> usize {
+    let mut n = 0;
+    while n + 4 <= bytes.len() {
+        if !(0xF0..=0xF4).contains(&bytes[n])
+            || bytes[n + 1] & 0xC0 != 0x80
+            || bytes[n + 2] & 0xC0 != 0x80
+            || bytes[n + 3] & 0xC0 != 0x80
+        {
+            break;
+        }
+        n += 4;
     }
     n
 }

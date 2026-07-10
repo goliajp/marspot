@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.79"  # wide 批量车道 + GB9b 补洞 — 3 字节 UTF-8 fast-class run(CJK/假名/全角 + Hangul 音节 LV/LVT 入 fast 类)批量双格写;batch prologue 检查 Prepend 尾/jamo 尾可黏合情形回退 scalar(修 0.6.78 print_ascii_run 无条件 flush 的 GB9b 洞).local cjk 112→251 MB/s.前 0.6.78 笔记见 git blame.
-core    = "0.11.53"  # 同 shell 0.6.79 — wide 批量车道重编.前 0.11.52 笔记见 git blame.
-session = "0.10.12"  # 同 shell 0.6.79 — L3 是 parse 热路径真正宿主.前 0.10.11 笔记见 git blame.
+shell   = "0.6.80"  # grapheme 单表化 + 4 字节解码车道 — regen 生成 CLUSTER_PROPS 合并表(gbp+pictographic+InCB 打包一次二分,旧三表删除变薄封装),GraphemeCursor 缓存 prev props(每字符 5-6 查表→1);feed 加 quad 解码车道(免 4× dispatch,零提前提交).local emoji 57→72 MB/s.前 0.6.79 笔记见 git blame.
+core    = "0.11.54"  # 同 shell 0.6.80 — grapheme 单表化重编.前 0.11.53 笔记见 git blame.
+session = "0.10.13"  # 同 shell 0.6.80 — L3 是 parse 热路径真正宿主.前 0.10.12 笔记见 git blame.

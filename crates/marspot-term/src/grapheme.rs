@@ -19,7 +19,7 @@
 //! Conformance: see `grapheme_break_test_conformance` test, which
 //! exercises every entry in the official `GraphemeBreakTest.txt`.
 
-use crate::unicode_data::{gbp, incb, is_extended_pictographic, GBP, InCB};
+use crate::unicode_data::{cluster_props, ClusterProps, GBP, InCB};
 
 /// Boundary decision state.  UAX #29 expresses GB11 ("Emoji Extend*
 /// ZWJ × Emoji") and GB9c (Indic Conjunct Break) as patterns that
@@ -61,26 +61,24 @@ struct ClusterState {
 /// Implements UAX #29 rules GB3, GB4, GB5, GB6, GB7, GB8, GB9, GB9a,
 /// GB9b, GB9c, GB11, GB12, GB13.  GB1/GB2 (start/end of text) are
 /// handled by the iterator's main loop.  Default GB999 is "break".
-fn is_break(prev: char, next: char, state: &mut ClusterState) -> bool {
-    let p = gbp(prev as u32);
-    let n = gbp(next as u32);
-
+fn is_break(p: ClusterProps, n: ClusterProps, state: &mut ClusterState) -> bool {
     // Cluster state for the *next* iteration must reflect the
     // codepoint we're about to attach (or break before).  We compute
     // the boundary decision below using the OLD state, then update
     // it.
-    let decision = decide_break(prev, next, p, n, state);
+    let decision = decide_break(p, n, state);
 
     if decision {
         // Boundary: state resets and the post-boundary codepoint
         // starts a new run.  Initialise from `next` alone.
         *state = ClusterState::default();
     }
-    update_state_with(next, n, state);
+    update_state_with(n, state);
     decision
 }
 
-fn decide_break(prev: char, next: char, p: GBP, n: GBP, state: &ClusterState) -> bool {
+fn decide_break(p: ClusterProps, n: ClusterProps, state: &ClusterState) -> bool {
+    let (p, n_incb, n_pict, n) = (p.gbp, n.incb, n.pict, n.gbp);
     // GB3: CR × LF — keep CRLF together as one cluster.
     if p == GBP::CR && n == GBP::LF {
         return false;
@@ -122,12 +120,12 @@ fn decide_break(prev: char, next: char, p: GBP, n: GBP, state: &ClusterState) ->
     //       [\p{InCB=Extend/Linker}]* × \p{InCB=Consonant}
     // Indic Conjunct Break — Devanagari, Bengali, etc.  Keep two
     // consonants together if a linker (virama) appeared between them.
-    if state.after_indic_linker && incb(next as u32) == InCB::Consonant {
+    if state.after_indic_linker && n_incb == InCB::Consonant {
         return false;
     }
     // GB11: \p{Extended_Pictographic} Extend* ZWJ × \p{Extended_Pictographic}
     // Compound emoji (👨‍👩‍👧‍👦, 🏳️‍🌈, 👩‍💻 …).
-    if state.after_emoji_zwj && is_extended_pictographic(next as u32) {
+    if state.after_emoji_zwj && n_pict {
         return false;
     }
     // GB12/GB13: (sot | [^RI]) (RI RI)* RI × RI
@@ -142,21 +140,21 @@ fn decide_break(prev: char, next: char, p: GBP, n: GBP, state: &ClusterState) ->
     }
 
     // GB999: default — break.
-    let _ = prev;
     true
 }
 
 /// Fold `next` into the cluster state used for the NEXT boundary
 /// decision.  Called after every codepoint we attach to (or start) a
 /// cluster, regardless of whether a boundary was emitted before it.
-fn update_state_with(next: char, n: GBP, state: &mut ClusterState) {
-    let in_cb = incb(next as u32);
+fn update_state_with(np: ClusterProps, state: &mut ClusterState) {
+    let in_cb = np.incb;
+    let n = np.gbp;
 
     // GB11 left-side run tracking.  An Extended_Pictographic codepoint
     // starts the run; any Extend continues it; a ZWJ immediately
     // following the run sets `after_emoji_zwj`; anything else clears
     // the run.
-    if is_extended_pictographic(next as u32) {
+    if np.pict {
         state.in_emoji_run = true;
         state.after_emoji_zwj = false;
     } else if state.in_emoji_run && n == GBP::Extend {
@@ -213,10 +211,12 @@ fn update_state_with(next: char, n: GBP, state: &mut ClusterState) {
 /// end of input — so the next codepoint starts a fresh cluster.
 pub struct GraphemeCursor {
     /// `None` at construction and immediately after a [`reset`] — the
-    /// next `step` always reports a boundary (GB1: sot ÷).
+    /// next `step` always reports a boundary (GB1: sot ÷).  Caches the
+    /// previous codepoint's resolved [`ClusterProps`] so each `step`
+    /// costs exactly one table lookup (for the incoming codepoint).
     ///
     /// [`reset`]: GraphemeCursor::reset
-    prev: Option<char>,
+    prev: Option<ClusterProps>,
     state: ClusterState,
 }
 
@@ -245,18 +245,19 @@ impl GraphemeCursor {
     /// first codepoint.  Returns `false` iff `ch` attaches to the
     /// current cluster.
     pub fn step(&mut self, ch: char) -> bool {
+        let cp = cluster_props(ch as u32);
         let break_here = match self.prev {
             None => true, // GB1: sot ÷
             Some(prev) => {
-                let decision = decide_break(prev, ch, gbp(prev as u32), gbp(ch as u32), &self.state);
+                let decision = decide_break(prev, cp, &self.state);
                 if decision {
                     self.state = ClusterState::default();
                 }
                 decision
             }
         };
-        update_state_with(ch, gbp(ch as u32), &mut self.state);
-        self.prev = Some(ch);
+        update_state_with(cp, &mut self.state);
+        self.prev = Some(cp);
         break_here
     }
 }
@@ -291,18 +292,19 @@ impl<'a> Iterator for GraphemeIter<'a> {
         // First codepoint of the cluster: always consume.
         let (_, first) = iter.next().expect("non-empty by precondition");
         self.state = ClusterState::default();
-        update_state_with(first, gbp(first as u32), &mut self.state);
-        let mut prev = first;
+        let mut prev = cluster_props(first as u32);
+        update_state_with(prev, &mut self.state);
         let mut cluster_end_offset = first.len_utf8();
         for (rel_byte, ch) in iter {
-            if is_break(prev, ch, &mut self.state) {
+            let cp = cluster_props(ch as u32);
+            if is_break(prev, cp, &mut self.state) {
                 cluster_end_offset = rel_byte;
                 break;
             }
             // No break: extend the cluster through `ch`.  Track its
             // end for the next iteration.
             cluster_end_offset = rel_byte + ch.len_utf8();
-            prev = ch;
+            prev = cp;
         }
         self.byte_pos = cluster_start + cluster_end_offset;
         Some(&self.s[cluster_start..self.byte_pos])
@@ -346,7 +348,7 @@ pub fn cluster_first_codepoint(cluster: &str) -> char {
 ///   1-cell glyph.
 fn cp_visual_width(ch: char) -> u8 {
     let cp = ch as u32;
-    match gbp(cp) {
+    match cluster_props(cp).gbp {
         GBP::Control | GBP::CR | GBP::LF | GBP::Extend | GBP::ZWJ => 0,
         // SpacingMark + Prepend render visibly in the same cluster as
         // their base; per-codepoint they contribute 1 cell of advance

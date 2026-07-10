@@ -21,7 +21,7 @@
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
 const MAX_OSC_LEN: usize = 4096;
-const REPLACEMENT_CHAR: char = '\u{FFFD}';
+pub(crate) const REPLACEMENT_CHAR: char = '\u{FFFD}';
 
 pub trait ParserCallbacks {
     fn print(&mut self, ch: char);
