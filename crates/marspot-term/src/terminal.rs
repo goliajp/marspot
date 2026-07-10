@@ -3355,7 +3355,9 @@ mod tests {
         // terminal (L3 exports it to the shell); without this
         // remove_var the test flips to File semantics and fails
         // (safe under nextest's process-per-test isolation).
-        std::env::remove_var("MARSPOT_SESSION_ID");
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::remove_var("MARSPOT_SESSION_ID") };
         let mut t = Terminal::new(3, 2);
         // Build some scrollback by feeding many lines.
         for _ in 0..5 {
@@ -3394,7 +3396,9 @@ mod tests {
     fn soak_scrollback_bounded_under_ten_million_lines() {
         // Force the Memory variant — see csi_3_J test for why the
         // var can be present (suite run inside a marspot terminal).
-        std::env::remove_var("MARSPOT_SESSION_ID");
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::remove_var("MARSPOT_SESSION_ID") };
         let mut t = Terminal::new(80, 24);
         // Warm up enough to fully wrap the ring once so all backing
         // pages have been faulted in before we baseline.  The Memory

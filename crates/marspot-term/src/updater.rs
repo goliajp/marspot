@@ -578,12 +578,12 @@ mod tests {
         let file = dir.join("payload.bin");
         let sig = dir.join("payload.bin.sig");
 
-        let gen = Command::new("/usr/bin/openssl")
+        let genkey = Command::new("/usr/bin/openssl")
             .args(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out"])
             .arg(&sec)
             .output()
             .unwrap();
-        assert!(gen.status.success(), "genkey failed");
+        assert!(genkey.status.success(), "genkey failed");
         let pubout = Command::new("/usr/bin/openssl")
             .arg("ec")
             .arg("-in")

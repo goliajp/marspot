@@ -34,7 +34,7 @@ pub fn list_all_procs() -> Vec<ProcRow> {
     unsafe { list_all_procs_inner().unwrap_or_default() }
 }
 
-unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> {
+unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> { unsafe {
     // proc_listpids(PROC_ALL_PIDS) — get every pid on the host.
     // libc crate doesn't expose PROC_ALL_PIDS; <sys/proc_info.h>
     // defines it as 1.
@@ -90,7 +90,7 @@ unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> {
         });
     }
     Some(out)
-}
+}}
 
 /// Working directory of `pid` via `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
 /// Returns None when the process has exited, when SIP / sandbox blocks
@@ -176,7 +176,7 @@ pub fn proc_cmdline(pid: i32) -> Option<String> {
     unsafe { proc_cmdline_inner(pid) }
 }
 
-unsafe fn proc_cmdline_inner(pid: i32) -> Option<String> {
+unsafe fn proc_cmdline_inner(pid: i32) -> Option<String> { unsafe {
     // First read kern.argmax to size the buffer right.
     let mut argmax: libc::c_int = 0;
     let mut sz: libc::size_t = std::mem::size_of::<libc::c_int>();
@@ -250,7 +250,7 @@ unsafe fn proc_cmdline_inner(pid: i32) -> Option<String> {
         }
     }
     Some(parts.join(" "))
-}
+}}
 
 /// Look up one environment variable on a running pid by walking
 /// KERN_PROCARGS2 past argv into envp.  Returns the value of the
@@ -260,7 +260,7 @@ pub fn proc_env_value(pid: i32, key: &str) -> Option<String> {
     unsafe { proc_env_value_inner(pid, key) }
 }
 
-unsafe fn proc_env_value_inner(pid: i32, key: &str) -> Option<String> {
+unsafe fn proc_env_value_inner(pid: i32, key: &str) -> Option<String> { unsafe {
     // Same buffer-sizing dance as `proc_cmdline_inner`.
     let mut argmax: libc::c_int = 0;
     let mut sz: libc::size_t = std::mem::size_of::<libc::c_int>();
@@ -342,7 +342,7 @@ unsafe fn proc_env_value_inner(pid: i32, key: &str) -> Option<String> {
         }
     }
     None
-}
+}}
 
 /// BFS the process tree rooted at `root_pid` using a pre-fetched
 /// `procs` table.  Returns every descendant in discovery order

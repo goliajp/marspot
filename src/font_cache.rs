@@ -151,7 +151,7 @@ pub fn resolve_attrs(
 // CoreText's per-string font fallback resolver — not in the
 // `core-text` crate so we declare it directly.
 #[link(name = "CoreText", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CTFontCreateForString(
         currentFont: CTFontRef,
         string: CFStringRef,

@@ -529,17 +529,17 @@ impl GridShmWriter {
     }
 
     #[inline]
-    unsafe fn cells_ptr(&self) -> *mut Cell {
+    unsafe fn cells_ptr(&self) -> *mut Cell { unsafe {
         self.base.add(HEADER_BYTES) as *mut Cell
-    }
+    }}
 
     /// Per-row wrapped-flag array — one byte per viewport row, fixed
     /// offset after the cell capacity.  Reader and writer agree by
     /// construction (same const), independent of live dims.
     #[inline]
-    unsafe fn wrapped_ptr(&self) -> *mut u8 {
+    unsafe fn wrapped_ptr(&self) -> *mut u8 { unsafe {
         self.base.add(wrapped_offset())
-    }
+    }}
 
     /// Hash-dedupe wrapper around [`publish`].  Computes an FNV-1a
     /// digest of every byte that the next `publish()` would write
@@ -785,16 +785,16 @@ impl GridShmReader {
     }
 
     #[inline]
-    unsafe fn cells_ptr(&self) -> *const Cell {
+    unsafe fn cells_ptr(&self) -> *const Cell { unsafe {
         self.base.add(HEADER_BYTES) as *const Cell
-    }
+    }}
 
     /// Per-row wrapped-flag array (read view) — mirrors the writer
     /// layout at the fixed offset after the cell capacity.
     #[inline]
-    unsafe fn wrapped_ptr(&self) -> *const u8 {
+    unsafe fn wrapped_ptr(&self) -> *const u8 { unsafe {
         self.base.add(wrapped_offset())
-    }
+    }}
 
     /// Read the latest published frame into `cells_out` + `wrapped_out`
     /// (both resized to the frame's `cols*rows` and `rows`),  retrying

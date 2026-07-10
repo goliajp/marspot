@@ -1325,7 +1325,9 @@ mod tilde_cjk_tests {
         let home = std::env::temp_dir().join("marspot-link-tilde-cjk");
         std::fs::create_dir_all(home.join("Downloads")).unwrap();
         std::fs::write(home.join("Downloads/GOLIA-代表取缔役印.png"), b"x").unwrap();
-        std::env::set_var("HOME", &home);
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::set_var("HOME", &home) };
         let s = "~/Downloads/GOLIA-代表取缔役印.png";
         let cols = (s.chars().count() as u16) * 2 + 20;
         let mut t = Terminal::new(cols, 3);

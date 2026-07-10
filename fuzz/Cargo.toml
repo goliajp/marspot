@@ -2,10 +2,15 @@
 name = "marspot-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
+
+# Standard cargo-fuzz layout: an empty [workspace] table keeps this
+# crate OUT of the parent workspace (newer cargo hard-errors on a
+# nested non-member package otherwise).
+[workspace]
 
 [dependencies]
 libfuzzer-sys = "0.4"

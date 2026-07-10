@@ -1395,11 +1395,11 @@ impl CoreApp {
         let mut ordered: Vec<Pane> = Vec::with_capacity(n_in_grid);
         let mut ordered_titles: Vec<Option<String>> = Vec::with_capacity(n_in_grid);
         for i in 0..n_in_grid {
-            if let Some(p) = new_panes[i].take() {
+            match new_panes[i].take() { Some(p) => {
                 ordered.push(p);
-            } else if let Some(p) = leftover.pop() {
+            } _ => { match leftover.pop() { Some(p) => {
                 ordered.push(p);
-            }
+            } _ => {}}}}
             if let Some(t) = new_titles[i].take() {
                 ordered_titles.push(t);
             } else if let Some(t) = leftover_titles.pop() {

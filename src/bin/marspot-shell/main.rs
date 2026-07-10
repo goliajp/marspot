@@ -900,7 +900,7 @@ impl ShellApp {
     /// loop made this hole obvious: six core boots in three minutes
     /// and no log entry telling us which path was firing them.
     fn shutdown_active(&mut self, reason: &'static str) {
-        if let Some(conn) = self.active.take() {
+        match self.active.take() { Some(conn) => {
             let pid = conn.child.as_ref().and_then(|c| Some(c.id())).unwrap_or(0);
             lx_event!(
                 "ACTIVE_SHUTDOWN",
@@ -909,7 +909,7 @@ impl ShellApp {
                 pid = pid
             );
             conn.shutdown();
-        } else {
+        } _ => {
             // No-op path is still worth logging — it tells us a
             // shutdown was requested when no core was live (race
             // between supervisor signals).
@@ -918,7 +918,7 @@ impl ShellApp {
                 "shutdown_active called but slot was empty",
                 reason = reason
             );
-        }
+        }}
     }
 
     /// Record a CORE_SPAWN into the rolling ring and flag a
@@ -2673,7 +2673,8 @@ Usage:\n\
     // place instead of jumping to the default rect.  Consumed here —
     // removed from our env so spawned children (core) don't carry it.
     let restore_frame = std::env::var("MARSPOT_RESTORE_FRAME").ok().and_then(|s| {
-        std::env::remove_var("MARSPOT_RESTORE_FRAME");
+        // SAFETY: startup path in main(), before any thread is spawned.
+        unsafe { std::env::remove_var("MARSPOT_RESTORE_FRAME") };
         let v: Vec<f64> = s.split(',').filter_map(|p| p.parse().ok()).collect();
         match v[..] {
             [x, y, w, h] if w > 0.0 && h > 0.0 => Some((x, y, w, h)),

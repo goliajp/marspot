@@ -1,7 +1,7 @@
 [package]
 name = "marspot-session"
 version = "0.2.12"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0 OR MIT"
 
 # The per-session L3 process (target #4): parser/terminal only, NO

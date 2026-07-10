@@ -341,7 +341,9 @@ mod tests {
             // Best-effort cleanup of prior debris from the same path.
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create sandbox dir");
-            std::env::set_var("MARSPOT_STATE_DIR", &dir);
+            // SAFETY: test/example code, single-threaded at this point (state-dir
+            // mutations additionally serialized by the suite's state-dir lock).
+            unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
             Self { prev, _lock: lock, _dir: dir }
         }
     }
@@ -349,8 +351,12 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self._dir);
             match self.prev.take() {
-                Some(v) => std::env::set_var("MARSPOT_STATE_DIR", v),
-                None => std::env::remove_var("MARSPOT_STATE_DIR"),
+                // SAFETY: test/example code, single-threaded at this point (state-dir
+                // mutations additionally serialized by the suite's state-dir lock).
+                Some(v) => unsafe { std::env::set_var("MARSPOT_STATE_DIR", v) },
+                // SAFETY: test/example code, single-threaded at this point (state-dir
+                // mutations additionally serialized by the suite's state-dir lock).
+                None => unsafe { std::env::remove_var("MARSPOT_STATE_DIR") },
             }
         }
     }

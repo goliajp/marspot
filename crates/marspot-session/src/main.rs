@@ -1313,7 +1313,7 @@ fn main() {
                     let _ = session.write(&bytes);
                 }
                 SessionEvent::Wake => {}
-                SessionEvent::CoreGone(gen) => {
+                SessionEvent::CoreGone(core_gen) => {
                     // RFC-003 §6 Amendment 11 (debug-2 + debug-3 root
                     // cause): owns-pty L3 MUST NOT exit on control
                     // EOF, AND the EOF that ends an OLD client must
@@ -1330,11 +1330,11 @@ fn main() {
                     //
                     // Without the gen tag, T3 would null poke and
                     // leave L3 disconnected from the live NEW L2.
-                    if gen < client_generation {
+                    if core_gen < client_generation {
                         lx_event!(
                             "L3_UDS_STALE_EOF",
                             "ignored stale control EOF; current client newer",
-                            stale_gen = gen,
+                            stale_gen = core_gen,
                             current_gen = client_generation
                         );
                     } else if owns_pty {
@@ -1342,7 +1342,7 @@ fn main() {
                         lx_event!(
                             "L3_UDS_CLIENT_GONE",
                             "control client closed; awaiting reattach (owns-pty)",
-                            gen = gen
+                            generation = core_gen
                         );
                     } else {
                         core_gone = true;
@@ -1714,7 +1714,7 @@ fn main() {
         let SessionImpl::Local(local) = session;
         let do_execv = should_execv_on_sigterm();
         if do_execv {
-            if let Some(listener_owned) = _listener.take() {
+            match _listener.take() { Some(listener_owned) => {
                 lx_event!(
                     "L3_SHUTDOWN_EXECV",
                     "fingerprint differs from current/marspot-session — execv",
@@ -1731,14 +1731,14 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
-            } else {
+            } _ => {
                 lx_error!(
                     "l3.execv.no_listener",
                     "want_shutdown but no SessionListener; bug",
                     session_id = id
                 );
                 std::process::exit(1);
-            }
+            }}
         } else {
             // Clean exit: persist snapshot, leave Pty::Drop alone
             // (it SIGHUPs the shell — that's correct for user-quit).

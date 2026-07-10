@@ -1804,7 +1804,9 @@ mod tests {
         // Tiny cap: header (32) + a handful of records.  Each record is
         // 4 + 1 + 2 + cols×13 = 7 + 104 = 111 bytes.
         // Cap at ~600 B → rotates after ~5 rows.
-        std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0"); // 0 MB still ≥ default
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "0") }; // 0 MB still ≥ default
         // 0 MB cap is degenerate; manually patch via direct construction
         // is not exposed — so set a non-zero cap that's still tiny.
         // 1 MB = 1048576 bytes; cap≥1MB won't trigger.  We instead set
@@ -1812,7 +1814,9 @@ mod tests {
         // hot_bytes_cap() floors at value*1MB, so 0 effectively disables
         // rotation.  We want a small >0 trigger, so... use the unit
         // size 1MB and feed lots of rows.
-        std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1");
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::set_var("MARSPOT_SCROLLBACK_HOT_CAP_MB", "1") };
         let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 4)
             .expect("create");
         // 1 MB / ~111 B = ~9450 rows before rotation.  Push 12 000
@@ -1861,7 +1865,9 @@ mod tests {
             .expect("cell_at(mid, 0) None — mid row should be reachable in hot or cold");
         let want_mid = (b'A' + (mid % 26) as u8) as char;
         assert_eq!(got_mid.ch, want_mid, "mid row mismatch");
-        std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB");
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::remove_var("MARSPOT_SCROLLBACK_HOT_CAP_MB") };
     }
 
     /// REGRESSION (F2+3) — `cell_at(line, col)` must return the cell at

@@ -79,7 +79,9 @@ fn main() {
 
     // Wait up to 5 s for the registry entry to land.
     let sock_path = {
-        env::set_var("MARSPOT_STATE_DIR", &sandbox);
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { env::set_var("MARSPOT_STATE_DIR", &sandbox) };
         session_socket_path(session_id)
     };
     let deadline = Instant::now() + Duration::from_secs(5);

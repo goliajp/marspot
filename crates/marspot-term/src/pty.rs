@@ -472,8 +472,12 @@ mod tests {
     fn spawn_env_remove_prefixes_strips_child_env() {
         // Safe under nextest (process per test); the var only needs
         // to exist in THIS process for the child to inherit it.
-        std::env::set_var("MARSPOT_TEST_LEAK_PROBE", "leaked");
-        std::env::set_var("MARSPOT_KEEP_PROBE", "kept");
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::set_var("MARSPOT_TEST_LEAK_PROBE", "leaked") };
+        // SAFETY: test/example code, single-threaded at this point (state-dir
+        // mutations additionally serialized by the suite's state-dir lock).
+        unsafe { std::env::set_var("MARSPOT_KEEP_PROBE", "kept") };
         let mut pty = Pty::spawn(PtyConfig {
             program: "/bin/sh".into(),
             args: vec![

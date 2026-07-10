@@ -63,7 +63,7 @@ pub type IOSurfaceRef = *mut __IOSurface;
 pub type IOSurfaceID = u32;
 
 #[link(name = "IOSurface", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn IOSurfaceCreate(properties: core_foundation::dictionary::CFDictionaryRef) -> IOSurfaceRef;
     fn IOSurfaceLookup(csid: IOSurfaceID) -> IOSurfaceRef;
     fn IOSurfaceGetID(buffer: IOSurfaceRef) -> IOSurfaceID;
@@ -74,7 +74,7 @@ extern "C" {
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CFRelease(cf: *const std::ffi::c_void);
     fn CFRetain(cf: *const std::ffi::c_void) -> *const std::ffi::c_void;
 }

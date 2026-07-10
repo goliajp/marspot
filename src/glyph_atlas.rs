@@ -81,7 +81,7 @@ const KCGIMAGE_ALPHA_ONLY: u32 = 7;
 // pass NULL.  Declared here as a private extern so we can build the
 // alpha-only context the atlas needs.
 #[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CGBitmapContextCreate(
         data: *mut c_void,
         width: usize,
