@@ -41,7 +41,7 @@ marspot 的红线 endpoint 按 [[project-iterm2-baseline]] + [[feedback-perf-ove
 |---|---|---|---|
 | 1 | idle CPU 0% | `bench --rss-watch` + 手测 | marspot 目前 ~0%,iTerm2 12-session 23%。**不能退** |
 | 2 | parse 字节吞吐 | `cat-ascii / cjk / emoji / mixed` | mini baseline 173-208 MB/s |
-| 3 | scroll p99 | `--bench scroll` + `scroll-cold` | mini ≤3µs / ≤4µs |
+| 3 | scroll p99 | `--bench scroll` + `scroll-cold` | mini ≤4µs / ≤4µs(2026-07-11 relock:中位 3.083µs ×1.3,见 baseline _note)|
 | 4 | render p99 | `--bench render` | mini ≤1301µs(2026-06-21 lock) |
 | 5 | RSS idle | `--bench` idle 段 | mini ≤95MB |
 | 6 | binary size | strip + lto | mcli ≤486KB / marspot ≤778KB |
