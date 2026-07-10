@@ -82,6 +82,14 @@ impl Parser {
         }
     }
 
+    /// True when the parser is in plain Ground state with no UTF-8
+    /// sequence in flight — i.e. a printable-ASCII byte fed now would
+    /// go straight to `print` with no state change.  Lets the caller
+    /// batch whole ASCII runs around the per-byte state machine.
+    pub fn in_ground_plain(&self) -> bool {
+        matches!(self.state, State::Ground) && self.utf8_remaining == 0
+    }
+
     pub fn advance<C: ParserCallbacks>(&mut self, cb: &mut C, byte: u8) {
         // Williams' "anywhere" transitions: these fire regardless of state.
         match byte {

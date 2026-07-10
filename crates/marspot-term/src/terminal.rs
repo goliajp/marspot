@@ -488,6 +488,23 @@ impl Terminal {
                 grapheme_cursor,
                 seg_synced,
             };
+            // BATCH LANE — parser in plain Ground and the next bytes
+            // are a printable-ASCII run: hand the whole run to the
+            // handler in one call, skipping the per-byte state machine
+            // (the run can't change parser state) and the per-char
+            // cursor round-trips.  Predictions must be empty — the
+            // per-byte loop is what validates them.
+            if parser.in_ground_plain() && self.predictions.is_empty() {
+                let run_len = bytes[i..]
+                    .iter()
+                    .position(|&b| !(0x20..=0x7E).contains(&b))
+                    .unwrap_or(bytes.len() - i);
+                if run_len >= 2 {
+                    handler.print_ascii_run(&bytes[i..i + run_len]);
+                    i += run_len;
+                    continue;
+                }
+            }
             parser.advance(&mut handler, bytes[i]);
             i += 1;
 
@@ -1323,6 +1340,71 @@ impl<'a> Handler<'a> {
         // any fast-path debt so the next slow-path print doesn't
         // replay a stale flag.
         *self.seg_synced = true;
+    }
+
+    /// Batch-commit a printable-ASCII run (the feed loop's batch
+    /// lane).  Semantically identical to `print`-ing each byte:
+    /// every byte is `boring_width` class, so a UAX #29 boundary
+    /// precedes each one unconditionally — the pending cluster (of
+    /// ANY content: no GB rule joins anything with a following
+    /// ASCII printable) flushes first, interior bytes commit without
+    /// touching `cluster_buf`, and the LAST byte stays buffered
+    /// exactly like the scalar fast path leaves it (a following
+    /// VS16 / combining mark must still see it as the open cluster).
+    fn print_ascii_run(&mut self, run: &[u8]) {
+        debug_assert!(run.iter().all(|&b| (0x20..=0x7E).contains(&b)));
+        if !self.cluster_buf.is_empty() {
+            self.flush_cluster_keep_cursor();
+        }
+        let (last, body) = run.split_last().expect("run_len >= 2");
+        self.write_ascii_body(body);
+        self.cluster_buf.push(*last as char);
+        *self.seg_synced = false;
+    }
+
+    /// Row-sliced bulk write of single-width ASCII glyphs.  Chains
+    /// the same DECAWM semantics as repeated `write_glyph(_, 1)`:
+    /// wrap immediately when more bytes follow, defer the wrap when
+    /// the run ends exactly at the right edge.
+    fn write_ascii_body(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.take_pending_wrap();
+        let cols = self.grid.cols();
+        let rows = self.grid.rows();
+        let mut idx = 0;
+        while idx < bytes.len() {
+            let (col, row) = self.grid.cursor();
+            let n = ((cols - col) as usize).min(bytes.len() - idx);
+            self.grid
+                .set_row_run_ascii(col, row, *self.attrs, &bytes[idx..idx + n]);
+            idx += n;
+            let next_col = col + n as u16;
+            if next_col < cols {
+                self.grid.set_cursor(next_col, row);
+            } else if idx < bytes.len() {
+                // Row filled and more bytes follow — wrap now (the
+                // per-char path would consume the deferred wrap on
+                // the next byte anyway; batching collapses that).
+                let bot = *self.scroll_bot;
+                if row == bot {
+                    self.region_scroll_up(1);
+                    self.grid.set_cursor(0, row);
+                } else if row + 1 < rows {
+                    self.grid.set_cursor(0, row + 1);
+                } else {
+                    self.grid.set_cursor(0, rows - 1);
+                }
+                let (_, r) = self.grid.cursor();
+                self.grid.set_row_wrapped(r, true);
+            } else {
+                // Run ends exactly at the right edge — defer the wrap,
+                // mirroring `write_glyph`.
+                self.grid.set_cursor(cols - 1, row);
+                *self.pending_wrap = true;
+            }
+        }
     }
 
     /// Re-seed the segmenter after the ASCII fast path skipped it.
@@ -2278,6 +2360,48 @@ mod tests {
         assert!(boring_width('\u{3099}').is_none()); // combining kana mark
         assert!(boring_width('\u{AC00}').is_none()); // Hangul LV
         assert!(boring_width('⭐').is_none()); // pictographic
+    }
+
+    /// Batch-lane specifics: right-edge wrap semantics must chain
+    /// exactly like repeated single-width `write_glyph` calls.
+    #[test]
+    fn batch_ascii_run_wrap_semantics() {
+        // 10-col grid, 25-char run → rows fill + wrapped flags.
+        let t = term_with(10, 4, b"abcdefghijklmnopqrstuvwxy");
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cell(9, 0).ch, 'j');
+        assert_eq!(t.grid().cell(0, 1).ch, 'k');
+        assert_eq!(t.grid().cell(9, 1).ch, 't');
+        assert_eq!(t.grid().cell(0, 2).ch, 'u');
+        assert_eq!(t.grid().cell(4, 2).ch, 'y');
+        assert!(t.grid().row_wrapped(1));
+        assert!(t.grid().row_wrapped(2));
+        assert_eq!(t.grid().cursor(), (5, 2));
+
+        // Run ending EXACTLY at the right edge defers the wrap: cursor
+        // parks on the last column, next glyph wraps, a CR instead
+        // cancels without advancing (classic DECAWM).
+        let t = term_with(10, 4, b"0123456789");
+        assert_eq!(t.grid().cursor(), (9, 0));
+        let t = term_with(10, 4, b"0123456789X");
+        assert_eq!(t.grid().cell(0, 1).ch, 'X');
+        let t = term_with(10, 4, b"0123456789\r\nY");
+        assert_eq!(t.grid().cell(0, 1).ch, 'Y');
+        assert_eq!(t.grid().cell(9, 0).ch, '9');
+
+        // Wide cluster immediately before a batch run: run starts
+        // after the trail pad.
+        let t = term_with(20, 4, "⭐abcdef".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '⭐');
+        assert_eq!(t.grid().cell(2, 0).ch, 'a');
+        assert_eq!(t.grid().cell(7, 0).ch, 'f');
+
+        // SGR mid-stream splits the run at the escape; attrs apply to
+        // the following batch.
+        let t = term_with(20, 4, b"ab\x1b[1mcd");
+        assert_eq!(t.grid().cell(2, 0).ch, 'c');
+        assert!(t.grid().cell(2, 0).attrs.bold);
+        assert!(!t.grid().cell(1, 0).attrs.bold);
     }
 
     /// The fast path must be behaviourally invisible: interleaving

@@ -442,6 +442,20 @@ impl Grid {
         self.cells[pr * self.cols as usize + col as usize] = cell;
     }
 
+    /// Overwrite `bytes.len()` consecutive cells of `row` starting at
+    /// `col` with single-width ASCII glyphs sharing `attrs`.  Caller
+    /// guarantees `col as usize + bytes.len() <= cols`.  One ring-index
+    /// resolve for the whole run instead of per cell — the batched
+    /// ground-state print hot path.
+    pub fn set_row_run_ascii(&mut self, col: u16, row: u16, attrs: CellAttrs, bytes: &[u8]) {
+        debug_assert!(col as usize + bytes.len() <= self.cols as usize && row < self.rows);
+        let pr = self.phys_row(row);
+        let base = pr * self.cols as usize + col as usize;
+        for (k, &b) in bytes.iter().enumerate() {
+            self.cells[base + k] = Cell { ch: b as char, attrs };
+        }
+    }
+
     /// Mark / unmark logical `row` as a soft continuation of the row
     /// above (DECAWM autowrap flowed a logical line across them).
     /// The emulator calls this from the deferred-wrap path; `resize`
