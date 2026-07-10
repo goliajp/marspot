@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.76"  # edition 2021→2024 全 workspace(含 fuzz)— unsafe extern / unsafe env::set_var / unsafe fn body 显式化;fuzz/Cargo.toml 补空 [workspace] 表修复预存的 gate 编译失败.前 0.6.75 笔记见 git blame.
-core    = "0.11.50"  # 同 shell 0.6.76 — edition 2024 重编.前 0.11.49 笔记见 git blame.
-session = "0.10.9"  # 同 shell 0.6.76 — edition 2024;`gen` 成保留字,CoreGone(gen) 改名 core_gen,L3_UDS_CLIENT_GONE 日志 key gen→generation.前 0.10.8 笔记见 git blame.
+shell   = "0.6.77"  # parser boring-cluster fast path — 修 82d74b6 灌进来的 parse 5x 回归:GBP=Other/非 pictographic/InCB=None 的字符类(ASCII/CJK/假名/全角,硬编码区段 + 穷举健全性测试钉真表)相邻必有 UAX29 边界,跳过 segmenter 零查表直提交;segmenter 懒重播同步.local ascii 34→127 cjk 50→122 MB/s.前 0.6.76 笔记见 git blame.
+core    = "0.11.51"  # 同 shell 0.6.77 — marspot-term parser fast path 重编.前 0.11.50 笔记见 git blame.
+session = "0.10.10"  # 同 shell 0.6.77 — L3 是 parse 热路径真正宿主.前 0.10.9 笔记见 git blame.

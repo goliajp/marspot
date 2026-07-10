@@ -186,6 +186,17 @@ pub struct Terminal {
     /// + renderer-shaping work tracked under task #5.
     cluster_buf: String,
     grapheme_cursor: crate::grapheme::GraphemeCursor,
+    /// Whether `grapheme_cursor`'s run state currently reflects
+    /// `cluster_buf`.  The ASCII fast path in `Handler::print` skips
+    /// the segmenter entirely (two printable-ASCII neighbours have an
+    /// unconditional UAX #29 boundary — no GB rule joins Other+Other)
+    /// and flips this false; the slow path re-seeds the cursor by
+    /// replaying the (≤1 char) buffer before consulting it.  The
+    /// fast path is what keeps a `cat` of plain text from paying the
+    /// per-codepoint gbp/incb/pictographic table walks — measured
+    /// ~84 % of parse time before it existed (2026-07-11 samply on
+    /// cat-ascii).
+    seg_synced: bool,
     /// Diagnostics — predictions confirmed by an echo byte.
     pub predictions_hit: u64,
     /// Diagnostics — predictions rolled back on mismatch (or alt-screen
@@ -261,6 +272,7 @@ impl Terminal {
             predictions: VecDeque::new(),
             cluster_buf: String::new(),
             grapheme_cursor: crate::grapheme::GraphemeCursor::new(),
+            seg_synced: true,
             predictions_hit: 0,
             predictions_miss: 0,
             generation: 0,
@@ -459,6 +471,7 @@ impl Terminal {
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let grapheme_cursor = &mut self.grapheme_cursor;
+            let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
@@ -473,6 +486,7 @@ impl Terminal {
                 pending_wrap,
                 cluster_buf,
                 grapheme_cursor,
+                seg_synced,
             };
             parser.advance(&mut handler, bytes[i]);
             i += 1;
@@ -514,6 +528,7 @@ impl Terminal {
             let pending_wrap = &mut self.pending_wrap;
             let cluster_buf = &mut self.cluster_buf;
             let grapheme_cursor = &mut self.grapheme_cursor;
+            let seg_synced = &mut self.seg_synced;
             let mut handler = Handler {
                 grid, saved_main, attrs, saved_cursor,
                 scroll_top, scroll_bot,
@@ -528,6 +543,7 @@ impl Terminal {
                 pending_wrap,
                 cluster_buf,
                 grapheme_cursor,
+                seg_synced,
             };
             handler.flush_cluster_keep_cursor();
         }
@@ -841,6 +857,7 @@ impl Terminal {
         self.predictions.clear();
         self.cluster_buf.clear();
         self.grapheme_cursor = crate::grapheme::GraphemeCursor::new();
+        self.seg_synced = true;
         self.pending_response.clear();
         // Replay scrollback in arrival order so the ring rebuilds
         // exactly the same shape it had pre-execv.  Wrapped flag is
@@ -1192,6 +1209,37 @@ struct Handler<'a> {
     pending_wrap: &'a mut bool,
     cluster_buf: &'a mut String,
     grapheme_cursor: &'a mut crate::grapheme::GraphemeCursor,
+    seg_synced: &'a mut bool,
+}
+
+/// The fast-path class for `Handler::print`: codepoints that can
+/// never open, extend, or join a multi-codepoint cluster — GBP=Other,
+/// not Extended_Pictographic, InCB=None — with their cell width.  Two
+/// neighbours from this class always have a cluster boundary between
+/// them (UAX #29 GB999) and their width needs no table walk, so the
+/// segmenter can be skipped entirely.
+///
+/// The ranges are hand-picked hot blocks (ASCII, CJK ideographs,
+/// kana, CJK punctuation, fullwidth forms); every member is verified
+/// against the real UCD tables by `fast_path_class_is_sound`, so a
+/// table regen that invalidated one would fail the suite before it
+/// could mis-render.  Deliberately NOT in the class: Hangul
+/// syllables (GBP LV/LVT, GB6-8), anything Extended_Pictographic
+/// (a following VS16/ZWJ changes width — early commit would be
+/// wrong), combining kana marks U+3099/309A (GBP Extend).
+#[inline(always)]
+fn boring_width(ch: char) -> Option<u8> {
+    match ch as u32 {
+        0x20..=0x7E => Some(1),            // ASCII printable
+        0x4E00..=0x9FFF => Some(2),        // CJK Unified Ideographs
+        0x3041..=0x3096 => Some(2),        // hiragana (sans 3099/309A marks)
+        0x30A1..=0x30FA => Some(2),        // katakana
+        0x30FC..=0x30FE => Some(2),        // ー ヽ ヾ (sans 30FF)
+        0x3001..=0x3029 => Some(2),        // CJK punctuation 、。「」等
+        0xFF01..=0xFF60 => Some(2),        // fullwidth forms
+        0x3400..=0x4DBF => Some(2),        // CJK Extension A
+        _ => None,
+    }
 }
 
 impl<'a> Handler<'a> {
@@ -1271,6 +1319,23 @@ impl<'a> Handler<'a> {
     fn flush_cluster_for_break(&mut self) {
         self.flush_cluster_keep_cursor();
         self.grapheme_cursor.reset();
+        // Empty buffer + freshly-reset cursor ARE in sync — clears
+        // any fast-path debt so the next slow-path print doesn't
+        // replay a stale flag.
+        *self.seg_synced = true;
+    }
+
+    /// Re-seed the segmenter after the ASCII fast path skipped it.
+    /// The fast path maintains the invariant that an unsynced buffer
+    /// holds at most one (ASCII) codepoint, so the replay is O(1).
+    fn resync_segmenter(&mut self) {
+        if !*self.seg_synced {
+            self.grapheme_cursor.reset();
+            for c in self.cluster_buf.chars() {
+                self.grapheme_cursor.step(c);
+            }
+            *self.seg_synced = true;
+        }
     }
 
     /// Commit one already-segmented glyph (codepoint + cell width) to
@@ -1473,15 +1538,43 @@ impl<'a> Handler<'a> {
 
 impl<'a> ParserCallbacks for Handler<'a> {
     fn print(&mut self, ch: char) {
-        // UAX #29 cluster aware: the VT parser feeds us one codepoint
-        // at a time, but a single user-perceived "character" can span
-        // several (é = e + ́, ⚠️ = ⚠ + VS16, 👨‍👩‍👧‍👦 = 4 emoji + 3
-        // ZWJ, क्क = क + virama + क …).  We buffer codepoints, ask
-        // the segmenter whether a boundary falls before each one, and
-        // commit a single cluster to the grid when the next codepoint
-        // starts a new one.  This is what makes ⭐ ✅ ❌ land in 2
-        // cells (cluster_width=2) instead of being half-clipped in a
-        // 1-cell slot when the EAW table alone gave them 1.
+        // FAST PATH — a `boring_width` char (ASCII / CJK / kana / …)
+        // arriving while the buffer holds nothing or one boring char.
+        // UAX #29 has no rule joining Other+Other, so the boundary is
+        // unconditional and the segmenter can be skipped entirely;
+        // width comes from the same range match.  This is what keeps
+        // `cat` of plain text / CJK prose from paying 3× gbp + incb
+        // + pictographic table walks per printable (measured ~84 % /
+        // ~55 % of parse time respectively, 2026-07-11 samply).
+        if boring_width(ch).is_some() {
+            if self.cluster_buf.is_empty() {
+                self.cluster_buf.push(ch);
+                *self.seg_synced = false;
+                return;
+            }
+            let mut it = self.cluster_buf.chars();
+            let first = it.next().expect("non-empty buffer");
+            if it.next().is_none() {
+                if let Some(prev_w) = boring_width(first) {
+                    self.cluster_buf.clear();
+                    self.write_glyph(first, prev_w);
+                    self.cluster_buf.push(ch);
+                    *self.seg_synced = false;
+                    return;
+                }
+            }
+        }
+        // SLOW PATH — UAX #29 cluster aware: the VT parser feeds us
+        // one codepoint at a time, but a single user-perceived
+        // "character" can span several (é = e + ́, ⚠️ = ⚠ + VS16,
+        // 👨‍👩‍👧‍👦 = 4 emoji + 3 ZWJ, क्क = क + virama + क …).  We
+        // buffer codepoints, ask the segmenter whether a boundary
+        // falls before each one, and commit a single cluster to the
+        // grid when the next codepoint starts a new one.  This is
+        // what makes ⭐ ✅ ❌ land in 2 cells (cluster_width=2)
+        // instead of being half-clipped in a 1-cell slot when the
+        // EAW table alone gave them 1.
+        self.resync_segmenter();
         if self.grapheme_cursor.step(ch) {
             // step has already advanced cursor state to track `ch` as
             // the first codepoint of a new cluster — flush_cluster
@@ -2154,6 +2247,80 @@ mod tests {
         let mut t = Terminal::new(cols, rows);
         t.feed(bytes);
         t
+    }
+
+    /// Pins the fast path's hardcoded class facts against the real
+    /// UCD tables: EVERY codepoint `boring_width` claims must be
+    /// GBP::Other, not Extended_Pictographic, InCB::None, and have
+    /// exactly the claimed single-char cluster_width.  Walking the
+    /// whole BMP+ExtA space keeps the range list itself honest — a
+    /// future `bin/regen-unicode-tables.sh` regen that invalidated a
+    /// member fails here before the fast path can mis-render.
+    #[test]
+    fn fast_path_class_is_sound() {
+        use crate::unicode_data::{gbp, incb, is_extended_pictographic, GBP, InCB};
+        for cp in 0x20u32..=0xFFFF {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            let Some(w) = boring_width(ch) else { continue };
+            assert_eq!(gbp(cp), GBP::Other, "U+{cp:04X} gbp");
+            assert!(!is_extended_pictographic(cp), "U+{cp:04X} pictographic");
+            assert_eq!(incb(cp), InCB::None, "U+{cp:04X} incb");
+            assert_eq!(
+                crate::grapheme::cluster_width(&ch.to_string()),
+                w,
+                "U+{cp:04X} width"
+            );
+        }
+        // Spot-check deliberate exclusions.
+        assert!(boring_width('\u{1F}').is_none()); // C0
+        assert!(boring_width('\u{7F}').is_none()); // DEL
+        assert!(boring_width('é').is_none()); // Latin-1 (can NFD-combine)
+        assert!(boring_width('\u{3099}').is_none()); // combining kana mark
+        assert!(boring_width('\u{AC00}').is_none()); // Hangul LV
+        assert!(boring_width('⭐').is_none()); // pictographic
+    }
+
+    /// The fast path must be behaviourally invisible: interleaving
+    /// ASCII with cluster-forming codepoints in every adjacency order
+    /// yields the same grid as the pure-slow-path semantics.
+    #[test]
+    fn ascii_fast_path_matches_slow_path_semantics() {
+        // ASCII then combining mark (fast → slow transition): the
+        // mark arrives with an unsynced segmenter and must not fuse
+        // wrongly or emit a stray cell.
+        let t = term_with(20, 4, "ae\u{0301}b".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cell(1, 0).ch, 'e'); // base committed, mark dropped (Phase 1)
+        assert_eq!(t.grid().cell(2, 0).ch, 'b');
+        assert_eq!(t.grid().cursor(), (3, 0));
+
+        // Wide cluster then ASCII (slow → fast transition).
+        let t = term_with(20, 4, "⭐x".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '⭐');
+        assert_eq!(t.grid().cell(2, 0).ch, 'x');
+
+        // ASCII split across feeds — end-of-feed flush + fresh feed.
+        let mut t = Terminal::new(20, 4);
+        t.feed(b"ab");
+        t.feed(b"cd");
+        for (i, ch) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+            assert_eq!(t.grid().cell(i as u16, 0).ch, ch);
+        }
+
+        // ASCII at end of feed, combining mark opens the next feed:
+        // same visible result as the single-feed case above.
+        let mut t = Terminal::new(20, 4);
+        t.feed(b"e");
+        t.feed("\u{0301}z".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, 'e');
+        assert_eq!(t.grid().cell(1, 0).ch, 'z');
+
+        // VS16 emoji sandwiched in ASCII keeps its 2-cell width.
+        let t = term_with(20, 4, "a\u{26A0}\u{FE0F}b".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cell(1, 0).ch, '\u{26A0}');
+        assert_eq!(t.grid().cell(2, 0).ch, '\0'); // wide trail pad
+        assert_eq!(t.grid().cell(3, 0).ch, 'b');
     }
 
     // ─── RFC-002 step 2 snapshot tests ───────────────────────────────
