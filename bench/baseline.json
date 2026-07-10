@@ -62,9 +62,9 @@
     "p99_us_max": 4
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Used to flag accidental code-size growth (e.g. forgetting #[inline] removals, or pulling in a heavy dep).  10% headroom over current (794 KiB after metal-perf adds the offscreen Metal bench harness).  NB: measure on the canonical bench host (idle mini) \u2014 a dev box with a different toolchain can report a fatter mcli (~557 KiB) that is a local artefact, not real growth; on the mini mcli stays ~442 KiB even after the target #4 marspot-term split (lto strips the unused engine paths).",
-    "mcli": 485830,
-    "marspot": 778008
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  Relocked 2026-07-11 at mini-measured current x 1.10: the Jun15-Jul10 feature month (+650KB: UI system, dev panel, SF Pro shaping, unicode tables, Phase 9) is acknowledged cost per user call '\u6027\u80fd\u548c\u5185\u5b58\u91cd\u8981,size \u4e0d\u7528\u5361\u592a\u7d27'.  Slimming (lib split / feature-gating so mcli stops linking the full GUI lib) is a separate project if ever wanted.  Previous ceilings 485830/778008 dated 2026-06-06.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.",
+    "mcli": 1370000,
+    "marspot": 1541000
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
