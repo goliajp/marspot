@@ -33,7 +33,7 @@
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSView, NSViewLayerContentsPlacement};
-use objc2_foundation::{CGSize, NSString};
+use objc2_foundation::{NSSize, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer,
     MTLCommandEncoder, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary,
@@ -689,7 +689,7 @@ impl MetalRenderer {
         // packer + atomic-rebuild-on-full bound as the mono atlas.
         let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024)?;
 
-        let layer = unsafe { CAMetalLayer::new() };
+        let layer = { CAMetalLayer::new() };
         unsafe {
             layer.setDevice(Some(&device));
             layer.setPixelFormat(TARGET_FORMAT);
@@ -734,7 +734,7 @@ impl MetalRenderer {
         }
 
         view.setWantsLayer(true);
-        unsafe {
+        {
             // NSView's own resize-time content placement.  AppKit's
             // path takes over for the brief moment between the
             // window-bounds change and our next present; default
@@ -1033,8 +1033,8 @@ impl MetalRenderer {
         self.width_px = width_px;
         self.height_px = height_px;
         if let Some(layer) = &self.layer {
-            unsafe {
-                layer.setDrawableSize(CGSize {
+            {
+                layer.setDrawableSize(NSSize {
                     width: width_px,
                     height: height_px,
                 });
@@ -1050,13 +1050,13 @@ impl MetalRenderer {
             Some(l) => l,
             None => return false,
         };
-        let drawable = match unsafe { layer.nextDrawable() } {
+        let drawable = match { layer.nextDrawable() } {
             Some(d) => d,
             None => return false,
         };
-        let texture = unsafe { drawable.texture() };
+        let texture = { drawable.texture() };
 
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let attachments = pass.colorAttachments();
             let color = attachments.objectAtIndexedSubscript(0);
@@ -1150,18 +1150,17 @@ impl MetalRenderer {
         let Some(layer) = self.layer.as_ref() else { return };
         // Size the layer to match the view.  drawableSize is in
         // physical pixels.
-        unsafe {
-            use objc2_foundation::CGSize;
-            layer.setDrawableSize(CGSize {
+        {
+            layer.setDrawableSize(NSSize {
                 width: width_px as f64,
                 height: height_px as f64,
             });
         }
-        let drawable = match unsafe { layer.nextDrawable() } {
+        let drawable = match { layer.nextDrawable() } {
             Some(d) => d,
             None => return,
         };
-        let texture = unsafe { drawable.texture() };
+        let texture = { drawable.texture() };
         let cmd = match self.queue.commandBuffer() {
             Some(c) => c,
             None => return,
@@ -1279,11 +1278,11 @@ impl MetalRenderer {
         );
 
         let layer = layer.as_ref().unwrap();
-        let drawable = match unsafe { layer.nextDrawable() } {
+        let drawable = match { layer.nextDrawable() } {
             Some(d) => d,
             None => return,
         };
-        let texture = unsafe { drawable.texture() };
+        let texture = { drawable.texture() };
 
         let cmd = match queue.commandBuffer() {
             Some(c) => c,
@@ -1569,7 +1568,7 @@ impl MetalRenderer {
             );
         }
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        { cmd.waitUntilCompleted() };
     }
 }
 
@@ -1627,7 +1626,7 @@ fn encode_passes(
     // title-bar text after a few seconds.  The `clear_bg` parameter is
     // retained as a hook for any future per-frame decision.
     let _ = clear_bg;
-    let bg_pass = unsafe { MTLRenderPassDescriptor::new() };
+    let bg_pass = { MTLRenderPassDescriptor::new() };
     unsafe {
         let color = bg_pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
@@ -1665,7 +1664,7 @@ fn encode_passes(
     // no dots queued (fast path for the bench / mcli single-session
     // case where there's no sidebar).
     if !dots.is_empty() {
-        let dot_pass = unsafe { MTLRenderPassDescriptor::new() };
+        let dot_pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = dot_pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -1698,7 +1697,7 @@ fn encode_passes(
     // glyphs that belong to the overlay (panel text) read on top.
     // Skipped entirely when no overlay is queued.
     if !ui_rects.is_empty() {
-        let ui_pass = unsafe { MTLRenderPassDescriptor::new() };
+        let ui_pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = ui_pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -1726,7 +1725,7 @@ fn encode_passes(
     }
 
     // FG pass — textured glyph quads, alpha-blended on top.
-    let fg_pass = unsafe { MTLRenderPassDescriptor::new() };
+    let fg_pass = { MTLRenderPassDescriptor::new() };
     unsafe {
         let color = fg_pass.colorAttachments().objectAtIndexedSubscript(0);
         color.setTexture(Some(target));
@@ -1761,7 +1760,7 @@ fn encode_passes(
     // nothing colour was queued (the common case — most frames have no
     // emoji), so the extra encoder costs nothing for plain text.
     if !color_glyphs.is_empty() {
-        let cfg_pass = unsafe { MTLRenderPassDescriptor::new() };
+        let cfg_pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = cfg_pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -1798,7 +1797,7 @@ fn encode_passes(
     // (Cells go FIRST so opaque flat fills sit below the SDF chrome
     // rects; glyphs LAST so text always reads on top.)
     if !overlay_cells.is_empty() {
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -1825,7 +1824,7 @@ fn encode_passes(
         enc.endEncoding();
     }
     if !overlay_ui_rects.is_empty() {
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -1852,7 +1851,7 @@ fn encode_passes(
         enc.endEncoding();
     }
     if !overlay_glyphs.is_empty() {
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -4257,7 +4256,7 @@ fn make_instance_buffer(
         device.newBufferWithBytes_length_options(
             NonNull::new(bytes.as_ptr() as *mut c_void).unwrap(),
             bytes.len(),
-            MTLResourceOptions::MTLResourceStorageModeShared,
+            MTLResourceOptions::StorageModeShared,
         )
     }
 }
@@ -4485,12 +4484,12 @@ impl MetalRenderer {
                 self.device.newBufferWithBytes_length_options(
                     NonNull::new(cells_bytes.as_ptr() as *mut c_void).unwrap(),
                     cells_bytes.len(),
-                    MTLResourceOptions::MTLResourceStorageModeShared,
+                    MTLResourceOptions::StorageModeShared,
                 )
             }
         };
 
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let attachments = pass.colorAttachments();
             let color = attachments.objectAtIndexedSubscript(0);
@@ -4547,7 +4546,7 @@ impl MetalRenderer {
         blit.endEncoding();
 
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        { cmd.waitUntilCompleted() };
 
         let bytes_per_row = (width as usize) * 4;
         let mut bytes = vec![0u8; bytes_per_row * height as usize];
@@ -4630,12 +4629,12 @@ impl MetalRenderer {
                 self.device.newBufferWithBytes_length_options(
                     NonNull::new(glyph_bytes.as_ptr() as *mut c_void).unwrap(),
                     glyph_bytes.len(),
-                    MTLResourceOptions::MTLResourceStorageModeShared,
+                    MTLResourceOptions::StorageModeShared,
                 )
             }
         };
 
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let attachments = pass.colorAttachments();
             let color = attachments.objectAtIndexedSubscript(0);
@@ -4692,7 +4691,7 @@ impl MetalRenderer {
         blit.endEncoding();
 
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        { cmd.waitUntilCompleted() };
 
         let bytes_per_row = (width as usize) * 4;
         let mut bytes = vec![0u8; bytes_per_row * height as usize];
@@ -4717,15 +4716,10 @@ impl MetalRenderer {
 }
 
 pub(crate) fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>, String> {
-    // SAFETY: MTLCreateSystemDefaultDevice returns a +1 retained pointer
-    // (per Apple docs) or null on failure.  Wrap with Retained::from_raw
-    // to take ownership without an extra retain.
-    let raw = unsafe { MTLCreateSystemDefaultDevice() };
-    if raw.is_null() {
-        return Err("MTLCreateSystemDefaultDevice returned nil — no Metal device".into());
-    }
-    unsafe { Retained::from_raw(raw) }
-        .ok_or_else(|| "MTLCreateSystemDefaultDevice → null after non-null check".into())
+    // objc2-metal 0.3 wraps the +1 retained pointer (or null) into
+    // `Option<Retained<..>>` for us.
+    MTLCreateSystemDefaultDevice()
+        .ok_or_else(|| "MTLCreateSystemDefaultDevice returned nil — no Metal device".into())
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -4981,7 +4975,7 @@ pub fn encode_canvas_into(
     let viewport_len = std::mem::size_of::<[f32; 2]>();
 
     for run in &runs {
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -5059,7 +5053,7 @@ pub fn encode_canvas_into(
     }
 
     if first_pass && clear_color.is_some() {
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         unsafe {
             let color = pass.colorAttachments().objectAtIndexedSubscript(0);
             color.setTexture(Some(target));
@@ -5146,7 +5140,7 @@ impl MetalRenderer {
         blit.synchronizeResource(resource);
         blit.endEncoding();
         cmd.commit();
-        unsafe { cmd.waitUntilCompleted() };
+        { cmd.waitUntilCompleted() };
 
         let bytes_per_row = (width as usize) * 4;
         let mut bytes = vec![0u8; bytes_per_row * height as usize];

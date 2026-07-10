@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.74"  # cc badge 右键 "switch to Px" — pane_badge_menu 出 discovery 集里除当前外每 profile 一行(tag=profile 号),menu pick 直启 cycle 到目标(start_profile_cycle_to 从左键 auto-next 路径拆出共用).前 0.6.73 笔记见 git blame.
-core    = "0.11.48"  # badge prefix 右键 → PaneBadgeMenuRequest,收 PaneBadgeMenu 用 ContextMenu 开(新 ContextRegion::PaneBadge,tag 插件不透明),选中回 PaneBadgeMenuAction.前 0.11.47 笔记见 git blame.
+shell   = "0.6.75"  # 依赖全面升级 — objc2 0.5→0.6.4 / objc2-app-kit·foundation·quartz-core·metal 0.2→0.3.2(declare_class!→define_class!、msg_send_id 并入 msg_send、mutability 模块删除、57+ 处 now-safe 方法去 unsafe)/ core-text 21→22 / core-graphics 0.24→0.25.前 0.6.74 笔记见 git blame.
+core    = "0.11.49"  # 同 shell 0.6.75 — 依赖升级重编所有 GUI 面(render_metal / glyph_atlas / iosurface).前 0.11.48 笔记见 git blame.
 session = "0.10.8"  # PTY spawn 剥离 MARSPOT_* 内部 env — PtyConfig.env_remove_prefixes:fork 前构造过滤 envp,child 里替换 environ 指针(AS-safe)再 execvp;shell 子孙不再继承 MARSPOT_SESSION_ID / SHM_FD / surface 等 12 个 plumbing 变量(2026-07-03 scrollback 覆盖事故根治).L3 自身 env 不动,self-execv 不受影响.前 0.10.7 笔记见 git blame.

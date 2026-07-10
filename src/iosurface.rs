@@ -32,7 +32,7 @@ use core_foundation::{
 };
 use objc2::{
     encode::{Encoding, RefEncode},
-    msg_send_id,
+    msg_send,
     rc::Retained,
     runtime::ProtocolObject,
 };
@@ -220,13 +220,13 @@ impl IOSurface {
         descriptor.setStorageMode(MTLStorageMode::Shared);
         // newTextureWithDescriptor:iosurface:plane: is the documented
         // entry point but objc2-metal skips it (IOSurfaceRef is a manual
-        // type).  Hand-dispatch via msg_send_id.  Pass the IOSurfaceRef
+        // type).  Hand-dispatch via msg_send.  Pass the IOSurfaceRef
         // with its actual struct-pointer Objective-C type encoding so
         // the runtime's argument typecheck accepts it; a `*const c_void`
         // would arrive encoded as `^v` and trip the check.
         let surface_ptr: IOSurfaceRef = self.raw;
         let tex: Option<Retained<ProtocolObject<dyn MTLTexture>>> = unsafe {
-            msg_send_id![
+            msg_send![
                 device,
                 newTextureWithDescriptor: &*descriptor,
                 iosurface: surface_ptr,

@@ -32,19 +32,18 @@
 
 use std::cell::RefCell;
 
-use objc2::declare_class;
-use objc2::msg_send_id;
-use objc2::mutability;
+use objc2::define_class;
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::ClassType;
-use objc2::DeclaredClass;
+use objc2::MainThreadMarker;
+use objc2::MainThreadOnly;
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSEvent, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 
 use crate::render_metal::MetalRenderer;
@@ -56,33 +55,27 @@ use crate::ui::components::DevPanelState;
 
 struct DevWindowDelegateIvars;
 
-declare_class!(
+define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MarspotDevWindowDelegate"]
+    #[ivars = DevWindowDelegateIvars]
     struct DevWindowDelegate;
-
-    unsafe impl ClassType for DevWindowDelegate {
-        type Super = objc2::runtime::NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MarspotDevWindowDelegate";
-    }
-
-    impl DeclaredClass for DevWindowDelegate {
-        type Ivars = DevWindowDelegateIvars;
-    }
 
     unsafe impl NSObjectProtocol for DevWindowDelegate {}
 
     unsafe impl NSWindowDelegate for DevWindowDelegate {
-        #[method(windowDidResize:)]
+        #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _n: &NSNotification) {
             crate::app::dispatch_event_pub(crate::app::EventKind::DevWindowChanged);
         }
 
-        #[method(windowDidMove:)]
+        #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _n: &NSNotification) {
             crate::app::dispatch_event_pub(crate::app::EventKind::DevWindowChanged);
         }
 
-        #[method(windowDidChangeBackingProperties:)]
+        #[unsafe(method(windowDidChangeBackingProperties:))]
         fn window_did_change_backing(&self, _n: &NSNotification) {
             // User dragged the window across displays of different
             // DPI.  Re-render so the next frame picks up the new
@@ -102,39 +95,32 @@ declare_class!(
 
 struct DevPanelViewIvars;
 
-declare_class!(
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MarspotDevPanelView"]
+    #[ivars = DevPanelViewIvars]
     struct DevPanelView;
-
-    unsafe impl ClassType for DevPanelView {
-        #[inherits(objc2_app_kit::NSResponder, objc2::runtime::NSObject)]
-        type Super = NSView;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MarspotDevPanelView";
-    }
-
-    impl DeclaredClass for DevPanelView {
-        type Ivars = DevPanelViewIvars;
-    }
 
     unsafe impl NSObjectProtocol for DevPanelView {}
 
-    unsafe impl DevPanelView {
-        #[method(acceptsFirstResponder)]
+    impl DevPanelView {
+        #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool { true }
 
         // First click on a non-key window lands AS a click (vs just
         // activating the window).  Without this the user has to click
         // twice when switching from main marspot window to dev panel.
-        #[method(acceptsFirstMouse:)]
+        #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _e: Option<&NSEvent>) -> bool { true }
 
         // y=0 at top, matching Canvas's coord convention.
-        #[method(isFlipped)]
+        #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool { true }
 
-        #[method(mouseDown:)]
+        #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let loc_window = unsafe { event.locationInWindow() };
+            let loc_window = { event.locationInWindow() };
             // convertPoint:fromView:nil = window coords → view coords;
             // with isFlipped=true this yields top-down y in logical pt.
             let loc_view = self.convertPoint_fromView(loc_window, None);
@@ -156,9 +142,9 @@ declare_class!(
         // sign: AppKit "scroll up" event reports +y on a flipped
         // view, but for scroll-content semantics "scroll up" =
         // content moves DOWN = offset_y DECREASES.  So we apply -y.
-        #[method(scrollWheel:)]
+        #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
-            let dy = unsafe { event.scrollingDeltaY() };
+            let dy = { event.scrollingDeltaY() };
             // Approximate "logical-pt × scale = phys pixels" — AppKit
             // scrollingDeltaY is already in points (typically magnitudes
             // like 1.0–20.0 on Apple trackpads).  Layout state is in
@@ -234,8 +220,8 @@ impl DevWindow {
         // when handing to NSWindow / storing in the struct's
         // `Retained<NSView>` field (same trick as `app.rs::setContentView`).
         let dpv: Retained<DevPanelView> = {
-            let alloc = mtm.alloc::<DevPanelView>().set_ivars(DevPanelViewIvars);
-            unsafe { msg_send_id![super(alloc), initWithFrame: frame] }
+            let alloc = DevPanelView::alloc(mtm).set_ivars(DevPanelViewIvars);
+            unsafe { msg_send![super(alloc), initWithFrame: frame] }
         };
         let view: Retained<NSView> = unsafe {
             // DevPanelView ⊆ NSView (declared via inherits).  Bump
@@ -249,11 +235,11 @@ impl DevWindow {
         // Without this the view stays pinned at 420×520 and the
         // panel canvas only paints the top-left corner of a
         // grown window.
-        unsafe {
+        {
             use objc2_app_kit::NSAutoresizingMaskOptions;
             view.setAutoresizingMask(
-                NSAutoresizingMaskOptions::NSViewWidthSizable
-                    | NSAutoresizingMaskOptions::NSViewHeightSizable,
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
             );
         }
 
@@ -267,18 +253,18 @@ impl DevWindow {
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::Resizable;
         let nswindow: Retained<NSWindow> = unsafe {
-            let alloc = mtm.alloc::<NSWindow>();
-            msg_send_id![alloc,
+            let alloc = NSWindow::alloc(mtm);
+            msg_send![alloc,
                 initWithContentRect: frame,
                 styleMask: style,
-                backing: NSBackingStoreType::NSBackingStoreBuffered,
+                backing: NSBackingStoreType::Buffered,
                 defer: false
             ]
         };
         nswindow.setTitle(&NSString::from_str("DevPanel"));
         // BG matches the panel's own BG so the title bar reads as
         // one continuous surface with the content beneath it.
-        unsafe {
+        {
             let bg = NSColor::colorWithSRGBRed_green_blue_alpha(
                 20.0 / 255.0, 22.0 / 255.0, 28.0 / 255.0, 1.0,
             );
@@ -309,8 +295,8 @@ impl DevWindow {
         // Attach a delegate so resize / move / display-change
         // notifications drive a host redraw.
         let delegate: Retained<DevWindowDelegate> = {
-            let alloc = mtm.alloc::<DevWindowDelegate>().set_ivars(DevWindowDelegateIvars);
-            unsafe { msg_send_id![super(alloc), init] }
+            let alloc = DevWindowDelegate::alloc(mtm).set_ivars(DevWindowDelegateIvars);
+            unsafe { msg_send![super(alloc), init] }
         };
         let proto: &ProtocolObject<dyn NSWindowDelegate> =
             ProtocolObject::from_ref(&*delegate);
@@ -418,10 +404,9 @@ impl DevWindow {
         // small then is dragged large); doing the sync here makes
         // the view + layer always match what the user sees.
         let content_rect = unsafe {
-            use objc2_foundation::CGRect;
             let frame = self.nswindow.frame();
             let style = self.nswindow.styleMask();
-            let cr: CGRect = objc2::msg_send![
+            let cr: NSRect = objc2::msg_send![
                 &*self.nswindow,
                 contentRectForFrameRect: frame,
                 styleMask: style
@@ -432,9 +417,8 @@ impl DevWindow {
         let h_pt = content_rect.size.height;
         // Sync the view's frame so subsequent `bounds()` calls and
         // hit-tests see the right size.
-        use objc2_foundation::CGSize;
-        unsafe {
-            self.view.setFrameSize(CGSize { width: w_pt, height: h_pt });
+        {
+            self.view.setFrameSize(NSSize { width: w_pt, height: h_pt });
         }
         let width_phys = w_pt * scale;
         let height_phys = h_pt * scale;

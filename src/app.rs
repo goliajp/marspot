@@ -43,7 +43,7 @@ use core_foundation::runloop::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::{ProtocolObject, Sel};
-use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSApplicationTerminateReply, NSBackingStoreType, NSColor, NSDragOperation, NSDraggingInfo,
@@ -52,7 +52,7 @@ use objc2_app_kit::{
     NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSCopying,
     NSNotFound, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize,
     NSString, NSUInteger, NSURL,
 };
@@ -383,34 +383,25 @@ pub struct MarspotViewIvars {
     caret_view_phys_rect: Cell<Option<NSRect>>,
 }
 
-declare_class!(
+define_class!(
     /// `NSView` subclass that captures key + mouse + scroll events
     /// and bridges them into `MarspotApp`.  Implements
     /// `NSTextInputClient` so CJK / emoji IMEs can compose into the
     /// terminal.
-    pub struct MarspotView;
-
     // SAFETY:
     // - Superclass NSView has no special subclassing requirements.
-    // - `#[inherits(NSResponder, NSObject)]` exposes NSResponder
-    //   methods (notably `interpretKeyEvents`).
-    // - Main-thread mutability is correct for an NSView subclass.
+    // - MainThreadOnly is correct for an NSView subclass.
     // - Drop-relevant state in ivars is safe inside RefCell/Cell.
-    unsafe impl ClassType for MarspotView {
-        #[inherits(objc2_app_kit::NSResponder, objc2::runtime::NSObject)]
-        type Super = NSView;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MarspotView";
-    }
-
-    impl DeclaredClass for MarspotView {
-        type Ivars = MarspotViewIvars;
-    }
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MarspotView"]
+    #[ivars = MarspotViewIvars]
+    pub struct MarspotView;
 
     unsafe impl NSObjectProtocol for MarspotView {}
 
-    unsafe impl MarspotView {
-        #[method(acceptsFirstResponder)]
+    impl MarspotView {
+        #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
         }
@@ -422,19 +413,19 @@ declare_class!(
         // Returning YES here routes that first click straight into
         // mouse_down, so the window-activation and pane-focus switch
         // happen in the same gesture.
-        #[method(acceptsFirstMouse:)]
+        #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true
         }
 
         // Flip Y-axis so origin is top-left (matches the rest of the
         // code base's convention; layout / hit-testing assume top-left).
-        #[method(isFlipped)]
+        #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
         }
 
-        #[method(keyDown:)]
+        #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let mods = nsevent_modifiers(event);
 
@@ -459,7 +450,7 @@ declare_class!(
             // When it commits, insertText fires.  When the key was
             // navigation / editing, doCommandBySelector fires.
             let array = NSArray::from_slice(&[event]);
-            unsafe { self.interpretKeyEvents(&array) };
+            { self.interpretKeyEvents(&array) };
 
             if !self.ivars().ime_consumed.get() {
                 // Composing guard: when marked_text is non-empty the
@@ -481,7 +472,7 @@ declare_class!(
             }
         }
 
-        #[method(keyUp:)]
+        #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
             // Released events bypass IME — IMEs only consume key-down.
             if let Some(ev) = nsevent_to_mars_key(event, KeyState::Released) {
@@ -490,7 +481,7 @@ declare_class!(
             }
         }
 
-        #[method(flagsChanged:)]
+        #[unsafe(method(flagsChanged:))]
         fn flags_changed(&self, event: &NSEvent) {
             // Modifiers carry on the event object; we surface them via
             // the next key_event delivery.  No callback to MarspotApp
@@ -499,7 +490,7 @@ declare_class!(
             let _ = event;
         }
 
-        #[method(mouseDown:)]
+        #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             // locationInWindow is in window coords (logical points,
             // origin bottom-left of window).  Convert into our flipped
@@ -509,7 +500,7 @@ declare_class!(
             // behaviour on isFlipped views (the previous
             // `view_h + backing.y` workaround inverted top clicks
             // into bottom y_phys, sending sidebar entry "1" to row 7).
-            let loc_window = unsafe { event.locationInWindow() };
+            let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
@@ -523,11 +514,11 @@ declare_class!(
             dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys, mods });
         }
 
-        #[method(rightMouseDown:)]
+        #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
             // Same coord conversion as mouse_down.  AppKit folds
             // Ctrl-Left-Click into this path on macOS by default.
-            let loc_window = unsafe { event.locationInWindow() };
+            let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
@@ -536,12 +527,12 @@ declare_class!(
             dispatch_event(EventKind::MouseRightDown { x: x_phys, y: y_phys, mods });
         }
 
-        #[method(mouseDragged:)]
+        #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
             // Same coord conversion as mouse_down — AppKit only
             // sends mouseDragged: between a paired mouseDown:
             // and mouseUp:, so the app can rely on order.
-            let loc_window = unsafe { event.locationInWindow() };
+            let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
@@ -549,9 +540,9 @@ declare_class!(
             dispatch_event(EventKind::MouseDrag { x: x_phys, y: y_phys });
         }
 
-        #[method(mouseUp:)]
+        #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            let loc_window = unsafe { event.locationInWindow() };
+            let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
@@ -559,12 +550,12 @@ declare_class!(
             dispatch_event(EventKind::MouseUp { x: x_phys, y: y_phys });
         }
 
-        #[method(mouseMoved:)]
+        #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             // AppKit only delivers mouseMoved: when the window is key
             // AND setAcceptsMouseMovedEvents is true (set in
             // build_window).  Coords match mouse_down.
-            let loc_window = unsafe { event.locationInWindow() };
+            let loc_window = { event.locationInWindow() };
             let loc_view = self.convertPoint_fromView(loc_window, None);
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
@@ -579,7 +570,7 @@ declare_class!(
         // registered, so a session that reaches performDragOperation
         // always has file paths to extract.
 
-        #[method(draggingEntered:)]
+        #[unsafe(method(draggingEntered:))]
         fn dragging_entered(
             &self,
             _info: &ProtocolObject<dyn NSDraggingInfo>,
@@ -589,7 +580,7 @@ declare_class!(
             NSDragOperation::Copy
         }
 
-        #[method(prepareForDragOperation:)]
+        #[unsafe(method(prepareForDragOperation:))]
         fn prepare_for_drag_operation(
             &self,
             _info: &ProtocolObject<dyn NSDraggingInfo>,
@@ -597,7 +588,7 @@ declare_class!(
             true
         }
 
-        #[method(performDragOperation:)]
+        #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(
             &self,
             info: &ProtocolObject<dyn NSDraggingInfo>,
@@ -606,17 +597,17 @@ declare_class!(
             // through NSURL (rather than trimming the `file://`
             // prefix by hand) handles percent-encoding — CJK
             // filenames arrive percent-encoded in the URL string.
-            let pb = unsafe { info.draggingPasteboard() };
+            let pb = { info.draggingPasteboard() };
             let mut paths: Vec<String> = Vec::new();
-            if let Some(items) = unsafe { pb.pasteboardItems() } {
+            if let Some(items) = { pb.pasteboardItems() } {
                 for item in items.iter() {
                     let url_str =
                         match unsafe { item.stringForType(NSPasteboardTypeFileURL) } {
                             Some(s) => s,
                             None => continue,
                         };
-                    let path = unsafe { NSURL::URLWithString(&url_str) }
-                        .and_then(|u| unsafe { u.path() });
+                    let path = { NSURL::URLWithString(&url_str) }
+                        .and_then(|u| { u.path() });
                     if let Some(p) = path {
                         paths.push(p.to_string());
                     }
@@ -627,7 +618,7 @@ declare_class!(
             } else {
                 // Drop point → view-local physical px, same conversion
                 // as mouse_down, so the receiver can pane-hit-test it.
-                let loc_window = unsafe { info.draggingLocation() };
+                let loc_window = { info.draggingLocation() };
                 let loc_view = self.convertPoint_fromView(loc_window, None);
                 let scale =
                     self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
@@ -640,24 +631,24 @@ declare_class!(
             }
         }
 
-        #[method(scrollWheel:)]
+        #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             // hasPreciseScrollingDeltas distinguishes trackpads
             // (pixel-precise) from wheels (line-stepped).  Scale on
             // the caller side via cell height.
-            let precise = unsafe { event.hasPreciseScrollingDeltas() };
+            let precise = { event.hasPreciseScrollingDeltas() };
             let dx;
             let dy;
             if precise {
                 // In points; convert to backing pixels.
                 let scale =
                     self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
-                dx = unsafe { event.scrollingDeltaX() } * scale;
-                dy = unsafe { event.scrollingDeltaY() } * scale;
+                dx = { event.scrollingDeltaX() } * scale;
+                dy = { event.scrollingDeltaY() } * scale;
             } else {
                 // Lines; pass through, caller scales.
-                dx = unsafe { event.deltaX() };
-                dy = unsafe { event.deltaY() };
+                dx = event.deltaX();
+                dy = event.deltaY();
             }
             dispatch_event(EventKind::Scroll { dx, dy, precise });
         }
@@ -666,12 +657,12 @@ declare_class!(
     unsafe impl NSTextInputClient for MarspotView {
         // Required: queries
 
-        #[method(hasMarkedText)]
+        #[unsafe(method(hasMarkedText))]
         fn has_marked_text(&self) -> bool {
             !self.ivars().marked_text.borrow().is_empty()
         }
 
-        #[method(markedRange)]
+        #[unsafe(method(markedRange))]
         fn marked_range(&self) -> NSRange {
             let len = self.ivars().marked_text.borrow().len();
             if len > 0 {
@@ -681,14 +672,14 @@ declare_class!(
             }
         }
 
-        #[method(selectedRange)]
+        #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
             // We don't maintain a selection model.  NSNotFound is
             // documented to mean "no selection".
             NSRange::new(NSNotFound as NSUInteger, 0)
         }
 
-        #[method_id(validAttributesForMarkedText)]
+        #[unsafe(method_id(validAttributesForMarkedText))]
         fn valid_attributes_for_marked_text(
             &self,
         ) -> Retained<NSArray<NSAttributedStringKey>> {
@@ -697,7 +688,7 @@ declare_class!(
             NSArray::new()
         }
 
-        #[method_id(attributedSubstringForProposedRange:actualRange:)]
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
         fn attributed_substring_for_proposed_range(
             &self,
             _range: NSRange,
@@ -707,12 +698,12 @@ declare_class!(
             None
         }
 
-        #[method(characterIndexForPoint:)]
+        #[unsafe(method(characterIndexForPoint:))]
         fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
             0
         }
 
-        #[method(firstRectForCharacterRange:actualRange:)]
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
         fn first_rect_for_character_range(
             &self,
             _range: NSRange,
@@ -771,7 +762,7 @@ declare_class!(
 
         // Required: composition lifecycle
 
-        #[method(setMarkedText:selectedRange:replacementRange:)]
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
         fn set_marked_text(
             &self,
             string: &NSObject,
@@ -786,13 +777,13 @@ declare_class!(
             dispatch_event(EventKind::ImePreedit(s));
         }
 
-        #[method(unmarkText)]
+        #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
             self.ivars().marked_text.borrow_mut().clear();
             dispatch_event(EventKind::ImePreedit(String::new()));
         }
 
-        #[method(insertText:replacementRange:)]
+        #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, string: &NSObject, _replacement_range: NSRange) {
             self.ivars().ime_consumed.set(true);
             let s = nsobject_string_to_string(string);
@@ -817,7 +808,7 @@ declare_class!(
             dispatch_event(EventKind::Key(ev, mods));
         }
 
-        #[method(doCommandBySelector:)]
+        #[unsafe(method(doCommandBySelector:))]
         fn do_command_by_selector(&self, selector: Sel) {
             // `interpretKeyEvents` lands here whenever the IME handed
             // the key event off as a standard editing command —
@@ -859,7 +850,9 @@ declare_class!(
 /// `noop:`, fired for ctrl-letter combos that we already routed
 /// through the raw path before entering IME).
 fn selector_named_key(selector: Sel) -> Option<NamedKey> {
-    match selector.name() {
+    // objc2 0.6: `Sel::name()` returns `&CStr`.  Selector names are
+    // always ASCII, so the lossy fallback never actually fires.
+    match selector.name().to_str().unwrap_or("") {
         "insertNewline:" | "insertLineBreak:" | "insertNewlineIgnoringFieldEditor:" => {
             Some(NamedKey::Enter)
         }
@@ -886,10 +879,8 @@ fn selector_named_key(selector: Sel) -> Option<NamedKey> {
 /// reference (the protocol declares `&AnyObject` for these
 /// arguments — runtime says it's always one of those two classes).
 fn nsobject_string_to_string(string: &NSObject) -> String {
-    if string.is_kind_of::<NSAttributedString>() {
-        let p: *const NSObject = string;
-        let p: *const NSAttributedString = p.cast();
-        unsafe { (*p).string().to_string() }
+    if let Some(attr) = string.downcast_ref::<NSAttributedString>() {
+        attr.string().to_string()
     } else {
         let p: *const NSObject = string;
         let p: *const NSString = p.cast();
@@ -903,27 +894,21 @@ fn nsobject_string_to_string(string: &NSObject) -> String {
 
 pub struct MarspotWindowDelegateIvars;
 
-declare_class!(
-    pub struct MarspotWindowDelegate;
-
+define_class!(
     // SAFETY:
     // - Superclass NSObject has no subclassing requirements.
     // - Window delegates are main-thread-only.
     // - No Drop logic here.
-    unsafe impl ClassType for MarspotWindowDelegate {
-        type Super = objc2::runtime::NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MarspotWindowDelegate";
-    }
-
-    impl DeclaredClass for MarspotWindowDelegate {
-        type Ivars = MarspotWindowDelegateIvars;
-    }
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "MarspotWindowDelegate"]
+    #[ivars = MarspotWindowDelegateIvars]
+    pub struct MarspotWindowDelegate;
 
     unsafe impl NSObjectProtocol for MarspotWindowDelegate {}
 
     unsafe impl NSWindowDelegate for MarspotWindowDelegate {
-        #[method(windowShouldClose:)]
+        #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
             dispatch_event(EventKind::CloseRequested);
             // Returning false lets the app handle the close; if the
@@ -933,22 +918,22 @@ declare_class!(
             false
         }
 
-        #[method(windowDidResize:)]
+        #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _notification: &NSNotification) {
             dispatch_event(EventKind::Resized);
         }
 
-        #[method(windowDidMove:)]
+        #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _notification: &NSNotification) {
             dispatch_event(EventKind::Moved);
         }
 
-        #[method(windowDidBecomeKey:)]
+        #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
             dispatch_event(EventKind::Focused(true));
         }
 
-        #[method(windowDidResignKey:)]
+        #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             dispatch_event(EventKind::Focused(false));
         }
@@ -967,13 +952,13 @@ declare_class!(
         /// fd-vault + pgrep sweep) never gets a chance to fire —
         /// that's the 2026-06-17 "user Cmd-Q'd but the 9 L3s lived
         /// on" surprise.
-        #[method(applicationShouldTerminate:)]
+        #[unsafe(method(applicationShouldTerminate:))]
         fn application_should_terminate(
             &self,
             _sender: &NSApplication,
         ) -> NSApplicationTerminateReply {
             dispatch_event(EventKind::CloseRequested);
-            NSApplicationTerminateReply::NSTerminateCancel
+            NSApplicationTerminateReply::TerminateCancel
         }
     }
 );
@@ -1101,15 +1086,15 @@ fn post_dummy_event(nsapp: &NSApplication) {
     unsafe {
         let event_cls = class!(NSEvent);
         let nsevent: *mut NSEvent = msg_send![event_cls,
-            otherEventWithType: 15u64 /* NSEventTypeApplicationDefined */
-            location: NSPoint::new(0.0, 0.0)
-            modifierFlags: 0u64
-            timestamp: 0.0_f64
-            windowNumber: 0_isize
-            context: ptr::null::<c_void>()
-            subtype: 0_i16
-            data1: 0_isize
-            data2: 0_isize
+            otherEventWithType: 15u64 /* NSEventTypeApplicationDefined */,
+            location: NSPoint::new(0.0, 0.0),
+            modifierFlags: 0u64,
+            timestamp: 0.0_f64,
+            windowNumber: 0_isize,
+            context: ptr::null::<c_void>(),
+            subtype: 0_i16,
+            data1: 0_isize,
+            data2: 0_isize,
         ];
         if !nsevent.is_null() {
             let nsevent = &*nsevent;
@@ -1155,7 +1140,7 @@ fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
     };
     let path_str = match icon_path.to_str() { Some(s) => s, None => return };
     let ns_path = NSString::from_str(path_str);
-    let img: Option<Retained<NSImage>> = unsafe {
+    let img: Option<Retained<NSImage>> = {
         NSImage::initWithContentsOfFile(NSImage::alloc(), &ns_path)
     };
     if let Some(img) = img {
@@ -1189,13 +1174,13 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         NSSize::new(attrs.width_logical, attrs.height_logical),
     );
     let view: Retained<MarspotView> = {
-        let alloc = mtm.alloc::<MarspotView>().set_ivars(MarspotViewIvars {
+        let alloc = MarspotView::alloc(mtm).set_ivars(MarspotViewIvars {
             marked_text: RefCell::new(String::new()),
             ime_consumed: Cell::new(false),
             last_modifiers: Cell::new(Modifiers::default()),
             caret_view_phys_rect: Cell::new(None),
         });
-        unsafe { msg_send_id![super(alloc), initWithFrame: frame] }
+        unsafe { msg_send![super(alloc), initWithFrame: frame] }
     };
     // Accept Finder file drags anywhere on the view — dropping a
     // file inserts its shell-quoted path into the pane under the
@@ -1203,8 +1188,8 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     // (`from_id_slice` + `copy` because NSString's mutable-subclass
     // mutability blocks the plain `from_slice` retainable bound;
     // copying an immutable NSString is just a retain.)
-    let drag_types = NSArray::from_id_slice(&[unsafe { NSPasteboardTypeFileURL.copy() }]);
-    unsafe { view.registerForDraggedTypes(&drag_types) };
+    let drag_types = NSArray::from_retained_slice(&[unsafe { NSPasteboardTypeFileURL.copy() }]);
+    { view.registerForDraggedTypes(&drag_types) };
 
     // 2. Create NSWindow with view as content.
     //
@@ -1221,18 +1206,18 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         | NSWindowStyleMask::Resizable
         | NSWindowStyleMask::FullSizeContentView;
     let window: Retained<NSWindow> = unsafe {
-        let alloc = mtm.alloc::<NSWindow>();
-        msg_send_id![alloc,
+        let alloc = NSWindow::alloc(mtm);
+        msg_send![alloc,
             initWithContentRect: frame,
             styleMask: style,
-            backing: NSBackingStoreType::NSBackingStoreBuffered,
+            backing: NSBackingStoreType::Buffered,
             defer: false
         ]
     };
     window.setTitle(&NSString::from_str(&attrs.title));
-    unsafe {
+    {
         window.setTitlebarAppearsTransparent(true);
-        window.setTitleVisibility(NSWindowTitleVisibility::NSWindowTitleHidden);
+        window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
         // Kill the 1-px hairline AppKit draws under the titlebar
         // (the visible darker strip the user kept seeing even after
         // FullSizeContentView).  `NSTitlebarSeparatorStyleNone`
@@ -1259,10 +1244,9 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
 
     // 3. Window delegate.
     let delegate: Retained<MarspotWindowDelegate> = {
-        let alloc = mtm
-            .alloc::<MarspotWindowDelegate>()
+        let alloc = MarspotWindowDelegate::alloc(mtm)
             .set_ivars(MarspotWindowDelegateIvars);
-        unsafe { msg_send_id![super(alloc), init] }
+        unsafe { msg_send![super(alloc), init] }
     };
     let proto: &ProtocolObject<dyn NSWindowDelegate> =
         ProtocolObject::from_ref(&*delegate);
@@ -1302,7 +1286,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
 
     // Show + focus + activate.  `activate()` replaces the deprecated
     // `activateIgnoringOtherApps(true)`; macOS 14+ is our target floor.
-    unsafe { nsapp.activate() };
+    { nsapp.activate() };
     window.makeKeyAndOrderFront(None);
 
     // Hand control to the app's resumed handler.  Borrow the cell as
@@ -1345,7 +1329,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     crate::dev_window::drain_pending_actions();
 
     // 6. Run.  Returns after dispatch_event sees an exit request.
-    unsafe { nsapp.run() };
+    { nsapp.run() };
 
     // Drop app state on the main thread so `Drop`s for sessions /
     // renderers fire here.
@@ -1357,17 +1341,17 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
 // ---------------------------------------------------------------------------
 
 fn nsevent_modifiers(event: &NSEvent) -> Modifiers {
-    let flags = unsafe { event.modifierFlags() };
+    let flags = { event.modifierFlags() };
     Modifiers {
-        shift: flags.contains(NSEventModifierFlags::NSEventModifierFlagShift),
-        control: flags.contains(NSEventModifierFlags::NSEventModifierFlagControl),
-        alt: flags.contains(NSEventModifierFlags::NSEventModifierFlagOption),
-        super_: flags.contains(NSEventModifierFlags::NSEventModifierFlagCommand),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        control: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        super_: flags.contains(NSEventModifierFlags::Command),
     }
 }
 
 fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEvent> {
-    let key_code = unsafe { event.keyCode() };
+    let key_code = { event.keyCode() };
     let logical = match key_code {
         // Carbon HIToolbox keyCodes — stable across macOS versions.
         // Reference: <HIToolbox/Events.h> kVK_* constants.
@@ -1409,7 +1393,7 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
         _ => {
             // Modifier-independent character.  charactersIgnoringModifiers
             // gives "a" for both `a` and `shift+a`.
-            let s_opt = unsafe { event.charactersIgnoringModifiers() };
+            let s_opt = { event.charactersIgnoringModifiers() };
             match s_opt.and_then(|s| s.to_string().chars().next()) {
                 Some(c) => LogicalKey::Char(c),
                 None => LogicalKey::Other,
@@ -1423,7 +1407,7 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
     let text = if matches!(logical, LogicalKey::Named(_)) {
         None
     } else {
-        unsafe { event.characters() }.map(|s| s.to_string())
+        { event.characters() }.map(|s| s.to_string())
     };
 
     Some(MarspotKeyEvent {

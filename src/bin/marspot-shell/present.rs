@@ -186,7 +186,7 @@ impl ShellPresenter {
         let banner_library = build_banner_library(&device)?;
         let banner_pipeline = build_banner_pipeline(&device, &banner_library)?;
 
-        let layer = unsafe { CAMetalLayer::new() };
+        let layer = { CAMetalLayer::new() };
         unsafe {
             layer.setDevice(Some(&device));
             layer.setPixelFormat(TARGET_FORMAT);
@@ -252,7 +252,7 @@ impl ShellPresenter {
             let _: () = msg_send![layer_ptr, setBackgroundColor: cgcolor_ref];
         }
         view.setWantsLayer(true);
-        unsafe {
+        {
             // Tell NSView how to *itself* place the layer's contents
             // during a live resize.  AppKit drives this — distinct
             // from CAMetalLayer's `contentsGravity`, which only kicks
@@ -367,7 +367,7 @@ impl ShellPresenter {
     pub fn set_drawable_size(&self, w_phys: f64, h_phys: f64) {
         let w = w_phys.max(1.0);
         let h = h_phys.max(1.0);
-        unsafe {
+        {
             self.layer
                 .setDrawableSize(objc2_foundation::NSSize::new(w, h));
         }
@@ -376,7 +376,7 @@ impl ShellPresenter {
     /// Render the IOSurface to the next CAMetalLayer drawable and
     /// present.  No-op if no drawable is available (all in-flight).
     pub fn present(&mut self) {
-        let drawable = match unsafe { self.layer.nextDrawable() } {
+        let drawable = match { self.layer.nextDrawable() } {
             Some(d) => d,
             None => {
                 // Dev-only — flash investigation 2026-06-15.  If
@@ -394,9 +394,9 @@ impl ShellPresenter {
                 return;
             }
         };
-        let texture = unsafe { drawable.texture() };
+        let texture = { drawable.texture() };
 
-        let pass = unsafe { MTLRenderPassDescriptor::new() };
+        let pass = { MTLRenderPassDescriptor::new() };
         let color0 = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
         color0.setTexture(Some(&texture));
         color0.setLoadAction(MTLLoadAction::Clear);
@@ -501,12 +501,10 @@ impl ShellPresenter {
 fn system_default_device() -> Result<Retained<ProtocolObject<dyn MTLDevice>>, String> {
     // Mirror render_metal::system_default_device — kept private to the
     // bin so the shell doesn't pull lib internals across the boundary.
-    let raw = unsafe { MTLCreateSystemDefaultDevice() };
-    if raw.is_null() {
-        return Err("MTLCreateSystemDefaultDevice returned nil — no Metal device".into());
-    }
-    unsafe { Retained::from_raw(raw) }
-        .ok_or_else(|| "MTLCreateSystemDefaultDevice → null after non-null check".into())
+    // objc2-metal 0.3 wraps the +1 retained pointer (or null) into
+    // `Option<Retained<..>>` for us.
+    MTLCreateSystemDefaultDevice()
+        .ok_or_else(|| "MTLCreateSystemDefaultDevice returned nil — no Metal device".into())
 }
 
 fn build_library(

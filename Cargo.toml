@@ -22,13 +22,16 @@ default-members = [".", "crates/marspot-term", "crates/marspot-session"]
 # `marspot::grid::...` paths keep resolving — see docs/per-session-l3.md.
 marspot-term = { path = "crates/marspot-term" }
 libc = "0.2"
-objc2 = "0.5"
-objc2-app-kit = { version = "0.2", features = ["all"] }
-objc2-foundation = { version = "0.2", features = ["all"] }
-objc2-quartz-core = { version = "0.2", features = ["all"] }
-objc2-metal = { version = "0.2", features = ["all"] }
-core-text = "21.0"
-core-graphics = "0.24"
+objc2 = "0.6"
+# 0.3 framework crates dropped the "all" feature — the defaults now
+# enable every regular binding (306/314 features), the residue being
+# gnustep / unstable flags we don't want.
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+objc2-quartz-core = "0.3"
+objc2-metal = "0.3"
+core-text = "22.0"
+core-graphics = "0.25"
 core-foundation = "0.10"
 foreign-types = "0.5"
 png = "0.18"
