@@ -43,9 +43,10 @@
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 194,
+      "mars_parse_MBps_min": 61,
       "mars_live_MBps_min": 144,
-      "mars_vs_best_other_min": 1.26
+      "mars_vs_best_other_min": 1.26,
+      "_note": "Relocked 2026-07-11: the old floor 194 was measured on the pre-82d74b6 parser whose emoji WIDTHS WERE WRONG (codepoint advance, no UAX #29 clusters - VS16/ZWJ/flags mis-sized). Correct cluster segmentation is a hard product requirement; pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter. After the packed-props table + quad decode lane the honest ceiling is ~66 MB/s on the mini (3-run median 65.7, stdev ~2%); floor = 65.7 x 0.93 = 61. mars_live_MBps_min / vs_best_other for this scenario are STALE (locked against the wrong-width parser) - re-measure on the next --full run before trusting."
     }
   ],
   "render_full_repaint": {
