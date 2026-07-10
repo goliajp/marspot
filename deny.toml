@@ -33,7 +33,12 @@ confidence-threshold = 0.8
 # that way at "deny" so any future dep that drags a dup in fails
 # the gate, forcing a conscious decision.
 multiple-versions = "deny"
+# Newer cargo-deny treats a version-less `{ path = ... }` dep as a
+# wildcard and fails the gate.  Workspace-internal path deps are the
+# normal shape for a private multi-crate repo — allow exactly those,
+# keep real `*` version requirements denied.
 wildcards = "deny"
+allow-wildcard-paths = true
 # Crates explicitly disallowed go here, with a reason note.
 deny = []
 skip = []

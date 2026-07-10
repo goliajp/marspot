@@ -3,6 +3,9 @@ name = "marspot-term"
 version = "0.2.12"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
+# Private repo — nothing here is published to crates.io.  (Also what
+# lets cargo-deny accept the version-less workspace path deps.)
+publish = false
 
 # The zero-GUI terminal engine: VT/xterm parser, cell grid, bounded
 # scrollback, terminal emulator, PTY, shelld client/protocol, and the

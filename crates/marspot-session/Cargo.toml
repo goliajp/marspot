@@ -3,6 +3,9 @@ name = "marspot-session"
 version = "0.2.12"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
+# Private repo — nothing here is published to crates.io.  (Also what
+# lets cargo-deny accept the version-less workspace path deps.)
+publish = false
 
 # The per-session L3 process (target #4): parser/terminal only, NO
 # Metal/AppKit/CoreText. Depends ONLY on the zero-GUI marspot-term
