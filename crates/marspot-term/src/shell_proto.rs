@@ -312,6 +312,26 @@ pub enum MsgType {
     /// top-left origin — same convention as `MouseDown`), `count u16
     /// LE`, then per path `len u16 LE + UTF-8 bytes`.
     FileDrop = 57,
+    /// core → shell: user right-clicked the active prefix of a pane
+    /// badge.  L2 owns the hit-test (it knows badge geometry); the
+    /// menu CONTENT is L1 plugin state, so this asks "what should the
+    /// menu say?".  Request/response pair with `PaneBadgeMenu`, same
+    /// shape as `GetSelectionText`/`SelectionText`.  Payload:
+    /// `session_id u64 LE, anchor_x f64 LE, anchor_y f64 LE`
+    /// (physical px, top-left origin — echoed back so the reply is
+    /// stateless).
+    PaneBadgeMenuRequest = 58,
+    /// shell → core: the badge context-menu items for a prior
+    /// `PaneBadgeMenuRequest`.  L2 opens its ContextMenu at the echoed
+    /// anchor.  An empty item list means "no menu" — L2 shows nothing.
+    /// Payload: `session_id u64 LE, anchor_x f64 LE, anchor_y f64 LE,
+    /// count u8`, then per item `tag u32 LE, label_len u16 LE,
+    /// label_utf8`.
+    PaneBadgeMenu = 59,
+    /// core → shell: user picked an item from a `PaneBadgeMenu`.  The
+    /// tag is the plugin-assigned opaque id from the menu frame.
+    /// Payload: `session_id u64 LE, tag u32 LE`.
+    PaneBadgeMenuAction = 60,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -358,6 +378,9 @@ impl MsgType {
             55 => MsgType::DevPanelToggle,
             56 => MsgType::PaneTitle,
             57 => MsgType::FileDrop,
+            58 => MsgType::PaneBadgeMenuRequest,
+            59 => MsgType::PaneBadgeMenu,
+            60 => MsgType::PaneBadgeMenuAction,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1138,6 +1161,145 @@ pub fn decode_pane_badge_clicked(payload: &[u8]) -> io::Result<u64> {
     Ok(u64::from_le_bytes(payload.try_into().unwrap()))
 }
 
+/// One row of a pane-badge context menu on the wire.  `tag` is the
+/// plugin-assigned opaque id echoed back via `PaneBadgeMenuAction`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneBadgeMenuItem {
+    pub tag: u32,
+    pub label: String,
+}
+
+/// Caps for the PaneBadgeMenu frame.  Labels reuse the badge cap —
+/// a menu row is the same order of magnitude as a badge; item count
+/// is bounded well under the u8 the wire carries.
+pub const PANE_BADGE_MENU_MAX_ITEMS: u8 = 16;
+pub const PANE_BADGE_MENU_LABEL_MAX_LEN: u16 = 64;
+
+/// PaneBadgeMenuRequest payload: `session_id u64 LE, anchor_x f64 LE,
+/// anchor_y f64 LE`.
+pub fn encode_pane_badge_menu_request(session_id: u64, x: f64, y: f64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(24);
+    out.extend_from_slice(&session_id.to_le_bytes());
+    out.extend_from_slice(&x.to_le_bytes());
+    out.extend_from_slice(&y.to_le_bytes());
+    out
+}
+
+pub fn decode_pane_badge_menu_request(payload: &[u8]) -> io::Result<(u64, f64, f64)> {
+    if payload.len() != 24 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_badge_menu_request payload != 24 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let x = f64::from_le_bytes(payload[8..16].try_into().unwrap());
+    let y = f64::from_le_bytes(payload[16..24].try_into().unwrap());
+    Ok((session_id, x, y))
+}
+
+/// PaneBadgeMenu payload: `session_id u64 LE, anchor_x f64 LE,
+/// anchor_y f64 LE, count u8`, then per item `tag u32 LE,
+/// label_len u16 LE, label_utf8`.
+pub fn encode_pane_badge_menu(
+    session_id: u64,
+    x: f64,
+    y: f64,
+    items: &[PaneBadgeMenuItem],
+) -> Vec<u8> {
+    let n = items.len().min(PANE_BADGE_MENU_MAX_ITEMS as usize);
+    let mut out = Vec::with_capacity(25 + n * 12);
+    out.extend_from_slice(&session_id.to_le_bytes());
+    out.extend_from_slice(&x.to_le_bytes());
+    out.extend_from_slice(&y.to_le_bytes());
+    out.push(n as u8);
+    for item in &items[..n] {
+        let bytes = item.label.as_bytes();
+        let len = bytes.len().min(PANE_BADGE_MENU_LABEL_MAX_LEN as usize);
+        out.extend_from_slice(&item.tag.to_le_bytes());
+        out.extend_from_slice(&(len as u16).to_le_bytes());
+        out.extend_from_slice(&bytes[..len]);
+    }
+    out
+}
+
+pub fn decode_pane_badge_menu(
+    payload: &[u8],
+) -> io::Result<(u64, f64, f64, Vec<PaneBadgeMenuItem>)> {
+    if payload.len() < 25 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_badge_menu payload < 25 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let x = f64::from_le_bytes(payload[8..16].try_into().unwrap());
+    let y = f64::from_le_bytes(payload[16..24].try_into().unwrap());
+    let count = payload[24];
+    if count > PANE_BADGE_MENU_MAX_ITEMS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "pane_badge_menu count {} > cap {}",
+                count, PANE_BADGE_MENU_MAX_ITEMS
+            ),
+        ));
+    }
+    let mut items = Vec::with_capacity(count as usize);
+    let mut off = 25usize;
+    for _ in 0..count {
+        if payload.len() < off + 6 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pane_badge_menu truncated before item header",
+            ));
+        }
+        let tag = u32::from_le_bytes(payload[off..off + 4].try_into().unwrap());
+        let len =
+            u16::from_le_bytes(payload[off + 4..off + 6].try_into().unwrap()) as usize;
+        if len > PANE_BADGE_MENU_LABEL_MAX_LEN as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "pane_badge_menu label len {} > cap {}",
+                    len, PANE_BADGE_MENU_LABEL_MAX_LEN
+                ),
+            ));
+        }
+        off += 6;
+        if payload.len() < off + len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pane_badge_menu truncated before label body",
+            ));
+        }
+        let label = String::from_utf8_lossy(&payload[off..off + len]).into_owned();
+        off += len;
+        items.push(PaneBadgeMenuItem { tag, label });
+    }
+    Ok((session_id, x, y, items))
+}
+
+/// PaneBadgeMenuAction payload: `session_id u64 LE, tag u32 LE`.
+pub fn encode_pane_badge_menu_action(session_id: u64, tag: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    out.extend_from_slice(&session_id.to_le_bytes());
+    out.extend_from_slice(&tag.to_le_bytes());
+    out
+}
+
+pub fn decode_pane_badge_menu_action(payload: &[u8]) -> io::Result<(u64, u32)> {
+    if payload.len() != 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_badge_menu_action payload != 12 bytes",
+        ));
+    }
+    let session_id = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let tag = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    Ok((session_id, tag))
+}
+
 /// PaneSession capability bits — packed into the u32 carried by
 /// `PaneSessionBegin`.  Each capability gates one host-mediated
 /// behaviour the plugin can ask for.
@@ -1683,6 +1845,52 @@ mod tests {
         let read = Frame::read_from(&mut cur).unwrap().unwrap();
         assert_eq!(read.msg_type, MsgType::KeyEvent);
         assert_eq!(read.payload, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn pane_badge_menu_request_roundtrip() {
+        let payload = encode_pane_badge_menu_request(42, 123.5, 987.25);
+        let (sid, x, y) = decode_pane_badge_menu_request(&payload).unwrap();
+        assert_eq!(sid, 42);
+        assert_eq!(x, 123.5);
+        assert_eq!(y, 987.25);
+    }
+
+    #[test]
+    fn pane_badge_menu_roundtrip() {
+        let items = vec![
+            PaneBadgeMenuItem { tag: 1, label: "switch to P1".into() },
+            PaneBadgeMenuItem { tag: 3, label: "switch to P3".into() },
+        ];
+        let payload = encode_pane_badge_menu(7, 10.0, 20.0, &items);
+        let (sid, x, y, decoded) = decode_pane_badge_menu(&payload).unwrap();
+        assert_eq!(sid, 7);
+        assert_eq!(x, 10.0);
+        assert_eq!(y, 20.0);
+        assert_eq!(decoded, items);
+    }
+
+    #[test]
+    fn pane_badge_menu_empty_items_roundtrip() {
+        let payload = encode_pane_badge_menu(7, 0.0, 0.0, &[]);
+        let (_, _, _, decoded) = decode_pane_badge_menu(&payload).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn pane_badge_menu_truncated_errors() {
+        let items = vec![PaneBadgeMenuItem { tag: 1, label: "switch to P1".into() }];
+        let payload = encode_pane_badge_menu(7, 0.0, 0.0, &items);
+        let err = decode_pane_badge_menu(&payload[..payload.len() - 1]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pane_badge_menu_action_roundtrip() {
+        let payload = encode_pane_badge_menu_action(9, 4);
+        let (sid, tag) = decode_pane_badge_menu_action(&payload).unwrap();
+        assert_eq!(sid, 9);
+        assert_eq!(tag, 4);
     }
 
     #[test]

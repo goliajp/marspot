@@ -346,6 +346,33 @@ pub trait Plugin: Send + Sync {
     ) {
         let _ = (host, shelld_session_id);
     }
+
+    /// L2 → L1 callback: the user RIGHT-clicked the active prefix of
+    /// a pane badge.  Return the context-menu rows this plugin offers
+    /// for that pane (empty = nothing; the registry concatenates
+    /// across plugins).  Tags are plugin-opaque — the pick comes back
+    /// via `on_pane_badge_menu_action` with the same tag.
+    fn pane_badge_menu(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+        let _ = (host, shelld_session_id);
+        Vec::new()
+    }
+
+    /// L2 → L1 callback: the user picked a `pane_badge_menu` row.
+    /// `tag` is the id this plugin assigned when building the menu.
+    /// Plugins must tolerate tags they didn't assign (another plugin
+    /// may have contributed rows to the same menu).
+    fn on_pane_badge_menu_action(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+        tag: u32,
+    ) {
+        let _ = (host, shelld_session_id, tag);
+    }
 }
 
 /// RFC-003 PaneSession — a plugin temporarily takes over a pane.
@@ -589,6 +616,52 @@ impl PluginRegistry {
         self.dispatch_pane_badge_click(host as &dyn PluginHost, shelld_session_id);
     }
 
+    /// Collect badge context-menu rows for a pane across every
+    /// enabled plugin (concatenated in registration order).  Called
+    /// when L2 reports a right-click on the badge prefix; the result
+    /// goes back over the wire as a `PaneBadgeMenu` frame.
+    pub fn dispatch_pane_badge_menu(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+        let mut out = Vec::new();
+        for slot in self.slots.iter_mut() {
+            if !slot.enabled {
+                continue;
+            }
+            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            if let Some(items) = run_hook_ret(slot, "pane_badge_menu", |p| {
+                p.pane_badge_menu(host, shelld_session_id)
+            }) {
+                out.extend(items);
+            }
+            host.clear_active_plugin();
+        }
+        out
+    }
+
+    /// Fan a badge-menu pick to every enabled plugin.  Plugins ignore
+    /// tags they didn't assign, so fanning (vs routing to the item's
+    /// author) keeps the registry free of per-row ownership state.
+    pub fn dispatch_pane_badge_menu_action(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+        tag: u32,
+    ) {
+        for slot in self.slots.iter_mut() {
+            if !slot.enabled {
+                continue;
+            }
+            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            run_hook_void(slot, "on_pane_badge_menu_action", |p| {
+                p.on_pane_badge_menu_action(host, shelld_session_id, tag)
+            });
+            host.clear_active_plugin();
+        }
+    }
+
     pub fn stop_all(&mut self, host: &dyn PluginHost) {
         for slot in self.slots.iter_mut() {
             if !slot.enabled {
@@ -646,6 +719,33 @@ where
                 hook = tag
             );
             slot.enabled = false;
+        }
+    }
+}
+
+/// Same as `run_hook_void` but for value-returning hooks
+/// (pane_badge_menu).  A panic disables the plugin and yields `None`.
+fn run_hook_ret<T, F>(slot: &mut Slot, tag: &'static str, f: F) -> Option<T>
+where
+    F: FnOnce(&mut Box<dyn Plugin>) -> T,
+{
+    let t0 = Instant::now();
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| f(&mut slot.plugin)));
+    let dur = t0.elapsed();
+    match result {
+        Ok(v) => {
+            check_budget(slot, tag, dur);
+            Some(v)
+        }
+        Err(_panic) => {
+            lx_error!(
+                "plugin.panic",
+                "plugin panicked — disabling",
+                name = slot.metadata.name,
+                hook = tag
+            );
+            slot.enabled = false;
+            None
         }
     }
 }

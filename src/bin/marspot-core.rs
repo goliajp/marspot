@@ -256,6 +256,11 @@ enum ContextRegion {
     Pane(usize),
     SidebarSlot(usize),
     TitleStrip,
+    /// Menu opened on a pane-badge prefix; the items came from an L1
+    /// plugin via `PaneBadgeMenu` and their tags are plugin-opaque —
+    /// item dispatch sends `PaneBadgeMenuAction` back to L1 instead
+    /// of mapping through `ContextMenuAction`.
+    PaneBadge(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,6 +477,12 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
+    /// Shell → core: context-menu items for a pane badge, replying to
+    /// a `PaneBadgeMenuRequest` this core sent from a right-click on
+    /// the badge prefix.  `(sid, anchor_x, anchor_y, items)` — the
+    /// anchor echoes the request so the open is stateless.  Empty
+    /// items = no menu.
+    PaneBadgeMenu(u64, f64, f64, Vec<marspot::shell_proto::PaneBadgeMenuItem>),
     /// Shell → core: plugin-set pane title.  Inserts into the title
     /// resolution chain ABOVE cwd basename, BELOW user-set custom
     /// title.  Empty `String` clears the plugin-set entry.
@@ -552,6 +563,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneBadge => marspot::shell_proto::decode_pane_badge(&f.payload)
             .ok()
             .map(|(sid, text)| CoreEvent::PaneBadge(sid, text)),
+        MsgType::PaneBadgeMenu => marspot::shell_proto::decode_pane_badge_menu(&f.payload)
+            .ok()
+            .map(|(sid, x, y, items)| CoreEvent::PaneBadgeMenu(sid, x, y, items)),
         MsgType::PaneTitle => marspot::shell_proto::decode_pane_title(&f.payload)
             .ok()
             .map(|(sid, text)| CoreEvent::PaneTitle(sid, text)),
@@ -1420,6 +1434,22 @@ impl CoreApp {
         if self.context_menu.take().is_some() {
             self.needs_render = true;
         }
+        // Badge-prefix right-click: the menu CONTENT lives in the L1
+        // plugin that owns the badge, so ask it (PaneBadgeMenuRequest)
+        // and open the menu when the PaneBadgeMenu reply arrives —
+        // same request/response shape as GetSelectionText.  Checked
+        // ahead of the link / region paths so `P<n>` never opens the
+        // generic pane menu.
+        if let Some(i) = self.hit_test_pane_badge_prefix(x_phys, y_phys) {
+            if let Some(sid) = self.panes.get(i).and_then(|p| p.shelld_session_id()) {
+                let payload = marspot::shell_proto::encode_pane_badge_menu_request(
+                    sid, x_phys, y_phys,
+                );
+                self.pending_to_shell
+                    .push((MsgType::PaneBadgeMenuRequest, payload));
+                return;
+            }
+        }
         // A right-click that lands on a recognised URL / file path
         // gets a link-specific menu (Open / Copy) instead of the
         // generic pane menu.  Email is recognised but inert.
@@ -1439,6 +1469,34 @@ impl CoreApp {
             region,
             hovered_idx: None,
             link,
+        });
+        self.needs_render = true;
+    }
+
+    /// Open the badge context menu from a `PaneBadgeMenu` reply.  The
+    /// anchor is the echoed right-click position; empty items = the
+    /// owning plugin has nothing to offer, show nothing.
+    fn open_pane_badge_menu(
+        &mut self,
+        sid: u64,
+        anchor_x: f64,
+        anchor_y: f64,
+        items: Vec<marspot::shell_proto::PaneBadgeMenuItem>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        let items = items
+            .into_iter()
+            .map(|it| marspot::ui::components::MenuItem::entry(&it.label, it.tag))
+            .collect();
+        self.context_menu = Some(ContextMenuState {
+            items,
+            anchor_x,
+            anchor_y,
+            region: ContextRegion::PaneBadge(sid),
+            hovered_idx: None,
+            link: None,
         });
         self.needs_render = true;
     }
@@ -1511,6 +1569,10 @@ impl CoreApp {
                 MenuItem::entry("Open layout…",
                     ContextMenuAction::OpenLayout.tag()),
             ],
+            // Badge menus never come through here — their items
+            // arrive from L1 via PaneBadgeMenu and open through
+            // `open_pane_badge_menu`.
+            ContextRegion::PaneBadge(_) => Vec::new(),
         }
     }
 
@@ -3011,7 +3073,19 @@ impl CoreApp {
                 ContextMenuHit::Item(idx) => {
                     let tag = self.context_menu.as_ref().unwrap()
                         .items[idx].action_tag;
-                    if let Some(action) = ContextMenuAction::from_tag(tag) {
+                    // Badge menus carry plugin-opaque tags — route the
+                    // pick back to L1 instead of mapping through
+                    // ContextMenuAction.
+                    if let ContextRegion::PaneBadge(sid) = region {
+                        self.pending_to_shell.push((
+                            MsgType::PaneBadgeMenuAction,
+                            marspot::shell_proto::encode_pane_badge_menu_action(
+                                sid, tag,
+                            ),
+                        ));
+                        self.context_menu = None;
+                        self.needs_render = true;
+                    } else if let Some(action) = ContextMenuAction::from_tag(tag) {
                         self.dispatch_context_action(action, region);
                     } else {
                         self.context_menu = None;
@@ -4615,6 +4689,9 @@ fn main() {
                 }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
+                }
+                CoreEvent::PaneBadgeMenu(sid, x, y, items) => {
+                    app.open_pane_badge_menu(sid, x, y, items);
                 }
                 CoreEvent::PaneTitle(sid, text) => {
                     app.set_pane_title(sid, text);

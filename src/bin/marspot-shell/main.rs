@@ -470,6 +470,14 @@ enum ShellInbox {
     /// plugin so whichever set the badge can react (claudecode → cycle
     /// the next profile and rerun `claudeN --resume <uuid>`).
     PaneBadgeClicked(u64),
+    /// L2 → L1: user right-clicked the badge prefix — collect menu
+    /// rows from the plugins and reply with a `PaneBadgeMenu` frame.
+    /// `(sid, anchor_x, anchor_y)`; the anchor is echoed back so the
+    /// exchange is stateless.
+    PaneBadgeMenuRequest(u64, f64, f64),
+    /// L2 → L1: user picked a badge-menu row.  `(sid, tag)` where
+    /// `tag` is the plugin-assigned id from the menu frame.
+    PaneBadgeMenuAction(u64, u32),
     /// L2 → L1: a keystroke arrived on a pane held by a LOCK_KEYS
     /// PaneSession.  Routed to the matching session's on_user_key.
     PaneSessionKey(u64, marspot::shell_proto::WireKeyEvent),
@@ -1812,6 +1820,32 @@ impl ShellApp {
                 self.plugin_registry
                     .dispatch_pane_badge_click_with(&self.plugin_host, shelld_sid);
             }
+            ShellInbox::PaneBadgeMenuRequest(shelld_sid, x, y) => {
+                let items = self.plugin_registry.dispatch_pane_badge_menu(
+                    &self.plugin_host,
+                    shelld_sid,
+                );
+                // Empty menu still gets no reply on purpose — L2
+                // opens nothing either way, so the frame would be
+                // dead weight.
+                if !items.is_empty() {
+                    if let Some(conn) = self.active.as_ref() {
+                        conn.send(
+                            MsgType::PaneBadgeMenu,
+                            marspot::shell_proto::encode_pane_badge_menu(
+                                shelld_sid, x, y, &items,
+                            ),
+                        );
+                    }
+                }
+            }
+            ShellInbox::PaneBadgeMenuAction(shelld_sid, tag) => {
+                self.plugin_registry.dispatch_pane_badge_menu_action(
+                    &self.plugin_host,
+                    shelld_sid,
+                    tag,
+                );
+            }
             ShellInbox::PaneSessionKey(sid, ev) => {
                 self.dispatch_pane_session_key(sid, ev);
             }
@@ -2475,6 +2509,16 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         marspot::shell_proto::decode_pane_badge_clicked(&frame.payload)
                             .ok()
                             .map(ShellInbox::PaneBadgeClicked)
+                    }
+                    MsgType::PaneBadgeMenuRequest => {
+                        marspot::shell_proto::decode_pane_badge_menu_request(&frame.payload)
+                            .ok()
+                            .map(|(sid, x, y)| ShellInbox::PaneBadgeMenuRequest(sid, x, y))
+                    }
+                    MsgType::PaneBadgeMenuAction => {
+                        marspot::shell_proto::decode_pane_badge_menu_action(&frame.payload)
+                            .ok()
+                            .map(|(sid, tag)| ShellInbox::PaneBadgeMenuAction(sid, tag))
                     }
                     MsgType::PaneSessionKey => {
                         marspot::shell_proto::decode_pane_session_key(&frame.payload)
