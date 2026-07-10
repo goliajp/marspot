@@ -117,11 +117,14 @@ if [[ ! -f "$SCENARIOS_DIR/cat-ascii.bin" || ! -f "$SCENARIOS_DIR/scroll-history
   "$ROOT/bin/gen-scenarios.sh" >/dev/null
 fi
 
-# Build release if missing or stale.
-if [[ ! -x "$(marspot_bin marspot)" ]]; then
-  echo "==> building marspot (release)"
-  ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
-fi
+# Build release unconditionally — cargo is incremental, so an
+# up-to-date tree is a sub-second no-op.  The previous "only if the
+# binary is missing" check silently benched a stale binary forever
+# once one existed: on the mini the gate measured a Jun 6 build for
+# a month of runs (caught 2026-07-11 via byte-identical size numbers
+# across an objc2 major upgrade).
+echo "==> building marspot (release)"
+( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
 
 # ---- collect current measurements ---------------------------------------
 
