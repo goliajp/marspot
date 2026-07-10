@@ -40,11 +40,11 @@ marspot 的红线 endpoint 按 [[project-iterm2-baseline]] + [[feedback-perf-ove
 | 优先 | 红线 | bench scenario | 当前位置 |
 |---|---|---|---|
 | 1 | idle CPU 0% | `bench --rss-watch` + 手测 | marspot 目前 ~0%,iTerm2 12-session 23%。**不能退** |
-| 2 | parse 字节吞吐 | `cat-ascii / cjk / emoji / mixed` | mini baseline 173-208 MB/s |
+| 2 | parse 字节吞吐 | `cat-ascii / cjk / emoji / mixed` | mini floor ascii 173 / mixed 167 / cjk 208 / emoji 61(2026-07-11 emoji relock:cluster 正确性成本,见 baseline _note)|
 | 3 | scroll p99 | `--bench scroll` + `scroll-cold` | mini ≤4µs / ≤4µs(2026-07-11 relock:中位 3.083µs ×1.3,见 baseline _note)|
 | 4 | render p99 | `--bench render` | mini ≤1301µs(2026-06-21 lock) |
 | 5 | RSS idle | `--bench` idle 段 | mini ≤95MB |
-| 6 | binary size | strip + lto | mcli ≤486KB / marspot ≤778KB |
+| 6 | binary size | strip + lto | mcli ≤1.37MB / marspot ≤1.54MB(2026-07-11 relock:feature 月成本入账,user 拍板 size 不卡紧;职能=抓意外大跳)|
 
 任何 perf attack 影响 idle CPU = **直接拒**。"hot path 神圣" 是产品调性(`[[feedback-perf-over-feature]]`),不是 negotiable budget。
 
