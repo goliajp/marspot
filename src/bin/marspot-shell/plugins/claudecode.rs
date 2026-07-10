@@ -707,6 +707,19 @@ impl ClaudecodePlugin {
                 profiles, meta.profile_num, next_profile
             ),
         );
+        self.start_profile_cycle_to(host, shelld_sid, meta, next_profile);
+    }
+
+    /// Start the exit → resume cycle towards an explicit target
+    /// profile.  Shared tail of the badge left-click (auto-next) and
+    /// the badge context-menu "switch to Px" pick (explicit target).
+    fn start_profile_cycle_to(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_sid: u64,
+        meta: BindMeta,
+        next_profile: u8,
+    ) {
         let Some(client) = self.shelld.as_ref().cloned() else {
             host.log(
                 LogLevel::Warn,
@@ -765,6 +778,25 @@ fn discover_profiles_in(home: &std::path::Path) -> Vec<u8> {
         .collect();
     nums.sort_unstable();
     nums
+}
+
+/// Build the badge right-click menu rows: one "switch to Px" per
+/// discovered profile except the pane's current one.  Tag = the
+/// profile number (echoed back via `on_pane_badge_menu_action`).
+/// Pure so the row shape is unit-testable without a $HOME fixture.
+fn badge_menu_for(
+    current: u8,
+    profiles: &[u8],
+) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+    profiles
+        .iter()
+        .copied()
+        .filter(|&n| n != current)
+        .map(|n| marspot::shell_proto::PaneBadgeMenuItem {
+            tag: n as u32,
+            label: format!("switch to P{}", n),
+        })
+        .collect()
 }
 
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
@@ -1055,6 +1087,51 @@ impl Plugin for ClaudecodePlugin {
         shelld_session_id: u64,
     ) {
         self.start_profile_cycle(host, shelld_session_id);
+    }
+
+    fn pane_badge_menu(
+        &mut self,
+        _host: &dyn PluginHost,
+        shelld_session_id: u64,
+    ) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+        let Some(meta) = self.last_meta.get(&shelld_session_id) else {
+            return Vec::new();
+        };
+        badge_menu_for(meta.profile_num, &discover_profiles())
+    }
+
+    fn on_pane_badge_menu_action(
+        &mut self,
+        host: &dyn PluginHost,
+        shelld_session_id: u64,
+        tag: u32,
+    ) {
+        // Tags this plugin assigns are profile numbers (fit in u8);
+        // anything else belongs to another plugin's rows.
+        let Ok(target) = u8::try_from(tag) else {
+            return;
+        };
+        let Some(meta) = self.last_meta.get(&shelld_session_id).cloned() else {
+            host.log(
+                LogLevel::Warn,
+                "cycle.menu_no_bind",
+                &format!("menu pick on unbound shelld_session={}", shelld_session_id),
+            );
+            return;
+        };
+        if meta.profile_num == target {
+            // Stale menu — the pane already cycled here.  Nothing to do.
+            return;
+        }
+        host.log(
+            LogLevel::Info,
+            "cycle.menu_pick",
+            &format!(
+                "shelld_session={} P{} → P{}",
+                shelld_session_id, meta.profile_num, target
+            ),
+        );
+        self.start_profile_cycle_to(host, shelld_session_id, meta, target);
     }
 
     fn stop(&mut self, host: &dyn PluginHost) {
@@ -1398,6 +1475,32 @@ mod tests {
     fn discover_profiles_empty_when_none_exist() {
         let home = tmphome(&[(".claude", true)]);
         assert!(discover_profiles_in(&home).is_empty());
+    }
+
+    #[test]
+    fn badge_menu_excludes_current_profile() {
+        let items = badge_menu_for(4, &[1, 2, 3, 4]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|i| (i.tag, i.label.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "switch to P1"), (2, "switch to P2"), (3, "switch to P3")],
+        );
+    }
+
+    #[test]
+    fn badge_menu_from_p0_offers_every_profile() {
+        // P0 (default .claude) isn't in the discovered set, so every
+        // numbered profile is a target.
+        let items = badge_menu_for(0, &[1, 2]);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn badge_menu_single_profile_current_is_empty() {
+        assert!(badge_menu_for(1, &[1]).is_empty());
+        assert!(badge_menu_for(1, &[]).is_empty());
     }
 
     #[test]
