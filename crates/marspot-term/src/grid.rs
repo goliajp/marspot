@@ -442,17 +442,24 @@ impl Grid {
         self.cells[pr * self.cols as usize + col as usize] = cell;
     }
 
-    /// Overwrite `bytes.len()` consecutive cells of `row` starting at
-    /// `col` with single-width ASCII glyphs sharing `attrs`.  Caller
-    /// guarantees `col as usize + bytes.len() <= cols`.  One ring-index
-    /// resolve for the whole run instead of per cell — the batched
-    /// ground-state print hot path.
-    pub fn set_row_run_ascii(&mut self, col: u16, row: u16, attrs: CellAttrs, bytes: &[u8]) {
-        debug_assert!(col as usize + bytes.len() <= self.cols as usize && row < self.rows);
+    /// Mutable view of `n` consecutive cells of `row` starting at
+    /// `col`.  One ring-index resolve for the whole run — the batched
+    /// ground-state print hot path builds on this.  Caller guarantees
+    /// `col as usize + n <= cols`.
+    pub fn row_cells_mut(&mut self, col: u16, row: u16, n: usize) -> &mut [Cell] {
+        debug_assert!(col as usize + n <= self.cols as usize && row < self.rows);
         let pr = self.phys_row(row);
         let base = pr * self.cols as usize + col as usize;
-        for (k, &b) in bytes.iter().enumerate() {
-            self.cells[base + k] = Cell { ch: b as char, attrs };
+        &mut self.cells[base..base + n]
+    }
+
+    /// Overwrite `bytes.len()` consecutive cells of `row` starting at
+    /// `col` with single-width ASCII glyphs sharing `attrs`.  Caller
+    /// guarantees `col as usize + bytes.len() <= cols`.
+    pub fn set_row_run_ascii(&mut self, col: u16, row: u16, attrs: CellAttrs, bytes: &[u8]) {
+        let run = self.row_cells_mut(col, row, bytes.len());
+        for (cell, &b) in run.iter_mut().zip(bytes) {
+            *cell = Cell { ch: b as char, attrs };
         }
     }
 

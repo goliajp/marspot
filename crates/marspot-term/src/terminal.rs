@@ -488,13 +488,14 @@ impl Terminal {
                 grapheme_cursor,
                 seg_synced,
             };
-            // BATCH LANE — parser in plain Ground and the next bytes
-            // are a printable-ASCII run: hand the whole run to the
-            // handler in one call, skipping the per-byte state machine
-            // (the run can't change parser state) and the per-char
-            // cursor round-trips.  Predictions must be empty — the
-            // per-byte loop is what validates them.
+            // BATCH LANES — parser in plain Ground: hand whole
+            // printable runs to the handler in one call, skipping the
+            // per-byte state machine (a printable run can't change
+            // parser state) and the per-char cursor round-trips.
+            // Predictions must be empty — the per-byte loop is what
+            // validates them.
             if parser.in_ground_plain() && self.predictions.is_empty() {
+                // ASCII lane: longest 0x20..=0x7E run.
                 let run_len = bytes[i..]
                     .iter()
                     .position(|&b| !(0x20..=0x7E).contains(&b))
@@ -502,6 +503,17 @@ impl Terminal {
                 if run_len >= 2 {
                     handler.print_ascii_run(&bytes[i..i + run_len]);
                     i += run_len;
+                    continue;
+                }
+                // Wide lane: longest run of 3-byte UTF-8 sequences
+                // decoding to boring width-2 chars (CJK / kana /
+                // fullwidth).  Scan and commit each decode once —
+                // three shifts, far cheaper than the 3× per-byte
+                // state-machine dispatch they replace.
+                let wide_len = wide_boring_run_len(&bytes[i..]);
+                if wide_len >= 6 {
+                    handler.print_wide_run(&bytes[i..i + wide_len]);
+                    i += wide_len;
                     continue;
                 }
             }
@@ -1244,6 +1256,35 @@ struct Handler<'a> {
 /// syllables (GBP LV/LVT, GB6-8), anything Extended_Pictographic
 /// (a following VS16/ZWJ changes width — early commit would be
 /// wrong), combining kana marks U+3099/309A (GBP Extend).
+/// Length (in bytes, multiple of 3) of the longest prefix of `bytes`
+/// consisting of 3-byte UTF-8 sequences that decode to `boring_width
+/// == Some(2)` chars.  The feed loop's wide batch lane.  Overlong /
+/// surrogate encodings can't reach the boring ranges, so the decode
+/// stays a plain shift-or.
+fn wide_boring_run_len(bytes: &[u8]) -> usize {
+    let mut n = 0;
+    while n + 3 <= bytes.len() {
+        let b0 = bytes[n];
+        if !(0xE0..=0xEF).contains(&b0)
+            || bytes[n + 1] & 0xC0 != 0x80
+            || bytes[n + 2] & 0xC0 != 0x80
+        {
+            break;
+        }
+        match char::from_u32(decode3_cp(&bytes[n..n + 3])) {
+            Some(c) if fast_width(c) == Some(2) => n += 3,
+            _ => break,
+        }
+    }
+    n
+}
+
+/// Raw codepoint of a 3-byte UTF-8 sequence (caller checked shape).
+#[inline(always)]
+fn decode3_cp(b: &[u8]) -> u32 {
+    (((b[0] & 0x0F) as u32) << 12) | (((b[1] & 0x3F) as u32) << 6) | (b[2] & 0x3F) as u32
+}
+
 #[inline(always)]
 fn boring_width(ch: char) -> Option<u8> {
     match ch as u32 {
@@ -1257,6 +1298,27 @@ fn boring_width(ch: char) -> Option<u8> {
         0x3400..=0x4DBF => Some(2),        // CJK Extension A
         _ => None,
     }
+}
+
+/// `boring_width` plus precomposed Hangul syllables.  Syllables are
+/// GBP LV/LVT — they can conjoin with FOLLOWING jamo (GB7/GB8), so
+/// they don't belong in `boring_width`'s "never interacts" story,
+/// but every pair drawn from {Other, LV, LVT} still has an
+/// unconditional boundary between them (GB6-8 only join when the
+/// NEXT char is jamo; GB9b needs a Prepend prev; neither class is
+/// in here).  Combined with the invariant that a batch/fast commit
+/// always leaves the LAST char buffered (so a following jamo, VS,
+/// or mark meets an open cluster via the slow path), that makes
+/// this the widest class the fast paths may commit early.
+#[inline(always)]
+fn fast_width(ch: char) -> Option<u8> {
+    if let Some(w) = boring_width(ch) {
+        return Some(w);
+    }
+    if matches!(ch as u32, 0xAC00..=0xD7A3) {
+        return Some(2); // Hangul syllables (LV / LVT)
+    }
+    None
 }
 
 impl<'a> Handler<'a> {
@@ -1345,21 +1407,58 @@ impl<'a> Handler<'a> {
     /// Batch-commit a printable-ASCII run (the feed loop's batch
     /// lane).  Semantically identical to `print`-ing each byte:
     /// every byte is `boring_width` class, so a UAX #29 boundary
-    /// precedes each one unconditionally — the pending cluster (of
-    /// ANY content: no GB rule joins anything with a following
-    /// ASCII printable) flushes first, interior bytes commit without
-    /// touching `cluster_buf`, and the LAST byte stays buffered
-    /// exactly like the scalar fast path leaves it (a following
-    /// VS16 / combining mark must still see it as the open cluster).
+    /// precedes each one unconditionally (sole exception: a pending
+    /// cluster ending in a GB9b Prepend — the prologue detects that
+    /// and we take the scalar path).  Interior bytes commit without
+    /// touching `cluster_buf`; the LAST byte stays buffered exactly
+    /// like the scalar fast path leaves it (a following VS16 /
+    /// combining mark must still see it as the open cluster).
     fn print_ascii_run(&mut self, run: &[u8]) {
         debug_assert!(run.iter().all(|&b| (0x20..=0x7E).contains(&b)));
-        if !self.cluster_buf.is_empty() {
-            self.flush_cluster_keep_cursor();
+        if !self.batch_prologue_flush(false) {
+            for &b in run {
+                self.print(b as char);
+            }
+            return;
         }
         let (last, body) = run.split_last().expect("run_len >= 2");
         self.write_ascii_body(body);
         self.cluster_buf.push(*last as char);
         *self.seg_synced = false;
+    }
+
+    /// Flush the pending cluster ahead of a batch run IF a boundary
+    /// before the run head is unconditional.  Returns false when the
+    /// cluster could legally absorb the head — GB9b (buffer ends in a
+    /// Prepend) for any head, GB6-8 (buffer ends in jamo / syllable)
+    /// for a Hangul-syllable head — and the caller must fall back to
+    /// the scalar path for the run.
+    fn batch_prologue_flush(&mut self, head_is_hangul: bool) -> bool {
+        if self.cluster_buf.is_empty() {
+            return true;
+        }
+        let mut it = self.cluster_buf.chars();
+        let first = it.next().expect("non-empty buffer");
+        if it.next().is_none() && fast_width(first).is_some() {
+            // fast-class × fast-class: unconditional boundary (GB6-8
+            // join only when the NEXT char is jamo, GB9b needs a
+            // Prepend prev — neither is in the fast class).
+            self.flush_cluster_keep_cursor();
+            return true;
+        }
+        use crate::unicode_data::{gbp, GBP};
+        let last = self.cluster_buf.chars().next_back().expect("non-empty");
+        let lp = gbp(last as u32);
+        if lp == GBP::Prepend {
+            return false; // GB9b: Prepend × any joins
+        }
+        if head_is_hangul
+            && matches!(lp, GBP::L | GBP::V | GBP::T | GBP::LV | GBP::LVT)
+        {
+            return false; // GB6-8: jamo / syllable can conjoin a syllable
+        }
+        self.flush_cluster_keep_cursor();
+        true
     }
 
     /// Row-sliced bulk write of single-width ASCII glyphs.  Chains
@@ -1387,17 +1486,7 @@ impl<'a> Handler<'a> {
                 // Row filled and more bytes follow — wrap now (the
                 // per-char path would consume the deferred wrap on
                 // the next byte anyway; batching collapses that).
-                let bot = *self.scroll_bot;
-                if row == bot {
-                    self.region_scroll_up(1);
-                    self.grid.set_cursor(0, row);
-                } else if row + 1 < rows {
-                    self.grid.set_cursor(0, row + 1);
-                } else {
-                    self.grid.set_cursor(0, rows - 1);
-                }
-                let (_, r) = self.grid.cursor();
-                self.grid.set_row_wrapped(r, true);
+                self.wrap_to_next_row(row, rows);
             } else {
                 // Run ends exactly at the right edge — defer the wrap,
                 // mirroring `write_glyph`.
@@ -1405,6 +1494,102 @@ impl<'a> Handler<'a> {
                 *self.pending_wrap = true;
             }
         }
+    }
+
+    /// Batch-commit a wide fast-class run (multiple 3-byte UTF-8
+    /// sequences, each a `fast_width == 2` char — the feed loop's
+    /// wide lane).  Same shape as `print_ascii_run`: prologue-flush
+    /// the pending cluster (falling back to the scalar path when it
+    /// could legally absorb the head), bulk-write the body, leave
+    /// the LAST char buffered so a following VS15/VS16/jamo still
+    /// sees an open cluster.
+    fn print_wide_run(&mut self, run: &[u8]) {
+        debug_assert!(run.len() % 3 == 0 && run.len() >= 6);
+        let head = char::from_u32(decode3_cp(&run[..3]))
+            .expect("scan admitted only fast-class scalars");
+        let head_is_hangul = matches!(head as u32, 0xAC00..=0xD7A3);
+        if !self.batch_prologue_flush(head_is_hangul) {
+            for chunk in run.chunks_exact(3) {
+                let c = char::from_u32(decode3_cp(chunk))
+                    .expect("scan admitted only fast-class scalars");
+                self.print(c);
+            }
+            return;
+        }
+        let body = &run[..run.len() - 3];
+        self.write_wide_body(body);
+        let last = char::from_u32(decode3_cp(&run[run.len() - 3..]))
+            .expect("scan admitted only fast-class scalars");
+        self.cluster_buf.push(last);
+        *self.seg_synced = false;
+    }
+
+    /// Row-sliced bulk write of width-2 glyphs (lead cell + NUL trail
+    /// pad), chaining the same DECAWM semantics as repeated
+    /// `write_glyph(_, 2)`: NUL-pad an unusable last column before
+    /// wrapping, wrap immediately when more chars follow, defer the
+    /// wrap when the run ends exactly at the right edge.
+    fn write_wide_body(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.take_pending_wrap();
+        let cols = self.grid.cols();
+        let rows = self.grid.rows();
+        let mut idx = 0;
+        while idx < bytes.len() {
+            let (col, row) = self.grid.cursor();
+            let space = cols - col;
+            if space < 2 {
+                // A wide glyph can't fit in the last column — pad it
+                // (when empty) and wrap, mirroring `write_glyph`.
+                if self.grid.cell(cols - 1, row) == Cell::default() {
+                    self.grid.set_cell(
+                        cols - 1,
+                        row,
+                        Cell { ch: '\0', attrs: *self.attrs },
+                    );
+                }
+                self.wrap_to_next_row(row, rows);
+                continue;
+            }
+            let fit = ((space / 2) as usize).min((bytes.len() - idx) / 3);
+            let attrs = *self.attrs;
+            let cells = self.grid.row_cells_mut(col, row, fit * 2);
+            for k in 0..fit {
+                let c = char::from_u32(decode3_cp(&bytes[idx + k * 3..idx + k * 3 + 3]))
+                    .expect("scan admitted only boring scalars");
+                cells[k * 2] = Cell { ch: c, attrs };
+                cells[k * 2 + 1] = Cell { ch: '\0', attrs };
+            }
+            idx += fit * 3;
+            let next_col = col + (fit * 2) as u16;
+            if next_col < cols {
+                self.grid.set_cursor(next_col, row);
+            } else if idx < bytes.len() {
+                self.wrap_to_next_row(row, rows);
+            } else {
+                self.grid.set_cursor(cols - 1, row);
+                *self.pending_wrap = true;
+            }
+        }
+    }
+
+    /// Scroll-or-step to column 0 of the next row and mark it as a
+    /// soft wrap continuation.  Shared tail of the batch lanes' and
+    /// `write_glyph`'s wrap paths.
+    fn wrap_to_next_row(&mut self, row: u16, rows: u16) {
+        let bot = *self.scroll_bot;
+        if row == bot {
+            self.region_scroll_up(1);
+            self.grid.set_cursor(0, row);
+        } else if row + 1 < rows {
+            self.grid.set_cursor(0, row + 1);
+        } else {
+            self.grid.set_cursor(0, rows - 1);
+        }
+        let (_, r) = self.grid.cursor();
+        self.grid.set_row_wrapped(r, true);
     }
 
     /// Re-seed the segmenter after the ASCII fast path skipped it.
@@ -1628,7 +1813,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
         // `cat` of plain text / CJK prose from paying 3× gbp + incb
         // + pictographic table walks per printable (measured ~84 % /
         // ~55 % of parse time respectively, 2026-07-11 samply).
-        if boring_width(ch).is_some() {
+        if fast_width(ch).is_some() {
             if self.cluster_buf.is_empty() {
                 self.cluster_buf.push(ch);
                 *self.seg_synced = false;
@@ -1637,7 +1822,7 @@ impl<'a> ParserCallbacks for Handler<'a> {
             let mut it = self.cluster_buf.chars();
             let first = it.next().expect("non-empty buffer");
             if it.next().is_none() {
-                if let Some(prev_w) = boring_width(first) {
+                if let Some(prev_w) = fast_width(first) {
                     self.cluster_buf.clear();
                     self.write_glyph(first, prev_w);
                     self.cluster_buf.push(ch);
@@ -2353,13 +2538,73 @@ mod tests {
                 "U+{cp:04X} width"
             );
         }
+        // Hangul syllables ride the wider `fast_width` class: LV/LVT
+        // only, never pictographic / InCB, always 2 cells.
+        for cp in 0xAC00u32..=0xD7A3 {
+            let ch = char::from_u32(cp).unwrap();
+            assert_eq!(fast_width(ch), Some(2), "U+{cp:04X} fast_width");
+            assert!(
+                matches!(gbp(cp), GBP::LV | GBP::LVT),
+                "U+{cp:04X} gbp must be LV/LVT"
+            );
+            assert!(!is_extended_pictographic(cp), "U+{cp:04X} pictographic");
+            assert_eq!(incb(cp), InCB::None, "U+{cp:04X} incb");
+            assert_eq!(
+                crate::grapheme::cluster_width(&ch.to_string()),
+                2,
+                "U+{cp:04X} width"
+            );
+        }
         // Spot-check deliberate exclusions.
         assert!(boring_width('\u{1F}').is_none()); // C0
         assert!(boring_width('\u{7F}').is_none()); // DEL
         assert!(boring_width('é').is_none()); // Latin-1 (can NFD-combine)
         assert!(boring_width('\u{3099}').is_none()); // combining kana mark
-        assert!(boring_width('\u{AC00}').is_none()); // Hangul LV
+        assert!(boring_width('\u{AC00}').is_none()); // Hangul stays out of boring
         assert!(boring_width('⭐').is_none()); // pictographic
+        assert!(fast_width('\u{1100}').is_none()); // L jamo — GB6 joins forward
+        assert!(fast_width('\u{11A8}').is_none()); // T jamo — GB8 joins backward
+    }
+
+    /// Hangul through the fast/batch lanes: precomposed syllables
+    /// batch as width-2 cells; conjoining jamo still fuse via the
+    /// slow path (the last run char stays buffered).
+    #[test]
+    fn hangul_fast_lane_semantics() {
+        // 안녕하세요 — five LVT/LV syllables, 2 cells each.
+        let t = term_with(20, 4, "안녕하세요".as_bytes());
+        for (i, ch) in "안녕하세요".chars().enumerate() {
+            assert_eq!(t.grid().cell(i as u16 * 2, 0).ch, ch);
+            assert_eq!(t.grid().cell(i as u16 * 2 + 1, 0).ch, '\0');
+        }
+        assert_eq!(t.grid().cursor(), (10, 0));
+
+        // LV syllable + trailing T jamo conjoin into ONE cluster
+        // (GB8 via the buffered last char), not two cell pairs.
+        let t = term_with(20, 4, "\u{AC00}\u{11A8}z".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '\u{AC00}');
+        assert_eq!(t.grid().cell(2, 0).ch, 'z');
+
+        // L + V jamo compose via the slow path (neither is fast class).
+        let t = term_with(20, 4, "\u{1100}\u{1161}z".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '\u{1100}');
+        assert_eq!(t.grid().cell(2, 0).ch, 'z');
+    }
+
+    /// GB9b regression: a pending cluster ending in a Prepend char
+    /// absorbs the following printable — the batch lanes must detect
+    /// that and fall back instead of flushing early.
+    #[test]
+    fn prepend_cluster_absorbs_batch_head() {
+        // U+0600 ARABIC NUMBER SIGN (GBP Prepend) + "1234":
+        // old scalar semantics = cluster [0600, '1'] commits base
+        // U+0600 at cluster_width, then '2','3','4' follow.
+        let w = crate::grapheme::cluster_width("\u{0600}1") as u16;
+        let t = term_with(20, 4, "\u{0600}1234".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '\u{0600}');
+        assert_eq!(t.grid().cell(w, 0).ch, '2');
+        assert_eq!(t.grid().cell(w + 1, 0).ch, '3');
+        assert_eq!(t.grid().cell(w + 2, 0).ch, '4');
     }
 
     /// Batch-lane specifics: right-edge wrap semantics must chain
@@ -2402,6 +2647,45 @@ mod tests {
         assert_eq!(t.grid().cell(2, 0).ch, 'c');
         assert!(t.grid().cell(2, 0).attrs.bold);
         assert!(!t.grid().cell(1, 0).attrs.bold);
+    }
+
+    /// Wide batch lane: CJK runs commit through `print_wide_run` with
+    /// the same wrap semantics as repeated `write_glyph(_, 2)`.
+    #[test]
+    fn batch_wide_run_wrap_semantics() {
+        // 10-col grid: 4 CJK chars/row, 9 chars → 3 rows (8 cells +
+        // 2-cell tail per row boundary).
+        let t = term_with(10, 4, "一二三四五六七八九".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '一');
+        assert_eq!(t.grid().cell(8, 0).ch, '五');
+        assert_eq!(t.grid().cell(9, 0).ch, '\0'); // trail pad
+        assert_eq!(t.grid().cell(0, 1).ch, '六');
+        assert!(t.grid().row_wrapped(1));
+        assert_eq!(t.grid().cell(6, 1).ch, '九');
+        assert_eq!(t.grid().cursor(), (8, 1));
+
+        // Odd column start: ASCII then CJK — last column unusable,
+        // NUL pad + wrap, identical to the scalar wide path.
+        let t = term_with(5, 4, "ab一二".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, 'a');
+        assert_eq!(t.grid().cell(2, 0).ch, '一');
+        assert_eq!(t.grid().cell(4, 0).ch, '\0'); // unusable last col pad
+        assert_eq!(t.grid().cell(0, 1).ch, '二');
+        assert!(t.grid().row_wrapped(1));
+
+        // Run ends exactly at the right edge → deferred wrap.
+        let t = term_with(4, 4, "一二".as_bytes());
+        assert_eq!(t.grid().cursor(), (3, 0));
+        let t = term_with(4, 4, "一二三".as_bytes());
+        assert_eq!(t.grid().cell(0, 1).ch, '三');
+
+        // CJK then combining mark: last run char stays the open
+        // cluster, mark attaches (and is dropped per Phase 1) without
+        // a stray cell.
+        let t = term_with(20, 4, "水木\u{3099}z".as_bytes());
+        assert_eq!(t.grid().cell(0, 0).ch, '水');
+        assert_eq!(t.grid().cell(2, 0).ch, '木');
+        assert_eq!(t.grid().cell(4, 0).ch, 'z');
     }
 
     /// The fast path must be behaviourally invisible: interleaving

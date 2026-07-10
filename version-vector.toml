@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.78"  # feed 批量车道 — parser 基态 + 无 UTF-8 悬挂 + 无 predictions 时整段 0x20-7E run 一次交给 print_ascii_run(免逐字节状态机),Grid::set_row_run_ascii 行切片批量写(一次 ring resolve),wrap 语义逐例对齐 write_glyph.local ascii 127→421 mixed 119→263 MB/s.前 0.6.77 笔记见 git blame.
-core    = "0.11.52"  # 同 shell 0.6.78 — marspot-term feed 批量车道重编.前 0.11.51 笔记见 git blame.
-session = "0.10.11"  # 同 shell 0.6.78 — L3 是 parse 热路径真正宿主.前 0.10.10 笔记见 git blame.
+shell   = "0.6.79"  # wide 批量车道 + GB9b 补洞 — 3 字节 UTF-8 fast-class run(CJK/假名/全角 + Hangul 音节 LV/LVT 入 fast 类)批量双格写;batch prologue 检查 Prepend 尾/jamo 尾可黏合情形回退 scalar(修 0.6.78 print_ascii_run 无条件 flush 的 GB9b 洞).local cjk 112→251 MB/s.前 0.6.78 笔记见 git blame.
+core    = "0.11.53"  # 同 shell 0.6.79 — wide 批量车道重编.前 0.11.52 笔记见 git blame.
+session = "0.10.12"  # 同 shell 0.6.79 — L3 是 parse 热路径真正宿主.前 0.10.11 笔记见 git blame.
