@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.6.87"  # 路径终止符 CJK 化 + :行:列 后缀 — path 终止符集加 ()/全角标点(中文语境路径后紧贴 、。() 极常见;URL 保留宽松集,维基括号不断);stat 前剥 :line(:col)? 后缀(rustc/panic 输出);scan_line 测试入口改单 segment 委托生产扫描器,消灭双实现漂移.前 0.6.86 笔记见 git blame.
-core    = "0.11.57"  # 同 shell 0.6.83 — grid_links 零缩进折行重编.前 0.11.56 笔记见 git blame.
-session = "0.10.16"  # 同 shell 0.6.83 — 共享 crate 源变更重编.前 0.10.15 笔记见 git blame.
+core    = "0.11.58"  # 补 0.6.87 漏 bump — grid_links 路径终止符 CJK 化 + :行:列 后缀属共享 crate,core 行为真变;版本号是 install-local staging 判据,漏 bump = 静默不部署(本次实战踩实).前 0.11.57 笔记见 git blame.
+session = "0.10.17"  # 同 core 0.11.58 — 补 0.6.87 共享 crate 漏 bump.前 0.10.16 笔记见 git blame.
