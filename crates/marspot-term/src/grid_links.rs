@@ -392,7 +392,7 @@ fn scan_line_into_matches(
         let at_seg_start = segments.iter().any(|s| s.char_offset == i);
 
         if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(&chars, i)) {
-            let end = scan_until_link_terminator(&chars, i);
+            let end = scan_until_path_terminator(&chars, i);
             let span = &chars[i..end];
             if looks_like_path(span) {
                 let text: String = span.iter().collect();
@@ -400,6 +400,19 @@ fn scan_line_into_matches(
                     emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
                     i = end;
                     continue;
+                }
+                // rustc / panic output habitually appends `:line:col`.
+                let stripped = strip_line_col_suffix(&chars, i, end);
+                if stripped < end {
+                    let text: String = chars[i..stripped].iter().collect();
+                    if is_real_path(&text) {
+                        emit_match(
+                            out, segments, col_map, cols_per_row, i, stripped,
+                            LinkKind::File, text,
+                        );
+                        i = end;
+                        continue;
+                    }
                 }
                 if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
                     let text: String = chars[i..b].iter().collect();
@@ -415,7 +428,7 @@ fn scan_line_into_matches(
             && chars[i + 1] == '/'
             && (at_seg_start || !is_left_boundary_alnum(&chars, i))
         {
-            let end = scan_until_link_terminator(&chars, i);
+            let end = scan_until_path_terminator(&chars, i);
             let span = &chars[i..end];
             if span.len() >= 3 && looks_like_path(span) {
                 let text: String = span.iter().collect();
@@ -475,6 +488,26 @@ fn scan_line_into_matches(
 /// disk is the real token.  Returns the char-pos to truncate at.
 /// (URL candidates have no existence oracle, so they keep the plain
 /// merged behaviour.)
+/// Strip a trailing `:line(:col)?` suffix (compiler / panic output
+/// like `/…/file.rs:120:5`) from a path span so the stat check sees
+/// the bare path.  Returns the new end; unchanged when no such
+/// suffix exists.  At most two `:digits` groups are stripped.
+fn strip_line_col_suffix(chars: &[char], start: usize, end: usize) -> usize {
+    let mut e = end;
+    for _ in 0..2 {
+        let mut j = e;
+        while j > start && chars[j - 1].is_ascii_digit() {
+            j -= 1;
+        }
+        if j < e && j > start && chars[j - 1] == ':' {
+            e = j - 1;
+        } else {
+            break;
+        }
+    }
+    e
+}
+
 /// First zero-indent cc boundary strictly inside `(lo, hi)`, if
 /// any.  Segments are ascending, so this returns the earliest one.
 fn first_zero_indent_boundary(
@@ -596,96 +629,21 @@ fn emit_match(
 /// `scan_line_into_matches` to benefit from soft-wrap merge.
 #[cfg(test)]
 fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
+    // Single-segment delegation to the production scanner — the
+    // legacy duplicate body drifted from `scan_line_into_matches`
+    // (it lacked the boundary retry and the line-col suffix strip),
+    // which let tests pass against semantics production didn't have.
+    // One scanner, zero drift.
     let chars: Vec<char> = line.chars().collect();
-    let n = chars.len();
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-
-        // URL: http:// or https://
-        if matches_prefix(&chars, i, "http://") || matches_prefix(&chars, i, "https://") {
-            let end = scan_until_link_terminator(&chars, i);
-            let span = &chars[i..end];
-            if looks_like_url(span) {
-                let text: String = span.iter().collect();
-                out.push(LinkRange {
-                    row,
-                    col_start: i as u16,
-                    col_end: (end - 1) as u16,
-                    kind: LinkKind::Url,
-                    text,
-                });
-                i = end;
-                continue;
-            }
-        }
-
-        // Absolute path: `/` not adjacent to an alnum on the left
-        // (rules out e.g. `cargo/Cargo.toml` mid-word `/`).  Pattern
-        // must look like a real path AND `stat()` (or its cached
-        // verdict) must say it exists — otherwise a bare `//`,
-        // `//./`, or `/something_that_does_not_exist` is left as
-        // plain text instead of inviting a wasted click.
-        if c == '/' && i + 1 < n && !is_left_boundary_alnum(&chars, i) {
-            let end = scan_until_link_terminator(&chars, i);
-            let span = &chars[i..end];
-            if looks_like_path(span) {
-                let text: String = span.iter().collect();
-                if is_real_path(&text) {
-                    out.push(LinkRange {
-                        row,
-                        col_start: i as u16,
-                        col_end: (end - 1) as u16,
-                        kind: LinkKind::File,
-                        text,
-                    });
-                    i = end;
-                    continue;
-                }
-            }
-        }
-
-        // Home-relative path: `~/...` — same stat-check.
-        if c == '~' && i + 1 < n && chars[i + 1] == '/' && !is_left_boundary_alnum(&chars, i) {
-            let end = scan_until_link_terminator(&chars, i);
-            let span = &chars[i..end];
-            if span.len() >= 3 && looks_like_path(span) {
-                let text: String = span.iter().collect();
-                if is_real_path(&text) {
-                    out.push(LinkRange {
-                        row,
-                        col_start: i as u16,
-                        col_end: (end - 1) as u16,
-                        kind: LinkKind::File,
-                        text,
-                    });
-                    i = end;
-                    continue;
-                }
-            }
-        }
-
-        // Email: <local>@<host>.<tld>.  Backtrack from a candidate
-        // `@` so we don't have to scan forward looking for the start.
-        if c == '@' && i > 0 && i + 1 < n {
-            let local_start = scan_back_local(&chars, i);
-            let host_end = scan_forward_host(&chars, i + 1);
-            if local_start < i && host_end > i + 1 && is_email_host(&chars[i + 1..host_end]) {
-                let text: String = chars[local_start..host_end].iter().collect();
-                out.push(LinkRange {
-                    row,
-                    col_start: local_start as u16,
-                    col_end: (host_end - 1) as u16,
-                    kind: LinkKind::Email,
-                    text,
-                });
-                i = host_end;
-                continue;
-            }
-        }
-
-        i += 1;
-    }
+    let col_map: Vec<u16> = (0..chars.len() as u16).collect();
+    let cols = chars.len().max(1);
+    let segments = [LineSegment {
+        phys_row: row,
+        char_offset: 0,
+        col_skip: 0,
+        cc_zero_indent: false,
+    }];
+    scan_line_into_matches(&chars, &col_map, out, &segments, cols);
 }
 
 /// True when `chars[start..]` begins with `prefix`.  All known
@@ -727,6 +685,22 @@ fn is_left_boundary_alnum(chars: &[char], pos: usize) -> bool {
 /// whitespace, control chars, balanced-pair closers, common
 /// punctuation that follows links in prose.
 fn scan_until_link_terminator(chars: &[char], start: usize) -> usize {
+    scan_until_terminator_impl(chars, start, false)
+}
+
+/// Path-flavoured terminator scan: additionally hard-stops at `(`,
+/// `)`, and the fullwidth CJK punctuation family.  CJK prose
+/// habitually glues those straight onto a path (`…visibility.md(Ask
+/// 12…`, `…plan.md、`) and a filename CONTAINING them is far rarer
+/// than prose abutting them (宁可漏不可错) — while URLs keep the
+/// permissive set because parens are legitimate there (Wikipedia's
+/// `Rust_(programming_language)`).  CJK ideographs / kana in
+/// filenames stay linkable; only punctuation terminates.
+fn scan_until_path_terminator(chars: &[char], start: usize) -> usize {
+    scan_until_terminator_impl(chars, start, true)
+}
+
+fn scan_until_terminator_impl(chars: &[char], start: usize, path_mode: bool) -> usize {
     let mut i = start;
     while i < chars.len() {
         let c = chars[i];
@@ -735,6 +709,26 @@ fn scan_until_link_terminator(chars: &[char], start: usize) -> usize {
         }
         // Hard terminators that almost never belong inside a link.
         if matches!(c, '<' | '>' | '"' | '\'' | '`' | '|') {
+            break;
+        }
+        if path_mode
+            && matches!(
+                c,
+                '(' | ')'
+                    | '\u{3001}' // 、
+                    | '\u{3002}' // 。
+                    | '\u{FF08}' // （
+                    | '\u{FF09}' // ）
+                    | '\u{FF0C}' // ，
+                    | '\u{FF1A}' // ：
+                    | '\u{FF1B}' // ；
+                    | '\u{FF01}' // ！
+                    | '\u{FF1F}' // ？
+                    | '\u{3008}'..='\u{301B}' // 〈〉《》「」『』【】〔〕〖〗〘〙〚〛
+                    | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}' // 弯引号
+                    | '\u{2026}' // …
+            )
+        {
             break;
         }
         i += 1;
@@ -1594,6 +1588,82 @@ mod cc_merge_false_positive {
             ));
         }
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// 2026-07-13 report: a wrapped path immediately followed by
+    /// `(Ask 12:…` prose lost its link — `(` wasn't a terminator, so
+    /// the token became `….md(Ask`, stat failed, and the boundary
+    /// retry only had the half-path prefix to offer.  Paths must
+    /// hard-stop at `(` and CJK fullwidth punctuation.
+    #[test]
+    fn path_terminates_at_paren_and_cjk_punct() {
+        // Single-row cases through the scan_line path.
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-lnkp-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("plan.md");
+        std::fs::write(&p, b"x").unwrap();
+        let ps = p.to_string_lossy().into_owned();
+        for suffix in ["(Ask 12", "、后续", "。end", "（全角）", ":120:5"] {
+            // ":120:5" exercises the line-col suffix strip; the rest
+            // exercise the new hard terminators.
+            let line = format!("看 {}{} 即可", ps, suffix);
+            let mut out = Vec::new();
+            scan_line(&line, 0, &mut out);
+            let files: Vec<_> =
+                out.iter().filter(|l| l.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "suffix {suffix:?}: {out:?}");
+            assert_eq!(files[0].text, ps, "suffix {suffix:?}");
+        }
+        // `:`+prose glued onto a path is NOT a recognised shape —
+        // stays unlinked rather than guessing (宁可漏).
+        let mut out = Vec::new();
+        scan_line(&format!("看 {}:note 即可", ps), 0, &mut out);
+        assert!(out.iter().all(|l| l.kind != LinkKind::File), "{out:?}");
+        // Wrapped zero-indent + glued paren — the screenshot shape.
+        use crate::grid::{Cell, Grid};
+        let cols = ps.chars().count() as u16 - 10;
+        let mut grid = Grid::new(cols, 4);
+        let split_byte = ps
+            .char_indices()
+            .nth(cols as usize)
+            .map(|(i, _)| i)
+            .unwrap();
+        let (a, b) = ps.split_at(split_byte);
+        for (c, ch) in a.chars().enumerate() {
+            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+        }
+        for (c, ch) in format!("{}(Ask 12", b).chars().enumerate() {
+            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+        }
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let files: Vec<_> =
+            links.iter().filter(|l| l.kind == LinkKind::File).collect();
+        assert!(
+            files.iter().any(|l| l.text == ps),
+            "wrapped path + glued paren must link: {links:?}"
+        );
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// URLs keep the permissive terminator set — parens are legal
+    /// inside them (Wikipedia article URLs).
+    #[test]
+    fn url_keeps_parens_inside() {
+        let mut v = Vec::new();
+        scan_line(
+            "see https://en.wikipedia.org/wiki/Rust_(programming_language) ok",
+            0,
+            &mut v,
+        );
+        assert_eq!(v.len(), 1);
+        // Trailing `)` is still trimmed by the prose heuristic (the
+        // long-standing tradeoff), but the interior `(` must not cut
+        // the URL short.
+        assert!(v[0].text.contains("(programming_language"), "{v:?}");
     }
 
     /// The zero-indent merge must NOT let a flush-ending URL absorb

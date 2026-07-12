@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.86"  # Px@model 自指误报修复 — 对话文本引用 marker 字样时被误当 /model 输出(在开发 marspot 的 session 里必现);锚改为未转义的 "content":" 直接前缀(聊天引用在 jsonl 里引号必被转义,判别式).short_model 输出白名单 ASCII,越界整体拒绝.前 0.6.85 笔记见 git blame.
+shell   = "0.6.87"  # 路径终止符 CJK 化 + :行:列 后缀 — path 终止符集加 ()/全角标点(中文语境路径后紧贴 、。() 极常见;URL 保留宽松集,维基括号不断);stat 前剥 :line(:col)? 后缀(rustc/panic 输出);scan_line 测试入口改单 segment 委托生产扫描器,消灭双实现漂移.前 0.6.86 笔记见 git blame.
 core    = "0.11.57"  # 同 shell 0.6.83 — grid_links 零缩进折行重编.前 0.11.56 笔记见 git blame.
 session = "0.10.16"  # 同 shell 0.6.83 — 共享 crate 源变更重编.前 0.10.15 笔记见 git blame.
