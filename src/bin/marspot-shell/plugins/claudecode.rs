@@ -869,14 +869,19 @@ fn tail_model_short_uncached(path: &std::path::Path) -> Option<String> {
         // /model output records vary by claudecode version: some
         // write `"type":"system","subtype":"local_command"`, some a
         // `"type":"user"` record whose content is the
-        // `<local-command-stdout>` block.  Keying on the stdout tag +
-        // phrase covers both (and can't collide with prose — the tag
-        // only appears in command output).  The display name may
-        // carry a trailing remark ("… and saved as your default for
-        // new sessions"), so the cut also stops at " and ".
+        // `<local-command-stdout>` block.  Anchoring on the marker as
+        // the DIRECT value of a content field (`"content":"<local-…`,
+        // quotes unescaped) covers both — and is what makes the match
+        // collision-proof against conversation text that merely
+        // QUOTES these strings (a session where marspot itself is
+        // being developed does exactly that): inside a text field the
+        // quotes around `"content":` are JSON-escaped to `\"`, so the
+        // unescaped anchor cannot occur.  The display name may carry
+        // a trailing remark ("… and saved as your default for new
+        // sessions"), so the cut also stops at " and ".
         for marker in [
-            "<local-command-stdout>Set model to ",
-            "<local-command-stdout>Kept model as ",
+            "\"content\":\"<local-command-stdout>Set model to ",
+            "\"content\":\"<local-command-stdout>Kept model as ",
         ] {
             if let Some(i) = line.find(marker) {
                 let rest = &line[i + marker.len()..];
@@ -952,11 +957,15 @@ fn short_model(raw: &str) -> String {
         }
         _ => cleaned,
     };
+    // Model identifiers and display names are ASCII words — any
+    // other character means we grabbed prose, not a model; reject
+    // the whole thing rather than render garbage in the badge.
     let mut out = String::with_capacity(cleaned.len());
     for c in cleaned.chars() {
         let mapped = match c {
             ' ' | '.' => '-',
-            _ => c.to_ascii_lowercase(),
+            c if c.is_ascii_alphanumeric() || c == '-' => c.to_ascii_lowercase(),
+            _ => return String::new(),
         };
         out.push(mapped);
         if out.len() >= 16 {
@@ -1693,6 +1702,18 @@ mod tests {
         // No model anywhere -> None.
         let path = tmpfile(r#"{"type":"user","text":"hi"}"#);
         assert_eq!(tail_model_short(&path), None);
+
+        // Self-reference guard: a conversation that DISCUSSES the
+        // marker (e.g. this feature being developed in a marspot
+        // session) stores it inside a text field with the
+        // surrounding quotes JSON-escaped — must NOT be picked up.
+        let path = tmpfile(concat!(
+            r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"marker 改锚 <local-command-stdout>Set model to 之类的-块),而 我 5"}]}}"#,
+            "\n",
+        ));
+        assert_eq!(tail_model_short(&path).as_deref(), Some("fable-5"));
     }
 
     #[test]
