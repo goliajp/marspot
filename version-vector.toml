@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.84"  # cc badge 显示 Px@model — tail session jsonl 取现用模型:assistant 记录 "model" 字段(权威)与 /model local_command 输出(切换即时)取文件更靠后者;(mtime,size) 缓存免 idle 重读;短名归一(claude- 前缀/快照日期/ANSI/括号注记剥除).前 0.6.83 笔记见 git blame.
+shell   = "0.6.85"  # Px@model 修 /model 记录形态差异 — 新版 claudecode 把 /model 输出写成 type:user 记录(非 system/local_command),marker 改锚 <local-command-stdout> 标签覆盖两种形态;显示名截掉 " and saved as your default…" 尾巴.前 0.6.84 笔记见 git blame.
 core    = "0.11.57"  # 同 shell 0.6.83 — grid_links 零缩进折行重编.前 0.11.56 笔记见 git blame.
 session = "0.10.16"  # 同 shell 0.6.83 — 共享 crate 源变更重编.前 0.10.15 笔记见 git blame.

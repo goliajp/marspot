@@ -866,15 +866,27 @@ fn tail_model_short_uncached(path: &std::path::Path) -> Option<String> {
     f.read_to_end(&mut raw).ok()?;
     buf.push_str(&String::from_utf8_lossy(&raw));
     for line in buf.lines().rev() {
-        if line.contains("\"subtype\":\"local_command\"") {
-            for marker in ["Set model to ", "Kept model as "] {
-                if let Some(i) = line.find(marker) {
-                    let rest = &line[i + marker.len()..];
-                    let end = rest.find(['<', '"']).unwrap_or(rest.len());
-                    let name = short_model(&rest[..end]);
-                    if !name.is_empty() {
-                        return Some(name);
-                    }
+        // /model output records vary by claudecode version: some
+        // write `"type":"system","subtype":"local_command"`, some a
+        // `"type":"user"` record whose content is the
+        // `<local-command-stdout>` block.  Keying on the stdout tag +
+        // phrase covers both (and can't collide with prose — the tag
+        // only appears in command output).  The display name may
+        // carry a trailing remark ("… and saved as your default for
+        // new sessions"), so the cut also stops at " and ".
+        for marker in [
+            "<local-command-stdout>Set model to ",
+            "<local-command-stdout>Kept model as ",
+        ] {
+            if let Some(i) = line.find(marker) {
+                let rest = &line[i + marker.len()..];
+                let mut end = rest.find(['<', '"']).unwrap_or(rest.len());
+                if let Some(a) = rest.find(" and ") {
+                    end = end.min(a);
+                }
+                let name = short_model(&rest[..end]);
+                if !name.is_empty() {
+                    return Some(name);
                 }
             }
         }
@@ -1657,25 +1669,28 @@ mod tests {
 
     #[test]
     fn tail_model_prefers_newest_record_in_file() {
-        // assistant(fable) then a later /model switch → the switch wins.
+        // assistant(fable) then a later /model switch (the modern
+        // "type":"user" record shape, JSON-escaped ANSI, trailing
+        // "and saved..." remark) -> the switch wins.
         let path = tmpfile(concat!(
             r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
             "\n",
-            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Set model to [1mOpus 4.8[22m</local-command-stdout>"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to \u001b[1mOpus 4.8\u001b[22m and saved as your default for new sessions</local-command-stdout>"}}"#,
             "\n",
         ));
         assert_eq!(tail_model_short(&path).as_deref(), Some("opus-4-8"));
 
-        // …and vice versa: an assistant turn after the switch wins.
+        // ...and vice versa: an assistant turn after the switch wins.
+        // (older "system"/"local_command" record shape)
         let path = tmpfile(concat!(
-            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Kept model as [1mOpus 4.8[22m</local-command-stdout>"}"#,
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Kept model as \u001b[1mOpus 4.8\u001b[22m</local-command-stdout>"}"#,
             "\n",
             r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
             "\n",
         ));
         assert_eq!(tail_model_short(&path).as_deref(), Some("fable-5"));
 
-        // No model anywhere → None.
+        // No model anywhere -> None.
         let path = tmpfile(r#"{"type":"user","text":"hi"}"#);
         assert_eq!(tail_model_short(&path), None);
     }
