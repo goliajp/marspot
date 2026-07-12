@@ -799,6 +799,161 @@ fn badge_menu_for(
         .collect()
 }
 
+/// How much of the session jsonl tail to search for the active
+/// model.  Single records (big tool_results) can run tens of KB, so
+/// the window must comfortably span several of them.
+const MODEL_TAIL_BYTES: u64 = 262_144;
+
+/// Tail the session jsonl and return the active model as a short
+/// display token (e.g. `fable-5`).  Two producers, newest-in-file
+/// wins:
+///
+///   - assistant records — authoritative, the model that actually
+///     served the turn: `"role":"assistant"` + `"model":"claude-…"`
+///   - `/model` slash-command output — `"subtype":"local_command"`
+///     with `Set model to …` / `Kept model as …` in its content,
+///     written the moment the user switches, so the badge follows a
+///     `/model` change on the next 2 s tick instead of waiting for
+///     the next assistant turn
+///
+/// Returns None when neither appears in the tail window (fresh
+/// session, or a single giant record swamping the window) — the
+/// badge then renders without the `@model` part.
+fn tail_model_short(path: &std::path::Path) -> Option<String> {
+    use std::cell::RefCell;
+    // (mtime, size)-keyed memo so the 2 s scan tick only re-reads a
+    // session's tail when the jsonl actually grew — idle panes cost
+    // one `stat` per tick, not a 256 KB read.  Worker-thread-local;
+    // capped so dead sessions can't accumulate entries forever.
+    thread_local! {
+        static CACHE: RefCell<
+            HashMap<PathBuf, (SystemTime, u64, Option<String>)>,
+        > = RefCell::new(HashMap::new());
+    }
+    const CACHE_CAP: usize = 64;
+    let md = fs::metadata(path).ok()?;
+    let mtime = md.modified().ok()?;
+    let size = md.len();
+    let hit = CACHE.with(|c| {
+        c.borrow().get(path).and_then(|(t, s, v)| {
+            (*t == mtime && *s == size).then(|| v.clone())
+        })
+    });
+    if let Some(v) = hit {
+        return v;
+    }
+    let result = tail_model_short_uncached(path);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= CACHE_CAP {
+            c.clear();
+        }
+        c.insert(path.to_path_buf(), (mtime, size, result.clone()));
+    });
+    result
+}
+
+fn tail_model_short_uncached(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(MODEL_TAIL_BYTES);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = String::new();
+    // Lossy is fine: we only pattern-scan ASCII keys, and a torn
+    // first line simply won't match.
+    let mut raw = Vec::with_capacity((len - start) as usize);
+    f.read_to_end(&mut raw).ok()?;
+    buf.push_str(&String::from_utf8_lossy(&raw));
+    for line in buf.lines().rev() {
+        if line.contains("\"subtype\":\"local_command\"") {
+            for marker in ["Set model to ", "Kept model as "] {
+                if let Some(i) = line.find(marker) {
+                    let rest = &line[i + marker.len()..];
+                    let end = rest.find(['<', '"']).unwrap_or(rest.len());
+                    let name = short_model(&rest[..end]);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+        if line.contains("\"role\":\"assistant\"") {
+            if let Some(i) = line.find("\"model\":\"") {
+                let rest = &line[i + 9..];
+                if let Some(end) = rest.find('"') {
+                    let name = short_model(&rest[..end]);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Normalise a model identifier or display name into the short badge
+/// token: strip ANSI escapes, the `claude-` prefix, a trailing
+/// `-YYYYMMDD` snapshot date, and any parenthesised remark; lowercase
+/// and map spaces / dots to `-` so `Opus 4.8` and `claude-opus-4-8`
+/// both come out as `opus-4-8`.  Capped at 16 chars — the badge
+/// shares the title strip with the session uuid.
+fn short_model(raw: &str) -> String {
+    // jsonl strings carry control chars JSON-escaped — decode the
+    // literal `\u001b` spelling into a real ESC before stripping.
+    let raw = raw.replace("\\u001b", "\u{1b}");
+    let raw = raw.as_str();
+    // Strip ANSI CSI sequences (`ESC [ … letter`).
+    let mut cleaned = String::with_capacity(raw.len());
+    let mut it = raw.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            if it.peek() == Some(&'[') {
+                it.next();
+                for e in it.by_ref() {
+                    if e.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        cleaned.push(c);
+    }
+    let cleaned = cleaned.trim();
+    // Drop a parenthesised remark: "Default (recommended)" → "Default".
+    let cleaned = match cleaned.find('(') {
+        Some(i) => cleaned[..i].trim_end(),
+        None => cleaned,
+    };
+    let cleaned = cleaned
+        .strip_prefix("claude-")
+        .unwrap_or(cleaned);
+    // Trailing snapshot date: "-20251001".
+    let cleaned = match cleaned.rfind('-') {
+        Some(i)
+            if cleaned.len() - i == 9
+                && cleaned[i + 1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            &cleaned[..i]
+        }
+        _ => cleaned,
+    };
+    let mut out = String::with_capacity(cleaned.len());
+    for c in cleaned.chars() {
+        let mapped = match c {
+            ' ' | '.' => '-',
+            _ => c.to_ascii_lowercase(),
+        };
+        out.push(mapped);
+        if out.len() >= 16 {
+            break;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
 /// short profile tag.  Returns:
 ///   * `Some("P1")` for `/Users/.../.claude-profile-1`
@@ -1340,7 +1495,7 @@ impl WorkerCtx {
                 continue;
             };
             let encoded = encode_project_dir(&cwd);
-            if let Some(sid_uuid) = self.session_id_for_project(&encoded) {
+            if let Some((sid_uuid, jsonl_path)) = self.session_for_project(&encoded) {
                 let (tag, profile_num) = match profile_tag_for(claude.pid) {
                     Some(t) => {
                         let n = t
@@ -1351,9 +1506,17 @@ impl WorkerCtx {
                     }
                     None => (None, u8::MAX),
                 };
-                let badge = match tag {
-                    Some(t) => format!("{} {}", t, sid_uuid),
-                    None => sid_uuid.clone(),
+                // Active model, tailed from the session jsonl: the
+                // newest of (assistant record's authoritative
+                // `"model"` field, `/model` local_command output) —
+                // the latter makes an interactive switch show up on
+                // the very next tick instead of after the next
+                // assistant turn.
+                let model = tail_model_short(&jsonl_path);
+                let badge = match (tag, model) {
+                    (Some(t), Some(m)) => format!("{}@{} {}", t, m, sid_uuid),
+                    (Some(t), None) => format!("{} {}", t, sid_uuid),
+                    (None, _) => sid_uuid.clone(),
                 };
                 let project_basename = cwd
                     .file_name()
@@ -1381,9 +1544,11 @@ impl WorkerCtx {
         ScanResult { new_mapping, new_meta, log_lines }
     }
 
-    /// Reverse-lookup: encoded project dir → newest known sessionId.
-    /// Cheap scan over `seen`; a dozen projects active in practice.
-    fn session_id_for_project(&self, encoded_dir: &str) -> Option<String> {
+    /// Reverse-lookup: encoded project dir → newest known session
+    /// (id + its jsonl path, so callers can tail per-session state
+    /// like the active model).  Cheap scan over `seen`; a dozen
+    /// projects active in practice.
+    fn session_for_project(&self, encoded_dir: &str) -> Option<(String, PathBuf)> {
         let mut newest: Option<(SystemTime, &SessionInfo)> = None;
         for s in self.seen.values() {
             if s.project_dir == encoded_dir {
@@ -1393,7 +1558,7 @@ impl WorkerCtx {
                 }
             }
         }
-        newest.map(|(_, s)| s.session_id.clone())
+        newest.map(|(_, s)| (s.session_id.clone(), s.jsonl_path.clone()))
     }
 }
 
@@ -1475,6 +1640,44 @@ mod tests {
     fn discover_profiles_empty_when_none_exist() {
         let home = tmphome(&[(".claude", true)]);
         assert!(discover_profiles_in(&home).is_empty());
+    }
+
+    #[test]
+    fn short_model_normalises_ids_and_display_names() {
+        assert_eq!(short_model("claude-fable-5"), "fable-5");
+        assert_eq!(short_model("claude-opus-4-8"), "opus-4-8");
+        assert_eq!(short_model("claude-sonnet-5"), "sonnet-5");
+        assert_eq!(short_model("claude-haiku-4-5-20251001"), "haiku-4-5");
+        assert_eq!(short_model("Fable 5"), "fable-5");
+        assert_eq!(short_model("Opus 4.8"), "opus-4-8");
+        assert_eq!(short_model("Default (recommended)"), "default");
+        // ANSI-bold display name straight out of /model's stdout.
+        assert_eq!(short_model("\u{1b}[1mFable 5\u{1b}[22m"), "fable-5");
+    }
+
+    #[test]
+    fn tail_model_prefers_newest_record_in_file() {
+        // assistant(fable) then a later /model switch → the switch wins.
+        let path = tmpfile(concat!(
+            r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
+            "\n",
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Set model to [1mOpus 4.8[22m</local-command-stdout>"}"#,
+            "\n",
+        ));
+        assert_eq!(tail_model_short(&path).as_deref(), Some("opus-4-8"));
+
+        // …and vice versa: an assistant turn after the switch wins.
+        let path = tmpfile(concat!(
+            r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>Kept model as [1mOpus 4.8[22m</local-command-stdout>"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
+            "\n",
+        ));
+        assert_eq!(tail_model_short(&path).as_deref(), Some("fable-5"));
+
+        // No model anywhere → None.
+        let path = tmpfile(r#"{"type":"user","text":"hi"}"#);
+        assert_eq!(tail_model_short(&path), None);
     }
 
     #[test]
