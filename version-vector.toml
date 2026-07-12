@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.82"  # email 误报修复 — pkg@1.0.23 类版本串不再当 email 下划线:is_email_host 完整 host 校验(label [alnum-] 不头尾连字符 + TLD 纯字母 ≥2,对齐 GitHub linkify/commonmark autolink 规则;WezTerm 默认正则有同款误报).前 0.6.81 笔记见 git blame.
-core    = "0.11.56"  # 同 shell 0.6.82 — grid_links email 规则重编(渲染下划线 + 点击都在 L2).前 0.11.55 笔记见 git blame.
-session = "0.10.15"  # 同 shell 0.6.82 — 共享 crate 源变更重编.前 0.10.14 笔记见 git blame.
+shell   = "0.6.83"  # 零缩进折行路径识别 — cc 拼接续行缩进 1-4 放宽到 0-4(零缩进要求上行完全顶满,mid-word 字符折行必占满末列);URL/Email 无存在性判据禁止跨零缩进边界;segment 起点视为文本左边界(retry 拆分后下一条路径的 / 不再被胶合的 alnum 邻字挡掉).前 0.6.82 笔记见 git blame.
+core    = "0.11.57"  # 同 shell 0.6.83 — grid_links 零缩进折行重编.前 0.11.56 笔记见 git blame.
+session = "0.10.16"  # 同 shell 0.6.83 — 共享 crate 源变更重编.前 0.10.15 笔记见 git blame.

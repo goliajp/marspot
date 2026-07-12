@@ -140,6 +140,7 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
             phys_row: r,
             char_offset,
             col_skip,
+            cc_zero_indent: cc_cont && col_skip == 0,
         });
         let mut prev_was_wide = false;
         for c in col_skip..cols {
@@ -175,7 +176,11 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
 ///   - previous row's last non-blank cell column ≥ cols - 2 (touches
 ///     or near the right edge — claudecode hard-wraps flush right)
 ///   - that last non-blank cell's char is URL/path-class
-///   - current row has 1..=4 leading whitespace cells
+///   - current row has 0..=4 leading whitespace cells; ZERO indent
+///     (claudecode's input box char-wraps long tokens mid-word with
+///     no hanging indent) additionally requires the previous row to
+///     be COMPLETELY full — a mid-word char wrap always occupies the
+///     last column
 ///   - current row's first non-blank cell's char is URL/path-class
 fn is_cc_hard_wrap_continuation(
     grid: &Grid,
@@ -207,8 +212,10 @@ fn is_cc_hard_wrap_continuation(
     if !is_url_path_class(last_nb_ch) {
         return false;
     }
-    // Current row leading whitespace must be 1..=4 cells, followed
-    // by a URL/path-class char.
+    // Current row leading whitespace must be 0..=4 cells, followed
+    // by a URL/path-class char.  Zero indent is the weakest signal
+    // (flush prose looks the same) — only accept it when the prev
+    // row is COMPLETELY full, as a mid-word char wrap must be.
     let mut lead = 0u16;
     while lead < cols {
         let ch = grid.cell_at_view(view_offset, lead, curr_row).ch;
@@ -218,7 +225,10 @@ fn is_cc_hard_wrap_continuation(
             break;
         }
     }
-    if !(1..=4).contains(&lead) {
+    if lead > 4 {
+        return false;
+    }
+    if lead == 0 && last_nb_col != cols - 1 {
         return false;
     }
     if lead >= cols {
@@ -268,6 +278,13 @@ struct LineSegment {
     /// starting col on continuation rows of a multi-row span; 0 for
     /// ordinary rows and DECAWM continuations.
     col_skip: u16,
+    /// This segment was joined by the cc heuristic's WEAKEST form —
+    /// zero-indent continuation (prev row completely full, this row
+    /// starts at col 0).  That shape also matches ordinary flush
+    /// prose, so matches without an existence oracle (URL, Email)
+    /// are not allowed to cross this boundary; File matches may
+    /// (stat + segment-boundary retry arbitrate).
+    cc_zero_indent: bool,
 }
 
 /// Scan a logical (possibly multi-row-merged) line and emit
@@ -342,7 +359,22 @@ fn scan_line_into_matches(
 
         // URL: http:// or https://
         if matches_prefix(&chars, i, "http://") || matches_prefix(&chars, i, "https://") {
-            let end = scan_until_link_terminator(&chars, i);
+            let mut end = scan_until_link_terminator(&chars, i);
+            // A zero-indent cc join is the weakest merge guess (flush
+            // prose looks identical), and URLs have no existence
+            // oracle to arbitrate — never let a URL cross one, or a
+            // flush-ending URL absorbs the next row's first word.
+            if let Some(b) = first_zero_indent_boundary(segments, i, end) {
+                end = b;
+                while end > i
+                    && matches!(
+                        chars[end - 1],
+                        ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?'
+                    )
+                {
+                    end -= 1;
+                }
+            }
             let span = &chars[i..end];
             if looks_like_url(span) {
                 let text: String = span.iter().collect();
@@ -352,7 +384,14 @@ fn scan_line_into_matches(
             }
         }
 
-        if c == '/' && i + 1 < n && !is_left_boundary_alnum(&chars, i) {
+        // A segment start is a text boundary even when the merged
+        // buffer glues it to the previous row's last char — without
+        // this, a path emitted via the boundary retry leaves the
+        // NEXT row's own `/Users/...` with an alnum left neighbour
+        // and it would be skipped as a mid-word slash.
+        let at_seg_start = segments.iter().any(|s| s.char_offset == i);
+
+        if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(&chars, i)) {
             let end = scan_until_link_terminator(&chars, i);
             let span = &chars[i..end];
             if looks_like_path(span) {
@@ -371,7 +410,11 @@ fn scan_line_into_matches(
             }
         }
 
-        if c == '~' && i + 1 < n && chars[i + 1] == '/' && !is_left_boundary_alnum(&chars, i) {
+        if c == '~'
+            && i + 1 < n
+            && chars[i + 1] == '/'
+            && (at_seg_start || !is_left_boundary_alnum(&chars, i))
+        {
             let end = scan_until_link_terminator(&chars, i);
             let span = &chars[i..end];
             if span.len() >= 3 && looks_like_path(span) {
@@ -393,7 +436,13 @@ fn scan_line_into_matches(
         if c == '@' && i > 0 && i + 1 < n {
             let local_start = scan_back_local(&chars, i);
             let host_end = scan_forward_host(&chars, i + 1);
-            if local_start < i && host_end > i + 1 && is_email_host(&chars[i + 1..host_end]) {
+            if local_start < i
+                && host_end > i + 1
+                && is_email_host(&chars[i + 1..host_end])
+                // Same weak-guess rule as URLs: an address glued out
+                // of two flush prose rows is not an address.
+                && first_zero_indent_boundary(segments, local_start, host_end).is_none()
+            {
                 let text: String = chars[local_start..host_end].iter().collect();
                 emit_match(
                     out,
@@ -426,6 +475,20 @@ fn scan_line_into_matches(
 /// disk is the real token.  Returns the char-pos to truncate at.
 /// (URL candidates have no existence oracle, so they keep the plain
 /// merged behaviour.)
+/// First zero-indent cc boundary strictly inside `(lo, hi)`, if
+/// any.  Segments are ascending, so this returns the earliest one.
+fn first_zero_indent_boundary(
+    segments: &[LineSegment],
+    lo: usize,
+    hi: usize,
+) -> Option<usize> {
+    segments
+        .iter()
+        .filter(|s| s.cc_zero_indent)
+        .map(|s| s.char_offset)
+        .find(|&b| b > lo && b < hi)
+}
+
 fn retry_file_at_segment_boundaries(
     chars: &[char],
     segments: &[LineSegment],
@@ -1100,11 +1163,13 @@ mod tests {
                 phys_row: 0,
                 char_offset: 0,
                 col_skip: 0,
+                cc_zero_indent: false,
             },
             super::LineSegment {
                 phys_row: 1,
                 char_offset: 10,
                 col_skip: 0,
+                cc_zero_indent: false,
             },
         ];
         let mut out = Vec::new();
@@ -1135,6 +1200,7 @@ mod tests {
             phys_row: 7,
             char_offset: 0,
             col_skip: 0,
+            cc_zero_indent: false,
         }];
         let mut out = Vec::new();
         let chars: Vec<char> = line.chars().collect();
@@ -1462,6 +1528,95 @@ mod tilde_cjk_tests {
 mod cc_merge_false_positive {
     use super::*;
     use crate::grid::{Cell, Grid};
+
+    /// 2026-07-12 second report: three shift+enter-separated real
+    /// paths in claudecode's input box; #2 and #3 char-wrap mid-word
+    /// at the right edge with ZERO hanging indent ("…roun" / "d-2.md")
+    /// — the old 1..=4-indent requirement never merged them, so only
+    /// path #1 got a link.  Zero-indent merge (gated on a completely
+    /// full prev row) must recover all three; the flush row0/row1
+    /// junction also exercises the glue-then-retry path (path #1 ends
+    /// flush and path #2 starts at col 0 → merged, stat fails, retry
+    /// splits at the boundary).
+    #[test]
+    fn zero_indent_char_wrap_paths_all_link() {
+        use crate::grid::{Cell, Grid};
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-lnk0-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mk = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            p.to_string_lossy().into_owned()
+        };
+        let p1 = mk("smix-feedback-2026-07-12.md");
+        let p2 = mk("smix-feedback-2026-07-12-round-2.md");
+        let p3 = mk("qa-sim-behavior-verification-plan.md");
+        let cols = p1.chars().count() as u16; // p1 exactly fills row 0
+
+        let mut grid = Grid::new(cols, 8);
+        let mut put = |row: u16, text: &str| {
+            for (c, ch) in text.chars().enumerate() {
+                grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+            }
+        };
+        let (a2, b2) = p2.split_at(
+            p2.char_indices().nth(cols as usize).map(|(i, _)| i).unwrap(),
+        );
+        let (a3, b3) = p3.split_at(
+            p3.char_indices().nth(cols as usize).map(|(i, _)| i).unwrap(),
+        );
+        put(0, &p1);
+        put(1, a2);
+        put(2, b2);
+        put(3, a3);
+        put(4, b3);
+
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        for f in [&p1, &p2, &p3] {
+            let hits: Vec<_> = links
+                .iter()
+                .filter(|l| l.kind == LinkKind::File && l.text == **f)
+                .collect();
+            assert!(
+                !hits.is_empty(),
+                "path {f} must be detected; got {links:?}"
+            );
+        }
+        let texts: std::collections::HashSet<_> =
+            links.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(texts.len(), 3, "exactly the three paths: {links:?}");
+        for p in [p1, p2, p3] {
+            let _ = std::fs::remove_file(dir.join(
+                std::path::Path::new(&p).file_name().unwrap(),
+            ));
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// The zero-indent merge must NOT let a flush-ending URL absorb
+    /// the next prose row (URLs have no existence oracle).
+    #[test]
+    fn zero_indent_does_not_glue_urls() {
+        use crate::grid::{Cell, Grid};
+        const COLS: u16 = 30;
+        let url = format!("https://example.com/{}", "a".repeat(10)); // 30 chars
+        assert_eq!(url.chars().count(), COLS as usize);
+        let mut grid = Grid::new(COLS, 4);
+        for (c, ch) in url.chars().enumerate() {
+            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+        }
+        for (c, ch) in "and more prose".chars().enumerate() {
+            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+        }
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].kind, LinkKind::Url);
+        assert_eq!(links[0].text, url, "URL must stop at the row edge");
+        assert_eq!(links[0].row, 0);
+    }
 
     /// 2026-07-12 regression: a real path that ends flush at the
     /// right edge, followed by a prose row starting with a
