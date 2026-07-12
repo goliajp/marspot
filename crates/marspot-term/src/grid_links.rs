@@ -164,9 +164,13 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
 }
 
 /// cc hard-wrap heuristic: does `r` look like a continuation of the
-/// URL/path that the previous row was rendering?  Conservative —
-/// false positives are fine (the pattern scan just won't match),
-/// false negatives leave the URL split as today.
+/// URL/path that the previous row was rendering?  A false negative
+/// leaves the URL split as today.  A false positive is USUALLY
+/// harmless (the pattern scan just won't match) — except for
+/// filesystem paths, where the glued next-row word breaks the stat
+/// check on an otherwise-valid single-row path;
+/// `retry_file_at_segment_boundaries` recovers that case at emit
+/// time.
 ///
 ///   - previous row's last non-blank cell column ≥ cols - 2 (touches
 ///     or near the right edge — claudecode hard-wraps flush right)
@@ -358,6 +362,12 @@ fn scan_line_into_matches(
                     i = end;
                     continue;
                 }
+                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
+                    continue;
+                }
             }
         }
 
@@ -369,6 +379,12 @@ fn scan_line_into_matches(
                 if is_real_path(&text) {
                     emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
                     i = end;
+                    continue;
+                }
+                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
                     continue;
                 }
             }
@@ -396,6 +412,41 @@ fn scan_line_into_matches(
 
         i += 1;
     }
+}
+
+/// The cc hard-wrap merge is a heuristic guess.  When a merged
+/// filesystem-path candidate doesn't stat, the glue may have absorbed
+/// the FOLLOWING row's first word: the path ended flush at the right
+/// edge (which looks exactly like a claudecode hard wrap) and the
+/// next row's opening word happens to be path-class — e.g.
+/// `.../feedback.md` + next row `fullpath 已交` merges into
+/// `.../feedback.mdfullpath`, and the real, existing single-row path
+/// is silently lost.  Retry the prefixes that end exactly at a
+/// segment boundary, longest first; the first one that exists on
+/// disk is the real token.  Returns the char-pos to truncate at.
+/// (URL candidates have no existence oracle, so they keep the plain
+/// merged behaviour.)
+fn retry_file_at_segment_boundaries(
+    chars: &[char],
+    segments: &[LineSegment],
+    lo: usize,
+    hi: usize,
+) -> Option<usize> {
+    for seg in segments.iter().rev() {
+        let b = seg.char_offset;
+        if b <= lo || b >= hi {
+            continue;
+        }
+        let prefix = &chars[lo..b];
+        if !looks_like_path(prefix) {
+            continue;
+        }
+        let text: String = prefix.iter().collect();
+        if is_real_path(&text) {
+            return Some(b);
+        }
+    }
+    None
 }
 
 /// Project one `[char_lo, char_hi)` match onto the physical rows it
@@ -1336,5 +1387,53 @@ mod tilde_cjk_tests {
         assert_eq!(links.len(), 1, "got {links:?}");
         assert_eq!(links[0].text, s);
         assert_eq!(links[0].kind, LinkKind::File);
+    }
+}
+
+#[cfg(test)]
+mod cc_merge_false_positive {
+    use super::*;
+    use crate::grid::{Cell, Grid};
+
+    /// 2026-07-12 regression: a real path that ends flush at the
+    /// right edge, followed by a prose row starting with a
+    /// path-class word ("fullpath 已交…"), tripped the cc hard-wrap
+    /// heuristic — the merge produced `…feedback.mdfullpath`, the
+    /// stat failed, and the perfectly valid single-row path lost its
+    /// link.  The emit-time segment-boundary retry must recover it.
+    #[test]
+    fn flush_right_path_followed_by_prose_still_links() {
+        // A REAL file; the grid is sized so the path exactly fills
+        // row 0 (flush right = what trips the cc merge heuristic).
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-lnk-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("feedback.md");
+        std::fs::write(&path, b"x").unwrap();
+        let path_s = path.to_string_lossy().into_owned();
+        let cols = path_s.chars().count() as u16;
+
+        let mut grid = Grid::new(cols, 4);
+        for (c, ch) in path_s.chars().enumerate() {
+            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+        }
+        // Continuation-looking prose row: 1-space indent + alnum word.
+        for (c, ch) in " fullpath done".chars().enumerate() {
+            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+        }
+
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(
+            links.len(),
+            1,
+            "flush-right real path must survive the cc merge: {links:?}"
+        );
+        assert_eq!(links[0].kind, LinkKind::File);
+        assert_eq!(links[0].text, path_s);
+        assert_eq!(links[0].row, 0);
     }
 }
