@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.81"  # 链接扫描 cc 拼接误伤修复 — 路径正好铺满右缘 + 下行首词是 path-class 字符时,cc 硬换行启发式把下行首词无缝拼进 token(…feedback.mdfullpath)→ stat 失败丢链接;emit 侧新增 segment 边界截断重试(最长前缀先试,stat 通过即采).前 0.6.80 笔记见 git blame.
-core    = "0.11.55"  # 同 shell 0.6.81 — grid_links 修复重编(扫描在 L2 点击时跑).前 0.11.54 笔记见 git blame.
-session = "0.10.14"  # 同 shell 0.6.81 — 共享 crate 源变更重编.前 0.10.13 笔记见 git blame.
+shell   = "0.6.82"  # email 误报修复 — pkg@1.0.23 类版本串不再当 email 下划线:is_email_host 完整 host 校验(label [alnum-] 不头尾连字符 + TLD 纯字母 ≥2,对齐 GitHub linkify/commonmark autolink 规则;WezTerm 默认正则有同款误报).前 0.6.81 笔记见 git blame.
+core    = "0.11.56"  # 同 shell 0.6.82 — grid_links email 规则重编(渲染下划线 + 点击都在 L2).前 0.11.55 笔记见 git blame.
+session = "0.10.15"  # 同 shell 0.6.82 — 共享 crate 源变更重编.前 0.10.14 笔记见 git blame.
