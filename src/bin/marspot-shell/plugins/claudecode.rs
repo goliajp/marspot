@@ -488,11 +488,13 @@ impl crate::plugins::PaneSession for ProfileCyclePaneSession {
                 }
             }
             CycleStage::ResumeSent => {
-                // Settle window so the user doesn't see the zsh
-                // prompt + spawn echo before claude paints its first
-                // frame.  2 s covers a healthy machine; the watchdog
-                // catches a hung claude.
-                if elapsed >= std::time::Duration::from_secs(2) {
+                // Short settle so the spawn echo doesn't flash.  Was
+                // 2 s — but on big sessions claude's first frame takes
+                // 10 s+ anyway (317 MB jsonl parse measured
+                // 2026-07-13), so a long freeze here buys nothing and
+                // just adds to the perceived switch lag; small
+                // sessions paint within ~600 ms.
+                if elapsed >= std::time::Duration::from_millis(600) {
                     host.end();
                 }
             }

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.6.87"  # 路径终止符 CJK 化 + :行:列 后缀 — path 终止符集加 ()/全角标点(中文语境路径后紧贴 、。() 极常见;URL 保留宽松集,维基括号不断);stat 前剥 :line(:col)? 后缀(rustc/panic 输出);scan_line 测试入口改单 segment 委托生产扫描器,消灭双实现漂移.前 0.6.86 笔记见 git blame.
+shell   = "0.6.88"  # profile cycle settle 2s→600ms — 实测账目:kill→resume 0.1-2s 是旧 claude 优雅退出,resume 后 10-20s 是 claude 解析巨型 session(317MB jsonl);2s settle 在大 session 下盖不住任何东西纯增感知延迟.前 0.6.87 笔记见 git blame.
 core    = "0.11.58"  # 补 0.6.87 漏 bump — grid_links 路径终止符 CJK 化 + :行:列 后缀属共享 crate,core 行为真变;版本号是 install-local staging 判据,漏 bump = 静默不部署(本次实战踩实).前 0.11.57 笔记见 git blame.
 session = "0.10.17"  # 同 core 0.11.58 — 补 0.6.87 共享 crate 漏 bump.前 0.10.16 笔记见 git blame.
