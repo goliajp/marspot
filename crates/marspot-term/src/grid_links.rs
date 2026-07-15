@@ -680,62 +680,129 @@ fn is_left_boundary_alnum(chars: &[char], pos: usize) -> bool {
     chars[pos - 1].is_alphanumeric()
 }
 
-/// Walk forward from `start` until we hit a character that almost
-/// certainly terminates a link span.  Conservative: stop at
-/// whitespace, control chars, balanced-pair closers, common
-/// punctuation that follows links in prose.
+/// URL-flavoured terminator scan.  URLs on the wire are pure ASCII
+/// — IDN hostnames arrive as `xn--` punycode, UTF-8 path bytes as
+/// `%XX` — so ANY non-ASCII char terminates.  The permissive char
+/// set inside the ASCII range follows RFC 3986 (unreserved +
+/// reserved), minus a small "prose delimiter" blacklist:
+///
+///   - `<` `>` `"` `'` `` ` `` `|` — quotes / markup / pipes
+///
+/// Parens are kept inside the scan so Wikipedia's
+/// `Rust_(programming_language)` reaches the end intact; the trim
+/// stage below then arbitrates balanced vs prose-wrapping parens by
+/// counting `(` vs `)` — unbalanced trailing paren = prose, stripped;
+/// balanced = URL content, kept.
+///
+/// The old "everything non-whitespace goes" behaviour swallowed CJK
+/// prose that abutted a URL — the 2026-07-15 field report was
+/// `…/calendar(刷新一下)。` becoming the URL text, since neither `(`
+/// nor CJK chars broke the scan.  The strict char class fixes it at
+/// the source: `刷` is non-ASCII → scan stops at `(`, then the trim
+/// strips the dangling `(`.
 fn scan_until_link_terminator(chars: &[char], start: usize) -> usize {
-    scan_until_terminator_impl(chars, start, false)
+    let mut i = start;
+    while i < chars.len() {
+        if !is_url_char(chars[i]) {
+            break;
+        }
+        i += 1;
+    }
+    // Balanced-paren arbitration + prose punctuation trim.  Repeat
+    // until nothing fires — sentences end with `link).`, `link!`,
+    // `link.`, etc.
+    loop {
+        if i <= start {
+            break;
+        }
+        let last = chars[i - 1];
+        if last == ')' {
+            let (opens, closes) = count_parens(&chars[start..i]);
+            if closes > opens {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if last == '(' {
+            let (opens, closes) = count_parens(&chars[start..i]);
+            if opens > closes {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if matches!(last, ',' | '.' | ';' | ':' | ']' | '}' | '!' | '?') {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn count_parens(span: &[char]) -> (usize, usize) {
+    let mut opens = 0usize;
+    let mut closes = 0usize;
+    for &c in span {
+        if c == '(' {
+            opens += 1;
+        } else if c == ')' {
+            closes += 1;
+        }
+    }
+    (opens, closes)
+}
+
+fn is_url_char(c: char) -> bool {
+    if !c.is_ascii() {
+        return false;
+    }
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '[' | ']'
+                | '@' | '!' | '$' | '&' | '(' | ')' | '*' | '+'
+                | ',' | ';' | '=' | '%'
+        )
 }
 
 /// Path-flavoured terminator scan: additionally hard-stops at `(`,
 /// `)`, and the fullwidth CJK punctuation family.  CJK prose
 /// habitually glues those straight onto a path (`…visibility.md(Ask
 /// 12…`, `…plan.md、`) and a filename CONTAINING them is far rarer
-/// than prose abutting them (宁可漏不可错) — while URLs keep the
-/// permissive set because parens are legitimate there (Wikipedia's
-/// `Rust_(programming_language)`).  CJK ideographs / kana in
+/// than prose abutting them (宁可漏不可错).  CJK ideographs / kana in
 /// filenames stay linkable; only punctuation terminates.
 fn scan_until_path_terminator(chars: &[char], start: usize) -> usize {
-    scan_until_terminator_impl(chars, start, true)
-}
-
-fn scan_until_terminator_impl(chars: &[char], start: usize, path_mode: bool) -> usize {
     let mut i = start;
     while i < chars.len() {
         let c = chars[i];
         if c.is_whitespace() || c == '\0' || (c.is_control() && c != '\t') {
             break;
         }
-        // Hard terminators that almost never belong inside a link.
         if matches!(c, '<' | '>' | '"' | '\'' | '`' | '|') {
             break;
         }
-        if path_mode
-            && matches!(
-                c,
-                '(' | ')'
-                    | '\u{3001}' // 、
-                    | '\u{3002}' // 。
-                    | '\u{FF08}' // （
-                    | '\u{FF09}' // ）
-                    | '\u{FF0C}' // ，
-                    | '\u{FF1A}' // ：
-                    | '\u{FF1B}' // ；
-                    | '\u{FF01}' // ！
-                    | '\u{FF1F}' // ？
-                    | '\u{3008}'..='\u{301B}' // 〈〉《》「」『』【】〔〕〖〗〘〙〚〛
-                    | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}' // 弯引号
-                    | '\u{2026}' // …
-            )
-        {
+        if matches!(
+            c,
+            '(' | ')'
+                | '\u{3001}' // 、
+                | '\u{3002}' // 。
+                | '\u{FF08}' // （
+                | '\u{FF09}' // ）
+                | '\u{FF0C}' // ，
+                | '\u{FF1A}' // ：
+                | '\u{FF1B}' // ；
+                | '\u{FF01}' // ！
+                | '\u{FF1F}' // ？
+                | '\u{3008}'..='\u{301B}' // 〈〉《》「」『』【】〔〕〖〗〘〙〚〛
+                | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}' // 弯引号
+                | '\u{2026}' // …
+        ) {
             break;
         }
         i += 1;
     }
-    // Trim trailing punctuation that usually belongs to surrounding
-    // prose, not the link itself.  Repeat — sentences end with
-    // `...".`, `link).`, etc.
     while i > start {
         let last = chars[i - 1];
         if matches!(last, ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?') {
@@ -1650,7 +1717,8 @@ mod cc_merge_false_positive {
     }
 
     /// URLs keep the permissive terminator set — parens are legal
-    /// inside them (Wikipedia article URLs).
+    /// inside them (Wikipedia article URLs) and balanced pairs must
+    /// survive the trim.
     #[test]
     fn url_keeps_parens_inside() {
         let mut v = Vec::new();
@@ -1660,10 +1728,44 @@ mod cc_merge_false_positive {
             &mut v,
         );
         assert_eq!(v.len(), 1);
-        // Trailing `)` is still trimmed by the prose heuristic (the
-        // long-standing tradeoff), but the interior `(` must not cut
-        // the URL short.
-        assert!(v[0].text.contains("(programming_language"), "{v:?}");
+        assert_eq!(
+            v[0].text,
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
+    }
+
+    /// 2026-07-15 field report: `https://devops.golia.jp/calendar(刷新一下)。`
+    /// was underlined as the URL text — `(` and CJK chars weren't
+    /// terminators.  Strict ASCII URL char class + balanced-paren trim
+    /// cut it back to the real URL.
+    #[test]
+    fn url_terminates_at_cjk_and_strips_dangling_paren() {
+        let mut v = Vec::new();
+        scan_line("日历 - https://devops.golia.jp/calendar(刷新一下)。", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1, "{v:?}");
+        assert_eq!(urls[0].text, "https://devops.golia.jp/calendar");
+    }
+
+    /// URL directly abutting Japanese prose (no `(`) — same fix, no
+    /// dangling ASCII to arbitrate; just non-ASCII terminates.
+    #[test]
+    fn url_terminates_at_bare_cjk() {
+        let mut v = Vec::new();
+        scan_line("参考 https://example.com/foo は使えます", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1, "{v:?}");
+        assert_eq!(urls[0].text, "https://example.com/foo");
+    }
+
+    /// Prose-wrapping parens still get stripped (long-standing case).
+    #[test]
+    fn url_in_prose_parens_still_trimmed() {
+        let mut v = Vec::new();
+        scan_line("(see https://example.com/x)", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].text, "https://example.com/x");
     }
 
     /// The zero-indent merge must NOT let a flush-ending URL absorb

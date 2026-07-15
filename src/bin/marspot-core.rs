@@ -310,11 +310,11 @@ struct LinkContext {
 }
 
 /// Build the right-click menu items shown when the user clicks (left
-/// or right) on an underlined URL / file-path span.  Returns Open +
-/// Copy entries (Copy on top — primary intent in a terminal context
-/// is "grab this URL/path", not "launch the browser").  Email is
-/// recognised at scan time but inert here — caller filters it via
-/// `hit_test_link_at_xy`; the empty Vec stays as the safety net.
+/// or right) on an underlined URL / file-path / email span.  Returns
+/// Copy + Open entries (Copy on top — primary intent in a terminal
+/// context is "grab this URL/path/address", not "launch the app").
+/// Email routes through `/usr/bin/open mailto:…` so the system's
+/// default mail client picks it up.
 ///
 /// **Regression-gate**: this is the contract behind the "click a URL,
 /// get a panel" feature (`/Users/doracawl/workspace/goliajp/marspot/src/bin/marspot-core.rs:3282` for the
@@ -337,7 +337,7 @@ fn link_menu_items_for(
     let (open_label, copy_label) = match link.kind {
         LinkKind::Url => ("Open URL", "Copy URL"),
         LinkKind::File => ("Open file", "Copy path"),
-        LinkKind::Email => return Vec::new(),
+        LinkKind::Email => ("Send email", "Copy email"),
     };
     vec![
         MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
@@ -373,12 +373,13 @@ mod link_menu_tests {
     }
 
     #[test]
-    fn email_yields_empty_menu() {
-        // Email is recognised but inert (per user request).  Empty
-        // menu = "do nothing" — mouse_(right_)down treats len()==0 as
-        // a no-op and the click falls through to selection / focus.
+    fn email_yields_copy_email_then_send_email() {
         let items = link_menu_items_for(&ctx(LinkKind::Email));
-        assert!(items.is_empty(), "Email kind must yield no items");
+        assert_eq!(items.len(), 2, "Email must surface Copy + Send");
+        assert_eq!(items[0].label, "Copy email");
+        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
+        assert_eq!(items[1].label, "Send email");
+        assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
     }
 
     /// Belt-and-braces: a NEW LinkKind variant (e.g. a future
@@ -392,14 +393,7 @@ mod link_menu_tests {
     fn every_known_linkkind_is_handled() {
         for kind in [LinkKind::Url, LinkKind::File, LinkKind::Email] {
             let items = link_menu_items_for(&ctx(kind));
-            match kind {
-                LinkKind::Url | LinkKind::File => {
-                    assert_eq!(items.len(), 2, "{kind:?} must be actionable");
-                }
-                LinkKind::Email => {
-                    assert!(items.is_empty(), "Email stays inert");
-                }
-            }
+            assert_eq!(items.len(), 2, "{kind:?} must be actionable");
         }
     }
 }
@@ -1591,13 +1585,14 @@ impl CoreApp {
         action: ContextMenuAction,
         region: ContextRegion,
     ) {
-        // Snapshot the link text before clearing the menu — the
-        // OpenLink / CopyLink arms read it after the clear.
-        let link_text = self
+        // Snapshot the link before clearing the menu — the OpenLink /
+        // CopyLink arms read it after the clear.  Kind matters for
+        // OpenLink (Email needs a `mailto:` prefix so `open(1)` routes
+        // to the default mail client, not the browser).
+        let link_snapshot = self
             .context_menu
             .as_ref()
-            .and_then(|s| s.link.as_ref())
-            .map(|l| l.text.clone());
+            .and_then(|s| s.link.clone());
         self.context_menu = None;
         match action {
             ContextMenuAction::CopySelection => {
@@ -1648,13 +1643,19 @@ impl CoreApp {
                 self.layout_modal_open = true;
             }
             ContextMenuAction::OpenLink => {
-                if let Some(t) = link_text {
-                    spawn_open(&t);
+                if let Some(link) = link_snapshot.as_ref() {
+                    let arg = match link.kind {
+                        marspot::grid_links::LinkKind::Email => {
+                            format!("mailto:{}", link.text)
+                        }
+                        _ => link.text.clone(),
+                    };
+                    spawn_open(&arg);
                 }
             }
             ContextMenuAction::CopyLink => {
-                if let Some(t) = link_text {
-                    let _ = marspot::input::write_clipboard_text(&t);
+                if let Some(link) = link_snapshot.as_ref() {
+                    let _ = marspot::input::write_clipboard_text(&link.text);
                 }
             }
         }
@@ -2578,14 +2579,10 @@ impl CoreApp {
         let (cw, ch) = self.renderer.cell_dims();
         let (idx, col, row) = self.layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
         let link = self.hit_test_pane_link(idx, col, row)?;
-        match link.kind {
-            marspot::grid_links::LinkKind::Url
-            | marspot::grid_links::LinkKind::File => Some(LinkContext {
-                text: link.text,
-                kind: link.kind,
-            }),
-            marspot::grid_links::LinkKind::Email => None,
-        }
+        Some(LinkContext {
+            text: link.text,
+            kind: link.kind,
+        })
     }
 
     /// Hit-test the right-side plugin badge's clickable prefix (text
