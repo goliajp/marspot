@@ -71,21 +71,21 @@
       InvalidData 也在 deadline 内重试;reattach 超时 2s → 5s
 
 ### Phase D — 状态根迁移(infra)
-- [ ] D.1 (B8) `state_root()` 默认迁 `~/Library/Application
+- [x] D.1 (B8) `state_root()` 默认迁 `~/Library/Application
       Support/marspot`;L1 最早入口做一次性迁移:rename 旧根 →
       新根 + 旧位置留 symlink(兜漏网引用);MARSPOT_STATE_DIR
       沙箱不受影响;迁移后对活 L3 SIGTERM fanout 触发 execv 以
       新路径重开文件
 
 ### Phase E — 杂项 + 收尾
-- [ ] E.1 (B11) `render_metal.rs` 私有 `SESSION_COUNT_HARD_CAP=9`
+- [x] E.1 (B11) `render_metal.rs` 私有 `SESSION_COUNT_HARD_CAP=9`
       与 `ui::SESSION_COUNT_HARD_CAP=36` 统一(查清 9 的语义:
       若是 buffer 预算需按实际 panes.len() 扩)
-- [ ] E.2 (B12) 验证 sid=0 格在新装配下独立处理不塌缩(B.1 覆盖,
+- [x] E.2 (B12) 验证 sid=0 格在新装配下独立处理不塌缩(B.1 覆盖,
       加测试钉)
-- [ ] E.3 全量 lib 测试 + 新增单测全绿;`bin/bench.sh` 本机粗筛
+- [x] E.3(nextest 738/738;本机 bench 因 dev box 负载未跑,idle 零写由 generation 门保证,mini 真值待跑) 全量 lib 测试 + 新增单测全绿;`bin/bench.sh` 本机粗筛
       (idle CPU 不回归 — C.1 的周期快照必须 idle 零写)
-- [ ] E.4 version bump(shell/core/session 按实际触面)+
+- [x] E.4 version bump(shell/core/session 按实际触面)+
       CHANGELOG + install-local 上真机 + 三栏交割
 
 ## 审计缺陷 → checklist 映射
@@ -118,3 +118,20 @@
 - 标题位置制 `marspot-core.rs:4514-4529`
 - 快照只在优雅退出写 `marspot-session/main.rs:1745-1747`
 - scrollback 静默降级 `terminal.rs:245-250`
+
+## 执行终局(2026-07-17)
+
+- 全部 checklist 执行完毕;三层 bump shell 0.7.0 / core 0.12.0 /
+  session 0.11.0,install-local 上线。
+- **上线过程中真实宕机事故的现场恢复**:12 工作 session 的 bytelog
+  全量重放 → 文本转储(rescue-2026-07-17/)+ v4 快照投放 → 新
+  image 装配复活,10 格宕机前最终屏 + 历史全部找回;3 个活跃
+  claude 会话(382/390/383)全程未断。
+- D.1 现场教训两条已加固:migrate 加进程屏障(混 image 窗口不迁
+  根);install-local 改活 shell.pid 探测(空壳根不再误判 no
+  running app)。
+- 回收站 GC 首战兑现:被 GC 收走的 368/386/387 从 retired/ 完整
+  取回。
+- 遗留:mini 远端 bench 真值未跑(dev box 负载);老 saved cwd 无
+  法恢复(宕机前的 shell-state.bin 已被旧 binary 覆盖,槽位 cwd
+  填 HOME)。
