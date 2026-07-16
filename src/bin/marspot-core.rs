@@ -391,6 +391,261 @@ fn link_menu_items_for(
     ]
 }
 
+/// RFC-004 B.5 — boot-assembly integration tests.  Each test runs in
+/// its own process (nextest) against a sandbox `MARSPOT_STATE_DIR`;
+/// resurrection/spawn paths exercise the REAL `marspot-session`
+/// binary (resolved as a sibling of the workspace target dir, or a
+/// deliberately-broken path for the failure tests).  These pin the
+/// RFC-004 invariants: slot order preserved, slots never compact,
+/// sids stable, failures yield vacant placeholders, orphans adopted.
+#[cfg(test)]
+mod boot_assembly_tests {
+    use super::*;
+    use marspot::state::{SavedPane, SavedState};
+    use marspot_term::session_registry::{
+        self as reg, write_session_entry, SessionEntry,
+    };
+
+    // `cargo test` runs tests as THREADS in one process; the sandbox
+    // env vars (MARSPOT_STATE_DIR / MARSPOT_SESSION_BIN) are process-
+    // global, so unsynchronised tests race and a spawned L3 lands in
+    // the wrong sandbox (observed: wait_and_connect polling a path
+    // the child never writes → spurious TimedOut).  nextest is
+    // process-per-test and immune, but keep `cargo test` correct too.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct Sandbox {
+        dir: std::path::PathBuf,
+        _env: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Sandbox {
+        fn new(tag: &str) -> Self {
+            let env = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dir = std::env::temp_dir().join(format!(
+                "marspot-rfc004-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            // SAFETY: nextest runs one test per process; no other
+            // thread reads these vars concurrently at this point.
+            unsafe {
+                std::env::set_var("MARSPOT_STATE_DIR", &dir);
+                std::env::set_var("MARSPOT_SESSION_BIN", real_session_bin());
+                std::env::remove_var("MARSPOT_SESSION_ID");
+            }
+            Self { dir, _env: env }
+        }
+        fn break_session_bin(&self) {
+            // SAFETY: as above.
+            unsafe {
+                std::env::set_var(
+                    "MARSPOT_SESSION_BIN",
+                    "/nonexistent/marspot-session-broken",
+                );
+            }
+        }
+    }
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            // Kill any L3 the test spawned in this sandbox, then wipe.
+            for e in reg::list_session_entries() {
+                if reg::pid_is_live_session(e.pid) {
+                    unsafe { libc::kill(e.pid, libc::SIGKILL) };
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// target/<profile>/marspot-session — sibling of the test binary's
+    /// grandparent (test bin lives in target/<profile>/deps/).
+    fn real_session_bin() -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("current_exe");
+        exe.parent()
+            .and_then(|d| d.parent())
+            .map(|d| d.join("marspot-session"))
+            .expect("target dir layout")
+    }
+
+    fn dead_entry(id: u64) -> SessionEntry {
+        SessionEntry {
+            id,
+            // Far above macOS pid_max (99999) — kill(pid, 0) fails,
+            // guaranteed dead.
+            pid: 3_999_999,
+            socket: reg::session_socket_path(id),
+            cols: 80,
+            rows: 24,
+            title: format!("saved-title-{id}"),
+            cwd: String::new(),
+            proto_version: reg::PROTO_VERSION,
+            created_at_unix: 1,
+            shm_name: String::new(),
+            shell_child_pid: 0,
+        }
+    }
+
+    fn saved(panes: &[(u64, &str)]) -> SavedState {
+        SavedState {
+            grid_cols: 3,
+            grid_rows: 3,
+            focused_idx: 0,
+            panes: panes
+                .iter()
+                .map(|(sid, title)| SavedPane {
+                    sid: *sid,
+                    custom_title: title.to_string(),
+                    last_cwd: String::new(),
+                })
+                .collect(),
+            window: None,
+        }
+    }
+
+    fn pane_sids(panes: &[Pane]) -> Vec<u64> {
+        panes
+            .iter()
+            .map(|p| p.session().shelld_session_id().unwrap_or(0))
+            .collect()
+    }
+
+    /// Full-crash restore (the 2026-07-17 field report): every L3
+    /// dead, session dirs on disk in arbitrary readdir order.  Slots
+    /// must come back in SAVED order — not readdir order — with each
+    /// slot's own sid resurrected as a live pane.
+    #[test]
+    fn dead_sessions_resurrect_in_saved_slot_order() {
+        let _sb = Sandbox::new("resurrect-order");
+        for id in [12u64, 5, 9] {
+            write_session_entry(&dead_entry(id)).unwrap();
+        }
+        let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
+        let (tx, _rx) = mpsc::channel();
+        let mut titles = std::collections::HashMap::new();
+        let (panes, reattached) =
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, &mut titles);
+        assert_eq!(
+            pane_sids(&panes),
+            vec![9, 12, 5],
+            "slots must follow saved order, not readdir order"
+        );
+        assert!(reattached.is_empty(), "nothing was alive to reattach");
+        for (i, p) in panes.iter().enumerate() {
+            assert!(
+                !p.is_vacant(),
+                "slot {i} must be a live resurrected L3, got vacant"
+            );
+        }
+    }
+
+    /// Spawn failure must hold the slot open as a vacant pane carrying
+    /// the sid — never compact, never shift the neighbours.
+    #[test]
+    fn spawn_failure_yields_vacant_slots_never_compacts() {
+        let sb = Sandbox::new("vacant");
+        sb.break_session_bin();
+        let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
+        let (tx, _rx) = mpsc::channel();
+        let mut titles = std::collections::HashMap::new();
+        let (panes, _) =
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, &mut titles);
+        assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
+        let sids = pane_sids(&panes);
+        assert_eq!(sids[0], 7, "slot 0 keeps its sid for revive");
+        assert_ne!(sids[1], 0, "anonymous slot got a fresh allocated id");
+        assert_eq!(sids[2], 8, "slot 2 keeps its sid for revive");
+        for (i, p) in panes.iter().enumerate() {
+            assert!(p.is_vacant(), "slot {i} must be vacant");
+            assert!(p.is_exited(), "vacant reports exited → revive path");
+        }
+    }
+
+    /// A live session missing from the saved layout is real user work
+    /// — it must be ADOPTED as an extra pane, not SIGKILLed + deleted
+    /// (the pre-RFC-004 behaviour when a layout shrank).
+    #[test]
+    fn orphan_live_session_adopted_not_killed() {
+        let _sb = Sandbox::new("adopt");
+        let (tx, _rx) = mpsc::channel();
+        // Bring up a REAL live L3 outside any saved layout.
+        let orphan_sid = reg::allocate_next_session_id().unwrap();
+        let live = spawn_l3_pane(60, 16, orphan_sid, &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+        // Keep it alive across the assembly (Drop would SIGKILL it);
+        // Sandbox::drop kills it via the registry at test end.
+        std::mem::forget(live);
+
+        let s = saved(&[(0, "")]);
+        let mut titles = std::collections::HashMap::new();
+        let (panes, reattached) =
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, &mut titles);
+        let sids = pane_sids(&panes);
+        assert_eq!(panes.len(), 2, "slot pane + adopted orphan: {sids:?}");
+        assert!(
+            sids.contains(&orphan_sid),
+            "live orphan {orphan_sid} must be adopted, got {sids:?}"
+        );
+        assert_eq!(reattached, vec![orphan_sid]);
+        // And its dir must still exist (never deleted).
+        assert!(reg::session_dir(orphan_sid).exists());
+    }
+
+    /// A dead dir that no slot references retires to the recycle bin
+    /// (recoverable), never deletes.
+    #[test]
+    fn unreferenced_dead_dir_retires_to_recycle_bin() {
+        let sb = Sandbox::new("retire");
+        write_session_entry(&dead_entry(31)).unwrap();
+        // Give it recognisable history so the retired copy is provably
+        // the same dir.
+        std::fs::write(reg::session_dir(31).join("bytelog"), b"HISTORY").unwrap();
+        sb.break_session_bin(); // slots don't matter; keep them vacant
+        let s = saved(&[(700, "")]);
+        let (tx, _rx) = mpsc::channel();
+        let mut titles = std::collections::HashMap::new();
+        let (panes, _) =
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, &mut titles);
+        assert_eq!(panes.len(), 1);
+        assert!(
+            !reg::session_dir(31).exists(),
+            "unreferenced dead dir must move out of sessions/"
+        );
+        let retired_root = sb.dir.join("retired");
+        let retired: Vec<_> = std::fs::read_dir(&retired_root)
+            .expect("retired/ must exist")
+            .flatten()
+            .filter(|e| {
+                e.file_name().to_string_lossy().starts_with("31-")
+            })
+            .collect();
+        assert_eq!(retired.len(), 1, "dir 31 must be in the recycle bin");
+        let bytelog = retired[0].path().join("bytelog");
+        assert_eq!(std::fs::read(bytelog).unwrap(), b"HISTORY");
+    }
+
+
+    /// Duplicate sid in a corrupt saved state must not double-bind one
+    /// session to two panes — the second slot falls back to a fresh id.
+    #[test]
+    fn duplicate_saved_sid_does_not_double_bind() {
+        let sb = Sandbox::new("dup-sid");
+        sb.break_session_bin();
+        let s = saved(&[(9, "a"), (9, "b")]);
+        let (tx, _rx) = mpsc::channel();
+        let mut titles = std::collections::HashMap::new();
+        let (panes, _) =
+            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, &mut titles);
+        let sids = pane_sids(&panes);
+        assert_eq!(sids.len(), 2);
+        assert_eq!(sids[0], 9);
+        assert_ne!(sids[1], 9, "second slot must not re-bind sid 9");
+    }
+}
+
 #[cfg(test)]
 mod link_menu_tests {
     use super::*;
@@ -2517,8 +2772,21 @@ impl CoreApp {
         // same on-disk record.  Only revive on a key press the user
         // would actually mean as "wake up" (any printable / Enter /
         // arrow / Tab etc); modifier-only key transitions don't fire.
-        if pane.is_l3() && pane.is_exited() && event.state == KeyState::Pressed {
-            if let Some(sid) = pane.session().shelld_session_id() {
+        //
+        // RFC-004 B.2 — vacant slots (boot-time assembly failures)
+        // revive through the exact same path: they hold their sid and
+        // report is_exited() = true.  A vacant slot with sid 0 (id
+        // allocation itself failed at boot) allocates one now.
+        if (pane.is_l3() || pane.is_vacant())
+            && pane.is_exited()
+            && event.state == KeyState::Pressed
+        {
+            let sid_opt = pane
+                .session()
+                .shelld_session_id()
+                .filter(|&s| s != 0)
+                .or_else(|| allocate_next_session_id().ok());
+            if let Some(sid) = sid_opt {
                 // Layout already sized the pane — keep its current
                 // cell dims so the new L3 boots at the same shape.
                 let (cols, rows) = self
@@ -2531,7 +2799,7 @@ impl CoreApp {
                     Ok(new_pane) => {
                         lx_event!(
                             "L3_REVIVED",
-                            "user keystroke respawned dead L3 at same id",
+                            "user keystroke respawned dead/vacant pane at same id",
                             session_id = sid
                         );
                         self.panes[self.focused_idx] = new_pane;
@@ -4111,6 +4379,292 @@ impl CoreApp {
     }
 }
 
+/// RFC-004 B.1 — identity-keyed boot assembly.  Extracted from
+/// `main()` so the slot semantics (order preserved, never
+/// compacted, sid-stable, vacant on failure) are testable with a
+/// sandbox state dir + real L3 binaries (`MARSPOT_SESSION_BIN`).
+/// Returns the assembled panes (one per slot + adopted orphans)
+/// and the reattached session ids (execv fanout drives off them).
+fn assemble_panes_at_boot(
+    saved_state: Option<&marspot::state::SavedState>,
+    n_sessions: usize,
+    boot_cols: u16,
+    boot_rows: u16,
+    event_tx: &Sender<CoreEvent>,
+    session_titles: &mut std::collections::HashMap<u64, String>,
+) -> (Vec<Pane>, Vec<u64>) {
+    let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
+    // RFC-004 B.1 — identity-keyed slot assembly.  Every saved
+    // slot is processed IN ORDER and ALWAYS yields a pane:
+    //
+    //   sid alive (identity-verified) → reattach; reattach failure
+    //     downgrades to resurrection (never delete)
+    //   sid dead + dir on disk       → resurrect same id (L3 cold
+    //     boot applies state.bin + reopens scrollback.bin)
+    //   sid without dir / sid == 0   → fresh spawn (same sid when
+    //     the slot names one, so identity survives a lost dir)
+    //   any spawn failure            → vacant placeholder pane
+    //     carrying the sid (revive-on-keystroke retries it)
+    //
+    // The old assembly compacted failed slots away (panes shifted,
+    // titles/cwd mis-bound by index, and the first
+    // save_session_state locked the damage in) and resurrected
+    // dead ids in readdir order (错位 after a full crash).
+    let raw_list = list_session_entries();
+    for e in &raw_list {
+        if !e.title.is_empty() {
+            session_titles.insert(e.id, e.title.clone());
+        }
+    }
+    let entry_by_id: std::collections::HashMap<
+        u64,
+        &marspot_term::session_registry::SessionEntry,
+    > = raw_list.iter().map(|e| (e.id, e)).collect();
+    // RFC-004 A.2 — liveness = pid signalable AND its executable
+    // is a marspot-session image.  A recycled pid can no longer
+    // impersonate a live session (nor eat a SIGKILL meant for one).
+    let alive_ids: std::collections::HashSet<u64> = raw_list
+        .iter()
+        .filter(|e| session_registry::pid_is_live_session(e.pid))
+        .map(|e| e.id)
+        .collect();
+    let dir_ids: std::collections::HashSet<u64> =
+        raw_list.iter().map(|e| e.id).collect();
+
+    // Slot specs come from the saved layout; without one, adopt
+    // whatever the registry holds (numeric order), padded with
+    // anonymous slots up to the grid size.
+    struct SlotSpec {
+        sid: u64,
+        cwd: String,
+    }
+    let slot_specs: Vec<SlotSpec> = match saved_state {
+        Some(s) => s
+            .panes
+            .iter()
+            .take(n_sessions)
+            .map(|p| SlotSpec { sid: p.sid, cwd: p.last_cwd.clone() })
+            .collect(),
+        None => {
+            let mut ids: Vec<u64> = dir_ids.iter().copied().collect();
+            ids.sort();
+            ids.truncate(n_sessions);
+            let mut specs: Vec<SlotSpec> = ids
+                .into_iter()
+                .map(|sid| SlotSpec { sid, cwd: String::new() })
+                .collect();
+            while specs.len() < n_sessions {
+                specs.push(SlotSpec { sid: 0, cwd: String::new() });
+            }
+            specs
+        }
+    };
+
+    let mut claimed: std::collections::HashSet<u64> =
+        std::collections::HashSet::new();
+    let mut reattached_ids: Vec<u64> = Vec::new();
+    // Fresh-id allocation that can't collide with a claimed sid:
+    // the allocator floors at max(existing dir id) (A.1), but a
+    // claimed sid whose dir hasn't been recreated yet is invisible
+    // to that floor — skip by hand.  64 tries is unreachable in
+    // practice (each miss burns one monotonic id).
+    let allocate_fresh = |claimed: &std::collections::HashSet<u64>| -> Option<u64> {
+        for _ in 0..64 {
+            match allocate_next_session_id() {
+                Ok(id) if !claimed.contains(&id) => return Some(id),
+                Ok(_) => continue,
+                Err(e) => {
+                    lx_error!(
+                        "core.session_registry.allocate_failed",
+                        &format!("{e}")
+                    );
+                    return None;
+                }
+            }
+        }
+        None
+    };
+
+    for spec in &slot_specs {
+        let mut sid = spec.sid;
+        if sid != 0 && claimed.contains(&sid) {
+            // Duplicate sid in saved state (corrupt / hand-edited)
+            // — assemble as an anonymous slot instead of
+            // double-binding one session to two panes.
+            sid = 0;
+        }
+        // 1) Live session → reattach in place.
+        if sid != 0 && alive_ids.contains(&sid) {
+            match reattach_l3_pane(sid, &event_tx) {
+                Ok(pane) => {
+                    panes.push(pane);
+                    claimed.insert(sid);
+                    reattached_ids.push(sid);
+                    continue;
+                }
+                Err(e) => {
+                    // Live-but-unreachable (shm wiped / UDS dead).
+                    // Identity is verified (A.2) so this SIGKILL
+                    // cannot hit a foreign process.  The dir is
+                    // KEPT and we fall through to resurrection —
+                    // the old path delete_session'd right here.
+                    lx_warn!(
+                        "core.reattach.l3_failed",
+                        &format!("{e} — SIGKILL verified L3, resurrect in place"),
+                        session = sid
+                    );
+                    if let Some(entry) = entry_by_id.get(&sid) {
+                        unsafe { libc::kill(entry.pid, libc::SIGKILL) };
+                    }
+                }
+            }
+        }
+        // 2) Dead (or just-killed) with a dir → resurrect same id.
+        // 3) No dir → fresh spawn, keeping the slot's sid.
+        let spawn_sid = if sid != 0 {
+            sid
+        } else {
+            match allocate_fresh(&claimed) {
+                Some(id) => id,
+                None => {
+                    panes.push(Pane::new_vacant(0, boot_cols, boot_rows));
+                    continue;
+                }
+            }
+        };
+        // Stale shm from a previous life can't be reattached —
+        // tear it down so the fresh L3 publishes a new region.
+        if let Some(entry) = entry_by_id.get(&spawn_sid) {
+            if !entry.shm_name.is_empty() {
+                if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
+                    grid_shm::delete_region(&c);
+                }
+            }
+        }
+        // RFC-004 C.2 belt+braces — a resurrect dir still holds the
+        // DEAD process's entry.toml; `wait_for_entry` would read it
+        // instantly and start connecting before the fresh child has
+        // even bound.  Unlink the stale entry + sock (KEEPING
+        // scrollback/bytelog/state.bin) so the post-spawn wait
+        // synchronises on the fresh child's own registry write.
+        let _ = std::fs::remove_file(
+            marspot_term::session_registry::session_entry_path(spawn_sid),
+        );
+        marspot_term::session_registry::cleanup_stale_socket(spawn_sid);
+        match spawn_l3_pane_with_cwd(
+            boot_cols, boot_rows, spawn_sid, &spec.cwd, &event_tx,
+        ) {
+            Ok(pane) => {
+                panes.push(pane);
+                claimed.insert(spawn_sid);
+            }
+            Err(e) => {
+                lx_error!(
+                    "core.spawn.l3_boot_failed",
+                    &format!("{e} — slot held vacant, revive retries this sid"),
+                    session = spawn_sid
+                );
+                claimed.insert(spawn_sid);
+                panes.push(Pane::new_vacant(spawn_sid, boot_cols, boot_rows));
+            }
+        }
+    }
+
+    // Live sessions no slot claimed = real user work whose slot
+    // record was lost — append as extra panes rather than kill
+    // (the old path SIGKILLed + deleted these when the layout
+    // shrank).  Over the hard cap: stop the process but RETIRE
+    // the dir (recoverable) instead of deleting.
+    for id in raw_list.iter().map(|e| e.id) {
+        if !alive_ids.contains(&id) || claimed.contains(&id) {
+            continue;
+        }
+        if panes.len() >= SESSION_COUNT_HARD_CAP {
+            if let Some(entry) = entry_by_id.get(&id) {
+                unsafe { libc::kill(entry.pid, libc::SIGKILL) };
+                if !entry.shm_name.is_empty() {
+                    if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
+                        grid_shm::delete_region(&c);
+                    }
+                }
+            }
+            match session_registry::retire_session_dir(id) {
+                Ok(dst) => lx_warn!(
+                    "core.boot.surplus_retired",
+                    "over-cap live session stopped + dir retired",
+                    session = id,
+                    retired_to = dst.display()
+                ),
+                Err(e) => lx_warn!(
+                    "core.boot.surplus_retire_failed",
+                    &format!("{e}"),
+                    session = id
+                ),
+            }
+            continue;
+        }
+        match reattach_l3_pane(id, &event_tx) {
+            Ok(pane) => {
+                lx_event!(
+                    "core.boot.orphan_adopted",
+                    "live session outside saved layout appended as extra pane",
+                    session = id
+                );
+                panes.push(pane);
+                claimed.insert(id);
+                reattached_ids.push(id);
+            }
+            Err(e) => lx_warn!(
+                "core.reattach.orphan_failed",
+                &format!("{e} — left on disk for next boot"),
+                session = id
+            ),
+        }
+    }
+
+    // RFC-004 B.4 — recycle-bin GC.  Any session dir that is
+    // neither claimed by a slot nor alive moves to retired/
+    // (kept RETIRED_TTL_SECS = 14 days), and expired retired
+    // entries purge.  Scans dir names directly (not raw_list) so
+    // dirs with corrupt entry.toml — invisible to discovery —
+    // stop accumulating too.  delete_session (真删) stays
+    // reserved for the user's explicit pane close.
+    let mut retired = 0usize;
+    for id in session_registry::list_session_dir_ids() {
+        if claimed.contains(&id) || alive_ids.contains(&id) {
+            continue;
+        }
+        if let Some(entry) = entry_by_id.get(&id) {
+            if !entry.shm_name.is_empty() {
+                if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
+                    grid_shm::delete_region(&c);
+                }
+            }
+        }
+        match session_registry::retire_session_dir(id) {
+            Ok(_) => retired += 1,
+            Err(e) => lx_warn!(
+                "core.boot.retire_failed",
+                &format!("{e}"),
+                session = id
+            ),
+        }
+    }
+    let purged = session_registry::purge_expired_retired();
+    lx_event!(
+        "core.session_registry.inventory",
+        "RFC-004 identity-keyed boot assembly",
+        total = raw_list.len(),
+        alive = alive_ids.len(),
+        reattached = reattached_ids.len(),
+        slots = slot_specs.len(),
+        panes = panes.len(),
+        retired = retired,
+        purged_expired = purged
+    );
+    (panes, reattached_ids)
+}
+
 fn main() {
     marspot::logx::init("core");
     lx_event!(
@@ -4283,120 +4837,20 @@ fn main() {
             Ok(false) => {}
             Err(e) => lx_error!("core.promote.boot_failed", &format!("{e}")),
         }
-        // RFC-003 step 3a + Amendment 7 step 4: scan registry,
-        // reattach to alive L3s by shm name + UDS connect, prune dead,
-        // allocate fresh for the remainder.
-        let raw_list = list_session_entries();
-        for e in &raw_list {
-            if !e.title.is_empty() {
-                session_titles.insert(e.id, e.title.clone());
-            }
-        }
-        // RFC-003 §6 Amendment 15 — separate alive vs dead.  alive
-        // entries reattach (L3 still running).  dead entries are
-        // resurrect candidates: their sessions/<id>/ dir survives
-        // disk (state.bin + bytelog + entry.toml), so we can spawn
-        // a fresh L3 against the saved snapshot + fresh shell.  No
-        // pruning during scan — pruning a dead entry would discard
-        // exactly the data we want to resurrect from.
-        let mut alive_ids: Vec<u64> = Vec::new();
-        let mut dead_ids: Vec<u64> = Vec::new();
-        for e in &raw_list {
-            let live = unsafe { libc::kill(e.pid, 0) } == 0;
-            if live {
-                alive_ids.push(e.id);
-            } else {
-                dead_ids.push(e.id);
-            }
-        }
-        let dead = dead_ids.len();
-        // F3+6 — order: saved.panes first (in saved order, for sids
-        // that survived), then any other alive sid as tail.  Without
-        // saved state, fall back to numeric sort (legacy).
-        if let Some(ref s) = saved_state {
-            let alive_set: std::collections::HashSet<u64> =
-                alive_ids.iter().copied().collect();
-            let saved_set: std::collections::HashSet<u64> =
-                s.panes.iter().map(|p| p.sid).filter(|&id| id != 0).collect();
-            let mut ordered: Vec<u64> = s.panes.iter()
-                .map(|p| p.sid)
-                .filter(|&id| id != 0 && alive_set.contains(&id))
-                .collect();
-            for &id in &alive_ids {
-                if !saved_set.contains(&id) {
-                    ordered.push(id);
-                }
-            }
-            alive_ids = ordered;
-        } else {
-            alive_ids.sort();
-        }
-        let mut reattached_ids: Vec<u64> = Vec::new();
-        for id in alive_ids.iter().take(n_sessions) {
-            match reattach_l3_pane(*id, &event_tx) {
-                Ok(pane) => {
-                    panes.push(pane);
-                    reattached_ids.push(*id);
-                }
-                Err(e) => {
-                    lx_warn!(
-                        "core.reattach.l3_failed",
-                        &format!("{e} — will SIGKILL + prune"),
-                        session = id
-                    );
-                    // Reattach failed: SIGKILL the orphan + clean
-                    // registry so the next boot doesn't loop on it.
-                    // F3+3.2 — SIGKILL (not SIGTERM), same reason
-                    // as the prune loop below: SIGTERM is overloaded
-                    // to trigger L3 self-execv on fingerprint
-                    // mismatch, which would leave a leaked L3
-                    // running with no L2 client.
-                    if let Ok(entry) =
-                        marspot_term::session_registry::read_session_entry(*id)
-                    {
-                        unsafe { libc::kill(entry.pid, libc::SIGKILL) };
-                        if !entry.shm_name.is_empty() {
-                            if let Ok(c) =
-                                std::ffi::CString::new(entry.shm_name.clone())
-                            {
-                                grid_shm::delete_region(&c);
-                            }
-                        }
-                    }
-                    let _ = session_registry::delete_session(*id);
-                }
-            }
-        }
-        // Any alive id beyond n_sessions is leftover from a wider
-        // layout; KILL + prune so they don't accumulate.
-        //
-        // F3+3.2 — SIGKILL, not SIGTERM.  SIGTERM is overloaded by
-        // RFC-003 §6 Amendment 16 to mean "binary fingerprint
-        // differs → self-execv into the new image".  During an
-        // install storm, an old L3 that we want to PRUNE receives
-        // SIGTERM, sees the new current/marspot-session fingerprint
-        // differs from its own, and execv's instead of dying.
-        // After execv it sits idle (no L2 client), leaking a whole
-        // marspot-session process.  SIGKILL bypasses the handler so
-        // the pruned L3 is reliably gone.  PTY child + sockets get
-        // cleaned by the kernel; `delete_session` below clears the
-        // registry dir.
-        for id in alive_ids.iter().skip(n_sessions) {
-            if let Ok(entry) = marspot_term::session_registry::read_session_entry(*id) {
-                unsafe { libc::kill(entry.pid, libc::SIGKILL) };
-                if !entry.shm_name.is_empty() {
-                    if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                        grid_shm::delete_region(&c);
-                    }
-                }
-            }
-            let _ = session_registry::delete_session(*id);
-        }
-        // RFC-003 §6 Amendment 16 — L3 self-execv silent update.
-        // If this boot promoted a fresh marspot-session binary, fan
-        // SIGTERM out to every reattached L3 — their handler will
-        // notice current/marspot-session's MARSPOT_FP differs from
-        // their own rodata fingerprint and self-execv into the new
+        // RFC-004 B.1 — identity-keyed slot assembly (extracted to
+        // `assemble_panes_at_boot`; see its doc for the semantics).
+        let (assembled, reattached_ids) = assemble_panes_at_boot(
+            saved_state.as_ref(),
+            n_sessions,
+            boot_cols,
+            boot_rows,
+            &event_tx,
+            &mut session_titles,
+        );
+        panes = assembled;
+        // RFC-003 §6 Amendment 16 — L3 self-execv silent update
+        // fanout (unchanged): freshly-promoted session binary →
+        // SIGTERM every reattached L3 so it execv's into the new
         // image (PTY master fd + UDS listener fd + shell child all
         // preserved via clear-CLOEXEC + manifest handoff).
         if session_binary_freshly_promoted && !reattached_ids.is_empty() {
@@ -4417,80 +4871,6 @@ fn main() {
                 n_reattached = reattached_ids.len()
             );
         }
-        // RFC-003 §6 Amendment 18 — dead L3 resurrection.  user 关窗
-        // → L1 close_requested → SIGTERM 全部 L3 → L3 SIGTERM handler
-        // 写 state.bin + process::exit(0)(Drop 不跑,entry.toml 存活).
-        // reopen → 这些 session 在 raw_list 里 pid 已死 → 落到
-        // dead_ids.之前 prune 把整个 session_dir rm,state.bin 跟着
-        // 没,新 L3 起来空白 — user 失去全 history.
-        //
-        // 现在 dead_ids 是 **resurrect candidates**:
-        //   1. 老 shm 区域死了 → 拆,新 L3 起来会拿到 L2 新发的 shm
-        //   2. session_dir(含 state.bin)留着
-        //   3. 走 fresh-spawn 路径时,优先用 dead_ids 的 id,L3 cold
-        //      boot 看到 state.bin 自动 apply_snapshot —— 用户看到
-        //      原来的 scrollback 完整保留.
-        for id in &dead_ids {
-            if let Ok(entry) = marspot_term::session_registry::read_session_entry(*id) {
-                if !entry.shm_name.is_empty() {
-                    if let Ok(c) = std::ffi::CString::new(entry.shm_name.clone()) {
-                        grid_shm::delete_region(&c);
-                    }
-                }
-            }
-            // 留 session_dir + state.bin;下面 resurrect loop spawn 时
-            // L3 cold boot 看到 state.bin 自动 load + delete.
-        }
-        lx_event!(
-            "core.session_registry.inventory",
-            "RFC-003 registry scan at boot",
-            total = raw_list.len(),
-            alive = alive_ids.len(),
-            reattached = reattached_ids.len(),
-            dead = dead,
-            want = n_sessions
-        );
-        // dead_ids 排在前面 — 它们各自的 session_dir 有 state.bin,
-        // 同 id 起 L3 时 L3 cold boot 自动 apply_snapshot 恢复 scrollback.
-        // 之后再用 allocate_next_session_id 给剩下的 slot 拿全新 id.
-        let mut ids: Vec<u64> = dead_ids
-            .iter()
-            .copied()
-            .take(n_sessions.saturating_sub(panes.len()))
-            .collect();
-        while panes.len() + ids.len() < n_sessions {
-            match allocate_next_session_id() {
-                Ok(id) => ids.push(id),
-                Err(e) => {
-                    lx_error!(
-                        "core.session_registry.allocate_failed",
-                        &format!("{e}")
-                    );
-                    break;
-                }
-            }
-        }
-        for (slot, id) in ids.into_iter().enumerate() {
-            // F3+6 — pick the cwd from saved.panes for the slot this
-            // spawn is filling.  `slot` indexes into the missing-tail
-            // (saved indexes 0..panes.len() are already reattached
-            // above; freshly spawned slots start at panes.len()
-            // before this iter began).
-            let target_slot = panes.len();
-            let cwd = saved_state.as_ref()
-                .and_then(|s| s.panes.get(target_slot))
-                .map(|p| p.last_cwd.clone())
-                .unwrap_or_default();
-            let _ = slot;
-            match spawn_l3_pane_with_cwd(boot_cols, boot_rows, id, &cwd, &event_tx) {
-                Ok(pane) => panes.push(pane),
-                Err(e) => lx_error!(
-                    "core.spawn.l3_boot_failed",
-                    &format!("{e}"),
-                    session = id
-                ),
-            }
-        }
         if panes.is_empty() {
             lx_warn!(
                 "core.boot.l3_empty",
@@ -4510,20 +4890,40 @@ fn main() {
     // wins over `session_titles` (the entry.toml-derived source)
     // because the bin file reflects the user's last interactive
     // state, including titles set after the last L3 reattach hop.
-    // Fallback chain: saved → session_titles → None.
+    //
+    // RFC-004 B.3 — titles bind by IDENTITY, not index: the
+    // positional entry is only trusted when its recorded sid matches
+    // the pane actually sitting in that slot (or the slot was
+    // anonymous, sid == 0, and just received a fresh id).  On
+    // mismatch, search the saved panes for the sid — a title follows
+    // its session wherever the session lands.  Fallback chain:
+    // saved-by-slot → saved-by-sid → entry.toml title → None.
     let custom_titles_init: Vec<Option<String>> = panes
         .iter()
         .enumerate()
         .map(|(i, p)| {
+            let pane_sid = p.shelld_session_id().unwrap_or(0);
             if let Some(ref s) = saved_state {
                 if let Some(entry) = s.panes.get(i) {
-                    if !entry.custom_title.is_empty() {
+                    let slot_matches =
+                        entry.sid == pane_sid || entry.sid == 0;
+                    if slot_matches && !entry.custom_title.is_empty() {
                         return Some(entry.custom_title.clone());
                     }
                 }
+                if pane_sid != 0 {
+                    if let Some(entry) =
+                        s.panes.iter().find(|e| e.sid == pane_sid)
+                    {
+                        if !entry.custom_title.is_empty() {
+                            return Some(entry.custom_title.clone());
+                        }
+                    }
+                }
             }
-            p.shelld_session_id()
-                .and_then(|sid| session_titles.get(&sid).cloned())
+            (pane_sid != 0)
+                .then(|| session_titles.get(&pane_sid).cloned())
+                .flatten()
                 .filter(|t| !t.is_empty())
         })
         .collect();

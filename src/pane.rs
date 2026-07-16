@@ -52,6 +52,49 @@ pub enum PaneBackend {
     /// control socket to forward keystrokes.  Behind `MARSPOT_L3=1`;
     /// the in-process backends above stay the default.
     L3(L3Conn),
+    /// RFC-004 B.2 — a slot whose session could not be brought up at
+    /// boot (spawn/reattach/resurrect failure).  Holds the session id
+    /// so the slot NEVER compacts away: the sid survives into the next
+    /// `save_session_state`, the on-disk `sessions/<sid>/` dir stays
+    /// eligible for resurrection, and the existing revive-on-keystroke
+    /// path retries a fresh L3 at the same id.  Renders a static
+    /// message grid; all I/O is a no-op.
+    Vacant(VacantPane),
+}
+
+/// RFC-004 B.2 — the inert backend behind a slot that failed to
+/// assemble.  See `PaneBackend::Vacant`.
+pub struct VacantPane {
+    session_id: u64,
+    grid: Grid,
+}
+
+impl VacantPane {
+    pub fn new(session_id: u64, cols: u16, rows: u16) -> Self {
+        let mut grid = Grid::new(cols.max(20), rows.max(3));
+        Self::paint_message(&mut grid, session_id);
+        Self { session_id, grid }
+    }
+
+    fn paint_message(grid: &mut Grid, session_id: u64) {
+        let msg = format!(
+            "session {session_id} unavailable — press any key to retry"
+        );
+        let row = 1u16.min(grid.rows().saturating_sub(1));
+        for (i, ch) in msg.chars().enumerate() {
+            let col = 2 + i as u16;
+            if col >= grid.cols() {
+                break;
+            }
+            grid.set_cell(col, row, Cell { ch, ..Default::default() });
+        }
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        let mut grid = Grid::new(cols.max(20), rows.max(3));
+        Self::paint_message(&mut grid, self.session_id);
+        self.grid = grid;
+    }
 }
 
 impl PaneBackend {
@@ -64,14 +107,18 @@ impl PaneBackend {
     pub fn terminal(&self) -> &Terminal {
         match self {
             PaneBackend::Local(s) => s.terminal(),
-            PaneBackend::L3(_) => unreachable!("L3 pane has no in-process Terminal"),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => {
+                unreachable!("L3/Vacant pane has no in-process Terminal")
+            }
         }
     }
 
     pub fn terminal_mut(&mut self) -> &mut Terminal {
         match self {
             PaneBackend::Local(s) => &mut s.terminal,
-            PaneBackend::L3(_) => unreachable!("L3 pane has no in-process Terminal"),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => {
+                unreachable!("L3/Vacant pane has no in-process Terminal")
+            }
         }
     }
 
@@ -81,6 +128,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().grid(),
             PaneBackend::L3(c) => &c.grid,
+            PaneBackend::Vacant(v) => &v.grid,
         }
     }
 
@@ -96,6 +144,9 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(_) => None,
             PaneBackend::L3(c) => Some(c.shelld_session_id()),
+            // A vacant slot still *names* its session — that's the
+            // whole point (sid survives save/restore + revive).
+            PaneBackend::Vacant(v) => Some(v.session_id),
         }
     }
 
@@ -103,6 +154,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_visible(),
             PaneBackend::L3(c) => c.cursor_visible,
+            PaneBackend::Vacant(_) => false,
         }
     }
 
@@ -110,6 +162,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_key_application_mode(),
             PaneBackend::L3(c) => c.app_cursor_keys,
+            PaneBackend::Vacant(_) => false,
         }
     }
 
@@ -117,6 +170,7 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.terminal().bracketed_paste_mode(),
             PaneBackend::L3(c) => c.bracketed_paste,
+            PaneBackend::Vacant(_) => false,
         }
     }
 
@@ -310,6 +364,7 @@ impl PaneBackend {
             // requests a redraw, 0 when nothing changed (so the 1 s
             // heartbeat doesn't force a spurious render).
             PaneBackend::L3(c) => usize::from(c.poll()),
+            PaneBackend::Vacant(_) => 0,
         }
     }
 
@@ -317,6 +372,9 @@ impl PaneBackend {
         match self {
             PaneBackend::Local(s) => s.is_exited(),
             PaneBackend::L3(c) => c.is_exited(),
+            // Vacant = born exited: the revive-on-keystroke path is
+            // exactly how a vacant slot gets its session back.
+            PaneBackend::Vacant(_) => true,
         }
     }
 
@@ -325,7 +383,7 @@ impl PaneBackend {
             PaneBackend::Local(s) => s.write(bytes),
             // L3 input is forwarded as key events, not raw bytes; the
             // session process owns its own PTY write + response path.
-            PaneBackend::L3(_) => Ok(0),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => Ok(0),
         }
     }
 
@@ -336,6 +394,7 @@ impl PaneBackend {
             // resizes its Terminal + PTY + reflows and republishes at the
             // new dims, which the mirror picks up on the next `poll`.
             PaneBackend::L3(c) => c.forward_resize(cols, rows),
+            PaneBackend::Vacant(v) => v.resize(cols, rows),
         }
     }
 
@@ -349,6 +408,7 @@ impl PaneBackend {
                     SessionState::Active
                 }
             }
+            PaneBackend::Vacant(_) => SessionState::Exited,
         }
     }
 
@@ -361,7 +421,7 @@ impl PaneBackend {
     pub fn feed_terminal(&mut self, bytes: &[u8]) {
         match self {
             PaneBackend::Local(s) => s.feed_terminal(bytes),
-            PaneBackend::L3(_) => {}
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => {}
         }
     }
 
@@ -371,7 +431,7 @@ impl PaneBackend {
     pub fn drain_raw(&mut self) -> Vec<u8> {
         match self {
             PaneBackend::Local(s) => s.drain_raw(),
-            PaneBackend::L3(_) => Vec::new(),
+            PaneBackend::L3(_) | PaneBackend::Vacant(_) => Vec::new(),
         }
     }
 }
@@ -1034,6 +1094,27 @@ impl Pane {
         }
     }
 
+    /// RFC-004 B.2 — a slot whose session failed to assemble at boot.
+    /// Keeps the sid alive so the slot never compacts; the revive path
+    /// (keystroke on an exited pane) respawns the same session id.
+    pub fn new_vacant(session_id: u64, cols: u16, rows: u16) -> Self {
+        Self {
+            session: PaneBackend::Vacant(VacantPane::new(session_id, cols, rows)),
+            view_offset: 0,
+            last_seen_scroll_push: 0,
+            update_pending: false,
+            tools: Vec::new(),
+            active_highlight: None,
+            search: None,
+        }
+    }
+
+    /// Vacant slot? (RFC-004 B.2) — the revive-on-keystroke path
+    /// covers these in addition to exited L3 panes.
+    pub fn is_vacant(&self) -> bool {
+        matches!(self.session, PaneBackend::Vacant(_))
+    }
+
     /// L3-backed?  Container input routing forwards key *events* to L3
     /// instead of encoding PTY bytes locally.
     pub fn is_l3(&self) -> bool {
@@ -1099,6 +1180,8 @@ impl Pane {
                     | ((cc as u64) << 16)
                     | (cr as u64)
             }
+            // Static message grid — never changes after construction.
+            PaneBackend::Vacant(_) => 0,
         }
     }
 

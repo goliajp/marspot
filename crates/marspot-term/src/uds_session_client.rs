@@ -103,6 +103,23 @@ pub fn wait_for_entry(id: u64, timeout: Duration) -> io::Result<std::path::PathB
 /// fresh-spawn territory each install, which the user saw as
 /// "missing pane after update".  Retry with 20 ms backoff until
 /// the supplied timeout, then surface the last error.
+///
+/// RFC-004 C.2 — the retry surface widens beyond ConnectionRefused;
+/// every transient boot-window shape retries until the deadline:
+///
+///   - `NotFound`: a resurrect spawn read a STALE entry.toml (dead
+///     dir kept on disk by design) whose sock file is gone — the
+///     fresh child rebinds momentarily.  The old fail-fast here made
+///     "dead dir without a sock file" unrecoverable, and the old
+///     boot deleted the session over it.
+///   - `UnexpectedEof` / `InvalidData` / `ConnectionReset`: connect
+///     landed inside the execv swap or mid-handshake of a booting
+///     child.  A REAL proto mismatch also lands here and now costs
+///     the full deadline instead of failing fast — acceptable: it
+///     only happens on version skew, and the alternative
+///     (fail-fast) turned boot races into lost panes.
+///
+/// The deadline bounds every retry; the last error surfaces.
 pub fn wait_and_connect(id: u64, timeout: Duration) -> io::Result<UnixStream> {
     let socket_path = wait_for_entry(id, timeout)?;
     let deadline = Instant::now() + timeout;
@@ -110,8 +127,14 @@ pub fn wait_and_connect(id: u64, timeout: Duration) -> io::Result<UnixStream> {
         match connect_with_handshake(&socket_path) {
             Ok(s) => return Ok(s),
             Err(e)
-                if e.kind() == io::ErrorKind::ConnectionRefused
-                    && Instant::now() < deadline =>
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::NotFound
+                        | io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::InvalidData
+                        | io::ErrorKind::ConnectionReset
+                ) && Instant::now() < deadline =>
             {
                 thread::sleep(Duration::from_millis(20));
                 continue;
