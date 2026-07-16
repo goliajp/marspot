@@ -525,7 +525,12 @@ fn do_l3_execv_swap(
     let started = Instant::now();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
 
-    let body = terminal.serialize_snapshot();
+    // v5 LIVE snapshot (RFC-004 C.1 amendment): the TUI on this PTY
+    // survives the execv, so an alt screen must come back verbatim —
+    // the fold form here swapped the visible base out from under the
+    // TUI's incremental repaints (claudecode's input box vanished
+    // until its next full repaint).
+    let body = terminal.serialize_snapshot_live();
     let state_path = session_state_bin_path(id);
     let _ = std::fs::write(&state_path, &body);
     // F3+10 — flush the FileScrollback BufWriter tail to the kernel
@@ -1041,6 +1046,19 @@ fn main() {
                 control_stream_fd = h.control_stream_fd,
                 child_pid = h.child_pid
             );
+            // RFC-004 C.1 amendment — nudge the PTY's foreground
+            // process group with SIGWINCH after the snapshot restore.
+            // A full-screen TUI (claudecode/vim) can't know the
+            // terminal emulator behind its PTY just swapped images;
+            // if any repaint drift slipped through, WINCH makes it
+            // re-query the size and repaint from scratch.  Harmless
+            // when nothing drifted (repaint is idempotent).
+            unsafe {
+                let pg = libc::tcgetpgrp(h.master_fd);
+                if pg > 0 {
+                    libc::killpg(pg, libc::SIGWINCH);
+                }
+            }
             let local = LocalSession::from_handoff(
                 id, h.master_fd, h.child_pid, h.cols, h.rows, terminal, wake,
             )

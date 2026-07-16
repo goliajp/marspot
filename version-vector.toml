@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.0"  # RFC-004 D.1 — L1 入口跑 migrate_legacy_state_root(Caches → Application Support,rename+symlink 一次性迁移).前 0.6.88 笔记见 git blame.
-core    = "0.12.0"  # RFC-004 装配身份制全量 — pane 永不漂移永不压缩:按格 sid 装配(活→reattach/死→同 id 复活/失败→Vacant 占位)、身份验证判活(pid 复用不再误杀)、reattach 失败降级复活不删目录、孤儿收养、回收站 GC(retired/ 14 天)、标题按 sid 绑定、[+] cap 统一 36、C.2 连接重试面扩大、状态根迁移.前 0.11.62 笔记见 git blame.
-session = "0.11.1"  # C.1 首次周期快照升 INFO 级(真机可验证 C.1 存活);steady 30s 仍 debug.前 0.11.0 RFC-004 L3 侧 — session 目录 flock(A.3)、周期快照 30s 防抖(C.1,硬宕机窗口有界)、快照 v4 alt 折叠(B13)+ B14 tail 序反修复、scrollback 损坏隔离重建(A.4)、.next_id 自愈(A.1)、Drop 去毁灭化.前 0.10.21 笔记见 git blame.
+shell   = "0.7.1"  # 共享 crate(snapshot v5)重链接.前 0.7.0 RFC-004 D.1 — L1 入口跑 migrate_legacy_state_root(Caches → Application Support,rename+symlink 一次性迁移).前 0.6.88 笔记见 git blame.
+core    = "0.12.1"  # 共享 crate(snapshot v5)重链接.前 0.12.0 RFC-004 装配身份制全量 — pane 永不漂移永不压缩:按格 sid 装配(活→reattach/死→同 id 复活/失败→Vacant 占位)、身份验证判活(pid 复用不再误杀)、reattach 失败降级复活不删目录、孤儿收养、回收站 GC(retired/ 14 天)、标题按 sid 绑定、[+] cap 统一 36、C.2 连接重试面扩大、状态根迁移.前 0.11.62 笔记见 git blame.
+session = "0.11.2"  # 快照 v5 live 变体 — execv 场景 alt 屏原样恢复(fold 语义误用导致输入框消失/重绘慢的现场回归修复)+ execv 恢复后 SIGWINCH 前台进程组兜底.前 0.11.1 C.1 快照升 INFO — session 目录 flock(A.3)、周期快照 30s 防抖(C.1,硬宕机窗口有界)、快照 v4 alt 折叠(B13)+ B14 tail 序反修复、scrollback 损坏隔离重建(A.4)、.next_id 自愈(A.1)、Drop 去毁灭化.前 0.10.21 笔记见 git blame.

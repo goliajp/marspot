@@ -842,7 +842,18 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.0**
+Current: **0.11.2**
+
+### 0.11.2
+
+快照 v5 — LIVE 变体(execv 专用)。v4 的 alt 折叠语义只适用于死亡
+快照(冷启复活,进程已死);execv 时 TUI 还活着还在 alt 里,折叠
+把可见屏换成主屏,TUI 增量重绘落在错误基底上(现场回归:reinstall
+后 claudecode 输入框消失、恢复慢)。v5 live:alt 屏 verbatim 序列
+化(尺寸/光标/滚动区/ring/cells),apply 重建 saved_main + alt 现
+场,bit 级延续;恢复后向 PTY 前台进程组发 SIGWINCH 兜底全量重绘。
+死亡快照(periodic/SIGTERM)保持 fold。0.11.1:首次周期快照升
+INFO 级便于真机验证 C.1 存活。
 
 ### 0.11.0
 
