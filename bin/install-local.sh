@@ -35,9 +35,17 @@ APP="$HOME/.local/Marspot.app"
 MACOS="$APP/Contents/MacOS"
 PLIST="$APP/Contents/Info.plist"
 # Production state dir — the default; never set MARSPOT_STATE_DIR here.
-TREE="$HOME/Library/Caches/marspot/binaries"
+# RFC-004 D.1: the root moved to Application Support; the old Caches
+# path survives as a symlink after the binaries' one-time migration.
+# Prefer the new root, fall back to the legacy one so this script
+# works on both sides of the migration boundary.
+STATE_ROOT="$HOME/Library/Application Support/marspot"
+if [[ ! -e "$STATE_ROOT" && -e "$HOME/Library/Caches/marspot" ]]; then
+  STATE_ROOT="$HOME/Library/Caches/marspot"
+fi
+TREE="$STATE_ROOT/binaries"
 SUP_LOG="$HOME/Library/Logs/Marspot/marspot.log"
-PROD_PID_FILE="$HOME/Library/Caches/marspot/shell.pid"
+PROD_PID_FILE="$STATE_ROOT/shell.pid"
 
 # Is the installed GUI shell actually running?  Uses its pid file
 # (written on startup), NOT a `pgrep marspot-shell` — that substring

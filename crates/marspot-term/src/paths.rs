@@ -20,12 +20,81 @@ fn home() -> PathBuf {
 }
 
 /// State root: `$MARSPOT_STATE_DIR`, else
-/// `~/Library/Caches/marspot` (the installed app's world).
+/// `~/Library/Application Support/marspot` (the installed app's
+/// world).
+///
+/// RFC-004 D.1 — moved OUT of `~/Library/Caches/marspot`: macOS
+/// treats Caches as purgeable under disk pressure (and cleaner
+/// tools wipe it wholesale), which is no home for the user's
+/// terminal history.  `migrate_legacy_state_root()` renames the old
+/// root here once and leaves a symlink behind, so live processes
+/// (open fds survive the rename) and not-yet-recompiled binaries
+/// (paths resolve through the symlink) never notice.
 pub fn state_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("MARSPOT_STATE_DIR") {
         return PathBuf::from(dir);
     }
-    home().join("Library/Caches/marspot")
+    home().join("Library/Application Support/marspot")
+}
+
+/// RFC-004 D.1 — one-time migration `~/Library/Caches/marspot` →
+/// `~/Library/Application Support/marspot`.  Call at every binary's
+/// earliest entry (before logx / any path use).  Idempotent + cheap
+/// (two lstats on the steady state).  Rules:
+///
+///   - `MARSPOT_STATE_DIR` set (dev/test sandbox) → no-op
+///   - new root already a real dir → done (steady state)
+///   - old root a real dir (not the symlink we leave behind) →
+///     `rename(old, new)` + `symlink(new, old)`.  rename is atomic
+///     on the same volume; open fds keep working; stragglers that
+///     still compute the old path resolve through the symlink.
+///   - neither exists → nothing to migrate (fresh install; dirs are
+///     created lazily by whoever needs them)
+///
+/// The symlink step failing is non-fatal (data already safe at the
+/// new root); worst case an OLD binary recreates a plain dir at the
+/// old path and its writes land in a parallel world until the next
+/// image swap — the same exposure every migration scheme has for
+/// un-upgraded writers, accepted.
+pub fn migrate_legacy_state_root() {
+    if std::env::var_os("MARSPOT_STATE_DIR").is_some() {
+        return;
+    }
+    let new_root = state_root();
+    let old_root = home().join("Library/Caches/marspot");
+    // symlink_metadata: never follow — the post-migration old path
+    // IS a symlink and must read as "already migrated".
+    let old_is_real_dir = std::fs::symlink_metadata(&old_root)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    let new_exists = std::fs::symlink_metadata(&new_root).is_ok();
+    if !old_is_real_dir || new_exists {
+        return;
+    }
+    if let Some(parent) = new_root.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::rename(&old_root, &new_root) {
+        Ok(()) => {
+            let _ = std::os::unix::fs::symlink(&new_root, &old_root);
+        }
+        Err(e) => {
+            // Keep running on the old root via the unchanged
+            // computed paths?  No — state_root() already answers the
+            // NEW path.  A failed rename with no new dir leaves
+            // lazy create_dir_all to start fresh at the new root,
+            // which silently forks the user's state.  Fall back HARD:
+            // symlink new → old so both names alias the surviving
+            // data until a later boot can migrate for real.
+            let _ = std::os::unix::fs::symlink(&old_root, &new_root);
+            eprintln!(
+                "[marspot] state-root migration failed ({e}); \
+                 aliased {} → {}",
+                new_root.display(),
+                old_root.display()
+            );
+        }
+    }
 }
 
 /// Log directory.  The installed app logs to the conventional
@@ -70,11 +139,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_root_is_under_home_caches() {
+    fn default_root_is_under_application_support() {
         if std::env::var_os("MARSPOT_STATE_DIR").is_none() {
-            assert!(state_root().ends_with("Library/Caches/marspot"));
+            assert!(
+                state_root().ends_with("Library/Application Support/marspot")
+            );
             assert!(log_dir().ends_with("Library/Logs/Marspot"));
         }
+    }
+
+    /// RFC-004 D.1 — migration renames the legacy Caches root to the
+    /// new location and leaves a symlink; idempotent on re-run.
+    /// Uses a fake $HOME (nextest = process-per-test; safe to set).
+    #[test]
+    fn migrate_legacy_root_renames_and_symlinks() {
+        let fake_home = std::env::temp_dir().join(format!(
+            "marspot-d1-home-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fake_home);
+        let old = fake_home.join("Library/Caches/marspot");
+        std::fs::create_dir_all(old.join("sessions/7")).unwrap();
+        std::fs::write(old.join("sessions/7/bytelog"), b"H").unwrap();
+        // SAFETY: test process, no concurrent env readers.
+        unsafe {
+            std::env::remove_var("MARSPOT_STATE_DIR");
+            std::env::set_var("HOME", &fake_home);
+        }
+        migrate_legacy_state_root();
+        let new = fake_home.join("Library/Application Support/marspot");
+        assert!(
+            std::fs::symlink_metadata(&new).unwrap().is_dir(),
+            "new root must be a real dir"
+        );
+        assert_eq!(
+            std::fs::read(new.join("sessions/7/bytelog")).unwrap(),
+            b"H",
+            "content must travel"
+        );
+        assert!(
+            std::fs::symlink_metadata(&old)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "old path must be a symlink"
+        );
+        // Old path still resolves to the same content (straggler
+        // binaries keep working through the alias).
+        assert_eq!(std::fs::read(old.join("sessions/7/bytelog")).unwrap(), b"H");
+        // Idempotent.
+        migrate_legacy_state_root();
+        assert!(std::fs::symlink_metadata(&new).unwrap().is_dir());
+        let _ = std::fs::remove_dir_all(&fake_home);
     }
 
     #[test]

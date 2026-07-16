@@ -1842,6 +1842,8 @@ impl Marspot {
 }
 
 fn main() {
+    // RFC-004 D.1 — must precede logx / any path computation.
+    marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("gui");
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {

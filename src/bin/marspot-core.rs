@@ -4666,6 +4666,8 @@ fn assemble_panes_at_boot(
 }
 
 fn main() {
+    // RFC-004 D.1 — must precede logx / any path computation.
+    marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("core");
     lx_event!(
         "CORE_BOOT",

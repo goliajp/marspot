@@ -929,6 +929,8 @@ fn setup_shm() -> (GridShmWriter, u16, u16) {
 }
 
 fn main() {
+    // RFC-004 D.1 — must precede logx / any path computation.
+    marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
     lx_event!(
         "SESSION_BOOT",

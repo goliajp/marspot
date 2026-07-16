@@ -2556,6 +2556,9 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
 }
 
 fn main() {
+    // RFC-004 D.1 — one-time Caches → Application Support state-root
+    // migration.  Must run before logx / any path computation.
+    marspot::paths::migrate_legacy_state_root();
     // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
     // head`) exit cleanly with the standard EPIPE convention instead
     // of panicking with a Rust backtrace.  SIG_DFL on macOS for SIGPIPE
