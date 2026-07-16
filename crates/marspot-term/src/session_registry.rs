@@ -87,6 +87,37 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
     Ok(next)
 }
 
+/// RFC-004 A.3 — per-session-dir owner lock.  Exactly one L3 process
+/// may own `sessions/<id>/` at a time; ownership is an exclusive
+/// non-blocking `flock` on `sessions/<id>/.lock`, held for the
+/// process's whole life (the fd is deliberately leaked into the
+/// process — flock releases on last close, which includes process
+/// death and survives execv when CLOEXEC is cleared).
+///
+/// Before this lock, mutual exclusion was pure convention ("L2 only
+/// spawns dead ids") — a second L3 landing on the same id would
+/// unlink the first's socket and overwrite entry.toml, and both
+/// would interleave appends into the same unlocked scrollback.bin
+/// (the session-347 corruption class).
+///
+/// Returns the held lock file on success; `WouldBlock` when another
+/// process owns the dir.
+pub fn try_lock_session_dir(id: u64) -> io::Result<std::fs::File> {
+    let dir = session_dir(id);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(".lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    let r = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if r < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
 /// RFC-004 A.2 — identity-verified liveness.  `kill(pid, 0)` alone is
 /// NOT a valid "this session's L3 is alive" test: after a reboot (or
 /// any long gap) the recorded pid may have been recycled by an
@@ -466,6 +497,25 @@ mod tests {
         std::fs::write(next_id_path(), "2").expect("corrupt counter");
         let got = allocate_next_session_id().expect("allocate");
         assert_eq!(got, 14, "corrupt low counter must not re-issue 3");
+    }
+
+    /// RFC-004 A.3 — session-dir lock is exclusive per id, released
+    /// on drop, and independent across ids.
+    #[test]
+    fn session_dir_lock_is_exclusive_and_releases_on_drop() {
+        let _g = StateDirGuard::new();
+        let first = try_lock_session_dir(21).expect("first lock");
+        // Same id: second attempt must fail while the first is held.
+        let second = try_lock_session_dir(21);
+        assert!(
+            second.is_err(),
+            "second lock on same id must be refused: {second:?}"
+        );
+        // Different id: independent.
+        let _other = try_lock_session_dir(22).expect("independent id");
+        // Release → re-acquire succeeds.
+        drop(first);
+        try_lock_session_dir(21).expect("relock after release");
     }
 
     /// RFC-004 A.2 — identity-verified liveness: our own pid is alive

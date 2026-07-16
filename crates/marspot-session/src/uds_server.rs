@@ -26,9 +26,9 @@ use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use marspot_term::{lx_event, lx_info, lx_warn};
+use marspot_term::{lx_error, lx_event, lx_info, lx_warn};
 use marspot_term::session_registry::{
-    cleanup_stale_socket, delete_session, session_dir, session_socket_path,
+    cleanup_stale_socket, session_dir, session_socket_path,
     write_session_entry, SessionEntry, PROTO_VERSION,
 };
 use marspot_term::shell_proto::{
@@ -54,6 +54,14 @@ pub struct SessionListener {
     /// on-disk sock, and the registry entry all survive the image
     /// swap (new image inherits the fd and adopts the entry as-is).
     suppress_drop: bool,
+    /// RFC-004 A.3 — exclusive flock on `sessions/<id>/.lock`, held
+    /// for the life of this process.  `None` only on the execv-handoff
+    /// path, where the pre-execv image's lock fd is still open in our
+    /// (same) process — the flock survives the image swap because the
+    /// open file description does.  Dropping this releases the lock;
+    /// `prepare_for_execv` clears its CLOEXEC + mem::forgets via the
+    /// suppress_drop path so ownership carries across the swap.
+    dir_lock: Option<std::fs::File>,
 }
 
 impl SessionListener {
@@ -73,6 +81,25 @@ impl SessionListener {
     ) -> io::Result<Self> {
         let dir = session_dir(id);
         std::fs::create_dir_all(&dir)?;
+        // RFC-004 A.3 — take exclusive ownership of the session dir
+        // BEFORE touching anything in it.  If another L3 holds the
+        // lock, unlinking its socket / overwriting its entry.toml
+        // would orphan a live session (347-class corruption); refuse
+        // to boot instead.
+        let dir_lock = match marspot_term::session_registry::try_lock_session_dir(id) {
+            Ok(f) => f,
+            Err(e) => {
+                lx_error!(
+                    "l3.session_dir_locked",
+                    &format!("{e} — another L3 owns sessions/{id}; refusing to bind"),
+                    session_id = id
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    format!("session dir {id} owned by another live L3"),
+                ));
+            }
+        };
         cleanup_stale_socket(id);
 
         let socket_path = session_socket_path(id);
@@ -106,8 +133,17 @@ impl SessionListener {
             shell_child_pid,
         };
         if let Err(e) = write_session_entry(&entry) {
-            // Rollback so list / scan won't see a phantom entry.
-            let _ = delete_session(id);
+            // Narrow rollback so list / scan won't see a phantom
+            // entry: unlink the sock + entry.toml only.  This bind
+            // may be a RESURRECTION into a dir that already holds
+            // scrollback.bin / bytelog — nuking the whole dir here
+            // (the old delete_session rollback) would destroy the
+            // very history the resurrect exists to restore
+            // (RFC-004 invariant 4).
+            cleanup_stale_socket(id);
+            let _ = std::fs::remove_file(
+                marspot_term::session_registry::session_entry_path(id),
+            );
             return Err(e);
         }
 
@@ -125,6 +161,7 @@ impl SessionListener {
             accept_thread: Some(accept_thread),
             keep_listener: Some(listener),
             suppress_drop: false,
+            dir_lock: Some(dir_lock),
         })
     }
 
@@ -179,6 +216,10 @@ impl SessionListener {
             accept_thread: Some(accept_thread),
             keep_listener: Some(listener),
             suppress_drop: false,
+            // RFC-004 A.3 — the pre-execv image's lock fd is still
+            // open in this same process (CLOEXEC cleared before the
+            // swap), so the flock is already ours; nothing to acquire.
+            dir_lock: None,
         })
     }
 
@@ -208,6 +249,25 @@ impl SessionListener {
                 return Err(io::Error::last_os_error());
             }
         }
+        // RFC-004 A.3 — the session-dir flock must survive the image
+        // swap: clear CLOEXEC on the lock fd so the kernel doesn't
+        // close it (and release the lock) during execv.  The new
+        // image never learns the fd number — it doesn't need to; the
+        // flock lives on the open file description until process
+        // death.  The fd itself is leaked into the new image via the
+        // suppress_drop/mem::forget path in Drop.
+        if let Some(lock) = self.dir_lock.as_ref() {
+            let lfd = lock.as_raw_fd();
+            unsafe {
+                let flags = libc::fcntl(lfd, libc::F_GETFD);
+                if flags < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::fcntl(lfd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+        }
         self.suppress_drop = true;
         Ok(fd)
     }
@@ -230,34 +290,42 @@ impl Drop for SessionListener {
             // The new image inherits the kept listener fd + the
             // on-disk sock + entry.toml as-is; we MUST NOT unbind or
             // delete anything here.  Leak the UnixListener so its own
-            // Drop doesn't close the fd before execv runs.
+            // Drop doesn't close the fd before execv runs, and leak
+            // the dir-lock File so the flock survives the swap
+            // (RFC-004 A.3).
             if let Some(l) = self.keep_listener.take() {
                 std::mem::forget(l);
+            }
+            if let Some(lock) = self.dir_lock.take() {
+                std::mem::forget(lock);
             }
             if let Some(h) = self.accept_thread.take() {
                 std::mem::drop(h);
             }
             return;
         }
-        // Best-effort tear-down. delete_session removes the whole
-        // per-session dir (entry.toml + sock + bytelog). A
-        // crashed-not-cleanly-dropped L3 leaves all three behind; L2
-        // notices the dead pid on next scan and prunes.
-        if let Err(e) = delete_session(self.id) {
-            lx_warn!(
-                "session.listener.cleanup_failed",
-                &format!("{e}"),
-                session_id = self.id
-            );
-        }
-        // The accept thread is parked in accept(); closing the
-        // listener (via delete_session unlinking the sock path)
-        // unblocks it with an error and it exits.
+        // RFC-004 invariant 4: destroying the session dir (history!)
+        // is reserved for the USER's explicit pane close — and that
+        // path runs in L2 (`close_session` → delete_session).  This
+        // Drop used to call delete_session too, but the only way an
+        // L3 reaches a non-suppressed Drop is an abnormal unwind
+        // (panic in the main loop) — exactly when the user most
+        // needs the on-disk state to survive for resurrection.  So:
+        // unlink only the socket (a dead L3's sock is useless and
+        // blocks nothing thanks to cleanup_stale_socket, but tidy is
+        // tidy), keep entry.toml + bytelog + scrollback + state.bin.
+        // The next L2 boot resurrects or retires the dir.
+        cleanup_stale_socket(self.id);
+        lx_warn!(
+            "session.listener.abnormal_drop",
+            "SessionListener dropped outside execv/clean-exit — \
+             session dir preserved for resurrection",
+            session_id = self.id
+        );
+        // The accept thread is parked in accept(); it exits when its
+        // accept() fails on the unlinked socket.  The OS reaps it
+        // shortly after process exit anyway.
         if let Some(h) = self.accept_thread.take() {
-            // Don't block tear-down on a thread we can't gracefully
-            // signal — it'll exit when its accept() fails on the
-            // unlinked socket. The OS reaps it shortly after process
-            // exit anyway.
             std::mem::drop(h);
         }
     }
