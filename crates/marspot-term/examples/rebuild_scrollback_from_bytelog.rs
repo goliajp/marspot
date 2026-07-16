@@ -13,9 +13,15 @@
 //! Usage:
 //!   cargo run --release -p marspot-term --example \
 //!     rebuild_scrollback_from_bytelog -- \
-//!     <bytelog-file> <staging-state-dir> <session-id> <cols> <rows>
+//!     <bytelog-file> <staging-state-dir> <session-id> <cols> <rows> \
+//!     [dump-text-path]
 //!
 //! Output lands in `<staging-state-dir>/sessions/<id>/scrollback.{bin,idx}`.
+//! With the optional 6th arg, ALSO writes a human-readable UTF-8 dump
+//! (every scrollback line + the final visible grid) to that path —
+//! for TUI-heavy sessions (claudecode, vim) almost nothing scrolls
+//! off-grid, so the final grid is where the recoverable content
+//! actually lives.
 //! ALWAYS point this at a staging dir, never the live state dir — the
 //! live L3 owns its files.  Swap protocol (proven on 347): SIGSTOP the
 //! L3 → freeze-copy its bytelog → replay here → rename the rebuilt
@@ -29,13 +35,14 @@ use std::io::Read;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 6 {
+    if args.len() != 6 && args.len() != 7 {
         eprintln!(
-            "usage: {} <bytelog> <staging-state-dir> <session-id> <cols> <rows>",
+            "usage: {} <bytelog> <staging-state-dir> <session-id> <cols> <rows> [dump-text-path]",
             args[0]
         );
         std::process::exit(2);
     }
+    let dump_text_path = args.get(6).cloned();
     let bytelog_path = &args[1];
     let staging_dir = &args[2];
     let session_id: u64 = args[3].parse().expect("session-id must be u64");
@@ -93,5 +100,37 @@ fn main() {
                 .collect();
             eprintln!("  [{i}] {}", text.trim_end());
         }
+    }
+
+    // Optional human-readable dump: full scrollback + the final
+    // visible grid.  TUI sessions rewrite in place, so the grid at
+    // end-of-bytelog is usually the recoverable payload.
+    if let Some(path) = dump_text_path {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(
+            std::fs::File::create(&path).expect("create dump-text file"),
+        );
+        writeln!(out, "# session {session_id} — bytelog replay dump").unwrap();
+        writeln!(out, "# scrollback: {lines} lines").unwrap();
+        for i in 0..lines {
+            if let Some(cells) = term.grid().scrollback_line(i) {
+                let text: String = cells
+                    .iter()
+                    .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+                    .collect();
+                writeln!(out, "{}", text.trim_end()).unwrap();
+            }
+        }
+        writeln!(out, "# ---- final visible grid ({cols}x{rows}) ----").unwrap();
+        let grid = term.grid();
+        for r in 0..grid.rows() {
+            let mut line = String::with_capacity(cols as usize);
+            for c in 0..grid.cols() {
+                let ch = grid.cell(c, r).ch;
+                line.push(if ch == '\0' { ' ' } else { ch });
+            }
+            writeln!(out, "{}", line.trim_end()).unwrap();
+        }
+        eprintln!("text dump → {path}");
     }
 }

@@ -23,9 +23,14 @@
 ## 线性 checklist(中途不决策,顺序执行)
 
 ### Phase 0 — 数据抢救(先于一切代码改动)
-- [ ] 0.1 用 `rebuild_scrollback_from_bytelog` 重放孤儿 369 / 373 /
+- [x] 0.1 用 `rebuild_scrollback_from_bytelog` 重放孤儿 369 / 373 /
       374 / 380 / 381 的 bytelog → 重建 scrollback.{bin,idx} 放回
       各自 session 目录(它们已死,无需 SIGSTOP 协议)
+      **执行记录 2026-07-17**:工具加了第 6 参数 dump-text(TUI 会
+      话内容在最终网格不在 scrollback);5 个孤儿的文本转储落在
+      `~/Library/Caches/marspot/rescue-2026-07-17/session-*.txt`;
+      369/373 重建的 bin/idx 已放回。重放过程中发现 **B13**(见下)
+      —— alt-screen 历史本就从未落盘,重放能拿回的就是文本转储。
 
 ### Phase A — 注册表与身份基础(infra)
 - [ ] A.1 (B5) `allocate_next_session_id` 自愈:counter 值与现存
@@ -56,9 +61,12 @@
       断言每格 sid/标题/history 对位;spawn 失败 → 占位不压缩;
       乱序 readdir 不影响槽位
 ### Phase C — 宕机窗口(infra,L3)
-- [ ] C.1 (B4) L3 周期快照:自上次快照后有 feed 才写,30s 防抖,
-      tmp+rename 原子;与 one-shot apply 语义兼容(apply 后删,
-      周期性重建)
+- [ ] C.1 (B4+B13) L3 周期快照:自上次快照后有 feed 才写,30s 防
+      抖,tmp+rename 原子;与 one-shot apply 语义兼容(apply 后删,
+      周期性重建)。**快照 v4**:在 alt-screen 时同时序列化
+      saved_main(主 grid + 主 scrollback 指针)与 alt grid + alt
+      ring tail(cap 同 20k 行),恢复时重建 saved_main 结构 ——
+      没有这个,claudecode pane 宕机快照恢复只剩 alt 表面一屏。
 - [ ] C.2 (B2) `wait_and_connect` 重试面扩大:握手 EOF /
       InvalidData 也在 deadline 内重试;reattach 超时 2s → 5s
 
@@ -96,6 +104,7 @@
 | B10 doc drift(.corrupt) | A.4 |
 | B11 常量分叉 | E.1 |
 | B12 sid=0 塌缩 | B.1 + E.2 |
+| **B13 alt-screen 历史不持久化**(Phase 0 重放中发现:`terminal.rs:1790` alt grid 用 Memory scrollback,claudecode 等 TUI 的滚动历史从不落盘;唯一载体 = 优雅退出的 state.bin → 硬宕机全灭。现网 369/374/381 scrollback.bin 只有 32B header 即此因) | C.1(快照 v4 覆盖 alt) |
 
 ## 审计原始报告
 
