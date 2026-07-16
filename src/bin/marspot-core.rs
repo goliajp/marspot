@@ -2680,10 +2680,11 @@ impl CoreApp {
 
     /// Top-level link hit-test from physical pixel coordinates.
     /// Folds the (x_phys, y_phys) → (pane, col, row) step the
-    /// renderer-aware caller would otherwise repeat, and filters
-    /// out the inert `Email` kind so callers can treat a `Some`
-    /// as actionable.  Returns owned text + kind so the result can
-    /// be stashed in `ContextMenuState.link` and survive the menu's
+    /// renderer-aware caller would otherwise repeat.  Every LinkKind
+    /// is actionable (URL / File / Ip open, Email mails, Uuid
+    /// copies), so a `Some` always warrants a menu.  Returns owned
+    /// text + kind so the result can be stashed in
+    /// `ContextMenuState.link` and survive the menu's
     /// clear-on-dispatch.
     fn hit_test_link_at_xy(
         &self,
