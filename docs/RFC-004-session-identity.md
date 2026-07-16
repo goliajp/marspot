@@ -1,6 +1,6 @@
 # RFC-004 — Session identity: pane 永不漂移
 
-> Status: EXECUTING (autorun).  2026-07-17.
+> Status: DONE.  2026-07-17(全量上线 + 宕机现场恢复实证).
 > 起因:宕机重启后 12 pane 变 10、history 按位置错位。审计结论:
 > pane↔session 绑定是位置制,装配失败压缩空位,错误处理毁灭式
 > (SIGKILL + delete_session)。本 RFC 把绑定改成身份制并修掉审计
