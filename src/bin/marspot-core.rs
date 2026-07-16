@@ -61,6 +61,42 @@ use marspot::HEADER_PT;
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
 
+/// Does this raw scanned-IP text look like a bare, unbracketed IPv6
+/// address that needs `[...]` wrapping before it can appear in an
+/// `http://` URL?  Bracketed input (`[::1]:8080`) is already URL-safe
+/// and returns false.  Bare IPv4 (`1.2.3.4`, `1.2.3.4:8080`) has at
+/// most one `:` and returns false.  Bare IPv6 (`::1`, `2001:db8::1`)
+/// has `::` or `≥3` colons and returns true.
+fn ip_text_is_bare_ipv6(text: &str) -> bool {
+    if text.starts_with('[') || !text.contains(':') {
+        return false;
+    }
+    if text.contains("::") {
+        return true;
+    }
+    text.chars().filter(|&c| c == ':').count() >= 3
+}
+
+#[cfg(test)]
+mod ip_bracket_tests {
+    use super::ip_text_is_bare_ipv6;
+    #[test]
+    fn bracketed_and_ipv4_do_not_need_wrapping() {
+        assert!(!ip_text_is_bare_ipv6("[::1]:8080"));
+        assert!(!ip_text_is_bare_ipv6("47.96.114.231"));
+        assert!(!ip_text_is_bare_ipv6("192.168.1.1:8080"));
+        assert!(!ip_text_is_bare_ipv6("10.0.0.5/status"));
+    }
+    #[test]
+    fn bare_ipv6_needs_wrapping() {
+        assert!(ip_text_is_bare_ipv6("::1"));
+        assert!(ip_text_is_bare_ipv6("2001:db8::1"));
+        assert!(ip_text_is_bare_ipv6(
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+        ));
+    }
+}
+
 /// Hand `arg` off to macOS `open(1)` so the system routes it to the
 /// right helper: URL → default browser, directory → Finder, file →
 /// default app for the file's UTI.  Fire and forget; we don't wait
@@ -334,10 +370,20 @@ fn link_menu_items_for(
 ) -> Vec<marspot::ui::components::MenuItem> {
     use marspot::grid_links::LinkKind;
     use marspot::ui::components::MenuItem;
+    // UUID is copy-only (nothing sensible to `open(1)`); every other
+    // kind surfaces both Copy and Open.
+    if link.kind == LinkKind::Uuid {
+        return vec![MenuItem::entry(
+            "Copy UUID",
+            ContextMenuAction::CopyLink.tag(),
+        )];
+    }
     let (open_label, copy_label) = match link.kind {
         LinkKind::Url => ("Open URL", "Copy URL"),
         LinkKind::File => ("Open file", "Copy path"),
         LinkKind::Email => ("Send email", "Copy email"),
+        LinkKind::Ip => ("Open in browser", "Copy IP"),
+        LinkKind::Uuid => unreachable!("handled above"),
     };
     vec![
         MenuItem::entry(copy_label, ContextMenuAction::CopyLink.tag()),
@@ -391,10 +437,38 @@ mod link_menu_tests {
     /// listing each known variant pins the surface.
     #[test]
     fn every_known_linkkind_is_handled() {
-        for kind in [LinkKind::Url, LinkKind::File, LinkKind::Email] {
+        for kind in [
+            LinkKind::Url,
+            LinkKind::File,
+            LinkKind::Email,
+            LinkKind::Ip,
+            LinkKind::Uuid,
+        ] {
             let items = link_menu_items_for(&ctx(kind));
-            assert_eq!(items.len(), 2, "{kind:?} must be actionable");
+            let expected = match kind {
+                LinkKind::Uuid => 1, // copy-only
+                _ => 2,
+            };
+            assert_eq!(items.len(), expected, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn ip_yields_copy_ip_then_open_in_browser() {
+        let items = link_menu_items_for(&ctx(LinkKind::Ip));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "Copy IP");
+        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
+        assert_eq!(items[1].label, "Open in browser");
+        assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
+    }
+
+    #[test]
+    fn uuid_yields_copy_only() {
+        let items = link_menu_items_for(&ctx(LinkKind::Uuid));
+        assert_eq!(items.len(), 1, "UUID must be copy-only");
+        assert_eq!(items[0].label, "Copy UUID");
+        assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
     }
 }
 
@@ -1646,14 +1720,24 @@ impl CoreApp {
                 if let Some(link) = link_snapshot.as_ref() {
                     let arg = match link.kind {
                         marspot::grid_links::LinkKind::Email => {
-                            format!("mailto:{}", link.text)
+                            Some(format!("mailto:{}", link.text))
                         }
-                        // Bare IPv4 (`47.96.114.231[:port][/path]`) is
-                        // scanned as Url with no scheme; open(1) needs
-                        // one to route to a handler, so we prepend
-                        // `http://`.  Regular URLs already carry
-                        // http:// or https://, checked via
-                        // ascii-lowercase to catch odd HTTPS:// too.
+                        // Bare IP (`47.96.114.231`, `::1`,
+                        // `2001:db8::1`, `[fe80::1]:8080/foo`) needs an
+                        // `http://` scheme so `open(1)` routes it —
+                        // defaults to port 80.  Bare IPv6 without
+                        // brackets gets wrapped so URL parsers accept
+                        // it (colons in a hostname are ambiguous with
+                        // `host:port` otherwise).
+                        marspot::grid_links::LinkKind::Ip => {
+                            Some(if link.text.starts_with('[')
+                                || !ip_text_is_bare_ipv6(&link.text)
+                            {
+                                format!("http://{}", link.text)
+                            } else {
+                                format!("http://[{}]", link.text)
+                            })
+                        }
                         marspot::grid_links::LinkKind::Url => {
                             let head: String = link
                                 .text
@@ -1661,17 +1745,26 @@ impl CoreApp {
                                 .take(8)
                                 .flat_map(char::to_lowercase)
                                 .collect();
-                            if head.starts_with("http://")
-                                || head.starts_with("https://")
-                            {
-                                link.text.clone()
-                            } else {
-                                format!("http://{}", link.text)
-                            }
+                            Some(
+                                if head.starts_with("http://")
+                                    || head.starts_with("https://")
+                                {
+                                    link.text.clone()
+                                } else {
+                                    format!("http://{}", link.text)
+                                },
+                            )
                         }
-                        _ => link.text.clone(),
+                        // UUID has no Open action (menu doesn't offer
+                        // it); if a stale click reaches here, no-op.
+                        marspot::grid_links::LinkKind::Uuid => None,
+                        marspot::grid_links::LinkKind::File => {
+                            Some(link.text.clone())
+                        }
                     };
-                    spawn_open(&arg);
+                    if let Some(a) = arg {
+                        spawn_open(&a);
+                    }
                 }
             }
             ContextMenuAction::CopyLink => {
