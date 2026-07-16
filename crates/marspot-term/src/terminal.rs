@@ -646,24 +646,61 @@ impl Terminal {
     /// ```
     ///
     /// Cell width: 13 bytes/cell.  A 97×75 grid serializes to ~95 KB.
-    /// Alt-screen content (the `saved_main` shadow grid) is NOT
-    /// included — restoring to alt mode in the middle of a vim
-    /// session is a separate problem (UX-level: the user expects
-    /// to re-open vim, not have it half-resumed).
+    ///
+    /// RFC-004 C.1 (snapshot v4) — alt-screen FOLD.  When the
+    /// terminal is inside `?1049h` (claudecode / vim / any TUI), the
+    /// MAIN layer (the grid + File scrollback hiding in `saved_main`)
+    /// is what serializes as the snapshot body — its
+    /// `start_logical_idx` is in the File's index space, which is
+    /// what apply's dedup skip arithmetic assumes.  (v3 serialized
+    /// whatever grid was current; in alt mode that was the alt grid
+    /// with its RAM-ring index space, and apply's skip computed
+    /// against the File count silently dropped alt history — B13.)
+    /// The alt layer (its ring history + final visible rows) is
+    /// appended as a v4 trailing section; apply folds those lines
+    /// into scrollback, so a resurrected claudecode pane keeps its
+    /// whole conversation as scrollable history above a fresh shell.
+    /// Restoring INTO alt mode stays deliberately unsupported — the
+    /// user expects to re-launch the TUI, not have it half-resumed.
     pub fn serialize_snapshot(&self) -> Vec<u8> {
-        let cols = self.grid.cols();
-        let rows = self.grid.rows();
+        self.serialize_snapshot_capped(SNAPSHOT_SCROLLBACK_LINE_CAP)
+    }
+
+    /// `serialize_snapshot` with a caller-chosen cap on the MAIN
+    /// scrollback tail section.  The periodic-snapshot path (RFC-004
+    /// C.1) flushes the File scrollback first, so its tail only needs
+    /// to cover a residual sliver — passing a small cap keeps the
+    /// 30-second write proportional to the visible grid, not to 20k
+    /// lines of already-persisted history.  The alt fold section is
+    /// NOT capped by this (its content exists nowhere on disk).
+    pub fn serialize_snapshot_capped(&self, tail_cap: usize) -> Vec<u8> {
+        // Main layer: in alt mode the real (File-backed) grid lives
+        // in saved_main; the current grid is the alt shadow.
+        let (main_grid, main_cursor, alt_grid) = match self.saved_main.as_ref() {
+            Some(sm) => (&sm.grid, sm.cursor, Some(&self.grid)),
+            None => (&self.grid, self.grid.cursor(), None),
+        };
+        let cols = main_grid.cols();
+        let rows = main_grid.rows();
         // Pre-size: header (~50) + sc bookkeeping (~14) + cells.
         let mut out = Vec::with_capacity(64 + (cols as usize * rows as usize * CELL_BYTES));
         out.extend_from_slice(&SNAPSHOT_MAGIC.to_le_bytes());
         out.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
         out.extend_from_slice(&cols.to_le_bytes());
         out.extend_from_slice(&rows.to_le_bytes());
-        let (cc, cr) = self.grid.cursor();
+        let (cc, cr) = main_cursor;
         out.extend_from_slice(&cc.to_le_bytes());
         out.extend_from_slice(&cr.to_le_bytes());
-        out.extend_from_slice(&self.scroll_top.to_le_bytes());
-        out.extend_from_slice(&self.scroll_bot.to_le_bytes());
+        // Scroll region belongs to the CURRENT screen; after an alt
+        // fold the restored state is main-mode, so emit full-screen
+        // defaults when folding.
+        let (st, sb) = if alt_grid.is_some() {
+            (0u16, rows.saturating_sub(1))
+        } else {
+            (self.scroll_top, self.scroll_bot)
+        };
+        out.extend_from_slice(&st.to_le_bytes());
+        out.extend_from_slice(&sb.to_le_bytes());
         let mut modes: u32 = 0;
         if self.cursor_key_application_mode { modes |= 1 << 0; }
         if self.bracketed_paste_mode        { modes |= 1 << 1; }
@@ -697,7 +734,7 @@ impl Terminal {
         }
         for r in 0..rows {
             for c in 0..cols {
-                let cell = self.grid.cell(c, r);
+                let cell = main_grid.cell(c, r);
                 out.extend_from_slice(&(cell.ch as u32).to_le_bytes());
                 out.extend_from_slice(&serialize_attrs(cell.attrs));
             }
@@ -728,26 +765,33 @@ impl Terminal {
         // apply a v3 payload, it'd misread the count field, but
         // the snapshot is regenerated on next push so the damage is
         // one render frame, not persistent state.
-        let sb_len = self.grid.scrollback_len();
-        let take_n = sb_len.min(SNAPSHOT_SCROLLBACK_LINE_CAP);
+        let sb_len = main_grid.scrollback_len();
+        let take_n = sb_len.min(tail_cap);
         let start_logical_idx = sb_len.saturating_sub(take_n) as u64;
         out.extend_from_slice(&start_logical_idx.to_le_bytes());
         out.extend_from_slice(&(take_n as u32).to_le_bytes());
-        // line_idx convention: 0 = newest (just above live), sb_len-1
-        // = oldest.  We emit oldest-first so push_line on apply rebuilds
-        // the ring in the same order it grew originally.
-        for line_idx in (0..take_n).rev() {
+        // line_idx convention: 0 = OLDEST, sb_len-1 = newest (just
+        // above live) — verified empirically 2026-07-17 (RFC-004
+        // B14).  Emit the NEWEST take_n lines in oldest-first order:
+        // walk [sb_len - take_n, sb_len) ascending.  The previous
+        // `(0..take_n).rev()` had the convention backwards on BOTH
+        // axes — it took the OLDEST take_n lines in newest-first
+        // order, so every v3 apply replayed the gap with copies of
+        // the oldest history instead of the lost BufWriter tail
+        // (length arithmetic matched, content didn't — the weak
+        // `starts_with("line ")` assertions never caught it).
+        for line_idx in (sb_len - take_n)..sb_len {
             // scrollback_read_page would also do this, but we want a
             // simpler per-line walk that doesn't allocate intermediate
             // Vecs — push the cells directly.
-            if let Some(line) = self.grid.scrollback_line(line_idx) {
+            if let Some(line) = main_grid.scrollback_line(line_idx) {
                 // wrapped = the row continued from the previous (DECAWM
                 // soft-wrap).  Read straight off `Grid::scrollback_wrapped`
                 // which is kept in lockstep with `scrollback.push_line`
                 // (see `push_historic_scrollback_line` + grid scroll_up).
                 // Without this flag a cross-row URL gets chopped at the
                 // row boundary in link scans after execv.
-                let wrapped = self.grid.scrollback_wrapped(line_idx) as u8;
+                let wrapped = main_grid.scrollback_wrapped(line_idx) as u8;
                 out.push(wrapped);
                 let line_cols = line.len() as u32;
                 out.extend_from_slice(&line_cols.to_le_bytes());
@@ -761,6 +805,73 @@ impl Terminal {
                 // expects.
                 out.push(0u8);
                 out.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+        // v4 trailing alt-fold section: [alt_present u8]; when 1,
+        // [count u32] + per-line (wrapped u8, cols u32, cells) —
+        // the alt grid's ring history (oldest→newest) then its final
+        // visible rows (trailing blank rows dropped).  These lines
+        // exist ONLY in RAM (the alt grid is Memory-backed — B13),
+        // so unlike the main tail they are never deduped on apply:
+        // they simply append into scrollback and thereby reach disk.
+        // Lines are right-trimmed (default-cell suffix dropped) —
+        // Memory ring rows are stored at full grid width and a
+        // claudecode transcript is mostly air.
+        match alt_grid {
+            None => out.push(0u8),
+            Some(alt) => {
+                out.push(1u8);
+                let ring_len = alt.scrollback_len().min(SNAPSHOT_SCROLLBACK_LINE_CAP);
+                // Visible rows: drop trailing all-default rows.
+                let arows = alt.rows();
+                let acols = alt.cols();
+                let mut last_content_row: i32 = -1;
+                for r in 0..arows {
+                    for c in 0..acols {
+                        if alt.cell(c, r) != Cell::default() {
+                            last_content_row = r as i32;
+                            break;
+                        }
+                    }
+                }
+                let vis_rows = (last_content_row + 1) as usize;
+                out.extend_from_slice(&((ring_len + vis_rows) as u32).to_le_bytes());
+                let trim = |line: &[Cell]| -> usize {
+                    line.iter()
+                        .rposition(|c| *c != Cell::default())
+                        .map(|i| i + 1)
+                        .unwrap_or(0)
+                };
+                let emit = |line: &[Cell], wrapped: u8, out: &mut Vec<u8>| {
+                    let n = trim(line);
+                    out.push(wrapped);
+                    out.extend_from_slice(&(n as u32).to_le_bytes());
+                    for cell in &line[..n] {
+                        out.extend_from_slice(&(cell.ch as u32).to_le_bytes());
+                        out.extend_from_slice(&serialize_attrs(cell.attrs));
+                    }
+                };
+                let mut scratch: Vec<Cell> = Vec::with_capacity(acols as usize);
+                let alt_sb_len = alt.scrollback_len();
+                for line_idx in (alt_sb_len - ring_len)..alt_sb_len {
+                    match alt.scrollback_line(line_idx) {
+                        Some(line) => {
+                            let wrapped = alt.scrollback_wrapped(line_idx) as u8;
+                            emit(&line[..], wrapped, &mut out);
+                        }
+                        None => {
+                            out.push(0u8);
+                            out.extend_from_slice(&0u32.to_le_bytes());
+                        }
+                    }
+                }
+                for r in 0..vis_rows {
+                    scratch.clear();
+                    for c in 0..acols {
+                        scratch.push(alt.cell(c, r as u16));
+                    }
+                    emit(&scratch, 0, &mut out);
+                }
             }
         }
         out
@@ -879,6 +990,50 @@ impl Terminal {
         } else {
             Vec::new()
         };
+        // v4 alt-fold section — parsed before commit like everything
+        // else.  Absent (or v ≤ 3) → empty.
+        let alt_fold_lines: Vec<(Vec<Cell>, bool)> = if snapshot_v >= 4 {
+            let present = read_u8(&mut cur)?;
+            if present == 1 {
+                let count = read_u32(&mut cur)? as usize;
+                if count > MAX_SCROLLBACK_LINES_DESER {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "snapshot alt-fold line count {} exceeds {} cap",
+                            count, MAX_SCROLLBACK_LINES_DESER
+                        ),
+                    ));
+                }
+                let mut out = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let wrapped = read_u8(&mut cur)? != 0;
+                    let line_cols = read_u32(&mut cur)? as usize;
+                    if line_cols > MAX_LINE_COLS_DESER {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "snapshot alt-fold line width {} exceeds {} cap",
+                                line_cols, MAX_LINE_COLS_DESER
+                            ),
+                        ));
+                    }
+                    let mut line = Vec::with_capacity(line_cols);
+                    for _ in 0..line_cols {
+                        let ch_u = read_u32(&mut cur)?;
+                        let cell_attrs = read_attrs(&mut cur)?;
+                        let ch = char::from_u32(ch_u).unwrap_or(' ');
+                        line.push(Cell { ch, attrs: cell_attrs });
+                    }
+                    out.push((line, wrapped));
+                }
+                out
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
         // All parsing OK — commit to live state.
         self.grid.resize(cols, rows);
         for r in 0..rows {
@@ -946,6 +1101,15 @@ impl Terminal {
             for (line, wrapped) in scrollback_lines {
                 self.grid.push_historic_scrollback_line(&line, wrapped);
             }
+        }
+        // v4 alt fold — the alt grid's ring + final screen existed
+        // only in RAM (B13), so there's nothing to dedup against:
+        // append into scrollback, which (File-backed) also persists
+        // them for every future boot.  A resurrected claudecode pane
+        // thus keeps its conversation as scrollable history above
+        // the restored main screen.
+        for (line, wrapped) in alt_fold_lines {
+            self.grid.push_historic_scrollback_line(&line, wrapped);
         }
         Ok(())
     }
@@ -1110,7 +1274,13 @@ const SNAPSHOT_MAGIC: u32 = 0xA557_5301;
 ///     diagnosed 2026-06-21 as "scrollback rows被吞" (sid 281
 ///     insight pane, long-running tables).  v3 makes the dedup
 ///     correct by construction; F2+4 stays for v2 fall-back only.
-const SNAPSHOT_VERSION: u32 = 3;
+// v4 (RFC-004 C.1): main layer always serializes the REAL grid (in
+// alt mode that's `saved_main`, whose scrollback index space matches
+// the on-disk File — v3 got this wrong and dropped alt history on
+// apply), plus a trailing alt-fold section appending the alt ring +
+// final alt screen into scrollback on apply.  v3 payloads (no alt
+// section) still apply — the section is read only when v >= 4.
+const SNAPSHOT_VERSION: u32 = 4;
 const SNAPSHOT_MIN_COMPAT: u32 = 1;
 /// Cap on how many of the most-recent scrollback lines we serialise
 /// across an execv.  Sized so an 8-pane window full of long
@@ -2909,7 +3079,7 @@ mod tests {
             "scrollback length should survive snapshot roundtrip (was {sb_pre}, got {sb_post})"
         );
         // Spot-check: pick a known-scrollback line and check its first
-        // few cells (scrollback_line(0) is the NEWEST scrollback row).
+        // few cells (scrollback_line(0) is the OLDEST scrollback row).
         let newest = dst
             .grid()
             .scrollback_line(0)
@@ -2987,14 +3157,117 @@ mod tests {
             dst_post, src_sb_len,
             "v3 apply should fill exactly the execv gap (expected {src_sb_len}, got {dst_post})"
         );
-        // Spot-check no duplicate: scrollback line 0 should be the
-        // oldest in src, not a duplicated line.
-        let line0 = dst.grid().scrollback_line(0).expect("line 0");
-        let txt0: String = line0.iter().take(8).map(|c| c.ch).collect();
+        // RFC-004 B14 — content-exact check across the WHOLE ring:
+        // every line must be the canonical line for its index (the
+        // pre-B14 emitter refilled the gap with copies of the OLDEST
+        // lines; a prefix-only assertion never noticed).
+        for idx in 0..dst_post {
+            let line = dst.grid().scrollback_line(idx).expect("line");
+            let txt: String =
+                line.iter().take(8).map(|c| c.ch).collect::<String>().trim_end().to_string();
+            assert_eq!(
+                txt, canonical[idx],
+                "scrollback line {idx} content mismatch after gap fill"
+            );
+        }
+    }
+
+
+    /// RFC-004 C.1 (v4) — alt-screen fold.  A terminal inside
+    /// `?1049h` (claudecode-shaped) serializes the MAIN layer as the
+    /// snapshot body and appends the alt ring + final alt screen as
+    /// the v4 fold section; apply lands the alt content in
+    /// scrollback and restores the main screen.  Pre-v4, this
+    /// scenario silently lost the whole alt conversation (B13).
+    #[test]
+    fn snapshot_v4_folds_alt_screen_history_into_scrollback() {
+        const COLS: u16 = 20;
+        const ROWS: u16 = 5;
+        let mut src = Terminal::new(COLS, ROWS);
+        // Main-screen prelude: pushes some lines into main scrollback.
+        for i in 0..8u32 {
+            src.feed(format!("main {i:02}\r\n").as_bytes());
+        }
+        let main_sb = src.grid().scrollback_len();
+        assert!(main_sb > 0);
+        // Enter alt (claudecode launch) + emit a conversation that
+        // scrolls well past the alt grid.
+        src.feed(b"\x1b[?1049h");
+        for i in 0..30u32 {
+            src.feed(format!("alt line {i:02}\r\n").as_bytes());
+        }
+        src.feed(b"FINAL ALT SCREEN");
+        let bytes = src.serialize_snapshot();
+
+        let mut dst = Terminal::new(COLS, ROWS);
+        dst.apply_snapshot(&bytes).unwrap();
+        let post = dst.grid().scrollback_len();
         assert!(
-            txt0.starts_with("line "),
-            "line 0 should be the oldest scrollback line, got {:?}",
-            txt0
+            post > main_sb,
+            "alt fold must land in scrollback: main={main_sb} post={post}"
+        );
+        // Newest folded line (idx = len-1; 0 is the OLDEST — B14) =
+        // the final visible alt screen content.
+        let newest = dst.grid().scrollback_line(post - 1).expect("newest line");
+        let text: String = newest.iter().map(|c| c.ch).collect();
+        assert!(
+            text.starts_with("FINAL ALT SCREEN"),
+            "final alt screen row must be the newest history: {text:?}"
+        );
+        // And the alt conversation lines are present above it.
+        let mut found_alt0 = false;
+        for idx in 0..post {
+            if let Some(l) = dst.grid().scrollback_line(idx) {
+                let t: String = l.iter().map(|c| c.ch).collect();
+                if t.starts_with("alt line 00") {
+                    found_alt0 = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_alt0, "oldest alt ring line must survive the fold");
+        // The restored VISIBLE grid is the main screen (pre-alt), not
+        // the alt shadow — a fresh shell draws over the main prompt.
+        let row0: String = (0..COLS).map(|c| dst.grid().cell(c, 0).ch).collect();
+        assert!(
+            row0.starts_with("main "),
+            "visible grid must be the restored main screen: {row0:?}"
+        );
+        // Mode bookkeeping: restored terminal is NOT in alt mode.
+        let bytes2 = dst.serialize_snapshot();
+        // Serializing the restored terminal must produce alt_present=0
+        // (quick structural probe: v4 payload of a non-alt terminal
+        // ends with the alt_present byte = 0).
+        assert_eq!(bytes2[bytes2.len() - 1], 0, "restored term must not be alt");
+    }
+
+    /// RFC-004 C.1 — `serialize_snapshot_capped` with a small tail
+    /// cap emits only the newest N main-scrollback lines, and apply's
+    /// v3 index arithmetic still dedupes correctly against a disk
+    /// that already has everything (periodic-snapshot shape: flush
+    /// first, then a snapshot whose tail is a sliver).
+    #[test]
+    fn snapshot_capped_tail_still_dedupes_on_apply() {
+        const COLS: u16 = 20;
+        const ROWS: u16 = 5;
+        let mut src = Terminal::new(COLS, ROWS);
+        for i in 0..40u32 {
+            src.feed(format!("line {i:03}\r\n").as_bytes());
+        }
+        let full = src.grid().scrollback_len();
+        let bytes = src.serialize_snapshot_capped(4);
+        // Destination already holds the FULL history (the flushed-
+        // File periodic case).
+        let mut dst = Terminal::new(COLS, ROWS);
+        for i in 0..40u32 {
+            dst.feed(format!("line {i:03}\r\n").as_bytes());
+        }
+        assert_eq!(dst.grid().scrollback_len(), full);
+        dst.apply_snapshot(&bytes).unwrap();
+        assert_eq!(
+            dst.grid().scrollback_len(),
+            full,
+            "capped tail must not duplicate lines the disk already has"
         );
     }
 

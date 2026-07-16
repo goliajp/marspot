@@ -33,41 +33,41 @@
       —— alt-screen 历史本就从未落盘,重放能拿回的就是文本转储。
 
 ### Phase A — 注册表与身份基础(infra)
-- [ ] A.1 (B5) `allocate_next_session_id` 自愈:counter 值与现存
+- [x] A.1 (B5) `allocate_next_session_id` 自愈:counter 值与现存
       目录 max(id) 取大者 +1;`.next_id` 缺失/损坏时从目录重建
-- [ ] A.2 (B1 前置) `session_registry::pid_is_live_session(pid)`:
+- [x] A.2 (B1 前置) `session_registry::pid_is_live_session(pid)`:
       `kill(0)` + `proc_pidpath` 含 `marspot-session` 才算活
-- [ ] A.3 (B6) L3 `SessionListener::bind` 前对 `session_dir/.lock`
+- [x] A.3 (B6) L3 `SessionListener::bind` 前对 `session_dir/.lock`
       `flock(LOCK_EX|LOCK_NB)`;拿不到 = 同 id 已有 L3 → 退出。
       锁 fd 跨 execv 传递(clear CLOEXEC)
-- [ ] A.4 (B7+B10) `FileScrollback::open` 失败:实现 doc 声称的
+- [x] A.4 (B7+B10) `FileScrollback::open` 失败:实现 doc 声称的
       行为 — 改名 `.corrupt-<ts>` + 重建空文件,保持 File 模式;
       `Terminal::new` 的 eprintln 换 lx_warn(L3 stderr 是 null)
 
 ### Phase B — 装配身份制(infra,核心手术)
-- [ ] B.1 重写 L2 boot 装配为按格身份制:遍历 `saved_state.panes`,
+- [x] B.1 重写 L2 boot 装配为按格身份制:遍历 `saved_state.panes`,
       每格:sid 活(A.2 验证)→ reattach;reattach 失败 → 降级
       复活(先 SIGKILL 已验证的本家进程,不删目录);sid 死且目
       录在 → 同 id resurrect;目录无/sid=0 → 新 id fresh spawn;
       spawn 失败 → 占位 pane(保 sid)。不在 saved 里的活 session
       → append 到尾部(封 HARD_CAP,超出 SIGKILL + retire)
-- [ ] B.2 占位 pane:无进程 Pane 变体,渲染显示 session lost 提示,
+- [x] B.2 占位 pane:无进程 Pane 变体,渲染显示 session lost 提示,
       Enter/点击触发同 id 复活重试;save_session_state 保留其 sid
-- [ ] B.3 标题恢复按 sid 匹配(saved 格 sid == 实装 sid 才用位置
+- [x] B.3 标题恢复按 sid 匹配(saved 格 sid == 实装 sid 才用位置
       项,否则全表按 sid 查);cwd 同理
-- [ ] B.4 (B9) boot 尾 GC:既不在 saved 又不活的死目录 → move 到
+- [x] B.4 (B9) boot 尾 GC:既不在 saved 又不活的死目录 → move 到
       `retired/<id>-<ts>`;`retired/` 内 >14 天的删除
-- [ ] B.5 e2e 装配测试:沙箱造多 session → SIGKILL 全部 → 冷启 →
+- [x] B.5 e2e 装配测试:沙箱造多 session → SIGKILL 全部 → 冷启 →
       断言每格 sid/标题/history 对位;spawn 失败 → 占位不压缩;
       乱序 readdir 不影响槽位
 ### Phase C — 宕机窗口(infra,L3)
-- [ ] C.1 (B4+B13) L3 周期快照:自上次快照后有 feed 才写,30s 防
+- [x] C.1 (B4+B13) L3 周期快照:自上次快照后有 feed 才写,30s 防
       抖,tmp+rename 原子;与 one-shot apply 语义兼容(apply 后删,
       周期性重建)。**快照 v4**:在 alt-screen 时同时序列化
       saved_main(主 grid + 主 scrollback 指针)与 alt grid + alt
       ring tail(cap 同 20k 行),恢复时重建 saved_main 结构 ——
       没有这个,claudecode pane 宕机快照恢复只剩 alt 表面一屏。
-- [ ] C.2 (B2) `wait_and_connect` 重试面扩大:握手 EOF /
+- [x] C.2 (B2) `wait_and_connect` 重试面扩大:握手 EOF /
       InvalidData 也在 deadline 内重试;reattach 超时 2s → 5s
 
 ### Phase D — 状态根迁移(infra)
@@ -104,6 +104,7 @@
 | B10 doc drift(.corrupt) | A.4 |
 | B11 常量分叉 | E.1 |
 | B12 sid=0 塌缩 | B.1 + E.2 |
+| **B14 快照 tail 序反 + 子集错**(C.1 实施中发现:`scrollback_line(0)` 实为最旧行,v3 serializer 的 `(0..take_n).rev()` 在两个轴上都反 — 取最旧子集、按新→旧发射;execv 补 gap 实际补进最老几行的复制品,行数对内容错,弱断言测试从未抓到.已修:取最新 take_n 行正序发射 + 内容级强断言回归钉) | C.1(顺手修) |
 | **B13 alt-screen 历史不持久化**(Phase 0 重放中发现:`terminal.rs:1790` alt grid 用 Memory scrollback,claudecode 等 TUI 的滚动历史从不落盘;唯一载体 = 优雅退出的 state.bin → 硬宕机全灭。现网 369/374/381 scrollback.bin 只有 32B header 即此因) | C.1(快照 v4 覆盖 alt) |
 
 ## 审计原始报告

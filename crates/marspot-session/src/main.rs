@@ -1249,6 +1249,12 @@ fn main() {
 
     let start = Instant::now();
     let mut frame: u64 = 0;
+    // RFC-004 C.1 — periodic-snapshot bookkeeping (see the writer
+    // block at the loop tail).
+    const PERIODIC_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
+    const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
+    let mut last_snapshot_generation: u64 = session.terminal().generation();
+    let mut last_snapshot_at = Instant::now();
     // RFC-003 §6 Amendment 11 (debug-3): generation tag for control
     // readers.  Increments on each NewClient adoption; CoreGone events
     // carry the generation of the reader that died, so a stale EOF
@@ -1684,6 +1690,59 @@ fn main() {
         }
 
         frame += 1;
+        // RFC-004 C.1 (B4+B13) — periodic crash-safe snapshot.  Hard
+        // death (power loss / kernel panic / SIGKILL) never runs the
+        // SIGTERM writer, so pre-C.1 the visible grid + the whole
+        // alt-screen conversation (B13: alt scrollback is RAM-only)
+        // evaporated.  Every loop iteration (event or the 5 s
+        // recv_timeout heartbeat) checks: content changed since the
+        // last snapshot (terminal generation — bumps once per
+        // non-empty feed) AND ≥30 s elapsed → flush scrollback
+        // BufWriter, serialize with a small main-tail cap (the flush
+        // just made the File complete; only the alt fold needs bulk),
+        // tmp + rename atomic.  Idle sessions: generation unchanged →
+        // zero writes, zero extra wakes (the 5 s timeout already
+        // existed).  Worst-case loss window shrinks from "since boot"
+        // to 30 s.
+        {
+            let gen_now = session.terminal().generation();
+            if gen_now != last_snapshot_generation
+                && last_snapshot_at.elapsed() >= PERIODIC_SNAPSHOT_INTERVAL
+            {
+                session.terminal().grid().scrollback_flush_for_handoff();
+                let body = session
+                    .terminal()
+                    .serialize_snapshot_capped(PERIODIC_SNAPSHOT_TAIL_CAP);
+                let path = session_state_bin_path(session.id());
+                let tmp = path.with_extension("bin.tmp");
+                let write_ok = std::fs::write(&tmp, &body)
+                    .and_then(|()| std::fs::rename(&tmp, &path));
+                match write_ok {
+                    Ok(()) => {
+                        lx_debug!(
+                            "session.periodic_snapshot",
+                            "crash-safe state.bin refreshed",
+                            session_id = session.id(),
+                            bytes = body.len(),
+                            generation = gen_now
+                        );
+                        last_snapshot_generation = gen_now;
+                        last_snapshot_at = Instant::now();
+                    }
+                    Err(e) => {
+                        lx_warn!(
+                            "session.periodic_snapshot_failed",
+                            &format!("{e}"),
+                            session_id = session.id()
+                        );
+                        // Back off a full interval on failure too —
+                        // a dead disk shouldn't turn this into a
+                        // per-iteration error loop.
+                        last_snapshot_at = Instant::now();
+                    }
+                }
+            }
+        }
         // Heartbeat is for proof-of-life on idle sessions, not for
         // tracking byte activity — emitting on `n > 0` floods the
         // shared marspot.log at PTY-chunk rate (thousands per second
