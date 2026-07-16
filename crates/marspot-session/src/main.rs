@@ -1257,6 +1257,7 @@ fn main() {
     const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
     let mut last_snapshot_at = Instant::now();
+    let mut periodic_snapshot_seen = false;
     // RFC-003 §6 Amendment 11 (debug-3): generation tag for control
     // readers.  Increments on each NewClient adoption; CoreGone events
     // carry the generation of the reader that died, so a stale EOF
@@ -1721,13 +1722,30 @@ fn main() {
                     .and_then(|()| std::fs::rename(&tmp, &path));
                 match write_ok {
                     Ok(()) => {
-                        lx_debug!(
-                            "session.periodic_snapshot",
-                            "crash-safe state.bin refreshed",
-                            session_id = session.id(),
-                            bytes = body.len(),
-                            generation = gen_now
-                        );
+                        // First write per process boots at INFO so a
+                        // plain `grep periodic_snapshot marspot.log`
+                        // proves C.1 is alive on the installed app
+                        // (dev-cycle observability); the steady 30s
+                        // cadence stays at debug to keep the shared
+                        // log quiet.
+                        if !periodic_snapshot_seen {
+                            periodic_snapshot_seen = true;
+                            lx_event!(
+                                "session.periodic_snapshot",
+                                "crash-safe state.bin refreshed (first this boot)",
+                                session_id = session.id(),
+                                bytes = body.len(),
+                                generation = gen_now
+                            );
+                        } else {
+                            lx_debug!(
+                                "session.periodic_snapshot",
+                                "crash-safe state.bin refreshed",
+                                session_id = session.id(),
+                                bytes = body.len(),
+                                generation = gen_now
+                            );
+                        }
                         last_snapshot_generation = gen_now;
                         last_snapshot_at = Instant::now();
                     }
