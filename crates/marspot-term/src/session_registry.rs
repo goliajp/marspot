@@ -44,6 +44,15 @@ fn next_id_path() -> PathBuf {
 /// rolls back even if a session is killed or its id falls out of use
 /// (id reuse would race attach + spawn during silent update). u64
 /// means the counter is effectively unlimited.
+///
+/// RFC-004 A.1 self-heal: the counter value is floored at
+/// `max(existing session dir ids)` on every allocation.  A deleted /
+/// truncated / corrupt `.next_id` used to reset the counter to 0 and
+/// hand out ids that COLLIDE with surviving `sessions/<id>/` dirs —
+/// two L3s then share one dir with no lock and interleave writes
+/// into the same scrollback.bin (the session-347 corruption class).
+/// The dir scan is O(#sessions) inside the flock and only runs on
+/// allocation (pane spawn), never on a hot path.
 pub fn allocate_next_session_id() -> io::Result<u64> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
@@ -65,8 +74,9 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
 
     let mut buf = String::new();
     file.read_to_string(&mut buf)?;
-    let current: u64 = buf.trim().parse().unwrap_or(0);
-    let next = current + 1;
+    let counter: u64 = buf.trim().parse().unwrap_or(0);
+    let dir_floor = max_existing_session_id(&dir);
+    let next = counter.max(dir_floor) + 1;
 
     file.seek(SeekFrom::Start(0))?;
     file.set_len(0)?;
@@ -75,6 +85,70 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
 
     // Lock released via Drop (file close).
     Ok(next)
+}
+
+/// RFC-004 A.2 — identity-verified liveness.  `kill(pid, 0)` alone is
+/// NOT a valid "this session's L3 is alive" test: after a reboot (or
+/// any long gap) the recorded pid may have been recycled by an
+/// arbitrary unrelated process.  Treating a recycled pid as a live L3
+/// used to send it SIGKILL on reattach failure — killing an innocent
+/// process — and then `delete_session` destroyed the session's
+/// history.  A live *session* requires BOTH:
+///
+///   1. `kill(pid, 0)` succeeds (a process exists and is signalable), and
+///   2. `proc_pidpath(pid)` resolves to an executable whose file name
+///      contains "marspot-session".
+///
+/// proc_pidpath failing (process died between the two calls, or a
+/// sandbox denies the query for a foreign process — which by itself
+/// proves the pid is not our child) counts as NOT a session.  Never
+/// signal a pid that fails this check.
+pub fn pid_is_live_session(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(
+            pid,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return false;
+    }
+    let path = String::from_utf8_lossy(&buf[..n as usize]);
+    path.rsplit('/')
+        .next()
+        .is_some_and(|name| name.contains("marspot-session"))
+}
+
+/// Highest numeric session-dir id currently on disk, 0 when none.
+/// Used as the allocation floor so a lost `.next_id` can never
+/// hand out an id that collides with a surviving session dir.
+fn max_existing_session_id(sessions_root: &Path) -> u64 {
+    let Ok(read_dir) = std::fs::read_dir(sessions_root) else {
+        return 0;
+    };
+    let mut max = 0u64;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !is_session_dir(&path) {
+            continue;
+        }
+        if let Some(id) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.parse::<u64>().ok())
+        {
+            max = max.max(id);
+        }
+    }
+    max
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -370,6 +444,43 @@ mod tests {
             let got = allocate_next_session_id().expect("allocate");
             assert_eq!(got, expect, "expected next_id={expect}, got={got}");
         }
+    }
+
+    /// RFC-004 A.1 — a lost/corrupt `.next_id` must not hand out ids
+    /// that collide with surviving session dirs: allocation is floored
+    /// at max(existing dir id).
+    #[test]
+    fn allocation_self_heals_from_lost_counter() {
+        let _g = StateDirGuard::new();
+        // Simulate surviving session dirs 5 and 12 with NO .next_id
+        // (the crash-lost-counter scenario).
+        write_session_entry(&sample_entry(5)).expect("write 5");
+        write_session_entry(&sample_entry(12)).expect("write 12");
+        assert!(!next_id_path().exists(), "counter must start absent");
+        let got = allocate_next_session_id().expect("allocate");
+        assert_eq!(got, 13, "must floor at max existing dir id (12) + 1");
+        // Corrupt the counter backwards; next allocation still can't
+        // collide with dir 13's... (13 has no dir yet) — recreate the
+        // regression shape: counter says 2, dirs go up to 13.
+        write_session_entry(&sample_entry(13)).expect("write 13");
+        std::fs::write(next_id_path(), "2").expect("corrupt counter");
+        let got = allocate_next_session_id().expect("allocate");
+        assert_eq!(got, 14, "corrupt low counter must not re-issue 3");
+    }
+
+    /// RFC-004 A.2 — identity-verified liveness: our own pid is alive
+    /// but is NOT a marspot-session image; pid 1 (launchd) is alive
+    /// and foreign; a wildly-invalid pid is dead.
+    #[test]
+    fn pid_liveness_requires_session_identity() {
+        assert!(
+            !pid_is_live_session(std::process::id() as i32),
+            "test binary is not marspot-session"
+        );
+        assert!(!pid_is_live_session(1), "launchd is not marspot-session");
+        assert!(!pid_is_live_session(0));
+        assert!(!pid_is_live_session(-1));
+        assert!(!pid_is_live_session(i32::MAX), "unallocated pid is dead");
     }
 
     /// Two threads racing on the same registry get distinct ids — the
