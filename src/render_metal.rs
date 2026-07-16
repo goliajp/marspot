@@ -3143,14 +3143,18 @@ const CLOSE_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
 const CLOSE_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
 
 // Add-[+] button colours.  Green-tinted BG to read as
-// "constructive action".  Disabled (N == 9) drops to gray —
-// `mouse_down` ignores the click but the dim look explains why.
+// "constructive action".  Disabled (N == SESSION_COUNT_HARD_CAP)
+// drops to gray — `mouse_down` ignores the click but the dim look
+// explains why.
 const ADD_BTN_BG: [f32; 4] = [0.07, 0.16, 0.10, 0.85];
 const ADD_BTN_FG: [f32; 4] = [0.65, 0.92, 0.72, 1.0];
 const ADD_BTN_BG_DISABLED: [f32; 4] = [0.10, 0.10, 0.11, 0.65];
 const ADD_BTN_FG_DISABLED: [f32; 4] = [0.45, 0.45, 0.47, 0.8];
 
-const SESSION_COUNT_HARD_CAP: usize = 9;
+// RFC-004 E.1 (B11) — this was a private `= 9` that predated the
+// cap raise to 36 in ui::mod; the [+] button greyed out at 9 panes
+// while spawn paths honoured 36.  One constant, one truth.
+use crate::ui::SESSION_COUNT_HARD_CAP;
 
 fn push_layout_chrome(
     layout: &Layout,

@@ -14,7 +14,14 @@
 //!   cargo run --release -p marspot-term --example \
 //!     rebuild_scrollback_from_bytelog -- \
 //!     <bytelog-file> <staging-state-dir> <session-id> <cols> <rows> \
-//!     [dump-text-path]
+//!     [dump-text-path] [state-bin-out]
+//!
+//! With the optional 7th arg, ALSO writes the replayed terminal's
+//! `serialize_snapshot()` (v4 — alt ring + final alt screen folded)
+//! to that path.  Drop it into `sessions/<id>/state.bin` alongside
+//! the rebuilt scrollback pair and the next L3 cold boot applies it:
+//! the pane comes back showing the pre-crash screen with the folded
+//! content as scrollable history (RFC-004 crash recovery).
 //!
 //! Output lands in `<staging-state-dir>/sessions/<id>/scrollback.{bin,idx}`.
 //! With the optional 6th arg, ALSO writes a human-readable UTF-8 dump
@@ -35,14 +42,15 @@ use std::io::Read;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 6 && args.len() != 7 {
+    if !(6..=8).contains(&args.len()) {
         eprintln!(
-            "usage: {} <bytelog> <staging-state-dir> <session-id> <cols> <rows> [dump-text-path]",
+            "usage: {} <bytelog> <staging-state-dir> <session-id> <cols> <rows> [dump-text-path] [state-bin-out]",
             args[0]
         );
         std::process::exit(2);
     }
     let dump_text_path = args.get(6).cloned();
+    let state_bin_out = args.get(7).cloned();
     let bytelog_path = &args[1];
     let staging_dir = &args[2];
     let session_id: u64 = args[3].parse().expect("session-id must be u64");
@@ -132,5 +140,14 @@ fn main() {
             writeln!(out, "{}", line.trim_end()).unwrap();
         }
         eprintln!("text dump → {path}");
+    }
+
+    // Optional v4 snapshot: the replayed terminal's full state —
+    // in alt mode this folds the alt ring + final screen into the
+    // snapshot so a cold-booting L3 lands them in scrollback.
+    if let Some(path) = state_bin_out {
+        let body = term.serialize_snapshot();
+        std::fs::write(&path, &body).expect("write state-bin-out");
+        eprintln!("state.bin ({} bytes) → {path}", body.len());
     }
 }
