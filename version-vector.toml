@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.6.88"  # profile cycle settle 2s→600ms — 实测账目:kill→resume 0.1-2s 是旧 claude 优雅退出,resume 后 10-20s 是 claude 解析巨型 session(317MB jsonl);2s settle 在大 session 下盖不住任何东西纯增感知延迟.前 0.6.87 笔记见 git blame.
-core    = "0.11.61"  # IP 独立成 kind + 加 IPv6 + 加 UUID — LinkKind 加 Ip / Uuid 变体;IPv6 bare 需 `::` 或 8-group 全形(避 12:34:56 时间误报),bracketed [::1]:port/path 全支持;UUID 复用固定 8-4-4-4-12 shape.菜单:IP 走 Copy IP + Open in browser(bare IPv6 自动 bracket + http://),UUID 走 Copy UUID 单项(无 open 意义).URL 有 scheme 时永远压 IP.前 0.11.60 笔记见 git blame.
-session = "0.10.20"  # 同 core 0.11.61 — grid_links 共享 crate 变了要同步 bump.前 0.10.19 笔记见 git blame.
+core    = "0.11.62"  # cc-mode 加 composer 豁免 — 底部 `╭…╮` / `╰…╯` 圆角框内的 URL/IP/UUID/邮箱不扫,避免用户在输入框里打字时下划线闪 & 右键误点;结构性检测靠 grid 内容自识(top+bottom 缺一即不生效),对非 cc pane 惰性零成本.前 0.11.61 笔记见 git blame.
+session = "0.10.21"  # 同 core 0.11.62 — grid_links 共享 crate 加了 exempt-range 逻辑.前 0.10.20 笔记见 git blame.

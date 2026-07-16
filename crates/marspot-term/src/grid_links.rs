@@ -90,6 +90,14 @@ pub struct ScanOpts {
 /// (see `ScanOpts::cc_mode`).  Continuation rows have their leading
 /// hanging-indent cells stripped from the logical line so the URL /
 /// path regex isn't broken by the indent's whitespace.
+///
+/// cc-mode input-box exemption: also when `opts.cc_mode` is set, rows
+/// belonging to claudecode's bottom-most rounded box (`╭…╮` / `╰…╯`,
+/// inclusive) are excluded from scanning entirely.  Mid-typing text
+/// in the composer shouldn't flash underlined as the user types a
+/// partial URL / path, and right-clicks in the composer shouldn't
+/// hit a link menu.  The exemption is structural (based on grid
+/// content), so it's inert on non-claudecode grids.
 pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<LinkRange> {
     let mut out = Vec::new();
     let rows = grid.rows();
@@ -97,6 +105,11 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
     if rows == 0 || cols == 0 {
         return out;
     }
+    let exempt_range: Option<(u16, u16)> = if opts.cc_mode {
+        find_cc_input_box_rows(grid, view_offset, rows, cols)
+    } else {
+        None
+    };
     // Per-frame allocation hot-path note: `scan_visible_links` is
     // called once per pane per render frame.  An earlier version
     // built a per-line `String` and `Vec<char>::from_iter`'d it
@@ -128,6 +141,23 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
     let mut segments: Vec<LineSegment> = Vec::with_capacity(8);
     let mut char_offset: usize = 0;
     for r in 0..rows {
+        // Rows inside the claudecode composer box are hard-skipped:
+        // flush any in-flight logical line above, then jump past this
+        // row without contributing any chars.  The `chars`/`col_map`/
+        // `segments` buffers are cleared so the row after the box
+        // starts a fresh line, not a phantom continuation.
+        if let Some((lo, hi)) = exempt_range {
+            if r >= lo && r <= hi {
+                if !segments.is_empty() {
+                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out);
+                    chars.clear();
+                    col_map.clear();
+                    segments.clear();
+                    char_offset = 0;
+                }
+                continue;
+            }
+        }
         let decawm_cont = r > 0 && grid.wrapped_at_view(view_offset, r);
         let cc_cont = !decawm_cont
             && r > 0
@@ -246,6 +276,67 @@ fn is_cc_hard_wrap_continuation(
     }
     let first = grid.cell_at_view(view_offset, lead, curr_row).ch;
     is_url_path_class(first)
+}
+
+/// Locate claudecode's composer box in the visible grid.  Returns the
+/// (top_row, bottom_row) inclusive range of the bottom-most rounded
+/// box (`╭…╮` at the top, `╰…╯` at the bottom).  Returns `None` when
+/// no such box exists in view — normal chat scrollback, tool-call
+/// output, or a non-claudecode pane just falls through.
+///
+/// Rules:
+///   - the bottom border is the closest `╰` or `╯` when walking rows
+///     from the last row upward
+///   - the matching top border is the next `╭` or `╮` above that
+///     bottom row
+///   - either corner glyph counts on either side (some claudecode
+///     versions draw only the leftmost / rightmost corner on
+///     truncated widths)
+///
+/// The scan checks the whole row rather than fixed columns, because
+/// the box may be indented or padded depending on pane width; only
+/// looking at col 0 / last col would miss narrow layouts.
+fn find_cc_input_box_rows(
+    grid: &Grid,
+    view_offset: u16,
+    rows: u16,
+    cols: u16,
+) -> Option<(u16, u16)> {
+    let mut bottom: Option<u16> = None;
+    for r in (0..rows).rev() {
+        if row_contains_any(grid, view_offset, r, cols, &['╰', '╯']) {
+            bottom = Some(r);
+            break;
+        }
+    }
+    let bottom = bottom?;
+    if bottom == 0 {
+        return None;
+    }
+    let mut top: Option<u16> = None;
+    for r in (0..bottom).rev() {
+        if row_contains_any(grid, view_offset, r, cols, &['╭', '╮']) {
+            top = Some(r);
+            break;
+        }
+    }
+    top.map(|t| (t, bottom))
+}
+
+fn row_contains_any(
+    grid: &Grid,
+    view_offset: u16,
+    row: u16,
+    cols: u16,
+    targets: &[char],
+) -> bool {
+    for c in 0..cols {
+        let ch = grid.cell_at_view(view_offset, c, row).ch;
+        if targets.contains(&ch) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Char class that we consider "could be part of a URL or path
@@ -2288,5 +2379,82 @@ mod cc_merge_false_positive {
         assert_eq!(links[0].kind, LinkKind::File);
         assert_eq!(links[0].text, path_s);
         assert_eq!(links[0].row, 0);
+    }
+
+    /// cc-mode input-box exemption: URL / IP / UUID inside the
+    /// bottom-most `╭…╮` / `╰…╯` box (the claudecode composer) must
+    /// NOT be detected — mid-typing text shouldn't flash underlined
+    /// and clicks in the composer shouldn't hit link menus.  Content
+    /// ABOVE the box (chat scrollback) still detects normally.
+    #[test]
+    fn cc_input_box_content_is_exempt_from_link_detection() {
+        use crate::grid::{Cell, Grid};
+        const COLS: u16 = 40;
+        const ROWS: u16 = 8;
+        let mut grid = Grid::new(COLS, ROWS);
+        // Row 0-1: chat scrollback with a URL — must detect.
+        let history = "see https://example.com/page for docs";
+        for (c, ch) in history.chars().enumerate() {
+            grid.set_cell(c as u16, 0, Cell { ch, ..Default::default() });
+        }
+        // Row 3: box top border ╭─────╮
+        grid.set_cell(0, 3, Cell { ch: '╭', ..Default::default() });
+        for c in 1..(COLS - 1) {
+            grid.set_cell(c, 3, Cell { ch: '─', ..Default::default() });
+        }
+        grid.set_cell(COLS - 1, 3, Cell { ch: '╮', ..Default::default() });
+        // Row 4-5: box interior with a URL user is typing — must NOT detect.
+        let typing = "│ > try https://foo.com/bar          │";
+        for (c, ch) in typing.chars().enumerate() {
+            grid.set_cell(c as u16, 4, Cell { ch, ..Default::default() });
+        }
+        let typing2 = "│   47.96.114.231 also             │";
+        for (c, ch) in typing2.chars().enumerate() {
+            grid.set_cell(c as u16, 5, Cell { ch, ..Default::default() });
+        }
+        // Row 6: box bottom border
+        grid.set_cell(0, 6, Cell { ch: '╰', ..Default::default() });
+        for c in 1..(COLS - 1) {
+            grid.set_cell(c, 6, Cell { ch: '─', ..Default::default() });
+        }
+        grid.set_cell(COLS - 1, 6, Cell { ch: '╯', ..Default::default() });
+
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        // Exactly one link, from row 0 (the scrollback URL).
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].kind, LinkKind::Url);
+        assert_eq!(links[0].text, "https://example.com/page");
+        assert_eq!(links[0].row, 0);
+        // Sanity: without cc_mode, both the scrollback URL AND the
+        // in-box URL / IP would surface — the exemption is what
+        // suppresses the composer noise.
+        let no_cc = scan_visible_links(&grid, 0, ScanOpts::default());
+        assert!(
+            no_cc.len() > 1,
+            "without cc_mode the exemption must not fire: {no_cc:?}"
+        );
+    }
+
+    /// A grid with `╰` at the very last row and no `╭` above (a
+    /// pathological / truncated frame) must NOT trip the exemption —
+    /// we'd rather scan a few false positives than silently swallow
+    /// the whole grid.
+    #[test]
+    fn cc_input_box_requires_both_top_and_bottom() {
+        use crate::grid::{Cell, Grid};
+        const COLS: u16 = 30;
+        const ROWS: u16 = 4;
+        let mut grid = Grid::new(COLS, ROWS);
+        // Only a bottom border, no top.
+        grid.set_cell(0, ROWS - 1, Cell { ch: '╰', ..Default::default() });
+        grid.set_cell(COLS - 1, ROWS - 1, Cell { ch: '╯', ..Default::default() });
+        // A URL earlier in the grid.
+        let url = "goto https://example.com/x";
+        for (c, ch) in url.chars().enumerate() {
+            grid.set_cell(c as u16, 1, Cell { ch, ..Default::default() });
+        }
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].text, "https://example.com/x");
     }
 }
