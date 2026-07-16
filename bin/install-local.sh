@@ -37,11 +37,27 @@ PLIST="$APP/Contents/Info.plist"
 # Production state dir — the default; never set MARSPOT_STATE_DIR here.
 # RFC-004 D.1: the root moved to Application Support; the old Caches
 # path survives as a symlink after the binaries' one-time migration.
-# Prefer the new root, fall back to the legacy one so this script
-# works on both sides of the migration boundary.
-STATE_ROOT="$HOME/Library/Application Support/marspot"
-if [[ ! -e "$STATE_ROOT" && -e "$HOME/Library/Caches/marspot" ]]; then
-  STATE_ROOT="$HOME/Library/Caches/marspot"
+# Root selection: the root whose shell.pid points at a LIVE process
+# wins (that's where the running app actually lives — 2026-07-17
+# incident: an empty Application Support shell dir out-ranked the
+# real Caches root, shell.pid wasn't found, and the script "launched"
+# a duplicate app).  With no live shell anywhere, prefer whichever
+# root exists, new first.
+NEW_ROOT="$HOME/Library/Application Support/marspot"
+OLD_ROOT="$HOME/Library/Caches/marspot"
+root_shell_alive() {
+  local p
+  p=$(cat "$1/shell.pid" 2>/dev/null) || return 1
+  [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null
+}
+if root_shell_alive "$NEW_ROOT"; then
+  STATE_ROOT="$NEW_ROOT"
+elif root_shell_alive "$OLD_ROOT"; then
+  STATE_ROOT="$OLD_ROOT"
+elif [[ -e "$NEW_ROOT" ]]; then
+  STATE_ROOT="$NEW_ROOT"
+else
+  STATE_ROOT="$OLD_ROOT"
 fi
 TREE="$STATE_ROOT/binaries"
 SUP_LOG="$HOME/Library/Logs/Marspot/marspot.log"

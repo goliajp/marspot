@@ -71,12 +71,30 @@ pub fn migrate_legacy_state_root() {
     if !old_is_real_dir || new_exists {
         return;
     }
+    // 2026-07-17 现场教训 — process barrier.  Renaming the root
+    // while OTHER marspot processes are alive is unsafe in the
+    // mixed-image window: an old-image L3 that recreates a path
+    // under the old root (create_dir_all on entry rewrite) would
+    // fork the state tree.  Only the true cold-boot first process
+    // migrates: if any other marspot-shell/-core/-session is
+    // running, skip — a later boot gets it.  (Racing NEW processes
+    // are also serialized by this: whoever sees a sibling defers.)
+    if other_marspot_processes_alive() {
+        return;
+    }
+    migrate_roots(&old_root, &new_root);
+}
+
+/// Barrier-free migration body — separated so tests can exercise the
+/// rename+symlink mechanics while a real marspot app is running on
+/// the machine (the barrier would otherwise always defer under test).
+fn migrate_roots(old_root: &std::path::Path, new_root: &std::path::Path) {
     if let Some(parent) = new_root.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::rename(&old_root, &new_root) {
+    match std::fs::rename(old_root, new_root) {
         Ok(()) => {
-            let _ = std::os::unix::fs::symlink(&new_root, &old_root);
+            let _ = std::os::unix::fs::symlink(new_root, old_root);
         }
         Err(e) => {
             // Keep running on the old root via the unchanged
@@ -86,7 +104,7 @@ pub fn migrate_legacy_state_root() {
             // which silently forks the user's state.  Fall back HARD:
             // symlink new → old so both names alias the surviving
             // data until a later boot can migrate for real.
-            let _ = std::os::unix::fs::symlink(&old_root, &new_root);
+            let _ = std::os::unix::fs::symlink(old_root, new_root);
             eprintln!(
                 "[marspot] state-root migration failed ({e}); \
                  aliased {} → {}",
@@ -134,6 +152,55 @@ pub fn shell_pid_file() -> PathBuf {
     state_root().join("shell.pid")
 }
 
+/// Any marspot process other than this one alive?  Scans the BSD
+/// process table via sysctl-free libproc (proc_listallpids +
+/// proc_pidpath) — no fork, no shell.  Conservative: enumeration
+/// failure reads as "somebody might be alive" so the migration
+/// defers rather than racing.
+fn other_marspot_processes_alive() -> bool {
+    let me = std::process::id() as i32;
+    let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if n <= 0 {
+        return true;
+    }
+    let mut pids = vec![0i32; n as usize * 2];
+    let filled = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr() as *mut libc::c_void,
+            (pids.len() * std::mem::size_of::<i32>()) as i32,
+        )
+    };
+    if filled <= 0 {
+        return true;
+    }
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    for &pid in pids.iter().take(filled as usize) {
+        if pid <= 0 || pid == me {
+            continue;
+        }
+        let len = unsafe {
+            libc::proc_pidpath(
+                pid,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len() as u32,
+            )
+        };
+        if len <= 0 {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&buf[..len as usize]);
+        let name = path.rsplit('/').next().unwrap_or("");
+        if name.starts_with("marspot-shell")
+            || name.starts_with("marspot-core")
+            || name.starts_with("marspot-session")
+            || name == "marspot"
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,8 +233,8 @@ mod tests {
             std::env::remove_var("MARSPOT_STATE_DIR");
             std::env::set_var("HOME", &fake_home);
         }
-        migrate_legacy_state_root();
         let new = fake_home.join("Library/Application Support/marspot");
+        migrate_roots(&old, &new);
         assert!(
             std::fs::symlink_metadata(&new).unwrap().is_dir(),
             "new root must be a real dir"
@@ -187,7 +254,7 @@ mod tests {
         // Old path still resolves to the same content (straggler
         // binaries keep working through the alias).
         assert_eq!(std::fs::read(old.join("sessions/7/bytelog")).unwrap(), b"H");
-        // Idempotent.
+        // Idempotent at the public entry (barrier + exists-check):
         migrate_legacy_state_root();
         assert!(std::fs::symlink_metadata(&new).unwrap().is_dir());
         let _ = std::fs::remove_dir_all(&fake_home);
