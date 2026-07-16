@@ -17,7 +17,15 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.6.29**
+Current: **0.7.0**
+
+### 0.7.0
+
+RFC-004 D.1 — 状态根迁出 Caches。L1 main 最早入口(logx 前)跑
+`migrate_legacy_state_root()`:`~/Library/Caches/marspot` →
+`~/Library/Application Support/marspot`,rename 原子 + 旧位置留
+symlink,活进程 fd 不断、未升级 binary 经 symlink 照常。macOS 把
+Caches 当可清区,用户终端 history 不能住那里。
 
 ### 0.6.29
 
@@ -622,7 +630,20 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.10.79**
+Current: **0.12.0**
+
+### 0.12.0
+
+RFC-004 装配身份制(2026-07-17 宕机事故的架构级修复)。boot 装配
+重写为按格 sid 处理:活(身份验证)→ reattach;reattach 失败 →
+SIGKILL 已验证进程 + 原地降级复活(不再 delete_session 毁史);死
+且目录在 → 同 id 复活;spawn 失败 → Vacant 占位 pane(保 sid,按
+键重试)——槽位永不压缩、永不漂移。判活 = kill(0) + proc_pidpath
+身份验证,pid 复用不再误杀无关进程。不在 saved 里的活 session 收养
+为额外 pane;未引用的死目录进 retired/ 回收站(14 天 TTL)。标题按
+sid 绑定不按下标。[+] 按钮 cap 与 ui::36 统一(私有 9 分叉)。
+wait_and_connect 重试面扩大(NotFound/EOF/InvalidData/Reset)。
+boot_assembly_tests ×5 集成测试(真 L3 + 沙箱)钉不变式。
 
 ### 0.10.79
 
@@ -821,7 +842,18 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.9.23**
+Current: **0.11.0**
+
+### 0.11.0
+
+RFC-004 L3 侧。A.3 session 目录 flock(双 L3 同 id 物理不可能,347
+类交错写根绝);C.1 周期快照(30s 防抖 + generation dirty 门,硬宕
+机丢失窗口从"自 boot"缩到 30s,idle 零写);快照 v4 alt 折叠
+(B13:claudecode 最终屏 + alt ring 落 scrollback)+ B14 修复(v3
+tail 两轴皆反,execv 补 gap 一直在补最老行的复制品);A.4 scroll-
+back 损坏隔离 `.corrupt-<ts>` 重建,不再静默 RAM 降级;A.1
+`.next_id` 自愈以目录 max(id) 为下限;SessionListener Drop 去毁灭
+化(panic unwind 不再删 session 目录)。
 
 ### F3+12.1 marspot-term 撤 blank-skip 一并进 L3
 
