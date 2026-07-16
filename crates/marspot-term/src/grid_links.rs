@@ -446,6 +446,25 @@ fn scan_line_into_matches(
             }
         }
 
+        // Bare IPv4 (optionally :port and /path).  Emitted as Url so
+        // the click dispatcher's OpenLink arm prepends `http://` and
+        // hands off to `/usr/bin/open`; Copy keeps the raw displayed
+        // text.  The reject rules avoid catching version strings
+        // (`v1.2.3.4`, `pkg 1.2.3.4-alpha`, `1.2.3.4.5`), IPs inside
+        // longer identifiers, or IPs already scanned as part of an
+        // `http://…` URL (prev char is `/` → reject).
+        if c.is_ascii_digit() {
+            if let Some(end) = try_scan_ipv4_url(chars, i) {
+                let text: String = chars[i..end].iter().collect();
+                emit_match(
+                    out, segments, col_map, cols_per_row, i, end,
+                    LinkKind::Url, text,
+                );
+                i = end;
+                continue;
+            }
+        }
+
         if c == '@' && i > 0 && i + 1 < n {
             let local_start = scan_back_local(&chars, i);
             let host_end = scan_forward_host(&chars, i + 1);
@@ -765,6 +784,120 @@ fn is_url_char(c: char) -> bool {
                 | '@' | '!' | '$' | '&' | '(' | ')' | '*' | '+'
                 | ',' | ';' | '=' | '%'
         )
+}
+
+/// Try to parse `chars[start..]` as a bare IPv4 address, optionally
+/// followed by `:port` and/or `/path`.  Returns the exclusive end
+/// index on success.  Conservative — the goal is to catch things a
+/// user could Cmd-click to open in a browser (`47.96.114.231`,
+/// `192.168.1.1:8080`, `10.0.0.1/status`) without also underlining
+/// version strings.
+///
+/// Reject rules:
+///   - preceded by alnum / `.` / `-` / `_` / `@` / `/` / `:` — that
+///     shape is a version, hostname component, or already-matched URL
+///     tail, not a fresh IP boundary
+///   - any octet > 255 or with a leading zero on a 2+ digit run
+///     (`010.1.2.3` is a shell escape / rare curiosity, and the
+///     leading-zero-reject also kills `1.02.3.4`-style version noise)
+///   - after the 4 octets, next char is `.` / alnum / `-` / `_` — a
+///     5th component or an identifier-continuation = version string
+///     (`1.2.3.4.5`, `1.2.3.4-rc1`, `1.2.3.4beta`)
+fn try_scan_ipv4_url(chars: &[char], start: usize) -> Option<usize> {
+    if start > 0 {
+        let prev = chars[start - 1];
+        if prev.is_ascii_alphanumeric()
+            || matches!(prev, '.' | '-' | '_' | '@' | '/' | ':')
+        {
+            return None;
+        }
+    }
+    let mut i = start;
+    for octet in 0..4 {
+        if octet > 0 {
+            if chars.get(i) != Some(&'.') {
+                return None;
+            }
+            i += 1;
+        }
+        let d0 = i;
+        while i < chars.len() && chars[i].is_ascii_digit() && i - d0 < 3 {
+            i += 1;
+        }
+        let digits = &chars[d0..i];
+        if digits.is_empty() {
+            return None;
+        }
+        if digits.len() > 1 && digits[0] == '0' {
+            return None;
+        }
+        let val: u32 = digits
+            .iter()
+            .map(|c| c.to_digit(10).unwrap())
+            .fold(0, |a, d| a * 10 + d);
+        if val > 255 {
+            return None;
+        }
+    }
+    if let Some(&next) = chars.get(i) {
+        if next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_') {
+            return None;
+        }
+    }
+    let ip_end = i;
+    if chars.get(i) == Some(&':') {
+        let ps = i + 1;
+        let mut pe = ps;
+        while pe < chars.len() && chars[pe].is_ascii_digit() && pe - ps < 5 {
+            pe += 1;
+        }
+        if pe > ps {
+            let port: u32 = chars[ps..pe]
+                .iter()
+                .map(|c| c.to_digit(10).unwrap())
+                .fold(0, |a, d| a * 10 + d);
+            if port <= 65535 {
+                i = pe;
+            }
+        }
+    }
+    if chars.get(i) == Some(&'/') {
+        while i < chars.len() && is_url_char(chars[i]) {
+            i += 1;
+        }
+    }
+    // Trim like the URL scanner: balanced parens + prose punctuation.
+    // The floor is `ip_end`, not `start` — the bare IPv4 body itself
+    // must not be shortened by trim (a trailing `.` inside it was
+    // already rejected by the octet regex).
+    loop {
+        if i <= ip_end {
+            break;
+        }
+        let last = chars[i - 1];
+        if last == ')' {
+            let (o, c) = count_parens(&chars[start..i]);
+            if c > o {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if last == '(' {
+            let (o, c) = count_parens(&chars[start..i]);
+            if o > c {
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+        if matches!(last, ',' | '.' | ';' | ':' | ']' | '}' | '!' | '?') {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    Some(i)
 }
 
 /// Path-flavoured terminator scan: additionally hard-stops at `(`,
@@ -1766,6 +1899,63 @@ mod cc_merge_false_positive {
         let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0].text, "https://example.com/x");
+    }
+
+    /// 2026-07-16 field ask: bare IPv4 must be recognised as a
+    /// clickable Url — OpenLink prepends `http://` in the dispatcher,
+    /// Copy keeps the raw displayed text.  Cover the common shapes:
+    /// bare, `:port`, `/path`, both.
+    #[test]
+    fn bare_ipv4_recognised_as_url() {
+        for (line, expected) in [
+            ("connect 47.96.114.231 now", "47.96.114.231"),
+            ("admin 192.168.1.1:8080/status ok", "192.168.1.1:8080/status"),
+            ("dashboard 10.0.0.5:3000", "10.0.0.5:3000"),
+            ("see 8.8.8.8/dns page", "8.8.8.8/dns"),
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+            assert_eq!(urls.len(), 1, "line {line:?}: {v:?}");
+            assert_eq!(urls[0].text, expected, "line {line:?}");
+        }
+    }
+
+    /// IPv4 recogniser must NOT swallow version strings, other
+    /// identifiers, or IPs already claimed by an `http://…` URL.
+    #[test]
+    fn ipv4_rejects_version_strings_and_url_tails() {
+        for line in [
+            "runtime v1.2.3.4 released",       // preceded by 'v'
+            "kernel 1.2.3.4-rc1 in test",      // trailing -rc1
+            "matrix 1.2.3.4.5 dot",            // 5th component
+            "big 999.1.1.1 not valid",         // octet > 255
+            "cargo pkg 1.0.23 pinned",         // not 4 octets
+            "leading 010.0.0.1 zero rejected", // leading zero
+            "http://1.2.3.4/foo done",         // already inside a URL
+        ] {
+            let mut v = Vec::new();
+            scan_line(line, 0, &mut v);
+            let ips: Vec<_> = v
+                .iter()
+                .filter(|l| l.kind == LinkKind::Url && !l.text.starts_with("http"))
+                .collect();
+            assert!(
+                ips.is_empty(),
+                "line {line:?} must not produce a bare-IP Url: {v:?}"
+            );
+        }
+    }
+
+    /// Prose-wrapping parens around the IP get stripped by the same
+    /// balanced-paren trim as URLs.
+    #[test]
+    fn ipv4_in_prose_parens_trimmed() {
+        let mut v = Vec::new();
+        scan_line("(see 47.96.114.231:8080)", 0, &mut v);
+        let urls: Vec<_> = v.iter().filter(|l| l.kind == LinkKind::Url).collect();
+        assert_eq!(urls.len(), 1, "{v:?}");
+        assert_eq!(urls[0].text, "47.96.114.231:8080");
     }
 
     /// The zero-indent merge must NOT let a flush-ending URL absorb

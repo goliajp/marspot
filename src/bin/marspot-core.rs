@@ -1648,6 +1648,27 @@ impl CoreApp {
                         marspot::grid_links::LinkKind::Email => {
                             format!("mailto:{}", link.text)
                         }
+                        // Bare IPv4 (`47.96.114.231[:port][/path]`) is
+                        // scanned as Url with no scheme; open(1) needs
+                        // one to route to a handler, so we prepend
+                        // `http://`.  Regular URLs already carry
+                        // http:// or https://, checked via
+                        // ascii-lowercase to catch odd HTTPS:// too.
+                        marspot::grid_links::LinkKind::Url => {
+                            let head: String = link
+                                .text
+                                .chars()
+                                .take(8)
+                                .flat_map(char::to_lowercase)
+                                .collect();
+                            if head.starts_with("http://")
+                                || head.starts_with("https://")
+                            {
+                                link.text.clone()
+                            } else {
+                                format!("http://{}", link.text)
+                            }
+                        }
                         _ => link.text.clone(),
                     };
                     spawn_open(&arg);

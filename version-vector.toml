@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.6.88"  # profile cycle settle 2s→600ms — 实测账目:kill→resume 0.1-2s 是旧 claude 优雅退出,resume 后 10-20s 是 claude 解析巨型 session(317MB jsonl);2s settle 在大 session 下盖不住任何东西纯增感知延迟.前 0.6.87 笔记见 git blame.
-core    = "0.11.59"  # URL 识别 CJK 边界修 + email 变可点击 — grid_links 改 URL 终止符为 RFC 3986 ASCII 集 + 平衡括号剥离(修 `…/calendar(刷新一下)。` 类型误吞);email 走 mailto: 让 open(1) 唤起邮件客户端.前 0.11.58 笔记见 git blame.
-session = "0.10.18"  # 同 core 0.11.59 — grid_links 共享 crate 变了要同步 bump.前 0.10.17 笔记见 git blame.
+core    = "0.11.60"  # 裸 IPv4 变可点击 — grid_links 加 `47.96.114.231[:port][/path]` 识别(拒 v1.2.3.4 / 1.2.3.4.5 / 999.x / http:// 尾里已收);OpenLink 无 scheme 时补 http:// 让 open(1) 走浏览器.前 0.11.59 笔记见 git blame.
+session = "0.10.19"  # 同 core 0.11.60 — grid_links 共享 crate 变了要同步 bump.前 0.10.18 笔记见 git blame.
