@@ -230,10 +230,14 @@ struct SavedCursor {
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
         // F2 — file-backed scrollback wins inside an L3 session
-        // (MARSPOT_SESSION_ID set).  Falls back to in-RAM Memory on
-        // any open error so a missing sessions dir / permission issue
-        // doesn't kill the session.  Tests / mcli / --snapshot don't
-        // set the env and so go straight to Memory.
+        // (MARSPOT_SESSION_ID set).  Corrupt pairs are quarantined +
+        // recreated inside `Scrollback::file` (RFC-004 A.4), so the
+        // only errors reaching here are environmental (permissions,
+        // ENOSPC) — those fall back to in-RAM Memory so the session
+        // still boots, and the failure lands in marspot.log (the old
+        // eprintln went to /dev/null: L3's stderr is nulled).
+        // Tests / mcli / --snapshot don't set the env and so go
+        // straight to Memory.
         let scrollback = if let Some(sid) = file_scrollback_session_id() {
             match crate::scrollback::Scrollback::file(
                 crate::session_registry::scrollback_bin_path(sid),
@@ -243,8 +247,10 @@ impl Terminal {
             ) {
                 Ok(sb) => sb,
                 Err(e) => {
-                    eprintln!(
-                        "[marspot] file scrollback init failed (sid={sid}): {e}; falling back to RAM-only"
+                    crate::lx_warn!(
+                        "scrollback.open_failed_ram_fallback",
+                        &format!("{e} — session runs RAM-only, disk history not loaded"),
+                        session_id = sid
                     );
                     Scrollback::memory(DEFAULT_SCROLLBACK_LINES, cols as usize)
                 }
@@ -3963,7 +3969,7 @@ mod tests {
     }
 
     #[test]
-    fn csi_3_J_clears_scrollback_only() {
+    fn csi_3_j_clears_scrollback_only() {
         // F1 — File scrollback deliberately preserves `total_lines`
         // across CSI 3 J (the .bin file IS the user's history; CSI
         // 3 J just drops the in-RAM view).  This test asserts the

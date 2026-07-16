@@ -52,18 +52,50 @@ impl Scrollback {
     }
 
     /// Open or create a file-backed scrollback at the given paths.
+    ///
+    /// RFC-004 A.4 — corrupt-quarantine: when `open()` rejects the
+    /// existing pair (bad magic / incompatible version / cell-ABI
+    /// mismatch / truncated header / ragged idx), the pair is renamed
+    /// to `<name>.corrupt-<unix-secs>` and a fresh empty pair is
+    /// opened in its place.  The session keeps its File persistence
+    /// (new history keeps landing on disk) and the rejected bytes
+    /// stay on disk for forensics instead of being silently shadowed
+    /// forever.  Errors that are NOT data-shaped (permissions, ENOSPC,
+    /// missing parent dir) propagate — quarantining can't fix those.
     pub fn file(
         bin_path: std::path::PathBuf,
         idx_path: std::path::PathBuf,
         cols: usize,
         ram_capacity: usize,
     ) -> std::io::Result<Self> {
-        Ok(Self::File(FileScrollback::open(
-            bin_path,
-            idx_path,
-            cols,
-            ram_capacity,
-        )?))
+        match FileScrollback::open(bin_path.clone(), idx_path.clone(), cols, ram_capacity) {
+            Ok(f) => Ok(Self::File(f)),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let quarantine = |p: &std::path::Path| {
+                    let mut q = p.as_os_str().to_owned();
+                    q.push(format!(".corrupt-{ts}"));
+                    let _ = std::fs::rename(p, std::path::PathBuf::from(q));
+                };
+                quarantine(&bin_path);
+                quarantine(&idx_path);
+                crate::lx_warn!(
+                    "scrollback.quarantined",
+                    &format!("{e} — pair renamed .corrupt-{ts}, starting fresh"),
+                    bin = bin_path.display()
+                );
+                Ok(Self::File(FileScrollback::open(
+                    bin_path,
+                    idx_path,
+                    cols,
+                    ram_capacity,
+                )?))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn push_line(&mut self, line: &[Cell]) {
@@ -416,13 +448,15 @@ const FILE_MAGIC: u32 = 0x5350_5301;
 // the mmap-write / blank-row-pollution era.  User authorised the
 // destruction ("新的历史没问题,老的全都不要了都可以"): pre-v2 files
 // can carry past-EOF idx tails + spinner blank pushes interleaved
-// mid-history that surface as blank rows in scrolled views.  Open()
-// already handles "version < FILE_MIN_COMPAT" by renaming the file
-// to `.corrupt-<ts>` and recursing with a fresh start — bumping
-// MIN_COMPAT alongside VERSION trips that path for every existing
-// user file on first open() after this upgrade.  Future scrollback
-// shape changes (e.g. adding a record-level field) only need
-// VERSION++ without touching MIN_COMPAT, preserving back-compat.
+// mid-history that surface as blank rows in scrolled views.
+// `Scrollback::file` (RFC-004 A.4) handles every InvalidData reject
+// from open() — bad magic, version outside compat, cell-ABI drift,
+// truncated header, ragged idx — by renaming the pair to
+// `.corrupt-<ts>` and reopening fresh, so incompatible files are
+// quarantined (not silently shadowed) and the session keeps disk
+// persistence.  Future scrollback shape changes (e.g. adding a
+// record-level field) only need VERSION++ without touching
+// MIN_COMPAT, preserving back-compat.
 const FILE_VERSION: u32 = 2;
 const FILE_MIN_COMPAT: u32 = 2;
 const FILE_HEADER_BYTES: u64 = 32;
@@ -1584,6 +1618,50 @@ mod tests {
         sb
     }
 
+    /// RFC-004 A.4 — a corrupt scrollback pair is quarantined
+    /// (renamed `.corrupt-<ts>`) and a fresh File pair opens in its
+    /// place: persistence continues, the bad bytes stay on disk.
+    #[test]
+    fn corrupt_pair_is_quarantined_and_reopened_fresh() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-sb-quarantine-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("scrollback.bin");
+        let idx = dir.join("scrollback.idx");
+        // Garbage that fails the magic check but passes the ≥32-byte
+        // header read.
+        std::fs::write(&bin, vec![0xFFu8; 64]).unwrap();
+        std::fs::write(&idx, vec![0u8; 8]).unwrap();
+
+        let sb = Scrollback::file(bin.clone(), idx.clone(), 8, 16)
+            .expect("quarantine + fresh open must succeed");
+        assert!(matches!(sb, Scrollback::File(_)), "must stay File variant");
+
+        // Quarantined originals exist; fresh pair is valid (header only).
+        let entries: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.iter().any(|n| n.starts_with("scrollback.bin.corrupt-")),
+            "bin not quarantined: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|n| n.starts_with("scrollback.idx.corrupt-")),
+            "idx not quarantined: {entries:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(&bin).unwrap().len(),
+            32,
+            "fresh bin must be header-only"
+        );
+        drop(sb);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn read_lines_zero_count_or_past_floor_returns_empty() {
         let sb = alphabet_sb_memory(5, 4);
@@ -2352,7 +2430,7 @@ mod tests {
             let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 16)
                 .expect("create");
             for i in 0..50u32 {
-                sb.push_line(&fill((b'a' + (i % 26) as u8), cols), false);
+                sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
             }
             assert_eq!(sb.len(), 50);
         }
@@ -2370,7 +2448,7 @@ mod tests {
         );
         // Re-push 50 reflowed rows at new cols.
         for i in 0..50u32 {
-            sb.push_line_with_wrapped(&fill((b'a' + (i % 26) as u8), 8), false);
+            sb.push_line_with_wrapped(&fill(b'a' + (i % 26) as u8, 8), false);
         }
         assert_eq!(
             sb.len(), 50,
@@ -2432,7 +2510,7 @@ mod tests {
             let mut sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32)
                 .expect("create");
             for i in 0..500u32 {
-                sb.push_line(&fill((b'a' + (i % 26) as u8), cols), false);
+                sb.push_line(&fill(b'a' + (i % 26) as u8, cols), false);
             }
         } // <- clean Drop runs flush_for_handoff equivalent
         let sb = FileScrollback::open(tmp.bin(), tmp.idx(), cols, 32)
