@@ -1073,7 +1073,6 @@ impl FileScrollback {
             return;
         }
         let _ = self.bin.borrow_mut().flush();
-        let _ = self.idx.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
@@ -1090,7 +1089,6 @@ impl FileScrollback {
     pub fn flush_for_handoff(&self) {
         use std::io::Write;
         let _ = self.bin.borrow_mut().flush();
-        let _ = self.idx.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
 
@@ -1399,21 +1397,71 @@ impl FileScrollback {
     }
 
     pub fn clear(&mut self) {
-        // Clear the RAM ring view but DO NOT truncate the file:
-        // CSI 3 J (clear scrollback) operates on the live emulator's
-        // view, not on persisted history that the user might have
-        // already exited a long-running session expecting to keep.
-        // If the user really wants to wipe the file, they can rm it
-        // when no L3 is open.
+        use std::io::Write;
+        // CSI 3 J = the user's EXPLICIT "wipe my history" instruction
+        // — it must reach the persistent tier, or `clear` + app
+        // restart resurrects everything from disk (2026-07-17 field
+        // report: "clear 了,重开还是一大堆 history").  The old
+        // behaviour cleared only the RAM ring "in case the user
+        // wanted to keep the file"; that guess inverted the actual
+        // contract (RFC-004 invariant 4: destructive actions happen
+        // exactly when the user explicitly asks — and 3J is exactly
+        // that ask).  The bytelog is NOT touched: it's the disaster-
+        // recovery ground truth, and replaying it re-applies this
+        // very 3J, converging on the same cleared state.
         self.ram_cells.clear();
         self.ram_wrapped.clear();
         self.ram_head = 0;
         self.ram_len = 0;
-        // total_lines and the file are intentionally NOT touched.
-        // This matches `MemoryScrollback::clear` which keeps Vec
-        // capacity but drops content — we keep file content but
-        // drop ring content (the live view) — both flavours of
-        // "clear what's currently visible".
+        // Flush any buffered records first so the BufWriter can't
+        // resurrect pre-clear rows into the truncated file later.
+        let _ = self.bin.borrow_mut().flush();
+        // Truncate hot pair to an empty (header-only) state.  The
+        // writers are append-mode fds, so subsequent pushes land at
+        // the new EOF automatically.
+        if let Err(e) = self
+            .bin
+            .borrow_mut()
+            .get_mut()
+            .set_len(FILE_HEADER_BYTES)
+        {
+            crate::lx_warn!(
+                "scrollback.clear_truncate_failed",
+                &format!("{e}"),
+                bin = self.bin_path.display()
+            );
+        }
+        let _ = self.idx.borrow_mut().set_len(0);
+        self.bin_tail_offset = FILE_HEADER_BYTES;
+        self.total_lines = 0;
+        self.hot_first_line = 0;
+        // Drop the cold tier entirely.
+        self.cold_bin_for_read = None;
+        self.cold_idx_for_read = None;
+        self.cold_first_line = 0;
+        self.cold_total_lines = 0;
+        let _ = std::fs::remove_file(&self.cold_bin_path);
+        let _ = std::fs::remove_file(&self.cold_idx_path);
+        // Invalidate read-side mmaps — they cover pre-truncate bytes.
+        let bp = self.bin_mmap_ptr.get();
+        let bl = self.bin_mmap_len.get();
+        if !bp.is_null() && bl > 0 {
+            unsafe {
+                libc::munmap(bp as *mut libc::c_void, bl);
+            }
+        }
+        self.bin_mmap_ptr.set(std::ptr::null_mut());
+        self.bin_mmap_len.set(0);
+        let ip = self.idx_mmap_ptr.get();
+        let il = self.idx_mmap_len.get();
+        if !ip.is_null() && il > 0 {
+            unsafe {
+                libc::munmap(ip as *mut libc::c_void, il);
+            }
+        }
+        self.idx_mmap_ptr.set(std::ptr::null_mut());
+        self.idx_mmap_len.set(0);
+        self.has_unflushed.set(false);
     }
 
     pub fn approx_bytes(&self) -> usize {
@@ -1429,7 +1477,6 @@ impl Drop for FileScrollback {
         // Flush BufWriters so any buffered bytes hit the page cache
         // before our fds close.  No fsync.  Dense idx — no sentinel.
         let _ = self.bin.borrow_mut().flush();
-        let _ = self.idx.borrow_mut().flush();
         // Unmap any active mmap regions.
         let bp = self.bin_mmap_ptr.get();
         let bl = self.bin_mmap_len.get();
@@ -1659,6 +1706,41 @@ mod tests {
             "fresh bin must be header-only"
         );
         drop(sb);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RFC-004 amendment — CSI 3 J reaches the persistent tier:
+    /// clear() truncates the hot pair (and drops cold), so a reopen
+    /// sees zero history, and pushes after clear persist normally.
+    #[test]
+    fn clear_truncates_persistent_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-sb-clear-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("scrollback.bin");
+        let idx = dir.join("scrollback.idx");
+        let mut sb = Scrollback::file(bin.clone(), idx.clone(), 4, 8)
+            .expect("open");
+        for i in 0..20u32 {
+            sb.push_line_with_wrapped(&fill(b'a' + (i % 26) as u8, 4), false);
+        }
+        assert_eq!(sb.len(), 20);
+        sb.clear();
+        assert_eq!(sb.len(), 0, "cleared in-process");
+        // Post-clear pushes work and are the ONLY surviving content.
+        sb.push_line_with_wrapped(&fill(b'z', 4), false);
+        sb.flush_for_handoff();
+        assert_eq!(sb.len(), 1);
+        drop(sb);
+        let sb2 = Scrollback::file(bin, idx, 4, 8).expect("reopen");
+        assert_eq!(
+            sb2.len(),
+            1,
+            "reopen must see only post-clear content — clear must persist"
+        );
+        drop(sb2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

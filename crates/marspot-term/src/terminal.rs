@@ -4465,11 +4465,13 @@ mod tests {
 
     #[test]
     fn csi_3_j_clears_scrollback_only() {
-        // F1 — File scrollback deliberately preserves `total_lines`
-        // across CSI 3 J (the .bin file IS the user's history; CSI
-        // 3 J just drops the in-RAM view).  This test asserts the
-        // Memory variant semantics where `len()` returns 0 after
-        // ESC[3J — so force Memory by clearing `MARSPOT_SESSION_ID`.
+        // RFC-004 amendment (2026-07-17): CSI 3 J now clears the
+        // PERSISTENT tier too (`clear` + app restart must stay
+        // cleared) — File and Memory agree on len()==0 after 3J.
+        // This test uses the Memory variant; the File-side
+        // persistence contract is pinned in
+        // scrollback::tests::clear_truncates_persistent_file.
+        // Force Memory by clearing `MARSPOT_SESSION_ID`.
         // The var IS set when the suite runs inside a marspot
         // terminal (L3 exports it to the shell); without this
         // remove_var the test flips to File semantics and fails

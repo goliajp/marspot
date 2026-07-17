@@ -842,7 +842,17 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.2**
+Current: **0.11.4**
+
+### 0.11.4
+
+CSI 3 J(`clear`)清到持久层。旧行为只清 RAM 视图、故意保留盘上
+文件("怕用户想留着"),结果 `clear` + 关闭重开 = 历史全量复活
+(现场报告)。3J 是用户显式的清历史指令,按 RFC-004 不变式 4
+(毁数据恰在用户显式要求时发生)修正:hot pair 截断到 header、
+cold 对删除、读侧 mmap 失效、计数归零;bytelog 保留(灾难恢复
+ground truth,重放会重现同一 3J 收敛到相同的清空态)。0.11.3:
+v5 live 无缝 execv 验证轮。
 
 ### 0.11.2
 
