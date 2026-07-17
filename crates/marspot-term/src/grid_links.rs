@@ -320,7 +320,21 @@ fn find_cc_input_box_rows(
             break;
         }
     }
-    top.map(|t| (t, bottom))
+    let top = top?;
+    // 2026-07-18 field regression — the bottom-most rounded box is
+    // only the COMPOSER when it looks like an active input area:
+    // it either contains the cursor row (the user's caret lives in
+    // the composer) or hugs the bottom of the viewport.  claudecode
+    // v2.1.212 dropped the composer's box entirely, which made the
+    // bottom-most box the WELCOME BANNER at the top of the screen —
+    // exempting it swallowed the banner's email/path links.
+    let (_, cursor_row) = grid.cursor();
+    let has_cursor = cursor_row >= top && cursor_row <= bottom;
+    let hugs_bottom = bottom + 4 >= rows;
+    if !has_cursor && !hugs_bottom {
+        return None;
+    }
+    Some((top, bottom))
 }
 
 fn row_contains_any(
@@ -2379,6 +2393,57 @@ mod cc_merge_false_positive {
         assert_eq!(links[0].kind, LinkKind::File);
         assert_eq!(links[0].text, path_s);
         assert_eq!(links[0].row, 0);
+    }
+
+
+    /// 2026-07-18 field regression — claudecode v2.1.212 dropped the
+    /// composer's rounded box, so the bottom-most `╭…╰` box on screen
+    /// became the WELCOME BANNER; the cc-mode exemption swallowed it
+    /// and the banner's email/path links vanished.  The exemption now
+    /// requires the box to look like an active input area (contains
+    /// the cursor row, or hugs the viewport bottom).
+    #[test]
+    fn cc_exemption_does_not_swallow_top_banner_without_composer_box() {
+        use crate::grid::{Cell, Grid};
+        const COLS: u16 = 60;
+        const ROWS: u16 = 12;
+        let mut grid = Grid::new(COLS, ROWS);
+        let put = |grid: &mut Grid, row: u16, text: &str| {
+            for (c, ch) in text.chars().enumerate() {
+                if (c as u16) < COLS {
+                    grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+                }
+            }
+        };
+        put(&mut grid, 0, " ╭──────────────────────────────╮  Tips for");
+        put(&mut grid, 1, " │  Welcome back!               │  Run /init");
+        put(&mut grid, 2, " │  takagi@golia.jp's Org       │  What's new");
+        put(&mut grid, 3, " │  ~/workspace                 │  Added fork");
+        put(&mut grid, 4, " ╰──────────────────────────────╯");
+        put(&mut grid, 7, " > bare composer, no box (claudecode v2.1.212)");
+        grid.set_cursor(3, 7);
+        let with_cc = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let texts: Vec<&str> = with_cc.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts.contains(&"takagi@golia.jp"),
+            "banner email must survive cc_mode: {with_cc:?}"
+        );
+        assert!(
+            texts.contains(&"~/workspace"),
+            "banner path must survive cc_mode: {with_cc:?}"
+        );
+
+        // Counter-case: an actual bottom composer box (old claudecode
+        // UI) still gets exempted — cursor inside it.
+        let mut grid2 = Grid::new(COLS, ROWS);
+        put(&mut grid2, 0, " see https://example.com/docs above");
+        put(&mut grid2, 8, " ╭──────────────────────────────╮");
+        put(&mut grid2, 9, " │ > typing https://foo.com/bar │");
+        put(&mut grid2, 10, " ╰──────────────────────────────╯");
+        grid2.set_cursor(30, 9);
+        let links = scan_visible_links(&grid2, 0, ScanOpts { cc_mode: true });
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].text, "https://example.com/docs");
     }
 
     /// cc-mode input-box exemption: URL / IP / UUID inside the
