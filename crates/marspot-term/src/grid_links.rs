@@ -171,6 +171,18 @@ pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<
             segments.clear();
             char_offset = 0;
         }
+        // A cc hard-wrap continuation glues to the PREVIOUS row's
+        // last content cell — the trailing blank cells between that
+        // cell and the pane edge are rendering padding, not text.
+        // Left in the buffer they terminate the merged token at the
+        // seam (the whole point of merging was to cross it).
+        if cc_cont {
+            while chars.last() == Some(&' ') {
+                chars.pop();
+                col_map.pop();
+            }
+            char_offset = chars.len();
+        }
         let col_skip = if cc_cont {
             count_leading_ws(grid, view_offset, r, cols)
         } else {
@@ -246,7 +258,16 @@ fn is_cc_hard_wrap_continuation(
         Some(c) => c,
         None => return false,
     };
-    if last_nb_col < cols.saturating_sub(2) {
+    // Flush requirement: within 2 cols of the right edge — except a
+    // `/`-ending row, which relaxes to 8 cols.  claudecode's `⎿ `
+    // indent blocks wrap paths at a fixed CONTENT width a few cells
+    // short of the pane edge, so a wrapped path's first row never
+    // passed the strict test and the path stayed split (2026-07-18
+    // field report).  A prose row ending in `/` is rare enough that
+    // the wider window stays conservative; File candidates keep the
+    // stat + boundary-retry arbitration either way.
+    let flush_slack: u16 = if last_nb_ch == '/' { 8 } else { 2 };
+    if last_nb_col < cols.saturating_sub(flush_slack) {
         return false;
     }
     if !is_url_path_class(last_nb_ch) {
@@ -1186,7 +1207,12 @@ fn try_scan_uuid(chars: &[char], start: usize) -> Option<usize> {
         }
     }
     if let Some(&next) = chars.get(i) {
-        if next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '.') {
+        // `/` — a uuid-named PATH COMPONENT (claude scratchpads,
+        // session dirs) is not a standalone UUID token; claiming it
+        // here splits the surrounding path into garbage links
+        // (2026-07-18 field report).  Mirrors the `/` in the
+        // left-boundary reject set.
+        if next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '.' | '/') {
             return None;
         }
     }
@@ -2395,6 +2421,71 @@ mod cc_merge_false_positive {
         assert_eq!(links[0].row, 0);
     }
 
+
+    /// 2026-07-18 field report #2 — a path hard-wrapped inside a
+    /// claudecode `⎿ ` indent block (first row ends in `/` a few
+    /// cols short of the pane edge, continuation indented 3) must
+    /// merge into ONE File link.  Pre-fix, the rows didn't merge
+    /// (flush test wanted cols-2), the uuid path component on row 2
+    /// got claimed as a standalone Uuid link, and the tail
+    /// `/scratchpad/x.png` was rejected as a mid-word slash.
+    #[test]
+    fn cc_wrapped_path_with_uuid_component_links_whole() {
+        use crate::grid::{Cell, Grid};
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-lnk-uuid-{}",
+            std::process::id()
+        ));
+        let uuid_dir = dir.join("3dbde79c-ab6e-43bd-8143-c448617e1d69/scratchpad");
+        std::fs::create_dir_all(&uuid_dir).unwrap();
+        let png = uuid_dir.join("env_now3_small.png");
+        std::fs::write(&png, b"x").unwrap();
+        let full = png.to_string_lossy().into_owned();
+        // Split after the parent-of-uuid slash, like the field case.
+        let split = full.find("3dbde79c").unwrap();
+        let (row1_body, row2_body) = full.split_at(split);
+        // Row 1 ends 4 cols short of the edge (claudecode ⎿ block).
+        let cols = (row1_body.chars().count() + 4) as u16;
+        let mut grid = Grid::new(cols, 6);
+        let put = |grid: &mut Grid, row: u16, text: &str| {
+            for (c, ch) in text.chars().enumerate() {
+                if (c as u16) < cols {
+                    grid.set_cell(c as u16, row, Cell { ch, ..Default::default() });
+                }
+            }
+        };
+        put(&mut grid, 0, row1_body);
+        put(&mut grid, 1, &format!("   {row2_body}"));
+        let links = scan_visible_links(&grid, 0, ScanOpts { cc_mode: true });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            links.iter().any(|l| l.kind == LinkKind::File && l.text == full),
+            "wrapped path must link whole: {links:?}"
+        );
+        assert!(
+            links.iter().all(|l| l.kind != LinkKind::Uuid),
+            "uuid path component must not become a Uuid link: {links:?}"
+        );
+    }
+
+    /// A uuid followed by `/` is a path component, never a Uuid link;
+    /// a standalone uuid still links.
+    #[test]
+    fn uuid_component_in_path_rejected_standalone_still_links() {
+        let mut v = Vec::new();
+        scan_line("id 3dbde79c-ab6e-43bd-8143-c448617e1d69/scratch x", 0, &mut v);
+        assert!(
+            v.iter().all(|l| l.kind != LinkKind::Uuid),
+            "{v:?}"
+        );
+        let mut v2 = Vec::new();
+        scan_line("id 3dbde79c-ab6e-43bd-8143-c448617e1d69 done", 0, &mut v2);
+        assert_eq!(
+            v2.iter().filter(|l| l.kind == LinkKind::Uuid).count(),
+            1,
+            "{v2:?}"
+        );
+    }
 
     /// 2026-07-18 field regression — claudecode v2.1.212 dropped the
     /// composer's rounded box, so the bottom-most `╭…╰` box on screen
