@@ -2060,20 +2060,25 @@ impl MarspotApp for ShellApp {
             self.plugin_registry.start_all_with(&self.plugin_host);
         }
 
-        // Restore the dev panel's saved frame + visibility, if any.
-        // `dev_window::ensure_built` already ran via `run_app`, so the
-        // NSWindow exists but starts hidden at its default geometry.
+        // Restore the dev panel's saved frame, if any.  VISIBILITY is
+        // deliberately NOT restored (2026-07-18 user request): the
+        // dev panel is a development tool, and persisting `visible`
+        // meant one debugging session made it auto-open on every
+        // subsequent launch.  Cold start = hidden, always; the
+        // toolbar's 4th icon summons it, and the saved geometry still
+        // puts it back where it was.  (`saved.visible` keeps being
+        // WRITTEN for format stability; only the read side ignores it.)
         if let Some(saved) = marspot::state::read_dev_window() {
             marspot::dev_window::with_dev_window(|w| {
                 w.apply_saved_frame(saved.x, saved.y, saved.w, saved.h);
             });
-            self.dev_panel.visible = saved.visible;
+            self.dev_panel.visible = false;
             // Seed the dedup tuple so the first `dev_window_changed`
             // tick doesn't trip a save with the same values.
             self.last_saved_dev_window = Some((
                 saved.x.round(), saved.y.round(),
                 saved.w.round(), saved.h.round(),
-                saved.display_id, saved.visible,
+                saved.display_id, false,
             ));
         }
 
