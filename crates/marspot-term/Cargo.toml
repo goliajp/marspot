@@ -15,6 +15,10 @@ publish = false
 # docs/per-session-l3.md.
 [dependencies]
 libc = "0.2"
+# Stone: clickable-span detection (URL/path/email/IP/UUID).  Split
+# out per the hard-won-pieces rule; marspot-term only adapts Grid
+# into its CellSource.
+marspot-linkify = { path = "../marspot-linkify" }
 # Rotated-log compression. Already transitive via the GUI crate's `png`
 # dep, so it costs zero new entries in Cargo.lock. The `logx::rotate`
 # path uses GzEncoder to compress sealed `marspot.<ts>.log` files to

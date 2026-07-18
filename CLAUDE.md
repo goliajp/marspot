@@ -64,6 +64,10 @@ the friction:
 The bar is "at least three of the above"; marspot-internal helpers that
 fail any of those tests stay in `src/` as utility modules.
 
+Extracted so far: `marspot-linkify` (2026-07-18 — clickable-span
+detection: URL/path/email/IP/UUID over a `CellSource` trait; a month
+of field-report-driven correctness work, zero deps, pure stdlib).
+
 Current extraction backlog (judgement-call, not commitments):
 `marspot-pty`, `marspot-anon-mmap-ring`, `marspot-glyph-atlas`, the
 `bench-runner` shell-scripts repo.  These are the four pieces that
