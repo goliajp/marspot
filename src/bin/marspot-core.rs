@@ -2658,6 +2658,24 @@ impl CoreApp {
             }
         }
 
+        // cc — Cmd+Shift+C toggles the usage modal.
+        //
+        // Placement is load-bearing twice over.  It sits ahead of the
+        // LOCK_KEYS routing below because this is a window-global
+        // overlay, not pane content — it has to work even while a
+        // plugin-held session (claudecode) owns the keyboard.  And it
+        // sits ahead of the Cmd-C copy handler because that one tests
+        // only `super_key()` and would happily swallow the shifted
+        // chord as a copy.
+        if event.state == KeyState::Pressed
+            && modifiers.super_
+            && modifiers.shift
+            && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
+        {
+            self.toggle_cc_usage_modal();
+            return;
+        }
+
         // RFC-003 LOCK_KEYS: if the focused pane is in a plugin-held
         // PaneSession that asked for the keyboard, route the event up
         // to L1 instead of forwarding to the PTY.  Also count Esc
@@ -3052,6 +3070,21 @@ impl CoreApp {
     /// cc — modal frame rect for the `Cc` usage modal.  Width scales
     /// with the account count (cards row); height with accounts
     /// (timeline rows).  Centered under the title strip.
+    /// cc — open the Claude usage modal, or close it if it's already
+    /// up.  Shared by the toolbar button and the Cmd+Shift+C binding
+    /// so the two can't drift apart.  Opening re-reads the feed, so a
+    /// stale panel is never what you get on a fresh open.
+    fn toggle_cc_usage_modal(&mut self) {
+        self.cc_usage_modal = match self.cc_usage_modal.take() {
+            Some(_) => None,
+            None => Some(CcUsageModalState {
+                data: marspot::cc_usage::read(),
+                loaded_at: Instant::now(),
+            }),
+        };
+        self.needs_render = true;
+    }
+
     fn cc_usage_modal_rect(&self) -> marspot_term::layout::Rect {
         let n = self
             .cc_usage_modal
@@ -3740,14 +3773,7 @@ impl CoreApp {
         }
         // cc — toolbar `Cc` button toggles the Claude usage modal.
         if self.layout.hit_test_cc_button(x_phys, y_phys) {
-            self.cc_usage_modal = match self.cc_usage_modal.take() {
-                Some(_) => None,
-                None => Some(CcUsageModalState {
-                    data: marspot::cc_usage::read(),
-                    loaded_at: Instant::now(),
-                }),
-            };
-            self.needs_render = true;
+            self.toggle_cc_usage_modal();
             return;
         }
         // cc — while the usage modal is open, any click outside its
