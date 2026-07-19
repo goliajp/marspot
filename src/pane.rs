@@ -1277,6 +1277,14 @@ impl Pane {
             } else {
                 (65u8, (-delta) as u32) // wheel down
             };
+            // Cap one event at a screenful of ticks.  Each tick is ~12
+            // bytes into the child's stdin, and a momentum scroll can
+            // hand us a delta of hundreds — which both over-scrolls the
+            // TUI and dumps kilobytes into a tty that may not be reading
+            // (see `PtyWriter` on why that used to wedge the pane).  The
+            // momentum stream delivers many events regardless, so the
+            // cap costs no reachable scroll distance.
+            let n = n.min(rows.max(1) as u32);
             if n > 0 {
                 self.session.l3_inject_wheel(button, n, cols, rows);
             }
