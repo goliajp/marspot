@@ -19,7 +19,7 @@
 
 use std::io;
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -40,6 +40,78 @@ const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 /// and the kernel returns whatever's queued — no benefit to capping.
 const READ_BUF_BYTES: usize = 64 * 1024;
 
+/// Ceiling on bytes queued for the PTY but not yet accepted by it.
+///
+/// A wedged writer is not hypothetical: the tty input buffer only
+/// drains when the foreground process reads its stdin, and a program
+/// busy for minutes (a long tool call, a compile, a `sleep`) reads
+/// nothing for that whole time.  The queue absorbs that; the cap keeps
+/// it from becoming an unbounded sink if the user keeps typing or
+/// scrolls a mouse-tracking app while it's blocked (per the project's
+/// bounded-queue rule).  256 KiB is thousands of keystrokes — a human
+/// cannot reach it, so hitting it means something is genuinely stuck.
+const WRITE_QUEUE_CAP_BYTES: usize = 256 * 1024;
+
+/// Write half of the PTY, owned by a dedicated thread.
+///
+/// **Why this exists.**  `write(2)` on a PTY master blocks once the
+/// tty's input buffer fills, and it fills whenever the foreground
+/// process stops reading stdin.  Calling it from the L3 main loop —
+/// which is what we used to do — parks that whole loop: no PTY output
+/// gets pumped, no control frames get served, no snapshot gets taken,
+/// for as long as the child stays busy.  Symptom: one pane goes
+/// completely unresponsive for minutes and then recovers on its own,
+/// while every other pane (a separate L3 process) stays fine.
+///
+/// Moving the write behind a thread that is *allowed* to block gives
+/// the main loop a non-blocking `write()` and keeps idle CPU at zero
+/// (the thread parks in `recv`, not a spin loop).  It mirrors the
+/// reader-thread half that has always been here.
+struct PtyWriter {
+    tx: Sender<Vec<u8>>,
+    /// Bytes handed to the thread but not yet accepted by the kernel.
+    /// Shared so `write` can enforce the cap without a round-trip.
+    pending: Arc<AtomicUsize>,
+    /// Bytes refused because the queue was full.  Monotonic; read for
+    /// logging so a stall is visible in the field instead of silent.
+    dropped: Arc<AtomicUsize>,
+}
+
+/// Spawn the writer thread for `pty` and return its queue handle.
+fn spawn_pty_writer(id: u64, pty: Arc<Pty>) -> PtyWriter {
+    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+    let pending = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let pending_thread = Arc::clone(&pending);
+    thread::Builder::new()
+        .name(format!("l3-pty-writer-{id}"))
+        .spawn(move || {
+            // Ends when the session drops its Sender.
+            while let Ok(chunk) = rx.recv() {
+                let mut off = 0;
+                while off < chunk.len() {
+                    match pty.write_shared(&chunk[off..]) {
+                        // Short writes are normal on a tty whose buffer
+                        // is nearly full — the old inline call ignored
+                        // the return value entirely and silently lost
+                        // the tail of anything it didn't accept.
+                        Ok(0) => break,
+                        Ok(n) => off += n,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        // Dead fd (child gone).  Abandon this chunk and
+                        // keep draining so `pending` stays truthful and
+                        // the session tears down through the normal
+                        // exit path rather than wedging here.
+                        Err(_) => break,
+                    }
+                }
+                pending_thread.fetch_sub(chunk.len(), Ordering::SeqCst);
+            }
+        })
+        .expect("spawn l3-pty-writer thread");
+    PtyWriter { tx, pending, dropped }
+}
+
 pub struct LocalSession {
     id: u64,
     /// Cloned and shared with the reader thread so both halves can
@@ -51,6 +123,8 @@ pub struct LocalSession {
     terminal: Terminal,
     bytelog: Option<ByteLog>,
     rx: Receiver<Vec<u8>>,
+    /// PTY write half.  Dropping this ends the writer thread.
+    writer: PtyWriter,
     exited: Arc<AtomicBool>,
     last_output: Option<Instant>,
     pending_scrollback_pages: Vec<PendingPage>,
@@ -187,6 +261,8 @@ impl LocalSession {
             })
             .expect("spawn l3-pty-reader thread");
 
+        let writer = spawn_pty_writer(id, Arc::clone(&pty));
+
         Ok(Self {
             id,
             pty,
@@ -194,6 +270,7 @@ impl LocalSession {
             terminal: Terminal::new(cols, rows),
             bytelog,
             rx,
+            writer,
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -256,8 +333,46 @@ impl LocalSession {
         total
     }
 
+    /// Queue `bytes` for the PTY.  Never blocks — see `PtyWriter`.
+    ///
+    /// `Ok(n)` means queued, not delivered; the only ordering promise
+    /// is FIFO, which is all the callers (keystrokes, paste, injected
+    /// input) need.  `WouldBlock` means the child has not read its
+    /// stdin for long enough to fill the queue and the input was
+    /// dropped — callers log it rather than retrying, since retrying
+    /// into a full queue just drops again.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.pty.write_shared(bytes)
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let pending = self.writer.pending.load(Ordering::SeqCst);
+        if pending + bytes.len() > WRITE_QUEUE_CAP_BYTES {
+            let dropped = self.writer.dropped.fetch_add(bytes.len(), Ordering::SeqCst)
+                + bytes.len();
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "pty write queue full: {pending} B pending, {dropped} B dropped so far \
+                     (foreground process is not reading stdin)"
+                ),
+            ));
+        }
+        self.writer.pending.fetch_add(bytes.len(), Ordering::SeqCst);
+        if self.writer.tx.send(bytes.to_vec()).is_err() {
+            self.writer.pending.fetch_sub(bytes.len(), Ordering::SeqCst);
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "pty writer thread gone",
+            ));
+        }
+        Ok(bytes.len())
+    }
+
+    /// Bytes queued for the PTY but not yet accepted by it.  Non-zero
+    /// for more than a moment means the foreground process is not
+    /// reading its stdin.
+    pub fn pty_write_backlog(&self) -> usize {
+        self.writer.pending.load(Ordering::SeqCst)
     }
 
     /// Resize the terminal + PTY.  TIOCSWINSZ delivers SIGWINCH so
@@ -366,6 +481,8 @@ impl LocalSession {
             })
             .expect("spawn l3-pty-reader thread");
 
+        let writer = spawn_pty_writer(id, Arc::clone(&pty));
+
         Ok(Self {
             id,
             pty,
@@ -373,6 +490,7 @@ impl LocalSession {
             terminal,
             bytelog,
             rx,
+            writer,
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -477,34 +595,159 @@ mod tests {
     }
 
     /// Closing the slave side (shell exits) flips `is_exited` and the
+    /// Regression: a child that never reads its stdin must not be able
+    /// to stall the main loop.
+    ///
+    /// The child must be in **raw** mode for this to reproduce, and
+    /// that detail is the whole bug.  Measured on macOS 15:
+    ///
+    /// | child tty mode | 256 KiB write to the master        |
+    /// |----------------|-----------------------------------|
+    /// | canonical      | 0.011 s — the tty discards overflow |
+    /// | raw            | accepts 1022 B, then **blocks**     |
+    ///
+    /// So a pane sitting at a shell prompt never showed this, while a
+    /// pane running a TUI (claudecode, vim, anything that raws the tty)
+    /// froze the moment its foreground process stopped reading stdin —
+    /// which is any long tool call — and unfroze when it resumed.  A
+    /// canonical-mode child would let this test pass against the old
+    /// inline write, so don't "simplify" the `stty raw` away.
+    #[test]
+    fn write_does_not_block_on_a_child_that_ignores_stdin() {
+        let pty_arc = Arc::new(
+            Pty::spawn(PtyConfig {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "stty raw -echo; sleep 3".into()],
+                size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+                argv0: None,
+                cwd: None,
+                ..Default::default()
+            })
+            .expect("spawn /bin/sh"),
+        );
+        let mut s = LocalSession {
+            id: 1,
+            pty: Arc::clone(&pty_arc),
+            child_pid: 0,
+            terminal: Terminal::new(80, 24),
+            bytelog: None,
+            rx: { let (_t, r) = mpsc::channel(); r },
+            writer: spawn_pty_writer(1, Arc::clone(&pty_arc)),
+            exited: Arc::new(AtomicBool::new(false)),
+            last_output: None,
+            pending_scrollback_pages: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+
+        // Let the child reach `stty raw` — before that it's canonical
+        // and the kernel would swallow everything without blocking.
+        thread::sleep(Duration::from_millis(400));
+
+        // 128 KiB — far past the ~1 KiB raw-mode buffer, still under
+        // the queue cap.
+        let chunk = vec![b'x'; 4096];
+        let t0 = Instant::now();
+        let mut queued = 0usize;
+        for _ in 0..32 {
+            if s.write(&chunk).is_ok() {
+                queued += chunk.len();
+            }
+        }
+        let elapsed = t0.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "write blocked for {elapsed:?} — the queue is not absorbing a non-reading child"
+        );
+        assert_eq!(queued, 32 * 4096, "everything under the cap should queue");
+        // Proof the child really isn't draining: the kernel cannot have
+        // taken all of it, so bytes must still be sitting in the queue.
+        assert!(
+            s.pty_write_backlog() > 0,
+            "expected a backlog against a child that never reads stdin"
+        );
+    }
+
+    /// The queue is bounded: past the cap, input is refused rather than
+    /// accumulating without limit.
+    #[test]
+    fn write_queue_is_bounded() {
+        let pty_arc = Arc::new(
+            Pty::spawn(PtyConfig {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "stty raw -echo; sleep 3".into()],
+                size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+                argv0: None,
+                cwd: None,
+                ..Default::default()
+            })
+            .expect("spawn /bin/sh"),
+        );
+        let mut s = LocalSession {
+            id: 2,
+            pty: Arc::clone(&pty_arc),
+            child_pid: 0,
+            terminal: Terminal::new(80, 24),
+            bytelog: None,
+            rx: { let (_t, r) = mpsc::channel(); r },
+            writer: spawn_pty_writer(2, Arc::clone(&pty_arc)),
+            exited: Arc::new(AtomicBool::new(false)),
+            last_output: None,
+            pending_scrollback_pages: Vec::new(),
+            cols: 80,
+            rows: 24,
+        };
+
+        thread::sleep(Duration::from_millis(400));
+        let chunk = vec![b'x'; 16 * 1024];
+        let mut refused = false;
+        // 64 × 16 KiB = 1 MiB against a 256 KiB cap.
+        for _ in 0..64 {
+            if let Err(e) = s.write(&chunk) {
+                assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "queue accepted 1 MiB against a 256 KiB cap");
+        assert!(
+            s.pty_write_backlog() <= WRITE_QUEUE_CAP_BYTES,
+            "backlog {} exceeded the cap",
+            s.pty_write_backlog()
+        );
+    }
+
     /// reader thread fires one final wake so the main loop won't park
     /// forever waiting for more bytes.
     #[test]
     fn shell_exit_flips_is_exited() {
         let wake = Arc::new(AtomicBool::new(false));
         // Use `/bin/sh -c "exit 0"` so the child exits immediately.
+        let pty_arc = Arc::new(
+            Pty::spawn(PtyConfig {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "exit 0".into()],
+                size: TerminalSize {
+                    cols: 80,
+                    rows: 24,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                },
+                argv0: None,
+                cwd: None,
+                ..Default::default()
+            })
+            .expect("spawn /bin/sh"),
+        );
         let mut s = LocalSession {
             id: 1,
-            pty: Arc::new(
-                Pty::spawn(PtyConfig {
-                    program: "/bin/sh".into(),
-                    args: vec!["-c".into(), "exit 0".into()],
-                    size: TerminalSize {
-                        cols: 80,
-                        rows: 24,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    },
-                    argv0: None,
-                    cwd: None,
-                    ..Default::default()
-                })
-                .expect("spawn /bin/sh"),
-            ),
+            pty: Arc::clone(&pty_arc),
             child_pid: 0,
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
+            writer: spawn_pty_writer(0, Arc::clone(&pty_arc)),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),

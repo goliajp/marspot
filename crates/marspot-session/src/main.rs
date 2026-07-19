@@ -73,6 +73,14 @@ impl SessionImpl {
             Self::Local(s) => s.id(),
         }
     }
+    /// Bytes queued for the PTY but not yet accepted by it.  Non-zero
+    /// for more than a moment means the foreground process has stopped
+    /// reading its stdin.
+    fn pty_write_backlog(&self) -> usize {
+        match self {
+            Self::Local(s) => s.pty_write_backlog(),
+        }
+    }
     fn child_pid(&self) -> i32 {
         match self {
             Self::Local(s) => s.child_pid(),
@@ -1335,9 +1343,21 @@ fn main() {
                 SessionEvent::Paste(text) => handle_paste(&mut session, &text),
                 SessionEvent::InjectInput(bytes) => {
                     // Raw write to PTY — no bracketed-paste, no key
-                    // encoding.  Best-effort: a dead PTY just means
-                    // the shell exited and we'll be torn down next.
-                    let _ = session.write(&bytes);
+                    // encoding.  A dead PTY just means the shell exited
+                    // and we'll be torn down next, so that stays quiet;
+                    // a FULL queue is worth a line, because it means the
+                    // foreground process has stopped reading stdin and
+                    // the user's input is being dropped on the floor.
+                    if let Err(e) = session.write(&bytes) {
+                        if e.kind() == std::io::ErrorKind::WouldBlock {
+                            lx_warn!(
+                                "l3.pty.write_dropped",
+                                &format!("{e}"),
+                                bytes = bytes.len(),
+                                backlog = session.pty_write_backlog()
+                            );
+                        }
+                    }
                 }
                 SessionEvent::Wake => {}
                 SessionEvent::CoreGone(core_gen) => {
