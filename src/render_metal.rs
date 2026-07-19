@@ -2618,24 +2618,34 @@ fn push_cc_usage_via_view(
     });
 }
 
-const CC_FG: [f32; 4] = [0.86, 0.87, 0.89, 1.0];
-const CC_FG_DIM: [f32; 4] = [0.52, 0.54, 0.58, 1.0];
-const CC_GREEN: [f32; 4] = [0.24, 0.78, 0.42, 1.0];
-const CC_AMBER: [f32; 4] = [0.87, 0.66, 0.16, 1.0];
-const CC_RED: [f32; 4] = [0.90, 0.32, 0.28, 1.0];
-const CC_TRACK: [f32; 4] = [0.16, 0.17, 0.19, 1.0];
-const CC_CARD_BG: [f32; 4] = [0.085, 0.09, 0.10, 1.0];
-const CC_CARD_BORDER: [f32; 4] = [0.20, 0.21, 0.23, 1.0];
-const CC_NOW: [f32; 4] = [0.35, 0.55, 0.95, 1.0];
-const CC_BADGE_BG: [f32; 4] = [0.10, 0.24, 0.14, 1.0];
+/// cc — modal palette comes from the UI theme tokens (the same
+/// system dev panel / buttons draw from), not hand-rolled RGB.  The
+/// only local decisions are which token maps to which role.
+mod cc_palette {
+    use crate::ui::theme::token::color;
+    pub fn fg() -> [f32; 4] { color::FG.to_rgba_f32() }
+    pub fn fg_dim() -> [f32; 4] { color::FG_MUTED.to_rgba_f32() }
+    pub fn ok() -> [f32; 4] { color::SUCCESS.to_rgba_f32() }
+    pub fn warn() -> [f32; 4] { color::WARN.to_rgba_f32() }
+    pub fn danger() -> [f32; 4] { color::DANGER.to_rgba_f32() }
+    pub fn track() -> [f32; 4] { color::BG_HOVER.to_rgba_f32() }
+    pub fn card_bg() -> [f32; 4] { color::SURFACE_1.to_rgba_f32() }
+    pub fn card_border() -> [f32; 4] { color::BORDER.to_rgba_f32() }
+    pub fn now() -> [f32; 4] { color::ACCENT.to_rgba_f32() }
+    pub fn badge_bg() -> [f32; 4] {
+        let mut c = color::SUCCESS.to_rgba_f32();
+        c[3] = 0.18;
+        c
+    }
+}
 
 fn cc_util_color(util: f32) -> [f32; 4] {
     if util < 0.5 {
-        CC_GREEN
+        cc_palette::ok()
     } else if util < 0.85 {
-        CC_AMBER
+        cc_palette::warn()
     } else {
-        CC_RED
+        cc_palette::danger()
     }
 }
 
@@ -2657,14 +2667,14 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // ---- title row ----
     let mut y = r.y_top + pad + ascent as f64;
     let title = format!("CLAUDE ACCOUNTS  {}", cc.accounts.len());
-    text(p, inner_x, y, &title, CC_FG);
+    text(p, inner_x, y, &title, cc_palette::fg());
     let upd = &cc.updated_label;
-    text(p, inner_x + inner_w - text_w(upd), y, upd, CC_FG_DIM);
+    text(p, inner_x + inner_w - text_w(upd), y, upd, cc_palette::fg_dim());
     y += lh * 0.6;
 
     if cc.feed_missing {
         y += lh;
-        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", CC_FG_DIM);
+        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", cc_palette::fg_dim());
         return;
     }
 
@@ -2672,12 +2682,12 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let n = cc.accounts.len().max(1);
     let gap = (cw * 1.5) as f64;
     let card_w = ((inner_w - gap * (n as f64 - 1.0)) / n as f64).max(40.0);
-    let card_h = lh * 4.2;
+    let card_h = lh * 4.6;
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
         let card = Rect { x: cx, y_top: card_top, w: card_w, h: card_h };
-        p.fill_rounded_rect(card, CC_CARD_BG, 6.0, (CC_CARD_BORDER, 1.0));
+        p.fill_rounded_rect(card, cc_palette::card_bg(), 6.0, (cc_palette::card_border(), 1.0));
         let px = cx + cw as f64;
         let mut cy = card_top + lh * 0.4 + ascent as f64;
         // r1: badge + name + email …… status right
@@ -2685,17 +2695,17 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         let badge_w = text_w(badge) + cw as f64;
         p.fill_rounded_rect(
             Rect { x: px, y_top: cy - ascent as f64, w: badge_w, h: ch as f64 },
-            CC_BADGE_BG, 3.0, ([0.0; 4], 0.0),
+            cc_palette::badge_bg(), 3.0, ([0.0; 4], 0.0),
         );
-        text(p, px + cw as f64 * 0.5, cy, badge, CC_GREEN);
+        text(p, px + cw as f64 * 0.5, cy, badge, cc_palette::ok());
         let name_x = px + badge_w + cw as f64;
-        text(p, name_x, cy, &a.name, CC_FG);
+        text(p, name_x, cy, &a.name, cc_palette::fg());
         let email_x = name_x + text_w(&a.name) + cw as f64;
-        text(p, email_x, cy, &a.email, CC_FG_DIM);
+        text(p, email_x, cy, &a.email, cc_palette::fg_dim());
         let (st, stc) = if a.status_ok {
-            ("ok", CC_FG_DIM)
+            ("ok", cc_palette::fg_dim())
         } else {
-            (a.status_raw.as_str(), CC_RED)
+            (a.status_raw.as_str(), cc_palette::danger())
         };
         text(p, cx + card_w - cw as f64 - text_w(st), cy, st, stc);
         cy += lh * 1.1;
@@ -2705,16 +2715,16 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             ("5H", a.util_5h, px),
             ("7D", a.util_7d, px + half + cw as f64),
         ] {
-            text(p, gx, cy, label, CC_FG_DIM);
+            text(p, gx, cy, label, cc_palette::fg_dim());
             let pct = format!("{:.0}%", util * 100.0);
-            text(p, gx + half - text_w(&pct), cy, &pct, CC_FG);
+            text(p, gx + half - text_w(&pct), cy, &pct, cc_palette::fg());
             let bar_x = gx;
             let bar_y = cy + lh * 0.28;
             let bar_w = half;
-            let bar_h = (ch * 0.28) as f64;
+            let bar_h = (ch * 0.55) as f64;
             p.fill_rounded_rect(
                 Rect { x: bar_x, y_top: bar_y, w: bar_w, h: bar_h },
-                CC_TRACK, 2.0, ([0.0; 4], 0.0),
+                cc_palette::track(), 2.0, ([0.0; 4], 0.0),
             );
             let fill_w = (bar_w * util.clamp(0.0, 1.0) as f64).max(0.0);
             if fill_w > 0.5 {
@@ -2724,14 +2734,14 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
                 );
             }
         }
-        cy += lh * 1.5;
+        cy += lh * 1.9;
         // r3: reset label
-        text(p, px, cy, &a.reset_label, CC_FG_DIM);
+        text(p, px, cy, &a.reset_label, cc_palette::fg_dim());
     }
     y = card_top + card_h + lh;
 
     // ---- timeline ----
-    text(p, inner_x, y + ascent as f64 * 0.0, "RESOURCE AVAILABILITY (±6D)", CC_FG);
+    text(p, inner_x, y + ascent as f64 * 0.0, "RESOURCE AVAILABILITY (±6D)", cc_palette::fg());
     y += lh * 0.8;
     let label_w = cc
         .accounts
@@ -2744,12 +2754,14 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let span_s: f64 = 12.0 * 86_400.0; // ±6 days
     let t0 = cc.now_unix as f64 - span_s / 2.0;
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
-    let row_h = lh * 1.7;
-    let bar_h = (ch * 0.30) as f64;
+    let bar_h = (ch * 0.55) as f64;
+    let bar_gap = (ch * 0.35) as f64;
+    let row_h = bar_h * 2.0 + bar_gap + lh * 0.9;
     let rows_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let ry = rows_top + i as f64 * row_h;
-        text(p, inner_x, ry + ascent as f64 + lh * 0.3, &a.name, CC_FG_DIM);
+        let name_baseline = ry + bar_h + bar_gap / 2.0 + ascent as f64 * 0.5;
+        text(p, inner_x, name_baseline, &a.name, cc_palette::fg_dim());
         for (idx, (span, reset, util, hm)) in [
             (5.0 * 3_600.0, a.reset_5h_unix as f64, a.util_5h, &a.reset_5h_hm),
             (7.0 * 86_400.0, a.reset_7d_unix as f64, a.util_7d, &a.reset_7d_hm),
@@ -2757,24 +2769,32 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         .into_iter()
         .enumerate()
         {
-            let by = ry + lh * 0.25 + idx as f64 * (bar_h + 3.0);
-            // Track spans the whole strip; the active window fills
-            // [reset - span, reset] in the utilization colour.
-            p.fill_rounded_rect(
-                Rect { x: tl_x, y_top: by, w: tl_w, h: bar_h },
-                CC_TRACK, 2.0, ([0.0; 4], 0.0),
-            );
+            let by = ry + idx as f64 * (bar_h + bar_gap);
+            // Track = the rolling window's extent [reset - span,
+            // reset]; the coloured fill covers only the USED portion
+            // (window start + span × utilization) — "used this much
+            // of this window", not "window exists".
             let wx0 = x_of(reset - span);
             let wx1 = x_of(reset);
             if wx1 - wx0 > 0.5 {
                 p.fill_rounded_rect(
                     Rect { x: wx0, y_top: by, w: wx1 - wx0, h: bar_h },
+                    cc_palette::track(), 2.0, ([0.0; 4], 0.0),
+                );
+            }
+            let ux1 = x_of(reset - span + span * util.clamp(0.0, 1.0) as f64);
+            if ux1 - wx0 > 0.5 {
+                p.fill_rounded_rect(
+                    Rect { x: wx0, y_top: by, w: ux1 - wx0, h: bar_h },
                     cc_util_color(util), 2.0, ([0.0; 4], 0.0),
                 );
             }
+            // Tag sits right of the window, vertically centered on
+            // the bar (baseline = bar centre + half the ascent).
             let tag = format!("{} {:.0}% {}", if idx == 0 { "5h" } else { "7d" }, util * 100.0, hm);
-            let tag_x = (wx1 + cw as f64 * 0.5).min(tl_x + tl_w - text_w(&tag));
-            text(p, tag_x, by + ascent as f64 * 0.8, &tag, CC_FG_DIM);
+            let tag_x = (wx1 + cw as f64 * 0.7).min(tl_x + tl_w - text_w(&tag));
+            let tag_baseline = by + bar_h / 2.0 + ascent as f64 * 0.42;
+            text(p, tag_x, tag_baseline, &tag, cc_palette::fg_dim());
         }
     }
     let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
@@ -2782,9 +2802,9 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let nx = x_of(cc.now_unix as f64);
     p.fill_rounded_rect(
         Rect { x: nx, y_top: rows_top - lh * 0.4, w: 1.5, h: rows_bottom - rows_top + lh * 0.4 },
-        CC_NOW, 0.0, ([0.0; 4], 0.0),
+        cc_palette::now(), 0.0, ([0.0; 4], 0.0),
     );
-    text(p, nx - text_w("NOW") / 2.0, rows_top - lh * 0.5, "NOW", CC_NOW);
+    text(p, nx - text_w("NOW") / 2.0, rows_top - lh * 0.5, "NOW", cc_palette::now());
     // Daily ticks + labels along the bottom.
     let day = 86_400.0;
     let first_day = (t0 / day).ceil() * day;
@@ -2797,7 +2817,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         );
         let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
         let lbl = format!("{mo}/{d}");
-        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, CC_FG_DIM);
+        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, cc_palette::fg_dim());
         t += day;
     }
 }
