@@ -3118,8 +3118,13 @@ impl CoreApp {
                     .map(|a| CcUsageAccountRender {
                         name: a.name.clone(),
                         email: a.email.clone(),
-                        status_ok: a.status == "allowed",
-                        status_raw: a.status.clone(),
+                        status_label: marspot::cc_usage::CcStatusKind::classify(&a.status)
+                            .label(&a.status),
+                        status_severity: match marspot::cc_usage::CcStatusKind::classify(&a.status) {
+                            marspot::cc_usage::CcStatusKind::Ok => 0,
+                            marspot::cc_usage::CcStatusKind::Warn => 1,
+                            _ => 2,
+                        },
                         util_5h: a.util_5h as f32,
                         util_7d: a.util_7d as f32,
                         reset_5h_unix: a.reset_5h,

@@ -330,10 +330,11 @@ pub struct ContextMenuRow {
 pub struct CcUsageAccountRender {
     pub name: String,
     pub email: String,
-    /// `status == "allowed"` → the card corner reads "ok"; anything
-    /// else renders the raw status string in warning colour.
-    pub status_ok: bool,
-    pub status_raw: String,
+    /// Short status label (≤ 7 chars, pre-classified by L2 from the
+    /// feed's raw status string) + the severity that picks its colour.
+    pub status_label: String,
+    /// 0 = ok, 1 = warn, 2 = limited/unknown-bad.
+    pub status_severity: u8,
     /// 0.0 ..= 1.0 window utilizations.
     pub util_5h: f32,
     pub util_7d: f32,
@@ -2690,7 +2691,20 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         p.fill_rounded_rect(card, cc_palette::card_bg(), 6.0, (cc_palette::card_border(), 1.0));
         let px = cx + cw as f64;
         let mut cy = card_top + lh * 0.4 + ascent as f64;
-        // r1: badge + name + email …… status right
+        let stc = match a.status_severity {
+            0 => cc_palette::fg_dim(),
+            1 => cc_palette::warn(),
+            _ => cc_palette::danger(),
+        };
+        // r1 identity row — laid out with RESERVED SLOTS so nothing
+        // can overlap regardless of name / email / status length:
+        //   [badge] [name] [email…truncated] ……… [status]
+        // The status slot is reserved first (right-aligned), then the
+        // name, and the email gets whatever is left — dropped entirely
+        // when the remainder can't fit at least a few glyphs.
+        let row_right = cx + card_w - cw as f64;
+        let status_w = text_w(&a.status_label);
+        text(p, row_right - status_w, cy, &a.status_label, stc);
         let badge = "active";
         let badge_w = text_w(badge) + cw as f64;
         p.fill_rounded_rect(
@@ -2699,15 +2713,27 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         );
         text(p, px + cw as f64 * 0.5, cy, badge, cc_palette::ok());
         let name_x = px + badge_w + cw as f64;
-        text(p, name_x, cy, &a.name, cc_palette::fg());
-        let email_x = name_x + text_w(&a.name) + cw as f64;
-        text(p, email_x, cy, &a.email, cc_palette::fg_dim());
-        let (st, stc) = if a.status_ok {
-            ("ok", cc_palette::fg_dim())
+        // Name may itself need trimming on a very narrow card.
+        let name_budget = (row_right - status_w - cw as f64 - name_x).max(0.0);
+        let name_fit = (name_budget / cw as f64).floor().max(0.0) as usize;
+        let name_shown: String = if a.name.chars().count() <= name_fit {
+            a.name.clone()
         } else {
-            (a.status_raw.as_str(), cc_palette::danger())
+            a.name.chars().take(name_fit.saturating_sub(1)).chain(['…']).collect()
         };
-        text(p, cx + card_w - cw as f64 - text_w(st), cy, st, stc);
+        text(p, name_x, cy, &name_shown, cc_palette::fg());
+        // Email fills the gap between the name and the status slot.
+        let email_x = name_x + text_w(&name_shown) + cw as f64;
+        let email_budget = (row_right - status_w - cw as f64 - email_x).max(0.0);
+        let email_fit = (email_budget / cw as f64).floor().max(0.0) as usize;
+        if email_fit >= 4 {
+            let email_shown: String = if a.email.chars().count() <= email_fit {
+                a.email.clone()
+            } else {
+                a.email.chars().take(email_fit.saturating_sub(1)).chain(['…']).collect()
+            };
+            text(p, email_x, cy, &email_shown, cc_palette::fg_dim());
+        }
         cy += lh * 1.1;
         // r2: 5H bar ... 7D bar (two half-width groups)
         let half = (card_w - 3.0 * cw as f64) / 2.0;

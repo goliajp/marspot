@@ -38,6 +38,55 @@ pub struct CcUsage {
     pub accounts: Vec<CcAccount>,
 }
 
+/// How the modal should present an account's rolling-window status.
+/// The feed carries the raw `anthropic-ratelimit-unified-status`
+/// response header verbatim; that header is not covered by the public
+/// API docs (it's the subscription-side unified limiter, not the
+/// per-org API rate limiter), so this maps only the values the
+/// collector has actually observed and lets anything else through
+/// as raw text rather than guessing at a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CcStatusKind {
+    /// `allowed` — within limits.
+    Ok,
+    /// `allowed_warning` — still served, but the window is close
+    /// enough to its cap that the header flags it.
+    Warn,
+    /// `rejected` — the window is exhausted; requests are refused.
+    Limited,
+    /// Collector-side sentinel: no token for this account.
+    NoToken,
+    /// Anything else (including `unknown`) — shown as raw text.
+    Other,
+}
+
+impl CcStatusKind {
+    pub fn classify(raw: &str) -> Self {
+        match raw {
+            "allowed" => Self::Ok,
+            "allowed_warning" => Self::Warn,
+            "rejected" => Self::Limited,
+            "no_token" => Self::NoToken,
+            _ => Self::Other,
+        }
+    }
+
+    /// Short label for the card corner.  Kept to ≤ 7 chars so the
+    /// layout can reserve a fixed slot and never collide with the
+    /// email to its left.
+    pub fn label(self, raw: &str) -> String {
+        match self {
+            Self::Ok => "ok".into(),
+            Self::Warn => "near".into(),
+            Self::Limited => "limit".into(),
+            Self::NoToken => "no key".into(),
+            // Unknown status: surface the source string, truncated to
+            // the reserved slot so a future value can't break layout.
+            Self::Other => raw.chars().take(7).collect(),
+        }
+    }
+}
+
 /// Feed location.  `$HOME/.local/state/devops/claude-usage.json`.
 pub fn feed_path() -> PathBuf {
     std::env::var_os("HOME")
@@ -211,6 +260,24 @@ mod tests {
         // 2026-07-19T01:13:59Z — cross-checked against date(1).
         let u = parse(SAMPLE).unwrap();
         assert_eq!(u.generated_at, 1_784_423_639);
+    }
+
+    #[test]
+    fn status_kinds_classify_and_label() {
+        use CcStatusKind::*;
+        assert_eq!(CcStatusKind::classify("allowed"), Ok);
+        assert_eq!(CcStatusKind::classify("allowed_warning"), Warn);
+        assert_eq!(CcStatusKind::classify("rejected"), Limited);
+        assert_eq!(CcStatusKind::classify("no_token"), NoToken);
+        assert_eq!(CcStatusKind::classify("unknown"), Other);
+        assert_eq!(CcStatusKind::classify(""), Other);
+        assert_eq!(Ok.label("allowed"), "ok");
+        assert_eq!(Warn.label("allowed_warning"), "near");
+        assert_eq!(Limited.label("rejected"), "limit");
+        // Unknown values are surfaced but bounded to the reserved slot.
+        let long = Other.label("some_unexpected_future_value");
+        assert_eq!(long, "some_un");
+        assert!(long.chars().count() <= 7);
     }
 
     #[test]
