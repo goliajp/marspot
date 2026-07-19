@@ -185,6 +185,8 @@ pub struct Layout {
     /// right of the process-tree button.  Toggles the UI-system
     /// workbench panel.  Always present.
     pub dev_panel_button_rect: Rect,
+    /// cc — toolbar `Cc` button (Claude profile usage modal).
+    pub cc_button_rect: Rect,
     // F3+3.0 — picker popup removed.  The toolbar layout button
     // now opens a `LayoutModal` (see `src/ui/components/`) where
     // the user sets arbitrary cols × rows.  The modal is rendered
@@ -339,6 +341,7 @@ impl Layout {
             sidebar_button_rect: Rect::ZERO,
             process_button_rect: Rect::ZERO,
             dev_panel_button_rect: Rect::ZERO,
+            cc_button_rect: Rect::ZERO,
             close_session_rects: Vec::new(),
             add_session_button_rect: Rect::ZERO,
             sidebar_top_pad_phys,
@@ -397,6 +400,7 @@ impl Layout {
         // movement.
         let process_btn_x = layout_btn_x + btn_size + btn_gap;
         let dev_panel_btn_x = process_btn_x + btn_size + btn_gap;
+        let cc_btn_x = dev_panel_btn_x + btn_size + btn_gap;
         self.sidebar_button_rect = Rect {
             x: sidebar_btn_x,
             y_top: btn_y,
@@ -417,6 +421,12 @@ impl Layout {
         };
         self.dev_panel_button_rect = Rect {
             x: dev_panel_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.cc_button_rect = Rect {
+            x: cc_btn_x,
             y_top: btn_y,
             w: btn_w,
             h: btn_h,
@@ -487,6 +497,12 @@ impl Layout {
     /// True when `(px, py)` falls inside the dev-panel toggle button.
     pub fn hit_test_dev_panel_button(&self, px: f64, py: f64) -> bool {
         self.dev_panel_button_rect.contains(px, py)
+    }
+
+    /// cc — true when `(px, py)` falls inside the toolbar `Cc`
+    /// (Claude usage modal) button.
+    pub fn hit_test_cc_button(&self, px: f64, py: f64) -> bool {
+        self.cc_button_rect.contains(px, py)
     }
 
     // F3+3.0 — `hit_test_picker_option` / `hit_test_picker_panel`
