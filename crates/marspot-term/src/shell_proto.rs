@@ -622,6 +622,12 @@ impl Frame {
         Self { msg_type, payload }
     }
 
+    /// Bytes this frame occupies on the wire, header included.  Used
+    /// to size queues that hold frames before they reach a socket.
+    pub fn wire_len(&self) -> usize {
+        HEADER_LEN + self.payload.len()
+    }
+
     pub fn write_to<W: Write>(&self, w: &mut W) -> io::Result<usize> {
         let mut header = [0u8; HEADER_LEN];
         header[0..4].copy_from_slice(&MAGIC.to_le_bytes());

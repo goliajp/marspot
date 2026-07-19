@@ -20,6 +20,8 @@
 //! CPU is ~0. With neither env var set it stays fully standalone
 //! (self-creates the region, no input source) for the dev/test path.
 
+mod control_writer;
+use control_writer::ControlWriter;
 mod local_session;
 mod uds_server;
 
@@ -528,7 +530,7 @@ fn do_l3_execv_swap(
     id: u64,
     local: local_session::LocalSession,
     mut listener: uds_server::SessionListener,
-    poke: Option<UnixStream>,
+    poke: Option<ControlWriter>,
 ) -> std::io::Result<()> {
     let started = Instant::now();
     let (master_fd, child_pid, terminal, cols, rows) = local.extract_for_handoff();
@@ -557,9 +559,8 @@ fn do_l3_execv_swap(
     // reader doesn't see EOF.  `into_raw_fd` so the OwnedFd doesn't
     // close on drop after we've cleared CLOEXEC on it.
     let control_stream_fd: RawFd = match poke {
-        Some(stream) => {
-            use std::os::fd::IntoRawFd;
-            let fd = stream.into_raw_fd();
+        Some(writer) => {
+            let fd = writer.into_raw_fd();
             clear_cloexec(fd)?;
             fd
         }
@@ -730,7 +731,7 @@ fn handle_paste(session: &mut SessionImpl, text: &str) {
 /// exit (`CoreGone`): the surviving shelld session is re-attached by the
 /// next core, so an orphaned engine would only leak (see `CoreGone`).
 /// No env var → standalone, no input source, no writer.
-fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
+fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<ControlWriter> {
     let fd: RawFd = match std::env::var(ENV_CONTROL_FD) {
         Ok(s) => match s.parse() {
             Ok(fd) => fd,
@@ -765,7 +766,21 @@ fn setup_control_socket(tx: Sender<SessionEvent>) -> Option<UnixStream> {
     // The inherited-fd path runs at generation 0; if it dies, that's a
     // genuine "no client left" (not a stale-reader race).
     spawn_control_reader(stream, tx, 0);
-    Some(writer)
+    match ControlWriter::new(writer) {
+        Ok(w) => Some(w),
+        Err((e, _)) => {
+            // Without a writer thread the only alternative is writing
+            // inline, which is the wedge this replaced.  Better to run
+            // pokeless: L2 falls back to its own polling and the pane
+            // stays responsive.
+            lx_error!(
+                "session.control_socket.writer_spawn_failed",
+                &format!("{e}; running without a poke channel"),
+                fd = fd
+            );
+            None
+        }
+    }
 }
 
 /// RFC-003 step 2e — frame-dispatch loop for the L2↔L3 control socket.
@@ -866,7 +881,7 @@ fn publish_and_poke(
     shm: &mut GridShmWriter,
     session: &mut SessionImpl,
     view_offset: u16,
-    mut poke: Option<&mut UnixStream>,
+    mut poke: Option<&mut ControlWriter>,
 ) {
     let changed = publish(shm, session, view_offset);
     // F3+3.6 — OSC 7 push-based cwd publish removed; L2 now pull-
@@ -884,7 +899,8 @@ fn publish_and_poke(
     if let Some(w) = poke {
         // Best-effort: a dead socket just means L2 went away; the next
         // read EOF tears the reader down and the session keeps running.
-        let _ = Frame::new(MsgType::GridReady, Vec::new()).write_to(w);
+        // Queued, never written inline — see `ControlWriter`.
+        let _ = w.send(Frame::new(MsgType::GridReady, Vec::new()));
     }
 }
 
@@ -981,7 +997,7 @@ fn main() {
     // populated by the resume branch below.  Lives outside `if
     // owns_pty` so `setup_control_socket` after the spawn can adopt
     // it.
-    let mut resumed_poke: Option<UnixStream> = None;
+    let mut resumed_poke: Option<ControlWriter> = None;
     let mut resumed_client_generation: u64 = 0;
     let mut session: SessionImpl = if owns_pty {
         let wake_tx = ev_tx.clone();
@@ -1095,7 +1111,7 @@ fn main() {
                 match stream.try_clone() {
                     Ok(writer) => {
                         resumed_client_generation = 1;
-                        resumed_poke = Some(writer);
+                        resumed_poke = ControlWriter::new(writer).ok();
                         spawn_control_reader(stream, ev_tx.clone(), 1);
                         lx_event!(
                             "L3_EXECV_CONTROL_ADOPTED",
@@ -1280,7 +1296,13 @@ fn main() {
     // RFC-004 C.1 — periodic-snapshot bookkeeping (see the writer
     // block at the loop tail).
     const PERIODIC_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
-    const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
+    /// Shortest main-loop iteration worth reporting as a stall.  Normal
+/// iterations are sub-millisecond; a loop that services keystrokes has
+/// no business taking a tenth of a second, so anything past this is
+/// already anomalous and worth a line in the log.
+const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
+
+const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
     let mut last_snapshot_at = Instant::now();
     let mut periodic_snapshot_seen = false;
@@ -1300,6 +1322,13 @@ fn main() {
     // cancel flag; the old worker exits at its next iteration without
     // delivering its batch.
     let mut current_search: Option<SearchWorker> = None;
+    // Both bugs this loop shipped today (a blocking PTY write, a 50 MiB
+    // bytelog compaction) froze it for seconds to minutes, and neither
+    // left a trace: sessions log on events, so a wedged loop and an idle
+    // loop look identical from the outside.  `LoopWatch` makes the loop
+    // report its own stalls, naming the phase that ate the time.  Silent
+    // below the threshold, so a healthy session logs nothing.
+    let mut watch = marspot_term::loop_watch::LoopWatch::new(LOOP_STALL_THRESHOLD);
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1309,6 +1338,10 @@ fn main() {
                 break;
             }
         };
+        // Time from here, not from before the `recv` above: a loop
+        // parked waiting for work is doing its job, not stalling.
+        watch.begin();
+        watch.phase("drain");
         // Drain the burst: handle every queued key now, coalesce wakes
         // into the single pump below, and collapse a flurry of resizes to
         // the final dims (intermediate sizes never need a reflow).
@@ -1476,8 +1509,9 @@ fn main() {
                                     0,
                                     &[],
                                 );
-                                let _ = Frame::new(MsgType::SearchResults, payload)
-                                    .write_to(w);
+                                let _ = w.send(
+                                    Frame::new(MsgType::SearchResults, payload),
+                                );
                             }
                             lx_debug!(
                                 "session.search.no_file_scrollback",
@@ -1527,7 +1561,7 @@ fn main() {
                         if let Some(w) = poke.as_mut() {
                             let payload =
                                 encode_search_results(query_id, has_more, total_seen, &hits);
-                            let _ = Frame::new(MsgType::SearchResults, payload).write_to(w);
+                            let _ = w.send(Frame::new(MsgType::SearchResults, payload));
                         }
                         // Worker has delivered; we can drop our
                         // handle.  Drop is a no-op cancel signal at
@@ -1559,7 +1593,7 @@ fn main() {
                     let this_gen = client_generation;
                     match stream.try_clone() {
                         Ok(writer) => {
-                            poke = Some(writer);
+                            poke = ControlWriter::new(writer).ok();
                             spawn_control_reader(stream, ev_tx.clone(), this_gen);
                             // RFC-003 §6 Amendment 7: republish the
                             // current grid + fire GridReady so L2 has
@@ -1715,6 +1749,7 @@ fn main() {
             }
         }
 
+        watch.phase("selection");
         // Answer any Cmd-C selection requests against the post-pump grid.
         if !selection_reqs.is_empty() {
             if let Some(w) = poke.as_mut() {
@@ -1722,8 +1757,17 @@ fn main() {
                     let text = grid_selection_text(session.terminal().grid(), anchor, focus, blockwise)
                         .unwrap_or_default();
                     let frame = Frame::new(MsgType::SelectionText, encode_selection_text(seq, &text));
-                    if let Err(e) = frame.write_to(w) {
-                        lx_warn!("session.selection_reply_failed", &format!("{e}"));
+                    // A refusal here means L2 has stopped reading long
+                    // enough to fill a 4 MiB queue — the reply is lost,
+                    // but the loop keeps running, which is the whole
+                    // trade this type exists to make.
+                    if !w.send(frame) {
+                        lx_warn!(
+                            "session.selection_reply_dropped",
+                            "L2 not draining the control socket",
+                            backlog = w.backlog(),
+                            dropped_bytes = w.dropped_bytes()
+                        );
                         break;
                     }
                 }
@@ -1746,6 +1790,7 @@ fn main() {
         // existed).  Worst-case loss window shrinks from "since boot"
         // to 30 s.
         {
+            watch.phase("snapshot");
             let gen_now = session.terminal().generation();
             if gen_now != last_snapshot_generation
                 && last_snapshot_at.elapsed() >= PERIODIC_SNAPSHOT_INTERVAL
@@ -1822,6 +1867,22 @@ fn main() {
                 cursor_col = cc,
                 cursor_row = cr,
                 state = state_str(session.state())
+            );
+        }
+
+        // Report only if this iteration ran long.  The phase breakdown
+        // is the part that matters: today both stalls were diagnosed by
+        // catching the process live and reading a stack, because the
+        // log could not say which phase was slow.
+        if let Some(r) = watch.end() {
+            lx_warn!(
+                "l3.loop.stall",
+                &format!("main loop iteration took {:.2}s", r.total.as_secs_f64()),
+                session_id = session.id(),
+                slowest = r.slowest,
+                slowest_ms = r.slowest_took.as_millis(),
+                breakdown = r.breakdown(),
+                stalls_total = watch.stall_count()
             );
         }
     }

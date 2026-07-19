@@ -21,6 +21,7 @@ pub mod grapheme;
 pub mod grid;
 pub mod grid_links;
 pub mod logx;
+pub mod loop_watch;
 pub mod scrollback_search;
 
 /// Fingerprint embedded into the binary's rodata so `install-local.sh`
