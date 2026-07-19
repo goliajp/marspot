@@ -234,11 +234,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "marspot-linkify"
+version = "0.1.0"
+
+[[package]]
 name = "marspot-term"
 version = "0.2.12"
 dependencies = [
  "flate2",
  "libc",
+ "marspot-linkify",
 ]
 
 [[package]]

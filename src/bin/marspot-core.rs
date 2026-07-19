@@ -138,6 +138,8 @@ enum ChromeBtn {
     ProcessTree,
     /// UI-system dev panel toggle.
     DevPanel,
+    /// cc — Claude usage modal toggle.
+    CcUsage,
 }
 
 /// Convert the typed hover-button to the renderer's wire shape
@@ -150,6 +152,7 @@ fn map_hover_to_u8(h: Option<ChromeBtn>) -> Option<u8> {
         Some(ChromeBtn::Layout) => Some(1),
         Some(ChromeBtn::ProcessTree) => Some(2),
         Some(ChromeBtn::DevPanel) => Some(3),
+        Some(ChromeBtn::CcUsage) => Some(4),
         None => None,
     }
 }
@@ -725,6 +728,14 @@ mod link_menu_tests {
         assert_eq!(items[0].label, "Copy UUID");
         assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
     }
+}
+
+/// cc — state behind the toolbar `Cc` (Claude usage) modal.
+struct CcUsageModalState {
+    /// Parsed feed; `None` = file missing/unreadable (modal shows a
+    /// placeholder instead of closing).
+    data: Option<marspot::cc_usage::CcUsage>,
+    loaded_at: Instant,
 }
 
 struct ContextMenuState {
@@ -1374,6 +1385,9 @@ struct CoreApp {
     hover_chrome_btn: Option<ChromeBtn>,
     /// F3+1 — process-tree panel.  `None` = closed (no libproc cost).
     process_panel: Option<ProcessPanelState>,
+    /// cc — open `Cc` usage modal.  `None` = closed; the feed file
+    /// is only read while this is `Some` (open + 5 s refresh).
+    cc_usage_modal: Option<CcUsageModalState>,
     ime_preedit: String,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
@@ -2632,6 +2646,17 @@ impl CoreApp {
                 return;
             }
         }
+        // cc — Esc / Cmd-W closes the usage modal, same semantics.
+        if self.cc_usage_modal.is_some() && event.state == KeyState::Pressed {
+            let is_esc = matches!(event.logical, LogicalKey::Named(NamedKey::Escape));
+            let is_cmd_w = matches!(event.logical, LogicalKey::Char('w'))
+                && modifiers.super_;
+            if is_esc || is_cmd_w {
+                self.cc_usage_modal = None;
+                self.needs_render = true;
+                return;
+            }
+        }
 
         // RFC-003 LOCK_KEYS: if the focused pane is in a plugin-held
         // PaneSession that asked for the keyboard, route the event up
@@ -3022,6 +3047,90 @@ impl CoreApp {
             }
         }
         None
+    }
+
+    /// cc — modal frame rect for the `Cc` usage modal.  Width scales
+    /// with the account count (cards row); height with accounts
+    /// (timeline rows).  Centered under the title strip.
+    fn cc_usage_modal_rect(&self) -> marspot_term::layout::Rect {
+        let n = self
+            .cc_usage_modal
+            .as_ref()
+            .and_then(|m| m.data.as_ref())
+            .map(|d| d.accounts.len())
+            .unwrap_or(1)
+            .max(1);
+        let (cell_w, cell_h) = self.renderer.cell_dims();
+        let lh = cell_h as f64 * 1.35;
+        let w = (self.w_phys * 0.9)
+            .min(n as f64 * 46.0 * cell_w as f64 + 8.0 * cell_w as f64)
+            .max(64.0 * cell_w as f64)
+            .min(self.w_phys - 24.0);
+        let h = (lh * 8.0 + n as f64 * lh * 1.7 + lh * 4.0).min(self.h_phys * 0.85);
+        marspot_term::layout::Rect {
+            x: (self.w_phys - w) / 2.0,
+            y_top: ((self.h_phys - h) / 2.0).max(self.layout.top_inset + 8.0),
+            w,
+            h,
+        }
+    }
+
+    /// cc — build the `Cc` usage modal render data.  Re-reads the
+    /// feed at most every 5 s while the modal is open.
+    fn build_cc_usage_render(&mut self) -> Option<marspot::render_metal::CcUsageRender> {
+        use marspot::render_metal::{CcUsageAccountRender, CcUsageRender};
+        let modal = self.cc_usage_modal.as_mut()?;
+        if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
+            modal.data = marspot::cc_usage::read();
+            modal.loaded_at = Instant::now();
+            self.needs_render = true;
+        }
+        let rect = self.cc_usage_modal_rect();
+        let modal = self.cc_usage_modal.as_ref()?;
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let fmt_md_hm = |unix: i64| -> String {
+            let (mo, d, h, mi) = marspot::cc_usage::local_mdhm(unix);
+            format!("{mo}/{d} {h:02}:{mi:02}")
+        };
+        let fmt_hm = |unix: i64| -> String {
+            let (_, _, h, mi) = marspot::cc_usage::local_mdhm(unix);
+            format!("{h:02}:{mi:02}")
+        };
+        match modal.data.as_ref() {
+            None => Some(CcUsageRender {
+                rect,
+                updated_label: String::new(),
+                accounts: Vec::new(),
+                now_unix,
+                feed_missing: true,
+            }),
+            Some(d) => Some(CcUsageRender {
+                rect,
+                updated_label: format!("updated {}", fmt_md_hm(d.generated_at)),
+                now_unix,
+                feed_missing: false,
+                accounts: d
+                    .accounts
+                    .iter()
+                    .map(|a| CcUsageAccountRender {
+                        name: a.name.clone(),
+                        email: a.email.clone(),
+                        status_ok: a.status == "allowed",
+                        status_raw: a.status.clone(),
+                        util_5h: a.util_5h as f32,
+                        util_7d: a.util_7d as f32,
+                        reset_5h_unix: a.reset_5h,
+                        reset_7d_unix: a.reset_7d,
+                        reset_label: format!("reset 5h: {}", fmt_md_hm(a.reset_5h)),
+                        reset_5h_hm: fmt_hm(a.reset_5h),
+                        reset_7d_hm: fmt_hm(a.reset_7d),
+                    })
+                    .collect(),
+            }),
+        }
     }
 
     /// F3+1.5 — build the centered Process Monitor modal data via the
@@ -3424,6 +3533,8 @@ impl CoreApp {
             Some(ChromeBtn::ProcessTree)
         } else if self.layout.hit_test_dev_panel_button(x_phys, y_phys) {
             Some(ChromeBtn::DevPanel)
+        } else if self.layout.hit_test_cc_button(x_phys, y_phys) {
+            Some(ChromeBtn::CcUsage)
         } else {
             None
         };
@@ -3617,6 +3728,29 @@ impl CoreApp {
         // + drives the AppKit show/hide on its main loop.
         if self.layout.hit_test_dev_panel_button(x_phys, y_phys) {
             self.pending_to_shell.push((MsgType::DevPanelToggle, Vec::new()));
+            return;
+        }
+        // cc — toolbar `Cc` button toggles the Claude usage modal.
+        if self.layout.hit_test_cc_button(x_phys, y_phys) {
+            self.cc_usage_modal = match self.cc_usage_modal.take() {
+                Some(_) => None,
+                None => Some(CcUsageModalState {
+                    data: marspot::cc_usage::read(),
+                    loaded_at: Instant::now(),
+                }),
+            };
+            self.needs_render = true;
+            return;
+        }
+        // cc — while the usage modal is open, any click outside its
+        // frame closes it; clicks inside are swallowed (display-only
+        // modal, nothing interactive yet).
+        if self.cc_usage_modal.is_some() {
+            let rect = self.cc_usage_modal_rect();
+            if !rect.contains(x_phys, y_phys) {
+                self.cc_usage_modal = None;
+            }
+            self.needs_render = true;
             return;
         }
         // F3+3.0 — when the LayoutModal is open, intercept ALL
@@ -4274,6 +4408,10 @@ impl CoreApp {
         // the render call below.
         let panel_data = self.build_process_panel_render();
         self.renderer.set_process_panel(panel_data);
+        // cc — publish `Cc` usage modal render state (refreshing the
+        // feed at most every 5 s while open; zero I/O when closed).
+        let cc_data = self.build_cc_usage_render();
+        self.renderer.set_cc_usage(cc_data);
         // F3+9 — publish ContextMenu render state every frame.
         // Dev panel renders into its own NSWindow, owned by L1
         // (marspot-shell), not by L2.  L2's only job re: dev panel
@@ -4972,6 +5110,7 @@ fn main() {
         sidebar_collapsed: true,
         hover_chrome_btn: None,
         process_panel: None,
+        cc_usage_modal: None,
         ime_preedit: String::new(),
         w_phys,
         h_phys,

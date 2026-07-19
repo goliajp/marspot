@@ -323,6 +323,44 @@ pub struct ContextMenuRow {
     pub divider: bool,
 }
 
+/// cc — one Claude account card in the `Cc` usage modal.
+/// Pre-formatted by L2 (`build_cc_usage_render`); the renderer only
+/// lays out and paints.
+#[derive(Debug, Clone)]
+pub struct CcUsageAccountRender {
+    pub name: String,
+    pub email: String,
+    /// `status == "allowed"` → the card corner reads "ok"; anything
+    /// else renders the raw status string in warning colour.
+    pub status_ok: bool,
+    pub status_raw: String,
+    /// 0.0 ..= 1.0 window utilizations.
+    pub util_5h: f32,
+    pub util_7d: f32,
+    /// Unix reset instants (drive the timeline bars).
+    pub reset_5h_unix: i64,
+    pub reset_7d_unix: i64,
+    /// "reset 5h: 7/19 11:50" — local time, formatted by L2.
+    pub reset_label: String,
+    /// "11:50" / "14:00" — timeline bar end labels.
+    pub reset_5h_hm: String,
+    pub reset_7d_hm: String,
+}
+
+/// cc — full data for one render of the `Cc` (Claude usage) modal.
+/// Renderer pulls this via `set_cc_usage`.  `None` = closed.
+#[derive(Debug, Clone)]
+pub struct CcUsageRender {
+    /// Modal frame rect (physical px), centered by L2.
+    pub rect: Rect,
+    /// "updated 7/19 10:13" — feed generation time, local.
+    pub updated_label: String,
+    pub accounts: Vec<CcUsageAccountRender>,
+    pub now_unix: i64,
+    /// Feed missing/unparseable → placeholder text instead of cards.
+    pub feed_missing: bool,
+}
+
 /// F3+1.4 — full data for one render of the centered Process Monitor
 /// modal.  Renderer pulls this via `set_process_panel`.  `None` =
 /// closed, nothing drawn.
@@ -604,6 +642,7 @@ pub struct MetalRenderer {
     /// while the panel is open; cheap because rows are typically
     /// tens of entries.
     process_panel: Option<ProcessPanelRender>,
+    cc_usage: Option<CcUsageRender>,
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
     /// open, `None` when closed.  See `LayoutModalRender` below.
     layout_modal_state: Option<LayoutModalRender>,
@@ -784,7 +823,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
             clear_bg_required: true,
@@ -850,7 +889,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
             clear_bg_required: true,
@@ -865,6 +904,10 @@ impl MetalRenderer {
     /// closes (renderer skips the panel pass).  Called by L2 on every
     /// render frame while the panel is open; cheap because typical
     /// row counts are < 200 and we're just storing the Vec.
+    pub fn set_cc_usage(&mut self, data: Option<CcUsageRender>) {
+        self.cc_usage = data;
+    }
+
     pub fn set_process_panel(&mut self, data: Option<ProcessPanelRender>) {
         self.process_panel = data;
     }
@@ -1239,6 +1282,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             ref process_panel,
+            ref cc_usage,
             width_px,
             height_px,
             ..
@@ -1261,6 +1305,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             process_panel.as_ref(),
+            cc_usage.as_ref(),
             self.layout_modal_state.as_ref(),
             self.context_menu_state.as_ref(),
             font,
@@ -1458,6 +1503,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             ref process_panel,
+            ref cc_usage,
             ..
         } = *self;
 
@@ -1478,6 +1524,7 @@ impl MetalRenderer {
             window_focused,
             hover_chrome_btn,
             process_panel.as_ref(),
+            cc_usage.as_ref(),
             self.layout_modal_state.as_ref(),
             self.context_menu_state.as_ref(),
             font,
@@ -2054,6 +2101,7 @@ fn build_instances(
     window_focused: bool,
     hover_chrome_btn: Option<u8>,
     process_panel: Option<&ProcessPanelRender>,
+    cc_usage: Option<&CcUsageRender>,
     layout_modal_state: Option<&LayoutModalRender>,
     context_menu_state: Option<&ContextMenuRender>,
     font: &mut FontCache,
@@ -2405,6 +2453,18 @@ fn build_instances(
         );
     }
 
+    // cc — `Cc` usage modal (Claude account windows).  Same overlay
+    // + backdrop treatment as the process panel.
+    if let Some(cc) = cc_usage {
+        push_cc_usage_via_view(
+            cc,
+            layout.top_inset,
+            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            layout.window_w, layout.window_h,
+            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
+        );
+    }
+
     // F3+3.0 — LayoutModal: cols/rows steppers + Apply.  Overlay
     // scratches → renders on top of grid, modal-style backdrop dims
     // everything below the title strip.
@@ -2507,6 +2567,239 @@ fn push_process_panel_via_view(
     view.paint(&mut painter, |p| {
         paint_process_panel_content(panel, p);
     });
+}
+
+/// cc — paint the `Cc` usage modal: one card per Claude account
+/// (5H / 7D utilization bars + reset instants) and a ±6-day
+/// availability timeline underneath (per-account 5h/7d window bars,
+/// NOW marker, daily ticks).  All geometry derives from cell
+/// metrics so the modal scales with the font.
+#[allow(clippy::too_many_arguments)]
+fn push_cc_usage_via_view(
+    cc: &CcUsageRender,
+    top_inset: f64,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    window_w: f64,
+    window_h: f64,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
+) {
+    use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
+    let mut painter = ViewPainter {
+        cell_w, cell_h, ascent, atlas_w, atlas_h,
+        window_w, window_h,
+        font, atlas, cells, glyphs, ui_rects,
+    };
+    let view = View {
+        rect: cc.rect,
+        style: ViewStyle {
+            bg: PROCESS_PANEL_BG,
+            border_color: PROCESS_PANEL_BORDER,
+            border_width: 1.0,
+            corner_radius: PROCESS_PANEL_CORNER_RADIUS,
+            shadow_blur: 16.0,
+            shadow_alpha: 0.45,
+            padding: 0.0,
+            backdrop: Backdrop::Dim {
+                color: [0.0, 0.0, 0.0, 0.45],
+                exclude_above_y: top_inset,
+            },
+        },
+    };
+    view.paint(&mut painter, |p| {
+        paint_cc_usage_content(cc, p);
+    });
+}
+
+const CC_FG: [f32; 4] = [0.86, 0.87, 0.89, 1.0];
+const CC_FG_DIM: [f32; 4] = [0.52, 0.54, 0.58, 1.0];
+const CC_GREEN: [f32; 4] = [0.24, 0.78, 0.42, 1.0];
+const CC_AMBER: [f32; 4] = [0.87, 0.66, 0.16, 1.0];
+const CC_RED: [f32; 4] = [0.90, 0.32, 0.28, 1.0];
+const CC_TRACK: [f32; 4] = [0.16, 0.17, 0.19, 1.0];
+const CC_CARD_BG: [f32; 4] = [0.085, 0.09, 0.10, 1.0];
+const CC_CARD_BORDER: [f32; 4] = [0.20, 0.21, 0.23, 1.0];
+const CC_NOW: [f32; 4] = [0.35, 0.55, 0.95, 1.0];
+const CC_BADGE_BG: [f32; 4] = [0.10, 0.24, 0.14, 1.0];
+
+fn cc_util_color(util: f32) -> [f32; 4] {
+    if util < 0.5 {
+        CC_GREEN
+    } else if util < 0.85 {
+        CC_AMBER
+    } else {
+        CC_RED
+    }
+}
+
+fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::ViewPainter) {
+    let cw = p.cell_w;
+    let ch = p.cell_h;
+    let ascent = p.ascent;
+    let r = cc.rect;
+    let pad = (ch * 1.0) as f64;
+    let lh = (ch * 1.35) as f64; // line advance
+    let inner_x = r.x + pad;
+    let inner_w = (r.w - 2.0 * pad).max(1.0);
+
+    let text = |p: &mut crate::ui::core::view::ViewPainter, x: f64, baseline: f64, s: &str, c: [f32; 4]| {
+        p.text(x as f32, baseline as f32, s, c);
+    };
+    let text_w = |s: &str| -> f64 { s.chars().count() as f64 * cw as f64 };
+
+    // ---- title row ----
+    let mut y = r.y_top + pad + ascent as f64;
+    let title = format!("CLAUDE ACCOUNTS  {}", cc.accounts.len());
+    text(p, inner_x, y, &title, CC_FG);
+    let upd = &cc.updated_label;
+    text(p, inner_x + inner_w - text_w(upd), y, upd, CC_FG_DIM);
+    y += lh * 0.6;
+
+    if cc.feed_missing {
+        y += lh;
+        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", CC_FG_DIM);
+        return;
+    }
+
+    // ---- account cards, one row ----
+    let n = cc.accounts.len().max(1);
+    let gap = (cw * 1.5) as f64;
+    let card_w = ((inner_w - gap * (n as f64 - 1.0)) / n as f64).max(40.0);
+    let card_h = lh * 4.2;
+    let card_top = y;
+    for (i, a) in cc.accounts.iter().enumerate() {
+        let cx = inner_x + i as f64 * (card_w + gap);
+        let card = Rect { x: cx, y_top: card_top, w: card_w, h: card_h };
+        p.fill_rounded_rect(card, CC_CARD_BG, 6.0, (CC_CARD_BORDER, 1.0));
+        let px = cx + cw as f64;
+        let mut cy = card_top + lh * 0.4 + ascent as f64;
+        // r1: badge + name + email …… status right
+        let badge = "active";
+        let badge_w = text_w(badge) + cw as f64;
+        p.fill_rounded_rect(
+            Rect { x: px, y_top: cy - ascent as f64, w: badge_w, h: ch as f64 },
+            CC_BADGE_BG, 3.0, ([0.0; 4], 0.0),
+        );
+        text(p, px + cw as f64 * 0.5, cy, badge, CC_GREEN);
+        let name_x = px + badge_w + cw as f64;
+        text(p, name_x, cy, &a.name, CC_FG);
+        let email_x = name_x + text_w(&a.name) + cw as f64;
+        text(p, email_x, cy, &a.email, CC_FG_DIM);
+        let (st, stc) = if a.status_ok {
+            ("ok", CC_FG_DIM)
+        } else {
+            (a.status_raw.as_str(), CC_RED)
+        };
+        text(p, cx + card_w - cw as f64 - text_w(st), cy, st, stc);
+        cy += lh * 1.1;
+        // r2: 5H bar ... 7D bar (two half-width groups)
+        let half = (card_w - 3.0 * cw as f64) / 2.0;
+        for (label, util, gx) in [
+            ("5H", a.util_5h, px),
+            ("7D", a.util_7d, px + half + cw as f64),
+        ] {
+            text(p, gx, cy, label, CC_FG_DIM);
+            let pct = format!("{:.0}%", util * 100.0);
+            text(p, gx + half - text_w(&pct), cy, &pct, CC_FG);
+            let bar_x = gx;
+            let bar_y = cy + lh * 0.28;
+            let bar_w = half;
+            let bar_h = (ch * 0.28) as f64;
+            p.fill_rounded_rect(
+                Rect { x: bar_x, y_top: bar_y, w: bar_w, h: bar_h },
+                CC_TRACK, 2.0, ([0.0; 4], 0.0),
+            );
+            let fill_w = (bar_w * util.clamp(0.0, 1.0) as f64).max(0.0);
+            if fill_w > 0.5 {
+                p.fill_rounded_rect(
+                    Rect { x: bar_x, y_top: bar_y, w: fill_w, h: bar_h },
+                    cc_util_color(util), 2.0, ([0.0; 4], 0.0),
+                );
+            }
+        }
+        cy += lh * 1.5;
+        // r3: reset label
+        text(p, px, cy, &a.reset_label, CC_FG_DIM);
+    }
+    y = card_top + card_h + lh;
+
+    // ---- timeline ----
+    text(p, inner_x, y + ascent as f64 * 0.0, "RESOURCE AVAILABILITY (±6D)", CC_FG);
+    y += lh * 0.8;
+    let label_w = cc
+        .accounts
+        .iter()
+        .map(|a| text_w(&a.name))
+        .fold(0.0f64, f64::max)
+        + cw as f64 * 2.0;
+    let tl_x = inner_x + label_w;
+    let tl_w = (inner_w - label_w).max(10.0);
+    let span_s: f64 = 12.0 * 86_400.0; // ±6 days
+    let t0 = cc.now_unix as f64 - span_s / 2.0;
+    let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
+    let row_h = lh * 1.7;
+    let bar_h = (ch * 0.30) as f64;
+    let rows_top = y;
+    for (i, a) in cc.accounts.iter().enumerate() {
+        let ry = rows_top + i as f64 * row_h;
+        text(p, inner_x, ry + ascent as f64 + lh * 0.3, &a.name, CC_FG_DIM);
+        for (idx, (span, reset, util, hm)) in [
+            (5.0 * 3_600.0, a.reset_5h_unix as f64, a.util_5h, &a.reset_5h_hm),
+            (7.0 * 86_400.0, a.reset_7d_unix as f64, a.util_7d, &a.reset_7d_hm),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let by = ry + lh * 0.25 + idx as f64 * (bar_h + 3.0);
+            // Track spans the whole strip; the active window fills
+            // [reset - span, reset] in the utilization colour.
+            p.fill_rounded_rect(
+                Rect { x: tl_x, y_top: by, w: tl_w, h: bar_h },
+                CC_TRACK, 2.0, ([0.0; 4], 0.0),
+            );
+            let wx0 = x_of(reset - span);
+            let wx1 = x_of(reset);
+            if wx1 - wx0 > 0.5 {
+                p.fill_rounded_rect(
+                    Rect { x: wx0, y_top: by, w: wx1 - wx0, h: bar_h },
+                    cc_util_color(util), 2.0, ([0.0; 4], 0.0),
+                );
+            }
+            let tag = format!("{} {:.0}% {}", if idx == 0 { "5h" } else { "7d" }, util * 100.0, hm);
+            let tag_x = (wx1 + cw as f64 * 0.5).min(tl_x + tl_w - text_w(&tag));
+            text(p, tag_x, by + ascent as f64 * 0.8, &tag, CC_FG_DIM);
+        }
+    }
+    let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
+    // NOW marker.
+    let nx = x_of(cc.now_unix as f64);
+    p.fill_rounded_rect(
+        Rect { x: nx, y_top: rows_top - lh * 0.4, w: 1.5, h: rows_bottom - rows_top + lh * 0.4 },
+        CC_NOW, 0.0, ([0.0; 4], 0.0),
+    );
+    text(p, nx - text_w("NOW") / 2.0, rows_top - lh * 0.5, "NOW", CC_NOW);
+    // Daily ticks + labels along the bottom.
+    let day = 86_400.0;
+    let first_day = (t0 / day).ceil() * day;
+    let mut t = first_day;
+    while t < t0 + span_s {
+        let x = x_of(t);
+        p.fill_rounded_rect(
+            Rect { x, y_top: rows_bottom, w: 1.0, h: 4.0 },
+            [0.30, 0.31, 0.34, 1.0], 0.0, ([0.0; 4], 0.0),
+        );
+        let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
+        let lbl = format!("{mo}/{d}");
+        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, CC_FG_DIM);
+        t += day;
+    }
 }
 
 /// F3+9 / P2c — build the right-click ContextMenu as a `Canvas`.
@@ -3222,6 +3515,19 @@ fn push_layout_chrome(
             icon: Some(IconSpec::Component(icon)),
             icon_position: IconPosition::Only,
             hovered: hover_chrome_btn == Some(hover_id),
+            style: chrome,
+        };
+        btn.paint(p);
+    }
+    // cc — 5th toolbar button opens the Claude usage modal.  Text
+    // label instead of a vector icon: "Cc" IS the semantic.
+    if layout.cc_button_rect.w > 0.0 {
+        let btn = Button {
+            rect: layout.cc_button_rect,
+            label: Some("Cc"),
+            icon: None,
+            icon_position: IconPosition::Only,
+            hovered: hover_chrome_btn == Some(4),
             style: chrome,
         };
         btn.paint(p);
@@ -6977,6 +7283,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -7080,6 +7387,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -7151,6 +7459,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -7273,6 +7582,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -7374,6 +7684,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -7444,6 +7755,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 None,
