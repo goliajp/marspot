@@ -22,7 +22,6 @@ use core_text::line::CTLine;
 use core_text::string_attributes::kCTFontAttributeName;
 use core_graphics::font::CGGlyph;
 use marspot_term::fast_hash::FxHashMap;
-use std::collections::VecDeque;
 
 /// One shaped glyph — what the chrome renderer needs to push a
 /// `GlyphInstance` at its real proportional position.
@@ -238,12 +237,28 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
 ///
 /// `cap = 1024` covers a few hundred unique chrome strings per
 /// session × ~3 size+font combinations, with headroom; bounded
-/// forever per CLAUDE.md.  On overflow we drop the oldest entry —
-/// simple LRU via `VecDeque<key>`; re-shape happens transparently
-/// on next access.
+/// forever per CLAUDE.md.  On overflow the least-recently-used entry
+/// goes; re-shape happens transparently on next access.
+///
+/// Recency is a counter stamp on each entry, not a `VecDeque<key>`
+/// ordering.  The deque version made every cache **hit** O(cap): a
+/// linear scan comparing `String` keys, a `VecDeque::remove` memmove,
+/// and a key clone — paid per chrome string per frame, and getting
+/// worse as the cache filled toward its cap, which is precisely the
+/// "slower the longer it runs" shape the project forbids.  With a
+/// stamp a hit is a counter bump, and the O(cap) scan happens only on
+/// eviction, i.e. at most once per miss once the cache is full.
+/// `glyph_atlas` already resolved the same problem the same way.
+struct ShapeEntry {
+    glyphs: Vec<ShapedGlyph>,
+    last_used: u64,
+}
+
 pub struct ShapeCache {
-    map: FxHashMap<ShapeKey, Vec<ShapedGlyph>>,
-    order: VecDeque<ShapeKey>,
+    map: FxHashMap<ShapeKey, ShapeEntry>,
+    /// Monotonic access counter; each entry records the value it last
+    /// saw.  Wrapping is not a concern (u64 at one bump per lookup).
+    tick: u64,
     cap: usize,
     /// Hits / misses since startup.  Exposed via `approx_bytes` /
     /// future profile-RSS surface so the chrome cache's working set
@@ -282,7 +297,7 @@ impl ShapeCache {
     pub fn new(cap: usize) -> Self {
         Self {
             map: FxHashMap::default(),
-            order: VecDeque::with_capacity(cap),
+            tick: 0,
             cap,
             hits: 0,
             misses: 0,
@@ -339,24 +354,34 @@ impl ShapeCache {
             calt: (key.opts_bits & 0b0100) != 0,
             contextual: (key.opts_bits & 0b1000) != 0,
         };
+        self.tick += 1;
+        let now = self.tick;
         if self.map.contains_key(&key) {
             self.hits += 1;
-            if let Some(pos) = self.order.iter().position(|k| k == &key) {
-                self.order.remove(pos);
-            }
-            self.order.push_back(key.clone());
-            return self.map.get(&key).unwrap();
+            let e = self.map.get_mut(&key).unwrap();
+            e.last_used = now;
+            return &e.glyphs;
         }
         self.misses += 1;
         let shaped = shape_fn(text, base_font, opts_for_shape, &mut intern);
         if self.map.len() >= self.cap {
-            if let Some(oldest) = self.order.pop_front() {
+            // Only reached on a miss into a full cache, so the scan is
+            // amortised against a CoreText shaping call that costs far
+            // more than reading 1024 integers.
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| k.clone())
+            {
                 self.map.remove(&oldest);
             }
         }
-        self.order.push_back(key.clone());
-        self.map.insert(key.clone(), shaped);
-        self.map.get(&key).unwrap()
+        self.map.insert(
+            key.clone(),
+            ShapeEntry { glyphs: shaped, last_used: now },
+        );
+        &self.map.get(&key).unwrap().glyphs
     }
 
     pub fn approx_bytes(&self) -> usize {
@@ -366,11 +391,9 @@ impl ShapeCache {
         let payloads: usize = self
             .map
             .values()
-            .map(|v| v.capacity() * std::mem::size_of::<ShapedGlyph>())
+            .map(|v| v.glyphs.capacity() * std::mem::size_of::<ShapedGlyph>())
             .sum();
-        let order_bytes = self.order.capacity()
-            * (std::mem::size_of::<ShapeKey>() + std::mem::size_of::<usize>());
-        self.map.capacity() * entry_hdr + key_strs + payloads + order_bytes
+        self.map.capacity() * entry_hdr + key_strs + payloads
     }
 
     pub fn cache_len(&self) -> usize {

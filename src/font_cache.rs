@@ -237,7 +237,11 @@ pub struct FontCache {
     /// 5-byte (cp u32, style u8) key was visible in the 9-session
     /// CPU profile.  Swap to FxHash — keys are derived from grid
     /// contents, never adversarial.
-    char_cache: FxHashMap<(u32, u8), (usize, CGGlyph)>,
+    /// Resolved glyphs, with a recency stamp so eviction can drop the
+    /// coldest entry instead of the whole table.
+    char_cache: FxHashMap<(u32, u8), ((usize, CGGlyph), u64)>,
+    /// Monotonic access counter feeding `char_cache`'s recency stamps.
+    char_tick: u64,
     /// Number of times the cache filled up and was rebuilt.
     /// Should be 0 in steady-state terminal use; non-zero after
     /// settling means we're hitting the cap (bump CHAR_CACHE_CAP
@@ -393,6 +397,7 @@ impl FontCache {
         Ok(Self {
             fonts,
             char_cache: FxHashMap::default(),
+            char_tick: 0,
             rebuild_count: 0,
             style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
             cell_w,
@@ -426,17 +431,35 @@ impl FontCache {
     pub fn resolve_char(&mut self, ch: char, bold: bool, italic: bool) -> (usize, CGGlyph) {
         let style: u8 = (bold as u8) | ((italic as u8) << 1);
         let key = (ch as u32, style);
-        if let Some(&entry) = self.char_cache.get(&key) {
-            return entry;
+        self.char_tick += 1;
+        let now = self.char_tick;
+        if let Some(slot) = self.char_cache.get_mut(&key) {
+            slot.1 = now;
+            return slot.0;
         }
-        // Atomic rebuild when full.  Realistic terminal working sets
-        // stay well under cap, so this is a safety net rather than
-        // a frequent path; if rebuild_count climbs in the wild,
-        // raise the cap or upgrade to true LRU.  Note we don't drop
-        // the FontRegistry — fallback fonts already discovered stay
-        // interned (they're heavy to recreate via CT discover).
+        // Evict the single coldest entry when full.
+        //
+        // This used to `clear()` the whole table.  That made the
+        // overflow a cliff rather than a slope: the next frame had to
+        // re-resolve every visible cell, and every codepoint the base
+        // font lacks costs a `CTFontCreateForString` cascade.  With
+        // nine dense CJK panes that lands hundreds of CoreText calls in
+        // one frame — a visible hitch, and one that repeats every time
+        // the working set climbs back to the cap.  Dropping one entry
+        // costs a scan of 8 K integers, amortised against a font
+        // lookup that is far more expensive.
+        //
+        // The FontRegistry is untouched either way: fallback fonts
+        // already discovered stay interned (they're heavy to recreate).
         if self.char_cache.len() >= CHAR_CACHE_CAP {
-            self.char_cache.clear();
+            if let Some(coldest) = self
+                .char_cache
+                .iter()
+                .min_by_key(|(_, (_, stamp))| *stamp)
+                .map(|(k, _)| *k)
+            {
+                self.char_cache.remove(&coldest);
+            }
             self.rebuild_count += 1;
         }
         let style_idx = self.style_font_idx[style as usize];
@@ -481,7 +504,7 @@ impl FontCache {
             let idx = self.fonts.intern(fallback);
             (idx, fb_glyph)
         };
-        self.char_cache.insert(key, entry);
+        self.char_cache.insert(key, (entry, now));
         entry
     }
 
@@ -907,7 +930,16 @@ mod tests {
         assert!(pushed > CHAR_CACHE_CAP, "pushed enough to overflow");
         assert!(
             fc.rebuild_count > 0,
-            "cap should have triggered at least one rebuild"
+            "cap should have triggered at least one eviction"
+        );
+        // Eviction is one entry, not the whole table: after overflowing
+        // by ~100 keys the cache must still be full, not emptied.  The
+        // clear-on-full version failed this — it dropped to near zero
+        // and then paid to re-resolve everything.
+        assert!(
+            fc.char_cache.len() > CHAR_CACHE_CAP / 2,
+            "cache collapsed to {} entries — eviction dropped more than the coldest entry",
+            fc.char_cache.len()
         );
         // After rebuild, cache len is bounded.
         assert!(

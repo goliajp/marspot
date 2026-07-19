@@ -20,6 +20,7 @@ pub mod unicode_data;
 pub mod grapheme;
 pub mod grid;
 pub mod grid_links;
+pub mod frame_writer;
 pub mod logx;
 pub mod loop_watch;
 pub mod scrollback_search;

@@ -53,6 +53,11 @@ fn next_id_path() -> PathBuf {
 /// into the same scrollback.bin (the session-347 corruption class).
 /// The dir scan is O(#sessions) inside the flock and only runs on
 /// allocation (pane spawn), never on a hot path.
+/// How long `allocate_next_session_id` waits for the `.next_id` lock
+/// before giving up.  Holders keep it for a directory scan plus an
+/// fsync — milliseconds — so this is ~100× the expected worst case.
+const ALLOC_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub fn allocate_next_session_id() -> io::Result<u64> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
@@ -66,10 +71,34 @@ pub fn allocate_next_session_id() -> io::Result<u64> {
 
     // SAFETY: file is a live fd; flock is the standard POSIX advisory
     // lock primitive. Released automatically when the fd closes.
+    //
+    // `LOCK_NB` with a bounded retry rather than a blocking `LOCK_EX`:
+    // this runs on L2's main loop (pane spawn), and the lock is held
+    // across a directory scan plus an `fsync`.  A blocking acquire
+    // would hand another process's slow disk the power to freeze every
+    // pane for as long as it liked.  Contention here is between at
+    // most a handful of processes each holding the lock for
+    // milliseconds, so the deadline is generous by two orders of
+    // magnitude; blowing through it means something is genuinely stuck
+    // and failing is better than hanging.
     let fd = file.as_raw_fd();
-    let r = unsafe { libc::flock(fd, libc::LOCK_EX) };
-    if r < 0 {
-        return Err(io::Error::last_os_error());
+    let deadline = std::time::Instant::now() + ALLOC_LOCK_TIMEOUT;
+    loop {
+        let r = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        if r == 0 {
+            break;
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::WouldBlock {
+            return Err(e);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "another process held the session-id lock too long",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 
     let mut buf = String::new();

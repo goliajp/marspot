@@ -257,6 +257,20 @@ const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
 /// window triggers a syscall.  150 ms keeps "cd && cd" sequences
 /// reflected near-instantly while collapsing pasted scripts into a
 /// single fetch.
+/// How many times a background reconnect retries before giving the
+/// pane up.  Cheap now that it is off the main loop.
+/// Bytes L2 may have queued for L1 before frames are dropped.  The
+/// traffic is small and steady (surface acks, caret rects, pokes), so
+/// this is sized to ride out a busy L1 rather than to hold a burst.
+const SHELL_WRITE_QUEUE_CAP: usize = 1024 * 1024;
+
+const L3_RECONNECT_ATTEMPTS: u32 = 3;
+
+/// Consecutive failures after which cwd resolution for a session is
+/// abandoned until an explicit trigger.  Small: the fetch either works
+/// once the shell has registered its pid, or it never will.
+const CWD_MAX_FAILURES: u32 = 5;
+
 const CWD_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// F3+1.4 — modal size in logical points (auto-scales by display
@@ -801,6 +815,16 @@ enum CoreEvent {
     /// before manifest v2 carried `control_stream_fd`, kernel races
     /// during dual-core swap, plain crashes, etc).
     L3ControlEof(u64),
+    /// A background reconnect finished.  `Some(stream)` swaps the
+    /// pane's control onto it; `None` means every attempt failed and
+    /// the pane stays on its dead stream.
+    ///
+    /// The reconnect itself must not run on this loop: it polls for
+    /// entry.toml and retries `connect` with backoff, up to twice the
+    /// timeout it is given.  Done inline, N panes EOF'ing together (a
+    /// silent update does exactly that) serialise into tens of seconds
+    /// with every pane frozen.
+    L3ControlReconnected(u64, Option<std::os::unix::net::UnixStream>),
     /// SIGUSR2 (per-session silent-update trigger): bring up replacement
     /// L3s on every idle pane's session and swap when they're ready.  The
     /// manual hook the updater will drive once a new `marspot-session` is
@@ -1388,6 +1412,12 @@ struct CoreApp {
     /// cc — open `Cc` usage modal.  `None` = closed; the feed file
     /// is only read while this is `Some` (open + 5 s refresh).
     cc_usage_modal: Option<CcUsageModalState>,
+    /// Sessions with a reconnect already in flight.  Without this, a
+    /// burst of EOFs for one session would spawn a thread each.
+    reconnecting: std::collections::HashSet<u64>,
+    /// Consecutive cwd-resolution failures per session.  Past
+    /// `CWD_MAX_FAILURES` the per-frame lazy fill stops asking.
+    cwd_unresolvable: std::collections::HashMap<u64, u32>,
     ime_preedit: String,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
@@ -1591,6 +1621,11 @@ impl CoreApp {
         let Some(pane) = self.panes.get(pane_idx) else { return false };
         let Some(sid) = pane.shelld_session_id() else { return false };
         let now = Instant::now();
+        if force {
+            // An explicit trigger means something just changed; drop
+            // the give-up mark so this attempt really runs.
+            self.cwd_unresolvable.remove(&sid);
+        }
         if !force {
             if let Some(&prev) = self.last_cwd_refresh.get(&sid) {
                 if now.duration_since(prev) < CWD_REFRESH_DEBOUNCE {
@@ -1605,9 +1640,34 @@ impl CoreApp {
         // by the build_views lazy fill.  Worst case becomes 1 attempt
         // per CWD_REFRESH_DEBOUNCE per pane instead of 60 fps × N.
         self.last_cwd_refresh.insert(sid, now);
-        let Some(pid) = read_shell_child_pid(sid) else { return false };
-        let Some(path) = marspot::pidtree::proc_cwd(pid) else { return false };
+        // F3+5.2 — the debounce above bounds the *rate* but not the
+        // *duration*: a pane whose cwd can never be resolved (entry.toml
+        // without shell_child_pid, sandbox-blocked proc_pidinfo) kept
+        // retrying at 1/150 ms for the life of the process, because
+        // `lazy_fill_missing_cwds` asks again every frame for any pane
+        // with no cached entry.  Nine such panes is ~60 open+read+close
+        // per second, forever.  Give up after a bounded number of
+        // consecutive failures; a real trigger (`force=true` — pane
+        // spawn, modal open, Enter) still clears the mark and retries,
+        // so a pane that becomes resolvable later is not stuck.
+        if !force && self.cwd_unresolvable.get(&sid).is_some_and(|&n| n >= CWD_MAX_FAILURES) {
+            return false;
+        }
+        let failed = |me: &mut Self| {
+            *me.cwd_unresolvable.entry(sid).or_insert(0) += 1;
+        };
+        let Some(pid) = read_shell_child_pid(sid) else {
+            failed(self);
+            return false;
+        };
+        let Some(path) = marspot::pidtree::proc_cwd(pid) else {
+            failed(self);
+            return false;
+        };
         self.pane_cwds.insert(sid, path.to_string_lossy().into_owned());
+        // Resolved — clear any accumulated failure count so a pane that
+        // goes unresolvable again gets a fresh budget.
+        self.cwd_unresolvable.remove(&sid);
         true
     }
 
@@ -5145,6 +5205,8 @@ fn main() {
         hover_chrome_btn: None,
         process_panel: None,
         cc_usage_modal: None,
+        reconnecting: std::collections::HashSet::new(),
+        cwd_unresolvable: std::collections::HashMap::new(),
         ime_preedit: String::new(),
         w_phys,
         h_phys,
@@ -5183,7 +5245,16 @@ fn main() {
     let reader_stream = control_stream
         .try_clone()
         .expect("[core] try_clone control_stream");
-    let mut control_writer = control_stream;
+    // L2 → L1 frames go through a writer thread, never inline.  L1 is
+    // an AppKit main loop; whenever it is busy it stops draining, and
+    // the kernel's 8 KiB socket buffer then parks a blocking write —
+    // which would freeze *every* pane, since this one loop drives them
+    // all.  Same fix L3 got for its end of the wire.
+    let control_writer = marspot_term::frame_writer::FrameWriter::new(
+        "l2-shell-writer",
+        control_stream,
+        SHELL_WRITE_QUEUE_CAP,
+    );
     let reader_tx = event_tx.clone();
     std::thread::spawn(move || reader_loop(reader_stream, reader_tx));
 
@@ -5194,6 +5265,13 @@ fn main() {
     lx_event!(
         "CORE_LOOP",
         "entering event loop (event-driven, no fixed cadence)"
+    );
+    // Self-reporting stalls.  A blocked iteration here freezes *every*
+    // pane, so the threshold is tighter than L3's: this loop is
+    // supposed to turn a frame around, and anything past ~80 ms has
+    // already cost the user a visible hitch.  Silent below it.
+    let mut watch = marspot_term::loop_watch::LoopWatch::new(
+        Duration::from_millis(80),
     );
 
     let start = Instant::now();
@@ -5227,6 +5305,8 @@ fn main() {
     let frame_min_interval = Duration::from_millis(FRAME_MIN_INTERVAL_MS);
     let mut last_render_at = Instant::now() - frame_min_interval;
     'main: loop {
+        // `begin` goes after the wait below, not here — see the
+        // `watch.begin()` call once an event is in hand.
         let first = if first_tick {
             first_tick = false;
             event_rx.try_recv().ok()
@@ -5314,52 +5394,80 @@ fn main() {
                     // execv before manifest v2 carried control_stream_fd
                     // closed the inherited stream; possibly a hard
                     // crash; possibly a dual-core swap race.
-                    // Reconnect via the same wait_and_connect L3's UDS
-                    // accept path serves, hot-swap the pane's control,
-                    // and respawn the reader on the new stream.  All
-                    // best-effort: a permanent L3 death is detected by
-                    // pane.poll's try_wait on the next tick.
-                    let pane_idx = app.panes.iter().position(|p| {
-                        p.session().l3_session_id() == Some(sid)
-                    });
-                    if let Some(idx) = pane_idx {
-                        match marspot::uds_session_client::wait_and_connect(
-                            sid,
-                            std::time::Duration::from_secs(2),
-                        ) {
-                            Ok(new_control) => {
-                                let reader_half = new_control.try_clone();
-                                match reader_half {
-                                    Ok(rh) => {
-                                        app.panes[idx]
-                                            .session_mut()
-                                            .swap_l3_control(new_control);
-                                        let tx = app.event_tx.clone();
-                                        let (selection_tx, _selection_rx) =
-                                            std::sync::mpsc::channel::<(u32, String)>();
-                                        std::thread::spawn(move || {
-                                            l3_reader_loop(rh, sid, tx, selection_tx);
-                                        });
-                                        lx_event!(
-                                            "L3_CONTROL_RECONNECTED",
-                                            "L2 reader reconnected after EOF",
-                                            session = sid,
-                                            pane = idx
-                                        );
+                    //
+                    // Reconnect on a thread, not here.  `wait_and_connect`
+                    // polls the filesystem for entry.toml and then
+                    // retries `connect` with backoff — up to 2× the
+                    // timeout — and a silent update EOFs every pane at
+                    // once, so inline this froze the whole window for
+                    // tens of seconds.
+                    if app.reconnecting.insert(sid) {
+                        let tx = app.event_tx.clone();
+                        std::thread::spawn(move || {
+                            // Off the loop, retries are free, so take
+                            // several.  The old single attempt left the
+                            // pane permanently mute when it lost the
+                            // race: the reader thread had already
+                            // returned, so no further EOF would ever
+                            // arrive to trigger another try.
+                            let mut got = None;
+                            for attempt in 0..L3_RECONNECT_ATTEMPTS {
+                                match marspot::uds_session_client::wait_and_connect(
+                                    sid,
+                                    std::time::Duration::from_secs(2),
+                                ) {
+                                    Ok(s) => {
+                                        got = Some(s);
+                                        break;
                                     }
                                     Err(e) => lx_warn!(
-                                        "core.l3.control_clone_failed",
+                                        "core.l3.control_reconnect_attempt_failed",
                                         &format!("{e}"),
-                                        session = sid
+                                        session = sid,
+                                        attempt = attempt + 1,
+                                        of = L3_RECONNECT_ATTEMPTS
                                     ),
                                 }
                             }
-                            Err(e) => lx_warn!(
-                                "core.l3.control_reconnect_failed",
-                                &format!("{e}; pane will go silent until next reconnect"),
-                                session = sid
-                            ),
+                            let _ = tx.send(CoreEvent::L3ControlReconnected(sid, got));
+                        });
+                    }
+                }
+                CoreEvent::L3ControlReconnected(sid, stream) => {
+                    app.reconnecting.remove(&sid);
+                    let Some(new_control) = stream else {
+                        lx_warn!(
+                            "core.l3.control_reconnect_failed",
+                            "every attempt failed; pane stays on its dead stream",
+                            session = sid
+                        );
+                        return;
+                    };
+                    let pane_idx = app.panes.iter().position(|p| {
+                        p.session().l3_session_id() == Some(sid)
+                    });
+                    let Some(idx) = pane_idx else { return };
+                    match new_control.try_clone() {
+                        Ok(rh) => {
+                            app.panes[idx].session_mut().swap_l3_control(new_control);
+                            let tx = app.event_tx.clone();
+                            let (selection_tx, _selection_rx) =
+                                std::sync::mpsc::channel::<(u32, String)>();
+                            std::thread::spawn(move || {
+                                l3_reader_loop(rh, sid, tx, selection_tx);
+                            });
+                            lx_event!(
+                                "L3_CONTROL_RECONNECTED",
+                                "L2 reader reconnected after EOF",
+                                session = sid,
+                                pane = idx
+                            );
                         }
+                        Err(e) => lx_warn!(
+                            "core.l3.control_clone_failed",
+                            &format!("{e}"),
+                            session = sid
+                        ),
                     }
                 }
                 CoreEvent::L3Ready => {
@@ -5397,12 +5505,17 @@ fn main() {
                 }
             }
         };
+        // Time from here: the wait above is the loop doing its job,
+        // not stalling.
+        watch.begin();
+        watch.phase("events");
         if let Some(ev) = first {
             process(&mut app, ev, &mut pending_attach, &mut to_ack, &mut closed);
         }
         while let Ok(ev) = event_rx.try_recv() {
             process(&mut app, ev, &mut pending_attach, &mut to_ack, &mut closed);
         }
+        watch.phase("shell-io");
         if closed {
             // The dominant CORE_EXIT path in real life — and the one
             // whose context was missing in the 2026-06-15 incident:
@@ -5423,24 +5536,23 @@ fn main() {
             break 'main;
         }
         for (ty, payload) in to_ack.drain(..) {
-            let f = Frame::new(ty, payload);
-            if let Err(e) = f.write_to(&mut control_writer) {
+            if !control_writer.send(Frame::new(ty, payload)) {
                 lx_error!(
                     "core.liveness.write_failed",
-                    &format!("{e}"),
-                    msg_type = format!("{:?}", ty)
+                    "L1 not draining the control socket; frame dropped",
+                    msg_type = format!("{:?}", ty),
+                    backlog = control_writer.backlog()
                 );
             }
         }
         // Drain frames queued from inside CoreApp event handlers
         // (mouse_down → PaneBadgeClicked, future similar paths).
         for (ty, payload) in app.pending_to_shell.drain(..) {
-            let f = Frame::new(ty, payload);
-            if let Err(e) = f.write_to(&mut control_writer) {
+            if !control_writer.send(Frame::new(ty, payload)) {
                 lx_error!(
                     "core.pending_to_shell.write_failed",
-                    &format!("{e}"),
-                    msg_type = format!("{:?}", ty)
+                    "L1 not draining the control socket; frame dropped",
+                    backlog = control_writer.backlog()
                 );
             }
         }
@@ -5475,16 +5587,18 @@ fn main() {
                             app.rebuild_layout();
                             // Render the latest content into slot 0 so
                             // the SurfaceReady ack reflects a real frame.
+                            watch.phase("render");
                             app.pump_all();
                             let _ = app.render(&target_tex[writing_idx]);
                             let ack = Frame::new(
                                 MsgType::SurfaceReady,
                                 encode_surface_ready(surfaces[writing_idx].id()),
                             );
-                            if let Err(e) = ack.write_to(&mut control_writer) {
+                            if !control_writer.send(ack) {
                                 lx_error!(
                                     "core.surface_ready.write_failed",
-                                    &format!("{e}")
+                                    "L1 not draining the control socket; frame dropped",
+                                    backlog = control_writer.backlog()
                                 );
                             }
                             // Next render writes the other half.
@@ -5582,8 +5696,12 @@ fn main() {
                 MsgType::SurfaceReady,
                 encode_surface_ready(surfaces[writing_idx].id()),
             );
-            if let Err(e) = ack.write_to(&mut control_writer) {
-                lx_error!("core.surface_ready.write_failed", &format!("{e}"));
+            if !control_writer.send(ack) {
+                lx_error!(
+                    "core.surface_ready.write_failed",
+                    "L1 not draining the control socket; frame dropped",
+                    backlog = control_writer.backlog()
+                );
             }
             // FrameRendered is the legacy v=1 wake.  A v=2 shell
             // already woke on SurfaceReady, so this is redundant for
@@ -5593,8 +5711,12 @@ fn main() {
             // keep emitting it for compatibility.  No-op on the v=2
             // shell side (handler just sets frame_pending again).
             let fr = Frame::new(MsgType::FrameRendered, Vec::new());
-            if let Err(e) = fr.write_to(&mut control_writer) {
-                lx_error!("core.frame_rendered.write_failed", &format!("{e}"));
+            if !control_writer.send(fr) {
+                lx_error!(
+                    "core.frame_rendered.write_failed",
+                    "L1 not draining the control socket; frame dropped",
+                    backlog = control_writer.backlog()
+                );
             }
             // Flip: next render writes the other half.
             writing_idx = 1 - writing_idx;
@@ -5604,10 +5726,26 @@ fn main() {
             if app.last_caret_sent != Some(caret) {
                 app.last_caret_sent = Some(caret);
                 let f = Frame::new(MsgType::CaretRect, encode_caret_rect(caret));
-                if let Err(e) = f.write_to(&mut control_writer) {
-                    lx_error!("core.caret_rect.write_failed", &format!("{e}"));
+                if !control_writer.send(f) {
+                    lx_error!(
+                        "core.caret_rect.write_failed",
+                        "L1 not draining the control socket; frame dropped",
+                        backlog = control_writer.backlog()
+                    );
                 }
             }
+        }
+
+        if let Some(r) = watch.end() {
+            lx_warn!(
+                "l2.loop.stall",
+                &format!("main loop iteration took {:.2}s", r.total.as_secs_f64()),
+                slowest = r.slowest,
+                slowest_ms = r.slowest_took.as_millis(),
+                breakdown = r.breakdown(),
+                panes = app.panes.len(),
+                stalls_total = watch.stall_count()
+            );
         }
 
         frame += 1;
