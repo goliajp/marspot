@@ -535,12 +535,27 @@ impl L3Process {
     }
 }
 
+/// Bytes L2 may have queued for one L3 before frames are dropped.
+/// Sized for a large paste (the biggest legitimate burst on this
+/// channel); keystrokes and resizes are bytes.
+const L3_WRITE_QUEUE_CAP: usize = 4 * 1024 * 1024;
+
+fn new_control_writer(s: UnixStream) -> marspot_term::frame_writer::FrameWriter {
+    marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, L3_WRITE_QUEUE_CAP)
+}
+
 pub struct L3Conn {
     child: L3Process,
     /// Write half of the L2↔L3 control socket — forwards key events.
     /// (A reader thread on the matching half lives in the container,
     /// turning L3's `GridReady` pokes into redraw wakes.)
-    control: UnixStream,
+    ///
+    /// Queued, never written inline: macOS gives these sockets an 8 KiB
+    /// send buffer (measured), so an L3 that stops reading — wedged,
+    /// mid-execv, stopped — would otherwise park **L2's** loop inside
+    /// `write_all`, freezing every pane instead of just its own.
+    /// Write-only; the reader runs on a separate clone in its own thread.
+    control: marspot_term::frame_writer::FrameWriter,
     reader: GridShmReader,
     /// shelld session this L3 drives — needed to spawn a replacement on the
     /// *same* session for a per-session silent update (target #4 step 5a).
@@ -621,7 +636,7 @@ impl L3Conn {
         let grid = Grid::new(cols, rows);
         Self {
             child: L3Process::Reattached { pid },
-            control,
+            control: new_control_writer(control),
             reader,
             session_id,
             pending: None,
@@ -652,7 +667,7 @@ impl L3Conn {
         let grid = Grid::new(cols, rows);
         Self {
             child: L3Process::Spawned(spawn.child),
-            control: spawn.control,
+            control: new_control_writer(spawn.control),
             reader: spawn.reader,
             session_id,
             pending: None,
@@ -720,7 +735,7 @@ impl L3Conn {
         let _ = self.child.kill();
         let _ = self.child.wait();
         self.child = L3Process::Spawned(next.child);
-        self.control = next.control;
+        self.control = new_control_writer(next.control);
         self.reader = next.reader;
         self.selection_rx = next.selection_rx;
         // The new L3 booted fresh: reset the mirror bookkeeping so the next
@@ -817,7 +832,10 @@ impl L3Conn {
     /// subsequent `forward_key`/`forward_resize`/etc go through the
     /// fresh stream).  Old stream's Drop closes the old fd.
     pub fn swap_control(&mut self, new_control: UnixStream) {
-        self.control = new_control;
+        // Dropping the old writer ends its thread; anything still queued
+        // for the dead socket goes with it, which is correct — those
+        // frames were addressed to an L3 that no longer exists.
+        self.control = new_control_writer(new_control);
     }
 
     /// Forward a keystroke to the session process, which encodes it with
@@ -826,7 +844,7 @@ impl L3Conn {
     fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         let wire = event_to_wire(event, mods);
         let frame = Frame::new(MsgType::KeyEvent, encode_key_event(&wire));
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     /// Forward pasted clipboard text; L3 bracketed-wraps it (per its own
@@ -834,7 +852,7 @@ impl L3Conn {
     /// socket.
     fn forward_paste(&mut self, text: &str) {
         let frame = Frame::new(MsgType::Paste, encode_paste(text));
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     /// Forward raw bytes (no bracketed-paste wrap) for cc plugin
@@ -845,7 +863,7 @@ impl L3Conn {
             MsgType::InjectInput,
             crate::shell_proto::encode_inject_input(self.session_id, bytes),
         );
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     /// C5 — send a search request to the L3 worker.  The L3 main
@@ -862,20 +880,20 @@ impl L3Conn {
     ) {
         let payload = encode_search_scrollback(query_id, case_sensitive, max_total, query);
         let frame = Frame::new(MsgType::SearchScrollback, payload);
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     fn forward_search_cancel(&mut self, query_id: u32) {
         let payload = encode_search_cancel(query_id);
         let frame = Frame::new(MsgType::SearchCancel, payload);
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     fn forward_search_more(&mut self, query_id: u32, count: u32) {
         // v1: direction is always 0 (older); D-phase will expose newer.
         let payload = encode_search_more(query_id, count, 0);
         let frame = Frame::new(MsgType::SearchMore, payload);
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     /// Forward a cell-grid resize to the session process (dedup'd against
@@ -889,7 +907,7 @@ impl L3Conn {
         self.req_cols = cols;
         self.req_rows = rows;
         let frame = Frame::new(MsgType::GridResize, encode_grid_resize(cols, rows));
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     /// Ask L3 to publish the window at `view_offset` rows up from live
@@ -901,7 +919,7 @@ impl L3Conn {
         }
         self.req_view_offset = view_offset;
         let frame = Frame::new(MsgType::GridScroll, encode_grid_scroll(view_offset));
-        let _ = frame.write_to(&mut self.control);
+        let _ = self.control.send(frame);
     }
 
     /// Scrollback depth reported by the last snapshot — L2's clamp bound
@@ -946,7 +964,9 @@ impl L3Conn {
             MsgType::GetSelectionText,
             encode_get_selection_text(want, anchor, focus, blockwise),
         );
-        frame.write_to(&mut self.control).ok()?;
+        if !self.control.send(frame) {
+            return None;
+        }
         // Wait up to ~1 s total for the reply tagged `want`, discarding any
         // earlier-seq reply that races in ahead of it.
         let deadline = Instant::now() + Duration::from_secs(1);

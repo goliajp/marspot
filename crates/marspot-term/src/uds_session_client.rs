@@ -121,8 +121,17 @@ pub fn wait_for_entry(id: u64, timeout: Duration) -> io::Result<std::path::PathB
 ///
 /// The deadline bounds every retry; the last error surfaces.
 pub fn wait_and_connect(id: u64, timeout: Duration) -> io::Result<UnixStream> {
-    let socket_path = wait_for_entry(id, timeout)?;
+    // ONE deadline for both halves.  The doc above says "the deadline
+    // bounds every retry", but the code used to poll for entry.toml for
+    // up to `timeout` and then start a *fresh* `timeout` for the connect
+    // retries — so the real worst case was 2×, and every caller's
+    // budget was silently double what it asked for.  On the reconnect
+    // path that turned a nominal 2 s into 4 s per pane, serialised
+    // across panes.
     let deadline = Instant::now() + timeout;
+    let socket_path = wait_for_entry(id, timeout)?;
+    // `wait_for_entry` may have consumed most of the budget; whatever is
+    // left is what the connect retries get.
     loop {
         match connect_with_handshake(&socket_path) {
             Ok(s) => return Ok(s),
@@ -141,5 +150,41 @@ pub fn wait_and_connect(id: u64, timeout: Duration) -> io::Result<UnixStream> {
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    /// `wait_and_connect` must spend at most the timeout it was given.
+    ///
+    /// It used to poll for entry.toml for up to `timeout`, then start a
+    /// *second* `timeout` for the connect retries — so a caller asking
+    /// for 2 s could block for 4.  On L2's main loop, with one call per
+    /// pane, that doubled every freeze.
+    ///
+    /// Uses a session id that will never register, so the call runs to
+    /// its deadline and returns TimedOut.
+    #[test]
+    fn wait_and_connect_honours_a_single_deadline() {
+        let dir = std::env::temp_dir().join("marspot-uds-deadline-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+
+        let timeout = Duration::from_millis(300);
+        let t0 = Instant::now();
+        let r = wait_and_connect(u64::MAX, timeout);
+        let elapsed = t0.elapsed();
+
+        assert!(r.is_err(), "a session that never registers must not connect");
+        assert!(
+            elapsed < timeout * 2,
+            "took {elapsed:?} against a {timeout:?} budget — the two halves \
+             are still each starting their own deadline"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -289,7 +289,15 @@ fragment float4 ui_rect_fragment(URVOut in [[stage_in]]) {
     }
 
     // Composite: shadow underneath, fill on top, border on top of both.
-    float4 rgba = float4(in.shadow_color.rgb, in.shadow_color.a * shadow_coverage);
+    // Premultiplied, like the fill and border layers below — the
+    // pipeline blends this shader's output with a `One` source factor,
+    // so every layer must arrive pre-scaled.  This line used to pass
+    // `shadow_color.rgb` unscaled, which was invisible only because
+    // every caller happens to use a black shadow (black × anything is
+    // still black).  A coloured shadow would have rendered at full
+    // brightness regardless of its alpha.
+    float shadow_a = in.shadow_color.a * shadow_coverage;
+    float4 rgba = float4(in.shadow_color.rgb * shadow_a, shadow_a);
     // Fill over shadow.
     {
         float a = in.fill_color.a * fill_coverage;
