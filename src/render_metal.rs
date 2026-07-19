@@ -2645,6 +2645,10 @@ mod cc_palette {
     pub fn card_bg() -> [f32; 4] { color::SURFACE_1.to_rgba_f32() }
     pub fn card_border() -> [f32; 4] { color::BORDER.to_rgba_f32() }
     pub fn now() -> [f32; 4] { color::ACCENT.to_rgba_f32() }
+    /// Day rules running up through the plot.  Low alpha rather than a
+    /// dim solid colour so the rule reads as behind the bars on both
+    /// the card surface and the modal ground it crosses.
+    pub fn grid() -> [f32; 4] { [0.62, 0.66, 0.74, 0.22] }
     /// Status chip fill — the severity colour at low alpha, so the
     /// chip reads as tinted glass over the card rather than a second
     /// solid block competing with the bars.
@@ -2803,6 +2807,35 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let bar_gap = (ch * 0.78) as f64;
     let row_h = bar_h * 2.0 + bar_gap + lh * 1.0;
     let rows_top = y;
+    let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
+    // Day grid, drawn first so the bars read as sitting on top of it.
+    //
+    // The dates used to live only as labels under the axis, which meant
+    // reading "when does Claude 3's 7d window reset" took a saccade to
+    // the bottom of the chart and back.  Carrying each day up through
+    // the plot as a dashed rule lets a bar's end be read against a date
+    // in place.  Dashed, and faint, because it is a background
+    // reference: a solid rule at this density competes with the bars,
+    // and the one line that must stay solid is NOW.
+    let day = 86_400.0;
+    let first_day = (t0 / day).ceil() * day;
+    let dash = (ch * 0.30) as f64;
+    let gap = (ch * 0.26) as f64;
+    let grid_top = rows_top - lh * 0.35;
+    let mut t_grid = first_day;
+    while t_grid < t0 + span_s {
+        let x = x_of(t_grid);
+        let mut gy = grid_top;
+        while gy < rows_bottom {
+            let h = dash.min(rows_bottom - gy);
+            p.fill_rounded_rect(
+                Rect { x, y_top: gy, w: 1.0, h },
+                cc_palette::grid(), 0.0, ([0.0; 4], 0.0),
+            );
+            gy += dash + gap;
+        }
+        t_grid += day;
+    }
     for (i, a) in cc.accounts.iter().enumerate() {
         let ry = rows_top + i as f64 * row_h;
         let name_baseline = ry + bar_h + bar_gap / 2.0 + ascent as f64 * 0.5;
@@ -2842,7 +2875,6 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             text(p, tag_x, tag_baseline, &tag, cc_palette::fg_sec());
         }
     }
-    let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
     // NOW marker.
     let nx = x_of(cc.now_unix as f64);
     p.fill_rounded_rect(
@@ -2850,16 +2882,11 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         cc_palette::now(), 0.0, ([0.0; 4], 0.0),
     );
     text(p, nx - text_w("NOW") / 2.0, rows_top - lh * 0.5, "NOW", cc_palette::now());
-    // Daily ticks + labels along the bottom.
-    let day = 86_400.0;
-    let first_day = (t0 / day).ceil() * day;
+    // Date labels along the axis.  No tick stubs — each date's dashed
+    // rule already lands on the axis, so a stub would just double it.
     let mut t = first_day;
     while t < t0 + span_s {
         let x = x_of(t);
-        p.fill_rounded_rect(
-            Rect { x, y_top: rows_bottom, w: 1.0, h: 4.0 },
-            cc_palette::fg_faint(), 0.0, ([0.0; 4], 0.0),
-        );
         let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
         let lbl = format!("{mo}/{d}");
         text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, cc_palette::fg_faint());
