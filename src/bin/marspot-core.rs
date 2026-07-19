@@ -764,6 +764,22 @@ struct ContextMenuState {
     link: Option<LinkContext>,
 }
 
+/// Carries an off-loop spawn result through `CoreEvent`.
+///
+/// A newtype only because `CoreEvent` derives `Debug` and `L3Spawn`
+/// holds a `GridShmReader`, which owns a raw mapping and reasonably
+/// declines to implement it.
+struct SpawnOutcome(Result<marspot::pane::L3Spawn, String>);
+
+impl std::fmt::Debug for SpawnOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Ok(_) => write!(f, "SpawnOutcome(ok)"),
+            Err(e) => write!(f, "SpawnOutcome(err: {e})"),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum CoreEvent {
     Key(MarspotKeyEvent, Modifiers),
@@ -825,6 +841,14 @@ enum CoreEvent {
     /// silent update does exactly that) serialise into tens of seconds
     /// with every pane frozen.
     L3ControlReconnected(u64, Option<std::os::unix::net::UnixStream>),
+    /// An off-loop `spawn_l3` finished for this session id.
+    ///
+    /// Bringing a pane up means forking the child, mapping its shm, then
+    /// polling for its entry.toml and handshaking — up to the full
+    /// `wait_and_connect` budget.  Done on this loop that froze every
+    /// pane for the duration, on a path the user triggers directly
+    /// ([+], and the revive-on-keystroke retry).
+    L3SpawnFinished(u64, SpawnOutcome),
     /// SIGUSR2 (per-session silent-update trigger): bring up replacement
     /// L3s on every idle pane's session and swap when they're ready.  The
     /// manual hook the updater will drive once a new `marspot-session` is
@@ -1233,6 +1257,11 @@ fn spawn_l3_with_cwd(
 }
 
 /// Boot/`[+]` helper: spawn an L3 and wrap it in a fresh L3-backed `Pane`.
+/// Synchronous pane bring-up.  Used by boot assembly and by the tests
+/// — both want a fully formed pane before continuing, and neither has
+/// an event loop to freeze.  Everything the user triggers at runtime
+/// goes through `spawn_l3_pane_async`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn spawn_l3_pane(
     cols: u16,
     rows: u16,
@@ -1240,6 +1269,38 @@ fn spawn_l3_pane(
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<Pane> {
     spawn_l3_pane_with_cwd(cols, rows, session_id, "", event_tx)
+}
+
+/// Start a pane whose L3 is brought up **off** this loop.
+///
+/// Returns immediately with a slot rendering "starting…"; the fork,
+/// shm map, entry.toml poll and handshake all run on a worker, and
+/// `CoreEvent::L3SpawnFinished` delivers the result.  The synchronous
+/// `spawn_l3_pane` below is still what boot assembly uses — there is no
+/// loop to freeze before the loop starts, and boot wants the pane fully
+/// formed before it lays out.
+fn spawn_l3_pane_async(
+    cols: u16,
+    rows: u16,
+    session_id: u64,
+    initial_cwd: &str,
+    event_tx: &Sender<CoreEvent>,
+) -> Pane {
+    let tx = event_tx.clone();
+    let cwd = initial_cwd.to_string();
+    std::thread::Builder::new()
+        .name(format!("l2-spawn-{session_id}"))
+        .spawn(move || {
+            let inner_tx = tx.clone();
+            let outcome = spawn_l3_with_cwd(cols, rows, session_id, &cwd, &inner_tx)
+                .map_err(|e| format!("{e}"));
+            let _ = tx.send(CoreEvent::L3SpawnFinished(
+                session_id,
+                SpawnOutcome(outcome),
+            ));
+        })
+        .expect("spawn l2-spawn worker");
+    Pane::new_pending(session_id, cols, rows)
 }
 
 fn spawn_l3_pane_with_cwd(
@@ -2120,9 +2181,13 @@ impl CoreApp {
             // RFC-003 step 3a: L2 allocates the session id itself via
             // the on-disk registry (sessions/.next_id with flock), no
             // L4 round-trip.
-            match allocate_next_session_id()
-                .and_then(|id| spawn_l3_pane(cols, rows, id, &self.event_tx))
-            {
+            // The spawn itself runs off-loop; this only allocates the
+            // id (a flock + a directory scan) and pushes a "starting…"
+            // slot.  Clicking [+] used to freeze every pane for as long
+            // as the new L3 took to register and handshake.
+            match allocate_next_session_id().map(|id| {
+                spawn_l3_pane_async(cols, rows, id, "", &self.event_tx)
+            }) {
                 Ok(pane) => {
                     self.panes.push(pane);
                     self.custom_titles.push(None);
@@ -2898,22 +2963,17 @@ impl CoreApp {
                     .get(self.focused_idx)
                     .map(|c| (c.cols, c.rows))
                     .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
-                match spawn_l3_pane(cols, rows, sid, &self.event_tx) {
-                    Ok(new_pane) => {
-                        lx_event!(
-                            "L3_REVIVED",
-                            "user keystroke respawned dead/vacant pane at same id",
-                            session_id = sid
-                        );
-                        self.panes[self.focused_idx] = new_pane;
-                        self.needs_render = true;
-                    }
-                    Err(e) => lx_error!(
-                        "core.revive.spawn_failed",
-                        &format!("{e}"),
-                        session_id = sid
-                    ),
-                }
+                // Off-loop, same as [+]: a keystroke into a dead slot
+                // must not freeze the other fifteen panes while the
+                // replacement boots.
+                self.panes[self.focused_idx] =
+                    spawn_l3_pane_async(cols, rows, sid, "", &self.event_tx);
+                self.needs_render = true;
+                lx_event!(
+                    "L3_REVIVING",
+                    "user keystroke started an off-loop respawn at same id",
+                    session_id = sid
+                );
                 return;
             }
         }
@@ -5472,6 +5532,50 @@ fn main() {
                             session = sid
                         ),
                     }
+                }
+                CoreEvent::L3SpawnFinished(sid, outcome) => {
+                    let Some(idx) = app
+                        .panes
+                        .iter()
+                        .position(|p| p.shelld_session_id() == Some(sid))
+                    else {
+                        // The slot was closed while the spawn ran.  The
+                        // child is dropped with the L3Spawn, which kills
+                        // it — nothing to reap here.
+                        return;
+                    };
+                    match outcome.0 {
+                        Ok(spawn) => {
+                            app.panes[idx].adopt_backend(
+                                marspot::pane::PaneBackend::L3(
+                                    marspot::pane::L3Conn::new(spawn, sid),
+                                ),
+                            );
+                            lx_event!(
+                                "L3_SPAWN_ADOPTED",
+                                "off-loop spawn landed; pending slot is now live",
+                                session_id = sid,
+                                pane = idx
+                            );
+                        }
+                        Err(e) => {
+                            // Fall back to the vacant slot: its
+                            // revive-on-keystroke path is exactly the
+                            // retry affordance this needs.
+                            let (c, r) = {
+                                let g = app.panes[idx].session().grid();
+                                (g.cols(), g.rows())
+                            };
+                            app.panes[idx] = Pane::new_vacant(sid, c, r);
+                            lx_error!(
+                                "core.spawn.failed",
+                                &format!("{e}"),
+                                session_id = sid,
+                                pane = idx
+                            );
+                        }
+                    }
+                    app.needs_render = true;
                 }
                 CoreEvent::L3Ready => {
                     // Just needs to wake the loop; `pump_all` re-reads

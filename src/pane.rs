@@ -67,19 +67,45 @@ pub enum PaneBackend {
 pub struct VacantPane {
     session_id: u64,
     grid: Grid,
+    /// A spawn for this slot is in flight.
+    ///
+    /// "Starting" is not a peer state to "vacant" — it *is* a vacant
+    /// slot (no live session behind it) that additionally has work
+    /// coming.  Modelling it as a flag rather than a second backend
+    /// variant keeps that relationship visible, and keeps the twenty
+    /// match arms that already handle `Vacant` correct by construction.
+    ///
+    /// Two things change while it holds: the slot says "starting"
+    /// instead of "unavailable", and `is_exited` reports false so the
+    /// revive-on-keystroke path can't fire a second spawn on top of the
+    /// one already running.
+    pending: bool,
 }
 
 impl VacantPane {
     pub fn new(session_id: u64, cols: u16, rows: u16) -> Self {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
-        Self::paint_message(&mut grid, session_id);
-        Self { session_id, grid }
+        Self::paint_message(&mut grid, session_id, false);
+        Self { session_id, grid, pending: false }
     }
 
-    fn paint_message(grid: &mut Grid, session_id: u64) {
-        let msg = format!(
-            "session {session_id} unavailable — press any key to retry"
-        );
+    /// A slot whose session is being spawned right now.
+    pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
+        let mut grid = Grid::new(cols.max(20), rows.max(3));
+        Self::paint_message(&mut grid, session_id, true);
+        Self { session_id, grid, pending: true }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    fn paint_message(grid: &mut Grid, session_id: u64, pending: bool) {
+        let msg = if pending {
+            format!("session {session_id} starting…")
+        } else {
+            format!("session {session_id} unavailable — press any key to retry")
+        };
         let row = 1u16.min(grid.rows().saturating_sub(1));
         for (i, ch) in msg.chars().enumerate() {
             let col = 2 + i as u16;
@@ -92,7 +118,7 @@ impl VacantPane {
 
     fn resize(&mut self, cols: u16, rows: u16) {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
-        Self::paint_message(&mut grid, self.session_id);
+        Self::paint_message(&mut grid, self.session_id, self.pending);
         self.grid = grid;
     }
 }
@@ -373,8 +399,10 @@ impl PaneBackend {
             PaneBackend::Local(s) => s.is_exited(),
             PaneBackend::L3(c) => c.is_exited(),
             // Vacant = born exited: the revive-on-keystroke path is
-            // exactly how a vacant slot gets its session back.
-            PaneBackend::Vacant(_) => true,
+            // exactly how a vacant slot gets its session back.  Except
+            // while a spawn is already in flight — reporting exited
+            // there would let the next keystroke start a second one.
+            PaneBackend::Vacant(v) => !v.pending,
         }
     }
 
@@ -1117,6 +1145,29 @@ impl Pane {
     /// RFC-004 B.2 — a slot whose session failed to assemble at boot.
     /// Keeps the sid alive so the slot never compacts; the revive path
     /// (keystroke on an exited pane) respawns the same session id.
+    /// A slot rendering "starting…" while its session is spawned off
+    /// the main loop.  Becomes a real L3 pane when the spawn lands.
+    pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
+        Self {
+            session: PaneBackend::Vacant(VacantPane::new_pending(session_id, cols, rows)),
+            view_offset: 0,
+            last_seen_scroll_push: 0,
+            update_pending: false,
+            tools: Vec::new(),
+            active_highlight: None,
+            search: None,
+        }
+    }
+
+    /// Replace this pane's backend in place, keeping its view state.
+    /// Used when an off-loop spawn lands and a pending slot becomes a
+    /// live L3 pane.
+    pub fn adopt_backend(&mut self, backend: PaneBackend) {
+        self.session = backend;
+        self.view_offset = 0;
+        self.last_seen_scroll_push = 0;
+    }
+
     pub fn new_vacant(session_id: u64, cols: u16, rows: u16) -> Self {
         Self {
             session: PaneBackend::Vacant(VacantPane::new(session_id, cols, rows)),
