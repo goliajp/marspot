@@ -132,6 +132,6 @@
   running app)。
 - 回收站 GC 首战兑现:被 GC 收走的 368/386/387 从 retired/ 完整
   取回。
-- 遗留:mini 远端 bench 真值未跑(dev box 负载);老 saved cwd 无
+- ~~遗留:mini 远端 bench 真值未跑(dev box 负载)~~ — **2026-07-19 结清**:mini `bin/bench-remote.sh` **11/11 PASS**,`rss marspot` 79,552 KiB vs 95,981 上限(低 17%)。此前本机读 96.8 MB 被当成"超 0.9%",是拿本机数比 mini 锁的 floor 造成的假账,不是回归。老 saved cwd 无
   法恢复(宕机前的 shell-state.bin 已被旧 binary 覆盖,槽位 cwd
   填 HOME)。
