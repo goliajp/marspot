@@ -2803,7 +2803,26 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         .fold(0.0f64, f64::max)
         + cw as f64 * 2.0;
     let tl_x = inner_x + label_w;
-    let tl_w = (inner_w - label_w).max(10.0);
+    // Reserve a gutter on the right for the tags that hang off the end
+    // of each window bar.  Without it the axis ran all the way to the
+    // inner edge and a bar ending at (or clamped to) the right of the
+    // range left its tag nowhere to go — it rendered on top of the
+    // modal's own border.  Sizing the gutter to the widest tag any
+    // account will draw means the plot compresses a little and nothing
+    // ever has to overlap.
+    let tag_gutter = cc
+        .accounts
+        .iter()
+        .flat_map(|a| {
+            [
+                format!("5h {:.0}% {}", a.util_5h * 100.0, a.reset_5h_hm),
+                format!("7d {:.0}% {}", a.util_7d * 100.0, a.reset_7d_hm),
+            ]
+        })
+        .map(|t| text_w(&t))
+        .fold(0.0f64, f64::max)
+        + cw as f64 * 1.2;
+    let tl_w = (inner_w - label_w - tag_gutter).max(10.0);
     let span_s: f64 = 12.0 * 86_400.0; // ±6 days
     let t0 = cc.now_unix as f64 - span_s / 2.0;
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
@@ -2874,7 +2893,10 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             // Tag sits right of the window, vertically centered on
             // the bar (baseline = bar centre + half the ascent).
             let tag = format!("{} {:.0}% {}", if idx == 0 { "5h" } else { "7d" }, util * 100.0, hm);
-            let tag_x = (wx1 + cw as f64 * 0.7).min(tl_x + tl_w - text_w(&tag));
+            // The gutter guarantees room, so this clamp is only a
+            // backstop against a pathologically long reset label.
+            let tag_x = (wx1 + cw as f64 * 0.7)
+                .min(inner_x + inner_w - text_w(&tag));
             let tag_baseline = by + bar_h / 2.0 + ascent as f64 * 0.42;
             text(p, tag_x, tag_baseline, &tag, cc_palette::fg_sec());
         }

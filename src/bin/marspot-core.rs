@@ -3155,8 +3155,11 @@ impl CoreApp {
             .max(1);
         let (cell_w, cell_h) = self.renderer.cell_dims();
         let lh = cell_h as f64 * 1.35;
-        let w = (self.w_phys * 0.9)
-            .min(n as f64 * 46.0 * cell_w as f64 + 8.0 * cell_w as f64)
+        // Per-card 52 cells (was 46) and 94% of the window (was 90%):
+        // the timeline now reserves a right-hand gutter for its tags,
+        // and the plot itself should not pay for that in resolution.
+        let w = (self.w_phys * 0.94)
+            .min(n as f64 * 52.0 * cell_w as f64 + 8.0 * cell_w as f64)
             .max(64.0 * cell_w as f64)
             .min(self.w_phys - 24.0);
         // 10 lh of fixed chrome (title + the 5.5 lh account card +
