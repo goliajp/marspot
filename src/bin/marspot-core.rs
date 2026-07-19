@@ -3066,7 +3066,10 @@ impl CoreApp {
             .min(n as f64 * 46.0 * cell_w as f64 + 8.0 * cell_w as f64)
             .max(64.0 * cell_w as f64)
             .min(self.w_phys - 24.0);
-        let h = (lh * 9.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.85);
+        // 10 lh of fixed chrome (title + the 5.5 lh account card +
+        // the timeline heading), one 2.6 lh band per timeline row, then
+        // 4 lh for the date axis and bottom padding.
+        let h = (lh * 10.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.85);
         marspot_term::layout::Rect {
             x: (self.w_phys - w) / 2.0,
             y_top: ((self.h_phys - h) / 2.0).max(self.layout.top_inset + 8.0),

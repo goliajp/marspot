@@ -2624,20 +2624,59 @@ fn push_cc_usage_via_view(
 /// only local decisions are which token maps to which role.
 mod cc_palette {
     use crate::ui::theme::token::color;
+    /// Primary — account names, headings, percentages.
     pub fn fg() -> [f32; 4] { color::FG.to_rgba_f32() }
-    pub fn fg_dim() -> [f32; 4] { color::FG_MUTED.to_rgba_f32() }
+    /// Secondary — email, reset times, timeline tags.  Deliberately
+    /// NOT `FG_MUTED`: at this density the muted token collapses the
+    /// whole panel into one grey and the reader can't find the row
+    /// they want.  This sits between FG and FG_MUTED so the hierarchy
+    /// (primary → secondary → axis) stays legible.
+    pub fn fg_sec() -> [f32; 4] { [0.70, 0.75, 0.82, 1.0] }
+    /// Tertiary — date axis, tick marks.  Chart furniture, reads as
+    /// background once you've found your row.
+    pub fn fg_faint() -> [f32; 4] { color::FG_MUTED.to_rgba_f32() }
     pub fn ok() -> [f32; 4] { color::SUCCESS.to_rgba_f32() }
     pub fn warn() -> [f32; 4] { color::WARN.to_rgba_f32() }
     pub fn danger() -> [f32; 4] { color::DANGER.to_rgba_f32() }
-    pub fn track() -> [f32; 4] { color::BG_HOVER.to_rgba_f32() }
+    /// Unfilled bar remainder.  `SURFACE_4`, not `BG_HOVER` — the
+    /// track has to separate from the card it sits on (`SURFACE_1`),
+    /// otherwise "0 %" and "no data" look identical.
+    pub fn track() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
     pub fn card_bg() -> [f32; 4] { color::SURFACE_1.to_rgba_f32() }
     pub fn card_border() -> [f32; 4] { color::BORDER.to_rgba_f32() }
     pub fn now() -> [f32; 4] { color::ACCENT.to_rgba_f32() }
-    pub fn badge_bg() -> [f32; 4] {
-        let mut c = color::SUCCESS.to_rgba_f32();
-        c[3] = 0.18;
+    /// Status chip fill — the severity colour at low alpha, so the
+    /// chip reads as tinted glass over the card rather than a second
+    /// solid block competing with the bars.
+    pub fn chip_bg(severity: u8) -> [f32; 4] {
+        let mut c = super::cc_severity_color(severity);
+        c[3] = 0.16;
         c
     }
+}
+
+/// Status severity → colour.  0 = fine, 1 = approaching the cap,
+/// 2 = refused / unknown.
+fn cc_severity_color(severity: u8) -> [f32; 4] {
+    match severity {
+        0 => cc_palette::ok(),
+        1 => cc_palette::warn(),
+        _ => cc_palette::danger(),
+    }
+}
+
+/// Clip `s` to `cols` monospace columns, marking the cut with `…`.
+/// Returns empty when there isn't room for at least a few glyphs —
+/// a lone ellipsis carries no information and just adds noise.
+fn fit_ellipsis(s: &str, cols: f64) -> String {
+    let fit = cols.floor().max(0.0) as usize;
+    if s.chars().count() <= fit {
+        return s.to_string();
+    }
+    if fit < 3 {
+        return String::new();
+    }
+    s.chars().take(fit - 1).chain(['…']).collect()
 }
 
 fn cc_util_color(util: f32) -> [f32; 4] {
@@ -2670,12 +2709,12 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let title = format!("CLAUDE ACCOUNTS  {}", cc.accounts.len());
     text(p, inner_x, y, &title, cc_palette::fg());
     let upd = &cc.updated_label;
-    text(p, inner_x + inner_w - text_w(upd), y, upd, cc_palette::fg_dim());
+    text(p, inner_x + inner_w - text_w(upd), y, upd, cc_palette::fg_sec());
     y += lh * 0.6;
 
     if cc.feed_missing {
         y += lh;
-        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", cc_palette::fg_dim());
+        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", cc_palette::fg_sec());
         return;
     }
 
@@ -2683,76 +2722,55 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let n = cc.accounts.len().max(1);
     let gap = (cw * 1.5) as f64;
     let card_w = ((inner_w - gap * (n as f64 - 1.0)) / n as f64).max(40.0);
-    let card_h = lh * 4.6;
+    let card_h = lh * 5.5;
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
         let card = Rect { x: cx, y_top: card_top, w: card_w, h: card_h };
         p.fill_rounded_rect(card, cc_palette::card_bg(), 6.0, (cc_palette::card_border(), 1.0));
         let px = cx + cw as f64;
-        let mut cy = card_top + lh * 0.4 + ascent as f64;
-        let stc = match a.status_severity {
-            0 => cc_palette::fg_dim(),
-            1 => cc_palette::warn(),
-            _ => cc_palette::danger(),
-        };
-        // r1 identity row — laid out with RESERVED SLOTS so nothing
-        // can overlap regardless of name / email / status length:
-        //   [badge] [name] [email…truncated] ……… [status]
-        // The status slot is reserved first (right-aligned), then the
-        // name, and the email gets whatever is left — dropped entirely
-        // when the remainder can't fit at least a few glyphs.
         let row_right = cx + card_w - cw as f64;
-        let status_w = text_w(&a.status_label);
-        text(p, row_right - status_w, cy, &a.status_label, stc);
-        let badge = "active";
-        let badge_w = text_w(badge) + cw as f64;
+        let mut cy = card_top + lh * 0.45 + ascent as f64;
+
+        // r1 — name (primary) + status chip, right-aligned in a slot
+        // reserved BEFORE the name is laid out so no length pairing can
+        // make them collide.
+        let chip_text = a.status_label.to_uppercase();
+        let chip_w = text_w(&chip_text) + cw as f64 * 1.2;
+        let chip_x = row_right - chip_w;
         p.fill_rounded_rect(
-            Rect { x: px, y_top: cy - ascent as f64, w: badge_w, h: ch as f64 },
-            cc_palette::badge_bg(), 3.0, ([0.0; 4], 0.0),
+            Rect { x: chip_x, y_top: cy - ascent as f64 * 0.92, w: chip_w, h: ch as f64 * 1.05 },
+            cc_palette::chip_bg(a.status_severity), 3.0, ([0.0; 4], 0.0),
         );
-        text(p, px + cw as f64 * 0.5, cy, badge, cc_palette::ok());
-        let name_x = px + badge_w + cw as f64;
-        // Name may itself need trimming on a very narrow card.
-        let name_budget = (row_right - status_w - cw as f64 - name_x).max(0.0);
-        let name_fit = (name_budget / cw as f64).floor().max(0.0) as usize;
-        let name_shown: String = if a.name.chars().count() <= name_fit {
-            a.name.clone()
-        } else {
-            a.name.chars().take(name_fit.saturating_sub(1)).chain(['…']).collect()
-        };
-        text(p, name_x, cy, &name_shown, cc_palette::fg());
-        // Email fills the gap between the name and the status slot.
-        let email_x = name_x + text_w(&name_shown) + cw as f64;
-        let email_budget = (row_right - status_w - cw as f64 - email_x).max(0.0);
-        let email_fit = (email_budget / cw as f64).floor().max(0.0) as usize;
-        if email_fit >= 4 {
-            let email_shown: String = if a.email.chars().count() <= email_fit {
-                a.email.clone()
-            } else {
-                a.email.chars().take(email_fit.saturating_sub(1)).chain(['…']).collect()
-            };
-            text(p, email_x, cy, &email_shown, cc_palette::fg_dim());
-        }
-        cy += lh * 1.1;
-        // r2: 5H bar ... 7D bar (two half-width groups)
-        let half = (card_w - 3.0 * cw as f64) / 2.0;
-        for (label, util, gx) in [
-            ("5H", a.util_5h, px),
-            ("7D", a.util_7d, px + half + cw as f64),
-        ] {
-            text(p, gx, cy, label, cc_palette::fg_dim());
+        text(p, chip_x + cw as f64 * 0.6, cy, &chip_text, cc_severity_color(a.status_severity));
+        text(p, px, cy, &fit_ellipsis(&a.name, (chip_x - cw as f64 - px) / cw as f64), cc_palette::fg());
+
+        // r2 — email, one full line of its own.  Cramming it beside the
+        // name is what produced the collisions; a dedicated line also
+        // lets a long address show in full.
+        cy += lh;
+        text(p, px, cy, &fit_ellipsis(&a.email, (row_right - px) / cw as f64), cc_palette::fg_sec());
+
+        // r3/r4 — one full-width bar per window: `5H [========----] 55%`.
+        // Full width (not two half-width groups) roughly doubles the
+        // resolution of the bar, which is the whole point of the panel.
+        let pct_slot = cw as f64 * 4.0; // "100%"
+        for (label, util) in [("5H", a.util_5h), ("7D", a.util_7d)] {
+            cy += lh * 1.15;
+            text(p, px, cy, label, cc_palette::fg_faint());
             let pct = format!("{:.0}%", util * 100.0);
-            text(p, gx + half - text_w(&pct), cy, &pct, cc_palette::fg());
-            let bar_x = gx;
-            let bar_y = cy + lh * 0.28;
-            let bar_w = half;
-            let bar_h = (ch * 0.55) as f64;
+            text(p, row_right - text_w(&pct), cy, &pct, cc_util_color(util));
+            let bar_x = px + cw as f64 * 3.0;
+            let bar_w = (row_right - pct_slot - cw as f64 - bar_x).max(1.0);
+            let bar_h = (ch * 0.62) as f64;
+            // Centre the bar on the text's optical middle so the row
+            // reads as one unit instead of a caption above a bar.
+            let bar_y = cy - ascent as f64 * 0.36 - bar_h / 2.0;
             p.fill_rounded_rect(
                 Rect { x: bar_x, y_top: bar_y, w: bar_w, h: bar_h },
                 cc_palette::track(), 2.0, ([0.0; 4], 0.0),
             );
-            let fill_w = (bar_w * util.clamp(0.0, 1.0) as f64).max(0.0);
+            let fill_w = bar_w * util.clamp(0.0, 1.0) as f64;
             if fill_w > 0.5 {
                 p.fill_rounded_rect(
                     Rect { x: bar_x, y_top: bar_y, w: fill_w, h: bar_h },
@@ -2760,9 +2778,10 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
                 );
             }
         }
-        cy += lh * 1.9;
-        // r3: reset label
-        text(p, px, cy, &a.reset_label, cc_palette::fg_dim());
+
+        // r5 — reset times.
+        cy += lh * 1.2;
+        text(p, px, cy, &fit_ellipsis(&a.reset_label, (row_right - px) / cw as f64), cc_palette::fg_sec());
     }
     y = card_top + card_h + lh;
 
@@ -2780,14 +2799,14 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let span_s: f64 = 12.0 * 86_400.0; // ±6 days
     let t0 = cc.now_unix as f64 - span_s / 2.0;
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
-    let bar_h = (ch * 0.55) as f64;
-    let bar_gap = (ch * 0.35) as f64;
-    let row_h = bar_h * 2.0 + bar_gap + lh * 0.9;
+    let bar_h = (ch * 0.62) as f64;
+    let bar_gap = (ch * 0.78) as f64;
+    let row_h = bar_h * 2.0 + bar_gap + lh * 1.0;
     let rows_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let ry = rows_top + i as f64 * row_h;
         let name_baseline = ry + bar_h + bar_gap / 2.0 + ascent as f64 * 0.5;
-        text(p, inner_x, name_baseline, &a.name, cc_palette::fg_dim());
+        text(p, inner_x, name_baseline, &a.name, cc_palette::fg());
         for (idx, (span, reset, util, hm)) in [
             (5.0 * 3_600.0, a.reset_5h_unix as f64, a.util_5h, &a.reset_5h_hm),
             (7.0 * 86_400.0, a.reset_7d_unix as f64, a.util_7d, &a.reset_7d_hm),
@@ -2820,7 +2839,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             let tag = format!("{} {:.0}% {}", if idx == 0 { "5h" } else { "7d" }, util * 100.0, hm);
             let tag_x = (wx1 + cw as f64 * 0.7).min(tl_x + tl_w - text_w(&tag));
             let tag_baseline = by + bar_h / 2.0 + ascent as f64 * 0.42;
-            text(p, tag_x, tag_baseline, &tag, cc_palette::fg_dim());
+            text(p, tag_x, tag_baseline, &tag, cc_palette::fg_sec());
         }
     }
     let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
@@ -2839,11 +2858,11 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         let x = x_of(t);
         p.fill_rounded_rect(
             Rect { x, y_top: rows_bottom, w: 1.0, h: 4.0 },
-            [0.30, 0.31, 0.34, 1.0], 0.0, ([0.0; 4], 0.0),
+            cc_palette::fg_faint(), 0.0, ([0.0; 4], 0.0),
         );
         let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
         let lbl = format!("{mo}/{d}");
-        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, cc_palette::fg_dim());
+        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, cc_palette::fg_faint());
         t += day;
     }
 }
@@ -7922,5 +7941,30 @@ mod tests {
             assert_eq!(runs[1].kind, CanvasRunKind::Glyph);
             assert_eq!(runs[1].count, gl.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod cc_layout_tests {
+    use super::fit_ellipsis;
+
+    #[test]
+    fn fit_ellipsis_bounds_every_case() {
+        // Fits untouched.
+        assert_eq!(fit_ellipsis("lihao@golia.jp", 20.0), "lihao@golia.jp");
+        assert_eq!(fit_ellipsis("abc", 3.0), "abc");
+        // Too long: cut to exactly the budget, last column is the mark.
+        let cut = fit_ellipsis("lihao@golia.jp", 8.0);
+        assert_eq!(cut, "lihao@g…");
+        assert_eq!(cut.chars().count(), 8);
+        // Never exceeds the budget for any prefix length.
+        for cols in 3..30 {
+            let out = fit_ellipsis("some.very.long.address@example.com", cols as f64);
+            assert!(out.chars().count() <= cols, "cols={cols} out={out:?}");
+        }
+        // Below the useful minimum the slot is dropped, not filled with
+        // a bare ellipsis.
+        assert_eq!(fit_ellipsis("abcdef", 2.0), "");
+        assert_eq!(fit_ellipsis("abcdef", 0.0), "");
     }
 }
