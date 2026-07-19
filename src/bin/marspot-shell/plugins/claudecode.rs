@@ -821,7 +821,7 @@ const MODEL_TAIL_BYTES: u64 = 262_144;
 /// Returns None when neither appears in the tail window (fresh
 /// session, or a single giant record swamping the window) — the
 /// badge then renders without the `@model` part.
-fn tail_model_short(path: &std::path::Path) -> Option<String> {
+fn tail_model_short(path: &std::path::Path, min_offset: u64) -> Option<String> {
     use std::cell::RefCell;
     // (mtime, size)-keyed memo so the 2 s scan tick only re-reads a
     // session's tail when the jsonl actually grew — idle panes cost
@@ -829,7 +829,7 @@ fn tail_model_short(path: &std::path::Path) -> Option<String> {
     // capped so dead sessions can't accumulate entries forever.
     thread_local! {
         static CACHE: RefCell<
-            HashMap<PathBuf, (SystemTime, u64, Option<String>)>,
+            HashMap<PathBuf, (SystemTime, u64, u64, Option<String>)>,
         > = RefCell::new(HashMap::new());
     }
     const CACHE_CAP: usize = 64;
@@ -837,29 +837,31 @@ fn tail_model_short(path: &std::path::Path) -> Option<String> {
     let mtime = md.modified().ok()?;
     let size = md.len();
     let hit = CACHE.with(|c| {
-        c.borrow().get(path).and_then(|(t, s, v)| {
-            (*t == mtime && *s == size).then(|| v.clone())
+        c.borrow().get(path).and_then(|(t, s, off, v)| {
+            (*t == mtime && *s == size && *off == min_offset).then(|| v.clone())
         })
     });
     if let Some(v) = hit {
         return v;
     }
-    let result = tail_model_short_uncached(path);
+    let result = tail_model_short_uncached(path, min_offset);
     CACHE.with(|c| {
         let mut c = c.borrow_mut();
         if c.len() >= CACHE_CAP {
             c.clear();
         }
-        c.insert(path.to_path_buf(), (mtime, size, result.clone()));
+        c.insert(path.to_path_buf(), (mtime, size, min_offset, result.clone()));
     });
     result
 }
 
-fn tail_model_short_uncached(path: &std::path::Path) -> Option<String> {
+fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
-    let start = len.saturating_sub(MODEL_TAIL_BYTES);
+    // Never read behind the fence — those records describe a process
+    // that no longer owns this session.
+    let start = len.saturating_sub(MODEL_TAIL_BYTES).max(min_offset.min(len));
     f.seek(SeekFrom::Start(start)).ok()?;
     let mut buf = String::new();
     // Lossy is fine: we only pattern-scan ASCII keys, and a torn
@@ -1101,6 +1103,7 @@ impl Plugin for ClaudecodePlugin {
             projects_root,
             shelld,
             seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
         };
         let handle = std::thread::Builder::new()
             .name("claudecode-scan".into())
@@ -1357,6 +1360,50 @@ struct WorkerCtx {
     /// Same role as the old `ClaudecodePlugin::seen` field, but the
     /// worker owns it now and the plugin never touches it.
     seen: HashMap<PathBuf, SessionInfo>,
+    /// Per-jsonl: the claude pid last seen owning it, and the byte
+    /// offset from which its model may be read.  See
+    /// `model_cutoff_for`.
+    model_cutoff: HashMap<PathBuf, (i32, u64)>,
+}
+
+impl WorkerCtx {
+    /// Byte offset in `path` from which an assistant record may be
+    /// trusted to describe the model `claude_pid` is actually using.
+    ///
+    /// A profile switch kills claude and re-runs it as
+    /// `claude<N> --resume <uuid>` — the **same** session, so the same
+    /// jsonl simply keeps growing.  Nothing is written at resume that
+    /// names the new model (checked: the only startup-ish records are
+    /// `mode`, `last-prompt` and `system/turn_duration`, none of which
+    /// carry one), so the newest assistant record in the file is still
+    /// the one the *previous* profile served — with the previous
+    /// profile's model.  Reading it back gives a badge that confidently
+    /// states the wrong model until the user sends another message, and
+    /// profiles really do differ here.
+    ///
+    /// A changed pid is the signal that the file's existing contents
+    /// belong to a process that is gone.  Everything before that point
+    /// is fenced off; until the new process answers a turn, the badge
+    /// renders without `@model` — which is the honest state, and one
+    /// the badge already knows how to draw.
+    fn model_cutoff_for(&mut self, path: &std::path::Path, claude_pid: i32) -> u64 {
+        match self.model_cutoff.get(path) {
+            Some(&(pid, cutoff)) if pid == claude_pid => cutoff,
+            _ => {
+                // Either the first sighting or a replaced process.  On
+                // first sighting the records are this process's own, so
+                // nothing is fenced (cutoff 0); on replacement, fence
+                // everything written so far.
+                let cutoff = if self.model_cutoff.contains_key(path) {
+                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+                } else {
+                    0
+                };
+                self.model_cutoff.insert(path.to_path_buf(), (claude_pid, cutoff));
+                cutoff
+            }
+        }
+    }
 }
 
 /// Worker thread entry.  Lives until the request channel is dropped
@@ -1535,7 +1582,8 @@ impl WorkerCtx {
                 // the latter makes an interactive switch show up on
                 // the very next tick instead of after the next
                 // assistant turn.
-                let model = tail_model_short(&jsonl_path);
+                let cutoff = self.model_cutoff_for(&jsonl_path, claude.pid);
+                let model = tail_model_short(&jsonl_path, cutoff);
                 let badge = match (tag, model) {
                     (Some(t), Some(m)) => format!("{}@{} {}", t, m, sid_uuid),
                     (Some(t), None) => format!("{} {}", t, sid_uuid),
@@ -1678,6 +1726,82 @@ mod tests {
         assert_eq!(short_model("\u{1b}[1mFable 5\u{1b}[22m"), "fable-5");
     }
 
+    /// The profile-switch case.
+    ///
+    /// Switching profiles re-runs `claude<N> --resume <uuid>`, so the
+    /// same jsonl keeps growing and its newest assistant record still
+    /// names the *previous* profile's model.  Reading it back made the
+    /// badge state the wrong model until the next turn.  Fencing the
+    /// read at the switch offset makes it report nothing instead —
+    /// the badge then omits `@model`, which is honest.
+    #[test]
+    fn model_read_is_fenced_at_a_profile_switch() {
+        let dir = std::env::temp_dir().join("cc-model-fence-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+
+        // Pre-switch history: P1 was answering with fable-5.
+        let pre = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-fable-5\"}}\n";
+        fs::write(&path, pre).unwrap();
+        let switch_at = fs::metadata(&path).unwrap().len();
+
+        // Unfenced, the old model is what you get — this is the bug.
+        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("fable-5"));
+
+        // Fenced at the switch: nothing to report yet.
+        assert_eq!(
+            tail_model_short(&path, switch_at),
+            None,
+            "a fenced read must not surface the previous profile's model"
+        );
+
+        // The new profile answers a turn; now it reports again.
+        let post = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-4-8\"}}\n";
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        use std::io::Write;
+        f.write_all(post.as_bytes()).unwrap();
+        drop(f);
+        assert_eq!(
+            tail_model_short(&path, switch_at).as_deref(),
+            Some("opus-4-8"),
+            "post-switch records must still be read"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The fence moves only when the owning process is replaced.
+    #[test]
+    fn model_cutoff_tracks_the_owning_pid() {
+        let dir = std::env::temp_dir().join("cc-model-cutoff-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fs::write(&path, "x".repeat(100)).unwrap();
+
+        let mut ctx = WorkerCtx {
+            projects_root: dir.clone(),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+        };
+
+        // First sighting: nothing is fenced — those records belong to
+        // the process we are looking at.
+        assert_eq!(ctx.model_cutoff_for(&path, 111), 0);
+        // Same process, file grew: still unfenced.
+        fs::write(&path, "x".repeat(200)).unwrap();
+        assert_eq!(ctx.model_cutoff_for(&path, 111), 0);
+        // Process replaced: everything written so far is fenced off.
+        assert_eq!(ctx.model_cutoff_for(&path, 222), 200);
+        // And it stays put while that process lives.
+        fs::write(&path, "x".repeat(500)).unwrap();
+        assert_eq!(ctx.model_cutoff_for(&path, 222), 200);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn tail_model_prefers_newest_record_in_file() {
         // assistant(fable) then a later /model switch (the modern
@@ -1689,7 +1813,7 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to \u001b[1mOpus 4.8\u001b[22m and saved as your default for new sessions</local-command-stdout>"}}"#,
             "\n",
         ));
-        assert_eq!(tail_model_short(&path).as_deref(), Some("opus-4-8"));
+        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("opus-4-8"));
 
         // ...and vice versa: an assistant turn after the switch wins.
         // (older "system"/"local_command" record shape)
@@ -1699,11 +1823,11 @@ mod tests {
             r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
             "\n",
         ));
-        assert_eq!(tail_model_short(&path).as_deref(), Some("fable-5"));
+        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("fable-5"));
 
         // No model anywhere -> None.
         let path = tmpfile(r#"{"type":"user","text":"hi"}"#);
-        assert_eq!(tail_model_short(&path), None);
+        assert_eq!(tail_model_short(&path, 0), None);
 
         // Self-reference guard: a conversation that DISCUSSES the
         // marker (e.g. this feature being developed in a marspot
@@ -1715,7 +1839,7 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"marker 改锚 <local-command-stdout>Set model to 之类的-块),而 我 5"}]}}"#,
             "\n",
         ));
-        assert_eq!(tail_model_short(&path).as_deref(), Some("fable-5"));
+        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("fable-5"));
     }
 
     #[test]
