@@ -2648,7 +2648,11 @@ mod cc_palette {
     /// Day rules running up through the plot.  Low alpha rather than a
     /// dim solid colour so the rule reads as behind the bars on both
     /// the card surface and the modal ground it crosses.
-    pub fn grid() -> [f32; 4] { [0.62, 0.66, 0.74, 0.22] }
+    ///
+    /// 0.14 is chosen against alpha that actually works: the first cut
+    /// used 0.22, picked by eye while the ui_rect pipeline was still
+    /// applying alpha twice, so what was really on screen was 0.05.
+    pub fn grid() -> [f32; 4] { [0.62, 0.66, 0.74, 0.14] }
     /// Status chip fill — the severity colour at low alpha, so the
     /// chip reads as tinted glass over the card rather than a second
     /// solid block competing with the bars.
@@ -4828,8 +4832,20 @@ fn build_ui_pipeline(
     attachment.setBlendingEnabled(true);
     attachment.setRgbBlendOperation(MTLBlendOperation::Add);
     attachment.setAlphaBlendOperation(MTLBlendOperation::Add);
-    attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::SourceAlpha);
+    // `One`, not `SourceAlpha`: `ui_rect_fragment` composites its
+    // shadow/fill/border layers into PREMULTIPLIED form (it returns
+    // `rgb * a`), so the source contribution is already scaled and the
+    // blend must not scale it again.
+    //
+    // It used to be `SourceAlpha`, which applied alpha twice.  At
+    // a = 1.0 the two formulas agree, so every opaque surface looked
+    // correct and the bug hid; a 0.2-alpha fill rendered at an
+    // effective 0.04 and simply disappeared.  Measured before the fix:
+    // white at a = 0.5 over black read 64 instead of 128.  This is
+    // where "semi-transparent panels don't work, make them opaque"
+    // came from — it was never a taste constraint, it was this.
+    attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
+    attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
     attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
     attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
@@ -7880,6 +7896,51 @@ mod tests {
     }
 
     // ── P2b: Canvas → Metal flush, submission-order = z-order ──
+
+    /// Semi-transparent fills must land at the alpha they were given.
+    ///
+    /// The `ui_rect` fragment shader composites its layers into
+    /// **premultiplied** form (`rgb * a`), but the pipeline's source
+    /// blend factor was `SourceAlpha` — the *non*-premultiplied
+    /// equation — so the destination got alpha applied twice.  At
+    /// a = 1.0 the two agree, which is why every opaque panel looked
+    /// right and the bug stayed hidden; at a = 0.2 the fill rendered at
+    /// an effective 0.04 and simply vanished.  That is what made the cc
+    /// modal's dashed day grid and its status chips invisible, and it is
+    /// almost certainly what taught this codebase the folk rule that
+    /// overlay backgrounds "have to be" opaque.
+    ///
+    /// White at alpha `a` over black must read `255 * a`, ± the SDF
+    /// edge AA. Sampled at the centre of a full-window rect, far from
+    /// any edge, so coverage is exactly 1.
+    #[test]
+    fn canvas_alpha_blends_at_the_requested_opacity() {
+        use crate::ui::core::{Canvas, ParentRect, Color, Length};
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(e) => { eprintln!("skip (no Metal): {e}"); return; }
+        };
+        let (w, h) = (16u32, 16u32);
+        for (alpha, want) in [(1.0_f64, 255.0_f64), (0.5, 127.5), (0.25, 63.75)] {
+            let mut canvas = Canvas::new(1.0, ParentRect::window(w as f64, h as f64));
+            canvas.rect()
+                .at(Length::Pt(0.0), Length::Pt(0.0))
+                .size(Length::Pct(1.0), Length::Pct(1.0))
+                .fill(Color::rgba(255, 255, 255, alpha))
+                .draw();
+            let bytes = renderer
+                .render_canvas_to_bitmap(w, h, &canvas, 48.0, 12.0, 9.0, false)
+                .expect("render");
+            let i = (w as usize / 2 + (h as usize / 2) * w as usize) * 4;
+            let got = bytes[i + 2] as f64; // R channel of BGRA8
+            assert!(
+                (got - want).abs() <= 6.0,
+                "alpha {alpha}: expected ~{want} over black, got {got} \
+                 (double-applied alpha would give {:.0})",
+                want * alpha
+            );
+        }
+    }
 
     /// Z-order invariant: three opaque rects at the SAME coord
     /// in submission order red → green → blue must land blue on

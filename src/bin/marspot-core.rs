@@ -5515,7 +5515,12 @@ fn main() {
         while let Ok(ev) = event_rx.try_recv() {
             process(&mut app, ev, &mut pending_attach, &mut to_ack, &mut closed);
         }
-        watch.phase("shell-io");
+        // Everything from here to the next marker used to be one
+        // "shell-io" phase, which turned out to be a catch-all that
+        // also swallowed pump + render + the GPU wait — a 2 s stall
+        // reported as "shell-io" told us nothing.  Split so the next
+        // report points at something.
+        watch.phase("shell-writes");
         if closed {
             // The dominant CORE_EXIT path in real life — and the one
             // whose context was missing in the 2026-06-15 incident:
@@ -5587,9 +5592,11 @@ fn main() {
                             app.rebuild_layout();
                             // Render the latest content into slot 0 so
                             // the SurfaceReady ack reflects a real frame.
-                            watch.phase("render");
+                            watch.phase("pump");
                             app.pump_all();
+                            watch.phase("render");
                             let _ = app.render(&target_tex[writing_idx]);
+                            watch.phase("post-render");
                             let ack = Frame::new(
                                 MsgType::SurfaceReady,
                                 encode_surface_ready(surfaces[writing_idx].id()),
@@ -5632,6 +5639,7 @@ fn main() {
                 }
             }
         }
+        watch.phase("pump");
         let pumped = app.pump_all();
         if pumped > 0 {
             bytes_pumped_total = bytes_pumped_total.saturating_add(pumped as u64);
@@ -5668,7 +5676,9 @@ fn main() {
             // has already finished.
             let render_t0 = Instant::now();
             last_render_at = render_t0;
+            watch.phase("render");
             let caret = app.render(&target_tex[writing_idx]);
+            watch.phase("post-render");
             // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
             // a busy display (60 Hz cap) without flooding when the
             // user runs `MARSPOT_LOG_CORE=debug` to investigate latency

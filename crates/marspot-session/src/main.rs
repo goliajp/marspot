@@ -1302,6 +1302,57 @@ fn main() {
 /// already anomalous and worth a line in the log.
 const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
 
+/// Off-loop writer for the periodic crash-safety snapshot.
+///
+/// Serialising is cheap and in-memory (state.bin runs ~100-300 KB), but
+/// the `write` + `rename` that follow are synchronous disk IO, and disk
+/// IO on this loop is a stall waiting for a busy disk.  Measured in the
+/// field: a 115 KB snapshot took **2.87 s** while a build was hammering
+/// the same disk — the pane was frozen for all of it.  Size was never
+/// the problem, contention was.
+///
+/// Latest-wins: the thread drains everything queued and writes only the
+/// newest, because an older snapshot of the same session has no value
+/// once a newer one exists.  That also bounds memory without a cap —
+/// the queue cannot outgrow the producer's 30 s cadence.
+struct SnapshotWriter {
+    tx: std::sync::mpsc::Sender<(std::path::PathBuf, Vec<u8>)>,
+}
+
+impl SnapshotWriter {
+    fn spawn(session_id: u64) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<(std::path::PathBuf, Vec<u8>)>();
+        std::thread::Builder::new()
+            .name(format!("l3-snapshot-writer-{session_id}"))
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    let mut latest = first;
+                    while let Ok(next) = rx.try_recv() {
+                        latest = next;
+                    }
+                    let (path, body) = latest;
+                    let tmp = path.with_extension("bin.tmp");
+                    let r = std::fs::write(&tmp, &body)
+                        .and_then(|()| std::fs::rename(&tmp, &path));
+                    if let Err(e) = r {
+                        lx_warn!(
+                            "session.periodic_snapshot_failed",
+                            &format!("{e}"),
+                            path = path.display()
+                        );
+                    }
+                }
+            })
+            .expect("spawn l3-snapshot-writer thread");
+        Self { tx }
+    }
+
+    /// Queue a snapshot body.  Never blocks.
+    fn send(&self, path: std::path::PathBuf, body: Vec<u8>) -> bool {
+        self.tx.send((path, body)).is_ok()
+    }
+}
+
 const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
     let mut last_snapshot_at = Instant::now();
@@ -1329,6 +1380,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // report its own stalls, naming the phase that ate the time.  Silent
     // below the threshold, so a healthy session logs nothing.
     let mut watch = marspot_term::loop_watch::LoopWatch::new(LOOP_STALL_THRESHOLD);
+    let snapshot_writer = SnapshotWriter::spawn(session.id());
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1790,20 +1842,25 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // existed).  Worst-case loss window shrinks from "since boot"
         // to 30 s.
         {
-            watch.phase("snapshot");
+            watch.phase("snapshot-flush");
             let gen_now = session.terminal().generation();
             if gen_now != last_snapshot_generation
                 && last_snapshot_at.elapsed() >= PERIODIC_SNAPSHOT_INTERVAL
             {
                 session.terminal().grid().scrollback_flush_for_handoff();
+                watch.phase("snapshot-serialize");
                 let body = session
                     .terminal()
                     .serialize_snapshot_capped(PERIODIC_SNAPSHOT_TAIL_CAP);
                 let path = session_state_bin_path(session.id());
-                let tmp = path.with_extension("bin.tmp");
-                let write_ok = std::fs::write(&tmp, &body)
-                    .and_then(|()| std::fs::rename(&tmp, &path));
-                match write_ok {
+                // Hand the write to the writer thread.  Success here
+                // means "queued": the cadence this drives is about
+                // bounding the crash-loss window, and a body that is
+                // queued is one the next crash still loses — the same
+                // as before, since the old inline write was not fsynced
+                // either.
+                let queued = snapshot_writer.send(path, body.clone());
+                match if queued { Ok(()) } else { Err(()) } {
                     Ok(()) => {
                         // First write per process boots at INFO so a
                         // plain `grep periodic_snapshot marspot.log`
@@ -1832,10 +1889,10 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         last_snapshot_generation = gen_now;
                         last_snapshot_at = Instant::now();
                     }
-                    Err(e) => {
+                    Err(()) => {
                         lx_warn!(
                             "session.periodic_snapshot_failed",
-                            &format!("{e}"),
+                            "snapshot writer thread is gone",
                             session_id = session.id()
                         );
                         // Back off a full interval on failure too —
