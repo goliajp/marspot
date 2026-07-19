@@ -3475,7 +3475,7 @@ fn push_layout_chrome(
     p: &mut crate::ui::core::view::ViewPainter,
 ) {
     use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
-    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon};
+    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon};
 
     // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid +
     // title-strip↔toolbar).  Same SEAM tone as GridSeams; routed
@@ -3539,13 +3539,17 @@ fn push_layout_chrome(
         };
         btn.paint(p);
     }
-    // cc — 5th toolbar button opens the Claude usage modal.  Text
-    // label instead of a vector icon: "Cc" IS the semantic.
+    // cc — 5th toolbar button opens the Claude usage modal.  Uses
+    // the same stroked-geometry icon family as its four neighbours
+    // (a text "Cc" label read as the odd one out).
     if layout.cc_button_rect.w > 0.0 {
+        let usage_icon = UsageBarsIcon;
         let btn = Button {
             rect: layout.cc_button_rect,
-            label: Some("Cc"),
-            icon: None,
+            label: None,
+            icon: Some(IconSpec::Component(
+                &usage_icon as &dyn crate::ui::core::IconComponent,
+            )),
             icon_position: IconPosition::Only,
             hovered: hover_chrome_btn == Some(4),
             style: chrome,

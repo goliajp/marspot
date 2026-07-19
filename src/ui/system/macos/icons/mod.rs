@@ -10,11 +10,13 @@ pub mod grid;
 pub mod sidebar;
 pub mod list_tree;
 pub mod dev_panel;
+pub mod usage_bars;
 
 pub use grid::GridIcon;
 pub use sidebar::SidebarIcon;
 pub use list_tree::ListTreeIcon;
 pub use dev_panel::DevPanelIcon;
+pub use usage_bars::UsageBarsIcon;
 
 use marspot_term::layout::Rect;
 
