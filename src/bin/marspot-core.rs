@@ -3244,7 +3244,10 @@ impl CoreApp {
         // landing near 7 lh), the 2.2 lh section break, the timeline
         // heading, and the panel's own top/bottom margin.  One 2.6 lh
         // band per timeline row, then 4 lh for the date axis.
-        let h = (lh * 13.5 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.9);
+        // 15 lh of fixed chrome: the two section headings now render in
+        // the taller system UI font (≈1.2 lh each rather than 1.0), plus
+        // the account card, the section break, and top/bottom margins.
+        let h = (lh * 15.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.9);
         marspot_term::layout::Rect {
             x: (self.w_phys - w) / 2.0,
             y_top: ((self.h_phys - h) / 2.0).max(self.layout.top_inset + 8.0),

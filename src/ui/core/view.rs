@@ -262,6 +262,47 @@ impl<'a> ViewPainter<'a> {
         );
     }
 
+    /// Proportional text in the **system UI font** (SF Pro), at the
+    /// system UI point size — the same font and size the native macOS
+    /// title bar and section headers use.  `text()` above renders the
+    /// terminal mono font at the grid's cell size, which is a
+    /// *different, smaller* face; a modal heading drawn with it reads
+    /// as visibly smaller than the surrounding system chrome.  Use this
+    /// for headings that should sit at parity with the OS, and keep
+    /// `text()` for tabular / numeric content that wants monospace.
+    ///
+    /// `baseline_y` is the text baseline in physical px.  Weight 600
+    /// (semibold) matches the macOS title convention.
+    pub fn ui_text(&mut self, x: f32, baseline_y: f32, s: &str, color: [f32; 4]) {
+        crate::render_metal::push_text_run_ui_shaped_mono(
+            s, x, baseline_y, color,
+            self.ascent, self.atlas_w, self.atlas_h,
+            600,
+            self.font, self.atlas, self.glyphs,
+        );
+    }
+
+    /// Advance width of `s` in the system UI font, physical px — pairs
+    /// with `ui_text` for right-aligning or centring a heading.
+    pub fn ui_text_width(&mut self, s: &str) -> f32 {
+        self.font.measure_ui_text(
+            s, 600, crate::font_shape::ShapeOptions::default(),
+        ) as f32
+    }
+
+    /// Ascent of the system UI font in physical px — for turning a
+    /// top-of-box y into a `ui_text` baseline.
+    pub fn ui_ascent(&self) -> f32 {
+        self.font.ui_ascent as f32
+    }
+
+    /// Cell height of the system UI font in physical px.
+    pub fn ui_line_h(&self) -> f32 {
+        self.font.ui_cell_h as f32
+    }
+
+    /// F3+3.4 — anchor-aligned text inside a rect.
+
     /// F3+3.4 — anchor-aligned text inside a rect.  Text width is
     /// `s.chars().count() * cell_w` (assumes monospace, fine for
     /// chrome labels in marspot); text height is `cell_h`.  Caller

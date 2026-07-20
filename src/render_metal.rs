@@ -2715,12 +2715,19 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let text_w = |s: &str| -> f64 { s.chars().count() as f64 * cw as f64 };
 
     // ---- title row ----
-    let mut y = r.y_top + pad + ascent as f64;
+    // The heading renders in the system UI font at the system size, so
+    // it sits at parity with the native macOS window header rather than
+    // in the smaller terminal mono face.  The right-aligned "updated"
+    // stamp stays mono — it is a timestamp, tabular by nature — and is
+    // vertically centred against the taller heading line.
+    let head_top = r.y_top + pad;
+    let ui_line = p.ui_line_h() as f64;
     let title = format!("CLAUDE ACCOUNTS  {}", cc.accounts.len());
-    text(p, inner_x, y, &title, cc_palette::fg());
+    p.ui_text(inner_x as f32, (head_top + p.ui_ascent() as f64) as f32, &title, cc_palette::fg());
     let upd = &cc.updated_label;
-    text(p, inner_x + inner_w - text_w(upd), y, upd, cc_palette::fg_sec());
-    y += lh * 0.6;
+    let upd_baseline = head_top + (ui_line - ch as f64) * 0.5 + ascent as f64;
+    text(p, inner_x + inner_w - text_w(upd), upd_baseline, upd, cc_palette::fg_sec());
+    let mut y = head_top + ui_line + lh * 0.3;
 
     if cc.feed_missing {
         y += lh;
@@ -2836,8 +2843,8 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     y = card_top + card_h + lh * 2.2;
 
     // ---- timeline ----
-    text(p, inner_x, y + ascent as f64 * 0.0, "RESOURCE AVAILABILITY (±6D)", cc_palette::fg());
-    y += lh * 0.8;
+    p.ui_text(inner_x as f32, (y + p.ui_ascent() as f64) as f32, "RESOURCE AVAILABILITY (±6D)", cc_palette::fg());
+    y += p.ui_line_h() as f64 + lh * 0.15;
     let label_w = cc
         .accounts
         .iter()
@@ -3861,7 +3868,7 @@ pub(crate) fn push_text_run_kind(
 /// — pre-Phase-7 visual).  Used by the legacy `push_text_run_kind`
 /// entry point that pre-dates the canvas colour glyph plumbing.
 #[allow(clippy::too_many_arguments)]
-fn push_text_run_ui_shaped_mono(
+pub(crate) fn push_text_run_ui_shaped_mono(
     text: &str,
     x_start: f32,
     baseline_y: f32,
