@@ -1218,9 +1218,16 @@ fn spawn_l3_with_cwd(
     // socketpair.  L3 boots, binds sessions/<id>/sock, writes entry.toml;
     // we poll for the entry then handshake.  Failure rolls back the
     // child (Drop sends SIGKILL via std).
+    // 10 s, explicitly.  This used to read 5 s and get 10 in practice,
+    // because `wait_and_connect` ran a fresh deadline for each of its
+    // two halves.  Now that the deadline is honestly single, the number
+    // here has to be the real budget — and a booting L3 needs it: it
+    // execs, then applies a state.bin that can run into the hundreds of
+    // KB before it binds its socket.  Halving it silently turned a slow
+    // boot into a lost pane (caught by the boot-assembly tests).
     let control = match marspot::uds_session_client::wait_and_connect(
         session_id,
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(10),
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -1342,9 +1349,12 @@ fn reattach_l3_pane(
     drop(shm_fd);
 
     // UDS connect + handshake — same wire as the spawn path.
+    // 4 s, explicitly — the effective budget this path had before the
+    // deadline was made single.  Reattach races a live L3 that may be
+    // mid-execv.
     let control = marspot::uds_session_client::wait_and_connect(
         session_id,
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(4),
     )?;
     let reader_stream = control.try_clone()?;
     let tx = event_tx.clone();
@@ -3225,7 +3235,11 @@ impl CoreApp {
         // 10 lh of fixed chrome (title + the 5.5 lh account card +
         // the timeline heading), one 2.6 lh band per timeline row, then
         // 4 lh for the date axis and bottom padding.
-        let h = (lh * 10.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.85);
+        // 13 lh of fixed chrome: title, the 6.5 lh account card, the
+        // 2.2 lh section break, and the timeline heading — plus real
+        // padding top and bottom.  One 2.6 lh band per timeline row,
+        // then 4 lh for the date axis and the bottom margin.
+        let h = (lh * 13.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.9);
         marspot_term::layout::Rect {
             x: (self.w_phys - w) / 2.0,
             y_top: ((self.h_phys - h) / 2.0).max(self.layout.top_inset + 8.0),
@@ -5477,7 +5491,10 @@ fn main() {
                             for attempt in 0..L3_RECONNECT_ATTEMPTS {
                                 match marspot::uds_session_client::wait_and_connect(
                                     sid,
-                                    std::time::Duration::from_secs(2),
+                                    // 4 s, explicitly — see the note on
+                                    // the reattach path.  Off-loop now,
+                                    // so the wait costs nobody a frame.
+                                    std::time::Duration::from_secs(4),
                                 ) {
                                     Ok(s) => {
                                         got = Some(s);

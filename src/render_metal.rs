@@ -2702,7 +2702,9 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let ch = p.cell_h;
     let ascent = p.ascent;
     let r = cc.rect;
-    let pad = (ch * 1.0) as f64;
+    // Outer breathing room.  The panel is a reference surface, not a
+    // dense readout — it can afford to sit away from its own frame.
+    let pad = (ch * 1.6) as f64;
     let lh = (ch * 1.35) as f64; // line advance
     let inner_x = r.x + pad;
     let inner_w = (r.w - 2.0 * pad).max(1.0);
@@ -2730,33 +2732,51 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let n = cc.accounts.len().max(1);
     let gap = (cw * 1.5) as f64;
     let card_w = ((inner_w - gap * (n as f64 - 1.0)) / n as f64).max(40.0);
-    let card_h = lh * 5.5;
+    // 6.5 rather than 5.5: five text rows plus real padding above the
+    // first and below the last, instead of rows pressed against the
+    // card's border.
+    let card_h = lh * 6.5;
+    // Horizontal inset for everything inside a card.
+    let card_pad_x = cw as f64 * 1.6;
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
         let card = Rect { x: cx, y_top: card_top, w: card_w, h: card_h };
         p.fill_rounded_rect(card, cc_palette::card_bg(), 6.0, (cc_palette::card_border(), 1.0));
-        let px = cx + cw as f64;
-        let row_right = cx + card_w - cw as f64;
-        let mut cy = card_top + lh * 0.45 + ascent as f64;
+        let px = cx + card_pad_x;
+        let row_right = cx + card_w - card_pad_x;
+        let mut cy = card_top + lh * 0.8 + ascent as f64;
 
         // r1 — name (primary) + status chip, right-aligned in a slot
         // reserved BEFORE the name is laid out so no length pairing can
         // make them collide.
+        // The chip's TEXT is what has to line up with the percentages
+        // below it — they are the same column of the card.  Aligning the
+        // chip's *background* instead pushed the label half a character
+        // left of the numbers, which is exactly the kind of near-miss
+        // that reads as sloppy.  So: right-align the text at
+        // `row_right`, then draw the pill around it, letting the pill
+        // spill into the card's padding rather than moving the text.
         let chip_text = a.status_label.to_uppercase();
-        let chip_w = text_w(&chip_text) + cw as f64 * 1.2;
-        let chip_x = row_right - chip_w;
+        let chip_pad = cw as f64 * 0.6;
+        let chip_text_x = row_right - text_w(&chip_text);
         p.fill_rounded_rect(
-            Rect { x: chip_x, y_top: cy - ascent as f64 * 0.92, w: chip_w, h: ch as f64 * 1.05 },
+            Rect {
+                x: chip_text_x - chip_pad,
+                y_top: cy - ascent as f64 * 0.92,
+                w: text_w(&chip_text) + chip_pad * 2.0,
+                h: ch as f64 * 1.05,
+            },
             cc_palette::chip_bg(a.status_severity), 3.0, ([0.0; 4], 0.0),
         );
-        text(p, chip_x + cw as f64 * 0.6, cy, &chip_text, cc_severity_color(a.status_severity));
-        text(p, px, cy, &fit_ellipsis(&a.name, (chip_x - cw as f64 - px) / cw as f64), cc_palette::fg());
+        text(p, chip_text_x, cy, &chip_text, cc_severity_color(a.status_severity));
+        let name_budget = (chip_text_x - chip_pad - cw as f64 - px) / cw as f64;
+        text(p, px, cy, &fit_ellipsis(&a.name, name_budget), cc_palette::fg());
 
         // r2 — email, one full line of its own.  Cramming it beside the
         // name is what produced the collisions; a dedicated line also
         // lets a long address show in full.
-        cy += lh;
+        cy += lh * 1.05;
         text(p, px, cy, &fit_ellipsis(&a.email, (row_right - px) / cw as f64), cc_palette::fg_sec());
 
         // r3/r4 — one full-width bar per window: `5H [========----] 55%`.
@@ -2764,7 +2784,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // resolution of the bar, which is the whole point of the panel.
         let pct_slot = cw as f64 * 4.0; // "100%"
         for (label, util) in [("5H", a.util_5h), ("7D", a.util_7d)] {
-            cy += lh * 1.15;
+            cy += lh * 1.3;
             text(p, px, cy, label, cc_palette::fg_faint());
             let pct = format!("{:.0}%", util * 100.0);
             text(p, row_right - text_w(&pct), cy, &pct, cc_util_color(util));
@@ -2788,10 +2808,12 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         }
 
         // r5 — reset times.
-        cy += lh * 1.2;
+        cy += lh * 1.35;
         text(p, px, cy, &fit_ellipsis(&a.reset_label, (row_right - px) / cw as f64), cc_palette::fg_sec());
     }
-    y = card_top + card_h + lh;
+    // Two sections, not one continuous list — give the boundary enough
+    // room to read as a break.
+    y = card_top + card_h + lh * 2.2;
 
     // ---- timeline ----
     text(p, inner_x, y + ascent as f64 * 0.0, "RESOURCE AVAILABILITY (±6D)", cc_palette::fg());
