@@ -2732,20 +2732,31 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let n = cc.accounts.len().max(1);
     let gap = (cw * 1.5) as f64;
     let card_w = ((inner_w - gap * (n as f64 - 1.0)) / n as f64).max(40.0);
-    // 6.5 rather than 5.5: five text rows plus real padding above the
-    // first and below the last, instead of rows pressed against the
-    // card's border.
-    let card_h = lh * 6.5;
-    // Horizontal inset for everything inside a card.
-    let card_pad_x = cw as f64 * 1.6;
+    // ONE padding value for all four sides, in physical px.
+    //
+    // The previous cut measured horizontal padding in `cw` and vertical
+    // padding in `lh`, which are different rulers — the four gaps came
+    // out visibly unequal, and the bottom one collapsed to almost
+    // nothing once the last row's descenders were accounted for.
+    let card_pad = (ch * 0.85) as f64;
+    // Baseline-to-baseline advances between the five rows.  Named so
+    // the card height below can be derived instead of guessed.
+    let row_adv = [lh * 1.05, lh * 1.3, lh * 1.3, lh * 1.35];
+    let rows_span: f64 = row_adv.iter().sum();
+    // Exact: pad, then the first row's ascent, the row advances, the
+    // last row's descent, then pad again.  `ch - ascent` is the
+    // descent — the painter reports cell height and ascent, and a
+    // monospace cell is exactly the two stacked.
+    let card_h = card_pad * 2.0 + ascent as f64 + rows_span
+        + (ch as f64 - ascent as f64);
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
         let card = Rect { x: cx, y_top: card_top, w: card_w, h: card_h };
         p.fill_rounded_rect(card, cc_palette::card_bg(), 6.0, (cc_palette::card_border(), 1.0));
-        let px = cx + card_pad_x;
-        let row_right = cx + card_w - card_pad_x;
-        let mut cy = card_top + lh * 0.8 + ascent as f64;
+        let px = cx + card_pad;
+        let row_right = cx + card_w - card_pad;
+        let mut cy = card_top + card_pad + ascent as f64;
 
         // r1 — name (primary) + status chip, right-aligned in a slot
         // reserved BEFORE the name is laid out so no length pairing can
@@ -2760,12 +2771,21 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         let chip_text = a.status_label.to_uppercase();
         let chip_pad = cw as f64 * 0.6;
         let chip_text_x = row_right - text_w(&chip_text);
+        // Centre the pill on the label's INK, not on its baseline box.
+        // The label is all-caps, so its ink runs from `baseline - cap`
+        // to the baseline with nothing below; hanging the pill off the
+        // full ascent left roughly twice as much air under the letters
+        // as above them.  0.72 × ascent is the usual stand-in for cap
+        // height — the painter reports ascent, not cap height — and is
+        // only ever applied to these fixed uppercase labels.
+        let chip_h = ch as f64 * 1.05;
+        let cap = ascent as f64 * 0.72;
         p.fill_rounded_rect(
             Rect {
                 x: chip_text_x - chip_pad,
-                y_top: cy - ascent as f64 * 0.92,
+                y_top: cy - cap * 0.5 - chip_h * 0.5,
                 w: text_w(&chip_text) + chip_pad * 2.0,
-                h: ch as f64 * 1.05,
+                h: chip_h,
             },
             cc_palette::chip_bg(a.status_severity), 3.0, ([0.0; 4], 0.0),
         );
@@ -2776,15 +2796,15 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // r2 — email, one full line of its own.  Cramming it beside the
         // name is what produced the collisions; a dedicated line also
         // lets a long address show in full.
-        cy += lh * 1.05;
+        cy += row_adv[0];
         text(p, px, cy, &fit_ellipsis(&a.email, (row_right - px) / cw as f64), cc_palette::fg_sec());
 
         // r3/r4 — one full-width bar per window: `5H [========----] 55%`.
         // Full width (not two half-width groups) roughly doubles the
         // resolution of the bar, which is the whole point of the panel.
         let pct_slot = cw as f64 * 4.0; // "100%"
-        for (label, util) in [("5H", a.util_5h), ("7D", a.util_7d)] {
-            cy += lh * 1.3;
+        for (i, (label, util)) in [("5H", a.util_5h), ("7D", a.util_7d)].into_iter().enumerate() {
+            cy += row_adv[1 + i];
             text(p, px, cy, label, cc_palette::fg_faint());
             let pct = format!("{:.0}%", util * 100.0);
             text(p, row_right - text_w(&pct), cy, &pct, cc_util_color(util));
@@ -2808,7 +2828,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         }
 
         // r5 — reset times.
-        cy += lh * 1.35;
+        cy += row_adv[3];
         text(p, px, cy, &fit_ellipsis(&a.reset_label, (row_right - px) / cw as f64), cc_palette::fg_sec());
     }
     // Two sections, not one continuous list — give the boundary enough

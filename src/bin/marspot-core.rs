@@ -3239,7 +3239,12 @@ impl CoreApp {
         // 2.2 lh section break, and the timeline heading — plus real
         // padding top and bottom.  One 2.6 lh band per timeline row,
         // then 4 lh for the date axis and the bottom margin.
-        let h = (lh * 13.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.9);
+        // 13.5 lh of fixed chrome: title, the account card (now derived
+        // from its own padding + rows rather than a round number, and
+        // landing near 7 lh), the 2.2 lh section break, the timeline
+        // heading, and the panel's own top/bottom margin.  One 2.6 lh
+        // band per timeline row, then 4 lh for the date axis.
+        let h = (lh * 13.5 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.9);
         marspot_term::layout::Rect {
             x: (self.w_phys - w) / 2.0,
             y_top: ((self.h_phys - h) / 2.0).max(self.layout.top_inset + 8.0),
