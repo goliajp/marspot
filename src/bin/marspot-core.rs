@@ -5374,6 +5374,18 @@ fn main() {
     let mut watch = marspot_term::loop_watch::LoopWatch::new(
         L2_LOOP_STALL_THRESHOLD,
     );
+    // A live report, not a post-mortem: this loop drives every pane, so
+    // while it is wedged the whole window is frozen and the user is
+    // looking at it right then.  `end()` cannot speak until the
+    // iteration completes.
+    watch.spawn_watchdog(|elapsed, phase| {
+        lx_warn!(
+            "l2.loop.stalling",
+            "main loop iteration STILL running — every pane is frozen right now",
+            phase = phase,
+            elapsed_ms = elapsed.as_millis()
+        );
+    });
 
     let start = Instant::now();
     let mut frame: u64 = 0;

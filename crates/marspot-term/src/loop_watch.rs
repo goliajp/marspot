@@ -21,6 +21,8 @@
 //! reports; the caller logs.  Keeping the logging macro out of here is
 //! what lets L2 and L3 share it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Maximum phases tracked per iteration.  Phases past this are folded
@@ -43,8 +45,30 @@ pub struct StallReport {
     pub phases: Vec<(&'static str, Duration)>,
 }
 
+/// State the watchdog thread reads while the loop is still inside an
+/// iteration.
+///
+/// Cheap to update: two relaxed atomic stores per iteration and one
+/// uncontended lock per phase.  The loop iterates per event, not per
+/// byte, so this is nowhere near the per-byte or per-frame budgets.
+struct WatchShared {
+    /// The clock both sides measure against.
+    epoch: Instant,
+    /// Nanos since this watch was created, marking when the current
+    /// iteration began.  `0` means "between iterations" — the loop is
+    /// parked waiting for work, which is not a stall.
+    started_nanos: AtomicU64,
+    /// Bumped on every `begin`, so the watchdog warns at most once per
+    /// iteration no matter how long it runs.
+    generation: AtomicU64,
+    /// Name of the phase currently executing.
+    phase: Mutex<&'static str>,
+}
+
 pub struct LoopWatch {
     threshold: Duration,
+    epoch: Instant,
+    shared: Arc<WatchShared>,
     iter_start: Instant,
     phase_start: Instant,
     current: &'static str,
@@ -66,6 +90,13 @@ impl LoopWatch {
         let now = Instant::now();
         Self {
             threshold,
+            epoch: now,
+            shared: Arc::new(WatchShared {
+                epoch: now,
+                started_nanos: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
+                phase: Mutex::new("start"),
+            }),
             iter_start: now,
             phase_start: now,
             current: "start",
@@ -84,6 +115,13 @@ impl LoopWatch {
         self.phase_start = now;
         self.current = "start";
         self.n_phases = 0;
+        self.shared.generation.fetch_add(1, Ordering::Relaxed);
+        *self.shared.phase.lock().unwrap_or_else(|p| p.into_inner()) = "start";
+        let since_epoch = now.duration_since(self.epoch).as_nanos() as u64;
+        // Never store 0 — that is the "between iterations" sentinel.
+        self.shared
+            .started_nanos
+            .store(since_epoch.max(1), Ordering::Relaxed);
     }
 
     /// Close the current phase and open `name`.
@@ -92,6 +130,7 @@ impl LoopWatch {
         self.push(self.current, now.duration_since(self.phase_start));
         self.current = name;
         self.phase_start = now;
+        *self.shared.phase.lock().unwrap_or_else(|p| p.into_inner()) = name;
     }
 
     fn push(&mut self, name: &'static str, took: Duration) {
@@ -111,6 +150,7 @@ impl LoopWatch {
     /// caller does nothing and nothing is logged.
     pub fn end(&mut self) -> Option<StallReport> {
         let now = Instant::now();
+        self.shared.started_nanos.store(0, Ordering::Relaxed);
         self.push(self.current, now.duration_since(self.phase_start));
         let total = now.duration_since(self.iter_start);
         if total < self.threshold {
@@ -139,6 +179,68 @@ impl LoopWatch {
     /// Iterations that have run past the threshold so far.
     pub fn stall_count(&self) -> u64 {
         self.stalls
+    }
+
+    /// Watch for a stall that is **still happening**, from another
+    /// thread.
+    ///
+    /// `end()` can only report a stall once the iteration finishes, and
+    /// the two field incidents this detector was built for were both
+    /// invisible for exactly that reason: while a pane was frozen the
+    /// log said nothing, and diagnosis meant catching the process live
+    /// and reading a stack.  Worse, a stall that ends by *leaving* the
+    /// loop (session exit — which is how a blocked PTY write commonly
+    /// unblocks) skips `end()` altogether and is never reported at all.
+    ///
+    /// This thread polls the shared iteration clock and fires
+    /// `on_stall(elapsed, phase)` once per iteration that outlives
+    /// `threshold`, so a live freeze shows up in the log *while the user
+    /// is still staring at it*.
+    ///
+    /// The thread ends when the `LoopWatch` is dropped (it holds only a
+    /// `Weak`), so a caller never has to shut it down.
+    pub fn spawn_watchdog<F>(&self, on_stall: F)
+    where
+        F: Fn(Duration, &'static str) + Send + 'static,
+    {
+        let weak = Arc::downgrade(&self.shared);
+        let threshold = self.threshold;
+        // Poll fast enough that a "the pane is frozen" report and the
+        // log line land in the same breath, cheap enough to be free:
+        // one atomic load per tick on an otherwise sleeping thread.
+        let tick = (threshold / 4).max(Duration::from_millis(25));
+        std::thread::Builder::new()
+            .name("loop-watchdog".into())
+            .spawn(move || {
+                let mut warned_for: u64 = 0;
+                loop {
+                    std::thread::sleep(tick);
+                    let Some(shared) = weak.upgrade() else {
+                        return; // owner dropped
+                    };
+                    let started = shared.started_nanos.load(Ordering::Relaxed);
+                    if started == 0 {
+                        continue; // parked between iterations
+                    }
+                    let iter_gen = shared.generation.load(Ordering::Relaxed);
+                    if iter_gen == warned_for {
+                        continue; // already reported this one
+                    }
+                    // `started` is nanos since the watch's epoch; the
+                    // elapsed time is measured against the same clock.
+                    let now_nanos = Instant::now()
+                        .saturating_duration_since(shared.epoch)
+                        .as_nanos() as u64;
+                    let elapsed = Duration::from_nanos(now_nanos.saturating_sub(started));
+                    if elapsed >= threshold {
+                        warned_for = iter_gen;
+                        let phase =
+                            *shared.phase.lock().unwrap_or_else(|p| p.into_inner());
+                        on_stall(elapsed, phase);
+                    }
+                }
+            })
+            .expect("spawn loop-watchdog thread");
     }
 }
 
@@ -245,6 +347,77 @@ mod tests {
             r.total
         );
         assert!(r.phases.len() <= MAX_PHASES);
+    }
+
+    /// The watchdog must report a stall that has NOT finished.
+    ///
+    /// This is the whole reason it exists: `end()` cannot speak until
+    /// the iteration completes, so a pane frozen right now produces an
+    /// empty log — which is exactly what made the two field incidents
+    /// so expensive to diagnose.
+    #[test]
+    fn watchdog_reports_a_stall_that_is_still_in_progress() {
+        use std::sync::mpsc::channel;
+        let mut w = LoopWatch::new(Duration::from_millis(100));
+        let (tx, rx) = channel();
+        w.spawn_watchdog(move |elapsed, phase| {
+            let _ = tx.send((elapsed, phase));
+        });
+
+        w.begin();
+        w.phase("blocking-write");
+        // Simulate an iteration that is still stuck — note we never
+        // call `end()` before checking.
+        let got = rx.recv_timeout(Duration::from_secs(3));
+        assert!(
+            got.is_ok(),
+            "watchdog stayed silent while an iteration was still running \
+             past its threshold"
+        );
+        let (elapsed, phase) = got.unwrap();
+        assert!(elapsed >= Duration::from_millis(100), "elapsed {elapsed:?}");
+        assert_eq!(phase, "blocking-write", "must name the stuck phase");
+        let _ = w.end();
+    }
+
+    /// It must fire at most once per iteration, not every poll.
+    #[test]
+    fn watchdog_reports_each_stall_once() {
+        use std::sync::mpsc::channel;
+        let mut w = LoopWatch::new(Duration::from_millis(60));
+        let (tx, rx) = channel();
+        w.spawn_watchdog(move |e, p| {
+            let _ = tx.send((e, p));
+        });
+        w.begin();
+        w.phase("stuck");
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = w.end();
+        let mut n = 0;
+        while rx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 1, "expected exactly one report for one stalled iteration");
+    }
+
+    /// A loop parked waiting for work is not a stall.
+    #[test]
+    fn watchdog_stays_quiet_between_iterations() {
+        use std::sync::mpsc::channel;
+        let mut w = LoopWatch::new(Duration::from_millis(60));
+        let (tx, rx) = channel();
+        w.spawn_watchdog(move |e, p| {
+            let _ = tx.send((e, p));
+        });
+        w.begin();
+        w.phase("quick");
+        let _ = w.end();
+        // Now idle — the loop is between iterations.
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            rx.try_recv().is_err(),
+            "watchdog fired while the loop was parked, not stalled"
+        );
     }
 
     #[test]

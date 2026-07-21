@@ -1332,6 +1332,23 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // report its own stalls, naming the phase that ate the time.  Silent
     // below the threshold, so a healthy session logs nothing.
     let mut watch = marspot_term::loop_watch::LoopWatch::new(LOOP_STALL_THRESHOLD);
+    // Report a freeze while it is happening, not after.  `end()` only
+    // speaks once the iteration finishes — and a blocked PTY write
+    // commonly ends by the session exiting, which leaves the loop
+    // without ever reaching it.  Both field incidents were silent in the
+    // log for exactly this reason.
+    {
+        let sid = session.id();
+        watch.spawn_watchdog(move |elapsed, phase| {
+            lx_warn!(
+                "l3.loop.stalling",
+                "main loop iteration STILL running — the pane is frozen right now",
+                session_id = sid,
+                phase = phase,
+                elapsed_ms = elapsed.as_millis()
+            );
+        });
+    }
     let snapshot_writer = SnapshotWriter::spawn(session.id());
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
