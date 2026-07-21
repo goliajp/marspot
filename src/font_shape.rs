@@ -567,18 +567,51 @@ mod tests {
         );
     }
 
+    /// Eviction is by **recency of use**, not insertion order.
+    ///
+    /// The previous version of this test inserted a, b, c and asserted
+    /// `a` was gone — which FIFO satisfies just as well as LRU, so it
+    /// proved nothing about the policy its name claims.  The
+    /// distinguishing move is to *touch* the oldest entry before
+    /// overflowing: under LRU that rescues it and the untouched one goes
+    /// instead; under FIFO it would still be the one dropped.
     #[test]
-    fn cache_lru_evicts_oldest() {
+    fn cache_evicts_least_recently_used_not_oldest_inserted() {
         let Ok(font) = new_from_name(".AppleSystemUIFont", 13.0) else {
             return;
         };
         let mut cache = ShapeCache::new(2);
-        let _ = cache.shape("a", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
-        let _ = cache.shape("b", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
-        let _ = cache.shape("c", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+        let mut shape = |c: &mut ShapeCache, t: &str| {
+            let _ = c.shape(t, &font, 0, 52, ShapeOptions::full(), |_| 0).len();
+        };
+        shape(&mut cache, "a");
+        shape(&mut cache, "b");
+        // Touch "a" — now "b" is the coldest, even though "a" went in
+        // first.  This is the line the old test was missing.
+        shape(&mut cache, "a");
+        let misses_before = cache.misses;
         assert_eq!(cache.cache_len(), 2);
-        // 'a' was evicted by 'c' insertion.
-        let _ = cache.shape("a", &font, 0, 52, ShapeOptions::full(), |_| 0).len();
-        assert_eq!(cache.misses, 4, "a, b, c, then a again on re-fetch");
+
+        // Overflow: exactly one entry must go, and it must be "b".
+        shape(&mut cache, "c");
+        assert_eq!(cache.cache_len(), 2, "cap must hold");
+
+        // "a" survived → hit (miss count unchanged).
+        shape(&mut cache, "a");
+        assert_eq!(
+            cache.misses,
+            misses_before + 1,
+            "only the \"c\" insertion should have missed; \"a\" was touched \
+             before the overflow and must have survived — a FIFO cache \
+             would have dropped it"
+        );
+
+        // "b" was the cold one → gone → miss.
+        shape(&mut cache, "b");
+        assert_eq!(
+            cache.misses,
+            misses_before + 2,
+            "\"b\" was least-recently-used and must have been the eviction"
+        );
     }
 }

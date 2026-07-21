@@ -79,25 +79,49 @@ pub struct VacantPane {
     /// instead of "unavailable", and `is_exited` reports false so the
     /// revive-on-keystroke path can't fire a second spawn on top of the
     /// one already running.
+    ///
+    /// It is deliberately time-boxed — see `pending_since`.
     pending: bool,
+    /// When the in-flight spawn started, for the pending state only.
+    ///
+    /// Suppressing `is_exited` is what stops a double spawn, but it also
+    /// means the revive-on-keystroke path — the one affordance a user has
+    /// for waking a dead slot — is disabled while it holds.  If the
+    /// worker never reports back (its thread panicked, the event was
+    /// dropped), the slot would sit at "starting…" forever with the
+    /// guard locking out the only escape.  So the guard expires: past
+    /// `PENDING_MAX`, the slot reports exited again and a keystroke can
+    /// retry.  A late-arriving result is still adopted normally — the
+    /// deadline only re-opens the escape hatch, it doesn't cancel
+    /// anything.
+    pending_since: Instant,
 }
+
+/// How long a slot may claim "a spawn is in flight" before a keystroke
+/// is allowed to start another.  Generously past the 10 s
+/// `wait_and_connect` budget a spawn can legitimately take, so a slow
+/// boot is never cut short.
+const PENDING_MAX: Duration = Duration::from_secs(30);
 
 impl VacantPane {
     pub fn new(session_id: u64, cols: u16, rows: u16) -> Self {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         Self::paint_message(&mut grid, session_id, false);
-        Self { session_id, grid, pending: false }
+        Self { session_id, grid, pending: false, pending_since: Instant::now() }
     }
 
     /// A slot whose session is being spawned right now.
     pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         Self::paint_message(&mut grid, session_id, true);
-        Self { session_id, grid, pending: true }
+        Self { session_id, grid, pending: true, pending_since: Instant::now() }
     }
 
+    /// A spawn is in flight *and* still within its deadline.  Past the
+    /// deadline the slot behaves like a plain vacant one so the user can
+    /// retry — see `pending_since`.
     pub fn is_pending(&self) -> bool {
-        self.pending
+        self.pending && self.pending_since.elapsed() < PENDING_MAX
     }
 
     fn paint_message(grid: &mut Grid, session_id: u64, pending: bool) {
@@ -406,7 +430,9 @@ impl PaneBackend {
             // exactly how a vacant slot gets its session back.  Except
             // while a spawn is already in flight — reporting exited
             // there would let the next keystroke start a second one.
-            PaneBackend::Vacant(v) => !v.pending,
+            // `is_pending` expires, so a spawn that never reports back
+            // can't lock the slot out of that path forever.
+            PaneBackend::Vacant(v) => !v.is_pending(),
         }
     }
 
@@ -1576,5 +1602,65 @@ impl Pane {
             }
         }
         (top, bot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pending guard must expire.
+    ///
+    /// `is_exited()` is what the revive-on-keystroke path checks, and
+    /// `pending` suppresses it so a second spawn can't pile onto the
+    /// first.  But that also disables the user's only way to wake a dead
+    /// slot, so a spawn whose worker never reports back would strand the
+    /// slot at "starting…" permanently.  Past `PENDING_MAX` the guard
+    /// lifts and a keystroke can retry.
+    #[test]
+    fn pending_guard_expires_so_a_lost_spawn_cannot_strand_a_slot() {
+        let mut v = VacantPane::new_pending(7, 80, 24);
+        assert!(v.is_pending(), "a fresh spawn is in flight");
+
+        // Fake the deadline having passed rather than sleeping 30 s.
+        v.pending_since = Instant::now() - (PENDING_MAX + Duration::from_secs(1));
+        assert!(
+            !v.is_pending(),
+            "past the deadline the slot must stop claiming a spawn is in flight"
+        );
+
+        let backend = PaneBackend::Vacant(v);
+        assert!(
+            backend.is_exited(),
+            "an expired pending slot must report exited so revive-on-keystroke works"
+        );
+    }
+
+    /// While the spawn is genuinely in flight, the slot must NOT report
+    /// exited — otherwise the next keystroke starts a second spawn on
+    /// top of the first.
+    #[test]
+    fn in_flight_spawn_suppresses_revive() {
+        let v = VacantPane::new_pending(9, 80, 24);
+        let backend = PaneBackend::Vacant(v);
+        assert!(!backend.is_exited());
+    }
+
+    /// A plain vacant slot (boot-assembly failure) is born exited: that
+    /// is precisely how the user gets it back.
+    #[test]
+    fn plain_vacant_slot_is_revivable_immediately() {
+        let backend = PaneBackend::Vacant(VacantPane::new(11, 80, 24));
+        assert!(backend.is_exited());
+        assert_eq!(backend.shelld_session_id(), Some(11));
+    }
+
+    /// A vacant slot keeps naming its session — the sid is what lets the
+    /// slot survive save/restore and be resurrected in place, so losing
+    /// it would let the slot compact away (the RFC-004 drift bug).
+    #[test]
+    fn vacant_slot_retains_its_session_id_when_pending() {
+        let backend = PaneBackend::Vacant(VacantPane::new_pending(42, 80, 24));
+        assert_eq!(backend.shelld_session_id(), Some(42));
     }
 }

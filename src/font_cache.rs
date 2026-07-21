@@ -225,28 +225,28 @@ impl FontRegistry {
 /// the glyph cache, and the precomputed cell metrics.
 pub struct FontCache {
     fonts: FontRegistry,
-    /// `(codepoint, style)` → `(font_idx, glyph)`.  Style is 2-bit:
-    /// bit 0 = bold, bit 1 = italic.  Bounded at `CHAR_CACHE_CAP`;
-    /// atomic-rebuild on full (drop everything, re-resolve on next
-    /// access) — same pattern as `GlyphAtlas`.  Realistic terminal
-    /// use exposes a few hundred to a few thousand unique
-    /// codepoints across the 4 styles, well under cap; the rebuild
-    /// is the safety net for pathological "user types every
-    /// codepoint of CJK + emoji" cases.
-    /// Hot per-cell lookup during `build_instances`; SipHash on a
-    /// 5-byte (cp u32, style u8) key was visible in the 9-session
-    /// CPU profile.  Swap to FxHash — keys are derived from grid
-    /// contents, never adversarial.
-    /// Resolved glyphs, with a recency stamp so eviction can drop the
-    /// coldest entry instead of the whole table.
+    /// `(codepoint, style)` → `((font_idx, glyph), last_used)`.  Style is
+    /// 2-bit: bit 0 = bold, bit 1 = italic.  Bounded at
+    /// `CHAR_CACHE_CAP`; on overflow the single least-recently-used
+    /// entry is evicted, using the recency stamp stored alongside each
+    /// value.  Realistic terminal use stays well under the cap — a few
+    /// hundred to a few thousand codepoints across the 4 styles — so
+    /// eviction is the safety net for "every CJK + emoji codepoint",
+    /// not a steady-state cost.
+    ///
+    /// FxHash rather than the default SipHash: this is a hot per-cell
+    /// lookup during `build_instances`, and hashing the 5-byte
+    /// `(cp u32, style u8)` key was visible in the 9-session CPU
+    /// profile.  Keys come from grid contents, never from an adversary.
     char_cache: FxHashMap<(u32, u8), ((usize, CGGlyph), u64)>,
     /// Monotonic access counter feeding `char_cache`'s recency stamps.
     char_tick: u64,
-    /// Number of times the cache filled up and was rebuilt.
-    /// Should be 0 in steady-state terminal use; non-zero after
-    /// settling means we're hitting the cap (bump CHAR_CACHE_CAP
-    /// or move to a real LRU).
-    pub rebuild_count: u64,
+    /// How many entries have been evicted for capacity.  Should stay 0
+    /// in steady-state terminal use; climbing after things settle means
+    /// the working set genuinely exceeds `CHAR_CACHE_CAP` and the cap
+    /// wants raising.  (It counted whole-table rebuilds before eviction
+    /// became per-entry — same role, finer grain.)
+    pub evict_count: u64,
     /// Index into `fonts` for each of the 4 base styles (regular,
     /// bold, italic, bold-italic).  Falls back to regular when a
     /// variant doesn't exist (e.g. Menlo lacks true italic).
@@ -398,7 +398,7 @@ impl FontCache {
             fonts,
             char_cache: FxHashMap::default(),
             char_tick: 0,
-            rebuild_count: 0,
+            evict_count: 0,
             style_font_idx: [0, bold_idx, italic_idx, bold_italic_idx],
             cell_w,
             cell_h,
@@ -460,7 +460,7 @@ impl FontCache {
             {
                 self.char_cache.remove(&coldest);
             }
-            self.rebuild_count += 1;
+            self.evict_count += 1;
         }
         let style_idx = self.style_font_idx[style as usize];
         let base = self.fonts.fonts[style_idx].clone();
@@ -909,17 +909,21 @@ fn build_weight_variant(base: &CTFont, pt_size: f64, weight_ct: f64) -> Option<C
 mod tests {
     use super::*;
 
+    /// Eviction drops the coldest entry, and only that one.
+    ///
+    /// Two things this pins that the earlier version didn't: the cache
+    /// must stay *full* after overflow (it used to `clear()` the whole
+    /// table, turning the cap into a cliff that re-resolved every
+    /// visible cell on the next frame), and the entry that survives must
+    /// be the recently-touched one rather than simply the newest.
     #[test]
-    fn char_cache_atomic_rebuild_on_cap() {
+    fn char_cache_evicts_coldest_entry_only() {
         let mut fc = match FontCache::build() {
             Ok(f) => f,
             Err(_) => return, // CI without the system font
         };
 
-        // Push CHAR_CACHE_CAP unique (codepoint, style) keys through.
-        // ASCII printable space is 95 chars × 4 styles = 380 keys per
-        // round; iterate enough rounds with synthetic codepoints to
-        // exceed cap.
+        // Fill past the cap.
         let mut pushed = 0;
         for cp in 0x20u32..0x20u32 + (CHAR_CACHE_CAP as u32 + 100) {
             if let Some(ch) = char::from_u32(cp) {
@@ -928,28 +932,37 @@ mod tests {
             }
         }
         assert!(pushed > CHAR_CACHE_CAP, "pushed enough to overflow");
-        assert!(
-            fc.rebuild_count > 0,
-            "cap should have triggered at least one eviction"
-        );
-        // Eviction is one entry, not the whole table: after overflowing
-        // by ~100 keys the cache must still be full, not emptied.  The
-        // clear-on-full version failed this — it dropped to near zero
-        // and then paid to re-resolve everything.
+        assert!(fc.evict_count > 0, "cap should have evicted");
+
+        // Per-entry eviction, not a wipe: the table is still full.
         assert!(
             fc.char_cache.len() > CHAR_CACHE_CAP / 2,
-            "cache collapsed to {} entries — eviction dropped more than the coldest entry",
+            "cache collapsed to {} entries — eviction dropped more than \
+             the coldest entry",
             fc.char_cache.len()
         );
-        // After rebuild, cache len is bounded.
+        assert!(fc.char_cache.len() <= CHAR_CACHE_CAP, "cap must hold");
+
+        // Recency beats insertion order: touch an old entry, then force
+        // one more eviction, and it must still be there.
+        let warm = 'A';
+        fc.resolve_char(warm, false, false);
+        let evictions_before = fc.evict_count;
+        for cp in 0xE000u32..0xE010u32 {
+            if let Some(ch) = char::from_u32(cp) {
+                fc.resolve_char(ch, false, false);
+            }
+        }
+        assert!(fc.evict_count > evictions_before, "should have evicted more");
         assert!(
-            fc.char_cache.len() <= CHAR_CACHE_CAP,
-            "cache must respect cap"
+            fc.char_cache.contains_key(&(warm as u32, 0)),
+            "a freshly touched entry must not be evicted while colder \
+             entries exist — that is the difference between LRU and FIFO"
         );
-        // Re-resolving should still work — atomic rebuild doesn't
-        // break the public contract.
+
+        // Still functional after all that.
         let (_idx, glyph) = fc.resolve_char('A', false, false);
-        assert!(glyph != 0, "resolve still works post-rebuild");
+        assert!(glyph != 0, "resolve still works post-eviction");
     }
 
     /// Phase 10b — FontCache uses its Shaper trait for the shape path.
