@@ -157,6 +157,60 @@ when the input rate is high.  An obvious next investigation.
 
 ---
 
+## Latency the gate cannot see (2026-07-21)
+
+Every scenario in `bin/bench.sh` measures **throughput** — bytes/s
+parsed, p99 µs per scroll or frame — against a steady-state workload.
+That is the right shape for the bytes path, and it is why the parse and
+scroll floors have held.  It is also blind to the class of bug that
+dominated this month:
+
+> a single iteration of a main loop blocking for seconds, once.
+
+A 2.87 s freeze does not move a p99 taken over thousands of scroll
+operations, and it does not move MB/s at all.  Five such bugs shipped
+and were fixed (see `architecture.md`, "Main-loop blocking discipline");
+**none of them would have failed the gate**, before or after.  They were
+found by users reporting "the pane went dead for a while".
+
+### What covers it today
+
+`LoopWatch` (`marspot-term/loop_watch.rs`) times each iteration of both
+loops, splits it into named phases, and logs one `l2.loop.stall` /
+`l3.loop.stall` line past a threshold (L2 80 ms, L3 150 ms).  That is
+**detection, not a gate**: it writes to the log of a running app.  It
+turns "a pane froze and I don't know why" into "phase X took 2.87 s",
+which is what closed the last two, but nothing fails a build because of
+it.
+
+### What a real gate would need
+
+Not built — recorded so the shape is agreed before someone improvises
+one:
+
+1. **Adversarial workloads, not steady ones.**  The stalls fired under
+   conditions the bench never creates: a foreground process that stops
+   reading stdin, a disk busy with someone else's build, a peer that
+   stops draining a socket.  A latency gate has to *induce* those, the
+   way `write_does_not_block_on_a_child_that_ignores_stdin` does at unit
+   scale.
+2. **Max, not percentile.**  The metric is "worst single iteration",
+   because one 2 s freeze is a worse experience than a uniformly 20 %
+   slower terminal.  p99 over a long run hides exactly the event we care
+   about.
+3. **A `LoopWatch` assertion, not a wall-clock timer.**  The detector
+   already exists and already attributes time to a phase; a gate should
+   assert `stall_count() == 0` over a scripted scenario rather than
+   re-derive timing from outside.
+
+Until that exists, the honest statement is: **marspot has no automated
+protection against a regression that reintroduces main-loop blocking.**
+The unit tests pin the specific mechanisms that were fixed (blocking PTY
+write, unbounded queues, handshake deadline), which is narrower than a
+gate but is what stops those exact bugs from coming back.
+
+---
+
 ## Gaps & fixability triage
 
 Filled in as `bin/measure.sh` results land. Each row gets:
