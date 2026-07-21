@@ -202,6 +202,8 @@ struct ProcessPanelState {
     /// + tab strip do NOT initiate drag, only title bar (matches
     /// macOS window-drag semantics).
     title_bar_rect: marspot_term::layout::Rect,
+    /// Cursor inside `title_bar_rect` — reveals the ×/−/+ glyphs.
+    title_bar_hovered: bool,
     /// F3+1.5 — body viewport rect (used for scroll wheel routing
     /// + content clip).
     body_rect: marspot_term::layout::Rect,
@@ -3331,6 +3333,10 @@ impl CoreApp {
         use marspot::ui::system::macos::TrafficLights;
         use marspot::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
         let scale = self.scale.max(0.1);
+        let hovered_title_bar = self
+            .process_panel
+            .as_ref()
+            .is_some_and(|p| p.title_bar_hovered);
         let panes_len;
         let selected_pane;
         let minimized;
@@ -3547,6 +3553,7 @@ impl CoreApp {
             selected_pane,
             rows: detail_rows,
             minimized,
+            title_bar_hovered: hovered_title_bar,
             scroll_y: scroll_y_clamped,
             draw_backdrop: true,
         })
@@ -3693,6 +3700,15 @@ impl CoreApp {
     }
 
     fn mouse_moved(&mut self, x_phys: f64, y_phys: f64) {
+        // Reveal the traffic-light glyphs while the cursor is anywhere
+        // in the panel's title bar, matching the system's affordance.
+        if let Some(panel) = self.process_panel.as_mut() {
+            let now = panel.title_bar_rect.contains(x_phys, y_phys);
+            if now != panel.title_bar_hovered {
+                panel.title_bar_hovered = now;
+                self.needs_render = true;
+            }
+        }
         // F3+9 — drive context menu hover highlight when open.
         if let Some(state) = self.context_menu.as_mut() {
             use marspot::ui::components::ContextMenu;
@@ -3892,6 +3908,7 @@ impl CoreApp {
                     min_btn_rect: marspot_term::layout::Rect::ZERO,
                     max_btn_rect: marspot_term::layout::Rect::ZERO,
                     title_bar_rect: marspot_term::layout::Rect::ZERO,
+                    title_bar_hovered: false,
                     body_rect: marspot_term::layout::Rect::ZERO,
                     modal_rect: marspot_term::layout::Rect::ZERO,
                     minimized: false,

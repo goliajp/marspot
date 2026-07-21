@@ -34,6 +34,13 @@ pub const LIGHT_SIZE_LOGICAL: f64 = 15.0;
 pub const LIGHT_GAP_LOGICAL: f64 = 8.0;
 pub const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
 
+/// Glyph colour for the hover-revealed ×/−/+ .
+///
+/// A dark wash of the dot's own hue rather than pure black — that is
+/// how the system draws it, and pure black on the yellow dot reads far
+/// heavier than on the red one.
+pub const GLYPH_FG: [f32; 4] = [0.12, 0.10, 0.06, 0.80];
+
 /// Standard colours (close to Apple HIG values).
 pub const COLOR_CLOSE: [f32; 4] = [0.99, 0.36, 0.31, 1.0];
 pub const COLOR_MIN:   [f32; 4] = [0.99, 0.74, 0.18, 1.0];

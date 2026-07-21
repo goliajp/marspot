@@ -388,6 +388,13 @@ pub struct ProcessPanelRender {
     /// `true`, `pane_rows` + `rows` are NOT rendered (still walked
     /// for hit-rect bookkeeping on the L2 side).
     pub minimized: bool,
+    /// Cursor is over the panel's title bar.
+    ///
+    /// macOS reveals the ×/−/+ glyphs inside its window buttons while
+    /// the pointer is anywhere in the title bar — not just over one
+    /// button — so the affordance is "these are clickable", not "this
+    /// one is". Mirrored here.
+    pub title_bar_hovered: bool,
     /// F3+1.5 — body scroll offset (physical px) for the DETAIL
     /// column.  Renderer paints rows starting at
     /// `body_top + body_pad_top - scroll_y`, clipped at body bottom.
@@ -3387,10 +3394,10 @@ fn paint_process_panel_content(
     let close_x = px + traffic_left_pad;
     let min_x = close_x + traffic + traffic_gap;
     let max_x = min_x + traffic + traffic_gap;
-    for (x, color) in [
-        (close_x, tl::COLOR_CLOSE),
-        (min_x,   tl::COLOR_MIN),
-        (max_x,   tl::COLOR_MAX),
+    for (x, color, glyph) in [
+        (close_x, tl::COLOR_CLOSE, "\u{2715}"),   // ✕
+        (min_x,   tl::COLOR_MIN,   "\u{2212}"),   // −
+        (max_x,   tl::COLOR_MAX,   "\u{002B}"),   // +
     ] {
         // No rim — the shader strokes borders *inside* the shape, so a
         // 1 px stroke eats a pixel off every edge of a 15 px disc.  That
@@ -3402,6 +3409,15 @@ fn paint_process_panel_content(
             traffic * 0.5,
             ([0.0; 4], 0.0),
         );
+        if panel.title_bar_hovered {
+            // Dark glyph on the dot's own colour, the way the system
+            // draws it — centred on the disc, not on the text baseline
+            // box, so it sits optically in the middle.
+            let gw = p.cell_w;
+            let gx = x + (traffic - gw) * 0.5;
+            let gy = traffic_y + traffic * 0.5 + p.ascent * 0.36;
+            p.text(gx, gy, glyph, tl::GLYPH_FG);
+        }
     }
     // Centered title text.
     let title_w_chars = panel.title.chars().count() as f32;
