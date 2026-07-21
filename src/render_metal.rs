@@ -3410,9 +3410,11 @@ fn paint_process_panel_content(
         if panel.title_bar_hovered {
             // Mask runs scale to the disc and centre on it exactly —
             // no font metrics involved, so there is nothing to be off by.
-            let unit = rect.w * icon.extent / icon.grid;
-            let ox = rect.x + (rect.w - unit * icon.grid) * 0.5;
-            let oy = rect.y_top + (rect.h - unit * icon.grid) * 0.5;
+            // Round the unit to whole pixels: a 1.1 px cell smears every
+            // run across two rows and the mark reads blurry and low.
+            let unit = (rect.w * icon.extent / icon.grid_w).round().max(1.0);
+            let ox = (rect.x + (rect.w - unit * icon.grid_w) * 0.5).round();
+            let oy = (rect.y_top + (rect.h - unit * icon.grid_h) * 0.5).round();
             for (row, x0, x1) in icon.runs {
                 p.fill_rounded_rect(
                     Rect {

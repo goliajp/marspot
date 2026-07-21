@@ -48,45 +48,52 @@ pub const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
 /// `(row, x_start, x_end_exclusive)` on the grid named by `GRID`, and
 /// the runs are scaled to the disc at paint time.
 pub struct IconMask {
-    pub grid: f64,
-    /// Fraction of the disc's diameter the mask should span.
+    /// Mask dimensions in grid cells.  Width and height are separate —
+    /// the minimise bar is 8×2, so squaring the grid would park it
+    /// against the top of the disc instead of its middle.
+    pub grid_w: f64,
+    pub grid_h: f64,
+    /// Mask width as a fraction of the disc's diameter.
     pub extent: f64,
+    /// `(row, x_start, x_end_exclusive)` runs.
     pub runs: &'static [(u8, u8, u8)],
 }
 
-/// ✕ — two diagonals, matching the OS's 6-px close mark.
+/// ✕ — two 2-px diagonals crossing.
 pub const ICON_CLOSE: IconMask = IconMask {
-    grid: 6.0,
-    extent: 0.44,
+    grid_w: 6.0,
+    grid_h: 6.0,
+    extent: 0.43,
     runs: &[
         (0, 0, 2), (0, 4, 6),
-        (1, 1, 5),
-        (2, 2, 4),
-        (3, 2, 4),
-        (4, 1, 5),
+        (1, 0, 6),
+        (2, 1, 5),
+        (3, 1, 5),
+        (4, 0, 6),
         (5, 0, 2), (5, 4, 6),
     ],
 };
 
-/// − — a single bar.
+/// − — a single bar, wider and thinner than the close mark.
 pub const ICON_MIN: IconMask = IconMask {
-    grid: 6.0,
-    extent: 0.44,
-    runs: &[(2, 0, 6), (3, 0, 6)],
+    grid_w: 8.0,
+    grid_h: 2.0,
+    extent: 0.57,
+    runs: &[(0, 0, 8), (1, 0, 8)],
 };
 
-/// Zoom — two triangles separated by a diagonal seam, the way macOS
-/// draws a non-fullscreen zoom button.
+/// Zoom — two triangles split by a diagonal seam.
 pub const ICON_ZOOM: IconMask = IconMask {
-    grid: 7.0,
-    extent: 0.60,
+    grid_w: 7.0,
+    grid_h: 6.0,
+    extent: 0.50,
     runs: &[
         (0, 0, 5),
-        (1, 0, 4),
-        (2, 0, 3),
-        (4, 4, 7),
-        (5, 3, 7),
-        (6, 2, 7),
+        (1, 0, 4), (1, 5, 6),
+        (2, 0, 3), (2, 4, 6),
+        (3, 0, 2), (3, 3, 6),
+        (4, 0, 1), (4, 2, 6),
+        (5, 1, 6),
     ],
 };
 
