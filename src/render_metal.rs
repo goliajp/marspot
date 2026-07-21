@@ -388,6 +388,16 @@ pub struct ProcessPanelRender {
     /// `true`, `pane_rows` + `rows` are NOT rendered (still walked
     /// for hit-rect bookkeeping on the L2 side).
     pub minimized: bool,
+    /// The three traffic-light discs, in physical px.
+    ///
+    /// Computed once in `marspot-core` (which owns the real backing
+    /// scale) and drawn verbatim here.  The painter used to recompute
+    /// them from `scale_hint`, a *font-derived* factor — so the dots
+    /// scaled with the terminal's point size while the hit rects scaled
+    /// with the display, and the two disagreed: 12 px drawn against a
+    /// 15 px click target.  System chrome tracks the system, not the
+    /// font.
+    pub light_rects: [Rect; 3],
     /// Cursor is over the panel's title bar.
     ///
     /// macOS reveals the ×/−/+ glyphs inside its window buttons while
@@ -3375,9 +3385,7 @@ fn paint_process_panel_content(
     let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
     let _tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
     use crate::ui::system::macos::traffic_lights as tl;
-    let traffic = tl::LIGHT_SIZE_LOGICAL as f32 * scale_hint;
-    let traffic_gap = tl::LIGHT_GAP_LOGICAL as f32 * scale_hint;
-    let traffic_left_pad = tl::LIGHT_LEFT_PAD_LOGICAL as f32 * scale_hint;
+
 
     // Title bar fill (flat over the rounded chrome).
     p.fill_rect(
@@ -3390,32 +3398,31 @@ fn paint_process_panel_content(
         PROCESS_PANEL_SEPARATOR,
     );
     // Traffic lights (3 SDF discs anchored title-bar left).
-    let traffic_y = py + (title_h - traffic) * 0.5;
-    let close_x = px + traffic_left_pad;
-    let min_x = close_x + traffic + traffic_gap;
-    let max_x = min_x + traffic + traffic_gap;
-    for (x, color, glyph) in [
-        (close_x, tl::COLOR_CLOSE, "\u{2715}"),   // ✕
-        (min_x,   tl::COLOR_MIN,   "\u{2212}"),   // −
-        (max_x,   tl::COLOR_MAX,   "\u{002B}"),   // +
+
+    for (rect, color, glyph) in [
+        (panel.light_rects[0], tl::COLOR_CLOSE, "\u{2715}"),  // ✕ close
+        (panel.light_rects[1], tl::COLOR_MIN,   "\u{2212}"),  // − minimise
+        (panel.light_rects[2], tl::COLOR_MAX,   "\u{2921}"),  // ⤡ zoom
     ] {
-        // No rim — the shader strokes borders *inside* the shape, so a
-        // 1 px stroke eats a pixel off every edge of a 15 px disc.  That
-        // is what made these read as far smaller than the OS's own
-        // buttons even after the diameter was raised.
+        // No rim: the shader strokes borders *inside* the shape, so a
+        // 1 px stroke eats a pixel off every edge — that, plus scaling
+        // by the font instead of the display, is what kept these
+        // reading smaller than the OS's own buttons.
         p.fill_rounded_rect(
-            Rect { x: x as f64, y_top: traffic_y as f64, w: traffic as f64, h: traffic as f64 },
+            rect,
             color,
-            traffic * 0.5,
+            (rect.w * 0.5) as f32,
             ([0.0; 4], 0.0),
         );
         if panel.title_bar_hovered {
-            // Dark glyph on the dot's own colour, the way the system
-            // draws it — centred on the disc, not on the text baseline
-            // box, so it sits optically in the middle.
-            let gw = p.cell_w;
-            let gx = x + (traffic - gw) * 0.5;
-            let gy = traffic_y + traffic * 0.5 + p.ascent * 0.36;
+            // Centre on the disc.  Horizontally the glyph is one mono
+            // cell wide; vertically, centre the *ink* — an all-caps-like
+            // symbol has no descender, so centring its baseline box
+            // would sit it low.  `0.72 × ascent` stands in for cap
+            // height, the same approximation the cc modal's chips use.
+            let cap = p.ascent * 0.72;
+            let gx = (rect.x + (rect.w - p.cell_w as f64) * 0.5) as f32;
+            let gy = (rect.y_top + rect.h * 0.5) as f32 + cap * 0.5;
             p.text(gx, gy, glyph, tl::GLYPH_FG);
         }
     }

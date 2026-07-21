@@ -3553,6 +3553,7 @@ impl CoreApp {
             selected_pane,
             rows: detail_rows,
             minimized,
+            light_rects: [lights.close, lights.min, lights.max],
             title_bar_hovered: hovered_title_bar,
             scroll_y: scroll_y_clamped,
             draw_backdrop: true,
