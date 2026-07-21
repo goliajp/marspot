@@ -3470,8 +3470,15 @@ impl CoreApp {
         let header_h = cell_h_f64 * 1.4;
         let kill_w = 18.0 * scale;
         let kill_h = (row_h - 4.0).max(8.0);
-        let master_w = frame.body.w * 0.38;
-        let master_rows_top = frame.body.y_top + header_h;
+        // Mirror of the painter's geometry (render_metal's
+        // `paint_process_panel_content`): same pad, same split.  The two
+        // must stay in lockstep — this side places the kill buttons'
+        // hit rects, the other draws them.
+        let pad = marspot::render_metal::PROCESS_PANEL_SIDE_PAD_LOGICAL as f64 * scale;
+        let content_x = frame.body.x + pad;
+        let content_w = frame.body.w - pad * 2.0;
+        let master_w = content_w * marspot::render_metal::PROCESS_PANEL_MASTER_FRAC;
+        let master_rows_top = frame.body.y_top + pad + header_h;
         let mut pane_row_rects: Vec<marspot_term::layout::Rect> =
             Vec::with_capacity(pane_rows.len());
         for i in 0..pane_rows.len() {
@@ -3483,12 +3490,12 @@ impl CoreApp {
             });
         }
         // Detail scroll body (under the header).
-        let detail_rows_top = frame.body.y_top + header_h;
+        let detail_rows_top = frame.body.y_top + pad + header_h;
         let content_h = (detail_rows.len() as f64) * row_h;
         let detail_body = marspot_term::layout::Rect {
-            x: frame.body.x + master_w,
+            x: content_x + master_w + pad * 0.5,
             y_top: detail_rows_top,
-            w: frame.body.w - master_w,
+            w: content_w - master_w - pad * 0.5,
             h: frame.body.h - header_h,
         };
         let mut sv = ScrollView::new(detail_body);

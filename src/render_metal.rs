@@ -2514,6 +2514,22 @@ const PROCESS_PANEL_TAB_STRIP_H_LOGICAL: f32 = 30.0;
 const PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL: f32 = 12.0;
 const PROCESS_PANEL_TRAFFIC_GAP_LOGICAL: f32 = 8.0;
 const PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL: f32 = 12.0;
+/// Inset between the panel's frame and its content on every side.
+///
+/// The tables used to be laid out from the panel's own edges, so the
+/// first column sat on the left border, the kill buttons sat on the
+/// right one, and rows ran to the bottom edge with nothing under them —
+/// the content read as spilling out of its frame.  One value for all
+/// four sides, same rule the cc modal's cards follow.
+pub const PROCESS_PANEL_SIDE_PAD_LOGICAL: f32 = 10.0;
+/// Fraction of the padded content width given to the master (pane)
+/// table; the detail table gets the rest.
+///
+/// Public because the hit-test geometry is computed a second time in
+/// `marspot-core` — the two derivations have to agree or the kill
+/// buttons stop landing where they are drawn, so at minimum they share
+/// the numbers.
+pub const PROCESS_PANEL_MASTER_FRAC: f64 = 0.38;
 const PROCESS_PANEL_KILL_W_LOGICAL: f32 = 18.0;
 
 /// F3+1.7 — paint the Process Monitor modal via the `View` component.
@@ -3402,10 +3418,15 @@ fn paint_process_panel_content(
         Table, TableColumn, TableRow, TableStyle, ColumnWidth, RowKind,
     };
 
-    let body_top = py + title_h;
-    let body_bottom = py + ph - 6.0 * scale_hint;
-    let master_w = pw * 0.38;
-    let split_x = px + master_w;
+    let pad = PROCESS_PANEL_SIDE_PAD_LOGICAL * scale_hint;
+    let body_top = py + title_h + pad;
+    let body_bottom = py + ph - pad;
+    // Content width is the frame minus a pad on each outer edge; the
+    // master/detail split lands inside that, not on the frame.
+    let content_x = px + pad;
+    let content_w = pw - pad * 2.0;
+    let master_w = content_w * PROCESS_PANEL_MASTER_FRAC as f32;
+    let split_x = content_x + master_w;
 
     // Vertical separator between master and detail spans full body.
     p.fill_rect(
@@ -3471,8 +3492,8 @@ fn paint_process_panel_content(
     }).collect();
     let master_table = Table {
         rect: Rect {
-            x: px as f64, y_top: body_top as f64,
-            w: master_w as f64,
+            x: content_x as f64, y_top: body_top as f64,
+            w: (master_w - pad * 0.5) as f64,
             h: (body_bottom - body_top) as f64,
         },
         columns: &m_cols,
@@ -3536,8 +3557,8 @@ fn paint_process_panel_content(
     }).collect();
     let detail_table = Table {
         rect: Rect {
-            x: split_x as f64, y_top: body_top as f64,
-            w: (pw - master_w) as f64,
+            x: (split_x + pad * 0.5) as f64, y_top: body_top as f64,
+            w: (content_w - master_w - pad * 0.5) as f64,
             h: (body_bottom - body_top) as f64,
         },
         columns: &d_cols,
