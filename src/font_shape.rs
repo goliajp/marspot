@@ -231,6 +231,12 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
     out
 }
 
+/// One cached shaping result plus the stamp that decides when it goes.
+struct ShapeEntry {
+    glyphs: Vec<ShapedGlyph>,
+    last_used: u64,
+}
+
 /// LRU shape cache.  Keyed by `(text, size_q, base_font_id)` so
 /// chrome at 12pt vs 13pt cache independently and the same string
 /// rendered twice (e.g. tab title repeating across frames) hits.
@@ -249,11 +255,6 @@ pub fn shape_line<F: FnMut(CTFont) -> u32>(
 /// stamp a hit is a counter bump, and the O(cap) scan happens only on
 /// eviction, i.e. at most once per miss once the cache is full.
 /// `glyph_atlas` already resolved the same problem the same way.
-struct ShapeEntry {
-    glyphs: Vec<ShapedGlyph>,
-    last_used: u64,
-}
-
 pub struct ShapeCache {
     map: FxHashMap<ShapeKey, ShapeEntry>,
     /// Monotonic access counter; each entry records the value it last
@@ -581,7 +582,7 @@ mod tests {
             return;
         };
         let mut cache = ShapeCache::new(2);
-        let mut shape = |c: &mut ShapeCache, t: &str| {
+        let shape = |c: &mut ShapeCache, t: &str| {
             let _ = c.shape(t, &font, 0, 52, ShapeOptions::full(), |_| 0).len();
         };
         shape(&mut cache, "a");

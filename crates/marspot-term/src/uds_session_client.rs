@@ -26,8 +26,33 @@ const ENTRY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Both sides use `shell_proto::PROTO_VERSION` as the agreed wire
 /// version; mismatches surface as `InvalidData`.
 pub fn connect_with_handshake(socket_path: &Path) -> io::Result<UnixStream> {
+    connect_with_handshake_by(socket_path, Instant::now() + CONNECT_HANDSHAKE_TIMEOUT)
+}
+
+/// Same, but bounded by an absolute `deadline` rather than a fresh
+/// per-attempt timeout.
+///
+/// The read timeout has to be clamped to what is left of the caller's
+/// budget, not reset to the full handshake allowance.  Otherwise a peer
+/// that accepts the connection and then never answers `HelloAck` blocks
+/// for the whole 5 s regardless — so a caller asking for 2 s could still
+/// wait 5.  `wait_and_connect`'s promise that "the deadline bounds every
+/// retry" was only true of the retry loop, not of the attempt inside it.
+pub fn connect_with_handshake_by(
+    socket_path: &Path,
+    deadline: Instant,
+) -> io::Result<UnixStream> {
     let mut stream = UnixStream::connect(socket_path)?;
-    stream.set_read_timeout(Some(CONNECT_HANDSHAKE_TIMEOUT))?;
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .min(CONNECT_HANDSHAKE_TIMEOUT);
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "no budget left for the handshake",
+        ));
+    }
+    stream.set_read_timeout(Some(remaining))?;
     Frame::new(MsgType::Hello, encode_hello(PROTO_VERSION)).write_to(&mut stream)?;
     let reply = Frame::read_from(&mut stream)?.ok_or_else(|| {
         io::Error::new(
@@ -133,7 +158,7 @@ pub fn wait_and_connect(id: u64, timeout: Duration) -> io::Result<UnixStream> {
     // `wait_for_entry` may have consumed most of the budget; whatever is
     // left is what the connect retries get.
     loop {
-        match connect_with_handshake(&socket_path) {
+        match connect_with_handshake_by(&socket_path, deadline) {
             Ok(s) => return Ok(s),
             Err(e)
                 if matches!(
@@ -166,6 +191,51 @@ mod deadline_tests {
     ///
     /// Uses a session id that will never register, so the call runs to
     /// its deadline and returns TimedOut.
+    /// A peer that accepts the connection and then goes silent must not
+    /// outlast the caller's budget.
+    ///
+    /// The sibling test above never reaches `connect` — its session
+    /// never registers — so it cannot see this path.  Here the socket
+    /// exists and accepts, but nothing ever answers `HelloAck`; before
+    /// the read timeout was clamped to the deadline, this blocked for
+    /// the full 5 s `CONNECT_HANDSHAKE_TIMEOUT` no matter what the
+    /// caller asked for.
+    #[test]
+    fn handshake_cannot_outlast_the_caller_budget() {
+        let dir = std::env::temp_dir().join("marspot-uds-silent-peer-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("sock");
+
+        // Accept connections, then never write anything back.
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let accepted = std::thread::spawn(move || {
+            // Hold the accepted stream so the peer stays connected and
+            // silent rather than getting an EOF.
+            let _held = listener.accept();
+            std::thread::sleep(Duration::from_secs(3));
+        });
+
+        let budget = Duration::from_millis(400);
+        let t0 = Instant::now();
+        let r = connect_with_handshake_by(&sock, Instant::now() + budget);
+        let elapsed = t0.elapsed();
+
+        assert!(r.is_err(), "a silent peer must not yield a live stream");
+        assert!(
+            elapsed < CONNECT_HANDSHAKE_TIMEOUT,
+            "took {elapsed:?} — the handshake read timeout is still using \
+             its own 5 s allowance instead of the caller's deadline"
+        );
+        assert!(
+            elapsed < budget * 3,
+            "took {elapsed:?} against a {budget:?} budget"
+        );
+
+        let _ = accepted.join();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn wait_and_connect_honours_a_single_deadline() {
         let dir = std::env::temp_dir().join("marspot-uds-deadline-test");

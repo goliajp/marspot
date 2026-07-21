@@ -1,7 +1,10 @@
 //! Per-session append-only byte log.
 //!
-//! Records every byte read from a session's PTY master so a freshly
-//! attached client gets the full history replayed (RFC-002 ATTACH path).
+//! Records every byte read from a session's PTY master.  Nothing in the
+//! running system reads it back — reattach restores from `state.bin`
+//! instead — so this is a write-only forensic record, kept for the
+//! "the scrollback is gone but the raw bytes survived" case that
+//! `examples/rebuild_scrollback_from_bytelog.rs` exists to handle.
 //! Bounded by **rotation**, not by copying.  The live file is
 //! `bytelog`; once it passes `BYTELOG_SEGMENT_BYTES` it is renamed to
 //! `bytelog.1` (replacing the previous `.1`) and a fresh empty
@@ -122,15 +125,6 @@ impl ByteLog {
         self.bytes_written = 0;
         Ok(())
     }
-}
-
-/// Remove a session's bytelog file and its session directory. Called
-/// from the KILL_SESSION arm in shelld so a killed session doesn't
-/// leave gigabytes of log behind. Best-effort — a failed remove just
-/// leaves stale files until the next housekeeping sweep.
-pub fn delete_bytelog(session_id: u64) {
-    let dir = sessions_dir().join(session_id.to_string());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(test)]

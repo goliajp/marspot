@@ -14,6 +14,10 @@
 //!   cargo run --release -p marspot-term --example \
 //!     rebuild_scrollback_from_bytelog -- \
 //!     <bytelog-file> <staging-state-dir> <session-id> <cols> <rows> \
+//!
+//! `<bytelog-file>` names the LIVE segment; if a retired `<file>.1`
+//! sits next to it (the log rotates at 50 MiB) it is replayed first,
+//! so the recovered history spans both.
 //!     [dump-text-path] [state-bin-out]
 //!
 //! With the optional 7th arg, ALSO writes the replayed terminal's
@@ -78,18 +82,39 @@ fn main() {
         "Terminal did not land on the File scrollback variant — env routing broke"
     );
 
-    let mut f = std::fs::File::open(bytelog_path).expect("open bytelog");
-    let total = f.metadata().expect("stat bytelog").len();
+    // The bytelog rotates: once the live segment passes its size limit
+    // it becomes `<path>.1` and a fresh `<path>` takes over.  Replaying
+    // only the file named on the command line therefore recovers just
+    // the newer half of the history — feed the retired segment first so
+    // the stream goes in chronological order, exactly as
+    // `ByteLog::segment_paths` orders it.
+    let retired = std::path::PathBuf::from(format!("{bytelog_path}.1"));
+    let mut segments: Vec<std::path::PathBuf> = Vec::new();
+    if retired.exists() {
+        segments.push(retired);
+    }
+    segments.push(std::path::PathBuf::from(bytelog_path));
+    let total: u64 = segments
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    eprintln!(
+        "  replaying {} segment(s), {total} bytes total",
+        segments.len()
+    );
     let mut buf = vec![0u8; 1 << 20];
     let mut fed: u64 = 0;
     let started = std::time::Instant::now();
-    loop {
-        let n = f.read(&mut buf).expect("read bytelog");
-        if n == 0 {
-            break;
+    for seg in &segments {
+        let mut f = std::fs::File::open(seg).expect("open bytelog segment");
+        loop {
+            let n = f.read(&mut buf).expect("read bytelog segment");
+            if n == 0 {
+                break;
+            }
+            term.feed(&buf[..n]);
+            fed += n as u64;
         }
-        term.feed(&buf[..n]);
-        fed += n as u64;
     }
     term.grid().scrollback_flush_for_handoff();
 
