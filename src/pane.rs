@@ -593,13 +593,8 @@ impl L3Process {
     }
 }
 
-/// Bytes L2 may have queued for one L3 before frames are dropped.
-/// Sized for a large paste (the biggest legitimate burst on this
-/// channel); keystrokes and resizes are bytes.
-const L3_WRITE_QUEUE_CAP: usize = 4 * 1024 * 1024;
-
 fn new_control_writer(s: UnixStream) -> marspot_term::frame_writer::FrameWriter {
-    marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, L3_WRITE_QUEUE_CAP)
+    marspot_term::frame_writer::FrameWriter::new("l2-l3-writer", s, marspot_term::frame_writer::cap::CONTROL_SOCKET)
 }
 
 pub struct L3Conn {

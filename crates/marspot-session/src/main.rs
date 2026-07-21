@@ -1863,9 +1863,13 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 // queued is one the next crash still loses — the same
                 // as before, since the old inline write was not fsynced
                 // either.
-                let queued = snapshot_writer.send(path, body.clone());
-                match if queued { Ok(()) } else { Err(()) } {
-                    Ok(()) => {
+                // Take the length before the move — cloning a 100–300 KB
+                // body just to log its size would put an alloc + memcpy
+                // of exactly that size back on the loop this writer
+                // exists to keep clear.
+                let body_len = body.len();
+                let queued = snapshot_writer.send(path, body);
+                if queued {
                         // First write per process boots at INFO so a
                         // plain `grep periodic_snapshot marspot.log`
                         // proves C.1 is alive on the installed app
@@ -1878,7 +1882,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                                 "session.periodic_snapshot",
                                 "crash-safe state.bin refreshed (first this boot)",
                                 session_id = session.id(),
-                                bytes = body.len(),
+                                bytes = body_len,
                                 generation = gen_now
                             );
                         } else {
@@ -1886,24 +1890,22 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                                 "session.periodic_snapshot",
                                 "crash-safe state.bin refreshed",
                                 session_id = session.id(),
-                                bytes = body.len(),
+                                bytes = body_len,
                                 generation = gen_now
                             );
                         }
-                        last_snapshot_generation = gen_now;
-                        last_snapshot_at = Instant::now();
-                    }
-                    Err(()) => {
-                        lx_warn!(
-                            "session.periodic_snapshot_failed",
-                            "snapshot writer thread is gone",
-                            session_id = session.id()
-                        );
-                        // Back off a full interval on failure too —
-                        // a dead disk shouldn't turn this into a
-                        // per-iteration error loop.
-                        last_snapshot_at = Instant::now();
-                    }
+                    last_snapshot_generation = gen_now;
+                    last_snapshot_at = Instant::now();
+                } else {
+                    lx_warn!(
+                        "session.periodic_snapshot_failed",
+                        "snapshot writer thread is gone",
+                        session_id = session.id()
+                    );
+                    // Back off a full interval on failure too —
+                    // a dead disk shouldn't turn this into a
+                    // per-iteration error loop.
+                    last_snapshot_at = Instant::now();
                 }
             }
         }

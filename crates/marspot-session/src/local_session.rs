@@ -40,18 +40,6 @@ const ACTIVE_WINDOW: Duration = Duration::from_secs(2);
 /// and the kernel returns whatever's queued — no benefit to capping.
 const READ_BUF_BYTES: usize = 64 * 1024;
 
-/// Ceiling on bytes queued for the PTY but not yet accepted by it.
-///
-/// A wedged writer is not hypothetical: the tty input buffer only
-/// drains when the foreground process reads its stdin, and a program
-/// busy for minutes (a long tool call, a compile, a `sleep`) reads
-/// nothing for that whole time.  The queue absorbs that; the cap keeps
-/// it from becoming an unbounded sink if the user keeps typing or
-/// scrolls a mouse-tracking app while it's blocked (per the project's
-/// bounded-queue rule).  256 KiB is thousands of keystrokes — a human
-/// cannot reach it, so hitting it means something is genuinely stuck.
-const WRITE_QUEUE_CAP_BYTES: usize = 256 * 1024;
-
 /// Write half of the PTY, owned by a dedicated thread.
 ///
 /// **Why this exists.**  `write(2)` on a PTY master blocks once the
@@ -346,7 +334,7 @@ impl LocalSession {
             return Ok(0);
         }
         let pending = self.writer.pending.load(Ordering::SeqCst);
-        if pending + bytes.len() > WRITE_QUEUE_CAP_BYTES {
+        if pending + bytes.len() > marspot_term::frame_writer::cap::PTY {
             let dropped = self.writer.dropped.fetch_add(bytes.len(), Ordering::SeqCst)
                 + bytes.len();
             return Err(io::Error::new(
@@ -712,7 +700,7 @@ mod tests {
         }
         assert!(refused, "queue accepted 1 MiB against a 256 KiB cap");
         assert!(
-            s.pty_write_backlog() <= WRITE_QUEUE_CAP_BYTES,
+            s.pty_write_backlog() <= marspot_term::frame_writer::cap::PTY,
             "backlog {} exceeded the cap",
             s.pty_write_backlog()
         );

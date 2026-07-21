@@ -252,11 +252,6 @@ struct PanePidTree {
 /// doesn't think the click was ignored.
 const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
 
-/// Bytes L2 may have queued for L1 before frames are dropped.  The
-/// traffic is small and steady (surface acks, caret rects, pokes), so
-/// this is sized to ride out a busy L1 rather than to hold a burst.
-const SHELL_WRITE_QUEUE_CAP: usize = 1024 * 1024;
-
 /// Queue one frame for L1, logging if it had to be dropped.
 ///
 /// Six call sites used to inline this `if !send { lx_error!(…) }` block
@@ -5370,7 +5365,7 @@ fn main() {
     let control_writer = marspot_term::frame_writer::FrameWriter::new(
         "l2-shell-writer",
         control_stream,
-        SHELL_WRITE_QUEUE_CAP,
+        marspot_term::frame_writer::cap::L2_TO_L1,
     );
     let reader_tx = event_tx.clone();
     std::thread::spawn(move || reader_loop(reader_stream, reader_tx));

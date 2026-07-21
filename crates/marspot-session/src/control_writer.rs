@@ -34,12 +34,6 @@ use std::os::unix::net::UnixStream;
 use marspot_term::frame_writer::FrameWriter;
 use marspot_term::shell_proto::Frame;
 
-/// Bytes allowed to sit queued for L2 before frames start being
-/// dropped.  Generous next to the kernel's 8 KiB, because a legitimate
-/// burst (a big `SelectionText`) must fit; small enough that a wedged
-/// L2 can't turn this into an unbounded sink.
-const QUEUE_CAP_BYTES: usize = 4 * 1024 * 1024;
-
 /// L3's end of the control socket.  The queueing lives in
 /// [`FrameWriter`]; this adds the fd bookkeeping the execv handoff
 /// needs, which is specific to L3's self-update path.
@@ -66,7 +60,7 @@ impl ControlWriter {
             stream.as_raw_fd()
         };
         Ok(Self {
-            inner: FrameWriter::new("l3-control-writer", thread_half, QUEUE_CAP_BYTES),
+            inner: FrameWriter::new("l3-control-writer", thread_half, marspot_term::frame_writer::cap::CONTROL_SOCKET),
             fd,
             stream: Some(stream),
         })

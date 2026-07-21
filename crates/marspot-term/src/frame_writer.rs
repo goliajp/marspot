@@ -34,6 +34,28 @@ use std::thread;
 
 use crate::shell_proto::Frame;
 
+/// Queue caps, one place.
+///
+/// Four call sites used to name this concept four different ways with
+/// values 16× apart and a fresh justification at each — which is how you
+/// end up unable to answer "how much can be in flight across the whole
+/// system?" without grepping.  Sizing rule: hold the largest *legitimate*
+/// burst the channel carries, and no more, so a wedged peer can't turn
+/// the queue into an unbounded sink.
+pub mod cap {
+    /// L2↔L3 control sockets, both directions.  Must fit one
+    /// `SelectionText` carrying a Cmd-A over deep scrollback, and one
+    /// large paste going the other way.
+    pub const CONTROL_SOCKET: usize = 4 * 1024 * 1024;
+    /// L2→L1.  Small, steady traffic (surface acks, caret rects, pokes)
+    /// — sized to ride out a busy AppKit loop, not to hold a burst.
+    pub const L2_TO_L1: usize = 1024 * 1024;
+    /// Keystrokes and injected input into one PTY.  A human cannot reach
+    /// this; hitting it means the foreground process has genuinely
+    /// stopped reading stdin.
+    pub const PTY: usize = 256 * 1024;
+}
+
 pub struct FrameWriter {
     tx: Option<Sender<Frame>>,
     pending: Arc<AtomicUsize>,
