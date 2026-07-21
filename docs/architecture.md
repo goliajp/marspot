@@ -320,6 +320,66 @@ If a future change re-introduces a per-second forced present anywhere
 in the render path: it WILL flicker.  The bar is "present only when
 content actually changed."
 
+## Main-loop blocking discipline (2026-07-19/20)
+
+L2 and L3 are each a single-threaded event loop.  Any blocking call made
+*from* the loop freezes everything the loop owns — for L3 that is one
+pane, for L2 it is **every** pane.  Five bugs of exactly this shape
+shipped and were fixed in one pass; the rule below exists so a sixth
+doesn't.
+
+**Rule: the loops never block.**  Anything that can wait — a socket
+write, a disk write, a connect handshake, a process spawn — is handed to
+a thread and the loop gets a queue or an event back.
+
+| What used to block | Where it lives now |
+|---|---|
+| `write(2)` to the PTY master | `PtyWriter` thread (`marspot-session/local_session.rs`) |
+| L3→L2 control frames | `ControlWriter` → `FrameWriter` (`marspot-term/frame_writer.rs`) |
+| L2→L1 and L2→L3 frames | `FrameWriter` (same type, three call sites) |
+| periodic `state.bin` write | `SnapshotWriter` thread (`marspot-session/main.rs`) |
+| bytelog compaction (50 MiB copy) | replaced by O(1) rotation (`marspot-term/bytelog.rs`) |
+| `wait_and_connect` on EOF-reconnect | worker thread → `CoreEvent::L3ControlReconnected` |
+| `spawn_l3` on `[+]` / revive | worker thread → `CoreEvent::L3SpawnFinished`, slot renders "starting…" |
+
+Two measurements motivate the socket cases, both taken on this codebase
+rather than assumed:
+
+* macOS gives an `AF_UNIX`/`SOCK_STREAM` socket an **8 KiB** send buffer.
+  A peer that stops reading parks a blocking `write_all` at byte 8193.
+* A PTY master in **raw** mode (any TUI) accepts ~1 KiB then blocks;
+  in canonical mode it discards instead.  That asymmetry is why only
+  TUI panes ever froze.  Reproduced by
+  `local_session::tests::write_does_not_block_on_a_child_that_ignores_stdin`,
+  whose child runs `stty raw -echo; sleep 3` — the `stty raw` is
+  load-bearing, a canonical-mode child lets the old blocking code pass.
+
+**Queues are bounded and drop whole frames.**  A partial frame would
+desynchronise the protocol stream permanently; a dropped frame costs one
+poke, one reply, or one redraw.  Caps: 4 MiB per control socket (must fit
+one `SelectionText` carrying a deep selection), 1 MiB L2→L1, 256 KiB per
+PTY.
+
+**Async pane bring-up.**  `[+]` and revive-on-keystroke go through
+`spawn_l3_pane_async`: the loop only allocates a session id, drops in a
+slot that renders "starting…", and the fork/shm-map/handshake run on a
+worker that reports back via `CoreEvent::L3SpawnFinished`.  "Starting"
+is not a peer state to "vacant" — it is `VacantPane { pending: true }`,
+because a slot with a spawn in flight *is* a vacant slot that has work
+coming.  The flag also makes `is_exited()` report false, which is what
+stops the next keystroke from firing a second spawn on top of the first.
+Boot assembly still uses the synchronous path: there is no loop to
+freeze before the loop starts.
+
+**`LoopWatch` makes a stall self-reporting** (`marspot-term/loop_watch.rs`).
+Each iteration is timed and split into named phases; an iteration past
+the threshold (L3 150 ms, L2 80 ms — L2 is tighter because it owes a
+frame) emits one `l3.loop.stall` / `l2.loop.stall` line naming the
+slowest phase.  Below the threshold it is silent, so a healthy session
+logs nothing.  This exists because the first two stalls could only be
+diagnosed by catching the process live and reading a stack: sessions log
+on events, so a wedged loop and an idle loop were indistinguishable.
+
 ## Latent issues (architectural, not just bugs)
 
 - **Retina double-scale**: long-standing bug from the winit-era code —
@@ -339,9 +399,15 @@ content actually changed."
   fresh CGImage. CA may not detect "same image, no change" — we should
   early-out when grid is unchanged.
 
-- **font_cache is unbounded**: HashMap<u32, _> grows monotonically. A
-  user typing all 1.1M codepoints would eat ~16 MB. Acceptable for
-  realistic terminal use, but document the bound.
+- ~~**font_cache is unbounded**~~ — fixed 2026-07-20.  `char_cache` is
+  capped at `CHAR_CACHE_CAP` (8192) and evicts the single coldest entry
+  via a recency stamp (`src/font_cache.rs`).  It used to `clear()` the
+  whole table on overflow, which turned the cap into a cliff: the next
+  frame re-resolved every visible cell, and each codepoint the base font
+  lacks costs a `CTFontCreateForString` cascade.  `ShapeCache`
+  (`src/font_shape.rs`) got the same treatment — its old `VecDeque`
+  ordering made every cache *hit* an O(cap) scan of `String` keys, the
+  one place in the tree that literally got slower the longer it ran.
 
 ## Architecture-review checklist
 
