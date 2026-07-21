@@ -346,9 +346,13 @@ impl PaneBackend {
 
     /// Hot-swap an L3 pane's control stream (after a reader-loop EOF
     /// → main loop reconnects).  No-op on non-L3 backends.
-    pub fn swap_l3_control(&mut self, new_control: UnixStream) {
+    pub fn swap_l3_control(
+        &mut self,
+        new_control: UnixStream,
+        selection_rx: Receiver<(u32, String)>,
+    ) {
         if let PaneBackend::L3(c) = self {
-            c.swap_control(new_control);
+            c.swap_control(new_control, selection_rx);
         }
     }
 
@@ -859,11 +863,27 @@ impl L3Conn {
     /// `wait_and_connect`, and now we hot-swap the write half so
     /// subsequent `forward_key`/`forward_resize`/etc go through the
     /// fresh stream).  Old stream's Drop closes the old fd.
-    pub fn swap_control(&mut self, new_control: UnixStream) {
+    /// Both halves move together, and that is the whole point.
+    ///
+    /// This used to swap only `control` (the write half).  The reader
+    /// half lives in a thread that owns the matching `selection_tx`, so
+    /// after a reconnect the old thread was gone — its sender dropped —
+    /// while `selection_rx` still pointed at that dead channel.
+    /// `request_selection_text` then got `Disconnected` immediately and
+    /// returned `None`, so **Cmd-C went permanently silent on that pane
+    /// after any silent-update reconnect**, with no log to say why.
+    /// `try_promote` (the swap path) always replaced both; this one
+    /// didn't, and the asymmetry is what made it a bug.
+    pub fn swap_control(
+        &mut self,
+        new_control: UnixStream,
+        selection_rx: Receiver<(u32, String)>,
+    ) {
         // Dropping the old writer ends its thread; anything still queued
         // for the dead socket goes with it, which is correct — those
         // frames were addressed to an L3 that no longer exists.
         self.control = new_control_writer(new_control);
+        self.selection_rx = selection_rx;
     }
 
     /// Forward a keystroke to the session process, which encodes it with

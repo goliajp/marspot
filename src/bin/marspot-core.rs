@@ -252,18 +252,35 @@ struct PanePidTree {
 /// doesn't think the click was ignored.
 const KILL_ESCALATION_GRACE: Duration = Duration::from_secs(2);
 
-/// F3+5 — per-sid debounce window on `refresh_pane_cwd_for`.  A
-/// multi-line paste fires Enter N times; only the first within this
-/// window triggers a syscall.  150 ms keeps "cd && cd" sequences
-/// reflected near-instantly while collapsing pasted scripts into a
-/// single fetch.
-/// How many times a background reconnect retries before giving the
-/// pane up.  Cheap now that it is off the main loop.
 /// Bytes L2 may have queued for L1 before frames are dropped.  The
 /// traffic is small and steady (surface acks, caret rects, pokes), so
 /// this is sized to ride out a busy L1 rather than to hold a burst.
 const SHELL_WRITE_QUEUE_CAP: usize = 1024 * 1024;
 
+/// Queue one frame for L1, logging if it had to be dropped.
+///
+/// Six call sites used to inline this `if !send { lx_error!(…) }` block
+/// verbatim, which is three past the point where CLAUDE.md says to
+/// extract.  `which` discriminates them in the log — one event name to
+/// grep for, a field to tell them apart, rather than six near-identical
+/// names.
+fn send_to_shell(
+    w: &marspot_term::frame_writer::FrameWriter,
+    frame: Frame,
+    which: &str,
+) {
+    if !w.send(frame) {
+        lx_error!(
+            "core.shell_write_dropped",
+            "L1 not draining the control socket; frame dropped",
+            which = which,
+            backlog = w.backlog()
+        );
+    }
+}
+
+/// How many times a background reconnect retries before giving the
+/// pane up.  Cheap now that it is off the main loop.
 const L3_RECONNECT_ATTEMPTS: u32 = 3;
 
 /// Consecutive failures after which cwd resolution for a session is
@@ -271,6 +288,11 @@ const L3_RECONNECT_ATTEMPTS: u32 = 3;
 /// once the shell has registered its pid, or it never will.
 const CWD_MAX_FAILURES: u32 = 5;
 
+/// F3+5 — per-sid debounce window on `refresh_pane_cwd_for`.  A
+/// multi-line paste fires Enter N times; only the first within this
+/// window triggers a syscall.  150 ms keeps "cd && cd" sequences
+/// reflected near-instantly while collapsing pasted scripts into a
+/// single fetch.
 const CWD_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// F3+1.4 — modal size in logical points (auto-scales by display
@@ -590,7 +612,7 @@ mod boot_assembly_tests {
         let (tx, _rx) = mpsc::channel();
         // Bring up a REAL live L3 outside any saved layout.
         let orphan_sid = reg::allocate_next_session_id().unwrap();
-        let live = spawn_l3_pane(60, 16, orphan_sid, &tx)
+        let live = spawn_l3_pane_with_cwd(60, 16, orphan_sid, "", &tx)
             .expect("real L3 spawn (is marspot-session built?)");
         // Keep it alive across the assembly (Drop would SIGKILL it);
         // Sandbox::drop kills it via the registry at test end.
@@ -1105,7 +1127,7 @@ fn install_swap_trigger(tx: Sender<CoreEvent>) {
 /// the fd (4) and the control socket (3) into the child, maps the region as
 /// a reader, and starts a thread turning L3's `GridReady` pokes into
 /// `L3Ready` wakes (and routing `SelectionText` replies).  Behind
-/// `MARSPOT_L3=1`.  Used both at boot ([`spawn_l3_pane`]) and to bring up a
+/// `MARSPOT_L3=1`.  Used by `begin_pane_swap` to bring up a
 /// silent-update replacement on the same session ([`CoreApp::swap_idle_l3`]).
 fn spawn_l3(
     cols: u16,
@@ -1263,27 +1285,12 @@ fn spawn_l3_with_cwd(
     })
 }
 
-/// Boot/`[+]` helper: spawn an L3 and wrap it in a fresh L3-backed `Pane`.
-/// Synchronous pane bring-up.  Used by boot assembly and by the tests
-/// — both want a fully formed pane before continuing, and neither has
-/// an event loop to freeze.  Everything the user triggers at runtime
-/// goes through `spawn_l3_pane_async`.
-#[cfg_attr(not(test), allow(dead_code))]
-fn spawn_l3_pane(
-    cols: u16,
-    rows: u16,
-    session_id: u64,
-    event_tx: &Sender<CoreEvent>,
-) -> std::io::Result<Pane> {
-    spawn_l3_pane_with_cwd(cols, rows, session_id, "", event_tx)
-}
-
 /// Start a pane whose L3 is brought up **off** this loop.
 ///
 /// Returns immediately with a slot rendering "starting…"; the fork,
 /// shm map, entry.toml poll and handshake all run on a worker, and
-/// `CoreEvent::L3SpawnFinished` delivers the result.  The synchronous
-/// `spawn_l3_pane` below is still what boot assembly uses — there is no
+/// `CoreEvent::L3SpawnFinished` delivers the result.  Boot assembly
+/// keeps calling `spawn_l3_pane_with_cwd` synchronously — there is no
 /// loop to freeze before the loop starts, and boot wants the pane fully
 /// formed before it lays out.
 fn spawn_l3_pane_async(
@@ -1328,7 +1335,7 @@ fn spawn_l3_pane_with_cwd(
 ///
 /// Returns Err on any failure (registry entry missing, shm name
 /// missing, shm gone, socket gone, handshake refused) — caller falls
-/// through to spawn_l3_pane.
+/// through to `spawn_l3_pane_with_cwd`.
 fn reattach_l3_pane(
     session_id: u64,
     event_tx: &Sender<CoreEvent>,
@@ -5562,10 +5569,18 @@ fn main() {
                     let Some(idx) = pane_idx else { return };
                     match new_control.try_clone() {
                         Ok(rh) => {
-                            app.panes[idx].session_mut().swap_l3_control(new_control);
-                            let tx = app.event_tx.clone();
-                            let (selection_tx, _selection_rx) =
+                            // Both halves of the new connection move
+                            // together: the reader thread keeps the
+                            // sender, the pane takes the receiver.
+                            // Dropping the receiver here is what used to
+                            // kill Cmd-C after a reconnect (see
+                            // `L3Conn::swap_control`).
+                            let (selection_tx, selection_rx) =
                                 std::sync::mpsc::channel::<(u32, String)>();
+                            app.panes[idx]
+                                .session_mut()
+                                .swap_l3_control(new_control, selection_rx);
+                            let tx = app.event_tx.clone();
                             std::thread::spawn(move || {
                                 l3_reader_loop(rh, sid, tx, selection_tx);
                             });
@@ -5698,25 +5713,13 @@ fn main() {
             break 'main;
         }
         for (ty, payload) in to_ack.drain(..) {
-            if !control_writer.send(Frame::new(ty, payload)) {
-                lx_error!(
-                    "core.liveness.write_failed",
-                    "L1 not draining the control socket; frame dropped",
-                    msg_type = format!("{:?}", ty),
-                    backlog = control_writer.backlog()
-                );
-            }
+            let which = format!("liveness:{ty:?}");
+            send_to_shell(&control_writer, Frame::new(ty, payload), &which);
         }
         // Drain frames queued from inside CoreApp event handlers
         // (mouse_down → PaneBadgeClicked, future similar paths).
         for (ty, payload) in app.pending_to_shell.drain(..) {
-            if !control_writer.send(Frame::new(ty, payload)) {
-                lx_error!(
-                    "core.pending_to_shell.write_failed",
-                    "L1 not draining the control socket; frame dropped",
-                    backlog = control_writer.backlog()
-                );
-            }
+            send_to_shell(&control_writer, Frame::new(ty, payload), "pending_to_shell");
         }
         if let Some((new_front, new_back, new_w, new_h, new_scale)) = pending_attach {
             // Shell handed us a freshly-created IOSurface pair at the
@@ -5758,13 +5761,7 @@ fn main() {
                                 MsgType::SurfaceReady,
                                 encode_surface_ready(surfaces[writing_idx].id()),
                             );
-                            if !control_writer.send(ack) {
-                                lx_error!(
-                                    "core.surface_ready.write_failed",
-                                    "L1 not draining the control socket; frame dropped",
-                                    backlog = control_writer.backlog()
-                                );
-                            }
+                            send_to_shell(&control_writer, ack, "surface_ready");
                             // Next render writes the other half.
                             writing_idx = 1 - writing_idx;
                         }
@@ -5863,13 +5860,7 @@ fn main() {
                 MsgType::SurfaceReady,
                 encode_surface_ready(surfaces[writing_idx].id()),
             );
-            if !control_writer.send(ack) {
-                lx_error!(
-                    "core.surface_ready.write_failed",
-                    "L1 not draining the control socket; frame dropped",
-                    backlog = control_writer.backlog()
-                );
-            }
+            send_to_shell(&control_writer, ack, "surface_ready");
             // FrameRendered is the legacy v=1 wake.  A v=2 shell
             // already woke on SurfaceReady, so this is redundant for
             // a same-version shell.  An OLD shell paired with this
@@ -5878,13 +5869,7 @@ fn main() {
             // keep emitting it for compatibility.  No-op on the v=2
             // shell side (handler just sets frame_pending again).
             let fr = Frame::new(MsgType::FrameRendered, Vec::new());
-            if !control_writer.send(fr) {
-                lx_error!(
-                    "core.frame_rendered.write_failed",
-                    "L1 not draining the control socket; frame dropped",
-                    backlog = control_writer.backlog()
-                );
-            }
+            send_to_shell(&control_writer, fr, "frame_rendered");
             // Flip: next render writes the other half.
             writing_idx = 1 - writing_idx;
             // Publish the focused-pane caret so the shell can anchor
@@ -5893,13 +5878,7 @@ fn main() {
             if app.last_caret_sent != Some(caret) {
                 app.last_caret_sent = Some(caret);
                 let f = Frame::new(MsgType::CaretRect, encode_caret_rect(caret));
-                if !control_writer.send(f) {
-                    lx_error!(
-                        "core.caret_rect.write_failed",
-                        "L1 not draining the control socket; frame dropped",
-                        backlog = control_writer.backlog()
-                    );
-                }
+                send_to_shell(&control_writer, f, "caret_rect");
             }
         }
 

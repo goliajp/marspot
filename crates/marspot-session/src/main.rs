@@ -1684,7 +1684,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         if want_shutdown {
             // Final pump before post-loop dispatcher decides
             // execv-handoff vs clean-exit.
+            watch.phase("resize-pump");
             let _ = session.pump();
+            watch.phase("resize-publish");
             publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
             break;
         }
@@ -1711,6 +1713,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             _ => false,
         };
 
+        watch.phase("pump");
         let n = session.pump();
         // Auto-pin view_offset on scrollback push: when the grid scrolls
         // a row into scrollback while the user is viewing history,
@@ -1763,6 +1766,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     cause = "scrolled"
                 );
             }
+            watch.phase("publish");
             publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
         }
 
