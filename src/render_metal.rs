@@ -3399,37 +3399,7 @@ fn paint_process_panel_content(
     );
     // Traffic lights (3 SDF discs anchored title-bar left).
 
-    for (rect, color, icon) in [
-        (panel.light_rects[0], tl::COLOR_CLOSE, &tl::ICON_CLOSE),
-        (panel.light_rects[1], tl::COLOR_MIN,   &tl::ICON_MIN),
-        (panel.light_rects[2], tl::COLOR_MAX,   &tl::ICON_ZOOM),
-    ] {
-        // No rim: the shader strokes borders *inside* the shape, so a
-        // 1 px stroke eats a pixel off every edge.
-        p.fill_rounded_rect(rect, color, (rect.w * 0.5) as f32, ([0.0; 4], 0.0));
-        if panel.title_bar_hovered {
-            // Mask runs scale to the disc and centre on it exactly —
-            // no font metrics involved, so there is nothing to be off by.
-            // Round the unit to whole pixels: a 1.1 px cell smears every
-            // run across two rows and the mark reads blurry and low.
-            let unit = (rect.w * icon.extent / icon.grid_w).round().max(1.0);
-            let ox = (rect.x + (rect.w - unit * icon.grid_w) * 0.5).round();
-            let oy = (rect.y_top + (rect.h - unit * icon.grid_h) * 0.5).round();
-            for (row, x0, x1) in icon.runs {
-                p.fill_rounded_rect(
-                    Rect {
-                        x: ox + unit * (*x0 as f64),
-                        y_top: oy + unit * (*row as f64),
-                        w: unit * ((x1 - x0) as f64),
-                        h: unit,
-                    },
-                    tl::GLYPH_FG,
-                    0.0,
-                    ([0.0; 4], 0.0),
-                );
-            }
-        }
-    }
+    tl::paint_discs(p.ui_rects, &panel.light_rects, panel.title_bar_hovered);
     // Centered title text.
     let title_w_chars = panel.title.chars().count() as f32;
     let title_x = px + (pw - title_w_chars * p.cell_w) * 0.5;

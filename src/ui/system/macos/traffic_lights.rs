@@ -108,18 +108,6 @@ pub const GLYPH_FG: [f32; 4] = [0.12, 0.10, 0.06, 0.80];
 pub const COLOR_CLOSE: [f32; 4] = [0.99, 0.36, 0.31, 1.0];
 pub const COLOR_MIN:   [f32; 4] = [0.99, 0.74, 0.18, 1.0];
 pub const COLOR_MAX:   [f32; 4] = [0.21, 0.78, 0.35, 1.0];
-/// No rim.
-///
-/// There used to be a 25 %-black inside-stroke here, and for most of its
-/// life it was invisible: the `ui_rect` pipeline was applying alpha
-/// twice, so 0.25 rendered as 0.06.  Fixing that blend made the rim
-/// appear for the first time — and because the shader draws borders
-/// *inside* the shape (box-sizing: border-box), it ate ~1 px off every
-/// edge.  Measured against the OS's own buttons in the same screenshot:
-/// native showed 14 px of colour, ours showed 9.  The dots did not
-/// shrink; the rim grew.  Dropping it restores what the design always
-/// looked like.
-const BORDER:          [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 impl TrafficLights {
     /// Lay out 3 dots inside `title_bar`, anchored to its left.
@@ -140,24 +128,8 @@ impl TrafficLights {
 
     /// Push 3 `UiRectInstance` dots into `ui_rects`.  Caller has
     /// already drawn the title-bar BG.
-    pub fn paint(&self, ui_rects: &mut Vec<UiRectInstance>) {
-        for (r, color) in [
-            (self.close, COLOR_CLOSE),
-            (self.min,   COLOR_MIN),
-            (self.max,   COLOR_MAX),
-        ] {
-            ui_rects.push(UiRectInstance {
-                origin: [r.x as f32, r.y_top as f32],
-                size: [r.w as f32, r.h as f32],
-                fill_color: color,
-                border_color: BORDER,
-                corner_radius: (r.w * 0.5) as f32,
-                border_width: 0.0,
-                shadow_blur: 0.0,
-                shadow_alpha: 0.0,
-                shadow_color: [0.0, 0.0, 0.0, 1.0],
-            });
-        }
+    pub fn paint(&self, ui_rects: &mut Vec<UiRectInstance>, hovered: bool) {
+        paint_discs(ui_rects, &[self.close, self.min, self.max], hovered);
     }
 
     pub fn hit_test(&self, x: f64, y: f64) -> Option<TrafficLightHit> {
@@ -165,6 +137,61 @@ impl TrafficLights {
         if self.min.contains(x, y)   { return Some(TrafficLightHit::Minimize); }
         if self.max.contains(x, y)   { return Some(TrafficLightHit::Maximize); }
         None
+    }
+}
+
+/// Draw the three discs, plus the hover marks when `hovered`.
+///
+/// One drawing path, taking the rects from whoever owns the geometry.
+/// There used to be two — this component, and an inline copy in the
+/// Process Monitor painter — and six rounds of "make these match the
+/// system" went into editing whichever one happened to be wrong at the
+/// time.  Everything here is a rect, so it needs no painter: the marks
+/// are mask runs, not glyphs.
+pub fn paint_discs(
+    ui_rects: &mut Vec<UiRectInstance>,
+    rects: &[Rect; 3],
+    hovered: bool,
+) {
+    let plain = |r: Rect, color: [f32; 4], radius: f32| UiRectInstance {
+        origin: [r.x as f32, r.y_top as f32],
+        size: [r.w as f32, r.h as f32],
+        fill_color: color,
+        border_color: [0.0; 4],
+        corner_radius: radius,
+        // No rim: the shader strokes borders *inside* the shape, so
+        // 1 px eats a pixel off every edge of an already-small disc.
+        border_width: 0.0,
+        shadow_blur: 0.0,
+        shadow_alpha: 0.0,
+        shadow_color: [0.0, 0.0, 0.0, 1.0],
+    };
+    for (r, color, icon) in [
+        (rects[0], COLOR_CLOSE, &ICON_CLOSE),
+        (rects[1], COLOR_MIN, &ICON_MIN),
+        (rects[2], COLOR_MAX, &ICON_ZOOM),
+    ] {
+        ui_rects.push(plain(r, color, (r.w * 0.5) as f32));
+        if !hovered {
+            continue;
+        }
+        // Whole-pixel units and origins — a fractional cell smears each
+        // run across two rows and the mark reads blurry and low.
+        let unit = (r.w * icon.extent / icon.grid_w).round().max(1.0);
+        let ox = (r.x + (r.w - unit * icon.grid_w) * 0.5).round();
+        let oy = (r.y_top + (r.h - unit * icon.grid_h) * 0.5).round();
+        for (row, x0, x1) in icon.runs {
+            ui_rects.push(plain(
+                Rect {
+                    x: ox + unit * (*x0 as f64),
+                    y_top: oy + unit * (*row as f64),
+                    w: unit * ((x1 - x0) as f64),
+                    h: unit,
+                },
+                GLYPH_FG,
+                0.0,
+            ));
+        }
     }
 }
 

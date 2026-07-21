@@ -6,7 +6,7 @@
 //! Typical use:
 //! ```ignore
 //! let bar = TitleBar::layout(title_bar_rect, scale, true /* with_lights */);
-//! bar.paint(painter, "Process Monitor", FG_TITLE, BG_FILL);
+//! bar.paint(painter, "Process Monitor", FG_TITLE, BG_FILL, hovered);
 //! match bar.hit_test(x, y) {
 //!     Some(TitleBarHit::Light(TrafficLightHit::Close)) => self.close(),
 //!     Some(TitleBarHit::Light(TrafficLightHit::Minimize)) => self.minimize(),
@@ -64,13 +64,18 @@ impl TitleBar {
         title: &str,
         fg_color: [f32; 4],
         bg_color: [f32; 4],
+        // Cursor anywhere in this bar — reveals the traffic-light
+        // marks, the way the system does (all three at once, because
+        // the affordance answers "are these clickable", not "which one
+        // am I on").
+        lights_hovered: bool,
     ) {
         // Title bar fill (flat — the parent View already drew the
         // outer rounded chrome, this just tints the band).
         p.fill_rect(self.rect, bg_color);
         // Traffic lights (if any).
         if let Some(l) = &self.lights {
-            l.paint(p.ui_rects);
+            l.paint(p.ui_rects, lights_hovered);
         }
         // Centered title text.
         let title_w_chars = title.chars().count() as f32;
