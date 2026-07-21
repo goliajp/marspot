@@ -4423,7 +4423,32 @@ impl CoreApp {
         if lines == 0 {
             return;
         }
-        if self.panes[self.focused_idx].apply_scroll_lines(lines) {
+        let idx = self.focused_idx;
+        // A mouse-tracking TUI (claudecode etc.) owns its own scroll: the
+        // wheel is injected to the app, which redraws the whole screen in
+        // place — marspot only ever sees the new grid and cannot re-anchor
+        // an existing selection to it (there is no marspot scrollback for
+        // these panes; `scrollback_len` stays 0). So a selection left in
+        // place after such a scroll highlights *different* bytes than the
+        // user drew it over — the "选区一滚就变" report. Clear it.
+        //
+        // This is deliberately narrower than "clear on any grid change":
+        // a claudecode pane redraws autonomously (spinner) several times a
+        // second, and the selection MUST survive that so the user can
+        // Cmd-C what they picked. Only a user-initiated scroll of a
+        // mouse-tracking pane clears — a real scroll can't keep a valid
+        // selection, autonomous output can.
+        let tui_scroll = self.panes[idx].session().is_l3()
+            && self.panes[idx].session().l3_mouse_tracking_active();
+        if self.panes[idx].apply_scroll_lines(lines) {
+            if tui_scroll {
+                if let Some(sel) = self.selection {
+                    if sel.session_idx == idx {
+                        self.selection = None;
+                        self.selection_dragging = false;
+                    }
+                }
+            }
             self.needs_render = true;
         }
     }
