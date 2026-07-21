@@ -4,6 +4,7 @@
 //! a modal frame layout, etc.  Built on top of `core::View` /
 //! `system::macos::*` primitives.
 
+pub mod cc_usage_modal;
 pub mod tab_strip;
 pub mod scroll_view;
 pub mod modal_frame;

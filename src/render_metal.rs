@@ -2704,8 +2704,9 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let r = cc.rect;
     // Outer breathing room.  The panel is a reference surface, not a
     // dense readout — it can afford to sit away from its own frame.
-    let pad = (ch * 1.6) as f64;
-    let lh = (ch * 1.35) as f64; // line advance
+    use crate::ui::components::cc_usage_modal::{metric, card_height, TIMELINE_SPAN_SECS};
+    let pad = ch as f64 * metric::PANEL_PAD;
+    let lh = ch as f64 * metric::LINE_ADVANCE;
     let inner_x = r.x + pad;
     let inner_w = (r.w - 2.0 * pad).max(1.0);
 
@@ -2737,7 +2738,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
 
     // ---- account cards, one row ----
     let n = cc.accounts.len().max(1);
-    let gap = (cw * 1.5) as f64;
+    let gap = cw as f64 * metric::CARD_GAP;
     let card_w = ((inner_w - gap * (n as f64 - 1.0)) / n as f64).max(40.0);
     // ONE padding value for all four sides, in physical px.
     //
@@ -2745,17 +2746,17 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // padding in `lh`, which are different rulers — the four gaps came
     // out visibly unequal, and the bottom one collapsed to almost
     // nothing once the last row's descenders were accounted for.
-    let card_pad = (ch * 0.85) as f64;
+    let card_pad = ch as f64 * metric::CARD_PAD;
     // Baseline-to-baseline advances between the five rows.  Named so
     // the card height below can be derived instead of guessed.
-    let row_adv = [lh * 1.05, lh * 1.3, lh * 1.3, lh * 1.35];
-    let rows_span: f64 = row_adv.iter().sum();
+    let row_adv: Vec<f64> =
+        metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).collect();
+
     // Exact: pad, then the first row's ascent, the row advances, the
     // last row's descent, then pad again.  `ch - ascent` is the
     // descent — the painter reports cell height and ascent, and a
     // monospace cell is exactly the two stacked.
-    let card_h = card_pad * 2.0 + ascent as f64 + rows_span
-        + (ch as f64 - ascent as f64);
+    let card_h = card_height(ch as f64, ascent as f64);
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
@@ -2776,7 +2777,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // `row_right`, then draw the pill around it, letting the pill
         // spill into the card's padding rather than moving the text.
         let chip_text = a.status_label.to_uppercase();
-        let chip_pad = cw as f64 * 0.6;
+        let chip_pad = cw as f64 * metric::CHIP_PAD;
         let chip_text_x = row_right - text_w(&chip_text);
         // Centre the pill on the label's INK, not on its baseline box.
         // The label is all-caps, so its ink runs from `baseline - cap`
@@ -2786,7 +2787,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // height — the painter reports ascent, not cap height — and is
         // only ever applied to these fixed uppercase labels.
         let chip_h = ch as f64 * 1.05;
-        let cap = ascent as f64 * 0.72;
+        let cap = ascent as f64 * metric::CAP_HEIGHT_OF_ASCENT;
         p.fill_rounded_rect(
             Rect {
                 x: chip_text_x - chip_pad,
@@ -2817,7 +2818,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             text(p, row_right - text_w(&pct), cy, &pct, cc_util_color(util));
             let bar_x = px + cw as f64 * 3.0;
             let bar_w = (row_right - pct_slot - cw as f64 - bar_x).max(1.0);
-            let bar_h = (ch * 0.62) as f64;
+            let bar_h = ch as f64 * metric::BAR_H;
             // Centre the bar on the text's optical middle so the row
             // reads as one unit instead of a caption above a bar.
             let bar_y = cy - ascent as f64 * 0.36 - bar_h / 2.0;
@@ -2840,7 +2841,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     }
     // Two sections, not one continuous list — give the boundary enough
     // room to read as a break.
-    y = card_top + card_h + lh * 2.2;
+    y = card_top + card_h + lh * metric::SECTION_BREAK;
 
     // ---- timeline ----
     p.ui_text(inner_x as f32, (y + p.ui_ascent() as f64) as f32, "RESOURCE AVAILABILITY (±6D)", cc_palette::fg());
@@ -2872,12 +2873,12 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         .fold(0.0f64, f64::max)
         + cw as f64 * 1.2;
     let tl_w = (inner_w - label_w - tag_gutter).max(10.0);
-    let span_s: f64 = 12.0 * 86_400.0; // ±6 days
+    let span_s: f64 = TIMELINE_SPAN_SECS;
     let t0 = cc.now_unix as f64 - span_s / 2.0;
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
-    let bar_h = (ch * 0.62) as f64;
-    let bar_gap = (ch * 0.78) as f64;
-    let row_h = bar_h * 2.0 + bar_gap + lh * 1.0;
+    let bar_h = ch as f64 * metric::BAR_H;
+    let bar_gap = ch as f64 * metric::TIMELINE_BAR_GAP;
+    let row_h = bar_h * 2.0 + bar_gap + lh * metric::TIMELINE_ROW_EXTRA;
     let rows_top = y;
     let rows_bottom = rows_top + cc.accounts.len() as f64 * row_h;
     // Day grid, drawn first so the bars read as sitting on top of it.
@@ -2891,8 +2892,8 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // and the one line that must stay solid is NOW.
     let day = 86_400.0;
     let first_day = (t0 / day).ceil() * day;
-    let dash = (ch * 0.30) as f64;
-    let gap = (ch * 0.26) as f64;
+    let dash = ch as f64 * metric::GRID_DASH;
+    let gap = ch as f64 * metric::GRID_GAP;
     let grid_top = rows_top - lh * 0.35;
     let mut t_grid = first_day;
     while t_grid < t0 + span_s {

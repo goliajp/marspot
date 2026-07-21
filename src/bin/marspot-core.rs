@@ -3223,39 +3223,18 @@ impl CoreApp {
             .as_ref()
             .and_then(|m| m.data.as_ref())
             .map(|d| d.accounts.len())
-            .unwrap_or(1)
-            .max(1);
+            .unwrap_or(1);
         let (cell_w, cell_h) = self.renderer.cell_dims();
-        let lh = cell_h as f64 * 1.35;
-        // Per-card 52 cells (was 46) and 94% of the window (was 90%):
-        // the timeline now reserves a right-hand gutter for its tags,
-        // and the plot itself should not pay for that in resolution.
-        let w = (self.w_phys * 0.94)
-            .min(n as f64 * 52.0 * cell_w as f64 + 8.0 * cell_w as f64)
-            .max(64.0 * cell_w as f64)
-            .min(self.w_phys - 24.0);
-        // 10 lh of fixed chrome (title + the 5.5 lh account card +
-        // the timeline heading), one 2.6 lh band per timeline row, then
-        // 4 lh for the date axis and bottom padding.
-        // 13 lh of fixed chrome: title, the 6.5 lh account card, the
-        // 2.2 lh section break, and the timeline heading — plus real
-        // padding top and bottom.  One 2.6 lh band per timeline row,
-        // then 4 lh for the date axis and the bottom margin.
-        // 13.5 lh of fixed chrome: title, the account card (now derived
-        // from its own padding + rows rather than a round number, and
-        // landing near 7 lh), the 2.2 lh section break, the timeline
-        // heading, and the panel's own top/bottom margin.  One 2.6 lh
-        // band per timeline row, then 4 lh for the date axis.
-        // 15 lh of fixed chrome: the two section headings now render in
-        // the taller system UI font (≈1.2 lh each rather than 1.0), plus
-        // the account card, the section break, and top/bottom margins.
-        let h = (lh * 15.0 + n as f64 * lh * 2.6 + lh * 4.0).min(self.h_phys * 0.9);
-        marspot_term::layout::Rect {
-            x: (self.w_phys - w) / 2.0,
-            y_top: ((self.h_phys - h) / 2.0).max(self.layout.top_inset + 8.0),
-            w,
-            h,
-        }
+        // Geometry lives with the rest of the modal's metrics so the
+        // painter and this rect can't disagree about how tall a card is.
+        marspot::ui::components::cc_usage_modal::panel_rect(
+            n,
+            self.w_phys,
+            self.h_phys,
+            cell_w as f64,
+            cell_h as f64,
+            self.layout.top_inset,
+        )
     }
 
     /// cc — build the `Cc` usage modal render data.  Re-reads the
