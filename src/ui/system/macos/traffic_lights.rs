@@ -99,18 +99,26 @@ mod tests {
     #[test]
     fn layout_anchors_close_at_left() {
         let bar = rect(100.0, 50.0, 800.0, 28.0);
-        let t = TrafficLights::layout(bar, 12.0, 8.0, 12.0);
-        assert_eq!(t.close.x, 112.0);
+        let t = TrafficLights::layout(bar, LIGHT_SIZE_LOGICAL, LIGHT_GAP_LOGICAL, LIGHT_LEFT_PAD_LOGICAL);
+        // Assertions derive from the constants rather than restating
+        // their current values — the previous version hardcoded both the
+        // inputs and the expected outputs, so bumping the diameter broke
+        // a test that was only ever checking arithmetic.
+        assert_eq!(t.close.x, 100.0 + LIGHT_LEFT_PAD_LOGICAL);
         // Vertically centered in the title bar.
-        assert_eq!(t.close.y_top, 50.0 + (28.0 - 12.0) * 0.5);
-        // Gaps: close → min → max stride = size + gap = 20.
-        assert_eq!(t.min.x - t.close.x, 20.0);
-        assert_eq!(t.max.x - t.min.x, 20.0);
+        assert_eq!(t.close.y_top, 50.0 + (28.0 - LIGHT_SIZE_LOGICAL) * 0.5);
+        // Stride between dots is diameter + gap.
+        let stride = LIGHT_SIZE_LOGICAL + LIGHT_GAP_LOGICAL;
+        assert_eq!(t.min.x - t.close.x, stride);
+        assert_eq!(t.max.x - t.min.x, stride);
     }
 
     #[test]
     fn hit_test_disjoint_regions() {
-        let t = TrafficLights::layout(rect(0.0, 0.0, 800.0, 28.0), 12.0, 8.0, 12.0);
+        let t = TrafficLights::layout(
+            rect(0.0, 0.0, 800.0, 28.0),
+            LIGHT_SIZE_LOGICAL, LIGHT_GAP_LOGICAL, LIGHT_LEFT_PAD_LOGICAL,
+        );
         let mid_close = (t.close.x + t.close.w * 0.5, t.close.y_top + t.close.h * 0.5);
         let mid_min   = (t.min.x   + t.min.w   * 0.5, t.min.y_top   + t.min.h   * 0.5);
         let mid_max   = (t.max.x   + t.max.w   * 0.5, t.max.y_top   + t.max.h   * 0.5);

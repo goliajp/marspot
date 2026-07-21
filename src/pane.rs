@@ -1200,9 +1200,18 @@ impl Pane {
         }
     }
 
-    /// Replace this pane's backend in place, keeping its view state.
-    /// Used when an off-loop spawn lands and a pending slot becomes a
-    /// live L3 pane.
+    /// Replace this pane's backend in place, keeping the pane shell
+    /// (tools, search, highlight) and resetting only what is tied to the
+    /// old backend's content.
+    ///
+    /// Both outcomes of an off-loop spawn go through here — success
+    /// installs an `L3` backend, failure installs a plain `Vacant` one —
+    /// so the two paths can't drift into "one preserves pane state, the
+    /// other silently drops it".
+    ///
+    /// `view_offset` and `last_seen_scroll_push` are reset deliberately:
+    /// they index into the *previous* backend's scrollback and mean
+    /// nothing against the new one.
     pub fn adopt_backend(&mut self, backend: PaneBackend) {
         self.session = backend;
         self.view_offset = 0;

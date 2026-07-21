@@ -301,8 +301,6 @@ impl<'a> ViewPainter<'a> {
         self.font.ui_cell_h as f32
     }
 
-    /// F3+3.4 — anchor-aligned text inside a rect.
-
     /// F3+3.4 — anchor-aligned text inside a rect.  Text width is
     /// `s.chars().count() * cell_w` (assumes monospace, fine for
     /// chrome labels in marspot); text height is `cell_h`.  Caller

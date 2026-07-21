@@ -283,6 +283,13 @@ const L3_RECONNECT_ATTEMPTS: u32 = 3;
 /// once the shell has registered its pid, or it never will.
 const CWD_MAX_FAILURES: u32 = 5;
 
+/// Shortest L2 main-loop iteration worth reporting as a stall.
+///
+/// Tighter than L3's 150 ms because this loop owes a frame: anything
+/// past ~80 ms has already cost the user a visible hitch, and a stall
+/// here freezes every pane rather than one.
+const L2_LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(80);
+
 /// F3+5 — per-sid debounce window on `refresh_pane_cwd_for`.  A
 /// multi-line paste fires Enter N times; only the first within this
 /// window triggers a syscall.  150 ms keeps "cd && cd" sequences
@@ -1292,11 +1299,13 @@ fn spawn_l3_pane_async(
     cols: u16,
     rows: u16,
     session_id: u64,
-    initial_cwd: &str,
     event_tx: &Sender<CoreEvent>,
 ) -> Pane {
     let tx = event_tx.clone();
-    let cwd = initial_cwd.to_string();
+    // Both callers ([+] and revive) want the default cwd; a fresh L3
+    // resolves it from $HOME.  Carrying a parameter that is always ""
+    // just invites a reader to look for the caller that sets it.
+    let cwd = String::new();
     std::thread::Builder::new()
         .name(format!("l2-spawn-{session_id}"))
         .spawn(move || {
@@ -1720,9 +1729,10 @@ impl CoreApp {
         // `lazy_fill_missing_cwds` asks again every frame for any pane
         // with no cached entry.  Nine such panes is ~60 open+read+close
         // per second, forever.  Give up after a bounded number of
-        // consecutive failures; a real trigger (`force=true` — pane
-        // spawn, modal open, Enter) still clears the mark and retries,
-        // so a pane that becomes resolvable later is not stuck.
+        // consecutive failures.  A real trigger (`force=true` — pane
+        // spawn, modal open, Enter) bypasses this check outright, so a
+        // pane that becomes resolvable later is never stuck; the mark
+        // itself is only cleared on a successful resolve.
         if !force && self.cwd_unresolvable.get(&sid).is_some_and(|&n| n >= CWD_MAX_FAILURES) {
             return false;
         }
@@ -2198,7 +2208,7 @@ impl CoreApp {
             // slot.  Clicking [+] used to freeze every pane for as long
             // as the new L3 took to register and handshake.
             match allocate_next_session_id().map(|id| {
-                spawn_l3_pane_async(cols, rows, id, "", &self.event_tx)
+                spawn_l3_pane_async(cols, rows, id, &self.event_tx)
             }) {
                 Ok(pane) => {
                     self.panes.push(pane);
@@ -2979,7 +2989,7 @@ impl CoreApp {
                 // must not freeze the other fifteen panes while the
                 // replacement boots.
                 self.panes[self.focused_idx] =
-                    spawn_l3_pane_async(cols, rows, sid, "", &self.event_tx);
+                    spawn_l3_pane_async(cols, rows, sid, &self.event_tx);
                 self.needs_render = true;
                 lx_event!(
                     "L3_REVIVING",
@@ -5362,7 +5372,7 @@ fn main() {
     // supposed to turn a frame around, and anything past ~80 ms has
     // already cost the user a visible hitch.  Silent below it.
     let mut watch = marspot_term::loop_watch::LoopWatch::new(
-        Duration::from_millis(80),
+        L2_LOOP_STALL_THRESHOLD,
     );
 
     let start = Instant::now();
@@ -5598,14 +5608,24 @@ fn main() {
                             );
                         }
                         Err(e) => {
-                            // Fall back to the vacant slot: its
+                            // Fall back to a plain vacant slot: its
                             // revive-on-keystroke path is exactly the
-                            // retry affordance this needs.
+                            // retry affordance this needs.  Swap the
+                            // backend rather than replacing the whole
+                            // `Pane`, so both outcomes go through the
+                            // same door — replacing wholesale would
+                            // quietly drop any pane-level state the day
+                            // someone adds a field that outlives a
+                            // failed spawn.
                             let (c, r) = {
                                 let g = app.panes[idx].session().grid();
                                 (g.cols(), g.rows())
                             };
-                            app.panes[idx] = Pane::new_vacant(sid, c, r);
+                            app.panes[idx].adopt_backend(
+                                marspot::pane::PaneBackend::Vacant(
+                                    marspot::pane::VacantPane::new(sid, c, r),
+                                ),
+                            );
                             lx_error!(
                                 "core.spawn.failed",
                                 &format!("{e}"),
@@ -5726,11 +5746,15 @@ fn main() {
                             app.rebuild_layout();
                             // Render the latest content into slot 0 so
                             // the SurfaceReady ack reflects a real frame.
-                            watch.phase("pump");
+                            // Distinct names: this branch and the main
+                            // path can both run in one iteration, and a
+                            // breakdown listing "pump" twice reads like
+                            // double bookkeeping.
+                            watch.phase("attach-pump");
                             app.pump_all();
-                            watch.phase("render");
+                            watch.phase("attach-render");
                             let _ = app.render(&target_tex[writing_idx]);
-                            watch.phase("post-render");
+                            watch.phase("attach-post");
                             let ack = Frame::new(
                                 MsgType::SurfaceReady,
                                 encode_surface_ready(surfaces[writing_idx].id()),
@@ -5859,7 +5883,7 @@ fn main() {
         if let Some(r) = watch.end() {
             lx_warn!(
                 "l2.loop.stall",
-                &format!("main loop iteration took {:.2}s", r.total.as_secs_f64()),
+                &r.summary(),
                 slowest = r.slowest,
                 slowest_ms = r.slowest_took.as_millis(),
                 breakdown = r.breakdown(),

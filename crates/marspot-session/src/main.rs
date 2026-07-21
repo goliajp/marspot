@@ -1892,7 +1892,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         if let Some(r) = watch.end() {
             lx_warn!(
                 "l3.loop.stall",
-                &format!("main loop iteration took {:.2}s", r.total.as_secs_f64()),
+                &r.summary(),
                 session_id = session.id(),
                 slowest = r.slowest,
                 slowest_ms = r.slowest_took.as_millis(),

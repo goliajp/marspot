@@ -118,10 +118,11 @@ impl LoopWatch {
         }
         self.stalls += 1;
         let used = &self.phases[..self.n_phases];
-        // Empty-name entries come from `begin`-to-first-`phase` gaps
-        // that never got a name; they're real time, so they stay in the
-        // list, but they never win "slowest" over a named phase unless
-        // they genuinely dominate.
+        // Every phase carries a name: `begin` seeds `"start"` and every
+        // other entry comes from a `&'static str` the caller passed, so
+        // there is no empty-name case to fold.  (An earlier version
+        // guarded for one — the guard was unreachable and the comment
+        // described a state that cannot occur.)
         let (slowest, slowest_took) = used
             .iter()
             .max_by_key(|(_, d)| *d)
@@ -129,12 +130,9 @@ impl LoopWatch {
             .unwrap_or(("unknown", total));
         Some(StallReport {
             total,
-            slowest: if slowest.is_empty() { "unnamed" } else { slowest },
+            slowest,
             slowest_took,
-            phases: used
-                .iter()
-                .map(|(n, d)| (if n.is_empty() { "unnamed" } else { *n }, *d))
-                .collect(),
+            phases: used.to_vec(),
         })
     }
 
@@ -145,6 +143,16 @@ impl LoopWatch {
 }
 
 impl StallReport {
+    /// One-line summary for the log message.
+    ///
+    /// Both loops used to inline `"main loop iteration took {:.2}s"`,
+    /// which renders L2's 80 ms threshold as a flat `0.08s` — not enough
+    /// resolution to tell an 80 ms hitch from a 140 ms one.  Scale the
+    /// unit to the magnitude instead, and keep the wording in one place.
+    pub fn summary(&self) -> String {
+        format!("main loop iteration took {}", fmt_dur(self.total))
+    }
+
     /// `pump 9.61s, snapshot 4ms, publish 1ms` — compact enough for one
     /// log field, ordered as the iteration ran.
     pub fn breakdown(&self) -> String {
