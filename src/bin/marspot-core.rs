@@ -3382,9 +3382,9 @@ impl CoreApp {
         );
         let lights = TrafficLights::layout(
             frame.title_bar,
-            12.0 * scale,
-            8.0  * scale,
-            12.0 * scale,
+            marspot::ui::system::macos::traffic_lights::LIGHT_SIZE_LOGICAL * scale,
+            marspot::ui::system::macos::traffic_lights::LIGHT_GAP_LOGICAL * scale,
+            marspot::ui::system::macos::traffic_lights::LIGHT_LEFT_PAD_LOGICAL * scale,
         );
         let (_cell_w_f64, cell_h_f64) = self.renderer.cell_dims();
 

@@ -18,7 +18,10 @@
 
 use marspot_term::layout::Rect;
 use crate::ui::core::ViewPainter;
-use super::traffic_lights::{TrafficLights, TrafficLightHit};
+use super::traffic_lights::{
+    TrafficLights, TrafficLightHit,
+    LIGHT_SIZE_LOGICAL, LIGHT_GAP_LOGICAL, LIGHT_LEFT_PAD_LOGICAL,
+};
 
 #[derive(Debug, Clone)]
 pub struct TitleBar {
@@ -37,10 +40,6 @@ pub enum TitleBarHit {
     /// the semantics (typically: start a drag).
     Body,
 }
-
-const LIGHT_SIZE_LOGICAL: f64 = 12.0;
-const LIGHT_GAP_LOGICAL: f64 = 8.0;
-const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
 
 impl TitleBar {
     pub fn layout(rect: Rect, scale: f64, with_lights: bool) -> Self {

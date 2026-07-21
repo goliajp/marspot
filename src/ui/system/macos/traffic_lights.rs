@@ -20,6 +20,21 @@ pub enum TrafficLightHit {
     Maximize,
 }
 
+/// Traffic-light geometry, in logical points (callers multiply by the
+/// backing scale).  These are the single source of truth for every
+/// custom-drawn title bar; the main window uses the OS's own native
+/// buttons and never touches these.
+///
+/// 14pt rather than the nominal 12pt macOS spec: side by side with the
+/// OS's native buttons the flat-filled 12pt discs read visibly
+/// smaller, so the diameter is nudged up to sit at the same visual
+/// weight as the system chrome.  Gap stays 8pt (native center-to-center
+/// spacing was ~20pt at 12pt dots; 14 + 8 = 22 keeps the cluster
+/// close).
+pub const LIGHT_SIZE_LOGICAL: f64 = 14.0;
+pub const LIGHT_GAP_LOGICAL: f64 = 8.0;
+pub const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
+
 /// Standard colours (close to Apple HIG values).
 pub const COLOR_CLOSE: [f32; 4] = [0.99, 0.36, 0.31, 1.0];
 pub const COLOR_MIN:   [f32; 4] = [0.99, 0.74, 0.18, 1.0];
