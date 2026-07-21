@@ -203,7 +203,34 @@ one:
    assert `stall_count() == 0` over a scripted scenario rather than
    re-derive timing from outside.
 
-Until that exists, the honest statement is: **marspot has no automated
+### Attempted 2026-07-21, did not work
+
+An integration test was written along these lines — spawn a real L3
+whose child raws the tty and never reads stdin, flood it with pasted
+input, then assert the sandbox log holds no `l3.loop.stall` line.  It
+passed.  It also passed with the pre-fix blocking `write(2)` restored
+and the session binary genuinely rebuilt around it (verified: the temp
+edit was present in the synced tree and the workspace recompiled), so it
+proved nothing and was removed rather than left green.
+
+Two things that cost time and are worth knowing before the next attempt:
+
+* **`LoopWatch` reports at the *end* of an iteration.**  While a loop is
+  wedged it logs nothing at all, so a test that samples the log during
+  the stall sees a clean file no matter how stuck the loop is.  The wait
+  has to outlast the blocking condition, not just the injection.
+* **Rebuild the binary under test, not just the test's own crate.**
+  `cargo nextest run -p marspot --bin marspot-core` leaves
+  `marspot-session` stale, so a "does it catch the bug?" control can
+  silently exercise the already-fixed binary.
+
+Why it still didn't reproduce is unresolved: with the blocking write in
+place and the child provably in raw mode, the flood produced no stall
+line.  Either the pastes are not reaching the PTY write on that path, or
+the write is not blocking under these conditions.  That question is the
+starting point for the next attempt.
+
+Until a gate exists, the honest statement is: **marspot has no automated
 protection against a regression that reintroduces main-loop blocking.**
 The unit tests pin the specific mechanisms that were fixed (blocking PTY
 write, unbounded queues, handshake deadline), which is narrower than a
