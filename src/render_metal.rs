@@ -3399,31 +3399,33 @@ fn paint_process_panel_content(
     );
     // Traffic lights (3 SDF discs anchored title-bar left).
 
-    for (rect, color, glyph) in [
-        (panel.light_rects[0], tl::COLOR_CLOSE, "\u{2715}"),  // ✕ close
-        (panel.light_rects[1], tl::COLOR_MIN,   "\u{2212}"),  // − minimise
-        (panel.light_rects[2], tl::COLOR_MAX,   "\u{2921}"),  // ⤡ zoom
+    for (rect, color, icon) in [
+        (panel.light_rects[0], tl::COLOR_CLOSE, &tl::ICON_CLOSE),
+        (panel.light_rects[1], tl::COLOR_MIN,   &tl::ICON_MIN),
+        (panel.light_rects[2], tl::COLOR_MAX,   &tl::ICON_ZOOM),
     ] {
         // No rim: the shader strokes borders *inside* the shape, so a
-        // 1 px stroke eats a pixel off every edge — that, plus scaling
-        // by the font instead of the display, is what kept these
-        // reading smaller than the OS's own buttons.
-        p.fill_rounded_rect(
-            rect,
-            color,
-            (rect.w * 0.5) as f32,
-            ([0.0; 4], 0.0),
-        );
+        // 1 px stroke eats a pixel off every edge.
+        p.fill_rounded_rect(rect, color, (rect.w * 0.5) as f32, ([0.0; 4], 0.0));
         if panel.title_bar_hovered {
-            // Centre on the disc.  Horizontally the glyph is one mono
-            // cell wide; vertically, centre the *ink* — an all-caps-like
-            // symbol has no descender, so centring its baseline box
-            // would sit it low.  `0.72 × ascent` stands in for cap
-            // height, the same approximation the cc modal's chips use.
-            let cap = p.ascent * 0.72;
-            let gx = (rect.x + (rect.w - p.cell_w as f64) * 0.5) as f32;
-            let gy = (rect.y_top + rect.h * 0.5) as f32 + cap * 0.5;
-            p.text(gx, gy, glyph, tl::GLYPH_FG);
+            // Mask runs scale to the disc and centre on it exactly —
+            // no font metrics involved, so there is nothing to be off by.
+            let unit = rect.w * icon.extent / icon.grid;
+            let ox = rect.x + (rect.w - unit * icon.grid) * 0.5;
+            let oy = rect.y_top + (rect.h - unit * icon.grid) * 0.5;
+            for (row, x0, x1) in icon.runs {
+                p.fill_rounded_rect(
+                    Rect {
+                        x: ox + unit * (*x0 as f64),
+                        y_top: oy + unit * (*row as f64),
+                        w: unit * ((x1 - x0) as f64),
+                        h: unit,
+                    },
+                    tl::GLYPH_FG,
+                    0.0,
+                    ([0.0; 4], 0.0),
+                );
+            }
         }
     }
     // Centered title text.

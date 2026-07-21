@@ -34,7 +34,63 @@ pub const LIGHT_SIZE_LOGICAL: f64 = 15.0;
 pub const LIGHT_GAP_LOGICAL: f64 = 8.0;
 pub const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
 
-/// Glyph colour for the hover-revealed ×/−/+ .
+/// Hover glyphs, as pixel masks on a normalised grid.
+///
+/// The shapes are diagonals — an X for close, two triangles split by a
+/// diagonal seam for zoom — and `ui_rect` only draws axis-aligned
+/// rectangles, so they cannot be stroked.  Drawing them as *text* was
+/// the first attempt and it does not hold up: the glyph comes out at
+/// whatever size the font's cell is rather than the disc's, and its ink
+/// box does not centre on the disc (measured against the system's own
+/// buttons: our ✕ rendered 6×11 px where the OS draws 6×6).
+///
+/// A mask gives exact control and no font dependency.  Each entry is
+/// `(row, x_start, x_end_exclusive)` on the grid named by `GRID`, and
+/// the runs are scaled to the disc at paint time.
+pub struct IconMask {
+    pub grid: f64,
+    /// Fraction of the disc's diameter the mask should span.
+    pub extent: f64,
+    pub runs: &'static [(u8, u8, u8)],
+}
+
+/// ✕ — two diagonals, matching the OS's 6-px close mark.
+pub const ICON_CLOSE: IconMask = IconMask {
+    grid: 6.0,
+    extent: 0.44,
+    runs: &[
+        (0, 0, 2), (0, 4, 6),
+        (1, 1, 5),
+        (2, 2, 4),
+        (3, 2, 4),
+        (4, 1, 5),
+        (5, 0, 2), (5, 4, 6),
+    ],
+};
+
+/// − — a single bar.
+pub const ICON_MIN: IconMask = IconMask {
+    grid: 6.0,
+    extent: 0.44,
+    runs: &[(2, 0, 6), (3, 0, 6)],
+};
+
+/// Zoom — two triangles separated by a diagonal seam, the way macOS
+/// draws a non-fullscreen zoom button.
+pub const ICON_ZOOM: IconMask = IconMask {
+    grid: 7.0,
+    extent: 0.60,
+    runs: &[
+        (0, 0, 5),
+        (1, 0, 4),
+        (2, 0, 3),
+        (4, 4, 7),
+        (5, 3, 7),
+        (6, 2, 7),
+    ],
+};
+
+/// Glyph colour for the hover-revealed marks.
 ///
 /// A dark wash of the dot's own hue rather than pure black — that is
 /// how the system draws it, and pure black on the yellow dot reads far
