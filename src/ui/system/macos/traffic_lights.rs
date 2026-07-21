@@ -25,13 +25,12 @@ pub enum TrafficLightHit {
 /// custom-drawn title bar; the main window uses the OS's own native
 /// buttons and never touches these.
 ///
-/// 14pt rather than the nominal 12pt macOS spec: side by side with the
-/// OS's native buttons the flat-filled 12pt discs read visibly
-/// smaller, so the diameter is nudged up to sit at the same visual
-/// weight as the system chrome.  Gap stays 8pt (native center-to-center
-/// spacing was ~20pt at 12pt dots; 14 + 8 = 22 keeps the cluster
-/// close).
-pub const LIGHT_SIZE_LOGICAL: f64 = 14.0;
+/// 15 rather than the nominal 12 of the macOS spec.  Measured against
+/// the OS's own buttons rendered beside ours (pixel-counted from a
+/// screenshot, not eyeballed): native shows **14 px** of saturated
+/// colour on this display.  A 15 px disc loses about a pixel to SDF
+/// antialiasing, landing on the same visible 14.  Gap stays 8.
+pub const LIGHT_SIZE_LOGICAL: f64 = 15.0;
 pub const LIGHT_GAP_LOGICAL: f64 = 8.0;
 pub const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
 
@@ -39,7 +38,18 @@ pub const LIGHT_LEFT_PAD_LOGICAL: f64 = 12.0;
 pub const COLOR_CLOSE: [f32; 4] = [0.99, 0.36, 0.31, 1.0];
 pub const COLOR_MIN:   [f32; 4] = [0.99, 0.74, 0.18, 1.0];
 pub const COLOR_MAX:   [f32; 4] = [0.21, 0.78, 0.35, 1.0];
-const BORDER:          [f32; 4] = [0.0, 0.0, 0.0, 0.25];
+/// No rim.
+///
+/// There used to be a 25 %-black inside-stroke here, and for most of its
+/// life it was invisible: the `ui_rect` pipeline was applying alpha
+/// twice, so 0.25 rendered as 0.06.  Fixing that blend made the rim
+/// appear for the first time — and because the shader draws borders
+/// *inside* the shape (box-sizing: border-box), it ate ~1 px off every
+/// edge.  Measured against the OS's own buttons in the same screenshot:
+/// native showed 14 px of colour, ours showed 9.  The dots did not
+/// shrink; the rim grew.  Dropping it restores what the design always
+/// looked like.
+const BORDER:          [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 impl TrafficLights {
     /// Lay out 3 dots inside `title_bar`, anchored to its left.
@@ -72,7 +82,7 @@ impl TrafficLights {
                 fill_color: color,
                 border_color: BORDER,
                 corner_radius: (r.w * 0.5) as f32,
-                border_width: 1.0,
+                border_width: 0.0,
                 shadow_blur: 0.0,
                 shadow_alpha: 0.0,
                 shadow_color: [0.0, 0.0, 0.0, 1.0],
