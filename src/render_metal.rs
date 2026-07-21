@@ -2506,14 +2506,13 @@ const PROCESS_PANEL_TAB_BG_ACTIVE: [f32; 4] = [0.20, 0.30, 0.55, 1.0];
 const PROCESS_PANEL_TAB_FG_ACTIVE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const PROCESS_PANEL_ROW_FG: [f32; 4] = [0.86, 0.88, 0.92, 1.0];
 const PROCESS_PANEL_HEADER_FG: [f32; 4] = [0.65, 0.78, 0.95, 1.0];
-const PROCESS_PANEL_TRAFFIC_CLOSE: [f32; 4]  = [0.99, 0.36, 0.31, 1.0]; // macOS-ish red
-const PROCESS_PANEL_TRAFFIC_MIN: [f32; 4]    = [0.99, 0.74, 0.18, 1.0]; // yellow
-const PROCESS_PANEL_TRAFFIC_MAX: [f32; 4]    = [0.21, 0.78, 0.35, 1.0]; // green
+
 const PROCESS_PANEL_TITLE_BAR_H_LOGICAL: f32 = 28.0;
 const PROCESS_PANEL_TAB_STRIP_H_LOGICAL: f32 = 30.0;
-const PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL: f32 = 12.0;
-const PROCESS_PANEL_TRAFFIC_GAP_LOGICAL: f32 = 8.0;
-const PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL: f32 = 12.0;
+// Traffic-light geometry and colour live in
+// `ui::system::macos::traffic_lights` — the panel used to carry its own
+// copy of both, which is why two rounds of "make the dots match the
+// system" edited constants this painter never read.
 /// Inset between the panel's frame and its content on every side.
 ///
 /// The tables used to be laid out from the panel's own edges, so the
@@ -3368,9 +3367,10 @@ fn paint_process_panel_content(
     let scale_hint = (p.cell_h / 20.0).max(0.5);
     let title_h = PROCESS_PANEL_TITLE_BAR_H_LOGICAL * scale_hint;
     let _tab_h = PROCESS_PANEL_TAB_STRIP_H_LOGICAL * scale_hint;
-    let traffic = PROCESS_PANEL_TRAFFIC_SIZE_LOGICAL * scale_hint;
-    let traffic_gap = PROCESS_PANEL_TRAFFIC_GAP_LOGICAL * scale_hint;
-    let traffic_left_pad = PROCESS_PANEL_TRAFFIC_LEFT_PAD_LOGICAL * scale_hint;
+    use crate::ui::system::macos::traffic_lights as tl;
+    let traffic = tl::LIGHT_SIZE_LOGICAL as f32 * scale_hint;
+    let traffic_gap = tl::LIGHT_GAP_LOGICAL as f32 * scale_hint;
+    let traffic_left_pad = tl::LIGHT_LEFT_PAD_LOGICAL as f32 * scale_hint;
 
     // Title bar fill (flat over the rounded chrome).
     p.fill_rect(
@@ -3388,15 +3388,19 @@ fn paint_process_panel_content(
     let min_x = close_x + traffic + traffic_gap;
     let max_x = min_x + traffic + traffic_gap;
     for (x, color) in [
-        (close_x, PROCESS_PANEL_TRAFFIC_CLOSE),
-        (min_x,   PROCESS_PANEL_TRAFFIC_MIN),
-        (max_x,   PROCESS_PANEL_TRAFFIC_MAX),
+        (close_x, tl::COLOR_CLOSE),
+        (min_x,   tl::COLOR_MIN),
+        (max_x,   tl::COLOR_MAX),
     ] {
+        // No rim — the shader strokes borders *inside* the shape, so a
+        // 1 px stroke eats a pixel off every edge of a 15 px disc.  That
+        // is what made these read as far smaller than the OS's own
+        // buttons even after the diameter was raised.
         p.fill_rounded_rect(
             Rect { x: x as f64, y_top: traffic_y as f64, w: traffic as f64, h: traffic as f64 },
             color,
             traffic * 0.5,
-            ([0.0, 0.0, 0.0, 0.25], 1.0),
+            ([0.0; 4], 0.0),
         );
     }
     // Centered title text.
