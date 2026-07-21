@@ -19,7 +19,7 @@
 
 use std::io;
 use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -55,50 +55,41 @@ const READ_BUF_BYTES: usize = 64 * 1024;
 /// the main loop a non-blocking `write()` and keeps idle CPU at zero
 /// (the thread parks in `recv`, not a spin loop).  It mirrors the
 /// reader-thread half that has always been here.
-struct PtyWriter {
-    tx: Sender<Vec<u8>>,
-    /// Bytes handed to the thread but not yet accepted by the kernel.
-    /// Shared so `write` can enforce the cap without a round-trip.
-    pending: Arc<AtomicUsize>,
-    /// Bytes refused because the queue was full.  Monotonic; read for
-    /// logging so a stall is visible in the field instead of silent.
-    dropped: Arc<AtomicUsize>,
+/// One chunk of bytes bound for the PTY.
+///
+/// The short-write retry loop lives here rather than in the queue: a
+/// tty whose buffer is nearly full accepts a partial write, and the
+/// original code discarded `write`'s return value entirely, silently
+/// losing the tail of anything it didn't accept.
+struct PtyChunk {
+    pty: Arc<Pty>,
+    bytes: Vec<u8>,
 }
 
-/// Spawn the writer thread for `pty` and return its queue handle.
-fn spawn_pty_writer(id: u64, pty: Arc<Pty>) -> PtyWriter {
-    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
-    let pending = Arc::new(AtomicUsize::new(0));
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let pending_thread = Arc::clone(&pending);
-    thread::Builder::new()
-        .name(format!("l3-pty-writer-{id}"))
-        .spawn(move || {
-            // Ends when the session drops its Sender.
-            while let Ok(chunk) = rx.recv() {
-                let mut off = 0;
-                while off < chunk.len() {
-                    match pty.write_shared(&chunk[off..]) {
-                        // Short writes are normal on a tty whose buffer
-                        // is nearly full — the old inline call ignored
-                        // the return value entirely and silently lost
-                        // the tail of anything it didn't accept.
-                        Ok(0) => break,
-                        Ok(n) => off += n,
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        // Dead fd (child gone).  Abandon this chunk and
-                        // keep draining so `pending` stays truthful and
-                        // the session tears down through the normal
-                        // exit path rather than wedging here.
-                        Err(_) => break,
-                    }
-                }
-                pending_thread.fetch_sub(chunk.len(), Ordering::SeqCst);
+impl marspot_term::frame_writer::Queued for PtyChunk {
+    fn queued_len(&self) -> usize {
+        self.bytes.len()
+    }
+    fn write_all_to(&self, _sink: &mut dyn io::Write) -> io::Result<()> {
+        // The destination is the PTY master this chunk carries, not the
+        // sink — `Pty` is fd-shared rather than `Write`-shaped.
+        let mut off = 0;
+        while off < self.bytes.len() {
+            match self.pty.write_shared(&self.bytes[off..]) {
+                Ok(0) => break,
+                Ok(n) => off += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                // Dead fd (child gone).  Abandon this chunk; the session
+                // tears down through the normal exit path.
+                Err(_) => break,
             }
-        })
-        .expect("spawn l3-pty-writer thread");
-    PtyWriter { tx, pending, dropped }
+        }
+        Ok(())
+    }
 }
+
+type PtyWriter = marspot_term::frame_writer::BoundedWriter<PtyChunk>;
+
 
 pub struct LocalSession {
     id: u64,
@@ -249,7 +240,7 @@ impl LocalSession {
             })
             .expect("spawn l3-pty-reader thread");
 
-        let writer = spawn_pty_writer(id, Arc::clone(&pty));
+        let writer = PtyWriter::new(&format!("l3-pty-writer-id"), io::sink(), marspot_term::frame_writer::cap::PTY);
 
         Ok(Self {
             id,
@@ -333,24 +324,18 @@ impl LocalSession {
         if bytes.is_empty() {
             return Ok(0);
         }
-        let pending = self.writer.pending.load(Ordering::SeqCst);
-        if pending + bytes.len() > marspot_term::frame_writer::cap::PTY {
-            let dropped = self.writer.dropped.fetch_add(bytes.len(), Ordering::SeqCst)
-                + bytes.len();
+        // The cap check lives in `BoundedWriter::send` — duplicating it
+        // here is how the two could drift apart.
+        let chunk = PtyChunk { pty: Arc::clone(&self.pty), bytes: bytes.to_vec() };
+        if !self.writer.send(chunk) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!(
-                    "pty write queue full: {pending} B pending, {dropped} B dropped so far \
-                     (foreground process is not reading stdin)"
+                    "pty write queue full ({} B pending, {} B dropped so far) \
+                     or writer gone — the foreground process is not reading stdin",
+                    self.writer.backlog(),
+                    self.writer.dropped_bytes(),
                 ),
-            ));
-        }
-        self.writer.pending.fetch_add(bytes.len(), Ordering::SeqCst);
-        if self.writer.tx.send(bytes.to_vec()).is_err() {
-            self.writer.pending.fetch_sub(bytes.len(), Ordering::SeqCst);
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "pty writer thread gone",
             ));
         }
         Ok(bytes.len())
@@ -360,7 +345,7 @@ impl LocalSession {
     /// for more than a moment means the foreground process is not
     /// reading its stdin.
     pub fn pty_write_backlog(&self) -> usize {
-        self.writer.pending.load(Ordering::SeqCst)
+        self.writer.backlog()
     }
 
     /// Resize the terminal + PTY.  TIOCSWINSZ delivers SIGWINCH so
@@ -469,7 +454,7 @@ impl LocalSession {
             })
             .expect("spawn l3-pty-reader thread");
 
-        let writer = spawn_pty_writer(id, Arc::clone(&pty));
+        let writer = PtyWriter::new(&format!("l3-pty-writer-id"), io::sink(), marspot_term::frame_writer::cap::PTY);
 
         Ok(Self {
             id,
@@ -620,7 +605,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
-            writer: spawn_pty_writer(1, Arc::clone(&pty_arc)),
+            writer: PtyWriter::new(&format!("l3-pty-writer-1"), io::sink(), marspot_term::frame_writer::cap::PTY),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -679,7 +664,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
-            writer: spawn_pty_writer(2, Arc::clone(&pty_arc)),
+            writer: PtyWriter::new(&format!("l3-pty-writer-2"), io::sink(), marspot_term::frame_writer::cap::PTY),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
@@ -735,7 +720,7 @@ mod tests {
             terminal: Terminal::new(80, 24),
             bytelog: None,
             rx: { let (_t, r) = mpsc::channel(); r },
-            writer: spawn_pty_writer(0, Arc::clone(&pty_arc)),
+            writer: PtyWriter::new(&format!("l3-pty-writer-0"), io::sink(), marspot_term::frame_writer::cap::PTY),
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),

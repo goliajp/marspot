@@ -56,14 +56,48 @@ pub mod cap {
     pub const PTY: usize = 256 * 1024;
 }
 
-pub struct FrameWriter {
-    tx: Option<Sender<Frame>>,
+/// One queued item.  Implementors say how much they weigh against the
+/// cap and how to put themselves on the wire.
+pub trait Queued: Send + 'static {
+    /// Bytes this item accounts for against the queue cap.
+    fn queued_len(&self) -> usize;
+    /// Write the item in full.  Implementors own their own
+    /// short-write handling — a PTY needs a retry loop, a framed
+    /// protocol writes header+payload as a unit.
+    fn write_all_to(&self, sink: &mut dyn Write) -> std::io::Result<()>;
+}
+
+impl Queued for Frame {
+    fn queued_len(&self) -> usize {
+        self.wire_len()
+    }
+    fn write_all_to(&self, sink: &mut dyn Write) -> std::io::Result<()> {
+        // `&mut dyn Write` is itself `Write`, so re-borrow to satisfy
+        // `write_to`'s `Sized` bound without making the trait generic
+        // (which would stop it being object-safe).
+        self.write_to(&mut { sink }).map(|_| ())
+    }
+}
+
+/// A bounded queue in front of a thread that is allowed to block.
+///
+/// This is the shape every non-blocking writer in the tree needs, which
+/// is the whole reason it is generic rather than copied: the PTY writer,
+/// the L3→L2 control writer, and both L2 writers are the same machine
+/// with a different item type.  (It was in fact hand-written four times
+/// before this got extracted, under a comment claiming it existed so
+/// nobody would write it a third time.)
+pub struct BoundedWriter<T: Queued> {
+    tx: Option<Sender<T>>,
     pending: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
     cap_bytes: usize,
 }
 
-impl FrameWriter {
+/// Frame-carrying specialisation — the L1/L2/L3 protocol sockets.
+pub type FrameWriter = BoundedWriter<Frame>;
+
+impl<T: Queued> BoundedWriter<T> {
     /// Take over `sink`, writing from a thread named `name`.
     ///
     /// `cap_bytes` bounds what may sit queued before frames are
@@ -75,7 +109,7 @@ impl FrameWriter {
     where
         W: Write + Send + 'static,
     {
-        let (tx, rx): (Sender<Frame>, Receiver<Frame>) = mpsc::channel();
+        let (tx, rx): (Sender<T>, Receiver<T>) = mpsc::channel();
         let pending = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let pending_thread = Arc::clone(&pending);
@@ -83,13 +117,13 @@ impl FrameWriter {
             .name(name.to_string())
             .spawn(move || {
                 // Ends when the owner drops its Sender.
-                while let Ok(frame) = rx.recv() {
-                    let size = frame.wire_len();
+                while let Ok(item) = rx.recv() {
+                    let size = item.queued_len();
                     // A write error means the peer is gone.  Keep
                     // draining rather than exiting, so `pending` stays
                     // truthful and teardown happens through the normal
                     // EOF path instead of a queue that silently stops.
-                    let _ = frame.write_to(&mut sink);
+                    let _ = item.write_all_to(&mut sink);
                     pending_thread.fetch_sub(size, Ordering::SeqCst);
                 }
             })
@@ -102,8 +136,8 @@ impl FrameWriter {
     /// `false` means the frame was dropped: either the queue is full
     /// (the peer has stopped reading) or the writer is gone.  Callers
     /// log; retrying into a full queue only drops again.
-    pub fn send(&self, frame: Frame) -> bool {
-        let size = frame.wire_len();
+    pub fn send(&self, item: T) -> bool {
+        let size = item.queued_len();
         let Some(tx) = self.tx.as_ref() else {
             return false;
         };
@@ -112,7 +146,7 @@ impl FrameWriter {
             return false;
         }
         self.pending.fetch_add(size, Ordering::SeqCst);
-        if tx.send(frame).is_err() {
+        if tx.send(item).is_err() {
             self.pending.fetch_sub(size, Ordering::SeqCst);
             return false;
         }

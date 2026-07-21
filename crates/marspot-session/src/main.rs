@@ -21,7 +21,9 @@
 //! (self-creates the region, no input source) for the dev/test path.
 
 mod control_writer;
+mod snapshot_writer;
 use control_writer::ControlWriter;
+use snapshot_writer::SnapshotWriter;
 mod local_session;
 mod uds_server;
 
@@ -1296,62 +1298,12 @@ fn main() {
     // RFC-004 C.1 — periodic-snapshot bookkeeping (see the writer
     // block at the loop tail).
     const PERIODIC_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
-    /// Shortest main-loop iteration worth reporting as a stall.  Normal
+/// Shortest main-loop iteration worth reporting as a stall.  Normal
 /// iterations are sub-millisecond; a loop that services keystrokes has
 /// no business taking a tenth of a second, so anything past this is
 /// already anomalous and worth a line in the log.
 const LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(150);
 
-/// Off-loop writer for the periodic crash-safety snapshot.
-///
-/// Serialising is cheap and in-memory (state.bin runs ~100-300 KB), but
-/// the `write` + `rename` that follow are synchronous disk IO, and disk
-/// IO on this loop is a stall waiting for a busy disk.  Measured in the
-/// field: a 115 KB snapshot took **2.87 s** while a build was hammering
-/// the same disk — the pane was frozen for all of it.  Size was never
-/// the problem, contention was.
-///
-/// Latest-wins: the thread drains everything queued and writes only the
-/// newest, because an older snapshot of the same session has no value
-/// once a newer one exists.  That also bounds memory without a cap —
-/// the queue cannot outgrow the producer's 30 s cadence.
-struct SnapshotWriter {
-    tx: std::sync::mpsc::Sender<(std::path::PathBuf, Vec<u8>)>,
-}
-
-impl SnapshotWriter {
-    fn spawn(session_id: u64) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel::<(std::path::PathBuf, Vec<u8>)>();
-        std::thread::Builder::new()
-            .name(format!("l3-snapshot-writer-{session_id}"))
-            .spawn(move || {
-                while let Ok(first) = rx.recv() {
-                    let mut latest = first;
-                    while let Ok(next) = rx.try_recv() {
-                        latest = next;
-                    }
-                    let (path, body) = latest;
-                    let tmp = path.with_extension("bin.tmp");
-                    let r = std::fs::write(&tmp, &body)
-                        .and_then(|()| std::fs::rename(&tmp, &path));
-                    if let Err(e) = r {
-                        lx_warn!(
-                            "session.periodic_snapshot_failed",
-                            &format!("{e}"),
-                            path = path.display()
-                        );
-                    }
-                }
-            })
-            .expect("spawn l3-snapshot-writer thread");
-        Self { tx }
-    }
-
-    /// Queue a snapshot body.  Never blocks.
-    fn send(&self, path: std::path::PathBuf, body: Vec<u8>) -> bool {
-        self.tx.send((path, body)).is_ok()
-    }
-}
 
 const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_snapshot_generation: u64 = session.terminal().generation();
