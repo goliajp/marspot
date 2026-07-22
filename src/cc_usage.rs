@@ -143,7 +143,57 @@ pub fn parse(body: &str) -> Option<CcUsage> {
     if accounts.is_empty() {
         return None;
     }
+    // The collector writes accounts in completion order, so the feed
+    // arrives shuffled (3, 1, 2, 4) and changes between refreshes.  Sort
+    // here rather than in the painter: the modal draws the same list
+    // twice — cards and timeline rows — and those two must agree.
+    accounts.sort_by(|a, b| natural_cmp(&a.name, &b.name).then_with(|| a.email.cmp(&b.email)));
     Some(CcUsage { generated_at, accounts })
+}
+
+/// Compare names the way a reader scans them: digit runs compare as
+/// numbers, everything else bytewise.
+///
+/// Plain string ordering is wrong here — these names end in an index,
+/// and `"Claude 10" < "Claude 2"` lexicographically.  Four accounts
+/// don't expose that today; a fifth-through-tenth would.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let (si, sj) = (i, j);
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Leading zeros carry no magnitude, so strip them before
+            // comparing by width.
+            let da = strip_zeros(&a[si..i]);
+            let db = strip_zeros(&b[sj..j]);
+            match da.len().cmp(&db.len()).then_with(|| da.cmp(db)) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+        } else {
+            match a[i].cmp(&b[j]) {
+                Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j))
+}
+
+fn strip_zeros(digits: &[u8]) -> &[u8] {
+    let start = digits.iter().position(|&d| d != b'0').unwrap_or(digits.len());
+    &digits[start..]
 }
 
 /// `"key": "value"` string extractor.
@@ -212,20 +262,12 @@ pub fn local_mdhm(unix: i64) -> (u32, u32, u32, u32) {
 mod tests {
     use super::*;
 
+    /// Accounts are deliberately out of order here, because that is how
+    /// the real feed arrives — the collector queries accounts
+    /// concurrently and appends each as it answers.
     const SAMPLE: &str = r#"{
   "generated_at": "2026-07-19T01:13:59.715798+00:00",
   "accounts": [
-    {
-      "name": "Claude 1",
-      "email": "lihao@golia.jp",
-      "status": "allowed",
-      "utilization_5h": 0.0,
-      "utilization_7d": 0.39,
-      "reset_5h": 1784429400,
-      "reset_7d": 1784862000,
-      "tier": "max_20x",
-      "collected_at": "2026-07-19T01:13:56.377929+00:00"
-    },
     {
       "name": "Claude 2",
       "email": "admin@golia.jp",
@@ -236,6 +278,17 @@ mod tests {
       "reset_7d": 1784494800,
       "tier": "max_20x",
       "collected_at": "2026-07-19T01:13:57.192408+00:00"
+    },
+    {
+      "name": "Claude 1",
+      "email": "lihao@golia.jp",
+      "status": "allowed",
+      "utilization_5h": 0.0,
+      "utilization_7d": 0.39,
+      "reset_5h": 1784429400,
+      "reset_7d": 1784862000,
+      "tier": "max_20x",
+      "collected_at": "2026-07-19T01:13:56.377929+00:00"
     }
   ]
 }"#;
@@ -278,6 +331,28 @@ mod tests {
         let long = Other.label("some_unexpected_future_value");
         assert_eq!(long, "some_un");
         assert!(long.chars().count() <= 7);
+    }
+
+    /// Names end in an index, so ordering must be numeric.  Plain
+    /// string ordering puts "Claude 10" between 1 and 2 — invisible at
+    /// four accounts, wrong at ten.
+    #[test]
+    fn accounts_order_numerically_not_lexicographically() {
+        let feed = |names: &[&str]| {
+            let objs: Vec<String> = names
+                .iter()
+                .map(|n| format!("{{\"name\": \"{n}\", \"email\": \"a@b\"}}"))
+                .collect();
+            format!("{{\"accounts\": [{}]}}", objs.join(","))
+        };
+        let u = parse(&feed(&["Claude 10", "Claude 2", "Claude 1", "Claude 9"])).unwrap();
+        let got: Vec<&str> = u.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(got, ["Claude 1", "Claude 2", "Claude 9", "Claude 10"]);
+
+        // Zero-padding is presentation, not magnitude.
+        let u = parse(&feed(&["Claude 03", "Claude 1"])).unwrap();
+        let got: Vec<&str> = u.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(got, ["Claude 1", "Claude 03"]);
     }
 
     #[test]
