@@ -118,6 +118,29 @@ fn spawn_open(arg: &str) {
     }
 }
 
+/// `install-local.sh`'s `sup_log` shells out to
+/// `marspot-core --log-event <tag> <detail>` so supervisor-side
+/// decisions land in the same marspot.log as everything else.
+///
+/// That mechanism was added after an install-local bug took down nine
+/// live sessions with no log line explaining why — and it had never
+/// once worked.  Nothing parsed argv, so every call fell straight into
+/// the boot path and panicked in `env_required` on the missing surface
+/// id: three dead processes per install (the script tries three binary
+/// paths) and not one line written.
+///
+/// Hence this is the first thing `main` does, before any env read.
+fn parse_log_event(args: &[String]) -> Option<(&str, String)> {
+    if args.first().map(String::as_str) != Some("--log-event") {
+        return None;
+    }
+    // A call with no tag is still a call — log it under a placeholder
+    // rather than falling through to the boot path and panicking,
+    // which is the failure this whole function exists to end.
+    let tag = args.get(1).map(String::as_str).unwrap_or("untagged");
+    Some((tag, args.get(2..).unwrap_or(&[]).join(" ")))
+}
+
 fn env_required<T: std::str::FromStr>(name: &str) -> T {
     let raw = std::env::var(name)
         .unwrap_or_else(|_| panic!("[core] missing required env var {name}"));
@@ -442,6 +465,54 @@ fn link_menu_items_for(
 /// deliberately-broken path for the failure tests).  These pin the
 /// RFC-004 invariants: slot order preserved, slots never compact,
 /// sids stable, failures yield vacant placeholders, orphans adopted.
+#[cfg(test)]
+mod sup_log_tests {
+    use super::parse_log_event;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The shape `install-local.sh` actually sends.
+    #[test]
+    fn log_event_is_recognised_and_keeps_the_whole_detail() {
+        let args = argv(&[
+            "--log-event",
+            "UPDATE_SWAP",
+            "single-core",
+            "swap",
+            "complete",
+        ]);
+        assert_eq!(
+            parse_log_event(&args),
+            Some(("UPDATE_SWAP", "single-core swap complete".to_string())),
+            "detail is several argv words and must be rejoined"
+        );
+    }
+
+    /// Degenerate calls must still be handled here rather than falling
+    /// through to the boot path, which panics on the missing surface
+    /// env — that fall-through is the bug this replaced.
+    #[test]
+    fn malformed_log_event_calls_never_fall_through() {
+        let bare = argv(&["--log-event"]);
+        assert_eq!(parse_log_event(&bare), Some(("untagged", String::new())));
+        let tag_only = argv(&["--log-event", "TAG"]);
+        assert_eq!(parse_log_event(&tag_only), Some(("TAG", String::new())));
+    }
+
+    /// A normal boot must NOT be mistaken for a log-event call.
+    #[test]
+    fn boot_argv_is_not_a_log_event() {
+        let empty = argv(&[]);
+        assert_eq!(parse_log_event(&empty), None);
+        let status = argv(&["--status"]);
+        assert_eq!(parse_log_event(&status), None);
+        let wrong_order = argv(&["TAG", "--log-event"]);
+        assert_eq!(parse_log_event(&wrong_order), None);
+    }
+}
+
 #[cfg(test)]
 mod window_state_tests {
     use super::*;
@@ -5398,6 +5469,14 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("core");
+
+    // Must run before any env is read — see `parse_log_event`.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((tag, detail)) = parse_log_event(&args) {
+        lx_event!("SUP_LOG", &detail, tag = tag);
+        return;
+    }
+
     lx_event!(
         "CORE_BOOT",
         "marspot-core started",
