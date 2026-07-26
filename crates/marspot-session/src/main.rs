@@ -796,7 +796,10 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
         match Frame::read_from(&mut reader) {
             Ok(Some(f)) => match f.msg_type {
                 MsgType::KeyEvent => {
-                    if let Ok(w) = decode_key_event(&f.payload) {
+                    // The trailing window id is an L1↔L2 concern; a
+                    // session belongs to a pane, and a pane does not
+                    // care which window draws it.
+                    if let Ok((w, _window_id)) = decode_key_event(&f.payload) {
                         let (e, m) = wire_to_event(w);
                         if tx.send(SessionEvent::Key(e, m)).is_err() {
                             break;

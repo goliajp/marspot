@@ -82,6 +82,36 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"MSPC");
 /// (`SurfaceAttach` frame, plus `SurfaceReady` per frame).  v=1 used
 /// a single IOSurface and the `Resize` frame to attach it.
 pub const PROTO_VERSION: u32 = 2;
+
+/// RFC-005 — the window a frame is about.
+///
+/// Deliberately NOT a `PROTO_VERSION` bump.  The shell kills a core
+/// whose `HelloAck` version differs from its own, so bumping the
+/// version is itself the hazardous act: a core-only update would put
+/// a v3 shell against a v2 core and respawn-loop it.  Instead the
+/// window id rides along in ways that are invisible to a peer that
+/// does not know about it:
+///
+/// * input frames **append** the id.  Every one of those decoders
+///   already reads `payload.len() < N` and ignores a longer tail, so
+///   an old reader keeps working and a new reader falls back to
+///   `FIRST_WINDOW_ID` when the tail is absent.
+/// * `SurfaceAttach` could not append — its decoder demands exactly
+///   32 bytes — so the window-aware form is a **new msg type**, which
+///   old readers silently skip (`Frame::read_from`'s forward-compat
+///   rule).  The legacy frame keeps being sent for the first window.
+///
+/// Both directions therefore stay lossless across any skew.
+pub const FIRST_WINDOW_ID: u32 = 1;
+
+/// Read a trailing window id, or `FIRST_WINDOW_ID` when the writer
+/// predates RFC-005.  `at` is the offset the id would start at.
+fn trailing_window_id(payload: &[u8], at: usize) -> u32 {
+    match payload.get(at..at + 4) {
+        Some(b) => u32::from_le_bytes(b.try_into().unwrap()),
+        None => FIRST_WINDOW_ID,
+    }
+}
 pub const HEADER_LEN: usize = 12;
 /// Sanity ceiling.  Input frames are tiny (≤256 B); a generous cap
 /// rules out runaway allocations from corrupted lengths.
@@ -332,6 +362,14 @@ pub enum MsgType {
     /// tag is the plugin-assigned opaque id from the menu frame.
     /// Payload: `session_id u64 LE, tag u32 LE`.
     PaneBadgeMenuAction = 60,
+    // ── windows (61..=63) — RFC-005 ──
+    /// Window-aware `SurfaceAttach`; carries a trailing `window_id`.
+    /// A frame naming an unseen window IS that window's birth event.
+    SurfaceAttachWindow = 61,
+    /// A window went away; the core drops its `WindowState`.
+    WindowClosed = 62,
+    /// Which window is key.  Keyboard and IME follow it.
+    WindowFocus = 63,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -381,6 +419,9 @@ impl MsgType {
             58 => MsgType::PaneBadgeMenuRequest,
             59 => MsgType::PaneBadgeMenu,
             60 => MsgType::PaneBadgeMenuAction,
+            61 => MsgType::SurfaceAttachWindow,
+            62 => MsgType::WindowClosed,
+            63 => MsgType::WindowFocus,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -874,9 +915,9 @@ pub fn mods_from_byte(b: u8) -> (bool, bool, bool, bool) {
     )
 }
 
-pub fn encode_key_event(ev: &WireKeyEvent) -> Vec<u8> {
+pub fn encode_key_event(ev: &WireKeyEvent, window_id: u32) -> Vec<u8> {
     let text_bytes = ev.text.as_bytes();
-    let mut out = Vec::with_capacity(10 + text_bytes.len());
+    let mut out = Vec::with_capacity(10 + text_bytes.len() + 4);
     out.push(ev.state as u8);
     out.push(ev.mods);
     out.push(ev.kind as u8);
@@ -884,10 +925,11 @@ pub fn encode_key_event(ev: &WireKeyEvent) -> Vec<u8> {
     out.extend_from_slice(&ev.key_data.to_le_bytes());
     out.extend_from_slice(&(text_bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(text_bytes);
+    out.extend_from_slice(&window_id.to_le_bytes());
     out
 }
 
-pub fn decode_key_event(payload: &[u8]) -> io::Result<WireKeyEvent> {
+pub fn decode_key_event(payload: &[u8]) -> io::Result<(WireKeyEvent, u32)> {
     if payload.len() < 10 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -927,26 +969,30 @@ pub fn decode_key_event(payload: &[u8]) -> io::Result<WireKeyEvent> {
     let text = std::str::from_utf8(&payload[10..10 + text_len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?
         .to_string();
-    Ok(WireKeyEvent {
-        state,
-        mods,
-        kind,
-        key_data,
-        text,
-    })
+    Ok((
+        WireKeyEvent {
+            state,
+            mods,
+            kind,
+            key_data,
+            text,
+        },
+        trailing_window_id(payload, 10 + text_len),
+    ))
 }
 
 // ── Mouse / Scroll ──
 
-pub fn encode_mouse(x: f64, y: f64, mods: u8) -> Vec<u8> {
-    let mut out = Vec::with_capacity(17);
+pub fn encode_mouse(x: f64, y: f64, mods: u8, window_id: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(21);
     out.extend_from_slice(&x.to_le_bytes());
     out.extend_from_slice(&y.to_le_bytes());
     out.push(mods);
+    out.extend_from_slice(&window_id.to_le_bytes());
     out
 }
 
-pub fn decode_mouse(payload: &[u8]) -> io::Result<(f64, f64, u8)> {
+pub fn decode_mouse(payload: &[u8]) -> io::Result<(f64, f64, u8, u32)> {
     if payload.len() < 17 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -956,18 +1002,19 @@ pub fn decode_mouse(payload: &[u8]) -> io::Result<(f64, f64, u8)> {
     let x = f64::from_le_bytes(payload[0..8].try_into().unwrap());
     let y = f64::from_le_bytes(payload[8..16].try_into().unwrap());
     let mods = payload[16];
-    Ok((x, y, mods))
+    Ok((x, y, mods, trailing_window_id(payload, 17)))
 }
 
-pub fn encode_scroll(dx: f64, dy: f64, precise: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(17);
+pub fn encode_scroll(dx: f64, dy: f64, precise: bool, window_id: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(21);
     out.extend_from_slice(&dx.to_le_bytes());
     out.extend_from_slice(&dy.to_le_bytes());
     out.push(if precise { 1 } else { 0 });
+    out.extend_from_slice(&window_id.to_le_bytes());
     out
 }
 
-pub fn decode_scroll(payload: &[u8]) -> io::Result<(f64, f64, bool)> {
+pub fn decode_scroll(payload: &[u8]) -> io::Result<(f64, f64, bool, u32)> {
     if payload.len() < 17 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -977,7 +1024,7 @@ pub fn decode_scroll(payload: &[u8]) -> io::Result<(f64, f64, bool)> {
     let dx = f64::from_le_bytes(payload[0..8].try_into().unwrap());
     let dy = f64::from_le_bytes(payload[8..16].try_into().unwrap());
     let precise = payload[16] != 0;
-    Ok((dx, dy, precise))
+    Ok((dx, dy, precise, trailing_window_id(payload, 17)))
 }
 
 // ── Focus / Resize / Preedit ──
@@ -1042,6 +1089,77 @@ pub fn decode_surface_attach(
         f64::from_le_bytes(payload[16..24].try_into().unwrap()),
         f64::from_le_bytes(payload[24..32].try_into().unwrap()),
     ))
+}
+
+/// Window-aware `SurfaceAttach` (RFC-005): the legacy 32-byte body
+/// plus a trailing `window_id`.
+///
+/// A separate msg type rather than a longer `SurfaceAttach` because
+/// that decoder demands *exactly* 32 bytes — appending would hard-fail
+/// on every core already installed.  An old core skips this type
+/// silently and keeps driving off the legacy frame, so the shell sends
+/// both for the first window.
+///
+/// A frame naming a `window_id` the core has not seen is that
+/// window's birth event; there is no separate "create window" message.
+pub fn encode_surface_attach_window(
+    front_id: u32,
+    back_id: u32,
+    w_phys: f64,
+    h_phys: f64,
+    scale: f64,
+    window_id: u32,
+) -> Vec<u8> {
+    let mut v = encode_surface_attach(front_id, back_id, w_phys, h_phys, scale);
+    v.extend_from_slice(&window_id.to_le_bytes());
+    v
+}
+
+pub fn decode_surface_attach_window(
+    payload: &[u8],
+) -> io::Result<(u32, u32, f64, f64, f64, u32)> {
+    if payload.len() < 36 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SURFACE_ATTACH_WINDOW payload < 36 bytes",
+        ));
+    }
+    let (front, back, w, h, scale) = decode_surface_attach(&payload[..32])?;
+    Ok((front, back, w, h, scale, trailing_window_id(payload, 32)))
+}
+
+/// A window closed.  The core drops that `WindowState` — and with it
+/// the panes it held, which are closed the same way the sidebar's
+/// `[x]` closes one.
+pub fn encode_window_closed(window_id: u32) -> Vec<u8> {
+    window_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_window_closed(payload: &[u8]) -> io::Result<u32> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WINDOW_CLOSED payload < 4 bytes",
+        ));
+    }
+    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
+}
+
+/// Which window became key.  Keyboard and IME follow this rather than
+/// tagging every keystroke: they are by definition delivered to the
+/// key window, and the frames share one ordered socket.
+pub fn encode_window_focus(window_id: u32) -> Vec<u8> {
+    window_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_window_focus(payload: &[u8]) -> io::Result<u32> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WINDOW_FOCUS payload < 4 bytes",
+        ));
+    }
+    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
 }
 
 pub fn encode_resize(new_surface_id: u32, w_phys: f64, h_phys: f64, scale: f64) -> Vec<u8> {
@@ -1352,7 +1470,11 @@ pub fn decode_pane_session_end(payload: &[u8]) -> io::Result<u64> {
 /// WireKeyEvent encoding (variable-length).  Plugin handler decodes
 /// the WireKeyEvent the same way the regular KeyEvent path does.
 pub fn encode_pane_session_key(session_id: u64, ev: &WireKeyEvent) -> Vec<u8> {
-    let key_payload = encode_key_event(ev);
+    // Pane sessions are addressed by session id, which is window-blind
+    // — the plugin holding the pane does not care which window it is
+    // drawn in — so the embedded key event carries a placeholder id
+    // that the decoder drops.
+    let key_payload = encode_key_event(ev, FIRST_WINDOW_ID);
     let mut v = Vec::with_capacity(8 + key_payload.len());
     v.extend_from_slice(&session_id.to_le_bytes());
     v.extend_from_slice(&key_payload);
@@ -1367,7 +1489,7 @@ pub fn decode_pane_session_key(payload: &[u8]) -> io::Result<(u64, WireKeyEvent)
         ));
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let ev = decode_key_event(&payload[8..])?;
+    let (ev, _window_id) = decode_key_event(&payload[8..])?;
     Ok((sid, ev))
 }
 
@@ -1561,22 +1683,28 @@ pub fn decode_surface_ready(payload: &[u8]) -> io::Result<u32> {
 /// CaretRect payload: `[present: u8]` then, when present == 1,
 /// `4 × f64 LE` (x, y, w, h) in view-local physical pixels with a
 /// top-left origin — the exact tuple `set_caret_rect_phys` takes.
-pub fn encode_caret_rect(rect: Option<(f64, f64, f64, f64)>) -> Vec<u8> {
+/// The trailing window id sits after whatever the variant carries —
+/// offset 1 for `None`, offset 33 for `Some` — because it has to go
+/// *after* the existing bytes to stay invisible to an old reader.
+pub fn encode_caret_rect(rect: Option<(f64, f64, f64, f64)>, window_id: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(37);
     match rect {
-        None => vec![0],
+        None => out.push(0),
         Some((x, y, w, h)) => {
-            let mut out = Vec::with_capacity(33);
             out.push(1);
             out.extend_from_slice(&x.to_le_bytes());
             out.extend_from_slice(&y.to_le_bytes());
             out.extend_from_slice(&w.to_le_bytes());
             out.extend_from_slice(&h.to_le_bytes());
-            out
         }
     }
+    out.extend_from_slice(&window_id.to_le_bytes());
+    out
 }
 
-pub fn decode_caret_rect(payload: &[u8]) -> io::Result<Option<(f64, f64, f64, f64)>> {
+pub fn decode_caret_rect(
+    payload: &[u8],
+) -> io::Result<(Option<(f64, f64, f64, f64)>, u32)> {
     if payload.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1584,7 +1712,7 @@ pub fn decode_caret_rect(payload: &[u8]) -> io::Result<Option<(f64, f64, f64, f6
         ));
     }
     if payload[0] == 0 {
-        return Ok(None);
+        return Ok((None, trailing_window_id(payload, 1)));
     }
     if payload.len() < 33 {
         return Err(io::Error::new(
@@ -1593,18 +1721,22 @@ pub fn decode_caret_rect(payload: &[u8]) -> io::Result<Option<(f64, f64, f64, f6
         ));
     }
     let f = |i: usize| f64::from_le_bytes(payload[i..i + 8].try_into().unwrap());
-    Ok(Some((f(1), f(9), f(17), f(25))))
+    Ok((
+        Some((f(1), f(9), f(17), f(25))),
+        trailing_window_id(payload, 33),
+    ))
 }
 
-pub fn encode_preedit(text: &str) -> Vec<u8> {
+pub fn encode_preedit(text: &str, window_id: u32) -> Vec<u8> {
     let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(2 + bytes.len());
+    let mut out = Vec::with_capacity(2 + bytes.len() + 4);
     out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(bytes);
+    out.extend_from_slice(&window_id.to_le_bytes());
     out
 }
 
-pub fn decode_preedit(payload: &[u8]) -> io::Result<String> {
+pub fn decode_preedit(payload: &[u8]) -> io::Result<(String, u32)> {
     if payload.len() < 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1618,9 +1750,10 @@ pub fn decode_preedit(payload: &[u8]) -> io::Result<String> {
             "preedit payload truncated",
         ));
     }
-    std::str::from_utf8(&payload[2..2 + len])
+    let text = std::str::from_utf8(&payload[2..2 + len])
         .map(|s| s.to_string())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok((text, trailing_window_id(payload, 2 + len)))
 }
 
 /// `Paste` payload: `[len u16 LE][utf8 text]` — same wire shape as Preedit.
@@ -1654,9 +1787,9 @@ pub fn decode_paste(payload: &[u8]) -> io::Result<String> {
 /// Encode a `FileDrop` payload: drop point (physical px, top-left
 /// origin) + the dropped paths.  Layout: `x f64 LE, y f64 LE,
 /// count u16 LE`, then per path `len u16 LE + UTF-8 bytes`.
-pub fn encode_file_drop(x: f64, y: f64, paths: &[String]) -> Vec<u8> {
+pub fn encode_file_drop(x: f64, y: f64, paths: &[String], window_id: u32) -> Vec<u8> {
     let body: usize = paths.iter().map(|p| 2 + p.len()).sum();
-    let mut out = Vec::with_capacity(18 + body);
+    let mut out = Vec::with_capacity(18 + body + 4);
     out.extend_from_slice(&x.to_le_bytes());
     out.extend_from_slice(&y.to_le_bytes());
     out.extend_from_slice(&(paths.len() as u16).to_le_bytes());
@@ -1664,10 +1797,11 @@ pub fn encode_file_drop(x: f64, y: f64, paths: &[String]) -> Vec<u8> {
         out.extend_from_slice(&(p.len() as u16).to_le_bytes());
         out.extend_from_slice(p.as_bytes());
     }
+    out.extend_from_slice(&window_id.to_le_bytes());
     out
 }
 
-pub fn decode_file_drop(payload: &[u8]) -> io::Result<(f64, f64, Vec<String>)> {
+pub fn decode_file_drop(payload: &[u8]) -> io::Result<(f64, f64, Vec<String>, u32)> {
     if payload.len() < 18 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1699,7 +1833,7 @@ pub fn decode_file_drop(payload: &[u8]) -> io::Result<(f64, f64, Vec<String>)> {
         paths.push(s.to_string());
         off += len;
     }
-    Ok((x, y, paths))
+    Ok((x, y, paths, trailing_window_id(payload, off)))
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1967,8 +2101,9 @@ mod tests {
             key_data: 'a' as u32,
             text: "a".to_string(),
         };
-        let p = encode_key_event(&ev);
-        let back = decode_key_event(&p).unwrap();
+        let p = encode_key_event(&ev, 7);
+        let (back, win) = decode_key_event(&p).unwrap();
+        assert_eq!(win, 7);
         assert_eq!(back.state, ev.state);
         assert_eq!(back.mods, ev.mods);
         assert_eq!(back.kind, ev.kind);
@@ -1985,8 +2120,8 @@ mod tests {
             key_data: WireNamedKey::ArrowUp as u32,
             text: String::new(),
         };
-        let p = encode_key_event(&ev);
-        let back = decode_key_event(&p).unwrap();
+        let p = encode_key_event(&ev, FIRST_WINDOW_ID);
+        let (back, _win) = decode_key_event(&p).unwrap();
         assert_eq!(back.kind, WireLogicalKind::Named);
         assert_eq!(
             WireNamedKey::from_u8(back.key_data as u8),
@@ -1997,20 +2132,22 @@ mod tests {
 
     #[test]
     fn mouse_roundtrip() {
-        let p = encode_mouse(123.5, -45.25, 0b0010);
-        let (x, y, m) = decode_mouse(&p).unwrap();
+        let p = encode_mouse(123.5, -45.25, 0b0010, 3);
+        let (x, y, m, win) = decode_mouse(&p).unwrap();
         assert_eq!(x, 123.5);
         assert_eq!(y, -45.25);
         assert_eq!(m, 0b0010);
+        assert_eq!(win, 3);
     }
 
     #[test]
     fn scroll_roundtrip() {
-        let p = encode_scroll(0.0, 12.5, true);
-        let (dx, dy, precise) = decode_scroll(&p).unwrap();
+        let p = encode_scroll(0.0, 12.5, true, 9);
+        let (dx, dy, precise, win) = decode_scroll(&p).unwrap();
         assert_eq!(dx, 0.0);
         assert_eq!(dy, 12.5);
         assert!(precise);
+        assert_eq!(win, 9);
     }
 
     #[test]
@@ -2189,9 +2326,10 @@ mod tests {
 
     #[test]
     fn preedit_roundtrip() {
-        let p = encode_preedit("你好");
-        let back = decode_preedit(&p).unwrap();
+        let p = encode_preedit("你好", 4);
+        let (back, win) = decode_preedit(&p).unwrap();
         assert_eq!(back, "你好");
+        assert_eq!(win, 4);
     }
 
     #[test]
@@ -2322,24 +2460,147 @@ mod tests {
             "/Users/x/My File.txt".to_string(),
             "/tmp/GOLIA-代表取缔役印.png".to_string(),
         ];
-        let payload = encode_file_drop(123.5, -0.25, &paths);
-        let (x, y, got) = decode_file_drop(&payload).unwrap();
+        let payload = encode_file_drop(123.5, -0.25, &paths, 2);
+        let (x, y, got, win) = decode_file_drop(&payload).unwrap();
         assert_eq!(x, 123.5);
         assert_eq!(y, -0.25);
         assert_eq!(got, paths);
+        assert_eq!(win, 2);
     }
 
     #[test]
     fn file_drop_empty_paths_roundtrip() {
-        let payload = encode_file_drop(0.0, 0.0, &[]);
-        let (_, _, got) = decode_file_drop(&payload).unwrap();
+        let payload = encode_file_drop(0.0, 0.0, &[], FIRST_WINDOW_ID);
+        let (_, _, got, _) = decode_file_drop(&payload).unwrap();
         assert!(got.is_empty());
+    }
+
+    // ── RFC-005 window id: cross-version safety ───────────────
+    //
+    // The whole design rests on one claim: a peer that predates the
+    // window id and a peer that knows about it can talk to each other
+    // in either direction without losing anything.  These pin both
+    // directions with hand-built payloads, because "old peer" cannot
+    // be produced from this source tree.
+
+    /// New reader ← old writer.  A payload without the trailing id
+    /// must decode as the first window, not fail and not read garbage.
+    #[test]
+    fn input_frames_without_a_window_id_decode_as_the_first_window() {
+        // Old encode_mouse: x, y, mods — 17 bytes, no tail.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&12.5f64.to_le_bytes());
+        legacy.extend_from_slice(&34.5f64.to_le_bytes());
+        legacy.push(0b0100);
+        assert_eq!(legacy.len(), 17);
+        let (x, y, m, win) = decode_mouse(&legacy).unwrap();
+        assert_eq!((x, y, m), (12.5, 34.5, 0b0100));
+        assert_eq!(win, FIRST_WINDOW_ID);
+
+        // Old encode_scroll: dx, dy, precise — also 17.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&0.0f64.to_le_bytes());
+        legacy.extend_from_slice(&(-3.5f64).to_le_bytes());
+        legacy.push(1);
+        let (_, dy, precise, win) = decode_scroll(&legacy).unwrap();
+        assert_eq!(dy, -3.5);
+        assert!(precise);
+        assert_eq!(win, FIRST_WINDOW_ID);
+
+        // Old encode_preedit: len-prefixed utf8, no tail.
+        let text = "ねこ";
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&(text.len() as u16).to_le_bytes());
+        legacy.extend_from_slice(text.as_bytes());
+        let (got, win) = decode_preedit(&legacy).unwrap();
+        assert_eq!(got, text);
+        assert_eq!(win, FIRST_WINDOW_ID);
+
+        // Old encode_caret_rect, both variants.
+        let (rect, win) = decode_caret_rect(&[0]).unwrap();
+        assert!(rect.is_none());
+        assert_eq!(win, FIRST_WINDOW_ID);
+        let mut legacy = vec![1u8];
+        for v in [1.0f64, 2.0, 3.0, 4.0] {
+            legacy.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(legacy.len(), 33);
+        let (rect, win) = decode_caret_rect(&legacy).unwrap();
+        assert_eq!(rect, Some((1.0, 2.0, 3.0, 4.0)));
+        assert_eq!(win, FIRST_WINDOW_ID);
+    }
+
+    /// Old reader ← new writer.  Every input payload must keep its
+    /// legacy prefix byte-for-byte, so a peer that stops reading at the
+    /// old length still gets the right values.
+    #[test]
+    fn window_id_is_appended_so_old_readers_see_an_unchanged_prefix() {
+        let p = encode_mouse(12.5, 34.5, 0b0100, 42);
+        assert_eq!(p.len(), 21, "17 legacy bytes + 4");
+        assert_eq!(f64::from_le_bytes(p[0..8].try_into().unwrap()), 12.5);
+        assert_eq!(f64::from_le_bytes(p[8..16].try_into().unwrap()), 34.5);
+        assert_eq!(p[16], 0b0100);
+
+        let p = encode_scroll(0.0, -3.5, true, 42);
+        assert_eq!(p.len(), 21);
+        assert_eq!(f64::from_le_bytes(p[8..16].try_into().unwrap()), -3.5);
+        assert_eq!(p[16], 1);
+
+        let p = encode_caret_rect(Some((1.0, 2.0, 3.0, 4.0)), 42);
+        assert_eq!(p.len(), 37, "33 legacy bytes + 4");
+        assert_eq!(p[0], 1);
+        assert_eq!(f64::from_le_bytes(p[25..33].try_into().unwrap()), 4.0);
+
+        // The `None` caret is a single 0 byte to an old reader, which
+        // returns early on it and never looks at the tail.
+        let p = encode_caret_rect(None, 42);
+        assert_eq!(p[0], 0);
+    }
+
+    /// `SurfaceAttach` is the one frame that could not grow: its
+    /// decoder demands exactly 32 bytes.  The window-aware form is a
+    /// separate message whose first 32 bytes are still a valid legacy
+    /// payload, and the legacy encoder must stay exactly 32 bytes.
+    #[test]
+    fn surface_attach_window_extends_a_still_valid_legacy_payload() {
+        let legacy = encode_surface_attach(11, 22, 800.0, 600.0, 2.0);
+        assert_eq!(legacy.len(), 32, "growing this breaks every old core");
+        assert!(decode_surface_attach(&legacy).is_ok());
+
+        let p = encode_surface_attach_window(11, 22, 800.0, 600.0, 2.0, 5);
+        assert_eq!(p.len(), 36);
+        assert_eq!(&p[..32], &legacy[..], "prefix must stay legacy-shaped");
+        assert!(
+            decode_surface_attach(&p).is_err(),
+            "the strict legacy decoder rejects the longer body — which \
+             is exactly why this needed its own msg type"
+        );
+        let (f, b, w, h, sc, win) = decode_surface_attach_window(&p).unwrap();
+        assert_eq!((f, b, w, h, sc, win), (11, 22, 800.0, 600.0, 2.0, 5));
+    }
+
+    /// The window lifecycle messages must be decodable by number, and
+    /// an old peer must treat them as unknown-and-skippable rather than
+    /// as a stream error.
+    #[test]
+    fn window_lifecycle_frames_round_trip() {
+        assert_eq!(
+            decode_window_closed(&encode_window_closed(9)).unwrap(),
+            9
+        );
+        assert_eq!(decode_window_focus(&encode_window_focus(3)).unwrap(), 3);
+        assert_eq!(MsgType::from_u32(61), Some(MsgType::SurfaceAttachWindow));
+        assert_eq!(MsgType::from_u32(62), Some(MsgType::WindowClosed));
+        assert_eq!(MsgType::from_u32(63), Some(MsgType::WindowFocus));
     }
 
     #[test]
     fn file_drop_truncated_rejected() {
-        let payload = encode_file_drop(1.0, 2.0, &["/tmp/a".to_string()]);
-        assert!(decode_file_drop(&payload[..payload.len() - 1]).is_err());
+        let payload = encode_file_drop(1.0, 2.0, &["/tmp/a".to_string()], FIRST_WINDOW_ID);
+        // Chopping the trailing window id is fine — that is exactly the
+        // shape an old writer produces.  Cutting into the path list is
+        // not.
         assert!(decode_file_drop(&payload[..10]).is_err());
+        assert!(decode_file_drop(&payload[..payload.len() - 8]).is_err());
     }
 }

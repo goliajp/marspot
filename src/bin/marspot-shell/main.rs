@@ -425,7 +425,8 @@ use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
     decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_file_drop,
     encode_focus, encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
-    encode_scroll, encode_surface_attach, event_to_wire, struct_to_mods_byte, Frame, MsgType,
+    encode_scroll, encode_surface_attach, encode_surface_attach_window, event_to_wire,
+    struct_to_mods_byte, Frame, MsgType,
     DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID,
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
 };
@@ -460,7 +461,9 @@ enum ShellInbox {
     /// Focused-pane caret rect from the core (view-local physical
     /// pixels), forwarded to AppKit so the IME candidate window
     /// anchors under the caret.
-    CaretRect(Option<(f64, f64, f64, f64)>),
+    /// Caret rect plus the window it belongs to — the shell parks the
+    /// IME candidate panel against that window.
+    CaretRect(Option<(f64, f64, f64, f64)>, u32),
     /// Core rendered a fresh frame into the IOSurface — present it.  Carries
     /// nothing; its arrival (via the reader's `proxy.wake()`) drives the
     /// per-frame present, replacing the blind ~60 fps redraw timer.
@@ -838,6 +841,46 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
 }
 
 impl ShellApp {
+    /// Announce a surface pair for one window.
+    ///
+    /// Sends BOTH forms: the legacy window-blind `SurfaceAttach`, which
+    /// is the only one a core predating RFC-005 understands, and the
+    /// window-aware one.  A new core ignores the legacy frame from the
+    /// first window-aware frame onward, so neither peer ever attaches
+    /// twice and neither is left without a surface across a skewed
+    /// update.  The legacy frame only makes sense for the first window
+    /// — it carries no id — so later windows send just the new form.
+    fn send_surface_attach(
+        &self,
+        window_id: u32,
+        f: u32,
+        b: u32,
+        w_phys: f64,
+        h_phys: f64,
+        scale: f64,
+    ) {
+        if window_id == marspot::shell_proto::FIRST_WINDOW_ID {
+            self.send(
+                MsgType::SurfaceAttach,
+                encode_surface_attach(f, b, w_phys, h_phys, scale),
+            );
+        }
+        self.send(
+            MsgType::SurfaceAttachWindow,
+            encode_surface_attach_window(f, b, w_phys, h_phys, scale, window_id),
+        );
+    }
+
+    /// Which window an AppKit callback is about.
+    ///
+    /// RFC-005 step 2: the shell owns exactly one window, so this is a
+    /// constant — but every input frame now names it, so step 4 turns
+    /// this into a lookup from the `MarspotAppCtx` the callback was
+    /// dispatched with and nothing downstream changes.
+    fn event_window(&self) -> u32 {
+        marspot::shell_proto::FIRST_WINDOW_ID
+    }
+
     fn new(proxy: EventProxy) -> Self {
         let binaries = BinaryTree::default_for("marspot-core")
             .expect("HOME must be set to manage binary slots");
@@ -1473,15 +1516,13 @@ impl ShellApp {
                         }
                         let (f, b) = pair.ids();
                         self.pending_surfaces = Some(pair);
-                        self.send(
-                            MsgType::SurfaceAttach,
-                            encode_surface_attach(
-                                f,
-                                b,
-                                w_px as f64,
-                                h_px as f64,
-                                scale,
-                            ),
+                        self.send_surface_attach(
+                            self.event_window(),
+                            f,
+                            b,
+                            w_px as f64,
+                            h_px as f64,
+                            scale,
                         );
                     }
                     Err(e) => {
@@ -1799,7 +1840,9 @@ impl ShellApp {
                     }
                 }
             }
-            ShellInbox::CaretRect(rect) => {
+            ShellInbox::CaretRect(rect, _window_id) => {
+                // One window today, so the id is informational; step 4
+                // picks the ctx for that window instead.
                 ctx.set_caret_rect_phys(rect);
             }
             // Legacy v=1 wake from the core's pre-A2-A4 single-
@@ -2156,13 +2199,15 @@ impl MarspotApp for ShellApp {
             state = format!("{:?}", event.state)
         );
         let wire = event_to_wire(&event, mods);
-        self.send(MsgType::KeyEvent, encode_key_event(&wire));
+        let w = self.event_window();
+        self.send(MsgType::KeyEvent, encode_key_event(&wire, w));
     }
 
     fn mouse_down(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {
+        let w = self.event_window();
         self.send(
             MsgType::MouseDown,
-            encode_mouse(x, y, struct_to_mods_byte(mods)),
+            encode_mouse(x, y, struct_to_mods_byte(mods), w),
         );
     }
 
@@ -2173,36 +2218,42 @@ impl MarspotApp for ShellApp {
         y: f64,
         mods: Modifiers,
     ) {
+        let w = self.event_window();
         self.send(
             MsgType::MouseRightDown,
-            encode_mouse(x, y, struct_to_mods_byte(mods)),
+            encode_mouse(x, y, struct_to_mods_byte(mods), w),
         );
     }
 
     fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
         // No modifier info on drag — pass zero; the renderer doesn't
         // currently need mods for drag-extend selection.
-        self.send(MsgType::MouseDrag, encode_mouse(x, y, 0));
+        let w = self.event_window();
+        self.send(MsgType::MouseDrag, encode_mouse(x, y, 0, w));
     }
 
     fn mouse_up(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
-        self.send(MsgType::MouseUp, encode_mouse(x, y, 0));
+        let w = self.event_window();
+        self.send(MsgType::MouseUp, encode_mouse(x, y, 0, w));
     }
 
     fn file_drop(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64, paths: &[String]) {
         // L2 owns the pane layout — forward drop point + raw paths;
         // it hit-tests the pane and shell-quotes before insertion.
-        self.send(MsgType::FileDrop, encode_file_drop(x, y, paths));
+        let w = self.event_window();
+        self.send(MsgType::FileDrop, encode_file_drop(x, y, paths, w));
     }
 
     fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
         // Forwarded raw — L2 hit-tests against chrome rects and
         // ignores moves that don't change its hover region (cheap).
-        self.send(MsgType::MouseMove, encode_mouse(x, y, 0));
+        let w = self.event_window();
+        self.send(MsgType::MouseMove, encode_mouse(x, y, 0, w));
     }
 
     fn scroll(&mut self, _ctx: &MarspotAppCtx, dx: f64, dy: f64, precise: bool) {
-        self.send(MsgType::Scroll, encode_scroll(dx, dy, precise));
+        let w = self.event_window();
+        self.send(MsgType::Scroll, encode_scroll(dx, dy, precise, w));
     }
 
     fn resized(&mut self, ctx: &MarspotAppCtx, w_phys: f64, h_phys: f64) {
@@ -2241,10 +2292,7 @@ impl MarspotApp for ShellApp {
                 }
                 let (f, b) = pair.ids();
                 self.pending_surfaces = Some(pair);
-                self.send(
-                    MsgType::SurfaceAttach,
-                    encode_surface_attach(f, b, w_phys, h_phys, scale),
-                );
+                self.send_surface_attach(self.event_window(), f, b, w_phys, h_phys, scale);
             }
             Err(e) => {
                 lx_error!("shell.resize.pair_create_failed", &format!("{e}"));
@@ -2282,7 +2330,8 @@ impl MarspotApp for ShellApp {
     }
 
     fn ime_preedit_changed(&mut self, _ctx: &MarspotAppCtx, text: &str) {
-        self.send(MsgType::Preedit, encode_preedit(text));
+        let w = self.event_window();
+        self.send(MsgType::Preedit, encode_preedit(text, w));
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
@@ -2505,7 +2554,7 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                     MsgType::Pong => decode_pong(&frame.payload).ok().map(ShellInbox::Pong),
                     MsgType::CaretRect => decode_caret_rect(&frame.payload)
                         .ok()
-                        .map(ShellInbox::CaretRect),
+                        .map(|(rect, win)| ShellInbox::CaretRect(rect, win)),
                     // Empty-payload wake: a fresh frame is in the IOSurface.
                     // Mapping it to Some(..) is what makes `proxy.wake()`
                     // fire below → user_event → present.

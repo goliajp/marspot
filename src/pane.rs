@@ -912,7 +912,11 @@ impl L3Conn {
     /// socket means L3 went away and the container will reap it.
     fn forward_key(&mut self, event: &MarspotKeyEvent, mods: Modifiers) {
         let wire = event_to_wire(event, mods);
-        let frame = Frame::new(MsgType::KeyEvent, encode_key_event(&wire));
+        // Placeholder window id: L3 is window-blind and drops it.
+        let frame = Frame::new(
+            MsgType::KeyEvent,
+            encode_key_event(&wire, marspot_term::shell_proto::FIRST_WINDOW_ID),
+        );
         let _ = self.control.send(frame);
     }
 

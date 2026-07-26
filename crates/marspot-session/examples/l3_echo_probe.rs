@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 
 use marspot_term::grid_shm::{create_region, GridShmReader};
 use marspot_term::input_core::{KeyState, LogicalKey, MarspotKeyEvent, Modifiers};
-use marspot_term::shell_proto::{encode_key_event, event_to_wire, Frame, MsgType};
+use marspot_term::shell_proto::{
+    encode_key_event, event_to_wire, Frame, MsgType, FIRST_WINDOW_ID,
+};
 
 const COLS: u16 = 80;
 const ROWS: u16 = 24;
@@ -115,7 +117,10 @@ fn main() {
         logical: LogicalKey::Char(TYPED),
         text: Some(TYPED.to_string()),
     };
-    let frame = Frame::new(MsgType::KeyEvent, encode_key_event(&event_to_wire(&ev, Modifiers::default())));
+    let frame = Frame::new(
+        MsgType::KeyEvent,
+        encode_key_event(&event_to_wire(&ev, Modifiers::default()), FIRST_WINDOW_ID),
+    );
     {
         let mut w = &parent;
         frame.write_to(&mut w).unwrap_or_else(|e| die(format!("write key frame: {e}")));

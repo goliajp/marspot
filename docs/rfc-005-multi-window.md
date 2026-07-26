@@ -76,20 +76,40 @@ target.  Split:
 
 ## Wire changes (step 2) — silent + lossless, per standing rule
 
-* `window_id` added to: `SurfaceAttach`, input frames (KeyEvent /
-  Mouse* / Scroll / Preedit / FileDrop), `CaretRect`.  Old readers
-  skip the extra field; missing field decodes as window 0.
-* New L1→L2 frame `WindowClosed(window_id)`.
-* A `SurfaceAttach` carrying an unseen `window_id` **is** the window
-  birth event — no separate create frame.
+**PROTO_VERSION stays at 2 — deliberately.**  Implementation found
+that the shell *kills* a core whose `HelloAck` version differs from
+its own, so bumping the version is itself the hazardous act: a
+core-only update would put a v3 shell against a v2 core and
+respawn-loop it.  The window id therefore rides along in ways a peer
+that has never heard of it cannot notice.
+
+* `window_id` is **appended** to the pointer frames (Mouse* / Scroll /
+  FileDrop), `Preedit`, `KeyEvent` and `CaretRect`.  Every one of those
+  decoders already reads `payload.len() < N` and ignores a longer
+  tail, so an old reader is unaffected and a new reader falls back to
+  `FIRST_WINDOW_ID` when the tail is absent.  Pinned in both
+  directions by `shell_proto` tests built from hand-written legacy
+  payloads.
+* `SurfaceAttach` could **not** grow — its decoder demands exactly 32
+  bytes, so appending would hard-fail every installed core.  The
+  window-aware form is a new msg type, `SurfaceAttachWindow`, which
+  old readers silently skip.  The shell sends both for the first
+  window; the core ignores the legacy frame from the first
+  window-aware one onward, so neither peer attaches twice.
+* New L1→L2 frames: `WindowClosed(window_id)`, `WindowFocus(window_id)`.
+* A `SurfaceAttachWindow` carrying an unseen `window_id` **is** the
+  window birth event — no separate create frame.
 * `SurfaceReady` / `FrameRendered` unchanged: surface ids are global,
   L1 resolves window by looking up which pair contains the id.
-* Boot handshake migrates from `ENV_SURFACE_ID*` to per-window
-  `SurfaceAttach` frames sent after core spawn.  The env path is kept
-  one release for version-skew tolerance, then removed.
-* Dual-core swap: L1 sends the pending core one `SurfaceAttach` per
-  window and requires all N `SurfaceReady` acks before `UPDATE_SWAP`.
-  N = 1 reproduces today's sequence exactly.
+* **The env handshake stays.**  RFC-005 originally called for
+  migrating `ENV_SURFACE_ID*` to frames; implementation showed that is
+  strictly worse.  Env hands the first window a surface at spawn, so
+  first paint has nothing to wait for, and additional windows arrive
+  by frame regardless — the env path does not need to scale.  Keeping
+  it also leaves the most delicate path in the system (boot) untouched.
+* Dual-core swap: L1 sends the pending core one attach per window and
+  requires all N `SurfaceReady` acks before `UPDATE_SWAP`.  N = 1
+  reproduces today's sequence exactly.
 
 ## Semantics (all decided up front — no mid-flight decisions)
 
@@ -137,7 +157,7 @@ changes are reported to L2.
 0. `basic` custom_title → Pane field (**shipped**, core 0.12.37)
 1. `basic` CoreApp → WindowState extraction; `windows.len() == 1`;
    zero behavior change; full nextest + bench gate green
-2. `infra` wire window_id + WindowClosed + boot handshake env→frames
+2. `infra` wire window_id + window lifecycle frames (**shipped**)
 3. `basic` renderer split (shared-by-scale / per-window target);
    still single-window; bench gate locks perf
 4. `basic` L1 window collections + Cmd-N + close semantics +

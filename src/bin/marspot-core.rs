@@ -43,6 +43,7 @@ use marspot::session_registry::{
 use marspot::shell_proto::{
     decode_file_drop, decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping,
     decode_preedit, decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
+    decode_surface_attach_window, decode_window_closed, decode_window_focus,
     encode_caret_rect, encode_hello_ack, encode_pong, encode_surface_ready, mods_to_struct,
     wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT,
     ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
@@ -898,10 +899,13 @@ impl std::fmt::Debug for SpawnOutcome {
 #[derive(Debug)]
 enum CoreEvent {
     Key(MarspotKeyEvent, Modifiers),
-    MouseDown(f64, f64, Modifiers),
+    /// RFC-005 — the pointer events carry the window they landed in.
+    /// Keyboard does not: it goes to the key window by definition, and
+    /// `WindowFocus` on the same ordered socket says which that is.
+    MouseDown(f64, f64, Modifiers, u32),
     /// F3+9 — right-click in screen coords + modifier byte.
     /// Drives the L2 context menu (same handler shape as MouseDown).
-    MouseRightDown(f64, f64, Modifiers),
+    MouseRightDown(f64, f64, Modifiers, u32),
     MouseDrag(f64, f64),
     /// Coordinates are on the wire but unused — release only ends
     /// the drag (same as src/main.rs `mouse_up`).
@@ -916,8 +920,15 @@ enum CoreEvent {
     /// Finder file drop forwarded by L1: `(x, y)` drop point in
     /// physical px + resolved filesystem paths.  L2 hit-tests the
     /// pane and inserts shell-quoted paths via the Paste path.
-    FileDrop(f64, f64, Vec<String>),
+    FileDrop(f64, f64, Vec<String>, u32),
     Focus(bool),
+    /// RFC-005 — window-aware surface attach.  A `window_id` the core
+    /// has not seen before *is* that window's birth event.
+    SurfaceAttachWindow(u32, u32, f64, f64, f64, u32),
+    /// RFC-005 — a window went away; drop its `WindowState`.
+    WindowClosed(u32),
+    /// RFC-005 — which window is key now.
+    WindowFocus(u32),
     /// PROTO_VERSION=1 single-surface resize.  Kept for tolerance; the
     /// PROTO_VERSION=2 path uses `SurfaceAttach` (dual-buffer).
     Resize(u32, f64, f64, f64),
@@ -1027,29 +1038,40 @@ struct LayoutModalDrag {
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
     match f.msg_type {
-        MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|w| {
+        MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|(w, _win)| {
             let (e, m) = wire_to_event(w);
             CoreEvent::Key(e, m)
         }),
         MsgType::MouseDown => decode_mouse(&f.payload)
             .ok()
-            .map(|(x, y, m)| CoreEvent::MouseDown(x, y, mods_to_struct(m))),
-        MsgType::MouseRightDown => decode_mouse(&f.payload)
-            .ok()
-            .map(|(x, y, m)| CoreEvent::MouseRightDown(x, y, mods_to_struct(m))),
+            .map(|(x, y, m, win)| CoreEvent::MouseDown(x, y, mods_to_struct(m), win)),
+        MsgType::MouseRightDown => decode_mouse(&f.payload).ok().map(|(x, y, m, win)| {
+            CoreEvent::MouseRightDown(x, y, mods_to_struct(m), win)
+        }),
         MsgType::MouseDrag => decode_mouse(&f.payload)
             .ok()
-            .map(|(x, y, _)| CoreEvent::MouseDrag(x, y)),
+            .map(|(x, y, _, _)| CoreEvent::MouseDrag(x, y)),
         MsgType::MouseUp => decode_mouse(&f.payload).ok().map(|_| CoreEvent::MouseUp),
         MsgType::MouseMove => decode_mouse(&f.payload)
             .ok()
-            .map(|(x, y, _)| CoreEvent::MouseMove(x, y)),
+            .map(|(x, y, _, _)| CoreEvent::MouseMove(x, y)),
         MsgType::Scroll => decode_scroll(&f.payload)
             .ok()
-            .map(|(_dx, dy, p)| CoreEvent::Scroll(dy, p)),
+            .map(|(_dx, dy, p, _)| CoreEvent::Scroll(dy, p)),
         MsgType::FileDrop => decode_file_drop(&f.payload)
             .ok()
-            .map(|(x, y, paths)| CoreEvent::FileDrop(x, y, paths)),
+            .map(|(x, y, paths, win)| CoreEvent::FileDrop(x, y, paths, win)),
+        MsgType::SurfaceAttachWindow => decode_surface_attach_window(&f.payload)
+            .ok()
+            .map(|(fr, bk, w, h, sc, win)| {
+                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win)
+            }),
+        MsgType::WindowClosed => decode_window_closed(&f.payload)
+            .ok()
+            .map(CoreEvent::WindowClosed),
+        MsgType::WindowFocus => decode_window_focus(&f.payload)
+            .ok()
+            .map(CoreEvent::WindowFocus),
         MsgType::Focus => decode_focus(&f.payload).ok().map(CoreEvent::Focus),
         MsgType::Resize => decode_resize(&f.payload)
             .ok()
@@ -1075,7 +1097,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::InjectInput => marspot::shell_proto::decode_inject_input(&f.payload)
             .ok()
             .map(|(sid, bytes)| CoreEvent::InjectInput(sid, bytes)),
-        MsgType::Preedit => decode_preedit(&f.payload).ok().map(CoreEvent::Preedit),
+        MsgType::Preedit => decode_preedit(&f.payload)
+            .ok()
+            .map(|(text, _win)| CoreEvent::Preedit(text)),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
         _ => None,
@@ -1728,6 +1752,11 @@ struct CoreApp {
     /// cleanly and the shell respawns a fresh core (which creates a
     /// fresh session), mirroring "marspot quits when all shells die".
     all_exited: bool,
+    /// True once a `SurfaceAttachWindow` has arrived.  From then on the
+    /// legacy `SurfaceAttach` is ignored as its duplicate — the shell
+    /// sends both so that a core predating RFC-005 still gets its
+    /// surface.
+    saw_window_aware_attach: bool,
     /// `MARSPOT_L3=1`: panes are per-session L3 processes, so [+] spawns
     /// a fresh L3 (with an L2-allocated session) instead of an in-process
     /// shelld pane.  Clone of the event channel so a new L3's poke reader
@@ -2533,35 +2562,102 @@ impl CoreApp {
 
     /// Terminate `panes[idx]` and keep all parallel state in sync.
     /// Caller refuses the call when it would leave zero sessions.
+    /// Retire the session behind a pane: signal its L3, drop the
+    /// registry dir + shm region, and forget the sid-keyed caches.
+    ///
+    /// Takes the id and kind by value rather than a `&Pane` so the
+    /// caller does not hold a borrow of `windows` across the call —
+    /// and so closing one pane and closing a whole window can share
+    /// the teardown while keeping their own bookkeeping.
+    ///
+    /// RFC-003 step 3c: L3 panes own their PTY in-process, so the
+    /// close is SIGTERM via entry.toml's pid + delete the registry dir
+    /// (which also wipes the bytelog, so the slot cannot replay if a
+    /// later L3 picks the same id).
+    fn retire_pane_session(&mut self, id: u64, is_l3: bool) {
+        if is_l3 {
+            if let Ok(entry) = session_registry::read_session_entry(id) {
+                unsafe { libc::kill(entry.pid, libc::SIGTERM) };
+            }
+            let _ = session_registry::delete_session(id);
+            // Amendment 7 step 3: also drop the named shm region so
+            // the kernel actually frees the pages once every fd-holder
+            // closes.
+            grid_shm::delete_region(&grid_shm::session_shm_name(id));
+        }
+        // F3+5 — drop cached cwd state so it can't leak past the pane.
+        // The same id may eventually be reused; a fresh pane gets a
+        // fresh refresh.
+        self.pane_cwds.remove(&id);
+        self.last_cwd_refresh.remove(&id);
+        self.pane_badges.remove(&id);
+        self.pane_titles.remove(&id);
+    }
+
+    /// Index of the window carrying `window_id`, if the core has it.
+    fn window_index(&self, window_id: u32) -> Option<usize> {
+        self.windows.iter().position(|w| w.window_id == window_id)
+    }
+
+    /// Make `window_id` the key window.  Returns false (and changes
+    /// nothing) when the core has no such window — a frame for a
+    /// window that already closed, which is a normal race, not an
+    /// error.
+    fn focus_window(&mut self, window_id: u32) -> bool {
+        match self.window_index(window_id) {
+            Some(i) => {
+                if self.key_window != i {
+                    self.key_window = i;
+                    win!(self).needs_render = true;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A window closed: retire every session it held and drop its
+    /// `WindowState`.
+    ///
+    /// The last window is left alone — L1 owns app teardown
+    /// (`close_requested` already SIGTERMs every session and exits),
+    /// and tearing the state down here first would race it.
+    fn close_window(&mut self, window_id: u32) {
+        let Some(i) = self.window_index(window_id) else { return };
+        if self.windows.len() <= 1 {
+            lx_event!(
+                "WINDOW_CLOSE_LAST",
+                "last window closed — L1 drives app teardown",
+                window_id = window_id
+            );
+            return;
+        }
+        let doomed: Vec<(u64, bool)> = self.windows[i]
+            .panes
+            .iter()
+            .filter_map(|p| p.shelld_session_id().map(|id| (id, p.is_l3())))
+            .collect();
+        for (id, is_l3) in doomed {
+            self.retire_pane_session(id, is_l3);
+        }
+        self.windows.remove(i);
+        self.key_window = self.key_window.min(self.windows.len() - 1);
+        win!(self).needs_render = true;
+        lx_event!(
+            "WINDOW_CLOSED",
+            "window and its panes retired",
+            window_id = window_id,
+            remaining = self.windows.len()
+        );
+    }
+
     fn close_session(&mut self, idx: usize) {
         if idx >= win!(self).panes.len() {
             return;
         }
-        // RFC-003 step 3c: L3 (owns-pty) panes own their PTY in-process,
-        // so SIGTERM the L3 child via entry.toml's pid + delete the
-        // registry dir (also wipes bytelog so the slot can't replay if
-        // a later L3 picks the same id).  Legacy shelld panes still go
-        // through L4 kill_session — that path is deleted in Phase 6.
         if let Some(id) = win!(self).panes[idx].shelld_session_id() {
-            if win!(self).panes[idx].is_l3() {
-                if let Ok(entry) = session_registry::read_session_entry(id) {
-                    unsafe { libc::kill(entry.pid, libc::SIGTERM) };
-                }
-                let _ = session_registry::delete_session(id);
-                // Amendment 7 step 3: also drop the named shm region
-                // so the kernel actually frees the pages once every
-                // fd-holder closes.
-                grid_shm::delete_region(&grid_shm::session_shm_name(id));
-            }
-            // RFC-003 Phase 6: shelld-backed panes don't exist anymore;
-            // the L3-only path above is the entire close path.
-            // F3+5 — drop cached cwd state so it can't leak past the
-            // pane.  Same id may eventually be reused; a fresh pane
-            // gets a fresh refresh.
-            self.pane_cwds.remove(&id);
-            self.last_cwd_refresh.remove(&id);
-            self.pane_badges.remove(&id);
-            self.pane_titles.remove(&id);
+            let is_l3 = win!(self).panes[idx].is_l3();
+            self.retire_pane_session(id, is_l3);
         }
         win!(self).panes.remove(idx);
         if !win!(self).panes.is_empty() {
@@ -5486,6 +5582,7 @@ fn main() {
         reconnecting: std::collections::HashSet::new(),
         cwd_unresolvable: std::collections::HashMap::new(),
         all_exited: false,
+        saw_window_aware_attach: false,
         l3_mode,
         event_tx: event_tx.clone(),
         windows: vec![WindowState::new(
@@ -5657,13 +5754,45 @@ fn main() {
                            closed: &mut bool| {
             match ev {
                 CoreEvent::Key(event, mods) => app.key(event, mods),
-                CoreEvent::MouseDown(x, y, mods) => app.mouse_down(x, y, mods),
-                CoreEvent::MouseRightDown(x, y, mods) => app.mouse_right_down(x, y, mods),
+                CoreEvent::MouseDown(x, y, mods, win) => {
+                    if app.focus_window(win) {
+                        app.mouse_down(x, y, mods)
+                    }
+                }
+                CoreEvent::MouseRightDown(x, y, mods, win) => {
+                    if app.focus_window(win) {
+                        app.mouse_right_down(x, y, mods)
+                    }
+                }
                 CoreEvent::MouseDrag(x, y) => app.mouse_drag(x, y),
                 CoreEvent::MouseUp => app.mouse_up(),
                 CoreEvent::MouseMove(x, y) => app.mouse_moved(x, y),
                 CoreEvent::Scroll(dy, precise) => app.scroll(dy, precise),
-                CoreEvent::FileDrop(x, y, paths) => app.file_drop(x, y, &paths),
+                CoreEvent::FileDrop(x, y, paths, win) => {
+                    if app.focus_window(win) {
+                        app.file_drop(x, y, &paths)
+                    }
+                }
+                CoreEvent::WindowFocus(win) => {
+                    app.focus_window(win);
+                }
+                CoreEvent::WindowClosed(win) => app.close_window(win),
+                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win) => {
+                    // Same staging as the legacy frame — the id only
+                    // says which window it is about.  From the first
+                    // one of these onward the legacy frame is ignored,
+                    // so a shell that sends both (for the benefit of
+                    // cores that predate RFC-005) does not attach twice.
+                    app.saw_window_aware_attach = true;
+                    match app.window_index(win) {
+                        Some(_) => *pending_attach = Some((fr, bk, w, h, sc)),
+                        None => lx_warn!(
+                            "core.window.attach_unknown",
+                            "SurfaceAttach for a window this core does not have",
+                            window_id = win
+                        ),
+                    }
+                }
                 CoreEvent::Focus(focused) => {
                     app.renderer.set_window_focused(focused);
                     // No mouseMoved deliveries while the window
@@ -5684,7 +5813,12 @@ fn main() {
                     // SurfaceAttach now.  Silently drop.
                 }
                 CoreEvent::SurfaceAttach(f_id, b_id, new_w, new_h, new_scale) => {
-                    *pending_attach = Some((f_id, b_id, new_w, new_h, new_scale));
+                    // Legacy, window-blind frame.  A shell that knows
+                    // about windows sends the window-aware form too;
+                    // once we have seen one, this is the duplicate.
+                    if !app.saw_window_aware_attach {
+                        *pending_attach = Some((f_id, b_id, new_w, new_h, new_scale));
+                    }
                 }
                 CoreEvent::L3ControlEof(sid) => {
                     // L3's reader EOF'd — typically silent-update
@@ -6071,7 +6205,10 @@ fn main() {
             // not stream identical frames at render cadence.
             if win!(app).last_caret_sent != Some(caret) {
                 win!(app).last_caret_sent = Some(caret);
-                let f = Frame::new(MsgType::CaretRect, encode_caret_rect(caret));
+                let f = Frame::new(
+                    MsgType::CaretRect,
+                    encode_caret_rect(caret, win!(app).window_id),
+                );
                 send_to_shell(&control_writer, f, "caret_rect");
             }
         }
