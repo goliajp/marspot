@@ -13,6 +13,39 @@ per-pane (history/scrollback, snapshot, PTY, search, scroll offset,
 badges) stays per-pane and must be provably untouched by window
 membership.
 
+## Architecture decision: windows are peers
+
+There is no main window.  L1 owns N windows of equal standing; L2
+holds one `WindowState` per window and no notion of a privileged one.
+`key_window` means exactly one thing — which window currently has
+keyboard focus — and nothing may read it to mean "the real window".
+
+This was decided after step 4c, when the second window turned out not
+to work despite every piece of it being written.  The reason was that
+"one window" had been encoded structurally in three places that the
+`Vec<WindowState>` refactor did not reach:
+
+* the IOSurface pair, its textures and the write cursor were locals in
+  `main()` — the second window's attach overwrote them, and the first
+  window's presenter went on sampling a surface nobody painted;
+* `pump_all` / `process_search_debounces` walked `win!(self)` only, so
+  a pane in an unfocused window received no PTY bytes at all;
+* `save_session_state` persisted only the key window's panes, and the
+  exit condition asked only the key window whether its panes had died.
+
+None of those are "the second window is a bit rough".  Each is the
+single-window assumption re-appearing as a data structure.  The rule
+that falls out, and that every later step is checked against:
+
+> Any state that describes a window lives in `WindowState`.  Any loop
+> that acts on windows iterates all of them.  Any file that records
+> windows records a list.  `key_window` is readable only where the
+> question genuinely is "where is the keyboard".
+
+Step 4d (paint + pump) and step 6a (persistence) implement it;
+step 4e finishes it on the input path, where `win!(self)` still stands
+in for "the window this event is about".
+
 ## Architecture decision: one core, N surfaces
 
 One L2 process holds `Vec<WindowState>`; L1 owns N NSWindows and one
@@ -39,8 +72,8 @@ supervises exactly one core.
 
 ```
 CoreApp {
-    windows: Vec<WindowState>,   // always >= 1
-    key_window: usize,           // L1-reported key window
+    windows: Vec<WindowState>,   // always >= 1; peers
+    key_window: usize,           // keyboard focus ONLY
     // stays global: sid-keyed maps (pane_badges/titles/cwds/
     // pane_sessions/last_cwd_refresh/reconnecting/cwd_unresolvable),
     // event_tx, reconnect bookkeeping, renderer shared layer,
@@ -48,7 +81,8 @@ CoreApp {
 }
 WindowState {
     window_id: u32,              // L1-allocated, monotonic
-    surfaces + render target,    // per-window
+    surfaces: Option<WindowSurfaces>,  // pair + textures + write cursor
+    last_render_at,              // per-window frame-interval cap
     layout, panes: Vec<Pane>, focused_idx,
     grid_cols/rows, w_phys/h_phys/scale,
     selection, selection_dragging, editing_title, title_edit_buffer,
@@ -146,14 +180,37 @@ that has never heard of it cannot notice.
 
 ## Persistence (step 6)
 
-* `shell-state.bin` v2: `windows: Vec<{ frame, display_id, grid_cols,
-  grid_rows, focused_idx, panes: Vec<SavedPane> }>` + `key_window`.
-  v1 files parse into a single window (fail-soft versioning already
-  in place).  Writer emits v2 only.
-* `window-state.bin` becomes a list (frame per window).
-* `MARSPOT_RESTORE_FRAME` (L1 execv handoff) carries N frames.
+**6a — format (shipped).**
+
+* `shell-state.bin` v2: `windows: Vec<{ grid_cols, grid_rows,
+  focused_idx, panes: Vec<SavedPane> }>` + `key_window`.  v1 files
+  parse into a single window (fail-soft versioning already in place).
+  Writer emits v2 only.  Geometry is *not* here — see below.
+* `window-state.bin` v2: a list of frames in window creation order,
+  written whole on every change by L1.  Entry *i* pairs with entry *i*
+  of the layout file; that pairing is the only coupling between the
+  two files, and both are ordered by window creation.
+* Keeping frames out of `shell-state.bin` is deliberate and unchanged
+  from F3+6.1: L1 owns AppKit geometry, L2 owns panes, one writer per
+  file, no cross-process atomic-rename race.
 * `sessions/<id>/` registry stays window-blind — window membership
   lives only in the layout file, exactly like pane order does today.
+
+**6b — restore (next).**  L2 boots window 0 from `windows[0]` and
+keeps `windows[1..]` queued.  For each queued record it asks L1 to
+open a window (new L2→L1 frame; unknown msg types are skipped by old
+readers, so no PROTO bump).  L1 opens it with frame *i* from
+`window-state.bin`; the resulting `SurfaceAttachWindow` reaches
+`adopt_window`, which pops the queued record and assembles that
+window's panes from it instead of spawning one fresh pane.
+
+Open question to settle when writing it: `assemble_panes_at_boot` is
+synchronous and can block on L3 reattach, and RFC-005's own rule is
+that opening a window must not freeze the windows already up.  Either
+the restore assembly runs off-loop like `spawn_l3_pane_async`, or the
+queued restore is assembled once at boot and handed over whole.
+
+* `MARSPOT_RESTORE_FRAME` (L1 execv handoff) carries N frames.
 
 ## L1 (step 4)
 
@@ -176,9 +233,23 @@ changes are reported to L2.
 3. `basic` renderer split (`WindowRender` per window, everything
    else shared) (**shipped**)
 4. `basic` L1 window collections + Cmd-N + close semantics +
-   per-window presenter + input tagging
+   per-window presenter + input tagging (**4a–4c shipped**)
+4d. `basic` L2 paint + pump go peer: per-window surfaces / textures /
+   write cursor / frame cap, attach routed by `window_id`, render pass
+   over all dirty windows, pump + search debounce over all windows,
+   exit only when every window is dead (**shipped**, core 0.12.43)
+6a. `infra` persistence v2: both files hold window lists
+   (**shipped**, core 0.12.44 / shell 0.7.14)
+6b. `infra` restore N windows at boot (see above)
+4e. `basic` input goes peer: `win!(self)` on the mouse / key / scroll /
+   drag / preedit paths takes the window the event names.  Scroll must
+   land in the window under the cursor even when it is not key; drag
+   and release belong to the window that took the press, not to
+   whichever window became key mid-drag.  The `self.key_window`
+   arguments left behind by 4d are the work list.
+    Then: re-enable Cmd-N (and press it once in the sandbox before
+   installing).
 5. `basic` pane move: drag + context menu, same commit series
-6. `infra` persistence v2 + per-window boot assembly
 7. E2E: two windows through install-local UPDATE_SWAP; L1 execv
    restoring N frames; L3 execv untouched
 
