@@ -207,6 +207,81 @@ pub struct GlyphInstance {
     pub color: [f32; 4],
 }
 
+/// Renderer state that belongs to one window rather than to the
+/// renderer as a whole.
+///
+/// RFC-005 — one `MetalRenderer` draws every window, one after the
+/// other, so almost everything on it is legitimately shared: the
+/// device, the pipelines, the font cache, both glyph atlases and every
+/// scratch buffer (a scratch buffer is only live inside a single
+/// `render_*` call).  Sharing them is the whole reason a second window
+/// costs a layout and a render target rather than another copy of the
+/// atlas.
+///
+/// Two things genuinely cannot be shared, and they live here:
+///
+/// * `pane_caches` is indexed by a window's pane order, so window A's
+///   slot 0 and window B's slot 0 are different panes.
+/// * `clear_bg_required` answers "does *this* window still owe a full
+///   clear", which a resize of some other window must not satisfy.
+///
+/// Note what is deliberately absent: a per-scale glyph atlas.  Glyphs
+/// are rasterised once at `FONT_POINT` and the atlas key carries the
+/// quantised size, so one atlas already serves windows on displays of
+/// different backing scales.
+pub struct WindowRender {
+    pane_caches: Vec<PaneInstanceCache>,
+    /// Should the next render to an IOSurface target start with a
+    /// hard Clear, or load the previous frame's pixels?  Clear is
+    /// only ever needed when the SHAPE of what gets painted changes
+    /// (layout mode switch, sidebar toggle, resize, first frame
+    /// after attach) — in steady state the BG region is identical
+    /// across frames, so loading preserves visually-identical
+    /// content.  Crucially, Clear opens a cross-process race window:
+    /// shell's presenter reads the IOSurface texture from a DIFFERENT
+    /// process / queue, with no MTLSharedEvent fence to gate the
+    /// read.  If presenter samples between the Clear and the cell
+    /// draws on the GPU, it sees a uniform-BG texture — exactly
+    /// what surfaces in the wild as "all 9 panes' contents momentarily
+    /// disappear to background and reappear, no clear trigger,
+    /// frequent" (the marspot flash bug, 2026-06-15).  Defaulting to
+    /// Load eliminates the bg-only intermediate state.  The same-
+    /// process CAMetalLayer path (`render_layout`, mcli/standalone)
+    /// always Clears — there's no cross-process race there.
+    ///
+    /// The flag itself now lives on `WindowRender`: it answers "does
+    /// this window still owe a clear", and one window's resize must
+    /// not discharge another's.
+    clear_bg_required: bool,
+}
+
+impl Default for WindowRender {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WindowRender {
+    pub fn new() -> Self {
+        // Starts true: a window has never been painted, so its first
+        // frame owes a full clear.
+        Self { pane_caches: Vec::new(), clear_bg_required: true }
+    }
+
+    /// The next frame for this window must clear rather than load.
+    pub fn mark_bg_clear_required(&mut self) {
+        self.clear_bg_required = true;
+    }
+
+    /// Consume the flag: returns whether this frame owes a clear, and
+    /// leaves the window not owing one.  The render path uses it, and
+    /// it is the only way to observe the flag — which is what lets a
+    /// test prove one window's flag is not another's.
+    pub fn take_clear_required(&mut self) -> bool {
+        std::mem::take(&mut self.clear_bg_required)
+    }
+}
+
 /// F1+13 — cached per-pane render contributions.  When a pane's
 /// `fingerprint` (computed from its `SessionView` fields) and both
 /// atlas generations match the previous frame, the renderer
@@ -646,7 +721,6 @@ pub struct MetalRenderer {
     /// `SessionView` field) AND the same atlas generations, the
     /// renderer copies the cached slice instead of recomputing —
     /// the dominant L2 CPU cost in 9-claudecode workloads.
-    pane_caches: Vec<PaneInstanceCache>,
     /// Window-level focus.  Mirror of the AppKit renderer's flag —
     /// drives whether the focused-session cursor is filled or hollow.
     window_focused: bool,
@@ -692,24 +766,6 @@ pub struct MetalRenderer {
     /// themselves and the LRU eviction path picks the oldest
     /// non-recent shelf instead of the legacy whole-atlas reset.
     frame_id: u64,
-    /// Should the next render to an IOSurface target start with a
-    /// hard Clear, or load the previous frame's pixels?  Clear is
-    /// only ever needed when the SHAPE of what gets painted changes
-    /// (layout mode switch, sidebar toggle, resize, first frame
-    /// after attach) — in steady state the BG region is identical
-    /// across frames, so loading preserves visually-identical
-    /// content.  Crucially, Clear opens a cross-process race window:
-    /// shell's presenter reads the IOSurface texture from a DIFFERENT
-    /// process / queue, with no MTLSharedEvent fence to gate the
-    /// read.  If presenter samples between the Clear and the cell
-    /// draws on the GPU, it sees a uniform-BG texture — exactly
-    /// what surfaces in the wild as "all 9 panes' contents momentarily
-    /// disappear to background and reappear, no clear trigger,
-    /// frequent" (the marspot flash bug, 2026-06-15).  Defaulting to
-    /// Load eliminates the bg-only intermediate state.  The same-
-    /// process CAMetalLayer path (`render_layout`, mcli/standalone)
-    /// always Clears — there's no cross-process race there.
-    clear_bg_required: bool,
 }
 
 impl MetalRenderer {
@@ -836,7 +892,6 @@ impl MetalRenderer {
             overlay_glyphs_scratch: Vec::new(),
             overlay_color_glyphs_scratch: Vec::new(),
             overlay_ui_rects_scratch: Vec::new(),
-            pane_caches: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
@@ -844,7 +899,6 @@ impl MetalRenderer {
             process_panel: None, cc_usage: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
-            clear_bg_required: true,
         })
     }
 
@@ -902,7 +956,6 @@ impl MetalRenderer {
             overlay_glyphs_scratch: Vec::new(),
             overlay_color_glyphs_scratch: Vec::new(),
             overlay_ui_rects_scratch: Vec::new(),
-            pane_caches: Vec::new(),
             glyphs_scratch: Vec::new(),
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
@@ -910,7 +963,6 @@ impl MetalRenderer {
             process_panel: None, cc_usage: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
-            clear_bg_required: true,
         })
     }
 
@@ -970,14 +1022,7 @@ impl MetalRenderer {
     /// (layout mode switch, sidebar toggle, resize, surface reattach).
     /// See `clear_bg_required` field doc for the race that motivates
     /// the Load-default for steady-state frames.
-    pub fn mark_bg_clear_required(&mut self) {
-        // Dev-only — flash investigation 2026-06-15.  If this fires
-        // on every render, my Load-by-default fix isn't actually
-        // taking effect and the race window persists.  Demote to
-        // lx_debug! once the steady-state Load is confirmed.
-        crate::lx_event!("render.bg_clear_required", "flag set");
-        self.clear_bg_required = true;
-    }
+
 
     /// Reserve a top strip (physical pixels) above the grid so window
     /// chrome (traffic lights, focused-session status) doesn't paint
@@ -998,7 +1043,7 @@ impl MetalRenderer {
     /// the current viewport + top inset, then dispatches to
     /// `render_layout`. mcli uses this so it doesn't have to know
     /// about Layout / sidebars.
-    pub fn render(&mut self, view: SessionView) {
+    pub fn render(&mut self, wr: &mut WindowRender, view: SessionView) {
         if self.layer.is_none() {
             return;
         }
@@ -1016,7 +1061,7 @@ impl MetalRenderer {
             self.font.cell_w,
             self.font.cell_h,
         );
-        self.render_layout(&layout, std::slice::from_ref(&view), &[], 0);
+        self.render_layout(wr, &layout, std::slice::from_ref(&view), &[], 0);
     }
 
     pub fn cell_dims(&self) -> (f64, f64) {
@@ -1254,6 +1299,7 @@ impl MetalRenderer {
 
     pub fn render_layout(
         &mut self,
+        wr: &mut WindowRender,
         layout: &Layout,
         views: &[SessionView],
         sidebar: &[SidebarEntry],
@@ -1292,7 +1338,6 @@ impl MetalRenderer {
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             ref mut ui_rects_scratch,
-            ref mut pane_caches,
             ref mut overlay_cells_scratch,
             ref mut overlay_glyphs_scratch,
             ref mut overlay_color_glyphs_scratch,
@@ -1334,7 +1379,7 @@ impl MetalRenderer {
             color_glyphs_scratch,
             dots_scratch,
             ui_rects_scratch,
-            pane_caches,
+            &mut wr.pane_caches,
             overlay_cells_scratch,
             overlay_glyphs_scratch,
             overlay_ui_rects_scratch,
@@ -1463,6 +1508,7 @@ impl MetalRenderer {
     /// drawable / present.
     pub fn render_layout_to_texture(
         &mut self,
+        wr: &mut WindowRender,
         target: &ProtocolObject<dyn MTLTexture>,
         layout: &Layout,
         views: &[SessionView],
@@ -1483,8 +1529,7 @@ impl MetalRenderer {
         // after this frame, subsequent IOSurface renders can Load until
         // something explicitly marks the flag again (resize, layout
         // change, etc.).
-        let clear_bg = self.clear_bg_required;
-        self.clear_bg_required = false;
+        let clear_bg = wr.take_clear_required();
         // Dev-only — flash investigation 2026-06-15.  At default Info
         // level this is filtered out; flip MARSPOT_LOG=debug to see
         // every IOSurface render's clear/load verdict.  Demote /
@@ -1513,7 +1558,6 @@ impl MetalRenderer {
             ref mut color_glyphs_scratch,
             ref mut dots_scratch,
             ref mut ui_rects_scratch,
-            ref mut pane_caches,
             ref mut overlay_cells_scratch,
             ref mut overlay_glyphs_scratch,
             ref mut overlay_color_glyphs_scratch,
@@ -1553,7 +1597,7 @@ impl MetalRenderer {
             color_glyphs_scratch,
             dots_scratch,
             ui_rects_scratch,
-            pane_caches,
+            &mut wr.pane_caches,
             overlay_cells_scratch,
             overlay_glyphs_scratch,
             overlay_ui_rects_scratch,

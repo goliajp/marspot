@@ -5,7 +5,7 @@ use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers as MarspotModifiers};
 use marspot::layout::Layout;
 use marspot::render::{SessionView, SidebarEntry};
-use marspot::render_metal::{make_target_texture, MetalRenderer};
+use marspot::render_metal::{make_target_texture, MetalRenderer, WindowRender};
 use marspot::session::SessionState;
 use marspot::terminal::Terminal;
 use marspot::tmux;
@@ -178,6 +178,10 @@ impl TmuxState {
 
 struct Marspot {
     renderer: Option<MetalRenderer>,
+    /// Standalone marspot is one window (RFC-005 keeps it that way —
+    /// it is the bench/dev harness, not the product surface), so it
+    /// carries exactly one of these.
+    window_render: WindowRender,
     /// Cached layout from the last Resized.  Drives both rendering and
     /// mouse-click hit-testing.
     layout: Option<Layout>,
@@ -1785,6 +1789,7 @@ impl Marspot {
             .collect();
         let layout = self.layout.as_ref().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
+        let window_render = &mut self.window_render;
         let (cell_w, cell_h) = renderer.cell_dims();
         // F3+9 — publish ContextMenu render state every frame the
         // menu is open.  Re-builds the row list from the items Vec
@@ -1815,7 +1820,7 @@ impl Marspot {
                 hovered_idx: state.hovered_idx,
             }
         }));
-        renderer.render_layout(layout, &views, &entries, sidebar_focus);
+        renderer.render_layout(window_render, layout, &views, &entries, sidebar_focus);
 
         // Publish the focused-pane caret rect (view-local physical
         // pixels, top-left origin) so the IME candidate window
@@ -1920,6 +1925,7 @@ fn main() {
 
     let app = Marspot {
         renderer: None,
+        window_render: WindowRender::new(),
         layout: None,
         tmux: if tmux_mode { Some(TmuxState::new()) } else { None },
         panes,
@@ -2289,6 +2295,7 @@ fn bench_rss_format_dump(arg: &str) {
     }
     let mut app = Marspot {
         renderer: None,
+        window_render: WindowRender::new(),
         layout: None,
         tmux: None,
         panes: Vec::new(),
@@ -2419,15 +2426,17 @@ fn bench_metal_render(arg: &str) {
     };
     let views = std::slice::from_ref(&view);
 
+    // The bench harness is one window, so one of these.
+    let mut wr = WindowRender::new();
     // Warm-up: 5 iters fill char_cache + atlas + GPU caches.
     for _ in 0..5 {
-        renderer.render_layout_to_texture(&target, &layout, views, &[], 0);
+        renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
     }
 
     let mut samples: Vec<u64> = Vec::with_capacity(n as usize);
     for _ in 0..n {
         let t0 = std::time::Instant::now();
-        renderer.render_layout_to_texture(&target, &layout, views, &[], 0);
+        renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
         samples.push(t0.elapsed().as_nanos() as u64);
     }
     samples.sort_unstable();

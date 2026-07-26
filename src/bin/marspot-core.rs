@@ -497,6 +497,27 @@ mod window_state_tests {
         );
     }
 
+    /// Each window owns its own renderer state.  The flag that says
+    /// "this window still owes a full clear" must not be dischargeable
+    /// by another window's resize — that would leave stale pixels in
+    /// whichever window did not repaint.
+    #[test]
+    fn each_window_owns_its_clear_flag() {
+        let mut a = win(1, Vec::new());
+        let mut b = win(2, Vec::new());
+        // A fresh window owes a clear; consume both so they start level.
+        assert!(a.render.take_clear_required());
+        assert!(b.render.take_clear_required());
+        assert!(!a.render.take_clear_required());
+
+        a.render.mark_bg_clear_required();
+        assert!(
+            !b.render.take_clear_required(),
+            "marking window A must not discharge or set window B"
+        );
+        assert!(a.render.take_clear_required());
+    }
+
     /// The modal's slot map is sized from the window's own grid, so a
     /// window created with a non-default shape starts consistent.
     #[test]
@@ -1537,6 +1558,13 @@ struct WindowState {
     /// L1-allocated, monotonic.  Stable across a core swap because
     /// L1 replays one `SurfaceAttach` per window into the new core.
     window_id: u32,
+    /// The renderer state that cannot be shared with the other
+    /// windows — this window's per-pane instance caches and its own
+    /// "still owes a clear" flag.  Everything else the renderer holds
+    /// (device, pipelines, font cache, both atlases, every scratch
+    /// buffer) is shared, which is why a second window costs a layout
+    /// and a render target rather than a second atlas.
+    render: marspot::render_metal::WindowRender,
     layout: Layout,
     panes: Vec<Pane>,
     focused_idx: usize,
@@ -1618,6 +1646,7 @@ impl WindowState {
     ) -> Self {
         Self {
             window_id,
+            render: marspot::render_metal::WindowRender::new(),
             layout: Layout::build(
                 w_phys,
                 h_phys,
@@ -1915,7 +1944,7 @@ impl CoreApp {
         // shows SIDEBAR_BG, not the previous frame's stale pixels.
         // (Steady-state frames use Load to dodge the cross-process
         // race; see `MetalRenderer::clear_bg_required`.)
-        self.renderer.mark_bg_clear_required();
+        win!(self).render.mark_bg_clear_required();
     }
 
     /// F3+3.3 — reset `card_slots` to identity for the current
@@ -4847,6 +4876,13 @@ impl CoreApp {
         target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
     ) -> Option<(f64, f64, f64, f64)> {
         let focused = win!(self).focused_idx;
+        // Everything below borrows the window — the pane grids, the
+        // preedit string, the layout — while the renderer wants `&mut`
+        // on that same window's render state.  They are disjoint
+        // fields, but the borrow checker cannot see through the
+        // `windows[key_window]` index, so move the render state out
+        // for the duration of the frame and put it back at the end.
+        let mut wr = std::mem::take(&mut win!(self).render);
 
         let labels: Vec<String> = (1..=win!(self).panes.len()).map(|n| n.to_string()).collect();
         let states: Vec<SessionState> =
@@ -5007,8 +5043,15 @@ impl CoreApp {
             })
             .collect();
         let (cell_w, cell_h) = self.renderer.cell_dims();
-        self.renderer
-            .render_layout_to_texture(target_tex, &win!(self).layout, &views, &entries, focused);
+        self.renderer.render_layout_to_texture(
+            &mut wr,
+            target_tex,
+            &win!(self).layout,
+            &views,
+            &entries,
+            focused,
+        );
+        win!(self).render = wr;
         win!(self).needs_render = false;
 
         win!(self).panes.get(focused).and_then(|pane| {

@@ -63,16 +63,31 @@ remaining per-pane L2 state is sid-keyed and window-agnostic.
 
 ## Renderer split (step 3)
 
-`MetalRenderer` today couples shared resources with the one window's
-target.  Split:
+The split turned out to be far smaller than this RFC first assumed,
+because the render target texture is **already** a parameter of
+`render_layout_to_texture` — the hard part was done.  What is left on
+the renderer that cannot be shared is exactly two things, and they now
+live in `render_metal::WindowRender`:
 
-* **Shared, keyed by backingScaleFactor**: FontCache, ShapeCache,
-  GlyphAtlas + color atlas.  Same-scale windows share one set; each
-  distinct scale gets its own (glyphs are rasterised at physical px,
-  so cross-scale sharing would be wrong, not just wasteful).  RSS
-  bound = number of distinct display scales, not number of windows.
-* **Shared, single**: MTLDevice, command queue, pipelines.
-* **Per-window**: drawable textures, dimensions, instance buffers.
+* `pane_caches` — indexed by a window's pane order, so window A's slot
+  0 and window B's slot 0 are different panes.
+* `clear_bg_required` — "does *this* window still owe a full clear";
+  another window's resize must not discharge it.  Pinned by
+  `window_state_tests::each_window_owns_its_clear_flag`.
+
+Everything else is genuinely shared, which is the RSS win: MTLDevice,
+command queue, every pipeline, the FontCache + ShapeCache, both glyph
+atlases, and every scratch buffer (a scratch buffer is only live
+inside one `render_*` call, and windows render one after another).
+
+**No per-scale atlas.**  This RFC originally called for atlases keyed
+by `backingScaleFactor`, on the assumption that glyphs are rasterised
+at each display's physical pixel size.  Reading the code refuted it:
+`FontCache::build` rasterises at a fixed `FONT_POINT`, the renderer's
+`scale` argument is used only for `layer.setContentsScale`, and
+`GlyphKey` already carries a quantised size — so one atlas serves
+windows on displays of any backing scale, with no thrash and no
+duplication.
 
 ## Wire changes (step 2) — silent + lossless, per standing rule
 
@@ -158,8 +173,8 @@ changes are reported to L2.
 1. `basic` CoreApp → WindowState extraction; `windows.len() == 1`;
    zero behavior change; full nextest + bench gate green
 2. `infra` wire window_id + window lifecycle frames (**shipped**)
-3. `basic` renderer split (shared-by-scale / per-window target);
-   still single-window; bench gate locks perf
+3. `basic` renderer split (`WindowRender` per window, everything
+   else shared) (**shipped**)
 4. `basic` L1 window collections + Cmd-N + close semantics +
    per-window presenter + input tagging
 5. `basic` pane move: drag + context menu, same commit series

@@ -15,7 +15,7 @@ use objc2_foundation::MainThreadMarker;
 use marspot::app::{run_app, EventProxy, MarspotApp, MarspotAppCtx, WindowAttrs};
 use marspot::input::{MarspotKeyEvent, Modifiers};
 use marspot::pane::Pane;
-use marspot::render_metal::MetalRenderer;
+use marspot::render_metal::{MetalRenderer, WindowRender};
 use marspot::session::Session;
 use marspot::HEADER_PT;
 
@@ -24,6 +24,9 @@ const INITIAL_ROWS: u16 = 24;
 
 struct Mcli {
     renderer: Option<MetalRenderer>,
+    /// mcli is single-window by construction; one of these is all it
+    /// will ever need.
+    window_render: WindowRender,
     pane: Pane,
 }
 
@@ -99,7 +102,7 @@ impl MarspotApp for Mcli {
         let cols = ((phys_w / cell_w).floor() as u16).max(1);
         let rows = ((usable_h / cell_h).floor() as u16).max(1);
         self.pane.resize(cols, rows);
-        r.render(self.pane.view(true, "", ""));
+        r.render(&mut self.window_render, self.pane.view(true, "", ""));
     }
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
@@ -117,7 +120,7 @@ impl MarspotApp for Mcli {
         let Some(r) = self.renderer.as_mut() else { return };
         let view = self.pane.view(true, "", "");
         let caret = r.focused_caret_view_phys_rect(&view);
-        r.render(view);
+        r.render(&mut self.window_render, view);
         ctx.set_caret_rect_phys(caret);
     }
 }
@@ -143,6 +146,7 @@ fn main() {
 
     let app = Mcli {
         renderer: None,
+        window_render: WindowRender::new(),
         pane: Pane::new(session),
     };
 
