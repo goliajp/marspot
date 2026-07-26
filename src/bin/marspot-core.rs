@@ -568,9 +568,8 @@ mod boot_assembly_tests {
         }
         let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
         let (tx, _rx) = mpsc::channel();
-        let mut titles = std::collections::HashMap::new();
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, &mut titles);
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx);
         assert_eq!(
             pane_sids(&panes),
             vec![9, 12, 5],
@@ -585,6 +584,34 @@ mod boot_assembly_tests {
         }
     }
 
+    /// Titles bind during assembly, riding the fallback chain: a
+    /// saved slot title wins; an empty saved title falls back to the
+    /// session's own entry.toml title.  The binding lives inside
+    /// `assemble_panes_at_boot` (it used to be a loop in `main()`,
+    /// invisible to these tests) and lands on `Pane::custom_title`,
+    /// so it travels with the pane through any later reorder.
+    #[test]
+    fn titles_bind_at_assembly_saved_over_entry_toml() {
+        let _sb = Sandbox::new("titles");
+        for id in [4u64, 6] {
+            write_session_entry(&dead_entry(id)).unwrap();
+        }
+        let s = saved(&[(4, "user-title"), (6, "")]);
+        let (tx, _rx) = mpsc::channel();
+        let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx);
+        assert_eq!(pane_sids(&panes), vec![4, 6]);
+        assert_eq!(
+            panes[0].custom_title.as_deref(),
+            Some("user-title"),
+            "saved slot title must win over entry.toml"
+        );
+        assert_eq!(
+            panes[1].custom_title.as_deref(),
+            Some("saved-title-6"),
+            "empty saved title must fall back to the entry.toml title"
+        );
+    }
+
     /// Spawn failure must hold the slot open as a vacant pane carrying
     /// the sid — never compact, never shift the neighbours.
     #[test]
@@ -593,9 +620,8 @@ mod boot_assembly_tests {
         sb.break_session_bin();
         let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
         let (tx, _rx) = mpsc::channel();
-        let mut titles = std::collections::HashMap::new();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, &mut titles);
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx);
         assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
         let sids = pane_sids(&panes);
         assert_eq!(sids[0], 7, "slot 0 keeps its sid for revive");
@@ -623,9 +649,8 @@ mod boot_assembly_tests {
         std::mem::forget(live);
 
         let s = saved(&[(0, "")]);
-        let mut titles = std::collections::HashMap::new();
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, &mut titles);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx);
         let sids = pane_sids(&panes);
         assert_eq!(panes.len(), 2, "slot pane + adopted orphan: {sids:?}");
         assert!(
@@ -649,9 +674,8 @@ mod boot_assembly_tests {
         sb.break_session_bin(); // slots don't matter; keep them vacant
         let s = saved(&[(700, "")]);
         let (tx, _rx) = mpsc::channel();
-        let mut titles = std::collections::HashMap::new();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, &mut titles);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx);
         assert_eq!(panes.len(), 1);
         assert!(
             !reg::session_dir(31).exists(),
@@ -679,9 +703,8 @@ mod boot_assembly_tests {
         sb.break_session_bin();
         let s = saved(&[(9, "a"), (9, "b")]);
         let (tx, _rx) = mpsc::channel();
-        let mut titles = std::collections::HashMap::new();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, &mut titles);
+            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx);
         let sids = pane_sids(&panes);
         assert_eq!(sids.len(), 2);
         assert_eq!(sids[0], 9);
@@ -1413,7 +1436,6 @@ struct CoreApp {
     layout: Layout,
     panes: Vec<Pane>,
     focused_idx: usize,
-    custom_titles: Vec<Option<String>>,
     editing_title: Option<usize>,
     title_edit_buffer: String,
     /// Per-shelld-session right-side badge, set by L1 plugins via
@@ -1763,11 +1785,9 @@ impl CoreApp {
     /// debounce because we never call this on the render hot path.
     fn save_session_state(&self) {
         use marspot::state::{SavedPane, SavedState};
-        let panes: Vec<SavedPane> = self.panes.iter().enumerate().map(|(i, p)| {
+        let panes: Vec<SavedPane> = self.panes.iter().map(|p| {
             let sid = p.shelld_session_id().unwrap_or(0);
-            let custom_title = self.custom_titles.get(i)
-                .and_then(|t| t.clone())
-                .unwrap_or_default();
+            let custom_title = p.custom_title.clone().unwrap_or_default();
             let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
             SavedPane { sid, custom_title, last_cwd }
         }).collect();
@@ -1830,9 +1850,9 @@ impl CoreApp {
     ///
     /// `card_slots` entries that point past the live pane count
     /// are skipped (empty cards stay empty).  The post-cells tail
-    /// of `self.panes` (sidebar overflow) is untouched.  Same
-    /// permutation is applied to `custom_titles` so the title-
-    /// strip / sidebar labels travel with their owning pane.
+    /// of `self.panes` (sidebar overflow) is untouched.  Titles,
+    /// scroll offsets, search state all travel for free — they are
+    /// fields of `Pane`, and it is whole `Pane`s being permuted.
     /// Resets `card_slots` to identity afterwards.
     fn apply_card_slot_permutation(&mut self, cells: usize) {
         let n_in_grid = cells.min(self.panes.len());
@@ -1845,24 +1865,14 @@ impl CoreApp {
         // and the corresponding existing pane keeps its place at
         // the tail (skipped during reorder).
         let mut new_panes: Vec<Option<Pane>> = (0..n_in_grid).map(|_| None).collect();
-        let mut new_titles: Vec<Option<Option<String>>> = (0..n_in_grid).map(|_| None).collect();
         // Drain the leading n_in_grid panes into Option holders so
         // we can move them around without re-borrow conflicts.
         let mut drained: Vec<Option<Pane>> =
             self.panes.drain(..n_in_grid).map(Some).collect();
-        let mut drained_titles: Vec<Option<Option<String>>> =
-            if self.custom_titles.len() >= n_in_grid {
-                self.custom_titles.drain(..n_in_grid).map(Some).collect()
-            } else {
-                (0..n_in_grid).map(|_| Some(None)).collect()
-            };
         for slot_idx in 0..n_in_grid {
             let from = self.card_slots[slot_idx];
             if from < drained.len() {
                 new_panes[slot_idx] = drained[from].take();
-                new_titles[slot_idx] = drained_titles
-                    .get_mut(from)
-                    .and_then(|t| t.take());
             }
         }
         // Re-insert at the head.  Any leftover (None) means the slot
@@ -1870,33 +1880,18 @@ impl CoreApp {
         // permutations but defensible: pull from a leftover pool to
         // avoid panicking.
         let mut leftover: Vec<Pane> = drained.into_iter().flatten().collect();
-        let mut leftover_titles: Vec<Option<String>> = drained_titles
-            .into_iter()
-            .flatten()
-            .collect();
         let mut ordered: Vec<Pane> = Vec::with_capacity(n_in_grid);
-        let mut ordered_titles: Vec<Option<String>> = Vec::with_capacity(n_in_grid);
         for i in 0..n_in_grid {
             match new_panes[i].take() { Some(p) => {
                 ordered.push(p);
             } _ => { match leftover.pop() { Some(p) => {
                 ordered.push(p);
             } _ => {}}}}
-            if let Some(t) = new_titles[i].take() {
-                ordered_titles.push(t);
-            } else if let Some(t) = leftover_titles.pop() {
-                ordered_titles.push(t);
-            } else {
-                ordered_titles.push(None);
-            }
         }
         // Re-prepend.
         let tail_panes = std::mem::take(&mut self.panes);
         self.panes = ordered;
         self.panes.extend(tail_panes);
-        let tail_titles = std::mem::take(&mut self.custom_titles);
-        self.custom_titles = ordered_titles;
-        self.custom_titles.extend(tail_titles);
         self.reset_card_slots();
     }
 
@@ -2214,7 +2209,6 @@ impl CoreApp {
             }) {
                 Ok(pane) => {
                     self.panes.push(pane);
-                    self.custom_titles.push(None);
                     // F3+5 — initial cwd pull for the new pane so the
                     // title strip lands populated on its first paint.
                     // shell_child_pid may not be written yet on this
@@ -2376,9 +2370,6 @@ impl CoreApp {
             self.pane_titles.remove(&id);
         }
         self.panes.remove(idx);
-        if idx < self.custom_titles.len() {
-            self.custom_titles.remove(idx);
-        }
         if !self.panes.is_empty() {
             if self.focused_idx == idx {
                 self.focused_idx = idx.min(self.panes.len() - 1);
@@ -2414,13 +2405,13 @@ impl CoreApp {
 
     fn commit_title_edit(&mut self) {
         if let Some(idx) = self.editing_title.take() {
-            if idx < self.custom_titles.len() {
+            if let Some(pane) = self.panes.get_mut(idx) {
                 let trimmed = self.title_edit_buffer.trim().to_string();
                 // RFC-003 Phase 6: titles survive an L2 swap via the
                 // L3 process's persisted entry.toml (Amendment 7
-                // reattach path).  L2-side `custom_titles` is the
+                // reattach path).  The pane's `custom_title` is the
                 // current truth.
-                self.custom_titles[idx] =
+                pane.custom_title =
                     if trimmed.is_empty() { None } else { Some(trimmed) };
             }
             self.title_edit_buffer.clear();
@@ -3668,7 +3659,8 @@ impl CoreApp {
             // Resolve pane name same way the title strip does:
             // custom > cwd basename > ordinal.
             let name = {
-                let custom = self.custom_titles.get(pane_idx).and_then(|t| t.clone())
+                let custom = self.panes.get(pane_idx)
+                    .and_then(|p| p.custom_title.clone())
                     .filter(|s| !s.is_empty());
                 if let Some(c) = custom { c }
                 else if let Some(p) = self.pane_cwds.get(&sid) {
@@ -4137,10 +4129,9 @@ impl CoreApp {
                 self.resolve_pending_on_defocus(idx);
                 self.focused_idx = idx;
                 self.editing_title = Some(idx);
-                self.title_edit_buffer = self
-                    .custom_titles
-                    .get(idx)
-                    .and_then(|t| t.clone())
+                self.title_edit_buffer = self.panes[idx]
+                    .custom_title
+                    .clone()
                     .unwrap_or_default();
                 let _ = self.panes[self.focused_idx].snap_to_live();
                 self.selection = None;
@@ -4594,7 +4585,7 @@ impl CoreApp {
             .map(|i| {
                 if self.editing_title == Some(i) {
                     self.title_edit_buffer.clone()
-                } else if let Some(Some(custom)) = self.custom_titles.get(i) {
+                } else if let Some(custom) = self.panes[i].custom_title.as_ref() {
                     custom.clone()
                 } else if let Some(plugin_title) = self.panes[i]
                     .shelld_session_id()
@@ -4749,8 +4740,11 @@ fn assemble_panes_at_boot(
     boot_cols: u16,
     boot_rows: u16,
     event_tx: &Sender<CoreEvent>,
-    session_titles: &mut std::collections::HashMap<u64, String>,
 ) -> (Vec<Pane>, Vec<u64>) {
+    // entry.toml titles, collected during the registry scan below.
+    // Last resort of the title fallback chain at the end of assembly.
+    let mut session_titles: std::collections::HashMap<u64, String> =
+        std::collections::HashMap::new();
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
     // RFC-004 B.1 — identity-keyed slot assembly.  Every saved
     // slot is processed IN ORDER and ALWAYS yields a pane:
@@ -5020,6 +5014,46 @@ fn assemble_panes_at_boot(
         retired = retired,
         purged_expired = purged
     );
+
+    // Per-pane custom titles.  F3+6 — `saved_state.panes` wins over
+    // `session_titles` (the entry.toml-derived source) because the
+    // bin file reflects the user's last interactive state, including
+    // titles set after the last L3 reattach hop.
+    //
+    // RFC-004 B.3 — titles bind by IDENTITY, not index: the
+    // positional entry is only trusted when its recorded sid matches
+    // the pane actually sitting in that slot (or the slot was
+    // anonymous, sid == 0, and just received a fresh id).  On
+    // mismatch, search the saved panes for the sid — a title follows
+    // its session wherever the session lands.  Fallback chain:
+    // saved-by-slot → saved-by-sid → entry.toml title → None.
+    for (i, p) in panes.iter_mut().enumerate() {
+        let pane_sid = p.shelld_session_id().unwrap_or(0);
+        p.custom_title = (|| {
+            if let Some(s) = saved_state {
+                if let Some(entry) = s.panes.get(i) {
+                    let slot_matches =
+                        entry.sid == pane_sid || entry.sid == 0;
+                    if slot_matches && !entry.custom_title.is_empty() {
+                        return Some(entry.custom_title.clone());
+                    }
+                }
+                if pane_sid != 0 {
+                    if let Some(entry) =
+                        s.panes.iter().find(|e| e.sid == pane_sid)
+                    {
+                        if !entry.custom_title.is_empty() {
+                            return Some(entry.custom_title.clone());
+                        }
+                    }
+                }
+            }
+            (pane_sid != 0)
+                .then(|| session_titles.get(&pane_sid).cloned())
+                .flatten()
+                .filter(|t| !t.is_empty())
+        })();
+    }
     (panes, reattached_ids)
 }
 
@@ -5131,7 +5165,7 @@ fn main() {
     // for nothing (and, pre-reflow, used to destroy it outright).
     // F3+6 — read persisted shell-state.bin first; defaults to 3×3
     // when none / corrupt.  `saved_state` then drives reattach order,
-    // fresh-spawn cwds, focused_idx and custom_titles below.
+    // fresh-spawn cwds, focused_idx and per-pane titles below.
     let saved_state = marspot::state::read();
     let (grid_cols, grid_rows): (usize, usize) = match saved_state.as_ref() {
         Some(s) if s.grid_cols > 0 && s.grid_rows > 0 => (
@@ -5161,13 +5195,6 @@ fn main() {
         (boot.cells[0].cols, boot.cells[0].rows)
     };
     let mut panes: Vec<Pane> = Vec::with_capacity(n_sessions);
-    // session_id → custom title, harvested from shelld so freshly-
-    // booted cores repopulate their per-pane title map.  Empty for a
-    // brand-new shelld; populated below from `list_sessions`
-    // responses on both the l3_mode and fallback paths.
-    let mut session_titles: std::collections::HashMap<u64, String> =
-        std::collections::HashMap::new();
-
     // Per-session L3 is now the DEFAULT (target #4 step 6): one L3 process
     // per cell, each owning its own session process + shm grid in its own
     // address space.  L2 owns session *assignment* so the N children never
@@ -5205,7 +5232,6 @@ fn main() {
             boot_cols,
             boot_rows,
             &event_tx,
-            &mut session_titles,
         );
         panes = assembled;
         // RFC-003 §6 Amendment 16 — L3 self-execv silent update
@@ -5246,47 +5272,6 @@ fn main() {
         return;
     }
 
-    // Repopulate per-pane custom titles.  F3+6 — `saved_state.panes`
-    // wins over `session_titles` (the entry.toml-derived source)
-    // because the bin file reflects the user's last interactive
-    // state, including titles set after the last L3 reattach hop.
-    //
-    // RFC-004 B.3 — titles bind by IDENTITY, not index: the
-    // positional entry is only trusted when its recorded sid matches
-    // the pane actually sitting in that slot (or the slot was
-    // anonymous, sid == 0, and just received a fresh id).  On
-    // mismatch, search the saved panes for the sid — a title follows
-    // its session wherever the session lands.  Fallback chain:
-    // saved-by-slot → saved-by-sid → entry.toml title → None.
-    let custom_titles_init: Vec<Option<String>> = panes
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let pane_sid = p.shelld_session_id().unwrap_or(0);
-            if let Some(ref s) = saved_state {
-                if let Some(entry) = s.panes.get(i) {
-                    let slot_matches =
-                        entry.sid == pane_sid || entry.sid == 0;
-                    if slot_matches && !entry.custom_title.is_empty() {
-                        return Some(entry.custom_title.clone());
-                    }
-                }
-                if pane_sid != 0 {
-                    if let Some(entry) =
-                        s.panes.iter().find(|e| e.sid == pane_sid)
-                    {
-                        if !entry.custom_title.is_empty() {
-                            return Some(entry.custom_title.clone());
-                        }
-                    }
-                }
-            }
-            (pane_sid != 0)
-                .then(|| session_titles.get(&pane_sid).cloned())
-                .flatten()
-                .filter(|t| !t.is_empty())
-        })
-        .collect();
     let initial_focused_idx = saved_state.as_ref()
         .map(|s| (s.focused_idx as usize).min(panes.len().saturating_sub(1)))
         .unwrap_or(0);
@@ -5307,7 +5292,6 @@ fn main() {
         ),
         panes,
         focused_idx: initial_focused_idx,
-        custom_titles: custom_titles_init,
         editing_title: None,
         title_edit_buffer: String::new(),
         pane_badges: std::collections::HashMap::new(),

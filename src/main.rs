@@ -213,7 +213,6 @@ struct Marspot {
     /// back to the default session label (the row number, or the
     /// tmux window name in tmux mode).  Persisting across runs is
     /// out of scope for the first cut.
-    custom_titles: Vec<Option<String>>,
     /// When `Some(i)`, session `i`'s cell title is being edited:
     /// keyboard input goes into `title_edit_buffer` instead of the
     /// PTY, and the renderer draws a caret at the end of the title.
@@ -719,10 +718,9 @@ impl MarspotApp for Marspot {
                 self.commit_title_edit();
                 self.focused_idx = idx;
                 self.editing_title = Some(idx);
-                self.title_edit_buffer = self
-                    .custom_titles
-                    .get(idx)
-                    .and_then(|t| t.clone())
+                self.title_edit_buffer = self.panes[idx]
+                    .custom_title
+                    .clone()
                     .unwrap_or_default();
                 let _ = self.panes[self.focused_idx].snap_to_live();
                 self.selection = None;
@@ -1082,8 +1080,8 @@ impl Marspot {
         }
     }
 
-    /// Spawn a fresh session and append it to `self.panes` /
-    /// `self.custom_titles`.  Reuses the wake-via-EventProxy path
+    /// Spawn a fresh session and append it to `self.panes`.
+    /// Reuses the wake-via-EventProxy path
     /// startup uses; safe to call from any `MarspotApp` callback.
     /// Refuses past `SESSION_COUNT_HARD_CAP`.  No-op in tmux mode
     /// (the single tmux -CC session is created at startup; runtime
@@ -1239,10 +1237,10 @@ impl Marspot {
                 };
                 if idx < self.panes.len() {
                     self.editing_title = Some(idx);
-                    let cur = self.custom_titles.get(idx)
-                        .and_then(|t| t.clone())
+                    self.title_edit_buffer = self.panes[idx]
+                        .custom_title
+                        .clone()
                         .unwrap_or_default();
-                    self.title_edit_buffer = cur;
                 }
             }
             ContextMenuAction::ToggleSidebar => {
@@ -1280,7 +1278,6 @@ impl Marspot {
         ) {
             Ok(s) => {
                 self.panes.push(marspot::pane::Pane::new(s));
-                self.custom_titles.push(None);
             }
             Err(e) => lx_error!("gui.spawn.session_failed", &format!("{e}")),
         }
@@ -1300,11 +1297,6 @@ impl Marspot {
         // chain below.
         // Drop the session — this fires Session/Pty teardown.
         self.panes.remove(idx);
-        // Parallel-array state must shrink in lockstep so the
-        // post-close indices line up with what's left.
-        if idx < self.custom_titles.len() {
-            self.custom_titles.remove(idx);
-        }
         // focused_idx: clamp into the new range.  If we just closed
         // the focused session, walk back one (or stay at 0 if it was
         // the leftmost); otherwise nudge down by one for any session
@@ -1408,9 +1400,9 @@ impl Marspot {
     /// default session label.  Idempotent if not editing.
     fn commit_title_edit(&mut self) {
         if let Some(idx) = self.editing_title.take() {
-            if idx < self.custom_titles.len() {
+            if let Some(pane) = self.panes.get_mut(idx) {
                 let trimmed = self.title_edit_buffer.trim().to_string();
-                self.custom_titles[idx] =
+                pane.custom_title =
                     if trimmed.is_empty() { None } else { Some(trimmed) };
             }
             self.title_edit_buffer.clear();
@@ -1715,7 +1707,8 @@ impl Marspot {
                 if !in_tmux && self.editing_title == Some(i) {
                     self.title_edit_buffer.clone()
                 } else if !in_tmux {
-                    if let Some(Some(custom)) = self.custom_titles.get(i)
+                    if let Some(custom) = self.panes.get(i)
+                        .and_then(|p| p.custom_title.as_ref())
                     {
                         custom.clone()
                     } else {
@@ -1925,7 +1918,6 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
 
-    let n_sessions = panes.len();
     let app = Marspot {
         renderer: None,
         layout: None,
@@ -1938,7 +1930,6 @@ fn main() {
         latency_out_path,
         prof: ProfileCounters::default(),
         profile_out_path,
-        custom_titles: vec![None; n_sessions],
         editing_title: None,
         title_edit_buffer: String::new(),
         selection: None,
@@ -2308,7 +2299,6 @@ fn bench_rss_format_dump(arg: &str) {
         latency_out_path: None,
         prof: ProfileCounters::default(),
         profile_out_path: None,
-        custom_titles: Vec::new(),
         editing_title: None,
         title_edit_buffer: String::new(),
         selection: None,
