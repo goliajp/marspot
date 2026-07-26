@@ -610,6 +610,7 @@ mod window_state_tests {
             saw_window_aware_attach: false,
             l3_mode: false,
             event_tx,
+            drag_window: None,
             saved_windows: std::collections::VecDeque::new(),
             windows,
             key_window: 0,
@@ -778,6 +779,69 @@ mod window_state_tests {
         assert_eq!(app.windows[1].panes.len(), 1);
         app.adopt_restored_panes(99, vec![Pane::new_vacant(50, 80, 24)]);
         assert_eq!(app.windows.len(), 2);
+    }
+
+    /// RFC-005 step 4e — a handler acts on the window the event names,
+    /// not on whichever window happens to hold the keyboard.  Typing
+    /// into window 2 while window 1 is key must not put the preedit
+    /// string in window 1.
+    #[test]
+    fn an_event_acts_on_the_window_it_names_not_the_focused_one() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+        ]);
+        assert_eq!(app.key_window, 0);
+
+        app.preedit(1, "あ".into());
+        assert_eq!(app.windows[1].ime_preedit, "あ");
+        assert_eq!(app.windows[0].ime_preedit, "", "key window must be untouched");
+        assert!(app.windows[1].needs_render);
+
+        // Plugin state is keyed by session, and a session names its
+        // window — the badge must repaint the window that shows it.
+        app.windows[0].needs_render = false;
+        app.windows[1].needs_render = false;
+        app.set_pane_badge(20, "busy".into());
+        assert!(app.windows[1].needs_render, "the window holding sid 20");
+        assert!(!app.windows[0].needs_render, "not the key window");
+    }
+
+    /// A drag belongs to the window that took the press for as long as
+    /// the button is down — crossing into another window, or focus
+    /// moving underneath it, must not redirect the selection.
+    #[test]
+    fn a_drag_stays_with_the_window_that_took_the_press() {
+        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        app.drag_window = Some(1); // pressed in window 1
+        app.key_window = 1; // …and focus has since moved to window 2
+
+        assert_eq!(app.drag_target(2), Some(0), "drag follows the press");
+        app.drag_window = None;
+        assert_eq!(app.drag_target(2), Some(1), "no press: the frame decides");
+        assert_eq!(app.drag_target(99), None, "unknown window is dropped");
+    }
+
+    /// Focus moving repaints both windows: the focus ring leaves one
+    /// and arrives in the other.  A frame for a window that already
+    /// closed changes nothing.
+    #[test]
+    fn focusing_a_window_repaints_the_one_it_left() {
+        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        app.windows[0].needs_render = false;
+        app.windows[1].needs_render = false;
+
+        assert_eq!(app.focus_window(2), Some(1));
+        assert_eq!(app.key_window, 1);
+        assert!(app.windows[0].needs_render, "the window that lost focus");
+        assert!(app.windows[1].needs_render, "the window that gained it");
+
+        app.windows[0].needs_render = false;
+        app.windows[1].needs_render = false;
+        assert_eq!(app.focus_window(99), None, "unknown window");
+        assert_eq!(app.key_window, 1);
+        assert!(!app.windows[0].needs_render);
+        assert!(!app.windows[1].needs_render);
     }
 
     /// The modal's slot map is sized from the window's own grid, so a
@@ -1229,25 +1293,30 @@ impl std::fmt::Debug for SpawnOutcome {
 
 #[derive(Debug)]
 enum CoreEvent {
-    Key(MarspotKeyEvent, Modifiers),
-    /// RFC-005 — the pointer events carry the window they landed in.
-    /// Keyboard does not: it goes to the key window by definition, and
-    /// `WindowFocus` on the same ordered socket says which that is.
+    /// RFC-005 step 4e — every input event names its window.  L1 tags
+    /// each frame with the NSWindow that received it, so nothing here
+    /// has to fall back on "whichever window is key" — the two answers
+    /// differ exactly when it matters (a scroll over an unfocused
+    /// window, a drag that continues after focus moved).
+    Key(MarspotKeyEvent, Modifiers, u32),
     MouseDown(f64, f64, Modifiers, u32),
     /// F3+9 — right-click in screen coords + modifier byte.
     /// Drives the L2 context menu (same handler shape as MouseDown).
     MouseRightDown(f64, f64, Modifiers, u32),
-    MouseDrag(f64, f64),
+    MouseDrag(f64, f64, u32),
     /// Coordinates are on the wire but unused — release only ends
     /// the drag (same as src/main.rs `mouse_up`).
-    MouseUp,
+    MouseUp(u32),
     /// Bare mouse-move (no button).  L2 hit-tests against chrome
     /// rects so icon-button hover affordances update under the
     /// cursor.  Modifier byte on the wire is currently unused.
-    MouseMove(f64, f64),
-    /// `(dy_phys, precise)`; the horizontal delta is dropped at
-    /// decode (terminal scrollback is vertical-only).
-    Scroll(f64, bool),
+    MouseMove(f64, f64, u32),
+    /// `(dy_phys, precise, window)`; the horizontal delta is dropped
+    /// at decode (terminal scrollback is vertical-only).  The window
+    /// is the one under the cursor, which on macOS receives the wheel
+    /// whether or not it is key — scrolling an unfocused window must
+    /// scroll THAT window.
+    Scroll(f64, bool, u32),
     /// Finder file drop forwarded by L1: `(x, y)` drop point in
     /// physical px + resolved filesystem paths.  L2 hit-tests the
     /// pane and inserts shell-quoted paths via the Paste path.
@@ -1271,7 +1340,7 @@ enum CoreEvent {
     /// / restart / pending-update spawn) or re-confirms the live pair
     /// at the same dims after a restart.
     SurfaceAttach(u32, u32, f64, f64, f64),
-    Preedit(String),
+    Preedit(String, u32),
     /// Shell sent HELLO with its protocol version.  We reply with
     /// HELLO_ACK echoing the version we agree on.
     Hello(u32),
@@ -1372,9 +1441,9 @@ struct LayoutModalDrag {
 
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
     match f.msg_type {
-        MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|(w, _win)| {
+        MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|(w, win)| {
             let (e, m) = wire_to_event(w);
-            CoreEvent::Key(e, m)
+            CoreEvent::Key(e, m, win)
         }),
         MsgType::MouseDown => decode_mouse(&f.payload)
             .ok()
@@ -1384,14 +1453,16 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         }),
         MsgType::MouseDrag => decode_mouse(&f.payload)
             .ok()
-            .map(|(x, y, _, _)| CoreEvent::MouseDrag(x, y)),
-        MsgType::MouseUp => decode_mouse(&f.payload).ok().map(|_| CoreEvent::MouseUp),
+            .map(|(x, y, _, win)| CoreEvent::MouseDrag(x, y, win)),
+        MsgType::MouseUp => decode_mouse(&f.payload)
+            .ok()
+            .map(|(_, _, _, win)| CoreEvent::MouseUp(win)),
         MsgType::MouseMove => decode_mouse(&f.payload)
             .ok()
-            .map(|(x, y, _, _)| CoreEvent::MouseMove(x, y)),
+            .map(|(x, y, _, win)| CoreEvent::MouseMove(x, y, win)),
         MsgType::Scroll => decode_scroll(&f.payload)
             .ok()
-            .map(|(_dx, dy, p, _)| CoreEvent::Scroll(dy, p)),
+            .map(|(_dx, dy, p, win)| CoreEvent::Scroll(dy, p, win)),
         MsgType::FileDrop => decode_file_drop(&f.payload)
             .ok()
             .map(|(x, y, paths, win)| CoreEvent::FileDrop(x, y, paths, win)),
@@ -1433,7 +1504,7 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .map(|(sid, bytes)| CoreEvent::InjectInput(sid, bytes)),
         MsgType::Preedit => decode_preedit(&f.payload)
             .ok()
-            .map(|(text, _win)| CoreEvent::Preedit(text)),
+            .map(|(text, win)| CoreEvent::Preedit(text, win)),
         MsgType::Hello => decode_hello(&f.payload).ok().map(CoreEvent::Hello),
         MsgType::Ping => decode_ping(&f.payload).ok().map(CoreEvent::Ping),
         _ => None,
@@ -2237,6 +2308,9 @@ struct CoreApp {
     /// Every open window, in creation order.  Never empty: the last
     /// window closing exits the app.
     windows: Vec<WindowState>,
+    /// The window that took the current mouse press, if any.  Set on
+    /// press, cleared on release; `drag_target` reads it.
+    drag_window: Option<u32>,
     /// RFC-005 step 6b — saved windows past the boot one, waiting for
     /// L1 to reopen them.  Each `SurfaceAttachWindow` for an unseen id
     /// pops the front record, so the queue is also what distinguishes
@@ -2259,14 +2333,14 @@ impl CoreApp {
         if changed {
             // FREEZE_GRID may want a redraw to (eventually) freeze
             // visibly; other caps don't change pixels right away.
-            win!(self).needs_render = true;
+            self.mark_sid_window_dirty(shelld_session_id);
         }
     }
 
     /// L1 plugin released the pane back to live mode.
     fn pane_session_end(&mut self, shelld_session_id: u64) {
         if self.pane_sessions.remove(&shelld_session_id).is_some() {
-            win!(self).needs_render = true;
+            self.mark_sid_window_dirty(shelld_session_id);
         }
     }
 
@@ -2279,8 +2353,8 @@ impl CoreApp {
     /// Returns the focused pane's shelld_session_id if it currently
     /// has any PaneSession (regardless of caps) — used for the Esc
     /// hatch + key routing.
-    fn focused_pane_active_session(&self) -> Option<u64> {
-        let p = win!(self).try_focused_pane()?;
+    fn focused_pane_active_session(&self, wi: usize) -> Option<u64> {
+        let p = win!(self, wi).try_focused_pane()?;
         let sid = p.shelld_session_id()?;
         if self.pane_sessions.contains_key(&sid) {
             Some(sid)
@@ -2315,8 +2389,11 @@ impl CoreApp {
     /// cc plugin asked to push raw bytes into the PTY behind
     /// `shelld_session_id`.  Find the matching L3 pane and let it
     /// forward via the existing control channel.
+    /// Plugin-injected bytes for one session.  Sid-keyed, so it looks
+    /// in every window — the plugin knows nothing about windows and
+    /// the pane may well be in one that is not focused.
     fn inject_input(&mut self, shelld_session_id: u64, bytes: &[u8]) {
-        for pane in &mut win!(self).panes {
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             if pane.session().l3_session_id() == Some(shelld_session_id) {
                 pane.session_mut().forward_inject_input(bytes);
                 return;
@@ -2335,7 +2412,7 @@ impl CoreApp {
             false
         };
         if changed {
-            win!(self).needs_render = true;
+            self.mark_sid_window_dirty(shelld_session_id);
         }
     }
 
@@ -2350,7 +2427,7 @@ impl CoreApp {
             false
         };
         if changed {
-            win!(self).needs_render = true;
+            self.mark_sid_window_dirty(shelld_session_id);
         }
     }
 
@@ -2401,9 +2478,9 @@ impl CoreApp {
     /// F3+3.6 — batch pull-based cwd refresh.  Walks every pane,
     /// `read_shell_child_pid` + `pidtree::proc_cwd` per pane.  Used
     /// by LayoutModal open to one-shot fresh all 9.
-    fn refresh_pane_cwds(&mut self) {
+    fn refresh_pane_cwds(&mut self, wi: usize) {
         let now = Instant::now();
-        for pane in &win!(self).panes {
+        for pane in &win!(self, wi).panes {
             let Some(sid) = pane.shelld_session_id() else { continue };
             let Some(pid) = read_shell_child_pid(sid) else { continue };
             let Some(path) = marspot::pidtree::proc_cwd(pid) else { continue };
@@ -2550,10 +2627,10 @@ impl CoreApp {
         }
     }
 
-    fn reset_card_slots(&mut self) {
-        let cells = win!(self).pending_grid_cols * win!(self).pending_grid_rows;
-        win!(self).card_slots = (0..cells).collect();
-        win!(self).layout_drag = None;
+    fn reset_card_slots(&mut self, wi: usize) {
+        let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
+        win!(self, wi).card_slots = (0..cells).collect();
+        win!(self, wi).layout_drag = None;
     }
 
     /// F3+3.3 — apply `card_slots` as a permutation on the leading
@@ -2567,10 +2644,10 @@ impl CoreApp {
     /// scroll offsets, search state all travel for free — they are
     /// fields of `Pane`, and it is whole `Pane`s being permuted.
     /// Resets `card_slots` to identity afterwards.
-    fn apply_card_slot_permutation(&mut self, cells: usize) {
-        let n_in_grid = cells.min(win!(self).panes.len());
-        if n_in_grid == 0 || win!(self).card_slots.len() < n_in_grid {
-            self.reset_card_slots();
+    fn apply_card_slot_permutation(&mut self, wi: usize, cells: usize) {
+        let n_in_grid = cells.min(win!(self, wi).panes.len());
+        if n_in_grid == 0 || win!(self, wi).card_slots.len() < n_in_grid {
+            self.reset_card_slots(wi);
             return;
         }
         // Build new layouts for the leading n_in_grid slots.  Slots
@@ -2581,9 +2658,9 @@ impl CoreApp {
         // Drain the leading n_in_grid panes into Option holders so
         // we can move them around without re-borrow conflicts.
         let mut drained: Vec<Option<Pane>> =
-            win!(self).panes.drain(..n_in_grid).map(Some).collect();
+            win!(self, wi).panes.drain(..n_in_grid).map(Some).collect();
         for slot_idx in 0..n_in_grid {
-            let from = win!(self).card_slots[slot_idx];
+            let from = win!(self, wi).card_slots[slot_idx];
             if from < drained.len() {
                 new_panes[slot_idx] = drained[from].take();
             }
@@ -2602,10 +2679,10 @@ impl CoreApp {
             } _ => {}}}}
         }
         // Re-prepend.
-        let tail_panes = std::mem::take(&mut win!(self).panes);
-        win!(self).panes = ordered;
-        win!(self).panes.extend(tail_panes);
-        self.reset_card_slots();
+        let tail_panes = std::mem::take(&mut win!(self, wi).panes);
+        win!(self, wi).panes = ordered;
+        win!(self, wi).panes.extend(tail_panes);
+        self.reset_card_slots(wi);
     }
 
     /// Spawn a fresh session and append it.  Refuses past
@@ -2615,14 +2692,14 @@ impl CoreApp {
     // ─── F3+9 — right-click context menu (split-arch L2 side) ────────
 
     fn mouse_right_down(
-        &mut self,
+        &mut self, wi: usize,
         x_phys: f64,
         y_phys: f64,
         _modifiers: Modifiers,
     ) {
         // Second right-click closes the previous menu first.
-        if win!(self).context_menu.take().is_some() {
-            win!(self).needs_render = true;
+        if win!(self, wi).context_menu.take().is_some() {
+            win!(self, wi).needs_render = true;
         }
         // Badge-prefix right-click: the menu CONTENT lives in the L1
         // plugin that owns the badge, so ask it (PaneBadgeMenuRequest)
@@ -2630,8 +2707,8 @@ impl CoreApp {
         // same request/response shape as GetSelectionText.  Checked
         // ahead of the link / region paths so `P<n>` never opens the
         // generic pane menu.
-        if let Some(i) = self.hit_test_pane_badge_prefix(x_phys, y_phys) {
-            if let Some(sid) = win!(self).panes.get(i).and_then(|p| p.shelld_session_id()) {
+        if let Some(i) = self.hit_test_pane_badge_prefix(wi, x_phys, y_phys) {
+            if let Some(sid) = win!(self, wi).panes.get(i).and_then(|p| p.shelld_session_id()) {
                 let payload = marspot::shell_proto::encode_pane_badge_menu_request(
                     sid, x_phys, y_phys,
                 );
@@ -2643,16 +2720,16 @@ impl CoreApp {
         // A right-click that lands on a recognised URL / file path
         // gets a link-specific menu (Open / Copy) instead of the
         // generic pane menu.  Email is recognised but inert.
-        let link = self.hit_test_link_at_xy(x_phys, y_phys);
-        let region = self.resolve_context_region(x_phys, y_phys);
+        let link = self.hit_test_link_at_xy(wi, x_phys, y_phys);
+        let region = self.resolve_context_region(wi, x_phys, y_phys);
         let items = match &link {
             Some(l) => self.build_link_menu_items(l),
-            None => self.build_menu_items(region),
+            None => self.build_menu_items(wi, region),
         };
         if items.is_empty() {
             return;
         }
-        win!(self).context_menu = Some(ContextMenuState {
+        win!(self, wi).context_menu = Some(ContextMenuState {
             items,
             anchor_x: x_phys,
             anchor_y: y_phys,
@@ -2660,14 +2737,14 @@ impl CoreApp {
             hovered_idx: None,
             link,
         });
-        win!(self).needs_render = true;
+        win!(self, wi).needs_render = true;
     }
 
     /// Open the badge context menu from a `PaneBadgeMenu` reply.  The
     /// anchor is the echoed right-click position; empty items = the
     /// owning plugin has nothing to offer, show nothing.
     fn open_pane_badge_menu(
-        &mut self,
+        &mut self, wi: usize,
         sid: u64,
         anchor_x: f64,
         anchor_y: f64,
@@ -2680,7 +2757,7 @@ impl CoreApp {
             .into_iter()
             .map(|it| marspot::ui::components::MenuItem::entry(&it.label, it.tag))
             .collect();
-        win!(self).context_menu = Some(ContextMenuState {
+        win!(self, wi).context_menu = Some(ContextMenuState {
             items,
             anchor_x,
             anchor_y,
@@ -2688,33 +2765,33 @@ impl CoreApp {
             hovered_idx: None,
             link: None,
         });
-        win!(self).needs_render = true;
+        win!(self, wi).needs_render = true;
     }
 
-    fn resolve_context_region(&self, x_phys: f64, y_phys: f64) -> ContextRegion {
+    fn resolve_context_region(&self, wi: usize, x_phys: f64, y_phys: f64) -> ContextRegion {
         // Sidebar row check first — wins over the cell-area hit when
         // both overlap (the sidebar overlays the title-strip band).
         let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
-        let top_pad_phys = win!(self).layout.top_inset + win!(self).layout.sidebar_top_pad_phys;
-        if let Some(idx) = win!(self).layout.hit_test_sidebar_row(
-            x_phys, y_phys, top_pad_phys, row_phys, win!(self).panes.len(),
+        let top_pad_phys = win!(self, wi).layout.top_inset + win!(self, wi).layout.sidebar_top_pad_phys;
+        if let Some(idx) = win!(self, wi).layout.hit_test_sidebar_row(
+            x_phys, y_phys, top_pad_phys, row_phys, win!(self, wi).panes.len(),
         ) {
             return ContextRegion::SidebarSlot(idx);
         }
-        if let Some(idx) = win!(self).layout.hit_test(x_phys, y_phys) {
+        if let Some(idx) = win!(self, wi).layout.hit_test(x_phys, y_phys) {
             return ContextRegion::Pane(idx);
         }
         ContextRegion::TitleStrip
     }
 
     fn build_menu_items(
-        &self,
+        &self, wi: usize,
         region: ContextRegion,
     ) -> Vec<marspot::ui::components::MenuItem> {
         use marspot::ui::components::MenuItem;
         match region {
             ContextRegion::Pane(_) => {
-                let close_disabled = win!(self).panes.len() <= 1;
+                let close_disabled = win!(self, wi).panes.len() <= 1;
                 let close = {
                     let mi = MenuItem::entry(
                         "Close pane", ContextMenuAction::ClosePane.tag(),
@@ -2725,7 +2802,7 @@ impl CoreApp {
                     "Copy", ContextMenuAction::CopySelection.tag(),
                 ).with_shortcut("⌘C");
                 vec![
-                    if win!(self).selection.is_some() { copy } else { copy.disabled() },
+                    if win!(self, wi).selection.is_some() { copy } else { copy.disabled() },
                     MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
                         .with_shortcut("⌘V"),
                     MenuItem::divider(),
@@ -2738,7 +2815,7 @@ impl CoreApp {
                 ]
             }
             ContextRegion::SidebarSlot(_) => {
-                let close_disabled = win!(self).panes.len() <= 1;
+                let close_disabled = win!(self, wi).panes.len() <= 1;
                 let close = {
                     let mi = MenuItem::entry(
                         "Close pane", ContextMenuAction::ClosePane.tag(),
@@ -2777,7 +2854,7 @@ impl CoreApp {
     }
 
     fn dispatch_context_action(
-        &mut self,
+        &mut self, wi: usize,
         action: ContextMenuAction,
         region: ContextRegion,
     ) {
@@ -2785,58 +2862,58 @@ impl CoreApp {
         // CopyLink arms read it after the clear.  Kind matters for
         // OpenLink (Email needs a `mailto:` prefix so `open(1)` routes
         // to the default mail client, not the browser).
-        let link_snapshot = win!(self)
+        let link_snapshot = win!(self, wi)
             .context_menu
             .as_ref()
             .and_then(|s| s.link.clone());
-        win!(self).context_menu = None;
+        win!(self, wi).context_menu = None;
         match action {
             ContextMenuAction::CopySelection => {
-                let _ = self.copy_selection_to_clipboard();
+                let _ = self.copy_selection_to_clipboard(wi);
             }
             ContextMenuAction::Paste => {
                 if let Some(txt) = marspot::input::read_clipboard_text() {
-                    if let Some(pane) = win!(self).try_focused_pane_mut() {
+                    if let Some(pane) = win!(self, wi).try_focused_pane_mut() {
                         pane.session_mut().forward_paste(&txt);
                     }
                 }
             }
             ContextMenuAction::ClearScrollback => {
-                if let Some(pane) = win!(self).try_focused_pane_mut() {
+                if let Some(pane) = win!(self, wi).try_focused_pane_mut() {
                     pane.session_mut().forward_inject_input(b"\x1b[3J");
                 }
             }
             ContextMenuAction::ClosePane => {
                 let idx = match region {
                     ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
-                    _ => win!(self).focused_idx,
+                    _ => win!(self, wi).focused_idx,
                 };
-                if win!(self).panes.len() > 1 && idx < win!(self).panes.len() {
-                    self.close_session(idx);
-                    self.rebuild_layout(self.key_window);
+                if win!(self, wi).panes.len() > 1 && idx < win!(self, wi).panes.len() {
+                    self.close_session(wi, idx);
+                    self.rebuild_layout(wi);
                 }
             }
             ContextMenuAction::SplitNewPane => {
-                if win!(self).panes.len() < marspot::ui::SESSION_COUNT_HARD_CAP {
-                    self.spawn_session();
-                    self.rebuild_layout(self.key_window);
+                if win!(self, wi).panes.len() < marspot::ui::SESSION_COUNT_HARD_CAP {
+                    self.spawn_session(wi);
+                    self.rebuild_layout(wi);
                 }
             }
             ContextMenuAction::RenameTitle => {
                 let idx = match region {
                     ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
-                    _ => win!(self).focused_idx,
+                    _ => win!(self, wi).focused_idx,
                 };
-                if idx < win!(self).panes.len() {
-                    win!(self).editing_title = Some(idx);
+                if idx < win!(self, wi).panes.len() {
+                    win!(self, wi).editing_title = Some(idx);
                 }
             }
             ContextMenuAction::ToggleSidebar => {
-                win!(self).sidebar_collapsed = !win!(self).sidebar_collapsed;
-                self.rebuild_layout(self.key_window);
+                win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
+                self.rebuild_layout(wi);
             }
             ContextMenuAction::OpenLayout => {
-                win!(self).layout_modal_open = true;
+                win!(self, wi).layout_modal_open = true;
             }
             ContextMenuAction::OpenLink => {
                 if let Some(link) = link_snapshot.as_ref() {
@@ -2895,18 +2972,18 @@ impl CoreApp {
                 }
             }
         }
-        win!(self).needs_render = true;
+        win!(self, wi).needs_render = true;
     }
 
-    fn spawn_session(&mut self) {
-        if win!(self).panes.len() >= SESSION_COUNT_HARD_CAP {
+    fn spawn_session(&mut self, wi: usize) {
+        if win!(self, wi).panes.len() >= SESSION_COUNT_HARD_CAP {
             return;
         }
-        let (cols, rows) = win!(self)
+        let (cols, rows) = win!(self, wi)
             .layout
             .cells
-            .get(win!(self).panes.len())
-            .or_else(|| win!(self).layout.cells.first())
+            .get(win!(self, wi).panes.len())
+            .or_else(|| win!(self, wi).layout.cells.first())
             .map(|c| (c.cols, c.rows))
             .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
         if self.l3_mode {
@@ -2921,15 +2998,15 @@ impl CoreApp {
                 spawn_l3_pane_async(cols, rows, id, &self.event_tx)
             }) {
                 Ok(pane) => {
-                    win!(self).panes.push(pane);
+                    win!(self, wi).panes.push(pane);
                     // F3+5 — initial cwd pull for the new pane so the
                     // title strip lands populated on its first paint.
                     // shell_child_pid may not be written yet on this
                     // very tick — `refresh_pane_cwd_for` silently
                     // returns false, and the build_views lazy-fill
                     // catches it on a later frame.
-                    let new_idx = win!(self).panes.len() - 1;
-                    self.refresh_pane_cwd_for(self.key_window, new_idx, true);
+                    let new_idx = win!(self, wi).panes.len() - 1;
+                    self.refresh_pane_cwd_for(wi, new_idx, true);
                     self.save_session_state();
                 }
                 Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
@@ -2979,7 +3056,7 @@ impl CoreApp {
             Err(e) => lx_error!("core.promote.swap_failed", &format!("{e}")),
         }
         let mut signalled = 0usize;
-        for pane in &win!(self).panes {
+        for pane in self.windows.iter().flat_map(|w| w.panes.iter()) {
             if !pane.is_l3() || pane.is_exited() {
                 continue;
             }
@@ -3009,31 +3086,31 @@ impl CoreApp {
     /// focused pane has a deferred update, it's about to become idle, so
     /// trigger its swap now (a replay is safe once it's not under the
     /// user's hands).  No-op if focus isn't actually changing.
-    fn resolve_pending_on_defocus(&mut self, new_idx: usize) {
-        if new_idx != win!(self).focused_idx
-            && win!(self)
+    fn resolve_pending_on_defocus(&mut self, wi: usize, new_idx: usize) {
+        if new_idx != win!(self, wi).focused_idx
+            && win!(self, wi)
                 .panes
-                .get(win!(self).focused_idx)
+                .get(win!(self, wi).focused_idx)
                 .is_some_and(|p| p.update_pending())
         {
-            self.begin_pane_swap(win!(self).focused_idx);
+            self.begin_pane_swap(wi, win!(self, wi).focused_idx);
         }
     }
 
     /// Bring up a replacement L3 on pane `i`'s session and stage the swap
     /// (clearing any deferred-update flag).  Caller has checked it's a live,
     /// not-already-swapping L3 pane.
-    fn begin_pane_swap(&mut self, i: usize) {
-        let pane = &win!(self).panes[i];
+    fn begin_pane_swap(&mut self, wi: usize, i: usize) {
+        let pane = &win!(self, wi).panes[i];
         let Some(sid) = pane.session().l3_session_id() else {
             return;
         };
         let (cols, rows) = (pane.session().grid().cols(), pane.session().grid().rows());
         match spawn_l3(cols, rows, sid, &self.event_tx) {
             Ok(spawn) => {
-                win!(self).panes[i].session_mut().begin_l3_swap(spawn);
-                win!(self).panes[i].set_update_pending(false);
-                win!(self).needs_render = true;
+                win!(self, wi).panes[i].session_mut().begin_l3_swap(spawn);
+                win!(self, wi).panes[i].set_update_pending(false);
+                win!(self, wi).needs_render = true;
                 lx_event!(
                     "L3_SWAP_STAGED",
                     "staged silent swap for L3 session",
@@ -3263,6 +3340,26 @@ impl CoreApp {
         })
     }
 
+    /// Total panes across every window — what the diagnostics mean by
+    /// "how big is this session", now that panes live in more than one
+    /// window.
+    fn total_panes(&self) -> usize {
+        self.windows.iter().map(|w| w.panes.len()).sum()
+    }
+
+    /// Repaint the window whose pane carries this session id.
+    ///
+    /// Plugin-driven state (badges, titles, PaneSession caps) is keyed
+    /// by session, and a session says nothing about which window shows
+    /// it.  Marking the key window instead would paint the badge into
+    /// whichever window the user happened to be looking at — and leave
+    /// the one that actually changed stale.
+    fn mark_sid_window_dirty(&mut self, sid: u64) {
+        if let Some((wi, _)) = self.find_pane_by_sid(sid) {
+            win!(self, wi).needs_render = true;
+        }
+    }
+
     /// Index of the window carrying `window_id`, if the core has it.
     fn window_index(&self, window_id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.window_id == window_id)
@@ -3312,17 +3409,29 @@ impl CoreApp {
     /// nothing) when the core has no such window — a frame for a
     /// window that already closed, which is a normal race, not an
     /// error.
-    fn focus_window(&mut self, window_id: u32) -> bool {
-        match self.window_index(window_id) {
-            Some(i) => {
-                if self.key_window != i {
-                    self.key_window = i;
-                    win!(self).needs_render = true;
-                }
-                true
-            }
-            None => false,
+    fn focus_window(&mut self, window_id: u32) -> Option<usize> {
+        let i = self.window_index(window_id)?;
+        if self.key_window != i {
+            let was = self.key_window;
+            self.key_window = i;
+            // The focus ring moves, so BOTH windows owe a frame — the
+            // one that gained it and the one that lost it.
+            win!(self, was).needs_render = true;
+            win!(self, i).needs_render = true;
         }
+        Some(i)
+    }
+
+    /// Which window a drag update or release belongs to: the one that
+    /// took the press.  A drag that leaves its window still steers the
+    /// selection it started, and a release delivered after focus moved
+    /// still ends that drag rather than poking whatever is key now.
+    /// Falls back to the window on the frame when no press is
+    /// outstanding (a release with no drag, e.g. after a core swap).
+    fn drag_target(&self, frame_window: u32) -> Option<usize> {
+        self.drag_window
+            .and_then(|w| self.window_index(w))
+            .or_else(|| self.window_index(frame_window))
     }
 
     /// A window closed: retire every session it held and drop its
@@ -3356,7 +3465,6 @@ impl CoreApp {
             s.release();
         }
         self.key_window = self.key_window.min(self.windows.len() - 1);
-        win!(self).needs_render = true;
         lx_event!(
             "WINDOW_CLOSED",
             "window and its panes retired",
@@ -3365,50 +3473,50 @@ impl CoreApp {
         );
     }
 
-    fn close_session(&mut self, idx: usize) {
-        if idx >= win!(self).panes.len() {
+    fn close_session(&mut self, wi: usize, idx: usize) {
+        if idx >= win!(self, wi).panes.len() {
             return;
         }
-        if let Some(id) = win!(self).panes[idx].shelld_session_id() {
-            let is_l3 = win!(self).panes[idx].is_l3();
+        if let Some(id) = win!(self, wi).panes[idx].shelld_session_id() {
+            let is_l3 = win!(self, wi).panes[idx].is_l3();
             self.retire_pane_session(id, is_l3);
         }
-        win!(self).panes.remove(idx);
-        if !win!(self).panes.is_empty() {
-            if win!(self).focused_idx == idx {
-                win!(self).focused_idx = idx.min(win!(self).panes.len() - 1);
-            } else if win!(self).focused_idx > idx {
-                win!(self).focused_idx -= 1;
+        win!(self, wi).panes.remove(idx);
+        if !win!(self, wi).panes.is_empty() {
+            if win!(self, wi).focused_idx == idx {
+                win!(self, wi).focused_idx = idx.min(win!(self, wi).panes.len() - 1);
+            } else if win!(self, wi).focused_idx > idx {
+                win!(self, wi).focused_idx -= 1;
             }
         } else {
-            win!(self).focused_idx = 0;
+            win!(self, wi).focused_idx = 0;
         }
-        if let Some(sel) = win!(self).selection {
+        if let Some(sel) = win!(self, wi).selection {
             if sel.session_idx == idx {
-                win!(self).selection = None;
-                win!(self).selection_dragging = false;
+                win!(self, wi).selection = None;
+                win!(self, wi).selection_dragging = false;
             } else if sel.session_idx > idx {
-                win!(self).selection = Some(Selection {
+                win!(self, wi).selection = Some(Selection {
                     session_idx: sel.session_idx - 1,
                     ..sel
                 });
             }
         }
-        match win!(self).editing_title {
+        match win!(self, wi).editing_title {
             Some(i) if i == idx => {
-                win!(self).editing_title = None;
-                win!(self).title_edit_buffer.clear();
+                win!(self, wi).editing_title = None;
+                win!(self, wi).title_edit_buffer.clear();
             }
             Some(i) if i > idx => {
-                win!(self).editing_title = Some(i - 1);
+                win!(self, wi).editing_title = Some(i - 1);
             }
             _ => {}
         }
         self.save_session_state();
     }
 
-    fn commit_title_edit(&mut self) {
-        let w = &mut win!(self);
+    fn commit_title_edit(&mut self, wi: usize) {
+        let w = &mut win!(self, wi);
         if let Some(idx) = w.editing_title.take() {
             let trimmed = w.title_edit_buffer.trim().to_string();
             if let Some(pane) = w.panes.get_mut(idx) {
@@ -3424,9 +3532,9 @@ impl CoreApp {
         }
     }
 
-    fn cancel_title_edit(&mut self) {
-        win!(self).editing_title = None;
-        win!(self).title_edit_buffer.clear();
+    fn cancel_title_edit(&mut self, wi: usize) {
+        win!(self, wi).editing_title = None;
+        win!(self, wi).title_edit_buffer.clear();
     }
 
     // ─── C5: scrollback search overlay ────────────────────────────
@@ -3440,9 +3548,9 @@ impl CoreApp {
     /// Cmd+F handler.  When search is closed → open + focus query.
     /// When already open → re-focus + select-all (browser convention
     /// per §6.9).  Narrow-pane fallback skips the open entirely.
-    fn handle_cmd_f(&mut self) -> bool {
-        let idx = win!(self).focused_idx;
-        let Some(pane) = win!(self).panes.get_mut(idx) else { return false };
+    fn handle_cmd_f(&mut self, wi: usize) -> bool {
+        let idx = win!(self, wi).focused_idx;
+        let Some(pane) = win!(self, wi).panes.get_mut(idx) else { return false };
         // Width gate (§6.7).
         let grid_cols = pane.session().grid().cols();
         if grid_cols < Self::SEARCH_MIN_PANE_COLS {
@@ -3457,7 +3565,7 @@ impl CoreApp {
         match pane.search.as_mut() {
             None => {
                 pane.search = Some(marspot::pane::PaneSearch::open());
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 lx_event!(
                     "L2_SEARCH_OPEN",
                     "Cmd+F opened search overlay",
@@ -3470,7 +3578,7 @@ impl CoreApp {
                 // SearchBar's Cmd+A behaviour maps to "cursor to end").
                 s.bar.focused = true;
                 s.bar.cursor = s.bar.query_char_len();
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
             }
         }
         true
@@ -3542,14 +3650,14 @@ impl CoreApp {
     /// propagate to PTY / Cmd-C / etc.).  Implements §6.7 routing
     /// rules: ↑/↓/Enter → list; everything else → bar.
     fn search_consume_key(
-        &mut self,
+        &mut self, wi: usize,
         event: &MarspotKeyEvent,
         mods: Modifiers,
     ) -> bool {
         use marspot::input::{LogicalKey, NamedKey};
-        let idx = win!(self).focused_idx;
+        let idx = win!(self, wi).focused_idx;
         // Decision: list vs bar.  Done in a scope so the mutable
-        // borrow of `win!(self).panes` ends before we call
+        // borrow of `win!(self, wi).panes` ends before we call
         // `jump_to_focused_hit(idx)` (which needs a fresh &mut self).
         enum Outcome {
             NotOpen,
@@ -3559,7 +3667,7 @@ impl CoreApp {
             Pass,
         }
         let outcome: Outcome = {
-            let Some(pane) = win!(self).panes.get_mut(idx) else { return false };
+            let Some(pane) = win!(self, wi).panes.get_mut(idx) else { return false };
             let Some(search) = pane.search.as_mut() else { return false };
             if !search.bar.focused {
                 Outcome::NotOpen
@@ -3615,12 +3723,12 @@ impl CoreApp {
             Outcome::NotOpen => false,
             Outcome::Pass => false,
             Outcome::Consumed | Outcome::ConsumedClosed => {
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 true
             }
             Outcome::ConsumedJump => {
-                win!(self).needs_render = true;
-                self.jump_to_focused_hit(idx);
+                win!(self, wi).needs_render = true;
+                self.jump_to_focused_hit(wi, idx);
                 true
             }
         }
@@ -3629,8 +3737,8 @@ impl CoreApp {
     /// Realise a `JumpRequest::JumpToFocused`: compute view_offset +
     /// HighlightSpan from the focused hit's WireSearchHit, store on
     /// the pane, and forward GridScroll if needed.
-    fn jump_to_focused_hit(&mut self, pane_idx: usize) {
-        let Some(pane) = win!(self).panes.get_mut(pane_idx) else { return };
+    fn jump_to_focused_hit(&mut self, wi: usize, pane_idx: usize) {
+        let Some(pane) = win!(self, wi).panes.get_mut(pane_idx) else { return };
         let Some(search) = pane.search.as_ref() else { return };
         let Some(hit) = search.list.focused_hit() else { return };
         let rows = pane.session().grid().rows();
@@ -3720,11 +3828,11 @@ impl CoreApp {
         // path's snap_to_live and bounce view_offset back to 0
         // before the user could see the hit.  Esc closes the overlay
         // and clears the highlight in one shot.
-        win!(self).needs_render = true;
+        win!(self, wi).needs_render = true;
     }
 
-    fn copy_selection_to_clipboard(&mut self) -> bool {
-        let Some(sel) = win!(self).selection else { return false };
+    fn copy_selection_to_clipboard(&mut self, wi: usize) -> bool {
+        let Some(sel) = win!(self, wi).selection else { return false };
         let idx = sel.session_idx;
         // L3 owns the real grid + scrollback; L2's mirror is a window-only
         // synthetic grid that `grid_selection_text` can't read back, so the
@@ -3732,14 +3840,14 @@ impl CoreApp {
         // read it locally.  The round-trip is made reliable by a per-request
         // sequence id (see `request_selection_text`) so a late reply from a
         // timed-out request can't alias the next copy.
-        let is_l3 = win!(self).panes.get(idx).is_some_and(|p| p.is_l3());
+        let is_l3 = win!(self, wi).panes.get(idx).is_some_and(|p| p.is_l3());
         let text = if is_l3 {
             let blockwise = sel.mode == marspot::ui::SelectionMode::Blockwise;
-            win!(self).panes
+            win!(self, wi).panes
                 .get_mut(idx)
                 .and_then(|p| p.session_mut().request_selection_text(sel.anchor, sel.focus, blockwise))
         } else {
-            win!(self).panes.get(idx).and_then(|pane| selection_text(pane, &sel))
+            win!(self, wi).panes.get(idx).and_then(|pane| selection_text(pane, &sel))
         };
         // cc-only post-processing: claudecode renders to a fixed inner
         // width with hard `\n` wraps that we don't want on the clipboard.
@@ -3747,7 +3855,7 @@ impl CoreApp {
         // this pane's shelld_session_id means cc plugin tagged it.  See
         // `src/cc.rs`.
         let text = text.map(|t| {
-            let is_cc = win!(self)
+            let is_cc = win!(self, wi)
                 .panes
                 .get(idx)
                 .and_then(|p| p.shelld_session_id())
@@ -3762,15 +3870,15 @@ impl CoreApp {
         }
     }
 
-    fn key(&mut self, event: MarspotKeyEvent, modifiers: Modifiers) {
+    fn key(&mut self, wi: usize, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
 
         // F3+9 — Esc closes the context menu if open.  Swallowed so the
         // \e doesn't reach the focused pane.
-        if event.state == KeyState::Pressed && win!(self).context_menu.is_some() {
+        if event.state == KeyState::Pressed && win!(self, wi).context_menu.is_some() {
             if let LogicalKey::Named(NamedKey::Escape) = event.logical {
-                win!(self).context_menu = None;
-                win!(self).needs_render = true;
+                win!(self, wi).context_menu = None;
+                win!(self, wi).needs_render = true;
                 return;
             }
         }
@@ -3779,13 +3887,13 @@ impl CoreApp {
         // when open (modal semantics).  Sits above every other key
         // path so a modal-active terminal still has working pane
         // keys after closing.
-        if win!(self).process_panel.is_some() && event.state == KeyState::Pressed {
+        if win!(self, wi).process_panel.is_some() && event.state == KeyState::Pressed {
             let is_esc = matches!(event.logical, LogicalKey::Named(NamedKey::Escape));
             let is_cmd_w = matches!(event.logical, LogicalKey::Char('w'))
                 && modifiers.super_;
             if is_esc || is_cmd_w {
-                win!(self).process_panel = None;
-                win!(self).needs_render = true;
+                win!(self, wi).process_panel = None;
+                win!(self, wi).needs_render = true;
                 return;
             }
         }
@@ -3796,7 +3904,7 @@ impl CoreApp {
                 && modifiers.super_;
             if is_esc || is_cmd_w {
                 self.cc_usage_modal = None;
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
         }
@@ -3815,7 +3923,7 @@ impl CoreApp {
             && modifiers.shift
             && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
         {
-            self.toggle_cc_usage_modal();
+            self.toggle_cc_usage_modal(wi);
             return;
         }
 
@@ -3829,7 +3937,7 @@ impl CoreApp {
         // user might genuinely need Esc to force-end a stuck session,
         // and we don't want any L2 shortcut to swallow it first.
         if event.state == KeyState::Pressed {
-            if let Some(active_sid) = self.focused_pane_active_session() {
+            if let Some(active_sid) = self.focused_pane_active_session(wi) {
                 let has_lock = self
                     .pane_session_for(active_sid)
                     .is_some_and(|s| s.has(marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS));
@@ -3874,11 +3982,11 @@ impl CoreApp {
             && modifiers.super_key()
             && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'f'))
         {
-            if self.handle_cmd_f() {
+            if self.handle_cmd_f(wi) {
                 return;
             }
         }
-        if event.state == KeyState::Pressed && self.search_consume_key(&event, modifiers) {
+        if event.state == KeyState::Pressed && self.search_consume_key(wi, &event, modifiers) {
             return;
         }
         // F1+12 — F1+9 had a too-wide guard here that returned early
@@ -3897,7 +4005,7 @@ impl CoreApp {
             && modifiers.super_key()
             && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'c'))
         {
-            if self.copy_selection_to_clipboard() {
+            if self.copy_selection_to_clipboard(wi) {
                 return;
             }
         }
@@ -3907,40 +4015,40 @@ impl CoreApp {
             && modifiers.super_key()
             && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'b'))
         {
-            win!(self).sidebar_collapsed = !win!(self).sidebar_collapsed;
-            self.rebuild_layout(self.key_window);
+            win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
+            self.rebuild_layout(wi);
             return;
         }
 
         // Title-edit mode intercepts the keyboard before the PTY
         // mapper sees anything.  Enter commits, Esc cancels,
         // Backspace pops a char, printable text appends.
-        if win!(self).editing_title.is_some() {
+        if win!(self, wi).editing_title.is_some() {
             if event.state == KeyState::Pressed && !modifiers.super_key() {
                 match &event.logical {
                     LogicalKey::Named(NamedKey::Enter) => {
-                        self.commit_title_edit();
-                        win!(self).needs_render = true;
+                        self.commit_title_edit(wi);
+                        win!(self, wi).needs_render = true;
                         return;
                     }
                     LogicalKey::Named(NamedKey::Escape) => {
-                        self.cancel_title_edit();
-                        win!(self).needs_render = true;
+                        self.cancel_title_edit(wi);
+                        win!(self, wi).needs_render = true;
                         return;
                     }
                     LogicalKey::Named(NamedKey::Backspace) => {
-                        win!(self).title_edit_buffer.pop();
-                        win!(self).needs_render = true;
+                        win!(self, wi).title_edit_buffer.pop();
+                        win!(self, wi).needs_render = true;
                         return;
                     }
                     _ => {
                         if let Some(t) = &event.text {
                             for ch in t.chars() {
                                 if !ch.is_control() {
-                                    win!(self).title_edit_buffer.push(ch);
+                                    win!(self, wi).title_edit_buffer.push(ch);
                                 }
                             }
-                            win!(self).needs_render = true;
+                            win!(self, wi).needs_render = true;
                             return;
                         }
                     }
@@ -3949,7 +4057,7 @@ impl CoreApp {
             return;
         }
 
-        let Some(pane) = win!(self).try_focused_pane() else { return };
+        let Some(pane) = win!(self, wi).try_focused_pane() else { return };
 
         // RFC-003 Phase 4 (frozen reattach minimum): an exited L3 pane
         // shows whatever was last published; on key press we revive it
@@ -3975,18 +4083,18 @@ impl CoreApp {
             if let Some(sid) = sid_opt {
                 // Layout already sized the pane — keep its current
                 // cell dims so the new L3 boots at the same shape.
-                let (cols, rows) = win!(self)
+                let (cols, rows) = win!(self, wi)
                     .layout
                     .cells
-                    .get(win!(self).focused_idx)
+                    .get(win!(self, wi).focused_idx)
                     .map(|c| (c.cols, c.rows))
                     .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
                 // Off-loop, same as [+]: a keystroke into a dead slot
                 // must not freeze the other fifteen panes while the
                 // replacement boots.
-                *win!(self).focused_pane_mut() =
+                *win!(self, wi).focused_pane_mut() =
                     spawn_l3_pane_async(cols, rows, sid, &self.event_tx);
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 lx_event!(
                     "L3_REVIVING",
                     "user keystroke started an off-loop respawn at same id",
@@ -4009,7 +4117,7 @@ impl CoreApp {
             // were already consumed by search_consume_key on the press
             // event.  Anything left (e.g. KeyState::Released, or a
             // Cmd-? we don't recognise) is dropped silently.
-            if win!(self).focused_pane_mut()
+            if win!(self, wi).focused_pane_mut()
                 .search
                 .as_ref()
                 .is_some_and(|s| s.bar.focused)
@@ -4026,22 +4134,22 @@ impl CoreApp {
                 && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'v'))
             {
                 if let Some(text) = marspot::input::read_clipboard_text() {
-                    if win!(self).focused_pane_mut().snap_to_live() {
-                        win!(self).needs_render = true;
+                    if win!(self, wi).focused_pane_mut().snap_to_live() {
+                        win!(self, wi).needs_render = true;
                     }
-                    win!(self).focused_pane_mut().session_mut().forward_paste(&text);
+                    win!(self, wi).focused_pane_mut().session_mut().forward_paste(&text);
                 }
                 return;
             }
-            if win!(self).focused_pane_mut().snap_to_live() {
-                win!(self).needs_render = true;
+            if win!(self, wi).focused_pane_mut().snap_to_live() {
+                win!(self, wi).needs_render = true;
             }
-            if win!(self).selection.is_some() {
-                win!(self).selection = None;
-                win!(self).selection_dragging = false;
-                win!(self).needs_render = true;
+            if win!(self, wi).selection.is_some() {
+                win!(self, wi).selection = None;
+                win!(self, wi).selection_dragging = false;
+                win!(self, wi).needs_render = true;
             }
-            win!(self).focused_pane_mut()
+            win!(self, wi).focused_pane_mut()
                 .session_mut()
                 .forward_key(&event, modifiers);
             return;
@@ -4057,16 +4165,16 @@ impl CoreApp {
             marspot::input::read_clipboard_text,
         ) {
             // Typing snaps the focused pane's view back to live.
-            if win!(self).focused_pane_mut().snap_to_live() {
-                win!(self).needs_render = true;
+            if win!(self, wi).focused_pane_mut().snap_to_live() {
+                win!(self, wi).needs_render = true;
             }
             // Typing into the PTY clears any text selection.
-            if win!(self).selection.is_some() {
-                win!(self).selection = None;
-                win!(self).selection_dragging = false;
-                win!(self).needs_render = true;
+            if win!(self, wi).selection.is_some() {
+                win!(self, wi).selection = None;
+                win!(self, wi).selection_dragging = false;
+                win!(self, wi).needs_render = true;
             }
-            let session = win!(self).focused_pane_mut().session_mut();
+            let session = win!(self, wi).focused_pane_mut().session_mut();
             let _ = session.write(&bytes);
             // Local-echo: paint each printable-ASCII byte to the grid
             // immediately, ahead of the PTY round trip — but only
@@ -4085,15 +4193,15 @@ impl CoreApp {
                 }
             }
             if predicted {
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
             }
             // F3+5 — Enter pressed → shell about to execute a line
             // (potentially `cd`).  Debounced refresh keeps a multi-
             // line paste collapsed to one syscall.  Carriage return
             // OR linefeed both count (modes may emit either).
             if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
-                let focused = win!(self).focused_idx;
-                self.refresh_pane_cwd_for(self.key_window, focused, false);
+                let focused = win!(self, wi).focused_idx;
+                self.refresh_pane_cwd_for(wi, focused, false);
             }
         }
     }
@@ -4103,12 +4211,12 @@ impl CoreApp {
     /// returns the first span containing the clicked (col, row).
     /// Returns None when the click missed every detected link.
     fn hit_test_pane_link(
-        &self,
+        &self, wi: usize,
         idx: usize,
         col: u16,
         row: u16,
     ) -> Option<marspot::grid_links::LinkRange> {
-        let pane = win!(self).panes.get(idx)?;
+        let pane = win!(self, wi).panes.get(idx)?;
         let view_offset = pane.view_offset();
         let grid = pane.session().grid();
         // cc-mode: claudecode renders URLs / paths to a fixed inner
@@ -4136,13 +4244,13 @@ impl CoreApp {
     /// `ContextMenuState.link` and survive the menu's
     /// clear-on-dispatch.
     fn hit_test_link_at_xy(
-        &self,
+        &self, wi: usize,
         x_phys: f64,
         y_phys: f64,
     ) -> Option<LinkContext> {
         let (cw, ch) = self.renderer.cell_dims();
-        let (idx, col, row) = win!(self).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
-        let link = self.hit_test_pane_link(idx, col, row)?;
+        let (idx, col, row) = win!(self, wi).layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)?;
+        let link = self.hit_test_pane_link(wi, idx, col, row)?;
         Some(LinkContext {
             text: link.text,
             kind: link.kind,
@@ -4156,16 +4264,16 @@ impl CoreApp {
     /// `render_metal::build_instances` so a visual hit lines up with
     /// the logical one.
     fn hit_test_pane_badge_prefix(
-        &self,
+        &self, wi: usize,
         x_phys: f64,
         y_phys: f64,
     ) -> Option<usize> {
         let (cell_w, _) = self.renderer.cell_dims();
         let cell_w = cell_w as f64;
-        let padding = win!(self).layout.padding;
-        let title_h = win!(self).layout.cell_title_h;
-        let cell_count = win!(self).layout.cells.len();
-        for (i, p) in win!(self).panes.iter().enumerate().take(cell_count) {
+        let padding = win!(self, wi).layout.padding;
+        let title_h = win!(self, wi).layout.cell_title_h;
+        let cell_count = win!(self, wi).layout.cells.len();
+        for (i, p) in win!(self, wi).panes.iter().enumerate().take(cell_count) {
             let sid = match p.shelld_session_id() {
                 Some(s) => s,
                 None => continue,
@@ -4180,11 +4288,11 @@ impl CoreApp {
             };
             let badge_chars = badge.chars().count() as f64;
             let prefix_chars = prefix.chars().count() as f64;
-            let rect = &win!(self).layout.cells[i];
+            let rect = &win!(self, wi).layout.cells[i];
             // Match the renderer's `reserved` carve-out for the
             // refresh affordance on the focused pane with a staged
             // update.
-            let reserved = if p.update_pending() && i == win!(self).focused_idx {
+            let reserved = if p.update_pending() && i == win!(self, wi).focused_idx {
                 cell_w * 1.5
             } else {
                 0.0
@@ -4212,7 +4320,7 @@ impl CoreApp {
     /// up.  Shared by the toolbar button and the Cmd+Shift+C binding
     /// so the two can't drift apart.  Opening re-reads the feed, so a
     /// stale panel is never what you get on a fresh open.
-    fn toggle_cc_usage_modal(&mut self) {
+    fn toggle_cc_usage_modal(&mut self, wi: usize) {
         self.cc_usage_modal = match self.cc_usage_modal.take() {
             Some(_) => None,
             None => Some(CcUsageModalState {
@@ -4220,10 +4328,10 @@ impl CoreApp {
                 loaded_at: Instant::now(),
             }),
         };
-        win!(self).needs_render = true;
+        win!(self, wi).needs_render = true;
     }
 
-    fn cc_usage_modal_rect(&self) -> marspot_term::layout::Rect {
+    fn cc_usage_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
         let n = self
             .cc_usage_modal
             .as_ref()
@@ -4235,11 +4343,11 @@ impl CoreApp {
         // painter and this rect can't disagree about how tall a card is.
         marspot::ui::components::cc_usage_modal::panel_rect(
             n,
-            win!(self).w_phys,
-            win!(self).h_phys,
+            win!(self, wi).w_phys,
+            win!(self, wi).h_phys,
             cell_w as f64,
             cell_h as f64,
-            win!(self).layout.top_inset,
+            win!(self, wi).layout.top_inset,
         )
     }
 
@@ -4253,7 +4361,7 @@ impl CoreApp {
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }
-        let rect = self.cc_usage_modal_rect();
+        let rect = self.cc_usage_modal_rect(wi);
         let modal = self.cc_usage_modal.as_ref()?;
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4557,7 +4665,7 @@ impl CoreApp {
     /// F3+1.3 — send SIGTERM to `pid` and track it for SIGKILL
     /// escalation 2 s later if it hasn't exited.  Logged at Info so
     /// post-mortem can correlate UI clicks with process deaths.
-    fn kill_and_track(&mut self, pid: i32) {
+    fn kill_and_track(&mut self, wi: usize, pid: i32) {
         match marspot::pidtree::kill_pid(pid, libc::SIGTERM) {
             Ok(()) => {
                 marspot::lx_event!(
@@ -4565,7 +4673,7 @@ impl CoreApp {
                     "user clicked panel [×] — SIGTERM sent",
                     pid = pid
                 );
-                if let Some(panel) = win!(self).process_panel.as_mut() {
+                if let Some(panel) = win!(self, wi).process_panel.as_mut() {
                     panel.pending_kills.push((pid, Instant::now()));
                 }
             }
@@ -4581,8 +4689,8 @@ impl CoreApp {
     /// F3+1.3 — escalate any pending SIGTERM that the target ignored
     /// past the grace period.  Called from the main loop; cheap when
     /// `pending_kills` is empty (the typical case).
-    fn tick_process_panel_kills(&mut self) {
-        let Some(panel) = win!(self).process_panel.as_mut() else { return };
+    fn tick_process_panel_kills(&mut self, wi: usize) {
+        let Some(panel) = win!(self, wi).process_panel.as_mut() else { return };
         if panel.pending_kills.is_empty() {
             return;
         }
@@ -4608,13 +4716,13 @@ impl CoreApp {
     /// rebuild the process-tree cache.  Called when the panel opens,
     /// and on the main loop's render path when `last_refresh` is
     /// older than 2 s.  No-op when the panel is closed.
-    fn refresh_process_panel(&mut self) {
+    fn refresh_process_panel(&mut self, wi: usize) {
         // F3+4 — walk libproc, sample per-pid stats, compute CPU%
         // deltas vs the previous refresh, build per-pane aggregates.
         // Two-pass: pass A snapshots procs + new stats; pass B walks
         // panes building summaries.  prev_pid_stats is rolled forward
         // (only pids seen this tick survive into next).
-        let w = &mut win!(self);
+        let w = &mut win!(self, wi);
         let Some(panel) = w.process_panel.as_mut() else { return };
         let all = marspot::pidtree::list_all_procs();
         let now = Instant::now();
@@ -4696,10 +4804,10 @@ impl CoreApp {
         panel.last_refresh = now;
     }
 
-    fn mouse_moved(&mut self, x_phys: f64, y_phys: f64) {
+    fn mouse_moved(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
         // Reveal the traffic-light glyphs while the cursor is anywhere
         // in the panel's title bar, matching the system's affordance.
-        let w = &mut win!(self);
+        let w = &mut win!(self, wi);
         if let Some(panel) = w.process_panel.as_mut() {
             let now = panel.title_bar_rect.contains(x_phys, y_phys);
             if now != panel.title_bar_hovered {
@@ -4723,44 +4831,44 @@ impl CoreApp {
             }
         }
 
-        let new_hover = if win!(self).layout.hit_test_sidebar_button(x_phys, y_phys) {
+        let new_hover = if win!(self, wi).layout.hit_test_sidebar_button(x_phys, y_phys) {
             Some(ChromeBtn::Sidebar)
-        } else if win!(self).layout.hit_test_layout_button(x_phys, y_phys) {
+        } else if win!(self, wi).layout.hit_test_layout_button(x_phys, y_phys) {
             Some(ChromeBtn::Layout)
-        } else if win!(self).layout.hit_test_process_button(x_phys, y_phys) {
+        } else if win!(self, wi).layout.hit_test_process_button(x_phys, y_phys) {
             Some(ChromeBtn::ProcessTree)
-        } else if win!(self).layout.hit_test_dev_panel_button(x_phys, y_phys) {
+        } else if win!(self, wi).layout.hit_test_dev_panel_button(x_phys, y_phys) {
             Some(ChromeBtn::DevPanel)
-        } else if win!(self).layout.hit_test_cc_button(x_phys, y_phys) {
+        } else if win!(self, wi).layout.hit_test_cc_button(x_phys, y_phys) {
             Some(ChromeBtn::CcUsage)
         } else {
             None
         };
-        if new_hover != win!(self).hover_chrome_btn {
-            win!(self).hover_chrome_btn = new_hover;
+        if new_hover != win!(self, wi).hover_chrome_btn {
+            win!(self, wi).hover_chrome_btn = new_hover;
             self.renderer.set_hover_chrome_btn(map_hover_to_u8(new_hover));
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
         }
     }
 
-    fn mouse_down(&mut self, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
+    fn mouse_down(&mut self, wi: usize, x_phys: f64, y_phys: f64, modifiers: Modifiers) {
         // F3+9 — when context menu is open, a left click first
         // dispatches an item / swallows on frame / closes-on-outside.
-        if win!(self).context_menu.is_some() {
+        if win!(self, wi).context_menu.is_some() {
             use marspot::ui::components::{ContextMenu, ContextMenuHit};
             let (hit, region) = {
-                let state = win!(self).context_menu.as_ref().unwrap();
+                let state = win!(self, wi).context_menu.as_ref().unwrap();
                 let menu = ContextMenu::layout(
-                    win!(self).layout.window_w, win!(self).layout.window_h, win!(self).scale,
+                    win!(self, wi).layout.window_w, win!(self, wi).layout.window_h, win!(self, wi).scale,
                     state.anchor_x, state.anchor_y,
-                    win!(self).layout.top_inset,
+                    win!(self, wi).layout.top_inset,
                     &state.items,
                 );
                 (menu.hit_test(&state.items, x_phys, y_phys), state.region)
             };
             match hit {
                 ContextMenuHit::Item(idx) => {
-                    let tag = win!(self).context_menu.as_ref().unwrap()
+                    let tag = win!(self, wi).context_menu.as_ref().unwrap()
                         .items[idx].action_tag;
                     // Badge menus carry plugin-opaque tags — route the
                     // pick back to L1 instead of mapping through
@@ -4772,13 +4880,13 @@ impl CoreApp {
                                 sid, tag,
                             ),
                         ));
-                        win!(self).context_menu = None;
-                        win!(self).needs_render = true;
+                        win!(self, wi).context_menu = None;
+                        win!(self, wi).needs_render = true;
                     } else if let Some(action) = ContextMenuAction::from_tag(tag) {
-                        self.dispatch_context_action(action, region);
+                        self.dispatch_context_action(wi, action, region);
                     } else {
-                        win!(self).context_menu = None;
-                        win!(self).needs_render = true;
+                        win!(self, wi).context_menu = None;
+                        win!(self, wi).needs_render = true;
                     }
                     return;
                 }
@@ -4788,15 +4896,15 @@ impl CoreApp {
                     return;
                 }
                 ContextMenuHit::Outside => {
-                    win!(self).context_menu = None;
-                    win!(self).needs_render = true;
+                    win!(self, wi).context_menu = None;
+                    win!(self, wi).needs_render = true;
                     // Fall through: click also triggers normal
                     // focus / selection behaviour.
                 }
             }
         }
 
-        let layout = &win!(self).layout;
+        let layout = &win!(self, wi).layout;
         let layout_btn_hit = layout.hit_test_layout_button(x_phys, y_phys);
         let sidebar_btn_hit = layout.hit_test_sidebar_button(x_phys, y_phys);
         let close_session_hit = layout.hit_test_close_session(x_phys, y_phys);
@@ -4806,8 +4914,8 @@ impl CoreApp {
         // Sidebar toggle: highest-priority chrome action so a click
         // on the chip never falls through to the cell underneath.
         if sidebar_btn_hit {
-            win!(self).sidebar_collapsed = !win!(self).sidebar_collapsed;
-            self.rebuild_layout(self.key_window);
+            win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
+            self.rebuild_layout(wi);
             return;
         }
         // F3+1.5 — Process Monitor modal click priorities (high → low):
@@ -4818,7 +4926,7 @@ impl CoreApp {
         //   5. body → swallow (modal semantics)
         //   6. backdrop (anywhere else in window) → swallow as well so
         //      a stray click doesn't punch through to the grid behind.
-        if let Some(panel) = win!(self).process_panel.as_ref() {
+        if let Some(panel) = win!(self, wi).process_panel.as_ref() {
             // 1) Row kill
             let kill_hit: Option<i32> = panel
                 .row_kill_rects
@@ -4826,9 +4934,9 @@ impl CoreApp {
                 .find(|(_, rect)| rect.contains(x_phys, y_phys))
                 .map(|(pid, _)| *pid);
             if let Some(pid) = kill_hit {
-                self.kill_and_track(pid);
-                self.refresh_process_panel();
-                win!(self).needs_render = true;
+                self.kill_and_track(wi, pid);
+                self.refresh_process_panel(wi);
+                win!(self, wi).needs_render = true;
                 return;
             }
             // F3+4 — master pane list row clicks switch the selection.
@@ -4839,39 +4947,39 @@ impl CoreApp {
                 .find(|(_, r)| r.contains(x_phys, y_phys))
                 .map(|(i, _)| i);
             if let Some(i) = pane_hit {
-                if let Some(p) = win!(self).process_panel.as_mut() {
+                if let Some(p) = win!(self, wi).process_panel.as_mut() {
                     p.selected_pane = i;
                     p.scroll_y = 0.0;
                 }
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
             // 3) Traffic lights
             if panel.close_btn_rect.contains(x_phys, y_phys) {
-                win!(self).process_panel = None;
-                win!(self).needs_render = true;
+                win!(self, wi).process_panel = None;
+                win!(self, wi).needs_render = true;
                 return;
             }
             if panel.min_btn_rect.contains(x_phys, y_phys) {
-                if let Some(p) = win!(self).process_panel.as_mut() {
+                if let Some(p) = win!(self, wi).process_panel.as_mut() {
                     p.minimized = !p.minimized;
                     if p.minimized { p.maximized = false; }
                 }
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
             if panel.max_btn_rect.contains(x_phys, y_phys) {
-                if let Some(p) = win!(self).process_panel.as_mut() {
+                if let Some(p) = win!(self, wi).process_panel.as_mut() {
                     p.maximized = !p.maximized;
                     if p.maximized { p.minimized = false; }
                 }
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
             // 4) Title bar drag — anywhere in title bar that isn't a
             //    traffic light starts a window-drag.
             if panel.title_bar_rect.contains(x_phys, y_phys) {
-                if let Some(p) = win!(self).process_panel.as_mut() {
+                if let Some(p) = win!(self, wi).process_panel.as_mut() {
                     p.drag_grab = Some((x_phys, y_phys, p.pos_offset.0, p.pos_offset.1));
                 }
                 return;
@@ -4882,19 +4990,19 @@ impl CoreApp {
             }
             // 6) Click on backdrop (outside modal) → close the modal.
             // Familiar pattern: clicking outside a modal dismisses it.
-            win!(self).process_panel = None;
-            win!(self).needs_render = true;
+            win!(self, wi).process_panel = None;
+            win!(self, wi).needs_render = true;
             return;
         }
         // F3+1 — process-tree panel toggle.  Same priority tier as
         // sidebar: a click on the icon never falls through.  Opening
         // forces an immediate libproc walk so the panel paints
         // populated on its first frame.
-        if win!(self).layout.hit_test_process_button(x_phys, y_phys) {
-            if win!(self).process_panel.is_some() {
-                win!(self).process_panel = None;
+        if win!(self, wi).layout.hit_test_process_button(x_phys, y_phys) {
+            if win!(self, wi).process_panel.is_some() {
+                win!(self, wi).process_panel = None;
             } else {
-                win!(self).process_panel = Some(ProcessPanelState {
+                win!(self, wi).process_panel = Some(ProcessPanelState {
                     panes: Vec::new(),
                     last_refresh: Instant::now() - std::time::Duration::from_secs(10),
                     row_kill_rects: Vec::new(),
@@ -4916,52 +5024,52 @@ impl CoreApp {
                     pos_offset: (0.0, 0.0),
                     drag_grab: None,
                 });
-                self.refresh_process_panel();
+                self.refresh_process_panel(wi);
             }
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
             return;
         }
         // UI-system dev panel toggle.  L2 doesn't own dev panel
         // visibility — L1 (marspot-shell) hosts the NSWindow.  Route
         // the click via `DevPanelToggle` wire frame; L1 flips state
         // + drives the AppKit show/hide on its main loop.
-        if win!(self).layout.hit_test_dev_panel_button(x_phys, y_phys) {
+        if win!(self, wi).layout.hit_test_dev_panel_button(x_phys, y_phys) {
             self.pending_to_shell.push((MsgType::DevPanelToggle, Vec::new()));
             return;
         }
         // cc — toolbar `Cc` button toggles the Claude usage modal.
-        if win!(self).layout.hit_test_cc_button(x_phys, y_phys) {
-            self.toggle_cc_usage_modal();
+        if win!(self, wi).layout.hit_test_cc_button(x_phys, y_phys) {
+            self.toggle_cc_usage_modal(wi);
             return;
         }
         // cc — while the usage modal is open, any click outside its
         // frame closes it; clicks inside are swallowed (display-only
         // modal, nothing interactive yet).
         if self.cc_usage_modal.is_some() {
-            let rect = self.cc_usage_modal_rect();
+            let rect = self.cc_usage_modal_rect(wi);
             if !rect.contains(x_phys, y_phys) {
                 self.cc_usage_modal = None;
             }
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
             return;
         }
         // F3+3.0 — when the LayoutModal is open, intercept ALL
         // clicks: hit-test its controls first, swallow non-control
         // clicks landing inside the frame so the modal feels modal
         // (doesn't punch through to the grid).
-        if win!(self).layout_modal_open {
+        if win!(self, wi).layout_modal_open {
             use marspot::ui::components::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
             let modal = LayoutModal::layout(
-                win!(self).w_phys, win!(self).h_phys, win!(self).scale,
-                marspot::TITLE_STRIP_PT * win!(self).scale,
-                win!(self).pending_grid_cols, win!(self).pending_grid_rows,
+                win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
+                marspot::TITLE_STRIP_PT * win!(self, wi).scale,
+                win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
             );
             // F3+3.3 — card drag start has priority over the
             // generic hit_test below (which would otherwise classify
             // a card click as `LayoutModalHit::Frame` and swallow it).
             if let Some(card_idx) = modal.hit_test_card(x_phys, y_phys) {
                 let card = modal.cards[card_idx];
-                win!(self).layout_drag = Some(LayoutModalDrag {
+                win!(self, wi).layout_drag = Some(LayoutModalDrag {
                     from_slot: card_idx,
                     grab_offset_phys: (
                         x_phys - card.x,
@@ -4969,69 +5077,69 @@ impl CoreApp {
                     ),
                     mouse_phys: (x_phys, y_phys),
                 });
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
             match modal.hit_test(x_phys, y_phys) {
                 Some(LayoutModalHit::Close) => {
-                    win!(self).layout_modal_open = false;
-                    win!(self).needs_render = true;
+                    win!(self, wi).layout_modal_open = false;
+                    win!(self, wi).needs_render = true;
                     return;
                 }
                 Some(LayoutModalHit::Apply) => {
-                    win!(self).layout_modal_open = false;
-                    win!(self).grid_cols = win!(self).pending_grid_cols;
-                    win!(self).grid_rows = win!(self).pending_grid_rows;
+                    win!(self, wi).layout_modal_open = false;
+                    win!(self, wi).grid_cols = win!(self, wi).pending_grid_cols;
+                    win!(self, wi).grid_rows = win!(self, wi).pending_grid_rows;
                     // F3+3.3 — apply card_slots permutation to
-                    // win!(self).panes so the modal's drag-reordered
+                    // win!(self, wi).panes so the modal's drag-reordered
                     // arrangement lands in the actual grid.  Only
                     // the in-cells portion is reordered (panes past
                     // grid cells stay in sidebar order).  Identity
                     // mapping = no-op.
-                    let cells = win!(self).grid_cols * win!(self).grid_rows;
-                    self.apply_card_slot_permutation(cells);
+                    let cells = win!(self, wi).grid_cols * win!(self, wi).grid_rows;
+                    self.apply_card_slot_permutation(wi, cells);
                     // shrink-guard — if focused pane slot is
                     // beyond the new cell count, jump focus to the
                     // last surviving cell so the user sees a focused
                     // pane in-grid.  Overflowed sessions stay alive
                     // in the sidebar (n_sessions > cells handling
                     // is already preserved by `take(cell_count)`).
-                    if cells > 0 && win!(self).focused_idx >= cells {
-                        win!(self).focused_idx = cells - 1;
+                    if cells > 0 && win!(self, wi).focused_idx >= cells {
+                        win!(self, wi).focused_idx = cells - 1;
                     }
-                    self.rebuild_layout(self.key_window);
+                    self.rebuild_layout(wi);
                     self.save_session_state();
                     return;
                 }
                 Some(LayoutModalHit::ColsDec) => {
-                    if win!(self).pending_grid_cols > GRID_MIN {
-                        win!(self).pending_grid_cols -= 1;
-                        self.reset_card_slots();
-                        win!(self).needs_render = true;
+                    if win!(self, wi).pending_grid_cols > GRID_MIN {
+                        win!(self, wi).pending_grid_cols -= 1;
+                        self.reset_card_slots(wi);
+                        win!(self, wi).needs_render = true;
                     }
                     return;
                 }
                 Some(LayoutModalHit::ColsInc) => {
-                    if win!(self).pending_grid_cols < GRID_MAX {
-                        win!(self).pending_grid_cols += 1;
-                        self.reset_card_slots();
-                        win!(self).needs_render = true;
+                    if win!(self, wi).pending_grid_cols < GRID_MAX {
+                        win!(self, wi).pending_grid_cols += 1;
+                        self.reset_card_slots(wi);
+                        win!(self, wi).needs_render = true;
                     }
                     return;
                 }
                 Some(LayoutModalHit::RowsDec) => {
-                    if win!(self).pending_grid_rows > GRID_MIN {
-                        win!(self).pending_grid_rows -= 1;
-                        self.reset_card_slots();
-                        win!(self).needs_render = true;
+                    if win!(self, wi).pending_grid_rows > GRID_MIN {
+                        win!(self, wi).pending_grid_rows -= 1;
+                        self.reset_card_slots(wi);
+                        win!(self, wi).needs_render = true;
                     }
                     return;
                 }
                 Some(LayoutModalHit::RowsInc) => {
-                    if win!(self).pending_grid_rows < GRID_MAX {
-                        win!(self).pending_grid_rows += 1;
-                        self.reset_card_slots();
-                        win!(self).needs_render = true;
+                    if win!(self, wi).pending_grid_rows < GRID_MAX {
+                        win!(self, wi).pending_grid_rows += 1;
+                        self.reset_card_slots(wi);
+                        win!(self, wi).needs_render = true;
                     }
                     return;
                 }
@@ -5042,8 +5150,8 @@ impl CoreApp {
                 None => {
                     // Click outside the modal closes it without
                     // any other side effect.
-                    win!(self).layout_modal_open = false;
-                    win!(self).needs_render = true;
+                    win!(self, wi).layout_modal_open = false;
+                    win!(self, wi).needs_render = true;
                     return;
                 }
             }
@@ -5052,35 +5160,35 @@ impl CoreApp {
         // Re-init pending values from current grid_* every open so
         // the modal always starts in sync with the live grid.
         if layout_btn_hit {
-            if !win!(self).layout_modal_open {
-                win!(self).pending_grid_cols = win!(self).grid_cols;
-                win!(self).pending_grid_rows = win!(self).grid_rows;
-                self.reset_card_slots();
+            if !win!(self, wi).layout_modal_open {
+                win!(self, wi).pending_grid_cols = win!(self, wi).grid_cols;
+                win!(self, wi).pending_grid_rows = win!(self, wi).grid_rows;
+                self.reset_card_slots(wi);
                 // F3+3.6 — pull-fetch each pane's cwd on the
                 // open transition so the modal preview + the
                 // title-strip placeholder show fresh values.
-                self.refresh_pane_cwds();
+                self.refresh_pane_cwds(wi);
             }
-            win!(self).layout_modal_open = !win!(self).layout_modal_open;
-            win!(self).layout_drag = None;
-            win!(self).needs_render = true;
+            win!(self, wi).layout_modal_open = !win!(self, wi).layout_modal_open;
+            win!(self, wi).layout_drag = None;
+            win!(self, wi).needs_render = true;
             return;
         }
 
         // Sidebar close-[×]: refuse to close the last session.
         if let Some(idx) = close_session_hit {
-            if win!(self).panes.len() > 1 && idx < win!(self).panes.len() {
-                self.close_session(idx);
-                self.rebuild_layout(self.key_window);
+            if win!(self, wi).panes.len() > 1 && idx < win!(self, wi).panes.len() {
+                self.close_session(wi, idx);
+                self.rebuild_layout(wi);
             }
             return;
         }
 
         // Sidebar [+] add-session.
         if add_session_hit {
-            if win!(self).panes.len() < SESSION_COUNT_HARD_CAP {
-                self.spawn_session();
-                self.rebuild_layout(self.key_window);
+            if win!(self, wi).panes.len() < SESSION_COUNT_HARD_CAP {
+                self.spawn_session(wi);
+                self.rebuild_layout(wi);
             }
             return;
         }
@@ -5091,8 +5199,8 @@ impl CoreApp {
         // when that pane actually has an update staged (else fall through to
         // normal title behaviour).
         if let Some(i) = refresh_hit {
-            if win!(self).panes.get(i).is_some_and(|p| p.update_pending()) {
-                self.begin_pane_swap(i);
+            if win!(self, wi).panes.get(i).is_some_and(|p| p.update_pending()) {
+                self.begin_pane_swap(wi, i);
                 return;
             }
         }
@@ -5102,8 +5210,8 @@ impl CoreApp {
         // the same title strip as title-edit + refresh; check here
         // before title-edit so a click on `P<n>` doesn't drop the
         // pane into rename mode.
-        if let Some(i) = self.hit_test_pane_badge_prefix(x_phys, y_phys) {
-            if let Some(sid) = win!(self).panes.get(i).and_then(|p| p.shelld_session_id())
+        if let Some(i) = self.hit_test_pane_badge_prefix(wi, x_phys, y_phys) {
+            if let Some(sid) = win!(self, wi).panes.get(i).and_then(|p| p.shelld_session_id())
             {
                 let payload = marspot::shell_proto::encode_pane_badge_clicked(sid);
                 self.pending_to_shell
@@ -5112,7 +5220,7 @@ impl CoreApp {
             }
         }
 
-        let layout = &win!(self).layout;
+        let layout = &win!(self, wi).layout;
         let row_phys = marspot::layout::SIDEBAR_ROW_H_PHYS;
         let top_pad_phys = layout.top_inset + layout.sidebar_top_pad_phys;
         let title_hit = layout.hit_test_cell_title(x_phys, y_phys);
@@ -5121,7 +5229,7 @@ impl CoreApp {
             y_phys,
             top_pad_phys,
             row_phys,
-            win!(self).panes.len(),
+            win!(self, wi).panes.len(),
         );
         let cell_hit = layout.hit_test(x_phys, y_phys);
         let (cw, ch) = self.renderer.cell_dims();
@@ -5129,27 +5237,27 @@ impl CoreApp {
 
         // Title-strip click → enter edit mode for that cell.
         if let Some(idx) = title_hit {
-            if idx < win!(self).panes.len() {
-                self.commit_title_edit();
-                self.resolve_pending_on_defocus(idx);
-                win!(self).focused_idx = idx;
-                win!(self).editing_title = Some(idx);
-                win!(self).title_edit_buffer = win!(self).panes[idx]
+            if idx < win!(self, wi).panes.len() {
+                self.commit_title_edit(wi);
+                self.resolve_pending_on_defocus(wi, idx);
+                win!(self, wi).focused_idx = idx;
+                win!(self, wi).editing_title = Some(idx);
+                win!(self, wi).title_edit_buffer = win!(self, wi).panes[idx]
                     .custom_title
                     .clone()
                     .unwrap_or_default();
-                let _ = win!(self).focused_pane_mut().snap_to_live();
-                win!(self).selection = None;
-                win!(self).selection_dragging = false;
-                win!(self).needs_render = true;
+                let _ = win!(self, wi).focused_pane_mut().snap_to_live();
+                win!(self, wi).selection = None;
+                win!(self, wi).selection_dragging = false;
+                win!(self, wi).needs_render = true;
                 return;
             }
         }
 
         // Click outside the title strip while editing commits first.
-        if win!(self).editing_title.is_some() {
-            self.commit_title_edit();
-            win!(self).needs_render = true;
+        if win!(self, wi).editing_title.is_some() {
+            self.commit_title_edit(wi);
+            win!(self, wi).needs_render = true;
         }
 
         // Auto-link hit-test: a click that lands on an underlined
@@ -5161,11 +5269,11 @@ impl CoreApp {
         // recognised but inert.  Sits ahead of selection so the
         // click doesn't simultaneously start a fresh selection
         // on the link cells.
-        if let Some(link) = self.hit_test_link_at_xy(x_phys, y_phys) {
+        if let Some(link) = self.hit_test_link_at_xy(wi, x_phys, y_phys) {
             let items = self.build_link_menu_items(&link);
             if !items.is_empty() {
-                let region = self.resolve_context_region(x_phys, y_phys);
-                win!(self).context_menu = Some(ContextMenuState {
+                let region = self.resolve_context_region(wi, x_phys, y_phys);
+                win!(self, wi).context_menu = Some(ContextMenuState {
                     items,
                     anchor_x: x_phys,
                     anchor_y: y_phys,
@@ -5173,23 +5281,23 @@ impl CoreApp {
                     hovered_idx: None,
                     link: Some(link),
                 });
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
             }
             return;
         }
 
         // Click in cell body → start a fresh selection there AND
         // focus that cell.
-        let prior_selection = win!(self).selection;
-        win!(self).selection = None;
-        win!(self).selection_dragging = false;
+        let prior_selection = win!(self, wi).selection;
+        win!(self, wi).selection = None;
+        win!(self, wi).selection_dragging = false;
         if let Some((idx, col, row)) = cell_pos_hit {
-            let pane = &win!(self).panes.get(idx);
+            let pane = &win!(self, wi).panes.get(idx);
             if let Some(pane) = pane {
                 let rows = pane.session().grid().rows() as u32;
                 let vo = pane.view_offset() as u32;
                 let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
-                win!(self).selection = Some(Selection {
+                win!(self, wi).selection = Some(Selection {
                     session_idx: idx,
                     anchor: (col, abs),
                     focus: (col, abs),
@@ -5199,17 +5307,17 @@ impl CoreApp {
                         SelectionMode::Linewise
                     },
                 });
-                win!(self).selection_dragging = true;
-                if idx != win!(self).focused_idx {
-                    self.resolve_pending_on_defocus(idx);
-                    win!(self).focused_idx = idx;
+                win!(self, wi).selection_dragging = true;
+                if idx != win!(self, wi).focused_idx {
+                    self.resolve_pending_on_defocus(wi, idx);
+                    win!(self, wi).focused_idx = idx;
                 }
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
         }
         if prior_selection.is_some() {
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
         }
 
         let new_focus = sidebar_hit.or(cell_hit);
@@ -5220,24 +5328,24 @@ impl CoreApp {
             // it.  Matches the sidebar [+] behaviour but lands the
             // user directly in the cell they clicked, so growing
             // the grid + filling it reads as one motion.
-            if idx >= win!(self).panes.len() && cell_hit.is_some() {
-                if win!(self).panes.len() < SESSION_COUNT_HARD_CAP {
-                    self.spawn_session();
-                    win!(self).focused_idx = win!(self).panes.len() - 1;
-                    self.rebuild_layout(self.key_window);
+            if idx >= win!(self, wi).panes.len() && cell_hit.is_some() {
+                if win!(self, wi).panes.len() < SESSION_COUNT_HARD_CAP {
+                    self.spawn_session(wi);
+                    win!(self, wi).focused_idx = win!(self, wi).panes.len() - 1;
+                    self.rebuild_layout(wi);
                 }
                 return;
             }
-            if idx < win!(self).panes.len() && idx != win!(self).focused_idx {
-                self.resolve_pending_on_defocus(idx);
-                win!(self).focused_idx = idx;
-                let _ = win!(self).focused_pane_mut().snap_to_live();
+            if idx < win!(self, wi).panes.len() && idx != win!(self, wi).focused_idx {
+                self.resolve_pending_on_defocus(wi, idx);
+                win!(self, wi).focused_idx = idx;
+                let _ = win!(self, wi).focused_pane_mut().snap_to_live();
                 // F3+5 — focus change = "user is looking at this pane
                 // right now"; refresh its cwd so the title strip stays
                 // current.  Debounced per-sid (cheap when same pane is
                 // focused twice in a row).
-                self.refresh_pane_cwd_for(self.key_window, idx, false);
-                win!(self).needs_render = true;
+                self.refresh_pane_cwd_for(wi, idx, false);
+                win!(self, wi).needs_render = true;
             }
         }
     }
@@ -5248,7 +5356,7 @@ impl CoreApp {
     /// existing Paste path (L3 wraps in bracketed-paste when the app
     /// enabled the mode), so shells insert at the prompt and TUI apps
     /// like claudecode see a normal paste in their input box.
-    fn file_drop(&mut self, x_phys: f64, y_phys: f64, paths: &[String]) {
+    fn file_drop(&mut self, wi: usize, x_phys: f64, y_phys: f64, paths: &[String]) {
         if paths.is_empty() {
             return;
         }
@@ -5256,26 +5364,26 @@ impl CoreApp {
         // sidebar row); a drop on chrome/padding goes to the focused
         // pane — dropping "at the terminal" should never be a no-op.
         let row_phys = marspot_term::layout::SIDEBAR_ROW_H_PHYS;
-        let top_pad_phys = win!(self).layout.top_inset + win!(self).layout.sidebar_top_pad_phys;
-        let sidebar_hit = win!(self).layout.hit_test_sidebar_row(
-            x_phys, y_phys, top_pad_phys, row_phys, win!(self).panes.len(),
+        let top_pad_phys = win!(self, wi).layout.top_inset + win!(self, wi).layout.sidebar_top_pad_phys;
+        let sidebar_hit = win!(self, wi).layout.hit_test_sidebar_row(
+            x_phys, y_phys, top_pad_phys, row_phys, win!(self, wi).panes.len(),
         );
         let idx = sidebar_hit
-            .or(win!(self).layout.hit_test(x_phys, y_phys))
-            .filter(|i| *i < win!(self).panes.len())
-            .unwrap_or(win!(self).focused_idx);
-        if idx >= win!(self).panes.len() {
+            .or(win!(self, wi).layout.hit_test(x_phys, y_phys))
+            .filter(|i| *i < win!(self, wi).panes.len())
+            .unwrap_or(win!(self, wi).focused_idx);
+        if idx >= win!(self, wi).panes.len() {
             return;
         }
         // Same focus motion as a click — the pane receiving the text
         // becomes the pane the user is typing into next.
-        if idx != win!(self).focused_idx {
-            self.resolve_pending_on_defocus(idx);
-            win!(self).focused_idx = idx;
-            self.refresh_pane_cwd_for(self.key_window, idx, false);
+        if idx != win!(self, wi).focused_idx {
+            self.resolve_pending_on_defocus(wi, idx);
+            win!(self, wi).focused_idx = idx;
+            self.refresh_pane_cwd_for(wi, idx, false);
         }
-        if win!(self).panes[idx].snap_to_live() {
-            win!(self).needs_render = true;
+        if win!(self, wi).panes[idx].snap_to_live() {
+            win!(self, wi).needs_render = true;
         }
         // Trailing space after each path so the user can keep typing
         // (and multiple files arrive space-separated) — matches the
@@ -5285,52 +5393,52 @@ impl CoreApp {
             text.push_str(&marspot_term::input_core::shell_quote_path(p));
             text.push(' ');
         }
-        win!(self).panes[idx].session_mut().forward_paste(&text);
-        win!(self).needs_render = true;
+        win!(self, wi).panes[idx].session_mut().forward_paste(&text);
+        win!(self, wi).needs_render = true;
     }
 
-    fn mouse_drag(&mut self, x_phys: f64, y_phys: f64) {
+    fn mouse_drag(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
         // F3+3.3 — LayoutModal card drag.  Take priority over the
         // process panel drag so a layout modal session never gets
         // captured by chrome elsewhere.
-        if let Some(d) = win!(self).layout_drag.as_mut() {
+        if let Some(d) = win!(self, wi).layout_drag.as_mut() {
             d.mouse_phys = (x_phys, y_phys);
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
             return;
         }
         // F3+1.5 — modal title bar drag.  Snapshot at mouse_down
         // (drag_grab = Some((grab_x, grab_y, grab_off_x, grab_off_y)))
         // → motion delta translates to pos_offset diff.
-        if let Some(panel) = win!(self).process_panel.as_mut() {
+        if let Some(panel) = win!(self, wi).process_panel.as_mut() {
             if let Some((gx, gy, gox, goy)) = panel.drag_grab {
                 panel.pos_offset = (gox + (x_phys - gx), goy + (y_phys - gy));
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
                 return;
             }
         }
-        if !win!(self).selection_dragging {
+        if !win!(self, wi).selection_dragging {
             return;
         }
         let (cw, ch) = self.renderer.cell_dims();
-        let target_idx = match win!(self).selection.as_ref() {
+        let target_idx = match win!(self, wi).selection.as_ref() {
             Some(s) => s.session_idx,
             None => return,
         };
-        let cell = match win!(self).layout.cells.get(target_idx) {
+        let cell = match win!(self, wi).layout.cells.get(target_idx) {
             Some(c) => c.clone(),
             None => return,
         };
-        let inner_x = cell.x + win!(self).layout.padding;
-        let inner_y = cell.y_top + win!(self).layout.cell_title_h + win!(self).layout.padding;
+        let inner_x = cell.x + win!(self, wi).layout.padding;
+        let inner_y = cell.y_top + win!(self, wi).layout.cell_title_h + win!(self, wi).layout.padding;
 
         // Past-edge auto-scroll, NSTextView-style (see src/main.rs
         // for the rate-limit rationale).
         let max_row = cell.rows.saturating_sub(1) as i64;
         let raw_row = ((y_phys - inner_y) / ch).floor() as i64;
         if raw_row < 0 {
-            win!(self).panes[target_idx].apply_scroll_lines(1);
+            win!(self, wi).panes[target_idx].apply_scroll_lines(1);
         } else if raw_row > max_row {
-            win!(self).panes[target_idx].apply_scroll_lines(-1);
+            win!(self, wi).panes[target_idx].apply_scroll_lines(-1);
         }
 
         let dx = (x_phys - inner_x).max(0.0);
@@ -5352,32 +5460,32 @@ impl CoreApp {
         }
 
         // Re-read view_offset AFTER any auto-scroll above.
-        let pane = &win!(self).panes[target_idx];
+        let pane = &win!(self, wi).panes[target_idx];
         let rows = pane.session().grid().rows() as u32;
         let vo = pane.view_offset() as u32;
         let abs = vo + rows.saturating_sub(1).saturating_sub(row as u32);
 
-        let Some(sel) = win!(self).selection.as_mut() else { return };
+        let Some(sel) = win!(self, wi).selection.as_mut() else { return };
         sel.focus = (col as u16, abs);
-        win!(self).needs_render = true;
+        win!(self, wi).needs_render = true;
     }
 
-    fn end_modal_drag(&mut self) {
-        if let Some(panel) = win!(self).process_panel.as_mut() {
+    fn end_modal_drag(&mut self, wi: usize) {
+        if let Some(panel) = win!(self, wi).process_panel.as_mut() {
             panel.drag_grab = None;
         }
     }
 
-    fn mouse_up(&mut self) {
+    fn mouse_up(&mut self, wi: usize) {
         // F3+3.3 — finalize LayoutModal card drag: pick the
         // destination slot under the cursor, swap, redraw.  No
         // animation (V2.0); settle = single-frame jump.
-        if let Some(d) = win!(self).layout_drag.take() {
+        if let Some(d) = win!(self, wi).layout_drag.take() {
             use marspot::ui::components::LayoutModal;
             let modal = LayoutModal::layout(
-                win!(self).w_phys, win!(self).h_phys, win!(self).scale,
-                marspot::TITLE_STRIP_PT * win!(self).scale,
-                win!(self).pending_grid_cols, win!(self).pending_grid_rows,
+                win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
+                marspot::TITLE_STRIP_PT * win!(self, wi).scale,
+                win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
             );
             // Drop position = card origin (mouse - grab_offset),
             // plus card center offset so the lookup tracks visual
@@ -5388,37 +5496,37 @@ impl CoreApp {
             let cy = d.mouse_phys.1 - d.grab_offset_phys.1 + card_h * 0.5;
             if let Some(to_slot) = modal.nearest_card(cx, cy) {
                 if to_slot != d.from_slot
-                    && to_slot < win!(self).card_slots.len()
-                    && d.from_slot < win!(self).card_slots.len()
+                    && to_slot < win!(self, wi).card_slots.len()
+                    && d.from_slot < win!(self, wi).card_slots.len()
                 {
-                    win!(self).card_slots.swap(d.from_slot, to_slot);
+                    win!(self, wi).card_slots.swap(d.from_slot, to_slot);
                 }
             }
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
             // Don't continue into selection / process-panel paths.
             return;
         }
-        self.end_modal_drag();
+        self.end_modal_drag(wi);
         // A click without movement leaves anchor == focus → treat as
         // "no selection" so a stray single-click doesn't ghost a
         // single-cell highlight.
-        if win!(self).selection_dragging {
-            win!(self).selection_dragging = false;
-            if let Some(sel) = win!(self).selection {
+        if win!(self, wi).selection_dragging {
+            win!(self, wi).selection_dragging = false;
+            if let Some(sel) = win!(self, wi).selection {
                 if sel.anchor == sel.focus {
-                    win!(self).selection = None;
+                    win!(self, wi).selection = None;
                 }
             }
         }
     }
 
-    fn scroll(&mut self, dy_phys: f64, precise: bool) {
+    fn scroll(&mut self, wi: usize, dy_phys: f64, precise: bool) {
         // F3+1.5 — when the Process Monitor modal is open, the wheel
         // belongs to it (assuming the cursor is over the modal — and
         // since the modal swallows clicks anyway, treating ALL scroll
         // as modal scroll while it's open is the simpler, more
         // predictable mapping).
-        if let Some(panel) = win!(self).process_panel.as_mut() {
+        if let Some(panel) = win!(self, wi).process_panel.as_mut() {
             if !panel.minimized {
                 let _ = precise;
                 panel.scroll_y += dy_phys;
@@ -5426,7 +5534,7 @@ impl CoreApp {
                 let max = (panel.content_h - panel.body_rect.h).max(0.0);
                 if panel.scroll_y < 0.0 { panel.scroll_y = 0.0; }
                 if panel.scroll_y > max { panel.scroll_y = max; }
-                win!(self).needs_render = true;
+                win!(self, wi).needs_render = true;
             }
             return;
         }
@@ -5435,7 +5543,7 @@ impl CoreApp {
         if lines == 0 {
             return;
         }
-        let idx = win!(self).focused_idx;
+        let idx = win!(self, wi).focused_idx;
         // A mouse-tracking TUI (claudecode etc.) owns its own scroll: the
         // wheel is injected to the app, which redraws the whole screen in
         // place — marspot only ever sees the new grid and cannot re-anchor
@@ -5450,25 +5558,25 @@ impl CoreApp {
         // Cmd-C what they picked. Only a user-initiated scroll of a
         // mouse-tracking pane clears — a real scroll can't keep a valid
         // selection, autonomous output can.
-        let tui_scroll = win!(self).panes[idx].session().is_l3()
-            && win!(self).panes[idx].session().l3_mouse_tracking_active();
-        if win!(self).panes[idx].apply_scroll_lines(lines) {
+        let tui_scroll = win!(self, wi).panes[idx].session().is_l3()
+            && win!(self, wi).panes[idx].session().l3_mouse_tracking_active();
+        if win!(self, wi).panes[idx].apply_scroll_lines(lines) {
             if tui_scroll {
-                if let Some(sel) = win!(self).selection {
+                if let Some(sel) = win!(self, wi).selection {
                     if sel.session_idx == idx {
-                        win!(self).selection = None;
-                        win!(self).selection_dragging = false;
+                        win!(self, wi).selection = None;
+                        win!(self, wi).selection_dragging = false;
                     }
                 }
             }
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
         }
     }
 
-    fn preedit(&mut self, text: String) {
-        if win!(self).ime_preedit != text {
-            win!(self).ime_preedit = text;
-            win!(self).needs_render = true;
+    fn preedit(&mut self, wi: usize, text: String) {
+        if win!(self, wi).ime_preedit != text {
+            win!(self, wi).ime_preedit = text;
+            win!(self, wi).needs_render = true;
         }
     }
 
@@ -6336,6 +6444,7 @@ fn main() {
         saw_window_aware_attach: false,
         l3_mode,
         event_tx: event_tx.clone(),
+        drag_window: None,
         saved_windows,
         windows: vec![{
             let mut w = WindowState::new(
@@ -6383,11 +6492,11 @@ fn main() {
         "core.layout.ready",
         "initial layout built",
         windows = app.windows.len(),
-        window_id = win!(app).window_id,
-        mode = format!("{}x{}", win!(app).grid_cols, win!(app).grid_rows),
-        panes = win!(app).panes.len(),
-        cols = win!(app).layout.cells[0].cols,
-        rows = win!(app).layout.cells[0].rows
+        window_id = win!(app, 0).window_id,
+        mode = format!("{}x{}", win!(app, 0).grid_cols, win!(app, 0).grid_rows),
+        panes = win!(app, 0).panes.len(),
+        cols = win!(app, 0).layout.cells[0].cols,
+        rows = win!(app, 0).layout.cells[0].rows
     );
 
     // Bring up the shell ↔ core control socket inherited as fd 3.
@@ -6512,11 +6621,18 @@ fn main() {
         //      so the panel reflects forked-since-last-walk children
         //      / dead descendants.  Bypassed entirely when the panel
         //      is closed.
-        app.tick_process_panel_kills();
-        if let Some(panel) = win!(app).process_panel.as_ref() {
-            if panel.last_refresh.elapsed() >= PROCESS_PANEL_REFRESH_INTERVAL {
-                app.refresh_process_panel();
-                win!(app).needs_render = true;
+        // The process panel is per-window: two windows can each have
+        // one open, and a kill pending in an unfocused window still has
+        // to escalate on schedule.
+        for wi in 0..app.windows.len() {
+            app.tick_process_panel_kills(wi);
+            let due = win!(app, wi)
+                .process_panel
+                .as_ref()
+                .is_some_and(|p| p.last_refresh.elapsed() >= PROCESS_PANEL_REFRESH_INTERVAL);
+            if due {
+                app.refresh_process_panel(wi);
+                win!(app, wi).needs_render = true;
             }
         }
         // Drain pending control-socket events.  Attach coalescing:
@@ -6546,28 +6662,76 @@ fn main() {
                 }
             }
             match ev {
-                CoreEvent::Key(event, mods) => app.key(event, mods),
+                // RFC-005 step 4e — each input kind names its window in
+                // its own way, and the differences are the point:
+                //
+                //   press / right-press / drop  the window it landed
+                //                               in, which also takes
+                //                               focus (clicking focuses)
+                //   scroll / move               the window under the
+                //                               cursor, focus untouched
+                //   drag / release              the window that took
+                //                               the press, so a drag
+                //                               that crosses windows
+                //                               still finishes where it
+                //                               started
+                //   key / preedit               the window it was typed
+                //                               into
+                //
+                // A frame for a window the core no longer has is a
+                // normal race (it closed first), and every arm below
+                // drops it rather than falling back to the key window
+                // — silently acting on the wrong window is worse than
+                // dropping one event.
+                CoreEvent::Key(event, mods, win) => {
+                    if let Some(wi) = app.window_index(win) {
+                        app.key(wi, event, mods)
+                    }
+                }
                 CoreEvent::MouseDown(x, y, mods, win) => {
-                    if app.focus_window(win) {
-                        app.mouse_down(x, y, mods)
+                    if let Some(wi) = app.focus_window(win) {
+                        app.drag_window = Some(win);
+                        app.mouse_down(wi, x, y, mods)
                     }
                 }
                 CoreEvent::MouseRightDown(x, y, mods, win) => {
-                    if app.focus_window(win) {
-                        app.mouse_right_down(x, y, mods)
+                    if let Some(wi) = app.focus_window(win) {
+                        app.mouse_right_down(wi, x, y, mods)
                     }
                 }
-                CoreEvent::MouseDrag(x, y) => app.mouse_drag(x, y),
-                CoreEvent::MouseUp => app.mouse_up(),
-                CoreEvent::MouseMove(x, y) => app.mouse_moved(x, y),
-                CoreEvent::Scroll(dy, precise) => app.scroll(dy, precise),
+                CoreEvent::MouseDrag(x, y, win) => {
+                    if let Some(wi) = app.drag_target(win) {
+                        app.mouse_drag(wi, x, y)
+                    }
+                }
+                CoreEvent::MouseUp(win) => {
+                    if let Some(wi) = app.drag_target(win) {
+                        app.mouse_up(wi)
+                    }
+                    app.drag_window = None;
+                }
+                CoreEvent::MouseMove(x, y, win) => {
+                    if let Some(wi) = app.window_index(win) {
+                        app.mouse_moved(wi, x, y)
+                    }
+                }
+                CoreEvent::Scroll(dy, precise, win) => {
+                    if let Some(wi) = app.window_index(win) {
+                        app.scroll(wi, dy, precise)
+                    }
+                }
                 CoreEvent::FileDrop(x, y, paths, win) => {
-                    if app.focus_window(win) {
-                        app.file_drop(x, y, &paths)
+                    if let Some(wi) = app.focus_window(win) {
+                        app.file_drop(wi, x, y, &paths)
                     }
                 }
                 CoreEvent::WindowFocus(win) => {
                     app.focus_window(win);
+                }
+                CoreEvent::Preedit(text, win) => {
+                    if let Some(wi) = app.window_index(win) {
+                        app.preedit(wi, text)
+                    }
                 }
                 CoreEvent::WindowRestoreFinished(win, panes) => {
                     app.adopt_restored_panes(win, panes.0)
@@ -6591,18 +6755,24 @@ fn main() {
                     queue_attach(pending_attach, win, (fr, bk, w, h, sc));
                 }
                 CoreEvent::Focus(focused) => {
+                    // Application-level, not window-level: the whole
+                    // app gained or lost focus, so every window's
+                    // chrome changes and every window owes a frame.
                     app.renderer.set_window_focused(focused);
-                    // No mouseMoved deliveries while the window
-                    // isn't key — drop any latched hover so the
+                    // No mouseMoved deliveries while the app isn't
+                    // active — drop any latched hover so the
                     // affordance doesn't linger when the user
                     // alt-tabs away mid-hover.
-                    if !focused && win!(app).hover_chrome_btn.is_some() {
-                        win!(app).hover_chrome_btn = None;
+                    if !focused {
                         app.renderer.set_hover_chrome_btn(None);
                     }
-                    win!(app).needs_render = true;
+                    for w in app.windows.iter_mut() {
+                        if !focused {
+                            w.hover_chrome_btn = None;
+                        }
+                        w.needs_render = true;
+                    }
                 }
-                CoreEvent::Preedit(text) => app.preedit(text),
                 CoreEvent::Closed => *closed = true,
                 CoreEvent::Resize(_new_id, _new_w, _new_h, _new_scale) => {
                     // Legacy PROTO_VERSION=1 path — kept as a tolerance
@@ -6769,9 +6939,12 @@ fn main() {
                     win!(app, wi).needs_render = true;
                 }
                 CoreEvent::L3Ready => {
-                    // Just needs to wake the loop; `pump_all` re-reads
-                    // the L3 mirror and flips needs_render if it changed.
-                    win!(app).needs_render = true;
+                    // A bare wake — the poke carries no session id, so
+                    // which window changed is not knowable here.
+                    // `pump_all` reads every window's mirror and marks
+                    // only the ones that actually took bytes; setting
+                    // needs_render here would repaint all of them for
+                    // one pane's output.
                 }
                 CoreEvent::SwapIdleL3 => app.swap_idle_l3(),
                 CoreEvent::Hello(v) => {
@@ -6784,7 +6957,11 @@ fn main() {
                     app.set_pane_badge(sid, text);
                 }
                 CoreEvent::PaneBadgeMenu(sid, x, y, items) => {
-                    app.open_pane_badge_menu(sid, x, y, items);
+                    // The menu belongs over the badge that was clicked,
+                    // which is in whichever window holds that session.
+                    if let Some((wi, _)) = app.find_pane_by_sid(sid) {
+                        app.open_pane_badge_menu(wi, sid, x, y, items);
+                    }
                 }
                 CoreEvent::PaneTitle(sid, text) => {
                     app.set_pane_title(sid, text);
@@ -6798,6 +6975,7 @@ fn main() {
                 CoreEvent::InjectInput(sid, bytes) => {
                     app.inject_input(sid, &bytes);
                 }
+
                 CoreEvent::SearchResults(sid, qid, has_more, _total_seen, hits) => {
                     app.apply_search_results(sid, qid, has_more, hits);
                 }
@@ -6833,8 +7011,8 @@ fn main() {
                 uptime_s = start.elapsed().as_secs(),
                 bytes_pumped = bytes_pumped_total,
                 last_progress_age_ms = last_progress.elapsed().as_millis() as u64,
-                n_panes = win!(app).panes.len(),
-                focused_idx = win!(app).focused_idx
+                n_panes = app.total_panes(),
+                windows = app.windows.len()
             );
             break 'main;
         }
@@ -6899,8 +7077,8 @@ fn main() {
                 uptime_s = start.elapsed().as_secs(),
                 bytes_pumped = bytes_pumped_total,
                 last_progress_age_ms = last_progress.elapsed().as_millis() as u64,
-                n_panes = win!(app).panes.len(),
-                focused_idx = win!(app).focused_idx
+                n_panes = app.total_panes(),
+                windows = app.windows.len()
             );
             break 'main;
         }
@@ -7003,7 +7181,7 @@ fn main() {
                 slowest = r.slowest,
                 slowest_ms = r.slowest_took.as_millis(),
                 breakdown = r.breakdown(),
-                panes = win!(app).panes.len(),
+                panes = app.total_panes(),
                 stalls_total = watch.stall_count()
             );
         }
@@ -7011,22 +7189,34 @@ fn main() {
         frame += 1;
         if frame.is_multiple_of(300) {
             let t = start.elapsed().as_secs_f64();
-            let p = &win!(app).panes[win!(app).focused_idx];
-            let state = match p.session().state() {
-                SessionState::Active => "active",
-                SessionState::Idle => "idle",
-                SessionState::Exited => "exited",
+            // The focused pane of the key window — indexing blindly
+            // would panic on a window that is mid-restore and holds no
+            // panes yet.
+            let kw = app.key_window;
+            let (state, cols, rows) = match win!(app, kw).try_focused_pane() {
+                Some(p) => (
+                    match p.session().state() {
+                        SessionState::Active => "active",
+                        SessionState::Idle => "idle",
+                        SessionState::Exited => "exited",
+                    },
+                    p.session().grid().cols(),
+                    p.session().grid().rows(),
+                ),
+                None => ("none", 0, 0),
             };
             lx_debug!(
                 "core.heartbeat",
                 "periodic heartbeat",
                 frame = frame,
                 t_s = format!("{t:.1}"),
-                panes = win!(app).panes.len(),
-                focused = win!(app).focused_idx,
+                windows = app.windows.len(),
+                panes = app.total_panes(),
+                key_window = win!(app, kw).window_id,
+                focused = win!(app, kw).focused_idx,
                 state = state,
-                cols = p.session().grid().cols(),
-                rows = p.session().grid().rows()
+                cols = cols,
+                rows = rows
             );
         }
     }

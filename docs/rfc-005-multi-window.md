@@ -260,13 +260,27 @@ changes are reported to L2.
 6a. `infra` persistence v2: both files hold window lists
    (**shipped**, core 0.12.44 / shell 0.7.14)
 6b. `infra` restore N windows at boot, assembly off-loop (**shipped**)
-4e. `basic` input goes peer: `win!(self)` on the mouse / key / scroll /
-   drag / preedit paths takes the window the event names.  Scroll must
-   land in the window under the cursor even when it is not key; drag
-   and release belong to the window that took the press, not to
-   whichever window became key mid-drag.  The `self.key_window`
-   arguments left behind by 4d are the work list.
-    Then: re-enable Cmd-N (and press it once in the sandbox before
+4e. `basic` input goes peer (**shipped**).  Every `CoreEvent` now
+   carries the window L1 tagged its frame with, and each kind resolves
+   its window its own way:
+
+   | event | window |
+   |---|---|
+   | press / right-press / file drop | the one it landed in; also takes focus |
+   | scroll / move | the one under the cursor; focus untouched |
+   | drag / release | the one that took the press (`drag_window`) |
+   | key / preedit | the one it was typed into |
+   | app focus | all of them — it is the *application* activating |
+   | badge / title / PaneSession / injected input | the window holding that sid |
+   | process panel tick | every window has its own panel |
+
+   A frame naming a window the core no longer has is dropped, never
+   redirected to the key window: acting on the wrong window is worse
+   than losing one event.  `win!(self)` (the key-window form) survives
+   only in doc comments; `key_window` is now read by focus bookkeeping,
+   persistence and one heartbeat log line.
+
+   Then: re-enable Cmd-N (and press it once in the sandbox before
    installing).
 5. `basic` pane move: drag + context menu, same commit series
 7. E2E: two windows through install-local UPDATE_SWAP; L1 execv
