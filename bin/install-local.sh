@@ -155,27 +155,33 @@ done
 # different cert.  If signing fails (no cert available), install
 # still works — just with the 30-60 s amfid penalty on next core
 # swap; warn loudly but don't abort.
-if (( BUILD )); then
-  SIGN_ID="${MARSPOT_SIGN_ID:-}"
-  if [[ -z "$SIGN_ID" ]]; then
-    SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
-              | awk -F'"' '/Developer ID Application/{print $2; exit}')
-  fi
-  if [[ -n "$SIGN_ID" ]]; then
-    echo "==> signing release binaries"
-    echo "    identity: $SIGN_ID"
-    for b in marspot-shell marspot-core marspot-session; do
-      if codesign --force --sign "$SIGN_ID" --timestamp=none \
-                  "$TARGET/$b" 2>&1 | sed "s/^/    /"; then
-        :
-      else
-        echo "    WARN: codesign $b failed (continuing, expect amfid 30-60s on first run)" >&2
-      fi
-    done
-  else
-    echo "    WARN: no Developer ID Application cert in keychain;"
-    echo "          binaries stay adhoc-signed → amfid 30-60 s on first run." >&2
-  fi
+#
+# Runs regardless of --no-build.  Signing is about the binaries being
+# INSTALLED, not about who compiled them: this block used to sit
+# behind `if (( BUILD ))`, so `--no-build` (the path used when the
+# binaries were cross-built on the bench host) installed adhoc,
+# linker-signed binaries.  AMFI killed the shell the instant it
+# execv'd into one — the whole app went down with sixteen live
+# sessions behind it.
+SIGN_ID="${MARSPOT_SIGN_ID:-}"
+if [[ -z "$SIGN_ID" ]]; then
+  SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+            | awk -F'"' '/Developer ID Application/{print $2; exit}')
+fi
+if [[ -n "$SIGN_ID" ]]; then
+  echo "==> signing release binaries"
+  echo "    identity: $SIGN_ID"
+  for b in marspot-shell marspot-core marspot-session; do
+    if codesign --force --sign "$SIGN_ID" --timestamp=none \
+                "$TARGET/$b" 2>&1 | sed "s/^/    /"; then
+      :
+    else
+      echo "    WARN: codesign $b failed (continuing, expect amfid 30-60s on first run)" >&2
+    fi
+  done
+else
+  echo "    WARN: no Developer ID Application cert in keychain;"
+  echo "          binaries stay adhoc-signed → amfid 30-60 s on first run." >&2
 fi
 
 # ── 2. Scaffold the bundle (first run) ────────────────────────────
