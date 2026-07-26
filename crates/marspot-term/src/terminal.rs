@@ -326,6 +326,31 @@ impl Terminal {
         self.bracketed_paste_mode
     }
 
+    /// Forget the modes that belong to the process that was running,
+    /// keeping everything that belongs to the *content*.
+    ///
+    /// A resurrected session restores its snapshot onto a **brand-new
+    /// shell**: the scrollback and screen are the point of the
+    /// restore, but mouse tracking, SGR mouse encoding, bracketed
+    /// paste and application cursor keys were switched on by a program
+    /// that no longer exists.  Carrying them over makes the terminal
+    /// lie about the fresh shell — and the lie is user-visible: with
+    /// mouse tracking "on", a scroll gets encoded as `CSI < 64;x;y M`
+    /// and typed straight into a zsh prompt, which answers
+    /// `command not found: 29M64`.
+    ///
+    /// NOT for the execv handoff, where the shell survives and every
+    /// one of these modes is still genuinely set.
+    pub fn reset_process_owned_modes(&mut self) {
+        self.mouse_tracking_mode = MouseTrackingMode::Off;
+        self.mouse_sgr_encoding = false;
+        self.bracketed_paste_mode = false;
+        self.cursor_key_application_mode = false;
+        // A new shell starts with a visible cursor; a TUI that hid it
+        // is gone.
+        self.cursor_visible = true;
+    }
+
     /// Drain any bytes the terminal wants to send back to the PTY in
     /// response to capability / version queries (CSI c, CSI > 0 c,
     /// CSI > 0 q, …). Caller (Session::pump) writes them to the PTY

@@ -1169,6 +1169,18 @@ fn main() {
                         let body_bytes = body.len();
                         match local.terminal_mut().apply_snapshot(&body) {
                             Ok(()) => {
+                                // The snapshot's *content* is what we
+                                // want; its *modes* belong to a process
+                                // that no longer exists.  This shell is
+                                // brand-new and has switched nothing on.
+                                //
+                                // Leaving them set is user-visible: a
+                                // restored session whose old TUI had
+                                // mouse tracking on turns every scroll
+                                // into `CSI < 64;x;y M` typed at the
+                                // zsh prompt — "command not found:
+                                // 29M64", over and over.
+                                local.terminal_mut().reset_process_owned_modes();
                                 lx_event!(
                                     "L3_COLD_SNAPSHOT_APPLIED",
                                     "restored Terminal from state.bin at cold boot — close→reopen resurrection",

@@ -729,6 +729,9 @@ struct ShellApp {
     /// Next id to hand a window.  Monotonic and never reused within a
     /// run: the core keys `WindowState` off it, and a recycled id
     /// would let a closed window's frames land in its successor.
+    ///
+    /// Unread while Cmd-N is disabled.
+    #[allow(dead_code)]
     next_window_id: u32,
     /// The live core: child process, control socket (both directions),
     /// and liveness-handshake state aggregated into `CoreConn`.
@@ -901,6 +904,12 @@ fn successor_can_start(bin: &std::path::Path) -> bool {
 
 impl ShellApp {
     /// Open another native window (Cmd-N).
+    ///
+    /// Currently unreachable — the keystroke is disabled, see
+    /// `key_event`.  Kept so re-enabling is a one-line change rather
+    /// than a rewrite of a path that already works up to the point the
+    /// persistence bug bites.
+    #[allow(dead_code)]
     ///
     /// RFC-005 semantics: a fresh window starts as a 1×1 grid with one
     /// new pane and becomes key.  L1 allocates the id — it is what
@@ -2358,10 +2367,19 @@ impl MarspotApp for ShellApp {
             mods_byte = struct_to_mods_byte(mods),
             state = format!("{:?}", event.state)
         );
-        // Cmd-N is a window-lifecycle command, and windows belong to
-        // L1 — handling it here rather than round-tripping through the
-        // core keeps the one layer that owns NSWindows in charge of
-        // creating them.  Swallowed, so it never reaches the PTY.
+        // Cmd-N is DISABLED.  Opening a window crashed the app on
+        // 2026-07-26 and, worse, the crash left `shell-state.bin`
+        // describing only the new window's single pane — the core
+        // saves state from the key window, and adopting a window makes
+        // the new one key, so sixteen panes were written out of the
+        // file that boot assembly reads.  The sessions survived (their
+        // dirs and bytelogs are the real store), but the user's layout
+        // was gone and every restart came up with one empty pane.
+        //
+        // Re-enable only once the core saves ALL windows' panes —
+        // RFC-005 step 6, `shell-state.bin` v2 — so a window opening
+        // cannot narrow what gets persisted.  Until then a crash here
+        // costs a layout, which is not a trade worth taking.
         if mods.super_
             && !mods.control
             && !mods.alt
@@ -2371,7 +2389,10 @@ impl MarspotApp for ShellApp {
                 marspot::input::LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'n')
             )
         {
-            self.open_new_window();
+            lx_warn!(
+                "shell.window.new_disabled",
+                "Cmd-N is disabled until per-window state persistence lands (RFC-005 step 6)"
+            );
             return;
         }
         let wire = event_to_wire(&event, mods);
