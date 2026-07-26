@@ -161,6 +161,10 @@ pub trait MarspotApp: 'static {
 /// Handle passed to every `MarspotApp` callback.  Owns the NSWindow /
 /// NSView retain counts; lets the app request redraws or exit.
 pub struct MarspotAppCtx {
+    /// RFC-005 — stable id of the window this context drives.  L1
+    /// allocates it; it is what every input frame carries and what
+    /// the core resolves a `WindowState` from.
+    window_id: u32,
     inner: Retained<MarspotView>,
     nswindow: Retained<NSWindow>,
     nsapp: Retained<NSApplication>,
@@ -169,6 +173,11 @@ pub struct MarspotAppCtx {
 }
 
 impl MarspotAppCtx {
+    /// Which window this context drives.
+    pub fn window_id(&self) -> u32 {
+        self.window_id
+    }
+
     /// The NSView the renderer attaches to.
     pub fn ns_view(&self) -> &NSView {
         // MarspotView ⊆ NSView (subclass); deref via cast.
@@ -346,8 +355,12 @@ impl Clone for EventProxy {
 
 extern "C" fn source_perform(_info: *const c_void) {
     // Wake fires user_event.  Any redraws or exits the handler
-    // requests are flushed by `dispatch_event`.
-    dispatch_event(EventKind::UserEvent);
+    // requests are flushed by `dispatch_event_for`.
+    //
+    // A wake is about the process, not a window — bytes arrived from
+    // the core — so it goes to the first window, whose `user_event`
+    // drains for everyone.
+    dispatch_event_for(marspot_term::shell_proto::FIRST_WINDOW_ID, EventKind::UserEvent);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +394,10 @@ pub struct MarspotViewIvars {
     /// fall back to the screen-centre default.  `None` until the
     /// first render or when there's no visible caret.
     caret_view_phys_rect: Cell<Option<NSRect>>,
+    /// RFC-005 — which window this view belongs to.  Every event the
+    /// view raises is tagged with it, so a second window's clicks
+    /// cannot be attributed to the first.
+    window_id: Cell<u32>,
 }
 
 define_class!(
@@ -435,7 +452,7 @@ define_class!(
             // don't consume these but we don't want to depend on that.
             if mods.super_ || mods.control {
                 if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
-                    dispatch_event(EventKind::Key(ev, mods));
+                    dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
                 }
                 return;
             }
@@ -467,7 +484,7 @@ define_class!(
                     return;
                 }
                 if let Some(ev) = nsevent_to_mars_key(event, KeyState::Pressed) {
-                    dispatch_event(EventKind::Key(ev, mods));
+                    dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
                 }
             }
         }
@@ -477,7 +494,7 @@ define_class!(
             // Released events bypass IME — IMEs only consume key-down.
             if let Some(ev) = nsevent_to_mars_key(event, KeyState::Released) {
                 let mods = nsevent_modifiers(event);
-                dispatch_event(EventKind::Key(ev, mods));
+                dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
             }
         }
 
@@ -511,7 +528,7 @@ define_class!(
             // without round-tripping through last_modifiers (which
             // only updates on keyDown).
             let mods = nsevent_modifiers(event);
-            dispatch_event(EventKind::MouseDown { x: x_phys, y: y_phys, mods });
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseDown { x: x_phys, y: y_phys, mods });
         }
 
         #[unsafe(method(rightMouseDown:))]
@@ -524,7 +541,7 @@ define_class!(
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
             let mods = nsevent_modifiers(event);
-            dispatch_event(EventKind::MouseRightDown { x: x_phys, y: y_phys, mods });
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseRightDown { x: x_phys, y: y_phys, mods });
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -537,7 +554,7 @@ define_class!(
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
-            dispatch_event(EventKind::MouseDrag { x: x_phys, y: y_phys });
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseDrag { x: x_phys, y: y_phys });
         }
 
         #[unsafe(method(mouseUp:))]
@@ -547,7 +564,7 @@ define_class!(
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
-            dispatch_event(EventKind::MouseUp { x: x_phys, y: y_phys });
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseUp { x: x_phys, y: y_phys });
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -560,7 +577,7 @@ define_class!(
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
-            dispatch_event(EventKind::MouseMove { x: x_phys, y: y_phys });
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseMove { x: x_phys, y: y_phys });
         }
 
         // ── NSDraggingDestination ──
@@ -622,7 +639,7 @@ define_class!(
                 let loc_view = self.convertPoint_fromView(loc_window, None);
                 let scale =
                     self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
-                dispatch_event(EventKind::FileDrop {
+                dispatch_event_for(self.ivars().window_id.get(), EventKind::FileDrop {
                     x: loc_view.x * scale,
                     y: loc_view.y * scale,
                     paths,
@@ -650,7 +667,7 @@ define_class!(
                 dx = event.deltaX();
                 dy = event.deltaY();
             }
-            dispatch_event(EventKind::Scroll { dx, dy, precise });
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Scroll { dx, dy, precise });
         }
     }
 
@@ -774,13 +791,13 @@ define_class!(
             *self.ivars().marked_text.borrow_mut() = s.clone();
             // Forward to the app so it can paint an inline preedit
             // overlay (pinyin candidates, hiragana composition, etc.).
-            dispatch_event(EventKind::ImePreedit(s));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::ImePreedit(s));
         }
 
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
             self.ivars().marked_text.borrow_mut().clear();
-            dispatch_event(EventKind::ImePreedit(String::new()));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::ImePreedit(String::new()));
         }
 
         #[unsafe(method(insertText:replacementRange:))]
@@ -791,7 +808,7 @@ define_class!(
             // Commit ends the composition — clear any preedit overlay
             // before we send the committed text so the app doesn't
             // briefly render both.
-            dispatch_event(EventKind::ImePreedit(String::new()));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::ImePreedit(String::new()));
             if s.is_empty() {
                 return;
             }
@@ -805,7 +822,7 @@ define_class!(
                 text: Some(s),
             };
             let mods = self.ivars().last_modifiers.get();
-            dispatch_event(EventKind::Key(ev, mods));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
         }
 
         #[unsafe(method(doCommandBySelector:))]
@@ -839,7 +856,7 @@ define_class!(
                 text: None,
             };
             let mods = self.ivars().last_modifiers.get();
-            dispatch_event(EventKind::Key(ev, mods));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Key(ev, mods));
         }
     }
 );
@@ -892,7 +909,10 @@ fn nsobject_string_to_string(string: &NSObject) -> String {
 // NSWindowDelegate subclass
 // ---------------------------------------------------------------------------
 
-pub struct MarspotWindowDelegateIvars;
+pub struct MarspotWindowDelegateIvars {
+    /// RFC-005 — the window this delegate speaks for.
+    window_id: Cell<u32>,
+}
 
 define_class!(
     // SAFETY:
@@ -910,7 +930,7 @@ define_class!(
     unsafe impl NSWindowDelegate for MarspotWindowDelegate {
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
-            dispatch_event(EventKind::CloseRequested);
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::CloseRequested);
             // Returning false lets the app handle the close; if the
             // app calls ctx.exit() inside close_requested, the run
             // loop stops and we return.  Marspot's current behaviour is
@@ -920,22 +940,22 @@ define_class!(
 
         #[unsafe(method(windowDidResize:))]
         fn window_did_resize(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Resized);
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
         }
 
         #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Moved);
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Moved);
         }
 
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Focused(true));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Focused(true));
         }
 
         #[unsafe(method(windowDidResignKey:))]
         fn window_did_resign_key(&self, _notification: &NSNotification) {
-            dispatch_event(EventKind::Focused(false));
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Focused(false));
         }
     }
 
@@ -957,7 +977,7 @@ define_class!(
             &self,
             _sender: &NSApplication,
         ) -> NSApplicationTerminateReply {
-            dispatch_event(EventKind::CloseRequested);
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::CloseRequested);
             NSApplicationTerminateReply::TerminateCancel
         }
     }
@@ -1004,7 +1024,15 @@ pub enum EventKind {
 
 struct AppState {
     app: Box<dyn MarspotApp>,
-    ctx: MarspotAppCtx,
+    /// One context per open window, in creation order.  Never empty
+    /// while the app is running.
+    windows: Vec<MarspotAppCtx>,
+}
+
+impl AppState {
+    fn window_index(&self, window_id: u32) -> Option<usize> {
+        self.windows.iter().position(|c| c.window_id == window_id)
+    }
 }
 
 thread_local! {
@@ -1013,15 +1041,23 @@ thread_local! {
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
+/// Dispatch an event that is about the app rather than a particular
+/// window — the dev panel's own NSWindow raises these.  Routed to the
+/// first window, which is the one the dev panel is anchored against.
 pub(crate) fn dispatch_event_pub(kind: EventKind) {
-    dispatch_event(kind);
+    dispatch_event_for(marspot_term::shell_proto::FIRST_WINDOW_ID, kind);
 }
 
-fn dispatch_event(kind: EventKind) {
+fn dispatch_event_for(window_id: u32, kind: EventKind) {
     APP_STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let Some(state) = slot.as_mut() else { return };
-        let AppState { app, ctx } = state;
+        // A window that has already been torn down can still have an
+        // event in flight from AppKit; dropping it is correct, and is
+        // not an error worth logging on a hot path.
+        let Some(i) = state.window_index(window_id) else { return };
+        let AppState { app, windows } = state;
+        let ctx = &mut windows[i];
 
         match kind {
             EventKind::UserEvent => app.user_event(ctx),
@@ -1157,6 +1193,9 @@ fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
 pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     let mtm = MainThreadMarker::new()
         .expect("run_app must be called on the main thread");
+    // The boot window's id.  RFC-005 step 4 adds `open_window` for the
+    // rest; they take ids from the same monotonic source.
+    let window_id = marspot_term::shell_proto::FIRST_WINDOW_ID;
     let nsapp = NSApplication::sharedApplication(mtm);
     nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // Force-refresh the Dock icon from the bundle's `Resources/AppIcon
@@ -1179,6 +1218,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
             ime_consumed: Cell::new(false),
             last_modifiers: Cell::new(Modifiers::default()),
             caret_view_phys_rect: Cell::new(None),
+            window_id: Cell::new(window_id),
         });
         unsafe { msg_send![super(alloc), initWithFrame: frame] }
     };
@@ -1245,7 +1285,9 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     // 3. Window delegate.
     let delegate: Retained<MarspotWindowDelegate> = {
         let alloc = MarspotWindowDelegate::alloc(mtm)
-            .set_ivars(MarspotWindowDelegateIvars);
+            .set_ivars(MarspotWindowDelegateIvars {
+                window_id: Cell::new(window_id),
+            });
         unsafe { msg_send![super(alloc), init] }
     };
     let proto: &ProtocolObject<dyn NSWindowDelegate> =
@@ -1269,6 +1311,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     // 5. Build the ctx and stash app state.  After this the NSView
     //    callbacks are live.
     let ctx = MarspotAppCtx {
+        window_id,
         inner: view.clone(),
         nswindow: window.clone(),
         nsapp: nsapp.clone(),
@@ -1294,7 +1337,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     APP_STATE.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
             app: Box::new(app),
-            ctx,
+            windows: vec![ctx],
         });
     });
 
@@ -1312,12 +1355,15 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     APP_STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let state = slot.as_mut().unwrap();
-        state.app.resumed(&state.ctx);
+        // Boot has exactly one window; the rest are opened later and
+        // get their own resumed/resized through the normal path.
+        let ctx = &state.windows[0];
+        state.app.resumed(ctx);
         // Deliver an initial Resized so the app sizes its renderer.
-        let (w, h) = state.ctx.inner_size_phys();
-        state.app.resized(&state.ctx, w, h);
-        if state.ctx.redraw_pending.replace(false) {
-            state.app.redraw(&state.ctx);
+        let (w, h) = ctx.inner_size_phys();
+        state.app.resized(ctx, w, h);
+        if ctx.redraw_pending.replace(false) {
+            state.app.redraw(ctx);
         }
     });
     // Drain anything `resumed` / `redraw` queued via the dev_window
@@ -1416,3 +1462,4 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
         text,
     })
 }
+

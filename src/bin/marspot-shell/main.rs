@@ -873,12 +873,11 @@ impl ShellApp {
 
     /// Which window an AppKit callback is about.
     ///
-    /// RFC-005 step 2: the shell owns exactly one window, so this is a
-    /// constant — but every input frame now names it, so step 4 turns
-    /// this into a lookup from the `MarspotAppCtx` the callback was
-    /// dispatched with and nothing downstream changes.
-    fn event_window(&self) -> u32 {
-        marspot::shell_proto::FIRST_WINDOW_ID
+    /// The context is the window: `dispatch_event_for` resolved it
+    /// from the id the raising view or delegate carries, so a click in
+    /// the second window cannot be attributed to the first.
+    fn event_window(ctx: &MarspotAppCtx) -> u32 {
+        ctx.window_id()
     }
 
     fn new(proxy: EventProxy) -> Self {
@@ -1517,7 +1516,11 @@ impl ShellApp {
                         let (f, b) = pair.ids();
                         self.pending_surfaces = Some(pair);
                         self.send_surface_attach(
-                            self.event_window(),
+                            // Supervisor path (crash restart) — no
+                            // AppKit callback, so no ctx.  It is the
+                            // boot window's pair; 4b gives ShellApp a
+                            // pair per window and this reads it there.
+                            marspot::shell_proto::FIRST_WINDOW_ID,
                             f,
                             b,
                             w_px as f64,
@@ -2182,7 +2185,7 @@ impl MarspotApp for ShellApp {
         ctx.request_redraw();
     }
 
-    fn key_event(&mut self, _ctx: &MarspotAppCtx, event: MarspotKeyEvent, mods: Modifiers) {
+    fn key_event(&mut self, ctx: &MarspotAppCtx, event: MarspotKeyEvent, mods: Modifiers) {
         // Forensic anchor for "key X did the wrong thing" reports.
         // We log the LogicalKey and the modifier byte; the actual PTY
         // bytes are encoded downstream in L3 (input_core::key_event_to_bytes)
@@ -2199,12 +2202,12 @@ impl MarspotApp for ShellApp {
             state = format!("{:?}", event.state)
         );
         let wire = event_to_wire(&event, mods);
-        let w = self.event_window();
+        let w = Self::event_window(ctx);
         self.send(MsgType::KeyEvent, encode_key_event(&wire, w));
     }
 
-    fn mouse_down(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {
-        let w = self.event_window();
+    fn mouse_down(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, mods: Modifiers) {
+        let w = Self::event_window(ctx);
         self.send(
             MsgType::MouseDown,
             encode_mouse(x, y, struct_to_mods_byte(mods), w),
@@ -2213,46 +2216,46 @@ impl MarspotApp for ShellApp {
 
     fn mouse_right_down(
         &mut self,
-        _ctx: &MarspotAppCtx,
+        ctx: &MarspotAppCtx,
         x: f64,
         y: f64,
         mods: Modifiers,
     ) {
-        let w = self.event_window();
+        let w = Self::event_window(ctx);
         self.send(
             MsgType::MouseRightDown,
             encode_mouse(x, y, struct_to_mods_byte(mods), w),
         );
     }
 
-    fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
+    fn mouse_drag(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64) {
         // No modifier info on drag — pass zero; the renderer doesn't
         // currently need mods for drag-extend selection.
-        let w = self.event_window();
+        let w = Self::event_window(ctx);
         self.send(MsgType::MouseDrag, encode_mouse(x, y, 0, w));
     }
 
-    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
-        let w = self.event_window();
+    fn mouse_up(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64) {
+        let w = Self::event_window(ctx);
         self.send(MsgType::MouseUp, encode_mouse(x, y, 0, w));
     }
 
-    fn file_drop(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64, paths: &[String]) {
+    fn file_drop(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, paths: &[String]) {
         // L2 owns the pane layout — forward drop point + raw paths;
         // it hit-tests the pane and shell-quotes before insertion.
-        let w = self.event_window();
+        let w = Self::event_window(ctx);
         self.send(MsgType::FileDrop, encode_file_drop(x, y, paths, w));
     }
 
-    fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, x: f64, y: f64) {
+    fn mouse_moved(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64) {
         // Forwarded raw — L2 hit-tests against chrome rects and
         // ignores moves that don't change its hover region (cheap).
-        let w = self.event_window();
+        let w = Self::event_window(ctx);
         self.send(MsgType::MouseMove, encode_mouse(x, y, 0, w));
     }
 
-    fn scroll(&mut self, _ctx: &MarspotAppCtx, dx: f64, dy: f64, precise: bool) {
-        let w = self.event_window();
+    fn scroll(&mut self, ctx: &MarspotAppCtx, dx: f64, dy: f64, precise: bool) {
+        let w = Self::event_window(ctx);
         self.send(MsgType::Scroll, encode_scroll(dx, dy, precise, w));
     }
 
@@ -2292,7 +2295,7 @@ impl MarspotApp for ShellApp {
                 }
                 let (f, b) = pair.ids();
                 self.pending_surfaces = Some(pair);
-                self.send_surface_attach(self.event_window(), f, b, w_phys, h_phys, scale);
+                self.send_surface_attach(Self::event_window(ctx), f, b, w_phys, h_phys, scale);
             }
             Err(e) => {
                 lx_error!("shell.resize.pair_create_failed", &format!("{e}"));
@@ -2329,8 +2332,8 @@ impl MarspotApp for ShellApp {
         }
     }
 
-    fn ime_preedit_changed(&mut self, _ctx: &MarspotAppCtx, text: &str) {
-        let w = self.event_window();
+    fn ime_preedit_changed(&mut self, ctx: &MarspotAppCtx, text: &str) {
+        let w = Self::event_window(ctx);
         self.send(MsgType::Preedit, encode_preedit(text, w));
     }
 
