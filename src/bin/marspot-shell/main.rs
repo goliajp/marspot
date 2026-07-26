@@ -656,8 +656,18 @@ impl SurfacePair {
     }
 }
 
-struct ShellApp {
-    proxy: EventProxy,
+/// Everything the shell owns on behalf of ONE native window.
+///
+/// RFC-005 — these used to sit directly on `ShellApp`, which is how
+/// "there is exactly one window" was encoded on the L1 side.  The core
+/// stays single (one process drives every window); what multiplies is
+/// the window-shaped kernel state: a surface pair, the presenter that
+/// samples it, and the gates that say whether this window has anything
+/// worth showing yet.
+struct ShellWindow {
+    /// Matches the id the view/delegate tag their events with, and the
+    /// id carried on the wire.
+    window_id: u32,
     /// Currently-displayed IOSurface pair — the presenter samples
     /// whichever half `current_idx` points at.
     surfaces: Option<SurfacePair>,
@@ -668,22 +678,11 @@ struct ShellApp {
     /// pending entry; the dropped one is abandoned (`release`).
     pending_surfaces: Option<SurfacePair>,
     presenter: Option<ShellPresenter>,
-    /// The live core: child process, control socket (both directions),
-    /// and liveness-handshake state aggregated into `CoreConn`.
-    /// `None` before the first spawn and in the brief gap between a
-    /// crash (or single-core swap retirement) and the respawn.
-    active: Option<CoreConn>,
-    /// True after the core has confirmed at least one SurfaceReady.
-    /// Until then `redraw` skips `present()` so the user sees the
-    /// NSWindow's BG colour (font_cache::BG) instead of an unfilled
-    /// black IOSurface — kills the cold-start flash.
+    /// True after the core has confirmed at least one SurfaceReady for
+    /// THIS window.  Until then `redraw` skips `present()` so the user
+    /// sees the NSWindow's BG colour (font_cache::BG) instead of an
+    /// unfilled black IOSurface — kills the cold-start flash.
     first_frame_ready: bool,
-    /// F3+6.1 — last saved (x, y, w, h, display_id) so per-frame
-    /// `resized` / `moved` callbacks dedup: only the saves where the
-    /// frame actually changed since the last bin write actually fire
-    /// I/O.  Eliminates the live-resize 60+ writes/s storm.
-    last_saved_window: Option<(f64, f64, f64, f64, u32)>,
-    redraw_thread_started: bool,
     /// `redraw()` only calls `present()` when this is true.  Set by
     /// every `FrameRendered` poke from the active core (its
     /// per-frame ack that the IOSurface has been fully written +
@@ -701,6 +700,38 @@ struct ShellApp {
     /// `safety_present_after` below provides the real safety net
     /// for genuinely-missed pokes.
     frame_pending: bool,
+    /// F3+6.1 — last saved (x, y, w, h, display_id) so per-frame
+    /// `resized` / `moved` callbacks dedup: only the saves where the
+    /// frame actually changed since the last bin write actually fire
+    /// I/O.  Eliminates the live-resize 60+ writes/s storm.
+    last_saved_window: Option<(f64, f64, f64, f64, u32)>,
+}
+
+impl ShellWindow {
+    fn new(window_id: u32) -> Self {
+        Self {
+            window_id,
+            surfaces: None,
+            pending_surfaces: None,
+            presenter: None,
+            first_frame_ready: false,
+            frame_pending: false,
+            last_saved_window: None,
+        }
+    }
+}
+
+struct ShellApp {
+    proxy: EventProxy,
+    /// One entry per open native window, in creation order.  Never
+    /// empty while the app runs; `windows[0]` is the boot window.
+    windows: Vec<ShellWindow>,
+    /// The live core: child process, control socket (both directions),
+    /// and liveness-handshake state aggregated into `CoreConn`.
+    /// `None` before the first spawn and in the brief gap between a
+    /// crash (or single-core swap retirement) and the respawn.
+    active: Option<CoreConn>,
+    redraw_thread_started: bool,
     /// Wall-clock time of the last `present()` call.  Combined with
     /// `frame_pending`: when the redraw callback runs and no fresh
     /// frame is pending, we ALSO force a present if too long has
@@ -841,6 +872,28 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
 }
 
 impl ShellApp {
+    /// Index of the window carrying `window_id`.
+    fn window_index(&self, window_id: u32) -> Option<usize> {
+        self.windows.iter().position(|w| w.window_id == window_id)
+    }
+
+    /// The window whose live or pending pair contains `surface_id`.
+    ///
+    /// This is why `SurfaceReady` never needed a window id on the
+    /// wire: surface ids are global, so the pair that holds one names
+    /// its window unambiguously.
+    fn window_index_of_surface(&self, surface_id: u32) -> Option<usize> {
+        self.windows.iter().position(|w| {
+            let has = |p: &Option<SurfacePair>| {
+                p.as_ref().is_some_and(|p| {
+                    let (f, b) = p.ids();
+                    f == surface_id || b == surface_id
+                })
+            };
+            has(&w.surfaces) || has(&w.pending_surfaces)
+        })
+    }
+
     /// Announce a surface pair for one window.
     ///
     /// Sends BOTH forms: the legacy window-blind `SurfaceAttach`, which
@@ -891,14 +944,11 @@ impl ShellApp {
         let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
-            surfaces: None,
-            pending_surfaces: None,
-            presenter: None,
+            windows: vec![ShellWindow::new(
+                marspot::shell_proto::FIRST_WINDOW_ID,
+            )],
             active: None,
-            first_frame_ready: false,
-            last_saved_window: None,
             redraw_thread_started: false,
-            frame_pending: false,
             last_present_at: None,
             binaries,
             sup_state: SupervisorState::Idle,
@@ -1235,7 +1285,11 @@ impl ShellApp {
         if !self.binaries.has_pending() {
             return false;
         }
-        let (w_px, h_px, front_id, back_id) = match self.surfaces.as_ref() {
+        // The core is spawned against the boot window's pair (its ids
+        // ride in on env).  Any further window announces itself to the
+        // fresh core with a `SurfaceAttachWindow` frame — RFC-005 step
+        // 4c, where more than one window can exist.
+        let (w_px, h_px, front_id, back_id) = match self.windows[0].surfaces.as_ref() {
             Some(s) => {
                 let (f, b) = s.ids();
                 (s.width(), s.height(), f, b)
@@ -1366,11 +1420,15 @@ impl ShellApp {
         // IOSurface is released.  Anything left would be inherited as
         // dangling fds in the new process — clean now.
         self.shutdown_active("shell self-update execv prep");
-        if let Some(s) = self.surfaces.take() {
-            s.release();
-        }
-        if let Some(s) = self.pending_surfaces.take() {
-            s.release();
+        // Every window's surfaces, not just one: anything left behind
+        // is inherited by the new image as a dangling fd.
+        for w in &mut self.windows {
+            if let Some(s) = w.surfaces.take() {
+                s.release();
+            }
+            if let Some(s) = w.pending_surfaces.take() {
+                s.release();
+            }
         }
         let target = shell_tree.current();
         if !target.exists() {
@@ -1423,9 +1481,10 @@ impl ShellApp {
     /// whole point is invisibility, the active core keeps rendering
     /// normally while the pending core warms up off-screen.
     fn refresh_banner(&mut self, ctx: &MarspotAppCtx) {
+        let Some(wi) = self.window_index(ctx.window_id()) else { return };
         let want = if self.auto_restart_disabled {
             Some(BannerKind::UpdateFailed)
-        } else if !self.core_alive() && self.surfaces.is_some() {
+        } else if !self.core_alive() && self.windows[wi].surfaces.is_some() {
             // Active core process is gone (just SIGKILL'd or died and we
             // haven't respawned yet).  Show the recovering banner while
             // the gap lasts.
@@ -1436,7 +1495,7 @@ impl ShellApp {
         if want == self.banner_kind {
             return;
         }
-        if let Some(p) = self.presenter.as_mut() {
+        if let Some(p) = self.windows[wi].presenter.as_mut() {
             let scale = ctx.scale();
             if let Err(e) = p.set_banner(want, scale) {
                 lx_warn!("shell.set_banner_failed", &format!("{e}"));
@@ -1486,7 +1545,8 @@ impl ShellApp {
         if self.auto_restart_disabled {
             return;
         }
-        if let Some(s) = self.surfaces.as_ref() {
+        let Some(wi) = self.window_index(ctx.window_id()) else { return };
+        if let Some(s) = self.windows[wi].surfaces.as_ref() {
             let (front_id, back_id) = s.ids();
             let w_px = s.width();
             let h_px = s.height();
@@ -1510,17 +1570,13 @@ impl ShellApp {
             if self.active.is_some() {
                 match SurfacePair::create(w_px, h_px) {
                     Ok(pair) => {
-                        if let Some(stale) = self.pending_surfaces.take() {
+                        if let Some(stale) = self.windows[wi].pending_surfaces.take() {
                             stale.release();
                         }
                         let (f, b) = pair.ids();
-                        self.pending_surfaces = Some(pair);
+                        self.windows[wi].pending_surfaces = Some(pair);
                         self.send_surface_attach(
-                            // Supervisor path (crash restart) — no
-                            // AppKit callback, so no ctx.  It is the
-                            // boot window's pair; 4b gives ShellApp a
-                            // pair per window and this reads it there.
-                            marspot::shell_proto::FIRST_WINDOW_ID,
+                            ctx.window_id(),
                             f,
                             b,
                             w_px as f64,
@@ -1725,8 +1781,18 @@ impl ShellApp {
     /// (replaced by a newer resize before the core got there) —
     /// silently dropped.
     fn on_surface_ready(&mut self, id: u32) {
-        let live_ids = self.surfaces.as_ref().map(|p| p.ids());
-        let pending_ids = self.pending_surfaces.as_ref().map(|p| p.ids());
+        // Surface ids are global, so the pair holding this one names
+        // its window — no window id is needed on the wire.
+        let Some(i) = self.window_index_of_surface(id) else {
+            lx_warn!(
+                "shell.surface_ready.id_unknown",
+                "SurfaceReady ignored — id belongs to no window's pair",
+                id = id
+            );
+            return;
+        };
+        let live_ids = self.windows[i].surfaces.as_ref().map(|p| p.ids());
+        let pending_ids = self.windows[i].pending_surfaces.as_ref().map(|p| p.ids());
         let in_live = live_ids
             .map(|(f, b)| f == id || b == id)
             .unwrap_or(false);
@@ -1745,7 +1811,7 @@ impl ShellApp {
                 "per-frame SurfaceReady ack",
                 id = id
             );
-            if let Some(p) = self.presenter.as_mut() {
+            if let Some(p) = self.windows[i].presenter.as_mut() {
                 if !p.swap_to_id(id) {
                     // Presenter and shell pair-ids disagree — should
                     // not happen, but log if it ever does.
@@ -1761,8 +1827,8 @@ impl ShellApp {
             // first_frame_ready gate so `redraw()` finally presents.
             // Without this the gate stays false for the entire run
             // (it only flipped on the legacy v=1 handshake path).
-            self.first_frame_ready = true;
-            self.frame_pending = true;
+            self.windows[i].first_frame_ready = true;
+            self.windows[i].frame_pending = true;
             return;
         }
         if !in_pending {
@@ -1776,11 +1842,11 @@ impl ShellApp {
             return;
         }
         // Handshake ack: install pending as live.
-        let new_pair = match self.pending_surfaces.take() {
+        let new_pair = match self.windows[i].pending_surfaces.take() {
             Some(p) => p,
             None => return,
         };
-        if let Some(p) = self.presenter.as_mut() {
+        if let Some(p) = self.windows[i].presenter.as_mut() {
             if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
                 lx_error!("shell.set_pair_failed", &format!("{e}"));
                 new_pair.release();
@@ -1789,7 +1855,7 @@ impl ShellApp {
             // The acked id is the one the core just wrote — point at it.
             p.swap_to_id(id);
         }
-        if let Some(old) = self.surfaces.take() {
+        if let Some(old) = self.windows[i].surfaces.take() {
             old.release();
         }
         lx_info!(
@@ -1799,9 +1865,9 @@ impl ShellApp {
             back = new_pair.back.id(),
             acked = id
         );
-        self.surfaces = Some(new_pair);
-        self.first_frame_ready = true;
-        self.frame_pending = true;
+        self.windows[i].surfaces = Some(new_pair);
+        self.windows[i].first_frame_ready = true;
+        self.windows[i].frame_pending = true;
     }
 
     /// Route a frame from the **active** core — it drives what's on
@@ -1859,8 +1925,10 @@ impl ShellApp {
             // would gate `redraw()` forever and paint black.
             // A v=2 core never sends this, so it's pure tolerance.
             ShellInbox::FrameRendered => {
-                self.first_frame_ready = true;
-                self.frame_pending = true;
+                if let Some(wi) = self.window_index(ctx.window_id()) {
+                    self.windows[wi].first_frame_ready = true;
+                    self.windows[wi].frame_pending = true;
+                }
             }
             ShellInbox::PaneBadgeClicked(shelld_sid) => {
                 self.plugin_registry
@@ -2035,13 +2103,14 @@ impl ShellApp {
     /// change.  Frames compared at 1-pt granularity (sub-pt diffs
     /// from AppKit's internal float math get coalesced).
     fn save_window_state_if_changed(&mut self, ctx: &MarspotAppCtx) {
+        let Some(wi) = self.window_index(ctx.window_id()) else { return };
         let (x, y, w, h) = ctx.window_frame_pt();
         let display_id = ctx.window_display_id().unwrap_or(0);
         let cur = (x.round(), y.round(), w.round(), h.round(), display_id);
-        if self.last_saved_window == Some(cur) {
+        if self.windows[wi].last_saved_window == Some(cur) {
             return;
         }
-        self.last_saved_window = Some(cur);
+        self.windows[wi].last_saved_window = Some(cur);
         let saved = marspot::state::SavedWindow {
             display_id, x, y, w, h,
         };
@@ -2157,8 +2226,11 @@ impl MarspotApp for ShellApp {
         };
 
         let (front_id, back_id) = pair.ids();
-        self.surfaces = Some(pair);
-        self.presenter = Some(presenter);
+        // `resumed` fires for the boot window, which the app state
+        // created before any callback could run.
+        let wi = self.window_index(ctx.window_id()).unwrap_or(0);
+        self.windows[wi].surfaces = Some(pair);
+        self.windows[wi].presenter = Some(presenter);
 
         self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
         if self.active.is_some() {
@@ -2265,7 +2337,10 @@ impl MarspotApp for ShellApp {
         // is always valid; the cost (~50us memcpy + 1 syscall) is
         // well below the per-frame resize budget.
         self.save_window_state_if_changed(ctx);
-        if let Some(p) = self.presenter.as_mut() {
+        let Some(wi) = self.window_index(ctx.window_id()) else { return };
+        // Read the gate before taking `&mut` on the same window.
+        let ready = self.windows[wi].first_frame_ready;
+        if let Some(p) = self.windows[wi].presenter.as_mut() {
             p.set_drawable_size(w_phys, h_phys);
             // Present *synchronously* inside the resize callback so
             // our drawable lands in the SAME CATransaction AppKit is
@@ -2274,7 +2349,7 @@ impl MarspotApp for ShellApp {
             // this gives Sublime-style frame-perfect resize — the
             // window edge and the drawable contents move together,
             // no inter-frame drift.
-            if self.first_frame_ready {
+            if ready {
                 p.present();
             }
         }
@@ -2290,11 +2365,11 @@ impl MarspotApp for ShellApp {
         let h_px = h_phys.max(64.0) as usize;
         match SurfacePair::create(w_px, h_px) {
             Ok(pair) => {
-                if let Some(stale) = self.pending_surfaces.take() {
+                if let Some(stale) = self.windows[wi].pending_surfaces.take() {
                     stale.release();
                 }
                 let (f, b) = pair.ids();
-                self.pending_surfaces = Some(pair);
+                self.windows[wi].pending_surfaces = Some(pair);
                 self.send_surface_attach(Self::event_window(ctx), f, b, w_phys, h_phys, scale);
             }
             Err(e) => {
@@ -2406,11 +2481,15 @@ impl MarspotApp for ShellApp {
         // Drop control socket first — gives the core a clean EOF on
         // its read side so it can shut down gracefully before SIGKILL.
         self.shutdown_active("window close_requested");
-        if let Some(pair) = self.surfaces.take() {
-            pair.release();
-        }
-        if let Some(stale) = self.pending_surfaces.take() {
-            stale.release();
+        // App quit: release every window's surfaces, not just the one
+        // whose close button was pressed.
+        for w in &mut self.windows {
+            if let Some(pair) = w.surfaces.take() {
+                pair.release();
+            }
+            if let Some(stale) = w.pending_surfaces.take() {
+                stale.release();
+            }
         }
         ctx.exit();
     }
@@ -2506,7 +2585,8 @@ impl MarspotApp for ShellApp {
         // this gate the user sees an uninitialised IOSurface for
         // ~50-100 ms at startup, then a hard snap to content — reads
         // as a black-then-content flash.
-        if !self.first_frame_ready {
+        let Some(wi) = self.window_index(ctx.window_id()) else { return };
+        if !self.windows[wi].first_frame_ready {
             return;
         }
         // Gate the present on whether a fresh frame is actually
@@ -2531,12 +2611,12 @@ impl MarspotApp for ShellApp {
             .last_present_at
             .map(|t| now.duration_since(t) > Duration::from_secs(5))
             .unwrap_or(true);
-        if !self.frame_pending && !stale {
+        if !self.windows[wi].frame_pending && !stale {
             return;
         }
-        if let Some(p) = self.presenter.as_mut() {
+        if let Some(p) = self.windows[wi].presenter.as_mut() {
             p.present();
-            self.frame_pending = false;
+            self.windows[wi].frame_pending = false;
             self.last_present_at = Some(now);
         }
     }
