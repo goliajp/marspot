@@ -903,15 +903,16 @@ impl ShellApp {
     /// Open another native window (Cmd-N).
     ///
     /// RFC-005 semantics: a fresh window starts as a 1×1 grid with one
-    /// new pane and becomes key.  L1 allocates the id, creates the
-    /// window's own IOSurface pair and presenter, then announces it to
-    /// the core with `SurfaceAttachWindow` — a frame naming a window
-    /// the core has not seen IS that window's birth event, so no
-    /// separate create message exists.
+    /// new pane and becomes key.  L1 allocates the id — it is what
+    /// every input frame carries and what the core keys a
+    /// `WindowState` off.
+    ///
+    /// Only *asks* here.  The window is created after this dispatch
+    /// returns (AppKit calls made while the app-state borrow is live
+    /// panic on re-entry), and `window_opened` finishes the job.
     fn open_new_window(&mut self) {
         let window_id = self.next_window_id;
         self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
-
         let attrs = WindowAttrs {
             title: DEFAULT_TITLE.to_string(),
             width_logical: DEFAULT_W_PT,
@@ -920,47 +921,7 @@ impl ShellApp {
             frame_pt: None,
             bg: marspot::font_cache::BG,
         };
-        if marspot::app::open_window(window_id, &attrs).is_none() {
-            lx_warn!(
-                "shell.window.open_failed",
-                "app state not ready — cannot open a window yet"
-            );
-            return;
-        }
-
-        // Size the pair from the window we just made, not from the one
-        // that happened to be key: a window opened on a different
-        // display can have a different backing scale.
-        let (w_px, h_px, scale) = match marspot::app::window_metrics(window_id) {
-            Some(m) => m,
-            None => {
-                lx_warn!(
-                    "shell.window.no_metrics",
-                    "window vanished before its surfaces were made",
-                    window_id = window_id
-                );
-                return;
-            }
-        };
-        let pair = match SurfacePair::create(w_px.max(64.0) as usize, h_px.max(64.0) as usize) {
-            Ok(p) => p,
-            Err(e) => {
-                lx_error!("shell.window.pair_create_failed", &format!("{e}"));
-                marspot::app::close_window(window_id);
-                return;
-            }
-        };
-        let (f, b) = pair.ids();
-        let mut win = ShellWindow::new(window_id);
-        win.pending_surfaces = Some(pair);
-        self.windows.push(win);
-        self.send_surface_attach(window_id, f, b, w_px, h_px, scale);
-        lx_event!(
-            "WINDOW_OPENED",
-            "new window announced to core",
-            window_id = window_id,
-            windows = self.windows.len()
-        );
+        marspot::app::open_window(window_id, &attrs);
     }
 
     /// Index of the window carrying `window_id`.
@@ -2552,6 +2513,41 @@ impl MarspotApp for ShellApp {
         self.send(MsgType::Preedit, encode_preedit(text, w));
     }
 
+    fn window_opened(&mut self, ctx: &MarspotAppCtx) {
+        // The window exists now, so its own metrics are readable — a
+        // window opened on another display can have a different
+        // backing scale, and sizing its pair off the key window would
+        // hand it a mismatched surface.
+        let window_id = ctx.window_id();
+        let (w_phys, h_phys) = ctx.inner_size_phys();
+        let scale = ctx.scale();
+        let pair = match SurfacePair::create(
+            w_phys.max(64.0) as usize,
+            h_phys.max(64.0) as usize,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                lx_error!("shell.window.pair_create_failed", &format!("{e}"));
+                marspot::app::close_window(window_id);
+                return;
+            }
+        };
+        let (f, b) = pair.ids();
+        let mut win = ShellWindow::new(window_id);
+        win.pending_surfaces = Some(pair);
+        self.windows.push(win);
+        // A `SurfaceAttachWindow` naming a window the core has not seen
+        // IS that window's birth event — there is no separate create
+        // frame.
+        self.send_surface_attach(window_id, f, b, w_phys, h_phys, scale);
+        lx_event!(
+            "WINDOW_OPENED",
+            "new window announced to core",
+            window_id = window_id,
+            windows = self.windows.len()
+        );
+    }
+
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
         // RFC-005 — closing one of several windows closes THAT window
         // and the panes it holds; only the last window closing is a
@@ -2577,12 +2573,14 @@ impl MarspotApp for ShellApp {
                     p.release();
                 }
             }
-            let remaining = marspot::app::close_window(window_id);
+            // Queued: the NSWindow is torn down after this dispatch,
+            // for the same re-entrancy reason opening one is.
+            marspot::app::close_window(window_id);
             lx_event!(
                 "WINDOW_CLOSED",
                 "closed one window; app keeps running",
                 window_id = window_id,
-                remaining = remaining
+                shell_windows = self.windows.len()
             );
             return;
         }

@@ -131,6 +131,11 @@ pub trait MarspotApp: 'static {
 
     fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool);
 
+    /// A window this app asked for has been created.  `ctx` is that
+    /// window's own context — which is what makes it the right place
+    /// to size its IOSurface pair.  Default: nothing to do.
+    fn window_opened(&mut self, _ctx: &MarspotAppCtx) {}
+
     fn close_requested(&mut self, ctx: &MarspotAppCtx);
 
     /// IME preedit ("marked text") changed.  Empty string means the
@@ -1012,6 +1017,11 @@ pub enum EventKind {
     Moved,
     Focused(bool),
     CloseRequested,
+    /// RFC-005 — a window the app asked for now exists.  Delivered with
+    /// that window's own ctx, which is what makes it safe to size its
+    /// IOSurface pair here: a window on another display can have a
+    /// different backing scale from the key one.
+    WindowOpened,
     /// Dev panel NSWindow was resized / moved / changed visibility.
     /// Signals that the next redraw needs to recompute dev panel
     /// dimensions and re-paint into the new layer size.
@@ -1041,10 +1051,32 @@ impl AppState {
     }
 }
 
+/// A window lifecycle request raised from inside the `APP_STATE`
+/// borrow, to be applied once that borrow is gone.
+enum WindowOp {
+    Open(u32, WindowAttrs),
+    Close(u32),
+}
+
 thread_local! {
     /// Owns the user's `MarspotApp` and the per-window context.
     /// Populated by `run_app`; accessed from every event handler.
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
+
+    /// Window opens / closes queued from inside a dispatch.
+    ///
+    /// Every event handler runs while `APP_STATE` is mutably borrowed,
+    /// so touching it again from a handler is an instant
+    /// "RefCell already borrowed" panic — and `makeKeyAndOrderFront:` /
+    /// `close` make it worse by synchronously firing delegate
+    /// notifications straight back into `dispatch_event_for`.  Same
+    /// hazard, same remedy as the dev window's deferred actions.
+    static PENDING_WINDOW_OPS: RefCell<Vec<WindowOp>> =
+        const { RefCell::new(Vec::new()) };
+
+    /// How many windows are open, readable without borrowing
+    /// `APP_STATE` — handlers need this while that borrow is live.
+    static WINDOW_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Dispatch an event that is about the app rather than a particular
@@ -1083,6 +1115,7 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             EventKind::Moved => app.moved(ctx),
             EventKind::Focused(f) => app.focused(ctx, f),
             EventKind::CloseRequested => app.close_requested(ctx),
+            EventKind::WindowOpened => app.window_opened(ctx),
             EventKind::DevWindowChanged => {
                 // The dev window's NSWindowDelegate noticed a resize
                 // / move / etc.  Hand the event to the App impl so
@@ -1118,6 +1151,7 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
     // notifications back through `dispatch_event` without
     // tripping a re-entrant `borrow_mut`.
     crate::dev_window::drain_pending_actions();
+    drain_pending_windows();
 }
 
 fn post_dummy_event(nsapp: &NSApplication) {
@@ -1300,99 +1334,108 @@ fn build_window(
     (window, view, delegate)
 }
 
-/// Open an additional native window and return its id.
+/// Open an additional native window.
 ///
-/// RFC-005 — windows after the boot one.  The caller (L1) allocates
-/// the id, because the id is what every input frame and every
-/// `SurfaceAttachWindow` carries; AppKit is told about it here so the
-/// view and delegate can tag their events with it from the first
-/// callback.
-///
-/// `None` if the app state is not up yet — nothing can be opened
-/// before `run_app` has installed it.
-pub fn open_window(window_id: u32, attrs: &WindowAttrs) -> Option<()> {
-    let mtm = MainThreadMarker::new()?;
-    let nsapp = NSApplication::sharedApplication(mtm);
-    let (window, view, delegate) = build_window(mtm, window_id, attrs);
-
-    if let Some((x, y, w, h)) = attrs.frame_pt {
-        let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
-        window.setFrame_display(rect, false);
-    } else {
-        // No saved frame: stagger off the key window so a new window
-        // does not land exactly on top of the one it was opened from.
-        window.center();
-    }
-    window.makeKeyAndOrderFront(None);
-
-    let ctx = MarspotAppCtx {
-        window_id,
-        inner: view,
-        nswindow: window,
-        nsapp,
-        _delegate: delegate,
-        redraw_pending: Cell::new(false),
-        exit_requested: Cell::new(false),
-    };
-    APP_STATE.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let state = slot.as_mut()?;
-        state.windows.push(ctx);
-        Some(())
-    })
+/// Queued, not immediate: callers are event handlers, and an event
+/// handler runs inside the `APP_STATE` borrow.  The window appears
+/// when `drain_pending_windows` runs at the end of the dispatch, and
+/// the app is told through `MarspotApp::window_opened` — which is
+/// where it can size surfaces against the real window.
+pub fn open_window(window_id: u32, attrs: &WindowAttrs) {
+    PENDING_WINDOW_OPS
+        .with(|q| q.borrow_mut().push(WindowOp::Open(window_id, attrs.clone())));
 }
 
-/// Physical size + backing scale of one window.
-///
-/// Needed before its IOSurface pair can be made, and it must come from
-/// THAT window: one opened on a different display can have a different
-/// backing scale, and sizing its pair off the key window would give it
-/// a mismatched surface.
-pub fn window_metrics(window_id: u32) -> Option<(f64, f64, f64)> {
-    APP_STATE.with(|cell| {
-        let slot = cell.borrow();
-        let state = slot.as_ref()?;
-        let i = state.window_index(window_id)?;
-        let ctx = &state.windows[i];
-        let (w, h) = ctx.inner_size_phys();
-        Some((w, h, ctx.scale()))
-    })
+/// Tear down the window carrying `window_id`.  Queued, for the same
+/// reason as `open_window`.
+pub fn close_window(window_id: u32) {
+    PENDING_WINDOW_OPS.with(|q| q.borrow_mut().push(WindowOp::Close(window_id)));
 }
 
-/// Tear down the window carrying `window_id`.
+/// Apply queued window opens / closes.
 ///
-/// Ordering matters: the context is removed from the state FIRST, so
-/// any AppKit callback the close itself fires (`windowWillClose:` and
-/// friends) resolves to no window and is dropped, instead of
-/// re-entering a half-torn-down entry.  Same re-entrancy hazard the
-/// dev window's deferred-action queue exists for.
-///
-/// Returns the number of windows still open.
-pub fn close_window(window_id: u32) -> usize {
-    let (closing, remaining) = APP_STATE.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let Some(state) = slot.as_mut() else { return (None, 0) };
-        match state.window_index(window_id) {
-            Some(i) => {
-                let ctx = state.windows.remove(i);
-                (Some(ctx), state.windows.len())
+/// Runs after the `APP_STATE` borrow is released, so the AppKit calls
+/// here are free to fire delegate notifications back through
+/// `dispatch_event_for`.
+fn drain_pending_windows() {
+    loop {
+        let op = PENDING_WINDOW_OPS.with(|q| {
+            let mut q = q.borrow_mut();
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
             }
-            None => (None, state.windows.len()),
+        });
+        let Some(op) = op else { break };
+        match op {
+            WindowOp::Open(window_id, attrs) => {
+                let Some(mtm) = MainThreadMarker::new() else { continue };
+                let nsapp = NSApplication::sharedApplication(mtm);
+                let (window, view, delegate) = build_window(mtm, window_id, &attrs);
+                if let Some((x, y, w, h)) = attrs.frame_pt {
+                    let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+                    window.setFrame_display(rect, false);
+                } else {
+                    // Centre rather than land exactly on top of the
+                    // window this was opened from.
+                    window.center();
+                }
+                window.makeKeyAndOrderFront(None);
+                let ctx = MarspotAppCtx {
+                    window_id,
+                    inner: view,
+                    nswindow: window,
+                    nsapp,
+                    _delegate: delegate,
+                    redraw_pending: Cell::new(false),
+                    exit_requested: Cell::new(false),
+                };
+                let added = APP_STATE.with(|cell| {
+                    let mut slot = cell.borrow_mut();
+                    match slot.as_mut() {
+                        Some(state) => {
+                            state.windows.push(ctx);
+                            WINDOW_COUNT.with(|c| c.set(state.windows.len()));
+                            true
+                        }
+                        None => false,
+                    }
+                });
+                if added {
+                    // Tell the app its window exists.  It needs a real
+                    // window to size surfaces against, and the ctx it
+                    // gets here is that window's own — not the key
+                    // one, whose backing scale may differ.
+                    dispatch_event_for(window_id, EventKind::WindowOpened);
+                }
+            }
+            WindowOp::Close(window_id) => {
+                let closing = APP_STATE.with(|cell| {
+                    let mut slot = cell.borrow_mut();
+                    let state = slot.as_mut()?;
+                    let i = state.window_index(window_id)?;
+                    let ctx = state.windows.remove(i);
+                    WINDOW_COUNT.with(|c| c.set(state.windows.len()));
+                    Some(ctx)
+                });
+                if let Some(ctx) = closing {
+                    // Delegate off first: `close` fires notifications,
+                    // and this window's state is already gone.
+                    ctx.nswindow.setDelegate(None);
+                    ctx.nswindow.close();
+                }
+            }
         }
-    });
-    if let Some(ctx) = closing {
-        // Drop the AppKit reference outside the state borrow.
-        ctx.nswindow.setDelegate(None);
-        ctx.nswindow.close();
     }
-    remaining
 }
 
 /// How many windows are open.
+///
+/// Reads a mirror rather than `APP_STATE`, so it is safe to call from
+/// an event handler (which runs inside that borrow).
 pub fn window_count() -> usize {
-    APP_STATE.with(|cell| {
-        cell.borrow().as_ref().map(|s| s.windows.len()).unwrap_or(0)
-    })
+    WINDOW_COUNT.with(|c| c.get())
 }
 
 /// Block on the AppKit run loop, dispatching events into `app`.
@@ -1590,3 +1633,42 @@ fn nsevent_to_mars_key(event: &NSEvent, state: KeyState) -> Option<MarspotKeyEve
     })
 }
 
+
+#[cfg(test)]
+mod window_op_tests {
+    use super::*;
+
+    fn attrs() -> WindowAttrs {
+        WindowAttrs {
+            title: "t".into(),
+            width_logical: 100.0,
+            height_logical: 100.0,
+            bg: (0.0, 0.0, 0.0),
+            frame_pt: None,
+        }
+    }
+
+    /// Every event handler runs inside the `APP_STATE` borrow, so a
+    /// window API that touches `APP_STATE` panics the instant a handler
+    /// calls it — which is exactly what Cmd-N did the first time it
+    /// shipped: `RefCell already borrowed`, app gone, sessions orphaned.
+    ///
+    /// The remedy is that these three queue or read a mirror instead.
+    /// This holds the borrow the way a dispatch does and requires them
+    /// to stay quiet.
+    #[test]
+    fn window_api_is_callable_from_inside_a_dispatch() {
+        APP_STATE.with(|cell| {
+            let _dispatch_borrow = cell.borrow_mut();
+
+            open_window(7, &attrs());
+            close_window(7);
+            let _ = window_count();
+        });
+
+        // Both ops must have been queued rather than applied.
+        let queued = PENDING_WINDOW_OPS.with(|q| q.borrow().len());
+        assert_eq!(queued, 2, "window ops must be deferred, not applied");
+        PENDING_WINDOW_OPS.with(|q| q.borrow_mut().clear());
+    }
+}
