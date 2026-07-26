@@ -679,18 +679,24 @@ mod window_state_tests {
     /// long its window has been out of focus.
     #[test]
     fn the_app_exits_only_when_every_window_is_dead() {
-        // Vacant = born exited; pending = a spawn in flight, i.e. alive.
+        // Vacant = born exited; pending = a spawn in flight, i.e.
+        // alive — but only for `PENDING_MAX` (30 s), so the pane is
+        // built *after* the renderer (whose construction can take
+        // minutes on a loaded machine) and pumped immediately.
         let dead = || Pane::new_vacant(1, 80, 24);
         let alive = || Pane::new_pending(2, 80, 24);
 
-        let mut app = app_with(vec![win(1, vec![dead()]), win(2, vec![alive()])]);
+        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        app.windows[0].panes.push(dead());
+        app.windows[1].panes.push(alive());
         app.pump_all();
         assert!(
             !app.all_exited,
             "a live pane in a non-key window must keep marspot alive"
         );
 
-        let mut app = app_with(vec![win(1, vec![dead()]), win(2, vec![dead()])]);
+        app.windows[1].panes[0] = dead();
+        app.all_exited = false;
         app.pump_all();
         assert!(app.all_exited, "every pane of every window has exited");
     }
@@ -709,7 +715,7 @@ mod window_state_tests {
 #[cfg(test)]
 mod boot_assembly_tests {
     use super::*;
-    use marspot::state::{SavedPane, SavedState};
+    use marspot::state::{SavedPane, SavedWindowLayout};
     use marspot_term::session_registry::{
         self as reg, write_session_entry, SessionEntry,
     };
@@ -797,8 +803,8 @@ mod boot_assembly_tests {
         }
     }
 
-    fn saved(panes: &[(u64, &str)]) -> SavedState {
-        SavedState {
+    fn saved(panes: &[(u64, &str)]) -> SavedWindowLayout {
+        SavedWindowLayout {
             grid_cols: 3,
             grid_rows: 3,
             focused_idx: 0,
@@ -810,7 +816,6 @@ mod boot_assembly_tests {
                     last_cwd: String::new(),
                 })
                 .collect(),
-            window: None,
         }
     }
 
@@ -2309,20 +2314,34 @@ impl CoreApp {
     /// state on disk.  ~50 us per call (memcpy + atomic rename); no
     /// debounce because we never call this on the render hot path.
     fn save_session_state(&self) {
-        use marspot::state::{SavedPane, SavedState};
-        let panes: Vec<SavedPane> = win!(self).panes.iter().map(|p| {
-            let sid = p.shelld_session_id().unwrap_or(0);
-            let custom_title = p.custom_title.clone().unwrap_or_default();
-            let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
-            SavedPane { sid, custom_title, last_cwd }
-        }).collect();
+        use marspot::state::{SavedPane, SavedState, SavedWindowLayout};
+        // RFC-005 step 6 — every window, in creation order.  Saving
+        // only the key window is what made opening a second window
+        // destructive: the new window became key the instant it
+        // appeared, and the next save replaced a 16-pane record with
+        // its single pane.
+        let windows: Vec<SavedWindowLayout> = self
+            .windows
+            .iter()
+            .map(|w| SavedWindowLayout {
+                grid_cols: w.grid_cols as u16,
+                grid_rows: w.grid_rows as u16,
+                focused_idx: w.focused_idx as u16,
+                panes: w
+                    .panes
+                    .iter()
+                    .map(|p| {
+                        let sid = p.shelld_session_id().unwrap_or(0);
+                        let custom_title = p.custom_title.clone().unwrap_or_default();
+                        let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
+                        SavedPane { sid, custom_title, last_cwd }
+                    })
+                    .collect(),
+            })
+            .collect();
         let saved = SavedState {
-            grid_cols: win!(self).grid_cols as u16,
-            grid_rows: win!(self).grid_rows as u16,
-            focused_idx: win!(self).focused_idx as u16,
-            panes,
-            // F3+6.1 reserved — L1 writes window frame on its side.
-            window: None,
+            windows,
+            key_window: self.key_window as u16,
         };
         if let Err(e) = marspot::state::write(&saved) {
             lx_warn!(
@@ -5454,7 +5473,7 @@ impl CoreApp {
 /// Returns the assembled panes (one per slot + adopted orphans)
 /// and the reattached session ids (execv fanout drives off them).
 fn assemble_panes_at_boot(
-    saved_state: Option<&marspot::state::SavedState>,
+    saved_state: Option<&marspot::state::SavedWindowLayout>,
     n_sessions: usize,
     boot_cols: u16,
     boot_rows: u16,
@@ -5867,15 +5886,21 @@ fn main() {
     // F3+6 — read persisted shell-state.bin first; defaults to 3×3
     // when none / corrupt.  `saved_state` then drives reattach order,
     // fresh-spawn cwds, focused_idx and per-pane titles below.
+    // RFC-005 step 6 — the file holds every window.  The boot window
+    // takes windows[0]; the rest are restored as L1 opens them (each
+    // `SurfaceAttachWindow` for an unseen id pops the next record).
     let saved_state = marspot::state::read();
-    let (grid_cols, grid_rows): (usize, usize) = match saved_state.as_ref() {
+    let mut saved_windows: std::collections::VecDeque<marspot::state::SavedWindowLayout> =
+        saved_state.map(|s| s.windows.into()).unwrap_or_default();
+    let boot_window = saved_windows.pop_front();
+    let (grid_cols, grid_rows): (usize, usize) = match boot_window.as_ref() {
         Some(s) if s.grid_cols > 0 && s.grid_rows > 0 => (
             (s.grid_cols as usize).clamp(1, 6),
             (s.grid_rows as usize).clamp(1, 6),
         ),
         _ => (3, 3),
     };
-    let n_sessions = match saved_state.as_ref() {
+    let n_sessions = match boot_window.as_ref() {
         Some(s) => s.panes.len().clamp(1, SESSION_COUNT_HARD_CAP),
         None => grid_cols * grid_rows,
     };
@@ -5928,7 +5953,7 @@ fn main() {
         // RFC-004 B.1 — identity-keyed slot assembly (extracted to
         // `assemble_panes_at_boot`; see its doc for the semantics).
         let (assembled, reattached_ids) = assemble_panes_at_boot(
-            saved_state.as_ref(),
+            boot_window.as_ref(),
             n_sessions,
             boot_cols,
             boot_rows,
@@ -5973,7 +5998,7 @@ fn main() {
         return;
     }
 
-    let initial_focused_idx = saved_state.as_ref()
+    let initial_focused_idx = boot_window.as_ref()
         .map(|s| (s.focused_idx as usize).min(panes.len().saturating_sub(1)))
         .unwrap_or(0);
     let mut app = CoreApp {

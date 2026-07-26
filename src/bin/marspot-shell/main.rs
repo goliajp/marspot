@@ -2205,10 +2205,29 @@ impl ShellApp {
             return;
         }
         self.windows[wi].last_saved_window = Some(cur);
-        let saved = marspot::state::SavedWindow {
-            display_id, x, y, w, h,
-        };
-        if let Err(e) = marspot::state::write_window(&saved) {
+        self.save_window_frames();
+    }
+
+    /// RFC-005 step 6 — write every window's frame, in creation order.
+    ///
+    /// The file used to hold exactly one frame, so whichever window
+    /// moved last owned it and the others' geometry was simply lost.
+    /// Each window's cached frame is kept current by its own resize /
+    /// move callbacks; this writes the whole list so that entry *i*
+    /// keeps pairing with window *i* of `shell-state.bin`.
+    fn save_window_frames(&self) {
+        let frames: Vec<marspot::state::SavedWindow> = self
+            .windows
+            .iter()
+            .filter_map(|w| w.last_saved_window)
+            .map(|(x, y, w, h, display_id)| marspot::state::SavedWindow {
+                display_id, x, y, w, h,
+            })
+            .collect();
+        if frames.is_empty() {
+            return;
+        }
+        if let Err(e) = marspot::state::write_windows(&frames) {
             marspot::lx_warn!(
                 "shell.window_state.write_failed",
                 &format!("{e}")
@@ -2556,7 +2575,20 @@ impl MarspotApp for ShellApp {
         let (f, b) = pair.ids();
         let mut win = ShellWindow::new(window_id);
         win.pending_surfaces = Some(pair);
+        // Seed the geometry cache from the window as it actually
+        // opened.  `window-state.bin` is a list written whole on every
+        // change, so a window with no cached frame would leave a hole
+        // in it and shift every later window's entry.
+        let (fx, fy, fw, fh) = ctx.window_frame_pt();
+        win.last_saved_window = Some((
+            fx.round(),
+            fy.round(),
+            fw.round(),
+            fh.round(),
+            ctx.window_display_id().unwrap_or(0),
+        ));
         self.windows.push(win);
+        self.save_window_frames();
         // A `SurfaceAttachWindow` naming a window the core has not seen
         // IS that window's birth event — there is no separate create
         // frame.
@@ -3019,7 +3051,9 @@ Usage:\n\
     // didn't carry a frame.  Sane bounds: w/h > 50 pt guards against a
     // corrupt file shrinking the window to a sliver.
     let restore_frame = restore_frame.or_else(|| {
-        let w = marspot::state::read_window()?;
+        // The boot window is entry 0 of the list; the rest are applied
+        // as their windows are reopened.
+        let w = marspot::state::read_windows()?.into_iter().next()?;
         if w.w > 50.0 && w.h > 50.0 { Some((w.x, w.y, w.w, w.h)) } else { None }
     });
     let attrs = WindowAttrs {
