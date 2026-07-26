@@ -589,6 +589,112 @@ mod window_state_tests {
         assert!(a.render.take_clear_required());
     }
 
+    /// A `CoreApp` with `windows` and nothing else going on.  Real
+    /// `MetalRenderer` because the paths under test (`rebuild_layout`,
+    /// texture creation) go through it.
+    fn app_with(windows: Vec<WindowState>) -> CoreApp {
+        let (event_tx, _rx) = mpsc::channel();
+        CoreApp {
+            renderer: MetalRenderer::new_headless().expect("headless renderer"),
+            pane_badges: std::collections::HashMap::new(),
+            pane_titles: std::collections::HashMap::new(),
+            pane_cwds: std::collections::HashMap::new(),
+            pending_to_shell: Vec::new(),
+            pane_sessions: std::collections::HashMap::new(),
+            esc_history: std::collections::VecDeque::new(),
+            last_cwd_refresh: std::collections::HashMap::new(),
+            cc_usage_modal: None,
+            reconnecting: std::collections::HashSet::new(),
+            cwd_unresolvable: std::collections::HashMap::new(),
+            all_exited: false,
+            saw_window_aware_attach: false,
+            l3_mode: false,
+            event_tx,
+            windows,
+            key_window: 0,
+        }
+    }
+
+    /// RFC-005 step 4d — the peer invariant on the paint side.  Every
+    /// window owns its own IOSurface pair and its own buffer flip; an
+    /// attach for one window must leave the others' targets exactly
+    /// where they were.
+    ///
+    /// The regression this pins is not hypothetical: the pair used to
+    /// be three locals in `main()`, so the second window's attach
+    /// silently repointed the first window at a surface nobody painted
+    /// into, and that window froze on its last frame.
+    #[test]
+    fn each_window_owns_its_paint_target() {
+        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+        let mk = || {
+            let f = IOSurface::create(64, 64).expect("front");
+            let b = IOSurface::create(64, 64).expect("back");
+            (f.id(), b.id(), f, b)
+        };
+        // Hold the originals alive for the duration of the test — the
+        // ids must stay valid for `lookup`.
+        let (a_f, a_b, _ka_f, _ka_b) = mk();
+        let (b_f, b_b, _kb_f, _kb_b) = mk();
+        let (c_f, c_b, _kc_f, _kc_b) = mk();
+
+        assert_eq!(
+            app.attach_window_surfaces(1, a_f, a_b, 800.0, 600.0, 2.0),
+            Some(0)
+        );
+        assert_eq!(
+            app.attach_window_surfaces(2, b_f, b_b, 400.0, 300.0, 2.0),
+            Some(1)
+        );
+        let pair_of = |app: &CoreApp, wi: usize| {
+            let s = app.windows[wi].surfaces.as_ref().expect("attached");
+            (s.pair[0].id(), s.pair[1].id(), s.writing_idx)
+        };
+        assert_eq!(pair_of(&app, 0), (a_f, a_b, 0));
+        assert_eq!(pair_of(&app, 1), (b_f, b_b, 0));
+
+        // Window 2 resizes: fresh pair, and window 1 must not notice.
+        assert_eq!(
+            app.attach_window_surfaces(2, c_f, c_b, 500.0, 500.0, 2.0),
+            Some(1)
+        );
+        assert_eq!(pair_of(&app, 0), (a_f, a_b, 0), "peer's pair moved");
+        assert_eq!(pair_of(&app, 1), (c_f, c_b, 0));
+        assert_eq!(app.windows[0].w_phys, 800.0, "peer's dims moved");
+        assert_eq!(app.windows[1].w_phys, 500.0);
+
+        // …and neither does its buffer flip.
+        app.windows[1].surfaces.as_mut().unwrap().flip();
+        assert_eq!(pair_of(&app, 0).2, 0, "peer's writing half flipped");
+        assert_eq!(pair_of(&app, 1).2, 1);
+
+        // An attach naming a window the core doesn't have is a normal
+        // race (the window closed first), not a reason to touch anyone.
+        assert_eq!(app.attach_window_surfaces(99, a_f, a_b, 10.0, 10.0, 1.0), None);
+        assert_eq!(pair_of(&app, 0), (a_f, a_b, 0));
+    }
+
+    /// marspot quits when every shell is gone — "every", across all
+    /// windows.  A live pane in any window keeps the app up, however
+    /// long its window has been out of focus.
+    #[test]
+    fn the_app_exits_only_when_every_window_is_dead() {
+        // Vacant = born exited; pending = a spawn in flight, i.e. alive.
+        let dead = || Pane::new_vacant(1, 80, 24);
+        let alive = || Pane::new_pending(2, 80, 24);
+
+        let mut app = app_with(vec![win(1, vec![dead()]), win(2, vec![alive()])]);
+        app.pump_all();
+        assert!(
+            !app.all_exited,
+            "a live pane in a non-key window must keep marspot alive"
+        );
+
+        let mut app = app_with(vec![win(1, vec![dead()]), win(2, vec![dead()])]);
+        app.pump_all();
+        assert!(app.all_exited, "every pane of every window has exited");
+    }
+
     /// The modal's slot map is sized from the window's own grid, so a
     /// window created with a non-default shape starts consistent.
     #[test]
@@ -1625,10 +1731,96 @@ impl PaneSessionState {
 /// What is NOT here (stays on `CoreApp`): anything keyed by session
 /// id, which travels with a pane across windows for free, and the
 /// renderer's shared resources.
+/// Where one window's frames land: the IOSurface pair L1 handed us
+/// for it, the Metal textures wrapping them, and which half the next
+/// frame writes into.
+///
+/// RFC-005 step 4d — this used to be three locals in `main()`, which
+/// is how "there is exactly one window" was encoded on the L2 side:
+/// a second window's `SurfaceAttach` overwrote the first window's
+/// pair, and from then on the first window's presenter sampled a
+/// surface nobody was painting into.  Windows are peers; each owns
+/// its own paint target.
+struct WindowSurfaces {
+    pair: [IOSurface; 2],
+    tex: [objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>; 2],
+    /// The half the next render writes; flipped after each frame so
+    /// the shell only ever presents a surface the GPU has finished.
+    writing_idx: usize,
+}
+
+impl WindowSurfaces {
+    /// Look both ids up, retain them, and wrap them in textures.
+    /// `None` when either lookup or texture creation fails — the
+    /// caller keeps whatever pair the window already had, which is
+    /// the difference between a dropped frame and a black window.
+    fn attach(
+        front_id: u32,
+        back_id: u32,
+        device: &ProtocolObject<dyn objc2_metal::MTLDevice>,
+    ) -> Option<Self> {
+        let front = IOSurface::lookup(front_id)?;
+        let Some(back) = IOSurface::lookup(back_id) else {
+            return None;
+        };
+        front.increment_use();
+        back.increment_use();
+        let tex_f = front.make_metal_texture(device);
+        let tex_b = back.make_metal_texture(device);
+        match (tex_f, tex_b) {
+            (Ok(tf), Ok(tb)) => Some(Self {
+                pair: [front, back],
+                tex: [tf, tb],
+                writing_idx: 0,
+            }),
+            (tf, tb) => {
+                if let Err(e) = tf {
+                    lx_error!("core.attach.metal_texture_front_failed", &format!("{e:?}"));
+                }
+                if let Err(e) = tb {
+                    lx_error!("core.attach.metal_texture_back_failed", &format!("{e:?}"));
+                }
+                front.decrement_use();
+                back.decrement_use();
+                None
+            }
+        }
+    }
+
+    /// Balance the two `increment_use` calls `attach` made.  Called
+    /// when the pair is replaced by a fresh one and when the window
+    /// itself goes away.
+    fn release(&self) {
+        self.pair[0].decrement_use();
+        self.pair[1].decrement_use();
+    }
+
+    fn writing_tex(&self) -> objc2::rc::Retained<ProtocolObject<dyn MTLTexture>> {
+        self.tex[self.writing_idx].clone()
+    }
+
+    fn writing_surface_id(&self) -> u32 {
+        self.pair[self.writing_idx].id()
+    }
+
+    fn flip(&mut self) {
+        self.writing_idx = 1 - self.writing_idx;
+    }
+}
+
 struct WindowState {
     /// L1-allocated, monotonic.  Stable across a core swap because
     /// L1 replays one `SurfaceAttach` per window into the new core.
     window_id: u32,
+    /// This window's paint target.  `None` between the window's birth
+    /// and its first successful attach (a stale id from a mid-spawn
+    /// surface rotation), during which the window simply isn't
+    /// rendered — the other windows keep painting.
+    surfaces: Option<WindowSurfaces>,
+    /// Per-window frame-interval cap.  Global would let a busy window
+    /// gate a quiet one's repaint, which is exactly the coupling the
+    /// peer model forbids.
+    last_render_at: Option<Instant>,
     /// The renderer state that cannot be shared with the other
     /// windows — this window's per-pane instance caches and its own
     /// "still owes a clear" flag.  Everything else the renderer holds
@@ -1717,6 +1909,8 @@ impl WindowState {
     ) -> Self {
         Self {
             window_id,
+            surfaces: None,
+            last_render_at: None,
             render: marspot::render_metal::WindowRender::new(),
             layout: Layout::build(
                 w_phys,
@@ -1793,11 +1987,19 @@ impl WindowState {
 /// of the render path unwritable.
 ///
 /// Every use marks a site that means "the window the user is acting
-/// on".  RFC-005 step 2 threads an explicit window index into the
-/// event handlers, at which point these become `self.windows[wi]`.
+/// on".  RFC-005 step 4d threads an explicit window index into the
+/// event handlers, at which point these become `win!(self, wi)`.
+///
+/// The two-argument form is the peer form: it names the window being
+/// worked on outright, with no appeal to which window happens to hold
+/// keyboard focus.  Anything that runs on behalf of *all* windows (the
+/// pump, the render pass, persistence) must use it.
 macro_rules! win {
     ($s:expr) => {
         $s.windows[$s.key_window]
+    };
+    ($s:expr, $i:expr) => {
+        $s.windows[$i]
     };
 }
 
@@ -1978,44 +2180,44 @@ impl CoreApp {
         }
     }
 
-    fn rebuild_layout(&mut self) {
+    fn rebuild_layout(&mut self, wi: usize) {
         let (cell_w, cell_h) = self.renderer.cell_dims();
-        let sidebar_phys = if win!(self).sidebar_collapsed {
+        let sidebar_phys = if win!(self, wi).sidebar_collapsed {
             0.0
         } else {
-            SIDEBAR_W_LOGICAL * win!(self).scale
+            SIDEBAR_W_LOGICAL * win!(self, wi).scale
         };
-        let (lc, lr) = (win!(self).grid_cols, win!(self).grid_rows);
+        let (lc, lr) = (win!(self, wi).grid_cols, win!(self, wi).grid_rows);
         let layout = Layout::build(
-            win!(self).w_phys,
-            win!(self).h_phys,
+            win!(self, wi).w_phys,
+            win!(self, wi).h_phys,
             sidebar_phys,
-            HEADER_PT * win!(self).scale,
-            CELL_TITLE_PT * win!(self).scale,
+            HEADER_PT * win!(self, wi).scale,
+            CELL_TITLE_PT * win!(self, wi).scale,
             lc,
             lr,
             cell_w,
             cell_h,
         )
         .with_chrome(
-            win!(self).scale,
-            win!(self).panes.len(),
-            marspot::TITLE_STRIP_PT * win!(self).scale,
+            win!(self, wi).scale,
+            win!(self, wi).panes.len(),
+            marspot::TITLE_STRIP_PT * win!(self, wi).scale,
         );
-        for (i, p) in win!(self).panes.iter_mut().enumerate() {
+        for (i, p) in win!(self, wi).panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);
             }
         }
-        win!(self).layout = layout;
-        win!(self).needs_render = true;
+        win!(self, wi).layout = layout;
+        win!(self, wi).needs_render = true;
         // The shape of the BG region just changed (sidebar / layout
         // mode / pane count / window dims).  Force a hard Clear on
         // the next IOSurface render so any newly-uncovered area
         // shows SIDEBAR_BG, not the previous frame's stale pixels.
         // (Steady-state frames use Load to dodge the cross-process
         // race; see `MetalRenderer::clear_bg_required`.)
-        win!(self).render.mark_bg_clear_required();
+        win!(self, wi).render.mark_bg_clear_required();
     }
 
     /// F3+3.3 — reset `card_slots` to identity for the current
@@ -2046,8 +2248,8 @@ impl CoreApp {
     /// Cost: at most two syscalls (one toml read + one
     /// `proc_pidinfo`) when not debounced; zero on debounce hit.
     /// Not on the render hot path.
-    fn refresh_pane_cwd_for(&mut self, pane_idx: usize, force: bool) -> bool {
-        let Some(pane) = win!(self).panes.get(pane_idx) else { return false };
+    fn refresh_pane_cwd_for(&mut self, wi: usize, pane_idx: usize, force: bool) -> bool {
+        let Some(pane) = win!(self, wi).panes.get(pane_idx) else { return false };
         let Some(sid) = pane.shelld_session_id() else { return false };
         let now = Instant::now();
         if force {
@@ -2137,17 +2339,17 @@ impl CoreApp {
     /// O(panes) with HashMap.contains_key on the hot path; the
     /// syscall only fires for the misses, which on a stable session
     /// = zero per frame after the first.
-    fn lazy_fill_missing_cwds(&mut self) {
+    fn lazy_fill_missing_cwds(&mut self, wi: usize) {
         let mut filled = false;
-        for i in 0..win!(self).panes.len() {
-            let Some(sid) = win!(self).panes[i].shelld_session_id() else { continue };
+        for i in 0..win!(self, wi).panes.len() {
+            let Some(sid) = win!(self, wi).panes[i].shelld_session_id() else { continue };
             if self.pane_cwds.contains_key(&sid) { continue; }
             // F3+5.1 — `force=false`: paired with the now-always-bumped
             // debounce clock in `refresh_pane_cwd_for`, this means a
             // pane that hasn't filled yet retries at most every
             // `CWD_REFRESH_DEBOUNCE`, not every frame.  Steady state
             // (all populated) skips entirely via contains_key above.
-            if self.refresh_pane_cwd_for(i, false) && self.pane_cwds.contains_key(&sid) {
+            if self.refresh_pane_cwd_for(wi, i, false) && self.pane_cwds.contains_key(&sid) {
                 filled = true;
             }
         }
@@ -2423,13 +2625,13 @@ impl CoreApp {
                 };
                 if win!(self).panes.len() > 1 && idx < win!(self).panes.len() {
                     self.close_session(idx);
-                    self.rebuild_layout();
+                    self.rebuild_layout(self.key_window);
                 }
             }
             ContextMenuAction::SplitNewPane => {
                 if win!(self).panes.len() < marspot::ui::SESSION_COUNT_HARD_CAP {
                     self.spawn_session();
-                    self.rebuild_layout();
+                    self.rebuild_layout(self.key_window);
                 }
             }
             ContextMenuAction::RenameTitle => {
@@ -2443,7 +2645,7 @@ impl CoreApp {
             }
             ContextMenuAction::ToggleSidebar => {
                 win!(self).sidebar_collapsed = !win!(self).sidebar_collapsed;
-                self.rebuild_layout();
+                self.rebuild_layout(self.key_window);
             }
             ContextMenuAction::OpenLayout => {
                 win!(self).layout_modal_open = true;
@@ -2539,7 +2741,7 @@ impl CoreApp {
                     // returns false, and the build_views lazy-fill
                     // catches it on a later frame.
                     let new_idx = win!(self).panes.len() - 1;
-                    self.refresh_pane_cwd_for(new_idx, true);
+                    self.refresh_pane_cwd_for(self.key_window, new_idx, true);
                     self.save_session_state();
                 }
                 Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
@@ -2724,8 +2926,12 @@ impl CoreApp {
         // A brand-new window has never been painted.
         w.render.mark_bg_clear_required();
         self.windows.push(w);
-        self.key_window = self.windows.len() - 1;
-        self.rebuild_layout();
+        let wi = self.windows.len() - 1;
+        // A freshly-opened window takes keyboard focus — that is a
+        // statement about focus, not about rank: every other window
+        // keeps pumping, painting and persisting exactly as before.
+        self.key_window = wi;
+        self.rebuild_layout(wi);
         lx_event!(
             "WINDOW_ADOPTED",
             "core took on a new window",
@@ -2738,6 +2944,46 @@ impl CoreApp {
     /// Index of the window carrying `window_id`, if the core has it.
     fn window_index(&self, window_id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.window_id == window_id)
+    }
+
+    /// L1 handed one window a freshly-created IOSurface pair (resize,
+    /// core restart, pending-update spawn, or the window's birth).
+    /// Swap that window's paint target, adopt the new dims, and
+    /// re-lay it out.  Every other window is untouched.
+    ///
+    /// Returns the window index when the pair took, `None` when the
+    /// window is gone or the surfaces couldn't be looked up — in the
+    /// latter case the window keeps the pair it had rather than going
+    /// black.
+    fn attach_window_surfaces(
+        &mut self,
+        window_id: u32,
+        front_id: u32,
+        back_id: u32,
+        w_phys: f64,
+        h_phys: f64,
+        scale: f64,
+    ) -> Option<usize> {
+        let wi = self.window_index(window_id)?;
+        let Some(fresh) = WindowSurfaces::attach(front_id, back_id, self.renderer.device())
+        else {
+            lx_warn!(
+                "core.attach.surface_lookup_nil",
+                "IOSurfaceLookup returned nil; keeping the previous pair",
+                window_id = window_id,
+                front_id = front_id,
+                back_id = back_id
+            );
+            return None;
+        };
+        if let Some(old) = win!(self, wi).surfaces.replace(fresh) {
+            old.release();
+        }
+        win!(self, wi).w_phys = w_phys;
+        win!(self, wi).h_phys = h_phys;
+        win!(self, wi).scale = scale;
+        self.rebuild_layout(wi);
+        Some(wi)
     }
 
     /// Make `window_id` the key window.  Returns false (and changes
@@ -2781,7 +3027,12 @@ impl CoreApp {
         for (id, is_l3) in doomed {
             self.retire_pane_session(id, is_l3);
         }
-        self.windows.remove(i);
+        let gone = self.windows.remove(i);
+        // Balance the `increment_use` from this window's last attach;
+        // without it the IOSurface pair leaks for the life of the core.
+        if let Some(s) = gone.surfaces.as_ref() {
+            s.release();
+        }
         self.key_window = self.key_window.min(self.windows.len() - 1);
         win!(self).needs_render = true;
         lx_event!(
@@ -2929,7 +3180,7 @@ impl CoreApp {
     /// (idle = single `is_none` check per pane).
     fn process_search_debounces(&mut self) {
         let now = std::time::Instant::now();
-        for pane in win!(self).panes.iter_mut() {
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             let Some(s) = pane.search.as_mut() else { continue };
             let fire = match s.bar.debounce_until {
                 Some(t) if now >= t => true,
@@ -3337,7 +3588,7 @@ impl CoreApp {
             && matches!(event.logical, LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'b'))
         {
             win!(self).sidebar_collapsed = !win!(self).sidebar_collapsed;
-            self.rebuild_layout();
+            self.rebuild_layout(self.key_window);
             return;
         }
 
@@ -3522,7 +3773,7 @@ impl CoreApp {
             // OR linefeed both count (modes may emit either).
             if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
                 let focused = win!(self).focused_idx;
-                self.refresh_pane_cwd_for(focused, false);
+                self.refresh_pane_cwd_for(self.key_window, focused, false);
             }
         }
     }
@@ -3674,13 +3925,13 @@ impl CoreApp {
 
     /// cc — build the `Cc` usage modal render data.  Re-reads the
     /// feed at most every 5 s while the modal is open.
-    fn build_cc_usage_render(&mut self) -> Option<marspot::render_metal::CcUsageRender> {
+    fn build_cc_usage_render(&mut self, wi: usize) -> Option<marspot::render_metal::CcUsageRender> {
         use marspot::render_metal::{CcUsageAccountRender, CcUsageRender};
         let modal = self.cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
             modal.loaded_at = Instant::now();
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
         }
         let rect = self.cc_usage_modal_rect();
         let modal = self.cc_usage_modal.as_ref()?;
@@ -3739,7 +3990,7 @@ impl CoreApp {
     /// new UI component kit (ModalFrame, TrafficLights, TabStrip,
     /// ScrollView).  Returns render data + populates parallel hit-test
     /// state.  All rects are physical pixels.
-    fn build_process_panel_render(&mut self) -> Option<marspot::render_metal::ProcessPanelRender> {
+    fn build_process_panel_render(&mut self, wi: usize) -> Option<marspot::render_metal::ProcessPanelRender> {
         // F3+4 — char-level truncation with ASCII ellipsis (matches the
         // sidebar's `truncate_for_sidebar` style; kept inline to avoid
         // pulling a "process panel utils" module in for one helper).
@@ -3755,8 +4006,8 @@ impl CoreApp {
         use marspot::ui::components::ScrollView;
         use marspot::ui::system::macos::TrafficLights;
         use marspot::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
-        let scale = win!(self).scale.max(0.1);
-        let hovered_title_bar = win!(self)
+        let scale = win!(self, wi).scale.max(0.1);
+        let hovered_title_bar = win!(self, wi)
             .process_panel
             .as_ref()
             .is_some_and(|p| p.title_bar_hovered);
@@ -3767,7 +4018,7 @@ impl CoreApp {
         let pos_offset;
         let scroll_y_in;
         {
-            let panel = win!(self).process_panel.as_mut()?;
+            let panel = win!(self, wi).process_panel.as_mut()?;
             if !panel.panes.is_empty() {
                 if panel.selected_pane >= panel.panes.len() {
                     panel.selected_pane = panel.panes.len() - 1;
@@ -3784,8 +4035,8 @@ impl CoreApp {
         }
         // F3+4 — modal frame: no tab strip anymore.
         let frame = ModalFrame::layout(
-            win!(self).w_phys as f64,
-            win!(self).h_phys as f64,
+            win!(self, wi).w_phys as f64,
+            win!(self, wi).h_phys as f64,
             ModalLayoutSpec {
                 default_w:   PROCESS_PANEL_WIDTH_LOGICAL  * scale,
                 default_h:   PROCESS_PANEL_HEIGHT_LOGICAL * scale,
@@ -3797,7 +4048,7 @@ impl CoreApp {
                 minimized,
                 with_tab_strip: false,
                 pos_offset,
-                top_obstruction: win!(self).layout.top_inset,
+                top_obstruction: win!(self, wi).layout.top_inset,
             },
         );
         let lights = TrafficLights::layout(
@@ -3818,7 +4069,7 @@ impl CoreApp {
         // (kept stable across resort) still points at the same pane.
         let mut sorted_to_orig: Vec<usize> = Vec::new();
         if !minimized {
-            let panel_ref = win!(self).process_panel.as_ref()?;
+            let panel_ref = win!(self, wi).process_panel.as_ref()?;
             let mut orig: Vec<usize> = (0..panel_ref.panes.len()).collect();
             orig.sort_by(|&a, &b| {
                 panel_ref.panes[b].cpu_pct.total_cmp(&panel_ref.panes[a].cpu_pct)
@@ -3956,7 +4207,7 @@ impl CoreApp {
         let _ = (pid_w, cpu_w, rss_w);
         // Persist hit-test state.
         {
-            let panel = win!(self).process_panel.as_mut()?;
+            let panel = win!(self, wi).process_panel.as_mut()?;
             panel.pane_row_rects = pane_row_rects;
             panel.close_btn_rect = lights.close;
             panel.min_btn_rect   = lights.min;
@@ -4236,7 +4487,7 @@ impl CoreApp {
         // on the chip never falls through to the cell underneath.
         if sidebar_btn_hit {
             win!(self).sidebar_collapsed = !win!(self).sidebar_collapsed;
-            self.rebuild_layout();
+            self.rebuild_layout(self.key_window);
             return;
         }
         // F3+1.5 — Process Monitor modal click priorities (high → low):
@@ -4428,7 +4679,7 @@ impl CoreApp {
                     if cells > 0 && win!(self).focused_idx >= cells {
                         win!(self).focused_idx = cells - 1;
                     }
-                    self.rebuild_layout();
+                    self.rebuild_layout(self.key_window);
                     self.save_session_state();
                     return;
                 }
@@ -4500,7 +4751,7 @@ impl CoreApp {
         if let Some(idx) = close_session_hit {
             if win!(self).panes.len() > 1 && idx < win!(self).panes.len() {
                 self.close_session(idx);
-                self.rebuild_layout();
+                self.rebuild_layout(self.key_window);
             }
             return;
         }
@@ -4509,7 +4760,7 @@ impl CoreApp {
         if add_session_hit {
             if win!(self).panes.len() < SESSION_COUNT_HARD_CAP {
                 self.spawn_session();
-                self.rebuild_layout();
+                self.rebuild_layout(self.key_window);
             }
             return;
         }
@@ -4653,7 +4904,7 @@ impl CoreApp {
                 if win!(self).panes.len() < SESSION_COUNT_HARD_CAP {
                     self.spawn_session();
                     win!(self).focused_idx = win!(self).panes.len() - 1;
-                    self.rebuild_layout();
+                    self.rebuild_layout(self.key_window);
                 }
                 return;
             }
@@ -4665,7 +4916,7 @@ impl CoreApp {
                 // right now"; refresh its cwd so the title strip stays
                 // current.  Debounced per-sid (cheap when same pane is
                 // focused twice in a row).
-                self.refresh_pane_cwd_for(idx, false);
+                self.refresh_pane_cwd_for(self.key_window, idx, false);
                 win!(self).needs_render = true;
             }
         }
@@ -4701,7 +4952,7 @@ impl CoreApp {
         if idx != win!(self).focused_idx {
             self.resolve_pending_on_defocus(idx);
             win!(self).focused_idx = idx;
-            self.refresh_pane_cwd_for(idx, false);
+            self.refresh_pane_cwd_for(self.key_window, idx, false);
         }
         if win!(self).panes[idx].snap_to_live() {
             win!(self).needs_render = true;
@@ -4924,55 +5175,73 @@ impl CoreApp {
                 }
             })
             .collect();
-        let w = &mut win!(self);
-        for (i, p) in w.panes.iter_mut().enumerate() {
-            // FREEZE_GRID: skip the pump entirely so the grid the
-            // renderer sees stays exactly as it was when the plugin
-            // took over.  PTY bytes still queue (shelld + client
-            // channel), they get consumed in one shot when the
-            // session ends and pump runs again.
-            let is_frozen = p
-                .shelld_session_id()
-                .is_some_and(|sid| frozen.contains(&sid));
-            if is_frozen {
-                continue;
-            }
-            let n = p.pump();
-            total += n;
-            let pushed = p.drain_scroll_push_delta();
-            // Auto-pin the viewport when a row scrolled into scrollback
-            // while the user is reading history.  L3 runs the symmetric
-            // bump in its publish loop so view_offset stays consistent
-            // across the L2↔L3 boundary without a round-trip.  Without
-            // this, every line the shell emits while the user is
-            // scrolled back slides the visible content downward by one
-            // row — the "老内容被新内容覆盖" symptom.
-            if pushed > 0 {
-                let pushed_u16 = pushed.min(u16::MAX as u64) as u16;
-                p.bump_view_offset_on_scroll_push(pushed_u16);
-            }
-            // Slide the selection anchor + focus when the PTY pushed
-            // rows into scrollback so the highlight tracks the same
-            // bytes as they roll up.  We do NOT clear the selection
-            // just because the PTY autonomously emitted bytes — a
-            // claudecode pane prints a spinner every few hundred ms
-            // and the old `has_bytes && !dragging → None` rule made
-            // selection disappear before the user could Cmd-C.
-            // Keyboard input + new clicks + focus changes still clear
-            // selection in their own paths; PTY autonomy doesn't.
-            if let Some(sel) = w.selection.as_mut() {
-                if sel.session_idx == i && pushed > 0 {
-                    let bump = pushed as u32;
-                    sel.anchor.1 = sel.anchor.1.saturating_add(bump);
-                    sel.focus.1 = sel.focus.1.saturating_add(bump);
+        // Every window's panes, not just the key window's.  A pane
+        // does not stop being live because its window lost focus —
+        // windows are peers, and a pane skipped here would sit on
+        // unread PTY bytes until its window happened to become key.
+        for wi in 0..self.windows.len() {
+            let mut window_total = 0usize;
+            let w = &mut win!(self, wi);
+            for (i, p) in w.panes.iter_mut().enumerate() {
+                // FREEZE_GRID: skip the pump entirely so the grid the
+                // renderer sees stays exactly as it was when the plugin
+                // took over.  PTY bytes still queue (shelld + client
+                // channel), they get consumed in one shot when the
+                // session ends and pump runs again.
+                let is_frozen = p
+                    .shelld_session_id()
+                    .is_some_and(|sid| frozen.contains(&sid));
+                if is_frozen {
+                    continue;
+                }
+                let n = p.pump();
+                window_total += n;
+                let pushed = p.drain_scroll_push_delta();
+                // Auto-pin the viewport when a row scrolled into
+                // scrollback while the user is reading history.  L3 runs
+                // the symmetric bump in its publish loop so view_offset
+                // stays consistent across the L2↔L3 boundary without a
+                // round-trip.  Without this, every line the shell emits
+                // while the user is scrolled back slides the visible
+                // content downward by one row — the "老内容被新内容覆盖"
+                // symptom.
+                if pushed > 0 {
+                    let pushed_u16 = pushed.min(u16::MAX as u64) as u16;
+                    p.bump_view_offset_on_scroll_push(pushed_u16);
+                }
+                // Slide the selection anchor + focus when the PTY pushed
+                // rows into scrollback so the highlight tracks the same
+                // bytes as they roll up.  We do NOT clear the selection
+                // just because the PTY autonomously emitted bytes — a
+                // claudecode pane prints a spinner every few hundred ms
+                // and the old `has_bytes && !dragging → None` rule made
+                // selection disappear before the user could Cmd-C.
+                // Keyboard input + new clicks + focus changes still clear
+                // selection in their own paths; PTY autonomy doesn't.
+                if let Some(sel) = w.selection.as_mut() {
+                    if sel.session_idx == i && pushed > 0 {
+                        let bump = pushed as u32;
+                        sel.anchor.1 = sel.anchor.1.saturating_add(bump);
+                        sel.focus.1 = sel.focus.1.saturating_add(bump);
+                    }
                 }
             }
+            // Only the window that actually took bytes owes a repaint.
+            if window_total > 0 {
+                w.needs_render = true;
+            }
+            total += window_total;
         }
-        if total > 0 {
-            win!(self).needs_render = true;
-        }
-        if !win!(self).panes.is_empty() && win!(self).panes.iter().all(|p| p.is_exited()) {
-            for p in &mut win!(self).panes {
+        // The app exits when every pane of every window has exited —
+        // one window still holding a live shell keeps marspot up.
+        let has_panes = self.windows.iter().any(|w| !w.panes.is_empty());
+        let all_dead = self
+            .windows
+            .iter()
+            .flat_map(|w| w.panes.iter())
+            .all(|p| p.is_exited());
+        if has_panes && all_dead {
+            for p in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
                 p.pump();
             }
             self.all_exited = true;
@@ -4985,20 +5254,21 @@ impl CoreApp {
     /// candidate window, or `None` when the cursor is hidden.
     fn render(
         &mut self,
+        wi: usize,
         target_tex: &objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>,
     ) -> Option<(f64, f64, f64, f64)> {
-        let focused = win!(self).focused_idx;
+        let focused = win!(self, wi).focused_idx;
         // Everything below borrows the window — the pane grids, the
         // preedit string, the layout — while the renderer wants `&mut`
         // on that same window's render state.  They are disjoint
         // fields, but the borrow checker cannot see through the
         // `windows[key_window]` index, so move the render state out
         // for the duration of the frame and put it back at the end.
-        let mut wr = std::mem::take(&mut win!(self).render);
+        let mut wr = std::mem::take(&mut win!(self, wi).render);
 
-        let labels: Vec<String> = (1..=win!(self).panes.len()).map(|n| n.to_string()).collect();
+        let labels: Vec<String> = (1..=win!(self, wi).panes.len()).map(|n| n.to_string()).collect();
         let states: Vec<SessionState> =
-            win!(self).panes.iter().map(|p| p.session().state()).collect();
+            win!(self, wi).panes.iter().map(|p| p.session().state()).collect();
 
         // F3+5 — title placeholder = basename of the cwd cached in
         // `pane_cwds`.  Population strategy is hybrid passive:
@@ -5009,10 +5279,10 @@ impl CoreApp {
         // the first paint.  Cost: HashMap.contains_key per pane (no
         // syscall) on the steady-state hot path; one proc_pidinfo
         // syscall only on a miss.
-        self.lazy_fill_missing_cwds();
-        let cwd_basenames: Vec<Option<&str>> = (0..win!(self).panes.len())
+        self.lazy_fill_missing_cwds(wi);
+        let cwd_basenames: Vec<Option<&str>> = (0..win!(self, wi).panes.len())
             .map(|i| {
-                let sid = win!(self).panes[i].shelld_session_id()?;
+                let sid = win!(self, wi).panes[i].shelld_session_id()?;
                 let path = self.pane_cwds.get(&sid)?;
                 std::path::Path::new(path)
                     .file_name()
@@ -5023,13 +5293,13 @@ impl CoreApp {
         // Resolved label per cell: edit-mode buffer → user-set custom
         // title → plugin-set title (MsgType::PaneTitle, cc/...) →
         // cwd basename (dynamic placeholder) → ordinal fallback.
-        let resolved_labels: Vec<String> = (0..win!(self).panes.len())
+        let resolved_labels: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
-                if win!(self).editing_title == Some(i) {
-                    win!(self).title_edit_buffer.clone()
-                } else if let Some(custom) = win!(self).panes[i].custom_title.as_ref() {
+                if win!(self, wi).editing_title == Some(i) {
+                    win!(self, wi).title_edit_buffer.clone()
+                } else if let Some(custom) = win!(self, wi).panes[i].custom_title.as_ref() {
                     custom.clone()
-                } else if let Some(plugin_title) = win!(self).panes[i]
+                } else if let Some(plugin_title) = win!(self, wi).panes[i]
                     .shelld_session_id()
                     .and_then(|sid| self.pane_titles.get(&sid))
                 {
@@ -5041,10 +5311,10 @@ impl CoreApp {
                 }
             })
             .collect();
-        let titles: Vec<String> = (0..win!(self).panes.len())
+        let titles: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 let mut s = resolved_labels.get(i).cloned().unwrap_or_default();
-                if win!(self).editing_title == Some(i) {
+                if win!(self, wi).editing_title == Some(i) {
                     s.push('▏');
                 }
                 s
@@ -5056,14 +5326,14 @@ impl CoreApp {
             .collect();
 
         // F3+1.3 — build + push process-panel data BEFORE we
-        // borrow `win!(self).panes` into `views`.  Renderer holds the
+        // borrow `win!(self, wi).panes` into `views`.  Renderer holds the
         // panel data via `set_process_panel`, freeing `&self` for
         // the render call below.
-        let panel_data = self.build_process_panel_render();
+        let panel_data = self.build_process_panel_render(wi);
         self.renderer.set_process_panel(panel_data);
         // cc — publish `Cc` usage modal render state (refreshing the
         // feed at most every 5 s while open; zero I/O when closed).
-        let cc_data = self.build_cc_usage_render();
+        let cc_data = self.build_cc_usage_render(wi);
         self.renderer.set_cc_usage(cc_data);
         // F3+9 — publish ContextMenu render state every frame.
         // Dev panel renders into its own NSWindow, owned by L1
@@ -5073,12 +5343,12 @@ impl CoreApp {
         // there.  No call here.
         self.renderer.set_dev_panel(None);
 
-        self.renderer.set_context_menu(win!(self).context_menu.as_ref().map(|state| {
+        self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
             use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
             ContextMenuRender {
-                scale: win!(self).scale,
+                scale: win!(self, wi).scale,
                 anchor_phys: (state.anchor_x, state.anchor_y),
-                top_inset: win!(self).layout.top_inset,
+                top_inset: win!(self, wi).layout.top_inset,
                 items: state.items.iter().map(|it| ContextMenuRow {
                     label: it.label.clone(),
                     shortcut_hint: it.shortcut_hint.clone(),
@@ -5092,12 +5362,12 @@ impl CoreApp {
         // Per-slot titles built from card_slots → resolved title
         // chain (custom > cwd basename > ordinal).  Empty slot if
         // the slot points at a pane index past the live count.
-        self.renderer.set_layout_modal(if win!(self).layout_modal_open {
+        self.renderer.set_layout_modal(if win!(self, wi).layout_modal_open {
             use marspot::render_metal::{LayoutModalRender, LayoutModalDragRender};
-            let cells = win!(self).pending_grid_cols * win!(self).pending_grid_rows;
+            let cells = win!(self, wi).pending_grid_cols * win!(self, wi).pending_grid_rows;
             let slot_titles: Vec<String> = (0..cells)
                 .map(|slot| {
-                    let pane_idx = win!(self).card_slots.get(slot).copied().unwrap_or(usize::MAX);
+                    let pane_idx = win!(self, wi).card_slots.get(slot).copied().unwrap_or(usize::MAX);
                     resolved_labels
                         .get(pane_idx)
                         .cloned()
@@ -5105,11 +5375,11 @@ impl CoreApp {
                 })
                 .collect();
             Some(LayoutModalRender {
-                cols: win!(self).pending_grid_cols,
-                rows: win!(self).pending_grid_rows,
-                scale: win!(self).scale,
+                cols: win!(self, wi).pending_grid_cols,
+                rows: win!(self, wi).pending_grid_rows,
+                scale: win!(self, wi).scale,
                 slot_titles,
-                drag: win!(self).layout_drag.map(|d| LayoutModalDragRender {
+                drag: win!(self, wi).layout_drag.map(|d| LayoutModalDragRender {
                     from_slot: d.from_slot,
                     grab_offset_phys: d.grab_offset_phys,
                     mouse_phys: d.mouse_phys,
@@ -5120,8 +5390,8 @@ impl CoreApp {
         });
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.
-        let cell_count = win!(self).layout.cells.len();
-        let views: Vec<SessionView> = win!(self)
+        let cell_count = win!(self, wi).layout.cells.len();
+        let views: Vec<SessionView> = win!(self, wi)
             .panes
             .iter()
             .take(cell_count)
@@ -5137,9 +5407,9 @@ impl CoreApp {
                     badge,
                 );
                 if i == focused && p.view_offset() == 0 {
-                    v.ime_preedit = win!(self).ime_preedit.as_str();
+                    v.ime_preedit = win!(self, wi).ime_preedit.as_str();
                 }
-                v.selection = win!(self)
+                v.selection = win!(self, wi)
                     .selection
                     .as_ref()
                     .and_then(|sel| selection_view_for_pane(p, sel, i));
@@ -5158,20 +5428,20 @@ impl CoreApp {
         self.renderer.render_layout_to_texture(
             &mut wr,
             target_tex,
-            &win!(self).layout,
+            &win!(self, wi).layout,
             &views,
             &entries,
             focused,
         );
-        win!(self).render = wr;
-        win!(self).needs_render = false;
+        win!(self, wi).render = wr;
+        win!(self, wi).needs_render = false;
 
-        win!(self).panes.get(focused).and_then(|pane| {
+        win!(self, wi).panes.get(focused).and_then(|pane| {
             if !pane.session().cursor_visible() {
                 return None;
             }
             let (col, row) = pane.session().grid().cursor();
-            win!(self).layout
+            win!(self, wi).layout
                 .caret_view_phys_rect(focused, col, row, cell_w, cell_h)
         })
     }
@@ -5553,54 +5823,28 @@ fn main() {
         scale = scale
     );
 
+    let renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
+    // Double-buffer: the boot window owns a (surface, texture) pair.
+    // Per-frame render alternates its `writing_idx`; the shell's
+    // presenter listens for `SurfaceReady(id)` and points at whichever
+    // slot is freshly done.  Eliminates the cross-process mid-render
+    // race that was the dominant flash source (handoff 2026-06-15).
+    //
     // Stale env IDs are normal during a dual-core install-local swap
     // window: L1 spawns this core with a `front_id`/`back_id` pair,
     // then a few ms later decides the previous core is unrecoverable
     // and rotates the pair before we get here.  Exit cleanly instead
     // of panicking so L1's "crash/hang detect → respawn" path picks
     // the next slot without a backtrace storm in marspot.log.
-    let Some(front) = IOSurface::lookup(front_id) else {
+    let Some(boot_surfaces) = WindowSurfaces::attach(front_id, back_id, renderer.device()) else {
         lx_warn!(
             "core.surface.lookup_nil",
-            "IOSurface front id stale (L1 rotated mid-spawn); exiting for respawn",
+            "IOSurface pair stale (L1 rotated mid-spawn); exiting for respawn",
             front_id = front_id,
             back_id = back_id
         );
         std::process::exit(2);
     };
-    front.increment_use();
-    let Some(back) = IOSurface::lookup(back_id) else {
-        lx_warn!(
-            "core.surface.lookup_nil",
-            "IOSurface back id stale (L1 rotated mid-spawn); exiting for respawn",
-            front_id = front_id,
-            back_id = back_id
-        );
-        std::process::exit(2);
-    };
-    back.increment_use();
-
-    let renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
-    // Double-buffer: own a (surface, texture) pair.  Per-frame render
-    // alternates `writing_idx`; the shell's presenter listens for
-    // `SurfaceReady(id)` and points at whichever slot is freshly done.
-    // Eliminates the cross-process mid-render race that was the
-    // dominant flash source (handoff 2026-06-15).
-    let mut surfaces: [IOSurface; 2] = [front, back];
-    let mut target_tex: [objc2::rc::Retained<ProtocolObject<dyn MTLTexture>>; 2] = [
-        surfaces[0]
-            .make_metal_texture(renderer.device())
-            .expect("[core] make_metal_texture front"),
-        surfaces[1]
-            .make_metal_texture(renderer.device())
-            .expect("[core] make_metal_texture back"),
-    ];
-    // Start writing into slot 0 — the shell's presenter starts at idx
-    // 0 too (`set_pair` resets `current_idx` to 0), so the first
-    // SurfaceReady(surfaces[0].id()) is a no-op flip but the
-    // accompanying `frame_pending=true` makes the shell actually
-    // present.
-    let mut writing_idx: usize = 0;
 
     // Unified event channel: the control-socket reader pushes
     // CoreEvents; the main loop blocks on `recv_timeout` so it
@@ -5748,19 +5992,26 @@ fn main() {
         saw_window_aware_attach: false,
         l3_mode,
         event_tx: event_tx.clone(),
-        windows: vec![WindowState::new(
-            FIRST_WINDOW_ID,
-            panes,
-            initial_focused_idx,
-            grid_cols,
-            grid_rows,
-            w_phys,
-            h_phys,
-            scale,
-        )],
+        windows: vec![{
+            let mut w = WindowState::new(
+                FIRST_WINDOW_ID,
+                panes,
+                initial_focused_idx,
+                grid_cols,
+                grid_rows,
+                w_phys,
+                h_phys,
+                scale,
+            );
+            // The boot window's pair comes from the env handshake, so
+            // it has a paint target before the first frame; every
+            // later window gets one from its `SurfaceAttachWindow`.
+            w.surfaces = Some(boot_surfaces);
+            w
+        }],
         key_window: 0,
     };
-    app.rebuild_layout();
+    app.rebuild_layout(0);
     // F3+6 — first save right after boot so a hard kill before any
     // user action still leaves the file populated.  Costs one write
     // (~50us); idempotent if shell-state.bin already matched.
@@ -5860,7 +6111,6 @@ fn main() {
     // 1-second idle timeout, so the deferred frame lands within ~8 ms.
     const FRAME_MIN_INTERVAL_MS: u64 = 8;
     let frame_min_interval = Duration::from_millis(FRAME_MIN_INTERVAL_MS);
-    let mut last_render_at = Instant::now() - frame_min_interval;
     'main: loop {
         // `begin` goes after the wait below, not here — see the
         // `watch.begin()` call once an event is in hand.
@@ -5868,20 +6118,24 @@ fn main() {
             first_tick = false;
             event_rx.try_recv().ok()
         } else {
-            // When a render is gated by the frame-interval cap, wake
-            // the loop in ≤ FRAME_MIN_INTERVAL to flush the deferred
-            // frame; otherwise stay event-driven at the 1 s idle
-            // timeout so CPU at rest stays near zero.
-            let recv_timeout = if win!(app).needs_render {
-                let since = last_render_at.elapsed();
-                if since < frame_min_interval {
-                    frame_min_interval - since
-                } else {
-                    Duration::from_millis(0)
-                }
-            } else {
-                Duration::from_secs(1)
-            };
+            // When any window's render is gated by the frame-interval
+            // cap, wake the loop in ≤ FRAME_MIN_INTERVAL to flush the
+            // deferred frame; otherwise stay event-driven at the 1 s
+            // idle timeout so CPU at rest stays near zero.  The
+            // deadline is the soonest across the dirty windows — one
+            // window's cap must not delay another's frame.
+            let recv_timeout = app
+                .windows
+                .iter()
+                .filter(|w| w.needs_render)
+                .map(|w| match w.last_render_at {
+                    Some(t) if t.elapsed() < frame_min_interval => {
+                        frame_min_interval - t.elapsed()
+                    }
+                    _ => Duration::from_millis(0),
+                })
+                .min()
+                .unwrap_or(Duration::from_secs(1));
             match event_rx.recv_timeout(recv_timeout) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
@@ -5903,18 +6157,31 @@ fn main() {
             }
         }
         // Drain pending control-socket events.  Attach coalescing:
-        // keep only the latest SurfaceAttach (resize fires fast in a
-        // live drag — old attach payloads are stale by the time we
-        // get to render); liveness frames are echoed within the same
-        // drain pass.
-        let mut pending_attach: Option<(u32, u32, f64, f64, f64)> = None;
+        // keep only the latest SurfaceAttach *per window* (resize
+        // fires fast in a live drag — old attach payloads are stale by
+        // the time we get to render, but window A's stale payload must
+        // never displace window B's fresh one); liveness frames are
+        // echoed within the same drain pass.
+        let mut pending_attach: Vec<(u32, (u32, u32, f64, f64, f64))> = Vec::new();
         let mut to_ack: Vec<(MsgType, Vec<u8>)> = Vec::new();
         let mut closed = false;
         let process = |app: &mut CoreApp,
                            ev: CoreEvent,
-                           pending_attach: &mut Option<(u32, u32, f64, f64, f64)>,
+                           pending_attach: &mut Vec<(u32, (u32, u32, f64, f64, f64))>,
                            to_ack: &mut Vec<(MsgType, Vec<u8>)>,
                            closed: &mut bool| {
+            /// Latest-wins, keyed by window: replace this window's
+            /// queued attach if it has one, else append.
+            fn queue_attach(
+                q: &mut Vec<(u32, (u32, u32, f64, f64, f64))>,
+                window_id: u32,
+                payload: (u32, u32, f64, f64, f64),
+            ) {
+                match q.iter_mut().find(|(id, _)| *id == window_id) {
+                    Some(slot) => slot.1 = payload,
+                    None => q.push((window_id, payload)),
+                }
+            }
             match ev {
                 CoreEvent::Key(event, mods) => app.key(event, mods),
                 CoreEvent::MouseDown(x, y, mods, win) => {
@@ -5955,7 +6222,7 @@ fn main() {
                         // adopted by the same path that created it.
                         app.adopt_window(win, w, h, sc);
                     }
-                    *pending_attach = Some((fr, bk, w, h, sc));
+                    queue_attach(pending_attach, win, (fr, bk, w, h, sc));
                 }
                 CoreEvent::Focus(focused) => {
                     app.renderer.set_window_focused(focused);
@@ -5980,8 +6247,14 @@ fn main() {
                     // Legacy, window-blind frame.  A shell that knows
                     // about windows sends the window-aware form too;
                     // once we have seen one, this is the duplicate.
+                    // Window-blind means the boot window by definition
+                    // — a shell that can't name windows only has one.
                     if !app.saw_window_aware_attach {
-                        *pending_attach = Some((f_id, b_id, new_w, new_h, new_scale));
+                        queue_attach(
+                            pending_attach,
+                            FIRST_WINDOW_ID,
+                            (f_id, b_id, new_w, new_h, new_scale),
+                        );
                     }
                 }
                 CoreEvent::L3ControlEof(sid) => {
@@ -6209,80 +6482,42 @@ fn main() {
         for (ty, payload) in app.pending_to_shell.drain(..) {
             send_to_shell(&control_writer, Frame::new(ty, payload), "pending_to_shell");
         }
-        if let Some((new_front, new_back, new_w, new_h, new_scale)) = pending_attach {
-            // Shell handed us a freshly-created IOSurface pair at the
-            // new size (resize / restart / pending-update spawn).
-            // Look up both, rebuild both textures, rebuild the layout,
-            // and immediately render into slot 0 + ack
-            // SurfaceReady(new_front) so the shell can install + swap
-            // the presenter to the new pair.
-            let f_surf = IOSurface::lookup(new_front);
-            let b_surf = IOSurface::lookup(new_back);
-            match (f_surf, b_surf) {
-                (Some(fs), Some(bs)) => {
-                    fs.increment_use();
-                    bs.increment_use();
-                    let new_tex_f = fs.make_metal_texture(app.renderer.device());
-                    let new_tex_b = bs.make_metal_texture(app.renderer.device());
-                    match (new_tex_f, new_tex_b) {
-                        (Ok(tf), Ok(tb)) => {
-                            // Release the old pair (decrement_use balances
-                            // the two increments we did at boot or in the
-                            // previous attach).
-                            surfaces[0].decrement_use();
-                            surfaces[1].decrement_use();
-                            surfaces = [fs, bs];
-                            target_tex = [tf, tb];
-                            writing_idx = 0;
-                            win!(app).w_phys = new_w;
-                            win!(app).h_phys = new_h;
-                            win!(app).scale = new_scale;
-                            app.rebuild_layout();
-                            // Render the latest content into slot 0 so
-                            // the SurfaceReady ack reflects a real frame.
-                            // Distinct names: this branch and the main
-                            // path can both run in one iteration, and a
-                            // breakdown listing "pump" twice reads like
-                            // double bookkeeping.
-                            watch.phase("attach-pump");
-                            app.pump_all();
-                            watch.phase("attach-render");
-                            let _ = app.render(&target_tex[writing_idx]);
-                            watch.phase("attach-post");
-                            let ack = Frame::new(
-                                MsgType::SurfaceReady,
-                                encode_surface_ready(surfaces[writing_idx].id()),
-                            );
-                            send_to_shell(&control_writer, ack, "surface_ready");
-                            // Next render writes the other half.
-                            writing_idx = 1 - writing_idx;
-                        }
-                        (tf, tb) => {
-                            if tf.is_err() {
-                                lx_error!(
-                                    "core.attach.metal_texture_front_failed",
-                                    &format!("{:?}", tf.err())
-                                );
-                            }
-                            if tb.is_err() {
-                                lx_error!(
-                                    "core.attach.metal_texture_back_failed",
-                                    &format!("{:?}", tb.err())
-                                );
-                            }
-                            fs.decrement_use();
-                            bs.decrement_use();
-                        }
-                    }
-                }
-                _ => {
-                    lx_warn!(
-                        "core.attach.surface_lookup_nil",
-                        "IOSurfaceLookup returned nil; dropping",
-                        front_id = new_front,
-                        back_id = new_back
-                    );
-                }
+        // Apply each window's freshly-attached pair.  Per window:
+        // swap the paint target, re-lay out, render one frame into
+        // slot 0 and ack `SurfaceReady` so the shell can install the
+        // new pair and swap its presenter onto it.  A stale id for one
+        // window leaves every other window's attach untouched.
+        for (window_id, (new_front, new_back, new_w, new_h, new_scale)) in
+            pending_attach.drain(..)
+        {
+            let Some(wi) = app.attach_window_surfaces(
+                window_id, new_front, new_back, new_w, new_h, new_scale,
+            ) else {
+                continue;
+            };
+            // Render the latest content into slot 0 so the
+            // SurfaceReady ack reflects a real frame.  Distinct phase
+            // names: this branch and the main render path can both run
+            // in one iteration, and a breakdown listing "pump" twice
+            // reads like double bookkeeping.
+            watch.phase("attach-pump");
+            app.pump_all();
+            watch.phase("attach-render");
+            let tex = win!(app, wi)
+                .surfaces
+                .as_ref()
+                .map(|s| s.writing_tex())
+                .expect("attach just installed a pair");
+            let _ = app.render(wi, &tex);
+            watch.phase("attach-post");
+            if let Some(s) = win!(app, wi).surfaces.as_mut() {
+                let ack = Frame::new(
+                    MsgType::SurfaceReady,
+                    encode_surface_ready(s.writing_surface_id()),
+                );
+                // Next render writes the other half.
+                s.flip();
+                send_to_shell(&control_writer, ack, "surface_ready");
             }
         }
         watch.phase("pump");
@@ -6305,26 +6540,47 @@ fn main() {
             break 'main;
         }
 
-        // Frame-interval cap: defer this frame if we just rendered
-        // < FRAME_MIN_INTERVAL ago.  needs_render stays true so the
-        // next loop iteration tries again — and the loop's
+        // Frame-interval cap, per window: defer a window's frame if
+        // it rendered < FRAME_MIN_INTERVAL ago.  `needs_render` stays
+        // true so the next loop iteration tries again — and the loop's
         // recv_timeout above is set to wake us inside the cap window,
-        // so the deferred frame lands within ~8 ms, not 1 s.
-        let render_gated_by_cap =
-            win!(app).needs_render && last_render_at.elapsed() < frame_min_interval;
-        if win!(app).needs_render && !render_gated_by_cap {
-            // Double-buffer: render into the back slot
-            // (`writing_idx`).  `render_layout_to_texture` calls
-            // `waitUntilCompleted`, so the moment we return here the
-            // surface bytes are settled and safe for the shell to
-            // sample — that's what makes `SurfaceReady` the dual-
-            // buffer race fix: we only ever flip to a slot the GPU
-            // has already finished.
+        // so the deferred frame lands within ~8 ms, not 1 s.  The cap
+        // is per window because a window streaming build output must
+        // not gate the repaint of a quiet one next to it.
+        for wi in 0..app.windows.len() {
+            if !win!(app, wi).needs_render {
+                continue;
+            }
+            let gated = win!(app, wi)
+                .last_render_at
+                .is_some_and(|t| t.elapsed() < frame_min_interval);
+            if gated {
+                continue;
+            }
+            // A window with no paint target (stale ids at attach) is
+            // skipped, not fatal: its peers keep painting and the next
+            // attach gives it one.
+            let Some(tex) = win!(app, wi).surfaces.as_ref().map(|s| s.writing_tex()) else {
+                continue;
+            };
+            // Double-buffer: render into the back slot.
+            // `render_layout_to_texture` calls `waitUntilCompleted`, so
+            // the moment we return here the surface bytes are settled
+            // and safe for the shell to sample — that's what makes
+            // `SurfaceReady` the dual-buffer race fix: we only ever
+            // flip to a slot the GPU has already finished.
             let render_t0 = Instant::now();
-            last_render_at = render_t0;
+            win!(app, wi).last_render_at = Some(render_t0);
             watch.phase("render");
-            let caret = app.render(&target_tex[writing_idx]);
+            let caret = app.render(wi, &tex);
             watch.phase("post-render");
+            let (surface_id, writing_idx) = {
+                let Some(s) = win!(app, wi).surfaces.as_mut() else { continue };
+                let ids = (s.writing_surface_id(), s.writing_idx);
+                // Flip: next render writes the other half.
+                s.flip();
+                ids
+            };
             // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
             // a busy display (60 Hz cap) without flooding when the
             // user runs `MARSPOT_LOG_CORE=debug` to investigate latency
@@ -6336,22 +6592,22 @@ fn main() {
                 8,
                 "frame rendered",
                 frame = frame,
+                window_id = win!(app, wi).window_id,
                 writing_idx = writing_idx,
-                surface_id = surfaces[writing_idx].id(),
+                surface_id = surface_id,
                 dur_us = render_t0.elapsed().as_micros() as u64,
-                n_panes = win!(app).panes.len(),
-                focused_idx = win!(app).focused_idx
+                n_panes = win!(app, wi).panes.len(),
+                focused_idx = win!(app, wi).focused_idx
             );
             // Per-frame ack — the just-completed surface ID.  In v=2
             // this replaces the empty-payload `FrameRendered` poke:
             // shell uses the id to flip its presenter's `current_idx`,
             // then presents.  Same one frame round-trip the old path
             // had, but the present now samples a guaranteed-finished
-            // surface instead of racing the writing one.
-            let ack = Frame::new(
-                MsgType::SurfaceReady,
-                encode_surface_ready(surfaces[writing_idx].id()),
-            );
+            // surface instead of racing the writing one.  The shell
+            // resolves which window an id belongs to by looking it up
+            // in its per-window pairs, so no window tag is needed.
+            let ack = Frame::new(MsgType::SurfaceReady, encode_surface_ready(surface_id));
             send_to_shell(&control_writer, ack, "surface_ready");
             // FrameRendered is the legacy v=1 wake.  A v=2 shell
             // already woke on SurfaceReady, so this is redundant for
@@ -6362,16 +6618,14 @@ fn main() {
             // shell side (handler just sets frame_pending again).
             let fr = Frame::new(MsgType::FrameRendered, Vec::new());
             send_to_shell(&control_writer, fr, "frame_rendered");
-            // Flip: next render writes the other half.
-            writing_idx = 1 - writing_idx;
             // Publish the focused-pane caret so the shell can anchor
             // the IME candidate window.  Dedupe — an idle cursor must
             // not stream identical frames at render cadence.
-            if win!(app).last_caret_sent != Some(caret) {
-                win!(app).last_caret_sent = Some(caret);
+            if win!(app, wi).last_caret_sent != Some(caret) {
+                win!(app, wi).last_caret_sent = Some(caret);
                 let f = Frame::new(
                     MsgType::CaretRect,
-                    encode_caret_rect(caret, win!(app).window_id),
+                    encode_caret_rect(caret, win!(app, wi).window_id),
                 );
                 send_to_shell(&control_writer, f, "caret_rect");
             }
