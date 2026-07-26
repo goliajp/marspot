@@ -871,6 +871,30 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
     }
 }
 
+/// Can this binary actually start?
+///
+/// Runs it with `--version`, which parses argv, prints, and exits
+/// without touching state.  A non-zero status or a signal death means
+/// the image is unusable — unsigned and killed by AMFI, wrong
+/// architecture, truncated by a half-finished copy.
+///
+/// `MARSPOT_NO_REDIRECT` is essential: without it the probe re-execs
+/// into `current/` and would happily report success for a broken
+/// candidate.
+fn successor_can_start(bin: &std::path::Path) -> bool {
+    match std::process::Command::new(bin)
+        .arg("--version")
+        .env("MARSPOT_NO_REDIRECT", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(st) => st.success(),
+        Err(_) => false,
+    }
+}
+
 impl ShellApp {
     /// Index of the window carrying `window_id`.
     fn window_index(&self, window_id: u32) -> Option<usize> {
@@ -1402,6 +1426,38 @@ impl ShellApp {
             "SHELL_UPDATE_APPLY",
             "applying pending shell self-update"
         );
+        // Prove the successor can start BEFORE promoting it, let alone
+        // exec'ing into it.  `exec` replaces this process: if the new
+        // image cannot run, the app is simply gone — no window, no log
+        // line (the redirect at the top of `main` runs before
+        // `logx::init`), and every live session orphaned.  That is
+        // exactly what happened on 2026-07-26, when an adhoc-signed
+        // binary reached `pending/` and AMFI killed the successor.
+        //
+        // The probe costs one fork of a binary that prints a version
+        // and exits.  `MARSPOT_NO_REDIRECT` keeps it from bouncing
+        // back into `current/` — we want to test THIS file.
+        let candidate = shell_tree.pending();
+        if !successor_can_start(&candidate) {
+            lx_event!(
+                "SHELL_UPDATE_REJECT",
+                "pending shell cannot start — refusing to exec into it",
+                candidate = candidate.display()
+            );
+            sup_log::log(
+                "SHELL_UPDATE_REJECT",
+                "pending/marspot-shell failed its start probe; quarantined",
+            );
+            // Get it out of `pending/` so the next trigger does not
+            // retry the same dead binary forever.
+            if let Err(e) = shell_tree.quarantine_pending() {
+                lx_warn!(
+                    "shell.update.quarantine_failed",
+                    &format!("{e}")
+                );
+            }
+            return false;
+        }
         sup_log::log(
             "SHELL_UPDATE_APPLY",
             "promoting pending/marspot-shell → current/",

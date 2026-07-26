@@ -148,6 +148,25 @@ impl BinaryTree {
         Ok(())
     }
 
+    /// Move `pending → quarantine`, without touching `current`.
+    ///
+    /// For a candidate rejected *before* it was ever promoted — the
+    /// caller probed it, found it cannot start, and must not exec into
+    /// it.  Leaving it in `pending/` would make the next update trigger
+    /// retry the same dead binary forever; `quarantine/` keeps it
+    /// around for inspection, which is the whole point of that slot.
+    pub fn quarantine_pending(&self) -> io::Result<()> {
+        let pending = self.pending();
+        if !pending.exists() {
+            return Ok(());
+        }
+        let quar = self.root.join("quarantine").join(&self.bin_name);
+        if let Some(parent) = quar.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(pending, quar)
+    }
+
     /// Move `prev → current`, overwriting whatever is there. Quarantines
     /// the existing current (the failed binary) for crash-report
     /// retention.

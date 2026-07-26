@@ -21,10 +21,14 @@
 #     again, not just the process alive)
 #   - pending/ is consumed and quarantine/ never grows
 #
-# It also runs one **negative** cycle: an unsigned (adhoc) shell staged
-# into pending/ must NOT take the supervisor down.  That is the exact
-# shape of the 2026-07-26 outage, and the assertion that would have
-# caught it.
+# It also runs one **negative** cycle: a successor that cannot start
+# must NOT take the supervisor down.  That is the exact shape of the
+# 2026-07-26 outage — and when this soak was first written it FAILED
+# there, which is how the product bug was found: the self-update path
+# promoted and exec'd without ever checking that the new image runs.
+# `successor_can_start` (marspot-shell) now probes the candidate first
+# and quarantines it on failure; this cycle is that fix's regression
+# test.
 #
 # Sandbox-only; never touches the installed app.
 #
@@ -94,6 +98,10 @@ wait_for $'\tHELLO_ACK\t' 1 100 || fail "boot HelloAck never landed"
 SHELL_PID=$(cat "$MARSPOT_STATE_DIR/shell.pid" 2>/dev/null \
             || pgrep -f "marspot-shell( |$)" | head -1)
 [[ -n "$SHELL_PID" ]] || fail "no shell pid after boot"
+# `apply_pending_update` refuses unless the supervisor is Idle, and a
+# HELLO_ACK is not yet Idle — poking at that instant makes the trigger a
+# no-op and the cycle looks like a failure.
+sleep 2
 echo "[boot] shell pid=$SHELL_PID — $CYCLES self-update cycles"
 
 # --- positive cycles -------------------------------------------------
@@ -104,12 +112,17 @@ for i in $(seq 1 "$CYCLES"); do
   install -m 755 "$SHELL_BIN" "$TREE/pending/marspot-shell"
   kill -USR1 "$SHELL_PID" 2>/dev/null || fail "cycle $i: SIGUSR1 to $SHELL_PID failed"
 
-  # The successor keeps the pid, so "alive" is the first thing to check
-  # — a dead pid here IS the outage this soak exists for.
-  wait_for $'\tSHELL_SELF_UPDATE\t' $((before_self + 1)) 150 \
-    || fail "cycle $i: successor never logged SHELL_SELF_UPDATE (died before logx::init?)"
+  # Aliveness first, and only then the log line.  The two failures look
+  # identical in a tail of the log but mean opposite things: a dead pid
+  # is the outage this soak exists for, while an alive pid that never
+  # logged is the supervisor declining to update (not Idle, nothing
+  # pending) — a harness problem, not a product one.
+  sleep 2
   shell_alive "$SHELL_PID" \
-    || fail "cycle $i: shell pid $SHELL_PID gone after execv"
+    || fail "cycle $i: shell pid $SHELL_PID GONE after execv — successor could not start"
+  wait_for $'\tSHELL_SELF_UPDATE\t' $((before_self + 1)) 150 \
+    || fail "cycle $i: shell $SHELL_PID is ALIVE but never logged SHELL_SELF_UPDATE \
+(supervisor declined the update, or the successor is pre-logx)"
   wait_for $'\tHELLO_ACK\t' $((before_ack + 1)) 200 \
     || fail "cycle $i: successor never got a core to HelloAck"
 
