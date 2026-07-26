@@ -2694,6 +2694,47 @@ impl CoreApp {
         self.pane_titles.remove(&id);
     }
 
+    /// Take on a window the shell has just opened (or re-announced
+    /// after a core swap).
+    ///
+    /// RFC-005: a fresh window starts as a 1×1 grid with one pane.
+    /// The pane is spawned off-loop like `[+]` does — a window opening
+    /// must not freeze the panes of the windows already up.
+    fn adopt_window(&mut self, window_id: u32, w_phys: f64, h_phys: f64, scale: f64) {
+        let (cell_w, cell_h) = self.renderer.cell_dims();
+        let cols = ((w_phys / cell_w) as u16).max(INITIAL_COLS);
+        let rows = ((h_phys / cell_h) as u16).max(INITIAL_ROWS);
+        let pane = match allocate_next_session_id() {
+            Ok(id) => spawn_l3_pane_async(cols, rows, id, &self.event_tx),
+            Err(e) => {
+                lx_error!("core.window.session_id_failed", &format!("{e}"));
+                return;
+            }
+        };
+        let mut w = WindowState::new(
+            window_id,
+            vec![pane],
+            0,
+            1,
+            1,
+            w_phys,
+            h_phys,
+            scale,
+        );
+        // A brand-new window has never been painted.
+        w.render.mark_bg_clear_required();
+        self.windows.push(w);
+        self.key_window = self.windows.len() - 1;
+        self.rebuild_layout();
+        lx_event!(
+            "WINDOW_ADOPTED",
+            "core took on a new window",
+            window_id = window_id,
+            windows = self.windows.len()
+        );
+        self.save_session_state();
+    }
+
     /// Index of the window carrying `window_id`, if the core has it.
     fn window_index(&self, window_id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.window_id == window_id)
@@ -5906,14 +5947,15 @@ fn main() {
                     // so a shell that sends both (for the benefit of
                     // cores that predate RFC-005) does not attach twice.
                     app.saw_window_aware_attach = true;
-                    match app.window_index(win) {
-                        Some(_) => *pending_attach = Some((fr, bk, w, h, sc)),
-                        None => lx_warn!(
-                            "core.window.attach_unknown",
-                            "SurfaceAttach for a window this core does not have",
-                            window_id = win
-                        ),
+                    if app.window_index(win).is_none() {
+                        // A window id we have never seen IS the birth
+                        // event for that window — RFC-005 deliberately
+                        // has no separate "create window" frame, so a
+                        // window that appears after a core swap is
+                        // adopted by the same path that created it.
+                        app.adopt_window(win, w, h, sc);
                     }
+                    *pending_attach = Some((fr, bk, w, h, sc));
                 }
                 CoreEvent::Focus(focused) => {
                     app.renderer.set_window_focused(focused);

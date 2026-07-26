@@ -726,6 +726,10 @@ struct ShellApp {
     /// One entry per open native window, in creation order.  Never
     /// empty while the app runs; `windows[0]` is the boot window.
     windows: Vec<ShellWindow>,
+    /// Next id to hand a window.  Monotonic and never reused within a
+    /// run: the core keys `WindowState` off it, and a recycled id
+    /// would let a closed window's frames land in its successor.
+    next_window_id: u32,
     /// The live core: child process, control socket (both directions),
     /// and liveness-handshake state aggregated into `CoreConn`.
     /// `None` before the first spawn and in the brief gap between a
@@ -896,6 +900,69 @@ fn successor_can_start(bin: &std::path::Path) -> bool {
 }
 
 impl ShellApp {
+    /// Open another native window (Cmd-N).
+    ///
+    /// RFC-005 semantics: a fresh window starts as a 1×1 grid with one
+    /// new pane and becomes key.  L1 allocates the id, creates the
+    /// window's own IOSurface pair and presenter, then announces it to
+    /// the core with `SurfaceAttachWindow` — a frame naming a window
+    /// the core has not seen IS that window's birth event, so no
+    /// separate create message exists.
+    fn open_new_window(&mut self) {
+        let window_id = self.next_window_id;
+        self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
+
+        let attrs = WindowAttrs {
+            title: DEFAULT_TITLE.to_string(),
+            width_logical: DEFAULT_W_PT,
+            height_logical: DEFAULT_H_PT,
+            // No saved frame: a new window is centred, not restored.
+            frame_pt: None,
+            bg: marspot::font_cache::BG,
+        };
+        if marspot::app::open_window(window_id, &attrs).is_none() {
+            lx_warn!(
+                "shell.window.open_failed",
+                "app state not ready — cannot open a window yet"
+            );
+            return;
+        }
+
+        // Size the pair from the window we just made, not from the one
+        // that happened to be key: a window opened on a different
+        // display can have a different backing scale.
+        let (w_px, h_px, scale) = match marspot::app::window_metrics(window_id) {
+            Some(m) => m,
+            None => {
+                lx_warn!(
+                    "shell.window.no_metrics",
+                    "window vanished before its surfaces were made",
+                    window_id = window_id
+                );
+                return;
+            }
+        };
+        let pair = match SurfacePair::create(w_px.max(64.0) as usize, h_px.max(64.0) as usize) {
+            Ok(p) => p,
+            Err(e) => {
+                lx_error!("shell.window.pair_create_failed", &format!("{e}"));
+                marspot::app::close_window(window_id);
+                return;
+            }
+        };
+        let (f, b) = pair.ids();
+        let mut win = ShellWindow::new(window_id);
+        win.pending_surfaces = Some(pair);
+        self.windows.push(win);
+        self.send_surface_attach(window_id, f, b, w_px, h_px, scale);
+        lx_event!(
+            "WINDOW_OPENED",
+            "new window announced to core",
+            window_id = window_id,
+            windows = self.windows.len()
+        );
+    }
+
     /// Index of the window carrying `window_id`.
     fn window_index(&self, window_id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.window_id == window_id)
@@ -971,6 +1038,7 @@ impl ShellApp {
             windows: vec![ShellWindow::new(
                 marspot::shell_proto::FIRST_WINDOW_ID,
             )],
+            next_window_id: marspot::shell_proto::FIRST_WINDOW_ID + 1,
             active: None,
             redraw_thread_started: false,
             last_present_at: None,
@@ -2329,6 +2397,22 @@ impl MarspotApp for ShellApp {
             mods_byte = struct_to_mods_byte(mods),
             state = format!("{:?}", event.state)
         );
+        // Cmd-N is a window-lifecycle command, and windows belong to
+        // L1 — handling it here rather than round-tripping through the
+        // core keeps the one layer that owns NSWindows in charge of
+        // creating them.  Swallowed, so it never reaches the PTY.
+        if mods.super_
+            && !mods.control
+            && !mods.alt
+            && event.state == marspot::input::KeyState::Pressed
+            && matches!(
+                event.logical,
+                marspot::input::LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'n')
+            )
+        {
+            self.open_new_window();
+            return;
+        }
         let wire = event_to_wire(&event, mods);
         let w = Self::event_window(ctx);
         self.send(MsgType::KeyEvent, encode_key_event(&wire, w));
@@ -2469,6 +2553,40 @@ impl MarspotApp for ShellApp {
     }
 
     fn close_requested(&mut self, ctx: &MarspotAppCtx) {
+        // RFC-005 — closing one of several windows closes THAT window
+        // and the panes it holds; only the last window closing is a
+        // quit.  Cmd-Q arrives through the same callback but via the
+        // NSApplicationDelegate, which the boot window's delegate
+        // wears, so it always lands on the boot window and falls
+        // through to the quit path below when it is the only one left.
+        if marspot::app::window_count() > 1 {
+            let window_id = Self::event_window(ctx);
+            // Tell the core first: it retires the window's sessions
+            // while the surfaces are still alive, so nothing renders
+            // into a released pair on the way out.
+            self.send(
+                MsgType::WindowClosed,
+                marspot::shell_proto::encode_window_closed(window_id),
+            );
+            if let Some(i) = self.window_index(window_id) {
+                let w = self.windows.remove(i);
+                if let Some(p) = w.surfaces {
+                    p.release();
+                }
+                if let Some(p) = w.pending_surfaces {
+                    p.release();
+                }
+            }
+            let remaining = marspot::app::close_window(window_id);
+            lx_event!(
+                "WINDOW_CLOSED",
+                "closed one window; app keeps running",
+                window_id = window_id,
+                remaining = remaining
+            );
+            return;
+        }
+
         // RFC-001: clean plugin shutdown FIRST, so plugins releasing
         // host resources (notifications, fs watchers) don't race
         // against the rest of the teardown.

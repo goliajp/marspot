@@ -168,6 +168,12 @@ pub struct MarspotAppCtx {
     inner: Retained<MarspotView>,
     nswindow: Retained<NSWindow>,
     nsapp: Retained<NSApplication>,
+    /// Kept alive here on purpose: `NSWindow.delegate` is a **weak**
+    /// reference.  The boot window got away with a local because
+    /// `run_app` never returns, but a window opened later would lose
+    /// every resize / close / focus callback the moment its builder
+    /// returned.
+    _delegate: Retained<MarspotWindowDelegate>,
     redraw_pending: Cell<bool>,
     exit_requested: Cell<bool>,
 }
@@ -1188,25 +1194,22 @@ fn set_dock_icon_from_bundle(nsapp: &NSApplication) {
 // run_app
 // ---------------------------------------------------------------------------
 
-/// Block on the AppKit run loop, dispatching events into `app`.
-/// Returns when `ctx.exit()` has been called and the run loop drains.
-pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
-    let mtm = MainThreadMarker::new()
-        .expect("run_app must be called on the main thread");
-    // The boot window's id.  RFC-005 step 4 adds `open_window` for the
-    // rest; they take ids from the same monotonic source.
-    let window_id = marspot_term::shell_proto::FIRST_WINDOW_ID;
-    let nsapp = NSApplication::sharedApplication(mtm);
-    nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    // Force-refresh the Dock icon from the bundle's `Resources/AppIcon
-    // .icns`.  Without this, a running marspot session shows whichever
-    // icon was cached at first launch — even after `bin/install-local
-    // .sh` lands a new .icns, the live Dock still draws the old one
-    // until next cold launch.  Reading from disk each startup is cheap
-    // (~74 KB) and self-update keeps the icon in lockstep with the
-    // codebase.
-    set_dock_icon_from_bundle(&nsapp);
-
+/// Build one native window: view, NSWindow, delegate — wired together
+/// and ready to show.
+///
+/// Extracted so `run_app` (boot window) and `open_window` (every
+/// window after it) cannot drift apart.  AppKit setup that differs
+/// between the two by accident is exactly the kind of bug that only
+/// shows up in the second window.
+fn build_window(
+    mtm: MainThreadMarker,
+    window_id: u32,
+    attrs: &WindowAttrs,
+) -> (
+    Retained<NSWindow>,
+    Retained<MarspotView>,
+    Retained<MarspotWindowDelegate>,
+) {
     // 1. Create custom NSView (origin top-left) sized to logical attrs.
     let frame = NSRect::new(
         NSPoint::new(0.0, 0.0),
@@ -1282,7 +1285,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     window.setAcceptsMouseMovedEvents(true);
     window.makeFirstResponder(Some(&view));
 
-    // 3. Window delegate.
+    // Window delegate.
     let delegate: Retained<MarspotWindowDelegate> = {
         let alloc = MarspotWindowDelegate::alloc(mtm)
             .set_ivars(MarspotWindowDelegateIvars {
@@ -1293,11 +1296,134 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     let proto: &ProtocolObject<dyn NSWindowDelegate> =
         ProtocolObject::from_ref(&*delegate);
     window.setDelegate(Some(proto));
-    // RFC-003 §6 Amendment 15 — also wear the NSApplicationDelegate
-    // hat so Cmd-Q / Quit menu / dock Quit run through `close_requested`.
-    let app_proto: &ProtocolObject<dyn NSApplicationDelegate> =
-        ProtocolObject::from_ref(&*delegate);
-    nsapp.setDelegate(Some(app_proto));
+
+    (window, view, delegate)
+}
+
+/// Open an additional native window and return its id.
+///
+/// RFC-005 — windows after the boot one.  The caller (L1) allocates
+/// the id, because the id is what every input frame and every
+/// `SurfaceAttachWindow` carries; AppKit is told about it here so the
+/// view and delegate can tag their events with it from the first
+/// callback.
+///
+/// `None` if the app state is not up yet — nothing can be opened
+/// before `run_app` has installed it.
+pub fn open_window(window_id: u32, attrs: &WindowAttrs) -> Option<()> {
+    let mtm = MainThreadMarker::new()?;
+    let nsapp = NSApplication::sharedApplication(mtm);
+    let (window, view, delegate) = build_window(mtm, window_id, attrs);
+
+    if let Some((x, y, w, h)) = attrs.frame_pt {
+        let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        window.setFrame_display(rect, false);
+    } else {
+        // No saved frame: stagger off the key window so a new window
+        // does not land exactly on top of the one it was opened from.
+        window.center();
+    }
+    window.makeKeyAndOrderFront(None);
+
+    let ctx = MarspotAppCtx {
+        window_id,
+        inner: view,
+        nswindow: window,
+        nsapp,
+        _delegate: delegate,
+        redraw_pending: Cell::new(false),
+        exit_requested: Cell::new(false),
+    };
+    APP_STATE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let state = slot.as_mut()?;
+        state.windows.push(ctx);
+        Some(())
+    })
+}
+
+/// Physical size + backing scale of one window.
+///
+/// Needed before its IOSurface pair can be made, and it must come from
+/// THAT window: one opened on a different display can have a different
+/// backing scale, and sizing its pair off the key window would give it
+/// a mismatched surface.
+pub fn window_metrics(window_id: u32) -> Option<(f64, f64, f64)> {
+    APP_STATE.with(|cell| {
+        let slot = cell.borrow();
+        let state = slot.as_ref()?;
+        let i = state.window_index(window_id)?;
+        let ctx = &state.windows[i];
+        let (w, h) = ctx.inner_size_phys();
+        Some((w, h, ctx.scale()))
+    })
+}
+
+/// Tear down the window carrying `window_id`.
+///
+/// Ordering matters: the context is removed from the state FIRST, so
+/// any AppKit callback the close itself fires (`windowWillClose:` and
+/// friends) resolves to no window and is dropped, instead of
+/// re-entering a half-torn-down entry.  Same re-entrancy hazard the
+/// dev window's deferred-action queue exists for.
+///
+/// Returns the number of windows still open.
+pub fn close_window(window_id: u32) -> usize {
+    let (closing, remaining) = APP_STATE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(state) = slot.as_mut() else { return (None, 0) };
+        match state.window_index(window_id) {
+            Some(i) => {
+                let ctx = state.windows.remove(i);
+                (Some(ctx), state.windows.len())
+            }
+            None => (None, state.windows.len()),
+        }
+    });
+    if let Some(ctx) = closing {
+        // Drop the AppKit reference outside the state borrow.
+        ctx.nswindow.setDelegate(None);
+        ctx.nswindow.close();
+    }
+    remaining
+}
+
+/// How many windows are open.
+pub fn window_count() -> usize {
+    APP_STATE.with(|cell| {
+        cell.borrow().as_ref().map(|s| s.windows.len()).unwrap_or(0)
+    })
+}
+
+/// Block on the AppKit run loop, dispatching events into `app`.
+/// Returns when `ctx.exit()` has been called and the run loop drains.
+pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
+    let mtm = MainThreadMarker::new()
+        .expect("run_app must be called on the main thread");
+    // The boot window's id.  RFC-005 step 4 adds `open_window` for the
+    // rest; they take ids from the same monotonic source.
+    let window_id = marspot_term::shell_proto::FIRST_WINDOW_ID;
+    let nsapp = NSApplication::sharedApplication(mtm);
+    nsapp.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Force-refresh the Dock icon from the bundle's `Resources/AppIcon
+    // .icns`.  Without this, a running marspot session shows whichever
+    // icon was cached at first launch — even after `bin/install-local
+    // .sh` lands a new .icns, the live Dock still draws the old one
+    // until next cold launch.  Reading from disk each startup is cheap
+    // (~74 KB) and self-update keeps the icon in lockstep with the
+    // codebase.
+    set_dock_icon_from_bundle(&nsapp);
+
+    let (window, view, delegate) = build_window(mtm, window_id, &attrs);
+    // RFC-003 §6 Amendment 15 — the boot window's delegate also wears
+    // the NSApplicationDelegate hat so Cmd-Q / Quit menu / dock Quit
+    // run through `close_requested`.  Only one object can hold that
+    // role, so later windows never take it.
+    {
+        let app_proto: &ProtocolObject<dyn NSApplicationDelegate> =
+            ProtocolObject::from_ref(&*delegate);
+        nsapp.setDelegate(Some(app_proto));
+    }
 
     // 4. Register the proxy's source on the main run loop.  Wakes
     //    posted before this point are sticky on the source and fire
@@ -1315,6 +1441,7 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         inner: view.clone(),
         nswindow: window.clone(),
         nsapp: nsapp.clone(),
+        _delegate: delegate.clone(),
         redraw_pending: Cell::new(false),
         exit_requested: Cell::new(false),
     };
