@@ -196,21 +196,40 @@ that has never heard of it cannot notice.
 * `sessions/<id>/` registry stays window-blind — window membership
   lives only in the layout file, exactly like pane order does today.
 
-**6b — restore (next).**  L2 boots window 0 from `windows[0]` and
-keeps `windows[1..]` queued.  For each queued record it asks L1 to
-open a window (new L2→L1 frame; unknown msg types are skipped by old
-readers, so no PROTO bump).  L1 opens it with frame *i* from
-`window-state.bin`; the resulting `SurfaceAttachWindow` reaches
-`adopt_window`, which pops the queued record and assembles that
-window's panes from it instead of spawning one fresh pane.
+**6b — restore (shipped).**  L2 boots window 0 from `windows[0]` and
+keeps `windows[1..]` queued.  For each queued record it sends
+`WindowOpenRequest(frame_index)` (msg type 64 — a new type, which old
+readers skip, so still no PROTO bump).  L1 opens the window at entry
+`frame_index` of `window-state.bin`; the resulting
+`SurfaceAttachWindow` reaches `adopt_window`, which pops the front
+record and restores from it instead of spawning one fresh pane.  The
+queue is also what tells the two cases apart — no extra flag.
 
-Open question to settle when writing it: `assemble_panes_at_boot` is
-synchronous and can block on L3 reattach, and RFC-005's own rule is
-that opening a window must not freeze the windows already up.  Either
-the restore assembly runs off-loop like `spawn_l3_pane_async`, or the
-queued restore is assembled once at boot and handed over whole.
+**The assembly runs off-loop.**  Reattaching an L3 blocks on a UDS
+handshake with its own deadline, and this RFC's own rule is that
+opening a window must not freeze the windows already up.  So the
+window appears at once with its saved grid and one "starting…"
+placeholder per saved slot, a worker thread runs
+`assemble_panes_at_boot`, and `WindowRestoreFinished` swaps the real
+panes in.
 
-* `MARSPOT_RESTORE_FRAME` (L1 execv handoff) carries N frames.
+Two consequences that are load-bearing:
+
+* **A restored assembly must not sweep the registry.**  The sweep —
+  adopting live sessions no slot claimed, retiring unclaimed dirs — is
+  global, and a restored window knows only its own saved sids.  Left
+  on, it would adopt the boot window's panes a second time and retire
+  the dirs of every session it never heard of.  Exactly one assembly
+  per boot sweeps: the boot window's (`sweeps_registry`).
+* **Off-loop results must find their pane in any window.**
+  `L3SpawnFinished`, `L3ControlReconnected` and `SearchResults` all
+  looked their pane up in the key window only, so a result landing
+  while the user had focused a different window was silently dropped.
+  They go through `find_pane_by_sid`, which searches every window.
+
+`MARSPOT_RESTORE_FRAME` (L1 execv handoff) still carries one frame,
+the boot window's, and does not need to grow: the restored windows
+read their geometry from `window-state.bin` like any other launch.
 
 ## L1 (step 4)
 
@@ -240,7 +259,7 @@ changes are reported to L2.
    exit only when every window is dead (**shipped**, core 0.12.43)
 6a. `infra` persistence v2: both files hold window lists
    (**shipped**, core 0.12.44 / shell 0.7.14)
-6b. `infra` restore N windows at boot (see above)
+6b. `infra` restore N windows at boot, assembly off-loop (**shipped**)
 4e. `basic` input goes peer: `win!(self)` on the mouse / key / scroll /
    drag / preedit paths takes the window the event names.  Scroll must
    land in the window under the cursor even when it is not key; drag

@@ -491,6 +491,11 @@ enum ShellInbox {
     /// L1 owns the dev panel's NSWindow visibility; the click here
     /// just flips that bit and the redraw cycle picks it up.
     DevPanelToggle,
+    /// L2 → L1: reopen a window the last session had, restoring its
+    /// geometry from this entry of `window-state.bin`.  RFC-005 step
+    /// 6b — the core knows how many windows the user had, L1 owns the
+    /// windows themselves, so the core asks.
+    WindowOpenRequest(u32),
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -920,14 +925,51 @@ impl ShellApp {
     /// returns (AppKit calls made while the app-state borrow is live
     /// panic on re-entry), and `window_opened` finishes the job.
     fn open_new_window(&mut self) {
+        // No saved frame: a new window is centred, not restored.
+        self.open_window_with_frame(None);
+    }
+
+    /// RFC-005 step 6b — reopen a window the last session had, at the
+    /// geometry entry `frame_index` of `window-state.bin`.
+    ///
+    /// The core drives this: it read the layout file and knows how
+    /// many windows there were, while L1 owns the windows and their
+    /// ids.  An index past the end of the geometry file (the two files
+    /// disagreeing after a crash between writes) is not an error —
+    /// the window opens at the default rect and the panes still land.
+    fn restore_window(&mut self, frame_index: u32) {
+        let frame = marspot::state::read_windows()
+            .and_then(|v| v.into_iter().nth(frame_index as usize))
+            .filter(|w| w.w > 50.0 && w.h > 50.0)
+            .map(|w| (w.x, w.y, w.w, w.h));
+        if frame.is_none() {
+            lx_warn!(
+                "shell.window.restore_no_frame",
+                "no saved geometry for this window; opening at default rect",
+                frame_index = frame_index
+            );
+        }
+        self.open_window_with_frame(frame);
+        lx_event!(
+            "WINDOW_RESTORE",
+            "core asked for a saved window to be reopened",
+            frame_index = frame_index
+        );
+    }
+
+    /// Allocate an id and ask AppKit for the window.
+    ///
+    /// Only *asks*.  The window is created after this dispatch returns
+    /// (AppKit calls made while the app-state borrow is live panic on
+    /// re-entry), and `window_opened` finishes the job.
+    fn open_window_with_frame(&mut self, frame_pt: Option<(f64, f64, f64, f64)>) {
         let window_id = self.next_window_id;
         self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
         let attrs = WindowAttrs {
             title: DEFAULT_TITLE.to_string(),
             width_logical: DEFAULT_W_PT,
             height_logical: DEFAULT_H_PT,
-            // No saved frame: a new window is centred, not restored.
-            frame_pt: None,
+            frame_pt,
             bg: marspot::font_cache::BG,
         };
         marspot::app::open_window(window_id, &attrs);
@@ -2060,6 +2102,9 @@ impl ShellApp {
             ShellInbox::PaneSessionUserEscape(sid) => {
                 self.end_pane_session(sid, plugins::EndReason::UserEscape);
             }
+            ShellInbox::WindowOpenRequest(frame_index) => {
+                self.restore_window(frame_index);
+            }
             ShellInbox::DevPanelToggle => {
                 self.dev_panel.visible = !self.dev_panel.visible;
                 self.dev_panel_dirty = true;
@@ -2897,6 +2942,11 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         // the signal.  L1 is the single source of truth
                         // for dev-panel visibility.
                         Some(ShellInbox::DevPanelToggle)
+                    }
+                    MsgType::WindowOpenRequest => {
+                        marspot::shell_proto::decode_window_open_request(&frame.payload)
+                            .ok()
+                            .map(ShellInbox::WindowOpenRequest)
                     }
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.

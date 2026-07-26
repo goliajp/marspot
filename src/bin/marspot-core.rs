@@ -610,6 +610,7 @@ mod window_state_tests {
             saw_window_aware_attach: false,
             l3_mode: false,
             event_tx,
+            saved_windows: std::collections::VecDeque::new(),
             windows,
             key_window: 0,
         }
@@ -699,6 +700,84 @@ mod window_state_tests {
         app.all_exited = false;
         app.pump_all();
         assert!(app.all_exited, "every pane of every window has exited");
+    }
+
+    /// RFC-005 step 6b — a window being restored is on screen with its
+    /// own saved shape before any reattach has been attempted.  That is
+    /// what makes the assembly off-loop worth doing: the windows
+    /// already up never wait on this one's I/O.
+    #[test]
+    fn a_restored_window_shows_its_saved_shape_before_its_panes_arrive() {
+        // Point the assembly worker at a binary that cannot start, so
+        // it fails fast instead of spawning real L3s behind the test.
+        // SAFETY: nextest runs one test per process.
+        unsafe {
+            std::env::set_var("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session");
+        }
+        let record = marspot::state::SavedWindowLayout {
+            grid_cols: 2,
+            grid_rows: 2,
+            focused_idx: 2,
+            panes: vec![
+                marspot::state::SavedPane { sid: 11, ..Default::default() },
+                marspot::state::SavedPane { sid: 12, ..Default::default() },
+                marspot::state::SavedPane { sid: 13, ..Default::default() },
+            ],
+        };
+        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
+        app.saved_windows.push_back(record);
+
+        app.adopt_window(2, 800.0, 600.0, 2.0);
+
+        assert_eq!(app.windows.len(), 2, "the window exists immediately");
+        let w = &app.windows[1];
+        assert_eq!(w.window_id, 2);
+        assert_eq!((w.grid_cols, w.grid_rows), (2, 2), "its own saved grid");
+        assert_eq!(w.panes.len(), 3, "one placeholder per saved slot");
+        assert_eq!(w.focused_idx, 2, "saved focus honoured");
+        assert!(
+            w.panes.iter().all(|p| !p.is_exited()),
+            "placeholders are 'starting…', not dead slots"
+        );
+        assert!(
+            app.saved_windows.is_empty(),
+            "the record is consumed, so the next window is a fresh one"
+        );
+    }
+
+    /// …and when the worker lands, its panes replace the placeholders.
+    /// A window closed in the meantime is a normal race.
+    #[test]
+    fn assembled_panes_replace_the_placeholders() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(1, 80, 24)]),
+            win(2, vec![Pane::new_pending(11, 80, 24), Pane::new_pending(12, 80, 24)]),
+        ]);
+        app.windows[1].focused_idx = 1;
+        app.windows[1].selection = Some(Selection {
+            session_idx: 1,
+            anchor: (0, 0),
+            focus: (1, 0),
+            mode: marspot::ui::SelectionMode::Linewise,
+        });
+        app.windows[1].editing_title = Some(1);
+
+        app.adopt_restored_panes(2, vec![Pane::new_vacant(11, 80, 24)]);
+
+        let w = &app.windows[1];
+        assert_eq!(w.panes.len(), 1);
+        assert_eq!(w.panes[0].shelld_session_id(), Some(11));
+        assert_eq!(w.focused_idx, 0, "focus clamped to the real pane count");
+        assert!(w.selection.is_none(), "placeholder-era selection dropped");
+        assert!(w.editing_title.is_none());
+        assert_eq!(app.windows[0].panes.len(), 1, "peer untouched");
+
+        // Empty assembly: keep the placeholders rather than blank the
+        // window.  Unknown window: drop the panes, no panic.
+        app.adopt_restored_panes(2, Vec::new());
+        assert_eq!(app.windows[1].panes.len(), 1);
+        app.adopt_restored_panes(99, vec![Pane::new_vacant(50, 80, 24)]);
+        assert_eq!(app.windows.len(), 2);
     }
 
     /// The modal's slot map is sized from the window's own grid, so a
@@ -839,7 +918,7 @@ mod boot_assembly_tests {
         let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx);
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true);
         assert_eq!(
             pane_sids(&panes),
             vec![9, 12, 5],
@@ -868,7 +947,7 @@ mod boot_assembly_tests {
         }
         let s = saved(&[(4, "user-title"), (6, "")]);
         let (tx, _rx) = mpsc::channel();
-        let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx);
+        let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true);
         assert_eq!(pane_sids(&panes), vec![4, 6]);
         assert_eq!(
             panes[0].custom_title.as_deref(),
@@ -891,7 +970,7 @@ mod boot_assembly_tests {
         let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx);
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true);
         assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
         let sids = pane_sids(&panes);
         assert_eq!(sids[0], 7, "slot 0 keeps its sid for revive");
@@ -920,7 +999,7 @@ mod boot_assembly_tests {
 
         let s = saved(&[(0, "")]);
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true);
         let sids = pane_sids(&panes);
         assert_eq!(panes.len(), 2, "slot pane + adopted orphan: {sids:?}");
         assert!(
@@ -945,7 +1024,7 @@ mod boot_assembly_tests {
         let s = saved(&[(700, "")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true);
         assert_eq!(panes.len(), 1);
         assert!(
             !reg::session_dir(31).exists(),
@@ -965,6 +1044,44 @@ mod boot_assembly_tests {
     }
 
 
+    /// RFC-005 step 6b — a restored window runs the same assembly, but
+    /// it must NOT sweep the registry.  It knows only its own saved
+    /// sids, so sweeping would (a) adopt another window's live panes a
+    /// second time and (b) retire the dirs of sessions it never heard
+    /// of.  Both halves are checked here against a sandbox that
+    /// contains exactly one of each.
+    #[test]
+    fn a_restore_assembly_leaves_other_windows_sessions_alone() {
+        let sb = Sandbox::new("no-sweep");
+        let (tx, _rx) = mpsc::channel();
+        // A live session belonging to some other window.
+        let other_sid = reg::allocate_next_session_id().unwrap();
+        let live = spawn_l3_pane_with_cwd(60, 16, other_sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+        std::mem::forget(live); // Sandbox::drop kills it via the registry
+        // A dead dir the sweeping assembly would retire.
+        write_session_entry(&dead_entry(31)).unwrap();
+        std::fs::write(reg::session_dir(31).join("bytelog"), b"HISTORY").unwrap();
+
+        sb.break_session_bin(); // this window's own slot stays vacant
+        let s = saved(&[(700, "")]);
+        let (panes, reattached) =
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, false);
+
+        let sids = pane_sids(&panes);
+        assert_eq!(panes.len(), 1, "only its own slot: {sids:?}");
+        assert!(
+            !sids.contains(&other_sid),
+            "another window's live session must not be adopted: {sids:?}"
+        );
+        assert!(reattached.is_empty());
+        assert!(
+            reg::session_dir(31).exists(),
+            "a non-sweeping assembly must not retire dirs it knows nothing about"
+        );
+        assert!(reg::session_dir(other_sid).exists());
+    }
+
     /// Duplicate sid in a corrupt saved state must not double-bind one
     /// session to two panes — the second slot falls back to a fresh id.
     #[test]
@@ -974,7 +1091,7 @@ mod boot_assembly_tests {
         let s = saved(&[(9, "a"), (9, "b")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx);
+            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true);
         let sids = pane_sids(&panes);
         assert_eq!(sids.len(), 2);
         assert_eq!(sids[0], 9);
@@ -1088,6 +1205,17 @@ struct ContextMenuState {
 /// A newtype only because `CoreEvent` derives `Debug` and `L3Spawn`
 /// holds a `GridShmReader`, which owns a raw mapping and reasonably
 /// declines to implement it.
+/// Assembled panes in transit from a restore worker.  A newtype for
+/// the same reason `SpawnOutcome` is one: `CoreEvent` derives Debug and
+/// `Pane` does not implement it.
+struct RestoredPanes(Vec<Pane>);
+
+impl std::fmt::Debug for RestoredPanes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RestoredPanes({})", self.0.len())
+    }
+}
+
 struct SpawnOutcome(Result<marspot::pane::L3Spawn, String>);
 
 impl std::fmt::Debug for SpawnOutcome {
@@ -1128,6 +1256,9 @@ enum CoreEvent {
     /// RFC-005 — window-aware surface attach.  A `window_id` the core
     /// has not seen before *is* that window's birth event.
     SurfaceAttachWindow(u32, u32, f64, f64, f64, u32),
+    /// RFC-005 step 6b — a restore worker finished assembling a saved
+    /// window's panes; they replace that window's placeholders.
+    WindowRestoreFinished(u32, RestoredPanes),
     /// RFC-005 — a window went away; drop its `WindowState`.
     WindowClosed(u32),
     /// RFC-005 — which window is key now.
@@ -1639,6 +1770,39 @@ fn spawn_l3_pane_async(
     Pane::new_pending(session_id, cols, rows)
 }
 
+/// RFC-005 step 6b — assemble a restored window's panes on a worker
+/// thread and deliver them whole via `CoreEvent::WindowRestoreFinished`.
+///
+/// Off-loop is not an optimisation here, it is the rule: reattaching an
+/// L3 blocks on a UDS handshake with its own deadline, and RFC-005 says
+/// opening a window must never freeze the windows already up.  The
+/// window appears immediately holding one "starting…" pane per saved
+/// slot; the real panes replace them when the worker lands.
+///
+/// `sweeps_registry: false` — see `assemble_panes_at_boot`.
+fn assemble_restore_window_async(
+    window_id: u32,
+    record: marspot::state::SavedWindowLayout,
+    cols: u16,
+    rows: u16,
+    event_tx: &Sender<CoreEvent>,
+) {
+    let tx = event_tx.clone();
+    std::thread::Builder::new()
+        .name(format!("l2-restore-w{window_id}"))
+        .spawn(move || {
+            let n = record.panes.len().clamp(1, SESSION_COUNT_HARD_CAP);
+            let inner_tx = tx.clone();
+            let (panes, _reattached) =
+                assemble_panes_at_boot(Some(&record), n, cols, rows, &inner_tx, false);
+            let _ = tx.send(CoreEvent::WindowRestoreFinished(
+                window_id,
+                RestoredPanes(panes),
+            ));
+        })
+        .expect("spawn l2-restore worker");
+}
+
 fn spawn_l3_pane_with_cwd(
     cols: u16,
     rows: u16,
@@ -2073,6 +2237,11 @@ struct CoreApp {
     /// Every open window, in creation order.  Never empty: the last
     /// window closing exits the app.
     windows: Vec<WindowState>,
+    /// RFC-005 step 6b — saved windows past the boot one, waiting for
+    /// L1 to reopen them.  Each `SurfaceAttachWindow` for an unseen id
+    /// pops the front record, so the queue is also what distinguishes
+    /// "restoring a window" from "the user pressed Cmd-N".
+    saved_windows: std::collections::VecDeque<marspot::state::SavedWindowLayout>,
     /// Index into `windows` of the window with keyboard focus.
     key_window: usize,
 }
@@ -2922,6 +3091,15 @@ impl CoreApp {
     /// The pane is spawned off-loop like `[+]` does — a window opening
     /// must not freeze the panes of the windows already up.
     fn adopt_window(&mut self, window_id: u32, w_phys: f64, h_phys: f64, scale: f64) {
+        // RFC-005 step 6b — a queued record means L1 is reopening a
+        // window from the last session, not making a new one.  The
+        // window comes up with its saved grid and one "starting…"
+        // placeholder per saved slot; the assembly worker replaces
+        // them with the real panes.
+        if let Some(record) = self.saved_windows.pop_front() {
+            self.adopt_restored_window(window_id, record, w_phys, h_phys, scale);
+            return;
+        }
         let (cell_w, cell_h) = self.renderer.cell_dims();
         let cols = ((w_phys / cell_w) as u16).max(INITIAL_COLS);
         let rows = ((h_phys / cell_h) as u16).max(INITIAL_ROWS);
@@ -2958,6 +3136,131 @@ impl CoreApp {
             windows = self.windows.len()
         );
         self.save_session_state();
+    }
+
+    /// RFC-005 step 6b — bring up a window from its saved record.
+    ///
+    /// Placeholders first, panes later: the window is on screen with
+    /// its own grid before any reattach has been attempted, so the
+    /// windows already up never stall on this one's I/O.
+    fn adopt_restored_window(
+        &mut self,
+        window_id: u32,
+        record: marspot::state::SavedWindowLayout,
+        w_phys: f64,
+        h_phys: f64,
+        scale: f64,
+    ) {
+        let grid_cols = (record.grid_cols as usize).clamp(1, 6);
+        let grid_rows = (record.grid_rows as usize).clamp(1, 6);
+        // Cell dims for this window's own grid — a restored 3×3 window
+        // must hand its L3s the size they will actually be shown at,
+        // exactly as the boot path does.
+        let (cell_w, cell_h) = self.renderer.cell_dims();
+        let probe = Layout::build(
+            w_phys,
+            h_phys,
+            0.0, // sidebar starts collapsed
+            HEADER_PT * scale,
+            CELL_TITLE_PT * scale,
+            grid_cols,
+            grid_rows,
+            cell_w,
+            cell_h,
+        );
+        let (cols, rows) = (probe.cells[0].cols, probe.cells[0].rows);
+        let placeholders: Vec<Pane> = record
+            .panes
+            .iter()
+            .map(|p| Pane::new_pending(p.sid, cols, rows))
+            .collect();
+        // A record with no panes would leave an empty window, which
+        // several paths index into; one placeholder is the floor.
+        let placeholders = if placeholders.is_empty() {
+            vec![Pane::new_pending(0, cols, rows)]
+        } else {
+            placeholders
+        };
+        let focused_idx = (record.focused_idx as usize).min(placeholders.len() - 1);
+        let mut w = WindowState::new(
+            window_id,
+            placeholders,
+            focused_idx,
+            grid_cols,
+            grid_rows,
+            w_phys,
+            h_phys,
+            scale,
+        );
+        w.render.mark_bg_clear_required();
+        self.windows.push(w);
+        let wi = self.windows.len() - 1;
+        self.key_window = wi;
+        self.rebuild_layout(wi);
+        assemble_restore_window_async(window_id, record, cols, rows, &self.event_tx);
+        lx_event!(
+            "WINDOW_RESTORING",
+            "saved window reopened; panes assembling off-loop",
+            window_id = window_id,
+            slots = win!(self, wi).panes.len(),
+            windows = self.windows.len()
+        );
+    }
+
+    /// A restore worker landed.  Swap the placeholders for the real
+    /// panes; a window closed in the meantime drops them.
+    fn adopt_restored_panes(&mut self, window_id: u32, panes: Vec<Pane>) {
+        let Some(wi) = self.window_index(window_id) else {
+            lx_warn!(
+                "core.window.restore_window_gone",
+                "window closed while its panes were assembling; dropping them",
+                window_id = window_id,
+                panes = panes.len()
+            );
+            return;
+        };
+        if panes.is_empty() {
+            lx_warn!(
+                "core.window.restore_empty",
+                "assembly produced no panes; window keeps its placeholders",
+                window_id = window_id
+            );
+            return;
+        }
+        let n = panes.len();
+        win!(self, wi).panes = panes;
+        win!(self, wi).focused_idx = win!(self, wi).focused_idx.min(n - 1);
+        // Placeholder-era selection / title edit referred to panes that
+        // no longer exist.
+        win!(self, wi).selection = None;
+        win!(self, wi).selection_dragging = false;
+        win!(self, wi).editing_title = None;
+        win!(self, wi).title_edit_buffer.clear();
+        self.rebuild_layout(wi);
+        self.save_session_state();
+        lx_event!(
+            "WINDOW_RESTORED",
+            "assembled panes replaced the placeholders",
+            window_id = window_id,
+            panes = n
+        );
+    }
+
+    /// `(window index, pane index)` of the pane holding this session.
+    ///
+    /// Sessions are window-agnostic: a session id says nothing about
+    /// which window its pane currently lives in, and an off-loop
+    /// result (spawn finished, control reconnected, search hits) has
+    /// to find it wherever it is.  Searching only the key window meant
+    /// those results were silently dropped whenever the user had
+    /// focused a different window in the meantime.
+    fn find_pane_by_sid(&self, sid: u64) -> Option<(usize, usize)> {
+        self.windows.iter().enumerate().find_map(|(wi, w)| {
+            w.panes
+                .iter()
+                .position(|p| p.shelld_session_id() == Some(sid))
+                .map(|pi| (wi, pi))
+        })
     }
 
     /// Index of the window carrying `window_id`, if the core has it.
@@ -3183,13 +3486,11 @@ impl CoreApp {
         has_more: bool,
         hits: Vec<marspot::shell_proto::WireSearchHit>,
     ) {
-        let Some(pane) = win!(self).panes.iter_mut().find(|p| {
-            p.session().shelld_session_id() == Some(shelld_session_id)
-        }) else { return };
-        let Some(s) = pane.search.as_mut() else { return };
+        let Some((wi, pi)) = self.find_pane_by_sid(shelld_session_id) else { return };
+        let Some(s) = win!(self, wi).panes[pi].search.as_mut() else { return };
         let changed = s.list.apply_results(query_id, hits, has_more);
         if changed {
-            win!(self).needs_render = true;
+            win!(self, wi).needs_render = true;
         }
     }
 
@@ -5478,6 +5779,7 @@ fn assemble_panes_at_boot(
     boot_cols: u16,
     boot_rows: u16,
     event_tx: &Sender<CoreEvent>,
+    sweeps_registry: bool,
 ) -> (Vec<Pane>, Vec<u64>) {
     // entry.toml titles, collected during the registry scan below.
     // Last resort of the title fallback chain at the end of assembly.
@@ -5665,7 +5967,13 @@ fn assemble_panes_at_boot(
     // (the old path SIGKILLed + deleted these when the layout
     // shrank).  Over the hard cap: stop the process but RETIRE
     // the dir (recoverable) instead of deleting.
-    for id in raw_list.iter().map(|e| e.id) {
+    //
+    // Only the sweeping assembly does this.  RFC-005 step 6b restores
+    // the other windows through this same function, and a restored
+    // window knows only its own saved sids: were it to sweep, it would
+    // adopt the boot window's panes a second time and retire the dirs
+    // of every session it simply never heard of.
+    for id in raw_list.iter().map(|e| e.id).filter(|_| sweeps_registry) {
         if !alive_ids.contains(&id) || claimed.contains(&id) {
             continue;
         }
@@ -5721,7 +6029,10 @@ fn assemble_panes_at_boot(
     // reserved for the user's explicit pane close.
     let mut retired = 0usize;
     for id in session_registry::list_session_dir_ids() {
-        if claimed.contains(&id) || alive_ids.contains(&id) {
+        // Same reason as the orphan loop above: a restored window's
+        // `claimed` set covers only its own saved sids, so sweeping
+        // here would retire the live dirs of every other window.
+        if !sweeps_registry || claimed.contains(&id) || alive_ids.contains(&id) {
             continue;
         }
         if let Some(entry) = entry_by_id.get(&id) {
@@ -5740,7 +6051,11 @@ fn assemble_panes_at_boot(
             ),
         }
     }
-    let purged = session_registry::purge_expired_retired();
+    let purged = if sweeps_registry {
+        session_registry::purge_expired_retired()
+    } else {
+        0
+    };
     lx_event!(
         "core.session_registry.inventory",
         "RFC-004 identity-keyed boot assembly",
@@ -5952,12 +6267,16 @@ fn main() {
         }
         // RFC-004 B.1 — identity-keyed slot assembly (extracted to
         // `assemble_panes_at_boot`; see its doc for the semantics).
+        // The boot assembly is the sweeping one: it adopts orphaned
+        // live sessions and retires unclaimed dirs.  Restored windows
+        // (step 6b) run the same function with that turned off.
         let (assembled, reattached_ids) = assemble_panes_at_boot(
             boot_window.as_ref(),
             n_sessions,
             boot_cols,
             boot_rows,
             &event_tx,
+            true,
         );
         panes = assembled;
         // RFC-003 §6 Amendment 16 — L3 self-execv silent update
@@ -6017,6 +6336,7 @@ fn main() {
         saw_window_aware_attach: false,
         l3_mode,
         event_tx: event_tx.clone(),
+        saved_windows,
         windows: vec![{
             let mut w = WindowState::new(
                 FIRST_WINDOW_ID,
@@ -6037,6 +6357,24 @@ fn main() {
         key_window: 0,
     };
     app.rebuild_layout(0);
+    // RFC-005 step 6b — ask L1 to reopen the windows the last session
+    // had past this one.  Frame index i+1 because the boot window is
+    // entry 0 of `window-state.bin`.  Queued rather than written here:
+    // the control socket is not up yet, and `pending_to_shell` drains
+    // on the first loop iteration.
+    for i in 0..app.saved_windows.len() {
+        app.pending_to_shell.push((
+            MsgType::WindowOpenRequest,
+            marspot::shell_proto::encode_window_open_request(i as u32 + 1),
+        ));
+    }
+    if !app.saved_windows.is_empty() {
+        lx_event!(
+            "WINDOW_RESTORE_REQUESTED",
+            "asked L1 to reopen the rest of the saved windows",
+            windows = app.saved_windows.len()
+        );
+    }
     // F3+6 — first save right after boot so a hard kill before any
     // user action still leaves the file populated.  Costs one write
     // (~50us); idempotent if shell-state.bin already matched.
@@ -6231,6 +6569,9 @@ fn main() {
                 CoreEvent::WindowFocus(win) => {
                     app.focus_window(win);
                 }
+                CoreEvent::WindowRestoreFinished(win, panes) => {
+                    app.adopt_restored_panes(win, panes.0)
+                }
                 CoreEvent::WindowClosed(win) => app.close_window(win),
                 CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win) => {
                     // Same staging as the legacy frame — the id only
@@ -6339,10 +6680,13 @@ fn main() {
                         );
                         return;
                     };
-                    let pane_idx = win!(app).panes.iter().position(|p| {
-                        p.session().l3_session_id() == Some(sid)
+                    let found = app.windows.iter().enumerate().find_map(|(wi, w)| {
+                        w.panes
+                            .iter()
+                            .position(|p| p.session().l3_session_id() == Some(sid))
+                            .map(|pi| (wi, pi))
                     });
-                    let Some(idx) = pane_idx else { return };
+                    let Some((wi, idx)) = found else { return };
                     match new_control.try_clone() {
                         Ok(rh) => {
                             // Both halves of the new connection move
@@ -6353,7 +6697,7 @@ fn main() {
                             // `L3Conn::swap_control`).
                             let (selection_tx, selection_rx) =
                                 std::sync::mpsc::channel::<(u32, String)>();
-                            win!(app).panes[idx]
+                            win!(app, wi).panes[idx]
                                 .session_mut()
                                 .swap_l3_control(new_control, selection_rx);
                             let tx = app.event_tx.clone();
@@ -6375,11 +6719,7 @@ fn main() {
                     }
                 }
                 CoreEvent::L3SpawnFinished(sid, outcome) => {
-                    let Some(idx) = win!(app)
-                        .panes
-                        .iter()
-                        .position(|p| p.shelld_session_id() == Some(sid))
-                    else {
+                    let Some((wi, idx)) = app.find_pane_by_sid(sid) else {
                         // The slot was closed while the spawn ran.  The
                         // child is dropped with the L3Spawn, which kills
                         // it — nothing to reap here.
@@ -6387,7 +6727,7 @@ fn main() {
                     };
                     match outcome.0 {
                         Ok(spawn) => {
-                            win!(app).panes[idx].adopt_backend(
+                            win!(app, wi).panes[idx].adopt_backend(
                                 marspot::pane::PaneBackend::L3(
                                     marspot::pane::L3Conn::new(spawn, sid),
                                 ),
@@ -6410,10 +6750,10 @@ fn main() {
                             // someone adds a field that outlives a
                             // failed spawn.
                             let (c, r) = {
-                                let g = win!(app).panes[idx].session().grid();
+                                let g = win!(app, wi).panes[idx].session().grid();
                                 (g.cols(), g.rows())
                             };
-                            win!(app).panes[idx].adopt_backend(
+                            win!(app, wi).panes[idx].adopt_backend(
                                 marspot::pane::PaneBackend::Vacant(
                                     marspot::pane::VacantPane::new(sid, c, r),
                                 ),
@@ -6426,7 +6766,7 @@ fn main() {
                             );
                         }
                     }
-                    win!(app).needs_render = true;
+                    win!(app, wi).needs_render = true;
                 }
                 CoreEvent::L3Ready => {
                     // Just needs to wake the loop; `pump_all` re-reads
