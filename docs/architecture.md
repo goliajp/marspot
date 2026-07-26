@@ -380,6 +380,38 @@ logs nothing.  This exists because the first two stalls could only be
 diagnosed by catching the process live and reading a stack: sessions log
 on events, so a wedged loop and an idle loop were indistinguishable.
 
+## Windows (RFC-005, in progress)
+
+L2's `CoreApp` used to hold one window's worth of state directly —
+one `Layout`, one `Vec<Pane>`, one `focused_idx`, one grid shape, one
+`(w_phys, h_phys, scale)` — which encoded "there is exactly one
+window" into ~450 field accesses.  Those fields now live in
+`WindowState`, and `CoreApp` holds `windows: Vec<WindowState>` plus
+`key_window`.
+
+Access goes through `win!(self)`, a macro that expands to
+`self.windows[self.key_window]`.  It is a macro rather than an
+accessor method so it stays a plain **field path**: the borrow
+checker still sees `win!(self).panes` and `self.renderer` as disjoint
+borrows, which an `fn win_mut(&mut self)` would not (it borrows all
+of `self` and makes most of the render path unwritable).
+
+What stayed on `CoreApp` is the set that is *not* window-scoped:
+everything keyed by session id (`pane_badges`, `pane_titles`,
+`pane_cwds`, `pane_sessions`, …), which travels with a pane across
+windows for free, plus the renderer and the event channel.
+
+The split is what makes a pane portable: a `Pane` owns its backend,
+session id, control socket, scroll offset, search state and title, so
+moving it between windows is a `Vec` move and L3 never learns it
+happened.  `window_state_tests::moving_a_pane_between_windows_carries_its_state`
+pins that.
+
+See `docs/rfc-005-multi-window.md` for the full plan — one core with
+N surfaces (not a core per window), the wire's `window_id`, the
+renderer's shared-by-scale split, and the per-window persistence
+format.
+
 ## Latent issues (architectural, not just bugs)
 
 - **Retina double-scale**: long-standing bug from the winit-era code —
