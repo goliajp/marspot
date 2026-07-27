@@ -40,6 +40,15 @@ dev_kill_shell_core() {
   pkill -9 -f "$DEV_TARGET/marspot-core( |\$)"  >/dev/null 2>&1 || true
   pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-shell( |\$)" >/dev/null 2>&1 || true
   pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |\$)"  >/dev/null 2>&1 || true
+  # 2026-07-28 事故:sessions 也必须收。L3 有意在 L2/L1 死后存活
+  # (silent update / 崩溃重连的根基),所以杀了 shell/core 之后它们
+  # 全部变成 ppid=1 的孤儿;测试脚本又常在下一轮开跑前 rm -rf 掉
+  # sessions/ 注册表 —— 注册表没了,任何 reaper 都再也找不到它们。
+  # 当晚 176 个泄漏 session 的主力就是这么来的。两道防线:这里按
+  # 沙箱二进制路径直接杀(只匹配 dev/target 与沙箱 binaries 路径,
+  # 碰不到安装版),加上 L3 自身的 registry 哨兵(条目消失即自杀)。
+  pkill -9 -f "$DEV_TARGET/marspot-session( |\$)" >/dev/null 2>&1 || true
+  pkill -9 -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-session( |\$)" >/dev/null 2>&1 || true
 }
 
 # Wipe the sandbox binary tree + structured marspot.log (NOT sessions —

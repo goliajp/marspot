@@ -1276,6 +1276,63 @@ mod boot_assembly_tests {
         );
     }
 
+    /// 2026-07-28 incident — the machine died with 176 live session
+    /// processes.  The population cap turns "grow until the OS falls
+    /// over" into "one spawn refuses, loudly".  Cap lowered via env so
+    /// proving the refusal doesn't itself need a process storm.
+    #[test]
+    fn spawning_past_the_session_population_cap_refuses() {
+        let _sb = Sandbox::new("popcap");
+        // SAFETY: nextest is process-per-test.
+        unsafe { std::env::set_var("MARSPOT_SESSION_CAP", "1") };
+        let (tx, _rx) = mpsc::channel();
+        let first_sid = reg::allocate_next_session_id().unwrap();
+        let _first = spawn_l3_pane_with_cwd(60, 16, first_sid, "", &tx)
+            .expect("first spawn fits under the cap");
+        let second_sid = reg::allocate_next_session_id().unwrap();
+        let err = match spawn_l3_pane_with_cwd(60, 16, second_sid, "", &tx) {
+            Err(e) => e,
+            Ok(_) => panic!("second spawn must refuse at cap 1"),
+        };
+        assert!(
+            err.to_string().contains("hard cap"),
+            "refusal must name the cap, got: {err}"
+        );
+        unsafe { std::env::remove_var("MARSPOT_SESSION_CAP") };
+    }
+
+    /// 2026-07-28 incident — a session whose registry entry is gone
+    /// must exit on its own.  L3s outlive their L2/L1 by design, so
+    /// the entry is the only ownership record; every reaper works by
+    /// removing it.  Before the deadman, a test script (or anything)
+    /// that deleted the registry out from under live sessions created
+    /// processes NOTHING could ever find or kill — 176 of them helped
+    /// push the machine into a forced reboot.
+    #[test]
+    fn a_session_whose_registry_entry_is_deleted_exits_by_itself() {
+        let _sb = Sandbox::new("deadman");
+        let (tx, _rx) = mpsc::channel();
+        let sid = reg::allocate_next_session_id().unwrap();
+        let live = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+        let pid = live.session().l3_pid().expect("spawned L3 has a pid");
+        std::mem::forget(live); // Drop would SIGKILL it — the deadman must do the work
+        assert!(reg::pid_is_live_session(pid));
+
+        std::fs::remove_file(reg::session_entry_path(sid)).expect("remove entry");
+
+        // Check cadence is 5 s; give it that plus scheduling margin.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
+            if !reg::pid_is_live_session(pid) {
+                return; // exited on its own — the leak class is closed
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        panic!("session {pid} outlived its deleted registry entry");
+    }
+
     /// Duplicate sid in a corrupt saved state must not double-bind one
     /// session to two panes — the second slot falls back to a fresh id.
     #[test]
@@ -1790,6 +1847,18 @@ fn spawn_l3(
     spawn_l3_with_cwd(cols, rows, session_id, "", event_tx)
 }
 
+/// Absolute ceiling on live `marspot-session` processes this state
+/// root may hold, counted against the registry at spawn time.
+///
+/// 2026-07-28 incident — the machine went down with 176 of them.
+/// `SESSION_COUNT_HARD_CAP` (36) bounds panes per window, but nothing
+/// bounded the PROCESS population: sessions outlive their windows by
+/// design, so a crash-restore loop grew a new generation every cycle.
+/// Refusing here turns "the system dies" into "one spawn fails and a
+/// vacant pane says so" — the failure the architecture already knows
+/// how to show.
+const SESSION_PROCESS_HARD_CAP: usize = 64;
+
 fn spawn_l3_with_cwd(
     cols: u16,
     rows: u16,
@@ -1797,6 +1866,32 @@ fn spawn_l3_with_cwd(
     initial_cwd: &str,
     event_tx: &Sender<CoreEvent>,
 ) -> std::io::Result<L3Spawn> {
+    // Population guard.  A readdir + one kill(0) per entry, only on
+    // the spawn path — spawns are user-rate (boot, [+], revive), never
+    // per-frame.  `MARSPOT_SESSION_CAP` overrides the cap for tests
+    // (spawning 64 real processes to prove a refusal would itself be
+    // a small process storm).
+    let cap = std::env::var("MARSPOT_SESSION_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(SESSION_PROCESS_HARD_CAP);
+    let live = marspot_term::session_registry::list_session_entries()
+        .iter()
+        .filter(|e| marspot_term::session_registry::pid_is_live_session(e.pid))
+        .count();
+    if live >= cap {
+        lx_error!(
+            "core.spawn.session_population_cap",
+            "refusing to spawn: live session processes at hard cap",
+            live = live,
+            cap = cap,
+            session = session_id
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::QuotaExceeded,
+            format!("{live} live sessions >= hard cap {cap}"),
+        ));
+    }
     // RFC-003 Amendment 7 step 3: L2 creates the region under the
     // deterministic per-session name `/msp-s-<id>` so a post-swap L2
     // can shm_open(name) and reattach to the surviving L3 instead of
@@ -6231,6 +6326,21 @@ fn assemble_panes_at_boot(
         // even bound.  Unlink the stale entry + sock (KEEPING
         // scrollback/bytelog/state.bin) so the post-spawn wait
         // synchronises on the fresh child's own registry write.
+        // 2026-07-28 — safe-mode boot (crash-loop brake, set by the
+        // shell): reattach is fine, fresh processes are not.  The slot
+        // stays vacant; the user revives it with a keystroke once the
+        // loop is understood.  This is the line that stops a crash
+        // loop from spawning a new generation every cycle.
+        if std::env::var("MARSPOT_SAFE_MODE").is_ok() {
+            lx_warn!(
+                "core.boot.safe_mode_vacant",
+                "safe mode: slot left vacant instead of spawning fresh",
+                session = spawn_sid
+            );
+            claimed.insert(spawn_sid);
+            panes.push(Pane::new_vacant(spawn_sid, boot_cols, boot_rows));
+            continue;
+        }
         let _ = std::fs::remove_file(
             marspot_term::session_registry::session_entry_path(spawn_sid),
         );
@@ -6682,11 +6792,15 @@ fn main() {
     // entry 0 of `window-state.bin`.  Queued rather than written here:
     // the control socket is not up yet, and `pending_to_shell` drains
     // on the first loop iteration.
-    for i in 0..app.saved_windows.len() {
-        app.pending_to_shell.push((
-            MsgType::WindowOpenRequest,
-            marspot::shell_proto::encode_window_open_request(i as u32 + 1),
-        ));
+    // Safe-mode boot: L1 would refuse these anyway; not asking keeps
+    // the intent visible on both sides of the wire.
+    if std::env::var("MARSPOT_SAFE_MODE").is_err() {
+        for i in 0..app.saved_windows.len() {
+            app.pending_to_shell.push((
+                MsgType::WindowOpenRequest,
+                marspot::shell_proto::encode_window_open_request(i as u32 + 1),
+            ));
+        }
     }
     if !app.saved_windows.is_empty() {
         lx_event!(

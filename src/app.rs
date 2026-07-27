@@ -1455,7 +1455,7 @@ fn drain_pending_windows() {
                     if let Some(mtm) = MainThreadMarker::new() {
                         let nsapp = NSApplication::sharedApplication(mtm);
                         #[allow(deprecated)]
-                        unsafe { nsapp.activateIgnoringOtherApps(true) };
+                        nsapp.activateIgnoringOtherApps(true);
                     }
                     w.makeKeyAndOrderFront(None);
                     w.performClose(None);

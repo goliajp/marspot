@@ -30,4 +30,11 @@ cd "$ROOT"
 # history (bit us 2026-07-03: session 347's scrollback truncated to
 # test residue).  Unset it before any test process spawns.
 unset MARSPOT_SESSION_ID
-exec cargo nextest run --workspace --all-targets "$@"
+# 2026-07-28 事故:nextest 默认并发 = 核数(此机 14),811 个测试里
+# 一批要各自初始化 Metal / CoreText 的重进程(每个 ~130MB)齐发,
+# 32 个测试二进制两分钟内并发拉起,16 个同时抢一把内核 rwlock 写锁,
+# tccd 跟着卡进不可中断等待,WindowServer 主线程同步等 tccd 40 秒 →
+# 被 watchdogd 击杀,整机强制重启。上限压到 6(可用 MARSPOT_TEST_JOBS
+# 覆盖);测试墙钟略增,换的是"跑测试不会把宿主机跑死"。
+exec cargo nextest run --workspace --all-targets \
+  --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@"

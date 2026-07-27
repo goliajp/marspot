@@ -47,6 +47,12 @@ pub enum BannerKind {
     /// Note: silent updates are *not* banner-worthy — the dual-core
     /// swap is invisible, so there's no "Updating…" state.
     Recovering,
+    /// 2026-07-28 incident — this boot detected a crash-restart loop
+    /// (≥5 launches in 5 min).  We came up in safe mode: sessions are
+    /// reattached but nothing new is spawned and no extra windows are
+    /// restored, so the loop cannot multiply processes.  Persistent
+    /// for the whole boot; the user should look at the logs.
+    CrashLoop,
 }
 
 impl BannerKind {
@@ -57,6 +63,9 @@ impl BannerKind {
         match self {
             BannerKind::UpdateFailed => "Marspot stopped — please restart the app",
             BannerKind::Recovering => "Marspot is recovering…",
+            BannerKind::CrashLoop => {
+                "Marspot crashed repeatedly — safe mode (sessions kept, nothing new spawned)"
+            }
         }
     }
 }

@@ -1365,6 +1365,20 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         });
     }
     let snapshot_writer = SnapshotWriter::spawn(session.id());
+    // 2026-07-28 incident — registry-liveness deadman.  This process
+    // is DESIGNED to outlive its L2/L1 (that is what makes silent
+    // updates and crash reattach possible), which also means nothing
+    // upstream will ever reap it: after a shell crash its ppid is 1.
+    // The registry entry is therefore its ownership record — every
+    // reaper (boot sweep, retire, dev sandbox wipe) works by removing
+    // the entry or the dir.  A session whose entry is gone is a
+    // session nobody can ever find again; 176 of those accumulated on
+    // 2026-07-28 and helped push the machine into a forced reboot.
+    // So: entry gone → exit.  Checked at most every 5 s off the
+    // existing recv timeout — a stat(2), nothing on the byte path.
+    let my_entry_path = marspot_term::session_registry::session_entry_path(session.id());
+    let mut last_entry_check = Instant::now();
+    const ENTRY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1374,6 +1388,17 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 break;
             }
         };
+        if last_entry_check.elapsed() >= ENTRY_CHECK_INTERVAL {
+            last_entry_check = Instant::now();
+            if !my_entry_path.exists() {
+                lx_event!(
+                    "SESSION_REGISTRY_GONE",
+                    "registry entry removed — this session is unreachable; exiting",
+                    session_id = session.id()
+                );
+                break;
+            }
+        }
         // Time from here, not from before the `recv` above: a loop
         // parked waiting for work is doing its job, not stalling.
         watch.begin();

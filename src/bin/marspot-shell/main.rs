@@ -112,6 +112,142 @@ fn record_launch_and_detect_loop(current: &std::path::Path) -> bool {
     recent.iter().all(|r| r.1 == mtime) && span >= 0.0 && span <= LAUNCH_LOOP_WINDOW_SECS
 }
 
+/// 2026-07-28 incident — what a launch history says about THIS boot.
+///
+/// The journal already existed, but it was only used to decide "is
+/// the current/ binary broken" (same-mtime loop → binary rollback).
+/// The incident loop was different: the binary was fine, the user's
+/// own action crashed it, an external relauncher restarted it within
+/// 1–5 s, and the restore path then spawned a fresh generation of
+/// processes each cycle — 159 extra sessions in the final hour, and
+/// the machine went down.  Neither backoff nor a spawn stop existed.
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchVerdict {
+    Normal,
+    /// ≥3 launches inside 60 s: sleep this many seconds before doing
+    /// anything expensive.  Exponential in the burst size, capped —
+    /// the relauncher may have no backoff of its own, so the shell
+    /// carries it: a sleeping process is cheap, a booting one is not.
+    Backoff(u64),
+    /// ≥5 launches inside 300 s: on top of the backoff, come up in
+    /// safe mode — reattach existing sessions (the user's live work)
+    /// but spawn nothing fresh and restore no extra windows.  A loop
+    /// that cannot multiply processes is a nuisance; one that can is
+    /// how 2026-07-28 happened.
+    SafeMode(u64),
+}
+
+const RAPID_WINDOW_SECS: f64 = 60.0;
+const RAPID_THRESHOLD: usize = 3;
+const SAFE_MODE_WINDOW_SECS: f64 = 300.0;
+const SAFE_MODE_THRESHOLD: usize = 5;
+const BACKOFF_CAP_SECS: u64 = 30;
+
+/// Pure so it can be pinned by tests: `stamps` are the journal's
+/// launch timestamps (any order), `now` is this launch's clock.  The
+/// journal row for this launch is already appended by the time the
+/// redirected shell runs, so the counts include self.
+fn assess_launch_history(stamps: &[f64], now: f64) -> LaunchVerdict {
+    let rapid = stamps
+        .iter()
+        .filter(|&&t| now - t >= 0.0 && now - t <= RAPID_WINDOW_SECS)
+        .count();
+    let recent = stamps
+        .iter()
+        .filter(|&&t| now - t >= 0.0 && now - t <= SAFE_MODE_WINDOW_SECS)
+        .count();
+    let backoff = if rapid >= RAPID_THRESHOLD {
+        (1u64 << (rapid - RAPID_THRESHOLD + 1)).min(BACKOFF_CAP_SECS)
+    } else {
+        0
+    };
+    if recent >= SAFE_MODE_THRESHOLD {
+        LaunchVerdict::SafeMode(backoff.max(1))
+    } else if backoff > 0 {
+        LaunchVerdict::Backoff(backoff)
+    } else {
+        LaunchVerdict::Normal
+    }
+}
+
+#[cfg(test)]
+mod crash_loop_tests {
+    use super::*;
+
+    /// 正常一天的启动分布(早一次、午一次、崩一次后 1 次)不触发。
+    #[test]
+    fn scattered_launches_are_normal() {
+        let now = 100_000.0;
+        assert_eq!(
+            assess_launch_history(&[now - 40_000.0, now - 7_000.0, now], now),
+            LaunchVerdict::Normal
+        );
+        // 两次快速重启还够不着阈值(用户手滑连开两次)。
+        assert_eq!(
+            assess_launch_history(&[now - 10.0, now], now),
+            LaunchVerdict::Normal
+        );
+    }
+
+    /// 60 秒里第 3 次 → 退避,且指数增长、有上限。
+    #[test]
+    fn rapid_relaunches_back_off_exponentially() {
+        let now = 100_000.0;
+        assert_eq!(
+            assess_launch_history(&[now - 20.0, now - 10.0, now], now),
+            LaunchVerdict::Backoff(2)
+        );
+        assert_eq!(
+            assess_launch_history(&[now - 30.0, now - 20.0, now - 10.0, now], now),
+            LaunchVerdict::Backoff(4)
+        );
+        // 8 连发:1<<6=64 被 30 封顶……但 300 秒窗口里 ≥5 已经进
+        // safe mode,所以先验证 cap 在 SafeMode 的退避里生效。
+        let burst: Vec<f64> = (0..8).map(|i| now - i as f64 * 5.0).collect();
+        assert_eq!(
+            assess_launch_history(&burst, now),
+            LaunchVerdict::SafeMode(30)
+        );
+    }
+
+    /// 5 分钟里第 5 次 → safe mode —— 2026-07-28 那晚的形状:
+    /// 崩溃后 1~5 秒被外部拉起,每轮 restore 又多一代进程。
+    #[test]
+    fn a_crash_loop_enters_safe_mode() {
+        let now = 100_000.0;
+        let stamps = [now - 240.0, now - 180.0, now - 120.0, now - 70.0, now];
+        assert_eq!(
+            assess_launch_history(&stamps, now),
+            LaunchVerdict::SafeMode(1),
+            "5 launches spread over 5 min: no rapid burst, but still a loop"
+        );
+    }
+
+    /// 时钟异常(未来时间戳)不许把正常启动误判成循环。
+    #[test]
+    fn future_stamps_do_not_count() {
+        let now = 100_000.0;
+        let stamps = [now + 50.0, now + 60.0, now + 70.0, now + 80.0, now];
+        assert_eq!(assess_launch_history(&stamps, now), LaunchVerdict::Normal);
+    }
+}
+
+fn now_unix_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Read the journal's timestamps.  Bad rows just don't count.
+fn read_launch_stamps() -> Vec<f64> {
+    std::fs::read_to_string(shell_launch_log_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split('\t').next()?.parse().ok())
+        .collect()
+}
+
 /// Re-exec into `binaries/current/marspot-shell` if it exists and
 /// is a different file from us.  Guarded against infinite recursion
 /// by `MARSPOT_NO_REDIRECT=1` (set on the env we pass to the new
@@ -780,6 +916,10 @@ struct ShellApp {
     /// transitions and call `presenter.set_banner` only when it
     /// actually changes.
     banner_kind: Option<BannerKind>,
+    /// This boot came up under the crash-loop brake: reattach only,
+    /// spawn nothing fresh, restore no extra windows.  Read once from
+    /// `MARSPOT_SAFE_MODE` (set in `main`, inherited by the core).
+    safe_mode: bool,
     /// Dev seam only (`MARSPOT_DEV_CLOSE_EXTRA`): close each extra
     /// window again once it has painted.  A script cannot deliver the
     /// red button or Cmd-W to the sandbox app, and closing a second
@@ -962,6 +1102,14 @@ impl ShellApp {
         // Keyed on the core generation rather than on "have we
         // restored yet", because a cold launch sends the whole batch
         // in one burst, before any of those windows exist.
+        if self.safe_mode {
+            lx_warn!(
+                "shell.window.restore_refused_safe_mode",
+                "safe-mode boot restores no extra windows",
+                frame_index = frame_index
+            );
+            return;
+        }
         if self.core_generation > 1 {
             lx_event!(
                 "WINDOW_RESTORE_IGNORED",
@@ -1113,6 +1261,7 @@ impl ShellApp {
             active: None,
             redraw_thread_started: false,
             binaries,
+            safe_mode: std::env::var("MARSPOT_SAFE_MODE").is_ok(),
             dev_close_extra: false,
             core_generation: 0,
             sup_state: SupervisorState::Idle,
@@ -1685,7 +1834,9 @@ impl ShellApp {
         // `banner_kind` compared against and one presenter written, the
         // second window silently never showed (or never cleared) it.
         let any_attached = self.windows.iter().any(|w| w.surfaces.is_some());
-        let want = if self.auto_restart_disabled {
+        let want = if self.safe_mode {
+            Some(BannerKind::CrashLoop)
+        } else if self.auto_restart_disabled {
             Some(BannerKind::UpdateFailed)
         } else if !self.core_alive() && any_attached {
             // Active core process is gone (just SIGKILL'd or died and we
@@ -3193,6 +3344,35 @@ Usage:\n\
             std::process::id()
         ),
     );
+    // 2026-07-28 — crash-loop brake.  Runs before anything expensive
+    // (updater thread, AppKit, core spawn): if this launch is part of
+    // a rapid-restart burst, sleep first so the burst cannot saturate
+    // the machine, and past the safe-mode threshold flag the whole
+    // boot as spawn-nothing-fresh (`MARSPOT_SAFE_MODE`, read by this
+    // process AND inherited by the core it spawns).
+    match assess_launch_history(&read_launch_stamps(), now_unix_f64()) {
+        LaunchVerdict::Normal => {}
+        LaunchVerdict::Backoff(secs) => {
+            lx_warn!(
+                "shell.crash_loop.backoff",
+                "rapid relaunches detected — sleeping before boot",
+                sleep_s = secs
+            );
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+        }
+        LaunchVerdict::SafeMode(secs) => {
+            lx_event!(
+                "SHELL_SAFE_MODE",
+                "crash loop detected — this boot reattaches but spawns nothing fresh",
+                sleep_s = secs
+            );
+            sup_log::log("SHELL_SAFE_MODE", "crash loop — safe-mode boot");
+            // SAFETY: startup path in main(), before any thread is
+            // spawned; children inherit it.
+            unsafe { std::env::set_var("MARSPOT_SAFE_MODE", "1") };
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+        }
+    }
     install_sigusr1_handler();
     // Record our pid for this state dir so `--trigger` / dev-push /
     // install-local signal THIS shell, not whichever marspot-shell
