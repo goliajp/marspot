@@ -147,9 +147,41 @@ pub fn read_windows() -> Option<Vec<SavedWindow>> {
     Some(out)
 }
 
+/// Refuse to write the real, installed app's state from a test
+/// binary.
+///
+/// `MARSPOT_STATE_DIR` unset means "the user's live layout", and a
+/// test that reaches any save path — directly, or through a `CoreApp`
+/// method that happens to persist — overwrites it with a fixture.  On
+/// 2026-07-27 that turned a 4×4 / 16-pane record into two 1×1 windows
+/// and the next core boot came up with one window and every session
+/// re-adopted as an orphan.  Sessions survived; the layout did not.
+///
+/// Cargo builds test executables into `target/{debug,release}/deps/`
+/// and nothing shipped ever runs from there, so the exe path is a
+/// precise signal.  An `Err` here is loud where the write was silent.
+fn refuse_if_test_binary(what: &str) -> io::Result<()> {
+    if std::env::var_os("MARSPOT_STATE_DIR").is_some() {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().unwrap_or_default();
+    let looks_like_test = exe
+        .parent()
+        .is_some_and(|d| d.file_name().is_some_and(|n| n == "deps"));
+    if looks_like_test {
+        return Err(io::Error::other(format!(
+            "refusing to write the installed app's {what} from a test \
+             binary ({}); set MARSPOT_STATE_DIR to a sandbox",
+            exe.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Best-effort atomic write of every window's frame, in creation
 /// order.  Always writes v2.
 pub fn write_windows(frames: &[SavedWindow]) -> io::Result<()> {
+    refuse_if_test_binary("window-state.bin")?;
     let path = window_state_file_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -225,6 +257,7 @@ pub fn read_dev_window() -> Option<SavedDevWindow> {
 }
 
 pub fn write_dev_window(s: &SavedDevWindow) -> io::Result<()> {
+    refuse_if_test_binary("dev-window-state.bin")?;
     let path = dev_window_state_file_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -331,6 +364,7 @@ fn read_panes(cur: &mut Cursor<&[u8]>) -> Option<Vec<SavedPane>> {
 /// propagated.  Best-effort means a transient I/O hiccup doesn't
 /// crash marspot.  Always writes v2.
 pub fn write(s: &SavedState) -> io::Result<()> {
+    refuse_if_test_binary("shell-state.bin")?;
     let path = state_file_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -518,6 +552,37 @@ mod tests {
 
         // A version from the future is not guessed at.
         assert!(read_from(&head(99)).is_none());
+    }
+
+    /// The net that would have saved the 2026-07-27 layout: with no
+    /// sandbox set, a write from a test binary must be refused rather
+    /// than land on the installed app's file.
+    ///
+    /// Also the honesty check on the mechanism itself — if cargo ever
+    /// stops building test executables into `deps/`, this fails and
+    /// says so instead of leaving a guard that quietly does nothing.
+    #[test]
+    fn a_test_binary_cannot_write_the_installed_apps_state() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let restore = std::env::var_os("MARSPOT_STATE_DIR");
+        // SAFETY: serialised by ENV_LOCK; restored before returning.
+        unsafe { std::env::remove_var("MARSPOT_STATE_DIR") };
+
+        let err = write(&SavedState::default()).expect_err("write must be refused");
+        assert!(
+            err.to_string().contains("refusing to write"),
+            "unexpected error: {err}"
+        );
+        assert!(write_windows(&[]).is_err());
+        assert!(write_dev_window(&SavedDevWindow {
+            display_id: 0, x: 0.0, y: 0.0, w: 1.0, h: 1.0, visible: false,
+        })
+        .is_err());
+
+        if let Some(v) = restore {
+            // SAFETY: as above.
+            unsafe { std::env::set_var("MARSPOT_STATE_DIR", v) };
+        }
     }
 
     /// Geometry file: same peer treatment, same v1 tolerance.

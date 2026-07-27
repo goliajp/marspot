@@ -589,10 +589,61 @@ mod window_state_tests {
         assert!(a.render.take_clear_required());
     }
 
+    /// Point every `marspot::paths` lookup at a per-process temp dir.
+    ///
+    /// Idempotent and cheap, so helpers call it unconditionally rather
+    /// than leaving it to each test to remember.
+    fn sandbox_state_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("marspot-core-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test state dir");
+        // SAFETY: nextest runs one test per process; `cargo test`
+        // shares one, but every test here wants the same sandbox, so
+        // racing writers all write the same value.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        dir
+    }
+
+    /// The guard that would have caught the 2026-07-27 incident: no
+    /// test in this module may run against the real state dir.
+    #[test]
+    fn tests_never_touch_the_real_state_dir() {
+        sandbox_state_dir();
+        let resolved = marspot::state::state_file_path();
+        assert!(
+            !resolved.starts_with(dirs_home().join("Library/Application Support/marspot")),
+            "state path escaped the sandbox: {}",
+            resolved.display()
+        );
+        assert!(
+            resolved.starts_with(std::env::temp_dir()),
+            "state path is not in a temp sandbox: {}",
+            resolved.display()
+        );
+    }
+
+    fn dirs_home() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    }
+
     /// A `CoreApp` with `windows` and nothing else going on.  Real
     /// `MetalRenderer` because the paths under test (`rebuild_layout`,
     /// texture creation) go through it.
+    ///
+    /// **Redirects the state dir first, always.**  A `CoreApp` reaches
+    /// `save_session_state`, and `marspot::paths` resolves to the real
+    /// `~/Library/Application Support/marspot` whenever
+    /// `MARSPOT_STATE_DIR` is unset — so a test that touches any path
+    /// which happens to save (`adopt_restored_panes`, `adopt_window`,
+    /// `close_session`, `commit_title_edit`, …) silently overwrites the
+    /// user's live layout with its own fixture.  That is not
+    /// hypothetical: on 2026-07-27 it replaced a 4×4 / 16-pane record
+    /// with this module's two 1×1 windows, and the next core boot came
+    /// up with one 1×1 window and every session re-adopted as an
+    /// orphan.  The sessions survived (their dirs are the real store);
+    /// the layout did not.
     fn app_with(windows: Vec<WindowState>) -> CoreApp {
+        sandbox_state_dir();
         let (event_tx, _rx) = mpsc::channel();
         CoreApp {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
