@@ -213,7 +213,6 @@ pub fn scan_visible_links<S: CellSource>(src: &S, opts: ScanOpts) -> Vec<LinkRan
         segments.push(LineSegment {
             phys_row: r,
             char_offset,
-            col_skip,
             cc_zero_indent: cc_cont && col_skip == 0,
         });
         let mut prev_was_wide = false;
@@ -553,7 +552,6 @@ fn scan_table_block<S: CellSource>(
             segments.push(LineSegment {
                 phys_row: r,
                 char_offset: chars.len(),
-                col_skip,
                 cc_zero_indent: false,
             });
             let mut prev_was_wide = false;
@@ -741,12 +739,6 @@ fn count_leading_ws<S: CellSource>(src: &S, row: u16, cols: u16) -> u16 {
 struct LineSegment {
     phys_row: u16,
     char_offset: usize,
-    /// Number of leading physical columns that were stripped from
-    /// this segment before joining the logical line (cc-mode hanging
-    /// indent removal).  Used by `emit_match()` to pick the right
-    /// starting col on continuation rows of a multi-row span; 0 for
-    /// ordinary rows and DECAWM continuations.
-    col_skip: u16,
     /// This segment was joined by the cc heuristic's WEAKEST form —
     /// zero-indent continuation (prev row completely full, this row
     /// starts at col 0).  That shape also matches ordinary flush
@@ -777,33 +769,6 @@ fn scan_logical_line(
     // panes typing).  emit_match is the only producer, append-only,
     // so passing `out` straight through is safe and saves the alloc.
     scan_line_into_matches(chars, col_map, out, segments, cols_per_row);
-}
-
-/// Char-pos → (phys_row, col) projector.  Linear over the small
-/// `segments` slice — O(N segments) per lookup, but in practice
-/// N ≤ 4 even for very wrapped URLs.  Physical column comes from
-/// `col_map[char_pos]` so wide-char trail halves (skipped) and
-/// cc-mode stripped indents don't desync the projection.
-fn locate(
-    segments: &[LineSegment],
-    col_map: &[u16],
-    char_pos: usize,
-    cols_per_row: usize,
-) -> Option<(u16, u16)> {
-    let col = *col_map.get(char_pos)? as usize;
-    if col >= cols_per_row {
-        return None;
-    }
-    for (i, seg) in segments.iter().enumerate() {
-        let next_off = segments
-            .get(i + 1)
-            .map(|s| s.char_offset)
-            .unwrap_or(usize::MAX);
-        if char_pos < next_off {
-            return Some((seg.phys_row, col as u16));
-        }
-    }
-    None
 }
 
 /// Original pattern scanner, but the per-row emit step now consults
@@ -1092,65 +1057,51 @@ fn emit_match(
     if char_lo >= char_hi_exclusive || segments.is_empty() {
         return;
     }
-    let (start_row, start_col) =
-        match locate(segments, col_map, char_lo, cols_per_row) {
-            Some(v) => v,
-            None => return,
-        };
-    let (end_row, end_col) =
-        match locate(segments, col_map, char_hi_exclusive - 1, cols_per_row) {
-            Some(v) => v,
-            None => return,
-        };
-    if start_row == end_row {
-        out.push(LinkRange {
-            row: start_row,
-            col_start: start_col,
-            col_end: end_col,
-            kind,
-            text,
-        });
-        return;
-    }
-    // Multi-row span: emit one LinkRange per physical row the match
-    // covers.  The first row runs from `start_col` to the row's right
-    // edge; middle / last rows run from their segment's `col_skip`
-    // (= start of contributed cells; 0 for DECAWM continuations, >0
-    // for cc-mode hanging-indent strips) to the right edge or
-    // `end_col`.  Every LinkRange carries the FULL text so click
-    // dispatch is identical regardless of which segment was clicked.
-    let last_col = cols_per_row.saturating_sub(1) as u16;
-    out.push(LinkRange {
-        row: start_row,
-        col_start: start_col,
-        col_end: last_col,
-        kind,
-        text: text.clone(),
-    });
-    for seg in segments.iter().skip(1) {
-        if seg.phys_row <= start_row || seg.phys_row >= end_row {
+    // One LinkRange per physical row the match touches, and each
+    // row's span is the cells it ACTUALLY covers — read back from
+    // `col_map`, the same projection `locate()` uses.
+    //
+    // The earlier shape ran every row but the last out to the pane's
+    // right edge, on the reasoning that a wrapped line fills its row.
+    // That holds for a DECAWM soft wrap and nothing else: a cc-mode
+    // hard wrap stops a few columns short, and a table cell stops at
+    // its border — where the underline then ran on through the border
+    // and out the far side of the table (2026-07-28, visible the
+    // moment table cells started merging).  Reading the columns back
+    // is both simpler and right in all three cases; for the soft wrap
+    // it produces the identical answer, because there the last char
+    // really is in the last column.
+    //
+    // `cols_per_row` still bounds the projection: a column at or past
+    // the row width is not a cell anyone can click.
+    for (i, seg) in segments.iter().enumerate() {
+        let seg_lo = seg.char_offset;
+        let seg_hi = segments
+            .get(i + 1)
+            .map(|s| s.char_offset)
+            .unwrap_or(col_map.len());
+        let lo = seg_lo.max(char_lo);
+        let hi = seg_hi.min(char_hi_exclusive);
+        if lo >= hi {
             continue;
         }
+        let (Some(&c0), Some(&c1)) = (col_map.get(lo), col_map.get(hi - 1)) else {
+            continue;
+        };
+        if c0 as usize >= cols_per_row || c1 < c0 {
+            continue;
+        }
+        let c1 = c1.min(cols_per_row.saturating_sub(1) as u16);
         out.push(LinkRange {
             row: seg.phys_row,
-            col_start: seg.col_skip,
-            col_end: last_col,
+            col_start: c0,
+            col_end: c1,
             kind,
+            // Every segment carries the FULL text, so click dispatch
+            // is the same wherever the user hit it.
             text: text.clone(),
         });
     }
-    let end_col_skip = segments
-        .iter()
-        .find(|s| s.phys_row == end_row)
-        .map(|s| s.col_skip)
-        .unwrap_or(0);
-    out.push(LinkRange {
-        row: end_row,
-        col_start: end_col_skip,
-        col_end: end_col,
-        kind,
-        text,
-    });
 }
 
 /// Scan one already-joined line of text.  The public single-line
@@ -1178,7 +1129,6 @@ fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
     let segments = [LineSegment {
         phys_row: row,
         char_offset: 0,
-        col_skip: 0,
         cc_zero_indent: false,
     }];
     scan_line_into_matches(&chars, &col_map, out, &segments, cols);
@@ -1937,6 +1887,23 @@ mod tests {
             .map(|l| l.text.as_str())
             .collect();
         assert_eq!(on_row_1, vec![full], "row 1 must carry ONE link");
+
+        // The underline stays inside the cell.  A multi-row span used
+        // to run every row but its last out to the pane's right edge
+        // — fine for a soft wrap, but here it drew straight through
+        // the cell border and out the other side of the table.
+        // Layout: `│ ` + 9-wide cell + ` │ ` + 31-wide cell + ` │`,
+        // so the right cell's text lives in columns 14..=44 and its
+        // border sits at 46.
+        for l in links.iter().filter(|l| l.text == full) {
+            assert!(
+                l.col_start >= 14 && l.col_end <= 44,
+                "row {} underlines {}..={}, outside the cell's 14..=44: {l:?}",
+                l.row,
+                l.col_start,
+                l.col_end
+            );
+        }
     }
 
     /// The join is per cell, not per row.  Two table rows whose cells
@@ -2180,13 +2147,11 @@ mod tests {
             super::LineSegment {
                 phys_row: 0,
                 char_offset: 0,
-                col_skip: 0,
                 cc_zero_indent: false,
             },
             super::LineSegment {
                 phys_row: 1,
                 char_offset: 10,
-                col_skip: 0,
                 cc_zero_indent: false,
             },
         ];
@@ -2218,7 +2183,6 @@ mod tests {
         let segments = vec![super::LineSegment {
             phys_row: 7,
             char_offset: 0,
-            col_skip: 0,
             cc_zero_indent: false,
         }];
         let mut out = Vec::new();
