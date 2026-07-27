@@ -214,6 +214,62 @@ assert shapes[0][2] >= 2, f'boot window lost panes: {shapes[0]}'
 assert shapes[1] == (1, 1, 1), f'fresh window should be 1x1 with one pane: {shapes[1]}'
 PY
 
+# --- 6. a core swap with two windows open -----------------------------
+# The riskiest thing about multi-window: a replacement core learns
+# about the boot window from its env pair and about the others from the
+# attach each sent when it opened — which a replacement missed.  L1 now
+# replays them (`announce_windows_to_new_core`), and refuses the
+# replacement core's restore requests (`core_generation`) so the
+# already-open windows are not opened a second time.
+#
+# SIGKILL is the cheapest way to get a fresh core against a live L1;
+# the silent-update path spawns one exactly the same way.
+echo
+echo "==> third phase: core swap with two windows open"
+mark=$(wc -l < "$APPLOG")
+CORE_PID=$(pgrep -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |$)" | head -1)
+[[ -z "$CORE_PID" ]] && CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
+[[ -n "$CORE_PID" ]] || fail "could not find the running core to kill"
+echo "==> SIGKILL core pid $CORE_PID"
+kill -9 "$CORE_PID"
+
+for _ in $(seq 1 300); do
+  tail -n "+$((mark + 1))" "$APPLOG" | grep -q 'WINDOW_REANNOUNCED' && break
+  sleep 0.1
+done
+after() { tail -n "+$((mark + 1))" "$APPLOG"; }
+
+after | grep -q 'WINDOW_REANNOUNCED' \
+  || fail "the replacement core was never told about the second window"
+
+sleep 3
+repainted=$(after | grep 'WINDOW_FIRST_FRAME' | grep -o 'window_id=[0-9]*' | sort -u)
+n_repainted=$(printf '%s' "$repainted" | grep -c 'window_id=')
+echo "==> windows painting under the new core: $(echo $repainted | tr '\n' ' ')"
+(( n_repainted >= 2 )) \
+  || fail "only $n_repainted window(s) painted after the swap — the rest are frozen"
+
+# The replacement core re-reads the same saved file; honouring its
+# restore requests would stack a second copy of every window.
+if after | grep -q 'WINDOW_RESTORE\b'; then
+  fail "L1 honoured a restore request from a replacement core"
+fi
+after | grep -q 'WINDOW_RESTORE_IGNORED' \
+  || echo "    (note: replacement core did not ask to restore — fine)"
+
+if after | grep -q 'core.boot.orphan_adopted'; then
+  fail "the new core's boot window adopted the other window's live panes"
+fi
+
+python3 - "$MARSPOT_STATE_DIR" <<'PY' || fail "the swap damaged the saved layout"
+import struct, sys, pathlib
+b = (pathlib.Path(sys.argv[1]) / 'shell-state.bin').read_bytes()
+key, n = struct.unpack_from('<HH', b, 8)
+print(f'saved after swap: {n} window(s), key_window={key}')
+assert n == 2, f'expected 2 windows after the swap, got {n}'
+PY
+
 echo
 echo "PASS — restore path: two windows, own surface pairs, layout survived;"
-echo "       Cmd-N path: fresh 1x1 window painted without narrowing the file."
+echo "       Cmd-N path: fresh 1x1 window painted without narrowing the file;"
+echo "       core swap:  both windows re-announced and painting, no duplicates."

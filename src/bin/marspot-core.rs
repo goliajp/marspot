@@ -5975,6 +5975,26 @@ impl CoreApp {
         );
         win!(self, wi).render = wr;
         win!(self, wi).needs_render = false;
+        // One INFO per window, the first time it paints.  Emitted here
+        // rather than in the render pass because the attach branch
+        // renders too — and that is precisely how the boot window gets
+        // its first frame after a core swap, so a check placed in the
+        // pass alone reports a perfectly healthy window as frozen.
+        if !win!(self, wi).painted_once {
+            win!(self, wi).painted_once = true;
+            let surface_id = win!(self, wi)
+                .surfaces
+                .as_ref()
+                .map(|s| s.writing_surface_id())
+                .unwrap_or(0);
+            lx_event!(
+                "WINDOW_FIRST_FRAME",
+                "window painted its first frame",
+                window_id = win!(self, wi).window_id,
+                surface_id = surface_id,
+                panes = win!(self, wi).panes.len()
+            );
+        }
 
         win!(self, wi).panes.get(focused).and_then(|pane| {
             if !pane.session().cursor_visible() {
@@ -7261,16 +7281,6 @@ fn main() {
                 s.flip();
                 ids
             };
-            if !win!(app, wi).painted_once {
-                win!(app, wi).painted_once = true;
-                lx_event!(
-                    "WINDOW_FIRST_FRAME",
-                    "window painted its first frame",
-                    window_id = win!(app, wi).window_id,
-                    surface_id = surface_id,
-                    panes = win!(app, wi).panes.len()
-                );
-            }
             // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
             // a busy display (60 Hz cap) without flooding when the
             // user runs `MARSPOT_LOG_CORE=debug` to investigate latency
