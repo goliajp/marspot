@@ -2147,6 +2147,11 @@ struct WindowState {
     /// gate a quiet one's repaint, which is exactly the coupling the
     /// peer model forbids.
     last_render_at: Option<Instant>,
+    /// Has this window ever completed a frame?  Drives one INFO line
+    /// per window — "did this window ever paint" is the first question
+    /// asked of a black window, and the per-frame log is sampled 1-in-8
+    /// so a quiet window can leave no trace of painting at all.
+    painted_once: bool,
     /// The renderer state that cannot be shared with the other
     /// windows — this window's per-pane instance caches and its own
     /// "still owes a clear" flag.  Everything else the renderer holds
@@ -2244,6 +2249,7 @@ impl WindowState {
             window_id,
             surfaces: None,
             last_render_at: None,
+            painted_once: false,
             render: marspot::render_metal::WindowRender::new(),
             layout: Layout::build(
                 w_phys,
@@ -7255,6 +7261,16 @@ fn main() {
                 s.flip();
                 ids
             };
+            if !win!(app, wi).painted_once {
+                win!(app, wi).painted_once = true;
+                lx_event!(
+                    "WINDOW_FIRST_FRAME",
+                    "window painted its first frame",
+                    window_id = win!(app, wi).window_id,
+                    surface_id = surface_id,
+                    panes = win!(app, wi).panes.len()
+                );
+            }
             // Sampled per-frame DEBUG.  1/8 keeps a ~7-Hz heartbeat on
             // a busy display (60 Hz cap) without flooding when the
             // user runs `MARSPOT_LOG_CORE=debug` to investigate latency

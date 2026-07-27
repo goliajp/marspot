@@ -748,8 +748,6 @@ struct ShellApp {
     /// run: the core keys `WindowState` off it, and a recycled id
     /// would let a closed window's frames land in its successor.
     ///
-    /// Unread while Cmd-N is disabled.
-    #[allow(dead_code)]
     next_window_id: u32,
     /// The live core: child process, control socket (both directions),
     /// and liveness-handshake state aggregated into `CoreConn`.
@@ -919,12 +917,6 @@ fn successor_can_start(bin: &std::path::Path) -> bool {
 
 impl ShellApp {
     /// Open another native window (Cmd-N).
-    ///
-    /// Currently unreachable — the keystroke is disabled, see
-    /// `key_event`.  Kept so re-enabling is a one-line change rather
-    /// than a rewrite of a path that already works up to the point the
-    /// persistence bug bites.
-    #[allow(dead_code)]
     ///
     /// RFC-005 semantics: a fresh window starts as a 1×1 grid with one
     /// new pane and becomes key.  L1 allocates the id — it is what
@@ -2460,6 +2452,24 @@ impl MarspotApp for ShellApp {
         }
         self.start_redraw_pump();
         ctx.request_redraw();
+        // Dev-only seam: open N extra windows exactly as Cmd-N does.
+        // A keystroke cannot be delivered to the sandbox app from a
+        // script, and the fresh-window path (1×1 grid, one brand-new
+        // session) is otherwise untestable — the restore path covers
+        // everything except that.  Unset in the installed app.
+        if let Ok(n) = std::env::var("MARSPOT_DEV_EXTRA_WINDOWS") {
+            let n: usize = n.parse().unwrap_or(0);
+            for _ in 0..n.min(8) {
+                self.open_new_window();
+            }
+            if n > 0 {
+                lx_event!(
+                    "DEV_EXTRA_WINDOWS",
+                    "opened extra windows on request (dev seam)",
+                    n = n
+                );
+            }
+        }
     }
 
     fn user_event(&mut self, ctx: &MarspotAppCtx) {
@@ -2495,19 +2505,18 @@ impl MarspotApp for ShellApp {
             mods_byte = struct_to_mods_byte(mods),
             state = format!("{:?}", event.state)
         );
-        // Cmd-N is DISABLED.  Opening a window crashed the app on
-        // 2026-07-26 and, worse, the crash left `shell-state.bin`
-        // describing only the new window's single pane — the core
-        // saves state from the key window, and adopting a window makes
-        // the new one key, so sixteen panes were written out of the
-        // file that boot assembly reads.  The sessions survived (their
-        // dirs and bytelogs are the real store), but the user's layout
-        // was gone and every restart came up with one empty pane.
+        // Cmd-N — open another window.  Handled here rather than being
+        // forwarded to the core: L1 owns windows.
         //
-        // Re-enable only once the core saves ALL windows' panes —
-        // RFC-005 step 6, `shell-state.bin` v2 — so a window opening
-        // cannot narrow what gets persisted.  Until then a crash here
-        // costs a layout, which is not a trade worth taking.
+        // This was disabled from 2026-07-26 until RFC-005 steps 4d/6/4e
+        // landed.  What made it unsafe was not the keystroke but what
+        // the rest of the system did with a second window: the core
+        // saved only the key window's panes, and a new window becomes
+        // key the instant it appears, so sixteen panes were written out
+        // of the file boot assembly reads.  The sessions survived
+        // (their dirs and bytelogs are the real store) but the layout
+        // did not.  `shell-state.bin` v2 saves every window, so opening
+        // one can no longer narrow what gets persisted.
         if mods.super_
             && !mods.control
             && !mods.alt
@@ -2517,10 +2526,7 @@ impl MarspotApp for ShellApp {
                 marspot::input::LogicalKey::Char(c) if c.eq_ignore_ascii_case(&'n')
             )
         {
-            lx_warn!(
-                "shell.window.new_disabled",
-                "Cmd-N is disabled until per-window state persistence lands (RFC-005 step 6)"
-            );
+            self.open_new_window();
             return;
         }
         let wire = event_to_wire(&event, mods);
