@@ -214,6 +214,45 @@ assert shapes[0][2] >= 2, f'boot window lost panes: {shapes[0]}'
 assert shapes[1] == (1, 1, 1), f'fresh window should be 1x1 with one pane: {shapes[1]}'
 PY
 
+# --- 5b. closing that window must not take the app with it ------------
+# 2026-07-28: closing a second window killed the whole app with SIGSEGV
+# inside `-[_NSWindowTransformAnimation dealloc]` — the window was
+# over-released (AppKit's `releasedWhenClosed` plus our own `Retained`)
+# and freed while the ordering animation still held it.
+#
+# A script cannot press the red button, so the shell presses it for
+# itself (`MARSPOT_DEV_CLOSE_EXTRA` → `performClose:`).  It also
+# activates the app and makes that window key first, and both are
+# load-bearing: closing a NON-key window in a background app does not
+# crash even without the fix — the animation that trips over the freed
+# window is the one AppKit runs when it hands key status on.  The
+# focus theft lasts a fraction of a second.
+echo
+echo "==> closing the extra window (real close button; steals focus briefly)"
+cleanup
+rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
+rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
+      "$MARSPOT_STATE_DIR/window-state.bin"
+> "$RUNLOG"
+
+MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+  MARSPOT_DEV_EXTRA_WINDOWS=1 MARSPOT_DEV_CLOSE_EXTRA=1 \
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+disown
+SHELL_PID=$!
+
+wait_for DEV_CLOSE_EXTRA 30 || fail "the extra window never reached the close path"
+wait_for "closed one window" 15 || fail "the close never completed"
+sleep 3
+
+kill -0 "$SHELL_PID" 2>/dev/null \
+  || fail "the shell died closing a window (check DiagnosticReports for a .ips)"
+grep -q 'PANIC' "$APPLOG" && fail "a panic was logged while closing the window"
+# And it must still be a working app afterwards, not a live husk.
+opened_after=$(grep -c 'WINDOW_CLOSED' "$APPLOG")
+(( opened_after >= 1 )) || fail "no WINDOW_CLOSED recorded"
+echo "==> shell survived the close (pid $SHELL_PID still up)"
+
 # --- 6. a core swap with two windows open -----------------------------
 # The riskiest thing about multi-window: a replacement core learns
 # about the boot window from its env pair and about the others from the
@@ -226,6 +265,17 @@ PY
 # the silent-update path spawns one exactly the same way.
 echo
 echo "==> third phase: core swap with two windows open"
+cleanup
+rm -rf "$MARSPOT_STATE_DIR/sessions" "$MARSPOT_STATE_DIR/retired"
+rm -f "$APPLOG" "$MARSPOT_STATE_DIR/shell-state.bin" \
+      "$MARSPOT_STATE_DIR/window-state.bin"
+> "$RUNLOG"
+MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
+  MARSPOT_LOG_CORE=debug MARSPOT_DEV_EXTRA_WINDOWS=1 \
+  nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
+disown
+wait_for WINDOW_ADOPTED 30 || fail "the second window never came up for the swap phase"
+sleep 2
 mark=$(wc -l < "$APPLOG")
 CORE_PID=$(pgrep -f "$MARSPOT_STATE_DIR/binaries/.*/marspot-core( |$)" | head -1)
 [[ -z "$CORE_PID" ]] && CORE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)

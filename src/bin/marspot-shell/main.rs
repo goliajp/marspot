@@ -717,6 +717,10 @@ struct ShellWindow {
     /// and no OTHER window could ever look stale — so the one that
     /// actually froze never got its forced present.
     last_present_at: Option<Instant>,
+    /// Dev seam only: this window is to be closed again as soon as it
+    /// has painted (`MARSPOT_DEV_CLOSE_EXTRA`).  Latched so the close
+    /// runs once.
+    dev_close_after_paint: bool,
     /// F3+6.1 — last saved (x, y, w, h, display_id) so per-frame
     /// `resized` / `moved` callbacks dedup: only the saves where the
     /// frame actually changed since the last bin write actually fire
@@ -733,6 +737,7 @@ impl ShellWindow {
             presenter: None,
             first_frame_ready: false,
             frame_pending: false,
+            dev_close_after_paint: false,
             last_present_at: None,
             last_saved_window: None,
         }
@@ -775,6 +780,13 @@ struct ShellApp {
     /// transitions and call `presenter.set_banner` only when it
     /// actually changes.
     banner_kind: Option<BannerKind>,
+    /// Dev seam only (`MARSPOT_DEV_CLOSE_EXTRA`): close each extra
+    /// window again once it has painted.  A script cannot deliver the
+    /// red button or Cmd-W to the sandbox app, and closing a second
+    /// window is what crashed the app on 2026-07-28 — so the path has
+    /// to be reachable from a test somehow.  Unset in the installed
+    /// app.
+    dev_close_extra: bool,
     /// How many cores this shell has spawned.  1 = the boot core; any
     /// higher value means a replacement (silent update, crash
     /// respawn), which must not re-run the saved-window restore.
@@ -1101,6 +1113,7 @@ impl ShellApp {
             active: None,
             redraw_thread_started: false,
             binaries,
+            dev_close_extra: false,
             core_generation: 0,
             sup_state: SupervisorState::Idle,
             crashes: std::collections::VecDeque::new(),
@@ -2060,6 +2073,66 @@ impl ShellApp {
         self.windows[i].surfaces = Some(new_pair);
         self.windows[i].first_frame_ready = true;
         self.windows[i].frame_pending = true;
+        self.dev_close_extra_if_armed(i);
+    }
+
+    /// Close ONE window: tell the core, drop our side, ask AppKit.
+    ///
+    /// Extracted from `close_requested` so the dev seam that a test
+    /// uses runs this exact code rather than a second copy of it —
+    /// the bug it guards against (over-released NSWindow) lives in
+    /// what happens after `app::close_window`, so a paraphrase would
+    /// not have caught it.
+    fn close_window_by_id(&mut self, window_id: u32) {
+        // Tell the core first: it retires the window's sessions
+        // while the surfaces are still alive, so nothing renders
+        // into a released pair on the way out.
+        self.send(
+            MsgType::WindowClosed,
+            marspot::shell_proto::encode_window_closed(window_id),
+        );
+        if let Some(i) = self.window_index(window_id) {
+            let w = self.windows.remove(i);
+            if let Some(p) = w.surfaces {
+                p.release();
+            }
+            if let Some(p) = w.pending_surfaces {
+                p.release();
+            }
+        }
+        // Queued: the NSWindow is torn down after this dispatch,
+        // for the same re-entrancy reason opening one is.
+        marspot::app::close_window(window_id);
+        lx_event!(
+            "WINDOW_CLOSED",
+            "closed one window; app keeps running",
+            window_id = window_id,
+            shell_windows = self.windows.len()
+        );
+    }
+
+    /// Dev seam (`MARSPOT_DEV_CLOSE_EXTRA`): close this window again,
+    /// now that it has a painted pair on screen, through the very path
+    /// the red button takes.  Hooked here rather than in `redraw`
+    /// because a background window may never get a draw callback at
+    /// all — the pump is poke-driven, and the test's app is not
+    /// frontmost.
+    fn dev_close_extra_if_armed(&mut self, i: usize) {
+        if !self.windows[i].dev_close_after_paint {
+            return;
+        }
+        self.windows[i].dev_close_after_paint = false;
+        let window_id = self.windows[i].window_id;
+        lx_event!(
+            "DEV_CLOSE_EXTRA",
+            "pressing this window's close button",
+            window_id = window_id
+        );
+        // `performClose:`, not our own close path: the delegate then
+        // calls back into `close_requested` while AppKit is still
+        // inside its close machinery, which is the shape the red
+        // button has and the shape that crashed.
+        marspot::app::perform_close(window_id);
     }
 
     /// Route a frame from the **active** core — it drives what's on
@@ -2457,6 +2530,9 @@ impl MarspotApp for ShellApp {
         // script, and the fresh-window path (1×1 grid, one brand-new
         // session) is otherwise untestable — the restore path covers
         // everything except that.  Unset in the installed app.
+        if std::env::var("MARSPOT_DEV_CLOSE_EXTRA").is_ok() {
+            self.dev_close_extra = true;
+        }
         if let Ok(n) = std::env::var("MARSPOT_DEV_EXTRA_WINDOWS") {
             let n: usize = n.parse().unwrap_or(0);
             for _ in 0..n.min(8) {
@@ -2702,6 +2778,9 @@ impl MarspotApp for ShellApp {
             fh.round(),
             ctx.window_display_id().unwrap_or(0),
         ));
+        if self.dev_close_extra && window_id != marspot::shell_proto::FIRST_WINDOW_ID {
+            win.dev_close_after_paint = true;
+        }
         self.windows.push(win);
         self.save_window_frames();
         // A `SurfaceAttachWindow` naming a window the core has not seen
@@ -2724,32 +2803,7 @@ impl MarspotApp for ShellApp {
         // wears, so it always lands on the boot window and falls
         // through to the quit path below when it is the only one left.
         if marspot::app::window_count() > 1 {
-            let window_id = Self::event_window(ctx);
-            // Tell the core first: it retires the window's sessions
-            // while the surfaces are still alive, so nothing renders
-            // into a released pair on the way out.
-            self.send(
-                MsgType::WindowClosed,
-                marspot::shell_proto::encode_window_closed(window_id),
-            );
-            if let Some(i) = self.window_index(window_id) {
-                let w = self.windows.remove(i);
-                if let Some(p) = w.surfaces {
-                    p.release();
-                }
-                if let Some(p) = w.pending_surfaces {
-                    p.release();
-                }
-            }
-            // Queued: the NSWindow is torn down after this dispatch,
-            // for the same re-entrancy reason opening one is.
-            marspot::app::close_window(window_id);
-            lx_event!(
-                "WINDOW_CLOSED",
-                "closed one window; app keeps running",
-                window_id = window_id,
-                shell_windows = self.windows.len()
-            );
+            self.close_window_by_id(Self::event_window(ctx));
             return;
         }
 

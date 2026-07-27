@@ -1056,6 +1056,8 @@ impl AppState {
 enum WindowOp {
     Open(u32, WindowAttrs),
     Close(u32),
+    /// Dev/test only — see `perform_close`.
+    PerformClose(u32),
 }
 
 thread_local! {
@@ -1291,6 +1293,20 @@ fn build_window(
             defer: false
         ]
     };
+    // We hold this window in a `Retained` for as long as it is open,
+    // so AppKit must NOT also release it on close.  A window built
+    // programmatically (rather than loaded from a nib) defaults to
+    // `releasedWhenClosed == YES`: `close()` drops AppKit's reference
+    // and our `Retained` then drops another, over-releasing it.  The
+    // window is freed while the close animation still holds it, and
+    // the app dies with SIGSEGV inside
+    // `-[_NSWindowTransformAnimation dealloc]` — which is exactly
+    // what closing a second window did (2026-07-28).  The boot window
+    // never showed it: closing that one quits the app, so nothing
+    // afterwards touched the freed object.
+    // SAFETY: plain setter on a window we just created and still own
+    // exclusively; nothing else can observe it mid-call.
+    unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str(&attrs.title));
     {
         window.setTitlebarAppearsTransparent(true);
@@ -1344,6 +1360,20 @@ fn build_window(
 pub fn open_window(window_id: u32, attrs: &WindowAttrs) {
     PENDING_WINDOW_OPS
         .with(|q| q.borrow_mut().push(WindowOp::Open(window_id, attrs.clone())));
+}
+
+/// Ask AppKit to close the window the way the red button does —
+/// `performClose:`, which runs the delegate's `windowShouldClose:`
+/// and, through it, the app's own close path.
+///
+/// Dev/test only.  It exists because that re-entrant shape (AppKit is
+/// inside its close machinery while our handler closes and releases
+/// the window) is what a script cannot otherwise reproduce, and it is
+/// exactly the shape that crashed on 2026-07-28.  Queued for the same
+/// reason as the others.
+pub fn perform_close(window_id: u32) {
+    PENDING_WINDOW_OPS
+        .with(|q| q.borrow_mut().push(WindowOp::PerformClose(window_id)));
 }
 
 /// Tear down the window carrying `window_id`.  Queued, for the same
@@ -1408,6 +1438,27 @@ fn drain_pending_windows() {
                     // gets here is that window's own — not the key
                     // one, whose backing scale may differ.
                     dispatch_event_for(window_id, EventKind::WindowOpened);
+                }
+            }
+            WindowOp::PerformClose(window_id) => {
+                let win = APP_STATE.with(|cell| {
+                    let slot = cell.borrow();
+                    let state = slot.as_ref()?;
+                    let i = state.window_index(window_id)?;
+                    Some(state.windows[i].nswindow.clone())
+                });
+                if let Some(w) = win {
+                    // Key, and the app active: closing the KEY window
+                    // is what makes AppKit hand focus on with an
+                    // ordering animation, and that animation is what
+                    // the 2026-07-28 crash died inside.
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        let nsapp = NSApplication::sharedApplication(mtm);
+                        #[allow(deprecated)]
+                        unsafe { nsapp.activateIgnoringOtherApps(true) };
+                    }
+                    w.makeKeyAndOrderFront(None);
+                    w.performClose(None);
                 }
             }
             WindowOp::Close(window_id) => {
