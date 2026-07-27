@@ -2417,6 +2417,21 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 let n = param(params, 0, 1);
                 self.grid.set_cursor(col.saturating_add(n).min(cols - 1), row);
             }
+            b'E' => {
+                // CNL: cursor next line — down N, column 0.
+                let n = param(params, 0, 1);
+                self.grid.set_cursor(0, row.saturating_add(n).min(rows - 1));
+            }
+            b'F' => {
+                // CPL: cursor previous line — up N, column 0.  Homebrew's
+                // concurrent-download display redraws itself with
+                // `\033[{n}F` (Tty.move_cursor_up_beginning); with this
+                // missing the cursor never moved up and every refresh
+                // APPENDED its lines — the 2026-07-28 "brew progress
+                // scrolls forever" field report.
+                let n = param(params, 0, 1);
+                self.grid.set_cursor(0, row.saturating_sub(n));
+            }
             b'D' => {
                 // CUB: cursor back (left).
                 let n = param(params, 0, 1);
@@ -4753,6 +4768,46 @@ mod tests {
 
     /// One visible row as a trimmed string ('\0' wide-trail cells
     /// skipped, same as the clipboard serialiser).
+    /// 2026-07-28 field report — Homebrew's concurrent-download UI
+    /// scrolled forever instead of redrawing in place.  brew moves the
+    /// cursor with `\033[0G` + `\033[{n}F` (CPL); marspot's CSI
+    /// dispatch had no `F` arm, the sequence was silently dropped, and
+    /// every refresh APPENDED its lines.  This test replays brew's
+    /// exact redraw shape (Tty.move_cursor_beginning +
+    /// move_cursor_up_beginning from download_queue.rb).
+    #[test]
+    fn brew_style_cpl_redraw_updates_in_place() {
+        let mut t = Terminal::new(40, 6);
+        t.feed(b"openjdk 10%\r\nqemu 5%");
+        // brew's refresh: CR to column 0, up (lines-1) to the first
+        // status row, then rewrite both lines with EL after each.
+        for pct in [20u32, 30, 40] {
+            t.feed(b"\x1b[0G\x1b[1F");
+            t.feed(format!("openjdk {pct}%\x1b[K\r\nqemu {pct}%\x1b[K").as_bytes());
+        }
+        assert_eq!(row_text(&t, 0), "openjdk 40%");
+        assert_eq!(row_text(&t, 1), "qemu 40%");
+        assert_eq!(row_text(&t, 2), "", "no appended garbage rows");
+        assert_eq!(
+            t.grid().scrollback_len(),
+            0,
+            "in-place redraw must not push anything into scrollback"
+        );
+    }
+
+    /// CNL is CPL's mirror; pin both while we are here.
+    #[test]
+    fn cnl_moves_down_to_column_zero() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"abc\x1b[2Exyz");
+        assert_eq!(row_text(&t, 0), "abc");
+        assert_eq!(row_text(&t, 2), "xyz", "down 2 rows, column 0");
+        // Clamped at the bottom edge, never scrolls.
+        t.feed(b"\x1b[99Eq");
+        assert_eq!(row_text(&t, 4), "q");
+        assert_eq!(t.grid().scrollback_len(), 0);
+    }
+
     fn row_text(t: &Terminal, r: u16) -> String {
         let g = t.grid();
         let mut s: String = (0..g.cols())
