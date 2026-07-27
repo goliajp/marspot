@@ -601,9 +601,8 @@ mod window_state_tests {
             pane_cwds: std::collections::HashMap::new(),
             pending_to_shell: Vec::new(),
             pane_sessions: std::collections::HashMap::new(),
-            esc_history: std::collections::VecDeque::new(),
+            esc_history: std::collections::HashMap::new(),
             last_cwd_refresh: std::collections::HashMap::new(),
-            cc_usage_modal: None,
             reconnecting: std::collections::HashSet::new(),
             cwd_unresolvable: std::collections::HashMap::new(),
             all_exited: false,
@@ -844,6 +843,48 @@ mod window_state_tests {
         assert!(!app.windows[1].needs_render);
     }
 
+    /// Overlays belong to the window they were opened in.  The cc
+    /// usage modal used to sit on `CoreApp`, and since every window
+    /// publishes overlay state right before it paints, one Cmd-Shift-C
+    /// drew the modal into every open window at once.
+    #[test]
+    fn an_overlay_opens_in_one_window_only() {
+        let mut app = app_with(vec![win(1, Vec::new()), win(2, Vec::new())]);
+
+        app.toggle_cc_usage_modal(1);
+        assert!(app.windows[1].cc_usage_modal.is_some());
+        assert!(app.windows[0].cc_usage_modal.is_none(), "peer must stay closed");
+
+        app.toggle_cc_usage_modal(1);
+        assert!(app.windows[1].cc_usage_modal.is_none(), "toggles off again");
+    }
+
+    /// The Esc-three-times escape hatch is about one pane refusing to
+    /// give the keyboard back, so its history is per session.  Global,
+    /// presses aimed at one pane could force-end another — reachable
+    /// as soon as two windows each hold a locked pane.
+    #[test]
+    fn the_escape_hatch_counts_presses_per_session() {
+        let mut app = app_with(vec![win(1, Vec::new())]);
+        let t = std::time::Instant::now();
+
+        assert!(!app.note_escape_for_pane_session(10, t));
+        assert!(!app.note_escape_for_pane_session(10, t));
+        assert!(
+            !app.note_escape_for_pane_session(20, t),
+            "another session's press must not complete this one's count"
+        );
+        assert!(
+            app.note_escape_for_pane_session(10, t),
+            "third press on THIS session fires"
+        );
+
+        // Ending the session forgets its history, so the next lock
+        // starts from zero rather than firing on the first Esc.
+        app.pane_session_end(10);
+        assert!(!app.note_escape_for_pane_session(10, t));
+    }
+
     /// The modal's slot map is sized from the window's own grid, so a
     /// window created with a non-default shape starts consistent.
     #[test]
@@ -982,7 +1023,7 @@ mod boot_assembly_tests {
         let s = saved(&[(9, "nine"), (12, "twelve"), (5, "five")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true);
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true, &Default::default());
         assert_eq!(
             pane_sids(&panes),
             vec![9, 12, 5],
@@ -1011,7 +1052,7 @@ mod boot_assembly_tests {
         }
         let s = saved(&[(4, "user-title"), (6, "")]);
         let (tx, _rx) = mpsc::channel();
-        let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true);
+        let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
         assert_eq!(pane_sids(&panes), vec![4, 6]);
         assert_eq!(
             panes[0].custom_title.as_deref(),
@@ -1034,7 +1075,7 @@ mod boot_assembly_tests {
         let s = saved(&[(7, "seven"), (0, ""), (8, "eight")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true);
+            assemble_panes_at_boot(Some(&s), 3, 60, 16, &tx, true, &Default::default());
         assert_eq!(panes.len(), 3, "failed slots must NOT compact away");
         let sids = pane_sids(&panes);
         assert_eq!(sids[0], 7, "slot 0 keeps its sid for revive");
@@ -1063,7 +1104,7 @@ mod boot_assembly_tests {
 
         let s = saved(&[(0, "")]);
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
         let sids = pane_sids(&panes);
         assert_eq!(panes.len(), 2, "slot pane + adopted orphan: {sids:?}");
         assert!(
@@ -1088,7 +1129,7 @@ mod boot_assembly_tests {
         let s = saved(&[(700, "")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &Default::default());
         assert_eq!(panes.len(), 1);
         assert!(
             !reg::session_dir(31).exists(),
@@ -1130,7 +1171,7 @@ mod boot_assembly_tests {
         sb.break_session_bin(); // this window's own slot stays vacant
         let s = saved(&[(700, "")]);
         let (panes, reattached) =
-            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, false);
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, false, &Default::default());
 
         let sids = pane_sids(&panes);
         assert_eq!(panes.len(), 1, "only its own slot: {sids:?}");
@@ -1146,6 +1187,44 @@ mod boot_assembly_tests {
         assert!(reg::session_dir(other_sid).exists());
     }
 
+    /// A session another window's saved record owns is neither an
+    /// orphan to adopt nor junk to retire — its window just has not
+    /// been opened yet.
+    ///
+    /// This is the core-swap case: the replacement core assembles the
+    /// boot window first, while windows 2..N are still unannounced and
+    /// their L3s very much alive.  Without the reservation the boot
+    /// window swallowed them, and the real window's restore then tried
+    /// to reattach sessions that were already bound elsewhere.
+    #[test]
+    fn sessions_owned_by_another_saved_window_are_left_for_it() {
+        let sb = Sandbox::new("reserved");
+        let (tx, _rx) = mpsc::channel();
+        // Window 2's live session…
+        let live_sid = reg::allocate_next_session_id().unwrap();
+        let live = spawn_l3_pane_with_cwd(60, 16, live_sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+        std::mem::forget(live);
+        // …and window 2's dead-but-saved session, which must keep its
+        // dir so that window can resurrect it.
+        write_session_entry(&dead_entry(41)).unwrap();
+
+        sb.break_session_bin();
+        let reserved: std::collections::HashSet<u64> = [live_sid, 41].into_iter().collect();
+        let s = saved(&[(700, "")]);
+        let (panes, reattached) =
+            assemble_panes_at_boot(Some(&s), 1, 60, 16, &tx, true, &reserved);
+
+        let sids = pane_sids(&panes);
+        assert_eq!(panes.len(), 1, "boot window keeps only its own slot: {sids:?}");
+        assert!(!sids.contains(&live_sid), "reserved live session adopted");
+        assert!(reattached.is_empty());
+        assert!(
+            reg::session_dir(41).exists(),
+            "reserved dead session's history must survive for its window"
+        );
+    }
+
     /// Duplicate sid in a corrupt saved state must not double-bind one
     /// session to two panes — the second slot falls back to a fresh id.
     #[test]
@@ -1155,7 +1234,7 @@ mod boot_assembly_tests {
         let s = saved(&[(9, "a"), (9, "b")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) =
-            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true);
+            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
         let sids = pane_sids(&panes);
         assert_eq!(sids.len(), 2);
         assert_eq!(sids[0], 9);
@@ -1864,8 +1943,15 @@ fn assemble_restore_window_async(
         .spawn(move || {
             let n = record.panes.len().clamp(1, SESSION_COUNT_HARD_CAP);
             let inner_tx = tx.clone();
-            let (panes, _reattached) =
-                assemble_panes_at_boot(Some(&record), n, cols, rows, &inner_tx, false);
+            let (panes, _reattached) = assemble_panes_at_boot(
+                Some(&record),
+                n,
+                cols,
+                rows,
+                &inner_tx,
+                false,
+                &std::collections::HashSet::new(),
+            );
             let _ = tx.send(CoreEvent::WindowRestoreFinished(
                 window_id,
                 RestoredPanes(panes),
@@ -2114,6 +2200,13 @@ struct WindowState {
     hover_chrome_btn: Option<ChromeBtn>,
     /// F3+1 — process-tree panel.  `None` = closed (no libproc cost).
     process_panel: Option<ProcessPanelState>,
+    /// cc — open `Cc` usage modal.  `None` = closed; the feed file is
+    /// only read while this is `Some` (open + 5 s refresh).
+    ///
+    /// Per window, like the process panel next to it.  Held on
+    /// `CoreApp` it was drawn into EVERY window at once, because each
+    /// window publishes the modal state right before it paints.
+    cc_usage_modal: Option<CcUsageModalState>,
     ime_preedit: String,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
@@ -2180,6 +2273,7 @@ impl WindowState {
             sidebar_collapsed: true,
             hover_chrome_btn: None,
             process_panel: None,
+            cc_usage_modal: None,
             ime_preedit: String::new(),
             w_phys,
             h_phys,
@@ -2271,19 +2365,22 @@ struct CoreApp {
     ///                       buffer for that pane (C6)
     ///   * INPUT cap → informational; plugin writes via shelld
     pane_sessions: std::collections::HashMap<u64, PaneSessionState>,
-    /// Rolling timestamps of recent Escape presses while a pane
-    /// session is active; 3 within 5 s force-ends the session
-    /// regardless of plugin opinion.  Bounded to the last 3 entries.
-    esc_history: std::collections::VecDeque<std::time::Instant>,
+    /// Rolling timestamps of recent Escape presses per locked session;
+    /// 3 within 5 s force-ends THAT session regardless of plugin
+    /// opinion.  Bounded to the last 3 entries per session, and the
+    /// entry is dropped when the session ends.
+    ///
+    /// Keyed by session, not global: the escape hatch is about one
+    /// pane refusing to give the keyboard back, and with two windows a
+    /// global deque let presses aimed at one pane satisfy the
+    /// threshold for another.
+    esc_history: std::collections::HashMap<u64, std::collections::VecDeque<std::time::Instant>>,
     /// F3+5 — per-sid debounce window for `refresh_pane_cwd_for`.
     /// A burst of Enter keys (multi-line paste) hits this map and
     /// returns within the debounce → at most one syscall per
     /// `CWD_REFRESH_DEBOUNCE` per pane.  Cleared per-sid on
     /// `close_session`.
     last_cwd_refresh: std::collections::HashMap<u64, Instant>,
-    /// cc — open `Cc` usage modal.  `None` = closed; the feed file
-    /// is only read while this is `Some` (open + 5 s refresh).
-    cc_usage_modal: Option<CcUsageModalState>,
     /// Sessions with a reconnect already in flight.  Without this, a
     /// burst of EOFs for one session would spawn a thread each.
     reconnecting: std::collections::HashSet<u64>,
@@ -2339,6 +2436,7 @@ impl CoreApp {
 
     /// L1 plugin released the pane back to live mode.
     fn pane_session_end(&mut self, shelld_session_id: u64) {
+        self.esc_history.remove(&shelld_session_id);
         if self.pane_sessions.remove(&shelld_session_id).is_some() {
             self.mark_sid_window_dirty(shelld_session_id);
         }
@@ -2366,21 +2464,22 @@ impl CoreApp {
     /// Record an Escape press at `now`.  Returns true if the rolling
     /// window contains ≥ 3 escapes within 5 s — the caller then sends
     /// PaneSessionUserEscape to force-end the session.
-    fn note_escape_for_pane_session(&mut self, now: std::time::Instant) -> bool {
+    fn note_escape_for_pane_session(&mut self, sid: u64, now: std::time::Instant) -> bool {
         const WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
         const THRESHOLD: usize = 3;
-        while let Some(&front) = self.esc_history.front() {
+        let hist = self.esc_history.entry(sid).or_default();
+        while let Some(&front) = hist.front() {
             if now.duration_since(front) > WINDOW {
-                self.esc_history.pop_front();
+                hist.pop_front();
             } else {
                 break;
             }
         }
-        self.esc_history.push_back(now);
-        if self.esc_history.len() > THRESHOLD {
-            self.esc_history.pop_front();
+        hist.push_back(now);
+        if hist.len() > THRESHOLD {
+            hist.pop_front();
         }
-        self.esc_history.len() >= THRESHOLD
+        hist.len() >= THRESHOLD
     }
 
     /// L1 plugin → control socket → here: stash a per-shelld-session
@@ -3159,6 +3258,7 @@ impl CoreApp {
         self.last_cwd_refresh.remove(&id);
         self.pane_badges.remove(&id);
         self.pane_titles.remove(&id);
+        self.esc_history.remove(&id);
     }
 
     /// Take on a window the shell has just opened (or re-announced
@@ -3898,12 +3998,12 @@ impl CoreApp {
             }
         }
         // cc — Esc / Cmd-W closes the usage modal, same semantics.
-        if self.cc_usage_modal.is_some() && event.state == KeyState::Pressed {
+        if win!(self, wi).cc_usage_modal.is_some() && event.state == KeyState::Pressed {
             let is_esc = matches!(event.logical, LogicalKey::Named(NamedKey::Escape));
             let is_cmd_w = matches!(event.logical, LogicalKey::Char('w'))
                 && modifiers.super_;
             if is_esc || is_cmd_w {
-                self.cc_usage_modal = None;
+                win!(self, wi).cc_usage_modal = None;
                 win!(self, wi).needs_render = true;
                 return;
             }
@@ -3946,8 +4046,8 @@ impl CoreApp {
                     LogicalKey::Named(NamedKey::Escape)
                 );
                 if is_esc {
-                    let force_end =
-                        self.note_escape_for_pane_session(std::time::Instant::now());
+                    let force_end = self
+                        .note_escape_for_pane_session(active_sid, std::time::Instant::now());
                     if force_end {
                         let payload = marspot::shell_proto::encode_pane_session_user_escape(
                             active_sid,
@@ -4321,7 +4421,7 @@ impl CoreApp {
     /// so the two can't drift apart.  Opening re-reads the feed, so a
     /// stale panel is never what you get on a fresh open.
     fn toggle_cc_usage_modal(&mut self, wi: usize) {
-        self.cc_usage_modal = match self.cc_usage_modal.take() {
+        win!(self, wi).cc_usage_modal = match win!(self, wi).cc_usage_modal.take() {
             Some(_) => None,
             None => Some(CcUsageModalState {
                 data: marspot::cc_usage::read(),
@@ -4332,7 +4432,7 @@ impl CoreApp {
     }
 
     fn cc_usage_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
-        let n = self
+        let n = win!(self, wi)
             .cc_usage_modal
             .as_ref()
             .and_then(|m| m.data.as_ref())
@@ -4355,14 +4455,14 @@ impl CoreApp {
     /// feed at most every 5 s while the modal is open.
     fn build_cc_usage_render(&mut self, wi: usize) -> Option<marspot::render_metal::CcUsageRender> {
         use marspot::render_metal::{CcUsageAccountRender, CcUsageRender};
-        let modal = self.cc_usage_modal.as_mut()?;
+        let modal = win!(self, wi).cc_usage_modal.as_mut()?;
         if modal.loaded_at.elapsed() > std::time::Duration::from_secs(5) {
             modal.data = marspot::cc_usage::read();
             modal.loaded_at = Instant::now();
             win!(self, wi).needs_render = true;
         }
         let rect = self.cc_usage_modal_rect(wi);
-        let modal = self.cc_usage_modal.as_ref()?;
+        let modal = win!(self, wi).cc_usage_modal.as_ref()?;
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -4846,7 +4946,9 @@ impl CoreApp {
         };
         if new_hover != win!(self, wi).hover_chrome_btn {
             win!(self, wi).hover_chrome_btn = new_hover;
-            self.renderer.set_hover_chrome_btn(map_hover_to_u8(new_hover));
+            // Published in `render`, not here: the renderer is shared,
+            // so pushing it at hit-test time drew window A's hover on
+            // window B's toolbar the next time B painted.
             win!(self, wi).needs_render = true;
         }
     }
@@ -5045,10 +5147,10 @@ impl CoreApp {
         // cc — while the usage modal is open, any click outside its
         // frame closes it; clicks inside are swallowed (display-only
         // modal, nothing interactive yet).
-        if self.cc_usage_modal.is_some() {
+        if win!(self, wi).cc_usage_modal.is_some() {
             let rect = self.cc_usage_modal_rect(wi);
             if !rect.contains(x_phys, y_phys) {
-                self.cc_usage_modal = None;
+                win!(self, wi).cc_usage_modal = None;
             }
             win!(self, wi).needs_render = true;
             return;
@@ -5770,6 +5872,10 @@ impl CoreApp {
         // a `DevPanelToggle` wire frame on click; L1 takes it from
         // there.  No call here.
         self.renderer.set_dev_panel(None);
+        // Per-window, like every overlay below it: the renderer holds
+        // one copy and each window sets its own right before painting.
+        self.renderer
+            .set_hover_chrome_btn(map_hover_to_u8(win!(self, wi).hover_chrome_btn));
 
         self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
             use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
@@ -5888,6 +5994,7 @@ fn assemble_panes_at_boot(
     boot_rows: u16,
     event_tx: &Sender<CoreEvent>,
     sweeps_registry: bool,
+    reserved_sids: &std::collections::HashSet<u64>,
 ) -> (Vec<Pane>, Vec<u64>) {
     // entry.toml titles, collected during the registry scan below.
     // Last resort of the title fallback chain at the end of assembly.
@@ -6085,6 +6192,16 @@ fn assemble_panes_at_boot(
         if !alive_ids.contains(&id) || claimed.contains(&id) {
             continue;
         }
+        // Spoken for by ANOTHER window's saved record.  Without this,
+        // a core swap with two windows open had the boot window adopt
+        // the second window's live panes as orphans — and then the
+        // second window's own restore tried to reattach the very same
+        // sessions.  They are not orphans; their window just has not
+        // been announced yet.
+        if reserved_sids.contains(&id) {
+            continue;
+        }
+
         if panes.len() >= SESSION_COUNT_HARD_CAP {
             if let Some(entry) = entry_by_id.get(&id) {
                 unsafe { libc::kill(entry.pid, libc::SIGKILL) };
@@ -6139,8 +6256,15 @@ fn assemble_panes_at_boot(
     for id in session_registry::list_session_dir_ids() {
         // Same reason as the orphan loop above: a restored window's
         // `claimed` set covers only its own saved sids, so sweeping
-        // here would retire the live dirs of every other window.
-        if !sweeps_registry || claimed.contains(&id) || alive_ids.contains(&id) {
+        // here would retire the live dirs of every other window.  And
+        // a dead session another window intends to resurrect must keep
+        // its dir — retiring it would destroy that pane's history one
+        // moment before its window asked for it back.
+        if !sweeps_registry
+            || claimed.contains(&id)
+            || alive_ids.contains(&id)
+            || reserved_sids.contains(&id)
+        {
             continue;
         }
         if let Some(entry) = entry_by_id.get(&id) {
@@ -6378,6 +6502,16 @@ fn main() {
         // The boot assembly is the sweeping one: it adopts orphaned
         // live sessions and retires unclaimed dirs.  Restored windows
         // (step 6b) run the same function with that turned off.
+        //
+        // Every sid the OTHER saved windows own is reserved: those
+        // sessions are neither orphans to adopt nor junk to retire,
+        // they are simply waiting for their own window to be opened.
+        let reserved_sids: std::collections::HashSet<u64> = saved_windows
+            .iter()
+            .flat_map(|w| w.panes.iter())
+            .map(|p| p.sid)
+            .filter(|sid| *sid != 0)
+            .collect();
         let (assembled, reattached_ids) = assemble_panes_at_boot(
             boot_window.as_ref(),
             n_sessions,
@@ -6385,6 +6519,7 @@ fn main() {
             boot_rows,
             &event_tx,
             true,
+            &reserved_sids,
         );
         panes = assembled;
         // RFC-003 §6 Amendment 16 — L3 self-execv silent update
@@ -6435,9 +6570,8 @@ fn main() {
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
         pane_sessions: std::collections::HashMap::new(),
-        esc_history: std::collections::VecDeque::with_capacity(3),
+        esc_history: std::collections::HashMap::new(),
         last_cwd_refresh: std::collections::HashMap::new(),
-        cc_usage_modal: None,
         reconnecting: std::collections::HashSet::new(),
         cwd_unresolvable: std::collections::HashMap::new(),
         all_exited: false,
@@ -6763,9 +6897,6 @@ fn main() {
                     // active — drop any latched hover so the
                     // affordance doesn't linger when the user
                     // alt-tabs away mid-hover.
-                    if !focused {
-                        app.renderer.set_hover_chrome_btn(None);
-                    }
                     for w in app.windows.iter_mut() {
                         if !focused {
                             w.hover_chrome_btn = None;

@@ -46,6 +46,30 @@ Step 4d (paint + pump) and step 6a (persistence) implement it;
 step 4e finishes it on the input path, where `win!(self)` still stands
 in for "the window this event is about".
 
+### Audit against the rule (before enabling Cmd-N)
+
+Compile-green is not the same as peer-correct, so the rule above was
+walked against the whole system once 4d/6/4e had landed.  Seven pieces
+of state were still shared that describe one window, or scoped to one
+window when they describe the app:
+
+| what | was | is |
+|---|---|---|
+| toolbar hover | pushed into the shared renderer at hit-test time, so window A's hover drew on window B's toolbar | published per window in `render` like every other overlay |
+| cc usage modal | one `Option` on `CoreApp`, so one Cmd-Shift-C drew it into every window | `WindowState`, next to the process panel |
+| Esc×3 escape hatch | one global deque, so presses at one locked pane completed the count for another | keyed by session |
+| banner | one `banner_kind` + the first window's presenter, so the second window never showed or cleared it | pushed to every window's presenter |
+| stale-present net | one `last_present_at` on `ShellApp`, so a window painting at 60 Hz kept every other window from ever looking stale | per `ShellWindow` |
+| core swap / respawn | only the boot window's pair reached the new core; every other window went painting-less and had its panes adopted as orphans | L1 replays a `SurfaceAttachWindow` per window into the new core |
+| saved-window restore | the replacement core re-read the layout file and asked to reopen windows that were already open | L1 honours restore requests only from the first core of a launch (`core_generation`) |
+
+One further hazard came out of the same walk: on a core swap the boot
+window's assembly runs while windows 2..N are unannounced and their
+L3s are alive, so it saw them as orphans and adopted them — moments
+before their own window asked to reattach them.  The sweep now takes a
+`reserved_sids` set (every sid the other saved windows own) and treats
+those sessions as neither orphans nor junk.
+
 ## Architecture decision: one core, N surfaces
 
 One L2 process holds `Vec<WindowState>`; L1 owns N NSWindows and one

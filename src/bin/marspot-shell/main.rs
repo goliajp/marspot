@@ -705,6 +705,18 @@ struct ShellWindow {
     /// `safety_present_after` below provides the real safety net
     /// for genuinely-missed pokes.
     frame_pending: bool,
+    /// Wall-clock time of this window's last `present()`.  Combined
+    /// with `frame_pending`: when the redraw callback runs and no
+    /// fresh frame is pending, we ALSO force a present if too long has
+    /// elapsed — covers the pathological "core froze mid-render and no
+    /// future poke is coming" case where waiting for FrameRendered
+    /// would freeze the window.
+    ///
+    /// Per window, because the net is per window: held on `ShellApp`,
+    /// a window painting at 60 Hz kept the timestamp permanently fresh
+    /// and no OTHER window could ever look stale — so the one that
+    /// actually froze never got its forced present.
+    last_present_at: Option<Instant>,
     /// F3+6.1 — last saved (x, y, w, h, display_id) so per-frame
     /// `resized` / `moved` callbacks dedup: only the saves where the
     /// frame actually changed since the last bin write actually fire
@@ -721,6 +733,7 @@ impl ShellWindow {
             presenter: None,
             first_frame_ready: false,
             frame_pending: false,
+            last_present_at: None,
             last_saved_window: None,
         }
     }
@@ -744,13 +757,6 @@ struct ShellApp {
     /// crash (or single-core swap retirement) and the respawn.
     active: Option<CoreConn>,
     redraw_thread_started: bool,
-    /// Wall-clock time of the last `present()` call.  Combined with
-    /// `frame_pending`: when the redraw callback runs and no fresh
-    /// frame is pending, we ALSO force a present if too long has
-    /// elapsed since the last one — covers the pathological
-    /// "core froze mid-render and no future poke is coming" case
-    /// where waiting for FrameRendered would freeze the window.
-    last_present_at: Option<Instant>,
     /// Binary slot manager: current / prev / pending.  Used to find
     /// the core binary at spawn time and to atomic-swap when a
     /// silent update fires.
@@ -771,6 +777,10 @@ struct ShellApp {
     /// transitions and call `presenter.set_banner` only when it
     /// actually changes.
     banner_kind: Option<BannerKind>,
+    /// How many cores this shell has spawned.  1 = the boot core; any
+    /// higher value means a replacement (silent update, crash
+    /// respawn), which must not re-run the saved-window restore.
+    core_generation: u32,
     /// Rolling 30 s ring of CORE_SPAWN timestamps.  When this fills
     /// (≥3 entries inside the window) we emit a `CORE_BOOT_LOOP`
     /// WARN — the alarm the 2026-06-15 incident lacked.  In that
@@ -938,6 +948,25 @@ impl ShellApp {
     /// disagreeing after a crash between writes) is not an error —
     /// the window opens at the default rect and the panes still land.
     fn restore_window(&mut self, frame_index: u32) {
+        // Only the FIRST core of this launch restores windows.  A
+        // replacement core (silent update, crash respawn) reads the
+        // same saved file and asks again — honouring that would stack
+        // a second copy of every window on top of the ones already
+        // open.  L1 owns windows, so L1 is where that judgement
+        // belongs; the core cannot tell whether it is the first one.
+        //
+        // Keyed on the core generation rather than on "have we
+        // restored yet", because a cold launch sends the whole batch
+        // in one burst, before any of those windows exist.
+        if self.core_generation > 1 {
+            lx_event!(
+                "WINDOW_RESTORE_IGNORED",
+                "not a cold launch; the windows are already open",
+                frame_index = frame_index,
+                windows = self.windows.len()
+            );
+            return;
+        }
         let frame = marspot::state::read_windows()
             .and_then(|v| v.into_iter().nth(frame_index as usize))
             .filter(|w| w.w > 50.0 && w.h > 50.0)
@@ -973,6 +1002,32 @@ impl ShellApp {
             bg: marspot::font_cache::BG,
         };
         marspot::app::open_window(window_id, &attrs);
+    }
+
+    /// Announce every window past the boot one to a core that has just
+    /// been spawned.
+    ///
+    /// A core learns about the boot window from the env pair it is
+    /// spawned with, and about later windows from the
+    /// `SurfaceAttachWindow` sent when each opened.  A *replacement*
+    /// core (silent update, crash respawn) missed all of those: it
+    /// would come up knowing one window, leaving every other window
+    /// painting-less forever while its panes were adopted as orphans
+    /// into the first one.  Replaying the attaches is what makes a core
+    /// swap invisible with more than one window open.
+    fn announce_windows_to_new_core(&self, ctx: &MarspotAppCtx) {
+        let scale = ctx.scale();
+        for i in 1..self.windows.len() {
+            let Some(s) = self.windows[i].surfaces.as_ref() else { continue };
+            let (f, b) = s.ids();
+            let (w, h) = (s.width() as f64, s.height() as f64);
+            self.send_surface_attach(self.windows[i].window_id, f, b, w, h, scale);
+            lx_event!(
+                "WINDOW_REANNOUNCED",
+                "replayed a window's surface pair into the new core",
+                window_id = self.windows[i].window_id
+            );
+        }
     }
 
     /// Index of the window carrying `window_id`.
@@ -1053,8 +1108,8 @@ impl ShellApp {
             next_window_id: marspot::shell_proto::FIRST_WINDOW_ID + 1,
             active: None,
             redraw_thread_started: false,
-            last_present_at: None,
             binaries,
+            core_generation: 0,
             sup_state: SupervisorState::Idle,
             crashes: std::collections::VecDeque::new(),
             auto_restart_disabled: false,
@@ -1123,6 +1178,7 @@ impl ShellApp {
     /// already paying VecDeque ops to maintain the ring; the
     /// occasional WARN is dwarfed by everything else in `poll_supervisor`.
     fn record_core_boot(&mut self) {
+        self.core_generation = self.core_generation.saturating_add(1);
         let now = Instant::now();
         let window = std::time::Duration::from_secs(30);
         let cutoff = now - window;
@@ -1446,6 +1502,7 @@ impl ShellApp {
                 return false;
             }
         };
+        self.announce_windows_to_new_core(ctx);
         // Commit the update — drop the rollback target.
         match self.binaries.finalize_stable() {
             Ok(()) => sup_log::log("UPDATE_STABLE", "single-core swap; prev/ deleted"),
@@ -1617,10 +1674,15 @@ impl ShellApp {
     /// whole point is invisibility, the active core keeps rendering
     /// normally while the pending core warms up off-screen.
     fn refresh_banner(&mut self, ctx: &MarspotAppCtx) {
-        let Some(wi) = self.window_index(ctx.window_id()) else { return };
+        // The condition is about the CORE, which every window shares —
+        // so the banner goes into every window's presenter, not just
+        // whichever one's callback happened to run first.  With one
+        // `banner_kind` compared against and one presenter written, the
+        // second window silently never showed (or never cleared) it.
+        let any_attached = self.windows.iter().any(|w| w.surfaces.is_some());
         let want = if self.auto_restart_disabled {
             Some(BannerKind::UpdateFailed)
-        } else if !self.core_alive() && self.windows[wi].surfaces.is_some() {
+        } else if !self.core_alive() && any_attached {
             // Active core process is gone (just SIGKILL'd or died and we
             // haven't respawned yet).  Show the recovering banner while
             // the gap lasts.
@@ -1631,8 +1693,9 @@ impl ShellApp {
         if want == self.banner_kind {
             return;
         }
-        if let Some(p) = self.windows[wi].presenter.as_mut() {
-            let scale = ctx.scale();
+        let scale = ctx.scale();
+        for w in self.windows.iter_mut() {
+            let Some(p) = w.presenter.as_mut() else { continue };
             if let Err(e) = p.set_banner(want, scale) {
                 lx_warn!("shell.set_banner_failed", &format!("{e}"));
                 return;
@@ -1690,6 +1753,7 @@ impl ShellApp {
             self.active = self.spawn_core(front_id, back_id, w_px, h_px, scale);
             if self.active.is_some() {
                 self.record_core_boot();
+                self.announce_windows_to_new_core(ctx);
             }
             // A freshly spawned core attaches its env pair but never
             // emits SurfaceReady spontaneously — drive it.  Initial boot
@@ -2877,7 +2941,7 @@ impl MarspotApp for ShellApp {
         // `child.try_wait()` → `restart_core`, so this branch only
         // matters when the core process is alive but silent.
         let now = Instant::now();
-        let stale = self
+        let stale = self.windows[wi]
             .last_present_at
             .map(|t| now.duration_since(t) > Duration::from_secs(5))
             .unwrap_or(true);
@@ -2887,7 +2951,7 @@ impl MarspotApp for ShellApp {
         if let Some(p) = self.windows[wi].presenter.as_mut() {
             p.present();
             self.windows[wi].frame_pending = false;
-            self.last_present_at = Some(now);
+            self.windows[wi].last_present_at = Some(now);
         }
     }
 }
