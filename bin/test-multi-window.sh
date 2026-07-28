@@ -150,6 +150,14 @@ presenters=$(grep -c 'WINDOW_PRESENTER_READY' "$APPLOG")
   || fail "the restored window has no presenter — it is a black rectangle"
 grep -q 'shell.surface_ready.no_presenter' "$APPLOG" \
   && fail "a pair was acked into a presenter-less window"
+# …and the presenter must have actually PRESENTED.  "painted + pair
+# installed + presenter exists" all logged green while the window was
+# still black — present() was only ever driven for the boot window.
+presented=$(grep 'WINDOW_FIRST_PRESENT' "$APPLOG" | grep -o 'window_id=[0-9]*' | sort -u)
+n_presented=$(printf '%s' "$presented" | grep -c 'window_id=')
+echo "==> windows that PRESENTED: $(echo $presented | tr '\n' ' ')"
+(( n_presented >= 2 )) \
+  || fail "only $n_presented window(s) ever presented — the other shows black"
 
 # --- 3. no cross-window orphan adoption -------------------------------
 if grep -q 'core.boot.orphan_adopted' "$APPLOG"; then
@@ -208,6 +216,9 @@ grep -q 'WINDOW_PRESENTER_READY' "$APPLOG" \
   || fail "the Cmd-N window has no presenter — it is a black rectangle"
 grep -q 'shell.surface_ready.no_presenter' "$APPLOG" \
   && fail "a pair was acked into a presenter-less window (Cmd-N phase)"
+n_presented=$(grep 'WINDOW_FIRST_PRESENT' "$APPLOG" | grep -o 'window_id=[0-9]*' | sort -u | grep -c 'window_id=')
+(( n_presented >= 2 )) \
+  || fail "the Cmd-N window never presented — it shows black"
 
 # The new window comes up 1x1 with one pane, and — the 2026-07-26
 # incident — must not shrink what the boot window persisted.

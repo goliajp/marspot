@@ -3169,43 +3169,62 @@ impl MarspotApp for ShellApp {
             }
         });
 
-        // Hold off until the core has written real content.  Without
-        // this gate the user sees an uninitialised IOSurface for
-        // ~50-100 ms at startup, then a hard snap to content — reads
-        // as a black-then-content flash.
-        let Some(wi) = self.window_index(ctx.window_id()) else { return };
-        if !self.windows[wi].first_frame_ready {
-            return;
-        }
-        // Gate the present on whether a fresh frame is actually
-        // pending.  See `frame_pending` field doc — the safety-net
-        // 250 ms timer wakes the redraw callback unconditionally,
-        // but sampling the IOSurface from here on every tick races
-        // against core's mid-render state and produces the flash.
-        //
-        // Stale safety net: if it's been a long while since the last
-        // present (real "core stuck but alive" case where no future
-        // poke is coming), force a present anyway so the window
-        // doesn't appear frozen.  Threshold deliberately wide (5 s)
-        // because every spurious present makes WindowServer composite
-        // the IOSurface again, and sub-LSB alpha-blend rounding can
-        // produce a faint BG flicker the user sees as "the whole
-        // background pulses" when an idle window force-presents at
-        // 1 Hz.  Crash-respawn is detected separately via
-        // `child.try_wait()` → `restart_core`, so this branch only
-        // matters when the core process is alive but silent.
+        // Present EVERY window that owes a frame, not the one this
+        // callback happens to be about.  All `proxy.wake()`s dispatch
+        // to the boot window by design ("a wake is about the process"),
+        // so a present step keyed to `ctx.window_id()` only ever ran
+        // for window 1 — a second window had core frames, an installed
+        // pair, even a presenter, and still showed black because
+        // nothing ever called its `present()` (2026-07-28, the black
+        // window's SECOND root cause).  Same class of bug as the L2
+        // render pass before step 4d: a per-window duty attached to
+        // one window.
         let now = Instant::now();
-        let stale = self.windows[wi]
-            .last_present_at
-            .map(|t| now.duration_since(t) > Duration::from_secs(5))
-            .unwrap_or(true);
-        if !self.windows[wi].frame_pending && !stale {
-            return;
-        }
-        if let Some(p) = self.windows[wi].presenter.as_mut() {
-            p.present();
-            self.windows[wi].frame_pending = false;
-            self.windows[wi].last_present_at = Some(now);
+        for wi in 0..self.windows.len() {
+            // Hold off until the core has written real content into
+            // this window's pair.  Without this gate the user sees an
+            // uninitialised IOSurface for ~50-100 ms at startup, then
+            // a hard snap to content — a black-then-content flash.
+            if !self.windows[wi].first_frame_ready {
+                continue;
+            }
+            // Gate on a fresh frame actually pending.  See the
+            // `frame_pending` field doc — the safety-net 250 ms timer
+            // wakes this callback unconditionally, and sampling the
+            // IOSurface on every tick races the core's mid-render
+            // state (the historical all-panes flash).
+            //
+            // Stale safety net: if it's been a long while since this
+            // window's last present (core stuck but alive — no future
+            // poke coming), force one so the window doesn't freeze.
+            // Threshold deliberately wide (5 s): every spurious
+            // present makes WindowServer composite again, and sub-LSB
+            // alpha rounding reads as a faint background pulse at 1 Hz.
+            let stale = self.windows[wi]
+                .last_present_at
+                .map(|t| now.duration_since(t) > Duration::from_secs(5))
+                .unwrap_or(true);
+            if !self.windows[wi].frame_pending && !stale {
+                continue;
+            }
+            if let Some(p) = self.windows[wi].presenter.as_mut() {
+                p.present();
+                self.windows[wi].frame_pending = false;
+                let first = self.windows[wi].last_present_at.is_none();
+                self.windows[wi].last_present_at = Some(now);
+                // One INFO per window per boot: the present-side
+                // mirror of the core's WINDOW_FIRST_FRAME.  The chain
+                // "painted → pair installed → presenter exists" logged
+                // green twice while the screen stayed black; only the
+                // present itself is proof the pixels went up.
+                if first {
+                    lx_event!(
+                        "WINDOW_FIRST_PRESENT",
+                        "first present for this window",
+                        window_id = self.windows[wi].window_id
+                    );
+                }
+            }
         }
     }
 }
