@@ -139,6 +139,18 @@ echo "==> windows that painted: $(echo $painted | tr '\n' ' ') (distinct surface
 (( ids >= 2 )) \
   || fail "both windows painted into the same surface — they share a pair"
 
+# --- 2b. the present side, not just the paint side --------------------
+# 2026-07-28: a window can pass every assertion above and still be
+# BLACK — core painted, shell installed the pair, but the window had no
+# presenter (the layer that puts the IOSurface on the NSView), and the
+# skip was silent.  Every non-boot window must log PRESENTER_READY, and
+# the no-presenter error must never fire.
+presenters=$(grep -c 'WINDOW_PRESENTER_READY' "$APPLOG")
+(( presenters >= 1 )) \
+  || fail "the restored window has no presenter — it is a black rectangle"
+grep -q 'shell.surface_ready.no_presenter' "$APPLOG" \
+  && fail "a pair was acked into a presenter-less window"
+
 # --- 3. no cross-window orphan adoption -------------------------------
 if grep -q 'core.boot.orphan_adopted' "$APPLOG"; then
   fail "boot window adopted sessions it should have left to the other window"
@@ -192,6 +204,10 @@ painted=$(grep 'WINDOW_FIRST_FRAME' "$APPLOG" | grep -o 'window_id=[0-9]*' | sor
 n_painted=$(printf '%s' "$painted" | grep -c 'window_id=')
 echo "==> windows that painted: $(echo $painted | tr '\n' ' ')"
 (( n_painted >= 2 )) || fail "the fresh window never painted ($n_painted painted)"
+grep -q 'WINDOW_PRESENTER_READY' "$APPLOG" \
+  || fail "the Cmd-N window has no presenter — it is a black rectangle"
+grep -q 'shell.surface_ready.no_presenter' "$APPLOG" \
+  && fail "a pair was acked into a presenter-less window (Cmd-N phase)"
 
 # The new window comes up 1x1 with one pane, and — the 2026-07-26
 # incident — must not shrink what the boot window persisted.

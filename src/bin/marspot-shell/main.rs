@@ -2202,14 +2202,29 @@ impl ShellApp {
             Some(p) => p,
             None => return,
         };
-        if let Some(p) = self.windows[i].presenter.as_mut() {
-            if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
-                lx_error!("shell.set_pair_failed", &format!("{e}"));
-                new_pair.release();
-                return;
+        match self.windows[i].presenter.as_mut() {
+            Some(p) => {
+                if let Err(e) = p.set_pair(&new_pair.front, &new_pair.back) {
+                    lx_error!("shell.set_pair_failed", &format!("{e}"));
+                    new_pair.release();
+                    return;
+                }
+                // The acked id is the one the core just wrote — point at it.
+                p.swap_to_id(id);
             }
-            // The acked id is the one the core just wrote — point at it.
-            p.swap_to_id(id);
+            None => {
+                // Silently skipping here is how the 2026-07-28 black
+                // window stayed invisible in the logs: the pair got
+                // installed, `pair_swapped` was logged, and nothing on
+                // screen ever changed.  Every window must have its
+                // presenter by the time its first frame is acked.
+                lx_error!(
+                    "shell.surface_ready.no_presenter",
+                    "pair acked but this window has no presenter — it will render black",
+                    window_id = self.windows[i].window_id,
+                    id = id
+                );
+            }
         }
         if let Some(old) = self.windows[i].surfaces.take() {
             old.release();
@@ -2916,6 +2931,34 @@ impl MarspotApp for ShellApp {
         };
         let (f, b) = pair.ids();
         let mut win = ShellWindow::new(window_id);
+        // The presenter is what actually puts the IOSurface on the
+        // NSView — the boot window gets one in `resumed()`, and a
+        // window without one is a permanently black rectangle no
+        // matter how faithfully the core paints (2026-07-28 field
+        // report: Cmd-N opened exactly that).  Built against the pair
+        // we just created; the SurfaceReady promote re-points it at
+        // whichever half the core acks.
+        match ShellPresenter::new(
+            ctx.ns_view(),
+            scale as f32,
+            &pair.front,
+            &pair.back,
+        ) {
+            Ok(p) => {
+                win.presenter = Some(p);
+                lx_event!(
+                    "WINDOW_PRESENTER_READY",
+                    "presenter attached to the new window's view",
+                    window_id = window_id
+                );
+            }
+            Err(e) => {
+                lx_error!("shell.window.presenter_new_failed", &format!("{e}"));
+                pair.release();
+                marspot::app::close_window(window_id);
+                return;
+            }
+        }
         win.pending_surfaces = Some(pair);
         // Seed the geometry cache from the window as it actually
         // opened.  `window-state.bin` is a list written whole on every
