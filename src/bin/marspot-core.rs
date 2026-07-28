@@ -1194,6 +1194,103 @@ mod window_state_tests {
         assert_eq!(app.windows[1].focused_idx, 0);
     }
 
+    /// 2026-07-29 field report — the ghost promised a split on the
+    /// pane's OWN slot while release (correctly) did nothing.  The
+    /// contract is "what lights up is what release does", enforced by
+    /// both sides reading ONE resolution.  Every no-op shape must
+    /// resolve to Nothing:
+    #[test]
+    fn releases_that_change_nothing_preview_nothing() {
+        let mut app = app_with(vec![win(1, vec![
+            Pane::new_vacant(10, 80, 24),
+            Pane::new_vacant(11, 80, 24),
+        ])]);
+        app.windows[0].grid_cols = 2;
+        app.windows[0].grid_rows = 1;
+        let drag = PaneDrag { from_wi: 0, idx: 0, start: (0.0, 0.0), active: true };
+        let t = |idx, zone| Some(DropTarget { wi: 0, pane_idx: idx, zone });
+
+        // Own slot, every zone: remove+reinsert lands back at 0.
+        for zone in [DropZone::Left, DropZone::Top, DropZone::Center] {
+            assert_eq!(
+                app.resolve_drop_outcome(&drag, t(0, zone), 1),
+                DropOutcome::Nothing,
+                "own slot {zone:?}"
+            );
+        }
+        // The neighbour's NEAR edge re-inserts at the old slot too.
+        assert_eq!(
+            app.resolve_drop_outcome(&drag, t(1, DropZone::Left), 1),
+            DropOutcome::Nothing,
+            "pane 0 on pane 1's left band = back where it was"
+        );
+        // …but the FAR edge is a real rearrange.
+        assert!(matches!(
+            app.resolve_drop_outcome(&drag, t(1, DropZone::Right), 1),
+            DropOutcome::Split { .. }
+        ));
+        // Own window, no pane under the pointer: nothing.
+        assert_eq!(app.resolve_drop_outcome(&drag, None, 1), DropOutcome::Nothing);
+
+        // And the ghost obeys the same resolution: hovering the own
+        // slot draws nothing.
+        app.pane_drag = Some(drag);
+        let rect = app.windows[0].layout.cells[0];
+        app.update_drop_target(1, rect.x + rect.w / 2.0, rect.y_top + rect.h / 2.0);
+        assert!(
+            app.windows.iter().all(|w| w.drop_preview.is_none()),
+            "a Nothing outcome must light no ghost"
+        );
+    }
+
+    /// A grid at both caps cannot reshape: the edge-band drop
+    /// degrades to append, and the resolution says so — previewing a
+    /// half-pane split there would promise an impossible shape.
+    #[test]
+    fn capped_grids_resolve_edge_drops_to_append() {
+        let mut panes: Vec<Pane> = (0..36).map(|i| Pane::new_vacant(100 + i, 80, 24)).collect();
+        let extra = Pane::new_vacant(10, 80, 24);
+        let mut app = app_with(vec![
+            win(1, vec![extra]),
+            win(2, panes.drain(..).collect()),
+        ]);
+        app.windows[1].grid_cols = 6;
+        app.windows[1].grid_rows = 6;
+        let drag = PaneDrag { from_wi: 0, idx: 0, start: (0.0, 0.0), active: true };
+        let t = Some(DropTarget { wi: 1, pane_idx: 0, zone: DropZone::Right });
+        assert_eq!(
+            app.resolve_drop_outcome(&drag, t, 2),
+            DropOutcome::Append { to_wi: 1 },
+            "6×6 full: split is impossible, say append"
+        );
+    }
+
+    /// Dropping on a dormant placeholder fills it — any zone.  The
+    /// placeholder is consumed, the source slot goes dormant, no
+    /// reshape anywhere.
+    #[test]
+    fn dropping_on_a_placeholder_fills_it() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24), Pane::new_dormant(80, 24)]),
+        ]);
+        let drag = PaneDrag { from_wi: 0, idx: 1, start: (0.0, 0.0), active: true };
+        for zone in [DropZone::Left, DropZone::Center, DropZone::Bottom] {
+            let t = Some(DropTarget { wi: 1, pane_idx: 1, zone });
+            assert_eq!(
+                app.resolve_drop_outcome(&drag, t, 2),
+                DropOutcome::Fill { to_wi: 1, idx: 1 },
+                "{zone:?} on a placeholder = fill it"
+            );
+        }
+        app.fill_placeholder(0, 1, 1, 1);
+        assert_eq!(app.windows[1].panes.len(), 2, "no new slot");
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
+        assert!(!app.windows[1].panes[1].is_dormant(), "placeholder consumed");
+        assert!(app.windows[0].panes[1].is_dormant(), "source slot went dormant");
+        assert_eq!(app.key_window, 1);
+    }
+
     /// The modal's slot map is sized from the window's own grid, so a
     /// window created with a non-default shape starts consistent.
     #[test]
@@ -1946,6 +2043,31 @@ struct DropTarget {
     wi: usize,
     pane_idx: usize,
     zone: DropZone,
+}
+
+/// RFC-006 — what a release would DO, resolved from (drag, hover).
+///
+/// The single source of truth for both the ghost and the release:
+/// `update_drop_target` renders it, `mouse_up` executes it, so the
+/// preview can never promise what the release won't deliver.  The
+/// field report that forced this: dragging a pane onto its own slot
+/// showed a split ghost, but release (correctly) did nothing — the
+/// ghost and the outcome were computed by two different pieces of
+/// code with two different ideas of "no-op".
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DropOutcome {
+    /// Insert into the target window beside the hovered pane.
+    Split { to_wi: usize, at_idx: usize, zone: DropZone },
+    /// Trade slots with the hovered pane.
+    Swap { to_wi: usize, idx: usize },
+    /// Land in the hovered dormant placeholder's slot.
+    Fill { to_wi: usize, idx: usize },
+    /// In a window but over no pane / grid at both caps: append.
+    Append { to_wi: usize },
+    /// Outside every marspot window: a new window at the point.
+    NewWindow,
+    /// Release changes nothing — and therefore previews nothing.
+    Nothing,
 }
 
 /// RFC-006 §1 — zone geometry.  Edge bands are 25 % of the rect's
@@ -3624,18 +3746,105 @@ impl CoreApp {
         );
     }
 
+    /// RFC-006 — resolve what a release at `target` would do for the
+    /// pane being dragged.  Pure decision logic; both the ghost and
+    /// the release go through it (single source of truth — a `Nothing`
+    /// previews nothing and does nothing).
+    fn resolve_drop_outcome(
+        &self,
+        drag: &PaneDrag,
+        target: Option<DropTarget>,
+        drop_window_id: u32,
+    ) -> DropOutcome {
+        let Some(t) = target else {
+            // No pane under the pointer.  In a foreign window that is
+            // the append landing; in the own window it is a no-op; in
+            // no window at all it births one.
+            return match self.window_index(drop_window_id) {
+                Some(to_wi) if to_wi != drag.from_wi => DropOutcome::Append { to_wi },
+                Some(_) => DropOutcome::Nothing,
+                None if drop_window_id == 0 => DropOutcome::NewWindow,
+                None => DropOutcome::Nothing,
+            };
+        };
+        let same_window = t.wi == drag.from_wi;
+        let hovered_dormant = win!(self, t.wi)
+            .panes
+            .get(t.pane_idx)
+            .is_some_and(|p| p.is_dormant());
+        // A placeholder is an empty slot asking to be filled — every
+        // zone of it means "put the pane HERE" (splitting beside
+        // emptiness would be pedantry).
+        if hovered_dormant {
+            if same_window && t.pane_idx == drag.idx {
+                return DropOutcome::Nothing; // cannot happen (dormant isn't draggable), but stay total
+            }
+            return DropOutcome::Fill { to_wi: t.wi, idx: t.pane_idx };
+        }
+        match t.zone {
+            DropZone::Center => {
+                if same_window && t.pane_idx == drag.idx {
+                    DropOutcome::Nothing // swapping with yourself
+                } else {
+                    DropOutcome::Swap { to_wi: t.wi, idx: t.pane_idx }
+                }
+            }
+            zone => {
+                if same_window {
+                    // Simulate the remove+insert: if the pane would
+                    // come back to its own slot, the release changes
+                    // nothing — own edges, AND the near edges of the
+                    // neighbours (pane i dropped on i+1's Left band
+                    // re-inserts at i).
+                    let at = if drag.idx < t.pane_idx {
+                        t.pane_idx - 1
+                    } else {
+                        t.pane_idx
+                    };
+                    let cols = win!(self, t.wi).grid_cols;
+                    let n_after_remove = win!(self, t.wi).panes.len() - 1;
+                    let insert_at = match zone {
+                        DropZone::Left | DropZone::Top => at,
+                        DropZone::Right => at + 1,
+                        DropZone::Bottom => {
+                            let r = at / cols;
+                            let c = at % cols;
+                            ((r + 1) * cols + c).min(n_after_remove)
+                        }
+                        DropZone::Center => unreachable!(),
+                    };
+                    if insert_at == drag.idx {
+                        return DropOutcome::Nothing;
+                    }
+                }
+                // At both grid caps a split cannot reshape — the drop
+                // is an append, and previewing a half-pane split there
+                // would promise a shape the release can't deliver.
+                let t_win = &win!(self, t.wi);
+                let full = t_win.panes.len() + 1 > t_win.grid_cols * t_win.grid_rows;
+                let can_reshape = match zone {
+                    DropZone::Left | DropZone::Right => t_win.grid_cols < 6,
+                    DropZone::Top | DropZone::Bottom => t_win.grid_rows < 6,
+                    DropZone::Center => false,
+                };
+                if !same_window && full && !can_reshape {
+                    return DropOutcome::Append { to_wi: t.wi };
+                }
+                DropOutcome::Split { to_wi: t.wi, at_idx: t.pane_idx, zone }
+            }
+        }
+    }
+
     /// RFC-006 — recompute the live drop target from this drag tick's
-    /// hover.  Sets/clears each window's `drop_preview` so exactly one
-    /// window (the hovered one) shows the ghost.
+    /// hover.  The ghost is rendered FROM the resolved outcome, so
+    /// what lights up is exactly what release will do — a `Nothing`
+    /// (own slot, no-op reinsert) lights nothing.
     fn update_drop_target(&mut self, hover_window_id: u32, hx: f64, hy: f64) {
         let new_target = self.window_index(hover_window_id).and_then(|wi| {
             let idx = win!(self, wi).layout.hit_test(hx, hy)?;
             if idx >= win!(self, wi).panes.len() {
                 return None;
             }
-            // Hovering the dragged pane itself: center there is a
-            // no-op swap; edges still mean "split beside myself" in
-            // the same window, which is a legitimate rearrange.
             let rect = win!(self, wi).layout.cells.get(idx)?;
             let zone = drop_zone_at(rect, hx, hy);
             Some(DropTarget { wi, pane_idx: idx, zone })
@@ -3644,12 +3853,24 @@ impl CoreApp {
             return;
         }
         self.clear_drop_preview();
-        if let Some(t) = new_target {
-            let rect = win!(self, t.wi).layout.cells[t.pane_idx];
-            win!(self, t.wi).drop_preview = Some(drop_preview_rect(&rect, t.zone));
-            win!(self, t.wi).needs_render = true;
-        }
         self.drop_target = new_target;
+        let Some(drag) = self.pane_drag else { return };
+        let ghost = match self.resolve_drop_outcome(&drag, new_target, hover_window_id) {
+            DropOutcome::Split { to_wi, at_idx, zone } => {
+                let rect = win!(self, to_wi).layout.cells[at_idx];
+                Some((to_wi, drop_preview_rect(&rect, zone)))
+            }
+            DropOutcome::Swap { to_wi, idx } | DropOutcome::Fill { to_wi, idx } => {
+                let rect = win!(self, to_wi).layout.cells[idx];
+                Some((to_wi, drop_preview_rect(&rect, DropZone::Center)))
+            }
+            // Append / NewWindow / Nothing: no rectangle to promise.
+            _ => None,
+        };
+        if let Some((wi, rect)) = ghost {
+            win!(self, wi).drop_preview = Some(rect);
+            win!(self, wi).needs_render = true;
+        }
     }
 
     fn clear_drop_preview(&mut self) {
@@ -3808,6 +4029,69 @@ impl CoreApp {
             b_window = win!(self, wb).window_id
         );
         self.save_session_state();
+    }
+
+    /// RFC-006 — drop onto a dormant placeholder: the pane takes the
+    /// empty slot (any zone of a placeholder means "put it HERE").
+    /// Source side follows the move-out rules; the placeholder is
+    /// consumed, so no reshape and no new slot.
+    fn fill_placeholder(&mut self, from_wi: usize, from_idx: usize, to_wi: usize, at_idx: usize) {
+        if from_wi >= self.windows.len()
+            || to_wi >= self.windows.len()
+            || from_idx >= win!(self, from_wi).panes.len()
+            || at_idx >= win!(self, to_wi).panes.len()
+            || !win!(self, to_wi).panes[at_idx].is_dormant()
+        {
+            return;
+        }
+        let same_window = from_wi == to_wi;
+        // Either way the vacated slot goes dormant — a fill is a
+        // slot-to-slot move, and the shape of the source layout is
+        // preserved exactly like every other move-out.
+        let (pc, pr) = {
+            let g = win!(self, from_wi).panes[from_idx].session().grid();
+            (g.cols(), g.rows())
+        };
+        let pane = std::mem::replace(
+            &mut win!(self, from_wi).panes[from_idx],
+            Pane::new_dormant(pc, pr),
+        );
+        {
+            let w = &mut win!(self, from_wi);
+            if w.focused_idx == from_idx {
+                w.focused_idx = (0..w.panes.len())
+                    .filter(|&i| !w.panes[i].is_dormant())
+                    .min_by_key(|&i| i.abs_diff(from_idx))
+                    .unwrap_or(from_idx);
+            }
+            if let Some(sel) = w.selection {
+                if sel.session_idx == from_idx {
+                    w.selection = None;
+                    w.selection_dragging = false;
+                }
+            }
+            if w.editing_title == Some(from_idx) {
+                w.editing_title = None;
+                w.title_edit_buffer.clear();
+            }
+        }
+        win!(self, to_wi).panes[at_idx] = pane;
+        win!(self, to_wi).focused_idx = at_idx;
+        self.key_window = to_wi;
+        if !same_window {
+            self.rebuild_layout(from_wi);
+        }
+        self.rebuild_layout(to_wi);
+        lx_event!(
+            "PANE_FILLED_PLACEHOLDER",
+            "pane dropped into a dormant slot",
+            to_window = win!(self, to_wi).window_id,
+            slot = at_idx
+        );
+        self.save_session_state();
+        if !same_window {
+            self.request_close_if_empty(from_wi);
+        }
     }
 
     /// RFC-006 §4 — drag-to-desktop: park the pane and ask L1 for a
@@ -4932,6 +5216,24 @@ impl CoreApp {
 
     fn key(&mut self, wi: usize, event: MarspotKeyEvent, modifiers: Modifiers) {
         use marspot::input::{KeyState, LogicalKey, NamedKey};
+
+        // RFC-006 §7 — Esc cancels an in-flight pane drag outright:
+        // state cleared, ghost cleared, the release that follows is a
+        // plain mouse-up.  Swallowed; a drag is modal.
+        if event.state == KeyState::Pressed
+            && self.pane_drag.is_some()
+            && matches!(event.logical, LogicalKey::Named(NamedKey::Escape))
+        {
+            if let Some(d) = self.pane_drag.take() {
+                let from = d.from_wi;
+                if from < self.windows.len() {
+                    win!(self, from).needs_render = true;
+                }
+            }
+            self.drop_target = None;
+            self.clear_drop_preview();
+            return;
+        }
 
         // F3+9 — Esc closes the context menu if open.  Swallowed so the
         // \e doesn't reach the focused pane.
@@ -6627,35 +6929,32 @@ impl CoreApp {
             if d.active {
                 let from = d.from_wi;
                 win!(self, from).needs_render = true;
-                match (self.window_index(drop_window_id), target) {
-                    // A zone on a hovered pane: split beside it or
-                    // swap with it — the preview showed exactly this.
-                    (Some(to_wi), Some(t)) if t.wi == to_wi => match t.zone {
-                        DropZone::Center => {
-                            self.swap_panes(d.from_wi, d.idx, t.wi, t.pane_idx);
-                        }
-                        zone => {
-                            self.split_insert(d.from_wi, d.idx, t.wi, t.pane_idx, zone);
-                        }
-                    },
-                    // In a window but over no pane (chrome, sidebar):
-                    // the append landing, as the menu does.
-                    (Some(to_wi), _) if to_wi != d.from_wi => {
+                // The SAME resolution the ghost was drawn from — the
+                // release delivers exactly what was previewed.
+                match self.resolve_drop_outcome(&d, target, drop_window_id) {
+                    DropOutcome::Split { to_wi, at_idx, zone } => {
+                        self.split_insert(d.from_wi, d.idx, to_wi, at_idx, zone);
+                    }
+                    DropOutcome::Swap { to_wi, idx } => {
+                        self.swap_panes(d.from_wi, d.idx, to_wi, idx);
+                    }
+                    DropOutcome::Fill { to_wi, idx } => {
+                        self.fill_placeholder(d.from_wi, d.idx, to_wi, idx);
+                    }
+                    DropOutcome::Append { to_wi } => {
                         self.move_pane_to_window(d.from_wi, d.idx, to_wi);
                     }
-                    // Outside every marspot window: a new 1×1 window
-                    // is born where the pane was dropped (screen pts).
-                    (None, _) if drop_window_id == 0 => {
+                    DropOutcome::NewWindow => {
                         self.move_pane_to_new_window_at(
                             d.from_wi,
                             d.idx,
                             (drop_x, drop_y),
                         );
                     }
-                    _ => {
+                    DropOutcome::Nothing => {
                         lx_debug!(
                             "core.pane_drag.cancelled",
-                            "pane drag released with no actionable target",
+                            "release resolves to nothing — as previewed",
                             drop_window_id = drop_window_id
                         );
                     }
