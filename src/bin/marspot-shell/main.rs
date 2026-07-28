@@ -632,6 +632,9 @@ enum ShellInbox {
     /// 6b — the core knows how many windows the user had, L1 owns the
     /// windows themselves, so the core asks.
     WindowOpenRequest(u32),
+    /// L2 → L1: close this window (RFC-005 step 5 — its last pane was
+    /// just moved out).  Runs the exact red-button path.
+    WindowCloseRequest(u32),
 }
 
 /// How long after spawn we expect HELLO_ACK before declaring the core
@@ -2398,7 +2401,24 @@ impl ShellApp {
                 self.end_pane_session(sid, plugins::EndReason::UserEscape);
             }
             ShellInbox::WindowOpenRequest(frame_index) => {
-                self.restore_window(frame_index);
+                if frame_index == marspot::shell_proto::WINDOW_OPEN_USER {
+                    // A user action (move-pane-to-new-window), not a
+                    // boot restore: none of the restore gates apply —
+                    // safe mode blocks automatic multiplication, and
+                    // an explicit user request is neither automatic
+                    // nor a spawn (the pane already exists).
+                    self.open_window_with_frame(None);
+                } else {
+                    self.restore_window(frame_index);
+                }
+            }
+            ShellInbox::WindowCloseRequest(window_id) => {
+                // The core asked because this window emptied out.  The
+                // last window never closes this way — that is app
+                // teardown, which stays user-driven.
+                if marspot::app::window_count() > 1 {
+                    self.close_window_by_id(window_id);
+                }
             }
             ShellInbox::DevPanelToggle => {
                 self.dev_panel.visible = !self.dev_panel.visible;
@@ -3284,6 +3304,11 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         marspot::shell_proto::decode_window_open_request(&frame.payload)
                             .ok()
                             .map(ShellInbox::WindowOpenRequest)
+                    }
+                    MsgType::WindowCloseRequest => {
+                        marspot::shell_proto::decode_window_close_request(&frame.payload)
+                            .ok()
+                            .map(ShellInbox::WindowCloseRequest)
                     }
                     // Unknown frames are ignored — keeps forward
                     // compatibility while the protocol grows.

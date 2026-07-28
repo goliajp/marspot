@@ -379,6 +379,10 @@ pub enum MsgType {
     /// and allocates their ids; the resulting `SurfaceAttachWindow`
     /// is still the window's birth event, exactly as for Cmd-N.
     WindowOpenRequest = 64,
+    /// core → shell: close this window (RFC-005 step 5 — the last
+    /// pane was moved out and an empty window closes itself).  L1
+    /// owns windows, so the core asks.  Payload: `window_id u32 LE`.
+    WindowCloseRequest = 65,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -432,6 +436,7 @@ impl MsgType {
             62 => MsgType::WindowClosed,
             63 => MsgType::WindowFocus,
             64 => MsgType::WindowOpenRequest,
+            65 => MsgType::WindowCloseRequest,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1175,6 +1180,26 @@ pub fn decode_window_focus(payload: &[u8]) -> io::Result<u32> {
 /// Ask L1 to reopen a saved window, restoring its geometry from entry
 /// `frame_index` of `window-state.bin`.  An index past the end of that
 /// file is not an error — the window opens at the default rect.
+/// `WindowOpenRequest` with this frame index is a USER action (move a
+/// pane to a brand-new window), not a boot restore: L1 opens it at
+/// the default rect and does NOT apply the crash-loop / generation
+/// gates that guard automatic restores.
+pub const WINDOW_OPEN_USER: u32 = u32::MAX;
+
+pub fn encode_window_close_request(window_id: u32) -> Vec<u8> {
+    window_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_window_close_request(payload: &[u8]) -> io::Result<u32> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WINDOW_CLOSE_REQUEST payload < 4 bytes",
+        ));
+    }
+    Ok(u32::from_le_bytes(payload[0..4].try_into().unwrap()))
+}
+
 pub fn encode_window_open_request(frame_index: u32) -> Vec<u8> {
     frame_index.to_le_bytes().to_vec()
 }
@@ -2620,6 +2645,7 @@ mod tests {
         assert_eq!(MsgType::from_u32(62), Some(MsgType::WindowClosed));
         assert_eq!(MsgType::from_u32(63), Some(MsgType::WindowFocus));
         assert_eq!(MsgType::from_u32(64), Some(MsgType::WindowOpenRequest));
+        assert_eq!(MsgType::from_u32(65), Some(MsgType::WindowCloseRequest));
     }
 
     #[test]

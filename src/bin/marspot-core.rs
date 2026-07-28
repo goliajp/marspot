@@ -383,6 +383,13 @@ enum ContextMenuAction {
     CopyLink,
 }
 
+/// Dynamic menu-tag band for "Move to Window N": tag = BASE + target
+/// window index.  Plain enum tags live far below; plugin badge tags
+/// are routed before decoding.  Checked before `from_tag`.
+const MOVE_TO_WINDOW_TAG_BASE: u32 = 0x4000_0000;
+/// "Move to New Window" — a single fixed tag just above the band.
+const MOVE_TO_NEW_WINDOW_TAG: u32 = 0x4FFF_FFFF;
+
 impl ContextMenuAction {
     fn tag(self) -> u32 { self as u32 }
     fn from_tag(t: u32) -> Option<Self> {
@@ -661,6 +668,7 @@ mod window_state_tests {
             l3_mode: false,
             event_tx,
             drag_window: None,
+            pending_move_sid: None,
             saved_windows: std::collections::VecDeque::new(),
             windows,
             key_window: 0,
@@ -934,6 +942,94 @@ mod window_state_tests {
         // starts from zero rather than firing on the first Esc.
         app.pane_session_end(10);
         assert!(!app.note_escape_for_pane_session(10, t));
+    }
+
+    /// RFC-005 step 5 — moving a pane between windows is a Vec move
+    /// with index repairs on both sides: source focus/selection stay
+    /// coherent, the target appends + focuses + becomes key, and a
+    /// window whose last pane left asks L1 to close it.
+    #[test]
+    fn moving_a_pane_repairs_both_windows() {
+        let mut app = app_with(vec![
+            win(1, vec![
+                Pane::new_vacant(10, 80, 24),
+                Pane::new_vacant(11, 80, 24),
+                Pane::new_vacant(12, 80, 24),
+            ]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+        ]);
+        app.windows[0].focused_idx = 2;
+        app.windows[0].selection = Some(Selection {
+            session_idx: 2,
+            anchor: (0, 0),
+            focus: (1, 0),
+            mode: marspot::ui::SelectionMode::Linewise,
+        });
+
+        // Move the middle pane (11): focus index 2 shifts down to 1,
+        // the selection on old-index-2 follows to 1.
+        app.move_pane_to_window(0, 1, 1);
+        assert_eq!(app.windows[0].panes.len(), 2);
+        assert_eq!(app.windows[1].panes.len(), 2);
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
+        assert_eq!(app.windows[1].focused_idx, 1, "moved pane takes focus");
+        assert_eq!(app.key_window, 1, "target window becomes key");
+        assert_eq!(app.windows[0].focused_idx, 1, "source focus shifted");
+        assert_eq!(
+            app.windows[0].selection.map(|s| s.session_idx),
+            Some(1),
+            "selection follows its pane's new index"
+        );
+        assert!(app.pending_to_shell.is_empty(), "no close for a non-empty window");
+
+        // Drain window 2 back out — the emptied window must ask L1 to
+        // close it (RFC: last pane moved out → auto-close).
+        app.move_pane_to_window(1, 1, 0);
+        app.move_pane_to_window(1, 0, 0);
+        assert!(app.windows[1].panes.is_empty());
+        assert!(
+            app.pending_to_shell
+                .iter()
+                .any(|(ty, _)| *ty == MsgType::WindowCloseRequest),
+            "empty window must request its own close"
+        );
+    }
+
+    /// "Move to New Window": the pane is parked by sid, and the next
+    /// unseen `SurfaceAttachWindow` builds the window around the MOVED
+    /// pane — no fresh spawn, and it outranks the restore queue.
+    #[test]
+    fn a_parked_move_claims_the_new_window_before_the_restore_queue() {
+        let mut app = app_with(vec![win(1, vec![
+            Pane::new_vacant(10, 80, 24),
+            Pane::new_vacant(11, 80, 24),
+        ])]);
+        // A stale restore record is also waiting — the user action wins.
+        app.saved_windows.push_back(marspot::state::SavedWindowLayout {
+            grid_cols: 2, grid_rows: 2, focused_idx: 0,
+            panes: vec![marspot::state::SavedPane { sid: 99, ..Default::default() }],
+        });
+        app.pending_move_sid = Some(11);
+
+        app.adopt_window(7, 800.0, 600.0, 2.0);
+
+        assert_eq!(app.windows.len(), 2);
+        let nw = &app.windows[1];
+        assert_eq!(nw.window_id, 7);
+        assert_eq!(nw.panes.len(), 1);
+        assert_eq!(
+            nw.panes[0].shelld_session_id(),
+            Some(11),
+            "the MOVED pane, not a fresh spawn or the restore record"
+        );
+        assert_eq!(app.windows[0].panes.len(), 1, "source gave the pane up");
+        assert_eq!(app.key_window, 1);
+        assert_eq!(
+            app.saved_windows.len(),
+            1,
+            "restore queue untouched — the user action claimed this window"
+        );
+        assert!(app.pending_move_sid.is_none(), "park is consumed");
     }
 
     /// The modal's slot map is sized from the window's own grid, so a
@@ -2560,6 +2656,12 @@ struct CoreApp {
     /// The window that took the current mouse press, if any.  Set on
     /// press, cleared on release; `drag_target` reads it.
     drag_window: Option<u32>,
+    /// RFC-005 step 5 — a pane parked mid-"Move to New Window": its
+    /// sid, waiting for L1 to open the window.  The next
+    /// `SurfaceAttachWindow` with an unseen id claims it (checked
+    /// before the saved-window restore queue — a user action outranks
+    /// a boot leftover).
+    pending_move_sid: Option<u64>,
     /// RFC-005 step 6b — saved windows past the boot one, waiting for
     /// L1 to reopen them.  Each `SurfaceAttachWindow` for an unseen id
     /// pops the front record, so the queue is also what distinguishes
@@ -3052,7 +3154,7 @@ impl CoreApp {
                 let copy = MenuItem::entry(
                     "Copy", ContextMenuAction::CopySelection.tag(),
                 ).with_shortcut("⌘C");
-                vec![
+                let mut items = vec![
                     if win!(self, wi).selection.is_some() { copy } else { copy.disabled() },
                     MenuItem::entry("Paste", ContextMenuAction::Paste.tag())
                         .with_shortcut("⌘V"),
@@ -3063,7 +3165,10 @@ impl CoreApp {
                     MenuItem::entry("New pane",
                         ContextMenuAction::SplitNewPane.tag()),
                     close,
-                ]
+                ];
+                items.push(MenuItem::divider());
+                self.push_move_to_window_items(wi, &mut items);
+                items
             }
             ContextRegion::SidebarSlot(_) => {
                 let close_disabled = win!(self, wi).panes.len() <= 1;
@@ -3073,12 +3178,15 @@ impl CoreApp {
                     );
                     if close_disabled { mi.disabled() } else { mi }
                 };
-                vec![
+                let mut items = vec![
                     MenuItem::entry("Rename…",
                         ContextMenuAction::RenameTitle.tag()),
                     MenuItem::divider(),
                     close,
-                ]
+                ];
+                items.push(MenuItem::divider());
+                self.push_move_to_window_items(wi, &mut items);
+                items
             }
             ContextRegion::TitleStrip => vec![
                 MenuItem::entry("Toggle sidebar",
@@ -3102,6 +3210,143 @@ impl CoreApp {
         link: &LinkContext,
     ) -> Vec<marspot::ui::components::MenuItem> {
         link_menu_items_for(link)
+    }
+
+    /// RFC-005 step 5 — the cross-window entries of a pane's context
+    /// menu: one "Move to Window N" per OTHER window, plus "Move to
+    /// New Window".  Window numbers are 1-based creation order, the
+    /// same order the sidebar of each window implies.
+    fn push_move_to_window_items(
+        &self,
+        wi: usize,
+        items: &mut Vec<marspot::ui::components::MenuItem>,
+    ) {
+        use marspot::ui::components::MenuItem;
+        for (ti, w) in self.windows.iter().enumerate() {
+            if ti == wi {
+                continue;
+            }
+            items.push(MenuItem::entry(
+                &format!("Move to Window {}", ti + 1),
+                MOVE_TO_WINDOW_TAG_BASE + ti as u32,
+            ));
+            let _ = w;
+        }
+        // Moving the only pane of the only window to a "new" window
+        // would just rebuild the same state with a window flash.
+        let pointless =
+            self.windows.len() == 1 && win!(self, wi).panes.len() <= 1;
+        let mi = MenuItem::entry("Move to New Window", MOVE_TO_NEW_WINDOW_TAG);
+        items.push(if pointless { mi.disabled() } else { mi });
+    }
+
+    /// Move one pane between windows — RFC-005 step 5's whole
+    /// mechanism: a `Vec` move.  Everything per-pane travels inside
+    /// the `Pane` value (pinned by
+    /// `moving_a_pane_between_windows_carries_its_state`); the L3
+    /// never notices.  Source window state that referenced the pane
+    /// by index (selection, title edit, focus) is repaired; the
+    /// target window appends, focuses it, and becomes key.
+    fn move_pane_to_window(&mut self, from_wi: usize, idx: usize, to_wi: usize) {
+        if from_wi == to_wi
+            || from_wi >= self.windows.len()
+            || to_wi >= self.windows.len()
+            || idx >= win!(self, from_wi).panes.len()
+        {
+            return;
+        }
+        let pane = win!(self, from_wi).panes.remove(idx);
+        // Index-keyed source state: drop what pointed at the moved
+        // pane, shift what pointed past it — same arithmetic as
+        // `close_session`, for the same reason.
+        let w = &mut win!(self, from_wi);
+        if !w.panes.is_empty() {
+            if w.focused_idx == idx {
+                w.focused_idx = idx.min(w.panes.len() - 1);
+            } else if w.focused_idx > idx {
+                w.focused_idx -= 1;
+            }
+        } else {
+            w.focused_idx = 0;
+        }
+        if let Some(sel) = w.selection {
+            if sel.session_idx == idx {
+                w.selection = None;
+                w.selection_dragging = false;
+            } else if sel.session_idx > idx {
+                w.selection = Some(Selection {
+                    session_idx: sel.session_idx - 1,
+                    ..sel
+                });
+            }
+        }
+        match w.editing_title {
+            Some(i) if i == idx => {
+                w.editing_title = None;
+                w.title_edit_buffer.clear();
+            }
+            Some(i) if i > idx => w.editing_title = Some(i - 1),
+            _ => {}
+        }
+        // Landing: appended (sidebar overflows if the grid is full),
+        // focused, and the target becomes the key window.
+        let t = &mut win!(self, to_wi);
+        t.panes.push(pane);
+        t.focused_idx = t.panes.len() - 1;
+        self.key_window = to_wi;
+        self.rebuild_layout(from_wi);
+        self.rebuild_layout(to_wi);
+        lx_event!(
+            "PANE_MOVED",
+            "pane moved between windows",
+            from_window = win!(self, from_wi).window_id,
+            to_window = win!(self, to_wi).window_id
+        );
+        self.save_session_state();
+        // An empty window closes itself — L1 owns windows, so ask.
+        self.request_close_if_empty(from_wi);
+    }
+
+    /// Move a pane into a window that does not exist yet.  The pane is
+    /// parked by sid; L1 opens a fresh window (user action — bypasses
+    /// the restore gates) and the `SurfaceAttachWindow` that follows
+    /// lands in `adopt_window`, which sees the parked sid and builds
+    /// the window around the MOVED pane instead of spawning one.
+    fn move_pane_to_new_window(&mut self, from_wi: usize, idx: usize) {
+        let Some(sid) = win!(self, from_wi)
+            .panes
+            .get(idx)
+            .and_then(|p| p.shelld_session_id())
+        else {
+            return;
+        };
+        self.pending_move_sid = Some(sid);
+        self.pending_to_shell.push((
+            MsgType::WindowOpenRequest,
+            marspot::shell_proto::encode_window_open_request(
+                marspot::shell_proto::WINDOW_OPEN_USER,
+            ),
+        ));
+        lx_event!(
+            "PANE_MOVE_NEW_WINDOW_REQUESTED",
+            "asked L1 for a fresh window to move a pane into",
+            session = sid
+        );
+    }
+
+    /// Post-move bookkeeping: a window with no panes left asks L1 to
+    /// close it (RFC-005: "last pane moved out → empty window
+    /// auto-closes").
+    fn request_close_if_empty(&mut self, wi: usize) {
+        if !win!(self, wi).panes.is_empty() {
+            return;
+        }
+        self.pending_to_shell.push((
+            MsgType::WindowCloseRequest,
+            marspot::shell_proto::encode_window_close_request(
+                win!(self, wi).window_id,
+            ),
+        ));
     }
 
     fn dispatch_context_action(
@@ -3420,6 +3665,47 @@ impl CoreApp {
     /// The pane is spawned off-loop like `[+]` does — a window opening
     /// must not freeze the panes of the windows already up.
     fn adopt_window(&mut self, window_id: u32, w_phys: f64, h_phys: f64, scale: f64) {
+        // RFC-005 step 5 — a parked "Move to New Window" pane claims
+        // the window before the restore queue gets a look: the user
+        // just asked for this window, a boot leftover did not.
+        if let Some(sid) = self.pending_move_sid.take() {
+            if let Some((from_wi, idx)) = self.find_pane_by_sid(sid) {
+                let pane = win!(self, from_wi).panes.remove(idx);
+                // Same index-keyed repair close_session does.
+                let w = &mut win!(self, from_wi);
+                if !w.panes.is_empty() {
+                    if w.focused_idx >= w.panes.len() {
+                        w.focused_idx = w.panes.len() - 1;
+                    }
+                } else {
+                    w.focused_idx = 0;
+                }
+                w.selection = None;
+                w.selection_dragging = false;
+                w.editing_title = None;
+                w.title_edit_buffer.clear();
+                let mut nw = WindowState::new(
+                    window_id, vec![pane], 0, 1, 1, w_phys, h_phys, scale,
+                );
+                nw.render.mark_bg_clear_required();
+                self.windows.push(nw);
+                let wi = self.windows.len() - 1;
+                self.key_window = wi;
+                self.rebuild_layout(from_wi);
+                self.rebuild_layout(wi);
+                lx_event!(
+                    "PANE_MOVED",
+                    "pane moved into its own new window",
+                    session = sid,
+                    to_window = window_id
+                );
+                self.save_session_state();
+                self.request_close_if_empty(from_wi);
+                return;
+            }
+            // The pane closed while the window was opening — fall
+            // through and let the fresh-pane path fill the window.
+        }
         // RFC-005 step 6b — a queued record means L1 is reopening a
         // window from the last session, not making a new one.  The
         // window comes up with its saved grid and one "starting…"
@@ -5136,6 +5422,22 @@ impl CoreApp {
                         ));
                         win!(self, wi).context_menu = None;
                         win!(self, wi).needs_render = true;
+                    } else if tag == MOVE_TO_NEW_WINDOW_TAG
+                        || (MOVE_TO_WINDOW_TAG_BASE..MOVE_TO_NEW_WINDOW_TAG).contains(&tag)
+                    {
+                        let idx = match region {
+                            ContextRegion::Pane(i)
+                            | ContextRegion::SidebarSlot(i) => i,
+                            _ => win!(self, wi).focused_idx,
+                        };
+                        win!(self, wi).context_menu = None;
+                        win!(self, wi).needs_render = true;
+                        if tag == MOVE_TO_NEW_WINDOW_TAG {
+                            self.move_pane_to_new_window(wi, idx);
+                        } else {
+                            let to = (tag - MOVE_TO_WINDOW_TAG_BASE) as usize;
+                            self.move_pane_to_window(wi, idx, to);
+                        }
                     } else if let Some(action) = ContextMenuAction::from_tag(tag) {
                         self.dispatch_context_action(wi, action, region);
                     } else {
@@ -6766,6 +7068,7 @@ fn main() {
         l3_mode,
         event_tx: event_tx.clone(),
         drag_window: None,
+        pending_move_sid: None,
         saved_windows,
         windows: vec![{
             let mut w = WindowState::new(
