@@ -738,6 +738,10 @@ pub struct MetalRenderer {
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
     /// open, `None` when closed.  See `LayoutModalRender` below.
     layout_modal_state: Option<LayoutModalRender>,
+    /// RFC-006 — drop-preview ghost for the window being rendered:
+    /// (x, y_top, w, h) physical px.  Published per window right
+    /// before its render, like every per-window overlay.
+    drop_preview: Option<(f64, f64, f64, f64)>,
     /// F3+9 — right-click context menu state.  `Some` while open.
     context_menu_state: Option<ContextMenuRender>,
     /// Dev-panel state.  `Some` while visible.  Owned by L2;
@@ -896,7 +900,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -960,7 +964,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, layout_modal_state: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -994,6 +998,10 @@ impl MetalRenderer {
     /// menu is open, `None` when closed.  Re-published every frame
     /// by L2 with current hovered_idx so the highlight tracks the
     /// cursor.
+    pub fn set_drop_preview(&mut self, rect: Option<(f64, f64, f64, f64)>) {
+        self.drop_preview = rect;
+    }
+
     pub fn set_context_menu(&mut self, state: Option<ContextMenuRender>) {
         self.context_menu_state = state;
     }
@@ -1370,6 +1378,7 @@ impl MetalRenderer {
             process_panel.as_ref(),
             cc_usage.as_ref(),
             self.layout_modal_state.as_ref(),
+            self.drop_preview,
             self.context_menu_state.as_ref(),
             font,
             atlas,
@@ -1588,6 +1597,7 @@ impl MetalRenderer {
             process_panel.as_ref(),
             cc_usage.as_ref(),
             self.layout_modal_state.as_ref(),
+            self.drop_preview,
             self.context_menu_state.as_ref(),
             font,
             atlas,
@@ -2165,6 +2175,7 @@ fn build_instances(
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
     layout_modal_state: Option<&LayoutModalRender>,
+    drop_preview: Option<(f64, f64, f64, f64)>,
     context_menu_state: Option<&ContextMenuRender>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
@@ -2185,6 +2196,25 @@ fn build_instances(
     let (atlas_w, atlas_h) = atlas.dims();
     let atlas_w_f = atlas_w as f32;
     let atlas_h_f = atlas_h as f32;
+
+    // RFC-006 — drop-preview ghost: a translucent accent fill + thin
+    // accent frame over the region a hovering pane drag would occupy
+    // on release.  Overlay pass, so it sits above the pane content it
+    // previews.  What is highlighted is exactly what release does.
+    if let Some((gx, gy, gw, gh)) = drop_preview {
+        let accent = crate::ui::theme::token::color::ACCENT.to_rgba_f32();
+        overlay_ui_rects.push(UiRectInstance {
+            origin: [gx as f32, gy as f32],
+            size: [gw as f32, gh as f32],
+            fill_color: [accent[0] * 0.25, accent[1] * 0.25, accent[2] * 0.25, 0.25],
+            border_color: accent,
+            corner_radius: 4.0,
+            border_width: 2.0,
+            shadow_blur: 0.0,
+            shadow_alpha: 0.0,
+            shadow_color: [0.0; 4],
+        });
+    }
 
     // Sidebar BG = cell BG (already covered by the clear pass).  No
     // explicit fill needed unless the sidebar palette ever diverges.
@@ -7534,6 +7564,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -7638,6 +7669,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -7709,6 +7741,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -7833,6 +7866,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -7935,6 +7969,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -8005,6 +8040,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 None,

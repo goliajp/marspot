@@ -793,7 +793,7 @@ impl MarspotApp for Marspot {
         }
     }
 
-    fn mouse_drag(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64) {
+    fn mouse_drag(&mut self, ctx: &MarspotAppCtx, x_phys: f64, y_phys: f64, _hw: u32, _hx: f64, _hy: f64) {
         if !self.selection_dragging {
             return;
         }
@@ -899,7 +899,7 @@ impl MarspotApp for Marspot {
         ctx.request_redraw();
     }
 
-    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _drop_window_id: u32) {
+    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _drop_window_id: u32, _dx: f64, _dy: f64) {
         // A click without movement leaves anchor == focus → treat
         // as "no selection" so a stray single-click doesn't ghost
         // a single-cell highlight.

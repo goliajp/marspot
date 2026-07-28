@@ -631,7 +631,7 @@ enum ShellInbox {
     /// geometry from this entry of `window-state.bin`.  RFC-005 step
     /// 6b — the core knows how many windows the user had, L1 owns the
     /// windows themselves, so the core asks.
-    WindowOpenRequest(u32),
+    WindowOpenRequest(u32, Option<(f64, f64)>),
     /// L2 → L1: close this window (RFC-005 step 5 — its last pane was
     /// just moved out).  Runs the exact red-button path.
     WindowCloseRequest(u32),
@@ -2400,14 +2400,28 @@ impl ShellApp {
             ShellInbox::PaneSessionUserEscape(sid) => {
                 self.end_pane_session(sid, plugins::EndReason::UserEscape);
             }
-            ShellInbox::WindowOpenRequest(frame_index) => {
+            ShellInbox::WindowOpenRequest(frame_index, hint) => {
                 if frame_index == marspot::shell_proto::WINDOW_OPEN_USER {
                     // A user action (move-pane-to-new-window), not a
                     // boot restore: none of the restore gates apply —
                     // safe mode blocks automatic multiplication, and
                     // an explicit user request is neither automatic
                     // nor a spawn (the pane already exists).
-                    self.open_window_with_frame(None);
+                    //
+                    // RFC-006 §4 — a drag-to-desktop carries the
+                    // release point (screen pts): the window opens
+                    // centred there, so it is born where the pane was
+                    // dropped.  AppKit's own constrain pass keeps it
+                    // on-screen.
+                    let frame = hint.map(|(cx, cy)| {
+                        (
+                            cx - DEFAULT_W_PT / 2.0,
+                            cy - DEFAULT_H_PT / 2.0,
+                            DEFAULT_W_PT,
+                            DEFAULT_H_PT,
+                        )
+                    });
+                    self.open_window_with_frame(frame);
                 } else {
                     self.restore_window(frame_index);
                 }
@@ -2818,18 +2832,41 @@ impl MarspotApp for ShellApp {
         );
     }
 
-    fn mouse_drag(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64) {
+    fn mouse_drag(
+        &mut self,
+        ctx: &MarspotAppCtx,
+        x: f64,
+        y: f64,
+        hover_window_id: u32,
+        hover_x: f64,
+        hover_y: f64,
+    ) {
         // No modifier info on drag — pass zero; the renderer doesn't
         // currently need mods for drag-extend selection.
         let w = Self::event_window(ctx);
-        self.send(MsgType::MouseDrag, encode_mouse(x, y, 0, w));
+        self.send(
+            MsgType::MouseDrag,
+            marspot::shell_proto::encode_mouse_drag(
+                x, y, 0, w, hover_window_id, hover_x, hover_y,
+            ),
+        );
     }
 
-    fn mouse_up(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, drop_window_id: u32) {
+    fn mouse_up(
+        &mut self,
+        ctx: &MarspotAppCtx,
+        x: f64,
+        y: f64,
+        drop_window_id: u32,
+        drop_x: f64,
+        drop_y: f64,
+    ) {
         let w = Self::event_window(ctx);
         self.send(
             MsgType::MouseUp,
-            marspot::shell_proto::encode_mouse_up(x, y, 0, w, drop_window_id),
+            marspot::shell_proto::encode_mouse_up(
+                x, y, 0, w, drop_window_id, drop_x, drop_y,
+            ),
         );
     }
 
@@ -3304,9 +3341,9 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         Some(ShellInbox::DevPanelToggle)
                     }
                     MsgType::WindowOpenRequest => {
-                        marspot::shell_proto::decode_window_open_request(&frame.payload)
+                        marspot::shell_proto::decode_window_open_request_at(&frame.payload)
                             .ok()
-                            .map(ShellInbox::WindowOpenRequest)
+                            .map(|(idx, hint)| ShellInbox::WindowOpenRequest(idx, hint))
                     }
                     MsgType::WindowCloseRequest => {
                         marspot::shell_proto::decode_window_close_request(&frame.payload)

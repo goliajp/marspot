@@ -669,6 +669,7 @@ mod window_state_tests {
             event_tx,
             drag_window: None,
             pane_drag: None,
+            drop_target: None,
             pending_move_sid: None,
             saved_windows: std::collections::VecDeque::new(),
             windows,
@@ -1065,15 +1066,15 @@ mod window_state_tests {
 
         // Ending 1 — no travel: the deferred click enters title edit.
         let mut app = mk();
-        app.mouse_up(0, 1);
+        app.mouse_up(0, 1, 0.0, 0.0);
         assert_eq!(app.windows[0].editing_title, Some(1), "click = rename");
         assert_eq!(app.windows[0].panes.len(), 2, "nothing moved");
 
         // Ending 2 — travel past the slop, release over window 2.
         let mut app = mk();
-        app.mouse_drag(0, 100.0 + PANE_DRAG_SLOP_PHYS + 1.0, 10.0);
+        app.mouse_drag(0, 100.0 + PANE_DRAG_SLOP_PHYS + 1.0, 10.0, 0, 0.0, 0.0);
         assert!(app.pane_drag.unwrap().active, "slop exceeded arms the drag");
-        app.mouse_up(0, 2);
+        app.mouse_up(0, 2, 0.0, 0.0);
         assert_eq!(app.windows[0].panes.len(), 2, "placeholder holds the slot");
         assert!(app.windows[0].panes[1].is_dormant());
         assert_eq!(app.windows[1].panes.len(), 2);
@@ -1085,8 +1086,8 @@ mod window_state_tests {
         // or over its own window: cancelled, everything stays.
         for drop in [0u32, 1u32] {
             let mut app = mk();
-            app.mouse_drag(0, 100.0, 40.0);
-            app.mouse_up(0, drop);
+            app.mouse_drag(0, 100.0, 40.0, 0, 0.0, 0.0);
+            app.mouse_up(0, drop, 0.0, 0.0);
             assert_eq!(app.windows[0].panes.len(), 2, "drop={drop}: no move");
             assert_eq!(app.windows[0].editing_title, None, "drop={drop}: no rename");
             assert!(app.pane_drag.is_none(), "drop={drop}: state cleared");
@@ -1094,10 +1095,103 @@ mod window_state_tests {
 
         // Sub-slop wiggle stays a click.
         let mut app = mk();
-        app.mouse_drag(0, 104.0, 12.0);
+        app.mouse_drag(0, 104.0, 12.0, 0, 0.0, 0.0);
         assert!(!app.pane_drag.unwrap().active, "inside slop = still a click");
-        app.mouse_up(0, 1);
+        app.mouse_up(0, 1, 0.0, 0.0);
         assert_eq!(app.windows[0].editing_title, Some(1));
+    }
+
+    /// RFC-006 §1 — zone geometry: 25 % edge bands (≥48 px, ≤⅓),
+    /// center elsewhere, corners to the deeper penetration.
+    #[test]
+    fn drop_zones_carve_the_pane_as_specified() {
+        use marspot::layout::CellRect;
+        let r = CellRect { x: 0.0, y_top: 0.0, w: 400.0, h: 400.0, cols: 10, rows: 10 };
+        assert_eq!(drop_zone_at(&r, 10.0, 200.0), DropZone::Left);
+        assert_eq!(drop_zone_at(&r, 390.0, 200.0), DropZone::Right);
+        assert_eq!(drop_zone_at(&r, 200.0, 10.0), DropZone::Top);
+        assert_eq!(drop_zone_at(&r, 200.0, 390.0), DropZone::Bottom);
+        assert_eq!(drop_zone_at(&r, 200.0, 200.0), DropZone::Center);
+        // Corner: deeper penetration wins — 5 px from the left,
+        // 30 px from the top → Left.
+        assert_eq!(drop_zone_at(&r, 5.0, 30.0), DropZone::Left);
+        // Slim pane: the 48 px floor keeps bands usable, the ⅓ cap
+        // keeps a center alive.
+        let slim = CellRect { x: 0.0, y_top: 0.0, w: 90.0, h: 400.0, cols: 3, rows: 10 };
+        // floor lifts 22.5px→48, cap trims to w/3 = 30.
+        assert_eq!(drop_zone_at(&slim, 29.0, 200.0), DropZone::Left, "inside the 30px band");
+        assert_eq!(drop_zone_at(&slim, 31.0, 200.0), DropZone::Center, "cap = w/3 keeps a center");
+    }
+
+    /// RFC-006 §2 flagship — a 1×1 window splits into 1×2 / 2×1 when
+    /// a pane is dropped on its only pane's edge, and the dragged
+    /// pane lands exactly where the preview said.
+    #[test]
+    fn dropping_on_a_1x1_window_splits_it() {
+        let mk = || app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+        ]);
+
+        // Right band → 1×2, dragged pane in the right slot.
+        let mut app = mk();
+        app.split_insert(0, 1, 1, 0, DropZone::Right);
+        assert_eq!((app.windows[1].grid_cols, app.windows[1].grid_rows), (2, 1));
+        assert_eq!(app.windows[1].panes.len(), 2);
+        assert_eq!(app.windows[1].panes[0].shelld_session_id(), Some(20));
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
+        assert_eq!(app.windows[1].focused_idx, 1);
+        assert_eq!(app.key_window, 1);
+        assert!(app.windows[0].panes[1].is_dormant(), "source keeps a placeholder");
+
+        // Bottom band → 2×1, dragged pane below.
+        let mut app = mk();
+        app.split_insert(0, 1, 1, 0, DropZone::Bottom);
+        assert_eq!((app.windows[1].grid_cols, app.windows[1].grid_rows), (1, 2));
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
+
+        // Left band → dragged pane takes the LEFT slot.
+        let mut app = mk();
+        app.split_insert(0, 1, 1, 0, DropZone::Left);
+        assert_eq!(app.windows[1].panes[0].shelld_session_id(), Some(11));
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(20));
+    }
+
+    /// Same-window edge drop is a REARRANGE: no placeholder, the pane
+    /// count is unchanged, only the order moves.
+    #[test]
+    fn splitting_within_a_window_rearranges_without_placeholders() {
+        let mut app = app_with(vec![win(1, vec![
+            Pane::new_vacant(10, 80, 24),
+            Pane::new_vacant(11, 80, 24),
+            Pane::new_vacant(12, 80, 24),
+        ])]);
+        app.windows[0].grid_cols = 2;
+        app.windows[0].grid_rows = 2;
+        // Drag pane 12 to pane 10's left band.
+        app.split_insert(0, 2, 0, 0, DropZone::Left);
+        let sids: Vec<_> = app.windows[0].panes.iter()
+            .map(|p| p.shelld_session_id()).collect();
+        assert_eq!(sids, vec![Some(12), Some(10), Some(11)]);
+        assert!(app.windows[0].panes.iter().all(|p| !p.is_dormant()));
+    }
+
+    /// RFC-006 §1 — center drop swaps: symmetric, no reshape, no
+    /// placeholder, focus + key follow the dragged pane's landing.
+    #[test]
+    fn center_drop_swaps_across_windows() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+        ]);
+        app.swap_panes(0, 1, 1, 0);
+        assert_eq!(app.windows[0].panes[1].shelld_session_id(), Some(20));
+        assert_eq!(app.windows[1].panes[0].shelld_session_id(), Some(11));
+        assert_eq!(app.windows[0].panes.len(), 2);
+        assert_eq!(app.windows[1].panes.len(), 1);
+        assert!(app.windows.iter().flat_map(|w| w.panes.iter()).all(|p| !p.is_dormant()));
+        assert_eq!(app.key_window, 1);
+        assert_eq!(app.windows[1].focused_idx, 0);
     }
 
     /// The modal's slot map is sized from the window's own grid, so a
@@ -1682,11 +1776,11 @@ enum CoreEvent {
     /// F3+9 — right-click in screen coords + modifier byte.
     /// Drives the L2 context menu (same handler shape as MouseDown).
     MouseRightDown(f64, f64, Modifiers, u32),
-    MouseDrag(f64, f64, u32),
+    MouseDrag(f64, f64, u32, u32, f64, f64),
     /// `(window, drop_window)` — release ends the drag; the second id
     /// is the marspot window under the pointer at release (0 = none),
     /// resolved by L1.  RFC-005 step 5's pane drag lands there.
-    MouseUp(u32, u32),
+    MouseUp(u32, u32, f64, f64),
     /// Bare mouse-move (no button).  L2 hit-tests against chrome
     /// rects so icon-button hover affordances update under the
     /// cursor.  Modifier byte on the wire is currently unused.
@@ -1835,6 +1929,68 @@ struct PaneDrag {
 /// that an ordinary click never trips it on a shaky hand.
 const PANE_DRAG_SLOP_PHYS: f64 = 10.0;
 
+/// RFC-006 §1 — where inside a hovered pane a drop would land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropZone {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Center — swap with the hovered pane.
+    Center,
+}
+
+/// The live drop target while a pane drag hovers a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DropTarget {
+    wi: usize,
+    pane_idx: usize,
+    zone: DropZone,
+}
+
+/// RFC-006 §1 — zone geometry.  Edge bands are 25 % of the rect's
+/// span on their axis, clamped to at least 48 physical px (slim panes
+/// keep usable bands) and at most a third of the span (so the center
+/// never vanishes).  Corners resolve to the axis with the deeper
+/// penetration.
+fn drop_zone_at(rect: &marspot::layout::CellRect, px: f64, py: f64) -> DropZone {
+    let band_w = (rect.w * 0.25).max(48.0).min(rect.w / 3.0);
+    let band_h = (rect.h * 0.25).max(48.0).min(rect.h / 3.0);
+    let from_l = px - rect.x;
+    let from_r = rect.x + rect.w - px;
+    let from_t = py - rect.y_top;
+    let from_b = rect.y_top + rect.h - py;
+    // Penetration depth into each band; ≤ 0 = not in that band.
+    let pen_l = band_w - from_l;
+    let pen_r = band_w - from_r;
+    let pen_t = band_h - from_t;
+    let pen_b = band_h - from_b;
+    let best_h = pen_l.max(pen_r);
+    let best_v = pen_t.max(pen_b);
+    if best_h <= 0.0 && best_v <= 0.0 {
+        return DropZone::Center;
+    }
+    if best_h >= best_v {
+        if pen_l >= pen_r { DropZone::Left } else { DropZone::Right }
+    } else if pen_t >= pen_b {
+        DropZone::Top
+    } else {
+        DropZone::Bottom
+    }
+}
+
+/// The preview rect a zone paints: the half of the hovered pane a
+/// split would occupy, or the whole pane for a swap.
+fn drop_preview_rect(rect: &marspot::layout::CellRect, zone: DropZone) -> (f64, f64, f64, f64) {
+    match zone {
+        DropZone::Left => (rect.x, rect.y_top, rect.w / 2.0, rect.h),
+        DropZone::Right => (rect.x + rect.w / 2.0, rect.y_top, rect.w / 2.0, rect.h),
+        DropZone::Top => (rect.x, rect.y_top, rect.w, rect.h / 2.0),
+        DropZone::Bottom => (rect.x, rect.y_top + rect.h / 2.0, rect.w, rect.h / 2.0),
+        DropZone::Center => (rect.x, rect.y_top, rect.w, rect.h),
+    }
+}
+
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
     match f.msg_type {
         MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|(w, win)| {
@@ -1847,12 +2003,12 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::MouseRightDown => decode_mouse(&f.payload).ok().map(|(x, y, m, win)| {
             CoreEvent::MouseRightDown(x, y, mods_to_struct(m), win)
         }),
-        MsgType::MouseDrag => decode_mouse(&f.payload)
+        MsgType::MouseDrag => marspot::shell_proto::decode_mouse_drag(&f.payload)
             .ok()
-            .map(|(x, y, _, win)| CoreEvent::MouseDrag(x, y, win)),
+            .map(|(x, y, _, win, hw, hx, hy)| CoreEvent::MouseDrag(x, y, win, hw, hx, hy)),
         MsgType::MouseUp => marspot::shell_proto::decode_mouse_up(&f.payload)
             .ok()
-            .map(|(_, _, _, win, drop)| CoreEvent::MouseUp(win, drop)),
+            .map(|(_, _, _, win, drop, dx, dy)| CoreEvent::MouseUp(win, drop, dx, dy)),
         MsgType::MouseMove => decode_mouse(&f.payload)
             .ok()
             .map(|(x, y, _, win)| CoreEvent::MouseMove(x, y, win)),
@@ -2572,6 +2728,10 @@ struct WindowState {
     w_phys: f64,
     h_phys: f64,
     scale: f64,
+    /// RFC-006 — the drop-preview ghost: the rect (x, y_top, w, h,
+    /// physical px) a hovering pane drag would occupy on release.
+    /// Exactly one window has it at a time (the hovered one).
+    drop_preview: Option<(f64, f64, f64, f64)>,
     /// Set by anything that changes what the next frame should look
     /// like; cleared after each `render`.
     needs_render: bool,
@@ -2635,6 +2795,7 @@ impl WindowState {
             hover_chrome_btn: None,
             process_panel: None,
             cc_usage_modal: None,
+            drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
             h_phys,
@@ -2777,6 +2938,9 @@ struct CoreApp {
     /// meaning, entering title edit).  One at a time, app-wide — a
     /// drag spans windows by nature.
     pane_drag: Option<PaneDrag>,
+    /// Where the active pane drag would land right now (None = over
+    /// nothing droppable).  Drives the per-window `drop_preview`.
+    drop_target: Option<DropTarget>,
     /// RFC-005 step 5 — a pane parked mid-"Move to New Window": its
     /// sid, waiting for L1 to open the window.  The next
     /// `SurfaceAttachWindow` with an unseen id claims it (checked
@@ -3456,6 +3620,218 @@ impl CoreApp {
         lx_event!(
             "PANE_MOVE_NEW_WINDOW_REQUESTED",
             "asked L1 for a fresh window to move a pane into",
+            session = sid
+        );
+    }
+
+    /// RFC-006 — recompute the live drop target from this drag tick's
+    /// hover.  Sets/clears each window's `drop_preview` so exactly one
+    /// window (the hovered one) shows the ghost.
+    fn update_drop_target(&mut self, hover_window_id: u32, hx: f64, hy: f64) {
+        let new_target = self.window_index(hover_window_id).and_then(|wi| {
+            let idx = win!(self, wi).layout.hit_test(hx, hy)?;
+            if idx >= win!(self, wi).panes.len() {
+                return None;
+            }
+            // Hovering the dragged pane itself: center there is a
+            // no-op swap; edges still mean "split beside myself" in
+            // the same window, which is a legitimate rearrange.
+            let rect = win!(self, wi).layout.cells.get(idx)?;
+            let zone = drop_zone_at(rect, hx, hy);
+            Some(DropTarget { wi, pane_idx: idx, zone })
+        });
+        if new_target == self.drop_target {
+            return;
+        }
+        self.clear_drop_preview();
+        if let Some(t) = new_target {
+            let rect = win!(self, t.wi).layout.cells[t.pane_idx];
+            win!(self, t.wi).drop_preview = Some(drop_preview_rect(&rect, t.zone));
+            win!(self, t.wi).needs_render = true;
+        }
+        self.drop_target = new_target;
+    }
+
+    fn clear_drop_preview(&mut self) {
+        for w in self.windows.iter_mut() {
+            if w.drop_preview.take().is_some() {
+                w.needs_render = true;
+            }
+        }
+    }
+
+    /// RFC-006 §2 — split placement: insert the dragged pane beside
+    /// the hovered pane, reshaping the grid when it is full.  Within
+    /// one window this is a REARRANGE (remove + insert, no
+    /// placeholder); across windows the source keeps its layout via
+    /// the dormant placeholder, same as every move-out.
+    fn split_insert(
+        &mut self,
+        from_wi: usize,
+        from_idx: usize,
+        to_wi: usize,
+        at_idx: usize,
+        zone: DropZone,
+    ) {
+        if from_wi >= self.windows.len()
+            || to_wi >= self.windows.len()
+            || from_idx >= win!(self, from_wi).panes.len()
+            || at_idx >= win!(self, to_wi).panes.len()
+        {
+            return;
+        }
+        let same_window = from_wi == to_wi;
+        if same_window && from_idx == at_idx {
+            return; // splitting beside yourself is where you already are
+        }
+        // Take the pane out.
+        let (pane, at_idx) = if same_window {
+            let p = win!(self, from_wi).panes.remove(from_idx);
+            let at = if from_idx < at_idx { at_idx - 1 } else { at_idx };
+            (p, at)
+        } else {
+            let (pc, pr) = {
+                let g = win!(self, from_wi).panes[from_idx].session().grid();
+                (g.cols(), g.rows())
+            };
+            let p = std::mem::replace(
+                &mut win!(self, from_wi).panes[from_idx],
+                Pane::new_dormant(pc, pr),
+            );
+            let w = &mut win!(self, from_wi);
+            if w.focused_idx == from_idx {
+                w.focused_idx = (0..w.panes.len())
+                    .filter(|&i| !w.panes[i].is_dormant())
+                    .min_by_key(|&i| i.abs_diff(from_idx))
+                    .unwrap_or(from_idx);
+            }
+            if let Some(sel) = w.selection {
+                if sel.session_idx == from_idx {
+                    w.selection = None;
+                    w.selection_dragging = false;
+                }
+            }
+            if w.editing_title == Some(from_idx) {
+                w.editing_title = None;
+                w.title_edit_buffer.clear();
+            }
+            (p, at_idx)
+        };
+        // Reshape the target grid if it cannot absorb one more pane.
+        // Horizontal zones grow a column, vertical ones a row; both at
+        // the 6-cap → the drop downgrades to append (previewed as the
+        // whole-pane rect, and the sidebar overflow catches it).
+        let t = &mut win!(self, to_wi);
+        let full = t.panes.len() + 1 > t.grid_cols * t.grid_rows;
+        if full {
+            match zone {
+                DropZone::Left | DropZone::Right if t.grid_cols < 6 => t.grid_cols += 1,
+                DropZone::Top | DropZone::Bottom if t.grid_rows < 6 => t.grid_rows += 1,
+                _ => {}
+            }
+        }
+        // Landing slot, row-major (RFC-006: exact for the flagship
+        // 1×1 cases, predictable in general — the preview showed it).
+        let cols = t.grid_cols;
+        let insert_at = match zone {
+            DropZone::Left | DropZone::Top | DropZone::Center => at_idx,
+            DropZone::Right => at_idx + 1,
+            DropZone::Bottom => {
+                let r = at_idx / cols;
+                let c = at_idx % cols;
+                ((r + 1) * cols + c).min(t.panes.len())
+            }
+        };
+        let insert_at = insert_at.min(t.panes.len());
+        t.panes.insert(insert_at, pane);
+        t.focused_idx = insert_at;
+        self.key_window = to_wi;
+        if !same_window {
+            self.rebuild_layout(from_wi);
+        }
+        self.rebuild_layout(to_wi);
+        lx_event!(
+            "PANE_SPLIT_IN",
+            "pane dropped into a split slot",
+            to_window = win!(self, to_wi).window_id,
+            slot = insert_at,
+            zone = format!("{zone:?}")
+        );
+        self.save_session_state();
+        if !same_window {
+            self.request_close_if_empty(from_wi);
+        }
+    }
+
+    /// RFC-006 §1 — center-zone drop: the dragged pane and the
+    /// hovered pane trade slots.  Nothing reshapes, nothing spawns,
+    /// no placeholder — a swap is symmetric.
+    fn swap_panes(&mut self, wa: usize, ia: usize, wb: usize, ib: usize) {
+        if wa >= self.windows.len()
+            || wb >= self.windows.len()
+            || ia >= win!(self, wa).panes.len()
+            || ib >= win!(self, wb).panes.len()
+        {
+            return;
+        }
+        if wa == wb {
+            if ia == ib {
+                return;
+            }
+            win!(self, wa).panes.swap(ia, ib);
+            win!(self, wa).focused_idx = ib;
+        } else {
+            // Two disjoint &mut windows via split_at_mut.
+            let (lo, hi, li, hj) = if wa < wb {
+                (wa, wb, ia, ib)
+            } else {
+                (wb, wa, ib, ia)
+            };
+            let (left, right) = self.windows.split_at_mut(hi);
+            std::mem::swap(&mut left[lo].panes[li], &mut right[0].panes[hj]);
+            win!(self, wb).focused_idx = ib;
+        }
+        // Selections referenced content that just teleported.
+        win!(self, wa).selection = None;
+        win!(self, wa).selection_dragging = false;
+        win!(self, wb).selection = None;
+        win!(self, wb).selection_dragging = false;
+        self.key_window = wb;
+        self.rebuild_layout(wa);
+        if wa != wb {
+            self.rebuild_layout(wb);
+        }
+        lx_event!(
+            "PANE_SWAPPED",
+            "panes traded slots",
+            a_window = win!(self, wa).window_id,
+            b_window = win!(self, wb).window_id
+        );
+        self.save_session_state();
+    }
+
+    /// RFC-006 §4 — drag-to-desktop: park the pane and ask L1 for a
+    /// window centred on the release point (screen pts).
+    fn move_pane_to_new_window_at(&mut self, from_wi: usize, idx: usize, at: (f64, f64)) {
+        let Some(sid) = win!(self, from_wi)
+            .panes
+            .get(idx)
+            .and_then(|p| p.shelld_session_id())
+        else {
+            return;
+        };
+        self.pending_move_sid = Some(sid);
+        self.pending_to_shell.push((
+            MsgType::WindowOpenRequest,
+            marspot::shell_proto::encode_window_open_request_at(
+                marspot::shell_proto::WINDOW_OPEN_USER,
+                at.0,
+                at.1,
+            ),
+        ));
+        lx_event!(
+            "PANE_MOVE_NEW_WINDOW_REQUESTED",
+            "drag-out: asked L1 for a window at the release point",
             session = sid
         );
     }
@@ -6139,7 +6515,15 @@ impl CoreApp {
         win!(self, wi).needs_render = true;
     }
 
-    fn mouse_drag(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
+    fn mouse_drag(
+        &mut self,
+        wi: usize,
+        x_phys: f64,
+        y_phys: f64,
+        hover_window_id: u32,
+        hover_x: f64,
+        hover_y: f64,
+    ) {
         // RFC-005 step 5 — an armed title press becomes a pane drag
         // once the pointer clears the slop radius.  The activation
         // repaints the title (a ⇢ marker) so the mode is visible.
@@ -6153,6 +6537,7 @@ impl CoreApp {
                 }
             }
             if self.pane_drag.map(|d| d.active).unwrap_or(false) {
+                self.update_drop_target(hover_window_id, hover_x, hover_y);
                 return;
             }
         }
@@ -6234,25 +6619,43 @@ impl CoreApp {
         }
     }
 
-    fn mouse_up(&mut self, wi: usize, drop_window_id: u32) {
-        // RFC-005 step 5 — resolve an armed title press first.
+    fn mouse_up(&mut self, wi: usize, drop_window_id: u32, drop_x: f64, drop_y: f64) {
+        // RFC-005 step 5 / RFC-006 — resolve an armed title press.
         if let Some(d) = self.pane_drag.take() {
+            let target = self.drop_target.take();
+            self.clear_drop_preview();
             if d.active {
-                // A drag.  Over another marspot window → move the
-                // pane there; anywhere else (same window, another
-                // app, the desktop) → cancel.  L1 resolved the drop
-                // window; 0 means none.
-                let to = self.window_index(drop_window_id);
                 let from = d.from_wi;
                 win!(self, from).needs_render = true;
-                match to {
-                    Some(to_wi) if to_wi != d.from_wi => {
+                match (self.window_index(drop_window_id), target) {
+                    // A zone on a hovered pane: split beside it or
+                    // swap with it — the preview showed exactly this.
+                    (Some(to_wi), Some(t)) if t.wi == to_wi => match t.zone {
+                        DropZone::Center => {
+                            self.swap_panes(d.from_wi, d.idx, t.wi, t.pane_idx);
+                        }
+                        zone => {
+                            self.split_insert(d.from_wi, d.idx, t.wi, t.pane_idx, zone);
+                        }
+                    },
+                    // In a window but over no pane (chrome, sidebar):
+                    // the append landing, as the menu does.
+                    (Some(to_wi), _) if to_wi != d.from_wi => {
                         self.move_pane_to_window(d.from_wi, d.idx, to_wi);
+                    }
+                    // Outside every marspot window: a new 1×1 window
+                    // is born where the pane was dropped (screen pts).
+                    (None, _) if drop_window_id == 0 => {
+                        self.move_pane_to_new_window_at(
+                            d.from_wi,
+                            d.idx,
+                            (drop_x, drop_y),
+                        );
                     }
                     _ => {
                         lx_debug!(
                             "core.pane_drag.cancelled",
-                            "pane drag released outside another window",
+                            "pane drag released with no actionable target",
                             drop_window_id = drop_window_id
                         );
                     }
@@ -6580,6 +6983,8 @@ impl CoreApp {
         // one copy and each window sets its own right before painting.
         self.renderer
             .set_hover_chrome_btn(map_hover_to_u8(win!(self, wi).hover_chrome_btn));
+        // RFC-006 — this window's drop-preview ghost (usually None).
+        self.renderer.set_drop_preview(win!(self, wi).drop_preview);
 
         self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
             use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
@@ -7333,6 +7738,7 @@ fn main() {
         event_tx: event_tx.clone(),
         drag_window: None,
         pane_drag: None,
+        drop_target: None,
         pending_move_sid: None,
         saved_windows,
         windows: vec![{
@@ -7592,14 +7998,14 @@ fn main() {
                         app.mouse_right_down(wi, x, y, mods)
                     }
                 }
-                CoreEvent::MouseDrag(x, y, win) => {
+                CoreEvent::MouseDrag(x, y, win, hw, hx, hy) => {
                     if let Some(wi) = app.drag_target(win) {
-                        app.mouse_drag(wi, x, y)
+                        app.mouse_drag(wi, x, y, hw, hx, hy)
                     }
                 }
-                CoreEvent::MouseUp(win, drop) => {
+                CoreEvent::MouseUp(win, drop, dx, dy) => {
                     if let Some(wi) = app.drag_target(win) {
-                        app.mouse_up(wi, drop)
+                        app.mouse_up(wi, drop, dx, dy)
                     }
                     app.drag_window = None;
                 }

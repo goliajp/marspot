@@ -1020,6 +1020,40 @@ pub fn decode_mouse(payload: &[u8]) -> io::Result<(f64, f64, u8, u32)> {
     Ok((x, y, mods, trailing_window_id(payload, 17)))
 }
 
+/// `MouseDrag` grows a hover tail: which marspot window the pointer
+/// is over RIGHT NOW plus the pointer in THAT window's physical
+/// coordinates.  RFC-006's live drop preview is drawn from it.  Old
+/// readers stop at their own tail; missing tail = hover 0 = no
+/// preview (the drag still resolves on release).
+pub fn encode_mouse_drag(
+    x: f64,
+    y: f64,
+    mods: u8,
+    window_id: u32,
+    hover_window_id: u32,
+    hover_x: f64,
+    hover_y: f64,
+) -> Vec<u8> {
+    let mut out = encode_mouse(x, y, mods, window_id);
+    out.extend_from_slice(&hover_window_id.to_le_bytes());
+    out.extend_from_slice(&hover_x.to_le_bytes());
+    out.extend_from_slice(&hover_y.to_le_bytes());
+    out
+}
+
+/// `(x, y, mods, window_id, hover_window_id, hover_x, hover_y)`.
+pub fn decode_mouse_drag(payload: &[u8]) -> io::Result<(f64, f64, u8, u32, u32, f64, f64)> {
+    let (x, y, mods, win) = decode_mouse(payload)?;
+    if payload.len() >= 41 {
+        let hw = u32::from_le_bytes(payload[21..25].try_into().unwrap());
+        let hx = f64::from_le_bytes(payload[25..33].try_into().unwrap());
+        let hy = f64::from_le_bytes(payload[33..41].try_into().unwrap());
+        Ok((x, y, mods, win, hw, hx, hy))
+    } else {
+        Ok((x, y, mods, win, 0, 0.0, 0.0))
+    }
+}
+
 /// `MouseUp` grows a second trailing id: the marspot window under the
 /// pointer at release time (0 = none).  RFC-005 step 5's drag-a-pane-
 /// between-windows needs it — AppKit keeps delivering the drag to the
@@ -1028,21 +1062,43 @@ pub fn decode_mouse(payload: &[u8]) -> io::Result<(f64, f64, u8, u32)> {
 /// at its own tail and never sees it; a new reader missing the tail
 /// (old shell) reads 0 = "no drop target", which cancels the drag —
 /// the safe end of the deal.
-pub fn encode_mouse_up(x: f64, y: f64, mods: u8, window_id: u32, drop_window_id: u32) -> Vec<u8> {
+/// …and, since RFC-006, the release point: physical coords in the
+/// drop window when `drop_window_id ≠ 0`, SCREEN POINTS when it is 0
+/// (the only case that needs screen space — placing the new window a
+/// drag-to-desktop births).
+pub fn encode_mouse_up(
+    x: f64,
+    y: f64,
+    mods: u8,
+    window_id: u32,
+    drop_window_id: u32,
+    drop_x: f64,
+    drop_y: f64,
+) -> Vec<u8> {
     let mut out = encode_mouse(x, y, mods, window_id);
     out.extend_from_slice(&drop_window_id.to_le_bytes());
+    out.extend_from_slice(&drop_x.to_le_bytes());
+    out.extend_from_slice(&drop_y.to_le_bytes());
     out
 }
 
-/// `(x, y, mods, window_id, drop_window_id)`.
-pub fn decode_mouse_up(payload: &[u8]) -> io::Result<(f64, f64, u8, u32, u32)> {
+/// `(x, y, mods, window_id, drop_window_id, drop_x, drop_y)`.
+pub fn decode_mouse_up(payload: &[u8]) -> io::Result<(f64, f64, u8, u32, u32, f64, f64)> {
     let (x, y, mods, win) = decode_mouse(payload)?;
     let drop = if payload.len() >= 25 {
         u32::from_le_bytes(payload[21..25].try_into().unwrap())
     } else {
         0
     };
-    Ok((x, y, mods, win, drop))
+    let (dx, dy) = if payload.len() >= 41 {
+        (
+            f64::from_le_bytes(payload[25..33].try_into().unwrap()),
+            f64::from_le_bytes(payload[33..41].try_into().unwrap()),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    Ok((x, y, mods, win, drop, dx, dy))
 }
 
 pub fn encode_scroll(dx: f64, dy: f64, precise: bool, window_id: u32) -> Vec<u8> {
@@ -1227,6 +1283,32 @@ pub fn decode_window_close_request(payload: &[u8]) -> io::Result<u32> {
 
 pub fn encode_window_open_request(frame_index: u32) -> Vec<u8> {
     frame_index.to_le_bytes().to_vec()
+}
+
+/// `WINDOW_OPEN_USER` request carrying a placement hint: the window
+/// opens centred on `(x, y)` screen points (drag-to-desktop births a
+/// window where the pane was dropped).  Old readers see only the
+/// leading frame_index.
+pub fn encode_window_open_request_at(frame_index: u32, x: f64, y: f64) -> Vec<u8> {
+    let mut out = frame_index.to_le_bytes().to_vec();
+    out.extend_from_slice(&x.to_le_bytes());
+    out.extend_from_slice(&y.to_le_bytes());
+    out
+}
+
+/// `(frame_index, hint)` — hint is `None` when the tail is absent or
+/// zero (no meaningful screen point is ever exactly (0, 0) for a
+/// centred window; the boot restore path never sends one).
+pub fn decode_window_open_request_at(payload: &[u8]) -> io::Result<(u32, Option<(f64, f64)>)> {
+    let idx = decode_window_open_request(payload)?;
+    if payload.len() >= 20 {
+        let x = f64::from_le_bytes(payload[4..12].try_into().unwrap());
+        let y = f64::from_le_bytes(payload[12..20].try_into().unwrap());
+        if x != 0.0 || y != 0.0 {
+            return Ok((idx, Some((x, y))));
+        }
+    }
+    Ok((idx, None))
 }
 
 pub fn decode_window_open_request(payload: &[u8]) -> io::Result<u32> {

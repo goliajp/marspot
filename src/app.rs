@@ -98,7 +98,7 @@ pub trait MarspotApp: 'static {
     /// Mouse-dragged (button still pressed) at physical-pixel `(x, y)`.
     /// Default implementation is a no-op — apps that want drag/select
     /// behaviour override this.
-    fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
+    fn mouse_drag(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _hover_window_id: u32, _hover_x: f64, _hover_y: f64) {}
 
     /// Mouse-moved (no button) at physical-pixel `(x, y)`.  Delivered
     /// only when the window is key and `setAcceptsMouseMovedEvents`
@@ -107,7 +107,7 @@ pub trait MarspotApp: 'static {
     fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
 
     /// Mouse-up at physical-pixel `(x, y)`.  Default no-op.
-    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _drop_window_id: u32) {}
+    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _drop_window_id: u32, _drop_x: f64, _drop_y: f64) {}
 
     /// Finder file drop at physical-pixel `(x, y)` with ≥1 resolved
     /// filesystem paths.  Default no-op — the terminal apps override
@@ -565,7 +565,14 @@ define_class!(
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
-            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseDrag { x: x_phys, y: y_phys });
+            // RFC-006 — resolve the hovered window per drag tick so
+            // the drop preview tracks the pointer live.  Entry-point
+            // context, same as mouseUp:.
+            let (hover_window_id, hover_x, hover_y) = marspot_pointer_in_window();
+            dispatch_event_for(
+                self.ivars().window_id.get(),
+                EventKind::MouseDrag { x: x_phys, y: y_phys, hover_window_id, hover_x, hover_y },
+            );
         }
 
         #[unsafe(method(mouseUp:))]
@@ -582,10 +589,18 @@ define_class!(
             // actual drop target can be resolved.  Computed in the
             // native callback (an entry point, no APP_STATE borrow
             // yet).  0 = not over any marspot window.
-            let drop_window_id = marspot_window_id_at_pointer();
+            let (drop_window_id, dwx, dwy) = marspot_pointer_in_window();
+            // Window hit → that window's physical coords; no window →
+            // raw screen points (they place the new window).
+            let (drop_x, drop_y) = if drop_window_id != 0 {
+                (dwx, dwy)
+            } else {
+                let sp = NSEvent::mouseLocation();
+                (sp.x, sp.y)
+            };
             dispatch_event_for(
                 self.ivars().window_id.get(),
-                EventKind::MouseUp { x: x_phys, y: y_phys, drop_window_id },
+                EventKind::MouseUp { x: x_phys, y: y_phys, drop_window_id, drop_x, drop_y },
             );
         }
 
@@ -1015,8 +1030,8 @@ pub enum EventKind {
     MouseDown { x: f64, y: f64, mods: Modifiers },
     MouseRightDown { x: f64, y: f64, mods: Modifiers },
     ImePreedit(String),
-    MouseDrag { x: f64, y: f64 },
-    MouseUp { x: f64, y: f64, drop_window_id: u32 },
+    MouseDrag { x: f64, y: f64, hover_window_id: u32, hover_x: f64, hover_y: f64 },
+    MouseUp { x: f64, y: f64, drop_window_id: u32, drop_x: f64, drop_y: f64 },
     MouseMove { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
     /// Finder file drop on the view.  `(x, y)` is the drop point in
@@ -1116,8 +1131,12 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             EventKind::MouseDown { x, y, mods } => app.mouse_down(ctx, x, y, mods),
             EventKind::MouseRightDown { x, y, mods } => app.mouse_right_down(ctx, x, y, mods),
             EventKind::ImePreedit(text) => app.ime_preedit_changed(ctx, &text),
-            EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
-            EventKind::MouseUp { x, y, drop_window_id } => app.mouse_up(ctx, x, y, drop_window_id),
+            EventKind::MouseDrag { x, y, hover_window_id, hover_x, hover_y } => {
+                app.mouse_drag(ctx, x, y, hover_window_id, hover_x, hover_y)
+            }
+            EventKind::MouseUp { x, y, drop_window_id, drop_x, drop_y } => {
+                app.mouse_up(ctx, x, y, drop_window_id, drop_x, drop_y)
+            }
             EventKind::MouseMove { x, y } => app.mouse_moved(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),
             EventKind::FileDrop { x, y, paths } => app.file_drop(ctx, x, y, &paths),
@@ -1492,28 +1511,30 @@ fn drain_pending_windows() {
     }
 }
 
-/// The marspot window under the pointer, or 0.
-///
-/// `NSWindow::windowNumberAtPoint` answers with the TOPMOST window's
-/// number at a screen point — any app's.  We then match it against
-/// our own windows, so a pointer over another app (or the desktop)
-/// yields 0 even when a marspot window sits underneath.  Must be
-/// called from an entry-point context (native event callback), not
-/// from inside a dispatch: it borrows `APP_STATE`.
-fn marspot_window_id_at_pointer() -> u32 {
-    let Some(mtm) = MainThreadMarker::new() else { return 0 };
+/// The pointer resolved into a marspot window's own space:
+/// `(window_id, x_phys, y_phys)` in that window's flipped view
+/// coordinates, or `(0, 0, 0)` when the pointer is not over any
+/// marspot window.  RFC-006's drop preview is drawn from this during
+/// a drag.  Entry-point context only (borrows `APP_STATE`).
+fn marspot_pointer_in_window() -> (u32, f64, f64) {
+    let Some(mtm) = MainThreadMarker::new() else { return (0, 0.0, 0.0) };
     let point = NSEvent::mouseLocation();
     let number =
         NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, mtm);
     APP_STATE.with(|cell| {
         let slot = cell.borrow();
-        let Some(state) = slot.as_ref() else { return 0 };
-        state
+        let Some(state) = slot.as_ref() else { return (0, 0.0, 0.0) };
+        let Some(c) = state
             .windows
             .iter()
             .find(|c| c.nswindow.windowNumber() == number)
-            .map(|c| c.window_id)
-            .unwrap_or(0)
+        else {
+            return (0, 0.0, 0.0);
+        };
+        let win_pt = c.nswindow.convertPointFromScreen(point);
+        let view_pt = c.inner.convertPoint_fromView(win_pt, None);
+        let scale = c.nswindow.backingScaleFactor();
+        (c.window_id, view_pt.x * scale, view_pt.y * scale)
     })
 }
 
