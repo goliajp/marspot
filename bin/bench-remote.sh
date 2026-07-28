@@ -81,19 +81,29 @@ ssh -o ConnectTimeout=5 "$HOST" "
   command -v cargo >/dev/null || { echo 'cargo missing on remote' >&2; exit 2; }
 " </dev/null
 
-# The whole point of the remote box is that it's IDLE — a foreign
-# compile (2026-07-11: a torajs rustc at 99% CPU, load 9) silently
-# depresses every number 10-15% and makes the boundary metrics
-# (scroll p99, cat-cjk) flap.  Refuse to produce polluted numbers;
-# MARSPOT_BENCH_IGNORE_LOAD=1 bypasses when you accept the noise.
+# Load gate — user ruling 2026-07-29: refuse only past load 20.  The
+# old 1.5 threshold blocked for hours whenever any sibling project
+# compiled on mini (load 6-10), which cost more than the noise it
+# avoided.  The asymmetry that makes 20 safe: load only DEPRESSES
+# numbers, so a PASS under load is still a PASS (an idle box would
+# only score better).  A FAIL under load is the one verdict that
+# needs an idle re-run before anyone treats it as a regression — the
+# runner prints that warning when it applies.
+# MARSPOT_BENCH_IGNORE_LOAD=1 still bypasses entirely.
+MARSPOT_BENCH_MAX_LOAD="${MARSPOT_BENCH_MAX_LOAD:-20}"
 if [[ "${MARSPOT_BENCH_IGNORE_LOAD:-}" != "1" ]]; then
   LOAD1="$(ssh "$HOST" "sysctl -n vm.loadavg | awk '{print \$2}'" </dev/null)"
-  if python3 -c "import sys; sys.exit(0 if float('$LOAD1') > 1.5 else 1)"; then
-    echo "==> $HOST is NOT idle (load1=$LOAD1 > 1.5) — refusing to bench." >&2
+  if python3 -c "import sys; sys.exit(0 if float('$LOAD1') > float('$MARSPOT_BENCH_MAX_LOAD') else 1)"; then
+    echo "==> $HOST is overloaded (load1=$LOAD1 > $MARSPOT_BENCH_MAX_LOAD) — refusing to bench." >&2
     ssh "$HOST" "ps aux | sort -k3 -rn | head -3 | awk '{printf \"    %s%% %s\n\", \$3, \$11}'" </dev/null >&2 || true
     echo "    Wait for the foreign workload to finish, or set" >&2
     echo "    MARSPOT_BENCH_IGNORE_LOAD=1 to accept polluted numbers." >&2
     exit 3
+  fi
+  if python3 -c "import sys; sys.exit(0 if float('$LOAD1') > 1.5 else 1)"; then
+    echo "==> note: $HOST under load (load1=$LOAD1).  A PASS is valid" >&2
+    echo "    (load only depresses numbers); re-run idle before" >&2
+    echo "    treating any FAIL as a real regression." >&2
   fi
 fi
 

@@ -1341,6 +1341,23 @@ mod boot_assembly_tests {
                 std::env::set_var("MARSPOT_SESSION_BIN", real_session_bin());
                 std::env::remove_var("MARSPOT_SESSION_ID");
             }
+            // POSIX shm names (`/msp-s-<id>`) are a GLOBAL namespace:
+            // the sandbox isolates the filesystem but not shm.  With
+            // every sandbox allocating ids from 1, two tests spawning
+            // concurrently raced on `/msp-s-1` — create_region_named
+            // unlink+O_EXCL either detached the other test's live
+            // region or lost the O_EXCL race, and the spawn `expect`
+            // blew up (the suite's one flaky).  Seeding the counter
+            // with a per-process base keeps every test's id space —
+            // and therefore its shm names — disjoint.  Production is
+            // untouched: one state root, one monotonic counter.
+            let sessions = dir.join("sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(
+                sessions.join(".next_id"),
+                format!("{}", std::process::id() as u64 * 100_000),
+            )
+            .unwrap();
             Self { dir, _env: env }
         }
         fn break_session_bin(&self) {
