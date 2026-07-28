@@ -107,7 +107,7 @@ pub trait MarspotApp: 'static {
     fn mouse_moved(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
 
     /// Mouse-up at physical-pixel `(x, y)`.  Default no-op.
-    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64) {}
+    fn mouse_up(&mut self, _ctx: &MarspotAppCtx, _x_phys: f64, _y_phys: f64, _drop_window_id: u32) {}
 
     /// Finder file drop at physical-pixel `(x, y)` with ≥1 resolved
     /// filesystem paths.  Default no-op — the terminal apps override
@@ -575,7 +575,18 @@ define_class!(
             let scale = self.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
             let x_phys = loc_view.x * scale;
             let y_phys = loc_view.y * scale;
-            dispatch_event_for(self.ivars().window_id.get(), EventKind::MouseUp { x: x_phys, y: y_phys });
+            // Which marspot window is the pointer over RIGHT NOW?
+            // AppKit delivers the whole drag to the window that took
+            // the press, so a pane dragged into another window still
+            // reports its release here — this is the one place the
+            // actual drop target can be resolved.  Computed in the
+            // native callback (an entry point, no APP_STATE borrow
+            // yet).  0 = not over any marspot window.
+            let drop_window_id = marspot_window_id_at_pointer();
+            dispatch_event_for(
+                self.ivars().window_id.get(),
+                EventKind::MouseUp { x: x_phys, y: y_phys, drop_window_id },
+            );
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -1005,7 +1016,7 @@ pub enum EventKind {
     MouseRightDown { x: f64, y: f64, mods: Modifiers },
     ImePreedit(String),
     MouseDrag { x: f64, y: f64 },
-    MouseUp { x: f64, y: f64 },
+    MouseUp { x: f64, y: f64, drop_window_id: u32 },
     MouseMove { x: f64, y: f64 },
     Scroll { dx: f64, dy: f64, precise: bool },
     /// Finder file drop on the view.  `(x, y)` is the drop point in
@@ -1106,7 +1117,7 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             EventKind::MouseRightDown { x, y, mods } => app.mouse_right_down(ctx, x, y, mods),
             EventKind::ImePreedit(text) => app.ime_preedit_changed(ctx, &text),
             EventKind::MouseDrag { x, y } => app.mouse_drag(ctx, x, y),
-            EventKind::MouseUp { x, y } => app.mouse_up(ctx, x, y),
+            EventKind::MouseUp { x, y, drop_window_id } => app.mouse_up(ctx, x, y, drop_window_id),
             EventKind::MouseMove { x, y } => app.mouse_moved(ctx, x, y),
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),
             EventKind::FileDrop { x, y, paths } => app.file_drop(ctx, x, y, &paths),
@@ -1479,6 +1490,31 @@ fn drain_pending_windows() {
             }
         }
     }
+}
+
+/// The marspot window under the pointer, or 0.
+///
+/// `NSWindow::windowNumberAtPoint` answers with the TOPMOST window's
+/// number at a screen point — any app's.  We then match it against
+/// our own windows, so a pointer over another app (or the desktop)
+/// yields 0 even when a marspot window sits underneath.  Must be
+/// called from an entry-point context (native event callback), not
+/// from inside a dispatch: it borrows `APP_STATE`.
+fn marspot_window_id_at_pointer() -> u32 {
+    let Some(mtm) = MainThreadMarker::new() else { return 0 };
+    let point = NSEvent::mouseLocation();
+    let number =
+        NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, mtm);
+    APP_STATE.with(|cell| {
+        let slot = cell.borrow();
+        let Some(state) = slot.as_ref() else { return 0 };
+        state
+            .windows
+            .iter()
+            .find(|c| c.nswindow.windowNumber() == number)
+            .map(|c| c.window_id)
+            .unwrap_or(0)
+    })
 }
 
 /// How many windows are open.

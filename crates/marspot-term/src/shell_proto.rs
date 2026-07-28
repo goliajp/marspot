@@ -1020,6 +1020,31 @@ pub fn decode_mouse(payload: &[u8]) -> io::Result<(f64, f64, u8, u32)> {
     Ok((x, y, mods, trailing_window_id(payload, 17)))
 }
 
+/// `MouseUp` grows a second trailing id: the marspot window under the
+/// pointer at release time (0 = none).  RFC-005 step 5's drag-a-pane-
+/// between-windows needs it — AppKit keeps delivering the drag to the
+/// window that took the press, so only L1 (which owns the NSWindows)
+/// can say where the pointer actually ended up.  An old reader stops
+/// at its own tail and never sees it; a new reader missing the tail
+/// (old shell) reads 0 = "no drop target", which cancels the drag —
+/// the safe end of the deal.
+pub fn encode_mouse_up(x: f64, y: f64, mods: u8, window_id: u32, drop_window_id: u32) -> Vec<u8> {
+    let mut out = encode_mouse(x, y, mods, window_id);
+    out.extend_from_slice(&drop_window_id.to_le_bytes());
+    out
+}
+
+/// `(x, y, mods, window_id, drop_window_id)`.
+pub fn decode_mouse_up(payload: &[u8]) -> io::Result<(f64, f64, u8, u32, u32)> {
+    let (x, y, mods, win) = decode_mouse(payload)?;
+    let drop = if payload.len() >= 25 {
+        u32::from_le_bytes(payload[21..25].try_into().unwrap())
+    } else {
+        0
+    };
+    Ok((x, y, mods, win, drop))
+}
+
 pub fn encode_scroll(dx: f64, dy: f64, precise: bool, window_id: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(21);
     out.extend_from_slice(&dx.to_le_bytes());

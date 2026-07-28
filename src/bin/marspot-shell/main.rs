@@ -2825,9 +2825,12 @@ impl MarspotApp for ShellApp {
         self.send(MsgType::MouseDrag, encode_mouse(x, y, 0, w));
     }
 
-    fn mouse_up(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64) {
+    fn mouse_up(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, drop_window_id: u32) {
         let w = Self::event_window(ctx);
-        self.send(MsgType::MouseUp, encode_mouse(x, y, 0, w));
+        self.send(
+            MsgType::MouseUp,
+            marspot::shell_proto::encode_mouse_up(x, y, 0, w, drop_window_id),
+        );
     }
 
     fn file_drop(&mut self, ctx: &MarspotAppCtx, x: f64, y: f64, paths: &[String]) {

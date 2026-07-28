@@ -668,6 +668,7 @@ mod window_state_tests {
             l3_mode: false,
             event_tx,
             drag_window: None,
+            pane_drag: None,
             pending_move_sid: None,
             saved_windows: std::collections::VecDeque::new(),
             windows,
@@ -1030,6 +1031,62 @@ mod window_state_tests {
             "restore queue untouched — the user action claimed this window"
         );
         assert!(app.pending_move_sid.is_none(), "park is consumed");
+    }
+
+    /// RFC-005 step 5 (drag half) — the title-press state machine.
+    /// One press, three endings: stay put = the click it looked like
+    /// (title edit); travel + release over another window = the pane
+    /// moves there; travel + release anywhere else = cancelled.
+    #[test]
+    fn a_title_press_is_a_click_a_move_or_nothing() {
+        let mk = || {
+            let mut app = app_with(vec![
+                win(1, vec![Pane::new_vacant(10, 80, 24), Pane::new_vacant(11, 80, 24)]),
+                win(2, vec![Pane::new_vacant(20, 80, 24)]),
+            ]);
+            app.pane_drag = Some(PaneDrag {
+                from_wi: 0,
+                idx: 1,
+                start: (100.0, 10.0),
+                active: false,
+            });
+            app
+        };
+
+        // Ending 1 — no travel: the deferred click enters title edit.
+        let mut app = mk();
+        app.mouse_up(0, 1);
+        assert_eq!(app.windows[0].editing_title, Some(1), "click = rename");
+        assert_eq!(app.windows[0].panes.len(), 2, "nothing moved");
+
+        // Ending 2 — travel past the slop, release over window 2.
+        let mut app = mk();
+        app.mouse_drag(0, 100.0 + PANE_DRAG_SLOP_PHYS + 1.0, 10.0);
+        assert!(app.pane_drag.unwrap().active, "slop exceeded arms the drag");
+        app.mouse_up(0, 2);
+        assert_eq!(app.windows[0].panes.len(), 1);
+        assert_eq!(app.windows[1].panes.len(), 2);
+        assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
+        assert_eq!(app.key_window, 1, "landing window becomes key");
+        assert_eq!(app.windows[0].editing_title, None, "a drag never renames");
+
+        // Ending 3 — active drag released over nothing (drop id 0)
+        // or over its own window: cancelled, everything stays.
+        for drop in [0u32, 1u32] {
+            let mut app = mk();
+            app.mouse_drag(0, 100.0, 40.0);
+            app.mouse_up(0, drop);
+            assert_eq!(app.windows[0].panes.len(), 2, "drop={drop}: no move");
+            assert_eq!(app.windows[0].editing_title, None, "drop={drop}: no rename");
+            assert!(app.pane_drag.is_none(), "drop={drop}: state cleared");
+        }
+
+        // Sub-slop wiggle stays a click.
+        let mut app = mk();
+        app.mouse_drag(0, 104.0, 12.0);
+        assert!(!app.pane_drag.unwrap().active, "inside slop = still a click");
+        app.mouse_up(0, 1);
+        assert_eq!(app.windows[0].editing_title, Some(1));
     }
 
     /// The modal's slot map is sized from the window's own grid, so a
@@ -1587,9 +1644,10 @@ enum CoreEvent {
     /// Drives the L2 context menu (same handler shape as MouseDown).
     MouseRightDown(f64, f64, Modifiers, u32),
     MouseDrag(f64, f64, u32),
-    /// Coordinates are on the wire but unused — release only ends
-    /// the drag (same as src/main.rs `mouse_up`).
-    MouseUp(u32),
+    /// `(window, drop_window)` — release ends the drag; the second id
+    /// is the marspot window under the pointer at release (0 = none),
+    /// resolved by L1.  RFC-005 step 5's pane drag lands there.
+    MouseUp(u32, u32),
     /// Bare mouse-move (no button).  L2 hit-tests against chrome
     /// rects so icon-button hover affordances update under the
     /// cursor.  Modifier byte on the wire is currently unused.
@@ -1722,6 +1780,22 @@ struct LayoutModalDrag {
     mouse_phys: (f64, f64),
 }
 
+/// RFC-005 step 5 — an in-flight pane drag (see `CoreApp.pane_drag`).
+#[derive(Clone, Copy, Debug)]
+struct PaneDrag {
+    from_wi: usize,
+    idx: usize,
+    /// Press position, physical px in the source window's space.
+    start: (f64, f64),
+    /// Slop exceeded: this press is a drag, not a click.
+    active: bool,
+}
+
+/// How far (physical px) the pointer must travel from the press
+/// before a title-bar hold becomes a pane drag.  Generous enough
+/// that an ordinary click never trips it on a shaky hand.
+const PANE_DRAG_SLOP_PHYS: f64 = 10.0;
+
 fn decode_frame(f: &Frame) -> Option<CoreEvent> {
     match f.msg_type {
         MsgType::KeyEvent => decode_key_event(&f.payload).ok().map(|(w, win)| {
@@ -1737,9 +1811,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::MouseDrag => decode_mouse(&f.payload)
             .ok()
             .map(|(x, y, _, win)| CoreEvent::MouseDrag(x, y, win)),
-        MsgType::MouseUp => decode_mouse(&f.payload)
+        MsgType::MouseUp => marspot::shell_proto::decode_mouse_up(&f.payload)
             .ok()
-            .map(|(_, _, _, win)| CoreEvent::MouseUp(win)),
+            .map(|(_, _, _, win, drop)| CoreEvent::MouseUp(win, drop)),
         MsgType::MouseMove => decode_mouse(&f.payload)
             .ok()
             .map(|(x, y, _, win)| CoreEvent::MouseMove(x, y, win)),
@@ -2656,6 +2730,14 @@ struct CoreApp {
     /// The window that took the current mouse press, if any.  Set on
     /// press, cleared on release; `drag_target` reads it.
     drag_window: Option<u32>,
+    /// RFC-005 step 5 — a title-bar press that may become a pane
+    /// drag.  Armed on mouse-down over a pane title; becomes `active`
+    /// once the pointer travels past the slop radius; resolved on
+    /// mouse-up (active + over another window → move; active
+    /// elsewhere → cancel; never active → the click's original
+    /// meaning, entering title edit).  One at a time, app-wide — a
+    /// drag spans windows by nature.
+    pane_drag: Option<PaneDrag>,
     /// RFC-005 step 5 — a pane parked mid-"Move to New Window": its
     /// sid, waiting for L1 to open the window.  The next
     /// `SurfaceAttachWindow` with an unseen id claims it (checked
@@ -3980,6 +4062,8 @@ impl CoreApp {
     /// and tearing the state down here first would race it.
     fn close_window(&mut self, window_id: u32) {
         let Some(i) = self.window_index(window_id) else { return };
+        // Window indices shift below; any in-flight drag is stale.
+        self.pane_drag = None;
         if self.windows.len() <= 1 {
             lx_event!(
                 "WINDOW_CLOSE_LAST",
@@ -4012,6 +4096,8 @@ impl CoreApp {
     }
 
     fn close_session(&mut self, wi: usize, idx: usize) {
+        // A pane closing invalidates any armed drag's index math.
+        self.pane_drag = None;
         if idx >= win!(self, wi).panes.len() {
             return;
         }
@@ -5791,21 +5877,26 @@ impl CoreApp {
         let (cw, ch) = self.renderer.cell_dims();
         let cell_pos_hit = layout.hit_test_cell_pos(x_phys, y_phys, cw, ch);
 
-        // Title-strip click → enter edit mode for that cell.
+        // Title-strip press: could be a click (enter title edit) or
+        // the start of a pane drag (RFC-005 step 5).  Arm the drag and
+        // defer the edit to mouse-up — the two intents are only
+        // distinguishable by whether the pointer moves.  Focus shifts
+        // immediately either way (clicking focuses).
         if let Some(idx) = title_hit {
             if idx < win!(self, wi).panes.len() {
                 self.commit_title_edit(wi);
                 self.resolve_pending_on_defocus(wi, idx);
                 win!(self, wi).focused_idx = idx;
-                win!(self, wi).editing_title = Some(idx);
-                win!(self, wi).title_edit_buffer = win!(self, wi).panes[idx]
-                    .custom_title
-                    .clone()
-                    .unwrap_or_default();
                 let _ = win!(self, wi).focused_pane_mut().snap_to_live();
                 win!(self, wi).selection = None;
                 win!(self, wi).selection_dragging = false;
                 win!(self, wi).needs_render = true;
+                self.pane_drag = Some(PaneDrag {
+                    from_wi: wi,
+                    idx,
+                    start: (x_phys, y_phys),
+                    active: false,
+                });
                 return;
             }
         }
@@ -5954,6 +6045,22 @@ impl CoreApp {
     }
 
     fn mouse_drag(&mut self, wi: usize, x_phys: f64, y_phys: f64) {
+        // RFC-005 step 5 — an armed title press becomes a pane drag
+        // once the pointer clears the slop radius.  The activation
+        // repaints the title (a ⇢ marker) so the mode is visible.
+        if let Some(d) = self.pane_drag.as_mut() {
+            if !d.active {
+                let (sx, sy) = d.start;
+                if (x_phys - sx).hypot(y_phys - sy) > PANE_DRAG_SLOP_PHYS {
+                    d.active = true;
+                    let from = d.from_wi;
+                    win!(self, from).needs_render = true;
+                }
+            }
+            if self.pane_drag.map(|d| d.active).unwrap_or(false) {
+                return;
+            }
+        }
         // F3+3.3 — LayoutModal card drag.  Take priority over the
         // process panel drag so a layout modal session never gets
         // captured by chrome elsewhere.
@@ -6032,7 +6139,45 @@ impl CoreApp {
         }
     }
 
-    fn mouse_up(&mut self, wi: usize) {
+    fn mouse_up(&mut self, wi: usize, drop_window_id: u32) {
+        // RFC-005 step 5 — resolve an armed title press first.
+        if let Some(d) = self.pane_drag.take() {
+            if d.active {
+                // A drag.  Over another marspot window → move the
+                // pane there; anywhere else (same window, another
+                // app, the desktop) → cancel.  L1 resolved the drop
+                // window; 0 means none.
+                let to = self.window_index(drop_window_id);
+                let from = d.from_wi;
+                win!(self, from).needs_render = true;
+                match to {
+                    Some(to_wi) if to_wi != d.from_wi => {
+                        self.move_pane_to_window(d.from_wi, d.idx, to_wi);
+                    }
+                    _ => {
+                        lx_debug!(
+                            "core.pane_drag.cancelled",
+                            "pane drag released outside another window",
+                            drop_window_id = drop_window_id
+                        );
+                    }
+                }
+                return;
+            }
+            // Never activated: this was the click it looked like —
+            // enter title edit, exactly what mouse-down used to do.
+            let idx = d.idx;
+            let from = d.from_wi;
+            if idx < win!(self, from).panes.len() {
+                win!(self, from).editing_title = Some(idx);
+                win!(self, from).title_edit_buffer = win!(self, from).panes[idx]
+                    .custom_title
+                    .clone()
+                    .unwrap_or_default();
+                win!(self, from).needs_render = true;
+            }
+            return;
+        }
         // F3+3.3 — finalize LayoutModal card drag: pick the
         // destination slot under the cursor, swap, redraw.  No
         // animation (V2.0); settle = single-frame jump.
@@ -6300,6 +6445,16 @@ impl CoreApp {
                 let mut s = resolved_labels.get(i).cloned().unwrap_or_default();
                 if win!(self, wi).editing_title == Some(i) {
                     s.push('▏');
+                }
+                // RFC-005 step 5 — a pane being dragged wears a ⇢ so
+                // the mode is visible without a ghost overlay: drop it
+                // on another window to move it there, release anywhere
+                // else to cancel.
+                if self
+                    .pane_drag
+                    .is_some_and(|d| d.active && d.from_wi == wi && d.idx == i)
+                {
+                    s.insert_str(0, "⇢ ");
                 }
                 s
             })
@@ -7068,6 +7223,7 @@ fn main() {
         l3_mode,
         event_tx: event_tx.clone(),
         drag_window: None,
+        pane_drag: None,
         pending_move_sid: None,
         saved_windows,
         windows: vec![{
@@ -7332,9 +7488,9 @@ fn main() {
                         app.mouse_drag(wi, x, y)
                     }
                 }
-                CoreEvent::MouseUp(win) => {
+                CoreEvent::MouseUp(win, drop) => {
                     if let Some(wi) = app.drag_target(win) {
-                        app.mouse_up(wi)
+                        app.mouse_up(wi, drop)
                     }
                     app.drag_window = None;
                 }
