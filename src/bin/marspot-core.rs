@@ -2868,9 +2868,11 @@ struct WindowState {
     h_phys: f64,
     scale: f64,
     /// RFC-006 — the drop-preview ghost: the rect (x, y_top, w, h,
-    /// physical px) a hovering pane drag would occupy on release.
-    /// Exactly one window has it at a time (the hovered one).
-    drop_preview: Option<(f64, f64, f64, f64)>,
+    /// physical px) a hovering pane drag would occupy on release,
+    /// plus the outline-only flag (Append landings frame the content
+    /// area instead of filling a half-pane).  Exactly one window has
+    /// it at a time (the hovered one).
+    drop_preview: Option<((f64, f64, f64, f64), bool)>,
     /// Set by anything that changes what the next frame should look
     /// like; cleared after each `render`.
     needs_render: bool,
@@ -3875,17 +3877,27 @@ impl CoreApp {
         let ghost = match self.resolve_drop_outcome(&drag, new_target, hover_window_id) {
             DropOutcome::Split { to_wi, at_idx, zone } => {
                 let rect = win!(self, to_wi).layout.cells[at_idx];
-                Some((to_wi, drop_preview_rect(&rect, zone)))
+                Some((to_wi, drop_preview_rect(&rect, zone), false))
             }
             DropOutcome::Swap { to_wi, idx } | DropOutcome::Fill { to_wi, idx } => {
                 let rect = win!(self, to_wi).layout.cells[idx];
-                Some((to_wi, drop_preview_rect(&rect, DropZone::Center)))
+                Some((to_wi, drop_preview_rect(&rect, DropZone::Center), false))
             }
-            // Append / NewWindow / Nothing: no rectangle to promise.
+            // Append: no particular slot to promise — frame the whole
+            // content area ("into this window"), outline only, so the
+            // downgrade is visible BEFORE release (RFC-006 §2).
+            DropOutcome::Append { to_wi } => {
+                let l = &win!(self, to_wi).layout;
+                let x = l.sidebar_w;
+                let y = l.top_inset;
+                let rect = (x, y, (l.window_w - x).max(0.0), (l.window_h - y).max(0.0));
+                Some((to_wi, rect, true))
+            }
+            // NewWindow / Nothing: no rectangle to promise.
             _ => None,
         };
-        if let Some((wi, rect)) = ghost {
-            win!(self, wi).drop_preview = Some(rect);
+        if let Some((wi, rect, outline)) = ghost {
+            win!(self, wi).drop_preview = Some((rect, outline));
             win!(self, wi).needs_render = true;
         }
     }
@@ -7299,8 +7311,14 @@ impl CoreApp {
         // one copy and each window sets its own right before painting.
         self.renderer
             .set_hover_chrome_btn(map_hover_to_u8(win!(self, wi).hover_chrome_btn));
-        // RFC-006 — this window's drop-preview ghost (usually None).
+        // RFC-006 — this window's drop-preview ghost (usually None),
+        // and the index of its pane mid-drag (dimmed by the renderer).
         self.renderer.set_drop_preview(win!(self, wi).drop_preview);
+        self.renderer.set_drag_source(
+            self.pane_drag
+                .filter(|d| d.active && d.from_wi == wi)
+                .map(|d| d.idx),
+        );
 
         self.renderer.set_context_menu(win!(self, wi).context_menu.as_ref().map(|state| {
             use marspot::render_metal::{ContextMenuRender, ContextMenuRow};

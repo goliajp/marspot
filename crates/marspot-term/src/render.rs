@@ -131,6 +131,12 @@ pub struct SessionView<'a> {
     /// clicking it triggers the swap.  Only the focused pane ever carries
     /// it (idle panes swap immediately).
     pub update_pending: bool,
+    /// RFC-006 — this slot is a dormant placeholder (a moved-out
+    /// pane's empty seat).  The renderer recesses it: a translucent
+    /// scrim over the whole cell so it reads as "space held, nothing
+    /// running" next to live panes, with the grid's own hint text
+    /// showing through.
+    pub dormant: bool,
     /// RFC-001 plugin badge — a short tag drawn at the right edge of
     /// the title strip (left of the optional refresh affordance) so
     /// plugins can surface per-pane metadata without overloading the

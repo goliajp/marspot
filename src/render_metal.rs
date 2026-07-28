@@ -739,9 +739,15 @@ pub struct MetalRenderer {
     /// open, `None` when closed.  See `LayoutModalRender` below.
     layout_modal_state: Option<LayoutModalRender>,
     /// RFC-006 — drop-preview ghost for the window being rendered:
-    /// (x, y_top, w, h) physical px.  Published per window right
+    /// (x, y_top, w, h) physical px + outline-only flag (an Append
+    /// landing frames the whole content area instead of filling a
+    /// half-pane it can't deliver).  Published per window right
     /// before its render, like every per-window overlay.
-    drop_preview: Option<(f64, f64, f64, f64)>,
+    drop_preview: Option<((f64, f64, f64, f64), bool)>,
+    /// RFC-006 — index of the pane in THIS window currently being
+    /// dragged, if any.  The renderer dims it (translucent scrim):
+    /// "you are moving THIS one".
+    drag_source: Option<usize>,
     /// F3+9 — right-click context menu state.  `Some` while open.
     context_menu_state: Option<ContextMenuRender>,
     /// Dev-panel state.  `Some` while visible.  Owned by L2;
@@ -900,7 +906,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -964,7 +970,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -998,8 +1004,12 @@ impl MetalRenderer {
     /// menu is open, `None` when closed.  Re-published every frame
     /// by L2 with current hovered_idx so the highlight tracks the
     /// cursor.
-    pub fn set_drop_preview(&mut self, rect: Option<(f64, f64, f64, f64)>) {
+    pub fn set_drop_preview(&mut self, rect: Option<((f64, f64, f64, f64), bool)>) {
         self.drop_preview = rect;
+    }
+
+    pub fn set_drag_source(&mut self, idx: Option<usize>) {
+        self.drag_source = idx;
     }
 
     pub fn set_context_menu(&mut self, state: Option<ContextMenuRender>) {
@@ -1379,6 +1389,7 @@ impl MetalRenderer {
             cc_usage.as_ref(),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
+            self.drag_source,
             self.context_menu_state.as_ref(),
             font,
             atlas,
@@ -1598,6 +1609,7 @@ impl MetalRenderer {
             cc_usage.as_ref(),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
+            self.drag_source,
             self.context_menu_state.as_ref(),
             font,
             atlas,
@@ -2175,7 +2187,8 @@ fn build_instances(
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
     layout_modal_state: Option<&LayoutModalRender>,
-    drop_preview: Option<(f64, f64, f64, f64)>,
+    drop_preview: Option<((f64, f64, f64, f64), bool)>,
+    drag_source: Option<usize>,
     context_menu_state: Option<&ContextMenuRender>,
     font: &mut FontCache,
     atlas: &mut GlyphAtlas,
@@ -2199,17 +2212,54 @@ fn build_instances(
 
     // RFC-006 — drop-preview ghost: a translucent accent fill + thin
     // accent frame over the region a hovering pane drag would occupy
-    // on release.  Overlay pass, so it sits above the pane content it
-    // previews.  What is highlighted is exactly what release does.
-    if let Some((gx, gy, gw, gh)) = drop_preview {
+    // on release; outline-only for an Append landing (no half-pane to
+    // promise, just "into this window").  Overlay pass, above the
+    // content it previews.  What lights up is exactly what release
+    // does.
+    if let Some(((gx, gy, gw, gh), outline_only)) = drop_preview {
         let accent = crate::ui::theme::token::color::ACCENT.to_rgba_f32();
+        let fill = if outline_only {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            [accent[0] * 0.25, accent[1] * 0.25, accent[2] * 0.25, 0.25]
+        };
         overlay_ui_rects.push(UiRectInstance {
             origin: [gx as f32, gy as f32],
             size: [gw as f32, gh as f32],
-            fill_color: [accent[0] * 0.25, accent[1] * 0.25, accent[2] * 0.25, 0.25],
+            fill_color: fill,
             border_color: accent,
             corner_radius: 4.0,
             border_width: 2.0,
+            shadow_blur: 0.0,
+            shadow_alpha: 0.0,
+            shadow_color: [0.0; 4],
+        });
+    }
+
+    // RFC-006 polish — whole-cell scrims, one primitive two duties:
+    //  * dormant placeholder: a steady recess so an empty seat reads
+    //    as "space held, nothing running" (hint text shows through);
+    //  * drag source: a deeper dim while its pane is mid-drag —
+    //    "you are moving THIS one" (the ⇢ title marker stays for the
+    //    pointer-outside-any-window case).
+    for (i, view) in views.iter().enumerate() {
+        let dimming = if drag_source == Some(i) {
+            Some(0.38)
+        } else if view.dormant {
+            Some(0.22)
+        } else {
+            None
+        };
+        let (Some(alpha), Some(rect)) = (dimming, layout.cells.get(i)) else {
+            continue;
+        };
+        overlay_ui_rects.push(UiRectInstance {
+            origin: [rect.x as f32, rect.y_top as f32],
+            size: [rect.w as f32, rect.h as f32],
+            fill_color: [0.0, 0.0, 0.0, alpha],
+            border_color: [0.0; 4],
+            corner_radius: 0.0,
+            border_width: 0.0,
             shadow_blur: 0.0,
             shadow_alpha: 0.0,
             shadow_color: [0.0; 4],
@@ -7496,6 +7546,63 @@ mod tests {
     /// that the scratch vecs come out populated.  Doesn't render —
     /// the BG/FG passes are tested end-to-end in the offscreen
     /// tests above.
+    /// RFC-006 polish — the whole-cell scrims: a dormant view adds
+    /// exactly one overlay rect (the recess), a drag-source index adds
+    /// one (the dim), and a plain view adds none.
+    #[test]
+    fn scrims_follow_dormant_and_drag_source() {
+        use crate::layout::Layout;
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let grid = crate::grid::Grid::new(10, 4);
+        let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
+        let mk = |dormant: bool| SessionView {
+            grid: &grid, view_offset: 0, cursor_visible: false, focused: false,
+            title: "", selection: None, ime_preedit: "", update_pending: false,
+            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+            highlight_spans: &[], search_overlay: None, seq: 0,
+            dormant,
+        };
+        let mut run = |view: SessionView, drag_source: Option<usize>| -> usize {
+            let mut overlay_rects = Vec::new();
+            build_instances(
+                &layout,
+                std::slice::from_ref(&view),
+                &[],
+                0,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                drag_source,
+                None,
+                &mut font,
+                &mut atlas,
+                &mut color_atlas,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut overlay_rects,
+            );
+            overlay_rects.len()
+        };
+        let plain = run(mk(false), None);
+        assert_eq!(run(mk(true), None), plain + 1, "dormant adds one recess scrim");
+        assert_eq!(run(mk(false), Some(0)), plain + 1, "drag source adds one dim scrim");
+    }
+
     #[test]
     fn build_instances_emits_cells_and_glyphs() {
         use crate::grid::{Cell, Grid};
@@ -7541,6 +7648,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            dormant: false,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7559,6 +7667,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -7646,6 +7755,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            dormant: false,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7664,6 +7774,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -7724,6 +7835,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            dormant: false,
             right_badge: "",
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
@@ -7741,6 +7853,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -7826,6 +7939,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            dormant: false,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7843,6 +7957,7 @@ mod tests {
             selection: view.selection,
             ime_preedit: view.ime_preedit,
             update_pending: view.update_pending,
+            dormant: false,
             right_badge: view.right_badge,
             top_fixed_h_cells: view.top_fixed_h_cells,
             bot_fixed_h_cells: view.bot_fixed_h_cells,
@@ -7861,6 +7976,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 None,
@@ -7947,6 +8063,7 @@ mod tests {
             selection: None,
             ime_preedit: "",
             update_pending: false,
+            dormant: false,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7964,6 +8081,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -8015,7 +8133,7 @@ mod tests {
         );
         let view_base = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
-            title: "", selection: None, ime_preedit: "", update_pending: false,
+            title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
@@ -8023,7 +8141,7 @@ mod tests {
         };
         let view_bot = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
-            title: "", selection: None, ime_preedit: "", update_pending: false,
+            title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,
@@ -8040,6 +8158,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 None,

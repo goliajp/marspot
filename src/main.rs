@@ -2417,6 +2417,7 @@ fn bench_metal_render(arg: &str) {
         selection: None,
         ime_preedit: "",
         update_pending: false,
+        dormant: false,
         right_badge: "",
         top_fixed_h_cells: 0,
         bot_fixed_h_cells: 0,

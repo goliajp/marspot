@@ -1657,6 +1657,7 @@ impl Pane {
             selection: None,
             ime_preedit: "",
             update_pending: self.update_pending,
+            dormant: self.is_dormant(),
             right_badge,
             top_fixed_h_cells,
             bot_fixed_h_cells,
