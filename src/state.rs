@@ -33,7 +33,7 @@ use std::io::{self, Cursor, Read, Write};
 use std::path::PathBuf;
 
 const MAGIC: u32 = 0xA5505010;
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Sanity ceiling — the modal caps grid at 6×6 = 36 + some headroom.
 const MAX_PANES: usize = 128;
 /// Sanity ceiling on the window list.  Well past any plausible
@@ -67,11 +67,18 @@ pub struct SavedWindowLayout {
     pub panes: Vec<SavedPane>,
 }
 
+/// `SavedPane.flags` bit 0 — RFC-006 dormant placeholder: the slot a
+/// moved-out pane left behind.  Restored as a placeholder directly;
+/// never reattached, never resurrected, never spawned.
+pub const PANE_FLAG_DORMANT: u8 = 1;
+
 #[derive(Debug, Clone, Default)]
 pub struct SavedPane {
     /// Shelld session id, or 0 for "no surviving sid" (in-process /
     /// pane saved before a sid was assigned).
     pub sid: u64,
+    /// v3 — see `PANE_FLAG_DORMANT`.  v1/v2 files read as 0.
+    pub flags: u8,
     /// User-set custom title.  Empty = no custom title (cwd basename
     /// or ordinal applies at render time).
     pub custom_title: String,
@@ -310,7 +317,8 @@ fn read_from(body: &[u8]) -> Option<SavedState> {
     if magic != MAGIC { return None; }
     match read_u32(&mut cur)? {
         1 => read_v1_body(&mut cur),
-        2 => read_v2_body(&mut cur),
+        2 => read_v2_body(&mut cur, 2),
+        3 => read_v2_body(&mut cur, 3),
         // Forward drift (a newer marspot wrote it, then the user
         // downgraded): fail soft to the registry-driven boot rather
         // than guess at a layout.
@@ -325,14 +333,14 @@ fn read_v1_body(cur: &mut Cursor<&[u8]>) -> Option<SavedState> {
     let grid_cols = read_u16(cur)?;
     let grid_rows = read_u16(cur)?;
     let focused_idx = read_u16(cur)?;
-    let panes = read_panes(cur)?;
+    let panes = read_panes(cur, 1)?;
     Some(SavedState {
         windows: vec![SavedWindowLayout { grid_cols, grid_rows, focused_idx, panes }],
         key_window: 0,
     })
 }
 
-fn read_v2_body(cur: &mut Cursor<&[u8]>) -> Option<SavedState> {
+fn read_v2_body(cur: &mut Cursor<&[u8]>, version: u32) -> Option<SavedState> {
     let key_window = read_u16(cur)?;
     let window_count = read_u16(cur)? as usize;
     if window_count > MAX_WINDOWS { return None; }
@@ -341,21 +349,24 @@ fn read_v2_body(cur: &mut Cursor<&[u8]>) -> Option<SavedState> {
         let grid_cols = read_u16(cur)?;
         let grid_rows = read_u16(cur)?;
         let focused_idx = read_u16(cur)?;
-        let panes = read_panes(cur)?;
+        let panes = read_panes(cur, version)?;
         windows.push(SavedWindowLayout { grid_cols, grid_rows, focused_idx, panes });
     }
     Some(SavedState { windows, key_window })
 }
 
-fn read_panes(cur: &mut Cursor<&[u8]>) -> Option<Vec<SavedPane>> {
+fn read_panes(cur: &mut Cursor<&[u8]>, version: u32) -> Option<Vec<SavedPane>> {
     let pane_count = read_u16(cur)? as usize;
     if pane_count > MAX_PANES { return None; }
     let mut panes = Vec::with_capacity(pane_count);
     for _ in 0..pane_count {
         let sid = read_u64(cur)?;
+        // v3 inserts flags between sid and the strings; older files
+        // simply don't have it.
+        let flags = if version >= 3 { read_u8(cur)? } else { 0 };
         let custom_title = read_string(cur)?;
         let last_cwd = read_string(cur)?;
-        panes.push(SavedPane { sid, custom_title, last_cwd });
+        panes.push(SavedPane { sid, flags, custom_title, last_cwd });
     }
     Some(panes)
 }
@@ -383,6 +394,7 @@ pub fn write(s: &SavedState) -> io::Result<()> {
         body.extend_from_slice(&n.to_le_bytes());
         for p in w.panes.iter().take(n as usize) {
             body.extend_from_slice(&p.sid.to_le_bytes());
+            body.push(p.flags);
             write_string(&mut body, &p.custom_title);
             write_string(&mut body, &p.last_cwd);
         }
@@ -439,7 +451,7 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn pane(sid: u64, title: &str, cwd: &str) -> SavedPane {
-        SavedPane { sid, custom_title: title.into(), last_cwd: cwd.into() }
+        SavedPane { sid, flags: 0, custom_title: title.into(), last_cwd: cwd.into() }
     }
 
     /// Encode via the real writer's body builder by writing to a temp
@@ -493,6 +505,47 @@ mod tests {
         assert_eq!(parsed.windows[1].grid_rows, 2);
         assert_eq!(parsed.windows[1].panes[0].sid, 200);
         assert_eq!(parsed.windows[1].panes[0].custom_title, "notes");
+    }
+
+    /// RFC-006 — the dormant flag survives the round trip; a v2 file
+    /// (no flags byte) reads as all-zero flags.
+    #[test]
+    fn dormant_flag_round_trips_and_v2_reads_as_zero() {
+        let s = SavedState {
+            key_window: 0,
+            windows: vec![SavedWindowLayout {
+                grid_cols: 2, grid_rows: 1, focused_idx: 0,
+                panes: vec![
+                    pane(100, "live", "/x"),
+                    SavedPane {
+                        sid: 0,
+                        flags: PANE_FLAG_DORMANT,
+                        custom_title: String::new(),
+                        last_cwd: String::new(),
+                    },
+                ],
+            }],
+        };
+        let parsed = round_trip(&s);
+        assert_eq!(parsed.windows[0].panes[0].flags, 0);
+        assert_eq!(parsed.windows[0].panes[1].flags, PANE_FLAG_DORMANT);
+
+        // Hand-built v2 body: sid + strings, no flags byte.
+        let mut body = Vec::new();
+        body.extend_from_slice(&MAGIC.to_le_bytes());
+        body.extend_from_slice(&2u32.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes()); // key
+        body.extend_from_slice(&1u16.to_le_bytes()); // 1 window
+        body.extend_from_slice(&1u16.to_le_bytes()); // cols
+        body.extend_from_slice(&1u16.to_le_bytes()); // rows
+        body.extend_from_slice(&0u16.to_le_bytes()); // focused
+        body.extend_from_slice(&1u16.to_le_bytes()); // 1 pane
+        body.extend_from_slice(&7u64.to_le_bytes());
+        write_string(&mut body, "t");
+        write_string(&mut body, "/c");
+        let parsed = read_from(&body).expect("v2 parses");
+        assert_eq!(parsed.windows[0].panes[0].sid, 7);
+        assert_eq!(parsed.windows[0].panes[0].flags, 0, "v2 = no flags = 0");
     }
 
     /// A v1 file written by any marspot up to 0.12.42 must still boot

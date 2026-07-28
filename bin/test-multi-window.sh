@@ -170,7 +170,7 @@ import struct, sys, pathlib
 b = (pathlib.Path(sys.argv[1]) / 'shell-state.bin').read_bytes()
 magic, ver = struct.unpack_from('<II', b, 0)
 assert magic == 0xA5505010, hex(magic)
-assert ver == 2, ver
+assert ver in (2, 3), ver  # v3 = RFC-006 dormant flags
 key, n = struct.unpack_from('<HH', b, 8)
 print(f'saved: {n} window(s), key_window={key}')
 assert n == 2, f'expected 2 windows in the saved file, got {n}'
@@ -225,6 +225,7 @@ n_presented=$(grep 'WINDOW_FIRST_PRESENT' "$APPLOG" | grep -o 'window_id=[0-9]*'
 python3 - "$MARSPOT_STATE_DIR" <<'PY' || fail "the fresh window damaged the saved layout"
 import struct, sys, pathlib
 b = (pathlib.Path(sys.argv[1]) / 'shell-state.bin').read_bytes()
+ver = struct.unpack_from('<I', b, 4)[0]
 key, n = struct.unpack_from('<HH', b, 8)
 off = 12
 shapes = []
@@ -232,6 +233,7 @@ for _ in range(n):
     c, r, f, np = struct.unpack_from('<HHHH', b, off); off += 8
     for _ in range(np):
         off += 8
+        if ver >= 3: off += 1  # RFC-006 flags byte
         for _ in range(2):
             ln = struct.unpack_from('<H', b, off)[0]; off += 2 + ln
     shapes.append((c, r, np))

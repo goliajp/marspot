@@ -945,10 +945,10 @@ mod window_state_tests {
         assert!(!app.note_escape_for_pane_session(10, t));
     }
 
-    /// RFC-005 step 5 — moving a pane between windows is a Vec move
-    /// with index repairs on both sides: source focus/selection stay
-    /// coherent, the target appends + focuses + becomes key, and a
-    /// window whose last pane left asks L1 to close it.
+    /// RFC-006 §3 — a move-out leaves a dormant placeholder: the
+    /// source layout holds still (nothing shifts), the placeholder is
+    /// not live, and a window whose last LIVE pane left asks L1 to
+    /// close it.  The target still appends + focuses + becomes key.
     #[test]
     fn moving_a_pane_repairs_both_windows() {
         let mut app = app_with(vec![
@@ -959,40 +959,46 @@ mod window_state_tests {
             ]),
             win(2, vec![Pane::new_vacant(20, 80, 24)]),
         ]);
-        app.windows[0].focused_idx = 2;
+        app.windows[0].focused_idx = 1;
         app.windows[0].selection = Some(Selection {
-            session_idx: 2,
+            session_idx: 1,
             anchor: (0, 0),
             focus: (1, 0),
             mode: marspot::ui::SelectionMode::Linewise,
         });
 
-        // Move the middle pane (11): focus index 2 shifts down to 1,
-        // the selection on old-index-2 follows to 1.
+        // Move the middle pane (11): its slot becomes a placeholder,
+        // panes 10 and 12 do not move, the selection on the moved
+        // pane is dropped, focus lands on the nearest live pane.
         app.move_pane_to_window(0, 1, 1);
-        assert_eq!(app.windows[0].panes.len(), 2);
+        assert_eq!(app.windows[0].panes.len(), 3, "source layout holds still");
+        assert!(app.windows[0].panes[1].is_dormant(), "slot 1 is a placeholder");
+        assert_eq!(app.windows[0].panes[0].shelld_session_id(), Some(10));
+        assert_eq!(app.windows[0].panes[2].shelld_session_id(), Some(12));
+        assert!(
+            !app.windows[0].panes[app.windows[0].focused_idx].is_dormant(),
+            "focus lands on a live pane, never the placeholder"
+        );
+        assert!(app.windows[0].selection.is_none(), "moved pane's selection dropped");
         assert_eq!(app.windows[1].panes.len(), 2);
         assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
         assert_eq!(app.windows[1].focused_idx, 1, "moved pane takes focus");
         assert_eq!(app.key_window, 1, "target window becomes key");
-        assert_eq!(app.windows[0].focused_idx, 1, "source focus shifted");
-        assert_eq!(
-            app.windows[0].selection.map(|s| s.session_idx),
-            Some(1),
-            "selection follows its pane's new index"
-        );
-        assert!(app.pending_to_shell.is_empty(), "no close for a non-empty window");
+        assert!(app.pending_to_shell.is_empty(), "no close while live panes remain");
 
-        // Drain window 2 back out — the emptied window must ask L1 to
-        // close it (RFC: last pane moved out → auto-close).
+        // Drain window 2's live panes back out — placeholders alone
+        // keep nothing alive: the window must request its own close.
         app.move_pane_to_window(1, 1, 0);
         app.move_pane_to_window(1, 0, 0);
-        assert!(app.windows[1].panes.is_empty());
+        assert!(
+            app.windows[1].panes.iter().all(|p| p.is_dormant()),
+            "only placeholders remain"
+        );
         assert!(
             app.pending_to_shell
                 .iter()
                 .any(|(ty, _)| *ty == MsgType::WindowCloseRequest),
-            "empty window must request its own close"
+            "a window with zero live panes must request its own close"
         );
     }
 
@@ -1023,7 +1029,11 @@ mod window_state_tests {
             Some(11),
             "the MOVED pane, not a fresh spawn or the restore record"
         );
-        assert_eq!(app.windows[0].panes.len(), 1, "source gave the pane up");
+        assert_eq!(app.windows[0].panes.len(), 2, "source layout holds still");
+        assert!(
+            app.windows[0].panes[1].is_dormant(),
+            "the moved pane's slot is a placeholder"
+        );
         assert_eq!(app.key_window, 1);
         assert_eq!(
             app.saved_windows.len(),
@@ -1064,7 +1074,8 @@ mod window_state_tests {
         app.mouse_drag(0, 100.0 + PANE_DRAG_SLOP_PHYS + 1.0, 10.0);
         assert!(app.pane_drag.unwrap().active, "slop exceeded arms the drag");
         app.mouse_up(0, 2);
-        assert_eq!(app.windows[0].panes.len(), 1);
+        assert_eq!(app.windows[0].panes.len(), 2, "placeholder holds the slot");
+        assert!(app.windows[0].panes[1].is_dormant());
         assert_eq!(app.windows[1].panes.len(), 2);
         assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
         assert_eq!(app.key_window, 1, "landing window becomes key");
@@ -1200,6 +1211,7 @@ mod boot_assembly_tests {
                 .iter()
                 .map(|(sid, title)| SavedPane {
                     sid: *sid,
+                    flags: 0,
                     custom_title: title.to_string(),
                     last_cwd: String::new(),
                 })
@@ -1452,6 +1464,33 @@ mod boot_assembly_tests {
             "refusal must name the cap, got: {err}"
         );
         unsafe { std::env::remove_var("MARSPOT_SESSION_CAP") };
+    }
+
+    /// RFC-006 — a dormant slot restores AS a dormant slot: boot
+    /// assembly must not reattach, resurrect, or spawn for it.
+    #[test]
+    fn a_dormant_slot_boots_as_a_placeholder() {
+        let sb = Sandbox::new("dormant-boot");
+        sb.break_session_bin(); // any spawn attempt would fail loudly
+        let s = SavedWindowLayout {
+            grid_cols: 2,
+            grid_rows: 1,
+            focused_idx: 0,
+            panes: vec![
+                SavedPane { sid: 700, ..Default::default() },
+                SavedPane {
+                    flags: marspot::state::PANE_FLAG_DORMANT,
+                    ..Default::default()
+                },
+            ],
+        };
+        let (tx, _rx) = mpsc::channel();
+        let (panes, reattached) =
+            assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
+        assert_eq!(panes.len(), 2);
+        assert!(!panes[0].is_dormant(), "live slot stays a session slot");
+        assert!(panes[1].is_dormant(), "dormant slot is a placeholder again");
+        assert!(reattached.is_empty());
     }
 
     /// 2026-07-28 incident — a session whose registry entry is gone
@@ -3015,7 +3054,12 @@ impl CoreApp {
                         let sid = p.shelld_session_id().unwrap_or(0);
                         let custom_title = p.custom_title.clone().unwrap_or_default();
                         let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
-                        SavedPane { sid, custom_title, last_cwd }
+                        let flags = if p.is_dormant() {
+                            marspot::state::PANE_FLAG_DORMANT
+                        } else {
+                            0
+                        };
+                        SavedPane { sid, flags, custom_title, last_cwd }
                     })
                     .collect(),
             })
@@ -3337,38 +3381,38 @@ impl CoreApp {
         {
             return;
         }
-        let pane = win!(self, from_wi).panes.remove(idx);
-        // Index-keyed source state: drop what pointed at the moved
-        // pane, shift what pointed past it — same arithmetic as
-        // `close_session`, for the same reason.
+        // RFC-006 §3 — a move-out leaves a DORMANT PLACEHOLDER, not a
+        // hole: the user is arranging space, and the arrangement they
+        // left behind holds still.  Nothing shifts, so no index
+        // arithmetic; only state that pointed AT the moved pane is
+        // dropped.  (Close keeps its compacting semantics — close
+        // means "done with this space"; move means "keep my layout".)
+        let (pc, pr) = {
+            let g = win!(self, from_wi).panes[idx].session().grid();
+            (g.cols(), g.rows())
+        };
+        let pane = std::mem::replace(
+            &mut win!(self, from_wi).panes[idx],
+            Pane::new_dormant(pc, pr),
+        );
         let w = &mut win!(self, from_wi);
-        if !w.panes.is_empty() {
-            if w.focused_idx == idx {
-                w.focused_idx = idx.min(w.panes.len() - 1);
-            } else if w.focused_idx > idx {
-                w.focused_idx -= 1;
-            }
-        } else {
-            w.focused_idx = 0;
+        if w.focused_idx == idx {
+            // Focus the nearest live pane; a placeholder is space,
+            // not a focus target.
+            w.focused_idx = (0..w.panes.len())
+                .filter(|&i| !w.panes[i].is_dormant())
+                .min_by_key(|&i| i.abs_diff(idx))
+                .unwrap_or(idx);
         }
         if let Some(sel) = w.selection {
             if sel.session_idx == idx {
                 w.selection = None;
                 w.selection_dragging = false;
-            } else if sel.session_idx > idx {
-                w.selection = Some(Selection {
-                    session_idx: sel.session_idx - 1,
-                    ..sel
-                });
             }
         }
-        match w.editing_title {
-            Some(i) if i == idx => {
-                w.editing_title = None;
-                w.title_edit_buffer.clear();
-            }
-            Some(i) if i > idx => w.editing_title = Some(i - 1),
-            _ => {}
+        if w.editing_title == Some(idx) {
+            w.editing_title = None;
+            w.title_edit_buffer.clear();
         }
         // Landing: appended (sidebar overflows if the grid is full),
         // focused, and the target becomes the key window.
@@ -3416,11 +3460,14 @@ impl CoreApp {
         );
     }
 
-    /// Post-move bookkeeping: a window with no panes left asks L1 to
-    /// close it (RFC-005: "last pane moved out → empty window
-    /// auto-closes").
+    /// Post-move bookkeeping — RFC-006 liveness rule: a window's
+    /// population is its NON-DORMANT panes, and a window whose last
+    /// live pane left asks L1 to close it.  Placeholders alone keep
+    /// nothing alive (they are layout, and their layout dies with the
+    /// window); this is also what makes "drag the sole pane of a 1×1
+    /// window away" read as the window following its pane.
     fn request_close_if_empty(&mut self, wi: usize) {
-        if !win!(self, wi).panes.is_empty() {
+        if win!(self, wi).panes.iter().any(|p| !p.is_dormant()) {
             return;
         }
         self.pending_to_shell.push((
@@ -3752,20 +3799,33 @@ impl CoreApp {
         // just asked for this window, a boot leftover did not.
         if let Some(sid) = self.pending_move_sid.take() {
             if let Some((from_wi, idx)) = self.find_pane_by_sid(sid) {
-                let pane = win!(self, from_wi).panes.remove(idx);
-                // Same index-keyed repair close_session does.
+                // RFC-006 §3 — same dormant-placeholder rule as an
+                // in-window move: the source layout holds still.
+                let (pc, pr) = {
+                    let g = win!(self, from_wi).panes[idx].session().grid();
+                    (g.cols(), g.rows())
+                };
+                let pane = std::mem::replace(
+                    &mut win!(self, from_wi).panes[idx],
+                    Pane::new_dormant(pc, pr),
+                );
                 let w = &mut win!(self, from_wi);
-                if !w.panes.is_empty() {
-                    if w.focused_idx >= w.panes.len() {
-                        w.focused_idx = w.panes.len() - 1;
-                    }
-                } else {
-                    w.focused_idx = 0;
+                if w.focused_idx == idx {
+                    w.focused_idx = (0..w.panes.len())
+                        .filter(|&i| !w.panes[i].is_dormant())
+                        .min_by_key(|&i| i.abs_diff(idx))
+                        .unwrap_or(idx);
                 }
-                w.selection = None;
-                w.selection_dragging = false;
-                w.editing_title = None;
-                w.title_edit_buffer.clear();
+                if let Some(sel) = w.selection {
+                    if sel.session_idx == idx {
+                        w.selection = None;
+                        w.selection_dragging = false;
+                    }
+                }
+                if w.editing_title == Some(idx) {
+                    w.editing_title = None;
+                    w.title_edit_buffer.clear();
+                }
                 let mut nw = WindowState::new(
                     window_id, vec![pane], 0, 1, 1, w_phys, h_phys, scale,
                 );
@@ -4696,6 +4756,7 @@ impl CoreApp {
         // report is_exited() = true.  A vacant slot with sid 0 (id
         // allocation itself failed at boot) allocates one now.
         if (pane.is_l3() || pane.is_vacant())
+            && !pane.is_dormant()
             && pane.is_exited()
             && event.state == KeyState::Pressed
         {
@@ -5883,6 +5944,12 @@ impl CoreApp {
         // distinguishable by whether the pointer moves.  Focus shifts
         // immediately either way (clicking focuses).
         if let Some(idx) = title_hit {
+            // RFC-006 — a dormant placeholder has no live content to
+            // move or rename; its title press is inert (the CELL
+            // click below is what revives it).
+            if win!(self, wi).panes.get(idx).is_some_and(|p| p.is_dormant()) {
+                return;
+            }
             if idx < win!(self, wi).panes.len() {
                 self.commit_title_edit(wi);
                 self.resolve_pending_on_defocus(wi, idx);
@@ -5931,6 +5998,34 @@ impl CoreApp {
                 win!(self, wi).needs_render = true;
             }
             return;
+        }
+
+        // RFC-006 — clicking a dormant placeholder is ITS revive
+        // gesture: spawn a fresh shell into that slot, explicitly and
+        // only on this click.  Checked before selection so the click
+        // doesn't also start selecting the hint text.
+        if let Some((idx, _, _)) = cell_pos_hit {
+            if win!(self, wi).panes.get(idx).is_some_and(|p| p.is_dormant()) {
+                if let Ok(sid) = allocate_next_session_id() {
+                    let (cols, rows) = win!(self, wi)
+                        .layout
+                        .cells
+                        .get(idx)
+                        .map(|c| (c.cols, c.rows))
+                        .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
+                    win!(self, wi).panes[idx] =
+                        spawn_l3_pane_async(cols, rows, sid, &self.event_tx);
+                    win!(self, wi).focused_idx = idx;
+                    win!(self, wi).needs_render = true;
+                    self.save_session_state();
+                    lx_event!(
+                        "DORMANT_REVIVED",
+                        "placeholder clicked; spawning a shell into the slot",
+                        session_id = sid
+                    );
+                }
+                return;
+            }
         }
 
         // Click in cell body → start a fresh selection there AND
@@ -6673,13 +6768,20 @@ fn assemble_panes_at_boot(
     struct SlotSpec {
         sid: u64,
         cwd: String,
+        /// RFC-006 — restore as a dormant placeholder: no reattach,
+        /// no resurrect, no spawn.  A placeholder is layout.
+        dormant: bool,
     }
     let slot_specs: Vec<SlotSpec> = match saved_state {
         Some(s) => s
             .panes
             .iter()
             .take(n_sessions)
-            .map(|p| SlotSpec { sid: p.sid, cwd: p.last_cwd.clone() })
+            .map(|p| SlotSpec {
+                sid: p.sid,
+                cwd: p.last_cwd.clone(),
+                dormant: p.flags & marspot::state::PANE_FLAG_DORMANT != 0,
+            })
             .collect(),
         None => {
             let mut ids: Vec<u64> = dir_ids.iter().copied().collect();
@@ -6687,10 +6789,10 @@ fn assemble_panes_at_boot(
             ids.truncate(n_sessions);
             let mut specs: Vec<SlotSpec> = ids
                 .into_iter()
-                .map(|sid| SlotSpec { sid, cwd: String::new() })
+                .map(|sid| SlotSpec { sid, cwd: String::new(), dormant: false })
                 .collect();
             while specs.len() < n_sessions {
-                specs.push(SlotSpec { sid: 0, cwd: String::new() });
+                specs.push(SlotSpec { sid: 0, cwd: String::new(), dormant: false });
             }
             specs
         }
@@ -6722,6 +6824,13 @@ fn assemble_panes_at_boot(
     };
 
     for spec in &slot_specs {
+        // RFC-006 — a dormant slot restores AS a dormant slot: it is
+        // layout, not a session, and none of the session machinery
+        // below (reattach / resurrect / spawn) applies.
+        if spec.dormant {
+            panes.push(Pane::new_dormant(boot_cols, boot_rows));
+            continue;
+        }
         let mut sid = spec.sid;
         if sid != 0 && claimed.contains(&sid) {
             // Duplicate sid in saved state (corrupt / hand-edited)

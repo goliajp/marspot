@@ -67,6 +67,12 @@ pub enum PaneBackend {
 pub struct VacantPane {
     session_id: u64,
     grid: Grid,
+    /// RFC-006 — a dormant placeholder: the slot a pane left behind
+    /// when it was MOVED to another window.  Holds the layout open
+    /// but is not a session in any sense: it never revives on a
+    /// keystroke (click only), counts as neither live nor
+    /// resurrectable, and persists as layout (SavedPane flags bit 0).
+    dormant: bool,
     /// A spawn for this slot is in flight.
     ///
     /// "Starting" is not a peer state to "vacant" — it *is* a vacant
@@ -107,14 +113,52 @@ impl VacantPane {
     pub fn new(session_id: u64, cols: u16, rows: u16) -> Self {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         Self::paint_message(&mut grid, session_id, false);
-        Self { session_id, grid, pending: false, pending_since: Instant::now() }
+        Self {
+            session_id,
+            grid,
+            dormant: false,
+            pending: false,
+            pending_since: Instant::now(),
+        }
     }
 
     /// A slot whose session is being spawned right now.
     pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
         let mut grid = Grid::new(cols.max(20), rows.max(3));
         Self::paint_message(&mut grid, session_id, true);
-        Self { session_id, grid, pending: true, pending_since: Instant::now() }
+        Self {
+            session_id,
+            grid,
+            dormant: false,
+            pending: true,
+            pending_since: Instant::now(),
+        }
+    }
+
+    /// RFC-006 — the placeholder a moved-out pane leaves behind.
+    pub fn new_dormant(cols: u16, rows: u16) -> Self {
+        let mut grid = Grid::new(cols.max(20), rows.max(3));
+        let msg = "empty — click to start a shell";
+        let row = (grid.rows() / 2).min(grid.rows().saturating_sub(1));
+        let start = (grid.cols().saturating_sub(msg.len() as u16)) / 2;
+        for (i, ch) in msg.chars().enumerate() {
+            let col = start + i as u16;
+            if col >= grid.cols() { break; }
+            let mut cell = Cell::default();
+            cell.ch = ch;
+            grid.set_cell(col, row, cell);
+        }
+        Self {
+            session_id: 0,
+            grid,
+            dormant: true,
+            pending: false,
+            pending_since: Instant::now(),
+        }
+    }
+
+    pub fn is_dormant(&self) -> bool {
+        self.dormant
     }
 
     /// A spawn is in flight *and* still within its deadline.  Past the
@@ -1252,6 +1296,26 @@ impl Pane {
     /// covers these in addition to exited L3 panes.
     pub fn is_vacant(&self) -> bool {
         matches!(self.session, PaneBackend::Vacant(_))
+    }
+
+    /// RFC-006 — dormant placeholder (a moved-out pane's empty slot).
+    /// Not live, not resurrectable, revives only on an explicit click.
+    pub fn is_dormant(&self) -> bool {
+        matches!(&self.session, PaneBackend::Vacant(v) if v.is_dormant())
+    }
+
+    /// RFC-006 — the placeholder a moved-out pane leaves behind.
+    pub fn new_dormant(cols: u16, rows: u16) -> Self {
+        Self {
+            session: PaneBackend::Vacant(VacantPane::new_dormant(cols, rows)),
+            view_offset: 0,
+            last_seen_scroll_push: 0,
+            update_pending: false,
+            tools: Vec::new(),
+            active_highlight: None,
+            search: None,
+            custom_title: None,
+        }
     }
 
     /// L3-backed?  Container input routing forwards key *events* to L3
