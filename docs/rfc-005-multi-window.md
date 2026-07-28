@@ -1,7 +1,10 @@
 # RFC-005 — Multi-window
 
-Status: ACCEPTED 2026-07-26.  Execution in progress (step 0 shipped
-as core 0.12.37).
+Status: **COMPLETE 2026-07-28** (accepted 2026-07-26).  Every step
+of the execution plan is shipped and installed; the five-phase E2E
+(`bin/test-multi-window.sh`, in test-all) holds the whole contract:
+restore / Cmd-N / close / core SIGKILL swap / UPDATE_SWAP, all with
+two windows, all asserted through to the present side.
 
 ## Goal
 
@@ -306,9 +309,17 @@ changes are reported to L2.
 
    Then: re-enable Cmd-N (and press it once in the sandbox before
    installing).
-5. `basic` pane move: drag + context menu, same commit series
-7. E2E: two windows through install-local UPDATE_SWAP; L1 execv
-   restoring N frames; L3 execv untouched
+5. `basic` pane move (**shipped**, menu `c9f5f22` + drag `4971953`):
+   context menu Move to Window N / New Window; title-bar drag with a
+   10px slop, ⇢ marker while dragging, drop resolved by L1 via
+   `windowNumberAtPoint` riding a `MouseUp` tail.  Empty windows
+   close themselves (`WindowCloseRequest`); a pane moved to a new
+   window parks by sid and claims the window ahead of the restore
+   queue.
+7. E2E (**shipped**): five phases in `bin/test-multi-window.sh` —
+   the UPDATE_SWAP phase stages a pending core and SIGUSR1-triggers
+   the real update machinery with two windows open.  First proven in
+   production 2026-07-28 (the 0.12.56 install ran under two windows).
 
 Gates per step: mini `cargo nextest run` (all targets, 780+), build
 0 warnings, `bin/bench-remote.sh` on perf-adjacent steps (3 above

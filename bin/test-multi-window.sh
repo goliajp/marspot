@@ -346,7 +346,43 @@ print(f'saved after swap: {n} window(s), key_window={key}')
 assert n == 2, f'expected 2 windows after the swap, got {n}'
 PY
 
+# --- 7. dual-window silent update (UPDATE_SWAP) -----------------------
+# RFC-005 step 7 — the same guarantee as phase 6 (SIGKILL), through
+# the REAL update machinery: stage a pending core, SIGUSR1-trigger the
+# swap, and both windows must come back painting under the new core
+# with no duplicated windows.  First proven in production on
+# 2026-07-28 (the 0.12.56 install ran with two windows open); this
+# pins it.
+echo
+echo "==> fourth phase: silent update with two windows open"
+mark=$(wc -l < "$APPLOG")
+mkdir -p "$MARSPOT_STATE_DIR/binaries/pending"
+cp "$CORE_BIN" "$MARSPOT_STATE_DIR/binaries/pending/marspot-core"
+"$SHELL_BIN" --trigger >/dev/null 2>&1 || fail "--trigger did not reach the shell"
+
+after7() { tail -n "+$((mark + 1))" "$APPLOG"; }
+for i in $(seq 1 300); do
+  after7 | grep -q 'UPDATE_SWAP' && break
+  sleep 0.1
+done
+after7 | grep -q 'UPDATE_SWAP' || fail "the staged core never swapped in"
+sleep 3
+
+after7 | grep -q 'WINDOW_REANNOUNCED' \
+  || fail "the swapped-in core was never told about the second window"
+repainted=$(after7 | grep 'WINDOW_FIRST_FRAME' | grep -o 'window_id=[0-9]*' | sort -u)
+n_repainted=$(printf '%s' "$repainted" | grep -c 'window_id=')
+echo "==> windows painting under the swapped core: $(echo $repainted | tr '\n' ' ')"
+(( n_repainted >= 2 )) \
+  || fail "only $n_repainted window(s) painted after UPDATE_SWAP"
+if after7 | grep -q 'WINDOW_RESTORE\b'; then
+  fail "the swapped-in core re-restored windows that were already open"
+fi
+after7 | grep -q 'core.boot.orphan_adopted' \
+  && fail "the swapped-in core adopted the other window's panes as orphans"
+
 echo
 echo "PASS — restore path: two windows, own surface pairs, layout survived;"
 echo "       Cmd-N path: fresh 1x1 window painted without narrowing the file;"
-echo "       core swap:  both windows re-announced and painting, no duplicates."
+echo "       core swap:  both windows re-announced and painting, no duplicates;"
+echo "       update:     UPDATE_SWAP with two windows — both back, none doubled."
