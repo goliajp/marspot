@@ -91,11 +91,12 @@ grep -q $'\tSIGUSR1\t' "$SUP_LOG" || fail "trigger: no SIGUSR1 entry"
 # loaded box, 204 s on 2026-07-29 when syspolicyd was being flooded.
 # The test waits for the verdict to *arrive*, not for it to be quick.
 for _ in $(seq 1 600); do
-  if grep -q $'\tUPDATE_PROBE_OK\t' "$SUP_LOG"; then break; fi
+  if grep -q $'\tUPDATE_PROBE_DONE\t.*core=ok' "$SUP_LOG"; then break; fi
   sleep 0.1
 done
 grep -q $'\tUPDATE_PROBE_START\t' "$SUP_LOG" || fail "trigger: no UPDATE_PROBE_START"
-grep -q $'\tUPDATE_PROBE_OK\t' "$SUP_LOG" || fail "trigger: probe never passed within 60 s"
+grep -q $'\tUPDATE_PROBE_DONE\t.*core=ok' "$SUP_LOG" \
+  || fail "trigger: core probe never passed within 60 s"
 echo "[3/5] trigger OK — SIGUSR1 → probe started → probe passed"
 
 # --- 4. Swap --------------------------------------------------------

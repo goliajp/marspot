@@ -29,24 +29,31 @@
 // `marspot-shell/main.rs` keep resolving without a churn rename.
 pub use marspot::binary_tree::BinaryTree;
 
-/// Which layer's staged binary a probe is warming.  The outcome routes
-/// back to a different completion path per layer, and the enum rides in
-/// `SupervisorState::Probing` so the trigger sites don't need a second
-/// field to disambiguate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeLayer {
-    /// `pending/marspot-shell` — on success, promote and `execv`.
-    Shell,
-    /// `pending/marspot-core` — on success, run the single-core swap.
-    Core,
+/// What one probe round concluded, per layer.  `None` means that layer
+/// had nothing staged and was not probed.
+///
+/// Both layers are probed in the same round when both have a candidate,
+/// which is the common case: `install-local.sh` stages shell and core
+/// together.  Knowing about the core *before* the shell execs is what
+/// lets the successor spawn the new core directly — otherwise it boots
+/// the old one, and a second probe + swap retires it moments later.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProbeVerdict {
+    pub shell: Option<bool>,
+    pub core: Option<bool>,
 }
 
-impl ProbeLayer {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProbeLayer::Shell => "shell",
-            ProbeLayer::Core => "core",
+impl ProbeVerdict {
+    /// Compact rendering for the log line: `shell=ok core=failed`.
+    pub fn summary(&self) -> String {
+        fn one(v: Option<bool>) -> &'static str {
+            match v {
+                Some(true) => "ok",
+                Some(false) => "failed",
+                None => "-",
+            }
         }
+        format!("shell={} core={}", one(self.shell), one(self.core))
     }
 }
 
@@ -73,8 +80,8 @@ pub enum SupervisorState {
     /// No update in flight; supervisor accepts new SIGUSR1 / focus-loss
     /// triggers.  Every completed or abandoned swap returns here.
     Idle,
-    /// A background thread is exec'ing a staged binary to warm its
-    /// Gatekeeper verdict.  Further triggers are ignored until it
-    /// reports — the outgoing process keeps serving throughout.
-    Probing(ProbeLayer),
+    /// A background thread is exec'ing the staged binaries to warm
+    /// their Gatekeeper verdicts.  Further triggers are ignored until
+    /// it reports — the outgoing processes keep serving throughout.
+    Probing,
 }

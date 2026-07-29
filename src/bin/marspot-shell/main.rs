@@ -576,7 +576,7 @@ use banner::BannerKind;
 use plugins::host::ShellPluginHost;
 use plugins::PluginRegistry;
 use present::ShellPresenter;
-use supervisor::{BinaryTree, ProbeLayer, SupervisorState};
+use supervisor::{BinaryTree, ProbeVerdict, SupervisorState};
 
 const DEFAULT_TITLE: &str = "Marspot";
 const DEFAULT_W_PT: f64 = 1200.0;
@@ -910,7 +910,7 @@ struct ShellApp {
     /// Receives the verdict from the in-flight probe thread.  `Some`
     /// exactly while `sup_state` is `Probing`; the layer being probed
     /// rides in the state, so the channel only carries the outcome.
-    probe_rx: Option<mpsc::Receiver<bool>>,
+    probe_rx: Option<mpsc::Receiver<ProbeVerdict>>,
     /// Recent crash timestamps inside the `CRASH_WINDOW` rolling
     /// window.  Used to refuse auto-restart on a binary that's
     /// flapping.
@@ -1580,18 +1580,22 @@ impl ShellApp {
         if !matches!(self.sup_state, SupervisorState::Idle) {
             return;
         }
-        // Shell self-update has precedence: pending L1 means the
-        // supervisor itself wants to turn over, which implies the
-        // renderer probably wants turning over too.  Doing it first
-        // means a single focus-loss / SIGUSR1 handles both layers.
-        if let Ok(t) = supervisor::BinaryTree::for_shell() {
-            if t.has_pending() {
-                self.start_probe(ProbeLayer::Shell, t.pending());
-                return;
-            }
-        }
-        if self.binaries.has_pending() {
-            self.start_probe(ProbeLayer::Core, self.binaries.pending());
+        // Probe every layer that has a candidate in the SAME round.
+        // `install-local.sh` stages shell and core together, and
+        // handling them as one round is what keeps the core from being
+        // started twice: knowing the core is good before we exec means
+        // the successor shell spawns it directly, instead of booting
+        // the outgoing core and swapping it out seconds later.
+        let shell_candidate = supervisor::BinaryTree::for_shell()
+            .ok()
+            .filter(|t| t.has_pending())
+            .map(|t| t.pending());
+        let core_candidate = self
+            .binaries
+            .has_pending()
+            .then(|| self.binaries.pending());
+        if shell_candidate.is_some() || core_candidate.is_some() {
+            self.start_probe(shell_candidate, core_candidate);
         }
     }
 
@@ -1608,64 +1612,116 @@ impl ShellApp {
     /// update lands later", never to "retire the old one anyway and
     /// hope" — that second shape is what froze the window for 204 s on
     /// 2026-07-29.
-    fn start_probe(&mut self, layer: ProbeLayer, candidate: std::path::PathBuf) {
+    fn start_probe(
+        &mut self,
+        shell_candidate: Option<std::path::PathBuf>,
+        core_candidate: Option<std::path::PathBuf>,
+    ) {
         lx_event!(
             "UPDATE_PROBE_START",
-            "warming a staged binary's Gatekeeper verdict off the main thread",
-            layer = layer.as_str(),
-            candidate = candidate.display()
+            "warming staged binaries' Gatekeeper verdicts off the main thread",
+            shell = shell_candidate
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".into()),
+            core = core_candidate
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "-".into())
         );
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(marspot::binary_tree::can_start(&candidate));
+            // Sequential on purpose: two concurrent first-execs just
+            // queue behind the same Gatekeeper anyway, and serialising
+            // keeps the wall-clock attributable per layer in the log.
+            let verdict = ProbeVerdict {
+                shell: shell_candidate
+                    .as_deref()
+                    .map(marspot::binary_tree::can_start),
+                core: core_candidate
+                    .as_deref()
+                    .map(marspot::binary_tree::can_start),
+            };
+            let _ = tx.send(verdict);
         });
         self.probe_rx = Some(rx);
-        self.sup_state = SupervisorState::Probing(layer);
+        self.sup_state = SupervisorState::Probing;
     }
 
     /// Route a finished probe.  A good verdict hands off to that layer's
     /// real swap; a bad one quarantines the candidate — so the next
     /// trigger doesn't retry the same dead binary forever — and leaves
     /// the running process untouched.
-    fn finish_probe(&mut self, ctx: &MarspotAppCtx, layer: ProbeLayer, ok: bool) {
-        if ok {
-            lx_event!(
-                "UPDATE_PROBE_OK",
-                "staged binary started under Gatekeeper; proceeding with the swap",
-                layer = layer.as_str()
-            );
-            match layer {
-                // Returns only if the exec failed — on success this
-                // process is already the new image.
-                ProbeLayer::Shell => {
-                    self.finish_shell_self_update(ctx.window_frame_pt());
+    fn finish_probe(&mut self, ctx: &MarspotAppCtx, v: ProbeVerdict) {
+        lx_event!("UPDATE_PROBE_DONE", "probe round finished", verdict = v.summary());
+
+        // Quarantine whatever failed, before acting on whatever passed.
+        // A rejected candidate must leave `pending/` either way, or the
+        // next trigger retries the same dead binary forever.
+        if v.shell == Some(false) {
+            self.quarantine_rejected("shell", supervisor::BinaryTree::for_shell().and_then(|t| t.quarantine_pending()));
+        }
+        if v.core == Some(false) {
+            self.quarantine_rejected("core", self.binaries.quarantine_pending());
+        }
+
+        // A good core promoted BEFORE the exec is the whole point of
+        // probing both layers together: the successor shell finds the
+        // new binary already in `current/` and spawns it once.  Without
+        // this, it boots the outgoing core (still in `current/` at exec
+        // time) and a second probe + swap retires it seconds later —
+        // two core starts, two L3 control reconnects, for one install.
+        if v.shell == Some(true) && v.core == Some(true) {
+            match self.binaries.promote_pending() {
+                Ok(()) => {
+                    lx_event!(
+                        "CORE_PROMOTED_FOR_EXECV",
+                        "staged core promoted ahead of the shell exec; \
+                         the successor spawns it directly"
+                    );
+                    sup_log::log(
+                        "CORE_PROMOTED_FOR_EXECV",
+                        "pending/marspot-core → current/ before shell execv",
+                    );
                 }
-                ProbeLayer::Core => {
-                    self.perform_core_swap(ctx);
+                Err(e) => {
+                    // Not fatal: the successor boots the old core and
+                    // its own trigger swaps it the usual way.
+                    lx_warn!(
+                        "shell.update.core_preprompte_failed",
+                        &format!("{e} — successor will swap it separately")
+                    );
                 }
             }
+        }
+
+        if v.shell == Some(true) {
+            // Returns only if the exec failed — on success this process
+            // is already the new image.
+            self.finish_shell_self_update(ctx.window_frame_pt());
             return;
         }
+        if v.core == Some(true) {
+            self.perform_core_swap(ctx);
+        }
+    }
+
+    /// Log one rejected candidate's quarantine outcome.
+    fn quarantine_rejected(&self, layer: &str, outcome: std::io::Result<()>) {
         lx_event!(
             "UPDATE_PROBE_REJECT",
             "staged binary could not start — quarantining it, leaving the running one alone",
-            layer = layer.as_str()
+            layer = layer
         );
         sup_log::log(
             "UPDATE_PROBE_REJECT",
-            &format!("pending/{} failed its start probe; quarantined", layer.as_str()),
+            &format!("pending/{layer} failed its start probe; quarantined"),
         );
-        let quarantined = match layer {
-            ProbeLayer::Shell => {
-                supervisor::BinaryTree::for_shell().and_then(|t| t.quarantine_pending())
-            }
-            ProbeLayer::Core => self.binaries.quarantine_pending(),
-        };
-        if let Err(e) = quarantined {
+        if let Err(e) = outcome {
             lx_warn!(
                 "shell.update.quarantine_failed",
                 &format!("{e}"),
-                layer = layer.as_str()
+                layer = layer
             );
         }
     }
@@ -2150,20 +2206,25 @@ impl ShellApp {
         // outgoing process is disturbed while this is pending — it keeps
         // rendering and keeps taking input — so a probe that takes
         // minutes costs a late update, not a frozen window.
-        if let SupervisorState::Probing(layer) = self.sup_state {
+        if matches!(self.sup_state, SupervisorState::Probing) {
             match self.probe_rx.as_ref().map(mpsc::Receiver::try_recv) {
                 // Still exec'ing.  Leave the state alone; we'll ask again
                 // next tick.
                 Some(Err(mpsc::TryRecvError::Empty)) => {}
-                verdict => {
-                    // Either a real answer, or the thread died without
-                    // sending (Disconnected) / no channel at all — both
-                    // of the latter mean "we did not prove it can start",
-                    // which is the same conclusion as a failed probe.
-                    let ok = matches!(verdict, Some(Ok(true)));
+                got => {
+                    // A real answer, or the thread died without sending
+                    // (Disconnected) / no channel at all.  Both of the
+                    // latter mean "we did not prove anything can start",
+                    // which is the same conclusion as a failed probe —
+                    // and `ProbeVerdict::default()` is all-`None`, so
+                    // nothing gets promoted or quarantined off it.
+                    let verdict = match got {
+                        Some(Ok(v)) => v,
+                        _ => supervisor::ProbeVerdict::default(),
+                    };
                     self.probe_rx = None;
                     self.sup_state = SupervisorState::Idle;
-                    self.finish_probe(ctx, layer, ok);
+                    self.finish_probe(ctx, verdict);
                 }
             }
         }
