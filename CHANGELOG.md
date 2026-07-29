@@ -794,7 +794,22 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.64**
+Current: **0.12.65**
+
+### 0.12.65
+
+cwd 扫描的存档限流改成延迟而非丢弃。
+
+0.12.64 装机后立刻坐实一个洞:第二个 window 的两个 pane 在
+`shell-state.bin` 里 `last_cwd` 被写成空串,而且之后再也不会纠正。
+时序 —— boot 首轮扫描填满 window 0 并 save(把 5 s 限流窗口吃掉);
+window 1 的 restore 发生在这之后,它两个 pane 的 cwd 在下一轮扫描才
+填上,那一轮 `changed = true` 但 gap 未到,于是**这次变化被忘掉**;
+再往后每轮都「无变化」,空串就留在文件里。live 标题是对的(内存里
+已填),但 `last_cwd` 是 L3 死掉后 respawn 的落脚目录,写空等于把那个
+pane 送回 `$HOME`。
+
+`cwd_save_pending` 粘滞标志:限流可以推迟一次 save,不能丢。
 
 ### 0.12.64
 

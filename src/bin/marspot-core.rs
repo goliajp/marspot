@@ -676,6 +676,7 @@ mod window_state_tests {
             shell_child_pids: std::collections::HashMap::new(),
             last_cwd_sweep: Instant::now() - CWD_SWEEP_INTERVAL,
             last_cwd_save: Instant::now() - CWD_SAVE_MIN_GAP,
+            cwd_save_pending: false,
             reconnecting: std::collections::HashSet::new(),
             all_exited: false,
             saw_window_aware_attach: false,
@@ -1434,6 +1435,44 @@ mod window_state_tests {
             "sweep inside the interval must not issue syscalls"
         );
         assert!(!app.windows[0].needs_render);
+    }
+
+    /// The save rate limit may delay a persist, never drop one.  Pinned
+    /// because dropping it is not hypothetical: the first live install
+    /// of this sweep wrote `last_cwd = ""` for the second window's two
+    /// panes and then never corrected it — their cwds were filled one
+    /// sweep after boot, inside the gap that had just been consumed by
+    /// the boot save, and no later sweep had anything new to report.
+    #[test]
+    fn a_move_inside_the_save_gap_is_deferred_not_dropped() {
+        let sid = 7704;
+        write_entry_with_child_pid(sid, std::process::id() as i32);
+        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+        // Something else just saved (boot, spawn, focus change).
+        app.last_cwd_save = Instant::now();
+
+        app.sweep_pane_cwds();
+        assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
+        assert!(
+            app.cwd_save_pending,
+            "the fill still owes a persist once the gap elapses"
+        );
+
+        // Later sweeps find nothing new; the debt must survive them.
+        app.last_cwd_sweep = Instant::now() - CWD_SWEEP_INTERVAL;
+        app.sweep_pane_cwds();
+        assert!(app.cwd_save_pending, "an idle sweep must not clear the debt");
+
+        app.last_cwd_sweep = Instant::now() - CWD_SWEEP_INTERVAL;
+        app.last_cwd_save = Instant::now() - CWD_SAVE_MIN_GAP;
+        app.sweep_pane_cwds();
+        assert!(!app.cwd_save_pending, "gap elapsed → debt settled");
+        let saved = marspot::state::read().expect("state written");
+        assert_eq!(
+            saved.windows[0].panes[0].last_cwd,
+            cwd_string(),
+            "the deferred save persists the cwd it was holding"
+        );
     }
 }
 
@@ -3185,6 +3224,13 @@ struct CoreApp {
     last_cwd_sweep: Instant,
     /// When the cwd sweep last persisted state — see `CWD_SAVE_MIN_GAP`.
     last_cwd_save: Instant,
+    /// A cwd move the sweep saw but could not persist yet, because the
+    /// previous save was inside `CWD_SAVE_MIN_GAP`.  Sticky: the rate
+    /// limit may delay a save, never drop one.  Without it, a window
+    /// adopted one sweep after boot (the second window's restore) had
+    /// its panes' cwds filled in memory and then persisted as empty
+    /// strings forever, since later sweeps found nothing new to report.
+    cwd_save_pending: bool,
     /// Sessions with a reconnect already in flight.  Without this, a
     /// burst of EOFs for one session would spawn a thread each.
     reconnecting: std::collections::HashSet<u64>,
@@ -3443,7 +3489,6 @@ impl CoreApp {
             return;
         }
         self.last_cwd_sweep = Instant::now();
-        let mut changed = false;
         for wi in 0..self.windows.len() {
             let sids: Vec<u64> = win!(self, wi)
                 .panes
@@ -3458,14 +3503,16 @@ impl CoreApp {
             }
             if window_changed {
                 win!(self, wi).needs_render = true;
-                changed = true;
+                self.cwd_save_pending = true;
             }
         }
         // `last_cwd` in the saved state feeds the respawn cwd on cold
         // boot, so a move wants persisting — but rate-limited, since a
-        // cd-ing script must not turn into one fsync per second.
-        if changed && self.last_cwd_save.elapsed() >= CWD_SAVE_MIN_GAP {
+        // cd-ing script must not turn into one fsync per second.  The
+        // pending flag makes the limit a delay rather than a drop.
+        if self.cwd_save_pending && self.last_cwd_save.elapsed() >= CWD_SAVE_MIN_GAP {
             self.last_cwd_save = Instant::now();
+            self.cwd_save_pending = false;
             self.save_session_state();
         }
     }
@@ -8227,6 +8274,7 @@ fn main() {
         // first paint) and the first change it finds is persisted.
         last_cwd_sweep: Instant::now() - CWD_SWEEP_INTERVAL,
         last_cwd_save: Instant::now() - CWD_SAVE_MIN_GAP,
+        cwd_save_pending: false,
         reconnecting: std::collections::HashSet::new(),
         all_exited: false,
         saw_window_aware_attach: false,
