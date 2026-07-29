@@ -794,7 +794,16 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.65**
+Current: **0.12.66**
+
+### 0.12.66
+
+`core.pane_cwd.changed` 从 DEBUG 提到 INFO。
+
+logx 的运行时默认级别是 Info,所以 0.12.64 加的那行 DEBUG 在真机上
+等于不存在 —— 而它正是「pane 标题不对」时第一个该看的日志。频率由
+结构封顶:每 pane 每轮扫描最多一行(`resolve_pane_cwd` 只在值真的
+变了才记)。
 
 ### 0.12.65
 

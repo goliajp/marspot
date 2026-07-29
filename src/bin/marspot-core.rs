@@ -3468,7 +3468,11 @@ impl CoreApp {
         if self.pane_cwds.get(&sid).is_some_and(|prev| *prev == next) {
             return false;
         }
-        lx_debug!(
+        // INFO, not DEBUG: the runtime default level is Info, so a
+        // DEBUG line does not exist on a real machine — and this is the
+        // first thing worth reading when a title looks wrong.  Rate is
+        // capped by construction at one line per pane per sweep.
+        lx_info!(
             "core.pane_cwd.changed",
             "pane cwd moved; title placeholder follows",
             sid = sid,
