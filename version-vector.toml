@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.31"  # pidtree::ProcRow 带上进程启动时间 + claudecode badge 绑定不再把一个 session 发给两个 pane;详见 CHANGELOG.md
+shell   = "0.7.32"  # cc jsonl 扫描只走有 pane 的项目、每项目留 4 个 session、seen 每轮收缩;详见 CHANGELOG.md
 core    = "0.12.67"  # 只重编:pidtree::ProcRow 加 start_unix,core 侧行为不变;详见 CHANGELOG.md
 session = "0.11.30"  # 可达性哨兵查完整契约:entry 没了 / sock 被 unlink / entry 改名到别的 pid 都自杀;详见 CHANGELOG.md

@@ -1366,7 +1366,121 @@ struct WorkerCtx {
     model_cutoff: HashMap<PathBuf, (i32, u64)>,
 }
 
+/// How many of a project's session files stay in `seen`.
+///
+/// One was not enough: with a single candidate per project, two panes
+/// in one project can never both be badged — the first takes it and the
+/// second has nothing to fall back to even when its own session is live.
+/// Four covers the realistic "a couple of panes in one repo" case with
+/// headroom, and bounds the map at panes × 4 entries.
+const SESSIONS_KEPT_PER_PROJECT: usize = 4;
+
 impl WorkerCtx {
+    /// Refresh `seen` for exactly the projects named in `wanted` —
+    /// the ones that have a live pane.
+    ///
+    /// Scoping matters twice over.  It used to walk every directory
+    /// under `~/.claude/projects` (~50 here, of which ~10 have panes),
+    /// paying a `parse_session_id` + `tail_last_message_type` per newly
+    /// changed file for projects nothing would ever ask about; and
+    /// `seen` was insert-only, so a long-lived shell accumulated an
+    /// entry per session file it had ever noticed.  Scoped + pruned,
+    /// the map is bounded by `wanted.len() × SESSIONS_KEPT_PER_PROJECT`
+    /// and the walk touches fewer directories than before despite
+    /// keeping four files each instead of one.
+    fn refresh_seen<'a>(
+        &mut self,
+        wanted: impl Iterator<Item = &'a str>,
+        log_lines: &mut Vec<(LogLevel, &'static str, String)>,
+    ) {
+        let mut newly_seen = 0usize;
+        let mut updates = 0usize;
+        let mut alive: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for project_dir in wanted {
+            if !done.insert(project_dir.to_string()) {
+                continue; // two panes, one project — walk it once
+            }
+            let project_path = self.projects_root.join(project_dir);
+            let Ok(dir) = fs::read_dir(&project_path) else { continue };
+            let mut cands: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
+            for f in dir.flatten() {
+                let p = f.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Ok(meta) = f.metadata() else { continue };
+                cands.push((
+                    p,
+                    meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    meta.len(),
+                ));
+            }
+            cands.sort_by(|a, b| b.1.cmp(&a.1));
+            cands.truncate(SESSIONS_KEPT_PER_PROJECT);
+            for (jsonl_path, mtime, size) in cands {
+                alive.insert(jsonl_path.clone());
+                if let Some(prev) = self.seen.get(&jsonl_path) {
+                    if prev.last_mtime == mtime && prev.last_size == size {
+                        continue;
+                    }
+                }
+                let Some(session_id) = parse_session_id(&jsonl_path) else { continue };
+                let last_message_kind = tail_last_message_type(&jsonl_path);
+                let is_new = !self.seen.contains_key(&jsonl_path);
+                self.seen.insert(
+                    jsonl_path.clone(),
+                    SessionInfo {
+                        session_id: session_id.clone(),
+                        project_dir: project_dir.to_string(),
+                        jsonl_path: jsonl_path.clone(),
+                        last_mtime: mtime,
+                        last_size: size,
+                        last_message_kind: last_message_kind.clone(),
+                    },
+                );
+                if is_new {
+                    newly_seen += 1;
+                    log_lines.push((
+                        LogLevel::Info,
+                        "session",
+                        format!(
+                            "session detected sid={} project={} kind={} size={}",
+                            session_id,
+                            project_dir,
+                            last_message_kind.as_deref().unwrap_or("?"),
+                            size
+                        ),
+                    ));
+                } else {
+                    updates += 1;
+                    log_lines.push((
+                        LogLevel::Debug,
+                        "session.update",
+                        format!(
+                            "sid={} kind={} size={}",
+                            session_id,
+                            last_message_kind.as_deref().unwrap_or("?"),
+                            size
+                        ),
+                    ));
+                }
+            }
+        }
+        // Bounded growth: anything that dropped out of a project's top
+        // N (or whose project lost its last pane) leaves the map, and
+        // the per-file model fence leaves with it.
+        self.seen.retain(|p, _| alive.contains(p));
+        self.model_cutoff.retain(|p, _| alive.contains(p));
+        if newly_seen > 0 || updates > 0 {
+            log_lines.push((
+                LogLevel::Debug,
+                "tick.summary",
+                format!("new={} updated={}", newly_seen, updates),
+            ));
+        }
+    }
+
     /// Byte offset in `path` from which an assistant record may be
     /// trusted to describe the model `claude_pid` is actually using.
     ///
@@ -1431,111 +1545,6 @@ impl WorkerCtx {
     fn scan_once(&mut self) -> ScanResult {
         let mut log_lines: Vec<(LogLevel, &'static str, String)> = Vec::new();
 
-        // -- jsonl pass: refresh self.seen ---------------------------
-        let projects = match fs::read_dir(&self.projects_root) {
-            Ok(d) => d,
-            Err(_) => {
-                // No projects dir yet — silent.  Still return so
-                // tick clears any stale mapping.
-                return ScanResult {
-                    new_mapping: HashMap::new(),
-                    new_meta: HashMap::new(),
-                    log_lines,
-                };
-            }
-        };
-        let mut newly_seen = 0usize;
-        let mut updates = 0usize;
-        for project_entry in projects.flatten() {
-            let project_path = project_entry.path();
-            if !project_path.is_dir() {
-                continue;
-            }
-            let project_dir = match project_path.file_name() {
-                Some(n) => n.to_string_lossy().to_string(),
-                None => continue,
-            };
-            let mut newest: Option<(PathBuf, SystemTime, u64)> = None;
-            let dir = match fs::read_dir(&project_path) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            for f in dir.flatten() {
-                let p = f.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let meta = match f.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                let size = meta.len();
-                match &newest {
-                    Some((_, prev_mtime, _)) if *prev_mtime >= mtime => {}
-                    _ => newest = Some((p, mtime, size)),
-                }
-            }
-            let Some((jsonl_path, mtime, size)) = newest else {
-                continue;
-            };
-            if let Some(prev) = self.seen.get(&jsonl_path) {
-                if prev.last_mtime == mtime && prev.last_size == size {
-                    continue;
-                }
-            }
-            let session_id = match parse_session_id(&jsonl_path) {
-                Some(id) => id,
-                None => continue,
-            };
-            let last_message_kind = tail_last_message_type(&jsonl_path);
-            let is_new = !self.seen.contains_key(&jsonl_path);
-            self.seen.insert(
-                jsonl_path.clone(),
-                SessionInfo {
-                    session_id: session_id.clone(),
-                    project_dir: project_dir.clone(),
-                    jsonl_path: jsonl_path.clone(),
-                    last_mtime: mtime,
-                    last_size: size,
-                    last_message_kind: last_message_kind.clone(),
-                },
-            );
-            if is_new {
-                newly_seen += 1;
-                log_lines.push((
-                    LogLevel::Info,
-                    "session",
-                    format!(
-                        "session detected sid={} project={} kind={} size={}",
-                        session_id,
-                        project_dir,
-                        last_message_kind.as_deref().unwrap_or("?"),
-                        size
-                    ),
-                ));
-            } else {
-                updates += 1;
-                log_lines.push((
-                    LogLevel::Debug,
-                    "session.update",
-                    format!(
-                        "sid={} kind={} size={}",
-                        session_id,
-                        last_message_kind.as_deref().unwrap_or("?"),
-                        size
-                    ),
-                ));
-            }
-        }
-        if newly_seen > 0 || updates > 0 {
-            log_lines.push((
-                LogLevel::Debug,
-                "tick.summary",
-                format!("new={} updated={}", newly_seen, updates),
-            ));
-        }
-
         // -- per-session mapping: BFS each shelld session ------------
         let mut new_mapping: HashMap<u64, String> = HashMap::new();
         let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
@@ -1592,6 +1601,12 @@ impl WorkerCtx {
         // every tick — badges that swap panes every 2 s would be worse
         // than a badge that is merely a guess.
         facts.sort_by_key(|f| f.shelld_sid);
+
+        // -- jsonl pass, scoped to the projects that have panes -------
+        self.refresh_seen(
+            facts.iter().map(|f| f.encoded.as_str()),
+            &mut log_lines,
+        );
 
         // Pass 2 — assign, proof first, guesses after, no uuid twice.
         let mut claimed: std::collections::HashSet<String> =
@@ -2057,6 +2072,94 @@ mod tests {
                 .map(|(u, _)| u),
             Some("df58a571".to_string())
         );
+    }
+
+    /// `seen` is bounded by the projects that currently have panes ×
+    /// `SESSIONS_KEPT_PER_PROJECT`, and it *shrinks* — it used to be
+    /// insert-only, which meant a shell running for weeks accumulated an
+    /// entry per session file it had ever noticed.
+    #[test]
+    fn seen_keeps_the_newest_few_per_live_project_and_prunes_the_rest() {
+        let root = std::env::temp_dir().join(format!(
+            "cc-refresh-seen-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mk = |project: &str, n: usize| {
+            let dir = root.join(project);
+            fs::create_dir_all(&dir).unwrap();
+            for i in 0..n {
+                let uuid = format!("{:08x}-1111-2222-3333-444444444444", i);
+                let p = dir.join(format!("{uuid}.jsonl"));
+                fs::write(&p, format!("{{\"sessionId\":\"{uuid}\"}}\n")).unwrap();
+                // Stagger mtimes so "newest N" is well defined; index 0
+                // is oldest.
+                let t = filetime_plus(i as u64);
+                set_mtime(&p, t);
+            }
+        };
+        mk("-p-alpha", 6);
+        mk("-p-beta", 2);
+
+        let mut ctx = WorkerCtx {
+            projects_root: root.clone(),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+        };
+        let mut logs = Vec::new();
+        // Two panes in alpha: the project is walked once, not twice.
+        ctx.refresh_seen(["-p-alpha", "-p-beta", "-p-alpha"].into_iter(), &mut logs);
+
+        let alpha: Vec<_> = ctx
+            .seen
+            .values()
+            .filter(|s| s.project_dir == "-p-alpha")
+            .map(|s| s.session_id.clone())
+            .collect();
+        assert_eq!(
+            alpha.len(),
+            SESSIONS_KEPT_PER_PROJECT,
+            "kept the newest few, not all six: {alpha:?}"
+        );
+        assert!(
+            !alpha.iter().any(|id| id.starts_with("00000000")
+                || id.starts_with("00000001")),
+            "the two oldest must be the ones dropped: {alpha:?}"
+        );
+        assert_eq!(
+            ctx.seen.values().filter(|s| s.project_dir == "-p-beta").count(),
+            2,
+            "a project with fewer files keeps all of them"
+        );
+
+        // Beta's pane goes away: its entries must leave the map.
+        let mut logs2 = Vec::new();
+        ctx.refresh_seen(["-p-alpha"].into_iter(), &mut logs2);
+        assert_eq!(ctx.seen.len(), SESSIONS_KEPT_PER_PROJECT);
+        assert!(ctx.seen.values().all(|s| s.project_dir == "-p-alpha"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn filetime_plus(secs: u64) -> SystemTime {
+        // A fixed base well in the past keeps the ordering deterministic
+        // regardless of when the test runs.
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + secs)
+    }
+
+    fn set_mtime(path: &PathBuf, t: SystemTime) {
+        let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let times = [
+            libc::timeval { tv_sec: secs as i64, tv_usec: 0 },
+            libc::timeval { tv_sec: secs as i64, tv_usec: 0 },
+        ];
+        let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let r = unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
+        assert_eq!(r, 0, "utimes failed for {}", path.display());
     }
 
     #[test]

@@ -28,7 +28,28 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.31**
+Current: **0.7.32**
+
+### 0.7.32
+
+claudecode 的 jsonl 扫描只走「有 pane 的项目」,每个项目留最新 4 个
+session,并且会**收缩**。
+
+三件事一起改,因为它们是同一个循环的三个面:
+
+- **范围**:原来每 tick `read_dir` 整个 `~/.claude/projects`(这台机器
+  ~50 个目录),其中只有 ~10 个有 pane 会被问到。现在按 pane 的 cwd 直接
+  `join(encoded)`,不扫无关目录。为此把 pane 那一趟挪到 jsonl 那一趟
+  **前面** —— 先知道要问哪些项目,再去读。
+- **深度**:每个项目从「只留 mtime 最新的一个」改成留最新 4 个。一个候选
+  的时候,同项目的两个 pane 里必然有一个拿不到 badge,哪怕它自己的
+  session 是活的 —— 0.7.31 的互斥约束需要有备选才能发挥。
+- **上界**:`seen` 原来只插不删,一个跑几周的 shell 会攒下它见过的每一个
+  session 文件。现在每轮按存活集合 `retain`,上界 = pane 数 × 4;
+  `model_cutoff` 同表清理。
+
+范围收窄抵掉了深度加倍:10 个目录 × 4 个文件,比原来 50 个目录 × 1 个
+文件读得还少。
 
 ### 0.7.31
 
