@@ -67,6 +67,10 @@ openssl ecparam -genkey -name prime256v1 -noout -out "$WRONG_KEY" 2>/dev/null \
 BASE="$SERVE_DIR/base.tar.gz"
 "$ROOT/bin/build-release-tarball.sh" --output "$BASE" >/dev/null \
   || fail "build-release-tarball.sh failed"
+# That step ran `cargo build --release`, so the binaries this test is
+# about to launch may be brand-new inodes.  Pay their Gatekeeper
+# assessment now, before anything is on a clock.
+dev_warm_binaries
 [[ -f "$BASE" ]] || fail "base tarball missing after build"
 
 # Helper: write a releases/latest-shaped feed.  $1=case dir (relative),

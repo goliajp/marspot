@@ -198,6 +198,19 @@ enum SessionEvent {
     /// or the user-quit path will close that vault entry too, letting
     /// the shell exit on its own.
     ShutdownRequested,
+    /// The background probe of `current/marspot-session` finished; the
+    /// payload is whether that image actually started.
+    ///
+    /// SIGTERM does not retire us directly when an execv is on the
+    /// cards.  macOS charges the Gatekeeper assessment on a new binary's
+    /// first exec, unbounded — on 2026-07-29 a concurrent cargo build
+    /// flooded `syspolicyd` and twenty L3s sat in that assessment for
+    /// 114 s, each with a frozen pane, because they had already stopped
+    /// serving to execv.  So the probe runs on a background thread while
+    /// this loop keeps driving the PTY, and only its verdict ends the
+    /// loop.  A slow Gatekeeper delays the upgrade; it no longer freezes
+    /// the pane.
+    ExecvProbeDone(bool),
     /// B3 — L2 asked for a scrollback search.  Main loop snapshots the
     /// File-backed scrollback off the live grid, cancels any in-flight
     /// worker (last-write-wins, D15), and spawns a new
@@ -963,6 +976,18 @@ fn setup_shm() -> (GridShmWriter, u16, u16) {
 }
 
 fn main() {
+    // `--version` answers before anything else touches the machine.
+    // The execv self-update probes a freshly-staged binary with it for
+    // one reason: to make the kernel exec this file while the current
+    // image is still driving the PTY, so the Gatekeeper assessment is
+    // paid then instead of during the execv gap.  A probe that
+    // migrated state or opened the log would be a probe with side
+    // effects — so this arm comes first and does neither.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{}", env!("MARSPOT_VERSION_SESSION"));
+        return;
+    }
+
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot_term::paths::migrate_legacy_state_root();
     marspot_term::logx::init("session");
@@ -1332,8 +1357,18 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut client_generation: u64 = resumed_client_generation;
     // RFC-003 §6 Amendment 16: SIGTERM watcher sets this; we break
     // the loop and the post-loop dispatcher decides between execv
-    // handoff and clean-exit based on `should_execv_on_sigterm`.
+    // handoff and clean-exit.
     let mut want_shutdown = false;
+    // What the Gatekeeper probe concluded about `current/marspot-
+    // session`.  `None` = no probe ran, which is the clean-exit path
+    // (the image on disk is the one we are already running, so there is
+    // nothing to hand over to).  `Some(false)` = it could not start, so
+    // retire without execv and let L2 respawn this pane on a binary
+    // that works.
+    let mut execv_verdict: Option<bool> = None;
+    // One probe per lifetime — a second SIGTERM while the first is
+    // still exec'ing must not stack another thread.
+    let mut execv_probe_started = false;
     // B3 — in-flight scrollback search worker, or None.  At most one
     // worker per L3 at any time (last-write-wins, D15): a new
     // `SearchRequest` drops this Option, which sets the old worker's
@@ -1495,7 +1530,68 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     // and `_listener` into `do_l3_execv_swap` (which
                     // needs ownership).  Drain the rest of this
                     // burst then break.
-                    want_shutdown = true;
+                    //
+                    // Unless an execv is on the cards: then we keep
+                    // driving the PTY until the probe says the new
+                    // image starts.  Retiring first and discovering
+                    // that afterwards is what froze twenty panes for
+                    // 114 s on 2026-07-29.
+                    if execv_probe_started {
+                        // Probe already running; this SIGTERM is a
+                        // repeat.  Nothing to do but keep serving.
+                    } else if should_execv_on_sigterm() {
+                        execv_probe_started = true;
+                        let target = marspot_term::binary_tree::BinaryTree::default_for(
+                            "marspot-session",
+                        )
+                        .map(|t| t.current());
+                        match target {
+                            Ok(target) => {
+                                lx_event!(
+                                    "L3_EXECV_PROBE_START",
+                                    "warming the new image's Gatekeeper verdict; pane keeps running",
+                                    session_id = session.id(),
+                                    target = target.display()
+                                );
+                                let tx = ev_tx.clone();
+                                std::thread::spawn(move || {
+                                    let ok = marspot_term::binary_tree::can_start(&target);
+                                    let _ = tx.send(SessionEvent::ExecvProbeDone(ok));
+                                });
+                            }
+                            Err(e) => {
+                                lx_warn!(
+                                    "l3.execv.tree_unavailable",
+                                    &format!("{e}; retiring without execv"),
+                                    session_id = session.id()
+                                );
+                                want_shutdown = true;
+                            }
+                        }
+                    } else {
+                        want_shutdown = true;
+                    }
+                }
+                SessionEvent::ExecvProbeDone(ok) => {
+                    if ok {
+                        execv_verdict = Some(true);
+                        want_shutdown = true;
+                    } else {
+                        // The candidate can't start, so keep serving on
+                        // the image we already have — the same call L1
+                        // and L2 make when their probe fails.  Retiring
+                        // here would cost the user this pane in
+                        // exchange for an upgrade that cannot happen
+                        // either way.  Clearing the flag lets a later
+                        // SIGTERM re-probe, once whoever staged the bad
+                        // binary has replaced it.
+                        lx_warn!(
+                            "l3.execv.probe_failed",
+                            "current/marspot-session could not start — staying on the running image",
+                            session_id = session.id()
+                        );
+                        execv_probe_started = false;
+                    }
                 }
                 SessionEvent::SearchRequest {
                     query_id,
@@ -1962,7 +2058,9 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     if want_shutdown {
         let id = session.id();
         let SessionImpl::Local(local) = session;
-        let do_execv = should_execv_on_sigterm();
+        // Only the probe can authorise an execv now; `None` means we
+        // never had a reason to hand over.
+        let do_execv = execv_verdict == Some(true);
         if do_execv {
             match _listener.take() { Some(listener_owned) => {
                 lx_event!(

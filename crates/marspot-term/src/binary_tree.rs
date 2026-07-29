@@ -22,6 +22,45 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Run `bin --version` to completion and report whether it exited 0.
+///
+/// Two things ride on one cheap fork, and both matter:
+///
+/// 1. **It proves the image can run at all.**  On 2026-07-26 an
+///    adhoc-signed binary reached `pending/`, AMFI killed the successor,
+///    and because `exec` had already replaced the caller there was no
+///    process left to notice — no window, no log line, every live
+///    session orphaned.
+/// 2. **It pays the Gatekeeper bill early.**  macOS assesses a newly
+///    created executable on its *first* exec, and that assessment has no
+///    upper bound: on 2026-07-29 a concurrent cargo build flooded
+///    `syspolicyd` and `marspot-core` sat in the kernel's exec path for
+///    204 s.  Doing it here means the wait happens while the process
+///    being replaced is still serving, instead of inside the gap after
+///    it has been retired.
+///
+/// Point 2 only holds because `promote_pending` moves the file with
+/// `rename`, which preserves the inode the verdict is cached against —
+/// probe `pending/`, spawn `current/`, same file, cached answer.
+///
+/// `MARSPOT_NO_REDIRECT` stops a probed shell from bouncing into
+/// `current/`: the whole point is to test *this* file.
+///
+/// Callers must run this off whatever thread is keeping the UI alive.
+pub fn can_start(bin: &Path) -> bool {
+    match Command::new(bin)
+        .arg("--version")
+        .env("MARSPOT_NO_REDIRECT", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(st) => st.success(),
+        Err(_) => false,
+    }
+}
+
 /// macOS-specific. Strip `com.apple.quarantine` and
 /// `com.apple.provenance` so the binary is launchable without a
 /// synchronous Gatekeeper check stall. Best-effort: silently
@@ -206,6 +245,22 @@ impl BinaryTree {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// 探测只认「跑起来并且退 0」。退非 0 / 根本不存在 / 不可执行,
+    /// 都必须判定为不可用 —— 这是 execv 之前唯一一道闸。
+    #[test]
+    fn can_start_accepts_only_a_clean_zero_exit() {
+        assert!(can_start(Path::new("/usr/bin/true")), "exit 0 must pass");
+        assert!(!can_start(Path::new("/usr/bin/false")), "exit 1 must fail");
+        assert!(
+            !can_start(Path::new("/nonexistent/marspot-core")),
+            "a missing file must fail, not panic"
+        );
+        assert!(
+            !can_start(Path::new("/etc/hosts")),
+            "a non-executable must fail"
+        );
+    }
 
     fn touch(p: &Path) {
         if let Some(parent) = p.parent() {

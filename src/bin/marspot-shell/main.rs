@@ -576,7 +576,7 @@ use banner::BannerKind;
 use plugins::host::ShellPluginHost;
 use plugins::PluginRegistry;
 use present::ShellPresenter;
-use supervisor::{BinaryTree, SupervisorState};
+use supervisor::{BinaryTree, ProbeLayer, SupervisorState};
 
 const DEFAULT_TITLE: &str = "Marspot";
 const DEFAULT_W_PT: f64 = 1200.0;
@@ -904,8 +904,13 @@ struct ShellApp {
     /// silent update fires.
     binaries: BinaryTree,
     /// Where in the silent-update lifecycle we are.  `Idle` most of
-    /// the time; flips to `Probation` after we promote a new core.
+    /// the time; flips to `Probing` while a staged binary's Gatekeeper
+    /// verdict is being warmed on a background thread.
     sup_state: SupervisorState,
+    /// Receives the verdict from the in-flight probe thread.  `Some`
+    /// exactly while `sup_state` is `Probing`; the layer being probed
+    /// rides in the state, so the channel only carries the outcome.
+    probe_rx: Option<mpsc::Receiver<bool>>,
     /// Recent crash timestamps inside the `CRASH_WINDOW` rolling
     /// window.  Used to refuse auto-restart on a binary that's
     /// flapping.
@@ -1046,29 +1051,6 @@ impl<'a> plugins::PaneSessionHost for ConcretePaneSessionHost<'a> {
     }
 }
 
-/// Can this binary actually start?
-///
-/// Runs it with `--version`, which parses argv, prints, and exits
-/// without touching state.  A non-zero status or a signal death means
-/// the image is unusable — unsigned and killed by AMFI, wrong
-/// architecture, truncated by a half-finished copy.
-///
-/// `MARSPOT_NO_REDIRECT` is essential: without it the probe re-execs
-/// into `current/` and would happily report success for a broken
-/// candidate.
-fn successor_can_start(bin: &std::path::Path) -> bool {
-    match std::process::Command::new(bin)
-        .arg("--version")
-        .env("MARSPOT_NO_REDIRECT", "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(st) => st.success(),
-        Err(_) => false,
-    }
-}
 
 impl ShellApp {
     /// Open another native window (Cmd-N).
@@ -1268,6 +1250,7 @@ impl ShellApp {
             dev_close_extra: false,
             core_generation: 0,
             sup_state: SupervisorState::Idle,
+            probe_rx: None,
             crashes: std::collections::VecDeque::new(),
             auto_restart_disabled: false,
             banner_kind: None,
@@ -1562,43 +1545,137 @@ impl ShellApp {
         }
     }
 
-    /// Apply a pending L2 update via **single-core in-place swap**.
+    /// Start applying a pending update: pick the layer, then hand off
+    /// to a background Gatekeeper probe.  Nothing is promoted, killed
+    /// or spawned here — `finish_probe` does that once the staged
+    /// binary has proven it starts.
     ///
-    /// History: this used to run a dual-core probation pattern —
-    /// active + pending L2 in parallel for 30 s, presenter atom-swaps
-    /// to pending if it survives probation.  That assumed pending +
-    /// active could share L3 control connections (the L4-shelld model
-    /// where shelld was a multi-consumer broker).  RFC-003 made L3
-    /// single-client: as soon as pending core's UDS hello reaches L3,
-    /// L3 closes the previous client (= active core).  Result for the
-    /// full probation window: active core has dead L3 control sockets,
-    /// L1 still routes input to active, every keystroke drops on the
-    /// floor.  The user sees panes (active still reads grid shm) but
-    /// can't type.
+    /// History, part 1 — why the swap is single-core.  It used to run a
+    /// dual-core probation pattern: active + pending L2 in parallel for
+    /// 30 s, presenter atom-swaps to pending if it survives.  That
+    /// assumed pending + active could share L3 control connections (the
+    /// L4-shelld model where shelld was a multi-consumer broker).
+    /// RFC-003 made L3 single-client: as soon as the pending core's UDS
+    /// hello reaches L3, L3 closes the previous client (= active core).
+    /// Result for the full probation window: active core has dead L3
+    /// control sockets, L1 still routes input to active, every
+    /// keystroke drops on the floor.  The user sees panes (active still
+    /// reads grid shm) but can't type.  So: kill active, spawn new from
+    /// promoted current/, let the new core reattach via registry.  L3
+    /// self-execv + state.bin reattach means each L3 survives that on
+    /// its own; the IOSurface pair is reused, so no presenter handshake
+    /// is required either.
     ///
-    /// L3 self-execv + state.bin reattach (RFC-003) means each L3
-    /// survives any L2 swap on its own.  We don't need probation as a
-    /// warm-up net — just swap atomically: kill active, spawn new from
-    /// promoted current/, the new core reattaches via registry.  The
-    /// only visible cost is the ~200-500 ms gap from old-core-down to
-    /// new-core's first SurfaceReady; the IOSurface pair is reused, so
-    /// no presenter handshake is required.
-    ///
-    /// Returns `true` if a swap was performed; `false` (no-op) when
-    /// there's nothing to promote or the supervisor isn't Idle.
-    fn apply_pending_update(&mut self, ctx: &MarspotAppCtx) -> bool {
+    /// History, part 2 — why the probe came later.  That swap's cost
+    /// was budgeted as "the ~200-500 ms gap from old-core-down to
+    /// new-core's first SurfaceReady", which held right up until the
+    /// gap stopped being bounded.  On 2026-07-29 a cargo build in
+    /// another project flooded `syspolicyd`, macOS took 204 s to assess
+    /// the freshly staged `marspot-core`, and the swap had already
+    /// retired the old one — so the window sat frozen on a dead core's
+    /// last frame for three and a half minutes, and relaunching only
+    /// queued more cores behind the same stall.  The probe puts that
+    /// wait back where it can be afforded: before anything is retired.
+    fn apply_pending_update(&mut self) {
         if !matches!(self.sup_state, SupervisorState::Idle) {
-            return false;
+            return;
         }
         // Shell self-update has precedence: pending L1 means the
         // supervisor itself wants to turn over, which implies the
         // renderer probably wants turning over too.  Doing it first
         // means a single focus-loss / SIGUSR1 handles both layers.
-        if self.try_apply_shell_self_update(ctx.window_frame_pt()) {
-            // We exec'd; this stack frame is gone.  Returning here
-            // only happens if exec failed.
-            return false;
+        if let Ok(t) = supervisor::BinaryTree::for_shell() {
+            if t.has_pending() {
+                self.start_probe(ProbeLayer::Shell, t.pending());
+                return;
+            }
         }
+        if self.binaries.has_pending() {
+            self.start_probe(ProbeLayer::Core, self.binaries.pending());
+        }
+    }
+
+    /// Exec a staged binary's `--version` on a background thread so the
+    /// kernel charges its Gatekeeper assessment now, while the process
+    /// this update is about to replace is still doing its job.
+    ///
+    /// Nothing here touches `current/`: the candidate is still sitting
+    /// in `pending/`.  `promote_pending` moves it with `rename`, which
+    /// preserves the inode, so the verdict this warms is the very one
+    /// the real spawn will hit.
+    ///
+    /// Deliberately un-timed.  A slow verdict has to degrade to "the
+    /// update lands later", never to "retire the old one anyway and
+    /// hope" — that second shape is what froze the window for 204 s on
+    /// 2026-07-29.
+    fn start_probe(&mut self, layer: ProbeLayer, candidate: std::path::PathBuf) {
+        lx_event!(
+            "UPDATE_PROBE_START",
+            "warming a staged binary's Gatekeeper verdict off the main thread",
+            layer = layer.as_str(),
+            candidate = candidate.display()
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(marspot::binary_tree::can_start(&candidate));
+        });
+        self.probe_rx = Some(rx);
+        self.sup_state = SupervisorState::Probing(layer);
+    }
+
+    /// Route a finished probe.  A good verdict hands off to that layer's
+    /// real swap; a bad one quarantines the candidate — so the next
+    /// trigger doesn't retry the same dead binary forever — and leaves
+    /// the running process untouched.
+    fn finish_probe(&mut self, ctx: &MarspotAppCtx, layer: ProbeLayer, ok: bool) {
+        if ok {
+            lx_event!(
+                "UPDATE_PROBE_OK",
+                "staged binary started under Gatekeeper; proceeding with the swap",
+                layer = layer.as_str()
+            );
+            match layer {
+                // Returns only if the exec failed — on success this
+                // process is already the new image.
+                ProbeLayer::Shell => {
+                    self.finish_shell_self_update(ctx.window_frame_pt());
+                }
+                ProbeLayer::Core => {
+                    self.perform_core_swap(ctx);
+                }
+            }
+            return;
+        }
+        lx_event!(
+            "UPDATE_PROBE_REJECT",
+            "staged binary could not start — quarantining it, leaving the running one alone",
+            layer = layer.as_str()
+        );
+        sup_log::log(
+            "UPDATE_PROBE_REJECT",
+            &format!("pending/{} failed its start probe; quarantined", layer.as_str()),
+        );
+        let quarantined = match layer {
+            ProbeLayer::Shell => {
+                supervisor::BinaryTree::for_shell().and_then(|t| t.quarantine_pending())
+            }
+            ProbeLayer::Core => self.binaries.quarantine_pending(),
+        };
+        if let Err(e) = quarantined {
+            lx_warn!(
+                "shell.update.quarantine_failed",
+                &format!("{e}"),
+                layer = layer.as_str()
+            );
+        }
+    }
+
+    /// The single-core swap itself, reached only once the probe proved
+    /// the staged core can start.  From here everything is the fast
+    /// path — the Gatekeeper verdict is cached, so the gap between the
+    /// old core dying and the new one drawing is back inside the
+    /// ~200-500 ms this design was built around.
+    fn perform_core_swap(&mut self, ctx: &MarspotAppCtx) -> bool {
         if !self.binaries.has_pending() {
             return false;
         }
@@ -1707,7 +1784,15 @@ impl ShellApp {
     /// Returns `true` if exec was attempted (caller's stack is gone
     /// past that point, but Rust can't express it).  Returns `false`
     /// if no pending shell was found *or* if any prep step failed.
-    fn try_apply_shell_self_update(&mut self, window_frame_pt: (f64, f64, f64, f64)) -> bool {
+    ///
+    /// Reached only after `start_probe(ProbeLayer::Shell, …)` came back
+    /// good, which is what makes the promotion safe: `exec` replaces
+    /// this process, so an image that cannot run means the app is
+    /// simply gone — no window, no log line (the redirect at the top of
+    /// `main` runs before `logx::init`), every live session orphaned.
+    /// That is exactly what happened on 2026-07-26, when an adhoc-signed
+    /// binary reached `pending/` and AMFI killed the successor.
+    fn finish_shell_self_update(&mut self, window_frame_pt: (f64, f64, f64, f64)) -> bool {
         use std::os::unix::process::CommandExt;
         let shell_tree = match supervisor::BinaryTree::for_shell() {
             Ok(t) => t,
@@ -1720,38 +1805,6 @@ impl ShellApp {
             "SHELL_UPDATE_APPLY",
             "applying pending shell self-update"
         );
-        // Prove the successor can start BEFORE promoting it, let alone
-        // exec'ing into it.  `exec` replaces this process: if the new
-        // image cannot run, the app is simply gone — no window, no log
-        // line (the redirect at the top of `main` runs before
-        // `logx::init`), and every live session orphaned.  That is
-        // exactly what happened on 2026-07-26, when an adhoc-signed
-        // binary reached `pending/` and AMFI killed the successor.
-        //
-        // The probe costs one fork of a binary that prints a version
-        // and exits.  `MARSPOT_NO_REDIRECT` keeps it from bouncing
-        // back into `current/` — we want to test THIS file.
-        let candidate = shell_tree.pending();
-        if !successor_can_start(&candidate) {
-            lx_event!(
-                "SHELL_UPDATE_REJECT",
-                "pending shell cannot start — refusing to exec into it",
-                candidate = candidate.display()
-            );
-            sup_log::log(
-                "SHELL_UPDATE_REJECT",
-                "pending/marspot-shell failed its start probe; quarantined",
-            );
-            // Get it out of `pending/` so the next trigger does not
-            // retry the same dead binary forever.
-            if let Err(e) = shell_tree.quarantine_pending() {
-                lx_warn!(
-                    "shell.update.quarantine_failed",
-                    &format!("{e}")
-                );
-            }
-            return false;
-        }
         sup_log::log(
             "SHELL_UPDATE_APPLY",
             "promoting pending/marspot-shell → current/",
@@ -1827,9 +1880,9 @@ impl ShellApp {
     /// Resolve which banner (if any) the current shell state wants
     /// to show, and push it into the presenter if it changed.
     ///
-    /// Note: a dual-core update on probation shows **no** banner — the
-    /// whole point is invisibility, the active core keeps rendering
-    /// normally while the pending core warms up off-screen.
+    /// Note: an update being probed shows **no** banner — the whole
+    /// point is invisibility, the active core keeps rendering normally
+    /// while the staged binary's Gatekeeper verdict warms up.
     fn refresh_banner(&mut self, ctx: &MarspotAppCtx) {
         // The condition is about the CORE, which every window shares —
         // so the banner goes into every window's presenter, not just
@@ -2093,13 +2146,35 @@ impl ShellApp {
             self.restart_core(ctx);
         }
 
+        // 4b. Collect an in-flight Gatekeeper probe.  Nothing about the
+        // outgoing process is disturbed while this is pending — it keeps
+        // rendering and keeps taking input — so a probe that takes
+        // minutes costs a late update, not a frozen window.
+        if let SupervisorState::Probing(layer) = self.sup_state {
+            match self.probe_rx.as_ref().map(mpsc::Receiver::try_recv) {
+                // Still exec'ing.  Leave the state alone; we'll ask again
+                // next tick.
+                Some(Err(mpsc::TryRecvError::Empty)) => {}
+                verdict => {
+                    // Either a real answer, or the thread died without
+                    // sending (Disconnected) / no channel at all — both
+                    // of the latter mean "we did not prove it can start",
+                    // which is the same conclusion as a failed probe.
+                    let ok = matches!(verdict, Some(Ok(true)));
+                    self.probe_rx = None;
+                    self.sup_state = SupervisorState::Idle;
+                    self.finish_probe(ctx, layer, ok);
+                }
+            }
+        }
+
         // 5. Manual update trigger via SIGUSR1.  Lets a CLI invoke
         // `kill -USR1 $(pgrep marspot-shell)` to apply a staged
         // update on demand instead of waiting for focus-loss.
         if SIGUSR1_FLAG.swap(false, Ordering::AcqRel) {
             sup_log::log("SIGUSR1", "manual update trigger");
             if matches!(self.sup_state, SupervisorState::Idle) {
-                self.apply_pending_update(ctx);
+                self.apply_pending_update();
             } else {
                 lx_warn!(
                     "shell.sigusr1.ignored_not_idle",
@@ -2945,7 +3020,7 @@ impl MarspotApp for ShellApp {
         self.save_window_state_if_changed(ctx);
     }
 
-    fn focused(&mut self, ctx: &MarspotAppCtx, focused: bool) {
+    fn focused(&mut self, _ctx: &MarspotAppCtx, focused: bool) {
         self.send(MsgType::Focus, encode_focus(focused));
         // Silent-update trigger: the user just left marspot's window
         // (cmd-tab, click on another app, minimise).  If a pending
@@ -2956,11 +3031,11 @@ impl MarspotApp for ShellApp {
         // they come back they see the same content rendered by the
         // new version's renderer.
         //
-        // Skipped during probation: we don't want to chain updates
-        // before knowing if the last one was healthy.
+        // Skipped while a probe is in flight: one staged binary at a
+        // time, and the probe already decided what happens next.
         if !focused && matches!(self.sup_state, SupervisorState::Idle) {
             if std::env::var_os("MARSPOT_MANUAL_UPDATE_ONLY").is_none() {
-                self.apply_pending_update(ctx);
+                self.apply_pending_update();
             }
         }
     }

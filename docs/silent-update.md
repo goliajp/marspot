@@ -9,7 +9,7 @@ throughout code, logs, docs, and operator output:
 | Layer | Binary | What it owns | Update policy |
 |---|---|---|---|
 | **L1** | `marspot-shell` | NSWindow, IOSurface, supervisor state machine, banner overlay, control socket | **Silent (opt-in)** — `install-local.sh --with-shell` triggers SIGUSR1 → promote + `execv` into new shell, same PID; window flashes closed→open ~100 ms; sessions survive (shelld preserves bytelogs, new shell re-attaches). Default `install-local.sh` skips L1 so no flash. |
-| **L2** | `marspot-core` | Renderer, UI dispatch, layout, session bootstrap, control-socket protocol driving — **the marspot version** (title bar shows L2's version) | **Silent (default)** — dual-core swap; new core spawns alongside, presenter switches IOSurfaces, old core exits; ~50 ms freeze, no window flash |
+| **L2** | `marspot-core` | Renderer, UI dispatch, layout, session bootstrap, control-socket protocol driving — **the marspot version** (title bar shows L2's version) | **Silent (default)** — probe, then single-core in-place swap: the staged core is exec'd once on a background thread to prove it starts (and to pay its Gatekeeper assessment) while the live core keeps drawing; only then is the old one retired and the new one spawned onto the same IOSurface pair. ~200-500 ms freeze, no window flash |
 | **L3** | `marspot-session` | Per-pane terminal engine: parser, grid, scrollback, shm publish, control reply | **Silent** — staged alongside core; new core boot-promotes `pending/marspot-session → current/` so the next L3 spawn picks up new bytes. `kill -USR2 <core-pid>` triggers in-place per-pane swap (idle panes silent, focused panes show a ↻ refresh affordance) |
 | **L4** | `marspot-shelld` | PTY daemon, bytelogs, session lifetime | **Silent (opt-in)** — `install-local.sh --with-shelld` → `bin/install-shelld.sh --apply-pending-execv` → SIGUSR1; shelld promotes pending + `execv` over its own image in place, **preserving the listen socket fd + every PTY master fd + every session**. PID unchanged. Bootout/bootstrap fallback (`--apply-pending`) exists for daemons that predate the SIGUSR1 handler. |
 
@@ -132,7 +132,9 @@ data, not a connection failure.
 
 | What broke | What the supervisor does | What the user sees |
 |---|---|---|
-| New core dies inside 30 s probation | `PROBATION_FAIL` → `rollback_to_prev`: quarantine current, restore prev → current; respawn from rolled-back binary | Brief "Marspot is recovering…" banner; same content as before |
+| Staged binary can't start (unsigned and AMFI-killed, wrong arch, truncated copy) | Pre-swap probe exits non-zero → `UPDATE_PROBE_REJECT` → `quarantine_pending` so the next trigger won't retry it forever.  **The live process is never retired** | Nothing — the update simply doesn't land |
+| Gatekeeper stalls the staged binary's first exec | The probe absorbs the wait on a background thread; the supervisor stays in `Probing` and the live core keeps drawing and taking input.  No timeout, by design — see below | Nothing.  The update lands whenever macOS finishes (204 s on 2026-07-29, when a concurrent cargo build flooded `syspolicyd`) |
+| New core dies after a swap | `record_crash` → `restart_core` respawns it; a failed *spawn* triggers `rollback_binary` (restore `prev/`, or `ROLLBACK_NOOP` when there is none) | Brief "Marspot is recovering…" banner; same content as before |
 | New core dies + no prev to restore | `ROLLBACK_NOOP`; current is quarantined, `resolve_runnable` falls back to bundle sibling | Same as above; banner may flicker through a recovery cycle |
 | 4 crashes in 5 min (rolling window) | `BUDGET_EXCEEDED`; `auto_restart_disabled=true`; no further respawns | Persistent "Marspot stopped — please restart the app" banner |
 | New shell crashes immediately after exec | shell process dies, window closes | User re-opens Marspot.app; bundle binary journals each redirect into `shell_launches.tsv` and, on the 3rd launch of the same `current/` binary within 60 s, declares a crash loop: quarantines it, restores `prev/` (`SHELL_AUTO_ROLLBACK`), or runs as the bundle binary when no prev exists |
@@ -141,6 +143,38 @@ data, not a connection failure.
 | New shelld fails to bootstrap (fallback path) | `bin/install-shelld.sh --apply-pending` polls launchctl for 30 s.  Not running at the end → `SHELLD_PROBATION_FAIL` → quarantine + restore prev + re-bootstrap | Sessions lost; daemon back on the old version |
 | ShelldClient reconnect backoff exhausts | After ~9 s of reconnect failures the supervisor marks all sessions exited.  Core observes all-exited → exits cleanly.  marspot-shell sees core gone → quits | Application disappears (daemon is truly gone) |
 | Manual rollback (any reason) | `marspot-shell --rollback-shell` / `--rollback-core`: quarantine `current/`, restore `prev/` (`MANUAL_ROLLBACK`).  Runs offline in the bundle binary, before the current/ redirect, so it works even when current/ is the broken one | User restarts Marspot afterwards |
+
+### The pre-swap probe, and why it has no timeout
+
+Every layer that replaces a running image — L1 `execv`ing over itself,
+L2 swapping the core, L3 `execv`ing over itself — first runs the staged
+binary once as `<bin> --version` on a background thread
+(`binary_tree::can_start`).  It answers two questions with one fork:
+
+1. **Can this image run at all?**  On 2026-07-26 an adhoc-signed binary
+   reached `pending/`, AMFI killed the successor, and since `exec` had
+   already replaced the caller there was nothing left to notice — no
+   window, no log line, every session orphaned.
+2. **Has macOS finished assessing it?**  Gatekeeper charges a newly
+   created executable on its *first* exec, and that charge is unbounded.
+   On 2026-07-29 a cargo build in an unrelated project flooded
+   `syspolicyd`; `marspot-core` sat in the kernel's exec path for 204 s
+   and twenty L3s for 114 s.  The swap had already retired the old core,
+   so the window was frozen on a dead core's last frame the whole time —
+   and relaunching just queued more cores behind the same stall.
+
+The second point only works because `promote_pending` moves the file
+with `rename`, preserving the inode the Gatekeeper verdict is cached
+against: probe `pending/`, spawn `current/`, same file, cached answer.
+
+**No timeout is deliberate.**  A timeout would have to choose between
+abandoning the update (and re-probing from scratch next time, paying the
+same bill again) or proceeding anyway — and "proceed anyway" is exactly
+the shape that froze the window.  A slow verdict degrades to *the update
+lands later*, which costs nothing: the outgoing process is still serving
+the whole time.  `install-local.sh` has its own 60 s wait on `pending/`
+draining and will tell you the update hasn't landed yet; the app is
+unaffected either way.
 
 ## Diagnostics
 
@@ -251,8 +285,8 @@ MARSPOT_TEST_PROFILE=release bin/test-shelld-execv-swap.sh
   `install-local.sh --with-shell`; momentary NSWindow flash is
   acceptable for that explicit ask, sessions resume.
 - **L2 marspot-core** updates frequently (every renderer / UI /
-  protocol change) → silent dual-core swap is the dominant path; no
-  visible flash. L2's version is THE marspot version.
+  protocol change) → silent probe-then-single-core swap is the dominant
+  path; no visible flash. L2's version is THE marspot version.
 - **L3 marspot-session** is per-pane → swapped per-pane via
   `kill -USR2 <core-pid>` on idle panes (silent); focused panes show
   a ↻ refresh affordance for explicit user action.

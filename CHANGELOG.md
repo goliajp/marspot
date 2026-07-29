@@ -17,7 +17,26 @@ its commit via `git log --grep 'F3+12.6'` etc.
 
 ## L1  marspot-shell
 
-Current: **0.7.0**
+Current: **0.7.28**
+
+### 0.7.28
+
+更新链装 pre-swap probe。换核 / 自更新前先在**后台线程**跑一次候选
+的 `--version`,一举两得:证明这个 image 能起来,并且把 macOS 的
+Gatekeeper 评估在"现役进程还在服务"的时候付掉。`promote_pending`
+用 `rename` 保 inode,所以预热的裁决正是真启动会命中的那个。
+
+2026-07-29 事故:另一个项目的 cargo build 洗版 `syspolicyd`,新
+`marspot-core` 在内核 exec 路径里卡了 204 秒 —— 而单核换核早已先把
+老 core 杀了,窗口就冻在死 core 的最后一帧三分半钟,强关重开只是把更
+多 core 排到同一个队列后面。老代码把这段间隙当成"~200-500ms",那是
+个没有上界的假设。
+
+`SupervisorState` 加 `Probing(ProbeLayer)` 态(127f3c9 砍 dual-core
+时特意留下的枚举骨架)。探测期间老 core 照常画、照常收输入;探测失败
+= 候选进隔离区、现役一秒没停。**刻意不设超时**:超时只能在"放弃更
+新"和"照杀不误"之间二选一,后者正是冻屏那条路,而慢裁决的代价不过是
+更新晚点生效。
 
 ### 0.7.0
 
@@ -630,7 +649,19 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.0**
+Current: **0.12.62**
+
+### 0.12.62
+
+加 `--version` 早退,排在任何 env 读取 / state 迁移 / 日志初始化之
+前。更新链的 probe 靠它:此前 `marspot-core --version` 会一路走到
+`env_required` 然后 panic 退 101,给 core 装 probe 会把所有 core 更
+新拒光(probe 判的是 exit 0)。probe 必须无副作用,所以这个分支不迁
+状态、不开日志、不读 env。
+
+顺带把 `updater::STAGED_BINARIES` 里的 `marspot-shelld` 去掉 ——
+RFC-003 已退役 L4,每次轮询都白刷一条 "tarball had no
+marspot-shelld"。
 
 ### 0.12.0
 
@@ -842,7 +873,18 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.4**
+Current: **0.11.29**
+
+### 0.11.29
+
+加 `--version` 早退 + execv 自更新前先 probe。SIGTERM 要求换 image
+时,不再立刻停服去准备 fd handoff,而是在后台 exec 一次候选,主循环
+继续驱动 PTY 直到裁决回来(`SessionEvent::ExecvProbeDone`)。候选起
+不来就留在现役 image 上继续服务 —— 与 L1/L2 同一口径:退休换不来的
+升级,不值得赔上这个 pane。
+
+2026-07-29 二十个 L3 在 Gatekeeper 评估里各卡 114 秒、pane 全冻,正
+是因为它们已经先停服了。
 
 ### 0.11.4
 

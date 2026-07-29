@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 #
-# Dual-core update rollback test.  Stages a binary that exits
-# immediately on spawn (so the *pending* core dies inside probation)
-# and verifies the supervisor:
+# Broken-update containment test, on a tree that already has history.
+# Does one good update first (so current/ + prev/ are both populated),
+# then stages a binary that cannot start and verifies the supervisor:
 #
-#   - notices the pending death and aborts (`UPDATE_ABORT`),
-#   - restores `prev/marspot-core` into `current/` (`ROLLBACK`),
-#   - quarantines the broken binary, and
-#   - leaves the live (active) core completely untouched — the whole
-#     point of dual-core: a failed update is invisible to the user.
+#   - rejects it before anything is retired (`UPDATE_PROBE_REJECT`),
+#   - quarantines it so the next trigger won't retry it forever,
+#   - leaves current/ byte-identical to the good binary, and
+#   - leaves the live core completely untouched — a failed update is
+#     invisible to the user.
+#
+# That last guarantee is the point, and it has outlived two mechanisms.
+# It used to come from dual-core probation: the candidate ran as a
+# *pending* core beside the live one and was aborted (`UPDATE_ABORT` →
+# `ROLLBACK`) if it died.  127f3c9 replaced that with the single-core
+# in-place swap and both events stopped existing — which broke this
+# test from 2026-06-17 until 2026-07-29.  The guarantee now comes from
+# the pre-swap probe instead, one step earlier: a candidate that can't
+# start never gets as far as a swap.
+#
+# `test-adversarial-update.sh` case 3 covers the same rejection on a
+# clean tree; what's specific here is that a bad candidate must not
+# disturb an already-stable current/ + prev/.
 #
 # Run after `cargo build --release`.  Exits 0 on success.
 
@@ -34,9 +47,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The "broken" core we'll stage.  A shell-script wrapper that
-# immediately exits non-zero — looks to the supervisor like the new
-# core SEGV-ed during startup.
+# The "broken" core we'll stage: a wrapper that exits non-zero however
+# it is invoked, which is what an unsigned binary AMFI kills, a
+# wrong-arch build, or a truncated copy all look like from here.
 stage_broken() {
   local dst="$1"
   mkdir -p "$(dirname "$dst")"
@@ -100,33 +113,38 @@ echo "[2/4] first update OK — current/ holds real binary, active pid=$ACTIVE_P
 stage_broken "$TREE/pending/marspot-core"
 "$SHELL_BIN" --trigger >/dev/null
 START=$(date +%s)
-until grep -q $'\tROLLBACK\t' "$SUP_LOG"; do
-  if (( $(date +%s) - START > 20 )); then
-    fail "rollback never logged within 20 s"
+until grep -q $'\tUPDATE_PROBE_REJECT\t' "$SUP_LOG"; do
+  if (( $(date +%s) - START > 60 )); then
+    fail "candidate was never rejected within 60 s"
   fi
   sleep 0.5
 done
-grep -q $'\tUPDATE_ABORT\t' "$SUP_LOG" || fail "UPDATE_ABORT not in log"
-grep -q $'\tROLLBACK\t.*prev/' "$SUP_LOG" || fail "ROLLBACK (prev/→current/) not in log"
-echo "[3/4] rollback OK — UPDATE_ABORT → ROLLBACK (prev/→current/)"
+# Rejection must come *instead of* a swap, not after one.
+if grep -q $'\tUPDATE_SWAP\tsingle-core swap complete' "$SUP_LOG"; then
+  swaps=$(grep -c $'\tUPDATE_SWAP\tsingle-core swap complete' "$SUP_LOG")
+  (( swaps == 1 )) || fail "a second swap ran for the broken candidate ($swaps total)"
+fi
+echo "[3/4] rejection OK — UPDATE_PROBE_REJECT, no second swap"
 
-# --- 4. Verify filesystem + silent rollback -------------------------
+# --- 4. Verify filesystem + the silent guarantee --------------------
 [[ -f "$TREE/current/marspot-core" ]] \
-  || fail "current/ has no marspot-core after rollback"
+  || fail "current/ has no marspot-core after the rejected update"
 [[ -f "$TREE/quarantine/marspot-core" ]] \
   || fail "quarantine/marspot-core missing — broken binary not preserved"
+[[ ! -f "$TREE/pending/marspot-core" ]] \
+  || fail "pending/ still holds the broken candidate — the next trigger would retry it"
 if ! cmp -s "$CORE_BIN" "$TREE/current/marspot-core"; then
-  fail "current/marspot-core != original CORE_BIN — rollback restored the wrong file"
+  fail "current/marspot-core != original CORE_BIN — a rejected candidate reached current/"
 fi
-# The broken update ran as a *pending* core and never touched the live
-# one.  Assert the active core from step 2 is still the same process —
-# the silent-rollback guarantee: the user saw nothing.
+# The candidate never ran as a core at all.  Assert the live core from
+# step 2 is still the same process — the silent guarantee: the user saw
+# nothing.
 sleep 1
 POST_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
-[[ -n "$POST_PID" ]] || fail "active core gone after rollback (should be untouched)"
+[[ -n "$POST_PID" ]] || fail "live core gone after the rejected update (should be untouched)"
 [[ "$POST_PID" == "$ACTIVE_PID" ]] \
-  || fail "active core was disturbed by the failed update (pid $ACTIVE_PID → $POST_PID)"
-echo "[4/4] silent rollback OK — active core pid=$ACTIVE_PID never disturbed"
+  || fail "live core was disturbed by the failed update (pid $ACTIVE_PID → $POST_PID)"
+echo "[4/4] silent containment OK — live core pid=$ACTIVE_PID never disturbed"
 
 cleanup
 echo "ALL PASS"

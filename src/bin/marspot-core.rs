@@ -7835,12 +7835,25 @@ fn assemble_panes_at_boot(
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // `--version` answers before anything else touches the machine.
+    // The update path probes a freshly-staged binary with it for one
+    // reason: to make the kernel exec this file while the outgoing
+    // core is still on screen, so the Gatekeeper assessment is paid
+    // then instead of during the swap's blackout.  A probe that
+    // migrated state, opened the log, or read env would be a probe
+    // with side effects — so this arm comes first and does neither.
+    if args.first().map(String::as_str) == Some("--version") {
+        println!("{}", env!("MARSPOT_VERSION_CORE"));
+        return;
+    }
+
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("core");
 
     // Must run before any env is read — see `parse_log_event`.
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some((tag, detail)) = parse_log_event(&args) {
         lx_event!("SUP_LOG", &detail, tag = tag);
         return;

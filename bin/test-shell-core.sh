@@ -23,6 +23,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/bin/_dev-sandbox.sh"
 LOG=/tmp/marspot-test-shell-core.log
+# The handshake is logged by logx into marspot.log, not to the shell's
+# stdout, and the protocol has been v=2 since the double-buffer
+# IOSurface work.  This test grepped stdout for "HelloAck v=1" and so
+# could never see a handshake again once either of those landed.
+SUP_LOG="$MARSPOT_STATE_DIR/logs/marspot.log"
 SHELL_BIN="$ROOT/target/release/marspot-shell"
 CORE_BIN="$ROOT/target/release/marspot-core"
 
@@ -63,27 +68,27 @@ SHELL_PID=$!
 
 # Wait up to 5 s for HelloAck.
 for _ in $(seq 1 50); do
-  if grep -q "HelloAck v=1" "$LOG"; then
+  if grep -q $'\tHELLO_ACK\t' "$SUP_LOG"; then
     break
   fi
   sleep 0.1
 done
-if ! grep -q "HelloAck v=1" "$LOG"; then
+if ! grep -q $'\tHELLO_ACK\t' "$SUP_LOG"; then
   fail "no HelloAck within 5 s"
 fi
-echo "[1/3] boot OK — HelloAck v=1 received"
+echo "[1/3] boot OK — HELLO_ACK logged"
 
 # --- 2. Crash recovery ---------------------------------------------
 PRE_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
 [[ -n "$PRE_PID" ]] || fail "no marspot-core running after boot"
 
 # Count HelloAcks before we kill; the restart should produce a fresh one.
-BEFORE_ACKS=$(grep -c "HelloAck v=1" "$LOG")
+BEFORE_ACKS=$(grep -c $'\tHELLO_ACK\tcore handshake OK' "$SUP_LOG")
 kill -9 "$PRE_PID"
 for _ in $(seq 1 30); do
   POST_PID=$(pgrep -f "$CORE_BIN( |$)" | head -1)
   if [[ -n "$POST_PID" && "$POST_PID" != "$PRE_PID" ]]; then
-    AFTER_ACKS=$(grep -c "HelloAck v=1" "$LOG")
+    AFTER_ACKS=$(grep -c $'\tHELLO_ACK\tcore handshake OK' "$SUP_LOG")
     if (( AFTER_ACKS > BEFORE_ACKS )); then
       break
     fi
@@ -111,7 +116,7 @@ done
 
 # Give the shell a beat to log + decide.
 sleep 2
-if ! grep -q "crash budget exceeded" "$LOG"; then
+if ! grep -q $'\tBUDGET_EXCEEDED\t' "$SUP_LOG"; then
   fail "crash budget did not trip after 4 SIGKILLs"
 fi
 if pgrep -f "$CORE_BIN( |$)" >/dev/null; then

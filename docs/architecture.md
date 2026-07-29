@@ -15,16 +15,17 @@ L1 marspot-shell    Pure "shell".  NSWindow owner + NSApp delegate
                     (Cmd-Q routes through CloseRequested), binary
                     tree manager (current/prev/pending/quarantine),
                     install-local trigger, supervisor state machine
-                    (probation, abort_pending_update, restart_core).
+                    (Idle / Probing, restart_core, crash budget).
                     NO business logic — does not know what L2 does
                     with the L3s it spawns; does not hold L3 fds.
 
-                    Self-update path: dump frame to NSUserDefaults,
-                    execv "current/marspot-shell", reattach IOSurface
-                    (kernel object survives the image swap), restore
-                    frame.  ~100 ms visible flash; "size + position
-                    + content all preserved" is the user contract.
-                    Rare path — L1 binary updates seldom.
+                    Self-update path: probe the staged binary on a
+                    background thread, then dump frame to NSUser-
+                    Defaults, execv "current/marspot-shell", reattach
+                    IOSurface (kernel object survives the image swap),
+                    restore frame.  ~100 ms visible flash; "size +
+                    position + content all preserved" is the user
+                    contract.  Rare path — L1 binary updates seldom.
 
 L2 marspot-core     UI brain.  Metal renderer / cell layout / pane
                     management / input dispatch / per-frame composit-
@@ -33,13 +34,23 @@ L2 marspot-core     UI brain.  Metal renderer / cell layout / pane
                     session registry.  THIS is the version users
                     mean when they say "what marspot are you on?".
 
-                    Self-update path: dual-core swap.  L1 spawns the
-                    pending L2 alongside the active one, both render
-                    to their own halves of the IOSurface pair;
-                    UPDATE_SWAP flips the presenter to the new half
-                    and SIGTERMs the old core.  Zero user-visible
-                    discontinuity — IOSurface bytes are atomic from
-                    the WindowServer's view.
+                    Self-update path: probe, then single-core in-place
+                    swap.  L1 execs the staged core once on a back-
+                    ground thread — proving it starts and paying its
+                    Gatekeeper assessment while the live core is still
+                    drawing — then retires the live core and spawns
+                    the replacement onto the SAME IOSurface pair.
+                    ~200-500 ms where no core is writing frames.
+
+                    It was a dual-core swap until 127f3c9: pending and
+                    active L2 ran side by side through a probation
+                    window.  RFC-003 made L3 single-client, so the
+                    pending core's hello killed the active core's L3
+                    control sockets — panes visible, keystrokes on the
+                    floor, for the whole window.  The probe recovers
+                    what dual-core was actually for (never retire the
+                    incumbent until the successor is known-good)
+                    without the two-clients-at-once problem.
 
 L3 marspot-session  One process per pane.  Owns the PTY master fd,
                     shell child, VT parser, grid, scrollback,

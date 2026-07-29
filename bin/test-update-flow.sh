@@ -8,13 +8,18 @@
 # What it covers:
 #   1. Boot — supervisor + core start, HelloAck arrives.
 #   2. Stage — drop a binary into `binaries/pending/marspot-core`.
-#   3. Trigger — `marspot-shell --trigger` (SIGUSR1) starts the swap.
-#   4. Probation — new core spawns from `binaries/current/`, fresh
-#      HelloAck arrives.  Live-fail testing (the probation rollback
-#      path) is covered by `test-shell-core.sh`'s crash-budget case;
-#      here we only verify the happy path graduates.
-#   5. Stable — 30 s probation expires, `prev/` is deleted, the log
-#      records UPDATE_STABLE.
+#   3. Trigger — `marspot-shell --trigger` (SIGUSR1) starts a probe of
+#      the staged binary on a background thread.
+#   4. Swap — the probe passes, the old core is retired and a new one
+#      spawns from `binaries/current/`.
+#   5. Stable — `prev/` is deleted, the log records UPDATE_STABLE.
+#
+# Stages 4-5 used to assert the dual-core probation events
+# (PENDING_HELLO_ACK / PENDING_SURFACE_READY).  RFC-003 replaced that
+# with the single-core in-place swap in 127f3c9 and those events stopped
+# existing, which quietly broke this test from 2026-06-17 until
+# 2026-07-29 — nothing failed loudly because the tarball builder it
+# shares a suite with was broken too.
 #
 # Run after `cargo build --release`; exits 0 on success.
 
@@ -77,33 +82,39 @@ for _ in $(seq 1 50); do
   sleep 0.1
 done
 grep -q $'\tSIGUSR1\t' "$SUP_LOG" || fail "trigger: no SIGUSR1 entry"
-grep -q $'\tUPDATE_APPLY\t' "$SUP_LOG" || fail "trigger: no UPDATE_APPLY"
-echo "[3/5] trigger OK — SIGUSR1 → UPDATE_APPLY"
+# The swap no longer happens inside the SIGUSR1 tick.  The staged binary
+# is exec'd once on a background thread first, both to prove it starts
+# and to pay its Gatekeeper assessment while the live core is still
+# drawing — so UPDATE_APPLY lands a probe later, not immediately.
+# How long the probe takes is macOS's call, not ours: it is a full
+# Gatekeeper assessment of a brand-new inode.  Measured 2.9 s on a
+# loaded box, 204 s on 2026-07-29 when syspolicyd was being flooded.
+# The test waits for the verdict to *arrive*, not for it to be quick.
+for _ in $(seq 1 600); do
+  if grep -q $'\tUPDATE_PROBE_OK\t' "$SUP_LOG"; then break; fi
+  sleep 0.1
+done
+grep -q $'\tUPDATE_PROBE_START\t' "$SUP_LOG" || fail "trigger: no UPDATE_PROBE_START"
+grep -q $'\tUPDATE_PROBE_OK\t' "$SUP_LOG" || fail "trigger: probe never passed within 60 s"
+echo "[3/5] trigger OK — SIGUSR1 → probe started → probe passed"
 
-# --- 4. Probation ---------------------------------------------------
-# The pending core spawns from binaries/current/ (after promote) and
-# proves itself via PENDING_HELLO_ACK + PENDING_SURFACE_READY — the two
-# gates that, plus probation, authorise the swap.  The active core is
-# untouched throughout.
-for _ in $(seq 1 30); do
+# --- 4. Swap --------------------------------------------------------
+# Probe passed, so the supervisor promotes pending → current, retires
+# the live core, and spawns the replacement from binaries/current/.
+for _ in $(seq 1 100); do
   if grep -q $'\tCORE_SPAWN\t.*binaries/current/marspot-core' "$SUP_LOG"; then break; fi
   sleep 0.1
 done
+grep -q $'\tUPDATE_APPLY\t' "$SUP_LOG" || fail "swap: no UPDATE_APPLY after a passing probe"
+grep -q $'\tACTIVE_SHUTDOWN\t' "$SUP_LOG" || fail "swap: live core was never retired"
 grep -q $'\tCORE_SPAWN\t.*binaries/current/marspot-core' "$SUP_LOG" \
-  || fail "probation: pending core never spawned from binaries/current"
-for _ in $(seq 1 50); do
-  if grep -q $'\tPENDING_SURFACE_READY\t' "$SUP_LOG"; then break; fi
-  sleep 0.1
-done
-grep -q $'\tPENDING_HELLO_ACK\t' "$SUP_LOG" || fail "probation: pending core never HelloAck'd"
-grep -q $'\tPENDING_SURFACE_READY\t' "$SUP_LOG" || fail "probation: pending core never SurfaceReady'd"
+  || fail "swap: replacement core never spawned from binaries/current"
 NEW_CORE_PID=$(pgrep -f "$TREE/current/marspot-core( |$)" | head -1)
-[[ -n "$NEW_CORE_PID" ]] || fail "probation: pgrep didn't find the pending core process"
-echo "[4/5] probation OK — pending core pid=$NEW_CORE_PID, HelloAck'd + SurfaceReady'd"
+[[ -n "$NEW_CORE_PID" ]] || fail "swap: pgrep didn't find the replacement core process"
+echo "[4/5] swap OK — old core retired, replacement pid=$NEW_CORE_PID from current/"
 
 # --- 5. Stable ------------------------------------------------------
-# Probation is 30 s; wait up to 45 with a hard upper bound.  Success is
-# the atomic swap (UPDATE_SWAP) + finalize (UPDATE_STABLE).
+# Success is the completed swap (UPDATE_SWAP) + finalize (UPDATE_STABLE).
 START=$(date +%s)
 until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; do
   if (( $(date +%s) - START > 45 )); then
@@ -111,7 +122,7 @@ until grep -q $'\tUPDATE_STABLE\t' "$SUP_LOG" 2>/dev/null; do
   fi
   sleep 1
 done
-grep -q $'\tUPDATE_SWAP\t' "$SUP_LOG" || fail "stable: UPDATE_SWAP (presenter swap) not logged"
+grep -q $'\tUPDATE_SWAP\t' "$SUP_LOG" || fail "stable: UPDATE_SWAP not logged"
 [[ ! -f "$TREE/prev/marspot-core" ]] \
   || fail "stable: prev/ still has marspot-core (finalize_stable didn't run?)"
 [[ ! -f "$TREE/pending/marspot-core" ]] \

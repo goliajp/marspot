@@ -63,6 +63,28 @@ dev_wipe_state() {
   rm -f "$MARSPOT_STATE_DIR/logs/marspot.log" 2>/dev/null || true
 }
 
+# Pay the Gatekeeper assessment on freshly built binaries BEFORE a test
+# starts timing anything.
+#
+# macOS assesses a newly created executable on its first exec, and that
+# assessment is unbounded — a concurrent cargo build elsewhere on the
+# box can flood `syspolicyd` and push it into the tens of seconds (204 s
+# was observed on 2026-07-29).  A suite that runs `cargo build` and then
+# gives the app 5 s to hand-shake is timing macOS's scheduler, not the
+# app, and fails for reasons that have nothing to do with the change
+# under test.
+#
+# So burn the cost here, outside every stopwatch.  This is the same
+# trick the supervisor plays before a swap (`binary_tree::can_start`),
+# for the same reason.  Call it after any build step.
+dev_warm_binaries() {
+  for b in marspot-shell marspot-core marspot-session; do
+    [[ -x "$DEV_TARGET/$b" ]] && \
+      MARSPOT_NO_REDIRECT=1 "$DEV_TARGET/$b" --version >/dev/null 2>&1
+  done
+  return 0
+}
+
 # RFC-003 Phase 6: L4 shelld retired.  These helpers stay as no-ops
 # for backwards compat with any test script still calling them.
 dev_ensure_shelld() { return 0; }

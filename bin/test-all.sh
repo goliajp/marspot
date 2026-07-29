@@ -35,6 +35,9 @@ ensure_shelld() {
 reset_state() {
   dev_kill_shell_core
   dev_wipe_state
+  # Keep macOS's first-exec Gatekeeper cost out of the next suite's
+  # stopwatch — see dev_warm_binaries.
+  dev_warm_binaries
   sleep 0.5
 }
 
@@ -63,6 +66,7 @@ reset_state; run test-multi-window.sh  "RFC-005: two windows, own pairs, layout 
 reset_state; run test-crash-guard.sh   "2026-07-28: crash-loop brake + session reaping + registry deadman"
 reset_state; run test-update-flow.sh   "silent update happy path"
 reset_state; run test-rollback.sh      "silent update rollback (broken binary)"
+reset_state; run test-l3-execv-probe.sh "L3 execv probe (bad session binary never costs the pane)"
 reset_state; run test-shell-rollback-loop.sh "shell crash-loop auto-rollback"
 reset_state; run test-manual-rollback.sh "manual rollback CLI (--rollback-shell/-core)"
 
@@ -78,7 +82,7 @@ for arg in "$@"; do
       reset_state
       run test-negative-update.sh "release trust gate (rejects tampered/wrong-key/unsigned)"
       reset_state
-      run test-adversarial-update.sh "adversarial (equal-version no-op + concurrent triggers)"
+      run test-adversarial-update.sh "adversarial (equal-version no-op + concurrent triggers + bad-candidate containment)"
       ;;
     --shelld)
       # Self-contained (own state dir + throwaway LaunchAgent) — no
