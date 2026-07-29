@@ -5,7 +5,6 @@
 # `find_named_file`):
 #
 #   marspot-aarch64-apple-darwin.tar.gz
-#   ├── marspot-shelld
 #   ├── marspot-shell
 #   ├── marspot-core
 #   └── marspot-session   (per-pane L3 engine — staged + promoted by
@@ -53,7 +52,13 @@ while (( $# )); do
   esac
 done
 
-bins=(marspot-shelld marspot-shell marspot-core marspot-session)
+# `marspot-shelld` used to lead this list.  RFC-003 retired L4 and
+# deleted the bin target, but this line kept naming it — so `cargo build
+# --bin=marspot-shelld` failed and took every caller down with it.  That
+# silently disabled all three `--real` suites (real / negative /
+# adversarial update), each of which builds a tarball before it can test
+# anything, from 2026-06-17 until 2026-07-29.
+bins=(marspot-shell marspot-core marspot-session)
 (( INCLUDE_MARSPOT )) && bins+=(marspot)
 
 echo "==> building release binaries"

@@ -110,17 +110,16 @@ fn pending_binary_path(bin_name: &str) -> PathBuf {
 /// The binaries the release tarball is expected to ship.  Order
 /// matters only for the log, safest-first: marspot-session swaps
 /// per-pane with replay (no session loss, no core restart), core is
-/// next (no session loss), shell after (window flash), shelld last
-/// (kills sessions — gated behind explicit `bin/install-shelld.sh
-/// --apply-pending`).  A tarball missing any of these still stages the
-/// rest — `extract_binary` is a named lookup that soft-skips absentees,
-/// so legacy single-binary releases keep working.
-const STAGED_BINARIES: &[&str] = &[
-    "marspot-session",
-    "marspot-core",
-    "marspot-shell",
-    "marspot-shelld",
-];
+/// next (no session loss), shell last (window flash).  A tarball
+/// missing any of these still stages the rest — `extract_binary` is a
+/// named lookup that soft-skips absentees, so legacy single-binary
+/// releases keep working.
+///
+/// `marspot-shelld` used to be the fourth entry.  RFC-003 retired L4
+/// and deleted the bin target, so every tarball built after that logged
+/// a "tarball had no marspot-shelld" skip on each poll — noise for a
+/// layer that no longer exists.
+const STAGED_BINARIES: &[&str] = &["marspot-session", "marspot-core", "marspot-shell"];
 
 fn feed_url() -> String {
     std::env::var("MARSPOT_UPDATE_FEED").unwrap_or_else(|_| DEFAULT_FEED.into())
