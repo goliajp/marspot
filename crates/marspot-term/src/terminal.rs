@@ -2766,7 +2766,21 @@ fn trace_seq(kind: &str, intermediates: &[u8], params: &[u16], byte: u8) {
 }
 
 fn blank_with(attrs: CellAttrs) -> Cell {
-    Cell { ch: ' ', attrs }
+    // BCE inherits ONLY the background colour — that is the whole of
+    // the xterm contract.  Stamping the full SGR state into erase /
+    // scroll-fill blanks let UNDERLINE leak: printing a `\e[4m` URL
+    // that wrapped on the bottom row scrolled a fresh row into
+    // existence while underline was still on, so every blank in it
+    // was born underlined and the tail of the line dragged a rule to
+    // the window edge (2026-07-29 field report — the omz update
+    // banner grew stray horizontal lines through its links and logo).
+    // bold/italic/underline/reverse/dim are glyph properties; a blank
+    // has no glyph, and reverse on a blank would even paint a solid
+    // fg-coloured block no real terminal shows on clear.
+    Cell {
+        ch: ' ',
+        attrs: CellAttrs { bg: attrs.bg, ..CellAttrs::default() },
+    }
 }
 
 fn fill_range(grid: &mut Grid, start: u32, end_exclusive: u32, attrs: CellAttrs) {
@@ -4392,6 +4406,41 @@ mod tests {
         assert_eq!(t.grid().cell(0, 0).attrs.fg, Color::Default);
         // 'B' was printed after — must have red fg.
         assert_eq!(t.grid().cell(1, 0).attrs.fg, Color::Indexed(1));
+    }
+
+    /// 2026-07-29 field report — the omz update banner grew stray
+    /// horizontal rules through its links: a `\e[4m` URL wrapping on
+    /// the bottom row scrolled a fresh row in while underline was
+    /// still on, and the blanks it was filled with carried the
+    /// underline.  BCE inherits ONLY the background; every other SGR
+    /// bit is a glyph property and blanks have no glyph.
+    #[test]
+    fn scroll_fill_and_erase_blanks_carry_only_the_background() {
+        // Scroll-fill: bottom-row wrap mid-underline.
+        let mut t = Terminal::new(20, 2);
+        t.feed(b"x\r\ny");
+        t.feed(b"\r\x1b[41m\x1b[4m0123456789abcdefghijKLM\x1b[24m\x1b[0m");
+        let g = t.grid();
+        // Row 1 is the wrapped continuation: "KLM" + fill blanks.
+        for c in 3..g.cols() {
+            let cell = g.cell(c, 1);
+            assert!(!cell.attrs.underline, "fill blank at col {c} must not be underlined");
+            assert!(!cell.attrs.bold && !cell.attrs.reverse && !cell.attrs.dim);
+            assert_eq!(cell.attrs.bg, Color::Indexed(1), "…but BCE keeps the bg");
+        }
+        // The printed glyphs DO keep their underline.
+        assert!(g.cell(0, 1).attrs.underline, "the K is genuinely underlined");
+
+        // Erase path (EL) mid-underline: same contract.
+        let mut t = Terminal::new(10, 2);
+        t.feed(b"\x1b[42m\x1b[4mab\x1b[K");
+        let g = t.grid();
+        assert!(g.cell(0, 0).attrs.underline && g.cell(1, 0).attrs.underline);
+        for c in 2..10 {
+            let cell = g.cell(c, 0);
+            assert!(!cell.attrs.underline, "EL blank at col {c} must not be underlined");
+            assert_eq!(cell.attrs.bg, Color::Indexed(2));
+        }
     }
 
     #[test]
