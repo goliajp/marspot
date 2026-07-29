@@ -24,6 +24,12 @@ pub struct ProcRow {
     /// `kp_proc.p_comm` — first 16 bytes of the executable name, NUL-
     /// trimmed.  Cheap; enough for "is this `node`?".
     pub comm: String,
+    /// Wall-clock start time, unix seconds (`pbi_start_tvsec`).  Comes
+    /// free with the `proc_bsdinfo` this table already fetches per pid.
+    /// The claudecode plugin compares it against a session file's mtime
+    /// to tell "this process is writing that session" from "that file
+    /// belongs to something older than this process".
+    pub start_unix: u64,
 }
 
 /// Snapshot of every running process on the host (kernel-level scan
@@ -87,6 +93,7 @@ unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> { unsafe {
             pid,
             ppid: info.pbi_ppid as i32,
             comm,
+            start_unix: info.pbi_start_tvsec,
         });
     }
     Some(out)

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 // RFC-003 Amendment 16 cc rewrite — read sessions from L3 entry.toml
 // registry (where each L3 records its shell child pid), forward
 // keystrokes via L1 → L2 → L3 InjectInput frame proxy.  Monitor
@@ -1551,6 +1551,20 @@ impl WorkerCtx {
             }
         };
         let procs = pidtree::list_all_procs();
+        // Pass 1 — the per-pane facts, gathered before anything is
+        // bound.  Binding needs to be a decision over the whole set:
+        // one session uuid belongs to exactly one pane, so a pane that
+        // can *prove* its uuid (argv) has to be served before a pane
+        // that is only guessing from mtimes.
+        struct PaneFacts {
+            shelld_sid: u64,
+            claude_pid: i32,
+            claude_start: SystemTime,
+            cwd: PathBuf,
+            encoded: String,
+            argv_uuid: Option<String>,
+        }
+        let mut facts: Vec<PaneFacts> = Vec::new();
         for s in &sessions {
             if !s.alive {
                 continue;
@@ -1564,52 +1578,94 @@ impl WorkerCtx {
             let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
                 continue;
             };
-            let encoded = encode_project_dir(&cwd);
-            if let Some((sid_uuid, jsonl_path)) = self.session_for_project(&encoded) {
-                let (tag, profile_num) = match profile_tag_for(claude.pid) {
-                    Some(t) => {
-                        let n = t
-                            .strip_prefix('P')
-                            .and_then(|d| d.parse::<u8>().ok())
-                            .unwrap_or(u8::MAX);
-                        (Some(t), n)
-                    }
-                    None => (None, u8::MAX),
-                };
-                // Active model, tailed from the session jsonl: the
-                // newest of (assistant record's authoritative
-                // `"model"` field, `/model` local_command output) —
-                // the latter makes an interactive switch show up on
-                // the very next tick instead of after the next
-                // assistant turn.
-                let cutoff = self.model_cutoff_for(&jsonl_path, claude.pid);
-                let model = tail_model_short(&jsonl_path, cutoff);
-                let badge = match (tag, model) {
-                    (Some(t), Some(m)) => format!("{}@{} {}", t, m, sid_uuid),
-                    (Some(t), None) => format!("{} {}", t, sid_uuid),
-                    (None, _) => sid_uuid.clone(),
-                };
-                let project_basename = cwd
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                new_mapping.insert(s.session_id, badge);
-                new_meta.insert(
-                    s.session_id,
-                    BindMeta {
-                        profile_num,
-                        uuid: sid_uuid,
-                        claude_pid: claude.pid,
-                        project_basename,
-                    },
-                );
-                // No log line here on purpose — `session.bound` is
-                // transition-only.  Main side diffs `result.new_mapping`
-                // against `self.last_mapping` and only logs the deltas;
-                // otherwise we'd write 12 lines per 2 s tick in steady
-                // state and drown the file.
+            facts.push(PaneFacts {
+                shelld_sid: s.session_id,
+                claude_pid: claude.pid,
+                claude_start: SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(claude.start_unix),
+                encoded: encode_project_dir(&cwd),
+                cwd,
+                argv_uuid: argv_session_uuid(claude.pid, &descendants),
+            });
+        }
+        // Stable order so an ambiguous project resolves the same way on
+        // every tick — badges that swap panes every 2 s would be worse
+        // than a badge that is merely a guess.
+        facts.sort_by_key(|f| f.shelld_sid);
+
+        // Pass 2 — assign, proof first, guesses after, no uuid twice.
+        let mut claimed: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut bound: Vec<(usize, String, Option<PathBuf>)> = Vec::new();
+        for (i, f) in facts.iter().enumerate() {
+            if let Some(uuid) = &f.argv_uuid {
+                if claimed.insert(uuid.clone()) {
+                    let path = self.session_by_uuid(uuid).map(|s| s.jsonl_path.clone());
+                    bound.push((i, uuid.clone(), path));
+                }
             }
+        }
+        for (i, f) in facts.iter().enumerate() {
+            if bound.iter().any(|(j, _, _)| *j == i) {
+                continue;
+            }
+            if let Some((uuid, path)) =
+                self.session_for_project(&f.encoded, &claimed, f.claude_start)
+            {
+                claimed.insert(uuid.clone());
+                bound.push((i, uuid, Some(path)));
+            }
+        }
+
+        for (i, sid_uuid, jsonl_path) in bound {
+            let f = &facts[i];
+            let (tag, profile_num) = match profile_tag_for(f.claude_pid) {
+                Some(t) => {
+                    let n = t
+                        .strip_prefix('P')
+                        .and_then(|d| d.parse::<u8>().ok())
+                        .unwrap_or(u8::MAX);
+                    (Some(t), n)
+                }
+                None => (None, u8::MAX),
+            };
+            // Active model, tailed from the session jsonl: the
+            // newest of (assistant record's authoritative
+            // `"model"` field, `/model` local_command output) —
+            // the latter makes an interactive switch show up on
+            // the very next tick instead of after the next
+            // assistant turn.  A session named by argv but not yet
+            // scanned has no path — badge without the model half.
+            let model = jsonl_path.as_ref().and_then(|p| {
+                let cutoff = self.model_cutoff_for(p, f.claude_pid);
+                tail_model_short(p, cutoff)
+            });
+            let badge = match (tag, model) {
+                (Some(t), Some(m)) => format!("{}@{} {}", t, m, sid_uuid),
+                (Some(t), None) => format!("{} {}", t, sid_uuid),
+                (None, _) => sid_uuid.clone(),
+            };
+            let project_basename = f
+                .cwd
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            new_mapping.insert(f.shelld_sid, badge);
+            new_meta.insert(
+                f.shelld_sid,
+                BindMeta {
+                    profile_num,
+                    uuid: sid_uuid,
+                    claude_pid: f.claude_pid,
+                    project_basename,
+                },
+            );
+            // No log line here on purpose — `session.bound` is
+            // transition-only.  Main side diffs `result.new_mapping`
+            // against `self.last_mapping` and only logs the deltas;
+            // otherwise we'd write 12 lines per 2 s tick in steady
+            // state and drown the file.
         }
 
         ScanResult { new_mapping, new_meta, log_lines }
@@ -1619,18 +1675,136 @@ impl WorkerCtx {
     /// (id + its jsonl path, so callers can tail per-session state
     /// like the active model).  Cheap scan over `seen`; a dozen
     /// projects active in practice.
-    fn session_for_project(&self, encoded_dir: &str) -> Option<(String, PathBuf)> {
+    ///
+    /// Two constraints make this a *guess with guardrails* rather than
+    /// a free-for-all:
+    ///
+    /// * `claimed` — a uuid already bound to another pane is skipped.
+    ///   Two panes cwd'd into one project used to receive the identical
+    ///   badge, which is provably wrong for at least one of them
+    ///   (2026-07-30: sessions 383 + 394 both in `qualcomm/insight`,
+    ///   both badged `9e304c9a`, which argv shows belongs to 383).
+    /// * `claude_start` — a session whose file has not been written
+    ///   since this claude process started cannot be the session it is
+    ///   writing.  Without this, a pane freshly `claude`d in a project
+    ///   whose newest session is days old wears that dead session's
+    ///   uuid.  No eligible candidate ⇒ no badge, which is the honest
+    ///   answer until the pane's own session file appears.
+    fn session_for_project(
+        &self,
+        encoded_dir: &str,
+        claimed: &std::collections::HashSet<String>,
+        claude_start: SystemTime,
+    ) -> Option<(String, PathBuf)> {
         let mut newest: Option<(SystemTime, &SessionInfo)> = None;
         for s in self.seen.values() {
-            if s.project_dir == encoded_dir {
-                match newest {
-                    Some((t, _)) if t >= s.last_mtime => {}
-                    _ => newest = Some((s.last_mtime, s)),
-                }
+            if s.project_dir != encoded_dir {
+                continue;
+            }
+            if claimed.contains(&s.session_id) {
+                continue;
+            }
+            if s.last_mtime < claude_start {
+                continue;
+            }
+            match newest {
+                Some((t, _)) if t >= s.last_mtime => {}
+                _ => newest = Some((s.last_mtime, s)),
             }
         }
         newest.map(|(_, s)| (s.session_id.clone(), s.jsonl_path.clone()))
     }
+
+    /// Look a session up by uuid — the argv-authoritative path knows
+    /// *which* session a pane owns but still needs its jsonl to tail
+    /// the active model.  `None` for a session too new to have been
+    /// scanned yet; the badge then carries no model until it is.
+    fn session_by_uuid(&self, uuid: &str) -> Option<&SessionInfo> {
+        self.seen.values().find(|s| s.session_id == uuid)
+    }
+}
+
+/// The live session uuid as stated by the claude process tree's own
+/// argv, if it states one.
+///
+/// This is the only *authoritative* binding available: everything else
+/// is inference from file mtimes.  Two argv shapes carry it —
+///
+/// * `--session-id <uuid>` — the session this process writes.  Wins,
+///   because a forked resume (`--resume old.jsonl --fork-session
+///   --session-id new`) writes `new` while naming `old`.
+/// * `--resume <uuid>` / `--resume <path>/<uuid>.jsonl` — a plain
+///   resume continues writing the file it names.
+///
+/// Searched on the matched process and its own subtree: the daemon
+/// shape (`claude daemon run` → pty host → version binary) puts the
+/// flags several levels below the `claude` the pane sees.  A plain
+/// interactive `claude` states nothing, which is why the inference path
+/// still has to exist.
+///
+/// `pane_tree` is the pane's already-computed descendant list, so this
+/// costs no new process-table walk.  Only claude's own subtree gets a
+/// `proc_cmdline` (a sysctl each) — scanning the whole pane tree would
+/// mean paying for rust-analyzer, node, and every build job as well.
+fn argv_session_uuid(claude_pid: i32, pane_tree: &[pidtree::ProcRow]) -> Option<String> {
+    let mut subtree: Vec<i32> = vec![claude_pid];
+    // Transitive closure by repeated passes.  The claude subtree is a
+    // handful of processes and at most a few levels deep, so this beats
+    // building a map for it.
+    loop {
+        let before = subtree.len();
+        for p in pane_tree {
+            if subtree.contains(&p.ppid) && !subtree.contains(&p.pid) {
+                subtree.push(p.pid);
+            }
+        }
+        if subtree.len() == before {
+            break;
+        }
+    }
+    let mut resumed: Option<String> = None;
+    for pid in subtree {
+        let Some(line) = pidtree::proc_cmdline(pid) else { continue };
+        if let Some(u) = flag_uuid(&line, "--session-id") {
+            return Some(u);
+        }
+        if resumed.is_none() {
+            resumed = flag_uuid(&line, "--resume");
+        }
+    }
+    resumed
+}
+
+/// Value of `flag` in a space-joined argv, reduced to a bare uuid.
+/// Accepts both `<uuid>` and `<path>/<uuid>.jsonl`; returns None when
+/// the flag is absent or its value isn't uuid-shaped (`--resume` also
+/// takes a session *name*).
+fn flag_uuid(cmdline: &str, flag: &str) -> Option<String> {
+    let mut it = cmdline.split(' ');
+    let raw = loop {
+        let tok = it.next()?;
+        if tok == flag {
+            break it.next()?;
+        }
+    };
+    let base = raw.rsplit('/').next().unwrap_or(raw);
+    let base = base.strip_suffix(".jsonl").unwrap_or(base);
+    is_uuid(base).then(|| base.to_string())
+}
+
+/// 8-4-4-4-12 lowercase hex with dashes.  Deliberately strict: a
+/// non-uuid `--resume` value must fall through to the inference path,
+/// not become a bogus badge.
+fn is_uuid(s: &str) -> bool {
+    const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+    let mut parts = s.split('-');
+    for want in GROUPS {
+        let Some(p) = parts.next() else { return false };
+        if p.len() != want || !p.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    parts.next().is_none()
 }
 
 /// Read the first line of `path` and try to parse `"sessionId":"<uuid>"`
@@ -1772,6 +1946,119 @@ mod tests {
     }
 
     /// The fence moves only when the owning process is replaced.
+    /// argv is the only authoritative statement of which session a
+    /// pane owns; these are the shapes claude actually emits (captured
+    /// from a live 18-pane session on 2026-07-30).
+    #[test]
+    fn argv_uuid_reads_the_shapes_claude_emits() {
+        // Plain resume: continues writing the file it names.
+        assert_eq!(
+            flag_uuid(
+                "claude --resume 9e304c9a-93d3-428d-a6a6-fc537db59dc7",
+                "--resume"
+            )
+            .as_deref(),
+            Some("9e304c9a-93d3-428d-a6a6-fc537db59dc7")
+        );
+        // Forked resume: `--resume` names the *source* file by path,
+        // `--session-id` names the session actually being written.
+        let forked = "/x/ClaudeCode.app/Contents/MacOS/claude --bg-pty-host /tmp/s.sock 72 56 \
+             -- /x/versions/2.1.220 --session-id 2c78740f-4a41-4e6e-8b99-5e0614326d1f \
+             --fork-session --resume /Users/d/.claude-profile-1/projects/-Users-d-p/\
+             429c7c04-81cc-43bf-8cbc-814dded894d0.jsonl --reply-on-resume";
+        assert_eq!(
+            flag_uuid(forked, "--session-id").as_deref(),
+            Some("2c78740f-4a41-4e6e-8b99-5e0614326d1f")
+        );
+        assert_eq!(
+            flag_uuid(forked, "--resume").as_deref(),
+            Some("429c7c04-81cc-43bf-8cbc-814dded894d0"),
+            "path form reduces to the bare uuid"
+        );
+        // A fresh interactive claude states nothing — that is what
+        // keeps the inference path load-bearing.
+        assert_eq!(flag_uuid("claude", "--resume"), None);
+        assert_eq!(flag_uuid("claude --resume", "--resume"), None);
+        // `--resume` also takes a session *name*; a non-uuid value must
+        // not become a badge.
+        assert_eq!(flag_uuid("claude --resume my-branch-work", "--resume"), None);
+        assert!(!is_uuid("9e304c9a93d3428da6a6fc537db59dc7"), "dashes required");
+        assert!(!is_uuid("9e304c9a-93d3-428d-a6a6-fc537db59dc7-extra"));
+        assert!(!is_uuid("9e304c9z-93d3-428d-a6a6-fc537db59dc7"), "hex only");
+    }
+
+    /// Build a `WorkerCtx` whose `seen` holds one session per project.
+    fn ctx_with_sessions(sessions: &[(&str, &str, SystemTime)]) -> WorkerCtx {
+        let mut seen = HashMap::new();
+        for (uuid, project, mtime) in sessions {
+            let path = PathBuf::from(format!("/fake/{project}/{uuid}.jsonl"));
+            seen.insert(
+                path.clone(),
+                SessionInfo {
+                    session_id: (*uuid).to_string(),
+                    project_dir: (*project).to_string(),
+                    jsonl_path: path,
+                    last_mtime: *mtime,
+                    last_size: 1,
+                    last_message_kind: None,
+                },
+            );
+        }
+        WorkerCtx {
+            projects_root: PathBuf::from("/fake"),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen,
+            model_cutoff: HashMap::new(),
+        }
+    }
+
+    /// The 2026-07-30 report: two panes cwd'd into one project both
+    /// wore badge `9e304c9a`.  One session belongs to one pane — the
+    /// second pane must come away with nothing, not a copy.
+    #[test]
+    fn a_session_already_bound_is_not_handed_to_a_second_pane() {
+        let now = SystemTime::now();
+        let ctx = ctx_with_sessions(&[("9e304c9a", "-Users-d-insight", now)]);
+        let started = now - Duration::from_secs(600);
+        let mut claimed = std::collections::HashSet::new();
+
+        let first = ctx.session_for_project("-Users-d-insight", &claimed, started);
+        assert_eq!(first.as_ref().map(|(u, _)| u.as_str()), Some("9e304c9a"));
+        claimed.insert("9e304c9a".to_string());
+
+        assert!(
+            ctx.session_for_project("-Users-d-insight", &claimed, started).is_none(),
+            "the only session is taken; a second pane gets no badge"
+        );
+    }
+
+    /// A pane freshly `claude`d in a project whose newest session is
+    /// days old must not wear that dead session's uuid: the file has
+    /// not been written since this process started, so it cannot be
+    /// what this process is writing.
+    #[test]
+    fn a_session_older_than_the_process_is_not_bound() {
+        let now = SystemTime::now();
+        let stale = now - Duration::from_secs(2 * 24 * 3600);
+        let ctx = ctx_with_sessions(&[("df58a571", "-Users-d-insight", stale)]);
+        let claimed = std::collections::HashSet::new();
+
+        let started_after = now - Duration::from_secs(300);
+        assert!(
+            ctx.session_for_project("-Users-d-insight", &claimed, started_after).is_none(),
+            "nothing written since launch ⇒ no session of ours yet"
+        );
+
+        // Same session, a claude that predates it: now it is plausibly
+        // ours and binds as before.
+        let started_before = stale - Duration::from_secs(60);
+        assert_eq!(
+            ctx.session_for_project("-Users-d-insight", &claimed, started_before)
+                .map(|(u, _)| u),
+            Some("df58a571".to_string())
+        );
+    }
+
     #[test]
     fn model_cutoff_tracks_the_owning_pid() {
         let dir = std::env::temp_dir().join("cc-model-cutoff-test");

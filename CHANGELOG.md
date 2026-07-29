@@ -28,7 +28,38 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.30**
+Current: **0.7.31**
+
+### 0.7.31
+
+claudecode badge 不再把同一个 session 发给两个 pane。
+
+2026-07-30 现场:session 383 和 394 都 cwd 在 `qualcomm/insight`,badge
+都是 `9e304c9a`。而 383 的 claude argv 明写 `--resume 9e304c9a`,394 的
+claude 是 07:12 起的裸 `claude`,那个项目里根本没有 07:12 之后新建的
+session 文件 —— 394 戴的是别人的号。根因:反查只按「项目目录 → mtime
+最新的 session」,没有任何互斥,而 scanner 每个项目只留最新一个 session,
+所以同项目的 N 个 pane 必然拿到同一个 uuid。
+
+三条约束叠上去:
+
+1. **argv 是唯一权威**。`argv_session_uuid` 在 claude 自身 + 它的子树里
+   找 `--session-id`(fork-resume 时它才是真正在写的那个)和
+   `--resume <uuid|path>`。daemon 形态(`claude daemon run` → pty host →
+   version 二进制)把 flag 埋在好几层下面,所以要走子树 —— 但只走 claude
+   的子树,不是整个 pane 树:后者要为 rust-analyzer / node / 每个 build
+   job 都付一次 `KERN_PROCARGS2`。
+2. **一个 uuid 只发一次**。先给能拿出 argv 证明的 pane,再让剩下的 pane
+   在**未被占用**的候选里挑。没得挑就**不发 badge** —— 空着比戴错号诚实。
+3. **活性闸**:候选 session 的 mtime 必须 ≥ 这个 claude 进程的启动时间。
+   自启动以来没被写过的文件,不可能是它正在写的 session。少了这条,一个
+   在「最新 session 是两天前」的项目里新起的 pane 会戴上那个死 session。
+
+顺带 `pidtree::ProcRow` 带上 `start_unix`(`pbi_start_tvsec`)—— 这张表
+本来就每个 pid 拉一次 `proc_bsdinfo`,启动时间白送,第 3 条要用。
+
+分配顺序按 shelld session id 固定:同项目的歧义每 tick 解成同一个答案,
+badge 在 pane 间来回跳比「这是个猜测」更糟。
 
 ### 0.7.30
 
@@ -794,7 +825,14 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.66**
+Current: **0.12.67**
+
+### 0.12.67
+
+只重编:`pidtree::ProcRow` 加了 `start_unix` 字段(见 L1 0.7.31)。core
+侧行为不变 —— process panel 和 cwd 扫描都不读这个字段。版本号照样 bump:
+共享 lib 变了而某层没 bump,`install-local.sh` 会判该层 unchanged 跳过
+staging,新二进制静默留在磁盘上。
 
 ### 0.12.66
 
