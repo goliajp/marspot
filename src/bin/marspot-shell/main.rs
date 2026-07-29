@@ -2479,10 +2479,15 @@ impl ShellApp {
                     }
                 }
             }
-            ShellInbox::CaretRect(rect, _window_id) => {
-                // One window today, so the id is informational; step 4
-                // picks the ctx for that window instead.
-                ctx.set_caret_rect_phys(rect);
+            ShellInbox::CaretRect(rect, window_id) => {
+                // NOT `ctx` — the control socket is drained in
+                // `user_event`, which is an event about the process and
+                // so always dispatched against the first window.  Using
+                // `ctx` sent every window's caret to window 1's view;
+                // the others answered `firstRectForCharacterRange:` with
+                // a zero rect and the IME candidate window detached from
+                // the caret.  The id on the wire names the right one.
+                marspot::app::set_caret_rect_phys_for(window_id, rect);
             }
             // Legacy v=1 wake from the core's pre-A2-A4 single-
             // surface path: the core renders into ENV_SURFACE_ID

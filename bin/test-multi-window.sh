@@ -95,7 +95,7 @@ PY
 # are painting into different pairs rather than sharing one.
 echo "==> launching marspot-shell"
 MARSPOT_SESSION_BIN="$SESSION_BIN" MARSPOT_CORE_BIN="$CORE_BIN" \
-  MARSPOT_LOG_CORE=debug \
+  MARSPOT_LOG_CORE=debug MARSPOT_DEV_CARET_PROBE=1 \
   nohup "$SHELL_BIN" >"$RUNLOG" 2>&1 < /dev/null &
 disown
 
@@ -158,6 +158,44 @@ n_presented=$(printf '%s' "$presented" | grep -c 'window_id=')
 echo "==> windows that PRESENTED: $(echo $presented | tr '\n' ' ')"
 (( n_presented >= 2 )) \
   || fail "only $n_presented window(s) ever presented — the other shows black"
+
+# --- 2c. each window anchors the IME candidate box on its OWN caret ---
+# The caret rides the core's control socket, which the shell drains in
+# `user_event` — an event about the process, dispatched against the
+# first window.  Routing it to that window's ctx (what the code did
+# while only one window existed) sent every window's caret to window
+# 1's view; window 2 then answered `firstRectForCharacterRange:` with a
+# zero rect and macOS parked the candidate box in a corner of the
+# screen instead of under the caret.
+#
+# A script cannot see a candidate window, so `MARSPOT_DEV_CARET_PROBE`
+# makes the shell ask each view the same question AppKit asks it and
+# print the answer.  The seeded frames do not overlap, so a caret that
+# went to the wrong view lands outside its window's frame.
+echo "==> checking IME caret anchoring per window"
+python3 - "$RUNLOG" <<'PY' || fail "IME caret is not anchored per window"
+import re, sys, pathlib
+pat = re.compile(
+    r'ime\.caret window_id=(\d+) phys=(\w+) '
+    r'screen=([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+) '
+    r'window=([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)')
+rows = {}
+for line in pathlib.Path(sys.argv[1]).read_text(errors='replace').splitlines():
+    m = pat.search(line)
+    if m:
+        rows[int(m.group(1))] = (m.group(2) == 'true',
+                                 [float(m.group(i)) for i in range(3, 7)],
+                                 [float(m.group(i)) for i in range(7, 11)])
+print(f'caret probed for window(s): {sorted(rows)}')
+assert len(rows) >= 2, f'only {len(rows)} window(s) ever received a caret: {sorted(rows)}'
+for wid, (has, (sx, sy, sw, sh), (fx, fy, fw, fh)) in sorted(rows.items()):
+    assert has, f'window {wid} got a caret-cleared frame only'
+    print(f'  window {wid}: caret at {sx:.0f},{sy:.0f} in frame '
+          f'{fx:.0f},{fy:.0f}+{fw:.0f}x{fh:.0f}')
+    assert fx <= sx <= fx + fw and fy <= sy <= fy + fh, (
+        f'window {wid} anchors the IME box at {sx},{sy}, outside its own '
+        f'frame {fx},{fy}+{fw}x{fh} — the caret went to another window view')
+PY
 
 # --- 3. no cross-window orphan adoption -------------------------------
 if grep -q 'core.boot.orphan_adopted' "$APPLOG"; then

@@ -1084,6 +1084,9 @@ enum WindowOp {
     Close(u32),
     /// Dev/test only — see `perform_close`.
     PerformClose(u32),
+    /// Caret rect for a window that is not the one currently
+    /// dispatching — see `set_caret_rect_phys_for`.
+    SetCaretRect(u32, Option<(f64, f64, f64, f64)>),
 }
 
 thread_local! {
@@ -1406,6 +1409,28 @@ pub fn perform_close(window_id: u32) {
         .with(|q| q.borrow_mut().push(WindowOp::PerformClose(window_id)));
 }
 
+/// Publish a caret rect to the view of `window_id`, whichever window
+/// is currently dispatching.
+///
+/// `MarspotAppCtx::set_caret_rect_phys` can only reach the window it
+/// was handed, and the caret stream does not arrive on that window's
+/// context: it rides the core's control socket, which is drained in
+/// `user_event` — an event about the *process*, so always dispatched
+/// against the first window.  With one window the two coincided; with
+/// two, every window's caret landed on window 1's view.  The second
+/// window then answered `firstRectForCharacterRange:` with a zero
+/// rect and macOS parked the IME candidate window off in a corner of
+/// the screen instead of under the caret.
+///
+/// Queued for the same reason as `open_window`: callers are event
+/// handlers, and `APP_STATE` is mutably borrowed for the whole of one.
+/// The drain runs in the same dispatch's tail, so the view is up to
+/// date well before AppKit next asks it where the caret is.
+pub fn set_caret_rect_phys_for(window_id: u32, rect: Option<(f64, f64, f64, f64)>) {
+    PENDING_WINDOW_OPS
+        .with(|q| q.borrow_mut().push(WindowOp::SetCaretRect(window_id, rect)));
+}
+
 /// Tear down the window carrying `window_id`.  Queued, for the same
 /// reason as `open_window`.
 pub fn close_window(window_id: u32) {
@@ -1491,6 +1516,18 @@ fn drain_pending_windows() {
                     w.performClose(None);
                 }
             }
+            WindowOp::SetCaretRect(window_id, rect) => {
+                APP_STATE.with(|cell| {
+                    let slot = cell.borrow();
+                    let Some(state) = slot.as_ref() else { return };
+                    // A caret can still be in flight for a window the
+                    // user just closed; dropping it is correct.
+                    let Some(i) = state.window_index(window_id) else { return };
+                    let ctx = &state.windows[i];
+                    ctx.set_caret_rect_phys(rect);
+                    caret_probe(ctx, rect);
+                });
+            }
             WindowOp::Close(window_id) => {
                 let closing = APP_STATE.with(|cell| {
                     let mut slot = cell.borrow_mut();
@@ -1509,6 +1546,50 @@ fn drain_pending_windows() {
             }
         }
     }
+}
+
+/// Dev seam (`MARSPOT_DEV_CARET_PROBE=1`) — print where the IME
+/// candidate window would be anchored for `ctx`, asking the view the
+/// same question AppKit asks it.
+///
+/// A script cannot see an IME candidate window, so this is how
+/// `bin/test-multi-window.sh` proves each window anchors the candidate
+/// box against its OWN caret: the screen rect printed here has to fall
+/// inside that window's own frame.  Off unless the env var is set —
+/// it runs one Objective-C round-trip per caret move.
+fn caret_probe(ctx: &MarspotAppCtx, rect: Option<(f64, f64, f64, f64)>) {
+    // Read the env once: a caret lands at most once per rendered
+    // frame, and `env::var_os` locks the environment and scans it.
+    thread_local! {
+        static ON: bool = std::env::var_os("MARSPOT_DEV_CARET_PROBE").is_some();
+    }
+    if !ON.with(|on| *on) {
+        return;
+    }
+    // SAFETY: our own NSTextInputClient method on our own view, on the
+    // main thread; a null `actualRange` is what AppKit itself passes
+    // when it does not want the resolved range back.
+    let screen: NSRect = unsafe {
+        ctx.inner.firstRectForCharacterRange_actualRange(
+            NSRange::new(0, 0),
+            std::ptr::null_mut(),
+        )
+    };
+    let f = ctx.nswindow.frame();
+    eprintln!(
+        "[marspot] ime.caret window_id={} phys={} screen={:.1},{:.1},{:.1},{:.1} \
+         window={:.1},{:.1},{:.1},{:.1}",
+        ctx.window_id,
+        rect.is_some(),
+        screen.origin.x,
+        screen.origin.y,
+        screen.size.width,
+        screen.size.height,
+        f.origin.x,
+        f.origin.y,
+        f.size.width,
+        f.size.height,
+    );
 }
 
 /// The pointer resolved into a marspot window's own space:

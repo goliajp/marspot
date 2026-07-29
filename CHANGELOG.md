@@ -28,7 +28,27 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.29**
+Current: **0.7.30**
+
+### 0.7.30
+
+IME 候选框跟着自己的窗口走。caret 走的是 core 的控制 socket,shell 在
+`user_event` 里排空它 —— 那是关于**进程**的事件,永远派发给第一个窗口。
+于是 `ShellInbox::CaretRect` 拿 `ctx` 当目标(单窗口时两者恰好重合),
+每个窗口的 caret 都落到了窗口 1 的 view 上:窗口 2 对
+`firstRectForCharacterRange:` 只能答零矩形,macOS 就把候选框停在屏幕角
+落,不在光标底下;窗口 1 的锚点则被窗口 2 的坐标覆盖。
+
+帧里本来就带着 window id,现在按它路由 —— 新增
+`app::set_caret_rect_phys_for(window_id, rect)`,跟 `open_window` /
+`close_window` 同样入队,在这次派发的尾部落到目标窗口的 view 上(处理
+器整个跑在 `APP_STATE` 的可变借用里,不能就地再借)。旧 core 不带 id
+时 `trailing_window_id` 仍退回 `FIRST_WINDOW_ID`。
+
+`bin/test-multi-window.sh` 加一段验收:`MARSPOT_DEV_CARET_PROBE=1` 让
+shell 拿 AppKit 问 view 的同一个问题去问它,打印锚点;两个窗口的锚点
+必须各自落在自己的 frame 里。种子布局的两个 frame 不重叠,所以走错
+view 的 caret 一定越界。
 
 ### 0.7.29
 
