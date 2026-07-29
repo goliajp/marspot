@@ -794,7 +794,36 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.63**
+Current: **0.12.64**
+
+### 0.12.64
+
+pane title 的 cwd 占位符改由一个 1 秒扫描驱动,不再挂在键盘事件上。
+
+原来的触发集是「焦点 pane 按下 Enter / 切焦点 / 打开 layout modal」。
+按 Enter 那一刻 shell 还没执行这一行 —— `cd` 生效前就把 cwd 读了,所以
+标题永远落后一条命令;而一个不再被敲键的 pane(`cd x && claude` 一行写完、
+脚本里 cd、非 key window 那几个)则根本不会再更新。实测 2026-07-30 现场
+16+2 个 pane 里有两个:cache 记 `labs/vectx` 实际在 `qualcomm/insight`,
+cache 记 `$HOME` 实际在 `labs/vectx`。目录换了这件事,键盘无从知道。
+
+现在 `sweep_pane_cwds` 在主循环既有的周期块里跑,每 `CWD_SWEEP_INTERVAL`
+= 1 s 重读一次全部 pane 的 shell cwd。成本:每 pane 一次
+`proc_pidinfo(PROC_PIDVNODEPATHINFO)`,实测 M 系 0.58 µs → 18 个 pane
+约 11 µs/s;pid 由 `shell_child_pids` 缓存,entry.toml 不再每轮重读。
+搭主循环原有的 1 s idle wake,没有新 timer;一轮扫下来没有变化就不置
+`needs_render`,idle 依旧零帧。
+
+顺带把两处旧机制删掉:
+- `lazy_fill_missing_cwds` 从 `build_views` 移除 —— 渲染路径现在是纯
+  读者,一次 syscall 都不发。
+- `cwd_unresolvable` 放弃计数器整套删除。它存在的理由是那个 per-frame
+  lazy fill 会 60 fps 重试;而它自己会把一个 pane 的 cwd **永久冻结**
+  在旧值上(只有 force 触发能解封)。改成固定间隔后重试率由结构保证,
+  这个补丁不再需要,连同它能造成的冻结一起消失。
+
+`last_cwd` 的持久化同样由扫描驱动,但 `CWD_SAVE_MIN_GAP` = 5 s 限流 ——
+一个在循环里 cd 的脚本不该变成每秒一次 fsync。
 
 ### 0.12.63
 

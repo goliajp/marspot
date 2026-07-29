@@ -304,11 +304,6 @@ fn send_to_shell(
 /// pane up.  Cheap now that it is off the main loop.
 const L3_RECONNECT_ATTEMPTS: u32 = 3;
 
-/// Consecutive failures after which cwd resolution for a session is
-/// abandoned until an explicit trigger.  Small: the fetch either works
-/// once the shell has registered its pid, or it never will.
-const CWD_MAX_FAILURES: u32 = 5;
-
 /// Shortest L2 main-loop iteration worth reporting as a stall.
 ///
 /// Tighter than L3's 150 ms because this loop owes a frame: anything
@@ -316,12 +311,30 @@ const CWD_MAX_FAILURES: u32 = 5;
 /// here freezes every pane rather than one.
 const L2_LOOP_STALL_THRESHOLD: Duration = Duration::from_millis(80);
 
-/// F3+5 — per-sid debounce window on `refresh_pane_cwd_for`.  A
-/// multi-line paste fires Enter N times; only the first within this
-/// window triggers a syscall.  150 ms keeps "cd && cd" sequences
-/// reflected near-instantly while collapsing pasted scripts into a
-/// single fetch.
-const CWD_REFRESH_DEBOUNCE: Duration = Duration::from_millis(150);
+/// How often the main loop re-reads every pane's cwd.
+///
+/// The trigger set this replaces (Enter in the focused pane, focus
+/// change, modal open) could not keep a title current: the Enter that
+/// runs `cd` fires the syscall *before* the shell has chdir'd, so a
+/// pane's title was always one command behind, and a pane the user
+/// stopped typing in — `cd x && claude`, a script that cds, the
+/// non-key window — never updated at all.  A pane's cwd is not
+/// something the keyboard knows about; it needs its own clock.
+///
+/// Cost is a `proc_pidinfo(PROC_PIDVNODEPATHINFO)` per pane per
+/// sweep, measured at 0.58 us on M-series: 18 panes = ~11 us/s, and
+/// the pid comes from `shell_child_pids` so entry.toml is not re-read.
+/// The sweep rides the loop's existing 1 s idle wake — no new timer,
+/// and a sweep that finds nothing changed marks nothing dirty, so
+/// idle stays frame-free.
+const CWD_SWEEP_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// Shortest gap between two `save_session_state` calls triggered by
+/// the cwd sweep.  A pane whose cwd flaps (a build script cd-ing in a
+/// loop) would otherwise write + fsync `shell-state.bin` once per
+/// sweep forever; `last_cwd` only needs to be roughly current, since
+/// it is read on cold boot.
+const CWD_SAVE_MIN_GAP: Duration = Duration::from_secs(5);
 
 /// F3+1.4 — modal size in logical points (auto-scales by display
 /// scale).  Centered over the marspot window.  Slightly smaller than
@@ -660,9 +673,10 @@ mod window_state_tests {
             pending_to_shell: Vec::new(),
             pane_sessions: std::collections::HashMap::new(),
             esc_history: std::collections::HashMap::new(),
-            last_cwd_refresh: std::collections::HashMap::new(),
+            shell_child_pids: std::collections::HashMap::new(),
+            last_cwd_sweep: Instant::now() - CWD_SWEEP_INTERVAL,
+            last_cwd_save: Instant::now() - CWD_SAVE_MIN_GAP,
             reconnecting: std::collections::HashSet::new(),
-            cwd_unresolvable: std::collections::HashMap::new(),
             all_exited: false,
             saw_window_aware_attach: false,
             l3_mode: false,
@@ -1299,6 +1313,127 @@ mod window_state_tests {
         assert_eq!(w.card_slots.len(), 8);
         assert_eq!(w.pending_grid_cols, 4);
         assert_eq!(w.pending_grid_rows, 2);
+    }
+
+    /// Fake a registry entry for `sid` whose `shell_child_pid` is `pid`,
+    /// which is all `resolve_pane_cwd` reads out of it.
+    fn write_entry_with_child_pid(sid: u64, pid: i32) {
+        sandbox_state_dir();
+        let dir = marspot_term::session_registry::session_dir(sid);
+        std::fs::create_dir_all(&dir).expect("session dir");
+        std::fs::write(
+            dir.join("entry.toml"),
+            format!("id = {sid}\nshell_child_pid = {pid}\n"),
+        )
+        .expect("entry.toml");
+    }
+
+    fn cwd_string() -> String {
+        std::env::current_dir()
+            .expect("cwd")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// First resolve reports a change (nothing was cached); the second
+    /// one must report *none*.  The sweep turns that bool into
+    /// `needs_render`, so a `true` on an unchanged cwd would mean a
+    /// frame per second forever with the user's hands off the keyboard.
+    #[test]
+    fn resolving_an_unchanged_cwd_reports_no_change() {
+        let sid = 7701;
+        write_entry_with_child_pid(sid, std::process::id() as i32);
+        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+
+        assert!(app.resolve_pane_cwd(sid), "first resolve = new value");
+        assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
+        assert_eq!(
+            app.shell_child_pids.get(&sid).copied(),
+            Some(std::process::id() as i32),
+            "resolved pid gets cached so the sweep skips entry.toml"
+        );
+        assert!(!app.resolve_pane_cwd(sid), "unchanged cwd = no repaint owed");
+    }
+
+    /// A pid that no longer resolves must not blank the cached cwd (an
+    /// L3 mid-execv briefly has no child), and must be dropped from the
+    /// cache so the next attempt re-reads entry.toml.
+    #[test]
+    fn a_dead_cached_pid_is_dropped_and_the_entry_reread() {
+        let sid = 7702;
+        write_entry_with_child_pid(sid, std::process::id() as i32);
+        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+        app.pane_cwds.insert(sid, "/somewhere/known".into());
+        // Above any plausible pid: proc_pidinfo says "no such process".
+        app.shell_child_pids.insert(sid, i32::MAX);
+
+        assert!(
+            app.resolve_pane_cwd(sid),
+            "falls back to entry.toml and lands on the live cwd"
+        );
+        assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
+        assert_eq!(
+            app.shell_child_pids.get(&sid).copied(),
+            Some(std::process::id() as i32)
+        );
+
+        // Now make the entry unreadable too: the last known cwd has to
+        // survive rather than degrade into an empty title.
+        let _ = std::fs::remove_file(
+            marspot_term::session_registry::session_dir(sid).join("entry.toml"),
+        );
+        app.shell_child_pids.insert(sid, i32::MAX);
+        assert!(!app.resolve_pane_cwd(sid), "unresolvable = no change");
+        assert_eq!(
+            app.pane_cwds.get(&sid),
+            Some(&cwd_string()),
+            "an unresolvable pane keeps its last known cwd"
+        );
+        assert!(
+            !app.shell_child_pids.contains_key(&sid),
+            "a pid that stopped resolving must not stay cached"
+        );
+    }
+
+    /// The sweep repaints a window only when one of its panes actually
+    /// moved, and does nothing at all inside `CWD_SWEEP_INTERVAL`.
+    #[test]
+    fn sweep_repaints_only_on_a_real_move_and_respects_its_interval() {
+        let sid = 7703;
+        write_entry_with_child_pid(sid, std::process::id() as i32);
+        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(sid, 80, 24)])]);
+
+        app.sweep_pane_cwds();
+        assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
+        assert!(app.windows[0].needs_render, "first fill owes a frame");
+
+        // Steady state: nothing moved, so nothing repaints.
+        app.windows[0].needs_render = false;
+        app.last_cwd_sweep = Instant::now() - CWD_SWEEP_INTERVAL;
+        app.sweep_pane_cwds();
+        assert!(
+            !app.windows[0].needs_render,
+            "an unchanged sweep must not wake the renderer"
+        );
+
+        // A pane that moved: the sweep notices and owes a frame.
+        app.pane_cwds.insert(sid, "/moved/away".into());
+        app.last_cwd_sweep = Instant::now() - CWD_SWEEP_INTERVAL;
+        app.sweep_pane_cwds();
+        assert_eq!(app.pane_cwds.get(&sid), Some(&cwd_string()));
+        assert!(app.windows[0].needs_render, "a moved cwd owes a frame");
+
+        // Same move again, but the interval has not elapsed: the sweep
+        // is a no-op, poisoned value and all.
+        app.windows[0].needs_render = false;
+        app.pane_cwds.insert(sid, "/moved/away".into());
+        app.sweep_pane_cwds();
+        assert_eq!(
+            app.pane_cwds.get(&sid).map(String::as_str),
+            Some("/moved/away"),
+            "sweep inside the interval must not issue syscalls"
+        );
+        assert!(!app.windows[0].needs_render);
     }
 }
 
@@ -3009,12 +3144,19 @@ struct CoreApp {
     /// Inserts into the title resolution chain ABOVE cwd basename,
     /// BELOW user-set custom title.  Empty payload removes the entry.
     pane_titles: std::collections::HashMap<u64, String>,
-    /// F3+2.1 — cwd reported by each pane's shell via OSC 7.  Keyed
-    /// by shelld_session_id.  Read by the title placeholder chain
-    /// (`Path::file_name` of the cached path → basename string).
-    /// Populated event-driven by `MsgType::PaneCwd` frames, so the
-    /// hot path stays zero-syscall.
+    /// Last-known cwd of each pane's shell, keyed by shelld_session_id.
+    /// Read by the title placeholder chain (`Path::file_name` of the
+    /// cached path → basename string) and persisted as `last_cwd` so a
+    /// pane whose L3 died respawns in the same project.  Written only
+    /// by `resolve_pane_cwd`, which the sweep drives — the render path
+    /// is a pure reader and never issues a syscall.
     pane_cwds: std::collections::HashMap<u64, String>,
+    /// `entry.toml`'s `shell_child_pid` per session, cached so the
+    /// once-per-second sweep costs one `proc_pidinfo` per pane instead
+    /// of also re-opening + re-parsing the registry entry.  Dropped for
+    /// a session as soon as its pid stops resolving (L3 execv, shell
+    /// restart), which makes the next sweep re-read the entry.
+    shell_child_pids: std::collections::HashMap<u64, i32>,
     /// Frames queued by event handlers (mouse_down etc.) to be
     /// written to the control socket by the main loop.  Avoids
     /// reaching the writer from inside the trait callbacks where
@@ -3038,18 +3180,14 @@ struct CoreApp {
     /// global deque let presses aimed at one pane satisfy the
     /// threshold for another.
     esc_history: std::collections::HashMap<u64, std::collections::VecDeque<std::time::Instant>>,
-    /// F3+5 — per-sid debounce window for `refresh_pane_cwd_for`.
-    /// A burst of Enter keys (multi-line paste) hits this map and
-    /// returns within the debounce → at most one syscall per
-    /// `CWD_REFRESH_DEBOUNCE` per pane.  Cleared per-sid on
-    /// `close_session`.
-    last_cwd_refresh: std::collections::HashMap<u64, Instant>,
+    /// When the last `sweep_pane_cwds` ran.  Gates the sweep to
+    /// `CWD_SWEEP_INTERVAL` regardless of how often the loop wakes.
+    last_cwd_sweep: Instant,
+    /// When the cwd sweep last persisted state — see `CWD_SAVE_MIN_GAP`.
+    last_cwd_save: Instant,
     /// Sessions with a reconnect already in flight.  Without this, a
     /// burst of EOFs for one session would spawn a thread each.
     reconnecting: std::collections::HashSet<u64>,
-    /// Consecutive cwd-resolution failures per session.  Past
-    /// `CWD_MAX_FAILURES` the per-frame lazy fill stops asking.
-    cwd_unresolvable: std::collections::HashMap<u64, u32>,
     /// True once every pane's session has exited — the loop exits
     /// cleanly and the shell respawns a fresh core (which creates a
     /// fresh session), mirroring "marspot quits when all shells die".
@@ -3254,83 +3392,82 @@ impl CoreApp {
     /// pending grid shape.  Called when the modal opens, when the
     /// user changes cols/rows in the modal (since the cell count
     /// changes), and on apply (after permuting).
-    /// F3+3.6 — batch pull-based cwd refresh.  Walks every pane,
-    /// `read_shell_child_pid` + `pidtree::proc_cwd` per pane.  Used
-    /// by LayoutModal open to one-shot fresh all 9.
-    fn refresh_pane_cwds(&mut self, wi: usize) {
-        let now = Instant::now();
-        for pane in &win!(self, wi).panes {
-            let Some(sid) = pane.shelld_session_id() else { continue };
-            let Some(pid) = read_shell_child_pid(sid) else { continue };
-            let Some(path) = marspot::pidtree::proc_cwd(pid) else { continue };
-            let s = path.to_string_lossy().into_owned();
-            self.pane_cwds.insert(sid, s);
-            self.last_cwd_refresh.insert(sid, now);
-        }
-    }
-
-    /// F3+5 — single-pane cwd refresh with per-sid debounce.
-    /// Returns `true` if a syscall actually ran.  Callers pass
-    /// `force=true` when the trigger has just-occurred semantics
-    /// (pane spawn, modal open) to bypass debounce; `false` for
-    /// rate-limited triggers (every focus change, every Enter).
+    /// Re-read one session's shell cwd into `pane_cwds`.  Returns
+    /// `true` when the stored path actually changed — callers use that
+    /// to decide whether a repaint is owed, so a sweep over N unchanged
+    /// panes costs N syscalls and zero frames.
     ///
-    /// Cost: at most two syscalls (one toml read + one
-    /// `proc_pidinfo`) when not debounced; zero on debounce hit.
-    /// Not on the render hot path.
-    fn refresh_pane_cwd_for(&mut self, wi: usize, pane_idx: usize, force: bool) -> bool {
-        let Some(pane) = win!(self, wi).panes.get(pane_idx) else { return false };
-        let Some(sid) = pane.shelld_session_id() else { return false };
-        let now = Instant::now();
-        if force {
-            // An explicit trigger means something just changed; drop
-            // the give-up mark so this attempt really runs.
-            self.cwd_unresolvable.remove(&sid);
-        }
-        if !force {
-            if let Some(&prev) = self.last_cwd_refresh.get(&sid) {
-                if now.duration_since(prev) < CWD_REFRESH_DEBOUNCE {
-                    return false;
+    /// The pid comes from `shell_child_pids`, refilled from entry.toml
+    /// only when it is missing or has stopped resolving.  A pid that
+    /// fails to resolve leaves the last known cwd in place: an L3
+    /// mid-execv has no live child for a moment, and blanking the title
+    /// for that moment would be a worse lie than a slightly old one.
+    fn resolve_pane_cwd(&mut self, sid: u64) -> bool {
+        let cached_pid = self.shell_child_pids.get(&sid).copied();
+        let mut path = cached_pid.and_then(marspot::pidtree::proc_cwd);
+        if path.is_none() {
+            // Either no pid cached yet, or the cached one is gone
+            // (shell replaced, L3 execv'd).  One entry.toml read, then
+            // retry — and only cache the pid once it has resolved.
+            self.shell_child_pids.remove(&sid);
+            if let Some(pid) = read_shell_child_pid(sid) {
+                path = marspot::pidtree::proc_cwd(pid);
+                if path.is_some() {
+                    self.shell_child_pids.insert(sid, pid);
                 }
             }
         }
-        // F3+5.1 — bump the debounce clock BEFORE the syscalls fire,
-        // so a permanently-failing fetch (entry.toml without
-        // shell_child_pid, sandbox-blocked proc_pidinfo) still ticks
-        // the debounce instead of getting force-retried every frame
-        // by the build_views lazy fill.  Worst case becomes 1 attempt
-        // per CWD_REFRESH_DEBOUNCE per pane instead of 60 fps × N.
-        self.last_cwd_refresh.insert(sid, now);
-        // F3+5.2 — the debounce above bounds the *rate* but not the
-        // *duration*: a pane whose cwd can never be resolved (entry.toml
-        // without shell_child_pid, sandbox-blocked proc_pidinfo) kept
-        // retrying at 1/150 ms for the life of the process, because
-        // `lazy_fill_missing_cwds` asks again every frame for any pane
-        // with no cached entry.  Nine such panes is ~60 open+read+close
-        // per second, forever.  Give up after a bounded number of
-        // consecutive failures.  A real trigger (`force=true` — pane
-        // spawn, modal open, Enter) bypasses this check outright, so a
-        // pane that becomes resolvable later is never stuck; the mark
-        // itself is only cleared on a successful resolve.
-        if !force && self.cwd_unresolvable.get(&sid).is_some_and(|&n| n >= CWD_MAX_FAILURES) {
+        let Some(path) = path else { return false };
+        let next = path.to_string_lossy().into_owned();
+        if self.pane_cwds.get(&sid).is_some_and(|prev| *prev == next) {
             return false;
         }
-        let failed = |me: &mut Self| {
-            *me.cwd_unresolvable.entry(sid).or_insert(0) += 1;
-        };
-        let Some(pid) = read_shell_child_pid(sid) else {
-            failed(self);
-            return false;
-        };
-        let Some(path) = marspot::pidtree::proc_cwd(pid) else {
-            failed(self);
-            return false;
-        };
-        self.pane_cwds.insert(sid, path.to_string_lossy().into_owned());
-        // Resolved — clear any accumulated failure count so a pane that
-        // goes unresolvable again gets a fresh budget.
-        self.cwd_unresolvable.remove(&sid);
+        lx_debug!(
+            "core.pane_cwd.changed",
+            "pane cwd moved; title placeholder follows",
+            sid = sid,
+            cwd = next.as_str()
+        );
+        self.pane_cwds.insert(sid, next);
         true
+    }
+
+    /// Re-read every pane's cwd, at most once per `CWD_SWEEP_INTERVAL`.
+    /// Driven from the main loop's periodic block, so it rides whatever
+    /// wake the loop already had (PTY output while the user works, the
+    /// 1 s idle timeout otherwise) rather than owning a timer.
+    ///
+    /// Only the windows whose titles actually changed are marked dirty.
+    fn sweep_pane_cwds(&mut self) {
+        if self.last_cwd_sweep.elapsed() < CWD_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_cwd_sweep = Instant::now();
+        let mut changed = false;
+        for wi in 0..self.windows.len() {
+            let sids: Vec<u64> = win!(self, wi)
+                .panes
+                .iter()
+                .filter_map(|p| p.shelld_session_id())
+                .collect();
+            let mut window_changed = false;
+            for sid in sids {
+                if self.resolve_pane_cwd(sid) {
+                    window_changed = true;
+                }
+            }
+            if window_changed {
+                win!(self, wi).needs_render = true;
+                changed = true;
+            }
+        }
+        // `last_cwd` in the saved state feeds the respawn cwd on cold
+        // boot, so a move wants persisting — but rate-limited, since a
+        // cd-ing script must not turn into one fsync per second.
+        if changed && self.last_cwd_save.elapsed() >= CWD_SAVE_MIN_GAP {
+            self.last_cwd_save = Instant::now();
+            self.save_session_state();
+        }
     }
 
     /// F3+6 — snapshot every persistable bit of state to
@@ -3378,36 +3515,6 @@ impl CoreApp {
                 "core.state_file.write_failed",
                 &format!("{e}; saved state not persisted this tick")
             );
-        }
-    }
-
-    /// F3+5 — fill `pane_cwds` for any pane that doesn't yet have an
-    /// entry cached.  Called at the top of `build_views` so the title
-    /// strip placeholder always reads a populated value (modulo
-    /// genuinely-failing fetches: pid not yet written, sandbox, etc).
-    /// O(panes) with HashMap.contains_key on the hot path; the
-    /// syscall only fires for the misses, which on a stable session
-    /// = zero per frame after the first.
-    fn lazy_fill_missing_cwds(&mut self, wi: usize) {
-        let mut filled = false;
-        for i in 0..win!(self, wi).panes.len() {
-            let Some(sid) = win!(self, wi).panes[i].shelld_session_id() else { continue };
-            if self.pane_cwds.contains_key(&sid) { continue; }
-            // F3+5.1 — `force=false`: paired with the now-always-bumped
-            // debounce clock in `refresh_pane_cwd_for`, this means a
-            // pane that hasn't filled yet retries at most every
-            // `CWD_REFRESH_DEBOUNCE`, not every frame.  Steady state
-            // (all populated) skips entirely via contains_key above.
-            if self.refresh_pane_cwd_for(wi, i, false) && self.pane_cwds.contains_key(&sid) {
-                filled = true;
-            }
-        }
-        // F3+6 — once we successfully ingested at least one fresh cwd,
-        // persist immediately so the saved file isn't empty after the
-        // very first frame's worth of fills.  No-op when nothing was
-        // actually filled (steady state skips above).
-        if filled {
-            self.save_session_state();
         }
     }
 
@@ -4312,15 +4419,17 @@ impl CoreApp {
                 spawn_l3_pane_async(cols, rows, id, &self.event_tx)
             }) {
                 Ok(pane) => {
+                    let new_sid = pane.shelld_session_id();
                     win!(self, wi).panes.push(pane);
-                    // F3+5 — initial cwd pull for the new pane so the
-                    // title strip lands populated on its first paint.
+                    // One-shot resolve so the title strip lands
+                    // populated on the new pane's first paint instead
+                    // of showing its ordinal until the next sweep.
                     // shell_child_pid may not be written yet on this
-                    // very tick — `refresh_pane_cwd_for` silently
-                    // returns false, and the build_views lazy-fill
-                    // catches it on a later frame.
-                    let new_idx = win!(self, wi).panes.len() - 1;
-                    self.refresh_pane_cwd_for(wi, new_idx, true);
+                    // very tick — then this is a no-op and the sweep
+                    // picks the pane up within CWD_SWEEP_INTERVAL.
+                    if let Some(sid) = new_sid {
+                        self.resolve_pane_cwd(sid);
+                    }
                     self.save_session_state();
                 }
                 Err(e) => lx_error!("core.spawn.l3_failed", &format!("{e}")),
@@ -4468,9 +4577,9 @@ impl CoreApp {
         }
         // F3+5 — drop cached cwd state so it can't leak past the pane.
         // The same id may eventually be reused; a fresh pane gets a
-        // fresh refresh.
+        // fresh resolve.
         self.pane_cwds.remove(&id);
-        self.last_cwd_refresh.remove(&id);
+        self.shell_child_pids.remove(&id);
         self.pane_badges.remove(&id);
         self.pane_titles.remove(&id);
         self.esc_history.remove(&id);
@@ -5587,14 +5696,11 @@ impl CoreApp {
             if predicted {
                 win!(self, wi).needs_render = true;
             }
-            // F3+5 — Enter pressed → shell about to execute a line
-            // (potentially `cd`).  Debounced refresh keeps a multi-
-            // line paste collapsed to one syscall.  Carriage return
-            // OR linefeed both count (modes may emit either).
-            if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
-                let focused = win!(self, wi).focused_idx;
-                self.refresh_pane_cwd_for(wi, focused, false);
-            }
+            // No cwd refresh here on purpose: an Enter fires *before*
+            // the shell has run the line it submits, so reading the cwd
+            // on Enter can only ever report the directory the pane was
+            // in before the `cd`.  `sweep_pane_cwds` reads it after the
+            // fact instead.
         }
     }
 
@@ -6574,10 +6680,17 @@ impl CoreApp {
                 win!(self, wi).pending_grid_cols = win!(self, wi).grid_cols;
                 win!(self, wi).pending_grid_rows = win!(self, wi).grid_rows;
                 self.reset_card_slots(wi);
-                // F3+3.6 — pull-fetch each pane's cwd on the
-                // open transition so the modal preview + the
-                // title-strip placeholder show fresh values.
-                self.refresh_pane_cwds(wi);
+                // Resolve every pane on the open transition so the
+                // modal preview shows values fetched now, not up to
+                // CWD_SWEEP_INTERVAL old.
+                let sids: Vec<u64> = win!(self, wi)
+                    .panes
+                    .iter()
+                    .filter_map(|p| p.shelld_session_id())
+                    .collect();
+                for sid in sids {
+                    self.resolve_pane_cwd(sid);
+                }
             }
             win!(self, wi).layout_modal_open = !win!(self, wi).layout_modal_open;
             win!(self, wi).layout_drag = None;
@@ -6789,11 +6902,6 @@ impl CoreApp {
                 self.resolve_pending_on_defocus(wi, idx);
                 win!(self, wi).focused_idx = idx;
                 let _ = win!(self, wi).focused_pane_mut().snap_to_live();
-                // F3+5 — focus change = "user is looking at this pane
-                // right now"; refresh its cwd so the title strip stays
-                // current.  Debounced per-sid (cheap when same pane is
-                // focused twice in a row).
-                self.refresh_pane_cwd_for(wi, idx, false);
                 win!(self, wi).needs_render = true;
             }
         }
@@ -6829,7 +6937,6 @@ impl CoreApp {
         if idx != win!(self, wi).focused_idx {
             self.resolve_pending_on_defocus(wi, idx);
             win!(self, wi).focused_idx = idx;
-            self.refresh_pane_cwd_for(wi, idx, false);
         }
         if win!(self, wi).panes[idx].snap_to_live() {
             win!(self, wi).needs_render = true;
@@ -7225,16 +7332,12 @@ impl CoreApp {
         let states: Vec<SessionState> =
             win!(self, wi).panes.iter().map(|p| p.session().state()).collect();
 
-        // F3+5 — title placeholder = basename of the cwd cached in
-        // `pane_cwds`.  Population strategy is hybrid passive:
-        // (1) pane spawn, (2) focus change, (3) Enter key in focused
-        // pane, (4) LayoutModal open (all panes), (5) `lazy_fill_missing_cwds`
-        // here at the top of build_views as a tail-of-conditions
-        // fallback — if anything else missed it, this catches it on
-        // the first paint.  Cost: HashMap.contains_key per pane (no
-        // syscall) on the steady-state hot path; one proc_pidinfo
-        // syscall only on a miss.
-        self.lazy_fill_missing_cwds(wi);
+        // Title placeholder = basename of the cwd cached in
+        // `pane_cwds`.  Pure read: `sweep_pane_cwds` owns population
+        // (once per CWD_SWEEP_INTERVAL from the main loop's periodic
+        // block, plus a one-shot resolve at pane spawn and on
+        // LayoutModal open).  Nothing here may issue a syscall — this
+        // runs per frame, per window.
         let cwd_basenames: Vec<Option<&str>> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 let sid = win!(self, wi).panes[i].shelld_session_id()?;
@@ -8118,9 +8221,13 @@ fn main() {
         pending_to_shell: Vec::new(),
         pane_sessions: std::collections::HashMap::new(),
         esc_history: std::collections::HashMap::new(),
-        last_cwd_refresh: std::collections::HashMap::new(),
+        shell_child_pids: std::collections::HashMap::new(),
+        // Both clocks start "already due" so the first main-loop
+        // iteration resolves every pane's cwd (boot titles land on the
+        // first paint) and the first change it finds is persisted.
+        last_cwd_sweep: Instant::now() - CWD_SWEEP_INTERVAL,
+        last_cwd_save: Instant::now() - CWD_SAVE_MIN_GAP,
         reconnecting: std::collections::HashSet::new(),
-        cwd_unresolvable: std::collections::HashMap::new(),
         all_exited: false,
         saw_window_aware_attach: false,
         l3_mode,
@@ -8323,6 +8430,13 @@ fn main() {
                 win!(app, wi).needs_render = true;
             }
         }
+        //   3) re-read every pane's shell cwd every
+        //      CWD_SWEEP_INTERVAL so the title-strip placeholder
+        //      follows `cd` on its own clock — the keyboard cannot
+        //      tell us a directory changed (see CWD_SWEEP_INTERVAL).
+        //      Interval-gated inside, and only repaints the windows
+        //      whose cwds actually moved.
+        app.sweep_pane_cwds();
         // Drain pending control-socket events.  Attach coalescing:
         // keep only the latest SurfaceAttach *per window* (resize
         // fires fast in a live drag — old attach payloads are stale by

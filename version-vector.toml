@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.30"  # CaretRect 按帧里的 window id 路由 —— 多窗口下 IME 候选框回到各自光标底下;详见 CHANGELOG.md
-core    = "0.12.63"  # 清空 session 槽前先试 A.3 目录锁,锁被占就留 vacant —— 不再 unlink 活 L3 的 sock;详见 CHANGELOG.md
+core    = "0.12.64"  # pane title 的 cwd 占位符改 1 秒周期扫描 —— 不再挂在 Enter 键上落后一条命令;详见 CHANGELOG.md
 session = "0.11.30"  # 可达性哨兵查完整契约:entry 没了 / sock 被 unlink / entry 改名到别的 pid 都自杀;详见 CHANGELOG.md
