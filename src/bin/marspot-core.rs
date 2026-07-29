@@ -7646,6 +7646,48 @@ fn assemble_panes_at_boot(
             panes.push(Pane::new_vacant(spawn_sid, boot_cols, boot_rows));
             continue;
         }
+        // …but only once we know nobody is living there.  The two
+        // unlinks below are what make a session reachable, and doing
+        // them under a running L3 strands it for good: its listener fd
+        // stays bound to a path that no longer exists, so no future
+        // core can dial it and its own deadman (which only watched
+        // entry.toml) saw nothing wrong.  Seven sessions were found in
+        // exactly that state on 2026-07-29 — an L3 mid-execv had not
+        // yet rewritten entry.toml when this boot scanned the
+        // registry, so it never made `alive_ids`, and we cleaned the
+        // slot out from under a live process.
+        //
+        // The A.3 dir lock is the right authority here precisely
+        // because it does not depend on the registry being current: it
+        // is held for the owner's whole life, survives execv, and
+        // releases only on process death.  `alive_ids` answers "was
+        // there a valid entry when we scanned"; this answers "is
+        // anyone home right now".
+        let dir_is_occupied = match marspot_term::session_registry::try_lock_session_dir(spawn_sid)
+        {
+            // Free — drop it straight away so the L3 we spawn takes
+            // ownership itself.
+            Ok(lock) => {
+                std::mem::drop(lock);
+                false
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+            // Couldn't even attempt the lock (IO error).  Don't let a
+            // lock problem block session bootstrap — fall through to
+            // the old behaviour.
+            Err(_) => false,
+        };
+        if dir_is_occupied {
+            lx_warn!(
+                "core.boot.slot_occupied",
+                "another process still owns this session dir — leaving the slot vacant \
+                 instead of unlinking a live L3's socket",
+                session = spawn_sid
+            );
+            claimed.insert(spawn_sid);
+            panes.push(Pane::new_vacant(spawn_sid, boot_cols, boot_rows));
+            continue;
+        }
         let _ = std::fs::remove_file(
             marspot_term::session_registry::session_entry_path(spawn_sid),
         );

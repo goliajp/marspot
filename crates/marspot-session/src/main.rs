@@ -1411,7 +1411,24 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     // 2026-07-28 and helped push the machine into a forced reboot.
     // So: entry gone → exit.  Checked at most every 5 s off the
     // existing recv timeout — a stat(2), nothing on the byte path.
+    //
+    // 2026-07-29 — the entry is not the only way to become
+    // unreachable, and the original check missed the other two.  Seven
+    // sessions were found alive with their listener fd still bound and
+    // their socket file unlinked out from under them: L2's fresh-spawn
+    // path (`marspot-core.rs`, the `remove_file(entry) +
+    // cleanup_stale_socket` pair) clears a slot before spawning into
+    // it, and if that spawn never lands — or the core dies first, as
+    // it did that morning — the incumbent is left holding a socket
+    // nobody can dial.  A replacement L3 that *does* land is the third
+    // case: it rewrites entry.toml with its own pid, and from that
+    // moment this process is the stale one.
+    //
+    // All three are the same condition — "nobody can reach me" — so
+    // check the whole reachability contract, not just one file of it.
     let my_entry_path = marspot_term::session_registry::session_entry_path(session.id());
+    let my_socket_path = marspot_term::session_registry::session_socket_path(session.id());
+    let my_pid = std::process::id() as i32;
     let mut last_entry_check = Instant::now();
     const ENTRY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
     loop {
@@ -1425,11 +1442,25 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         };
         if last_entry_check.elapsed() >= ENTRY_CHECK_INTERVAL {
             last_entry_check = Instant::now();
-            if !my_entry_path.exists() {
+            let unreachable = if !my_entry_path.exists() {
+                Some("entry.toml removed")
+            } else if !my_socket_path.exists() {
+                Some("socket unlinked")
+            } else {
+                match marspot_term::session_registry::read_session_entry(session.id()) {
+                    // Someone else owns this sid now.  Note we do NOT
+                    // exit on a read error: a torn read of an entry
+                    // being rewritten must not look like eviction.
+                    Ok(e) if e.pid != my_pid => Some("entry reassigned to another pid"),
+                    _ => None,
+                }
+            };
+            if let Some(reason) = unreachable {
                 lx_event!(
                     "SESSION_REGISTRY_GONE",
-                    "registry entry removed — this session is unreachable; exiting",
-                    session_id = session.id()
+                    "this session is unreachable; exiting",
+                    session_id = session.id(),
+                    reason = reason
                 );
                 break;
             }
