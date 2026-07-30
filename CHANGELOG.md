@@ -28,7 +28,32 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.33**
+Current: **0.7.34**
+
+### 0.7.34
+
+pane status 的第一层:pidtree 现在认得「这个 pane 前台是谁」。
+
+`proc_bsdinfo` 里本来就有 `pbi_pgid`(进程自己的 group)、`e_tdev`
+(控制终端)、`e_tpgid`(该终端的**前台** group,等于对着那个 tty 调
+`tcgetpgrp()`)。`list_all_procs` 每个 pid 都已经在取这个 struct,只是
+从来没读这三个字段 —— 所以 `pane_foreground(shell_pid, &procs)` 是
+**零新增 syscall**,一次 proc 表扫描喂所有 pane。
+
+判据:tty 前台 group == shell 自己的 group ⟺ zsh 停在提示符;否则是
+作业在前台,取 group leader(pid == pgid;leader 已退出但 group 还在时
+退到该 group 里最老的成员)。同 pgid 号在别的 tty 上也会出现,所以匹配
+必须带 `tty_dev` —— 不带就会把隔壁 pane 的作业算成自己的。
+
+这一层**不需要 shell 配合**:zsh 什么都不用装,已经能分辨「在提示符 /
+在跑 claude / 在跑 cargo」。它也刻意不认识任何具体程序 —— 插件层
+(claudecode 读 jsonl)在 `Job` 之上细化,这里不长那种知识。
+
+实测 18 个 pane:10 个 `Job`、8 个 `AtPrompt`,leader pid 与 `ps` 里的
+claude pid 一一对上。顺带量到一件事:claude 的 `pbi_comm` 是
+**`2.1.220`**(它 exec 的是版本号命名的文件),不是 `claude` —— 想知道
+「这是哪个程序」必须读 `proc_cmdline`,`comm` 只能当粗标签。这条写进
+了 `leader_comm` 的文档,免得下一个消费者踩。
 
 ### 0.7.33
 
@@ -853,7 +878,13 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.68**
+Current: **0.12.69**
+
+### 0.12.69
+
+只重编:`pidtree::ProcRow` 加了 `pgid` / `tty_dev` / `tty_fg_pgid`
+三个字段(见 L1 0.7.34)。core 侧行为不变 —— process panel 用 `comm`
+和树形结构,不读这三个。bump 的理由同 0.12.67。
 
 ### 0.12.68
 
