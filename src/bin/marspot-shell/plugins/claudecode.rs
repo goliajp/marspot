@@ -142,6 +142,10 @@ pub struct ClaudecodePlugin {
     /// Richer per-binding meta we need to act on a badge click:
     /// profile number, sessionId, and the live claude pid.
     last_meta: HashMap<u64, BindMeta>,
+    /// Previous tick's `shelld_session_id → "<fg|bg>,<activity>"`, so
+    /// `cc_status.changed` is transition-only.  Pruned every tick to
+    /// the sessions still reporting.
+    last_activity: HashMap<u64, String>,
     /// RFC-003 C7 auto-retry monitor: one entry per shelld session
     /// currently running claudecode.  Created when a session first
     /// binds, dropped when the bind goes away.  See `MonitorState`.
@@ -525,6 +529,7 @@ impl ClaudecodePlugin {
             shelld: None,
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
+            last_activity: HashMap::new(),
             monitors: HashMap::new(),
             monitor_unsupported: false,
             worker: None,
@@ -1225,6 +1230,46 @@ impl Plugin for ClaudecodePlugin {
                     }
                 }
             }
+            // cc status transitions.  Logged on the main side because
+            // that is where the previous tick's map lives — and where
+            // the generic layer can be asked, which the worker thread
+            // has no host to do.
+            //
+            // The two layers are reported together on purpose: the
+            // generic one answers "does claude own the pane's keyboard"
+            // (a suspended or backgrounded claude reads as `bg` even
+            // while its jsonl says it was mid-turn), the cc one answers
+            // "what is it doing in there".  Neither is derivable from
+            // the other.
+            for (sid, activity) in &result.new_activity {
+                let fg = match host.pane_status(*sid) {
+                    Ok(Some(marspot::pidtree::PaneForeground::Job { .. })) => "fg",
+                    Ok(Some(marspot::pidtree::PaneForeground::AtPrompt)) => "bg",
+                    // No entry yet / no controlling tty / the sweep
+                    // can't say.  Not "fg", not "bg" — unknown.
+                    _ => "fg?",
+                };
+                let next = format!("{},{}", fg, activity.describe());
+                let prev = self.last_activity.get(sid);
+                if prev.map(|p| p != &next).unwrap_or(true) {
+                    host.log(
+                        LogLevel::Info,
+                        "cc_status.changed",
+                        &format!(
+                            "shelld_session={} {} → {}",
+                            sid,
+                            prev.map(|s| s.as_str()).unwrap_or("-"),
+                            next
+                        ),
+                    );
+                }
+                self.last_activity.insert(*sid, next);
+            }
+            // Sessions that stopped reporting (claude exited, pane
+            // closed) drop out — same bound-by-construction rule the
+            // generic sweep follows.
+            self.last_activity
+                .retain(|sid, _| result.new_activity.contains_key(sid));
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;
         }
@@ -1339,10 +1384,99 @@ impl Plugin for ClaudecodePlugin {
 // ============================================================
 
 /// What `WorkerCtx::scan_once` returns to `tick`.  Owned, Send-safe.
+/// What claudecode is doing in a pane — the cc-specific layer sitting
+/// on top of the generic `PaneForeground` (which only knows "a job owns
+/// this tty").  Read off the session jsonl's last record, whose shapes
+/// were taken from a live transcript rather than guessed:
+///
+/// ```text
+/// {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use",…}]}}
+/// {"type":"user",     "message":{"role":"user",     "content":[{"type":"tool_result",…}]}}
+/// {"type":"assistant","message":{"role":"assistant","content":[{"type":"text"|"thinking",…}]}}
+/// ```
+///
+/// The distinction that matters to anything acting on this: only
+/// `AwaitingUser` means nothing is in flight.  Every other variant —
+/// including `Unknown` — has to be treated as "do not touch this pane".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CcActivity {
+    /// The assistant's turn ended with a message; the prompt belongs
+    /// to the user now.
+    AwaitingUser,
+    /// A tool call is outstanding — the last record asks for one and
+    /// no result followed it.  `executing` is best-effort: true when
+    /// claude has a child process younger than that record (the tool
+    /// is running), false when it has none (so claude is most likely
+    /// parked on the approval prompt).  Both mean "in flight"; the
+    /// split is for the log, not for permission.
+    ToolPending { executing: bool },
+    /// A turn is being produced: the last record is the user's message
+    /// or a tool result, so the assistant is the one who owes the next
+    /// record.
+    Working,
+    /// Tail unreadable, or a record shape this doesn't model.  Not a
+    /// synonym for idle.
+    Unknown,
+}
+
+impl CcActivity {
+    fn describe(self) -> &'static str {
+        match self {
+            CcActivity::AwaitingUser => "awaiting_user",
+            CcActivity::ToolPending { executing: true } => "tool_executing",
+            CcActivity::ToolPending { executing: false } => "tool_awaiting_approval",
+            CcActivity::Working => "working",
+            CcActivity::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classify a session's last jsonl record.  Split from the file read so
+/// the shape rules are testable against literal records.
+///
+/// `has_young_child` answers "does claude have a process younger than
+/// this record" — the caller resolves it from the proc table it already
+/// walked, since a tool that shells out shows up as a child of claude
+/// while an approval prompt shows nothing.
+fn activity_from_last_record(line: &str, has_young_child: bool) -> CcActivity {
+    let kind = {
+        let key = "\"type\":\"";
+        match line.find(key).map(|i| &line[i + key.len()..]) {
+            Some(rest) => match rest.find('"') {
+                Some(end) => &rest[..end],
+                None => return CcActivity::Unknown,
+            },
+            None => return CcActivity::Unknown,
+        }
+    };
+    match kind {
+        // The record's own `"type"` comes first in every claudecode
+        // record, so the inner content types below can be searched for
+        // anywhere in the line without ambiguity.
+        "assistant" => {
+            if line.contains("\"type\":\"tool_use\"") {
+                CcActivity::ToolPending { executing: has_young_child }
+            } else {
+                CcActivity::AwaitingUser
+            }
+        }
+        // A user record is either a real prompt or the transcript's
+        // record of a tool result; both leave the assistant owing the
+        // next record.
+        "user" => CcActivity::Working,
+        // `system` records (hooks, notices, local-command output) say
+        // nothing about whose turn it is.
+        _ => CcActivity::Unknown,
+    }
+}
+
 struct ScanResult {
     /// `shelld_session_id → badge string ("P<n> <uuid>")`.  Replaces
     /// `last_mapping` on the main side every time it arrives.
     new_mapping: HashMap<u64, String>,
+    /// `shelld_session_id → what cc is doing there`.  Diffed against
+    /// `last_activity` on the main side so only transitions are logged.
+    new_activity: HashMap<u64, CcActivity>,
     /// `shelld_session_id → BindMeta`.  Drives `on_pane_badge_click`'s
     /// profile-cycle dispatch on the main side.
     new_meta: HashMap<u64, BindMeta>,
@@ -1548,6 +1682,7 @@ impl WorkerCtx {
         // -- per-session mapping: BFS each shelld session ------------
         let mut new_mapping: HashMap<u64, String> = HashMap::new();
         let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
+        let mut new_activity: HashMap<u64, CcActivity> = HashMap::new();
         let sessions = match self.shelld.list_sessions() {
             Ok(v) => v,
             Err(e) => {
@@ -1556,7 +1691,7 @@ impl WorkerCtx {
                     "tick.shelld_list_failed",
                     format!("{e}"),
                 ));
-                return ScanResult { new_mapping, new_meta, log_lines };
+                return ScanResult { new_mapping, new_meta, new_activity, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
@@ -1666,6 +1801,29 @@ impl WorkerCtx {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
+            // cc-layer status.  The generic layer already said a job
+            // owns this tty (that is how we found claude at all); this
+            // says what claude is doing inside it.  A tool that shells
+            // out appears as a process under claude younger than the
+            // record that asked for it, which is what separates "the
+            // tool is running" from "claude is parked on the approval
+            // prompt" — long-lived children (MCP servers, started with
+            // the session) are older than the record and don't count.
+            if let Some(path) = jsonl_path.as_ref() {
+                let record_at = fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let has_young_child = pidtree::descendants_of(f.claude_pid, &procs)
+                    .iter()
+                    .any(|d| d.start_unix >= record_at);
+                new_activity.insert(
+                    f.shelld_sid,
+                    tail_activity(path, has_young_child),
+                );
+            }
             new_mapping.insert(f.shelld_sid, badge);
             new_meta.insert(
                 f.shelld_sid,
@@ -1683,7 +1841,7 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
-        ScanResult { new_mapping, new_meta, log_lines }
+        ScanResult { new_mapping, new_meta, new_activity, log_lines }
     }
 
     /// Reverse-lookup: encoded project dir → newest known session
@@ -2281,6 +2439,114 @@ mod tests {
         assert!(parse_session_id(&path).is_none());
     }
 
+    // ── cc activity classification ────────────────────────────────
+    // The literals below are trimmed copies of real records from a
+    // live transcript (`~/.claude/projects/…/<uuid>.jsonl`), not
+    // invented shapes — the whole classification rests on where
+    // `"type"` appears, so a guessed shape would test nothing.
+
+    const REC_TOOL_USE: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}"#;
+    const REC_TEXT: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#;
+    const REC_THINKING: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"…"}]}}"#;
+    const REC_TOOL_RESULT: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#;
+    const REC_USER_TEXT: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"go on"}]}}"#;
+    const REC_SYSTEM: &str = r#"{"type":"system","subtype":"local_command","content":"<local-command-stdout>"}"#;
+
+    /// An assistant turn that ended with a message is the one state
+    /// where nothing is in flight.
+    #[test]
+    fn activity_assistant_message_is_awaiting_user() {
+        assert_eq!(
+            activity_from_last_record(REC_TEXT, false),
+            CcActivity::AwaitingUser
+        );
+        assert_eq!(
+            activity_from_last_record(REC_THINKING, false),
+            CcActivity::AwaitingUser
+        );
+    }
+
+    /// A tool call with nothing after it: running when claude has a
+    /// child younger than the record, parked on the approval prompt
+    /// when it has none.  Both are "in flight" — the split is for the
+    /// log line, and neither may be read as idle.
+    #[test]
+    fn activity_tool_use_splits_on_whether_a_child_is_running() {
+        assert_eq!(
+            activity_from_last_record(REC_TOOL_USE, true),
+            CcActivity::ToolPending { executing: true }
+        );
+        assert_eq!(
+            activity_from_last_record(REC_TOOL_USE, false),
+            CcActivity::ToolPending { executing: false }
+        );
+        assert_ne!(
+            activity_from_last_record(REC_TOOL_USE, false),
+            CcActivity::AwaitingUser,
+            "an unanswered tool call is never idle — this is the case \
+             that makes killing claude lose a pending call"
+        );
+    }
+
+    /// Both user-record flavours (a real prompt, and the transcript's
+    /// record of a tool result) leave the assistant owing the next
+    /// record.
+    #[test]
+    fn activity_user_records_mean_the_assistant_owes_a_turn() {
+        assert_eq!(
+            activity_from_last_record(REC_USER_TEXT, false),
+            CcActivity::Working
+        );
+        assert_eq!(
+            activity_from_last_record(REC_TOOL_RESULT, false),
+            CcActivity::Working
+        );
+    }
+
+    /// Anything not modelled reads as Unknown, which callers treat as
+    /// "in flight" — never as idle.
+    #[test]
+    fn activity_unmodelled_shapes_are_unknown_not_idle() {
+        for line in [REC_SYSTEM, "", "not json at all", r#"{"no_type":1}"#] {
+            let got = activity_from_last_record(line, false);
+            assert_eq!(got, CcActivity::Unknown, "line: {line}");
+        }
+    }
+
+    /// `describe` is what lands in the log, so pin the strings — they
+    /// are what a future reader greps for.
+    #[test]
+    fn activity_describe_strings_are_stable() {
+        assert_eq!(CcActivity::AwaitingUser.describe(), "awaiting_user");
+        assert_eq!(
+            CcActivity::ToolPending { executing: true }.describe(),
+            "tool_executing"
+        );
+        assert_eq!(
+            CcActivity::ToolPending { executing: false }.describe(),
+            "tool_awaiting_approval"
+        );
+        assert_eq!(CcActivity::Working.describe(), "working");
+        assert_eq!(CcActivity::Unknown.describe(), "unknown");
+    }
+
+    /// End-to-end through the file read, including the "last line
+    /// wins" rule.
+    #[test]
+    fn tail_activity_classifies_the_final_record_of_a_file() {
+        let path = tmpfile(&format!(
+            "{REC_USER_TEXT}\n{REC_TOOL_USE}\n{REC_TOOL_RESULT}\n{REC_TEXT}\n"
+        ));
+        assert_eq!(tail_activity(&path, false), CcActivity::AwaitingUser);
+        let path = tmpfile(&format!("{REC_TEXT}\n{REC_TOOL_USE}\n"));
+        assert_eq!(
+            tail_activity(&path, false),
+            CcActivity::ToolPending { executing: false }
+        );
+        let missing = PathBuf::from("/nonexistent/marspot-cc-activity.jsonl");
+        assert_eq!(tail_activity(&missing, false), CcActivity::Unknown);
+    }
+
     #[test]
     fn tail_last_message_type_reads_final_record() {
         let path = tmpfile(concat!(
@@ -2357,6 +2623,35 @@ mod tests {
 /// the last 32 KiB of the file and looks at the last `\n`-separated
 /// record's `"type":"…"` field.  Returns None if the file is malformed
 /// or has no recognisable type.
+/// Read a session's last record and classify it.  Same 32 KB tail
+/// window as `tail_last_message_type`; the record we need is the last
+/// line, and a single record over 32 KB (a huge tool result) reads as
+/// `Unknown`, which the caller must already treat as "in flight".
+fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 32 * 1024;
+    let Ok(mut f) = fs::File::open(path) else {
+        return CcActivity::Unknown;
+    };
+    let Ok(md) = f.metadata() else {
+        return CcActivity::Unknown;
+    };
+    let len = md.len();
+    let start = len.saturating_sub(TAIL);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return CcActivity::Unknown;
+    }
+    let mut buf = Vec::with_capacity(TAIL as usize);
+    if f.read_to_end(&mut buf).is_err() {
+        return CcActivity::Unknown;
+    }
+    let s = String::from_utf8_lossy(&buf);
+    match s.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(last) => activity_from_last_record(last, has_young_child),
+        None => CcActivity::Unknown,
+    }
+}
+
 fn tail_last_message_type(path: &PathBuf) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 32 * 1024;

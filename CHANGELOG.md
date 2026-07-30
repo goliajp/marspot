@@ -28,7 +28,38 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.36**
+Current: **0.7.37**
+
+### 0.7.37
+
+pane status 的 cc 层:claude 在那个 pane 里到底在干嘛。
+
+通用层(0.7.34/0.7.35)只知道「有作业占着这个 tty」。cc 层从 session
+jsonl 的**最后一条记录**细化:
+
+| 末条记录 | 结论 |
+|---|---|
+| assistant + `text`/`thinking` | `awaiting_user` —— 轮次结束,球在用户脚下 |
+| assistant + `tool_use`,后面没东西 | `tool_executing` / `tool_awaiting_approval` |
+| user(真提示词 **或** tool_result) | `working` —— assistant 欠下一条记录 |
+| 其它(system / 读不到 / 单条超 32KB) | `unknown` |
+
+**只有 `awaiting_user` 表示「没有东西在飞」**,其余全部(含 `unknown`)
+都必须按「别碰这个 pane」对待 —— 这条写在类型的文档里,因为第一个消费者
+就是要拿它决定能不能杀 claude。
+
+`tool_use` 那条的二分靠进程:工具真在跑时,claude 底下会有一个**比那条
+记录年轻**的子进程;停在批准提示上则一个都没有。长命子进程(MCP server,
+随 session 一起起来的)比记录老,不会误判。用的是扫描器本来就走过的那张
+proc 表,没有新增开销。
+
+记录形状是从真实 transcript 里抄的,不是猜的 —— 分类完全押在 `"type"`
+出现的位置上,形状猜错测了等于没测。6 个新单测。
+
+日志同通用层:只在变化时落 `plugin.claudecode.cc_status.changed`,写成
+`<fg|bg>,<activity>` 两层一起报 —— 通用层答「claude 是不是占着键盘」
+(被 Ctrl-Z 挂起 / 退到后台的 claude 读作 `bg`,哪怕 jsonl 还停在半轮),
+cc 层答「它在里面干嘛」,互相推不出来。
 
 ### 0.7.36
 
