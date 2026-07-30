@@ -198,6 +198,19 @@ impl From<std::io::Error> for PluginError {
     }
 }
 
+/// What `PluginHost::pane_status` answers with.
+///
+/// `quiescent` is the decision surface and the only field a policy
+/// should branch on: it means the machine has held a quiet state long
+/// enough to be believed (see `pane_state::CONFIRM_TICKS`).  `status`
+/// and `held` are for display and logs.
+#[derive(Clone, Debug)]
+pub struct PaneStatusView {
+    pub status: marspot::pane_state::PaneStatus,
+    pub held: Duration,
+    pub quiescent: bool,
+}
+
 /// One PTY child observed by `pane_pty_pid_tree`.
 #[derive(Clone, Debug)]
 pub struct PtyChild {
@@ -217,34 +230,39 @@ pub trait PluginHost: Send + Sync {
     fn pane_pty_device(&self, pane: usize) -> Result<Option<PathBuf>, PluginError>;
     fn pane_pty_pid_tree(&self, pane: usize) -> Result<Vec<PtyChild>, PluginError>;
 
-    /// Generic foreground status of the pane backing
-    /// `shelld_session_id`, plus how long that status has been true.
-    /// Sampled by the shell once per second — the same value for every
-    /// caller in a tick, so a plugin may call it per pane without
-    /// multiplying syscalls.
+    /// The pane's composed state — the kernel's view of the pane
+    /// folded with whatever plugins have reported about it — plus how
+    /// long it has held and whether it is safe to act on.
     ///
-    /// The duration is the actionable half: "at a prompt" says nothing
-    /// on its own, "at a prompt for two hours" is a fact a policy can
-    /// be built on.  It measures the *state*, not the sweep — an
-    /// unchanged status keeps the stamp it was first seen with.
+    /// `Ok(None)` = no machine for that session (it just appeared, or
+    /// it is gone).  That is NOT "quiet": a caller deciding whether to
+    /// touch a pane reads `quiescent` and nothing else.
     ///
-    /// `Ok(None)` means the sweep has no entry for that session (it
-    /// just appeared, or it is gone).  That is NOT "idle": a caller
-    /// deciding whether a pane is safe to act on must treat both
-    /// `None` and `PaneForeground::Unknown` as "no information".
-    ///
-    /// This is deliberately program-agnostic.  A plugin that knows the
-    /// foreground program refines `Job` itself (claudecode reads the
-    /// session's jsonl); the host will not grow per-program states.
+    /// Sampled by the shell once per second, so a plugin may call this
+    /// per pane without multiplying syscalls.
     fn pane_status(
         &self,
         _shelld_session_id: u64,
-    ) -> Result<
-        Option<(marspot::pidtree::PaneForeground, std::time::Duration)>,
-        PluginError,
-    > {
+    ) -> Result<Option<PaneStatusView>, PluginError> {
         Ok(None)
     }
+
+    /// Report what the program this plugin understands is doing in a
+    /// pane.  The shell folds it with the kernel's view; a plugin does
+    /// not compose the two itself, and does not decide what is
+    /// actionable.
+    ///
+    /// Reporting `Activity::Absent` is meaningful — it says "my
+    /// program is not in this pane", which is different from staying
+    /// silent.
+    fn report_pane_activity(
+        &self,
+        _shelld_session_id: u64,
+        _activity: marspot::pane_state::Activity,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
     fn pane_focused(&self) -> Option<usize>;
 
     // ── Persistence(PERSIST_STATE) ───────────────────────────────

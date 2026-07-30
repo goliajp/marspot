@@ -963,7 +963,13 @@ struct ShellApp {
     /// tick and published to `plugin_host` so plugins read a snapshot.
     /// The pane-status layer that knows about specific programs lives
     /// in the plugins on top of this one.
-    pane_status: pane_status::PaneStatusTracker,
+    pane_status: pane_status::PaneStateTracker,
+    /// Plugin → shell reports of what the program in a pane is doing.
+    /// Drained at the top of each supervisor tick, straight into the
+    /// state machines.  Same shape as the badge channel: plugins push,
+    /// the main loop owns the state.
+    pane_activity_rx:
+        std::sync::mpsc::Receiver<(u64, marspot::pane_state::Activity)>,
     /// Receiver half of the channel `ShellPluginHost::set_pane_badge`
     /// pushes into; drained each `poll_supervisor` tick and forwarded
     /// to the active core as `MsgType::PaneBadge` frames.
@@ -1254,6 +1260,7 @@ impl ShellApp {
         let pane_title_tx_clone = pane_title_tx.clone();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
         let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
+        let (pane_activity_tx, pane_activity_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
             windows: vec![ShellWindow::new(
@@ -1278,11 +1285,13 @@ impl ShellApp {
                 h.attach_pane_title_tx(pane_title_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
                 h.attach_inject_input_tx(inject_input_tx);
+                h.attach_pane_activity_tx(pane_activity_tx);
                 h
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
-            pane_status: pane_status::PaneStatusTracker::new(),
+            pane_status: pane_status::PaneStateTracker::new(),
+            pane_activity_rx,
             // Mirror of `window-state.bin` as it was on disk when this
             // process started.  Load it BEFORE any window opens: the
             // first window's own save must not be allowed to shorten
@@ -2097,43 +2106,33 @@ impl ShellApp {
         }
     }
 
-    /// Re-probe every pane's foreground status (gated to
-    /// `pane_status::SWEEP_INTERVAL` inside the tracker), publish it
-    /// for plugins, and log the transitions.
-    ///
-    /// INFO, not DEBUG: the runtime default level is Info, so a DEBUG
-    /// line does not exist on a real machine — and "when did this pane
-    /// stop running something" is exactly the history the consumers of
-    /// this signal (idle policy, badges) will be argued about from.
-    /// The rate is capped by construction: one line per pane per
-    /// *change*, and a pane that sits at its prompt for an hour prints
-    /// once.
+    /// Step every pane's state machine (gated to
+    /// `pane_status::SWEEP_INTERVAL` inside the tracker), publish the
+    /// result for plugins, and log the committed transitions.
     fn sweep_pane_status(&mut self) {
-        // None = interval gate; nothing was re-probed, nothing to say.
-        let Some(transitions) = self.pane_status.sweep() else {
+        // None = interval gate; the machines weren't stepped.
+        let now = Instant::now();
+        let Some(changes) = self.pane_status.sweep(now) else {
             return;
         };
-        for t in &transitions {
+        for c in &changes {
+            // INFO, not DEBUG: the runtime default level is Info, so a
+            // DEBUG line does not exist on a real machine — and the
+            // transition history is what any future threshold gets
+            // calibrated against.  Rate is capped by construction: one
+            // line per pane per committed transition, and a pane that
+            // sits quiet for an hour prints once.
             lx_info!(
-                "shell.pane_status.changed",
-                "pane foreground changed",
-                sid = t.sid,
-                from = t
-                    .prev
-                    .as_ref()
-                    .map(pane_status::describe)
-                    .unwrap_or_else(|| "-".to_string())
-                    .as_str(),
-                // How long the previous state held.  This is the
-                // number a future idle threshold gets calibrated
-                // against, so it belongs in the record rather than in
-                // someone's estimate.
-                held_s = t.held.map(|d| d.as_secs()).unwrap_or(0),
-                to = pane_status::describe(&t.next).as_str()
+                "shell.pane_state.changed",
+                "pane state machine committed a transition",
+                sid = c.sid,
+                from = c.change.from.label().as_str(),
+                held_s = c.change.held.as_secs(),
+                to = c.change.to.label().as_str()
             );
         }
         self.plugin_host
-            .publish_pane_status(self.pane_status.snapshot());
+            .publish_pane_status(self.pane_status.snapshot(now));
     }
 
     /// Periodic check.  Fired from `user_event` (which runs every
@@ -2152,9 +2151,13 @@ impl ShellApp {
         // tick_interval_ms.  Cheap when no plugin needs to tick.
         // last_plugin_tick is reserved for future "supervisor-level
         // throttle" — MVP doesn't gate here, the registry handles it.
-        // Pane status BEFORE the plugin ticks: plugins read the value
-        // through the host, so a plugin's tick in this same round sees
-        // this round's sweep, not the previous one's.
+        // Order matters twice over: drain the plugins' activity
+        // reports first so this round's observation is built from
+        // them, then step the machines, and only then tick the plugins
+        // — which read the fresh state back through the host.
+        while let Ok((sid, activity)) = self.pane_activity_rx.try_recv() {
+            self.pane_status.report_activity(sid, activity);
+        }
         self.sweep_pane_status();
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);

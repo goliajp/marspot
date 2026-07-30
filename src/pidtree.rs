@@ -44,6 +44,26 @@ pub struct ProcRow {
     /// pane's keyboard" without opening the device.  0 / negative when
     /// there is no tty or no foreground group.
     pub tty_fg_pgid: i32,
+    /// `pbi_status` — `SRUN` / `SSLEEP` / `SSTOP` / `SZOMB`.  Comes off
+    /// the same struct as everything above.  `SSTOP` is what tells a
+    /// `^Z`-suspended job apart from one that simply is not in the
+    /// foreground, and that distinction is the difference between "this
+    /// pane is empty" and "this pane has the user's work parked in it".
+    pub status: u32,
+}
+
+impl ProcRow {
+    /// Suspended (`^Z`, `SIGSTOP`).  Not "not running" — a stopped
+    /// process holds all of its state and resumes on `fg`.
+    pub fn is_stopped(&self) -> bool {
+        self.status == libc::SSTOP
+    }
+
+    /// Exited but not yet reaped.  Counts as neither running nor
+    /// stopped; a zombie in a pane is not work in progress.
+    pub fn is_zombie(&self) -> bool {
+        self.status == libc::SZOMB
+    }
 }
 
 /// Snapshot of every running process on the host (kernel-level scan
@@ -124,7 +144,115 @@ pub fn proc_row(pid: i32) -> Option<ProcRow> {
             pgid: info.pbi_pgid as i32,
             tty_dev: info.e_tdev,
             tty_fg_pgid: info.e_tpgid as i32,
+            status: info.pbi_status,
         })
+    }
+}
+
+/// Direct children of `pid`, via `proc_listchildpids` — one syscall,
+/// no table walk.  Empty on error or when there are none.
+///
+/// The shell's direct children ARE its jobs: job control puts each one
+/// in its own process group under the shell, whether it ends up in the
+/// foreground, the background, or suspended.
+pub fn child_pids(pid: i32) -> Vec<i32> {
+    unsafe {
+        let need = libc::proc_listchildpids(pid, std::ptr::null_mut(), 0);
+        if need <= 0 {
+            return Vec::new();
+        }
+        // Slop for children forked between sizing and reading.
+        let cap = need as usize / std::mem::size_of::<libc::pid_t>() + 8;
+        let mut buf: Vec<libc::pid_t> = vec![0; cap];
+        let got = libc::proc_listchildpids(
+            pid,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            (buf.len() * std::mem::size_of::<libc::pid_t>()) as i32,
+        );
+        if got <= 0 {
+            return Vec::new();
+        }
+        buf.truncate(got as usize / std::mem::size_of::<libc::pid_t>());
+        buf.into_iter().filter(|p| *p > 0).collect()
+    }
+}
+
+/// The kernel half of a pane's state: who owns the tty, and what else
+/// the shell is holding.
+///
+/// Cost is 2 syscalls for a quiet pane (the shell's row + its child
+/// list) plus one per job, which at the shell's 1 s sweep is the same
+/// order as the cwd sweep that already runs.
+///
+/// This replaces `pane_foreground`, which could not tell an empty pane
+/// from one with a suspended job in it — both looked like "at a
+/// prompt".
+pub fn observe_pane(shell_pid: i32) -> crate::pane_state::Generic {
+    let Some(shell) = proc_row(shell_pid) else {
+        return crate::pane_state::Generic::Unknown;
+    };
+    // Only the foreground branch needs the leader, and only the
+    // shell-in-front branch needs the children — fetch each lazily so
+    // a busy pane costs 2 syscalls and a quiet one costs 2 + jobs.
+    let fg_leader = (shell.tty_fg_pgid > 0 && shell.tty_fg_pgid != shell.pgid)
+        .then(|| proc_row(shell.tty_fg_pgid))
+        .flatten();
+    let children: Vec<ProcRow> = if shell.tty_fg_pgid == shell.pgid {
+        child_pids(shell_pid).into_iter().filter_map(proc_row).collect()
+    } else {
+        Vec::new()
+    };
+    classify_pane(&shell, fg_leader.as_ref(), &children)
+}
+
+/// The classification rules, as a pure function of rows already read —
+/// so every branch is testable without arranging real jobs on a real
+/// tty (which is exactly what "a pane with a suspended job" is
+/// awkward to arrange in a unit test).
+pub fn classify_pane(
+    shell: &ProcRow,
+    fg_leader: Option<&ProcRow>,
+    children: &[ProcRow],
+) -> crate::pane_state::Generic {
+    use crate::pane_state::Generic;
+    if shell.tty_dev == 0 || shell.tty_fg_pgid <= 0 {
+        return Generic::Unknown;
+    }
+    if shell.tty_fg_pgid != shell.pgid {
+        // A job owns the tty.  Believe a leader only if it shares the
+        // pane's terminal: pids are recycled, and a stale pgid could
+        // name an unrelated process on another tty.
+        let leader = fg_leader
+            .filter(|p| p.tty_dev == shell.tty_dev && p.pid == shell.tty_fg_pgid)
+            .map(|p| JobLeader {
+                pid: p.pid,
+                comm: p.comm.clone(),
+                start_unix: p.start_unix,
+            });
+        return Generic::Foreground { pgid: shell.tty_fg_pgid, leader };
+    }
+    // The shell owns the tty.  Whether the pane is actually empty
+    // depends on what it is still holding: `^Z`-suspended jobs and
+    // `cmd &` background jobs both live on with the shell in front,
+    // and the old model could see neither.
+    let (mut stopped, mut running) = (0u16, 0u16);
+    for row in children {
+        if row.is_zombie() {
+            continue; // exited, just not reaped — not work in progress
+        }
+        if row.pgid == shell.pgid {
+            continue; // in the shell's own group, so not a job
+        }
+        if row.is_stopped() {
+            stopped = stopped.saturating_add(1);
+        } else {
+            running = running.saturating_add(1);
+        }
+    }
+    if stopped == 0 && running == 0 {
+        Generic::Idle
+    } else {
+        Generic::PromptWithJobs { stopped, running }
     }
 }
 
@@ -406,38 +534,6 @@ pub fn descendants_of(root_pid: i32, procs: &[ProcRow]) -> Vec<ProcRow> {
     out
 }
 
-/// What currently owns a pane's keyboard, derived from the kernel's
-/// own view of the PTY — no shell cooperation, no extra syscall (the
-/// fields come off the `proc_bsdinfo` `list_all_procs` already reads).
-///
-/// This is the GENERIC layer of pane status: it knows about jobs and
-/// terminals, not about what any particular job means.  A plugin that
-/// understands the foreground program (e.g. claudecode reading its
-/// jsonl) refines `Job` into program-specific states on top; nothing
-/// here may grow that knowledge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PaneForeground {
-    /// The shell's own process group owns the tty — zsh is sitting at
-    /// its prompt with nothing running.
-    AtPrompt,
-    /// A job holds the tty.  `pgid` alone is the load-bearing part —
-    /// "something the user started is running" — and it is always
-    /// known.  `leader` names that job when it can be identified;
-    /// `None` means the group owns the tty but no member of it was
-    /// readable, which is a real state (leader exited a moment ago,
-    /// or the one-pid probe path can't see the survivors).
-    Job {
-        pgid: i32,
-        leader: Option<JobLeader>,
-    },
-    /// Can't tell: the shell pid is no longer in the table (pane
-    /// exited), it has no controlling terminal, or the tty reports no
-    /// foreground group — which is a real transient state between
-    /// jobs and the steady state of an orphaned group.  Callers must
-    /// treat this as "no information", never as "idle".
-    Unknown,
-}
-
 /// The process at the head of a foreground job — what the user
 /// launched (`claude`, `vim`, `cargo`, `ssh`), not whatever it has
 /// since forked underneath.
@@ -456,97 +552,6 @@ pub struct JobLeader {
     /// gives "how long has this job held the pane" with no history
     /// kept anywhere.
     pub start_unix: u64,
-}
-
-/// Foreground status of the pane whose PTY is headed by `shell_pid`
-/// (the shelld session's `shell_child_pid` — the zsh at the top of the
-/// pane's process tree), from a pre-fetched `procs` table.
-///
-/// Pure function of the table so it is testable without spawning
-/// anything, and so one `list_all_procs()` serves every pane.  Callers
-/// that don't already hold a table want `pane_foreground_probe`, which
-/// costs 1–2 syscalls instead of one per pid on the host.
-pub fn pane_foreground(shell_pid: i32, procs: &[ProcRow]) -> PaneForeground {
-    let Some(shell) = procs.iter().find(|p| p.pid == shell_pid) else {
-        return PaneForeground::Unknown;
-    };
-    let fg = match classify_shell(shell) {
-        Ok(settled) => return settled,
-        Err(fg) => fg,
-    };
-    // The foreground group's leader is the process whose pid equals
-    // the pgid.  It can be gone while the group still owns the tty
-    // (leader exited, children outlive it), so fall back to the
-    // oldest surviving member of the group on the same tty — that is
-    // the closest thing to "the job the user started".  Matching on
-    // pgid alone would pick up another pane's job, since pgid numbers
-    // are not per-terminal.
-    let same_group = || {
-        procs
-            .iter()
-            .filter(|p| p.pgid == fg && p.tty_dev == shell.tty_dev)
-    };
-    let leader = same_group()
-        .find(|p| p.pid == fg)
-        .or_else(|| same_group().min_by_key(|p| (p.start_unix, p.pid)));
-    PaneForeground::Job {
-        pgid: fg,
-        leader: leader.map(|p| JobLeader {
-            pid: p.pid,
-            comm: p.comm.clone(),
-            start_unix: p.start_unix,
-        }),
-    }
-}
-
-/// Same answer as `pane_foreground`, without walking the host's whole
-/// process table: one `proc_pidinfo` on the shell, plus one on the
-/// foreground group leader when a job is running.
-///
-/// This is the variant a per-second sweep over N panes should use —
-/// `list_all_procs` costs a `proc_pidinfo` per pid on the box (~600 on
-/// a dev machine), which is the wrong shape to pay every second for a
-/// signal about 18 panes.  The cost is that the "leader exited but its
-/// group still owns the tty" case yields `Job { leader: None }` rather
-/// than the oldest surviving member: finding that member needs the
-/// table.  Callers that already hold one (the claudecode scan does)
-/// should use `pane_foreground` and get the better answer for free.
-pub fn pane_foreground_probe(shell_pid: i32) -> PaneForeground {
-    let Some(shell) = proc_row(shell_pid) else {
-        return PaneForeground::Unknown;
-    };
-    let fg = match classify_shell(&shell) {
-        Ok(settled) => return settled,
-        Err(fg) => fg,
-    };
-    // Group leader = the pid equal to the pgid.  Verify it shares the
-    // pane's tty before believing it: pids are recycled, and a stale
-    // pgid pointing at an unrelated process on another terminal must
-    // not be reported as this pane's job.
-    let leader = proc_row(fg)
-        .filter(|p| p.tty_dev == shell.tty_dev)
-        .map(|p| JobLeader {
-            pid: p.pid,
-            comm: p.comm,
-            start_unix: p.start_unix,
-        });
-    PaneForeground::Job { pgid: fg, leader }
-}
-
-/// Shared first half of both entry points: settle the cases that need
-/// nothing but the shell's own row.  `Ok` = final answer, `Err(pgid)` =
-/// a job owns the tty and its leader still has to be resolved.
-fn classify_shell(shell: &ProcRow) -> Result<PaneForeground, i32> {
-    // No controlling tty, or the tty has no foreground group.  Both
-    // are "no information" — a pane whose shell lost its tty is not
-    // an idle pane.
-    if shell.tty_dev == 0 || shell.tty_fg_pgid <= 0 {
-        return Ok(PaneForeground::Unknown);
-    }
-    if shell.tty_fg_pgid == shell.pgid {
-        return Ok(PaneForeground::AtPrompt);
-    }
-    Err(shell.tty_fg_pgid)
 }
 
 /// F3+1 — one node of a process tree.  Same data as `ProcRow` plus
@@ -651,6 +656,7 @@ pub fn pid_is_alive(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane_state::Generic;
 
     #[test]
     fn list_all_procs_returns_at_least_self() {
@@ -759,17 +765,21 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
-    // ── pane_foreground ───────────────────────────────────────────
-    // Synthetic tables: the whole point of `pane_foreground` being a
-    // pure function of the proc table is that these cases are
-    // reachable without arranging real jobs on a real tty.
+    // ── pane classification ───────────────────────────────────────
+    // Synthetic rows: the point of `classify_pane` being pure is that
+    // "a pane with a suspended job in it" is a case you can assert on
+    // without arranging one on a real tty.
 
     /// Pane 1's tty.  Any non-zero dev_t; the value only has to be
-    /// consistent within a table and different from other panes'.
+    /// consistent within a case and different from other panes'.
     const TTY_A: u32 = 0x1000_0011;
     const TTY_B: u32 = 0x1000_0022;
 
-    fn row(pid: i32, ppid: i32, comm: &str, pgid: i32, tty: u32, fg: i32, start: u64) -> ProcRow {
+    #[allow(clippy::too_many_arguments)]
+    fn row(
+        pid: i32, ppid: i32, comm: &str, pgid: i32, tty: u32, fg: i32, start: u64,
+        status: u32,
+    ) -> ProcRow {
         ProcRow {
             pid,
             ppid,
@@ -778,29 +788,60 @@ mod tests {
             pgid,
             tty_dev: tty,
             tty_fg_pgid: fg,
+            status,
         }
     }
 
-    /// zsh at its prompt: the tty's foreground group IS the shell's.
-    #[test]
-    fn pane_foreground_at_prompt_when_shell_owns_the_tty() {
-        let procs = vec![row(500, 400, "zsh", 500, TTY_A, 500, 1000)];
-        assert_eq!(pane_foreground(500, &procs), PaneForeground::AtPrompt);
+    fn shell(fg: i32) -> ProcRow {
+        row(500, 400, "zsh", 500, TTY_A, fg, 1000, libc::SSLEEP)
     }
 
-    /// A job in the foreground reports the job's leader, not the shell
-    /// and not the leader's children.
+    /// Nothing running and nothing held: the only shape that may be
+    /// called empty.
     #[test]
-    fn pane_foreground_reports_the_job_leader_not_its_children() {
-        let procs = vec![
-            row(500, 400, "zsh", 500, TTY_A, 600, 1000),
-            row(600, 500, "claude", 600, TTY_A, 600, 2000),
-            // A tool the job forked: same group, same tty, younger.
-            row(601, 600, "cargo", 600, TTY_A, 600, 3000),
-        ];
+    fn classify_idle_needs_the_shell_in_front_AND_no_jobs() {
+        assert_eq!(classify_pane(&shell(500), None, &[]), Generic::Idle);
+    }
+
+    /// The regression the whole state machine exists for: a `^Z`'d job
+    /// leaves the shell in the foreground, so the old model reported
+    /// this pane as "at a prompt" — indistinguishable from empty.
+    #[test]
+    fn classify_a_suspended_job_is_not_idle() {
+        let kids = [row(600, 500, "claude", 600, TTY_A, 500, 2000, libc::SSTOP)];
         assert_eq!(
-            pane_foreground(500, &procs),
-            PaneForeground::Job {
+            classify_pane(&shell(500), None, &kids),
+            Generic::PromptWithJobs { stopped: 1, running: 0 }
+        );
+    }
+
+    #[test]
+    fn classify_a_background_job_is_not_idle_either() {
+        let kids = [row(600, 500, "cargo", 600, TTY_A, 500, 2000, libc::SRUN)];
+        assert_eq!(
+            classify_pane(&shell(500), None, &kids),
+            Generic::PromptWithJobs { stopped: 0, running: 1 }
+        );
+    }
+
+    /// A zombie is an exited job, not work in progress; a child that
+    /// shares the shell's own process group is not a job at all.
+    #[test]
+    fn classify_ignores_zombies_and_the_shells_own_group() {
+        let kids = [
+            row(600, 500, "gone", 600, TTY_A, 500, 2000, libc::SZOMB),
+            row(601, 500, "helper", 500, TTY_A, 500, 2000, libc::SRUN),
+        ];
+        assert_eq!(classify_pane(&shell(500), None, &kids), Generic::Idle);
+    }
+
+    /// A job in the foreground names its leader.
+    #[test]
+    fn classify_foreground_reports_the_leader() {
+        let leader = row(600, 500, "claude", 600, TTY_A, 600, 2000, libc::SRUN);
+        assert_eq!(
+            classify_pane(&shell(600), Some(&leader), &[]),
+            Generic::Foreground {
                 pgid: 600,
                 leader: Some(JobLeader {
                     pid: 600,
@@ -811,103 +852,61 @@ mod tests {
         );
     }
 
-    /// Leader gone, group still owns the tty — report the oldest
-    /// surviving member rather than losing the pane's status.
+    /// A leader row from a DIFFERENT tty must not be believed — pids
+    /// are recycled, and pgid numbers are not per-terminal.
     #[test]
-    fn pane_foreground_falls_back_to_oldest_member_when_leader_exited() {
-        let procs = vec![
-            row(500, 400, "zsh", 500, TTY_A, 600, 1000),
-            row(602, 1, "node", 600, TTY_A, 600, 3000),
-            row(601, 1, "node", 600, TTY_A, 600, 2500),
-        ];
+    fn classify_rejects_a_leader_row_from_another_tty() {
+        let impostor = row(600, 1, "vim", 600, TTY_B, 600, 2000, libc::SRUN);
         assert_eq!(
-            pane_foreground(500, &procs),
-            PaneForeground::Job {
-                pgid: 600,
-                leader: Some(JobLeader {
-                    pid: 601,
-                    comm: "node".into(),
-                    start_unix: 2500,
-                }),
-            }
+            classify_pane(&shell(600), Some(&impostor), &[]),
+            Generic::Foreground { pgid: 600, leader: None },
+            "a job we cannot name is still a job"
         );
-    }
-
-    /// A job whose group has no readable member is still a job — the
-    /// pane is NOT idle just because we failed to name what's running.
-    /// (This is also the shape the one-pid probe returns for the
-    /// leader-exited case, since naming the survivor needs the table.)
-    #[test]
-    fn pane_foreground_job_without_identifiable_leader_is_still_a_job() {
-        let procs = vec![row(500, 400, "zsh", 500, TTY_A, 600, 1000)];
-        assert_eq!(
-            pane_foreground(500, &procs),
-            PaneForeground::Job { pgid: 600, leader: None }
-        );
-    }
-
-    /// Another pane's job must never be picked up: same pgid number
-    /// can exist on a different tty, and pgid alone would match it.
-    #[test]
-    fn pane_foreground_ignores_same_pgid_on_a_different_tty() {
-        let procs = vec![
-            row(500, 400, "zsh", 500, TTY_A, 600, 1000),
-            row(600, 500, "vim", 600, TTY_A, 600, 2000),
-            row(700, 450, "zsh", 700, TTY_B, 600, 1000),
-            row(701, 700, "ssh", 600, TTY_B, 600, 1500),
-        ];
-        match pane_foreground(500, &procs) {
-            PaneForeground::Job { leader: Some(l), .. } => {
-                assert_eq!((l.pid, l.comm.as_str()), (600, "vim"));
-            }
-            other => panic!("expected pane A's own job, got {other:?}"),
-        }
     }
 
     /// "No information" cases stay Unknown — a caller deciding whether
     /// a pane is safe to touch must not read any of these as idle.
     #[test]
-    fn pane_foreground_unknown_covers_every_no_information_case() {
-        // Shell not in the table at all (pane exited).
-        assert_eq!(pane_foreground(500, &[]), PaneForeground::Unknown);
-        // No controlling tty.
-        let no_tty = vec![row(500, 400, "zsh", 500, 0, 0, 1000)];
-        assert_eq!(pane_foreground(500, &no_tty), PaneForeground::Unknown);
-        // tty present, no foreground group (tcgetpgrp would say -1).
-        let no_fg = vec![row(500, 400, "zsh", 500, TTY_A, -1, 1000)];
-        assert_eq!(pane_foreground(500, &no_fg), PaneForeground::Unknown);
+    fn classify_unknown_covers_the_no_information_cases() {
+        let no_tty = row(500, 400, "zsh", 500, 0, 0, 1000, libc::SSLEEP);
+        assert_eq!(classify_pane(&no_tty, None, &[]), Generic::Unknown);
+        let no_fg = row(500, 400, "zsh", 500, TTY_A, -1, 1000, libc::SSLEEP);
+        assert_eq!(classify_pane(&no_fg, None, &[]), Generic::Unknown);
     }
 
-    /// The probe path answers off the real kernel state for the test
-    /// process itself.  `cargo`/`nextest` run it without a controlling
-    /// terminal, so the honest answer is `Unknown`; under a tty (run
-    /// the binary by hand) the same call reports the job.  Either way
-    /// it must not panic and must not claim `AtPrompt` — asserting the
-    /// tty-shape rather than a fixed variant keeps this from being a
-    /// test of how the CI runner happens to attach stdio.
+    /// The syscall wrapper agrees with the kernel about this very
+    /// process.  Under `cargo`/`nextest` there is no controlling
+    /// terminal, so the honest answer is Unknown; asserting the shape
+    /// rather than a fixed variant keeps this from testing how the CI
+    /// runner attaches stdio.
     #[test]
-    fn pane_foreground_probe_agrees_with_this_process_own_tty_state() {
+    fn observe_pane_agrees_with_this_process_own_tty_state() {
         let me = std::process::id() as i32;
-        let row = proc_row(me).expect("proc_row None for self");
-        let probed = pane_foreground_probe(me);
-        if row.tty_dev == 0 || row.tty_fg_pgid <= 0 {
-            assert_eq!(probed, PaneForeground::Unknown);
-        } else if row.tty_fg_pgid == row.pgid {
-            assert_eq!(probed, PaneForeground::AtPrompt);
+        let r = proc_row(me).expect("proc_row None for self");
+        let observed = observe_pane(me);
+        if r.tty_dev == 0 || r.tty_fg_pgid <= 0 {
+            assert_eq!(observed, Generic::Unknown);
+        } else if r.tty_fg_pgid == r.pgid {
+            assert!(matches!(
+                observed,
+                Generic::Idle | Generic::PromptWithJobs { .. }
+            ));
         } else {
-            assert!(
-                matches!(probed, PaneForeground::Job { .. }),
-                "tty fg group {} != own group {} should read as Job, got {probed:?}",
-                row.tty_fg_pgid,
-                row.pgid,
-            );
+            assert!(matches!(observed, Generic::Foreground { .. }));
         }
     }
 
-    /// A pid that cannot exist has no row and no status.
     #[test]
-    fn pane_foreground_probe_unknown_for_dead_pid() {
+    fn child_pids_of_a_pid_with_no_children_is_empty() {
+        // pid 1 (launchd) has children; a pid that cannot exist has
+        // none and must not panic.
+        assert!(child_pids(-1).is_empty());
+    }
+
+    /// A pid that cannot exist has no row and no state.
+    #[test]
+    fn observe_pane_unknown_for_dead_pid() {
         assert!(proc_row(-1).is_none());
-        assert_eq!(pane_foreground_probe(-1), PaneForeground::Unknown);
+        assert_eq!(observe_pane(-1), Generic::Unknown);
     }
 }

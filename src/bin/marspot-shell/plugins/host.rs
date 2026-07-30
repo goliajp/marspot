@@ -15,9 +15,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use marspot::pidtree::PaneForeground;
+use marspot::pane_state::{Activity, PaneStatus};
 use marspot::{lx_debug, lx_error, lx_info, lx_warn};
 
 use super::{LogLevel, PaneSession, PermissionSet, PluginError, PluginHost, PtyChild};
@@ -68,7 +68,7 @@ pub struct ShellPluginHost {
     /// plugins already hold (badges, PaneSessions, inject-input all
     /// address sessions), and because pane indices shift when panes
     /// are added or moved between windows.
-    pane_status: Arc<Mutex<HashMap<u64, (PaneForeground, Instant)>>>,
+    pane_status: Arc<Mutex<HashMap<u64, (PaneStatus, Duration, bool)>>>,
     /// Current plugin being invoked — used for the log namespace and
     /// permission lookup.  Set/cleared by the registry around each
     /// hook.  See `with_active_plugin`.
@@ -85,6 +85,11 @@ pub struct ShellPluginHost {
     /// state machine to push raw bytes (e.g. `claude5 --resume <uuid>\r`)
     /// at the PTY backing a given session id.  None in tests.
     inject_input_tx: Mutex<Option<Sender<InjectInputRequest>>>,
+    /// Plugin → shell activity reports, feeding the pane state
+    /// machines.  Plugins push what they know about the program they
+    /// understand; composition with the kernel's view is the shell's
+    /// job, not theirs.
+    pane_activity_tx: Mutex<Option<Sender<(u64, Activity)>>>,
 }
 
 /// What the main loop receives on its inject_input channel.  The
@@ -113,6 +118,7 @@ impl ShellPluginHost {
             pane_title_tx: Mutex::new(None),
             pane_session_begin_tx: Mutex::new(None),
             inject_input_tx: Mutex::new(None),
+            pane_activity_tx: Mutex::new(None),
         }
     }
 
@@ -142,11 +148,17 @@ impl ShellPluginHost {
         *self.inject_input_tx.lock().unwrap() = Some(tx);
     }
 
+    /// Wire the channel the shell main loop drains for plugin
+    /// activity reports.  Called once during shell startup.
+    pub fn attach_pane_activity_tx(&self, tx: Sender<(u64, Activity)>) {
+        *self.pane_activity_tx.lock().unwrap() = Some(tx);
+    }
+
     /// Publish the sweep's result so plugin calls to `pane_status`
     /// read a snapshot instead of probing the kernel per call (a
     /// plugin walking N panes would otherwise multiply the syscall
     /// cost by however many plugins are loaded).
-    pub fn publish_pane_status(&self, map: HashMap<u64, (PaneForeground, Instant)>) {
+    pub fn publish_pane_status(&self, map: HashMap<u64, (PaneStatus, Duration, bool)>) {
         *self.pane_status.lock().unwrap() = map;
     }
 
@@ -244,17 +256,27 @@ impl PluginHost for ShellPluginHost {
     fn pane_status(
         &self,
         shelld_session_id: u64,
-    ) -> Result<Option<(PaneForeground, Duration)>, PluginError> {
+    ) -> Result<Option<super::PaneStatusView>, PluginError> {
         self.require(PermissionSet::READ_PANE_INFO)?;
-        // Age is computed at call time, not stored: the stamp says
-        // when the state started, and every caller wants "how long has
-        // this been true *now*".
-        Ok(self
-            .pane_status
-            .lock()
-            .unwrap()
-            .get(&shelld_session_id)
-            .map(|(fg, since)| (fg.clone(), since.elapsed())))
+        Ok(self.pane_status.lock().unwrap().get(&shelld_session_id).map(
+            |(status, held, quiescent)| super::PaneStatusView {
+                status: status.clone(),
+                held: *held,
+                quiescent: *quiescent,
+            },
+        ))
+    }
+
+    fn report_pane_activity(
+        &self,
+        shelld_session_id: u64,
+        activity: Activity,
+    ) -> Result<(), PluginError> {
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        if let Some(tx) = self.pane_activity_tx.lock().unwrap().as_ref() {
+            let _ = tx.send((shelld_session_id, activity));
+        }
+        Ok(())
     }
 
     fn pane_focused(&self) -> Option<usize> {

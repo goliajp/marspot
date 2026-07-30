@@ -1,287 +1,264 @@
-//! Per-pane foreground status — the generic layer of "what is this
-//! pane doing", swept in L1 and handed to plugins.
+//! Per-pane state machines, swept in L1.
 //!
-//! The signal itself is `marspot::pidtree::pane_foreground_probe`:
-//! kernel-side, no shell cooperation, 1–2 syscalls per pane.  This
-//! module is only the bookkeeping around it — when to sweep, what
-//! changed since last time, and what to forget when a pane closes.
+//! The machine itself is `marspot::pane_state` (states, transition
+//! rules, hysteresis — all pure and unit-tested); this module owns one
+//! instance per session and feeds it.  Splitting them that way is what
+//! makes the transition table testable without processes, ttys, or a
+//! running shell.
 //!
-//! Why L1 and not L2: the consumers are plugins (claudecode refines
-//! `Job` into its own states from the session jsonl; a hibernation
-//! policy would gate on "no job, nothing under it"), and L1 can read
-//! the session registry directly, so computing it here costs no wire
-//! hop.  L2 does its own per-second `resolve_pane_cwd` sweep for the
-//! pane title, which is a different signal with a different consumer.
+//! Each sweep builds one [`Observation`] per pane from two sources:
+//!
+//! - the **kernel half** via `pidtree::observe_pane` — who owns the
+//!   tty, and what jobs the shell is still holding (suspended or
+//!   backgrounded).  No shell cooperation, 2 syscalls for a quiet pane.
+//! - the **plugin half** — whatever a plugin last reported for that
+//!   session (claudecode reports what its transcript says).  A session
+//!   with no report is [`Activity::Absent`] once some plugin has
+//!   reported at least once, and [`Activity::Unknown`] before that:
+//!   "no claude here" and "nobody has looked yet" are different facts.
+//!
+//! Why L1 owns this: the consumers are plugins and (later) policies
+//! that live here, the session registry is readable here, and nothing
+//! has to cross a wire.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use marspot::pidtree::{self, PaneForeground};
+use marspot::pane_state::{Activity, Change, Generic, Observation, PaneMachine, PaneStatus};
+use marspot::pidtree;
 
-/// How often the status is re-probed.  Rides `poll_supervisor`'s
+/// How often the machines are stepped.  Rides `poll_supervisor`'s
 /// ~250 ms cadence but gates itself to this, so the syscall cost is
-/// ~2 per pane per second — the same order as L2's cwd sweep, and
-/// nothing like `list_all_procs`' one-per-pid-on-the-host.
+/// ~2-4 per pane per second — the same order as L2's cwd sweep.
 ///
-/// The states this feeds are human-scale (a job starts, a job ends, a
-/// session goes idle for an hour); sampling faster would buy nothing
-/// and print a busier log.
+/// This is also the machine's clock: `CONFIRM_TICKS` agreeing
+/// observations at this interval is how long a pane must look quiet
+/// before anything may act on it.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// One observed change, for the caller to log.  Logging lives in the
-/// caller so the sweep stays a pure-ish function that tests can drive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Transition {
+/// A committed transition, tagged with the session it belongs to.
+#[derive(Debug, Clone)]
+pub struct SessionChange {
     pub sid: u64,
-    /// None = first observation of this pane.
-    pub prev: Option<PaneForeground>,
-    /// How long `prev` had been true.  None on first observation.
-    /// Logged because it is the number any future threshold gets
-    /// calibrated against — "how long do panes actually sit idle here"
-    /// is not a question to answer by guessing.
-    pub held: Option<Duration>,
-    pub next: PaneForeground,
+    pub change: Change,
 }
 
-/// Last-known foreground per live session, plus the sweep clock.
+/// One machine per live session, plus the sweep clock.
 ///
-/// Bounded by construction: every sweep replaces the map's key set
-/// with the sessions the registry currently lists, so a pane that
-/// closes is forgotten on the next tick rather than accumulating for
-/// the lifetime of the shell (CLAUDE.md §3).
-pub struct PaneStatusTracker {
-    /// Current status per session, plus when it started being true.
-    ///
-    /// The timestamp is the whole reason a policy can exist: "at a
-    /// prompt" is not actionable, "at a prompt for the last two hours"
-    /// is.  It costs one `Instant` per pane and no history — a state
-    /// that doesn't change simply keeps its original stamp.
-    last: HashMap<u64, (PaneForeground, Instant)>,
+/// Bounded by construction: every sweep drops machines for sessions
+/// the registry no longer lists, so a closed pane is forgotten on the
+/// next tick rather than accumulating for the life of the shell
+/// (CLAUDE.md §3).
+pub struct PaneStateTracker {
+    machines: HashMap<u64, PaneMachine>,
+    /// What each plugin last reported per session.  Absent key = no
+    /// plugin has spoken for that pane.
+    reported: HashMap<u64, Activity>,
+    /// True once any plugin has reported anything at all.  Before
+    /// that, a pane with no report is `Unknown` rather than `Absent` —
+    /// claiming "there is no claude here" while the scanner is still
+    /// warming up would be a lie with the same shape as the truth.
+    any_report_seen: bool,
     last_sweep: Option<Instant>,
 }
 
-impl PaneStatusTracker {
+impl PaneStateTracker {
     pub fn new() -> Self {
-        Self { last: HashMap::new(), last_sweep: None }
+        Self {
+            machines: HashMap::new(),
+            reported: HashMap::new(),
+            any_report_seen: false,
+            last_sweep: None,
+        }
     }
 
-    /// Current view — what `PluginHost::pane_status` serves.
-    pub fn snapshot(&self) -> HashMap<u64, (PaneForeground, Instant)> {
-        self.last.clone()
+    /// Record a plugin's view of one session.  Called from the plugin
+    /// channel drain; the value is consumed by the next sweep.
+    pub fn report_activity(&mut self, sid: u64, activity: Activity) {
+        self.any_report_seen = true;
+        self.reported.insert(sid, activity);
     }
 
-    /// Probe every live session, at most once per `SWEEP_INTERVAL`.
+    /// Current composed status + how long it has held, for every live
+    /// session — what `PluginHost::pane_status` serves.
+    pub fn snapshot(&self, now: Instant) -> HashMap<u64, (PaneStatus, Duration, bool)> {
+        self.machines
+            .iter()
+            .map(|(sid, m)| (*sid, (m.status().clone(), m.age(now), m.quiescent())))
+            .collect()
+    }
+
+    /// Step every live session's machine, at most once per
+    /// [`SWEEP_INTERVAL`].
     ///
-    /// `None` = the interval gate skipped this call; `Some(vec)` = a
-    /// sweep ran and these are its transitions (possibly empty).  The
-    /// caller needs the distinction: "ran, nothing changed" still has
-    /// to re-publish, because a pane *closing* drops a key without
-    /// producing a transition — treating an empty vec as "nothing to
-    /// do" would leave the closed pane's last status readable forever.
-    pub fn sweep(&mut self) -> Option<Vec<Transition>> {
-        if self
-            .last_sweep
-            .is_some_and(|t| t.elapsed() < SWEEP_INTERVAL)
-        {
+    /// `None` = the interval gate skipped this call; `Some(vec)` = the
+    /// machines were stepped and these are the committed transitions
+    /// (possibly empty).  The caller needs the distinction: a pane
+    /// *closing* removes a machine without producing a transition, so
+    /// treating an empty vec as "nothing to do" would leave the closed
+    /// pane's last status readable forever.
+    pub fn sweep(&mut self, now: Instant) -> Option<Vec<SessionChange>> {
+        if self.last_sweep.is_some_and(|t| now.duration_since(t) < SWEEP_INTERVAL) {
             return None;
         }
-        self.last_sweep = Some(Instant::now());
-        let panes: Vec<(u64, i32)> =
-            marspot_term::session_registry::list_session_entries()
-                .into_iter()
-                .map(|e| (e.id, e.shell_child_pid))
-                .collect();
-        Some(self.sweep_with(panes, pidtree::pane_foreground_probe))
+        self.last_sweep = Some(now);
+        let panes: Vec<(u64, i32)> = marspot_term::session_registry::list_session_entries()
+            .into_iter()
+            .map(|e| (e.id, e.shell_child_pid))
+            .collect();
+        Some(self.sweep_with(panes, now, pidtree::observe_pane))
     }
 
-    /// Sweep body, with the pane list and the probe injected — the
-    /// transition + forgetting logic is what's worth testing, and it
-    /// shouldn't need real panes on a real tty to test.
+    /// Sweep body with the pane list and the kernel probe injected —
+    /// the bookkeeping (which machines exist, what each is fed, what
+    /// is forgotten) is what's worth testing, and it shouldn't need
+    /// real panes on a real tty to test.
     pub fn sweep_with<F>(
         &mut self,
         panes: Vec<(u64, i32)>,
+        now: Instant,
         mut probe: F,
-    ) -> Vec<Transition>
+    ) -> Vec<SessionChange>
     where
-        F: FnMut(i32) -> PaneForeground,
+        F: FnMut(i32) -> Generic,
     {
-        let now = Instant::now();
-        let mut next_map: HashMap<u64, (PaneForeground, Instant)> =
-            HashMap::with_capacity(panes.len());
-        let mut transitions = Vec::new();
+        let mut changes = Vec::new();
+        let live: Vec<u64> = panes.iter().map(|(sid, _)| *sid).collect();
         for (sid, shell_pid) in panes {
-            let next = probe(shell_pid);
-            let prev = self.last.get(&sid);
-            // Unchanged state keeps its original stamp, so the age
-            // measures the state and not the sweep.
-            let since = match prev {
-                Some((p, since)) if *p == next => *since,
-                _ => {
-                    transitions.push(Transition {
-                        sid,
-                        prev: prev.map(|(p, _)| p.clone()),
-                        held: prev.map(|(_, since)| now.duration_since(*since)),
-                        next: next.clone(),
-                    });
-                    now
-                }
+            let activity = match self.reported.get(&sid) {
+                Some(a) => *a,
+                None if self.any_report_seen => Activity::Absent,
+                None => Activity::Unknown,
             };
-            next_map.insert(sid, (next, since));
+            let obs = Observation { generic: probe(shell_pid), activity };
+            let machine = self
+                .machines
+                .entry(sid)
+                .or_insert_with(|| PaneMachine::new(now));
+            if let Some(change) = machine.observe(obs, now) {
+                changes.push(SessionChange { sid, change });
+            }
         }
-        // Replace rather than merge: sessions that vanished from the
-        // registry are gone, and their last status is not news.
-        self.last = next_map;
-        transitions
-    }
-}
-
-/// Log form of a status, short enough to sit in a TSV field.
-/// `job:<comm>` deliberately carries `pbi_comm` and not a resolved
-/// program name — resolving would cost a `proc_cmdline` per pane per
-/// sweep, and for claude `comm` is a version string anyway (see
-/// `pidtree::JobLeader::comm`).  Reading the log, `job:2.1.220` is
-/// still the answer to "is something running".
-pub fn describe(fg: &PaneForeground) -> String {
-    match fg {
-        PaneForeground::AtPrompt => "prompt".to_string(),
-        PaneForeground::Job { pgid, leader: Some(l) } => {
-            format!("job:{} pid={} pgid={}", l.comm, l.pid, pgid)
-        }
-        PaneForeground::Job { pgid, leader: None } => {
-            format!("job:? pgid={}", pgid)
-        }
-        PaneForeground::Unknown => "unknown".to_string(),
+        // Sessions that vanished from the registry are gone; their
+        // machines and their last reports go with them.
+        self.machines.retain(|sid, _| live.contains(sid));
+        self.reported.retain(|sid, _| live.contains(sid));
+        changes
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use marspot::pidtree::JobLeader;
+    use marspot::pane_state::{BusyKind, CONFIRM_TICKS};
 
-    fn job(pid: i32, comm: &str) -> PaneForeground {
-        PaneForeground::Job {
-            pgid: pid,
-            leader: Some(JobLeader { pid, comm: comm.into(), start_unix: 1000 }),
-        }
+    fn fg() -> Generic {
+        Generic::Foreground { pgid: 600, leader: None }
+    }
+
+    /// Step the tracker `n` times, one `SWEEP_INTERVAL` apart.
+    fn steps<F: FnMut(i32) -> Generic + Copy>(
+        t: &mut PaneStateTracker,
+        panes: &[(u64, i32)],
+        base: Instant,
+        n: u64,
+        probe: F,
+    ) -> Vec<SessionChange> {
+        (1..=n)
+            .flat_map(|i| t.sweep_with(panes.to_vec(), base + SWEEP_INTERVAL * i as u32, probe))
+            .collect()
     }
 
     #[test]
-    fn first_sweep_reports_every_pane_as_a_transition_from_none() {
-        let mut t = PaneStatusTracker::new();
-        let out = t.sweep_with(vec![(1, 100), (2, 200)], |pid| match pid {
-            100 => PaneForeground::AtPrompt,
-            _ => job(201, "claude"),
+    fn a_pane_with_no_plugin_report_yet_is_unknown_not_absent() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        let out = steps(&mut t, &[(1, 100)], base, 5, |_| Generic::Idle);
+        // Unknown poisons, so no quiet state can be reached and the
+        // only commit is the one INTO Unknown (from the initial
+        // Unknown → nothing, since they are equal).
+        assert!(out.is_empty(), "unknown → unknown is not a transition");
+        let snap = t.snapshot(base + Duration::from_secs(10));
+        assert_eq!(snap[&1].0, PaneStatus::Unknown);
+        assert!(!snap[&1].2, "never quiescent without information");
+    }
+
+    #[test]
+    fn an_absent_report_plus_an_idle_shell_becomes_empty_after_confirmation() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        // Some other pane reported, so "no report" now means absent.
+        t.report_activity(99, Activity::Working);
+        let out = steps(
+            &mut t,
+            &[(1, 100)],
+            base,
+            CONFIRM_TICKS as u64,
+            |_| Generic::Idle,
+        );
+        assert_eq!(out.len(), 1, "one commit, after confirmation");
+        assert_eq!(out[0].change.to, PaneStatus::Empty);
+        assert!(t.snapshot(base + SWEEP_INTERVAL * 4)[&1].2);
+    }
+
+    /// The case the machine exists for, end to end through the
+    /// tracker: a suspended job keeps the pane out of every quiet
+    /// state no matter what the plugin says.
+    #[test]
+    fn a_suspended_job_keeps_the_pane_busy_through_the_tracker() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        t.report_activity(1, Activity::AwaitingUser);
+        let out = steps(&mut t, &[(1, 100)], base, 6, |_| {
+            Generic::PromptWithJobs { stopped: 1, running: 0 }
         });
-        assert_eq!(out.len(), 2, "both panes are news on first sight");
-        assert!(out.iter().all(|tr| tr.prev.is_none()));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].change.to, PaneStatus::Busy(BusyKind::StoppedJobs));
+        assert!(!t.snapshot(base + SWEEP_INTERVAL * 7)[&1].2);
     }
 
     #[test]
-    fn unchanged_panes_produce_no_transitions() {
-        let mut t = PaneStatusTracker::new();
-        let panes = vec![(1, 100)];
-        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
-        let out = t.sweep_with(panes, |_| PaneForeground::AtPrompt);
-        assert!(out.is_empty(), "steady state must be silent, got {out:?}");
-    }
-
-    #[test]
-    fn a_job_starting_and_ending_are_both_transitions() {
-        let mut t = PaneStatusTracker::new();
-        let panes = vec![(7, 700)];
-        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
-        let started = t.sweep_with(panes.clone(), |_| job(701, "cargo"));
-        assert_eq!(started.len(), 1);
-        assert_eq!(started[0].prev, Some(PaneForeground::AtPrompt));
-        let ended = t.sweep_with(panes, |_| PaneForeground::AtPrompt);
-        assert_eq!(ended.len(), 1);
-        assert_eq!(ended[0].next, PaneForeground::AtPrompt);
-    }
-
-    /// Same job, different leader pid = a real transition: this is how
-    /// "claude was restarted under the same pane" shows up.
-    #[test]
-    fn a_replaced_leader_is_a_transition_even_with_the_same_comm() {
-        let mut t = PaneStatusTracker::new();
-        let panes = vec![(3, 300)];
-        t.sweep_with(panes.clone(), |_| job(301, "claude"));
-        let out = t.sweep_with(panes, |_| job(999, "claude"));
-        assert_eq!(out.len(), 1, "new pid under the same name is news");
-    }
-
-    #[test]
-    fn closed_panes_are_forgotten_so_the_map_stays_bounded() {
-        let mut t = PaneStatusTracker::new();
-        t.sweep_with(vec![(1, 100), (2, 200)], |_| PaneForeground::AtPrompt);
-        assert_eq!(t.snapshot().len(), 2);
-        t.sweep_with(vec![(2, 200)], |_| PaneForeground::AtPrompt);
-        let snap = t.snapshot();
-        assert_eq!(snap.len(), 1, "pane 1 closed; its entry must not linger");
+    fn a_closed_pane_is_forgotten_so_the_maps_stay_bounded() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        t.report_activity(1, Activity::Working);
+        t.report_activity(2, Activity::Working);
+        t.sweep_with(vec![(1, 100), (2, 200)], base + SWEEP_INTERVAL, |_| fg());
+        assert_eq!(t.snapshot(base).len(), 2);
+        t.sweep_with(vec![(2, 200)], base + SWEEP_INTERVAL * 2, |_| fg());
+        let snap = t.snapshot(base);
+        assert_eq!(snap.len(), 1, "pane 1 closed; its machine must not linger");
         assert!(snap.contains_key(&2));
     }
 
-    /// A pane that reappears after being forgotten reads as first
-    /// sight again — better than silently treating stale state as
-    /// current.
     #[test]
-    fn a_returning_sid_is_reported_as_first_sight() {
-        let mut t = PaneStatusTracker::new();
-        t.sweep_with(vec![(5, 500)], |_| PaneForeground::AtPrompt);
-        t.sweep_with(vec![], |_| PaneForeground::AtPrompt);
-        let out = t.sweep_with(vec![(5, 500)], |_| PaneForeground::AtPrompt);
-        assert_eq!(out.len(), 1);
-        assert!(out[0].prev.is_none());
+    fn the_interval_gate_skips_a_second_sweep_inside_the_window() {
+        let mut t = PaneStateTracker::new();
+        let base = Instant::now();
+        assert!(t.sweep(base).is_some(), "first sweep runs");
+        assert!(
+            t.sweep(base + Duration::from_millis(250)).is_none(),
+            "a second sweep inside the window must be a no-op"
+        );
+        assert!(t.sweep(base + SWEEP_INTERVAL).is_some());
     }
 
+    /// A plugin's report is used by the NEXT sweep, and replaces the
+    /// previous one — the tracker holds one view per session, not a
+    /// history.
     #[test]
-    fn interval_gate_skips_a_second_sweep_inside_the_window() {
-        let mut t = PaneStatusTracker::new();
-        // `sweep` (not `sweep_with`) owns the clock; drive it twice and
-        // assert the second call is gated by checking the clock moved
-        // only once.  The registry may be empty in a test process —
-        // that's fine, the gate is what's under test.
-        t.sweep();
-        let first = t.last_sweep;
-        t.sweep();
-        assert_eq!(first, t.last_sweep, "second sweep inside the window must be a no-op");
-    }
-
-    /// The stamp measures the STATE, not the sweep: three sweeps of an
-    /// unchanged pane must not restart its clock, or "idle for two
-    /// hours" could never be observed.
-    #[test]
-    fn an_unchanged_state_keeps_its_original_stamp() {
-        let mut t = PaneStatusTracker::new();
-        let panes = vec![(1, 100)];
-        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
-        let first = t.snapshot().get(&1).map(|(_, s)| *s).unwrap();
-        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
-        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
-        assert_eq!(
-            t.snapshot().get(&1).map(|(_, s)| *s),
-            Some(first),
-            "the clock must not restart on every sweep"
+    fn the_latest_report_wins() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        t.report_activity(1, Activity::Working);
+        t.report_activity(1, Activity::AwaitingUser);
+        let out = steps(
+            &mut t,
+            &[(1, 100)],
+            base,
+            CONFIRM_TICKS as u64,
+            |_| fg(),
         );
-        // A real change restarts it, and reports how long the old
-        // state had held.
-        let out = t.sweep_with(panes, |_| job(101, "vim"));
-        assert_eq!(out.len(), 1);
-        assert!(out[0].held.is_some(), "a transition carries the held time");
-        assert_ne!(t.snapshot().get(&1).map(|(_, s)| *s), Some(first));
-    }
-
-    #[test]
-    fn describe_covers_every_variant() {
-        assert_eq!(describe(&PaneForeground::AtPrompt), "prompt");
-        assert_eq!(describe(&PaneForeground::Unknown), "unknown");
-        assert_eq!(
-            describe(&job(42, "vim")),
-            "job:vim pid=42 pgid=42",
-        );
-        assert_eq!(
-            describe(&PaneForeground::Job { pgid: 9, leader: None }),
-            "job:? pgid=9",
-        );
+        assert_eq!(out.last().unwrap().change.to, PaneStatus::AwaitingUser);
     }
 }

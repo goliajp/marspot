@@ -1232,56 +1232,24 @@ impl Plugin for ClaudecodePlugin {
                     }
                 }
             }
-            // cc status transitions.  Logged on the main side because
-            // that is where the previous tick's map lives — and where
-            // the generic layer can be asked, which the worker thread
-            // has no host to do.
-            //
-            // The two layers are reported together on purpose: the
-            // generic one answers "does claude own the pane's keyboard"
-            // (a suspended or backgrounded claude reads as `bg` even
-            // while its jsonl says it was mid-turn), the cc one answers
-            // "what is it doing in there".  Neither is derivable from
-            // the other.
+            // Report this layer to the shell, which owns the state
+            // machine.  The plugin does NOT compose its view with the
+            // kernel's and does not decide what is actionable — it
+            // only says what its own transcript shows.  Every live
+            // session gets a report, including `Absent` for panes with
+            // no claude in them: silence and "not here" are different
+            // facts, and the machine distinguishes them.
             for (sid, activity) in &result.new_activity {
-                let fg = match host.pane_status(*sid).map(|o| o.map(|(fg, _age)| fg)) {
-                    Ok(Some(marspot::pidtree::PaneForeground::Job { .. })) => "fg",
-                    Ok(Some(marspot::pidtree::PaneForeground::AtPrompt)) => "bg",
-                    // No entry yet / no controlling tty / the sweep
-                    // can't say.  Not "fg", not "bg" — unknown.
-                    _ => "fg?",
-                };
-                let next = format!("{},{}", fg, activity.describe());
-                let prev = self.last_activity.get(sid);
-                let since = match prev {
-                    // Unchanged: keep the original stamp so the age
-                    // measures the state, not the tick.
-                    Some((p, since)) if p == &next => *since,
-                    _ => {
-                        host.log(
-                            LogLevel::Info,
-                            "cc_status.changed",
-                            &format!(
-                                "shelld_session={} {} → {} (held {}s)",
-                                sid,
-                                prev.map(|(s, _)| s.as_str()).unwrap_or("-"),
-                                next,
-                                prev.map(|(_, t): &(String, Instant)| {
-                                    t.elapsed().as_secs()
-                                })
-                                .unwrap_or(0),
-                            ),
-                        );
-                        Instant::now()
-                    }
-                };
-                self.last_activity.insert(*sid, (next, since));
+                let _ = host.report_pane_activity(*sid, *activity);
             }
-            // Sessions that stopped reporting (claude exited, pane
-            // closed) drop out — same bound-by-construction rule the
-            // generic sweep follows.
-            self.last_activity
-                .retain(|sid, _| result.new_activity.contains_key(sid));
+            for sid in result.sessions_seen.iter() {
+                if !result.new_activity.contains_key(sid) {
+                    let _ = host.report_pane_activity(
+                        *sid,
+                        marspot::pane_state::Activity::Absent,
+                    );
+                }
+            }
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;
         }
@@ -1396,9 +1364,13 @@ impl Plugin for ClaudecodePlugin {
 // ============================================================
 
 /// What `WorkerCtx::scan_once` returns to `tick`.  Owned, Send-safe.
-/// What claudecode is doing in a pane — the cc-specific layer sitting
-/// on top of the generic `PaneForeground` (which only knows "a job owns
-/// this tty").  Read off the session jsonl's last record, whose shapes
+/// Alias for the shared alphabet: what claudecode reports about a
+/// pane.  The variants live in `marspot::pane_state` because the shell
+/// composes them with the kernel's view — the plugin's job ends at
+/// "here is what my transcript says".
+///
+/// The classification below reads the session jsonl's last
+/// conversation record.  Read off the session jsonl's last record, whose shapes
 /// were taken from a live transcript rather than guessed:
 ///
 /// ```text
@@ -1410,38 +1382,7 @@ impl Plugin for ClaudecodePlugin {
 /// The distinction that matters to anything acting on this: only
 /// `AwaitingUser` means nothing is in flight.  Every other variant —
 /// including `Unknown` — has to be treated as "do not touch this pane".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CcActivity {
-    /// The assistant's turn ended with a message; the prompt belongs
-    /// to the user now.
-    AwaitingUser,
-    /// A tool call is outstanding — the last record asks for one and
-    /// no result followed it.  `executing` is best-effort: true when
-    /// claude has a child process younger than that record (the tool
-    /// is running), false when it has none (so claude is most likely
-    /// parked on the approval prompt).  Both mean "in flight"; the
-    /// split is for the log, not for permission.
-    ToolPending { executing: bool },
-    /// A turn is being produced: the last record is the user's message
-    /// or a tool result, so the assistant is the one who owes the next
-    /// record.
-    Working,
-    /// Tail unreadable, or a record shape this doesn't model.  Not a
-    /// synonym for idle.
-    Unknown,
-}
-
-impl CcActivity {
-    fn describe(self) -> &'static str {
-        match self {
-            CcActivity::AwaitingUser => "awaiting_user",
-            CcActivity::ToolPending { executing: true } => "tool_executing",
-            CcActivity::ToolPending { executing: false } => "tool_awaiting_approval",
-            CcActivity::Working => "working",
-            CcActivity::Unknown => "unknown",
-        }
-    }
-}
+type CcActivity = marspot::pane_state::Activity;
 
 /// Value of a **top-level** string field of one jsonl record.
 ///
@@ -1571,9 +1512,15 @@ struct ScanResult {
     /// `shelld_session_id → badge string ("P<n> <uuid>")`.  Replaces
     /// `last_mapping` on the main side every time it arrives.
     new_mapping: HashMap<u64, String>,
-    /// `shelld_session_id → what cc is doing there`.  Diffed against
-    /// `last_activity` on the main side so only transitions are logged.
+    /// `shelld_session_id → what cc is doing there`.  Reported to the
+    /// shell, which folds it into the pane's state machine.
     new_activity: HashMap<u64, CcActivity>,
+    /// Every live session the scan looked at, bound or not.  The ones
+    /// missing from `new_activity` get reported as `Absent` — "claude
+    /// is not in this pane" is an answer the machine needs, and it
+    /// cannot be inferred from a missing key (that could equally mean
+    /// the scan never ran).
+    sessions_seen: Vec<u64>,
     /// `shelld_session_id → BindMeta`.  Drives `on_pane_badge_click`'s
     /// profile-cycle dispatch on the main side.
     new_meta: HashMap<u64, BindMeta>,
@@ -1780,6 +1727,7 @@ impl WorkerCtx {
         let mut new_mapping: HashMap<u64, String> = HashMap::new();
         let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
         let mut new_activity: HashMap<u64, CcActivity> = HashMap::new();
+        let mut sessions_seen: Vec<u64> = Vec::new();
         let sessions = match self.shelld.list_sessions() {
             Ok(v) => v,
             Err(e) => {
@@ -1788,7 +1736,7 @@ impl WorkerCtx {
                     "tick.shelld_list_failed",
                     format!("{e}"),
                 ));
-                return ScanResult { new_mapping, new_meta, new_activity, log_lines };
+                return ScanResult { new_mapping, new_meta, new_activity, sessions_seen, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
@@ -1810,6 +1758,7 @@ impl WorkerCtx {
             if !s.alive {
                 continue;
             }
+            sessions_seen.push(s.session_id);
             let descendants = pidtree::descendants_of(s.child_pid, &procs);
             let Some(claude) =
                 descendants.iter().find(|d| looks_like_claudecode(d))
@@ -1938,7 +1887,7 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
-        ScanResult { new_mapping, new_meta, new_activity, log_lines }
+        ScanResult { new_mapping, new_meta, new_activity, sessions_seen, log_lines }
     }
 
     /// Reverse-lookup: encoded project dir → newest known session
@@ -2610,21 +2559,21 @@ mod tests {
         }
     }
 
-    /// `describe` is what lands in the log, so pin the strings — they
-    /// are what a future reader greps for.
+    /// The labels land in logs on both sides of the report channel,
+    /// so pin them — they are what a future reader greps for.
     #[test]
-    fn activity_describe_strings_are_stable() {
-        assert_eq!(CcActivity::AwaitingUser.describe(), "awaiting_user");
+    fn activity_label_strings_are_stable() {
+        assert_eq!(CcActivity::AwaitingUser.label(), "awaiting_user");
         assert_eq!(
-            CcActivity::ToolPending { executing: true }.describe(),
+            CcActivity::ToolPending { executing: true }.label(),
             "tool_executing"
         );
         assert_eq!(
-            CcActivity::ToolPending { executing: false }.describe(),
+            CcActivity::ToolPending { executing: false }.label(),
             "tool_awaiting_approval"
         );
-        assert_eq!(CcActivity::Working.describe(), "working");
-        assert_eq!(CcActivity::Unknown.describe(), "unknown");
+        assert_eq!(CcActivity::Working.label(), "working");
+        assert_eq!(CcActivity::Unknown.label(), "unknown");
     }
 
     /// End-to-end through the file read, including the "last line
