@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.37"  # cc 层 status:jsonl 末条记录判 awaiting_user / tool_pending / working,与通用层合并落日志;详见 CHANGELOG.md
+shell   = "0.7.38"  # cc status 跳过 turn_duration 这类记账记录 —— 真机 9 个 pane 里 7 个被读成 unknown;详见 CHANGELOG.md
 core    = "0.12.70"  # 只重编:pidtree 的 PaneForeground 换形(见 L1 0.7.35),core 侧行为不变;详见 CHANGELOG.md
 session = "0.11.31"  # 只重编:marspot-term layout 的 chrome 几何变了,session 侧行为不变;详见 CHANGELOG.md

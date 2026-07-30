@@ -28,7 +28,28 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.37**
+Current: **0.7.38**
+
+### 0.7.38
+
+cc status 跳过记账记录 —— 0.7.37 装上去当场被真机推翻。
+
+装完 25 秒后看日志:9 个 pane 里 **7 个是 `fg,unknown`**。根因是
+claudecode 在 assistant 收尾消息**之后**还会写一条
+`{"type":"system","subtype":"turn_duration",…}`,而 0.7.37 只看字面上的
+最后一行 —— 于是「一轮结束、等用户」这个最常见的静止态,恰恰是唯一读不
+出来的那个。
+
+改成从尾往回找第一条 `assistant` / `user` 记录(最多回溯 64 行),中间的
+system / meta 记录跳过。同时把「记录自身的 type = 行内第一个 `"type"`」
+这条抽成 `record_type`,因为真实记录前面还有 `parentUuid` /
+`isSidechain` / `promptId`,而内容块的 type(`tool_use` / `tool_result`)
+嵌在后面的 `message` 里。
+
+4 个新单测用的是**真实 transcript 的原样行**(含前缀字段和
+turn_duration 尾巴)。0.7.37 的测试是自己按 `"type"` 开头编的形状 —— 形状
+对了、字段顺序和尾巴都不对,所以测试全绿而真机全错。这条教训值一句:
+jsonl 这种外部格式的判据,单测必须拿原样行喂。
 
 ### 0.7.37
 

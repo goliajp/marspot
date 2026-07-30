@@ -1431,29 +1431,27 @@ impl CcActivity {
     }
 }
 
-/// Classify a session's last jsonl record.  Split from the file read so
-/// the shape rules are testable against literal records.
+/// The record's own `"type"`, i.e. the first `"type":"…"` in the line.
+/// Records carry `parentUuid` / `isSidechain` / `promptId` before it,
+/// but nothing named `type`, so first-match is the record's own; the
+/// content-block types (`tool_use`, `tool_result`, …) come later,
+/// nested inside `message`.
+fn record_type(line: &str) -> Option<&str> {
+    let key = "\"type\":\"";
+    let rest = &line[line.find(key)? + key.len()..];
+    rest.find('"').map(|end| &rest[..end])
+}
+
+/// Classify one conversation record.  Split from the file read so the
+/// shape rules are testable against literal records.
 ///
 /// `has_young_child` answers "does claude have a process younger than
 /// this record" — the caller resolves it from the proc table it already
 /// walked, since a tool that shells out shows up as a child of claude
 /// while an approval prompt shows nothing.
 fn activity_from_last_record(line: &str, has_young_child: bool) -> CcActivity {
-    let kind = {
-        let key = "\"type\":\"";
-        match line.find(key).map(|i| &line[i + key.len()..]) {
-            Some(rest) => match rest.find('"') {
-                Some(end) => &rest[..end],
-                None => return CcActivity::Unknown,
-            },
-            None => return CcActivity::Unknown,
-        }
-    };
-    match kind {
-        // The record's own `"type"` comes first in every claudecode
-        // record, so the inner content types below can be searched for
-        // anywhere in the line without ambiguity.
-        "assistant" => {
+    match record_type(line) {
+        Some("assistant") => {
             if line.contains("\"type\":\"tool_use\"") {
                 CcActivity::ToolPending { executing: has_young_child }
             } else {
@@ -1463,11 +1461,22 @@ fn activity_from_last_record(line: &str, has_young_child: bool) -> CcActivity {
         // A user record is either a real prompt or the transcript's
         // record of a tool result; both leave the assistant owing the
         // next record.
-        "user" => CcActivity::Working,
-        // `system` records (hooks, notices, local-command output) say
-        // nothing about whose turn it is.
+        Some("user") => CcActivity::Working,
         _ => CcActivity::Unknown,
     }
+}
+
+/// True for records that say nothing about whose turn it is and must be
+/// skipped when scanning back for the conversation's last state.
+///
+/// This is not a hypothetical: claudecode writes
+/// `{"type":"system","subtype":"turn_duration",…}` **after** the
+/// assistant's closing message, so the single most common resting state
+/// — a finished turn waiting on the user — sits behind one of these.
+/// Classifying only the literal last line read `unknown` on 7 of 9 live
+/// panes, which is what caught it.
+fn is_bookkeeping_record(line: &str) -> bool {
+    !matches!(record_type(line), Some("assistant") | Some("user"))
 }
 
 struct ScanResult {
@@ -2547,6 +2556,65 @@ mod tests {
         assert_eq!(tail_activity(&missing, false), CcActivity::Unknown);
     }
 
+    // ── real transcript lines ─────────────────────────────────────
+    // Verbatim prefixes of live records (`~/.claude/projects/…`),
+    // truncated only in the payload.  The records above were written
+    // with `"type"` first, which is NOT the on-disk field order, and
+    // the classifier reading only the literal last line was wrong on 7
+    // of 9 live panes — both facts are only visible against the real
+    // thing.
+
+    const LIVE_TOOL_RESULT: &str = r#"{"parentUuid":"22efebbb-9e50-42b8-a263-0870f70dde24","isSidechain":false,"promptId":"df17b9a2-3099-4e1c-a7ca-2405556f6a85","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01SRfj2obe7VZK5ykPYFbcGz","type":"tool_result","content":"…"}]}}"#;
+    const LIVE_TURN_DURATION: &str = r#"{"parentUuid":"d387726e-c410-4213-84b6-c73a3e604ddd","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":29074,"messageCount":1433,"timestamp":"2026-07-30T18:31:52.149Z","isMeta":false}"#;
+    const LIVE_ASSISTANT_TEXT: &str = r#"{"parentUuid":"c1f0a0d2-1111-2222-3333-444455556666","isSidechain":false,"promptId":"9a9a","type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"done"}]}}"#;
+
+    /// The record's own type is the first `"type"` even with the real
+    /// prefix fields in front of it.
+    #[test]
+    fn record_type_reads_the_records_own_type_from_a_live_line() {
+        assert_eq!(record_type(LIVE_TOOL_RESULT), Some("user"));
+        assert_eq!(record_type(LIVE_TURN_DURATION), Some("system"));
+        assert_eq!(record_type(LIVE_ASSISTANT_TEXT), Some("assistant"));
+    }
+
+    /// The regression this whole helper exists for: claudecode appends
+    /// `system/turn_duration` after the assistant's closing message, so
+    /// the resting state hides one line up.
+    #[test]
+    fn tail_activity_skips_the_turn_duration_record_after_a_finished_turn() {
+        let path = tmpfile(&format!(
+            "{LIVE_TOOL_RESULT}\n{LIVE_ASSISTANT_TEXT}\n{LIVE_TURN_DURATION}\n"
+        ));
+        assert_eq!(
+            tail_activity(&path, false),
+            CcActivity::AwaitingUser,
+            "a finished turn must not read as unknown just because a \
+             bookkeeping record trails it"
+        );
+    }
+
+    /// Skipping bookkeeping must not skip past a real record: a tool
+    /// call still pending is still pending.
+    #[test]
+    fn tail_activity_stops_at_the_first_conversation_record() {
+        let path = tmpfile(&format!(
+            "{LIVE_ASSISTANT_TEXT}\n{REC_TOOL_USE}\n{LIVE_TURN_DURATION}\n"
+        ));
+        assert_eq!(
+            tail_activity(&path, true),
+            CcActivity::ToolPending { executing: true }
+        );
+    }
+
+    /// Nothing but bookkeeping in the window = no information.
+    #[test]
+    fn tail_activity_is_unknown_when_only_bookkeeping_is_visible() {
+        let path = tmpfile(&format!(
+            "{LIVE_TURN_DURATION}\n{LIVE_TURN_DURATION}\n"
+        ));
+        assert_eq!(tail_activity(&path, false), CcActivity::Unknown);
+    }
+
     #[test]
     fn tail_last_message_type_reads_final_record() {
         let path = tmpfile(concat!(
@@ -2646,7 +2714,18 @@ fn tail_activity(path: &PathBuf, has_young_child: bool) -> CcActivity {
         return CcActivity::Unknown;
     }
     let s = String::from_utf8_lossy(&buf);
-    match s.lines().rev().find(|l| !l.trim().is_empty()) {
+    // Walk back to the last record that is part of the conversation,
+    // stepping over the bookkeeping ones claudecode appends after a
+    // turn.  Bounded so a long run of them can't turn one tick into a
+    // scan of the whole window.
+    const MAX_SKIP: usize = 64;
+    match s
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(MAX_SKIP)
+        .find(|l| !is_bookkeeping_record(l))
+    {
         Some(last) => activity_from_last_record(last, has_young_child),
         None => CcActivity::Unknown,
     }
