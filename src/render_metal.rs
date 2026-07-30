@@ -2525,19 +2525,19 @@ fn build_instances(
             painter.text(x, y_baseline, "+", color);
         }
 
-        // Header version label — quiet metadata in the title strip.
+        // Header version label — quiet metadata flush right, on the
+        // same row as the traffic lights and the toolbar buttons.
         if layout.top_inset > 0.0 {
             let label = version_label();
             let text_w = label.chars().count() as f32 * cell_w;
-            let title_h = (layout.top_inset as f32)
-                * (crate::TITLE_STRIP_PT / crate::HEADER_PT) as f32;
-            let right_margin_logical_pt: f32 = 8.0;
             let scale_approx = (layout.top_inset as f32) / crate::HEADER_PT as f32;
+            let right_margin_logical_pt: f32 = 10.0;
             let right_margin_phys = right_margin_logical_pt * scale_approx;
             let x =
                 ((layout.window_w as f32) - right_margin_phys - text_w).max(cell_w);
-            let baseline_y =
-                ((title_h - cell_h) * 0.5).max(0.0) + ascent;
+            let row_center = marspot_term::layout::TRAFFIC_LIGHT_CENTER_Y_LOGICAL as f32
+                * scale_approx;
+            let baseline_y = (row_center - cell_h * 0.5).max(0.0) + ascent;
             painter.text(
                 x, baseline_y, &label,
                 [HEADER_VERSION_FG.0, HEADER_VERSION_FG.1, HEADER_VERSION_FG.2, 1.0],
@@ -3771,10 +3771,12 @@ fn push_layout_chrome(
     use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
     use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon};
 
-    // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid +
-    // title-strip↔toolbar).  Same SEAM tone as GridSeams; routed
-    // through the painter (UI pipeline) so they layer over pane BG
-    // like the rest of the chrome.
+    // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid).
+    // Same SEAM tone as GridSeams; routed through the painter (UI
+    // pipeline) so they layer over pane BG like the rest of the
+    // chrome.  There used to be a third seam splitting the header into
+    // title strip + toolbar; the header is one band now, so drawing a
+    // line through it would cut the row the lights sit on.
     if layout.gutter > 0.0 {
         let g = layout.gutter;
         let seam = [SEAM.0, SEAM.1, SEAM.2, 1.0];
@@ -3792,14 +3794,6 @@ fn push_layout_chrome(
                 x: 0.0, y_top: layout.top_inset - g,
                 w: layout.window_w, h: g,
             });
-            let title_h = layout.top_inset
-                * (crate::TITLE_STRIP_PT / crate::HEADER_PT);
-            if title_h > 0.0 {
-                ui_fill(p, Rect {
-                    x: 0.0, y_top: title_h - g,
-                    w: layout.window_w, h: g,
-                });
-            }
         }
     }
 
@@ -3875,21 +3869,19 @@ fn push_layout_chrome(
 
 
 #[allow(clippy::too_many_arguments)]
-/// The running binary's version label, e.g. `Marspot v0.2.0 (1a7b23c5)`.
-/// `MARSPOT_GIT_SHA` is stamped per build (build.rs), so this string
-/// changes on every silent update — the header renders it as visible
-/// proof the new core landed.
+/// The running binary's version label, e.g. `v0.12.67`.  Bumped on
+/// every commit that changes a binary (project rule), so it still works
+/// as visible proof that a silent update landed — the product name and
+/// the git sha that used to trail it were noise in a corner the user
+/// reads dozens of times a day.  The sha stays available in the window
+/// title and in logs.
 pub fn version_label() -> String {
-    // L2 (marspot-core) is the canonical marspot version — the title
-    // bar shows it, since the renderer is what users actually interact
-    // with. The other layers in the four-layer split (L1 shell, L3
-    // session, L4 shelld) carry their own semver in version-vector.toml
-    // for operator diagnostics, but the headline number is L2's.
-    format!(
-        "Marspot v{} ({})",
-        env!("MARSPOT_VERSION_CORE"),
-        env!("MARSPOT_GIT_SHA"),
-    )
+    // L2 (marspot-core) is the canonical marspot version — the header
+    // shows it, since the renderer is what users actually interact
+    // with. The other layers (L1 shell, L3 session) carry their own
+    // semver in version-vector.toml for operator diagnostics, but the
+    // headline number is L2's.
+    format!("v{}", env!("MARSPOT_VERSION_CORE"))
 }
 
 /// Lay a run of text starting at baseline `(x, baseline_y)` in

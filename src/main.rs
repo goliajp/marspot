@@ -106,10 +106,10 @@ const DEFAULT_WIN_H: f64 = 1300.0;
 const INITIAL_COLS: u16 = 40;
 const INITIAL_ROWS: u16 = 12;
 
-// Header chrome geometry (TITLE_STRIP_PT + TOOLBAR_PT = HEADER_PT)
-// lives in lib.rs so binaries + render code share the same source
-// of truth.  All other vertical layout (sidebar items, cell rects)
-// starts BELOW the HEADER_PT band.
+// Header chrome geometry (the single HEADER_PT band: traffic lights +
+// toolbar buttons + version label, all on one row) lives in lib.rs so
+// binaries + render code share the same source of truth.  All other
+// vertical layout (sidebar items, cell rects) starts BELOW that band.
 use marspot::HEADER_PT;
 
 // Sidebar row geometry now lives on `Layout` itself
@@ -1061,11 +1061,7 @@ impl Marspot {
             phys_w, phys_h, sidebar_phys, header_phys, title_phys,
             lc, lr, cell_w, cell_h,
         )
-        .with_chrome(
-            scale,
-            self.panes.len(),
-            marspot::TITLE_STRIP_PT * scale,
-        );
+        .with_chrome(scale, self.panes.len());
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);

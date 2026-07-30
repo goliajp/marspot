@@ -28,7 +28,14 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.32**
+Current: **0.7.33**
+
+### 0.7.33
+
+只重编:window header 合并成一行(见 L2 0.12.68),`HEADER_PT` 在共享 lib
+里从 62 变成 32。shell 侧行为不变 —— 它不读这个常量,只是把 NSWindow 交
+给 core。版本号照样 bump:共享 lib 变了而某层没 bump,`install-local.sh`
+会判该层 unchanged 跳过 staging,新二进制静默留在磁盘上。
 
 ### 0.7.32
 
@@ -846,7 +853,27 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.67**
+Current: **0.12.68**
+
+### 0.12.68
+
+window header 从「标题条 + 工具栏」两条带子合成一行。
+
+工具栏图标原来在第二条带子里(标题条 32pt + 工具栏 30pt = 62pt),
+右上角写着 `Marspot v0.12.67 (7735d33c)`。现在五个图标跟 macOS 的
+traffic lights 同排垂直居中,右上角只留 `v0.12.67`,整个 chrome 从
+62pt 降到 32pt —— 每个窗口都多出 30pt 的正文高度。
+
+对齐的锚点是 traffic lights 那一行,不是 header 自己的中线:窗口按钮是
+AppKit 画的,位置相对窗口顶边固定,不跟着我们的 chrome 高度走。所以
+`TRAFFIC_LIGHT_CENTER_Y_LOGICAL = 16` 是**量出来的**(截屏窗口 frame 原点
+起算:14pt 圆点占 y 9..23),`HEADER_PT = 32` 是从它推的(2 × 16),按钮
+和版本号都按这一行居中。同一张截图里按钮落在常量要求的那一行上,所以
+截图坐标系和布局坐标系对得上 —— 这一步是量的自校验,不是眼估。
+
+顺带修掉一处不一致:`LayoutModal` 的 hit-test 传的 top obstruction 是
+`TITLE_STRIP_PT`,而渲染传的是 `layout.top_inset`(= `HEADER_PT`),两边
+差 30pt。现在只剩一个常量,不一致没地方存在了。
 
 ### 0.12.67
 
@@ -1387,7 +1414,13 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.30**
+Current: **0.11.31**
+
+### 0.11.31
+
+只重编:`marspot-term::layout` 的 chrome 几何变了(见 L2 0.12.68)。
+session 侧行为不变 —— 它用 layout 里的 grid 计算,不碰 chrome rect。
+bump 的理由同 L1 0.7.33。
 
 ### 0.11.30
 

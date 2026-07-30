@@ -75,23 +75,20 @@ pub mod state;
 pub mod tools;
 pub mod ui;
 
-/// Title-strip height in **logical points** — top band that carries
-/// the version label.  Sized to match macOS's standard title-bar
-/// vertical placement so the AppKit-drawn traffic lights (positioned
-/// at a fixed offset from the window top, ~7pt + 14pt = 21pt) sit
-/// visually centered.  Anything shorter clips them against the
-/// title↔toolbar SEAM.  Below it sits the toolbar (`TOOLBAR_PT`).
-pub const TITLE_STRIP_PT: f64 = 32.0;
-/// Toolbar height in **logical points** — band below the title strip
-/// that hosts the L2-owned icon buttons (sidebar toggle, layout
-/// picker).  Sized for a 22×22 square button with ~4pt vertical
-/// padding.
-pub const TOOLBAR_PT: f64 = 30.0;
-/// Total chrome reserved above the grid — title strip + toolbar.
+/// Window-chrome height in **logical points** — ONE band above the
+/// grid carrying three groups on a single row: the AppKit-drawn
+/// traffic lights (window left), the L2-owned toolbar icon buttons
+/// (right of the lights), and the version label (flush right).
+///
+/// 32 = 2 × `layout::TRAFFIC_LIGHT_CENTER_Y_LOGICAL`.  AppKit places
+/// its window buttons at a fixed offset from the window's top edge
+/// (measured: 14pt discs spanning y 9..23, center 16) and that offset
+/// does not follow our chrome height.  32pt is therefore the one band
+/// height that centers the lights inside itself; everything else in
+/// the header centers on the same row, so the header reads as a single
+/// line rather than two stacked strips.
+///
 /// Shared between binaries so a single-session consumer (mcli) gets
 /// the same window chrome as the multi-session container (marspot)
-/// automatically.  Layout::build treats this as one `top_inset`; the
-/// internal title↔toolbar split is known only to render code (version
-/// label positioning + button hit-test geometry, both via the
-/// matching constants above).
-pub const HEADER_PT: f64 = TITLE_STRIP_PT + TOOLBAR_PT;
+/// automatically.  `Layout::build` takes it as `top_inset`.
+pub const HEADER_PT: f64 = 32.0;

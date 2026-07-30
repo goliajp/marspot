@@ -217,8 +217,24 @@ pub struct Layout {
 /// (sidebar toggle, layout picker) are now true squares — Lucide-
 /// style monochrome line icons sit inside a 22×22 hit-target.
 const ICON_BUTTON_LOGICAL_SIZE: f64 = 22.0;
-const ICON_BUTTON_LOGICAL_MARGIN: f64 = 8.0;
 const ICON_BUTTON_LOGICAL_GAP: f64 = 6.0;
+
+/// Vertical center of the macOS traffic-light row, in logical pt from
+/// the window's top edge.  AppKit draws the window buttons itself at a
+/// fixed offset that ignores our chrome height, so this is measured,
+/// not derived: screen-captured the live window at its frame origin and
+/// found the 14pt discs spanning y 9..23 — center 16.  (The capture
+/// self-calibrates: the toolbar buttons in the same frame landed on
+/// exactly the row this constant asked for, so the capture's origin and
+/// the layout's origin are known to agree.)  The toolbar buttons center
+/// on this same row, which is what makes the header read as one line
+/// instead of a title strip stacked over a toolbar.
+pub const TRAFFIC_LIGHT_CENTER_Y_LOGICAL: f64 = 16.0;
+/// Left edge of the toolbar's first icon button, logical pt from the
+/// window's left edge.  Same capture: the light group runs x 9..69, so
+/// this leaves a 15pt gap — wide enough that the OS's cluster and ours
+/// read as two groups instead of one crowded run of controls.
+const TOOLBAR_LEFT_LOGICAL: f64 = 84.0;
 
 /// Sidebar geometry, all in physical pixels.  Renderer reads
 /// `Layout::sidebar_top_pad_phys` (computed at build time so the
@@ -355,44 +371,33 @@ impl Layout {
     /// chrome can call the original `build` unchanged.
     /// `scale` is the device pixel ratio (caller already has it
     /// from `ctx.scale()`); we use it for the button + picker
-    /// (logical-pt sizing).  `toolbar_top_phys` is the physical-px y
-    /// of the toolbar band (0 < toolbar_top_phys < top_inset means
-    /// the chrome above the grid is split title-strip + toolbar, and
-    /// buttons live in the lower band).  Pass 0.0 to keep buttons in
-    /// the legacy single-band layout for snapshot / bench callers.
-    /// `n_sessions` populates the close-[×] rects (one per row).
+    /// (logical-pt sizing).  `n_sessions` populates the close-[×]
+    /// rects (one per row).
     pub fn with_chrome(
         mut self,
         scale: f64,
         n_sessions: usize,
-        toolbar_top_phys: f64,
     ) -> Self {
         let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
-        let btn_margin = ICON_BUTTON_LOGICAL_MARGIN * scale;
         let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
-        // Toolbar band runs from `toolbar_top_phys` to `top_inset`.
-        // Center the square buttons vertically inside it.  When the
-        // caller hands us 0.0 (snapshot / bench paths with no split
-        // header), fall back to the legacy "sit at the top of the
-        // inset with `btn_margin` padding" anchoring.
-        let toolbar_top = if toolbar_top_phys > 0.0 {
-            toolbar_top_phys
-        } else {
-            self.top_inset
-        };
-        let toolbar_h = (self.top_inset - toolbar_top).max(btn_size);
-        let btn_y = toolbar_top + ((toolbar_h - btn_size) * 0.5).max(0.0);
-        // Both icon buttons anchored to the LEFT of the toolbar so
-        // the user's hand path stays on one side; sidebar toggle
-        // first (it stays visible when sidebar is collapsed and is
-        // the most-used affordance), layout picker right of it.
+        // Buttons center on the traffic-light row, NOT inside the
+        // header band — the lights are AppKit's and sit at a fixed
+        // offset from the window top, so that row is the anchor the
+        // whole header lines up against (`HEADER_PT` is sized to
+        // agree with it, but this math doesn't depend on that).
+        let btn_y = TRAFFIC_LIGHT_CENTER_Y_LOGICAL * scale - btn_size * 0.5;
+        // Icon buttons anchored to the LEFT of the header, starting
+        // right of the traffic lights so the user's hand path stays on
+        // one side; sidebar toggle first (it stays visible when the
+        // sidebar is collapsed and is the most-used affordance),
+        // layout picker right of it.
         // Anchored to the window's left edge, NOT to the sidebar's
-        // right edge — the title strip + toolbar both extend full
-        // width over the sidebar area, so window-left is the
-        // consistent anchor whether sidebar is shown or collapsed.
+        // right edge — the header extends full width over the sidebar
+        // area, so window-left is the consistent anchor whether the
+        // sidebar is shown or collapsed.
         let btn_w = btn_size;
         let btn_h = btn_size;
-        let sidebar_btn_x = btn_margin;
+        let sidebar_btn_x = TOOLBAR_LEFT_LOGICAL * scale;
         let layout_btn_x = sidebar_btn_x + btn_size + btn_gap;
         // F3+1 — process-tree toggle sits immediately right of layout
         // picker, anchored to the left toolbar group.  Keeps all three

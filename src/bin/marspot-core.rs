@@ -3416,7 +3416,6 @@ impl CoreApp {
         .with_chrome(
             win!(self, wi).scale,
             win!(self, wi).panes.len(),
-            marspot::TITLE_STRIP_PT * win!(self, wi).scale,
         );
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
@@ -6628,7 +6627,7 @@ impl CoreApp {
             use marspot::ui::components::{LayoutModal, LayoutModalHit, GRID_MIN, GRID_MAX};
             let modal = LayoutModal::layout(
                 win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
-                marspot::TITLE_STRIP_PT * win!(self, wi).scale,
+                HEADER_PT * win!(self, wi).scale,
                 win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
             );
             // F3+3.3 — card drag start has priority over the
@@ -7169,7 +7168,7 @@ impl CoreApp {
             use marspot::ui::components::LayoutModal;
             let modal = LayoutModal::layout(
                 win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
-                marspot::TITLE_STRIP_PT * win!(self, wi).scale,
+                HEADER_PT * win!(self, wi).scale,
                 win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
             );
             // Drop position = card origin (mouse - grab_offset),
