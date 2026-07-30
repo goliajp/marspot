@@ -1431,15 +1431,91 @@ impl CcActivity {
     }
 }
 
-/// The record's own `"type"`, i.e. the first `"type":"…"` in the line.
-/// Records carry `parentUuid` / `isSidechain` / `promptId` before it,
-/// but nothing named `type`, so first-match is the record's own; the
-/// content-block types (`tool_use`, `tool_result`, …) come later,
-/// nested inside `message`.
+/// Value of a **top-level** string field of one jsonl record.
+///
+/// Depth-aware, and that is the whole point.  Measured off live
+/// records, the field order is not what a reader assumes:
+///
+/// ```text
+/// user:      {"parentUuid":…,"promptId":…,"type":"user","message":{…}}
+/// assistant: {"parentUuid":…,"message":{"model":…,"type":"message",…},…,"type":"assistant",…}
+/// ```
+///
+/// Assistant records put `message` — which has its own
+/// `"type":"message"` — **before** their own `type`, so "first
+/// `"type"` in the line" reads every assistant record as `message`.
+/// That shipped in 0.7.38 and made all 9 live panes report `working`:
+/// assistant records were being skipped as bookkeeping and the scan
+/// fell through to the user record behind them.  Scanning at depth 1
+/// is the fix, and it retires the whole class of field-order bugs.
+fn top_level_str<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let b = line.as_bytes();
+    // Content of the JSON string starting at `at` (which must be the
+    // opening quote), plus the index just past its closing quote.
+    // Escapes are stepped over, not decoded — the values this reads
+    // ("assistant", "user", …) have none.
+    fn scan_string(b: &[u8], at: usize) -> Option<(&str, usize)> {
+        let mut i = at + 1;
+        let start = i;
+        while i < b.len() {
+            match b[i] {
+                b'\\' => i += 2,
+                b'"' => {
+                    return std::str::from_utf8(&b[start..i]).ok().map(|s| (s, i + 1))
+                }
+                _ => i += 1,
+            }
+        }
+        None
+    }
+    let mut i = 0usize;
+    let mut depth: i32 = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+            }
+            b'"' => {
+                let (s, after) = scan_string(b, i)?;
+                let mut j = after;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                // A key is a string followed by ':'.  Only depth 1 is
+                // the record's own object.
+                if depth == 1 && j < b.len() && b[j] == b':' {
+                    let mut k = j + 1;
+                    while k < b.len() && b[k].is_ascii_whitespace() {
+                        k += 1;
+                    }
+                    if s == field {
+                        return if k < b.len() && b[k] == b'"' {
+                            scan_string(b, k).map(|(v, _)| v)
+                        } else {
+                            None // present but not a string
+                        };
+                    }
+                    i = k; // resume at the value; its braces adjust depth
+                } else {
+                    i = after;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The record's own `type` — `assistant`, `user`, `system`,
+/// `last-prompt`, `attachment`, `ai-title`, `mode`, `permission-mode`,
+/// … (that list is what live transcripts actually contain).
 fn record_type(line: &str) -> Option<&str> {
-    let key = "\"type\":\"";
-    let rest = &line[line.find(key)? + key.len()..];
-    rest.find('"').map(|end| &rest[..end])
+    top_level_str(line, "type")
 }
 
 /// Classify one conversation record.  Split from the file read so the
@@ -2566,15 +2642,80 @@ mod tests {
 
     const LIVE_TOOL_RESULT: &str = r#"{"parentUuid":"22efebbb-9e50-42b8-a263-0870f70dde24","isSidechain":false,"promptId":"df17b9a2-3099-4e1c-a7ca-2405556f6a85","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01SRfj2obe7VZK5ykPYFbcGz","type":"tool_result","content":"…"}]}}"#;
     const LIVE_TURN_DURATION: &str = r#"{"parentUuid":"d387726e-c410-4213-84b6-c73a3e604ddd","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":29074,"messageCount":1433,"timestamp":"2026-07-30T18:31:52.149Z","isMeta":false}"#;
-    const LIVE_ASSISTANT_TEXT: &str = r#"{"parentUuid":"c1f0a0d2-1111-2222-3333-444455556666","isSidechain":false,"promptId":"9a9a","type":"assistant","message":{"id":"msg_01","role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"done"}]}}"#;
+    /// NOTE the field order: `message` (carrying its own
+    /// `"type":"message"`) comes BEFORE the record's own `"type"`.
+    /// That is how claudecode actually writes assistant records, and
+    /// reading the first `"type"` in the line therefore yields
+    /// `message` — the bug 0.7.38 shipped.
+    const LIVE_ASSISTANT_TEXT: &str = r#"{"parentUuid":"4809f00f-b471-4330-a9e3-870374a08f67","isSidechain":false,"message":{"model":"claude-fable-5","id":"msg_011CdTzjoRr7Nb2u3TumMno6","type":"message","role":"assistant","content":[{"type":"text","text":"这条唤醒滞后"}]},"type":"assistant","uuid":"a261e9a7","timestamp":"2026-07-28T06:39:12.718Z"}"#;
+    const LIVE_ASSISTANT_TOOL_USE: &str = r#"{"parentUuid":"4809f00f","isSidechain":false,"message":{"model":"claude-fable-5","id":"msg_02","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_9","name":"Bash","input":{"command":"ls"}}]},"type":"assistant","uuid":"b1"}"#;
+    const LIVE_LAST_PROMPT: &str = r#"{"type":"last-prompt","lastPrompt":"文档、网站都要更新","leafUuid":"a261e9a7","sessionId":"f59436fa"}"#;
 
-    /// The record's own type is the first `"type"` even with the real
-    /// prefix fields in front of it.
+    /// The record's own type is the TOP-LEVEL one — not the first
+    /// `"type"` in the line, which for assistant records belongs to
+    /// the nested `message` object.
     #[test]
     fn record_type_reads_the_records_own_type_from_a_live_line() {
         assert_eq!(record_type(LIVE_TOOL_RESULT), Some("user"));
         assert_eq!(record_type(LIVE_TURN_DURATION), Some("system"));
-        assert_eq!(record_type(LIVE_ASSISTANT_TEXT), Some("assistant"));
+        assert_eq!(record_type(LIVE_LAST_PROMPT), Some("last-prompt"));
+        assert_eq!(
+            record_type(LIVE_ASSISTANT_TEXT),
+            Some("assistant"),
+            "nested message.type must not win — this is the 0.7.38 bug"
+        );
+        assert_eq!(record_type(LIVE_ASSISTANT_TOOL_USE), Some("assistant"));
+    }
+
+    /// Depth is what makes it right, so pin the pieces directly.
+    #[test]
+    fn top_level_str_ignores_nested_keys_and_handles_escapes() {
+        assert_eq!(
+            top_level_str(r#"{"a":{"type":"inner"},"type":"outer"}"#, "type"),
+            Some("outer")
+        );
+        assert_eq!(
+            top_level_str(r#"{"list":[{"type":"x"}],"type":"outer"}"#, "type"),
+            Some("outer")
+        );
+        // A quoted brace / escaped quote inside a value must not move
+        // the depth counter or end the string early.
+        assert_eq!(
+            top_level_str(r#"{"text":"a \" } { b","type":"outer"}"#, "type"),
+            Some("outer")
+        );
+        // Present but not a string, and simply absent.
+        assert_eq!(top_level_str(r#"{"type":7}"#, "type"), None);
+        assert_eq!(top_level_str(r#"{"other":"x"}"#, "type"), None);
+    }
+
+    /// A finished assistant turn, written the way claudecode writes
+    /// it, is `awaiting_user` — the state 0.7.38 could never produce.
+    #[test]
+    fn live_assistant_records_classify_without_being_mistaken_for_bookkeeping() {
+        assert!(!is_bookkeeping_record(LIVE_ASSISTANT_TEXT));
+        assert_eq!(
+            activity_from_last_record(LIVE_ASSISTANT_TEXT, false),
+            CcActivity::AwaitingUser
+        );
+        assert_eq!(
+            activity_from_last_record(LIVE_ASSISTANT_TOOL_USE, false),
+            CcActivity::ToolPending { executing: false }
+        );
+        assert!(is_bookkeeping_record(LIVE_LAST_PROMPT));
+        assert!(is_bookkeeping_record(LIVE_TURN_DURATION));
+    }
+
+    /// Transcript text that merely QUOTES the marker (a session where
+    /// marspot itself is being developed does exactly this) is escaped
+    /// in JSON, so the unescaped pattern can't match it.
+    #[test]
+    fn a_quoted_tool_use_marker_in_message_text_is_not_a_tool_call() {
+        let line = r#"{"parentUuid":"x","message":{"type":"message","role":"assistant","content":[{"type":"text","text":"we match on \"type\":\"tool_use\" here"}]},"type":"assistant"}"#;
+        assert_eq!(
+            activity_from_last_record(line, false),
+            CcActivity::AwaitingUser
+        );
     }
 
     /// The regression this whole helper exists for: claudecode appends

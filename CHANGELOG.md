@@ -28,7 +28,36 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.38**
+Current: **0.7.39**
+
+### 0.7.39
+
+记录的 type 必须按**顶层字段**读 —— 0.7.38 装上去又被真机推翻一次。
+
+0.7.38 之后 9 个 pane 全是 `fg,working`,`awaiting_user` /
+`tool_pending` 一次都没出现过。对着真文件跑等价逻辑才看清字段顺序:
+
+```
+user:      {"parentUuid":…,"promptId":…,"type":"user","message":{…}}
+assistant: {"parentUuid":…,"message":{…,"type":"message",…},…,"type":"assistant",…}
+```
+
+assistant 记录把 `message` 放在**自己的 `type` 前面**,而 `message` 里
+有 `"type":"message"` —— 于是「行内第一个 type」把每条 assistant 记录都
+读成 `message`,被当记账记录跳过,退回到它前面那条 user 记录 →
+`working`。user 记录恰好 type 在前,所以它们是对的,错误看上去就成了
+「全是 working」。
+
+改成 `top_level_str`:带深度和转义的扫描,只认深度 1 的键。顺带把
+「文本里引用了 `"type":"tool_use"` 字面量」这条也钉进测试 —— JSON 里
+那种引用是转义过的,不转义的模式匹配不到(marspot 自己的开发 session
+里就有这种文本)。
+
+装之前先拿真文件对账过:10 个 session 里 tool_pending / working /
+awaiting_user 三种都出现,不再是一边倒。这一步是前两轮都跳过的。
+
+三轮教训同一条:外部格式的判据,**单测喂原样行、上线前对真数据跑一遍**。
+自己编的形状(0.7.37)、只补了尾巴没补字段顺序(0.7.38)都不够。
 
 ### 0.7.38
 
