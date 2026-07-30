@@ -28,7 +28,33 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.34**
+Current: **0.7.35**
+
+### 0.7.35
+
+pane status 通用层接上 tick:每秒一扫,变化才落日志,插件能读。
+
+- `pane_status::PaneStatusTracker` 挂在 `poll_supervisor`(~250ms)上,
+  自己按 1s 闸门,来源是 `session_registry::list_session_entries()`
+  (通用来源,不经任何插件),每 pane 1-2 个 syscall —— 用的是新加的
+  `pidtree::pane_foreground_probe`,不是 `list_all_procs`(那个每个
+  host 上的 pid 一次 `proc_pidinfo`,~600 次/秒,不是给每秒扫的形状)。
+- 只在**变化时**落 `shell.pane_status.changed`(INFO,因为运行时默认
+  级别就是 Info,DEBUG 在真机上不存在)。一个 pane 在提示符上坐一小时
+  只打一行。
+- `PluginHost::pane_status(sid)` 给插件读快照(READ_PANE_INFO 权限),
+  在插件 tick **之前**扫,所以同一轮里插件看到的是本轮的值。
+- 上界:每轮用 registry 当前的 sid 集合**替换**整张表,pane 关掉下一轮
+  就忘掉,不是只插不删(CLAUDE.md §3)。
+- `sweep()` 返回 `Option<Vec<Transition>>` 而不是 `Vec`:空 vec 不等于
+  「没事发生」—— pane **关闭**会丢 key 却不产生 transition,把空 vec 当
+  no-op 会让已关 pane 的最后状态永远留在插件读到的那张表里。None =
+  被闸门跳过,Some(空) = 扫过但没变,仍要重新 publish。
+
+`Job` 的形状同时改成 `{ pgid, leader: Option<JobLeader> }`:一出现第二个
+生产者(单 pid 探针)就发现旧形状撒谎 —— 探针认不出 leader 时,pane
+仍然**在跑东西**,不能退成 `Unknown`。「组在前台但认不出成员」是真状态,
+现在是一等公民。
 
 ### 0.7.34
 
@@ -878,7 +904,13 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.69**
+Current: **0.12.70**
+
+### 0.12.70
+
+只重编:`pidtree::PaneForeground::Job` 换成
+`{ pgid, leader: Option<JobLeader> }`(见 L1 0.7.35)。core 侧行为不变 ——
+process panel 不读这个枚举。bump 理由同 0.12.67。
 
 ### 0.12.69
 

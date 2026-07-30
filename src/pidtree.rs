@@ -89,6 +89,19 @@ unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> { unsafe {
         if pid == 0 {
             continue;
         }
+        // None = exited between listpids and pidinfo.
+        if let Some(row) = proc_row(pid) {
+            out.push(row);
+        }
+    }
+    Some(out)
+}}
+
+/// One process's row, without the table walk — a single
+/// `proc_pidinfo(PROC_PIDTBSDINFO)`.  None when the pid is gone or the
+/// call is refused.
+pub fn proc_row(pid: i32) -> Option<ProcRow> {
+    unsafe {
         let mut info: libc::proc_bsdinfo = std::mem::zeroed();
         let r = libc::proc_pidinfo(
             pid,
@@ -98,12 +111,12 @@ unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> { unsafe {
             std::mem::size_of::<libc::proc_bsdinfo>() as i32,
         );
         if r <= 0 {
-            continue; // process exited between listpids and pidinfo
+            return None;
         }
         let comm = CStr::from_ptr(info.pbi_comm.as_ptr())
             .to_string_lossy()
             .into_owned();
-        out.push(ProcRow {
+        Some(ProcRow {
             pid,
             ppid: info.pbi_ppid as i32,
             comm,
@@ -111,10 +124,9 @@ unsafe fn list_all_procs_inner() -> Option<Vec<ProcRow>> { unsafe {
             pgid: info.pbi_pgid as i32,
             tty_dev: info.e_tdev,
             tty_fg_pgid: info.e_tpgid as i32,
-        });
+        })
     }
-    Some(out)
-}}
+}
 
 /// Working directory of `pid` via `proc_pidinfo(PROC_PIDVNODEPATHINFO)`.
 /// Returns None when the process has exited, when SIP / sandbox blocks
@@ -408,25 +420,15 @@ pub enum PaneForeground {
     /// The shell's own process group owns the tty — zsh is sitting at
     /// its prompt with nothing running.
     AtPrompt,
-    /// A job holds the tty.  `leader` is the job's process-group
-    /// leader — the process the user launched (`claude`, `vim`,
-    /// `cargo`, `ssh`), not whatever it has since forked underneath.
+    /// A job holds the tty.  `pgid` alone is the load-bearing part —
+    /// "something the user started is running" — and it is always
+    /// known.  `leader` names that job when it can be identified;
+    /// `None` means the group owns the tty but no member of it was
+    /// readable, which is a real state (leader exited a moment ago,
+    /// or the one-pid probe path can't see the survivors).
     Job {
-        leader_pid: i32,
-        /// `pbi_comm` of the leader, i.e. the first 16 bytes of the
-        /// **executable file's** name.  Useful as a coarse label, NOT
-        /// as the program identity: probed against the 10 live claude
-        /// panes on this host, every one reports `2.1.220` (claude
-        /// execs a version-named file), not `claude`.  A caller that
-        /// needs to know *which program* this is must read
-        /// `proc_cmdline(leader_pid)` — which is what the claudecode
-        /// plugin's own `looks_like_claudecode` already does.
-        leader_comm: String,
         pgid: i32,
-        /// Group leader's start time, unix seconds.  Together with the
-        /// observation time this gives "how long has this job been in
-        /// the foreground" without keeping any history.
-        leader_start_unix: u64,
+        leader: Option<JobLeader>,
     },
     /// Can't tell: the shell pid is no longer in the table (pane
     /// exited), it has no controlling terminal, or the tty reports no
@@ -436,31 +438,49 @@ pub enum PaneForeground {
     Unknown,
 }
 
+/// The process at the head of a foreground job — what the user
+/// launched (`claude`, `vim`, `cargo`, `ssh`), not whatever it has
+/// since forked underneath.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobLeader {
+    pub pid: i32,
+    /// `pbi_comm`, i.e. the first 16 bytes of the **executable file's**
+    /// name.  A coarse label, NOT the program identity: probed against
+    /// the 10 live claude panes on this host, every one reports
+    /// `2.1.220` (claude execs a version-named file), not `claude`.  A
+    /// caller that needs to know *which program* this is must read
+    /// `proc_cmdline(pid)` — which is what the claudecode plugin's own
+    /// `looks_like_claudecode` already does.
+    pub comm: String,
+    /// Start time, unix seconds.  Against the observation time this
+    /// gives "how long has this job held the pane" with no history
+    /// kept anywhere.
+    pub start_unix: u64,
+}
+
 /// Foreground status of the pane whose PTY is headed by `shell_pid`
-/// (the shelld session's `child_pid` — the zsh at the top of the
+/// (the shelld session's `shell_child_pid` — the zsh at the top of the
 /// pane's process tree), from a pre-fetched `procs` table.
 ///
 /// Pure function of the table so it is testable without spawning
-/// anything, and so one `list_all_procs()` serves every pane.
+/// anything, and so one `list_all_procs()` serves every pane.  Callers
+/// that don't already hold a table want `pane_foreground_probe`, which
+/// costs 1–2 syscalls instead of one per pid on the host.
 pub fn pane_foreground(shell_pid: i32, procs: &[ProcRow]) -> PaneForeground {
     let Some(shell) = procs.iter().find(|p| p.pid == shell_pid) else {
         return PaneForeground::Unknown;
     };
-    // No controlling tty, or the tty has no foreground group.  Both
-    // are "no information" — a pane whose shell lost its tty is not
-    // an idle pane.
-    if shell.tty_dev == 0 || shell.tty_fg_pgid <= 0 {
-        return PaneForeground::Unknown;
-    }
-    if shell.tty_fg_pgid == shell.pgid {
-        return PaneForeground::AtPrompt;
-    }
+    let fg = match classify_shell(shell) {
+        Ok(settled) => return settled,
+        Err(fg) => fg,
+    };
     // The foreground group's leader is the process whose pid equals
     // the pgid.  It can be gone while the group still owns the tty
     // (leader exited, children outlive it), so fall back to the
     // oldest surviving member of the group on the same tty — that is
-    // the closest thing to "the job the user started".
-    let fg = shell.tty_fg_pgid;
+    // the closest thing to "the job the user started".  Matching on
+    // pgid alone would pick up another pane's job, since pgid numbers
+    // are not per-terminal.
     let same_group = || {
         procs
             .iter()
@@ -469,17 +489,64 @@ pub fn pane_foreground(shell_pid: i32, procs: &[ProcRow]) -> PaneForeground {
     let leader = same_group()
         .find(|p| p.pid == fg)
         .or_else(|| same_group().min_by_key(|p| (p.start_unix, p.pid)));
-    match leader {
-        Some(p) => PaneForeground::Job {
-            leader_pid: p.pid,
-            leader_comm: p.comm.clone(),
-            pgid: fg,
-            leader_start_unix: p.start_unix,
-        },
-        // Foreground group exists per the kernel but no member is in
-        // our snapshot — the job exited between listpids and now.
-        None => PaneForeground::Unknown,
+    PaneForeground::Job {
+        pgid: fg,
+        leader: leader.map(|p| JobLeader {
+            pid: p.pid,
+            comm: p.comm.clone(),
+            start_unix: p.start_unix,
+        }),
     }
+}
+
+/// Same answer as `pane_foreground`, without walking the host's whole
+/// process table: one `proc_pidinfo` on the shell, plus one on the
+/// foreground group leader when a job is running.
+///
+/// This is the variant a per-second sweep over N panes should use —
+/// `list_all_procs` costs a `proc_pidinfo` per pid on the box (~600 on
+/// a dev machine), which is the wrong shape to pay every second for a
+/// signal about 18 panes.  The cost is that the "leader exited but its
+/// group still owns the tty" case yields `Job { leader: None }` rather
+/// than the oldest surviving member: finding that member needs the
+/// table.  Callers that already hold one (the claudecode scan does)
+/// should use `pane_foreground` and get the better answer for free.
+pub fn pane_foreground_probe(shell_pid: i32) -> PaneForeground {
+    let Some(shell) = proc_row(shell_pid) else {
+        return PaneForeground::Unknown;
+    };
+    let fg = match classify_shell(&shell) {
+        Ok(settled) => return settled,
+        Err(fg) => fg,
+    };
+    // Group leader = the pid equal to the pgid.  Verify it shares the
+    // pane's tty before believing it: pids are recycled, and a stale
+    // pgid pointing at an unrelated process on another terminal must
+    // not be reported as this pane's job.
+    let leader = proc_row(fg)
+        .filter(|p| p.tty_dev == shell.tty_dev)
+        .map(|p| JobLeader {
+            pid: p.pid,
+            comm: p.comm,
+            start_unix: p.start_unix,
+        });
+    PaneForeground::Job { pgid: fg, leader }
+}
+
+/// Shared first half of both entry points: settle the cases that need
+/// nothing but the shell's own row.  `Ok` = final answer, `Err(pgid)` =
+/// a job owns the tty and its leader still has to be resolved.
+fn classify_shell(shell: &ProcRow) -> Result<PaneForeground, i32> {
+    // No controlling tty, or the tty has no foreground group.  Both
+    // are "no information" — a pane whose shell lost its tty is not
+    // an idle pane.
+    if shell.tty_dev == 0 || shell.tty_fg_pgid <= 0 {
+        return Ok(PaneForeground::Unknown);
+    }
+    if shell.tty_fg_pgid == shell.pgid {
+        return Ok(PaneForeground::AtPrompt);
+    }
+    Err(shell.tty_fg_pgid)
 }
 
 /// F3+1 — one node of a process tree.  Same data as `ProcRow` plus
@@ -734,10 +801,12 @@ mod tests {
         assert_eq!(
             pane_foreground(500, &procs),
             PaneForeground::Job {
-                leader_pid: 600,
-                leader_comm: "claude".into(),
                 pgid: 600,
-                leader_start_unix: 2000,
+                leader: Some(JobLeader {
+                    pid: 600,
+                    comm: "claude".into(),
+                    start_unix: 2000,
+                }),
             }
         );
     }
@@ -754,11 +823,26 @@ mod tests {
         assert_eq!(
             pane_foreground(500, &procs),
             PaneForeground::Job {
-                leader_pid: 601,
-                leader_comm: "node".into(),
                 pgid: 600,
-                leader_start_unix: 2500,
+                leader: Some(JobLeader {
+                    pid: 601,
+                    comm: "node".into(),
+                    start_unix: 2500,
+                }),
             }
+        );
+    }
+
+    /// A job whose group has no readable member is still a job — the
+    /// pane is NOT idle just because we failed to name what's running.
+    /// (This is also the shape the one-pid probe returns for the
+    /// leader-exited case, since naming the survivor needs the table.)
+    #[test]
+    fn pane_foreground_job_without_identifiable_leader_is_still_a_job() {
+        let procs = vec![row(500, 400, "zsh", 500, TTY_A, 600, 1000)];
+        assert_eq!(
+            pane_foreground(500, &procs),
+            PaneForeground::Job { pgid: 600, leader: None }
         );
     }
 
@@ -773,8 +857,8 @@ mod tests {
             row(701, 700, "ssh", 600, TTY_B, 600, 1500),
         ];
         match pane_foreground(500, &procs) {
-            PaneForeground::Job { leader_pid, ref leader_comm, .. } => {
-                assert_eq!((leader_pid, leader_comm.as_str()), (600, "vim"));
+            PaneForeground::Job { leader: Some(l), .. } => {
+                assert_eq!((l.pid, l.comm.as_str()), (600, "vim"));
             }
             other => panic!("expected pane A's own job, got {other:?}"),
         }
@@ -792,8 +876,38 @@ mod tests {
         // tty present, no foreground group (tcgetpgrp would say -1).
         let no_fg = vec![row(500, 400, "zsh", 500, TTY_A, -1, 1000)];
         assert_eq!(pane_foreground(500, &no_fg), PaneForeground::Unknown);
-        // Foreground group has no surviving member in the snapshot.
-        let vanished = vec![row(500, 400, "zsh", 500, TTY_A, 600, 1000)];
-        assert_eq!(pane_foreground(500, &vanished), PaneForeground::Unknown);
+    }
+
+    /// The probe path answers off the real kernel state for the test
+    /// process itself.  `cargo`/`nextest` run it without a controlling
+    /// terminal, so the honest answer is `Unknown`; under a tty (run
+    /// the binary by hand) the same call reports the job.  Either way
+    /// it must not panic and must not claim `AtPrompt` — asserting the
+    /// tty-shape rather than a fixed variant keeps this from being a
+    /// test of how the CI runner happens to attach stdio.
+    #[test]
+    fn pane_foreground_probe_agrees_with_this_process_own_tty_state() {
+        let me = std::process::id() as i32;
+        let row = proc_row(me).expect("proc_row None for self");
+        let probed = pane_foreground_probe(me);
+        if row.tty_dev == 0 || row.tty_fg_pgid <= 0 {
+            assert_eq!(probed, PaneForeground::Unknown);
+        } else if row.tty_fg_pgid == row.pgid {
+            assert_eq!(probed, PaneForeground::AtPrompt);
+        } else {
+            assert!(
+                matches!(probed, PaneForeground::Job { .. }),
+                "tty fg group {} != own group {} should read as Job, got {probed:?}",
+                row.tty_fg_pgid,
+                row.pgid,
+            );
+        }
+    }
+
+    /// A pid that cannot exist has no row and no status.
+    #[test]
+    fn pane_foreground_probe_unknown_for_dead_pid() {
+        assert!(proc_row(-1).is_none());
+        assert_eq!(pane_foreground_probe(-1), PaneForeground::Unknown);
     }
 }

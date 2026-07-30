@@ -216,6 +216,27 @@ pub trait PluginHost: Send + Sync {
     fn pane_count(&self) -> usize;
     fn pane_pty_device(&self, pane: usize) -> Result<Option<PathBuf>, PluginError>;
     fn pane_pty_pid_tree(&self, pane: usize) -> Result<Vec<PtyChild>, PluginError>;
+
+    /// Generic foreground status of the pane backing
+    /// `shelld_session_id`: is its shell at a prompt, is a job running,
+    /// or does the kernel not say.  Sampled by the shell once per
+    /// second — the same value for every caller in a tick, so a plugin
+    /// may call it per pane without multiplying syscalls.
+    ///
+    /// `Ok(None)` means the sweep has no entry for that session (it
+    /// just appeared, or it is gone).  That is NOT "idle": a caller
+    /// deciding whether a pane is safe to act on must treat both
+    /// `None` and `PaneForeground::Unknown` as "no information".
+    ///
+    /// This is deliberately program-agnostic.  A plugin that knows the
+    /// foreground program refines `Job` itself (claudecode reads the
+    /// session's jsonl); the host will not grow per-program states.
+    fn pane_status(
+        &self,
+        _shelld_session_id: u64,
+    ) -> Result<Option<marspot::pidtree::PaneForeground>, PluginError> {
+        Ok(None)
+    }
     fn pane_focused(&self) -> Option<usize>;
 
     // ── Persistence(PERSIST_STATE) ───────────────────────────────

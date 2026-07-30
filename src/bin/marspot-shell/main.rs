@@ -568,6 +568,7 @@ use marspot::shell_proto::{
 };
 
 mod banner;
+mod pane_status;
 mod plugins;
 mod present;
 mod sup_log;
@@ -957,6 +958,12 @@ struct ShellApp {
     /// just see the supervisor cadence.  Their per-plugin interval
     /// gating lives in the registry.
     last_plugin_tick: Instant,
+    /// Generic per-pane foreground status (shell at prompt / job
+    /// running / unknown), swept once a second from the supervisor
+    /// tick and published to `plugin_host` so plugins read a snapshot.
+    /// The pane-status layer that knows about specific programs lives
+    /// in the plugins on top of this one.
+    pane_status: pane_status::PaneStatusTracker,
     /// Receiver half of the channel `ShellPluginHost::set_pane_badge`
     /// pushes into; drained each `poll_supervisor` tick and forwarded
     /// to the active core as `MsgType::PaneBadge` frames.
@@ -1265,6 +1272,7 @@ impl ShellApp {
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
+            pane_status: pane_status::PaneStatusTracker::new(),
             pane_badge_rx,
             pane_title_rx,
             pane_session_begin_rx,
@@ -2063,6 +2071,40 @@ impl ShellApp {
         }
     }
 
+    /// Re-probe every pane's foreground status (gated to
+    /// `pane_status::SWEEP_INTERVAL` inside the tracker), publish it
+    /// for plugins, and log the transitions.
+    ///
+    /// INFO, not DEBUG: the runtime default level is Info, so a DEBUG
+    /// line does not exist on a real machine — and "when did this pane
+    /// stop running something" is exactly the history the consumers of
+    /// this signal (idle policy, badges) will be argued about from.
+    /// The rate is capped by construction: one line per pane per
+    /// *change*, and a pane that sits at its prompt for an hour prints
+    /// once.
+    fn sweep_pane_status(&mut self) {
+        // None = interval gate; nothing was re-probed, nothing to say.
+        let Some(transitions) = self.pane_status.sweep() else {
+            return;
+        };
+        for t in &transitions {
+            lx_info!(
+                "shell.pane_status.changed",
+                "pane foreground changed",
+                sid = t.sid,
+                from = t
+                    .prev
+                    .as_ref()
+                    .map(pane_status::describe)
+                    .unwrap_or_else(|| "-".to_string())
+                    .as_str(),
+                to = pane_status::describe(&t.next).as_str()
+            );
+        }
+        self.plugin_host
+            .publish_pane_status(self.pane_status.snapshot());
+    }
+
     /// Periodic check.  Fired from `user_event` (which runs every
     /// 16 ms via the redraw pump).  Responsibilities:
     ///
@@ -2079,6 +2121,10 @@ impl ShellApp {
         // tick_interval_ms.  Cheap when no plugin needs to tick.
         // last_plugin_tick is reserved for future "supervisor-level
         // throttle" — MVP doesn't gate here, the registry handles it.
+        // Pane status BEFORE the plugin ticks: plugins read the value
+        // through the host, so a plugin's tick in this same round sees
+        // this round's sweep, not the previous one's.
+        self.sweep_pane_status();
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
 

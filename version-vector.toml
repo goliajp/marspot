@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.34"  # pidtree 认前台作业:e_tpgid/pbi_pgid 入 ProcRow + pane_foreground 判据;详见 CHANGELOG.md
-core    = "0.12.69"  # 只重编:pidtree::ProcRow 加 pgid/tty 字段(见 L1 0.7.34),core 侧行为不变;详见 CHANGELOG.md
+shell   = "0.7.35"  # pane status 通用层上线:每秒一扫 + 变化才落 INFO + PluginHost::pane_status;详见 CHANGELOG.md
+core    = "0.12.70"  # 只重编:pidtree 的 PaneForeground 换形(见 L1 0.7.35),core 侧行为不变;详见 CHANGELOG.md
 session = "0.11.31"  # 只重编:marspot-term layout 的 chrome 几何变了,session 侧行为不变;详见 CHANGELOG.md

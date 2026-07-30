@@ -10,11 +10,13 @@
 //! plugins reading them get a snapshot, not live state.  This avoids
 //! cross-process query latency on every plugin call.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use marspot::pidtree::PaneForeground;
 use marspot::{lx_debug, lx_error, lx_info, lx_warn};
 
 use super::{LogLevel, PaneSession, PermissionSet, PluginError, PluginHost, PtyChild};
@@ -59,6 +61,13 @@ pub struct ShellPluginHost {
     /// want 1-based label them).
     panes: Arc<Mutex<Vec<PaneSnapshot>>>,
     focused: Arc<Mutex<Option<usize>>>,
+    /// `shelld_session_id → foreground status`, refreshed once per
+    /// `pane_status::SWEEP_INTERVAL` by the shell's supervisor tick.
+    /// Keyed by session id rather than pane index because that is what
+    /// plugins already hold (badges, PaneSessions, inject-input all
+    /// address sessions), and because pane indices shift when panes
+    /// are added or moved between windows.
+    pane_status: Arc<Mutex<HashMap<u64, PaneForeground>>>,
     /// Current plugin being invoked — used for the log namespace and
     /// permission lookup.  Set/cleared by the registry around each
     /// hook.  See `with_active_plugin`.
@@ -97,6 +106,7 @@ impl ShellPluginHost {
         Self {
             panes: Arc::new(Mutex::new(Vec::new())),
             focused: Arc::new(Mutex::new(None)),
+            pane_status: Arc::new(Mutex::new(HashMap::new())),
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
             pane_title_tx: Mutex::new(None),
@@ -129,6 +139,14 @@ impl ShellPluginHost {
     /// PTY inject requests.  Called once during shell startup.
     pub fn attach_inject_input_tx(&self, tx: Sender<InjectInputRequest>) {
         *self.inject_input_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Publish the sweep's result so plugin calls to `pane_status`
+    /// read a snapshot instead of probing the kernel per call (a
+    /// plugin walking N panes would otherwise multiply the syscall
+    /// cost by however many plugins are loaded).
+    pub fn publish_pane_status(&self, map: HashMap<u64, PaneForeground>) {
+        *self.pane_status.lock().unwrap() = map;
     }
 
     /// Refresh per-pane snapshots.  Called from the shell's tick
@@ -220,6 +238,19 @@ impl PluginHost for ShellPluginHost {
         self.require(PermissionSet::READ_PTY_TREE)?;
         let g = self.panes.lock().unwrap();
         Ok(g.get(pane).map(|s| s.pid_tree.clone()).unwrap_or_default())
+    }
+
+    fn pane_status(
+        &self,
+        shelld_session_id: u64,
+    ) -> Result<Option<PaneForeground>, PluginError> {
+        self.require(PermissionSet::READ_PANE_INFO)?;
+        Ok(self
+            .pane_status
+            .lock()
+            .unwrap()
+            .get(&shelld_session_id)
+            .cloned())
     }
 
     fn pane_focused(&self) -> Option<usize> {
