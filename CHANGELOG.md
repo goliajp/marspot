@@ -28,7 +28,25 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.39**
+Current: **0.7.40**
+
+### 0.7.40
+
+status 两层都带上「这个状态持续了多久」。
+
+`AtPrompt` 本身不可行动,`AtPrompt 已经两小时`才是能建策略的事实。两层
+都存一个起始时间戳:
+
+- 通用层:`PaneStatusTracker` 存 `(状态, since)`;`PluginHost::pane_status`
+  返回 `(状态, 已持续多久)`,age 在调用时算,不是存下来的。
+- cc 层:`cc_status.changed` 的日志行尾多一个 `(held Ns)`。
+
+关键语义:**时间戳量的是状态,不是扫描**。状态没变就保留原来的戳 ——
+每轮扫描都刷新的话,「闲了两小时」这件事永远观测不到。单测钉了这条
+(连扫三轮不变,戳必须不动;真变了才重置并报出旧状态持续了多久)。
+
+`shell.pane_status.changed` 同样多一个 `held_s=` 字段。这两个数就是
+以后定阈值的原始数据 —— 「这台机器上的 pane 实际闲多久」不该靠估。
 
 ### 0.7.39
 

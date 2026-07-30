@@ -2124,6 +2124,11 @@ impl ShellApp {
                     .map(pane_status::describe)
                     .unwrap_or_else(|| "-".to_string())
                     .as_str(),
+                // How long the previous state held.  This is the
+                // number a future idle threshold gets calibrated
+                // against, so it belongs in the record rather than in
+                // someone's estimate.
+                held_s = t.held.map(|d| d.as_secs()).unwrap_or(0),
                 to = pane_status::describe(&t.next).as_str()
             );
         }

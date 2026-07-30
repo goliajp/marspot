@@ -218,10 +218,15 @@ pub trait PluginHost: Send + Sync {
     fn pane_pty_pid_tree(&self, pane: usize) -> Result<Vec<PtyChild>, PluginError>;
 
     /// Generic foreground status of the pane backing
-    /// `shelld_session_id`: is its shell at a prompt, is a job running,
-    /// or does the kernel not say.  Sampled by the shell once per
-    /// second — the same value for every caller in a tick, so a plugin
-    /// may call it per pane without multiplying syscalls.
+    /// `shelld_session_id`, plus how long that status has been true.
+    /// Sampled by the shell once per second — the same value for every
+    /// caller in a tick, so a plugin may call it per pane without
+    /// multiplying syscalls.
+    ///
+    /// The duration is the actionable half: "at a prompt" says nothing
+    /// on its own, "at a prompt for two hours" is a fact a policy can
+    /// be built on.  It measures the *state*, not the sweep — an
+    /// unchanged status keeps the stamp it was first seen with.
     ///
     /// `Ok(None)` means the sweep has no entry for that session (it
     /// just appeared, or it is gone).  That is NOT "idle": a caller
@@ -234,7 +239,10 @@ pub trait PluginHost: Send + Sync {
     fn pane_status(
         &self,
         _shelld_session_id: u64,
-    ) -> Result<Option<marspot::pidtree::PaneForeground>, PluginError> {
+    ) -> Result<
+        Option<(marspot::pidtree::PaneForeground, std::time::Duration)>,
+        PluginError,
+    > {
         Ok(None)
     }
     fn pane_focused(&self) -> Option<usize>;

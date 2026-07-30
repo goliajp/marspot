@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use marspot::pidtree::PaneForeground;
 use marspot::{lx_debug, lx_error, lx_info, lx_warn};
@@ -67,7 +68,7 @@ pub struct ShellPluginHost {
     /// plugins already hold (badges, PaneSessions, inject-input all
     /// address sessions), and because pane indices shift when panes
     /// are added or moved between windows.
-    pane_status: Arc<Mutex<HashMap<u64, PaneForeground>>>,
+    pane_status: Arc<Mutex<HashMap<u64, (PaneForeground, Instant)>>>,
     /// Current plugin being invoked — used for the log namespace and
     /// permission lookup.  Set/cleared by the registry around each
     /// hook.  See `with_active_plugin`.
@@ -145,7 +146,7 @@ impl ShellPluginHost {
     /// read a snapshot instead of probing the kernel per call (a
     /// plugin walking N panes would otherwise multiply the syscall
     /// cost by however many plugins are loaded).
-    pub fn publish_pane_status(&self, map: HashMap<u64, PaneForeground>) {
+    pub fn publish_pane_status(&self, map: HashMap<u64, (PaneForeground, Instant)>) {
         *self.pane_status.lock().unwrap() = map;
     }
 
@@ -243,14 +244,17 @@ impl PluginHost for ShellPluginHost {
     fn pane_status(
         &self,
         shelld_session_id: u64,
-    ) -> Result<Option<PaneForeground>, PluginError> {
+    ) -> Result<Option<(PaneForeground, Duration)>, PluginError> {
         self.require(PermissionSet::READ_PANE_INFO)?;
+        // Age is computed at call time, not stored: the stamp says
+        // when the state started, and every caller wants "how long has
+        // this been true *now*".
         Ok(self
             .pane_status
             .lock()
             .unwrap()
             .get(&shelld_session_id)
-            .cloned())
+            .map(|(fg, since)| (fg.clone(), since.elapsed())))
     }
 
     fn pane_focused(&self) -> Option<usize> {

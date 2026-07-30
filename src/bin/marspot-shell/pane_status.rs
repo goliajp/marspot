@@ -35,6 +35,11 @@ pub struct Transition {
     pub sid: u64,
     /// None = first observation of this pane.
     pub prev: Option<PaneForeground>,
+    /// How long `prev` had been true.  None on first observation.
+    /// Logged because it is the number any future threshold gets
+    /// calibrated against — "how long do panes actually sit idle here"
+    /// is not a question to answer by guessing.
+    pub held: Option<Duration>,
     pub next: PaneForeground,
 }
 
@@ -45,7 +50,13 @@ pub struct Transition {
 /// closes is forgotten on the next tick rather than accumulating for
 /// the lifetime of the shell (CLAUDE.md §3).
 pub struct PaneStatusTracker {
-    last: HashMap<u64, PaneForeground>,
+    /// Current status per session, plus when it started being true.
+    ///
+    /// The timestamp is the whole reason a policy can exist: "at a
+    /// prompt" is not actionable, "at a prompt for the last two hours"
+    /// is.  It costs one `Instant` per pane and no history — a state
+    /// that doesn't change simply keeps its original stamp.
+    last: HashMap<u64, (PaneForeground, Instant)>,
     last_sweep: Option<Instant>,
 }
 
@@ -55,7 +66,7 @@ impl PaneStatusTracker {
     }
 
     /// Current view — what `PluginHost::pane_status` serves.
-    pub fn snapshot(&self) -> HashMap<u64, PaneForeground> {
+    pub fn snapshot(&self) -> HashMap<u64, (PaneForeground, Instant)> {
         self.last.clone()
     }
 
@@ -94,20 +105,28 @@ impl PaneStatusTracker {
     where
         F: FnMut(i32) -> PaneForeground,
     {
-        let mut next_map: HashMap<u64, PaneForeground> =
+        let now = Instant::now();
+        let mut next_map: HashMap<u64, (PaneForeground, Instant)> =
             HashMap::with_capacity(panes.len());
         let mut transitions = Vec::new();
         for (sid, shell_pid) in panes {
             let next = probe(shell_pid);
             let prev = self.last.get(&sid);
-            if prev != Some(&next) {
-                transitions.push(Transition {
-                    sid,
-                    prev: prev.cloned(),
-                    next: next.clone(),
-                });
-            }
-            next_map.insert(sid, next);
+            // Unchanged state keeps its original stamp, so the age
+            // measures the state and not the sweep.
+            let since = match prev {
+                Some((p, since)) if *p == next => *since,
+                _ => {
+                    transitions.push(Transition {
+                        sid,
+                        prev: prev.map(|(p, _)| p.clone()),
+                        held: prev.map(|(_, since)| now.duration_since(*since)),
+                        next: next.clone(),
+                    });
+                    now
+                }
+            };
+            next_map.insert(sid, (next, since));
         }
         // Replace rather than merge: sessions that vanished from the
         // registry are gone, and their last status is not news.
@@ -226,6 +245,30 @@ mod tests {
         let first = t.last_sweep;
         t.sweep();
         assert_eq!(first, t.last_sweep, "second sweep inside the window must be a no-op");
+    }
+
+    /// The stamp measures the STATE, not the sweep: three sweeps of an
+    /// unchanged pane must not restart its clock, or "idle for two
+    /// hours" could never be observed.
+    #[test]
+    fn an_unchanged_state_keeps_its_original_stamp() {
+        let mut t = PaneStatusTracker::new();
+        let panes = vec![(1, 100)];
+        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
+        let first = t.snapshot().get(&1).map(|(_, s)| *s).unwrap();
+        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
+        t.sweep_with(panes.clone(), |_| PaneForeground::AtPrompt);
+        assert_eq!(
+            t.snapshot().get(&1).map(|(_, s)| *s),
+            Some(first),
+            "the clock must not restart on every sweep"
+        );
+        // A real change restarts it, and reports how long the old
+        // state had held.
+        let out = t.sweep_with(panes, |_| job(101, "vim"));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].held.is_some(), "a transition carries the held time");
+        assert_ne!(t.snapshot().get(&1).map(|(_, s)| *s), Some(first));
     }
 
     #[test]

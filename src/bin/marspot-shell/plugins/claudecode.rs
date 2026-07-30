@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 // RFC-003 Amendment 16 cc rewrite — read sessions from L3 entry.toml
 // registry (where each L3 records its shell child pid), forward
 // keystrokes via L1 → L2 → L3 InjectInput frame proxy.  Monitor
@@ -142,10 +142,12 @@ pub struct ClaudecodePlugin {
     /// Richer per-binding meta we need to act on a badge click:
     /// profile number, sessionId, and the live claude pid.
     last_meta: HashMap<u64, BindMeta>,
-    /// Previous tick's `shelld_session_id → "<fg|bg>,<activity>"`, so
-    /// `cc_status.changed` is transition-only.  Pruned every tick to
-    /// the sessions still reporting.
-    last_activity: HashMap<u64, String>,
+    /// Previous tick's `shelld_session_id → ("<fg|bg>,<activity>",
+    /// since)`, so `cc_status.changed` is transition-only and can say
+    /// how long the state it replaces had held — the number any future
+    /// idle threshold has to be calibrated against.  Pruned every tick
+    /// to the sessions still reporting.
+    last_activity: HashMap<u64, (String, Instant)>,
     /// RFC-003 C7 auto-retry monitor: one entry per shelld session
     /// currently running claudecode.  Created when a session first
     /// binds, dropped when the bind goes away.  See `MonitorState`.
@@ -1242,7 +1244,7 @@ impl Plugin for ClaudecodePlugin {
             // "what is it doing in there".  Neither is derivable from
             // the other.
             for (sid, activity) in &result.new_activity {
-                let fg = match host.pane_status(*sid) {
+                let fg = match host.pane_status(*sid).map(|o| o.map(|(fg, _age)| fg)) {
                     Ok(Some(marspot::pidtree::PaneForeground::Job { .. })) => "fg",
                     Ok(Some(marspot::pidtree::PaneForeground::AtPrompt)) => "bg",
                     // No entry yet / no controlling tty / the sweep
@@ -1251,19 +1253,29 @@ impl Plugin for ClaudecodePlugin {
                 };
                 let next = format!("{},{}", fg, activity.describe());
                 let prev = self.last_activity.get(sid);
-                if prev.map(|p| p != &next).unwrap_or(true) {
-                    host.log(
-                        LogLevel::Info,
-                        "cc_status.changed",
-                        &format!(
-                            "shelld_session={} {} → {}",
-                            sid,
-                            prev.map(|s| s.as_str()).unwrap_or("-"),
-                            next
-                        ),
-                    );
-                }
-                self.last_activity.insert(*sid, next);
+                let since = match prev {
+                    // Unchanged: keep the original stamp so the age
+                    // measures the state, not the tick.
+                    Some((p, since)) if p == &next => *since,
+                    _ => {
+                        host.log(
+                            LogLevel::Info,
+                            "cc_status.changed",
+                            &format!(
+                                "shelld_session={} {} → {} (held {}s)",
+                                sid,
+                                prev.map(|(s, _)| s.as_str()).unwrap_or("-"),
+                                next,
+                                prev.map(|(_, t): &(String, Instant)| {
+                                    t.elapsed().as_secs()
+                                })
+                                .unwrap_or(0),
+                            ),
+                        );
+                        Instant::now()
+                    }
+                };
+                self.last_activity.insert(*sid, (next, since));
             }
             // Sessions that stopped reporting (claude exited, pane
             // closed) drop out — same bound-by-construction rule the
