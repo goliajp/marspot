@@ -28,7 +28,42 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.35**
+Current: **0.7.36**
+
+### 0.7.36
+
+静默更新不再把第二个窗口的位置尺寸抹掉。
+
+现场:每次 `install-local` 之后,主窗口(一堆 session)好好的,另一个
+窗口回到默认的 1200×800 并且换了位置。日志里每次更新都有一行
+`shell.window.restore_no_frame frame_index=1` —— 从 07-28 起就在,一次
+没落空。
+
+`window-state.bin` 是按索引配对的列表(entry i ↔ 窗口 i)。L1 self-execv
+把所有 NSWindow 都拆了,继任进程先开窗口 0(用 `MARSPOT_RESTORE_FRAME`
+里交接过来的 frame),`window_opened` 顺手存一次几何 —— 那一刻
+`self.windows.len() == 1`,而旧的 `save_window_frames` 写的是「当前活着
+的窗口」整表,于是文件被一条 entry 覆盖,**窗口 1 的几何在 core 来要它
+之前就被删了**。几十毫秒后 core 请求 frame_index=1,读到 None,窗口就
+开在默认矩形上。
+
+改成按索引合并、只覆盖不缩短(`merge_window_frames`,5 个单测):
+- 活窗口占自己的槽位;
+- 活窗口还没报 frame 的槽位保留磁盘上的值 —— 旧代码那个 `filter_map`
+  会把它整个跳过,于是后面每个窗口的 entry 都往前挪一格;
+- 磁盘上多出来的尾部保留 —— cold launch(含 execv 后那次 boot)时,那
+  正是 core 马上要问的几何;
+- 都没有的槽位写一个零尺寸洞,而不是跳过 —— restore 侧本来就有
+  `w > 50 && h > 50` 的判据,读到洞就等于「这个窗口开默认矩形」,但索引
+  不会错位。
+
+窗口关掉后它的几何留在文件里不再清理,这是有意的:core 是按它自己的
+per-window 布局记录来驱动 restore 的,没有窗口的索引不会有人来问。
+
+同一条路上第二个错配也修了:交接给继任进程的 frame 原来取
+`ctx.window_frame_pt()`,而这条路跑在 redraw pump 上,ctx 是「本轮恰好
+驱动 tick 的那个窗口」—— 两个窗口开着时,boot 窗口可能被告知开在第二个
+窗口的位置上。现在明确取 `windows[0].last_saved_window`。
 
 ### 0.7.35
 

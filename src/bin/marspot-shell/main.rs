@@ -995,6 +995,16 @@ struct ShellApp {
     /// same way `last_saved_window` does for the main window.
     last_saved_dev_window:
         Option<(f64, f64, f64, f64, u32, bool)>,
+    /// In-memory mirror of `window-state.bin`, seeded from disk at
+    /// startup and updated on every save.
+    ///
+    /// It exists because the file is a positional list and this process
+    /// does not own all of it yet: on a cold launch (including the boot
+    /// after an L1 self-execv) window 0 opens first and saves, while
+    /// window 1's geometry is still only on disk, waiting for the core
+    /// to ask for it.  Writing just the live windows there deleted that
+    /// entry — see `save_window_frames`.
+    saved_window_frames: Vec<marspot::state::SavedWindow>,
     /// Last observed `marspot::ui::theme::version()` value.  When
     /// the theme is swapped via `set_current()`, the framework bumps
     /// this counter; we compare each `redraw()` to invalidate cached
@@ -1273,6 +1283,11 @@ impl ShellApp {
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
             pane_status: pane_status::PaneStatusTracker::new(),
+            // Mirror of `window-state.bin` as it was on disk when this
+            // process started.  Load it BEFORE any window opens: the
+            // first window's own save must not be allowed to shorten
+            // the list past the windows this boot is about to restore.
+            saved_window_frames: marspot::state::read_windows().unwrap_or_default(),
             pane_badge_rx,
             pane_title_rx,
             pane_session_begin_rx,
@@ -1704,9 +1719,20 @@ impl ShellApp {
         }
 
         if v.shell == Some(true) {
+            // The successor opens ITS window 0 at the frame we hand
+            // over, so hand over window 0's frame — not `ctx`'s.  This
+            // path runs from the redraw pump, whose ctx is whichever
+            // window happened to drive the tick, so with two windows
+            // open the boot window could be told to open where the
+            // second one was.  `last_saved_window` is window 0's own
+            // frame, kept current by its move / resize callbacks.
+            let frame0 = self.windows[0]
+                .last_saved_window
+                .map(|(x, y, w, h, _)| (x, y, w, h))
+                .unwrap_or_else(|| ctx.window_frame_pt());
             // Returns only if the exec failed — on success this process
             // is already the new image.
-            self.finish_shell_self_update(ctx.window_frame_pt());
+            self.finish_shell_self_update(frame0);
             return;
         }
         if v.core == Some(true) {
@@ -2749,6 +2775,108 @@ impl ShellApp {
 
 }
 
+/// Fold this process's live window frames into the list already on
+/// disk: index *i* takes the live frame when there is one, otherwise
+/// keeps whatever was saved there, and entries past the live windows
+/// are preserved.
+///
+/// Both halves of that matter, and both were bugs:
+///   - a live window with no frame yet (`None`) must NOT be skipped —
+///     skipping shifts every later window's entry by one;
+///   - the on-disk tail must NOT be truncated — during a cold-launch
+///     restore those entries are the geometry the core is about to ask
+///     for, and they are gone by the time it does.
+fn merge_window_frames(
+    prev: &[marspot::state::SavedWindow],
+    live: &[Option<marspot::state::SavedWindow>],
+) -> Vec<marspot::state::SavedWindow> {
+    let mut out: Vec<marspot::state::SavedWindow> =
+        Vec::with_capacity(prev.len().max(live.len()));
+    for i in 0..prev.len().max(live.len()) {
+        match live.get(i).and_then(|v| v.clone()) {
+            Some(fresh) => out.push(fresh),
+            // No live frame for this slot: keep the saved one.  With
+            // nothing saved either (a window that somehow hasn't
+            // reported its frame and has no history), write a zeroed
+            // hole rather than skipping the slot — a skip would shift
+            // every later entry, while a hole is rejected by the
+            // restore path's own `w > 50 && h > 50` check and just
+            // means "this one opens at the default rect".
+            None => out.push(
+                prev.get(i).cloned().unwrap_or(marspot::state::SavedWindow {
+                    display_id: 0,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                }),
+            ),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod window_frame_merge_tests {
+    use super::merge_window_frames;
+    use marspot::state::SavedWindow;
+
+    fn win(x: f64) -> SavedWindow {
+        SavedWindow { display_id: 1, x, y: 10.0, w: 1200.0, h: 800.0 }
+    }
+
+    /// The silent-update regression: one live window, two on disk.
+    /// The second entry is the geometry the boot restore is about to
+    /// ask for, so it has to survive window 0's save.
+    #[test]
+    fn a_single_live_window_does_not_delete_the_other_saved_frames() {
+        let prev = vec![win(0.0), win(872.0)];
+        let live = vec![Some(win(5.0))];
+        let out = merge_window_frames(&prev, &live);
+        assert_eq!(out.len(), 2, "saved tail must survive");
+        assert_eq!(out[0].x, 5.0, "live window wins its own slot");
+        assert_eq!(out[1].x, 872.0, "window 1 keeps its saved geometry");
+    }
+
+    /// A live window with no frame yet keeps its slot pointing at the
+    /// saved value — the old `filter_map` dropped it and shifted the
+    /// windows after it up by one.
+    #[test]
+    fn a_frameless_live_window_keeps_its_slot_instead_of_shifting() {
+        let prev = vec![win(0.0), win(100.0), win(200.0)];
+        let live = vec![Some(win(1.0)), None, Some(win(201.0))];
+        let out = merge_window_frames(&prev, &live);
+        assert_eq!(
+            out.iter().map(|w| w.x).collect::<Vec<_>>(),
+            vec![1.0, 100.0, 201.0],
+        );
+    }
+
+    /// Nothing live and nothing saved for a slot: a hole, not a shift.
+    #[test]
+    fn a_slot_with_no_history_becomes_a_hole_not_a_shift() {
+        let live = vec![None, Some(win(9.0))];
+        let out = merge_window_frames(&[], &live);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].w, 0.0, "hole is zero-sized (restore rejects it)");
+        assert_eq!(out[1].x, 9.0, "later window keeps index 1");
+    }
+
+    #[test]
+    fn a_new_window_past_the_saved_list_is_appended() {
+        let prev = vec![win(0.0)];
+        let live = vec![Some(win(0.0)), Some(win(500.0))];
+        let out = merge_window_frames(&prev, &live);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].x, 500.0);
+    }
+
+    #[test]
+    fn no_windows_and_no_history_writes_nothing() {
+        assert!(merge_window_frames(&[], &[]).is_empty());
+    }
+}
+
 impl ShellApp {
     /// F3+6.1 — read the NSWindow's current frame + screen, atomic-
     /// write to `window-state.bin` ONLY when the values changed since
@@ -2769,22 +2897,35 @@ impl ShellApp {
         self.save_window_frames();
     }
 
-    /// RFC-005 step 6 — write every window's frame, in creation order.
+    /// RFC-005 step 6 — write every window's frame, in creation order,
+    /// so entry *i* keeps pairing with window *i* of `shell-state.bin`.
     ///
-    /// The file used to hold exactly one frame, so whichever window
-    /// moved last owned it and the others' geometry was simply lost.
-    /// Each window's cached frame is kept current by its own resize /
-    /// move callbacks; this writes the whole list so that entry *i*
-    /// keeps pairing with window *i* of `shell-state.bin`.
-    fn save_window_frames(&self) {
-        let frames: Vec<marspot::state::SavedWindow> = self
+    /// Merged against the previous list rather than replacing it.  The
+    /// replacing version broke every silent update: an L1 self-execv
+    /// tears down all the NSWindows, the successor opens window 0 (at
+    /// the frame handed over in `MARSPOT_RESTORE_FRAME`) and saves — at
+    /// which point `self.windows.len() == 1`, so the file was rewritten
+    /// with one entry and window 1's geometry was deleted.  Moments
+    /// later the core asked for window 1 to be reopened, the restore
+    /// found no entry for index 1, and the window came back at the
+    /// default 1200×800 rect.  `shell.window.restore_no_frame
+    /// frame_index=1` was in the log for every single update.
+    ///
+    /// So: overwrite by index, never shorten.  A window that closed
+    /// leaves its last geometry behind, which is harmless — the core
+    /// drives restores from its own per-window layout records, and
+    /// nothing asks for an index it has no window for.
+    fn save_window_frames(&mut self) {
+        let live: Vec<Option<marspot::state::SavedWindow>> = self
             .windows
             .iter()
-            .filter_map(|w| w.last_saved_window)
-            .map(|(x, y, w, h, display_id)| marspot::state::SavedWindow {
-                display_id, x, y, w, h,
+            .map(|w| {
+                w.last_saved_window.map(|(x, y, w, h, display_id)| {
+                    marspot::state::SavedWindow { display_id, x, y, w, h }
+                })
             })
             .collect();
+        let frames = merge_window_frames(&self.saved_window_frames, &live);
         if frames.is_empty() {
             return;
         }
@@ -2793,7 +2934,9 @@ impl ShellApp {
                 "shell.window_state.write_failed",
                 &format!("{e}")
             );
+            return;
         }
+        self.saved_window_frames = frames;
     }
 
     /// Mirror of `save_window_state_if_changed` for the dev panel's
