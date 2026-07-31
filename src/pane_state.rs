@@ -100,6 +100,16 @@ pub enum Activity {
 pub struct Observation {
     pub generic: Generic,
     pub activity: Activity,
+    /// The pane's PTY has produced no output for a while.
+    ///
+    /// The bluntest and most honest "is anything happening here"
+    /// signal there is, and the one the other two miss: a program can
+    /// be thinking for five minutes with no new transcript record, no
+    /// child process and no measurable CPU, while its spinner writes
+    /// to the terminal every tenth of a second.  Measured on this
+    /// desktop: a claude mid-thought wrote 597 bytes in ten seconds, a
+    /// claude genuinely waiting for its user wrote zero.
+    pub pty_quiet: bool,
 }
 
 /// Why a pane is busy.  Carried for the log and for any future UI; no
@@ -117,6 +127,9 @@ pub enum BusyKind {
     Working,
     /// The bound program has a tool call outstanding.
     ToolExecuting,
+    /// The pane is writing to its terminal.  Whatever anyone else
+    /// thinks, something is happening in there.
+    Output,
     /// …and is parked on the user's approval, which is the case that
     /// looks idle by every naive measure (silent tty, no children, old
     /// mtime) and is the most expensive one to get wrong.
@@ -190,6 +203,7 @@ impl BusyKind {
             BusyKind::BackgroundJobs => "bg_jobs",
             BusyKind::Working => "working",
             BusyKind::ToolExecuting => "tool_executing",
+            BusyKind::Output => "output",
             BusyKind::ToolAwaitingApproval => "tool_awaiting_approval",
         }
     }
@@ -241,7 +255,17 @@ impl Activity {
 /// - `PromptWithJobs` beats whatever the plugin says, because a
 ///   suspended program's transcript is frozen mid-whatever and cannot
 ///   describe the present.  Suspended is busy.
-pub fn compose(generic: &Generic, activity: Activity) -> PaneStatus {
+pub fn compose(generic: &Generic, activity: Activity, pty_quiet: bool) -> PaneStatus {
+    // A pane that is writing to its terminal is busy, full stop.  This
+    // sits above the table because it outranks every entry in it: the
+    // transcript can say a turn finished, the process table can show
+    // nothing but helpers, and the CPU can be flat, while the program
+    // is mid-thought and saying so on screen.  The one exception is a
+    // parked pane, whose picture is frozen and whose "output" would be
+    // the resume line we typed ourselves.
+    if !pty_quiet && activity != Activity::Dormant {
+        return PaneStatus::Busy(BusyKind::Output);
+    }
     match (generic, activity) {
         (Generic::Unknown, _) | (_, Activity::Unknown) => match generic {
             // A suspended/background job is a fact about the pane even
@@ -370,7 +394,7 @@ impl PaneMachine {
     /// actionable, while a pane that starts doing something must stop
     /// being actionable immediately.
     pub fn observe(&mut self, obs: Observation, now: Instant) -> Option<Change> {
-        let next = compose(&obs.generic, obs.activity);
+        let next = compose(&obs.generic, obs.activity, obs.pty_quiet);
         if next == self.state {
             // Steady state.  Any half-built candidate is stale.
             self.pending = None;
@@ -414,7 +438,7 @@ mod tests {
     }
 
     fn obs(generic: Generic, activity: Activity) -> Observation {
-        Observation { generic, activity }
+        Observation { generic, activity, pty_quiet: true }
     }
 
     /// Drive `n` identical observations, returning the changes.
@@ -451,7 +475,7 @@ mod tests {
         let mut quiet = Vec::new();
         for g in &generics {
             for a in activities {
-                let s = compose(g, a);
+                let s = compose(g, a, true);
                 if s.is_quiet() {
                     quiet.push((g.label(), a.label(), s));
                 }
@@ -482,6 +506,7 @@ mod tests {
         let s = compose(
             &Generic::PromptWithJobs { stopped: 1, running: 0 },
             Activity::AwaitingUser,
+            true,
         );
         assert_eq!(s, PaneStatus::Busy(BusyKind::StoppedJobs));
         assert!(!s.is_quiet(), "a ^Z'd program must never read as quiet");
@@ -492,6 +517,7 @@ mod tests {
         let s = compose(
             &Generic::PromptWithJobs { stopped: 0, running: 1 },
             Activity::Absent,
+            true,
         );
         assert_eq!(s, PaneStatus::Busy(BusyKind::BackgroundJobs));
     }
@@ -505,7 +531,7 @@ mod tests {
             Activity::AwaitingUser,
             Activity::ToolPending { executing: false },
         ] {
-            let s = compose(&Generic::Idle, a);
+            let s = compose(&Generic::Idle, a, true);
             assert!(
                 matches!(s, PaneStatus::Contradiction { .. }),
                 "idle + {a:?} must be a contradiction, got {s:?}"
@@ -517,15 +543,16 @@ mod tests {
     #[test]
     fn unknown_on_either_side_poisons_unless_jobs_are_known() {
         assert_eq!(
-            compose(&Generic::Unknown, Activity::AwaitingUser),
+            compose(&Generic::Unknown, Activity::AwaitingUser, true),
             PaneStatus::Unknown
         );
-        assert_eq!(compose(&fg(), Activity::Unknown), PaneStatus::Unknown);
+        assert_eq!(compose(&fg(), Activity::Unknown, true), PaneStatus::Unknown);
         // …but a suspended job is a fact even with no reporter.
         assert_eq!(
             compose(
                 &Generic::PromptWithJobs { stopped: 2, running: 0 },
-                Activity::Unknown
+                Activity::Unknown,
+                true,
             ),
             PaneStatus::Busy(BusyKind::StoppedJobs)
         );
@@ -537,11 +564,11 @@ mod tests {
     /// offer.
     #[test]
     fn a_dormant_pane_is_quiet_but_distinguishable_from_empty() {
-        let dormant = compose(&Generic::Idle, Activity::Dormant);
+        let dormant = compose(&Generic::Idle, Activity::Dormant, true);
         assert_eq!(dormant, PaneStatus::Dormant);
         assert!(dormant.is_quiet());
         assert!(dormant.owes_restore());
-        assert_ne!(dormant, compose(&Generic::Idle, Activity::Absent));
+        assert_ne!(dormant, compose(&Generic::Idle, Activity::Absent, true));
     }
 
     /// The program came back (woken, or restarted by hand) before the
@@ -549,15 +576,45 @@ mod tests {
     #[test]
     fn a_stale_dormant_report_loses_to_a_running_job() {
         assert_eq!(
-            compose(&fg(), Activity::Dormant),
+            compose(&fg(), Activity::Dormant, true),
             PaneStatus::Busy(BusyKind::ForegroundJob)
+        );
+    }
+
+    /// A pane that is writing to its terminal is busy, whatever the
+    /// transcript and the process table say.
+    ///
+    /// This is the case the other two miss, and it showed up on
+    /// screen: a session mid-thought had finished its last turn (so
+    /// the transcript said "awaiting user"), had nothing but helpers
+    /// under it, and burned no measurable CPU — while its spinner
+    /// wrote to the terminal several times a second.  It was dimmed as
+    /// resting while visibly working.
+    #[test]
+    fn a_pane_writing_to_its_terminal_is_busy_whatever_else_says() {
+        assert_eq!(
+            compose(&fg(), Activity::AwaitingUser, false),
+            PaneStatus::Busy(BusyKind::Output)
+        );
+        assert_eq!(
+            compose(&Generic::Idle, Activity::Absent, false),
+            PaneStatus::Busy(BusyKind::Output),
+            "a shell printing output is busy too"
+        );
+        assert!(!compose(&fg(), Activity::AwaitingUser, false).is_quiet());
+        // A parked pane is the exception: its picture is frozen, and
+        // the only thing that could write is the resume line we type
+        // ourselves.
+        assert_eq!(
+            compose(&Generic::Idle, Activity::Dormant, false),
+            PaneStatus::Dormant
         );
     }
 
     #[test]
     fn an_unbound_pane_running_something_is_a_plain_job() {
         assert_eq!(
-            compose(&fg(), Activity::Absent),
+            compose(&fg(), Activity::Absent, true),
             PaneStatus::Busy(BusyKind::ForegroundJob)
         );
     }

@@ -45,6 +45,16 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// drifting out"; a pane at level 2 has already gone.
 pub const RESTING_AFTER: Duration = Duration::from_secs(300);
 
+/// How long a pane's terminal must stay silent before the pane counts
+/// as quiet.
+///
+/// Generous next to what it is watching for — a spinner writes several
+/// times a second — but the point is to survive a program that pauses
+/// between frames, not to react fast.  Nothing downstream cares about
+/// the difference between 15 and 30 seconds; the thresholds that act
+/// are minutes away.
+pub const PTY_QUIET_AFTER: Duration = Duration::from_secs(30);
+
 /// Recede level for a pane, from its machine state.
 ///
 /// Deliberately **not** a stopwatch over every quiet pane.  A shell
@@ -88,6 +98,10 @@ type ClockFile = HashMap<u64, (String, SystemTime)>;
 /// (CLAUDE.md §3).
 pub struct PaneStateTracker {
     machines: HashMap<u64, PaneMachine>,
+    /// `sid → (bytelog size, when it last changed)`.  The pane's own
+    /// output, which is the bluntest "is anything happening" signal
+    /// there is.
+    pty_bytes: HashMap<u64, (u64, Instant)>,
     /// Clocks an earlier process left behind, consumed as each pane's
     /// state is re-confirmed.  Entries are removed once used or once
     /// contradicted, so a stale one cannot be applied twice.
@@ -107,11 +121,44 @@ impl PaneStateTracker {
     pub fn new() -> Self {
         Self {
             machines: HashMap::new(),
+            pty_bytes: HashMap::new(),
             restorable: HashMap::new(),
             reported: HashMap::new(),
             any_report_seen: false,
             last_sweep: None,
         }
+    }
+
+    /// Has this pane's PTY been silent long enough to call it quiet?
+    ///
+    /// Read from the session's own bytelog: L3 appends every byte the
+    /// PTY produces, so its size is a running total of "how much has
+    /// this pane said".  One `stat` per pane per sweep.
+    ///
+    /// This is the signal the transcript and the process table both
+    /// miss.  Measured on this desktop over twelve seconds: a claude
+    /// mid-thought wrote 695 bytes (its spinner), two working sessions
+    /// wrote ~10 KB each, and a claude genuinely waiting for its user
+    /// wrote **zero** — while all four looked identical to every other
+    /// check, because a finished turn plus a long think leaves no new
+    /// record, no child process and no measurable CPU.
+    fn pty_quiet(&mut self, sid: u64, now: Instant) -> bool {
+        let path = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        // No bytelog at all — a pane that has never had a PTY behind
+        // it, or a test harness — says nothing, and "says nothing" is
+        // quiet.  Reading a missing file as "just spoke" would freeze
+        // every such pane at busy forever.
+        let Ok(size) = std::fs::metadata(&path).map(|m| m.len()) else {
+            self.pty_bytes.remove(&sid);
+            return true;
+        };
+        let entry = self.pty_bytes.entry(sid).or_insert((size, now));
+        if entry.0 != size {
+            *entry = (size, now);
+        }
+        now.duration_since(entry.1) >= PTY_QUIET_AFTER
     }
 
     /// Where the clocks live between processes.  Inside the state dir,
@@ -228,7 +275,11 @@ impl PaneStateTracker {
                 None if self.any_report_seen => Activity::Absent,
                 None => Activity::Unknown,
             };
-            let obs = Observation { generic: probe(shell_pid), activity };
+            let obs = Observation {
+                generic: probe(shell_pid),
+                activity,
+                pty_quiet: self.pty_quiet(sid, now),
+            };
             let machine = self
                 .machines
                 .entry(sid)
@@ -257,6 +308,7 @@ impl PaneStateTracker {
         // machines and their last reports go with them.
         self.machines.retain(|sid, _| live.contains(sid));
         self.reported.retain(|sid, _| live.contains(sid));
+        self.pty_bytes.retain(|sid, _| live.contains(sid));
         changes
     }
 }

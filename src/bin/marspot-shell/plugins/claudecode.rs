@@ -3650,6 +3650,7 @@ mod tests {
                 marspot::pane_state::Observation {
                     generic: pidtree::observe_pane(shell_pid),
                     activity: marspot::pane_state::Activity::AwaitingUser,
+                    pty_quiet: true,
                 },
                 base + Duration::from_secs(i as u64),
             );
@@ -4296,14 +4297,16 @@ mod tests {
         assert!(
             marspot::pane_state::compose(
                 &marspot::pane_state::Generic::Idle,
-                CcActivity::Dormant
+                CcActivity::Dormant,
+                true,
             )
             .owes_restore()
         );
         assert!(
             !marspot::pane_state::compose(
                 &marspot::pane_state::Generic::Idle,
-                CcActivity::Absent
+                CcActivity::Absent,
+                true,
             )
             .owes_restore()
         );

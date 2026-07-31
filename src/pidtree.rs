@@ -1045,6 +1045,7 @@ mod tests {
         let status = crate::pane_state::compose(
             &suspended,
             crate::pane_state::Activity::AwaitingUser,
+            true,
         );
         assert!(
             !status.is_quiet(),

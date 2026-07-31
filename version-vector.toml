@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.59"  # 闲置门槛 30 分钟,外加两道否决:自动运行的和自己定了闹钟的不回收;详见 CHANGELOG.md
+shell   = "0.7.60"  # pane 自己在往终端写字就是在忙 —— 记录和进程表都看不见这件事;详见 CHANGELOG.md
 core    = "0.12.77"  # 四档不透明度:聚焦 100 / 其他 75 / 歇着 50 / 已停放 25;详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md
