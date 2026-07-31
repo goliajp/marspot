@@ -327,6 +327,26 @@ impl PaneMachine {
         &self.state
     }
 
+    /// Move this state's start time back to when it actually began.
+    ///
+    /// Idleness is a property of the pane, not of the process watching
+    /// it: a pane that has been waiting on its user for three hours is
+    /// still three hours idle after an L1 self-execv, even though the
+    /// machine watching it is seconds old.  Without this, every silent
+    /// update resets every pane's clock and an hour-scale threshold
+    /// would only fire on a shell that happened to run uninterrupted
+    /// for an hour — six updates in an afternoon (a normal dev day
+    /// here) means it never fires at all.
+    ///
+    /// The caller is responsible for only backdating a state it has
+    /// just re-confirmed by observation; this method takes the claim
+    /// at face value, but refuses one from the future.
+    pub fn backdate(&mut self, entered_at: Instant, now: Instant) {
+        if entered_at <= now {
+            self.entered_at = entered_at;
+        }
+    }
+
     /// How long the current state has been held.
     pub fn age(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.entered_at)

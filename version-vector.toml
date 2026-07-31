@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.46"  # 只重编:Pty::drop 顺序改了(见 L3 0.11.32),shell 侧行为不变;详见 CHANGELOG.md
+shell   = "0.7.47"  # idle 时钟跨自更新存活 —— 否则每次静默更新都把所有 pane 的闲置时间清零;详见 CHANGELOG.md
 core    = "0.12.72"  # 只重编:Pty::drop 的顺序改了(见 L3 0.11.32),core 侧行为不变;详见 CHANGELOG.md
 session = "0.11.32"  # PTY teardown 不再被挂起作业卡死:先关 master、SIGCONT 再 HUP、等待全部有界;详见 CHANGELOG.md

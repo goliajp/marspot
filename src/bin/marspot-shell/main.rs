@@ -1290,7 +1290,21 @@ impl ShellApp {
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
-            pane_status: pane_status::PaneStateTracker::new(),
+            pane_status: {
+                // Idle is a property of the pane, not of this process:
+                // pick up the clocks the previous image left so a
+                // silent update doesn't tell every pane it just woke.
+                let mut t = pane_status::PaneStateTracker::new();
+                let n = t.load_clocks();
+                if n > 0 {
+                    lx_info!(
+                        "shell.pane_state.clocks_restored",
+                        "carried pane idle clocks across the restart",
+                        panes = n
+                    );
+                }
+                t
+            },
             pane_activity_rx,
             // Mirror of `window-state.bin` as it was on disk when this
             // process started.  Load it BEFORE any window opens: the

@@ -22,7 +22,7 @@
 //! has to cross a wire.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use marspot::pane_state::{Activity, Change, Generic, Observation, PaneMachine, PaneStatus};
 use marspot::pidtree;
@@ -43,6 +43,18 @@ pub struct SessionChange {
     pub change: Change,
 }
 
+/// Longest a persisted clock is believed.  A pane genuinely idle for
+/// a month is indistinguishable from a state file left behind by
+/// something that went wrong, and the wrong answer in that direction
+/// reclaims a session on evidence nobody checked.
+const MAX_PERSISTED_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// `shelld_session_id → (status label, when it started)`, as written
+/// to disk.  Labels rather than the enum: this file outlives the build
+/// that wrote it, and a label that no longer exists simply fails to
+/// match, which is the correct outcome.
+type ClockFile = HashMap<u64, (String, SystemTime)>;
+
 /// One machine per live session, plus the sweep clock.
 ///
 /// Bounded by construction: every sweep drops machines for sessions
@@ -51,6 +63,10 @@ pub struct SessionChange {
 /// (CLAUDE.md §3).
 pub struct PaneStateTracker {
     machines: HashMap<u64, PaneMachine>,
+    /// Clocks an earlier process left behind, consumed as each pane's
+    /// state is re-confirmed.  Entries are removed once used or once
+    /// contradicted, so a stale one cannot be applied twice.
+    restorable: ClockFile,
     /// What each plugin last reported per session.  Absent key = no
     /// plugin has spoken for that pane.
     reported: HashMap<u64, Activity>,
@@ -66,9 +82,59 @@ impl PaneStateTracker {
     pub fn new() -> Self {
         Self {
             machines: HashMap::new(),
+            restorable: HashMap::new(),
             reported: HashMap::new(),
             any_report_seen: false,
             last_sweep: None,
+        }
+    }
+
+    /// Where the clocks live between processes.  Inside the state dir,
+    /// so a sandbox run cannot read or clobber the installed app's.
+    fn clock_path() -> std::path::PathBuf {
+        marspot_term::paths::state_root().join("pane-state-clock.tsv")
+    }
+
+    /// Read what an earlier process left.  Best-effort: a missing or
+    /// unreadable file just means every pane's clock starts now, which
+    /// is the old behaviour and never wrong in the dangerous direction.
+    pub fn load_clocks(&mut self) -> usize {
+        let Ok(text) = std::fs::read_to_string(Self::clock_path()) else {
+            return 0;
+        };
+        self.restorable = text
+            .lines()
+            .filter_map(|line| {
+                let mut it = line.split('\t');
+                let sid = it.next()?.parse::<u64>().ok()?;
+                let label = it.next()?.to_string();
+                let secs = it.next()?.parse::<u64>().ok()?;
+                (!label.is_empty())
+                    .then(|| (sid, (label, UNIX_EPOCH + Duration::from_secs(secs))))
+            })
+            .collect();
+        self.restorable.len()
+    }
+
+    /// Persist the current clocks.  Called after a sweep that changed
+    /// something — one line per live pane, so the file is bounded by
+    /// the pane count and rewritten whole.
+    fn save_clocks(&self, now: Instant) {
+        let mut out = String::new();
+        for (sid, m) in &self.machines {
+            // `Instant` has no epoch; convert through the age, which is
+            // what actually has to survive.
+            let started = SystemTime::now() - m.age(now);
+            let secs = started.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            out.push_str(&format!("{}\t{}\t{}\n", sid, m.status().label(), secs));
+        }
+        let path = Self::clock_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("tsv.tmp");
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 
@@ -106,7 +172,14 @@ impl PaneStateTracker {
             .into_iter()
             .map(|e| (e.id, e.shell_child_pid))
             .collect();
-        Some(self.sweep_with(panes, now, pidtree::observe_pane))
+        let changes = self.sweep_with(panes, now, pidtree::observe_pane);
+        // Write only when something moved: in steady state this is a
+        // sweep that touches no disk at all, which is what lets it run
+        // once a second forever.
+        if !changes.is_empty() {
+            self.save_clocks(now);
+        }
+        Some(changes)
     }
 
     /// Sweep body with the pane list and the kernel probe injected —
@@ -136,6 +209,22 @@ impl PaneStateTracker {
                 .entry(sid)
                 .or_insert_with(|| PaneMachine::new(now));
             if let Some(change) = machine.observe(obs, now) {
+                // A machine that has just re-confirmed the state an
+                // earlier process left behind inherits that state's
+                // clock: the pane did not become idle when this process
+                // started watching it.  Consumed once — a restored
+                // clock that no longer matches is dropped, not kept
+                // around for a later state to pick up by accident.
+                if let Some((label, since)) = self.restorable.remove(&sid) {
+                    if label == change.to.label() {
+                        let age = SystemTime::now()
+                            .duration_since(since)
+                            .unwrap_or_default();
+                        if age <= MAX_PERSISTED_AGE {
+                            machine.backdate(now - age, now);
+                        }
+                    }
+                }
                 changes.push(SessionChange { sid, change });
             }
         }
@@ -229,6 +318,70 @@ mod tests {
         let snap = t.snapshot(base);
         assert_eq!(snap.len(), 1, "pane 1 closed; its machine must not linger");
         assert!(snap.contains_key(&2));
+    }
+
+    /// Idle is a property of the pane, not of the process watching it:
+    /// a pane that was already quiet keeps its clock across a restart,
+    /// so an hour-scale threshold survives a silent update.
+    #[test]
+    fn a_re_confirmed_state_inherits_the_clock_a_previous_process_left() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        t.report_activity(1, Activity::AwaitingUser);
+        t.restorable.insert(
+            1,
+            ("awaiting_user".into(), SystemTime::now() - Duration::from_secs(7200)),
+        );
+        steps(&mut t, &[(1, 100)], base, CONFIRM_TICKS as u64, |_| fg());
+        let (status, held, quiescent) = t.snapshot(base + SWEEP_INTERVAL * 4)[&1].clone();
+        assert_eq!(status, PaneStatus::AwaitingUser);
+        assert!(quiescent);
+        assert!(
+            held >= Duration::from_secs(7200),
+            "the clock should carry over, got {held:?}"
+        );
+    }
+
+    /// A clock only applies to the state it was written for.  A pane
+    /// that came back in a *different* state starts fresh — otherwise
+    /// a restart could hand a busy pane hours of fake idleness.
+    #[test]
+    fn a_clock_for_a_different_state_is_discarded_not_reused() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        t.report_activity(1, Activity::AwaitingUser);
+        t.restorable
+            .insert(1, ("empty".into(), SystemTime::now() - Duration::from_secs(7200)));
+        steps(&mut t, &[(1, 100)], base, CONFIRM_TICKS as u64, |_| fg());
+        let held = t.snapshot(base + SWEEP_INTERVAL * 4)[&1].1;
+        assert!(
+            held < Duration::from_secs(60),
+            "a mismatched clock must not be applied, got {held:?}"
+        );
+        assert!(
+            t.restorable.is_empty(),
+            "and it must be consumed, not left for a later state to pick up"
+        );
+    }
+
+    /// A clock older than the cap is not evidence of anything — a
+    /// state file left behind by something that went wrong looks
+    /// exactly like a pane idle for a month.
+    #[test]
+    fn an_ancient_clock_is_ignored() {
+        let base = Instant::now();
+        let mut t = PaneStateTracker::new();
+        t.report_activity(1, Activity::AwaitingUser);
+        t.restorable.insert(
+            1,
+            (
+                "awaiting_user".into(),
+                SystemTime::now() - (MAX_PERSISTED_AGE + Duration::from_secs(60)),
+            ),
+        );
+        steps(&mut t, &[(1, 100)], base, CONFIRM_TICKS as u64, |_| fg());
+        let held = t.snapshot(base + SWEEP_INTERVAL * 4)[&1].1;
+        assert!(held < Duration::from_secs(60), "got {held:?}");
     }
 
     #[test]
