@@ -2902,7 +2902,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let r = cc.rect;
     // Outer breathing room.  The panel is a reference surface, not a
     // dense readout — it can afford to sit away from its own frame.
-    use crate::ui::components::cc_usage_modal::{metric, card_height, TIMELINE_SPAN_SECS};
+    use crate::ui::components::cc_usage_modal::{metric, card_height, timeline_range};
     let pad = ch as f64 * metric::PANEL_PAD;
     let lh = ch as f64 * metric::LINE_ADVANCE;
     let inner_x = r.x + pad;
@@ -3042,7 +3042,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     y = card_top + card_h + lh * metric::SECTION_BREAK;
 
     // ---- timeline ----
-    p.ui_text(inner_x as f32, (y + p.ui_ascent() as f64) as f32, "RESOURCE AVAILABILITY (±6D)", cc_palette::fg());
+    p.ui_text(inner_x as f32, (y + p.ui_ascent() as f64) as f32, "RESOURCE AVAILABILITY", cc_palette::fg());
     y += p.ui_line_h() as f64 + lh * 0.15;
     let label_w = cc
         .accounts
@@ -3071,8 +3071,22 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         .fold(0.0f64, f64::max)
         + cw as f64 * 1.2;
     let tl_w = (inner_w - label_w - tag_gutter).max(10.0);
-    let span_s: f64 = TIMELINE_SPAN_SECS;
-    let t0 = cc.now_unix as f64 - span_s / 2.0;
+    // Scale to what has to be drawn.  A fixed ±6 d window cut every
+    // 7-day bar short (its reset is up to 7 d out), so the bar stopped
+    // at the axis edge while its label still named the real reset time
+    // — the bar and the number beside it disagreed.
+    let extents: Vec<(i64, i64)> = cc
+        .accounts
+        .iter()
+        .flat_map(|a| {
+            [
+                (a.reset_5h_unix - 5 * 3_600, a.reset_5h_unix),
+                (a.reset_7d_unix - 7 * 86_400, a.reset_7d_unix),
+            ]
+        })
+        .collect();
+    let (t0, t1) = timeline_range(cc.now_unix, &extents);
+    let span_s = t1 - t0;
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
     let bar_h = ch as f64 * metric::BAR_H;
     let bar_gap = ch as f64 * metric::TIMELINE_BAR_GAP;
@@ -3143,8 +3157,11 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             let tag = format!("{} {:.0}% {}", if idx == 0 { "5h" } else { "7d" }, util * 100.0, hm);
             // The gutter guarantees room, so this clamp is only a
             // backstop against a pathologically long reset label.
-            let tag_x = (wx1 + cw as f64 * 0.7)
-                .min(inner_x + inner_w - text_w(&tag));
+            // Strictly right of where the bar ends — never pulled back
+            // over it.  The gutter above is sized to the widest tag any
+            // account draws, and the axis now ends where the data ends,
+            // so the furthest-right bar's tag still has its room.
+            let tag_x = wx1 + cw as f64 * 0.7;
             let tag_baseline = by + bar_h / 2.0 + ascent as f64 * 0.42;
             text(p, tag_x, tag_baseline, &tag, cc_palette::fg_sec());
         }

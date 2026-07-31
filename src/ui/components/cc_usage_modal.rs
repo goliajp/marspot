@@ -57,8 +57,44 @@ pub mod metric {
     pub const GRID_GAP: f64 = 0.26;
 }
 
-/// Timeline span: ±6 days around now, in seconds.
+/// Fallback timeline span when there is nothing to measure: ±6 days
+/// around now, in seconds.  Real spans come from [`timeline_range`].
 pub const TIMELINE_SPAN_SECS: f64 = 12.0 * 86_400.0;
+
+/// Breathing room at each end of the plot, as a fraction of the span,
+/// so the outermost bar's rounded cap isn't flush against the axis.
+const RANGE_PAD: f64 = 0.02;
+
+/// The instants the plot must cover: every bar's full extent, plus now.
+///
+/// This used to be a fixed ±6 days, which does not fit the data it is
+/// drawing: a 7-day window resets up to 7 days out, so its bar ran off
+/// the right end and was clamped there — ending at the axis edge
+/// instead of at the time written on its own label.  Measured on the
+/// live feed: two of four 7d bars ended at 1.014 and 1.056 of the
+/// span, i.e. both were cut short, and the further out the reset the
+/// more the label lied about where the bar stopped.
+///
+/// Deriving the range from the extents makes clamping impossible, which
+/// is what lets the label sit immediately right of a bar end that is
+/// always the truth.
+pub fn timeline_range(now: i64, extents: &[(i64, i64)]) -> (f64, f64) {
+    let mut lo = now as f64;
+    let mut hi = now as f64;
+    for &(start, end) in extents {
+        lo = lo.min(start as f64);
+        hi = hi.max(end as f64);
+    }
+    if hi - lo < 3_600.0 {
+        // Degenerate feed (everything resets within the hour): fall
+        // back to the fixed span rather than draw a plot whose scale
+        // magnifies clock skew.
+        let n = now as f64;
+        return (n - TIMELINE_SPAN_SECS / 2.0, n + TIMELINE_SPAN_SECS / 2.0);
+    }
+    let pad = (hi - lo) * RANGE_PAD;
+    (lo - pad, hi + pad)
+}
 
 /// Height of one account card in physical px.
 ///
@@ -116,6 +152,42 @@ pub fn panel_rect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every bar must fit: the plot exists to show where each window
+    /// ends, and a bar clamped at the axis edge says the opposite of
+    /// what its own label says.
+    ///
+    /// Numbers are the live feed of 2026-08-01 (four accounts, both
+    /// windows each).  Under the old fixed ±6 d span, Claude 1's and
+    /// Claude 4's 7-day bars ended at 1.014 and 1.056 of the span.
+    #[test]
+    fn every_window_fits_inside_the_range() {
+        let now = 1785538544i64;
+        let resets_7d = [1786071600i64, 1785704400, 1785646800, 1786114800];
+        let resets_5h = [1785543600i64, 1785544800, 1785543600, 1785546000];
+        let extents: Vec<(i64, i64)> = resets_5h
+            .iter()
+            .map(|r| (r - 5 * 3_600, *r))
+            .chain(resets_7d.iter().map(|r| (r - 7 * 86_400, *r)))
+            .collect();
+        let (t0, t1) = timeline_range(now, &extents);
+        for (start, end) in extents {
+            let f0 = (start as f64 - t0) / (t1 - t0);
+            let f1 = (end as f64 - t0) / (t1 - t0);
+            assert!(f0 >= 0.0 && f1 <= 1.0, "window {start}..{end} escapes the plot: {f0}..{f1}");
+        }
+        // Now is inside it too — the marker has to land somewhere real.
+        assert!((now as f64) > t0 && (now as f64) < t1);
+    }
+
+    /// A feed whose windows all reset within the hour would otherwise
+    /// be drawn at a scale where clock skew looks like a day.
+    #[test]
+    fn a_degenerate_feed_falls_back_to_the_fixed_span() {
+        let now = 1785538544i64;
+        let (t0, t1) = timeline_range(now, &[(now - 60, now + 60)]);
+        assert!((t1 - t0 - TIMELINE_SPAN_SECS).abs() < 1.0);
+    }
 
     /// Card height must account for the last row's descenders — the
     /// bug this derivation replaced was a hardcoded multiple that left
