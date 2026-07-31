@@ -112,14 +112,9 @@ pub fn parse(body: &str) -> Option<CcUsage> {
         .unwrap_or(0);
     let accounts_start = body.find("\"accounts\"")?;
     let arr_start = body[accounts_start..].find('[')? + accounts_start;
-    let mut accounts = Vec::new();
-    let mut rest = &body[arr_start + 1..];
-    loop {
-        let Some(obj_start) = rest.find('{') else { break };
-        // Objects in this feed are flat — the next '}' closes it.
-        let Some(obj_end) = rest[obj_start..].find('}') else { break };
-        let obj = &rest[obj_start..obj_start + obj_end + 1];
-        accounts.push(CcAccount {
+    let accounts: Vec<CcAccount> = objects_in_array(&body[arr_start..])
+        .into_iter()
+        .map(|obj| CcAccount {
             name: str_field(obj, "name").unwrap_or_default(),
             email: str_field(obj, "email").unwrap_or_default(),
             status: str_field(obj, "status").unwrap_or_default(),
@@ -127,19 +122,9 @@ pub fn parse(body: &str) -> Option<CcUsage> {
             util_7d: num_field(obj, "utilization_7d").unwrap_or(0.0),
             reset_5h: num_field(obj, "reset_5h").unwrap_or(0.0) as i64,
             reset_7d: num_field(obj, "reset_7d").unwrap_or(0.0) as i64,
-        });
-        rest = &rest[obj_start + obj_end + 1..];
-        // Stop at the array's closing bracket (an object brace can't
-        // appear before it in this flat schema).
-        if let (Some(bracket), next_obj) = (rest.find(']'), rest.find('{')) {
-            match next_obj {
-                Some(o) if o < bracket => continue,
-                _ => break,
-            }
-        } else {
-            break;
-        }
-    }
+        })
+        .collect();
+    let mut accounts = accounts;
     if accounts.is_empty() {
         return None;
     }
@@ -196,22 +181,112 @@ fn strip_zeros(digits: &[u8]) -> &[u8] {
     &digits[start..]
 }
 
+/// Every `{...}` directly inside the array `s` starts with, with
+/// nesting respected.
+///
+/// The first version took "the next `}` closes the object", which held
+/// while accounts were flat.  The feed since grew `model_limits` and
+/// `credits` sub-objects, so that `}` became the end of an inner
+/// object: account 1 parsed from a truncated slice (its scalar fields
+/// happen to precede the nesting, so it looked fine) and the scan then
+/// hit the `]` closing `model_limits` and called that the end of the
+/// array.  Three of four accounts vanished from the panel with no
+/// error anywhere — the failure a hand-rolled scanner has to be
+/// written against.
+fn objects_in_array(s: &str) -> Vec<&str> {
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'"' => i = skip_string(b, i),
+            b'{' | b'[' => {
+                depth += 1;
+                // depth 1 is the array itself, so an object opening at
+                // depth 2 is one of its elements.
+                if depth == 2 && b[i] == b'{' {
+                    start = i;
+                }
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 1 && b[i] == b'}' {
+                    out.push(&s[start..=i]);
+                } else if depth == 0 {
+                    return out;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Index just past the string literal starting at `b[i] == '"'`.
+fn skip_string(b: &[u8], i: usize) -> usize {
+    let mut j = i + 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    j
+}
+
+/// The value of `key` **at this object's own level**, as a slice
+/// starting at its first byte.
+///
+/// Depth-aware for the same reason as [`objects_in_array`]: with
+/// sub-objects in play, a plain `find("\"status\"")` would happily
+/// match a nested field, and which one it hits would depend on the
+/// order the generator happens to write.
+fn top_level_value<'a>(obj: &'a str, key: &str) -> Option<&'a str> {
+    let b = obj.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                let end = skip_string(b, i);
+                // A string is a key only if a colon follows it; without
+                // that test the *value* `"name": "status"` would answer
+                // a lookup for `status`.
+                let after = obj[end..].trim_start();
+                if depth == 1 && after.starts_with(':') && &obj[i + 1..end - 1] == key {
+                    return Some(after[1..].trim_start());
+                }
+                i = end;
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// `"key": "value"` string extractor.
 fn str_field(obj: &str, key: &str) -> Option<String> {
-    let pat = format!("\"{key}\"");
-    let at = obj.find(&pat)? + pat.len();
-    let colon = obj[at..].find(':')? + at;
-    let open = obj[colon..].find('"')? + colon;
-    let close = obj[open + 1..].find('"')? + open + 1;
-    Some(obj[open + 1..close].to_string())
+    let v = top_level_value(obj, key)?.strip_prefix('"')?;
+    let end = v.find('"')?;
+    Some(v[..end].to_string())
 }
 
 /// `"key": 12.34` number extractor.
 fn num_field(obj: &str, key: &str) -> Option<f64> {
-    let pat = format!("\"{key}\"");
-    let at = obj.find(&pat)? + pat.len();
-    let colon = obj[at..].find(':')? + at;
-    let tail = obj[colon + 1..].trim_start();
+    let tail = top_level_value(obj, key)?;
     let end = tail
         .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E'))
         .unwrap_or(tail.len());
@@ -261,6 +336,116 @@ pub fn local_mdhm(unix: i64) -> (u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The live file on this machine, whatever it currently says —
+    /// skipped when it is not there (CI, a fresh checkout).
+    #[test]
+    fn the_live_feed_on_this_machine_parses_every_account() {
+        let Some(u) = read() else { return };
+        let n = std::fs::read_to_string(feed_path())
+            .unwrap()
+            .matches("\"collected_at\"")
+            .count();
+        assert_eq!(u.accounts.len(), n, "one account parsed per account written");
+    }
+
+    /// The real feed, verbatim, as of 2026-08-01 — two accounts kept.
+    ///
+    /// The shape that broke the old scanner: each account now carries a
+    /// `model_limits` array of objects and a `credits` object, so the
+    /// first `}` after an account's opening brace closes something
+    /// *inside* it.
+    const NESTED_FEED: &str = r#"{
+  "generated_at": "2026-07-31T22:42:33.439858+00:00",
+  "accounts": [
+    {
+      "name": "Claude 1",
+      "email": "lihao@golia.jp",
+      "status": "allowed",
+      "utilization_5h": 0.05,
+      "utilization_7d": 0.05,
+      "reset_5h": 1785543600,
+      "reset_7d": 1786071600,
+      "model_limits": [
+        {
+          "label": "Fable",
+          "utilization": 0.0,
+          "reset": null,
+          "severity": "normal",
+          "is_active": false
+        }
+      ],
+      "credits": {
+        "enabled": false,
+        "ever_enabled": false,
+        "user_disabled": false,
+        "spend_limit_reached": false,
+        "disabled_reason": null,
+        "utilization": 0.0,
+        "used_minor": 0,
+        "limit_minor": null,
+        "currency": "USD",
+        "exponent": 2
+      },
+      "tier": "max_20x",
+      "collected_at": "2026-07-31T22:42:29.478675+00:00"
+    },
+    {
+      "name": "Claude 2",
+      "email": "admin@golia.jp",
+      "status": "allowed",
+      "utilization_5h": 0.3,
+      "utilization_7d": 0.39,
+      "reset_5h": 1785544800,
+      "reset_7d": 1785704400,
+      "model_limits": [
+        {
+          "label": "Fable",
+          "utilization": 0.66,
+          "reset": 1785704399,
+          "severity": "normal",
+          "is_active": true
+        }
+      ],
+      "credits": {
+        "enabled": false,
+        "ever_enabled": true,
+        "user_disabled": false,
+        "spend_limit_reached": false,
+        "disabled_reason": "out_of_credits",
+        "utilization": 0.0,
+        "used_minor": 0,
+        "limit_minor": 20000,
+        "currency": "USD",
+        "exponent": 2
+      },
+      "tier": "max_20x",
+      "collected_at": "2026-07-31T22:42:31.069053+00:00"
+    }
+  ]
+}
+"#;
+
+    /// Four accounts in the feed must be four accounts on screen.
+    ///
+    /// This shipped: the panel read `CLAUDE ACCOUNTS 1` while the feed
+    /// held four, because the scanner mistook an inner `}` for the end
+    /// of account 1 and the `]` closing its `model_limits` for the end
+    /// of the whole array.  Nothing logged; the other three simply were
+    /// not there.
+    #[test]
+    fn nested_sub_objects_do_not_truncate_the_account_list() {
+        let u = parse(NESTED_FEED).expect("feed parses");
+        assert_eq!(u.accounts.len(), 2, "both accounts, not just the first");
+        assert_eq!(u.accounts[0].email, "lihao@golia.jp");
+        assert_eq!(u.accounts[1].email, "admin@golia.jp");
+        // Fields still come from the account itself, not from a nested
+        // object that happens to share a name.
+        assert_eq!(u.accounts[1].status, "allowed");
+        assert!((u.accounts[1].util_5h - 0.3).abs() < 1e-9);
+        assert!((u.accounts[1].util_7d - 0.39).abs() < 1e-9);
+        assert_eq!(u.accounts[1].reset_7d, 1785704400);
+    }
 
     /// Accounts are deliberately out of order here, because that is how
     /// the real feed arrives — the collector queries accounts
