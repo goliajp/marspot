@@ -650,12 +650,22 @@ impl HibernatePaneSession {
 
 impl crate::plugins::PaneSession for HibernatePaneSession {
     fn caps(&self) -> u32 {
-        // No FREEZE_GRID: a dormant pane keeps showing its scrollback,
-        // which is the whole point — the session looks like it is
-        // still there, because as far as the user's history is
-        // concerned it is.
+        // FREEZE_GRID from the moment the reclamation starts.
+        //
+        // Without it the user watches the machinery: claude's exit,
+        // the shell prompt coming back, and later the
+        // `claude --resume …` line being typed into it.  None of that
+        // is theirs to care about — what they left on screen is.  With
+        // the grid frozen, the pane holds the picture it had, the kill
+        // and the resume happen behind it, and the live grid returns
+        // only when claude has repainted.
+        //
+        // (I left this out first, reasoning that a dormant pane should
+        // keep showing its scrollback.  It does — the frozen frame IS
+        // that scrollback; what it also showed was the plumbing.)
         marspot::shell_proto::PANE_SESSION_CAP_INPUT
             | marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS
+            | marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID
     }
 
     fn on_focus(&mut self, host: &dyn crate::plugins::PaneSessionHost) {

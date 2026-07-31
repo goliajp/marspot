@@ -36,6 +36,37 @@ use marspot::pidtree;
 /// before anything may act on it.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long a pane must hold a quiet state before it visually
+/// recedes, and how far.
+///
+/// This is the generic half of the idle story, and deliberately the
+/// only half for a plain shell: a pane that has been sitting there
+/// for five minutes looks rested, and **nothing is taken from it**.
+/// Reclaiming a shell would be a lossy trade (its live state has no
+/// snapshot) with no bounded win — measured on this host, an idle
+/// pane's L3 + zsh come to ~6.7 MB, a fiftieth of what a claude
+/// costs.  So the shell layer stops at appearance.
+pub const IDLE_DIM_AFTER: Duration = Duration::from_secs(300);
+/// Deep enough to read as "resting", shallow enough that the content
+/// stays legible — this is a hint, not a curtain.
+pub const IDLE_DIM_ALPHA: f32 = 0.18;
+
+/// The dim a pane should be drawn with, from its machine state.
+///
+/// A dormant pane (its program reclaimed) is dimmed immediately: it
+/// is not resting, it is parked, and the dim is the only thing on
+/// screen that says so — the picture behind it is frozen exactly as
+/// the user left it.
+pub fn idle_dim_for(status: &PaneStatus, held: Duration) -> f32 {
+    if matches!(status, PaneStatus::Dormant) {
+        return IDLE_DIM_ALPHA;
+    }
+    if status.is_quiet() && held >= IDLE_DIM_AFTER {
+        return IDLE_DIM_ALPHA;
+    }
+    0.0
+}
+
 /// A committed transition, tagged with the session it belongs to.
 #[derive(Debug, Clone)]
 pub struct SessionChange {
@@ -382,6 +413,48 @@ mod tests {
         steps(&mut t, &[(1, 100)], base, CONFIRM_TICKS as u64, |_| fg());
         let held = t.snapshot(base + SWEEP_INTERVAL * 4)[&1].1;
         assert!(held < Duration::from_secs(60), "got {held:?}");
+    }
+
+    /// The visual half of the idle story, which is all a plain shell
+    /// pane ever gets: rest, then recede.  Nothing is reclaimed.
+    #[test]
+    fn a_quiet_pane_dims_only_after_it_has_been_quiet_a_while() {
+        assert_eq!(idle_dim_for(&PaneStatus::Empty, Duration::ZERO), 0.0);
+        assert_eq!(
+            idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER - Duration::from_secs(1)),
+            0.0
+        );
+        assert_eq!(idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER), IDLE_DIM_ALPHA);
+        assert_eq!(
+            idle_dim_for(&PaneStatus::AwaitingUser, IDLE_DIM_AFTER),
+            IDLE_DIM_ALPHA
+        );
+    }
+
+    /// A parked pane dims at once: the picture behind it is frozen
+    /// exactly as the user left it, so the dim is the only thing on
+    /// screen saying "this one is not live".
+    #[test]
+    fn a_dormant_pane_dims_immediately() {
+        assert_eq!(idle_dim_for(&PaneStatus::Dormant, Duration::ZERO), IDLE_DIM_ALPHA);
+    }
+
+    /// Busy and unknown panes never dim — dimming something that is
+    /// working would be a lie about the pane.
+    #[test]
+    fn busy_and_unknown_panes_never_dim() {
+        for s in [
+            PaneStatus::Busy(BusyKind::Working),
+            PaneStatus::Busy(BusyKind::StoppedJobs),
+            PaneStatus::Unknown,
+            PaneStatus::Contradiction { generic: "idle", activity: "working" },
+        ] {
+            assert_eq!(
+                idle_dim_for(&s, Duration::from_secs(86_400)),
+                0.0,
+                "{s:?} must stay at full strength"
+            );
+        }
     }
 
     #[test]

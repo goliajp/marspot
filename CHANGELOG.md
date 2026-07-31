@@ -30,6 +30,31 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.54
+
+休眠时画面冻在原样;闲置的 pane 变暗。
+
+用户看到的问题:回收时 claude 退出 → 露出 zsh 提示符 → 唤醒时又当着面把
+`claude --resume …` 敲进去。那些都是机械过程,不是他留在屏幕上的东西。
+
+两层分别给两件事:
+
+- **cc 层:冻住画面**。`HibernatePaneSession` 现在带
+  `PANE_SESSION_CAP_FREEZE_GRID`(这个能力早就有,profile cycle 一直在
+  用,我第一版判断错了没要)。从发出 SIGTERM 那一刻起 L2 保持最后一帧,
+  杀进程和 resume 都发生在画面背后,直到 claude 重新画出来才恢复实况。
+- **zsh 层:只是透明度**。新增 `PaneIdle` 帧(L1 → L2,67):安静满 5 分钟
+  的 pane 拿 0.18 的 scrim,忙的和状态不明的一律不暗(把在干活的 pane 画暗
+  是对 pane 撒谎)。dormant 的 pane 立刻暗 —— 它不是在休息,是被停放了,而
+  画面又冻着,那层暗是屏幕上唯一说明这件事的东西。
+
+这就是两层叠起来的样子:**cc 冻画面 + 静默进出,generic 加一层暗**。
+渲染侧三种「后退」(拖拽源 / 空座位 / 闲置)共用一个 scrim 原语,**最深者
+胜**而不是叠加 —— 两层 0.22 叠出来是 0.39,那是另一个颜色。
+
+判据在 L1(`idle_dim_for`),L2 只负责画;帧只在值变化时发,一个歇了一小时
+的 pane 花一帧,不是一秒一帧。
+
 ### 0.7.53
 
 聚焦即开始恢复;claude 一回来就交还键盘。

@@ -393,6 +393,14 @@ pub enum MsgType {
     /// have already tried to use it, which reads as "it takes
     /// forever".
     PaneFocused = 66,
+    /// shell → core: how idle this pane looks, as a dim factor.
+    /// Payload: `session_id u64 LE, alpha f32 LE` (0.0 = live).
+    ///
+    /// The generic half of the idle story: a pane that has been quiet
+    /// for a while recedes visually instead of being taken apart.  The
+    /// policy (what counts as idle, how dim) stays in L1 with the
+    /// state machine; L2 just paints what it is told.
+    PaneIdle = 67,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -448,6 +456,7 @@ impl MsgType {
             64 => MsgType::WindowOpenRequest,
             65 => MsgType::WindowCloseRequest,
             66 => MsgType::PaneFocused,
+            67 => MsgType::PaneIdle,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1435,6 +1444,26 @@ pub fn decode_pane_title(payload: &[u8]) -> io::Result<(u64, String)> {
     }
     let title = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
     Ok((session_id, title))
+}
+
+/// PaneIdle payload: `session_id u64 LE, alpha f32 LE`.
+pub fn encode_pane_idle(session_id: u64, alpha: f32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&alpha.to_le_bytes());
+    v
+}
+
+pub fn decode_pane_idle(payload: &[u8]) -> io::Result<(u64, f32)> {
+    if payload.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneIdle payload too short",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let alpha = f32::from_le_bytes(payload[8..12].try_into().unwrap());
+    Ok((sid, alpha))
 }
 
 /// PaneFocused payload: `session_id u64 LE`.

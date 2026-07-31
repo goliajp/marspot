@@ -137,6 +137,13 @@ pub struct SessionView<'a> {
     /// running" next to live panes, with the grid's own hint text
     /// showing through.
     pub dormant: bool,
+    /// How much this pane recedes because it has been idle, 0.0 = live.
+    ///
+    /// Separate from `dormant` (which means "an empty seat left by a
+    /// pane that moved out") because they are different facts that
+    /// happen to share a scrim: one is about a seat, this is about a
+    /// session resting.  Both can be true, and the deeper one wins.
+    pub idle_dim: f32,
     /// RFC-001 plugin badge — a short tag drawn at the right edge of
     /// the title strip (left of the optional refresh affordance) so
     /// plugins can surface per-pane metadata without overloading the

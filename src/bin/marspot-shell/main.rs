@@ -966,6 +966,9 @@ struct ShellApp {
     /// The pane-status layer that knows about specific programs lives
     /// in the plugins on top of this one.
     pane_status: pane_status::PaneStateTracker,
+    /// Last idle dim sent to L2 per session, so the frame goes out on
+    /// change rather than every sweep.
+    pane_idle_dim: std::collections::HashMap<u64, f32>,
     /// Plugin → shell reports of what the program in a pane is doing.
     /// Drained at the top of each supervisor tick, straight into the
     /// state machines.  Same shape as the badge channel: plugins push,
@@ -1292,6 +1295,7 @@ impl ShellApp {
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
+            pane_idle_dim: std::collections::HashMap::new(),
             pane_status: {
                 // Idle is a property of the pane, not of this process:
                 // pick up the clocks the previous image left so a
@@ -2147,8 +2151,22 @@ impl ShellApp {
                 to = c.change.to.label().as_str()
             );
         }
-        self.plugin_host
-            .publish_pane_status(self.pane_status.snapshot(now));
+        let snapshot = self.pane_status.snapshot(now);
+        // Tell L2 how each pane should look.  On change only: a pane
+        // that has been resting for an hour costs one frame, not one
+        // per second.
+        for (sid, (status, held, _)) in &snapshot {
+            let alpha = pane_status::idle_dim_for(status, *held);
+            if self.pane_idle_dim.get(sid).copied() != Some(alpha) {
+                self.pane_idle_dim.insert(*sid, alpha);
+                self.send(
+                    MsgType::PaneIdle,
+                    marspot::shell_proto::encode_pane_idle(*sid, alpha),
+                );
+            }
+        }
+        self.pane_idle_dim.retain(|sid, _| snapshot.contains_key(sid));
+        self.plugin_host.publish_pane_status(snapshot);
     }
 
     /// Periodic check.  Fired from `user_event` (which runs every

@@ -2243,13 +2243,18 @@ fn build_instances(
     //    "you are moving THIS one" (the ⇢ title marker stays for the
     //    pointer-outside-any-window case).
     for (i, view) in views.iter().enumerate() {
-        let dimming = if drag_source == Some(i) {
-            Some(0.38)
-        } else if view.dormant {
-            Some(0.22)
-        } else {
-            None
-        };
+        // Three reasons a pane can recede, one primitive.  The
+        // deepest wins rather than stacking: two scrims at 0.22 read
+        // as one at 0.39, which is a different (and unintended)
+        // shade.
+        let dimming = [
+            (drag_source == Some(i)).then_some(0.38),
+            view.dormant.then_some(0.22),
+            (view.idle_dim > 0.0).then_some(view.idle_dim),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(None::<f32>, |acc, v| Some(acc.map_or(v, |a: f32| a.max(v))));
         let (Some(alpha), Some(rect)) = (dimming, layout.cells.get(i)) else {
             continue;
         };
@@ -7558,7 +7563,7 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant,
+            dormant, idle_dim: 0.0,
         };
         let mut run = |view: SessionView, drag_source: Option<usize>| -> usize {
             let mut overlay_rects = Vec::new();
@@ -7641,6 +7646,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
+            idle_dim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7748,6 +7754,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
+            idle_dim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7828,6 +7835,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
+            idle_dim: 0.0,
             right_badge: "",
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
@@ -7932,6 +7940,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
+            idle_dim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7950,6 +7959,7 @@ mod tests {
             ime_preedit: view.ime_preedit,
             update_pending: view.update_pending,
             dormant: false,
+            idle_dim: 0.0,
             right_badge: view.right_badge,
             top_fixed_h_cells: view.top_fixed_h_cells,
             bot_fixed_h_cells: view.bot_fixed_h_cells,
@@ -8056,6 +8066,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
+            idle_dim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -8126,6 +8137,7 @@ mod tests {
         let view_base = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
+                                                                                idle_dim: 0.0,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
@@ -8134,6 +8146,7 @@ mod tests {
         let view_bot = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
+                                                                                idle_dim: 0.0,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,
