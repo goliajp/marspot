@@ -347,16 +347,15 @@ enum CycleStage {
 /// How long a pane must hold a quiet state before its claude is
 /// reclaimed, and the knob to change or disable it.
 ///
-/// Default one hour, chosen against a real cost rather than taste: the
-/// prompt cache's TTL is an hour, so past that point the next request
-/// re-sends the whole transcript as input tokens whether or not we
-/// hibernated.  Reclaiming after the cache is cold is therefore close
-/// to free — the marginal cost is claude's startup, not the tokens.
-/// Below the TTL it would be spending money to save memory.
+/// Default half an hour.  The cost model has not changed — the prompt
+/// cache's TTL is an hour, so reclaiming before it expires means the
+/// next request re-sends the transcript that a warm cache would have
+/// covered — but that cost is bounded and one-off, while 340 MB per
+/// session is not, and a session woken by focus pays it anyway.
 ///
 /// `MARSPOT_CC_IDLE_HIBERNATE_S=0` turns it off entirely.
 fn hibernate_after() -> Option<Duration> {
-    const DEFAULT_S: u64 = 3600;
+    const DEFAULT_S: u64 = 1800;
     let secs = std::env::var("MARSPOT_CC_IDLE_HIBERNATE_S")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
@@ -374,6 +373,75 @@ fn hibernate_after() -> Option<Duration> {
 /// fired at all.  Holding the baseline for a minute makes the delta
 /// mean "cpu burned in the last minute", which is the question.
 const CPU_BASELINE_WINDOW: Duration = Duration::from_secs(60);
+
+/// Processes a resting claude keeps around, measured on this host:
+/// an MCP server per session (`smix-mcp`), a language server it
+/// started (`rust-analyzer` and its proc-macro helper), and
+/// `caffeinate` (short-lived, respawned).  None of them is work.
+///
+/// Anything else under claude IS work: a background task, a watcher,
+/// a dev server, a `tail -f` a monitor is following.  Measured on a
+/// live session: `zsh → cargo-fuzz + tail`, all at **0.0 % CPU** —
+/// which is exactly why the CPU gate cannot be the only one.  Killing
+/// claude kills that whole tree.
+///
+/// The list is a name allowlist, so it fails in the safe direction:
+/// an unrecognised helper (a new MCP server, another language server)
+/// reads as work and the session simply is not reclaimed.  The
+/// opposite default would silently kill somebody's build.
+fn is_resting_helper(row: &pidtree::ProcRow, has_children: bool) -> bool {
+    let name = row.comm.as_str();
+    if name.contains("-mcp") || name.starts_with("mcp-") {
+        return true;
+    }
+    if name.starts_with("rust-analyzer") || name.ends_with("-language-server") {
+        return true;
+    }
+    if name == "caffeinate" {
+        return true;
+    }
+    // claude keeps one shell around per session; an empty one is
+    // furniture, one with something under it is a job in flight.
+    if matches!(name, "zsh" | "bash" | "sh") && !has_children {
+        return true;
+    }
+    false
+}
+
+/// Does this session have work of its own running?
+///
+/// Cheap: one pass over the descendants the scan already walked.
+pub fn has_work_in_flight(claude_pid: i32, procs: &[pidtree::ProcRow]) -> bool {
+    let descendants = pidtree::descendants_of(claude_pid, procs);
+    descendants.iter().any(|d| {
+        // A helper's own children (rust-analyzer's proc-macro server)
+        // ride along with it; judge each row on its own name first.
+        let has_children = procs.iter().any(|p| p.ppid == d.pid);
+        !is_resting_helper(d, has_children)
+            && !descendants.iter().any(|parent| {
+                parent.pid == d.ppid
+                    && is_resting_helper(
+                        parent,
+                        procs.iter().any(|p| p.ppid == parent.pid),
+                    )
+            })
+    })
+}
+
+/// Is this session waiting on its own timer rather than on the user?
+///
+/// A `/loop` autorun schedules its next wake from inside claude —
+/// nothing shows up in the process table, the transcript stops, and
+/// the pane looks exactly like one waiting for a person.  Reclaiming
+/// it kills the loop.  The one trace it leaves is the tool call, so
+/// that is what this looks for in the tail window.
+///
+/// Heuristic and deliberately sticky: a stale hit means a session is
+/// not reclaimed, which costs memory; a miss means someone's
+/// autonomous run dies.
+fn tail_mentions_own_timer(text: &str) -> bool {
+    text.contains("\"name\":\"ScheduleWakeup\"") || text.contains("<<autonomous-loop")
+}
 
 /// CPU a claude subtree may burn during the observation window and
 /// still count as idle.  Not zero: an idling MCP server and a language
@@ -398,6 +466,13 @@ struct IdleEvidence {
     /// how long ago that sample was taken.
     cpu_delta_ns: u64,
     since_sample: Duration,
+    /// A process of the session's own is running — a background task,
+    /// a watcher, a build.  CPU says nothing about these: measured on
+    /// a live session, `zsh → cargo-fuzz + tail` sat at 0.0 %.
+    work_in_flight: bool,
+    /// The session is waiting on a timer it set itself (a `/loop`
+    /// autorun), not on the user.
+    own_timer: bool,
 }
 
 /// Why a candidate pane was not reclaimed on this pass, as
@@ -423,6 +498,18 @@ fn blocking_reason(
     }
     if !(e.quiescent && e.awaiting_user) {
         return None; // not a candidate; not this log's business
+    }
+    if e.work_in_flight {
+        return Some((
+            "work_in_flight",
+            "a process of its own is running".to_string(),
+        ));
+    }
+    if e.own_timer {
+        return Some((
+            "own_timer",
+            "waiting on a timer it set itself".to_string(),
+        ));
     }
     Some(if e.held < threshold {
         (
@@ -456,6 +543,11 @@ fn blocking_reason(
 fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
     e.quiescent
         && e.awaiting_user
+        // Two vetoes the clock cannot see: something of the session's
+        // own is running, or the session is waiting on its own timer.
+        // Both mean the pane is not resting, it is between steps.
+        && !e.work_in_flight
+        && !e.own_timer
         && e.held >= threshold
         // A CPU sample only means something once it spans real time;
         // the first sample after a restart spans none.  Half the
@@ -1221,7 +1313,11 @@ impl ClaudecodePlugin {
                 self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
                 continue;
             };
+            let (work_in_flight, own_timer) =
+                result.new_vetoes.get(sid).copied().unwrap_or((true, true));
             let evidence = IdleEvidence {
+                work_in_flight,
+                own_timer,
                 quiescent: view.quiescent,
                 awaiting_user: matches!(
                     view.status,
@@ -2344,6 +2440,10 @@ struct ScanResult {
     /// Taken in the same pass as the bindings so the idle policy
     /// compares like with like.
     new_cpu: HashMap<u64, (u64, SystemTime)>,
+    /// `shelld_session_id → (work of its own running, waiting on its
+    /// own timer)`.  Both are vetoes on reclamation that the clock and
+    /// the CPU sample cannot see.
+    new_vetoes: HashMap<u64, (bool, bool)>,
     /// When this scan's facts were gathered.  A dormant record newer
     /// than this must not be judged by it — see `DormantRecord`.
     scanned_at: SystemTime,
@@ -2562,6 +2662,7 @@ impl WorkerCtx {
         let mut sessions_seen: Vec<u64> = Vec::new();
         let scanned_at = SystemTime::now();
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
+        let mut new_vetoes: HashMap<u64, (bool, bool)> = HashMap::new();
         let sessions = match self.shelld.list_sessions() {
             Ok(v) => v,
             Err(e) => {
@@ -2570,7 +2671,7 @@ impl WorkerCtx {
                     "tick.shelld_list_failed",
                     format!("{e}"),
                 ));
-                return ScanResult { new_mapping, new_meta, new_activity, new_cpu, scanned_at, sessions_seen, log_lines };
+                return ScanResult { new_mapping, new_meta, new_activity, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
@@ -2704,6 +2805,16 @@ impl WorkerCtx {
                     tail_activity(path, has_young_child),
                 );
             }
+            new_vetoes.insert(
+                f.shelld_sid,
+                (
+                    has_work_in_flight(f.claude_pid, &procs),
+                    jsonl_path
+                        .as_ref()
+                        .map(|p| tail_mentions_own_timer(&tail_window(p)))
+                        .unwrap_or(false),
+                ),
+            );
             new_cpu.insert(
                 f.shelld_sid,
                 (
@@ -2732,7 +2843,7 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
-        ScanResult { new_mapping, new_meta, new_activity, new_cpu, scanned_at, sessions_seen, log_lines }
+        ScanResult { new_mapping, new_meta, new_activity, new_cpu, new_vetoes, scanned_at, sessions_seen, log_lines }
     }
 
     /// Reverse-lookup: encoded project dir → newest known session
@@ -3573,6 +3684,7 @@ mod tests {
             new_meta: scan.new_meta.clone(),
             new_activity: scan.new_activity.clone(),
             new_cpu: HashMap::new(),
+            new_vetoes: HashMap::from([(1, (false, false))]),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
@@ -3603,6 +3715,7 @@ mod tests {
             new_meta: first.new_meta.clone(),
             new_activity: first.new_activity.clone(),
             new_cpu: HashMap::new(),
+            new_vetoes: HashMap::from([(1, (false, false))]),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
@@ -3848,6 +3961,7 @@ mod tests {
             new_meta,
             new_activity: HashMap::new(),
             new_cpu,
+            new_vetoes: HashMap::from([(sid, (false, false))]),
             scanned_at: SystemTime::now(),
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
@@ -4148,6 +4262,7 @@ mod tests {
     // written from the veto side.
 
     const HOUR: Duration = Duration::from_secs(3600);
+    const HALF_HOUR: Duration = Duration::from_secs(1800);
 
     fn idle_for(secs: u64) -> IdleEvidence {
         IdleEvidence {
@@ -4156,6 +4271,8 @@ mod tests {
             held: Duration::from_secs(secs),
             cpu_delta_ns: 0,
             since_sample: Duration::from_secs(120),
+            work_in_flight: false,
+            own_timer: false,
         }
     }
 
@@ -4204,6 +4321,8 @@ mod tests {
             held: Duration::from_secs(86_400),
             cpu_delta_ns: 0,
             since_sample: Duration::from_secs(300),
+            work_in_flight: false,
+            own_timer: false,
         };
         assert!(!should_hibernate(e, HOUR));
     }
@@ -4252,6 +4371,77 @@ mod tests {
         assert_eq!(blocking_reason(e, HOUR), None);
         let e = IdleEvidence { quiescent: false, ..idle_for(7200) };
         assert_eq!(blocking_reason(e, HOUR), None);
+    }
+
+    /// A session with a process of its own running is not resting,
+    /// however quiet it looks.  Measured on a live pane:
+    /// `zsh → cargo-fuzz + tail`, all at 0.0 % CPU and no transcript
+    /// activity — the clock and the CPU gate both say "idle", and
+    /// reclaiming would kill the build.
+    #[test]
+    fn a_session_running_something_of_its_own_is_never_reclaimed() {
+        let e = IdleEvidence { work_in_flight: true, ..idle_for(86_400) };
+        assert!(!should_hibernate(e, HALF_HOUR));
+        let (cat, _) = blocking_reason(e, HALF_HOUR).expect("a reason");
+        assert_eq!(cat, "work_in_flight");
+    }
+
+    /// A `/loop` autorun waits on a timer inside claude: no processes,
+    /// no transcript, and a pane that looks exactly like one waiting
+    /// for a person.  Reclaiming it ends the run.
+    #[test]
+    fn a_session_waiting_on_its_own_timer_is_never_reclaimed() {
+        let e = IdleEvidence { own_timer: true, ..idle_for(86_400) };
+        assert!(!should_hibernate(e, HALF_HOUR));
+        let (cat, _) = blocking_reason(e, HALF_HOUR).expect("a reason");
+        assert_eq!(cat, "own_timer");
+    }
+
+    /// The traces those two leave, as they appear in a transcript and
+    /// a process table.
+    #[test]
+    fn the_two_vetoes_recognise_what_they_are_looking_for() {
+        assert!(tail_mentions_own_timer(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"ScheduleWakeup"}]}}"#
+        ));
+        assert!(tail_mentions_own_timer("… <<autonomous-loop-dynamic>> …"));
+        assert!(!tail_mentions_own_timer(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#
+        ));
+
+        let row = |pid: i32, ppid: i32, comm: &str| pidtree::ProcRow {
+            pid,
+            ppid,
+            comm: comm.into(),
+            start_unix: 0,
+            pgid: pid,
+            tty_dev: 1,
+            tty_fg_pgid: 1,
+            status: libc::SSLEEP,
+        };
+        let claude = 100;
+        // A resting session: an MCP server, a language server with its
+        // own helper, caffeinate, and an empty shell.
+        let resting = vec![
+            row(claude, 1, "claude"),
+            row(101, claude, "smix-mcp"),
+            row(102, claude, "rust-analyzer"),
+            row(103, 102, "rust-analyzer-proc-macro-srv"),
+            row(104, claude, "caffeinate"),
+            row(105, claude, "zsh"),
+        ];
+        assert!(!has_work_in_flight(claude, &resting), "none of that is work");
+
+        // The same session with a job under its shell.
+        let mut working = resting.clone();
+        working.push(row(106, 105, "cargo-fuzz"));
+        assert!(has_work_in_flight(claude, &working), "a job under the shell is work");
+
+        // An unrecognised helper counts as work: the allowlist fails
+        // towards not reclaiming, never towards killing something.
+        let mut unknown = resting.clone();
+        unknown.push(row(107, claude, "some-new-helper"));
+        assert!(has_work_in_flight(claude, &unknown));
     }
 
     #[test]
@@ -4447,11 +4637,11 @@ mod tests {
             std::env::set_var(key, "nonsense");
             assert_eq!(
                 hibernate_after(),
-                Some(Duration::from_secs(3600)),
+                Some(HALF_HOUR),
                 "an unparsable value falls back to the default rather than to off"
             );
             std::env::remove_var(key);
-            assert_eq!(hibernate_after(), Some(Duration::from_secs(3600)));
+            assert_eq!(hibernate_after(), Some(HALF_HOUR));
             if let Some(v) = saved {
                 std::env::set_var(key, v);
             }
@@ -4766,6 +4956,31 @@ mod tests {
 /// the last 32 KiB of the file and looks at the last `\n`-separated
 /// record's `"type":"…"` field.  Returns None if the file is malformed
 /// or has no recognisable type.
+/// The tail window of a transcript as text, for the cheap
+/// "what has this session been doing" checks.  Same 32 KB window the
+/// classifier uses; a read failure yields an empty string, which the
+/// callers read as "no evidence" — and every caller's no-evidence
+/// answer is the conservative one.
+fn tail_window(path: &PathBuf) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 32 * 1024;
+    let Ok(mut f) = fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(md) = f.metadata() else {
+        return String::new();
+    };
+    let start = md.len().saturating_sub(TAIL);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::with_capacity(TAIL as usize);
+    if f.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Read a session's last record and classify it.  Same 32 KB tail
 /// window as `tail_last_message_type`; the record we need is the last
 /// line, and a single record over 32 KB (a huge tool result) reads as
