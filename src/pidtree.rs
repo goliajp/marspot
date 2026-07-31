@@ -149,6 +149,46 @@ pub fn proc_row(pid: i32) -> Option<ProcRow> {
     }
 }
 
+/// Total CPU time this process has consumed, in nanoseconds (user +
+/// system), via `proc_pidinfo(PROC_PIDTASKINFO)`.  None when the pid
+/// is gone or the call is refused.
+///
+/// Sampled twice, the difference answers "is anything actually working
+/// in here" — which is a different question from "does this process
+/// have children", and the only one of the two that can be answered
+/// honestly.  Measured on this host: every live claude keeps children
+/// permanently (an MCP server, a language server, `caffeinate`, a
+/// long-lived shell), so a child count says nothing about whether work
+/// is in flight.
+pub fn proc_cpu_time_ns(pid: i32) -> Option<u64> {
+    unsafe {
+        let mut info: libc::proc_taskinfo = std::mem::zeroed();
+        let r = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            std::mem::size_of::<libc::proc_taskinfo>() as i32,
+        );
+        if r <= 0 {
+            return None;
+        }
+        Some(info.pti_total_user + info.pti_total_system)
+    }
+}
+
+/// CPU time of `root` plus every descendant, nanoseconds.  Processes
+/// that vanish mid-walk are skipped rather than failing the sum: this
+/// feeds a "has anything moved since last time" comparison, and a
+/// disappearing child is itself not work in flight.
+pub fn subtree_cpu_time_ns(root: i32, procs: &[ProcRow]) -> u64 {
+    let mut total = proc_cpu_time_ns(root).unwrap_or(0);
+    for d in descendants_of(root, procs) {
+        total = total.saturating_add(proc_cpu_time_ns(d.pid).unwrap_or(0));
+    }
+    total
+}
+
 /// Direct children of `pid`, via `proc_listchildpids` — one syscall,
 /// no table walk.  Empty on error or when there are none.
 ///
@@ -1047,6 +1087,28 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert!(found, "spawned child {} missing from {:?}", child.id(), kids);
+    }
+
+    /// CPU time is monotonic and moves when work happens — the two
+    /// properties the idle policy relies on.
+    #[test]
+    fn proc_cpu_time_ns_is_monotonic_and_grows_under_load() {
+        let me = std::process::id() as i32;
+        let before = proc_cpu_time_ns(me).expect("cpu time for self");
+        // Burn a measurable slice of CPU without sleeping (a sleep
+        // would prove nothing — the point is that *work* moves it).
+        let mut acc = 0u64;
+        for i in 0..8_000_000u64 {
+            acc = acc.wrapping_add(i ^ acc.rotate_left(7));
+        }
+        std::hint::black_box(acc);
+        let after = proc_cpu_time_ns(me).expect("cpu time for self");
+        assert!(after >= before, "cpu time went backwards: {before} → {after}");
+        assert!(
+            after > before,
+            "burning 8M iterations must show up as CPU time ({before} → {after})"
+        );
+        assert!(proc_cpu_time_ns(-1).is_none());
     }
 
     #[test]
