@@ -30,6 +30,34 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.45
+
+休眠变成一等状态 —— `Dormant` 进状态机,决策不再读插件私有集合。
+
+0.7.43 的实现有个分层缺口:claude 被收掉之后插件报 `Absent`,合成出来是
+`Empty` —— 从状态机看,这个 pane 跟一个**干净的空 pane 长得一模一样**。
+不重复回收它靠的是插件私有的 `dormant` 集合,一条绕过状态机的旁路。
+
+后果很具体:等 zsh 层(冷存 shell)建起来,它看到 `Empty` 就会去拆这个
+pane,而且**不知道**这里躺着一个可以 resume 的 claude 会话 —— 那条 resume
+会静默丢掉。
+
+现在:
+
+- `Activity::Dormant` 由插件上报(`activity_for_unbound`:同样是「没有
+  绑定」,parked 的报 Dormant,真空的报 Absent);
+- 合成出 `PaneStatus::Dormant` —— **安静,但带着一笔待恢复的债**;
+- `owes_restore()` 是给下一层看的判据:安静态有三个,只有这个欠着东西;
+- 回收判据不再有「这个我是不是已经收过了」的私有检查 —— `Dormant` 不是
+  `AwaitingUser`,它在跟所有人一样的证据上被同一个 gate 排除。
+
+顺带钉住一条时序:插件报 `Dormant` 而内核说有作业占着 tty 时(claude 被
+唤醒、或用户自己起了东西,插件还没扫到),**内核赢** —— pane 读作
+`Busy(fg_job)`,插件下一轮自己纠正。
+
+全叉乘测试从「有且只有两对是安静的」改成三对,并断言只有 `Dormant`
+那对 `owes_restore()`。
+
 ### 0.7.44
 
 idle 闭环在**自己的 PTY** 上跑通了 —— 回收 → 休眠 → 按键 → resume,

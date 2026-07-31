@@ -80,6 +80,16 @@ pub enum Activity {
     ToolPending { executing: bool },
     /// A turn is being produced.
     Working,
+    /// The program was reclaimed while idle and the pane is holding a
+    /// restore for it — nothing is running, but this is NOT an empty
+    /// pane: acting on it (reclaiming the shell, closing the pane)
+    /// silently discards a session that could still be resumed.
+    ///
+    /// It is a state rather than a plugin-private flag precisely so a
+    /// second layer can see the debt.  The identity of what is parked
+    /// (a session uuid, for claudecode) stays with the plugin; the
+    /// machine only needs to know that something is owed.
+    Dormant,
     /// Nobody has looked yet, or the transcript's shape wasn't
     /// recognised.  Never treat as idle.
     Unknown,
@@ -121,9 +131,13 @@ pub enum PaneStatus {
     /// doing nothing at all.
     Empty,
     /// A program is bound and waiting for the user, with nothing in
-    /// flight.  Together with [`PaneStatus::Empty`] this is what
-    /// `quiescent` means.
+    /// flight.
     AwaitingUser,
+    /// Nothing is running, but a reclaimed program is parked here
+    /// waiting to be restored.  Quiet, and carrying a debt: a policy
+    /// that reclaims further (the shell, the pane itself) has to take
+    /// the restore with it or drop it deliberately, not by accident.
+    Dormant,
     /// Something is running or pending.
     Busy(BusyKind),
     /// The two views cannot both be true.  The pane is left alone and
@@ -140,7 +154,17 @@ impl PaneStatus {
     /// held this state for [`CONFIRM_TICKS`], which is what
     /// [`PaneMachine::quiescent`] checks.
     pub fn is_quiet(&self) -> bool {
-        matches!(self, PaneStatus::Empty | PaneStatus::AwaitingUser)
+        matches!(
+            self,
+            PaneStatus::Empty | PaneStatus::AwaitingUser | PaneStatus::Dormant
+        )
+    }
+
+    /// A restore is parked in this pane.  Anything that would take the
+    /// pane further down (reclaim its shell, close it) must carry this
+    /// forward or discard it on purpose.
+    pub fn owes_restore(&self) -> bool {
+        matches!(self, PaneStatus::Dormant)
     }
 
     /// Stable, greppable label for logs.
@@ -148,6 +172,7 @@ impl PaneStatus {
         match self {
             PaneStatus::Empty => "empty".into(),
             PaneStatus::AwaitingUser => "awaiting_user".into(),
+            PaneStatus::Dormant => "dormant".into(),
             PaneStatus::Busy(k) => format!("busy:{}", k.label()),
             PaneStatus::Contradiction { generic, activity } => {
                 format!("contradiction:{}/{}", generic, activity)
@@ -191,6 +216,7 @@ impl Activity {
             Activity::ToolPending { executing: true } => "tool_executing",
             Activity::ToolPending { executing: false } => "tool_awaiting_approval",
             Activity::Working => "working",
+            Activity::Dormant => "dormant",
             Activity::Unknown => "unknown",
         }
     }
@@ -229,6 +255,10 @@ pub fn compose(generic: &Generic, activity: Activity) -> PaneStatus {
             _ => PaneStatus::Unknown,
         },
         (Generic::Idle, Activity::Absent) => PaneStatus::Empty,
+        // Reclaimed and parked: quiet like `Empty`, but distinguishable
+        // from it, which is the whole point — an `Empty` pane may be
+        // taken apart, a dormant one may not be taken apart *silently*.
+        (Generic::Idle, Activity::Dormant) => PaneStatus::Dormant,
         (Generic::Idle, a) => PaneStatus::Contradiction {
             generic: generic.label(),
             activity: a.label(),
@@ -236,7 +266,11 @@ pub fn compose(generic: &Generic, activity: Activity) -> PaneStatus {
         (Generic::PromptWithJobs { stopped, running }, _) => {
             PaneStatus::Busy(jobs_kind(*stopped, *running))
         }
-        (Generic::Foreground { .. }, Activity::Absent) => {
+        // A job owns the tty while a plugin still says "dormant": the
+        // report is one scan behind (the program came back, or the user
+        // started something).  The kernel is the fresher of the two, so
+        // the pane reads busy; the plugin corrects itself next pass.
+        (Generic::Foreground { .. }, Activity::Absent | Activity::Dormant) => {
             PaneStatus::Busy(BusyKind::ForegroundJob)
         }
         (Generic::Foreground { .. }, Activity::AwaitingUser) => PaneStatus::AwaitingUser,
@@ -387,6 +421,7 @@ mod tests {
             Activity::Working,
             Activity::ToolPending { executing: true },
             Activity::ToolPending { executing: false },
+            Activity::Dormant,
             Activity::Unknown,
         ];
         // Every pair maps somewhere, and only the two intended pairs
@@ -406,10 +441,17 @@ mod tests {
             quiet,
             vec![
                 ("idle", "absent", PaneStatus::Empty),
+                ("idle", "dormant", PaneStatus::Dormant),
                 ("foreground", "awaiting_user", PaneStatus::AwaitingUser),
             ],
-            "exactly two pairs may be quiet"
+            "exactly three pairs may be quiet, and each means something \
+             different: nothing here, something parked here, something \
+             waiting for you"
         );
+        // Only one of the quiet states carries a debt.
+        assert!(PaneStatus::Dormant.owes_restore());
+        assert!(!PaneStatus::Empty.owes_restore());
+        assert!(!PaneStatus::AwaitingUser.owes_restore());
     }
 
     /// The regression the machine was built for: a suspended job is
@@ -466,6 +508,29 @@ mod tests {
                 Activity::Unknown
             ),
             PaneStatus::Busy(BusyKind::StoppedJobs)
+        );
+    }
+
+    /// A dormant pane is quiet but is NOT an empty one.  A second
+    /// layer reclaiming shells must be able to tell them apart, which
+    /// is exactly what the plugin-private flag it replaces could not
+    /// offer.
+    #[test]
+    fn a_dormant_pane_is_quiet_but_distinguishable_from_empty() {
+        let dormant = compose(&Generic::Idle, Activity::Dormant);
+        assert_eq!(dormant, PaneStatus::Dormant);
+        assert!(dormant.is_quiet());
+        assert!(dormant.owes_restore());
+        assert_ne!(dormant, compose(&Generic::Idle, Activity::Absent));
+    }
+
+    /// The program came back (woken, or restarted by hand) before the
+    /// plugin's next report: the kernel wins, the pane reads busy.
+    #[test]
+    fn a_stale_dormant_report_loses_to_a_running_job() {
+        assert_eq!(
+            compose(&fg(), Activity::Dormant),
+            PaneStatus::Busy(BusyKind::ForegroundJob)
         );
     }
 

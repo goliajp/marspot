@@ -392,6 +392,22 @@ fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
         && e.cpu_delta_ns <= IDLE_CPU_TOLERANCE_NS
 }
 
+/// What this plugin reports for a pane it has no live binding in.
+///
+/// "No claude here" and "a claude was reclaimed from here and can be
+/// restored" look identical from the outside — same absent process,
+/// same shell at the same prompt — and they are not the same thing at
+/// all.  Reporting them apart is what lets the state machine (and any
+/// second layer built on it) see that a pane owes a restore, instead
+/// of that fact living in a plugin-private set nobody else can read.
+fn activity_for_unbound(sid: u64, dormant: &[DormantRecord]) -> CcActivity {
+    if dormant.iter().any(|d| d.shelld_sid == sid) {
+        CcActivity::Dormant
+    } else {
+        CcActivity::Absent
+    }
+}
+
 /// What a dormant pane needs to wake itself up again, persisted so it
 /// survives an L1 self-execv (which drops every PaneSession).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -977,9 +993,11 @@ impl ClaudecodePlugin {
         };
         let now = SystemTime::now();
         for (sid, (cpu_now, sampled_at)) in &result.new_cpu {
-            if self.dormant.iter().any(|d| d.shelld_sid == *sid) {
-                continue; // already reclaimed
-            }
+            // No "have I already done this one" check: a pane we
+            // reclaimed reports `Dormant`, which composes to a state
+            // that is not `AwaitingUser`, so the gate below excludes it
+            // on the same evidence everyone else uses.  The private
+            // dormant set is for the wake path, not for decisions.
             let Ok(Some(view)) = host.pane_status(*sid) else {
                 continue; // no machine for this pane yet
             };
@@ -1757,7 +1775,7 @@ impl Plugin for ClaudecodePlugin {
                 if !result.new_activity.contains_key(sid) {
                     let _ = host.report_pane_activity(
                         *sid,
-                        marspot::pane_state::Activity::Absent,
+                        activity_for_unbound(*sid, &self.dormant),
                     );
                 }
             }
@@ -3626,6 +3644,53 @@ mod tests {
             cpu_delta_ns: 0,
             since_sample: Duration::from_secs(120),
         }
+    }
+
+    /// A pane this plugin has parked reports `Dormant`, not `Absent`.
+    /// Both look the same from outside (no claude, shell at a prompt);
+    /// only one of them owes a restore, and the difference has to be
+    /// visible to anyone reading the pane's state.
+    #[test]
+    fn an_unbound_pane_reports_dormant_only_when_something_is_parked() {
+        let parked = vec![DormantRecord {
+            shelld_sid: 7,
+            uuid: "u".into(),
+            profile_num: 1,
+        }];
+        assert_eq!(activity_for_unbound(7, &parked), CcActivity::Dormant);
+        assert_eq!(activity_for_unbound(8, &parked), CcActivity::Absent);
+        assert_eq!(activity_for_unbound(7, &[]), CcActivity::Absent);
+        // …and the composed state keeps the two apart.
+        assert!(
+            marspot::pane_state::compose(
+                &marspot::pane_state::Generic::Idle,
+                CcActivity::Dormant
+            )
+            .owes_restore()
+        );
+        assert!(
+            !marspot::pane_state::compose(
+                &marspot::pane_state::Generic::Idle,
+                CcActivity::Absent
+            )
+            .owes_restore()
+        );
+    }
+
+    /// The reclamation gate excludes an already-parked pane on the
+    /// same evidence it uses for everything else — no private "have I
+    /// done this one" flag.
+    #[test]
+    fn a_dormant_pane_is_not_a_reclamation_candidate() {
+        let e = IdleEvidence {
+            quiescent: true,
+            // `Dormant` is quiet but is not `AwaitingUser`.
+            awaiting_user: false,
+            held: Duration::from_secs(86_400),
+            cpu_delta_ns: 0,
+            since_sample: Duration::from_secs(300),
+        };
+        assert!(!should_hibernate(e, HOUR));
     }
 
     #[test]
