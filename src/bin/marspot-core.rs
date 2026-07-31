@@ -2151,8 +2151,8 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
-    /// L1 → L2: this pane's idle dim changed.
-    PaneIdle(u64, f32),
+    /// L1 → L2: how far this pane has receded from active use.
+    PaneRecede(u64, u32),
     /// Shell → core: context-menu items for a pane badge, replying to
     /// a `PaneBadgeMenuRequest` this core sent from a right-click on
     /// the badge prefix.  `(sid, anchor_x, anchor_y, items)` — the
@@ -2352,9 +2352,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::SurfaceAttach => decode_surface_attach(&f.payload)
             .ok()
             .map(|(f_id, b_id, w, h, s)| CoreEvent::SurfaceAttach(f_id, b_id, w, h, s)),
-        MsgType::PaneIdle => marspot::shell_proto::decode_pane_idle(&f.payload)
+        MsgType::PaneRecede => marspot::shell_proto::decode_pane_recede(&f.payload)
             .ok()
-            .map(|(sid, alpha)| CoreEvent::PaneIdle(sid, alpha)),
+            .map(|(sid, level)| CoreEvent::PaneRecede(sid, level)),
         MsgType::PaneBadge => marspot::shell_proto::decode_pane_badge(&f.payload)
             .ok()
             .map(|(sid, text)| CoreEvent::PaneBadge(sid, text)),
@@ -3374,18 +3374,18 @@ impl CoreApp {
         }
     }
 
-    /// How much this pane recedes for being idle.  Repaints only when
-    /// the value actually moves — L1 sends on change, but a repeated
-    /// value after a core swap must not cost a frame.
-    fn set_pane_idle_dim(&mut self, sid: u64, alpha: f32) {
+    /// How far this pane has receded from active use.  Repaints only
+    /// when the value actually moves — L1 sends on change, but a
+    /// repeated value after a core swap must not cost a frame.
+    fn set_pane_recede(&mut self, sid: u64, level: u32) {
         let Some((wi, idx)) = self.find_pane_by_sid(sid) else {
             return;
         };
         let pane = &mut win!(self, wi).panes[idx];
-        if (pane.idle_dim - alpha).abs() < f32::EPSILON {
+        if pane.recede == level {
             return;
         }
-        pane.idle_dim = alpha;
+        pane.recede = level;
         win!(self, wi).needs_render = true;
     }
 
@@ -8854,8 +8854,8 @@ fn main() {
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
                 }
-                CoreEvent::PaneIdle(sid, alpha) => {
-                    app.set_pane_idle_dim(sid, alpha);
+                CoreEvent::PaneRecede(sid, level) => {
+                    app.set_pane_recede(sid, level);
                 }
                 CoreEvent::PaneBadgeMenu(sid, x, y, items) => {
                     // The menu belongs over the badge that was clicked,

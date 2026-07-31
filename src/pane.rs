@@ -1136,10 +1136,9 @@ impl Drop for L3Conn {
 /// (scrollback view offset, …) it owns independently of any container.
 pub struct Pane {
     session: PaneBackend,
-    /// How much this pane recedes for being idle, set by L1 through
-    /// `PaneIdle`.  0.0 = live.  The generic half of the idle story:
-    /// a resting pane looks rested, and nothing is taken from it.
-    pub idle_dim: f32,
+    /// How far this pane has receded from active use (0 live,
+    /// 1 resting, 2 parked), set by L1 through `PaneRecede`.
+    pub recede: u32,
     /// View offset into scrollback in rows. `0` = live tail; positive
     /// = looking back into history. A keystroke resets to 0 so the
     /// user's keypress always lands in a visible prompt.
@@ -1220,7 +1219,7 @@ impl Pane {
     pub fn new(session: Session) -> Self {
         Self {
             session: PaneBackend::Local(session),
-            idle_dim: 0.0,
+            recede: 0,
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
@@ -1238,7 +1237,7 @@ impl Pane {
     pub fn new_l3(conn: L3Conn) -> Self {
         Self {
             session: PaneBackend::L3(conn),
-            idle_dim: 0.0,
+            recede: 0,
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
@@ -1257,7 +1256,7 @@ impl Pane {
     pub fn new_pending(session_id: u64, cols: u16, rows: u16) -> Self {
         Self {
             session: PaneBackend::Vacant(VacantPane::new_pending(session_id, cols, rows)),
-            idle_dim: 0.0,
+            recede: 0,
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
@@ -1289,7 +1288,7 @@ impl Pane {
     pub fn new_vacant(session_id: u64, cols: u16, rows: u16) -> Self {
         Self {
             session: PaneBackend::Vacant(VacantPane::new(session_id, cols, rows)),
-            idle_dim: 0.0,
+            recede: 0,
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
@@ -1316,7 +1315,7 @@ impl Pane {
     pub fn new_dormant(cols: u16, rows: u16) -> Self {
         Self {
             session: PaneBackend::Vacant(VacantPane::new_dormant(cols, rows)),
-            idle_dim: 0.0,
+            recede: 0,
             view_offset: 0,
             last_seen_scroll_push: 0,
             update_pending: false,
@@ -1667,7 +1666,7 @@ impl Pane {
             ime_preedit: "",
             update_pending: self.update_pending,
             dormant: self.is_dormant(),
-            idle_dim: self.idle_dim,
+            recede: self.recede,
             right_badge,
             top_fixed_h_cells,
             bot_fixed_h_cells,

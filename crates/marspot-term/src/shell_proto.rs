@@ -393,14 +393,24 @@ pub enum MsgType {
     /// have already tried to use it, which reads as "it takes
     /// forever".
     PaneFocused = 66,
-    /// shell → core: how idle this pane looks, as a dim factor.
-    /// Payload: `session_id u64 LE, alpha f32 LE` (0.0 = live).
+    /// shell → core: how far this pane has receded from active use.
+    /// Payload: `session_id u64 LE, level u32 LE`.
     ///
-    /// The generic half of the idle story: a pane that has been quiet
-    /// for a while recedes visually instead of being taken apart.  The
-    /// policy (what counts as idle, how dim) stays in L1 with the
-    /// state machine; L2 just paints what it is told.
-    PaneIdle = 67,
+    /// The levels track a session's own lifecycle, not a stopwatch:
+    ///   0 — live.  Includes a shell sitting at its prompt: a terminal
+    ///       waiting for you is not idle, and an earlier version that
+    ///       dimmed anything quiet for five minutes marked 15 of 18
+    ///       panes on this desktop, which is the same as marking none.
+    ///   1 — resting: a bound program finished its turn and has been
+    ///       waiting long enough to be a reclamation candidate.  The
+    ///       dim is the warning that it is drifting out.
+    ///   2 — parked: the program was reclaimed; the picture is frozen
+    ///       and a keystroke (or focus) brings it back.
+    ///
+    /// How dark each level looks is the renderer's ladder — it also
+    /// depends on whether this is the pane the user is in, which L1
+    /// does not know.
+    PaneRecede = 67,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -456,7 +466,7 @@ impl MsgType {
             64 => MsgType::WindowOpenRequest,
             65 => MsgType::WindowCloseRequest,
             66 => MsgType::PaneFocused,
-            67 => MsgType::PaneIdle,
+            67 => MsgType::PaneRecede,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1446,24 +1456,24 @@ pub fn decode_pane_title(payload: &[u8]) -> io::Result<(u64, String)> {
     Ok((session_id, title))
 }
 
-/// PaneIdle payload: `session_id u64 LE, alpha f32 LE`.
-pub fn encode_pane_idle(session_id: u64, alpha: f32) -> Vec<u8> {
+/// PaneRecede payload: `session_id u64 LE, level u32 LE`.
+pub fn encode_pane_recede(session_id: u64, level: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity(12);
     v.extend_from_slice(&session_id.to_le_bytes());
-    v.extend_from_slice(&alpha.to_le_bytes());
+    v.extend_from_slice(&level.to_le_bytes());
     v
 }
 
-pub fn decode_pane_idle(payload: &[u8]) -> io::Result<(u64, f32)> {
+pub fn decode_pane_recede(payload: &[u8]) -> io::Result<(u64, u32)> {
     if payload.len() < 12 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "PaneIdle payload too short",
+            "PaneRecede payload too short",
         ));
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-    let alpha = f32::from_le_bytes(payload[8..12].try_into().unwrap());
-    Ok((sid, alpha))
+    let level = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+    Ok((sid, level))
 }
 
 /// PaneFocused payload: `session_id u64 LE`.

@@ -2249,7 +2249,7 @@ fn build_instances(
         let dimming = [
             (drag_source == Some(i)).then_some(DRAG_SOURCE_SCRIM),
             view.dormant.then_some(EMPTY_SEAT_SCRIM),
-            Some(attention_scrim(view.focused, view.idle_dim > 0.0)),
+            Some(attention_scrim(view.focused, view.recede)),
         ]
         .into_iter()
         .flatten()
@@ -2633,18 +2633,20 @@ fn build_instances(
     let _ = context_menu_state;
 }
 
-/// The attention ladder: how present a pane is, by whether the user
-/// is in it and whether it has been resting.
+/// The attention ladder: how present a pane is, from whether the user
+/// is in it and how far its session has receded.
 ///
 /// One pane is fully there — the one being used.  Everything else
-/// steps back a little, and a pane that has been idle steps back a
-/// lot.  The point is that a glance at the window should answer
-/// "where am I / what is still alive" before any reading happens.
+/// steps back; a session that has been sitting finished steps back
+/// again; one that has been reclaimed steps back furthest.  A glance
+/// should answer "where am I / what is still alive / what has drifted
+/// out" before any reading happens.
 ///
 /// Expressed as scrim alpha, which is `1 - opacity`: 0.25 scrim =
-/// 75 % opacity.
+/// 75 % opacity, 0.50 = 50 %, 0.75 = 25 %.
 const UNFOCUSED_SCRIM: f32 = 0.25;
-const IDLE_SCRIM: f32 = 0.75;
+const RESTING_SCRIM: f32 = 0.50;
+const PARKED_SCRIM: f32 = 0.75;
 /// Deeper than either, because dragging is a live gesture and the
 /// source pane has to read as "the one in your hand".
 const DRAG_SOURCE_SCRIM: f32 = 0.38;
@@ -2654,14 +2656,17 @@ const EMPTY_SEAT_SCRIM: f32 = 0.22;
 
 /// Scrim for a pane from the attention ladder alone.
 ///
-/// The focused pane is never dimmed, idle or not: whatever the state
-/// machine thinks, a pane the user is looking at is not resting from
-/// where they sit.
-fn attention_scrim(focused: bool, idle: bool) -> f32 {
-    match (focused, idle) {
-        (true, _) => 0.0,
-        (false, false) => UNFOCUSED_SCRIM,
-        (false, true) => IDLE_SCRIM,
+/// The focused pane is never dimmed at any level: whatever the state
+/// machine thinks of it, a pane the user is looking at is not
+/// receding from where they sit.
+fn attention_scrim(focused: bool, recede: u32) -> f32 {
+    if focused {
+        return 0.0;
+    }
+    match recede {
+        0 => UNFOCUSED_SCRIM,
+        1 => RESTING_SCRIM,
+        _ => PARKED_SCRIM,
     }
 }
 
@@ -7590,7 +7595,7 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant: false, idle_dim: 0.0,
+            dormant: false, recede: 0,
         };
         let mut overlay_rects = Vec::new();
         build_instances(
@@ -7634,22 +7639,29 @@ mod tests {
     /// thinks of it.
     #[test]
     fn the_attention_ladder_puts_the_focused_pane_in_front() {
-        assert_eq!(attention_scrim(true, false), 0.0, "the pane you are in");
+        assert_eq!(attention_scrim(true, 0), 0.0, "the pane you are in");
         assert_eq!(
-            attention_scrim(true, true),
+            attention_scrim(true, 2),
             0.0,
-            "…even if it has been resting: you are in it now"
+            "…even if its session was reclaimed: you are in it now"
         );
-        assert_eq!(attention_scrim(false, false), UNFOCUSED_SCRIM);
-        assert_eq!(attention_scrim(false, true), IDLE_SCRIM);
+        assert_eq!(attention_scrim(false, 0), UNFOCUSED_SCRIM);
+        assert_eq!(attention_scrim(false, 1), RESTING_SCRIM);
+        assert_eq!(attention_scrim(false, 2), PARKED_SCRIM);
         assert!(
-            IDLE_SCRIM > UNFOCUSED_SCRIM,
-            "resting has to read as further away than merely not-here"
+            UNFOCUSED_SCRIM < RESTING_SCRIM && RESTING_SCRIM < PARKED_SCRIM,
+            "the ladder has to be monotonic or it says nothing"
+        );
+        assert!(
+            PARKED_SCRIM > UNFOCUSED_SCRIM,
+            "a pane whose program is gone has to read further away than \
+             one that is merely not the focused pane"
         );
         // Opacity is what the user perceives; the constants are its
         // complement, and the tiers are the ones asked for.
         assert!((1.0 - UNFOCUSED_SCRIM - 0.75).abs() < 1e-6, "75 % opacity");
-        assert!((1.0 - IDLE_SCRIM - 0.25).abs() < 1e-6, "25 % opacity");
+        assert!((1.0 - RESTING_SCRIM - 0.50).abs() < 1e-6, "50 % opacity");
+        assert!((1.0 - PARKED_SCRIM - 0.25).abs() < 1e-6, "25 % opacity");
     }
 
     /// The scrim primitive is shared by every reason a pane recedes,
@@ -7667,12 +7679,12 @@ mod tests {
         let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
-        let mk = |focused: bool, dormant: bool, idle: f32| SessionView {
+        let mk = |focused: bool, dormant: bool, recede: u32| SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused,
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant, idle_dim: idle,
+            dormant, recede,
         };
         let mut scrim_alphas = |view: SessionView| -> Vec<f32> {
             let mut overlay_rects = Vec::new();
@@ -7703,23 +7715,23 @@ mod tests {
                 .collect()
         };
         // Focused and live: nothing over it at all.
-        let focused = scrim_alphas(mk(true, false, 0.0));
+        let focused = scrim_alphas(mk(true, false, 0));
         assert!(
             !focused.iter().any(|a| (*a - UNFOCUSED_SCRIM).abs() < 1e-6),
             "the focused pane gets no attention scrim, got {focused:?}"
         );
-        // Unfocused and resting: one scrim, the idle one.
-        let idle = scrim_alphas(mk(false, false, 1.0));
+        // Unfocused and parked: one scrim, the parked one.
+        let parked = scrim_alphas(mk(false, false, 2));
         assert!(
-            idle.iter().any(|a| (*a - IDLE_SCRIM).abs() < 1e-6),
-            "an idle pane recedes to the idle tier, got {idle:?}"
+            parked.iter().any(|a| (*a - PARKED_SCRIM).abs() < 1e-6),
+            "a parked pane recedes to the parked tier, got {parked:?}"
         );
-        // Resting AND an empty seat: still one scrim, the deeper of
+        // Parked AND an empty seat: still one scrim, the deeper of
         // the two.
-        let both = scrim_alphas(mk(false, true, 1.0));
+        let both = scrim_alphas(mk(false, true, 2));
         let deep = both.iter().filter(|a| **a >= EMPTY_SEAT_SCRIM).count();
         assert_eq!(deep, 1, "exactly one scrim, got {both:?}");
-        assert!(both.iter().any(|a| (*a - IDLE_SCRIM).abs() < 1e-6));
+        assert!(both.iter().any(|a| (*a - PARKED_SCRIM).abs() < 1e-6));
     }
 
     #[test]
@@ -7768,7 +7780,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
-            idle_dim: 0.0,
+            recede: 0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7876,7 +7888,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
-            idle_dim: 0.0,
+            recede: 0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7957,7 +7969,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
-            idle_dim: 0.0,
+            recede: 0,
             right_badge: "",
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
@@ -8062,7 +8074,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
-            idle_dim: 0.0,
+            recede: 0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -8081,7 +8093,7 @@ mod tests {
             ime_preedit: view.ime_preedit,
             update_pending: view.update_pending,
             dormant: false,
-            idle_dim: 0.0,
+            recede: 0,
             right_badge: view.right_badge,
             top_fixed_h_cells: view.top_fixed_h_cells,
             bot_fixed_h_cells: view.bot_fixed_h_cells,
@@ -8188,7 +8200,7 @@ mod tests {
             ime_preedit: "",
             update_pending: false,
             dormant: false,
-            idle_dim: 0.0,
+            recede: 0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -8259,7 +8271,7 @@ mod tests {
         let view_base = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
-                                                                                idle_dim: 0.0,
+                                                                                recede: 0,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
@@ -8268,7 +8280,7 @@ mod tests {
         let view_bot = SessionView {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
-                                                                                idle_dim: 0.0,
+                                                                                recede: 0,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,

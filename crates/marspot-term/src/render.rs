@@ -137,17 +137,19 @@ pub struct SessionView<'a> {
     /// running" next to live panes, with the grid's own hint text
     /// showing through.
     pub dormant: bool,
-    /// Non-zero when L1's state machine calls this pane resting.
+    /// How far this pane has receded from active use: 0 live,
+    /// 1 resting (a bound session that finished its turn a while ago),
+    /// 2 parked (its program reclaimed, picture frozen).
     ///
-    /// A marker, not a shade: how far a resting pane recedes is the
-    /// renderer's business, because it depends on whether this is the
-    /// pane the user is in — which L1 does not know and should not
-    /// have to.
+    /// A level, not a shade: how dark each one looks is the
+    /// renderer's business, because it also depends on whether this
+    /// is the pane the user is in — which L1 does not know and should
+    /// not have to.
     ///
     /// Separate from `dormant` ("an empty seat left by a pane that
     /// moved out") because they are different facts that happen to
     /// share a scrim.  Both can be true; the deeper one wins.
-    pub idle_dim: f32,
+    pub recede: u32,
     /// RFC-001 plugin badge — a short tag drawn at the right edge of
     /// the title strip (left of the optional refresh affordance) so
     /// plugins can surface per-pane metadata without overloading the

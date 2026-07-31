@@ -966,9 +966,9 @@ struct ShellApp {
     /// The pane-status layer that knows about specific programs lives
     /// in the plugins on top of this one.
     pane_status: pane_status::PaneStateTracker,
-    /// Last idle dim sent to L2 per session, so the frame goes out on
-    /// change rather than every sweep.
-    pane_idle_dim: std::collections::HashMap<u64, f32>,
+    /// Last recede level sent to L2 per session, so the frame goes out
+    /// on change rather than every sweep.
+    pane_recede: std::collections::HashMap<u64, u32>,
     /// Plugin → shell reports of what the program in a pane is doing.
     /// Drained at the top of each supervisor tick, straight into the
     /// state machines.  Same shape as the badge channel: plugins push,
@@ -1295,7 +1295,7 @@ impl ShellApp {
             },
             plugin_registry: PluginRegistry::new(),
             last_plugin_tick: Instant::now() - Duration::from_secs(1),
-            pane_idle_dim: std::collections::HashMap::new(),
+            pane_recede: std::collections::HashMap::new(),
             pane_status: {
                 // Idle is a property of the pane, not of this process:
                 // pick up the clocks the previous image left so a
@@ -2156,28 +2156,28 @@ impl ShellApp {
         // that has been resting for an hour costs one frame, not one
         // per second.
         for (sid, (status, held, _)) in &snapshot {
-            let alpha = pane_status::idle_dim_for(status, *held);
-            if self.pane_idle_dim.get(sid).copied() != Some(alpha) {
-                self.pane_idle_dim.insert(*sid, alpha);
+            let level = pane_status::recede_level_for(status, *held);
+            if self.pane_recede.get(sid).copied() != Some(level) {
+                self.pane_recede.insert(*sid, level);
                 self.send(
-                    MsgType::PaneIdle,
-                    marspot::shell_proto::encode_pane_idle(*sid, alpha),
+                    MsgType::PaneRecede,
+                    marspot::shell_proto::encode_pane_recede(*sid, level),
                 );
                 // On change only — a pane that stays rested for an
                 // hour is one line, not one per second.  Worth having:
                 // "the pane looks wrong" is otherwise unanswerable
                 // without a screenshot.
                 lx_info!(
-                    "shell.pane_idle_dim.changed",
-                    "pane dim changed",
+                    "shell.pane_recede.changed",
+                    "pane recede level changed",
                     sid = *sid,
-                    alpha_pct = (alpha * 100.0) as u64,
+                    level = level as u64,
                     state = status.label().as_str(),
                     held_s = held.as_secs()
                 );
             }
         }
-        self.pane_idle_dim.retain(|sid, _| snapshot.contains_key(sid));
+        self.pane_recede.retain(|sid, _| snapshot.contains_key(sid));
         self.plugin_host.publish_pane_status(snapshot);
     }
 

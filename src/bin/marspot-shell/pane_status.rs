@@ -36,36 +36,29 @@ use marspot::pidtree;
 /// before anything may act on it.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long a pane must hold a quiet state before it counts as
-/// resting.
+/// How long a bound program must sit finished before its pane starts
+/// to recede.
 ///
-/// This is the generic half of the idle story, and deliberately the
-/// only half for a plain shell: a pane that has been sitting there
-/// for five minutes looks rested, and **nothing is taken from it**.
-/// Reclaiming a shell would be a lossy trade (its live state has no
-/// snapshot) with no bounded win — measured on this host, an idle
-/// pane's L3 + zsh come to ~6.7 MB, a fiftieth of what a claude
-/// costs.  So the shell layer stops at appearance.
-pub const IDLE_DIM_AFTER: Duration = Duration::from_secs(300);
-/// What L1 sends for "this one is resting".  A marker, not a shade —
-/// **how far** an idle pane recedes is the renderer's ladder
-/// (`render_metal::attention_scrim`), because it depends on something
-/// only the renderer knows: whether this is the pane the user is in.
-pub const IDLE_MARK: f32 = 1.0;
+/// Short relative to the reclamation threshold on purpose: the dim is
+/// the warning, and a warning that appears at the same moment as the
+/// action is not one.  A pane at level 1 is saying "this session is
+/// drifting out"; a pane at level 2 has already gone.
+pub const RESTING_AFTER: Duration = Duration::from_secs(300);
 
-/// Is this pane resting, as far as the state machine can tell?
+/// Recede level for a pane, from its machine state.
 ///
-/// A dormant pane (its program reclaimed) counts immediately: it is
-/// not resting, it is parked, and with its picture frozen the dim is
-/// the only thing on screen that says so.
-pub fn idle_dim_for(status: &PaneStatus, held: Duration) -> f32 {
-    if matches!(status, PaneStatus::Dormant) {
-        return IDLE_MARK;
+/// Deliberately **not** a stopwatch over every quiet pane.  A shell
+/// sitting at its prompt is a terminal waiting for its user, however
+/// long it waits — dimming those marked 15 of 18 panes here, which is
+/// the same as marking none.  What earns a level is a *session*
+/// receding: a bound program that finished its turn (1), and one that
+/// has since been reclaimed (2).
+pub fn recede_level_for(status: &PaneStatus, held: Duration) -> u32 {
+    match status {
+        PaneStatus::Dormant => 2,
+        PaneStatus::AwaitingUser if held >= RESTING_AFTER => 1,
+        _ => 0,
     }
-    if status.is_quiet() && held >= IDLE_DIM_AFTER {
-        return IDLE_MARK;
-    }
-    0.0
 }
 
 /// A committed transition, tagged with the session it belongs to.
@@ -416,45 +409,29 @@ mod tests {
         assert!(held < Duration::from_secs(60), "got {held:?}");
     }
 
-    /// The visual half of the idle story, which is all a plain shell
-    /// pane ever gets: rest, then recede.  Nothing is reclaimed.
+    /// The ladder tracks a session receding, not a stopwatch over
+    /// quiet panes.
     #[test]
-    fn a_quiet_pane_dims_only_after_it_has_been_quiet_a_while() {
-        assert_eq!(idle_dim_for(&PaneStatus::Empty, Duration::ZERO), 0.0);
-        assert_eq!(
-            idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER - Duration::from_secs(1)),
-            0.0
-        );
-        assert_eq!(idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER), IDLE_MARK);
-        assert_eq!(
-            idle_dim_for(&PaneStatus::AwaitingUser, IDLE_DIM_AFTER),
-            IDLE_MARK
-        );
-    }
-
-    /// A parked pane dims at once: the picture behind it is frozen
-    /// exactly as the user left it, so the dim is the only thing on
-    /// screen saying "this one is not live".
-    #[test]
-    fn a_dormant_pane_dims_immediately() {
-        assert_eq!(idle_dim_for(&PaneStatus::Dormant, Duration::ZERO), IDLE_MARK);
-    }
-
-    /// Busy and unknown panes never dim — dimming something that is
-    /// working would be a lie about the pane.
-    #[test]
-    fn busy_and_unknown_panes_never_dim() {
+    fn recede_levels_follow_the_session_not_the_clock() {
+        // A shell at its prompt is a terminal waiting for you, for as
+        // long as it waits.
+        assert_eq!(recede_level_for(&PaneStatus::Empty, Duration::from_secs(86_400)), 0);
+        // A bound session that just finished a turn is still live…
+        assert_eq!(recede_level_for(&PaneStatus::AwaitingUser, Duration::ZERO), 0);
+        // …and starts to recede once it has been finished a while —
+        // this is the pane that will be reclaimed if it keeps sitting.
+        assert_eq!(recede_level_for(&PaneStatus::AwaitingUser, RESTING_AFTER), 1);
+        // Reclaimed: gone until something brings it back.
+        assert_eq!(recede_level_for(&PaneStatus::Dormant, Duration::ZERO), 2);
+        // Anything working, or unreadable, stays at full strength.
         for s in [
             PaneStatus::Busy(BusyKind::Working),
+            PaneStatus::Busy(BusyKind::ToolAwaitingApproval),
             PaneStatus::Busy(BusyKind::StoppedJobs),
             PaneStatus::Unknown,
             PaneStatus::Contradiction { generic: "idle", activity: "working" },
         ] {
-            assert_eq!(
-                idle_dim_for(&s, Duration::from_secs(86_400)),
-                0.0,
-                "{s:?} must stay at full strength"
-            );
+            assert_eq!(recede_level_for(&s, Duration::from_secs(86_400)), 0, "{s:?}");
         }
     }
 

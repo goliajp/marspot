@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.57"  # L1 只报「闲不闲」,不透明度阶梯归渲染层;详见 CHANGELOG.md
-core    = "0.12.76"  # 不透明度阶梯:聚焦 100% / 其他 75% / 闲置 25%;详见 CHANGELOG.md
+shell   = "0.7.58"  # 后退等级跟着会话生命周期走,不是掐表:提示符上的 shell 不算闲;详见 CHANGELOG.md
+core    = "0.12.77"  # 四档不透明度:聚焦 100 / 其他 75 / 歇着 50 / 已停放 25;详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md
