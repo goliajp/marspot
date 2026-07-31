@@ -69,8 +69,19 @@ impl Sink {
     /// Close the current fd and reopen `path`. Used when a sibling
     /// process rotated the active file out from under us — our fd now
     /// points at a renamed inode and would write into the rotated
-    /// file instead of the fresh active one.
+    /// file instead of the fresh active one — and when the file was
+    /// removed entirely.
+    ///
+    /// The directory is re-created first, because the removal is not
+    /// always ours to explain: on 2026-07-31 a third-party cleaner
+    /// (Tencent Lemon) deleted `~/Library/Logs/Marspot` wholesale while
+    /// marspot was running. The unlink case was already handled, but
+    /// `open` with a missing parent fails, the error was swallowed, and
+    /// the process kept appending to the now-unreachable inode: logs
+    /// silently stopped for the rest of that process's life, which on a
+    /// terminal meant for weeks of uptime is the whole log.
     pub fn reopen(&mut self) -> std::io::Result<()> {
+        let _ = std::fs::create_dir_all(&self.dir);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -149,4 +160,50 @@ fn env_max_bytes() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_MAX_MB)
         .saturating_mul(1024 * 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    /// A third-party cleaner removing the log directory must not
+    /// silence logging for the rest of the process's life.
+    ///
+    /// This is not hypothetical: on 2026-07-31 Tencent Lemon deleted
+    /// `~/Library/Logs/Marspot` while marspot was running, and the
+    /// process kept appending to the unlinked inode — `lsof` showed the
+    /// fd still pointing at a path that no longer existed, and nothing
+    /// new was ever written where anyone could read it.  The unlink
+    /// case was handled; the missing-parent case was not.
+    #[test]
+    fn writing_after_the_log_directory_is_deleted_recreates_it() {
+        let dir: PathBuf = std::env::temp_dir()
+            .join(format!("marspot-logx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: nextest gives each test its own process, and the sink
+        // singleton below is initialised from this value.
+        unsafe { std::env::set_var("MARSPOT_LOG_DIR", &dir) };
+
+        crate::logx::init("test");
+        crate::lx_info!("logx.test", "before the cleaner");
+        let path = dir.join("marspot.log");
+        assert!(path.exists(), "log file should exist to begin with");
+
+        // The cleaner takes the whole directory, not just the file.
+        std::fs::remove_dir_all(&dir).expect("remove the log dir");
+        assert!(!path.exists());
+
+        // Enough writes to reach the periodic stat that notices.
+        for i in 0..(super::STAT_INTERVAL + 8) {
+            crate::lx_info!("logx.test", "after the cleaner", i = i as u64);
+        }
+
+        assert!(path.exists(), "the sink should have re-created its directory");
+        let body = std::fs::read_to_string(&path).expect("read the new log");
+        assert!(
+            body.contains("after the cleaner"),
+            "the new file should hold the lines written after the deletion"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

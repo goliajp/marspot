@@ -1819,6 +1819,30 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 Current: **0.11.32**
 
+### 0.11.33
+
+日志目录被整个删掉之后能自愈。
+
+今天 09:34 UTC 我去翻 hibernate 日志,`~/Library/Logs/Marspot` **整个不
+见了** —— 而 marspot 还在跑,`lsof` 显示它的 fd 仍指着那个已经不存在的
+路径,4.8MB,还在往一个 unlink 掉的 inode 里写。也就是说:从那一刻起,
+这个进程剩下的日志谁也读不到。
+
+不是我们删的:`~/Library/Logs/LemonMonitor.log` 里 18:34(=09:34 UTC)
+有一次 `cleanResultDidEnd: totalSize: 36003690256` —— 腾讯柠檬清理跑了
+一遍,清掉约 36GB,顺手带走了 app 的日志目录。这类清理工具在这台机器上
+是常驻的,所以这不是一次意外,是环境。
+
+我们这边的缺口是真的:`rotate::check_and_maybe_rotate` 早就处理了「文件
+被 unlink」(stat 失败就 `reopen`),但 `reopen` 只是重新 `open(path)` ——
+父目录没了的话它必然失败,而这个错误被吞掉,于是继续写老 fd,永远。
+
+改一行:`reopen` 先 `create_dir_all(dir)`。对一个要跑几周的终端来说,
+「日志从某一刻起永久静默」跟「没有日志」是一回事。
+
+回归测试就照现场复现:开 sink、写一行、**把整个目录删掉**、再写够一个
+stat 周期,断言目录和文件都回来了、而且新写的行在里面。
+
 ### 0.11.32
 
 PTY teardown 不再被一个挂起的作业卡死。

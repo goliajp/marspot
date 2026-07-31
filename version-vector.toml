@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.48"  # 候选 pane 会说自己在等什么(hibernate.waiting,变化才落);详见 CHANGELOG.md
-core    = "0.12.72"  # 只重编:Pty::drop 的顺序改了(见 L3 0.11.32),core 侧行为不变;详见 CHANGELOG.md
-session = "0.11.32"  # PTY teardown 不再被挂起作业卡死:先关 master、SIGCONT 再 HUP、等待全部有界;详见 CHANGELOG.md
+shell   = "0.7.49"  # 只重编:logx 目录自愈(见 L3 0.11.33);详见 CHANGELOG.md
+core    = "0.12.73"  # 只重编:logx 目录自愈(见 L3 0.11.33);详见 CHANGELOG.md
+session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md
