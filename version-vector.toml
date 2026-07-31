@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.49"  # 只重编:logx 目录自愈(见 L3 0.11.33);详见 CHANGELOG.md
+shell   = "0.7.50"  # hibernate.waiting 去重键改成无值的类别 —— 上一版 25 分钟刷了 3030 行;详见 CHANGELOG.md
 core    = "0.12.73"  # 只重编:logx 目录自愈(见 L3 0.11.33);详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md

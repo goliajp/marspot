@@ -378,13 +378,24 @@ struct IdleEvidence {
     since_sample: Duration,
 }
 
-/// Why a candidate pane was not reclaimed on this pass.
+/// Why a candidate pane was not reclaimed on this pass, as
+/// `(category, line)`.
+///
+/// The category is what the caller de-duplicates on, and it is
+/// deliberately value-free.  The first version returned one string
+/// containing the current idle seconds — which changes every scan, so
+/// "log when the reason changes" logged **every** scan: 3030 lines in
+/// 25 minutes on this machine, about 1 MB/hour of noise that would
+/// rotate the real history out of an 8 MB log in under a day.
 ///
 /// Only computed for panes the machine already calls quiet and
 /// awaiting their user — i.e. ones that are *going* to be reclaimed
-/// once something finishes ticking.  Anything busier than that is not
-/// a candidate and has nothing to explain.
-fn blocking_reason(e: IdleEvidence, threshold: Duration) -> Option<String> {
+/// once something finishes ticking.  Anything busier is not a
+/// candidate and has nothing to explain.
+fn blocking_reason(
+    e: IdleEvidence,
+    threshold: Duration,
+) -> Option<(&'static str, String)> {
     if should_hibernate(e, threshold) {
         return None;
     }
@@ -392,18 +403,23 @@ fn blocking_reason(e: IdleEvidence, threshold: Duration) -> Option<String> {
         return None; // not a candidate; not this log's business
     }
     Some(if e.held < threshold {
-        format!(
-            "idle {}s of {}s",
-            e.held.as_secs(),
-            threshold.as_secs()
+        (
+            "below_threshold",
+            format!("idle {}s of {}s", e.held.as_secs(), threshold.as_secs()),
         )
     } else if e.since_sample < Duration::from_secs(30) {
-        format!("cpu sample spans only {}s", e.since_sample.as_secs())
+        (
+            "short_cpu_sample",
+            format!("cpu sample spans only {}s", e.since_sample.as_secs()),
+        )
     } else {
-        format!(
-            "subtree burned {}ms of cpu in {}s",
-            e.cpu_delta_ns / 1_000_000,
-            e.since_sample.as_secs()
+        (
+            "cpu_busy",
+            format!(
+                "subtree burned {}ms of cpu in {}s",
+                e.cpu_delta_ns / 1_000_000,
+                e.since_sample.as_secs()
+            ),
         )
     })
 }
@@ -1056,14 +1072,17 @@ impl ClaudecodePlugin {
                 // log shows nothing at all until the moment a session
                 // is reclaimed, and "nothing happened" reads the same
                 // whether the policy is waiting or broken.
-                if let Some(reason) = blocking_reason(evidence, threshold) {
-                    if self.blocked_reason.get(sid) != Some(&reason) {
+                if let Some((category, line)) = blocking_reason(evidence, threshold) {
+                    // De-duplicate on the CATEGORY: the line carries a
+                    // live number, so comparing lines would log every
+                    // scan (it did — see `blocking_reason`).
+                    if self.blocked_reason.get(sid).map(String::as_str) != Some(category) {
                         host.log(
                             LogLevel::Info,
                             "hibernate.waiting",
-                            &format!("shelld_session={} — {}", sid, reason),
+                            &format!("shelld_session={} — {}", sid, line),
                         );
-                        self.blocked_reason.insert(*sid, reason);
+                        self.blocked_reason.insert(*sid, category.to_string());
                     }
                 } else {
                     self.blocked_reason.remove(sid);
@@ -3755,8 +3774,15 @@ mod tests {
         assert_eq!(blocking_reason(idle_for(7200), HOUR), None);
 
         // Still accruing idle time.
-        let r = blocking_reason(idle_for(1800), HOUR).expect("a reason");
-        assert!(r.contains("1800s of 3600s"), "got {r:?}");
+        let (cat, line) = blocking_reason(idle_for(1800), HOUR).expect("a reason");
+        assert_eq!(cat, "below_threshold");
+        assert!(line.contains("1800s of 3600s"), "got {line:?}");
+
+        // The category must NOT move with the number, or "log on
+        // change" logs on every scan — which is exactly what happened
+        // in production: 3030 lines in 25 minutes.
+        let (later, _) = blocking_reason(idle_for(1801), HOUR).expect("a reason");
+        assert_eq!(later, cat, "the dedup key must be value-free");
 
         // Past the threshold, but the CPU window is too short to mean
         // anything yet.
@@ -3764,16 +3790,18 @@ mod tests {
             since_sample: Duration::from_secs(5),
             ..idle_for(7200)
         };
-        let r = blocking_reason(e, HOUR).expect("a reason");
-        assert!(r.contains("spans only 5s"), "got {r:?}");
+        let (cat, line) = blocking_reason(e, HOUR).expect("a reason");
+        assert_eq!(cat, "short_cpu_sample");
+        assert!(line.contains("spans only 5s"), "got {line:?}");
 
         // Past the threshold, window fine, but something is running.
         let e = IdleEvidence {
             cpu_delta_ns: 900_000_000,
             ..idle_for(7200)
         };
-        let r = blocking_reason(e, HOUR).expect("a reason");
-        assert!(r.contains("900ms of cpu"), "got {r:?}");
+        let (cat, line) = blocking_reason(e, HOUR).expect("a reason");
+        assert_eq!(cat, "cpu_busy");
+        assert!(line.contains("900ms of cpu"), "got {line:?}");
 
         // Not a candidate at all → silence, not noise.  Every busy pane
         // in the window would otherwise explain itself once a second.
