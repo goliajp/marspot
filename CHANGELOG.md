@@ -28,7 +28,51 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.42**
+Current: **0.7.43**
+
+### 0.7.43
+
+idle 的 claude 自动回收,按键唤醒同一个 session。
+
+状态机把「这个 pane 到底在不在干活」答清楚之后,idle 这件事闭环:静止
+超过阈值就 SIGTERM 收掉 claude(PTY 和 scrollback 留着,那只值 3.5MB),
+badge 变 `zZ <uuid>`;用户在那个 pane 里按任意键,自动
+`claude[N] --resume <uuid>` 把同一个 session 拉回来。真机现值:12 个
+claude 占 4.1GB。
+
+**阈值 1 小时,按代价选的**:prompt cache TTL 就是一小时,过了这个点
+下一次请求本来就要重付全量 input token —— 回收的边际成本只剩冷启动。
+低于 TTL 去收是花钱换内存。`MARSPOT_CC_IDLE_HIBERNATE_S=0` 关掉。
+
+**四条判据全是否决项**:状态机 `quiescent` 且状态是 `AwaitingUser`
+(`Empty` 也安静但那是「没有 claude 可收」);该状态已持续 ≥ 阈值;
+claude **子树 CPU** 自上次采样几乎没动(容差 50ms);采样窗口 ≥ 30s。
+第三条是实测逼出来的 —— 每个活着的 claude 都常驻子进程(smix-mcp /
+rust-analyzer / caffeinate / 长命 zsh),「没有子进程」当判据永远不成立。
+
+**发信号前复核 pid**:重读 cmdline 确认还是 claude。pid 会被内核回收,
+拿旧 pid 发 SIGTERM 的下场是打到无关进程。顺带量清楚一件事:活 claude
+的 `ps comm`(argv[0])是 `claude`,而 `pbi_comm`(可执行文件名)是版本
+号 `2.1.220` —— 守卫读 argv 才对。
+
+**唤醒路径跨 L1 自更新不丢**:execv 换掉所有 PaneSession,而 pane 还在、
+claude 已收 —— 不补的话下一次按键当 shell 命令跑掉。dormant 集合落盘,
+下一轮扫描重新挂上;解码时校验 uuid 字面(它要进 shell 命令行),坏行
+丢掉不修。
+
+策略读**本轮**扫描的 binding 而不是上一轮的 `last_meta` —— pid 马上要被
+发信号,该用手上最新的那个。
+
+验证:906 tests green。策略层单测从否决面写满(低于阈值 / 机器不确定 /
+没有 claude / 子树在烧 CPU / 采样跨度为零 / 无 profile 时 resume 命令
+必须是 `claude` 不是 `claude255` / 坏 dormant 行不许进 shell 命令),
+外加三个「真资源」测试:真起一个 argv[0]=claude 的进程走完整回收路径并
+**确认它真的被信号杀掉**、pid 不再是 claude 时拒绝发信号、claude 回来
+后 dormant 记录必须出列。
+
+**未验证**:整条真链路(真 claude 被回收 → 按键唤醒)还没在装机上跑过。
+沙箱注入这条路走不通 —— L3 的 UDS listener 目前「accept 后只记日志就
+丢」(`uds_server.rs:10`),外部注不进去。
 
 ### 0.7.42
 

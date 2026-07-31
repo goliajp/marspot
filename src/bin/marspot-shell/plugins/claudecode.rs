@@ -1005,7 +1005,11 @@ impl ClaudecodePlugin {
                 self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
                 continue;
             }
-            let Some(meta) = self.last_meta.get(sid).cloned() else {
+            // This scan's binding, not the previous tick's: the pid
+            // is about to be signalled, so it should be the freshest
+            // one we have.  (`last_meta` is only updated after this
+            // runs, which would hand the policy a pid one scan old.)
+            let Some(meta) = result.new_meta.get(sid).cloned() else {
                 continue;
             };
             // Re-verify the pid immediately before signalling it.
@@ -3012,6 +3016,249 @@ mod tests {
     fn parse_session_id_returns_none_when_missing() {
         let path = tmpfile(r#"{"type":"user","text":"hello"}"#);
         assert!(parse_session_id(&path).is_none());
+    }
+
+    // ── the reclamation itself, against a real process ────────────
+
+    /// A `PluginHost` that records what the plugin asked it to do.
+    /// Only the methods the idle policy touches do anything.
+    struct FakeHost {
+        state_dir: PathBuf,
+        status: std::sync::Mutex<HashMap<u64, crate::plugins::PaneStatusView>>,
+        begun: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl FakeHost {
+        fn new(dir: PathBuf) -> Self {
+            Self {
+                state_dir: dir,
+                status: std::sync::Mutex::new(HashMap::new()),
+                begun: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn set_status(&self, sid: u64, view: crate::plugins::PaneStatusView) {
+            self.status.lock().unwrap().insert(sid, view);
+        }
+    }
+
+    impl PluginHost for FakeHost {
+        fn pane_count(&self) -> usize {
+            1
+        }
+        fn pane_pty_device(&self, _: usize) -> Result<Option<PathBuf>, PluginError> {
+            Ok(None)
+        }
+        fn pane_pty_pid_tree(
+            &self,
+            _: usize,
+        ) -> Result<Vec<crate::plugins::PtyChild>, PluginError> {
+            Ok(Vec::new())
+        }
+        fn pane_focused(&self) -> Option<usize> {
+            None
+        }
+        fn pane_status(
+            &self,
+            sid: u64,
+        ) -> Result<Option<crate::plugins::PaneStatusView>, PluginError> {
+            Ok(self.status.lock().unwrap().get(&sid).cloned())
+        }
+        fn state_dir(&self) -> Result<PathBuf, PluginError> {
+            Ok(self.state_dir.clone())
+        }
+        fn log(&self, _: LogLevel, _: &str, _: &str) {}
+        fn begin_pane_session(
+            &self,
+            sid: u64,
+            _session: Box<dyn crate::plugins::PaneSession>,
+        ) -> Result<(), PluginError> {
+            self.begun.lock().unwrap().push(sid);
+            Ok(())
+        }
+    }
+
+    /// Build a process the policy will accept as claude, and that can
+    /// be observed dying.
+    ///
+    /// The guard reads `proc_cmdline`, i.e. **argv**, so what matters
+    /// is argv[0] — not the executable's name.  Measured on a live
+    /// claude: `ps comm` (argv[0]) is `claude` while `pbi_comm` (the
+    /// executable file) is the version string `2.1.220`, so argv is
+    /// the field with the program's identity in it.  A wrapper script
+    /// would produce argv[0] = `/bin/sh` and be rejected, which is
+    /// correct behaviour and useless as a fixture; `arg0` gives the
+    /// real shape instead.
+    fn spawn_fake_claude(_dir: &std::path::Path) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new("/bin/sleep")
+            .arg0("claude")
+            .arg("120")
+            .spawn()
+            .unwrap()
+    }
+
+    fn idle_view(held: Duration) -> crate::plugins::PaneStatusView {
+        crate::plugins::PaneStatusView {
+            status: marspot::pane_state::PaneStatus::AwaitingUser,
+            held,
+            quiescent: true,
+        }
+    }
+
+    fn scan_with(sid: u64, claude_pid: i32, uuid: &str) -> ScanResult {
+        let mut new_meta = HashMap::new();
+        new_meta.insert(
+            sid,
+            BindMeta {
+                profile_num: 2,
+                uuid: uuid.to_string(),
+                claude_pid,
+                project_basename: "proj".into(),
+            },
+        );
+        let mut new_cpu = HashMap::new();
+        new_cpu.insert(sid, (1_000u64, SystemTime::now()));
+        ScanResult {
+            new_mapping: HashMap::new(),
+            new_meta,
+            new_activity: HashMap::new(),
+            new_cpu,
+            sessions_seen: vec![sid],
+            log_lines: Vec::new(),
+        }
+    }
+
+    /// The whole reclamation path, with a real process on the other
+    /// end of the signal: first pass only samples CPU, second pass
+    /// decides, signals, and records the pane as dormant.
+    #[test]
+    fn idle_policy_reclaims_a_real_process_and_records_it_dormant() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = spawn_fake_claude(&dir);
+        let pid = child.id() as i32;
+        let host = FakeHost::new(dir.clone());
+        host.set_status(7, idle_view(Duration::from_secs(7200)));
+
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        let uuid = "aaaa-bbbb";
+
+        // Pass 1: no previous CPU sample, so nothing may be decided.
+        let mut scan = scan_with(7, pid, uuid);
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
+        plugin.run_idle_policy(&host, &scan);
+        assert!(
+            host.begun.lock().unwrap().is_empty(),
+            "the first CPU sample cannot decide anything"
+        );
+        assert!(plugin.dormant.is_empty());
+
+        // Pass 2: same CPU total, sample window wide enough.
+        let scan = scan_with(7, pid, uuid);
+        plugin.run_idle_policy(&host, &scan);
+        assert_eq!(*host.begun.lock().unwrap(), vec![7], "a wake session is armed");
+        assert_eq!(plugin.dormant.len(), 1);
+        assert_eq!(plugin.dormant[0].uuid, uuid);
+
+        // The signal really went out: the process is gone (SIGTERM
+        // kills /bin/sh + its exec'd sleep).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut exited = false;
+        while std::time::Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(exited, "the fake claude should have been signalled");
+
+        // …and it survives a restart: the record is on disk.
+        let text = fs::read_to_string(dir.join("dormant.tsv")).unwrap();
+        assert_eq!(decode_dormant(&text).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The pid guard: `last_meta` can name a pid that has since been
+    /// recycled into something else, and signalling that would hit an
+    /// unrelated process.
+    #[test]
+    fn idle_policy_refuses_to_signal_a_pid_that_is_no_longer_claude() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // A live process that is emphatically not claude: this test
+        // process itself.
+        let host = FakeHost::new(dir.clone());
+        host.set_status(7, idle_view(Duration::from_secs(7200)));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        let me = std::process::id() as i32;
+
+        let mut scan = scan_with(7, me, "uuid-1");
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
+        plugin.run_idle_policy(&host, &scan);
+        let scan = scan_with(7, me, "uuid-1");
+        plugin.run_idle_policy(&host, &scan);
+
+        assert!(
+            host.begun.lock().unwrap().is_empty(),
+            "nothing may be armed against a pid that isn't claude"
+        );
+        assert!(plugin.dormant.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A pane whose claude came back (woken, or restarted by hand)
+    /// stops being dormant, which is what keeps the set bounded.
+    #[test]
+    fn rearm_drops_records_for_panes_whose_claude_is_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let host = FakeHost::new(dir.clone());
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        plugin.dormant = vec![
+            DormantRecord { shelld_sid: 7, uuid: "u7".into(), profile_num: 1 },
+            DormantRecord { shelld_sid: 8, uuid: "u8".into(), profile_num: 1 },
+        ];
+
+        let mut scan = scan_with(7, 1, "u7");
+        scan.sessions_seen = vec![7, 8];
+        // Pane 7 has a binding again → no longer dormant.  Pane 8 is
+        // still live and still without claude → stays, and gets a
+        // fresh wake session.
+        scan.new_mapping.insert(7, "badge".into());
+        plugin.rearm_dormant(&host, &scan);
+
+        assert_eq!(plugin.dormant.len(), 1);
+        assert_eq!(plugin.dormant[0].shelld_sid, 8);
+        assert_eq!(*host.begun.lock().unwrap(), vec![8], "only the still-dormant pane is re-armed");
+
+        // Re-arming twice must not stack two sessions on one pane.
+        plugin.rearm_dormant(&host, &scan);
+        assert_eq!(*host.begun.lock().unwrap(), vec![8]);
+
+        // A pane that vanished from the registry drops out entirely.
+        let mut gone = scan_with(9, 1, "u9");
+        gone.sessions_seen = vec![9];
+        plugin.rearm_dormant(&host, &gone);
+        assert!(plugin.dormant.is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── idle reclamation policy ───────────────────────────────────
