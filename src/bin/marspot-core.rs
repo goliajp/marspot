@@ -671,6 +671,7 @@ mod window_state_tests {
             pane_titles: std::collections::HashMap::new(),
             pane_cwds: std::collections::HashMap::new(),
             pending_to_shell: Vec::new(),
+            last_focus_notified: std::collections::HashMap::new(),
             pane_sessions: std::collections::HashMap::new(),
             esc_history: std::collections::HashMap::new(),
             shell_child_pids: std::collections::HashMap::new(),
@@ -3201,6 +3202,10 @@ struct CoreApp {
     /// reaching the writer from inside the trait callbacks where
     /// the borrow tree doesn't permit it.
     pending_to_shell: Vec<(MsgType, Vec<u8>)>,
+    /// Per window: the focused session id L1 has already been told
+    /// about, so `PaneFocused` is emitted on change rather than every
+    /// loop iteration.
+    last_focus_notified: std::collections::HashMap<usize, u64>,
     /// RFC-003 pane sessions currently held by L1 plugins, keyed by
     /// shelld_session_id.  Membership routes L2 behaviour:
     ///   * LOCK_KEYS cap → key events forwarded as PaneSessionKey,
@@ -3487,6 +3492,28 @@ impl CoreApp {
     /// 1 s idle timeout otherwise) rather than owning a timer.
     ///
     /// Only the windows whose titles actually changed are marked dirty.
+    /// Emit `PaneFocused` for any window whose focused pane changed
+    /// since the last check.  Cheap enough to call every loop
+    /// iteration: one map lookup per window, and nothing on the wire
+    /// unless focus actually moved.
+    fn notify_pane_focus_changes(&mut self) {
+        for wi in 0..self.windows.len() {
+            let sid = win!(self, wi)
+                .panes
+                .get(win!(self, wi).focused_idx)
+                .and_then(|p| p.shelld_session_id());
+            let Some(sid) = sid else { continue };
+            if self.last_focus_notified.get(&wi) == Some(&sid) {
+                continue;
+            }
+            self.last_focus_notified.insert(wi, sid);
+            self.pending_to_shell.push((
+                MsgType::PaneFocused,
+                marspot::shell_proto::encode_pane_focused(sid),
+            ));
+        }
+    }
+
     fn sweep_pane_cwds(&mut self) {
         if self.last_cwd_sweep.elapsed() < CWD_SWEEP_INTERVAL {
             return;
@@ -8269,6 +8296,7 @@ fn main() {
         pane_titles: std::collections::HashMap::new(),
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
+        last_focus_notified: std::collections::HashMap::new(),
         pane_sessions: std::collections::HashMap::new(),
         esc_history: std::collections::HashMap::new(),
         shell_child_pids: std::collections::HashMap::new(),
@@ -8870,6 +8898,16 @@ fn main() {
             let which = format!("liveness:{ty:?}");
             send_to_shell(&control_writer, Frame::new(ty, payload), &which);
         }
+        // Tell L1 which pane the user is on, when it changes.  One
+        // comparison per window per loop iteration, and a frame only
+        // on an actual change — focus moves at human speed.
+        //
+        // L1 plugins need it because "the user is looking at this pane
+        // again" is the earliest honest moment to start restoring
+        // something reclaimed while idle.  Waiting for a keystroke
+        // means the restore begins after they have already tried to
+        // use the pane, which is indistinguishable from slowness.
+        app.notify_pane_focus_changes();
         // Drain frames queued from inside CoreApp event handlers
         // (mouse_down → PaneBadgeClicked, future similar paths).
         for (ty, payload) in app.pending_to_shell.drain(..) {

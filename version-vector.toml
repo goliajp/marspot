@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.52"  # dormant 记录不许被「建它的那次扫描」判死 —— 真机回收后 dormant.tsv 是空的;详见 CHANGELOG.md
-core    = "0.12.73"  # 只重编:logx 目录自愈(见 L3 0.11.33);详见 CHANGELOG.md
+shell   = "0.7.53"  # 聚焦即开始恢复 + claude 一回来就交还键盘(原来死等 20s);详见 CHANGELOG.md
+core    = "0.12.74"  # 新增 PaneFocused 帧:焦点变化告诉 L1(休眠 pane 聚焦即恢复);详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md

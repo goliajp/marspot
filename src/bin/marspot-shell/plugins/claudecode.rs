@@ -454,6 +454,17 @@ fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
         && e.cpu_delta_ns <= IDLE_CPU_TOLERANCE_NS
 }
 
+/// The pane's shell pid, straight from the registry.  0 when the
+/// session is gone — the callers treat that as "cannot tell", which is
+/// the honest reading.
+fn shell_pid_for(sid: u64) -> i32 {
+    marspot_term::session_registry::list_session_entries()
+        .into_iter()
+        .find(|e| e.id == sid)
+        .map(|e| e.shell_child_pid)
+        .unwrap_or(0)
+}
+
 /// What this plugin reports for a pane it has no live binding in.
 ///
 /// "No claude here" and "a claude was reclaimed from here and can be
@@ -573,6 +584,10 @@ struct HibernatePaneSession {
     client: Arc<ShelldClient>,
     uuid: String,
     profile_num: u8,
+    /// The pane's shell pid, so the waking stage can see claude come
+    /// back and hand the keyboard over immediately instead of holding
+    /// it for a fixed timeout.
+    shell_pid: i32,
     /// The pid we are reclaiming; only meaningful in `Killing`.
     claude_pid: i32,
     stage: HibernateStage,
@@ -581,6 +596,48 @@ struct HibernatePaneSession {
 }
 
 impl HibernatePaneSession {
+    /// Send the resume line and move to `Waking`.  Shared by the two
+    /// things that mean "the user is back": focus and a keystroke.
+    fn begin_wake(
+        &mut self,
+        host: &dyn crate::plugins::PaneSessionHost,
+        trigger: &str,
+    ) -> bool {
+        let cmd = resume_command(self.profile_num, &self.uuid);
+        match self.client.send_input_to(host.shelld_session_id(), cmd.as_bytes()) {
+            Ok(()) => {
+                host.log(
+                    crate::plugins::LogLevel::Info,
+                    "hibernate.waking",
+                    &format!("{} woke session {}", trigger, self.uuid),
+                );
+                self.stage = HibernateStage::Waking;
+                self.stage_since = SystemTime::now();
+                true
+            }
+            Err(e) => {
+                host.log(
+                    crate::plugins::LogLevel::Warn,
+                    "hibernate.resume_send_failed",
+                    &format!("{e}"),
+                );
+                false
+            }
+        }
+    }
+
+    /// Is a claude running in this pane again?  Cheap enough for a
+    /// tick: one proc-table walk only while a wake is in flight.
+    fn claude_is_back(&self) -> bool {
+        if self.shell_pid <= 0 {
+            return false;
+        }
+        let procs = pidtree::list_all_procs();
+        pidtree::descendants_of(self.shell_pid, &procs)
+            .iter()
+            .any(looks_like_claudecode)
+    }
+
     fn pid_alive(pid: i32) -> bool {
         unsafe {
             if libc::kill(pid, 0) == 0 {
@@ -601,6 +658,16 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
             | marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS
     }
 
+    fn on_focus(&mut self, host: &dyn crate::plugins::PaneSessionHost) {
+        // Looking at the pane is the earliest honest signal that the
+        // user wants it back.  Starting here means claude's startup
+        // overlaps with them reading the screen, instead of beginning
+        // after they have already typed.
+        if self.stage == HibernateStage::Dormant {
+            self.begin_wake(host, "focus");
+        }
+    }
+
     fn on_user_key(
         &mut self,
         host: &dyn crate::plugins::PaneSessionHost,
@@ -608,32 +675,16 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
     ) -> crate::plugins::KeyHandling {
         match self.stage {
             HibernateStage::Dormant => {
-                // Any key wakes it.  The key itself is swallowed: it
-                // was meant for claude, and claude is about to exist
-                // again — replaying it into the shell first would run
-                // it as a command.
-                let cmd = resume_command(self.profile_num, &self.uuid);
-                match self.client.send_input_to(host.shelld_session_id(), cmd.as_bytes()) {
-                    Ok(()) => {
-                        host.log(
-                            crate::plugins::LogLevel::Info,
-                            "hibernate.waking",
-                            &format!("keypress woke session {}", self.uuid),
-                        );
-                        self.stage = HibernateStage::Waking;
-                        self.stage_since = SystemTime::now();
-                    }
-                    Err(e) => {
-                        host.log(
-                            crate::plugins::LogLevel::Warn,
-                            "hibernate.resume_send_failed",
-                            &format!("{e}"),
-                        );
-                        // Hand the pane back rather than trapping the
-                        // user's keyboard in a session that cannot
-                        // wake.
-                        return crate::plugins::KeyHandling::EndSession;
-                    }
+                // A key still wakes it — focus is the usual trigger,
+                // but a pane can receive input without a focus change
+                // (already focused when it was parked).  The key
+                // itself is swallowed: it was meant for claude, and
+                // claude is about to exist again; replaying it into
+                // the shell first would run it as a command.
+                if !self.begin_wake(host, "keypress") {
+                    // Hand the pane back rather than trapping the
+                    // user's keyboard in a session that cannot wake.
+                    return crate::plugins::KeyHandling::EndSession;
                 }
                 crate::plugins::KeyHandling::Swallow
             }
@@ -689,10 +740,12 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
                     "zZ→ {}",
                     ProfileCyclePaneSession::spinner_frame(self.spin_phase)
                 ));
-                // The scan will rebind the session and take the badge
-                // back over; give claude a moment to come up, then get
-                // out of the keyboard's way.
-                if elapsed >= Duration::from_secs(20) {
+                // Hand the keyboard back the moment claude is really
+                // there.  The first version waited a flat 20 s, so
+                // every keystroke typed in that window was eaten even
+                // after the session was usable again — which is what
+                // "restoring takes forever" actually was.
+                if self.claude_is_back() || elapsed >= Duration::from_secs(30) {
                     host.end();
                 }
             }
@@ -1195,6 +1248,7 @@ impl ClaudecodePlugin {
                 uuid: meta.uuid.clone(),
                 profile_num: meta.profile_num,
                 claude_pid: meta.claude_pid,
+                shell_pid: shell_pid_for(*sid),
                 stage: HibernateStage::Killing,
                 stage_since: now,
                 spin_phase: 0,
@@ -1261,6 +1315,7 @@ impl ClaudecodePlugin {
                 uuid: d.uuid.clone(),
                 profile_num: d.profile_num,
                 claude_pid: 0,
+                shell_pid: shell_pid_for(d.shelld_sid),
                 // Straight to Dormant: there is nothing left to kill.
                 stage: HibernateStage::Dormant,
                 stage_since: SystemTime::now(),
@@ -3312,10 +3367,15 @@ mod tests {
 
         // Start the stand-in claude in the pane — by writing to the
         // master, which is what a keyboard is.
-        // Absolute path rather than PATH juggling: the check is on
-        // argv[0]'s basename, and this keeps the shell's environment
-        // out of the test.
-        let start = format!("{}/claude 100000\r", bin.to_string_lossy());
+        // Put the stand-in on the pane's PATH before starting it: the
+        // wake writes a bare `claude --resume …`, so PATH is what
+        // decides whether this test drives the stand-in or launches a
+        // real claude (it launched a real one until this line existed
+        // — visible in the pane's output as the trust prompt).
+        let start = format!(
+            "export PATH={}:$PATH\rclaude 100000\r",
+            bin.to_string_lossy()
+        );
         unsafe {
             libc::write(
                 master,
@@ -3447,18 +3507,29 @@ mod tests {
             )
         });
 
-        // Wake: one keypress through the same PaneSession the policy
-        // armed.
+        // Wake: focus, which is what the user actually does first.
+        // (A keypress works too — same path — but waiting for one
+        // starts the restore after they have already tried to use the
+        // pane.)
         let mut session = HibernatePaneSession {
             client: Arc::new(ShelldClient::new(Some(inject.clone()))),
             uuid: uuid.to_string(),
             profile_num: u8::MAX, // no profile → the plain binary
             claude_pid: 0,
+            shell_pid,
             stage: HibernateStage::Dormant,
             stage_since: SystemTime::now(),
             spin_phase: 0,
         };
         let host_session = FakePaneSessionHost { sid: 1 };
+        crate::plugins::PaneSession::on_focus(&mut session, &host_session);
+        assert_eq!(
+            session.stage,
+            HibernateStage::Waking,
+            "focusing a dormant pane starts the restore"
+        );
+        // A keystroke arriving mid-wake is swallowed rather than run
+        // as a shell command.
         let handling = crate::plugins::PaneSession::on_user_key(
             &mut session,
             &host_session,
@@ -3472,18 +3543,35 @@ mod tests {
         );
         assert!(
             matches!(handling, crate::plugins::KeyHandling::Swallow),
-            "the waking keypress is consumed, not run as a shell command"
+            "keys during the wake are consumed, not run as shell commands"
         );
         assert_eq!(
             String::from_utf8_lossy(&inject.sent.lock().unwrap()),
             format!("claude --resume {uuid}\r"),
             "the wake writes the resume line for this very session"
         );
-        // It really reached the PTY: the shell echoes it back.
+        // It really reached the PTY: the shell echoes it back…
         let mut echoed = String::new();
         poll_until("the pane to echo the resume line", || {
             echoed.push_str(&drain_pty(master));
             echoed.contains("--resume")
+        });
+        // …and the shell RUNS it.  Echo alone was what the first
+        // version asserted, and it is not the same claim: the user
+        // reported the line sitting on the prompt waiting for them to
+        // press Enter, which an echo-only assertion cannot see.
+        // `claude` here is the stand-in (a `sleep` symlink), so it
+        // exits immediately on the unknown `--resume` argument — what
+        // matters is that the shell dispatched the line at all, which
+        // shows up as the prompt coming back after it.
+        poll_until("the shell to execute the resume line", || {
+            echoed.push_str(&drain_pty(master));
+            // The stand-in is `sleep` under another name, so the
+            // resume's arguments make it fail loudly — which is proof
+            // the line was DISPATCHED, not left sitting on the prompt
+            // for the user to press Enter on (the bug this asserts
+            // against).
+            echoed.contains("invalid time interval") || echoed.contains("usage:")
         });
 
         // Teardown: kill whatever the pane still holds, then the shell.

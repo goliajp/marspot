@@ -383,6 +383,16 @@ pub enum MsgType {
     /// pane was moved out and an empty window closes itself).  L1
     /// owns windows, so the core asks.  Payload: `window_id u32 LE`.
     WindowCloseRequest = 65,
+    /// core → shell: the user's focus moved to this pane.  Payload:
+    /// `session_id u64 LE`.
+    ///
+    /// L1 plugins get it as an event.  It exists because "the user is
+    /// looking at this pane again" is the earliest honest moment to
+    /// start restoring something that was reclaimed while idle —
+    /// waiting for a keystroke means the restore starts after they
+    /// have already tried to use it, which reads as "it takes
+    /// forever".
+    PaneFocused = 66,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -437,6 +447,7 @@ impl MsgType {
             63 => MsgType::WindowFocus,
             64 => MsgType::WindowOpenRequest,
             65 => MsgType::WindowCloseRequest,
+            66 => MsgType::PaneFocused,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1424,6 +1435,15 @@ pub fn decode_pane_title(payload: &[u8]) -> io::Result<(u64, String)> {
     }
     let title = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
     Ok((session_id, title))
+}
+
+/// PaneFocused payload: `session_id u64 LE`.
+pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_focused(payload: &[u8]) -> io::Result<u64> {
+    decode_pane_badge_clicked(payload)
 }
 
 /// PaneBadgeClicked payload: `session_id u64 LE`.  Carries which pane

@@ -610,6 +610,8 @@ enum ShellInbox {
     /// plugin so whichever set the badge can react (claudecode → cycle
     /// the next profile and rerun `claudeN --resume <uuid>`).
     PaneBadgeClicked(u64),
+    /// core → shell: the user's focus moved to this pane.
+    PaneFocused(u64),
     /// L2 → L1: user right-clicked the badge prefix — collect menu
     /// rows from the plugins and reply with a `PaneBadgeMenu` frame.
     /// `(sid, anchor_x, anchor_y)`; the anchor is echoed back so the
@@ -2632,6 +2634,14 @@ impl ShellApp {
             ShellInbox::PaneSessionKey(sid, ev) => {
                 self.dispatch_pane_session_key(sid, ev);
             }
+            ShellInbox::PaneFocused(sid) => {
+                // Straight to the pane's own session, if it has one:
+                // a reclaimed pane starts restoring the moment the
+                // user looks at it, instead of after they type.
+                self.dispatch_pane_session_focus(sid);
+                self.plugin_registry
+                    .dispatch_pane_focused(&self.plugin_host, sid);
+            }
             ShellInbox::PaneSessionUserEscape(sid) => {
                 self.end_pane_session(sid, plugins::EndReason::UserEscape);
             }
@@ -2739,6 +2749,31 @@ impl ShellApp {
             if end_flag.get() {
                 self.end_pane_session(sid, plugins::EndReason::PluginRequested);
             }
+        }
+    }
+
+    /// Hand a focus change to the pane's own session, if it has one.
+    ///
+    /// Mirrors `dispatch_pane_session_key` — same host, same
+    /// end-on-request handling — because a restore that starts when
+    /// the user looks at the pane is the difference between "it came
+    /// back" and "it took forever".
+    fn dispatch_pane_session_focus(&mut self, sid: u64) {
+        let Some(active) = self.active_pane_sessions.get_mut(&sid) else {
+            return;
+        };
+        let plugin_name = active.plugin_name;
+        let end_flag = std::cell::Cell::new(false);
+        let host = ConcretePaneSessionHost {
+            sid,
+            plugin_name,
+            badge_tx: &self.pane_badge_tx_clone,
+            title_tx: &self.pane_title_tx_clone,
+            end_requested: &end_flag,
+        };
+        active.session.on_focus(&host);
+        if end_flag.get() {
+            self.end_pane_session(sid, plugins::EndReason::PluginRequested);
         }
     }
 
@@ -3665,6 +3700,11 @@ fn control_reader_loop(mut stream: UnixStream, tx: Sender<ShellInbox>, proxy: Ev
                         marspot::shell_proto::decode_pane_badge_clicked(&frame.payload)
                             .ok()
                             .map(ShellInbox::PaneBadgeClicked)
+                    }
+                    MsgType::PaneFocused => {
+                        marspot::shell_proto::decode_pane_focused(&frame.payload)
+                            .ok()
+                            .map(ShellInbox::PaneFocused)
                     }
                     MsgType::PaneBadgeMenuRequest => {
                         marspot::shell_proto::decode_pane_badge_menu_request(&frame.payload)

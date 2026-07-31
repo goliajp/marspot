@@ -386,6 +386,14 @@ pub trait Plugin: Send + Sync {
     /// the pane.  Default no-op so plugins without a click-handle
     /// don't need to override.  Same panic / budget rules as the
     /// other hooks; called on the supervisor thread.
+    /// The user's focus moved to this pane.
+    ///
+    /// Default no-op.  A plugin that parked something in the pane uses
+    /// it to start restoring before the user types — the alternative
+    /// (wait for a keystroke) begins the work after they have already
+    /// tried to use the pane.
+    fn on_pane_focused(&mut self, _host: &dyn PluginHost, _shelld_session_id: u64) {}
+
     fn on_pane_badge_click(
         &mut self,
         host: &dyn PluginHost,
@@ -444,6 +452,14 @@ pub trait PaneSession: Send {
 
     /// PTY bytes for the held pane.  Only fires when OBSERVE_PTY is
     /// in `caps()` (wiring lands in C4 — until then, never called).
+    /// The user's focus moved to this pane.  Default no-op.
+    ///
+    /// For a session that parked something here, this is the moment to
+    /// start bringing it back — earlier than the first keystroke, and
+    /// early enough that the work overlaps with the user reading the
+    /// screen.
+    fn on_focus(&mut self, _host: &dyn PaneSessionHost) {}
+
     fn on_pty_bytes(&mut self, host: &dyn PaneSessionHost, bytes: &[u8]) {
         let _ = (host, bytes);
     }
@@ -638,6 +654,19 @@ impl PluginRegistry {
     /// shell main loop calls this when it receives the frame from L2;
     /// plugins that didn't set a badge ignore it via the default
     /// no-op.
+    /// Fan a focus change out to every plugin, under the same
+    /// crash-isolation + budget policing as any other hook.
+    pub fn dispatch_pane_focused(&mut self, host: &dyn PluginHost, sid: u64) {
+        for slot in self.slots.iter_mut() {
+            if !slot.enabled {
+                continue;
+            }
+            host.set_active_plugin(slot.metadata.name, slot.metadata.permissions);
+            run_hook_void(slot, "on_pane_focused", |p| p.on_pane_focused(host, sid));
+            host.clear_active_plugin();
+        }
+    }
+
     pub fn dispatch_pane_badge_click(
         &mut self,
         host: &dyn PluginHost,
