@@ -353,6 +353,17 @@ fn hibernate_after() -> Option<Duration> {
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
+/// How far back the CPU baseline is kept before being replaced.
+///
+/// The scan runs every ~2 s, and the first version replaced the
+/// baseline on every pass — so the delta always spanned one scan and
+/// the "sample must span at least 30 s" gate could never pass.  Live
+/// proof: a pane sat past the one-hour threshold logging
+/// `cpu sample spans only 2s`, i.e. reclamation would never have
+/// fired at all.  Holding the baseline for a minute makes the delta
+/// mean "cpu burned in the last minute", which is the question.
+const CPU_BASELINE_WINDOW: Duration = Duration::from_secs(60);
+
 /// CPU a claude subtree may burn during the observation window and
 /// still count as idle.  Not zero: an idling MCP server and a language
 /// server both tick over.  50 ms across a window of many seconds is
@@ -436,8 +447,10 @@ fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
         && e.awaiting_user
         && e.held >= threshold
         // A CPU sample only means something once it spans real time;
-        // the first sample after a restart spans none.
-        && e.since_sample >= Duration::from_secs(30)
+        // the first sample after a restart spans none.  Half the
+        // baseline window, so a pane becomes eligible partway through
+        // one rather than having to wait for a full fresh one.
+        && e.since_sample >= CPU_BASELINE_WINDOW / 2
         && e.cpu_delta_ns <= IDLE_CPU_TOLERANCE_NS
 }
 
@@ -1087,9 +1100,12 @@ impl ClaudecodePlugin {
                 } else {
                     self.blocked_reason.remove(sid);
                 }
-                // Roll the sample forward only while NOT hibernating,
-                // so the window keeps pace with the scan.
-                self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
+                // Replace the baseline only once it is older than the
+                // window: rolling it forward every scan is what made
+                // the delta span 2 s and the gate unreachable.
+                if evidence.since_sample >= CPU_BASELINE_WINDOW {
+                    self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
+                }
                 continue;
             }
             self.blocked_reason.remove(sid);
@@ -3622,6 +3638,54 @@ mod tests {
         // …and it survives a restart: the record is on disk.
         let text = fs::read_to_string(dir.join("dormant.tsv")).unwrap();
         assert_eq!(decode_dormant(&text).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The CPU baseline must survive across scans, or the delta always
+    /// spans one scan (~2 s) and the "sample must span real time" gate
+    /// can never pass.  That shipped: a pane past the one-hour
+    /// threshold sat logging `cpu sample spans only 2s`, meaning
+    /// reclamation would never have fired for anyone.
+    #[test]
+    fn the_cpu_baseline_is_held_across_scans_not_replaced_every_time() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let host = FakeHost::new(dir.clone());
+        // Below the threshold, so the policy keeps looking rather than
+        // reclaiming — which is when the baseline handling matters.
+        host.set_status(7, idle_view(Duration::from_secs(10)));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+
+        let t0 = SystemTime::now() - Duration::from_secs(120);
+        let mut scan = scan_with(7, std::process::id() as i32, "u");
+        scan.new_cpu.insert(7, (1_000, t0));
+        plugin.run_idle_policy(&host, &scan);
+        assert_eq!(plugin.cpu_samples.get(&7).map(|(c, _)| *c), Some(1_000));
+
+        // A scan two seconds later must NOT move the baseline.
+        let mut scan = scan_with(7, std::process::id() as i32, "u");
+        scan.new_cpu.insert(7, (2_000, t0 + Duration::from_secs(2)));
+        plugin.run_idle_policy(&host, &scan);
+        assert_eq!(
+            plugin.cpu_samples.get(&7).map(|(c, _)| *c),
+            Some(1_000),
+            "a 2s-old baseline must be kept, or the delta measures nothing"
+        );
+
+        // Past the window, it rolls forward.
+        let mut scan = scan_with(7, std::process::id() as i32, "u");
+        scan.new_cpu.insert(7, (3_000, t0 + CPU_BASELINE_WINDOW + Duration::from_secs(1)));
+        plugin.run_idle_policy(&host, &scan);
+        assert_eq!(
+            plugin.cpu_samples.get(&7).map(|(c, _)| *c),
+            Some(3_000),
+            "past the window the baseline should move"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
