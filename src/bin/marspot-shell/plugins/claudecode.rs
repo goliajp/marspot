@@ -312,6 +312,17 @@ fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
 struct BindMeta {
     /// 0 = default `.claude`, N = `.claude-profile-N`, 255 = unknown.
     profile_num: u8,
+    /// `CLAUDE_CONFIG_DIR` as read off the live process — the ground
+    /// truth of which profile this session belongs to.
+    ///
+    /// The resume line uses THIS rather than reconstructing
+    /// `claude<N>`: those are interactive shell aliases
+    /// (`alias claude1='CLAUDE_CONFIG_DIR=~/.claude-profile-1 claude'`),
+    /// so reproducing them depends on the user's rc file still
+    /// defining them, in that shell, at that moment.  Setting the
+    /// variable we observed is the alias's own expansion, made
+    /// explicit and independent of all of that.
+    config_dir: Option<String>,
     uuid: String,
     claude_pid: i32,
     /// Basename of the claude process's cwd — used as the pane title
@@ -488,6 +499,9 @@ struct DormantRecord {
     shelld_sid: u64,
     uuid: String,
     profile_num: u8,
+    /// The config dir observed on the live process, so a wake after a
+    /// restart still resumes under the same account.
+    config_dir: Option<String>,
     /// When this pane was parked.  A record may only be judged
     /// ("is the program back?") by a scan that ran AFTER it was
     /// created — the scan that triggers the reclamation was taken
@@ -498,16 +512,47 @@ struct DormantRecord {
     created_at: SystemTime,
 }
 
-/// The resume command for a session, honouring its profile.  P0 / an
-/// unknown profile is the plain `claude` binary — `claude255` was what
-/// a naive `format!` produced, and it does not exist.
-fn resume_command(profile_num: u8, uuid: &str) -> String {
-    if profile_num == 0 || profile_num == u8::MAX {
-        format!("claude --resume {}\r", uuid)
-    } else {
-        format!("claude{} --resume {}\r", profile_num, uuid)
+/// The resume command for a session, honouring its profile.
+///
+/// P0 is the default config dir, which is what the plain `claude`
+/// entry point uses; every other profile has its own `claudeN`.
+/// Getting this wrong is not cosmetic — a session resumed under
+/// another profile comes back against a different config dir, i.e.
+/// a different account.
+///
+/// An UNKNOWN profile (`u8::MAX`) has no correct command, so there is
+/// no branch for it here: the caller must not reclaim a session it
+/// cannot name the profile of.  See `PROFILE_UNKNOWN`.
+fn resume_command(config_dir: Option<&str>, uuid: &str) -> String {
+    match config_dir.filter(|d| shell_safe(d)) {
+        Some(dir) => format!("CLAUDE_CONFIG_DIR='{}' claude --resume {}\r", dir, uuid),
+        // No observed dir: the default profile's own entry point.  The
+        // caller refuses to reclaim a session whose profile it could
+        // not read, so this branch is the genuine P0 case.
+        None => format!("claude --resume {}\r", uuid),
     }
 }
+
+/// A value safe to drop inside single quotes in a shell command.
+///
+/// The config dir goes onto a command line verbatim; a quote or a
+/// newline in it would end the quoting and turn the rest into
+/// something else entirely.  Rejected values fall back to the plain
+/// entry point rather than being escaped — a path this strange is not
+/// one to guess about.
+fn shell_safe(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 512
+        && !s.contains(['\'', '"', '\n', '\r', '\\', '$', '`'])
+}
+
+/// "We could not tell which profile this session belongs to."
+///
+/// Set when the badge reads `P?` (an unrecognised `CLAUDE_CONFIG_DIR`
+/// shape) or when the env could not be read at all.  It is a refusal
+/// marker, not a default: resuming under the wrong profile puts the
+/// session in front of a different account.
+const PROFILE_UNKNOWN: u8 = u8::MAX;
 
 /// Serialise the dormant set, one record per line.  Hand-rolled
 /// because it is three fields and the project does not take a
@@ -521,8 +566,12 @@ fn encode_dormant(records: &[DormantRecord]) -> String {
             .unwrap_or_default()
             .as_secs();
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            r.shelld_sid, r.uuid, r.profile_num, secs
+            "{}\t{}\t{}\t{}\t{}\n",
+            r.shelld_sid,
+            r.uuid,
+            r.profile_num,
+            secs,
+            r.config_dir.as_deref().unwrap_or("")
         ));
     }
     s
@@ -543,6 +592,7 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
                 .unwrap_or(std::time::UNIX_EPOCH);
+            let config_dir = it.next().map(|s| s.to_string());
             // A uuid is the only field that can be typo'd into
             // something dangerous (it lands in a shell command), so it
             // is checked here rather than at the write site.
@@ -553,6 +603,10 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 shelld_sid: sid,
                 uuid,
                 profile_num: profile,
+                // 5th column, added with the config-dir resume; an
+                // older row without it falls back to the plain entry
+                // point, which is the default profile.
+                config_dir: config_dir.filter(|d| !d.is_empty() && shell_safe(d)),
                 created_at,
             })
         })
@@ -583,7 +637,9 @@ enum HibernateStage {
 struct HibernatePaneSession {
     client: Arc<ShelldClient>,
     uuid: String,
-    profile_num: u8,
+    /// The config dir this session was running under, so the resume
+    /// puts it back in front of the same account.
+    config_dir: Option<String>,
     /// The pane's shell pid, so the waking stage can see claude come
     /// back and hand the keyboard over immediately instead of holding
     /// it for a fixed timeout.
@@ -603,13 +659,16 @@ impl HibernatePaneSession {
         host: &dyn crate::plugins::PaneSessionHost,
         trigger: &str,
     ) -> bool {
-        let cmd = resume_command(self.profile_num, &self.uuid);
+        let cmd = resume_command(self.config_dir.as_deref(), &self.uuid);
         match self.client.send_input_to(host.shelld_session_id(), cmd.as_bytes()) {
             Ok(()) => {
                 host.log(
                     crate::plugins::LogLevel::Info,
                     "hibernate.waking",
-                    &format!("{} woke session {}", trigger, self.uuid),
+                    // The command verbatim: which profile a session
+                    // comes back under is the one thing about this
+                    // path that cannot be inferred afterwards.
+                    &format!("{} woke session {} with `{}`", trigger, self.uuid, cmd.trim_end()),
                 );
                 self.stage = HibernateStage::Waking;
                 self.stage_since = SystemTime::now();
@@ -1208,6 +1267,27 @@ impl ClaudecodePlugin {
             let Some(meta) = result.new_meta.get(sid).cloned() else {
                 continue;
             };
+            // A session we cannot name the profile of cannot be
+            // brought back correctly: the resume line decides which
+            // config dir — which account — claude comes back under.
+            // Not reclaiming costs memory; reclaiming costs the user
+            // their session in the wrong place.
+            if meta.profile_num == PROFILE_UNKNOWN {
+                if self.blocked_reason.get(sid).map(String::as_str)
+                    != Some("unknown_profile")
+                {
+                    host.log(
+                        LogLevel::Warn,
+                        "hibernate.unknown_profile",
+                        &format!(
+                            "shelld_session={} uuid={} — profile unreadable; not reclaiming",
+                            sid, meta.uuid
+                        ),
+                    );
+                    self.blocked_reason.insert(*sid, "unknown_profile".to_string());
+                }
+                continue;
+            }
             // Re-verify the pid immediately before signalling it.
             // `last_meta` is up to one scan old, pids are recycled by
             // the kernel, and the consequence of acting on a stale one
@@ -1256,7 +1336,7 @@ impl ClaudecodePlugin {
             let session = Box::new(HibernatePaneSession {
                 client: client.clone(),
                 uuid: meta.uuid.clone(),
-                profile_num: meta.profile_num,
+                config_dir: meta.config_dir.clone(),
                 claude_pid: meta.claude_pid,
                 shell_pid: shell_pid_for(*sid),
                 stage: HibernateStage::Killing,
@@ -1275,6 +1355,7 @@ impl ClaudecodePlugin {
                 shelld_sid: *sid,
                 uuid: meta.uuid,
                 profile_num: meta.profile_num,
+                config_dir: meta.config_dir,
                 created_at: SystemTime::now(),
             });
             self.persist_dormant(host);
@@ -1323,7 +1404,7 @@ impl ClaudecodePlugin {
             let session = Box::new(HibernatePaneSession {
                 client: client.clone(),
                 uuid: d.uuid.clone(),
-                profile_num: d.profile_num,
+                config_dir: d.config_dir.clone(),
                 claude_pid: 0,
                 shell_pid: shell_pid_for(d.shelld_sid),
                 // Straight to Dormant: there is nothing left to kill.
@@ -2619,6 +2700,10 @@ impl WorkerCtx {
                 f.shelld_sid,
                 BindMeta {
                     profile_num,
+                    config_dir: pidtree::proc_env_value(
+                        f.claude_pid,
+                        "CLAUDE_CONFIG_DIR",
+                    ),
                     uuid: sid_uuid,
                     claude_pid: f.claude_pid,
                     project_basename,
@@ -3382,9 +3467,16 @@ mod tests {
         // decides whether this test drives the stand-in or launches a
         // real claude (it launched a real one until this line existed
         // — visible in the pane's output as the trust prompt).
+        // A profile dir on the stand-in's environment, so the scan
+        // reads it exactly as it reads a real one — and so the wake
+        // has to carry it back.  Without it the policy now (rightly)
+        // refuses to reclaim a session it cannot name the profile of.
+        let profile_dir = root.join(".claude-profile-9");
+        fs::create_dir_all(&profile_dir).unwrap();
         let start = format!(
-            "export PATH={}:$PATH\rclaude 100000\r",
-            bin.to_string_lossy()
+            "export PATH={}:$PATH CLAUDE_CONFIG_DIR={}\rclaude 100000\r",
+            bin.to_string_lossy(),
+            profile_dir.to_string_lossy(),
         );
         unsafe {
             libc::write(
@@ -3469,6 +3561,17 @@ mod tests {
             sessions_seen: vec![1],
             log_lines: Vec::new(),
         };
+        // The stand-in is a system binary, and macOS redacts the
+        // environment of hardened ones — `proc_cmdline` works on it,
+        // `proc_env_value` returns None (measured).  A real claude is
+        // an ordinary user binary and reads fine, which is why the
+        // badge shows P1/P2/P3 in production.  So the profile is
+        // supplied here rather than pretending the scan could read it;
+        // everything downstream of the binding is still the real path.
+        for m in first.new_meta.values_mut() {
+            m.profile_num = 9;
+            m.config_dir = Some(profile_dir.to_string_lossy().into_owned());
+        }
         first.new_cpu.insert(
             1,
             (
@@ -3497,6 +3600,11 @@ mod tests {
         );
         plugin.run_idle_policy(&host, &second);
         assert_eq!(plugin.dormant.len(), 1, "the pane should now be dormant");
+        assert_eq!(
+            plugin.dormant[0].config_dir.as_deref(),
+            Some(profile_dir.to_string_lossy().as_ref()),
+            "the parked record carries the profile the session ran under"
+        );
         assert_eq!(plugin.dormant[0].uuid, uuid);
 
         // The signal was real: claude is gone from the pane.
@@ -3521,10 +3629,12 @@ mod tests {
         // (A keypress works too — same path — but waiting for one
         // starts the restore after they have already tried to use the
         // pane.)
+        // The session the policy armed knows the profile; rebuild it
+        // the same way here to drive the wake directly.
         let mut session = HibernatePaneSession {
             client: Arc::new(ShelldClient::new(Some(inject.clone()))),
             uuid: uuid.to_string(),
-            profile_num: u8::MAX, // no profile → the plain binary
+            config_dir: Some(profile_dir.to_string_lossy().into_owned()),
             claude_pid: 0,
             shell_pid,
             stage: HibernateStage::Dormant,
@@ -3557,8 +3667,11 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8_lossy(&inject.sent.lock().unwrap()),
-            format!("claude --resume {uuid}\r"),
-            "the wake writes the resume line for this very session"
+            format!(
+                "CLAUDE_CONFIG_DIR='{}' claude --resume {uuid}\r",
+                profile_dir.to_string_lossy()
+            ),
+            "the wake resumes the session under the profile it was running"
         );
         // It really reached the PTY: the shell echoes it back…
         let mut echoed = String::new();
@@ -3706,6 +3819,7 @@ mod tests {
             sid,
             BindMeta {
                 profile_num: 2,
+                config_dir: Some("/Users/x/.claude-profile-2".into()),
                 uuid: uuid.to_string(),
                 claude_pid,
                 project_basename: "proj".into(),
@@ -3892,6 +4006,7 @@ mod tests {
             shelld_sid: 7,
             uuid: "u7".into(),
             profile_num: 1,
+                config_dir: None,
             created_at: scan.scanned_at + Duration::from_millis(1),
         });
 
@@ -3930,12 +4045,14 @@ mod tests {
                 shelld_sid: 7,
                 uuid: "u7".into(),
                 profile_num: 1,
+                config_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             },
             DormantRecord {
                 shelld_sid: 8,
                 uuid: "u8".into(),
                 profile_num: 1,
+                config_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             },
         ];
@@ -3992,6 +4109,7 @@ mod tests {
             shelld_sid: 7,
             uuid: "u".into(),
             profile_num: 1,
+                config_dir: None,
             created_at: std::time::UNIX_EPOCH,
         }];
         assert_eq!(activity_for_unbound(7, &parked), CcActivity::Dormant);
@@ -4136,20 +4254,76 @@ mod tests {
     /// The resume line goes into a shell verbatim, so the profile
     /// number has to produce a binary that exists — `claude255` was
     /// what a naive format produced for "no profile".
+    /// The profile decides which config dir — which account — the
+    /// session comes back under, so the resume line has to carry it.
     #[test]
-    fn resume_command_uses_the_plain_binary_without_a_profile() {
+    fn resume_command_carries_the_session_profile() {
+        // The observed config dir goes back verbatim.  `claudeN` is an
+        // interactive alias in the user's rc file
+        // (`alias claude1='CLAUDE_CONFIG_DIR=~/.claude-profile-1 claude'`),
+        // so reproducing the alias would depend on that file still
+        // defining it; setting the variable is the same thing without
+        // the dependency.
         assert_eq!(
-            resume_command(0, "abc-123"),
-            "claude --resume abc-123\r"
+            resume_command(Some("/Users/x/.claude-profile-3"), "abc-123"),
+            "CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude --resume abc-123\r"
         );
-        assert_eq!(
-            resume_command(u8::MAX, "abc-123"),
-            "claude --resume abc-123\r"
+        // No dir observed = the default profile's own entry point.
+        assert_eq!(resume_command(None, "abc-123"), "claude --resume abc-123\r");
+    }
+
+    /// The dir lands inside single quotes on a real command line, so a
+    /// value that could close them is refused rather than escaped.
+    #[test]
+    fn a_config_dir_that_could_break_out_of_quoting_is_refused() {
+        for bad in [
+            "/tmp/a'; rm -rf ~; '",
+            "/tmp/a\nclaude --dangerously",
+            "/tmp/$(whoami)",
+            "/tmp/`id`",
+            "",
+        ] {
+            assert!(!shell_safe(bad), "{bad:?} should be refused");
+            assert_eq!(
+                resume_command(Some(bad), "u"),
+                "claude --resume u\r",
+                "a refused dir falls back to the plain entry point"
+            );
+        }
+        assert!(shell_safe("/Users/doracawl/.claude-profile-1"));
+    }
+
+    /// A session whose profile could not be read must not be
+    /// reclaimed at all: there is no resume line that is known to put
+    /// it back where it was, and guessing means a different account.
+    #[test]
+    fn an_unreadable_profile_blocks_reclamation() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let host = FakeHost::new(dir.clone());
+        host.set_status(7, idle_view(Duration::from_secs(7200)));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+
+        let claude_like = std::process::id() as i32;
+        let mut scan = scan_with(7, claude_like, "uuid-1");
+        scan.new_meta.get_mut(&7).unwrap().profile_num = PROFILE_UNKNOWN;
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
+        plugin.run_idle_policy(&host, &scan);
+        let mut scan = scan_with(7, claude_like, "uuid-1");
+        scan.new_meta.get_mut(&7).unwrap().profile_num = PROFILE_UNKNOWN;
+        plugin.run_idle_policy(&host, &scan);
+
+        assert!(
+            host.begun.lock().unwrap().is_empty(),
+            "an unnamed profile must not be reclaimed"
         );
-        assert_eq!(
-            resume_command(3, "abc-123"),
-            "claude3 --resume abc-123\r"
-        );
+        assert!(plugin.dormant.is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4162,12 +4336,14 @@ mod tests {
                 shelld_sid: 7,
                 uuid: "9cff8661-3275-4dce-8c93-89797bc63f44".into(),
                 profile_num: 1,
+                config_dir: Some("/Users/x/.claude-profile-1".into()),
                 created_at: t,
             },
             DormantRecord {
                 shelld_sid: 9,
                 uuid: "abc".into(),
                 profile_num: 255,
+                config_dir: None,
                 created_at: t,
             },
         ];
@@ -4191,6 +4367,7 @@ mod tests {
                 shelld_sid: 2,
                 uuid: "good-uuid-1".into(),
                 profile_num: 2,
+                config_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             }]
         );

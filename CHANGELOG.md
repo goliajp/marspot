@@ -30,6 +30,35 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.55
+
+resume 把 profile 带回来;读不到 profile 就不回收。
+
+用户报的:「之前是 Px 就要用 claudex 来 resume」。之前的实现是拿
+`profile_num` 拼 `claude<N>`,而 `profile_num` 读不出来时(255)会**悄悄退回
+plain `claude`** —— 那不是降级,那是把会话恢复到**另一个账号**下面。
+
+两处改:
+
+1. **不再拼别名,直接用观测到的 `CLAUDE_CONFIG_DIR`**。`claude1/2/3` 是
+   用户 rc 里的交互别名
+   (`alias claude1='CLAUDE_CONFIG_DIR=~/.claude-profile-1 claude'`),
+   复现别名要赌那个文件此刻仍然定义着它;而我们在杀进程之前本来就从活
+   进程上读到了那个变量。现在 resume 行是
+   `CLAUDE_CONFIG_DIR='<原样的目录>' claude --resume <uuid>` —— 别名自己
+   的展开,写明白了。目录随 dormant 记录落盘(第 5 列),重启后唤醒也对。
+2. **读不到 profile 就拒绝回收**(`hibernate.unknown_profile`,变化才落)。
+   不回收的代价是内存;回收错的代价是用户的会话出现在别的账号下。
+
+目录会原样进一条 shell 命令行,所以先过 `shell_safe`:带引号、反引号、
+`$`、换行、超长的一律拒绝 —— 拒绝而不是转义,这种路径不值得猜。
+
+顺带记一条实测:`proc_env_value` 对**加固签名的系统二进制**读不到环境
+(argv 能读、env 被屏蔽),而真 claude 是普通用户态二进制所以读得到 ——
+这就是为什么生产里 badge 一直能显示 P1/P2/P3,而全链路测试里用
+`/bin/sleep` 当替身时读到的是 None。测试因此显式提供 profile,并断言
+唤醒时把它原样带了回去。
+
 ### 0.7.54
 
 休眠时画面冻在原样;闲置的 pane 变暗。
