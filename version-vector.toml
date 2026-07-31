@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.43"  # idle 的 claude 自动回收 + 按键唤醒;判据全是否决项,杀之前复核 pid;详见 CHANGELOG.md
+shell   = "0.7.44"  # idle 闭环在自有 PTY 上跑通:回收→休眠→按键→resume 全链路一个测试;详见 CHANGELOG.md
 core    = "0.12.71"  # 只重编:pidtree 换成 pane_state 那套(见 L1 0.7.41),core 侧行为不变;详见 CHANGELOG.md
 session = "0.11.31"  # 只重编:marspot-term layout 的 chrome 几何变了,session 侧行为不变;详见 CHANGELOG.md

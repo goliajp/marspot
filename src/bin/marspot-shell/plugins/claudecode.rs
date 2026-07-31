@@ -3018,6 +3018,355 @@ mod tests {
         assert!(parse_session_id(&path).is_none());
     }
 
+    // ── the whole loop, on a PTY this test owns ───────────────────
+    //
+    // Everything below runs against real machinery: a real zsh on a
+    // real PTY, a real registry entry, the real scan, the real state
+    // machine, a real signal, and the real wake path writing into the
+    // real PTY.  The master fd IS the keyboard here — no window, no
+    // synthetic events, nothing of the user's touched.
+    //
+    // What it cannot cover is claude's own behaviour on `--resume`;
+    // that belongs to claude, and the byte path it arrives on is the
+    // one the profile cycle has used in production every day.
+
+    /// Wake injections land here instead of going L1 → L2 → L3, so the
+    /// test can assert on exactly what would reach the PTY — and then
+    /// actually put it there.
+    struct PtyInject {
+        master: std::os::fd::RawFd,
+        sent: std::sync::Mutex<Vec<u8>>,
+    }
+
+    impl InjectInputProxy for PtyInject {
+        fn inject_input(&self, _sid: u64, bytes: &[u8]) -> std::io::Result<()> {
+            self.sent.lock().unwrap().extend_from_slice(bytes);
+            let n = unsafe {
+                libc::write(
+                    self.master,
+                    bytes.as_ptr() as *const libc::c_void,
+                    bytes.len(),
+                )
+            };
+            (n > 0).then_some(()).ok_or_else(|| {
+                std::io::Error::other("write to pty master failed")
+            })
+        }
+    }
+
+    /// Drain a PTY master (set non-blocking by the caller) into a
+    /// string, so the test can see what the shell echoed.
+    fn drain_pty(master: std::os::fd::RawFd) -> String {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = unsafe {
+                libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            };
+            if n <= 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn poll_until<F: FnMut() -> bool>(what: &str, mut f: F) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if f() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Hibernate → dormant → keypress → resume, end to end.
+    #[test]
+    fn the_whole_idle_loop_runs_on_a_pty_this_test_owns() {
+        use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
+
+        let root = std::env::temp_dir().join(format!("marspot-loop-{}", std::process::id()));
+        let bin = root.join("bin");
+        let proj = root.join("proj");
+        let state = root.join("state");
+        for d in [&bin, &proj, &state] {
+            fs::create_dir_all(d).unwrap();
+        }
+        // A "claude" that is a real binary, so argv[0] ends in
+        // `claude` — the identity both the scan and the pid guard
+        // check.  A #! wrapper would give argv[0] = /bin/sh and be
+        // (correctly) rejected.
+        //
+        // Symlink, not copy: a copied system binary is killed on exec
+        // ("zsh: killed") because the signature no longer matches the
+        // file it is being loaded from.  The symlink runs the original,
+        // signed binary under the name we need.
+        std::os::unix::fs::symlink("/bin/sleep", bin.join("claude")).unwrap();
+
+        // The transcript the scan binds against: one finished assistant
+        // turn, in the on-disk shape (`message` before `type`).
+        let uuid = "aaaaaaaa-1111-2222-3333-444444444444";
+        let home = std::env::var("HOME").unwrap();
+        // Use the plugin's own encoder, and canonicalise first: the
+        // scan encodes what `proc_cwd` reports, which is the resolved
+        // path (`/private/var/...`), while `temp_dir()` hands back the
+        // symlinked one (`/var/...`).  Encoding the wrong one puts the
+        // fixture transcript in a directory the scan never looks at.
+        let proj = fs::canonicalize(&proj).unwrap();
+        let encoded = encode_project_dir(&proj);
+        let proj_dir = PathBuf::from(&home).join(".claude/projects").join(&encoded);
+        fs::create_dir_all(&proj_dir).unwrap();
+        let jsonl = proj_dir.join(format!("{uuid}.jsonl"));
+        fs::write(
+            &jsonl,
+            format!(
+                r#"{{"parentUuid":"p","isSidechain":false,"message":{{"model":"m","id":"i","type":"message","role":"assistant","content":[{{"type":"text","text":"done"}}]}},"type":"assistant","uuid":"u","sessionId":"{uuid}"}}"#
+            ) + "\n",
+        )
+        .unwrap();
+
+        // A real shell on a PTY this test owns.
+        let pty = Pty::spawn(PtyConfig {
+            program: "/bin/zsh".into(),
+            args: vec!["-f".into()],
+            size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+            argv0: None,
+            cwd: Some(proj.to_string_lossy().into_owned()),
+            env_remove_prefixes: vec!["MARSPOT_".into()],
+        })
+        .expect("spawn zsh");
+        let master = pty.raw_master();
+        unsafe {
+            let fl = libc::fcntl(master, libc::F_GETFL);
+            libc::fcntl(master, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        }
+        let shell_pid = pty.child_pid();
+
+        // Registry entry, so the plugin's session list finds this pane
+        // exactly as it finds a real one.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &state) };
+        marspot_term::session_registry::write_session_entry(
+            &marspot_term::session_registry::SessionEntry {
+                id: 1,
+                pid: std::process::id() as i32,
+                socket: state.join("s.sock"),
+                cols: 80,
+                rows: 24,
+                title: "loop".into(),
+                cwd: proj.to_string_lossy().into_owned(),
+                proto_version: 1,
+                created_at_unix: 0,
+                shm_name: String::new(),
+                shell_child_pid: shell_pid,
+            },
+        )
+        .unwrap();
+
+        // Start the stand-in claude in the pane — by writing to the
+        // master, which is what a keyboard is.
+        // Absolute path rather than PATH juggling: the check is on
+        // argv[0]'s basename, and this keeps the shell's environment
+        // out of the test.
+        let start = format!("{}/claude 100000\r", bin.to_string_lossy());
+        unsafe {
+            libc::write(
+                master,
+                start.as_ptr() as *const libc::c_void,
+                start.len(),
+            )
+        };
+        poll_until("the stand-in claude to be running", || {
+            drain_pty(master);
+            let procs = pidtree::list_all_procs();
+            pidtree::descendants_of(shell_pid, &procs)
+                .iter()
+                .any(|d| looks_like_claudecode(d))
+        });
+        // The scan only binds a transcript that is newer than the
+        // process writing it, same as in production.
+        fs::write(&jsonl, fs::read(&jsonl).unwrap()).unwrap();
+
+        // Real scan → real binding.
+        let mut worker = WorkerCtx {
+            projects_root: PathBuf::from(&home).join(".claude/projects"),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+        };
+        let mut scan = worker.scan_once();
+        poll_until("the scan to bind the pane", || {
+            scan = worker.scan_once();
+            scan.new_meta.contains_key(&1)
+        });
+        let claude_pid = scan.new_meta[&1].claude_pid;
+        assert_eq!(
+            scan.new_activity.get(&1),
+            Some(&marspot::pane_state::Activity::AwaitingUser),
+            "a finished turn reads as awaiting the user"
+        );
+
+        // The real state machine, fed the real kernel observation.
+        let mut machine = marspot::pane_state::PaneMachine::new(std::time::Instant::now());
+        let base = std::time::Instant::now();
+        for i in 1..=marspot::pane_state::CONFIRM_TICKS {
+            machine.observe(
+                marspot::pane_state::Observation {
+                    generic: pidtree::observe_pane(shell_pid),
+                    activity: marspot::pane_state::Activity::AwaitingUser,
+                },
+                base + Duration::from_secs(i as u64),
+            );
+        }
+        assert!(
+            machine.quiescent(),
+            "machine should call this pane quiet: {:?}",
+            machine.status()
+        );
+
+        // Policy, with the pane presented as long-idle.
+        let inject = Arc::new(PtyInject {
+            master,
+            sent: std::sync::Mutex::new(Vec::new()),
+        });
+        let host = FakeHost::new(state.clone());
+        host.set_status(
+            1,
+            crate::plugins::PaneStatusView {
+                status: machine.status().clone(),
+                held: Duration::from_secs(7200),
+                quiescent: true,
+            },
+        );
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(Some(inject.clone()))));
+
+        // First pass records the CPU baseline; make it old enough for
+        // the second to be able to decide.
+        let mut first = ScanResult {
+            new_mapping: scan.new_mapping.clone(),
+            new_meta: scan.new_meta.clone(),
+            new_activity: scan.new_activity.clone(),
+            new_cpu: HashMap::new(),
+            sessions_seen: vec![1],
+            log_lines: Vec::new(),
+        };
+        first.new_cpu.insert(
+            1,
+            (
+                pidtree::subtree_cpu_time_ns(claude_pid, &pidtree::list_all_procs()),
+                SystemTime::now() - Duration::from_secs(120),
+            ),
+        );
+        plugin.run_idle_policy(&host, &first);
+        assert!(plugin.dormant.is_empty(), "one sample decides nothing");
+
+        let mut second = ScanResult {
+            new_mapping: first.new_mapping.clone(),
+            new_meta: first.new_meta.clone(),
+            new_activity: first.new_activity.clone(),
+            new_cpu: HashMap::new(),
+            sessions_seen: vec![1],
+            log_lines: Vec::new(),
+        };
+        second.new_cpu.insert(
+            1,
+            (
+                pidtree::subtree_cpu_time_ns(claude_pid, &pidtree::list_all_procs()),
+                SystemTime::now(),
+            ),
+        );
+        plugin.run_idle_policy(&host, &second);
+        assert_eq!(plugin.dormant.len(), 1, "the pane should now be dormant");
+        assert_eq!(plugin.dormant[0].uuid, uuid);
+
+        // The signal was real: claude is gone from the pane.
+        poll_until("the stand-in claude to be reclaimed", || {
+            let procs = pidtree::list_all_procs();
+            !pidtree::descendants_of(shell_pid, &procs)
+                .iter()
+                .any(|d| looks_like_claudecode(d))
+        });
+
+        // …and the shell is back in front of its own tty, which is
+        // what makes the pane usable again.
+        poll_until("the shell to take the tty back", || {
+            drain_pty(master);
+            matches!(
+                pidtree::observe_pane(shell_pid),
+                marspot::pane_state::Generic::Idle
+            )
+        });
+
+        // Wake: one keypress through the same PaneSession the policy
+        // armed.
+        let mut session = HibernatePaneSession {
+            client: Arc::new(ShelldClient::new(Some(inject.clone()))),
+            uuid: uuid.to_string(),
+            profile_num: u8::MAX, // no profile → the plain binary
+            claude_pid: 0,
+            stage: HibernateStage::Dormant,
+            stage_since: SystemTime::now(),
+            spin_phase: 0,
+        };
+        let host_session = FakePaneSessionHost { sid: 1 };
+        let handling = crate::plugins::PaneSession::on_user_key(
+            &mut session,
+            &host_session,
+            &marspot::shell_proto::WireKeyEvent {
+                state: marspot::shell_proto::WireKeyState::Pressed,
+                mods: 0,
+                kind: marspot::shell_proto::WireLogicalKind::Char,
+                key_data: 'x' as u32,
+                text: "x".into(),
+            },
+        );
+        assert!(
+            matches!(handling, crate::plugins::KeyHandling::Swallow),
+            "the waking keypress is consumed, not run as a shell command"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&inject.sent.lock().unwrap()),
+            format!("claude --resume {uuid}\r"),
+            "the wake writes the resume line for this very session"
+        );
+        // It really reached the PTY: the shell echoes it back.
+        let mut echoed = String::new();
+        poll_until("the pane to echo the resume line", || {
+            echoed.push_str(&drain_pty(master));
+            echoed.contains("--resume")
+        });
+
+        // Teardown: kill whatever the pane still holds, then the shell.
+        for pid in pidtree::child_pids(shell_pid) {
+            if let Some(row) = pidtree::proc_row(pid) {
+                unsafe {
+                    libc::killpg(row.pgid, libc::SIGCONT);
+                    libc::killpg(row.pgid, libc::SIGKILL);
+                }
+            }
+        }
+        drop(pty);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&proj_dir);
+    }
+
+    /// Minimal `PaneSessionHost` for driving a PaneSession directly.
+    struct FakePaneSessionHost {
+        sid: u64,
+    }
+
+    impl crate::plugins::PaneSessionHost for FakePaneSessionHost {
+        fn shelld_session_id(&self) -> u64 {
+            self.sid
+        }
+        fn end(&self) {}
+        fn set_badge(&self, _text: &str) {}
+        fn set_pane_title(&self, _text: &str) {}
+        fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
+    }
+
     // ── the reclamation itself, against a real process ────────────
 
     /// A `PluginHost` that records what the plugin asked it to do.

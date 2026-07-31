@@ -30,6 +30,41 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.44
+
+idle 闭环在**自己的 PTY** 上跑通了 —— 回收 → 休眠 → 按键 → resume,
+一个测试走完。
+
+0.7.43 收尾时我把「必须在 marspot 的窗口里验」当成了前提,于是绕去合成
+键盘事件、绕去往 L3 的 UDS 口注入(那条路是死的:`uds_server.rs:10`
+写着 accept 后只记日志就丢)。前提本身是错的:测试自己 `forkpty` 出来的
+PTY,master fd 就在手里,`write()` 就是键盘。
+
+`the_whole_idle_loop_runs_on_a_pty_this_test_owns` 用的全是真机件:
+
+- 真 zsh 跑在测试自己的 PTY 上,真 registry entry(entry.toml)让扫描
+  像发现真 pane 一样发现它;
+- 真扫描完成绑定(替身 claude + 真实形状的 transcript);
+- 真状态机吃 `pidtree::observe_pane` 的真观测,连喂 3 拍确认到
+  `quiescent`;
+- 真策略发真 SIGTERM —— 断言那个进程**真的没了**,而且 shell 真的把 tty
+  收了回去;
+- 真唤醒:一个按键走 `HibernatePaneSession::on_user_key`,断言写进 PTY
+  的字节正好是 `claude --resume <uuid>\r`,并且 shell 把它回显了出来。
+
+三个坑都是实测出来的,顺手记着:
+
+1. 替身 claude 不能用**拷贝**的系统二进制 —— 拷完 exec 会被签名校验杀掉
+   (`zsh: killed`),要用符号链接跑原始已签名的那个;
+2. 判据看的是 **argv[0]**,所以 `#!` 包装脚本会得到 `/bin/sh` 并被正确
+   拒绝,夹具得是真二进制;
+3. `proc_cwd` 报的是解析过的路径(`/private/var/...`),而 `temp_dir()`
+   给的是符号链接那个(`/var/...`)—— 不 canonicalize,fixture 的
+   transcript 就放在扫描永远不看的目录里。
+
+唯一没被这个测试覆盖的是 claude 自己对 `--resume` 的反应,那属于 claude;
+字节送达的那条路是 profile cycle 每天在生产里走的同一条。
+
 ### 0.7.43
 
 idle 的 claude 自动回收,按键唤醒同一个 session。
