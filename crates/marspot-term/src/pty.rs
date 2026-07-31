@@ -298,46 +298,74 @@ impl Pty {
 }
 
 impl Drop for Pty {
+    /// Teardown, in the order the kernel needs rather than the order
+    /// that reads naturally.
+    ///
+    /// The master fd is closed FIRST.  A child that is mid-exit can
+    /// block indefinitely tearing down its controlling terminal while
+    /// the master is still open and nobody is reading it — measured:
+    /// with a `^Z`-suspended job in the pane, `waitpid` after `SIGKILL`
+    /// never returned, the child sat in the `E` (exiting) state, and a
+    /// test hung for 13 minutes until the runner killed it.  Closing
+    /// the master drops the last reader, the slave side sees EOF, and
+    /// the exit completes.
+    ///
+    /// Then: `SIGCONT` before the polite `SIGHUP`, because a stopped
+    /// process never runs a signal handler — the shell has to be
+    /// running to flush its history and hang up its own jobs.
+    ///
+    /// And finally the wait is BOUNDED at every step.  Leaving a
+    /// zombie behind for a moment is a bounded, local cost; blocking
+    /// the caller forever is not, and this runs on paths (pane close,
+    /// L3 teardown) where forever means a wedged app.
     fn drop(&mut self) {
-        if self.child > 0 {
-            // Polite first: SIGHUP lets shells flush history etc.  If the
-            // child does not exit quickly, escalate to SIGKILL.  In all cases
-            // we must waitpid() to avoid leaving zombies.
-            unsafe {
-                libc::kill(self.child, libc::SIGHUP);
-            }
-
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
-            let mut reaped = false;
-            while std::time::Instant::now() < deadline {
-                let mut status: c_int = 0;
-                let r = unsafe { libc::waitpid(self.child, &mut status, libc::WNOHANG) };
-                if r > 0 {
-                    reaped = true;
-                    break;
-                }
-                if r < 0 {
-                    // ECHILD = already reaped by someone else.  Treat as done.
-                    reaped = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-
-            if !reaped {
-                unsafe {
-                    libc::kill(self.child, libc::SIGKILL);
-                    let mut status: c_int = 0;
-                    libc::waitpid(self.child, &mut status, 0);
-                }
-            }
-            self.child = 0;
-        }
         if self.master >= 0 {
             unsafe {
                 libc::close(self.master);
             }
             self.master = -1;
+        }
+        if self.child > 0 {
+            unsafe {
+                // Wake a stopped shell so the SIGHUP below is more than
+                // a queued signal on a process that will never run.
+                libc::kill(self.child, libc::SIGCONT);
+                libc::kill(self.child, libc::SIGHUP);
+            }
+            if !self.reap_within(std::time::Duration::from_millis(100)) {
+                unsafe {
+                    libc::kill(self.child, libc::SIGCONT);
+                    libc::kill(self.child, libc::SIGKILL);
+                }
+                // A SIGKILL'd process still has to be torn down by the
+                // kernel; give that a bounded moment, then move on.
+                let _ = self.reap_within(std::time::Duration::from_millis(500));
+            }
+            self.child = 0;
+        }
+    }
+}
+
+impl Pty {
+    /// Poll for the child to be reapable until `budget` runs out.
+    /// True = reaped (or already gone).  Never blocks past the budget.
+    fn reap_within(&self, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let mut status: c_int = 0;
+            let r = unsafe { libc::waitpid(self.child, &mut status, libc::WNOHANG) };
+            if r > 0 {
+                return true;
+            }
+            if r < 0 {
+                // ECHILD = someone else already reaped it.  Done either
+                // way; there is nothing left to wait for.
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 }
@@ -716,6 +744,83 @@ mod tests {
     }
 
     // ----- end soak tests -----
+
+    /// A pane with a `^Z`-suspended job in it must still tear down.
+    ///
+    /// It did not: with the master closed last, the child sat in the
+    /// kernel's `E` (exiting) state — its controlling terminal could
+    /// not be torn down while an unread master fd was still open — and
+    /// the `waitpid` after `SIGKILL` never returned.  A test hung for
+    /// 13 minutes before the runner killed it; on the real thing this
+    /// is a pane close, i.e. a wedged app.
+    ///
+    /// The assertion is a time bound, because "eventually" was never
+    /// the problem.
+    #[test]
+    fn drop_does_not_hang_when_the_pane_holds_a_suspended_job() {
+        use std::time::{Duration, Instant};
+        let mut pty = Pty::spawn(PtyConfig {
+            program: "/bin/zsh".into(),
+            args: vec!["-f".into()],
+            size: TerminalSize::default(),
+            argv0: None,
+            cwd: Some("/".into()),
+            ..Default::default()
+        })
+        .expect("spawn zsh");
+        let shell = pty.child_pid();
+        let master = pty.raw_master();
+        unsafe {
+            let fl = libc::fcntl(master, libc::F_GETFL);
+            libc::fcntl(master, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        }
+        // Wait for a state change on the tty's foreground group, so the
+        // job is really running before it is suspended (and really
+        // suspended before the drop).
+        let settle = |want_job: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut buf = [0u8; 4096];
+            loop {
+                while unsafe {
+                    libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                } > 0
+                {}
+                let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+                let ok = unsafe {
+                    libc::proc_pidinfo(
+                        shell,
+                        libc::PROC_PIDTBSDINFO,
+                        0,
+                        &mut info as *mut _ as *mut libc::c_void,
+                        std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+                    )
+                } > 0;
+                if ok && ((info.e_tpgid as i32 != info.pbi_pgid as i32) == want_job) {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "shell never settled");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        settle(false);
+        pty.write(b"sleep 300\n").expect("write");
+        settle(true);
+        pty.write(&[0x1a]).expect("^Z"); // line discipline → SIGTSTP
+        settle(false);
+
+        let t = Instant::now();
+        drop(pty);
+        let took = t.elapsed();
+        assert!(
+            took < Duration::from_secs(3),
+            "drop took {took:?} with a suspended job in the pane"
+        );
+        // The shell is gone; the orphaned job is not this test's to
+        // keep alive either.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_ne!(unsafe { libc::kill(shell, 0) }, 0, "shell should be gone");
+        unsafe { libc::kill(-shell, libc::SIGKILL) };
+    }
 
     #[test]
     fn drop_kills_child_and_closes_fd() {

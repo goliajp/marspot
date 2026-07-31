@@ -1782,7 +1782,32 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.31**
+Current: **0.11.32**
+
+### 0.11.32
+
+PTY teardown 不再被一个挂起的作业卡死。
+
+现场是测试里撞出来的:pane 里 `^Z` 一个作业再 drop `Pty`,`waitpid` 在
+`SIGKILL` 之后**永不返回**,子进程停在内核的 `E`(exiting)态,测试挂了
+13 分钟直到 runner 把它杀掉。真机上这条路是**关 pane**,也就是整个 app
+卡住。
+
+根因顺序问题:master fd 关在最后。只要它还开着而且没人读,子进程拆自己
+的控制终端就可能永远拆不完。
+
+三处改动,都是量出来的:
+
+1. **先关 master**。最后一个 reader 一走,slave 侧拿到 EOF,退出流程才
+   走得完。
+2. **SIGCONT 再 SIGHUP**。停止的进程不会跑信号处理器 —— shell 得先活过来
+   才谈得上冲 history、给自己的作业发 HUP。
+3. **每一步等待都有界**(polite 100ms,SIGKILL 之后 500ms,都是 WNOHANG
+   轮询)。留一个僵尸片刻是有界的局部代价;把调用方永远堵住不是 —— 而这
+   条路跑在关 pane / L3 teardown 上。
+
+回归测试断言的是**时间上界**(3s),因为"最终会好"从来不是问题所在:
+真 zsh + `sleep 300` + `^Z` + drop,实测 6.4ms。
 
 ### 0.11.31
 

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.45"  # 休眠成为一等状态:Dormant 进状态机,决策不再看插件私有集合;详见 CHANGELOG.md
-core    = "0.12.71"  # 只重编:pidtree 换成 pane_state 那套(见 L1 0.7.41),core 侧行为不变;详见 CHANGELOG.md
-session = "0.11.31"  # 只重编:marspot-term layout 的 chrome 几何变了,session 侧行为不变;详见 CHANGELOG.md
+shell   = "0.7.46"  # 只重编:Pty::drop 顺序改了(见 L3 0.11.32),shell 侧行为不变;详见 CHANGELOG.md
+core    = "0.12.72"  # 只重编:Pty::drop 的顺序改了(见 L3 0.11.32),core 侧行为不变;详见 CHANGELOG.md
+session = "0.11.32"  # PTY teardown 不再被挂起作业卡死:先关 master、SIGCONT 再 HUP、等待全部有界;详见 CHANGELOG.md
