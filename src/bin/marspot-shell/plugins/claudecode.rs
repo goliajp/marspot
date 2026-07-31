@@ -148,6 +148,18 @@ pub struct ClaudecodePlugin {
     /// idle threshold has to be calibrated against.  Pruned every tick
     /// to the sessions still reporting.
     last_activity: HashMap<u64, (String, Instant)>,
+    /// Panes whose claude has been reclaimed and that are waiting for a
+    /// keypress.  Persisted (`dormant.tsv`) because an L1 self-execv
+    /// drops the PaneSessions that carry the wake path.
+    dormant: Vec<DormantRecord>,
+    /// Dormant panes that currently have a live `HibernatePaneSession`
+    /// attached.  Split from `dormant` so a re-arm after an execv
+    /// doesn't stack a second session onto a pane that still has one.
+    armed: std::collections::HashSet<u64>,
+    /// `shelld_session_id → (claude subtree CPU ns, sampled at)` from
+    /// the previous scan, so the idle policy can look at a delta
+    /// rather than an absolute.
+    cpu_samples: HashMap<u64, (u64, SystemTime)>,
     /// RFC-003 C7 auto-retry monitor: one entry per shelld session
     /// currently running claudecode.  Created when a session first
     /// binds, dropped when the bind goes away.  See `MonitorState`.
@@ -316,6 +328,277 @@ enum CycleStage {
     /// `claudeN --resume <uuid>\r` written to the PTY; waiting a
     /// settle window before ending the PaneSession.
     ResumeSent,
+}
+
+/// How long a pane must hold a quiet state before its claude is
+/// reclaimed, and the knob to change or disable it.
+///
+/// Default one hour, chosen against a real cost rather than taste: the
+/// prompt cache's TTL is an hour, so past that point the next request
+/// re-sends the whole transcript as input tokens whether or not we
+/// hibernated.  Reclaiming after the cache is cold is therefore close
+/// to free — the marginal cost is claude's startup, not the tokens.
+/// Below the TTL it would be spending money to save memory.
+///
+/// `MARSPOT_CC_IDLE_HIBERNATE_S=0` turns it off entirely.
+fn hibernate_after() -> Option<Duration> {
+    const DEFAULT_S: u64 = 3600;
+    let secs = std::env::var("MARSPOT_CC_IDLE_HIBERNATE_S")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_S);
+    (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// CPU a claude subtree may burn during the observation window and
+/// still count as idle.  Not zero: an idling MCP server and a language
+/// server both tick over.  50 ms across a window of many seconds is
+/// well under 1 % of a core — an actual tool run is orders above it.
+const IDLE_CPU_TOLERANCE_NS: u64 = 50_000_000;
+
+/// Everything the idle decision looks at, gathered so the rule itself
+/// stays a pure function.
+#[derive(Clone, Copy, Debug)]
+struct IdleEvidence {
+    /// The state machine says nothing is in flight AND has held that
+    /// view long enough to be believed (`CONFIRM_TICKS`).
+    quiescent: bool,
+    /// The composed state is specifically "a program is bound and
+    /// waiting for the user".  `Empty` is quiet too, but it means
+    /// there is no claude here to reclaim.
+    awaiting_user: bool,
+    /// How long that state has held.
+    held: Duration,
+    /// CPU the claude subtree consumed since the previous sample, and
+    /// how long ago that sample was taken.
+    cpu_delta_ns: u64,
+    since_sample: Duration,
+}
+
+/// May this pane's claude be reclaimed right now?
+///
+/// Deliberately conjunctive and default-deny: every unknown answers
+/// false.  The expensive mistake is killing a session that was doing
+/// something (an unanswered tool call, a background task, a turn in
+/// flight); the cheap mistake is leaving memory on the table for
+/// another hour.
+fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
+    e.quiescent
+        && e.awaiting_user
+        && e.held >= threshold
+        // A CPU sample only means something once it spans real time;
+        // the first sample after a restart spans none.
+        && e.since_sample >= Duration::from_secs(30)
+        && e.cpu_delta_ns <= IDLE_CPU_TOLERANCE_NS
+}
+
+/// What a dormant pane needs to wake itself up again, persisted so it
+/// survives an L1 self-execv (which drops every PaneSession).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DormantRecord {
+    shelld_sid: u64,
+    uuid: String,
+    profile_num: u8,
+}
+
+/// The resume command for a session, honouring its profile.  P0 / an
+/// unknown profile is the plain `claude` binary — `claude255` was what
+/// a naive `format!` produced, and it does not exist.
+fn resume_command(profile_num: u8, uuid: &str) -> String {
+    if profile_num == 0 || profile_num == u8::MAX {
+        format!("claude --resume {}\r", uuid)
+    } else {
+        format!("claude{} --resume {}\r", profile_num, uuid)
+    }
+}
+
+/// Serialise the dormant set, one record per line.  Hand-rolled
+/// because it is three fields and the project does not take a
+/// serialisation dependency for that.
+fn encode_dormant(records: &[DormantRecord]) -> String {
+    let mut s = String::new();
+    for r in records {
+        s.push_str(&format!("{}\t{}\t{}\n", r.shelld_sid, r.uuid, r.profile_num));
+    }
+    s
+}
+
+fn decode_dormant(text: &str) -> Vec<DormantRecord> {
+    text.lines()
+        .filter_map(|line| {
+            let mut it = line.split('\t');
+            let sid = it.next()?.parse::<u64>().ok()?;
+            let uuid = it.next()?.to_string();
+            let profile = it.next()?.parse::<u8>().ok()?;
+            // A uuid is the only field that can be typo'd into
+            // something dangerous (it lands in a shell command), so it
+            // is checked here rather than at the write site.
+            (!uuid.is_empty()
+                && uuid.len() <= 64
+                && uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+            .then_some(DormantRecord { shelld_sid: sid, uuid, profile_num: profile })
+        })
+        .collect()
+}
+
+/// Stage of the hibernate → dormant → wake cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HibernateStage {
+    /// SIGTERM sent, waiting for the pid to leave the process table.
+    Killing,
+    /// claude is gone; the pane holds its scrollback and waits for a
+    /// keypress.  This is where the memory saving lives, and it can
+    /// last indefinitely.
+    Dormant,
+    /// `claude --resume` written to the PTY; waiting for it to come
+    /// back before handing the keyboard over.
+    Waking,
+}
+
+/// PaneSession that reclaims an idle claude and brings it back on the
+/// next keypress.
+///
+/// It is a PaneSession rather than a plain kill because waking has to
+/// intercept the user's first keystroke: the pane's shell is sitting
+/// at its prompt with claude gone, and a key typed there would run as
+/// a shell command instead of resuming the session.
+struct HibernatePaneSession {
+    client: Arc<ShelldClient>,
+    uuid: String,
+    profile_num: u8,
+    /// The pid we are reclaiming; only meaningful in `Killing`.
+    claude_pid: i32,
+    stage: HibernateStage,
+    stage_since: SystemTime,
+    spin_phase: u8,
+}
+
+impl HibernatePaneSession {
+    fn pid_alive(pid: i32) -> bool {
+        unsafe {
+            if libc::kill(pid, 0) == 0 {
+                return true;
+            }
+            *libc::__error() != libc::ESRCH
+        }
+    }
+}
+
+impl crate::plugins::PaneSession for HibernatePaneSession {
+    fn caps(&self) -> u32 {
+        // No FREEZE_GRID: a dormant pane keeps showing its scrollback,
+        // which is the whole point — the session looks like it is
+        // still there, because as far as the user's history is
+        // concerned it is.
+        marspot::shell_proto::PANE_SESSION_CAP_INPUT
+            | marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS
+    }
+
+    fn on_user_key(
+        &mut self,
+        host: &dyn crate::plugins::PaneSessionHost,
+        _ev: &marspot::shell_proto::WireKeyEvent,
+    ) -> crate::plugins::KeyHandling {
+        match self.stage {
+            HibernateStage::Dormant => {
+                // Any key wakes it.  The key itself is swallowed: it
+                // was meant for claude, and claude is about to exist
+                // again — replaying it into the shell first would run
+                // it as a command.
+                let cmd = resume_command(self.profile_num, &self.uuid);
+                match self.client.send_input_to(host.shelld_session_id(), cmd.as_bytes()) {
+                    Ok(()) => {
+                        host.log(
+                            crate::plugins::LogLevel::Info,
+                            "hibernate.waking",
+                            &format!("keypress woke session {}", self.uuid),
+                        );
+                        self.stage = HibernateStage::Waking;
+                        self.stage_since = SystemTime::now();
+                    }
+                    Err(e) => {
+                        host.log(
+                            crate::plugins::LogLevel::Warn,
+                            "hibernate.resume_send_failed",
+                            &format!("{e}"),
+                        );
+                        // Hand the pane back rather than trapping the
+                        // user's keyboard in a session that cannot
+                        // wake.
+                        return crate::plugins::KeyHandling::EndSession;
+                    }
+                }
+                crate::plugins::KeyHandling::Swallow
+            }
+            // Mid-kill or mid-resume: swallow so a keystroke cannot
+            // land in the shell between claude dying and coming back.
+            _ => crate::plugins::KeyHandling::Swallow,
+        }
+    }
+
+    fn on_tick(&mut self, host: &dyn crate::plugins::PaneSessionHost) {
+        self.spin_phase = self.spin_phase.wrapping_add(1);
+        let elapsed = SystemTime::now()
+            .duration_since(self.stage_since)
+            .unwrap_or_default();
+        match self.stage {
+            HibernateStage::Killing => {
+                if !Self::pid_alive(self.claude_pid) {
+                    host.log(
+                        crate::plugins::LogLevel::Info,
+                        "hibernate.dormant",
+                        &format!("claude reclaimed; session {} is dormant", self.uuid),
+                    );
+                    self.stage = HibernateStage::Dormant;
+                    self.stage_since = SystemTime::now();
+                    host.set_badge(&format!("zZ {}", self.uuid));
+                    return;
+                }
+                if elapsed >= Duration::from_secs(3) {
+                    // Same escalation the profile cycle uses: SIGTERM
+                    // is the polite ask, SIGKILL is the deadline.
+                    unsafe { libc::kill(self.claude_pid, libc::SIGKILL) };
+                    host.log(
+                        crate::plugins::LogLevel::Warn,
+                        "hibernate.escalated_sigkill",
+                        &format!("pid={}", self.claude_pid),
+                    );
+                }
+                host.set_badge("zZ …");
+            }
+            HibernateStage::Dormant => {
+                // Re-assert the badge periodically rather than every
+                // tick: a core that respawned (silent update, crash)
+                // comes up with no badges, but this state can last
+                // hours and the tick is ~250 ms — one wire frame per
+                // pane per 250 ms for a pane that is doing nothing
+                // would be the definition of background creep.
+                if self.spin_phase % 64 == 0 {
+                    host.set_badge(&format!("zZ {}", self.uuid));
+                }
+            }
+            HibernateStage::Waking => {
+                host.set_badge(&format!(
+                    "zZ→ {}",
+                    ProfileCyclePaneSession::spinner_frame(self.spin_phase)
+                ));
+                // The scan will rebind the session and take the badge
+                // back over; give claude a moment to come up, then get
+                // out of the keyboard's way.
+                if elapsed >= Duration::from_secs(20) {
+                    host.end();
+                }
+            }
+        }
+    }
+
+    fn on_end(&mut self, host: &dyn crate::plugins::PaneSessionHost, _reason: crate::plugins::EndReason) {
+        host.log(
+            crate::plugins::LogLevel::Info,
+            "hibernate.ended",
+            &format!("session {} stage={:?}", self.uuid, self.stage),
+        );
+    }
 }
 
 /// RFC-003 §10 PaneSession that drives the claudecode profile cycle:
@@ -532,6 +815,9 @@ impl ClaudecodePlugin {
             last_mapping: HashMap::new(),
             last_meta: HashMap::new(),
             last_activity: HashMap::new(),
+            dormant: Vec::new(),
+            armed: std::collections::HashSet::new(),
+            cpu_samples: HashMap::new(),
             monitors: HashMap::new(),
             monitor_unsupported: false,
             worker: None,
@@ -670,6 +956,224 @@ impl ClaudecodePlugin {
                 LogLevel::Info,
                 "monitor.stop",
                 &format!("shelld_session={}", sid),
+            );
+        }
+    }
+
+    /// Reclaim the claude in any pane the state machine says has been
+    /// quiet long enough, and that shows no CPU of its own.
+    ///
+    /// Every gate here is a veto; nothing "votes for" hibernating.
+    /// The state machine already refuses to call a pane quiet without
+    /// three agreeing observations, so this adds only what the machine
+    /// cannot see: whether the subtree is burning CPU behind a silent
+    /// transcript, and how long ago we last looked.
+    fn run_idle_policy(&mut self, host: &dyn PluginHost, result: &ScanResult) {
+        let Some(threshold) = hibernate_after() else {
+            return;
+        };
+        let Some(client) = self.shelld.as_ref().cloned() else {
+            return;
+        };
+        let now = SystemTime::now();
+        for (sid, (cpu_now, sampled_at)) in &result.new_cpu {
+            if self.dormant.iter().any(|d| d.shelld_sid == *sid) {
+                continue; // already reclaimed
+            }
+            let Ok(Some(view)) = host.pane_status(*sid) else {
+                continue; // no machine for this pane yet
+            };
+            let Some((cpu_prev, prev_at)) = self.cpu_samples.get(sid).copied() else {
+                // First sample for this pane: record it and decide on
+                // the next pass, when there is a delta to look at.
+                self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
+                continue;
+            };
+            let evidence = IdleEvidence {
+                quiescent: view.quiescent,
+                awaiting_user: matches!(
+                    view.status,
+                    marspot::pane_state::PaneStatus::AwaitingUser
+                ),
+                held: view.held,
+                cpu_delta_ns: cpu_now.saturating_sub(cpu_prev),
+                since_sample: sampled_at.duration_since(prev_at).unwrap_or_default(),
+            };
+            if !should_hibernate(evidence, threshold) {
+                // Roll the sample forward only while NOT hibernating,
+                // so the window keeps pace with the scan.
+                self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
+                continue;
+            }
+            let Some(meta) = self.last_meta.get(sid).cloned() else {
+                continue;
+            };
+            // Re-verify the pid immediately before signalling it.
+            // `last_meta` is up to one scan old, pids are recycled by
+            // the kernel, and the consequence of acting on a stale one
+            // is sending SIGTERM to an unrelated process.  Cheap check,
+            // unbounded downside without it.
+            let still_claude = pidtree::proc_cmdline(meta.claude_pid)
+                .map(|line| {
+                    let first = line.split_whitespace().next().unwrap_or("");
+                    std::path::Path::new(first)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("claude") || n == "node")
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if !still_claude {
+                host.log(
+                    LogLevel::Warn,
+                    "hibernate.pid_no_longer_claude",
+                    &format!(
+                        "shelld_session={} pid={} is not claude any more; not signalling",
+                        sid, meta.claude_pid
+                    ),
+                );
+                self.cpu_samples.remove(sid);
+                continue;
+            }
+            host.log(
+                LogLevel::Info,
+                "hibernate.start",
+                &format!(
+                    "shelld_session={} uuid={} idle={}s cpu_delta={}ms over {}s — reclaiming pid {}",
+                    sid,
+                    meta.uuid,
+                    evidence.held.as_secs(),
+                    evidence.cpu_delta_ns / 1_000_000,
+                    evidence.since_sample.as_secs(),
+                    meta.claude_pid,
+                ),
+            );
+            // SIGTERM directly, not `/exit` through the PTY: the same
+            // reasoning as the profile cycle — no echo lands in the
+            // grid, and claude's own exit path is not a request we can
+            // be sure it will honour while idle.
+            unsafe { libc::kill(meta.claude_pid, libc::SIGTERM) };
+            let session = Box::new(HibernatePaneSession {
+                client: client.clone(),
+                uuid: meta.uuid.clone(),
+                profile_num: meta.profile_num,
+                claude_pid: meta.claude_pid,
+                stage: HibernateStage::Killing,
+                stage_since: now,
+                spin_phase: 0,
+            });
+            if let Err(e) = host.begin_pane_session(*sid, session) {
+                host.log(
+                    LogLevel::Warn,
+                    "hibernate.begin_pane_session_failed",
+                    &format!("{e}"),
+                );
+                continue;
+            }
+            self.dormant.push(DormantRecord {
+                shelld_sid: *sid,
+                uuid: meta.uuid,
+                profile_num: meta.profile_num,
+            });
+            self.persist_dormant(host);
+        }
+        // Forget samples for panes that are gone.
+        self.cpu_samples
+            .retain(|sid, _| result.sessions_seen.contains(sid));
+    }
+
+    /// Put the wake path back after it was lost.
+    ///
+    /// An L1 self-execv replaces the process and every PaneSession
+    /// with it, while the pane itself survives with claude already
+    /// reclaimed.  Without this, the next keystroke in a dormant pane
+    /// runs as a shell command and the session is only recoverable by
+    /// typing the resume line by hand.
+    ///
+    /// Also drops records for panes where claude is back (woken, or
+    /// started by the user), which is what keeps the set bounded.
+    fn rearm_dormant(&mut self, host: &dyn PluginHost, result: &ScanResult) {
+        let Some(client) = self.shelld.as_ref().cloned() else {
+            return;
+        };
+        let before = self.dormant.len();
+        // A pane that reports a binding again has a live claude: it is
+        // no longer dormant, whoever woke it.
+        self.dormant.retain(|d| {
+            !result.new_mapping.contains_key(&d.shelld_sid)
+                && result.sessions_seen.contains(&d.shelld_sid)
+        });
+        let rearm: Vec<DormantRecord> = self
+            .dormant
+            .iter()
+            .filter(|d| !self.armed.contains(&d.shelld_sid))
+            .cloned()
+            .collect();
+        for d in rearm {
+            let session = Box::new(HibernatePaneSession {
+                client: client.clone(),
+                uuid: d.uuid.clone(),
+                profile_num: d.profile_num,
+                claude_pid: 0,
+                // Straight to Dormant: there is nothing left to kill.
+                stage: HibernateStage::Dormant,
+                stage_since: SystemTime::now(),
+                spin_phase: 0,
+            });
+            match host.begin_pane_session(d.shelld_sid, session) {
+                Ok(()) => {
+                    self.armed.insert(d.shelld_sid);
+                    host.log(
+                        LogLevel::Info,
+                        "hibernate.rearmed",
+                        &format!(
+                            "dormant session {} can be woken again",
+                            d.uuid
+                        ),
+                    );
+                }
+                Err(e) => host.log(
+                    LogLevel::Warn,
+                    "hibernate.rearm_failed",
+                    &format!("{e}"),
+                ),
+            }
+        }
+        self.armed.retain(|sid| {
+            self.dormant.iter().any(|d| d.shelld_sid == *sid)
+        });
+        if self.dormant.len() != before {
+            self.persist_dormant(host);
+        }
+    }
+
+    /// Write the dormant set to the plugin's state dir.  Best-effort:
+    /// losing it costs a wake path, not a session.
+    fn persist_dormant(&self, host: &dyn PluginHost) {
+        let Ok(dir) = host.state_dir() else { return };
+        let path = dir.join("dormant.tsv");
+        if let Err(e) = fs::write(&path, encode_dormant(&self.dormant)) {
+            host.log(
+                LogLevel::Warn,
+                "hibernate.persist_failed",
+                &format!("{e}"),
+            );
+        }
+    }
+
+    /// Read back what an earlier process left dormant.  Called once at
+    /// init; `rearm_dormant` does the rest on the next scan.
+    fn load_dormant(&mut self, host: &dyn PluginHost) {
+        let Ok(dir) = host.state_dir() else { return };
+        let Ok(text) = fs::read_to_string(dir.join("dormant.tsv")) else {
+            return;
+        };
+        self.dormant = decode_dormant(&text);
+        if !self.dormant.is_empty() {
+            host.log(
+                LogLevel::Info,
+                "hibernate.loaded",
+                &format!("{} dormant session(s) carried over", self.dormant.len()),
             );
         }
     }
@@ -1069,6 +1573,9 @@ impl Plugin for ClaudecodePlugin {
         // Persistence dir set up now so PluginError::IoError surfaces
         // a bad config early instead of mid-tick.
         let _ = host.state_dir()?;
+        // Anything an earlier process left dormant still has its
+        // scrollback and its uuid; the next scan re-arms the wake path.
+        self.load_dormant(host);
         // Resolve ~/.claude/projects.  Without HOME there's nothing
         // to do — disable cleanly via a soft Err.
         let home = std::env::var_os("HOME").ok_or_else(|| {
@@ -1250,6 +1757,16 @@ impl Plugin for ClaudecodePlugin {
                     );
                 }
             }
+            // Idle reclamation runs off the same scan: the CPU samples
+            // it compares were taken by the worker in the same pass
+            // that produced these bindings.
+            self.run_idle_policy(host, &result);
+            // A pane that lost its claude while we had it marked
+            // dormant, with no session of ours attached (an L1
+            // self-execv drops every PaneSession), needs its wake path
+            // put back — otherwise the next keystroke lands in the
+            // shell and the session is only recoverable by hand.
+            self.rearm_dormant(host, &result);
             self.last_mapping = result.new_mapping;
             self.last_meta = result.new_meta;
         }
@@ -1515,6 +2032,10 @@ struct ScanResult {
     /// `shelld_session_id → what cc is doing there`.  Reported to the
     /// shell, which folds it into the pane's state machine.
     new_activity: HashMap<u64, CcActivity>,
+    /// `shelld_session_id → (claude subtree CPU ns, sampled at)`.
+    /// Taken in the same pass as the bindings so the idle policy
+    /// compares like with like.
+    new_cpu: HashMap<u64, (u64, SystemTime)>,
     /// Every live session the scan looked at, bound or not.  The ones
     /// missing from `new_activity` get reported as `Absent` — "claude
     /// is not in this pane" is an answer the machine needs, and it
@@ -1728,6 +2249,7 @@ impl WorkerCtx {
         let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
         let mut new_activity: HashMap<u64, CcActivity> = HashMap::new();
         let mut sessions_seen: Vec<u64> = Vec::new();
+        let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
         let sessions = match self.shelld.list_sessions() {
             Ok(v) => v,
             Err(e) => {
@@ -1736,7 +2258,7 @@ impl WorkerCtx {
                     "tick.shelld_list_failed",
                     format!("{e}"),
                 ));
-                return ScanResult { new_mapping, new_meta, new_activity, sessions_seen, log_lines };
+                return ScanResult { new_mapping, new_meta, new_activity, new_cpu, sessions_seen, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
@@ -1870,6 +2392,13 @@ impl WorkerCtx {
                     tail_activity(path, has_young_child),
                 );
             }
+            new_cpu.insert(
+                f.shelld_sid,
+                (
+                    pidtree::subtree_cpu_time_ns(f.claude_pid, &procs),
+                    SystemTime::now(),
+                ),
+            );
             new_mapping.insert(f.shelld_sid, badge);
             new_meta.insert(
                 f.shelld_sid,
@@ -1887,7 +2416,7 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
-        ScanResult { new_mapping, new_meta, new_activity, sessions_seen, log_lines }
+        ScanResult { new_mapping, new_meta, new_activity, new_cpu, sessions_seen, log_lines }
     }
 
     /// Reverse-lookup: encoded project dir → newest known session
@@ -2483,6 +3012,157 @@ mod tests {
     fn parse_session_id_returns_none_when_missing() {
         let path = tmpfile(r#"{"type":"user","text":"hello"}"#);
         assert!(parse_session_id(&path).is_none());
+    }
+
+    // ── idle reclamation policy ───────────────────────────────────
+    // Every one of these is about NOT killing something.  The upside
+    // of hibernating is memory; the downside is a lost turn, a lost
+    // pending tool call, or a lost background task — so the tests are
+    // written from the veto side.
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    fn idle_for(secs: u64) -> IdleEvidence {
+        IdleEvidence {
+            quiescent: true,
+            awaiting_user: true,
+            held: Duration::from_secs(secs),
+            cpu_delta_ns: 0,
+            since_sample: Duration::from_secs(120),
+        }
+    }
+
+    #[test]
+    fn hibernates_a_pane_that_has_been_quiet_past_the_threshold() {
+        assert!(should_hibernate(idle_for(3600), HOUR));
+        assert!(should_hibernate(idle_for(7200), HOUR));
+    }
+
+    #[test]
+    fn refuses_below_the_threshold() {
+        assert!(!should_hibernate(idle_for(3599), HOUR));
+        assert!(!should_hibernate(idle_for(0), HOUR));
+    }
+
+    /// The state machine's own verdict is a veto: without confirmed
+    /// quiescence nothing else matters.
+    #[test]
+    fn refuses_when_the_state_machine_is_not_confident() {
+        let e = IdleEvidence { quiescent: false, ..idle_for(7200) };
+        assert!(!should_hibernate(e, HOUR));
+    }
+
+    /// `Empty` is quiet too — an empty pane with no claude in it.
+    /// There is nothing to reclaim, and acting on it would mean
+    /// killing whatever the user is about to start.
+    #[test]
+    fn refuses_a_quiet_pane_that_has_no_claude() {
+        let e = IdleEvidence { awaiting_user: false, ..idle_for(7200) };
+        assert!(!should_hibernate(e, HOUR));
+    }
+
+    /// A silent transcript with a busy subtree is the case a
+    /// transcript-only policy would get wrong: a background task, or a
+    /// tool that hasn't written its result yet.
+    #[test]
+    fn refuses_when_the_subtree_is_burning_cpu() {
+        let e = IdleEvidence {
+            cpu_delta_ns: IDLE_CPU_TOLERANCE_NS + 1,
+            ..idle_for(7200)
+        };
+        assert!(!should_hibernate(e, HOUR));
+        // …but an idling MCP server's tick is under the tolerance and
+        // must not block reclamation forever.
+        let e = IdleEvidence {
+            cpu_delta_ns: IDLE_CPU_TOLERANCE_NS / 2,
+            ..idle_for(7200)
+        };
+        assert!(should_hibernate(e, HOUR));
+    }
+
+    /// A CPU delta measured across no time says nothing.  This is the
+    /// state right after a restart, when the first sample has just
+    /// been taken.
+    #[test]
+    fn refuses_on_a_cpu_sample_that_spans_no_time() {
+        let e = IdleEvidence { since_sample: Duration::from_secs(1), ..idle_for(7200) };
+        assert!(!should_hibernate(e, HOUR));
+    }
+
+    /// The resume line goes into a shell verbatim, so the profile
+    /// number has to produce a binary that exists — `claude255` was
+    /// what a naive format produced for "no profile".
+    #[test]
+    fn resume_command_uses_the_plain_binary_without_a_profile() {
+        assert_eq!(
+            resume_command(0, "abc-123"),
+            "claude --resume abc-123\r"
+        );
+        assert_eq!(
+            resume_command(u8::MAX, "abc-123"),
+            "claude --resume abc-123\r"
+        );
+        assert_eq!(
+            resume_command(3, "abc-123"),
+            "claude3 --resume abc-123\r"
+        );
+    }
+
+    #[test]
+    fn dormant_records_round_trip() {
+        let records = vec![
+            DormantRecord {
+                shelld_sid: 7,
+                uuid: "9cff8661-3275-4dce-8c93-89797bc63f44".into(),
+                profile_num: 1,
+            },
+            DormantRecord { shelld_sid: 9, uuid: "abc".into(), profile_num: 255 },
+        ];
+        assert_eq!(decode_dormant(&encode_dormant(&records)), records);
+    }
+
+    /// The uuid ends up inside a shell command line, so a corrupt or
+    /// tampered state file must not be able to smuggle anything into
+    /// it.  Rejected rows are dropped, not repaired.
+    #[test]
+    fn dormant_decode_rejects_a_uuid_that_is_not_a_uuid() {
+        let bad = "1\tabc; rm -rf ~\t1\n2\t\t1\n3\tok-uuid\tnot_a_number\n";
+        assert!(decode_dormant(bad).is_empty());
+        // A well-formed row alongside bad ones still survives.
+        let mixed = "1\tbad;line\t1\n2\tgood-uuid-1\t2\n";
+        assert_eq!(
+            decode_dormant(mixed),
+            vec![DormantRecord {
+                shelld_sid: 2,
+                uuid: "good-uuid-1".into(),
+                profile_num: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn hibernate_can_be_turned_off_and_tuned() {
+        // Serialised through the env, so keep the assertions in one
+        // test rather than racing sibling tests in the same process.
+        let key = "MARSPOT_CC_IDLE_HIBERNATE_S";
+        let saved = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, "0");
+            assert_eq!(hibernate_after(), None, "0 disables reclamation");
+            std::env::set_var(key, "90");
+            assert_eq!(hibernate_after(), Some(Duration::from_secs(90)));
+            std::env::set_var(key, "nonsense");
+            assert_eq!(
+                hibernate_after(),
+                Some(Duration::from_secs(3600)),
+                "an unparsable value falls back to the default rather than to off"
+            );
+            std::env::remove_var(key);
+            assert_eq!(hibernate_after(), Some(Duration::from_secs(3600)));
+            if let Some(v) = saved {
+                std::env::set_var(key, v);
+            }
+        }
     }
 
     // ── cc activity classification ────────────────────────────────
