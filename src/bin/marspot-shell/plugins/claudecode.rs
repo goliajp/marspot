@@ -374,6 +374,21 @@ fn hibernate_after() -> Option<Duration> {
 /// mean "cpu burned in the last minute", which is the question.
 const CPU_BASELINE_WINDOW: Duration = Duration::from_secs(60);
 
+/// How long a fresh dormant record is immune to being judged by a scan.
+///
+/// SIGTERM is not instantaneous: claude flushes its transcript and
+/// exits over several seconds, and every scan in that window still
+/// finds it in the process table and still holds its binding.  Read
+/// literally, that binding says "claude is back" — which drops the
+/// record that was just written, and with it the pane's wake path.
+///
+/// Comfortably longer than the observed exit (a couple of ticks) and
+/// far shorter than anything a person would notice.  The cost of being
+/// too generous is a record that lingers a few seconds after a wake;
+/// arming already asks the kernel whether the pane really has no
+/// claude, so a lingering record cannot misfire.
+const KILL_GRACE: Duration = Duration::from_secs(15);
+
 /// Processes a resting claude keeps around, measured on this host:
 /// an MCP server per session (`smix-mcp`), a language server it
 /// started (`rust-analyzer` and its proc-macro helper), and
@@ -1481,10 +1496,18 @@ impl ClaudecodePlugin {
         // A pane that reports a binding again has a live claude: it is
         // no longer dormant, whoever woke it.
         self.dormant.retain(|d| {
-            // Younger than this scan → the scan's facts predate the
-            // reclamation and say nothing about it.  Keep it; the next
-            // scan will judge it.
-            if result.scanned_at <= d.created_at {
+            // A scan may not judge a record until the kill it was made
+            // for has had time to land.  The scan that triggers the
+            // reclamation predates it, which is obvious; the ones for
+            // the next few seconds are the subtle case — claude takes
+            // longer than one 2 s tick to flush and exit, so those
+            // scans still find it alive and still hold its binding.
+            // Reading that as "claude is back" drops the record, and
+            // with it the wake path.  Observed on the real machine at
+            // 21:15: pane 384 was reclaimed and `dormant.tsv` was
+            // rewritten empty in the same minute, leaving the pane at
+            // a bare shell instead of a resumable session.
+            if result.scanned_at <= d.created_at + KILL_GRACE {
                 return true;
             }
             !result.new_mapping.contains_key(&d.shelld_sid)
@@ -4148,11 +4171,27 @@ mod tests {
             "the scan predates the record and says nothing about it"
         );
 
-        // A later scan, still showing a binding, does mean claude came
-        // back — and then the record goes.
+        // Nor may the scans taken while the kill is still landing.
+        // This is the one that shipped: claude takes longer than a
+        // tick to flush and exit, those scans still hold its binding,
+        // and reading that as "claude is back" emptied `dormant.tsv`
+        // seconds after the reclamation wrote it.
+        let mut during_kill = scan_with(7, 1, "u7");
+        during_kill.new_mapping.insert(7, "P1 u7".into());
+        during_kill.scanned_at = plugin.dormant[0].created_at + Duration::from_secs(2);
+        plugin.rearm_dormant(&host, &during_kill);
+        assert_eq!(
+            plugin.dormant.len(),
+            1,
+            "claude is still exiting; its lingering binding proves nothing"
+        );
+
+        // Past the grace window, a binding does mean claude came back —
+        // and then the record goes.
         let mut later = scan_with(7, 1, "u7");
         later.new_mapping.insert(7, "P1 u7".into());
-        later.scanned_at = SystemTime::now() + Duration::from_secs(1);
+        later.scanned_at =
+            plugin.dormant[0].created_at + KILL_GRACE + Duration::from_secs(1);
         plugin.rearm_dormant(&host, &later);
         assert!(plugin.dormant.is_empty(), "a later scan may judge it");
         let _ = fs::remove_dir_all(&dir);

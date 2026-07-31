@@ -28,7 +28,26 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.61**
+Current: **0.7.62**
+
+### 0.7.62
+
+**回收之后 `dormant.tsv` 又空了** —— 这次是杀进程期间的扫描判的死。
+
+0.7.4x 修过一次:触发回收的那次扫描是在 claude 还活着的时候取的,拿它去
+判刚写下的记录,读起来就是「claude 回来了」,当场删掉。加了
+`scanned_at <= created_at` 的守卫。
+
+漏掉的是**紧随其后的那几次**。SIGTERM 不是瞬时的,claude 要落盘、要退出,
+花的时间超过一个 2 秒 tick;这期间每次扫描都还能在进程表里看到它、还带着
+它的 binding。守卫只挡「更老的扫描」,挡不住「刚好在杀的过程中取的扫描」。
+
+真机证据:21:15:47 pane 384 被回收(30 分 22 秒闲置,门槛到点),
+`dormant.tsv` 同一分钟内被重写成空,pane 随后落到 `empty` 而不是
+`dormant` —— 唤醒路径没了,那个 session 只能手敲 resume 找回来。
+
+守卫改成 `created_at + KILL_GRACE`(15 秒)。多留几秒的代价是零:唤醒前
+本来就要问内核这个 pane 是不是真没有 claude,残留的记录不会误触发。
 
 ### 0.7.61
 
