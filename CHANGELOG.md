@@ -28,7 +28,19 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.43**
+Current: **0.7.57**
+
+### 0.7.57
+
+L1 只报「这个 pane 闲不闲」,**不透明度阶梯归渲染层**。
+
+上一版 L1 直接送 0.18 的 alpha,等于让 L1 决定看起来多暗。但「多暗」取决于
+**这是不是用户正在用的那个 pane** —— 那是渲染层才知道的事(L1 没有焦点
+信息,也不该为了这个去要)。
+
+现在 L1 送 `IDLE_MARK`(1.0),含义是「状态机认为它在歇着」;深浅由
+`render_metal::attention_scrim` 决定(见 L2 0.12.76)。判据仍在 L1(歇满
+5 分钟、或已停放),表现仍在 L2,各自只做自己知道的事。
 
 ### 0.7.56
 

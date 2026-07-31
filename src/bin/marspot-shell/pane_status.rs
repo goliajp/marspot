@@ -36,8 +36,8 @@ use marspot::pidtree;
 /// before anything may act on it.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long a pane must hold a quiet state before it visually
-/// recedes, and how far.
+/// How long a pane must hold a quiet state before it counts as
+/// resting.
 ///
 /// This is the generic half of the idle story, and deliberately the
 /// only half for a plain shell: a pane that has been sitting there
@@ -47,22 +47,23 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// pane's L3 + zsh come to ~6.7 MB, a fiftieth of what a claude
 /// costs.  So the shell layer stops at appearance.
 pub const IDLE_DIM_AFTER: Duration = Duration::from_secs(300);
-/// Deep enough to read as "resting", shallow enough that the content
-/// stays legible — this is a hint, not a curtain.
-pub const IDLE_DIM_ALPHA: f32 = 0.18;
+/// What L1 sends for "this one is resting".  A marker, not a shade —
+/// **how far** an idle pane recedes is the renderer's ladder
+/// (`render_metal::attention_scrim`), because it depends on something
+/// only the renderer knows: whether this is the pane the user is in.
+pub const IDLE_MARK: f32 = 1.0;
 
-/// The dim a pane should be drawn with, from its machine state.
+/// Is this pane resting, as far as the state machine can tell?
 ///
-/// A dormant pane (its program reclaimed) is dimmed immediately: it
-/// is not resting, it is parked, and the dim is the only thing on
-/// screen that says so — the picture behind it is frozen exactly as
-/// the user left it.
+/// A dormant pane (its program reclaimed) counts immediately: it is
+/// not resting, it is parked, and with its picture frozen the dim is
+/// the only thing on screen that says so.
 pub fn idle_dim_for(status: &PaneStatus, held: Duration) -> f32 {
     if matches!(status, PaneStatus::Dormant) {
-        return IDLE_DIM_ALPHA;
+        return IDLE_MARK;
     }
     if status.is_quiet() && held >= IDLE_DIM_AFTER {
-        return IDLE_DIM_ALPHA;
+        return IDLE_MARK;
     }
     0.0
 }
@@ -424,10 +425,10 @@ mod tests {
             idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER - Duration::from_secs(1)),
             0.0
         );
-        assert_eq!(idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER), IDLE_DIM_ALPHA);
+        assert_eq!(idle_dim_for(&PaneStatus::Empty, IDLE_DIM_AFTER), IDLE_MARK);
         assert_eq!(
             idle_dim_for(&PaneStatus::AwaitingUser, IDLE_DIM_AFTER),
-            IDLE_DIM_ALPHA
+            IDLE_MARK
         );
     }
 
@@ -436,7 +437,7 @@ mod tests {
     /// screen saying "this one is not live".
     #[test]
     fn a_dormant_pane_dims_immediately() {
-        assert_eq!(idle_dim_for(&PaneStatus::Dormant, Duration::ZERO), IDLE_DIM_ALPHA);
+        assert_eq!(idle_dim_for(&PaneStatus::Dormant, Duration::ZERO), IDLE_MARK);
     }
 
     /// Busy and unknown panes never dim — dimming something that is

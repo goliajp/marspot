@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.56"  # 只在内核确认 pane 里真没有 claude 时才挂唤醒会话;详见 CHANGELOG.md
-core    = "0.12.75"  # 新增 PaneIdle 帧 + 每 pane 闲置变暗(与 dormant/拖拽同一层 scrim,最深者胜);详见 CHANGELOG.md
+shell   = "0.7.57"  # L1 只报「闲不闲」,不透明度阶梯归渲染层;详见 CHANGELOG.md
+core    = "0.12.76"  # 不透明度阶梯:聚焦 100% / 其他 75% / 闲置 25%;详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md

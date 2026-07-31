@@ -2243,17 +2243,17 @@ fn build_instances(
     //    "you are moving THIS one" (the ⇢ title marker stays for the
     //    pointer-outside-any-window case).
     for (i, view) in views.iter().enumerate() {
-        // Three reasons a pane can recede, one primitive.  The
-        // deepest wins rather than stacking: two scrims at 0.22 read
-        // as one at 0.39, which is a different (and unintended)
-        // shade.
+        // Reasons a pane can recede, one primitive.  The deepest wins
+        // rather than stacking: two scrims at 0.22 read as one at
+        // 0.39, which is a different (and unintended) shade.
         let dimming = [
-            (drag_source == Some(i)).then_some(0.38),
-            view.dormant.then_some(0.22),
-            (view.idle_dim > 0.0).then_some(view.idle_dim),
+            (drag_source == Some(i)).then_some(DRAG_SOURCE_SCRIM),
+            view.dormant.then_some(EMPTY_SEAT_SCRIM),
+            Some(attention_scrim(view.focused, view.idle_dim > 0.0)),
         ]
         .into_iter()
         .flatten()
+        .filter(|a| *a > 0.0)
         .fold(None::<f32>, |acc, v| Some(acc.map_or(v, |a: f32| a.max(v))));
         let (Some(alpha), Some(rect)) = (dimming, layout.cells.get(i)) else {
             continue;
@@ -2631,6 +2631,38 @@ fn build_instances(
     // `encode_canvas` to draw in submission-order.  The variable
     // is consumed there.
     let _ = context_menu_state;
+}
+
+/// The attention ladder: how present a pane is, by whether the user
+/// is in it and whether it has been resting.
+///
+/// One pane is fully there — the one being used.  Everything else
+/// steps back a little, and a pane that has been idle steps back a
+/// lot.  The point is that a glance at the window should answer
+/// "where am I / what is still alive" before any reading happens.
+///
+/// Expressed as scrim alpha, which is `1 - opacity`: 0.25 scrim =
+/// 75 % opacity.
+const UNFOCUSED_SCRIM: f32 = 0.25;
+const IDLE_SCRIM: f32 = 0.75;
+/// Deeper than either, because dragging is a live gesture and the
+/// source pane has to read as "the one in your hand".
+const DRAG_SOURCE_SCRIM: f32 = 0.38;
+/// A seat a pane moved out of — nothing is running there, and the
+/// hint text has to stay readable through it.
+const EMPTY_SEAT_SCRIM: f32 = 0.22;
+
+/// Scrim for a pane from the attention ladder alone.
+///
+/// The focused pane is never dimmed, idle or not: whatever the state
+/// machine thinks, a pane the user is looking at is not resting from
+/// where they sit.
+fn attention_scrim(focused: bool, idle: bool) -> f32 {
+    match (focused, idle) {
+        (true, _) => 0.0,
+        (false, false) => UNFOCUSED_SCRIM,
+        (false, true) => IDLE_SCRIM,
+    }
 }
 
 /// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`
@@ -7538,16 +7570,11 @@ mod tests {
         );
     }
 
-    /// Translation-layer smoke test: feed a tiny one-session layout
-    /// + a grid with "AB" on it through `build_instances` and check
-    /// that the scratch vecs come out populated.  Doesn't render —
-    /// the BG/FG passes are tested end-to-end in the offscreen
-    /// tests above.
-    /// RFC-006 polish — the whole-cell scrims: a dormant view adds
-    /// exactly one overlay rect (the recess), a drag-source index adds
-    /// one (the dim), and a plain view adds none.
+    /// The drag source is the deepest reason of all: while a pane is
+    /// in the user's hand it has to read as picked up, deeper than
+    /// merely unfocused and deeper than an empty seat.
     #[test]
-    fn scrims_follow_dormant_and_drag_source() {
+    fn the_drag_source_reads_deeper_than_the_other_reasons() {
         use crate::layout::Layout;
         let device = match system_default_device() {
             Ok(d) => d,
@@ -7558,53 +7585,78 @@ mod tests {
         let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
-        let mk = |dormant: bool| SessionView {
-            grid: &grid, view_offset: 0, cursor_visible: false, focused: false,
+        let view = SessionView {
+            grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant, idle_dim: 0.0,
+            dormant: false, idle_dim: 0.0,
         };
-        let mut run = |view: SessionView, drag_source: Option<usize>| -> usize {
-            let mut overlay_rects = Vec::new();
-            build_instances(
-                &layout,
-                std::slice::from_ref(&view),
-                &[],
-                0,
-                true,
-                None,
-                None,
-                None,
-                None,
-                None,
-                drag_source,
-                None,
-                &mut font,
-                &mut atlas,
-                &mut color_atlas,
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut overlay_rects,
-            );
-            overlay_rects.len()
-        };
-        let plain = run(mk(false), None);
-        assert_eq!(run(mk(true), None), plain + 1, "dormant adds one recess scrim");
-        assert_eq!(run(mk(false), Some(0)), plain + 1, "drag source adds one dim scrim");
+        let mut overlay_rects = Vec::new();
+        build_instances(
+            &layout,
+            std::slice::from_ref(&view),
+            &[],
+            0,
+            true,
+            None, None, None, None, None,
+            Some(0), // this pane is being dragged
+            None,
+            &mut font,
+            &mut atlas,
+            &mut color_atlas,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut overlay_rects,
+        );
+        let scrims: Vec<f32> = overlay_rects
+            .iter()
+            .filter(|r| r.fill_color[0] == 0.0 && r.fill_color[3] > 0.0)
+            .map(|r| r.fill_color[3])
+            .collect();
+        assert!(
+            scrims.iter().any(|a| (*a - DRAG_SOURCE_SCRIM).abs() < 1e-6),
+            "a dragged pane wears the drag scrim even while focused, got {scrims:?}"
+        );
+        assert!(DRAG_SOURCE_SCRIM > EMPTY_SEAT_SCRIM);
     }
 
-    /// The idle scrim comes from the same primitive as the other two,
+
+    /// The attention ladder, as a table.  One pane is fully present,
+    /// the rest step back, a resting one steps back further — and the
+    /// pane the user is in is never dimmed, whatever the state machine
+    /// thinks of it.
+    #[test]
+    fn the_attention_ladder_puts_the_focused_pane_in_front() {
+        assert_eq!(attention_scrim(true, false), 0.0, "the pane you are in");
+        assert_eq!(
+            attention_scrim(true, true),
+            0.0,
+            "…even if it has been resting: you are in it now"
+        );
+        assert_eq!(attention_scrim(false, false), UNFOCUSED_SCRIM);
+        assert_eq!(attention_scrim(false, true), IDLE_SCRIM);
+        assert!(
+            IDLE_SCRIM > UNFOCUSED_SCRIM,
+            "resting has to read as further away than merely not-here"
+        );
+        // Opacity is what the user perceives; the constants are its
+        // complement, and the tiers are the ones asked for.
+        assert!((1.0 - UNFOCUSED_SCRIM - 0.75).abs() < 1e-6, "75 % opacity");
+        assert!((1.0 - IDLE_SCRIM - 0.25).abs() < 1e-6, "25 % opacity");
+    }
+
+    /// The scrim primitive is shared by every reason a pane recedes,
     /// and they do not stack: two 0.22 layers composite to 0.39, a
     /// shade nobody chose.
     #[test]
-    fn the_idle_scrim_draws_and_the_deepest_reason_wins() {
+    fn scrims_do_not_stack_the_deepest_reason_wins() {
         use crate::layout::Layout;
         let device = match system_default_device() {
             Ok(d) => d,
@@ -7615,12 +7667,12 @@ mod tests {
         let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
         let grid = crate::grid::Grid::new(10, 4);
         let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
-        let mk = |dormant: bool, idle_dim: f32| SessionView {
-            grid: &grid, view_offset: 0, cursor_visible: false, focused: false,
+        let mk = |focused: bool, dormant: bool, idle: f32| SessionView {
+            grid: &grid, view_offset: 0, cursor_visible: false, focused,
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant, idle_dim,
+            dormant, idle_dim: idle,
         };
         let mut scrim_alphas = |view: SessionView| -> Vec<f32> {
             let mut overlay_rects = Vec::new();
@@ -7630,13 +7682,7 @@ mod tests {
                 &[],
                 0,
                 true,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                None, None, None, None, None, None, None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -7656,22 +7702,24 @@ mod tests {
                 .map(|r| r.fill_color[3])
                 .collect()
         };
-        let live = scrim_alphas(mk(false, 0.0)).len();
-        assert_eq!(
-            scrim_alphas(mk(false, 0.18)).len(),
-            live + 1,
-            "an idle pane draws one scrim"
-        );
-        let both = scrim_alphas(mk(true, 0.18));
-        assert_eq!(
-            both.len(),
-            live + 1,
-            "an empty seat that is also idle still draws exactly one"
-        );
+        // Focused and live: nothing over it at all.
+        let focused = scrim_alphas(mk(true, false, 0.0));
         assert!(
-            both.iter().any(|a| (*a - 0.22).abs() < 1e-6),
-            "and it is the deeper of the two reasons, got {both:?}"
+            !focused.iter().any(|a| (*a - UNFOCUSED_SCRIM).abs() < 1e-6),
+            "the focused pane gets no attention scrim, got {focused:?}"
         );
+        // Unfocused and resting: one scrim, the idle one.
+        let idle = scrim_alphas(mk(false, false, 1.0));
+        assert!(
+            idle.iter().any(|a| (*a - IDLE_SCRIM).abs() < 1e-6),
+            "an idle pane recedes to the idle tier, got {idle:?}"
+        );
+        // Resting AND an empty seat: still one scrim, the deeper of
+        // the two.
+        let both = scrim_alphas(mk(false, true, 1.0));
+        let deep = both.iter().filter(|a| **a >= EMPTY_SEAT_SCRIM).count();
+        assert_eq!(deep, 1, "exactly one scrim, got {both:?}");
+        assert!(both.iter().any(|a| (*a - IDLE_SCRIM).abs() < 1e-6));
     }
 
     #[test]
