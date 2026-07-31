@@ -2163,6 +2163,18 @@ impl ShellApp {
                     MsgType::PaneIdle,
                     marspot::shell_proto::encode_pane_idle(*sid, alpha),
                 );
+                // On change only — a pane that stays rested for an
+                // hour is one line, not one per second.  Worth having:
+                // "the pane looks wrong" is otherwise unanswerable
+                // without a screenshot.
+                lx_info!(
+                    "shell.pane_idle_dim.changed",
+                    "pane dim changed",
+                    sid = *sid,
+                    alpha_pct = (alpha * 100.0) as u64,
+                    state = status.label().as_str(),
+                    held_s = held.as_secs()
+                );
             }
         }
         self.pane_idle_dim.retain(|sid, _| snapshot.contains_key(sid));

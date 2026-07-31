@@ -7600,6 +7600,80 @@ mod tests {
         assert_eq!(run(mk(false), Some(0)), plain + 1, "drag source adds one dim scrim");
     }
 
+    /// The idle scrim comes from the same primitive as the other two,
+    /// and they do not stack: two 0.22 layers composite to 0.39, a
+    /// shade nobody chose.
+    #[test]
+    fn the_idle_scrim_draws_and_the_deepest_reason_wins() {
+        use crate::layout::Layout;
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+        let grid = crate::grid::Grid::new(10, 4);
+        let layout = Layout::build(800.0, 600.0, 0.0, 0.0, 20.0, 1, 1, 8.0, 16.0);
+        let mk = |dormant: bool, idle_dim: f32| SessionView {
+            grid: &grid, view_offset: 0, cursor_visible: false, focused: false,
+            title: "", selection: None, ime_preedit: "", update_pending: false,
+            right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
+            highlight_spans: &[], search_overlay: None, seq: 0,
+            dormant, idle_dim,
+        };
+        let mut scrim_alphas = |view: SessionView| -> Vec<f32> {
+            let mut overlay_rects = Vec::new();
+            build_instances(
+                &layout,
+                std::slice::from_ref(&view),
+                &[],
+                0,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &mut font,
+                &mut atlas,
+                &mut color_atlas,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut overlay_rects,
+            );
+            overlay_rects
+                .iter()
+                .filter(|r| r.fill_color[0] == 0.0 && r.fill_color[3] > 0.0)
+                .map(|r| r.fill_color[3])
+                .collect()
+        };
+        let live = scrim_alphas(mk(false, 0.0)).len();
+        assert_eq!(
+            scrim_alphas(mk(false, 0.18)).len(),
+            live + 1,
+            "an idle pane draws one scrim"
+        );
+        let both = scrim_alphas(mk(true, 0.18));
+        assert_eq!(
+            both.len(),
+            live + 1,
+            "an empty seat that is also idle still draws exactly one"
+        );
+        assert!(
+            both.iter().any(|a| (*a - 0.22).abs() < 1e-6),
+            "and it is the deeper of the two reasons, got {both:?}"
+        );
+    }
+
     #[test]
     fn build_instances_emits_cells_and_glyphs() {
         use crate::grid::{Cell, Grid};
