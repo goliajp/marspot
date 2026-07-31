@@ -30,6 +30,18 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.48
+
+候选 pane 会说自己在等什么。
+
+`hibernate.waiting`,只在**原因变化**时落一行:「idle 1800s of 3600s」/
+「cpu sample spans only 5s」/「subtree burned 900ms of cpu in 60s」。
+只对**已经安静且在等用户**的 pane 说话 —— 比这更忙的不是候选,没有什么
+要解释;否则窗口里每个忙碌 pane 都会一秒一句。
+
+理由很实际:在第一次真回收发生之前,日志里什么都没有,而「什么都没发生」
+读起来跟「策略坏了」一模一样。现在这两件事分得开。
+
 ### 0.7.47
 
 idle 时钟跨 L1 自更新存活。

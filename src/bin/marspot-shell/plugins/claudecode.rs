@@ -160,6 +160,9 @@ pub struct ClaudecodePlugin {
     /// the previous scan, so the idle policy can look at a delta
     /// rather than an absolute.
     cpu_samples: HashMap<u64, (u64, SystemTime)>,
+    /// Last logged "why not yet" per candidate pane, so the reason is
+    /// logged on change rather than every scan.
+    blocked_reason: HashMap<u64, String>,
     /// RFC-003 C7 auto-retry monitor: one entry per shelld session
     /// currently running claudecode.  Created when a session first
     /// binds, dropped when the bind goes away.  See `MonitorState`.
@@ -373,6 +376,36 @@ struct IdleEvidence {
     /// how long ago that sample was taken.
     cpu_delta_ns: u64,
     since_sample: Duration,
+}
+
+/// Why a candidate pane was not reclaimed on this pass.
+///
+/// Only computed for panes the machine already calls quiet and
+/// awaiting their user — i.e. ones that are *going* to be reclaimed
+/// once something finishes ticking.  Anything busier than that is not
+/// a candidate and has nothing to explain.
+fn blocking_reason(e: IdleEvidence, threshold: Duration) -> Option<String> {
+    if should_hibernate(e, threshold) {
+        return None;
+    }
+    if !(e.quiescent && e.awaiting_user) {
+        return None; // not a candidate; not this log's business
+    }
+    Some(if e.held < threshold {
+        format!(
+            "idle {}s of {}s",
+            e.held.as_secs(),
+            threshold.as_secs()
+        )
+    } else if e.since_sample < Duration::from_secs(30) {
+        format!("cpu sample spans only {}s", e.since_sample.as_secs())
+    } else {
+        format!(
+            "subtree burned {}ms of cpu in {}s",
+            e.cpu_delta_ns / 1_000_000,
+            e.since_sample.as_secs()
+        )
+    })
 }
 
 /// May this pane's claude be reclaimed right now?
@@ -834,6 +867,7 @@ impl ClaudecodePlugin {
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             cpu_samples: HashMap::new(),
+            blocked_reason: HashMap::new(),
             monitors: HashMap::new(),
             monitor_unsupported: false,
             worker: None,
@@ -1018,11 +1052,28 @@ impl ClaudecodePlugin {
                 since_sample: sampled_at.duration_since(prev_at).unwrap_or_default(),
             };
             if !should_hibernate(evidence, threshold) {
+                // Say why, once per change of reason.  Without this the
+                // log shows nothing at all until the moment a session
+                // is reclaimed, and "nothing happened" reads the same
+                // whether the policy is waiting or broken.
+                if let Some(reason) = blocking_reason(evidence, threshold) {
+                    if self.blocked_reason.get(sid) != Some(&reason) {
+                        host.log(
+                            LogLevel::Info,
+                            "hibernate.waiting",
+                            &format!("shelld_session={} — {}", sid, reason),
+                        );
+                        self.blocked_reason.insert(*sid, reason);
+                    }
+                } else {
+                    self.blocked_reason.remove(sid);
+                }
                 // Roll the sample forward only while NOT hibernating,
                 // so the window keeps pace with the scan.
                 self.cpu_samples.insert(*sid, (*cpu_now, *sampled_at));
                 continue;
             }
+            self.blocked_reason.remove(sid);
             // This scan's binding, not the previous tick's: the pid
             // is about to be signalled, so it should be the freshest
             // one we have.  (`last_meta` is only updated after this
@@ -1101,6 +1152,8 @@ impl ClaudecodePlugin {
         }
         // Forget samples for panes that are gone.
         self.cpu_samples
+            .retain(|sid, _| result.sessions_seen.contains(sid));
+        self.blocked_reason
             .retain(|sid, _| result.sessions_seen.contains(sid));
     }
 
@@ -3691,6 +3744,43 @@ mod tests {
             since_sample: Duration::from_secs(300),
         };
         assert!(!should_hibernate(e, HOUR));
+    }
+
+    /// The log has to be able to say why a candidate is still waiting.
+    /// "Nothing happened" reads the same whether the policy is patient
+    /// or broken, and only one of those is fine.
+    #[test]
+    fn a_waiting_candidate_can_say_what_it_is_waiting_on() {
+        // Ready to go → nothing to explain.
+        assert_eq!(blocking_reason(idle_for(7200), HOUR), None);
+
+        // Still accruing idle time.
+        let r = blocking_reason(idle_for(1800), HOUR).expect("a reason");
+        assert!(r.contains("1800s of 3600s"), "got {r:?}");
+
+        // Past the threshold, but the CPU window is too short to mean
+        // anything yet.
+        let e = IdleEvidence {
+            since_sample: Duration::from_secs(5),
+            ..idle_for(7200)
+        };
+        let r = blocking_reason(e, HOUR).expect("a reason");
+        assert!(r.contains("spans only 5s"), "got {r:?}");
+
+        // Past the threshold, window fine, but something is running.
+        let e = IdleEvidence {
+            cpu_delta_ns: 900_000_000,
+            ..idle_for(7200)
+        };
+        let r = blocking_reason(e, HOUR).expect("a reason");
+        assert!(r.contains("900ms of cpu"), "got {r:?}");
+
+        // Not a candidate at all → silence, not noise.  Every busy pane
+        // in the window would otherwise explain itself once a second.
+        let e = IdleEvidence { awaiting_user: false, ..idle_for(7200) };
+        assert_eq!(blocking_reason(e, HOUR), None);
+        let e = IdleEvidence { quiescent: false, ..idle_for(7200) };
+        assert_eq!(blocking_reason(e, HOUR), None);
     }
 
     #[test]
