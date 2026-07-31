@@ -90,6 +90,10 @@ const MAX_PERSISTED_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// match, which is the correct outcome.
 type ClockFile = HashMap<u64, (String, SystemTime)>;
 
+/// `sid → bytelog size when the clocks were last written`.  Restored
+/// alongside them; see [`PaneStateTracker::pty_quiet`].
+type ByteFile = HashMap<u64, u64>;
+
 /// One machine per live session, plus the sweep clock.
 ///
 /// Bounded by construction: every sweep drops machines for sessions
@@ -106,6 +110,12 @@ pub struct PaneStateTracker {
     /// state is re-confirmed.  Entries are removed once used or once
     /// contradicted, so a stale one cannot be applied twice.
     restorable: ClockFile,
+    /// Bytelog sizes from the same file, consumed the first time each
+    /// pane is looked at.  Without these the clocks above are useless:
+    /// a fresh process has no idea when each pane last spoke, calls
+    /// them all busy for 30 s, and the restored clock — written for a
+    /// quiet state — fails to match and is thrown away.
+    restorable_bytes: ByteFile,
     /// What each plugin last reported per session.  Absent key = no
     /// plugin has spoken for that pane.
     reported: HashMap<u64, Activity>,
@@ -123,6 +133,7 @@ impl PaneStateTracker {
             machines: HashMap::new(),
             pty_bytes: HashMap::new(),
             restorable: HashMap::new(),
+            restorable_bytes: HashMap::new(),
             reported: HashMap::new(),
             any_report_seen: false,
             last_sweep: None,
@@ -154,7 +165,19 @@ impl PaneStateTracker {
             self.pty_bytes.remove(&sid);
             return true;
         };
-        let entry = self.pty_bytes.entry(sid).or_insert((size, now));
+        let seed = match self.restorable_bytes.remove(&sid) {
+            // Same size the previous process recorded: this pane has
+            // not said a word since, however long ago that was.  Seed
+            // it as already quiet — otherwise every silent update
+            // declares all eighteen panes busy for half a minute, which
+            // (being a different state) discards the very clocks the
+            // restart just restored, and a threshold measured in
+            // minutes can never be reached by a terminal that updates
+            // itself.
+            Some(prev) if prev == size => now.checked_sub(PTY_QUIET_AFTER).unwrap_or(now),
+            _ => now,
+        };
+        let entry = self.pty_bytes.entry(sid).or_insert((size, seed));
         if entry.0 != size {
             *entry = (size, now);
         }
@@ -174,17 +197,26 @@ impl PaneStateTracker {
         let Ok(text) = std::fs::read_to_string(Self::clock_path()) else {
             return 0;
         };
-        self.restorable = text
-            .lines()
-            .filter_map(|line| {
-                let mut it = line.split('\t');
-                let sid = it.next()?.parse::<u64>().ok()?;
-                let label = it.next()?.to_string();
-                let secs = it.next()?.parse::<u64>().ok()?;
-                (!label.is_empty())
-                    .then(|| (sid, (label, UNIX_EPOCH + Duration::from_secs(secs))))
-            })
-            .collect();
+        for line in text.lines() {
+            let mut it = line.split('\t');
+            let Some(sid) = it.next().and_then(|s| s.parse::<u64>().ok()) else {
+                continue;
+            };
+            let Some(label) = it.next().filter(|l| !l.is_empty()) else {
+                continue;
+            };
+            let Some(secs) = it.next().and_then(|s| s.parse::<u64>().ok()) else {
+                continue;
+            };
+            self.restorable
+                .insert(sid, (label.to_string(), UNIX_EPOCH + Duration::from_secs(secs)));
+            // Fourth column arrived after the third; a file written by
+            // an older build simply has no byte counts, and those panes
+            // start their quiet timer now.
+            if let Some(bytes) = it.next().and_then(|s| s.parse::<u64>().ok()) {
+                self.restorable_bytes.insert(sid, bytes);
+            }
+        }
         self.restorable.len()
     }
 
@@ -198,7 +230,8 @@ impl PaneStateTracker {
             // what actually has to survive.
             let started = SystemTime::now() - m.age(now);
             let secs = started.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-            out.push_str(&format!("{}\t{}\t{}\n", sid, m.status().label(), secs));
+            let bytes = self.pty_bytes.get(sid).map(|(n, _)| *n).unwrap_or(0);
+            out.push_str(&format!("{}\t{}\t{}\t{}\n", sid, m.status().label(), secs, bytes));
         }
         let path = Self::clock_path();
         if let Some(dir) = path.parent() {
@@ -321,6 +354,11 @@ mod tests {
     fn fg() -> Generic {
         Generic::Foreground { pgid: 600, leader: None }
     }
+
+    /// `MARSPOT_STATE_DIR` is process-global, so the tests that touch
+    /// real files serialise on this.  (nextest is process-per-test and
+    /// immune; keep `cargo test` correct too.)
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Step the tracker `n` times, one `SWEEP_INTERVAL` apart.
     fn steps<F: FnMut(i32) -> Generic + Copy>(
@@ -485,6 +523,98 @@ mod tests {
         ] {
             assert_eq!(recede_level_for(&s, Duration::from_secs(86_400)), 0, "{s:?}");
         }
+    }
+
+    /// The restored clock is worthless without the byte count that
+    /// goes with it.
+    ///
+    /// A fresh process cannot know when each pane last spoke, so it
+    /// starts every quiet timer at zero and calls all of them busy for
+    /// thirty seconds.  Busy is a different state than the one the
+    /// clock was written for, so the restore is discarded — and a
+    /// threshold measured in minutes can never be reached by a
+    /// terminal that silently updates itself.  Carrying the bytelog
+    /// size across is what makes "this pane has said nothing since"
+    /// answerable at startup.
+    #[test]
+    fn a_pane_that_has_said_nothing_since_the_restart_is_quiet_immediately() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-pane-clock-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let bytelog = dir.join("sessions").join("1").join("bytelog");
+        std::fs::create_dir_all(bytelog.parent().unwrap()).expect("temp dir");
+        std::fs::write(&bytelog, b"hello from the pty").expect("bytelog");
+        // SAFETY: single-threaded within this test, guarded by ENV_LOCK.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+
+        // One process watches the pane, sees it settle, and exits.
+        let base = Instant::now();
+        let mut first = PaneStateTracker::new();
+        first.report_activity(1, Activity::AwaitingUser);
+        // Long enough that its own quiet timer (30 s) has expired and
+        // the pane has been settled for a good while after that.
+        steps(&mut first, &[(1, 100)], base, 90, |_| fg());
+        assert_eq!(
+            first.snapshot(base + SWEEP_INTERVAL * 91)[&1].0,
+            PaneStatus::AwaitingUser,
+            "the first process should have settled before it saved"
+        );
+        first.save_clocks(base + SWEEP_INTERVAL * 91);
+
+        // Its successor picks the pane up where it was left.
+        let mut second = PaneStateTracker::new();
+        assert_eq!(second.load_clocks(), 1);
+        second.report_activity(1, Activity::AwaitingUser);
+        let out = steps(&mut second, &[(1, 100)], base, CONFIRM_TICKS as u64, |_| fg());
+        let (status, held, _) = second.snapshot(base + SWEEP_INTERVAL * 4)[&1].clone();
+        assert_eq!(
+            status,
+            PaneStatus::AwaitingUser,
+            "an unchanged bytelog means the pane never spoke, so it is quiet — \
+             not busy for the first 30 s; got {out:?}"
+        );
+        assert!(
+            held >= SWEEP_INTERVAL * 45,
+            "and it keeps the clock its predecessor was holding, got {held:?}"
+        );
+
+        // A pane that DID speak while nobody was watching starts over.
+        std::fs::write(&bytelog, b"hello from the pty, and then some more").expect("bytelog");
+        let mut third = PaneStateTracker::new();
+        third.load_clocks();
+        third.report_activity(1, Activity::AwaitingUser);
+        steps(&mut third, &[(1, 100)], base, CONFIRM_TICKS as u64, |_| fg());
+        assert_eq!(
+            third.snapshot(base + SWEEP_INTERVAL * 4)[&1].0,
+            PaneStatus::Busy(BusyKind::Output),
+            "new bytes since the save is exactly what the signal is for"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clock_file_from_an_older_build_still_loads() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-pane-clock-old-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // SAFETY: single-threaded within this test, guarded by ENV_LOCK.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &dir) };
+        // Three columns — the shape before byte counts existed.
+        std::fs::write(dir.join("pane-state-clock.tsv"), "7\tawaiting_user\t1700000000\n")
+            .expect("clock file");
+
+        let mut t = PaneStateTracker::new();
+        assert_eq!(t.load_clocks(), 1, "the clock still parses");
+        assert!(t.restorable_bytes.is_empty(), "with no byte count to go with it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
