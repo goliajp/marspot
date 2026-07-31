@@ -28,7 +28,71 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.40**
+Current: **0.7.42**
+
+### 0.7.42
+
+`child_pids` 的返回值是**条目数**不是字节数 —— 0.7.41 那个挂起作业检测
+一直是死的。
+
+真 PTY 上跑一遍就露了:起 `zsh -f`、`sleep 30`、`^Z`。表遍历看得见
+`comm=sleep status=4`(SSTOP),而 `observe_pane` 报 `Idle` —— 刚修的那个
+误放行一点没修上。
+
+根因是 `proc_listchildpids` 的两条约定跟隔壁 `proc_listpids` 不一样,
+我照后者写了:
+
+1. 返回值是写入的**条目数**,不是字节数。一个子进程返回 1;除以
+   `size_of::<pid_t>()` 得 0 —— 于是「少于 4 个子进程的进程」一律报告
+   没有子进程。
+2. NULL 探大小那次调用不给这份结果的大小:对一个只有一个子进程的进程
+   它回答 971。所以没有可探的大小,直接给缓冲区、满了翻倍。
+
+两条都是实测出来的。新增两个「合成数据永远抓不到」的测试:
+`child_pids_finds_a_real_child_process`(真起 `/bin/sleep` 钉约定)和
+`observe_pane_sees_a_suspended_job_on_a_real_pty`(真 PTY + 真 zsh,写
+0x1a 让行规程翻成 SIGTSTP,走用户那条路)。实测链路:Idle →
+Foreground{sleep} → ^Z → PromptWithJobs{stopped:1} → Busy(StoppedJobs)
+→ fg → Foreground。
+
+记一笔:测试第一版会挂死在 `Pty::drop`(pane 里留着 stopped 作业时),
+13 分钟后被 nextest SIGKILL。测试现在自己收尾(SIGCONT + SIGKILL 到作业
+组)。`Pty::drop` 遇到 stopped 作业该不该自己扛得住是 L3 teardown 的
+语义问题,单独记着,没混进这个改动。
+
+教训与 0.7.37-0.7.39 那三轮同一条,换了个面:**外部接口的行为要拿真
+东西验**。那三轮是 jsonl 的字段顺序,这轮是 libproc 的返回值语义;两次
+都是单测全绿而真机全错。
+
+### 0.7.41
+
+pane status 从「采样分类器 + 逐拍 diff」改成**真正的状态机**。
+
+旧的每轮从头算一个标签、跟上轮比。够用来看,不够用来动:没有合法转移
+的概念,两层矛盾无法表达,宣布一个 pane 安静之前没有确认,而且「这里
+没有 claude」是用「map 里没这一项」表达的。
+
+`marspot::pane_state`:
+
+- **两个输入字母表,一个合成态**。`Generic`(内核视角)× `Activity`
+  (插件视角)经 `compose` 一张表折成 `PaneStatus`。表写在文档注释里,
+  单测对**全叉乘**断言「有且只有两对是安静的」。
+- **矛盾是一个状态**。内核说这个 pane 一个进程都没有、插件却说 claude
+  正在半轮里 —— 有一边过期了(通常是绑定活过了进程)。`Contradiction`
+  显式留痕,任何策略都不许动它。
+- **缺席是一个状态**。`Activity::Absent`(这个 pane 没有 claude)跟
+  `Unknown`(还没人看过)分开;插件对每个存活 session 都报,包括没绑定
+  的那些。
+- **非对称滞回**。进安静态要 3 拍连续一致(`CONFIRM_TICKS`),出安静态
+  一拍即出。在只闪了一下的 pane 上动手是昂贵的错误。
+- **`quiescent()` 是唯一决策面**,消费者不许 match 裸变体。
+
+观测层同时补上唯一会误放行的盲区:读 `pbi_status` + 数 shell 手里的
+作业,`^Z` 挂起和 `cmd &` 后台作业不再和空 pane 同形。
+
+分层也摆正:插件只 `report_pane_activity` 报自己那层,合成、矛盾判定、
+滞回、决策全在 shell —— 插件不再自己拼 `fg,working` 字符串,也不再决定
+什么算可动。`PaneForeground` / `pane_foreground*` 整套删掉。
 
 ### 0.7.40
 

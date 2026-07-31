@@ -156,24 +156,40 @@ pub fn proc_row(pid: i32) -> Option<ProcRow> {
 /// in its own process group under the shell, whether it ends up in the
 /// foreground, the background, or suspended.
 pub fn child_pids(pid: i32) -> Vec<i32> {
-    unsafe {
-        let need = libc::proc_listchildpids(pid, std::ptr::null_mut(), 0);
-        if need <= 0 {
-            return Vec::new();
-        }
-        // Slop for children forked between sizing and reading.
-        let cap = need as usize / std::mem::size_of::<libc::pid_t>() + 8;
+    // Two things about this call are not what `proc_listpids` teaches,
+    // and both were measured rather than assumed after the first
+    // version of this function silently returned nothing:
+    //
+    //   1. The return value is the number of **entries** written, not
+    //      a byte count.  One child returns 1.  Dividing it by
+    //      `size_of::<pid_t>()` — the pattern the sibling API needs —
+    //      yields 0, i.e. "this process has no children", for every
+    //      process with fewer than four of them.
+    //   2. The NULL-buffer sizing call does not size *these* results:
+    //      asked about a process with exactly one child it answered
+    //      971.  So there is nothing to size against; pass a buffer
+    //      and grow it while it comes back full.
+    const START: usize = 64;
+    const MAX: usize = 4096;
+    let mut cap = START;
+    loop {
         let mut buf: Vec<libc::pid_t> = vec![0; cap];
-        let got = libc::proc_listchildpids(
-            pid,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            (buf.len() * std::mem::size_of::<libc::pid_t>()) as i32,
-        );
-        if got <= 0 {
+        let n = unsafe {
+            libc::proc_listchildpids(
+                pid,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                (buf.len() * std::mem::size_of::<libc::pid_t>()) as i32,
+            )
+        };
+        if n <= 0 {
             return Vec::new();
         }
-        buf.truncate(got as usize / std::mem::size_of::<libc::pid_t>());
-        buf.into_iter().filter(|p| *p > 0).collect()
+        let n = n as usize;
+        if n < cap || cap >= MAX {
+            buf.truncate(n.min(cap));
+            return buf.into_iter().filter(|p| *p > 0).collect();
+        }
+        cap *= 4;
     }
 }
 
@@ -799,7 +815,7 @@ mod tests {
     /// Nothing running and nothing held: the only shape that may be
     /// called empty.
     #[test]
-    fn classify_idle_needs_the_shell_in_front_AND_no_jobs() {
+    fn classify_idle_needs_the_shell_in_front_and_no_jobs() {
         assert_eq!(classify_pane(&shell(500), None, &[]), Generic::Idle);
     }
 
@@ -894,6 +910,143 @@ mod tests {
         } else {
             assert!(matches!(observed, Generic::Foreground { .. }));
         }
+    }
+
+    /// End-to-end on a real PTY with a real shell: run a job, `^Z` it,
+    /// and require the observation to change from `Foreground` to
+    /// `PromptWithJobs { stopped: 1 }`.
+    ///
+    /// This is the case the whole state machine was built for, and it
+    /// is exactly the one the synthetic rows above cannot prove: that
+    /// the kernel really does report a suspended job the way
+    /// `classify_pane` assumes (child of the shell, own process group,
+    /// `SSTOP`, with the shell back in front of the tty).  `^Z` is sent
+    /// as the byte the line discipline turns into SIGTSTP, not as a
+    /// signal we deliver ourselves, so the path is the user's path.
+    #[test]
+    fn observe_pane_sees_a_suspended_job_on_a_real_pty() {
+        use marspot_term::pty::{Pty, PtyConfig, TerminalSize};
+        use std::time::{Duration, Instant};
+
+        let mut pty = Pty::spawn(PtyConfig {
+            // `-f` skips rc files: this test is about the kernel's
+            // view, and the user's zsh setup is not part of it.
+            program: "/bin/zsh".into(),
+            args: vec!["-f".into()],
+            size: TerminalSize { cols: 80, rows: 24, pixel_width: 0, pixel_height: 0 },
+            argv0: None,
+            cwd: Some("/".into()),
+            env_remove_prefixes: vec!["MARSPOT_".into()],
+        })
+        .expect("spawn zsh on a pty");
+        let shell_pid = pty.child_pid();
+
+        // Drain whatever the shell prints; a full pty buffer would
+        // block it and stall the test for reasons unrelated to what is
+        // under test.  The master fd is blocking by default, so it has
+        // to be switched first — a blocking read on a quiet shell is a
+        // hang, not a drain (learned the direct way).
+        unsafe {
+            let fd = pty.raw_master();
+            let fl = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
+        }
+        let drain = |p: &Pty| {
+            let mut buf = [0u8; 4096];
+            while p.read_shared(&mut buf).unwrap_or(0) > 0 {}
+        };
+        let poll = |p: &Pty, want: &str, f: &dyn Fn(&Generic) -> bool| -> Generic {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                drain(p);
+                let g = observe_pane(shell_pid);
+                if f(&g) {
+                    return g;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for {want}; last observation {g:?}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        // Wait for the shell itself to settle at a prompt first, so a
+        // slow startup can't be mistaken for the job we start next.
+        poll(&pty, "the shell to reach its prompt", &|g| {
+            matches!(g, Generic::Idle)
+        });
+
+        pty.write(b"sleep 30\n").expect("write to the pty");
+        let fg = poll(&pty, "the job to take the tty", &|g| {
+            matches!(g, Generic::Foreground { .. })
+        });
+        let Generic::Foreground { leader, .. } = &fg else {
+            unreachable!()
+        };
+        assert_eq!(
+            leader.as_ref().map(|l| l.comm.as_str()),
+            Some("sleep"),
+            "the foreground job should be the one we started"
+        );
+
+        // 0x1a = ^Z.  The line discipline turns it into SIGTSTP for
+        // the foreground group.
+        pty.write(&[0x1a]).expect("send ^Z");
+        let suspended = poll(&pty, "the job to be suspended", &|g| {
+            matches!(g, Generic::PromptWithJobs { .. })
+        });
+        assert_eq!(
+            suspended,
+            Generic::PromptWithJobs { stopped: 1, running: 0 },
+            "a ^Z'd job must read as one stopped job, not as an idle pane"
+        );
+        // …and the composed state must not be quiet.
+        let status = crate::pane_state::compose(
+            &suspended,
+            crate::pane_state::Activity::AwaitingUser,
+        );
+        assert!(
+            !status.is_quiet(),
+            "composed state {status:?} must not be quiet with a job parked in the pane"
+        );
+
+        // Tear down what this test parked in the pane, BEFORE `Pty`'s
+        // Drop runs: a stopped job left behind makes that Drop block
+        // (measured — the test sat in it for 13 minutes until nextest
+        // SIGKILLed the process).  Whether Drop should survive a
+        // stopped job on its own is a separate question about `Pty`;
+        // this test is about the classification and cleans up after
+        // itself either way.
+        for pid in child_pids(shell_pid) {
+            if let Some(row) = proc_row(pid) {
+                unsafe {
+                    libc::killpg(row.pgid, libc::SIGCONT);
+                    libc::killpg(row.pgid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// Pins the calling convention against a real child.  The first
+    /// version of `child_pids` treated the return value as a byte
+    /// count and so reported "no children" for every process with
+    /// fewer than four — which made the whole suspended-job detection
+    /// inert while every synthetic test still passed.
+    #[test]
+    fn child_pids_finds_a_real_child_process() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn /bin/sleep");
+        // The child is visible as soon as fork returns; no wait needed
+        // beyond the spawn itself.
+        let me = std::process::id() as i32;
+        let kids = child_pids(me);
+        let found = kids.contains(&(child.id() as i32));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found, "spawned child {} missing from {:?}", child.id(), kids);
     }
 
     #[test]
