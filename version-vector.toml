@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.51"  # CPU 基线跨扫描保留 —— 否则采样窗永远是 2s,回收从来不可能触发;详见 CHANGELOG.md
+shell   = "0.7.52"  # dormant 记录不许被「建它的那次扫描」判死 —— 真机回收后 dormant.tsv 是空的;详见 CHANGELOG.md
 core    = "0.12.73"  # 只重编:logx 目录自愈(见 L3 0.11.33);详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md

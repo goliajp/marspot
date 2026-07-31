@@ -477,6 +477,14 @@ struct DormantRecord {
     shelld_sid: u64,
     uuid: String,
     profile_num: u8,
+    /// When this pane was parked.  A record may only be judged
+    /// ("is the program back?") by a scan that ran AFTER it was
+    /// created — the scan that triggers the reclamation was taken
+    /// while the program was still alive, so judging by it drops the
+    /// record the instant it is made.  That shipped: `dormant.tsv`
+    /// came out empty and the wake path would not have survived a
+    /// restart.
+    created_at: SystemTime,
 }
 
 /// The resume command for a session, honouring its profile.  P0 / an
@@ -496,7 +504,15 @@ fn resume_command(profile_num: u8, uuid: &str) -> String {
 fn encode_dormant(records: &[DormantRecord]) -> String {
     let mut s = String::new();
     for r in records {
-        s.push_str(&format!("{}\t{}\t{}\n", r.shelld_sid, r.uuid, r.profile_num));
+        let secs = r
+            .created_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        s.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            r.shelld_sid, r.uuid, r.profile_num, secs
+        ));
     }
     s
 }
@@ -508,13 +524,26 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
             let sid = it.next()?.parse::<u64>().ok()?;
             let uuid = it.next()?.to_string();
             let profile = it.next()?.parse::<u8>().ok()?;
+            // 4th column added later; a file without it decodes as
+            // epoch, i.e. "old enough to be judged", which is the
+            // right answer for a record from a previous process.
+            let created_at = it
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
+                .unwrap_or(std::time::UNIX_EPOCH);
             // A uuid is the only field that can be typo'd into
             // something dangerous (it lands in a shell command), so it
             // is checked here rather than at the write site.
             (!uuid.is_empty()
                 && uuid.len() <= 64
                 && uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-            .then_some(DormantRecord { shelld_sid: sid, uuid, profile_num: profile })
+            .then_some(DormantRecord {
+                shelld_sid: sid,
+                uuid,
+                profile_num: profile,
+                created_at,
+            })
         })
         .collect()
 }
@@ -1182,6 +1211,7 @@ impl ClaudecodePlugin {
                 shelld_sid: *sid,
                 uuid: meta.uuid,
                 profile_num: meta.profile_num,
+                created_at: SystemTime::now(),
             });
             self.persist_dormant(host);
         }
@@ -1210,6 +1240,12 @@ impl ClaudecodePlugin {
         // A pane that reports a binding again has a live claude: it is
         // no longer dormant, whoever woke it.
         self.dormant.retain(|d| {
+            // Younger than this scan → the scan's facts predate the
+            // reclamation and say nothing about it.  Keep it; the next
+            // scan will judge it.
+            if result.scanned_at <= d.created_at {
+                return true;
+            }
             !result.new_mapping.contains_key(&d.shelld_sid)
                 && result.sessions_seen.contains(&d.shelld_sid)
         });
@@ -2146,6 +2182,9 @@ struct ScanResult {
     /// Taken in the same pass as the bindings so the idle policy
     /// compares like with like.
     new_cpu: HashMap<u64, (u64, SystemTime)>,
+    /// When this scan's facts were gathered.  A dormant record newer
+    /// than this must not be judged by it — see `DormantRecord`.
+    scanned_at: SystemTime,
     /// Every live session the scan looked at, bound or not.  The ones
     /// missing from `new_activity` get reported as `Absent` — "claude
     /// is not in this pane" is an answer the machine needs, and it
@@ -2359,6 +2398,7 @@ impl WorkerCtx {
         let mut new_meta: HashMap<u64, BindMeta> = HashMap::new();
         let mut new_activity: HashMap<u64, CcActivity> = HashMap::new();
         let mut sessions_seen: Vec<u64> = Vec::new();
+        let scanned_at = SystemTime::now();
         let mut new_cpu: HashMap<u64, (u64, SystemTime)> = HashMap::new();
         let sessions = match self.shelld.list_sessions() {
             Ok(v) => v,
@@ -2368,7 +2408,7 @@ impl WorkerCtx {
                     "tick.shelld_list_failed",
                     format!("{e}"),
                 ));
-                return ScanResult { new_mapping, new_meta, new_activity, new_cpu, sessions_seen, log_lines };
+                return ScanResult { new_mapping, new_meta, new_activity, new_cpu, scanned_at, sessions_seen, log_lines };
             }
         };
         let procs = pidtree::list_all_procs();
@@ -2526,7 +2566,7 @@ impl WorkerCtx {
             // state and drown the file.
         }
 
-        ScanResult { new_mapping, new_meta, new_activity, new_cpu, sessions_seen, log_lines }
+        ScanResult { new_mapping, new_meta, new_activity, new_cpu, scanned_at, sessions_seen, log_lines }
     }
 
     /// Reverse-lookup: encoded project dir → newest known session
@@ -3355,6 +3395,7 @@ mod tests {
             new_meta: scan.new_meta.clone(),
             new_activity: scan.new_activity.clone(),
             new_cpu: HashMap::new(),
+            scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
         };
@@ -3373,6 +3414,7 @@ mod tests {
             new_meta: first.new_meta.clone(),
             new_activity: first.new_activity.clone(),
             new_cpu: HashMap::new(),
+            scanned_at: SystemTime::now(),
             sessions_seen: vec![1],
             log_lines: Vec::new(),
         };
@@ -3578,6 +3620,7 @@ mod tests {
             new_meta,
             new_activity: HashMap::new(),
             new_cpu,
+            scanned_at: SystemTime::now(),
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
         }
@@ -3722,6 +3765,55 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A record must not be judged by a scan older than itself.
+    ///
+    /// The scan that triggers a reclamation was taken while claude was
+    /// still alive, so it still holds a binding for that pane — judging
+    /// the fresh record by it reads as "claude is back" and drops it on
+    /// the spot.  That shipped: three sessions were reclaimed on the
+    /// real machine at 10:14 and `dormant.tsv` came out **empty**, so
+    /// the wake path would not have survived the next restart.
+    #[test]
+    fn a_record_is_not_dropped_by_the_scan_that_created_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let host = FakeHost::new(dir.clone());
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+
+        // The scan that will trigger the reclamation: taken while the
+        // binding was still live.
+        let mut scan = scan_with(7, 1, "u7");
+        scan.new_mapping.insert(7, "P1 u7".into());
+        // …and the record created just after it.
+        plugin.dormant.push(DormantRecord {
+            shelld_sid: 7,
+            uuid: "u7".into(),
+            profile_num: 1,
+            created_at: scan.scanned_at + Duration::from_millis(1),
+        });
+
+        plugin.rearm_dormant(&host, &scan);
+        assert_eq!(
+            plugin.dormant.len(),
+            1,
+            "the scan predates the record and says nothing about it"
+        );
+
+        // A later scan, still showing a binding, does mean claude came
+        // back — and then the record goes.
+        let mut later = scan_with(7, 1, "u7");
+        later.new_mapping.insert(7, "P1 u7".into());
+        later.scanned_at = SystemTime::now() + Duration::from_secs(1);
+        plugin.rearm_dormant(&host, &later);
+        assert!(plugin.dormant.is_empty(), "a later scan may judge it");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A pane whose claude came back (woken, or restarted by hand)
     /// stops being dormant, which is what keeps the set bounded.
     #[test]
@@ -3736,8 +3828,18 @@ mod tests {
         let mut plugin = ClaudecodePlugin::new();
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
         plugin.dormant = vec![
-            DormantRecord { shelld_sid: 7, uuid: "u7".into(), profile_num: 1 },
-            DormantRecord { shelld_sid: 8, uuid: "u8".into(), profile_num: 1 },
+            DormantRecord {
+                shelld_sid: 7,
+                uuid: "u7".into(),
+                profile_num: 1,
+                created_at: std::time::UNIX_EPOCH,
+            },
+            DormantRecord {
+                shelld_sid: 8,
+                uuid: "u8".into(),
+                profile_num: 1,
+                created_at: std::time::UNIX_EPOCH,
+            },
         ];
 
         let mut scan = scan_with(7, 1, "u7");
@@ -3792,6 +3894,7 @@ mod tests {
             shelld_sid: 7,
             uuid: "u".into(),
             profile_num: 1,
+            created_at: std::time::UNIX_EPOCH,
         }];
         assert_eq!(activity_for_unbound(7, &parked), CcActivity::Dormant);
         assert_eq!(activity_for_unbound(8, &parked), CcActivity::Absent);
@@ -3953,13 +4056,22 @@ mod tests {
 
     #[test]
     fn dormant_records_round_trip() {
+        // Whole seconds: the file stores unix seconds, so a round
+        // trip cannot carry sub-second precision.
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(1_785_000_000);
         let records = vec![
             DormantRecord {
                 shelld_sid: 7,
                 uuid: "9cff8661-3275-4dce-8c93-89797bc63f44".into(),
                 profile_num: 1,
+                created_at: t,
             },
-            DormantRecord { shelld_sid: 9, uuid: "abc".into(), profile_num: 255 },
+            DormantRecord {
+                shelld_sid: 9,
+                uuid: "abc".into(),
+                profile_num: 255,
+                created_at: t,
+            },
         ];
         assert_eq!(decode_dormant(&encode_dormant(&records)), records);
     }
@@ -3972,13 +4084,16 @@ mod tests {
         let bad = "1\tabc; rm -rf ~\t1\n2\t\t1\n3\tok-uuid\tnot_a_number\n";
         assert!(decode_dormant(bad).is_empty());
         // A well-formed row alongside bad ones still survives.
+        // A row without the 4th column is an older file: it decodes,
+        // with a creation time old enough to be judged normally.
         let mixed = "1\tbad;line\t1\n2\tgood-uuid-1\t2\n";
         assert_eq!(
             decode_dormant(mixed),
             vec![DormantRecord {
                 shelld_sid: 2,
                 uuid: "good-uuid-1".into(),
-                profile_num: 2
+                profile_num: 2,
+                created_at: std::time::UNIX_EPOCH,
             }]
         );
     }

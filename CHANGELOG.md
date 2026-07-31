@@ -30,6 +30,31 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.52
+
+dormant 记录不许被「创建它的那次扫描」判死。
+
+第一次真回收发生了(10:14:11,三个 session,idle 5408s,cpu_delta 1-2ms
+over 30s,一秒内全部进 dormant,claude 从 4.64GB 降到 3.92GB)。但
+`dormant.tsv` **是空的**,而且那三个 pane 的合成状态走成了
+`awaiting_user → contradiction:idle/awaiting_user → empty`,不是
+`dormant`。
+
+根因:`rearm_dormant` 用 `result.new_mapping` 判断「claude 是不是回来
+了」,而触发这次回收的那份扫描是**杀之前**采的 —— 那时绑定当然还在。于是
+刚建好的记录当场被判成「回来了」删掉:内存里没了、盘上写成空、
+`activity_for_unbound` 于是报 `Absent` 而不是 `Dormant`。
+
+后果不是理论上的:唤醒会话还挂在内存里(所以按键仍能唤醒),但**下一次
+自更新之后就没了** —— 那三个 session 只能靠手敲 resume 命令找回。
+
+改:`DormantRecord` 记 `created_at`,`ScanResult` 记 `scanned_at`,
+一条记录只能被**比它新**的扫描判决。落盘加第 4 列,老文件缺列时读作
+epoch(即「足够老,正常判决」)。
+
+现场那三条记录我按日志里的 uuid 和 profile 手工写回了 dormant.tsv,
+新版本会在下一轮扫描里重新挂上唤醒会话。
+
 ### 0.7.51
 
 CPU 基线跨扫描保留 —— 否则回收**从来不可能触发**。
