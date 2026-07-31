@@ -30,6 +30,23 @@ the regression — the entry belongs in this file.
 
 Current: **0.7.43**
 
+### 0.7.56
+
+只在**内核确认** pane 里真的没有 claude 时,才给它挂唤醒会话。
+
+重新挂载唤醒(重启后)原来只看扫描的绑定表:「没有绑定」就当「没有
+claude」。但绑定会比重启慢一两拍 —— 在那个窗口里给一个**已经有活 claude**
+的 pane 挂上唤醒会话,下一次聚焦就会把 `claude --resume …` 敲进那个正在
+跑的 claude 的输入框里,停在那儿等用户按回车。
+
+这正是用户报的「必须要回车才能完成 resume 的输入」的形状。这次真机上没
+撞到(19:07 那次唤醒查下来是正常的:焦点触发 → 注入带 profile 的 resume →
+2 秒后 `session.bound P1@opus`),但触发条件随时都在。
+
+改成问内核:重新挂载前走一次 proc 表,pane 底下真没有 claude 才挂;
+`shell_pid_for` 查不到那个 session(0)也拒绝 —— 查不到的 pane 不等于空的
+pane。一次 proc 表遍历换掉一整类「把命令敲进别人输入框」的 bug。
+
 ### 0.7.55
 
 resume 把 profile 带回来;读不到 profile 就不回收。

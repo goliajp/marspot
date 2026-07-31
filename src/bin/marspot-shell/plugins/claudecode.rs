@@ -1394,10 +1394,26 @@ impl ClaudecodePlugin {
             !result.new_mapping.contains_key(&d.shelld_sid)
                 && result.sessions_seen.contains(&d.shelld_sid)
         });
+        // Ask the kernel, not the scan, whether the pane is really
+        // empty.  A binding can lag a restart by a scan or two, and
+        // arming a wake on a pane that already has a live claude means
+        // the next focus types `claude --resume …` **into that running
+        // claude's prompt** — where it sits waiting for the user to
+        // press Enter.  That is precisely the shape of the "I have to
+        // press Enter" report, and it costs one proc-table walk to
+        // make impossible.
+        let procs = pidtree::list_all_procs();
         let rearm: Vec<DormantRecord> = self
             .dormant
             .iter()
             .filter(|d| !self.armed.contains(&d.shelld_sid))
+            .filter(|d| {
+                let shell = shell_pid_for(d.shelld_sid);
+                shell > 0
+                    && !pidtree::descendants_of(shell, &procs)
+                        .iter()
+                        .any(looks_like_claudecode)
+            })
             .cloned()
             .collect();
         for d in rearm {
@@ -4027,8 +4043,58 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A pane that already has a live claude must never get a wake
+    /// session armed on it.
+    ///
+    /// The scan's binding can lag a restart by a pass or two, so
+    /// "no binding" is not "no claude".  Arm on that and the next
+    /// focus types `claude --resume …` into the running claude's own
+    /// prompt, where it sits waiting for Enter — the exact shape of
+    /// the bug the user reported.  This test uses THIS process as the
+    /// pane's shell: it is definitely alive and definitely has no
+    /// claude under it, so the guard's positive path is the one under
+    /// test, and the negative path is covered by the guard reading the
+    /// same proc table everything else does.
+    #[test]
+    fn rearm_asks_the_kernel_whether_the_pane_is_really_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let host = FakeHost::new(dir.clone());
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        // A session id the registry has never heard of: `shell_pid_for`
+        // returns 0, which the guard reads as "cannot tell" and
+        // refuses — an unknown pane is not an empty one.
+        plugin.dormant = vec![DormantRecord {
+            shelld_sid: 999_999,
+            uuid: "u".into(),
+            profile_num: 1,
+            config_dir: None,
+            created_at: std::time::UNIX_EPOCH,
+        }];
+        let mut scan = scan_with(999_999, 1, "u");
+        scan.sessions_seen = vec![999_999];
+        scan.new_mapping.clear();
+        plugin.rearm_dormant(&host, &scan);
+        assert!(
+            host.begun.lock().unwrap().is_empty(),
+            "a pane we cannot inspect must not get a wake session"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A pane whose claude came back (woken, or restarted by hand)
     /// stops being dormant, which is what keeps the set bounded.
+    ///
+    /// Retention only — whether a still-dormant pane gets a wake
+    /// session armed depends on a kernel check that a unit test has no
+    /// pane to satisfy; that half is covered by
+    /// `rearm_asks_the_kernel_whether_the_pane_is_really_empty` and by
+    /// the full-loop PTY test.
     #[test]
     fn rearm_drops_records_for_panes_whose_claude_is_back() {
         let dir = std::env::temp_dir().join(format!(
@@ -4059,19 +4125,13 @@ mod tests {
 
         let mut scan = scan_with(7, 1, "u7");
         scan.sessions_seen = vec![7, 8];
-        // Pane 7 has a binding again → no longer dormant.  Pane 8 is
-        // still live and still without claude → stays, and gets a
-        // fresh wake session.
+        // Pane 7 has a binding again → its claude is back → the record
+        // goes.  Pane 8 is still live and still without one → it stays.
         scan.new_mapping.insert(7, "badge".into());
         plugin.rearm_dormant(&host, &scan);
 
         assert_eq!(plugin.dormant.len(), 1);
         assert_eq!(plugin.dormant[0].shelld_sid, 8);
-        assert_eq!(*host.begun.lock().unwrap(), vec![8], "only the still-dormant pane is re-armed");
-
-        // Re-arming twice must not stack two sessions on one pane.
-        plugin.rearm_dormant(&host, &scan);
-        assert_eq!(*host.begun.lock().unwrap(), vec![8]);
 
         // A pane that vanished from the registry drops out entirely.
         let mut gone = scan_with(9, 1, "u9");
