@@ -631,12 +631,23 @@ struct DormantRecord {
 /// no branch for it here: the caller must not reclaim a session it
 /// cannot name the profile of.  See `PROFILE_UNKNOWN`.
 fn resume_command(config_dir: Option<&str>, uuid: &str) -> String {
+    // Wipe the screen first, in the same line.
+    //
+    // The typed line is echoed by the shell and sits under the frozen
+    // frame; the freeze means nobody watches it happen, but it is
+    // still there when the freeze lifts — a shell prompt and a
+    // `claude --resume …` line wedged above the restored session.
+    // Erasing the display as the first thing the line does leaves the
+    // pane showing only what claude paints.  `\033[2J` and nothing
+    // else: `\033[3J` would take the scrollback with it, and the
+    // scrollback is the user's.
+    let clear = "printf '\\033[H\\033[2J'; ";
     match config_dir.filter(|d| shell_safe(d)) {
-        Some(dir) => format!("CLAUDE_CONFIG_DIR='{}' claude --resume {}\r", dir, uuid),
+        Some(dir) => format!("{}CLAUDE_CONFIG_DIR='{}' claude --resume {}\r", clear, dir, uuid),
         // No observed dir: the default profile's own entry point.  The
         // caller refuses to reclaim a session whose profile it could
         // not read, so this branch is the genuine P0 case.
-        None => format!("claude --resume {}\r", uuid),
+        None => format!("{}claude --resume {}\r", clear, uuid),
     }
 }
 
@@ -3900,10 +3911,11 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&inject.sent.lock().unwrap()),
             format!(
-                "CLAUDE_CONFIG_DIR='{}' claude --resume {uuid}\r",
+                "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='{}' claude --resume {uuid}\r",
                 profile_dir.to_string_lossy()
             ),
-            "the wake resumes the session under the profile it was running"
+            "the wake resumes the session under the profile it was running, \
+             behind a screen wipe so the line itself never shows"
         );
         // It really reached the PTY: the shell echoes it back…
         let mut echoed = String::new();
@@ -4659,10 +4671,17 @@ mod tests {
         // the dependency.
         assert_eq!(
             resume_command(Some("/Users/x/.claude-profile-3"), "abc-123"),
-            "CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude --resume abc-123\r"
+            "printf '\\033[H\\033[2J'; \
+             CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude --resume abc-123\r"
         );
         // No dir observed = the default profile's own entry point.
-        assert_eq!(resume_command(None, "abc-123"), "claude --resume abc-123\r");
+        assert_eq!(
+            resume_command(None, "abc-123"),
+            "printf '\\033[H\\033[2J'; claude --resume abc-123\r"
+        );
+        // The screen wipe never takes the scrollback with it — that is
+        // the user's history, not the plumbing's to clear.
+        assert!(!resume_command(None, "u").contains("[3J"));
     }
 
     /// The dir lands inside single quotes on a real command line, so a
@@ -4677,10 +4696,10 @@ mod tests {
             "",
         ] {
             assert!(!shell_safe(bad), "{bad:?} should be refused");
-            assert_eq!(
-                resume_command(Some(bad), "u"),
-                "claude --resume u\r",
-                "a refused dir falls back to the plain entry point"
+            let cmd = resume_command(Some(bad), "u");
+            assert!(
+                cmd.ends_with("claude --resume u\r") && !cmd.contains("CLAUDE_CONFIG_DIR"),
+                "a refused dir falls back to the plain entry point, got {cmd:?}"
             );
         }
         assert!(shell_safe("/Users/doracawl/.claude-profile-1"));

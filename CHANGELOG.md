@@ -28,7 +28,21 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.63**
+Current: **0.7.64**
+
+### 0.7.64
+
+**resume 那一行连痕迹都不留。**
+
+冻结画面挡住了「看着它发生」,但解冻之后那行还在:shell 提示符加一行
+`CLAUDE_CONFIG_DIR='…' claude --resume …`,楔在恢复出来的会话上面。
+
+resume 命令前面挂一个屏幕擦除(`printf '\033[H\033[2J'; …`)。回显发生在
+冻结之下没人看得见,命令一执行先把这一屏抹掉,claude 再在干净的屏上画 ——
+解冻时 pane 上只有 claude 自己画的东西。
+
+只用 `\033[2J`,不带 `\033[3J`:后者会把 scrollback 一起清掉,而 scrollback
+是用户的东西。测试里专门断言这一点。
 
 ### 0.7.63
 
