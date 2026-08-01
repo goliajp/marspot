@@ -302,6 +302,14 @@ impl PaneBackend {
         }
     }
 
+    /// Ask the pane's L3 to hold (or release) its grid.  No-op on
+    /// non-L3 backends: there is no separate process to hold.
+    pub fn forward_pane_hold_grid(&mut self, on: bool) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_pane_hold_grid(on);
+        }
+    }
+
     /// C5 — send a `SearchScrollback` frame to the L3 session
     /// behind this pane.  No-op on non-L3 backends (search is
     /// File-backed scrollback only, which only L3 owns).
@@ -979,6 +987,14 @@ impl L3Conn {
         let frame = Frame::new(
             MsgType::InjectInput,
             crate::shell_proto::encode_inject_input(self.session_id, bytes),
+        );
+        let _ = self.control.send(frame);
+    }
+
+    fn forward_pane_hold_grid(&mut self, on: bool) {
+        let frame = Frame::new(
+            MsgType::PaneHoldGrid,
+            crate::shell_proto::encode_pane_hold_grid(self.session_id, on),
         );
         let _ = self.control.send(frame);
     }

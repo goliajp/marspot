@@ -115,6 +115,16 @@ impl SessionImpl {
             Self::Local(s) => s.pump(),
         }
     }
+    fn hold_grid(&mut self, on: bool) {
+        match self {
+            Self::Local(s) => s.hold_grid(on),
+        }
+    }
+    fn is_holding(&self) -> bool {
+        match self {
+            Self::Local(s) => s.is_holding(),
+        }
+    }
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Local(s) => s.write(bytes),
@@ -147,6 +157,9 @@ impl SessionImpl {
 /// `Key` when L2 forwards a keystroke.
 enum SessionEvent {
     Wake,
+    /// L1 (through L2) asks this pane to hold its picture where it is,
+    /// or to let it go.  See `LocalSession::hold_grid`.
+    HoldGrid(bool),
     Key(MarspotKeyEvent, Modifiers),
     /// L2 forwarded a cell-grid resize (window/layout changed). L3 resizes
     /// its Terminal + ioctl's the PTY (via shelld) + reflows, then
@@ -847,6 +860,15 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         }
                     }
                 }
+                MsgType::PaneHoldGrid => {
+                    if let Ok((_sid, on)) =
+                        marspot_term::shell_proto::decode_pane_hold_grid(&f.payload)
+                    {
+                        if tx.send(SessionEvent::HoldGrid(on)).is_err() {
+                            break;
+                        }
+                    }
+                }
                 MsgType::InjectInput => {
                     if let Ok((_sid, bytes)) =
                         marspot_term::shell_proto::decode_inject_input(&f.payload)
@@ -1479,7 +1501,35 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         let mut core_gone = false;
         for ev in first.into_iter().chain(std::iter::from_fn(|| ev_rx.try_recv().ok())) {
             match ev {
-                SessionEvent::Key(e, m) => predicted |= handle_key(&mut session, e, m),
+                SessionEvent::Key(e, m) => {
+                    // Failsafe: a real keystroke from the user reaches
+                    // L3 only when nothing upstream is holding the
+                    // keyboard.  If the pane is held and a key gets
+                    // here, whatever asked for the hold is gone (an L1
+                    // that never came back), and a pane frozen with no
+                    // one to unfreeze it is worse than a pane that
+                    // shows what happened.
+                    if session.is_holding() {
+                        lx_warn!(
+                            "l3.hold.released_by_key",
+                            "a keystroke reached a held pane — releasing",
+                            session_id = session.id()
+                        );
+                        session.hold_grid(false);
+                    }
+                    predicted |= handle_key(&mut session, e, m)
+                }
+                SessionEvent::HoldGrid(on) => {
+                    if session.is_holding() != on {
+                        lx_event!(
+                            "L3_HOLD",
+                            "grid hold changed",
+                            session_id = session.id(),
+                            on = on as u32
+                        );
+                    }
+                    session.hold_grid(on);
+                }
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
                 SessionEvent::Scroll(off) => {
                     // L2(0.11.42+)mouse tracking on 时直接 encode +

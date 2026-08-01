@@ -2174,6 +2174,10 @@ enum CoreEvent {
     /// pane and forwards via the existing control channel as an
     /// InjectInput frame.
     InjectInput(u64, Vec<u8>),
+    /// L1 asks a pane to hold (or release) its picture.  Forwarded
+    /// straight to the pane's L3 — the hold lives there so it survives
+    /// this process being replaced by a silent update.
+    PaneHoldGrid(u64, bool),
     /// C5 — L3 → L2 `SearchResults` frame.  Carries the shelld
     /// session id (so we can route to the right pane in a multi-pane
     /// world), the query_id (so a stale batch from a cancelled
@@ -2370,6 +2374,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneSessionEnd => marspot::shell_proto::decode_pane_session_end(&f.payload)
             .ok()
             .map(CoreEvent::PaneSessionEnd),
+        MsgType::PaneHoldGrid => marspot::shell_proto::decode_pane_hold_grid(&f.payload)
+            .ok()
+            .map(|(sid, on)| CoreEvent::PaneHoldGrid(sid, on)),
         MsgType::InjectInput => marspot::shell_proto::decode_inject_input(&f.payload)
             .ok()
             .map(|(sid, bytes)| CoreEvent::InjectInput(sid, bytes)),
@@ -3369,6 +3376,19 @@ impl CoreApp {
         for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             if pane.session().l3_session_id() == Some(shelld_session_id) {
                 pane.session_mut().forward_inject_input(bytes);
+                return;
+            }
+        }
+    }
+
+    /// Pass a grid hold down to the pane's own L3.
+    ///
+    /// L2 does not act on it: the point of the hold is that it belongs
+    /// to the session, not to whichever core is currently drawing it.
+    fn forward_pane_hold_grid(&mut self, shelld_session_id: u64, on: bool) {
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
+            if pane.session().l3_session_id() == Some(shelld_session_id) {
+                pane.session_mut().forward_pane_hold_grid(on);
                 return;
             }
         }
@@ -8875,6 +8895,9 @@ fn main() {
                 }
                 CoreEvent::InjectInput(sid, bytes) => {
                     app.inject_input(sid, &bytes);
+                }
+                CoreEvent::PaneHoldGrid(sid, on) => {
+                    app.forward_pane_hold_grid(sid, on);
                 }
 
                 CoreEvent::SearchResults(sid, qid, has_more, _total_seen, hits) => {

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.66"  # tick 是 16ms 不是 250ms:唤醒的静止判据换成挂钟 500ms;详见 CHANGELOG.md
-core    = "0.12.79"  # 时间轴按数据定尺:bar 不再被夹短,标签严格在 bar 终点右侧;详见 CHANGELOG.md
-session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md
+shell   = "0.7.67"  # 回收的冻结改由 L3 持有 —— core 每次装机都重启,冻结活不过去;详见 CHANGELOG.md
+core    = "0.12.80"  # 转发 PaneHoldGrid 到 pane 自己的 L3;详见 CHANGELOG.md
+session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

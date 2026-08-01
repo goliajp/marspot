@@ -107,9 +107,24 @@ pub struct LocalSession {
     exited: Arc<AtomicBool>,
     last_output: Option<Instant>,
     pending_scrollback_pages: Vec<PendingPage>,
+    /// While set, PTY bytes are collected instead of parsed — see
+    /// [`LocalSession::hold_grid`].
+    hold: bool,
+    held: Vec<Vec<u8>>,
+    held_bytes: usize,
     cols: u16,
     rows: u16,
 }
+
+/// Most a held pane may accumulate before the hold is abandoned.
+///
+/// A pane is held because the thing that was drawing it has been
+/// reclaimed, so the expected volume is a shell prompt and a resume
+/// line — hundreds of bytes.  Half a megabyte means something is very
+/// much alive down there, and the honest response is to show it rather
+/// than to keep growing a buffer for the life of the process
+/// (CLAUDE.md §3: every queue is bounded).
+const HOLD_CAP: usize = 512 * 1024;
 
 impl LocalSession {
     /// Spawn a fresh shell on a new PTY and start the reader thread.
@@ -253,6 +268,9 @@ impl LocalSession {
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
+            hold: false,
+            held: Vec::new(),
+            held_bytes: 0,
             cols,
             rows,
         })
@@ -296,11 +314,23 @@ impl LocalSession {
         loop {
             match self.rx.try_recv() {
                 Ok(bytes) => {
+                    // The bytelog is written either way: it is the
+                    // record of what the PTY produced, and holding the
+                    // *picture* must not make the pane look silent to
+                    // everything that reads that record.
                     if let Some(b) = self.bytelog.as_mut() {
                         let _ = b.append(&bytes);
                     }
-                    self.terminal.feed(&bytes);
                     total += bytes.len();
+                    if self.hold {
+                        self.held_bytes += bytes.len();
+                        self.held.push(bytes);
+                        if self.held_bytes >= HOLD_CAP {
+                            self.hold_grid(false);
+                        }
+                    } else {
+                        self.terminal.feed(&bytes);
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
@@ -310,6 +340,39 @@ impl LocalSession {
             self.last_output = Some(Instant::now());
         }
         total
+    }
+
+    /// Hold the grid exactly where it is (or let it go).
+    ///
+    /// The pane keeps reading its PTY — the child must never block on
+    /// a full pipe — but the bytes are parked instead of parsed, so
+    /// the terminal, and therefore everything published from it, stays
+    /// on the last frame the user saw.  Releasing feeds the whole
+    /// backlog in one pass: the jump is from the old picture to the
+    /// new one, with no intermediate state drawn.
+    ///
+    /// Why here and not in L2: a silent update restarts the core, and
+    /// a fresh core rebuilds its view from what L3 publishes.  A freeze
+    /// held in L2 evaporates at that moment and the pane shows whatever
+    /// happened underneath — for a reclaimed session, a bare shell
+    /// prompt.  L3 outlives core restarts, so a hold here is one the
+    /// user never sees broken.
+    pub fn hold_grid(&mut self, on: bool) {
+        if self.hold == on {
+            return;
+        }
+        self.hold = on;
+        if !on {
+            for chunk in std::mem::take(&mut self.held) {
+                self.terminal.feed(&chunk);
+            }
+            self.held_bytes = 0;
+        }
+    }
+
+    /// Is the grid currently held?
+    pub fn is_holding(&self) -> bool {
+        self.hold
     }
 
     /// Queue `bytes` for the PTY.  Never blocks — see `PtyWriter`.
@@ -467,6 +530,9 @@ impl LocalSession {
             exited,
             last_output: None,
             pending_scrollback_pages: Vec::new(),
+            hold: false,
+            held: Vec::new(),
+            held_bytes: 0,
             cols,
             rows,
         })
@@ -518,6 +584,57 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
+
+    /// A held pane keeps its picture while its PTY keeps talking.
+    ///
+    /// This is what makes a reclaimed session survive a silent update:
+    /// the freeze L2 used to do died with the core (every update
+    /// restarts one), so a parked pane came back showing the bare
+    /// shell prompt that appeared after claude was killed.  Held here,
+    /// the picture is the session's own property.
+    #[test]
+    fn a_held_grid_keeps_its_picture_and_replays_on_release() {
+        let mut s = LocalSession::spawn(7, 80, 24, "", || {}).expect("spawn");
+        let text = |s: &LocalSession| -> String {
+            let g = s.terminal().grid();
+            (0..g.rows())
+                .flat_map(|r| (0..g.cols()).map(move |c| (c, r)))
+                .map(|(c, r)| g.cell(c, r).ch)
+                .collect()
+        };
+        assert!(
+            pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0), Duration::from_secs(5)),
+            "shell should come up"
+        );
+        s.write(b"printf 'BEFORE\\n'\r").unwrap();
+        assert!(
+            pump_until(&mut s, |s| text(s).contains("BEFORE"), Duration::from_secs(5)),
+            "the pane draws what it prints"
+        );
+
+        s.hold_grid(true);
+        s.write(b"printf 'DURING\\n'\r").unwrap();
+        // Pump for a while: the bytes really do arrive (`pump` returns
+        // them), they are simply not parsed.  Without this the test
+        // could pass just because the output was late.
+        let mut arrived = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && arrived == 0 {
+            arrived += s.pump();
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(arrived > 0, "the PTY kept producing while held");
+        assert!(
+            !text(&s).contains("DURING"),
+            "a held grid must not draw what arrived while it was held"
+        );
+
+        s.hold_grid(false);
+        assert!(
+            text(&s).contains("DURING"),
+            "releasing replays the backlog in one pass, no extra pump needed"
+        );
+    }
 
     fn pump_until<F: FnMut(&LocalSession) -> bool>(
         s: &mut LocalSession,
@@ -609,6 +726,9 @@ mod tests {
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
+            hold: false,
+            held: Vec::new(),
+            held_bytes: 0,
             cols: 80,
             rows: 24,
         };
@@ -668,6 +788,9 @@ mod tests {
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
+            hold: false,
+            held: Vec::new(),
+            held_bytes: 0,
             cols: 80,
             rows: 24,
         };
@@ -724,6 +847,9 @@ mod tests {
             exited: Arc::new(AtomicBool::new(false)),
             last_output: None,
             pending_scrollback_pages: Vec::new(),
+            hold: false,
+            held: Vec::new(),
+            held_bytes: 0,
             cols: 80,
             rows: 24,
         };

@@ -28,7 +28,27 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.66**
+Current: **0.7.67**
+
+### 0.7.67
+
+**回收的冻结改由 L3 持有** —— 装机会重启 core,冻结在 core 里就活不过装机。
+
+用户报告:恢复 sentori 那个 pane 时,它已经是 zsh 界面了。查下来跟唤醒无关
+—— `PANE_SESSION_CAP_FREEZE_GRID` 只让 L2 不去 pump 自己那份网格,而**每次
+静默更新都会重启 core**(今天六次)。新 core 的 `pane_sessions` 是空的,于是
+立刻 pump:claude 退出后排在队列里的字节 —— 提示符 —— 一次性画出来。L1 两秒
+后重新挂上唤醒会话,又把冻结按在 zsh 画面上。
+
+冻结挪到 L3:新 wire `PaneHoldGrid`(L1 → L2 → L3),L3 收到后照常读 PTY
+(子进程绝不能被堵),但把字节**存着不喂给解析器**,释放时一次性喂完。
+L3 活得比 core 长,所以这个冻结用户不会看到它破掉;释放是一步到位的,
+中间态一帧都不画。
+
+L1 这边:SIGTERM **之前**就 hold,唤醒画完才 release;重新挂载时幂等地
+再 hold 一次(L3 已经在 hold 就是空操作);另外每轮扫描做一次自愈 ——
+凡是「我们 hold 过、但 claude 已经回来」的 pane 一律释放,防止 release 那
+一帧正好撞上 core 重启被丢掉。
 
 ### 0.7.66
 
@@ -1561,7 +1581,14 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.79**
+Current: **0.12.80**
+
+### 0.12.80
+
+转发 `PaneHoldGrid` 到 pane 自己的 L3。
+
+core 不对它做任何事 —— 这正是重点:冻结属于会话,不属于「此刻正在画它的
+那个 core」。core 每次静默更新都会换一个,而 pane 停在哪一帧不该跟着换。
 
 ### 0.12.79
 
@@ -2218,7 +2245,19 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.32**
+Current: **0.11.34**
+
+### 0.11.34
+
+**grid hold** —— 收到 `PaneHoldGrid` 后,PTY 照读、字节照记 bytelog,但不喂
+给终端解析器,所以这个 pane 的画面停在原处;释放时把攒下的字节一次喂完。
+
+为什么在这一层:回收一个 idle 的 claude 时要让画面停在它最后一帧,而 L2 的
+冻结活不过静默更新(每次更新都重启 core)。L3 活得比 core 长。
+
+两条自保:攒够 512 KB 自动放弃 hold(pane 里显然有活物,`CLAUDE.md` §3 要求
+每个队列有界);以及**用户按键一旦到达 L3 就立刻释放** —— 键能走到这里说明
+上游没人锁着键盘,也就没人会来解冻,冻着不如让他看见真相。
 
 ### 0.11.33
 

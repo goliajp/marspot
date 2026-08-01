@@ -411,6 +411,13 @@ pub enum MsgType {
     /// depends on whether this is the pane the user is in, which L1
     /// does not know.
     PaneRecede = 67,
+    /// L1 → L2 → L3: hold this pane's grid where it is.
+    ///
+    /// Unlike `PANE_SESSION_CAP_FREEZE_GRID`, which only stops L2 from
+    /// pumping its own copy, this stops **L3** from feeding the PTY
+    /// into its terminal at all — so the held picture survives an L2
+    /// restart, which every silent update performs.
+    PaneHoldGrid = 68,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -467,6 +474,7 @@ impl MsgType {
             65 => MsgType::WindowCloseRequest,
             66 => MsgType::PaneFocused,
             67 => MsgType::PaneRecede,
+            68 => MsgType::PaneHoldGrid,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1476,6 +1484,25 @@ pub fn decode_pane_recede(payload: &[u8]) -> io::Result<(u64, u32)> {
     Ok((sid, level))
 }
 
+/// PaneHoldGrid payload: `session_id u64 LE, on u8` (1 = hold).
+pub fn encode_pane_hold_grid(session_id: u64, on: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(9);
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.push(on as u8);
+    v
+}
+
+pub fn decode_pane_hold_grid(payload: &[u8]) -> io::Result<(u64, bool)> {
+    if payload.len() < 9 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneHoldGrid payload too short",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    Ok((sid, payload[8] != 0))
+}
+
 /// PaneFocused payload: `session_id u64 LE`.
 pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
     session_id.to_le_bytes().to_vec()
@@ -2191,6 +2218,16 @@ fn u8_to_named(w: WireNamedKey) -> NamedKey {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pane_hold_grid_round_trips() {
+        for on in [true, false] {
+            let (sid, got) = decode_pane_hold_grid(&encode_pane_hold_grid(9_001, on)).unwrap();
+            assert_eq!((sid, got), (9_001, on));
+        }
+        assert!(decode_pane_hold_grid(&[0u8; 8]).is_err(), "truncated payload is an error");
+    }
+
     use super::*;
     use std::io::Cursor;
 
@@ -2811,6 +2848,8 @@ mod tests {
         assert_eq!(MsgType::from_u32(62), Some(MsgType::WindowClosed));
         assert_eq!(MsgType::from_u32(63), Some(MsgType::WindowFocus));
         assert_eq!(MsgType::from_u32(64), Some(MsgType::WindowOpenRequest));
+        assert_eq!(MsgType::from_u32(68), Some(MsgType::PaneHoldGrid));
+
         assert_eq!(MsgType::from_u32(65), Some(MsgType::WindowCloseRequest));
     }
 

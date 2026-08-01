@@ -98,7 +98,18 @@ pub struct ShellPluginHost {
 #[derive(Debug, Clone)]
 pub struct InjectInputRequest {
     pub session_id: u64,
-    pub bytes: Vec<u8>,
+    /// `Input` carries bytes for the PTY; `HoldGrid` carries a hold
+    /// flag for the pane's L3.  One channel because they are the same
+    /// journey — plugin → shell main loop → live core — and ordering
+    /// between them matters: releasing a hold before the input that
+    /// justifies it would show the very frames the hold is hiding.
+    pub what: InjectWhat,
+}
+
+#[derive(Debug, Clone)]
+pub enum InjectWhat {
+    Input(Vec<u8>),
+    HoldGrid(bool),
 }
 
 #[derive(Clone)]
@@ -217,19 +228,26 @@ struct InjectInputForwarder {
     tx: Sender<InjectInputRequest>,
 }
 
-impl crate::plugins::claudecode::InjectInputProxy for InjectInputForwarder {
-    fn inject_input(&self, session_id: u64, bytes: &[u8]) -> std::io::Result<()> {
+impl InjectInputForwarder {
+    fn send(&self, session_id: u64, what: InjectWhat) -> std::io::Result<()> {
         self.tx
-            .send(InjectInputRequest {
-                session_id,
-                bytes: bytes.to_vec(),
-            })
+            .send(InjectInputRequest { session_id, what })
             .map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "inject_input channel closed",
                 )
             })
+    }
+}
+
+impl crate::plugins::claudecode::InjectInputProxy for InjectInputForwarder {
+    fn inject_input(&self, session_id: u64, bytes: &[u8]) -> std::io::Result<()> {
+        self.send(session_id, InjectWhat::Input(bytes.to_vec()))
+    }
+
+    fn hold_grid(&self, session_id: u64, on: bool) -> std::io::Result<()> {
+        self.send(session_id, InjectWhat::HoldGrid(on))
     }
 }
 

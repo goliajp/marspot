@@ -47,6 +47,11 @@ struct ShelldClient {
 /// (the trait isn't `'static`).  Implemented by `ShellPluginHost`.
 pub trait InjectInputProxy: Send + Sync {
     fn inject_input(&self, session_id: u64, bytes: &[u8]) -> std::io::Result<()>;
+    /// Ask the pane's L3 to hold its picture where it is (or release
+    /// it).  Separate from `PANE_SESSION_CAP_FREEZE_GRID`, which only
+    /// stops L2 drawing: that one dies with the core, and every silent
+    /// update restarts the core.
+    fn hold_grid(&self, session_id: u64, on: bool) -> std::io::Result<()>;
 }
 
 #[allow(dead_code)]
@@ -87,6 +92,16 @@ impl ShelldClient {
     /// wrapping — the caller's bytes hit the PTY verbatim, so
     /// scripts like `claude5 --resume <uuid>\r` work even inside
     /// apps that have DECSET 2004 on.
+    fn hold_grid_of(&self, sid: u64, on: bool) -> std::io::Result<()> {
+        match self.host_inject.as_ref() {
+            Some(p) => p.hold_grid(sid, on),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no InjectInputProxy on this host (test build?)",
+            )),
+        }
+    }
+
     fn send_input_to(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()> {
         match self.host_inject.as_ref() {
             Some(p) => p.inject_input(sid, bytes),
@@ -156,6 +171,10 @@ pub struct ClaudecodePlugin {
     /// attached.  Split from `dormant` so a re-arm after an execv
     /// doesn't stack a second session onto a pane that still has one.
     armed: std::collections::HashSet<u64>,
+    /// Panes this plugin has asked L3 to hold.  Tracked so a hold can
+    /// be undone even if the session that asked for it is gone — see
+    /// the sweep in `rearm_dormant`.
+    held: std::collections::HashSet<u64>,
     /// `shelld_session_id → (claude subtree CPU ns, sampled at)` from
     /// the previous scan, so the idle policy can look at a delta
     /// rather than an absolute.
@@ -882,6 +901,18 @@ impl HibernatePaneSession {
             .any(looks_like_claudecode)
     }
 
+    /// Let the pane draw again.  Safe to call twice — L3 ignores a
+    /// hold that doesn't change.
+    fn release_hold(&self, host: &dyn crate::plugins::PaneSessionHost) {
+        if let Err(e) = self.client.hold_grid_of(host.shelld_session_id(), false) {
+            host.log(
+                crate::plugins::LogLevel::Warn,
+                "hibernate.release_failed",
+                &format!("{e}"),
+            );
+        }
+    }
+
     fn pid_alive(pid: i32) -> bool {
         unsafe {
             if libc::kill(pid, 0) == 0 {
@@ -1036,10 +1067,12 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
                         .duration_since(self.wake_still_since)
                         .unwrap_or_default();
                     if wake_may_finish(len > self.wake_bytes_at_claude, still) {
+                        self.release_hold(host);
                         host.end();
                     }
                 }
                 if elapsed >= WAKE_WATCHDOG {
+                    self.release_hold(host);
                     host.end();
                 }
             }
@@ -1047,6 +1080,17 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
     }
 
     fn on_end(&mut self, host: &dyn crate::plugins::PaneSessionHost, reason: crate::plugins::EndReason) {
+        // Whatever ended this — the wake finishing, the Esc hatch, the
+        // pane closing — the pane must not be left holding a picture
+        // with nobody to release it.  The exception is a *dormant*
+        // session ending because L1 itself is going away: the pane is
+        // still parked and a fresh L1 will re-arm it, so the hold has
+        // to outlive this process.
+        if self.stage != HibernateStage::Dormant
+            || reason != crate::plugins::EndReason::PluginRequested
+        {
+            self.release_hold(host);
+        }
         // The reason is half the story: a wake that ends because
         // claude finished painting and one that ends because the host
         // tore the session down look identical without it, and the
@@ -1282,6 +1326,7 @@ impl ClaudecodePlugin {
             last_activity: HashMap::new(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
+            held: std::collections::HashSet::new(),
             cpu_samples: HashMap::new(),
             blocked_reason: HashMap::new(),
             monitors: HashMap::new(),
@@ -1568,6 +1613,23 @@ impl ClaudecodePlugin {
                     meta.claude_pid,
                 ),
             );
+            // Hold the pane's picture BEFORE the signal.  Everything
+            // from here to the far side of the wake — claude's exit,
+            // the shell prompt, the resume line, claude's startup —
+            // happens behind the frame the user last saw.
+            //
+            // The hold lives in L3, not in the core: a silent update
+            // restarts the core, and a core-side freeze evaporates
+            // with it.  That is what put a bare zsh prompt in a parked
+            // pane after an update.
+            self.held.insert(*sid);
+            if let Err(e) = client.hold_grid_of(*sid, true) {
+                host.log(
+                    LogLevel::Warn,
+                    "hibernate.hold_failed",
+                    &format!("{e}"),
+                );
+            }
             // SIGTERM directly, not `/exit` through the PTY: the same
             // reasoning as the profile cycle — no echo lands in the
             // grid, and claude's own exit path is not a request we can
@@ -1686,6 +1748,12 @@ impl ClaudecodePlugin {
                 wake_still_since: SystemTime::now(),
                 last_badge_at: SystemTime::UNIX_EPOCH,
             });
+            // Idempotent by design: if this pane is already held (the
+            // usual case — L3 outlived the L1 that asked), L3 sees no
+            // change.  If a *new* L3 came up meanwhile, this is what
+            // puts the hold back.
+            self.held.insert(d.shelld_sid);
+            let _ = client.hold_grid_of(d.shelld_sid, true);
             match host.begin_pane_session(d.shelld_sid, session) {
                 Ok(()) => {
                     self.armed.insert(d.shelld_sid);
@@ -1708,6 +1776,30 @@ impl ClaudecodePlugin {
         self.armed.retain(|sid| {
             self.dormant.iter().any(|d| d.shelld_sid == *sid)
         });
+        // A held pane whose claude is back must be drawing again.
+        //
+        // The session releases its own hold when the wake finishes,
+        // but that release travels L1 → L2 → L3 and a core that is
+        // restarting at that instant drops it — leaving a live pane
+        // showing a picture from before the reclamation.  This is the
+        // sweep that notices.  Costs a frame only when it is the one
+        // fixing something: `held` is empty in the ordinary case.
+        let back: Vec<u64> = self
+            .held
+            .iter()
+            .copied()
+            .filter(|sid| result.new_mapping.contains_key(sid))
+            .collect();
+        for sid in back {
+            self.held.remove(&sid);
+            if client.hold_grid_of(sid, false).is_ok() {
+                host.log(
+                    LogLevel::Info,
+                    "hibernate.hold_released",
+                    &format!("pane {sid} has a live claude again"),
+                );
+            }
+        }
         if self.dormant.len() != before {
             self.persist_dormant(host);
         }
@@ -3621,6 +3713,10 @@ mod tests {
     struct PtyInject {
         master: std::os::fd::RawFd,
         sent: std::sync::Mutex<Vec<u8>>,
+        /// Every hold/release the session asked for, in order — the
+        /// sequence is the whole point (hold before the kill, release
+        /// only once the new picture is ready).
+        holds: std::sync::Mutex<Vec<bool>>,
     }
 
     impl InjectInputProxy for PtyInject {
@@ -3636,6 +3732,11 @@ mod tests {
             (n > 0).then_some(()).ok_or_else(|| {
                 std::io::Error::other("write to pty master failed")
             })
+        }
+
+        fn hold_grid(&self, _sid: u64, on: bool) -> std::io::Result<()> {
+            self.holds.lock().unwrap().push(on);
+            Ok(())
         }
     }
 
@@ -3827,6 +3928,7 @@ mod tests {
         let inject = Arc::new(PtyInject {
             master,
             sent: std::sync::Mutex::new(Vec::new()),
+            holds: std::sync::Mutex::new(Vec::new()),
         });
         let host = FakeHost::new(state.clone());
         host.set_status(

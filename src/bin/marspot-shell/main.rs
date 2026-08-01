@@ -2250,13 +2250,22 @@ impl ShellApp {
         // session_id to the L3 owning that pane.
         while let Ok(req) = self.inject_input_rx.try_recv() {
             if let Some(conn) = self.active.as_ref() {
-                conn.send(
-                    MsgType::InjectInput,
-                    marspot::shell_proto::encode_inject_input(
-                        req.session_id,
-                        &req.bytes,
+                match req.what {
+                    plugins::host::InjectWhat::Input(bytes) => conn.send(
+                        MsgType::InjectInput,
+                        marspot::shell_proto::encode_inject_input(
+                            req.session_id,
+                            &bytes,
+                        ),
                     ),
-                );
+                    plugins::host::InjectWhat::HoldGrid(on) => conn.send(
+                        MsgType::PaneHoldGrid,
+                        marspot::shell_proto::encode_pane_hold_grid(
+                            req.session_id,
+                            on,
+                        ),
+                    ),
+                }
             }
         }
 
