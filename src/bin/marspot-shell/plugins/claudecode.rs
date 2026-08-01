@@ -761,6 +761,14 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
 /// lifted there.  A duration is the same length whatever the cadence.
 const WAKE_QUIET_FOR: Duration = Duration::from_millis(500);
 
+/// How long the hold gets to reach L3 before the signal is sent.
+///
+/// The request crosses two process boundaries (L1 → L2 → L3), each a
+/// channel drained on its own loop; the signal crosses none.  Sub-
+/// millisecond in practice, and the whole wait is invisible — the pane
+/// is already showing the frame it will keep.
+const HOLD_SETTLE: Duration = Duration::from_millis(250);
+
 /// How often a dormant pane re-asserts its badge.  Also wall-clock,
 /// and for the same reason: a count of ticks is 1 s or 16 s depending
 /// on what the window happens to be doing.
@@ -803,6 +811,16 @@ fn bytelog_len(shelld_sid: u64) -> u64 {
 /// Stage of the hibernate → dormant → wake cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HibernateStage {
+    /// The hold has been asked for; waiting for it to reach L3 before
+    /// anything is allowed to happen on screen.
+    ///
+    /// The request travels L1 → L2 → L3 through channels and sockets,
+    /// while SIGTERM goes straight from here to the process.  Sent in
+    /// the same breath, the signal wins: claude prints its parting
+    /// `Resume this session with: …` and the shell its prompt, both
+    /// before L3 has been told to stop drawing — and those two lines
+    /// are exactly what the user must never see.
+    Holding,
     /// SIGTERM sent, waiting for the pid to leave the process table.
     Killing,
     /// claude is gone; the pane holds its scrollback and waits for a
@@ -985,6 +1003,19 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
             .duration_since(self.stage_since)
             .unwrap_or_default();
         match self.stage {
+            HibernateStage::Holding => {
+                host.set_badge("zZ …");
+                if elapsed < HOLD_SETTLE {
+                    return;
+                }
+                // SIGTERM directly, not `/exit` through the PTY: the
+                // same reasoning as the profile cycle — no echo lands
+                // in the grid, and claude's own exit path is not a
+                // request we can be sure it will honour while idle.
+                unsafe { libc::kill(self.claude_pid, libc::SIGTERM) };
+                self.stage = HibernateStage::Killing;
+                self.stage_since = SystemTime::now();
+            }
             HibernateStage::Killing => {
                 if !Self::pid_alive(self.claude_pid) {
                     host.log(
@@ -1613,15 +1644,19 @@ impl ClaudecodePlugin {
                     meta.claude_pid,
                 ),
             );
-            // Hold the pane's picture BEFORE the signal.  Everything
-            // from here to the far side of the wake — claude's exit,
-            // the shell prompt, the resume line, claude's startup —
-            // happens behind the frame the user last saw.
+            // Hold the pane's picture BEFORE anything else happens on
+            // it.  Everything from here to the far side of the wake —
+            // claude's exit, the shell prompt, the resume line,
+            // claude's startup — has to happen behind the frame the
+            // user last saw.
             //
             // The hold lives in L3, not in the core: a silent update
             // restarts the core, and a core-side freeze evaporates
             // with it.  That is what put a bare zsh prompt in a parked
             // pane after an update.
+            //
+            // The signal itself is sent from the `Holding` stage, once
+            // this request has had time to land — see that variant.
             self.held.insert(*sid);
             if let Err(e) = client.hold_grid_of(*sid, true) {
                 host.log(
@@ -1630,18 +1665,13 @@ impl ClaudecodePlugin {
                     &format!("{e}"),
                 );
             }
-            // SIGTERM directly, not `/exit` through the PTY: the same
-            // reasoning as the profile cycle — no echo lands in the
-            // grid, and claude's own exit path is not a request we can
-            // be sure it will honour while idle.
-            unsafe { libc::kill(meta.claude_pid, libc::SIGTERM) };
             let session = Box::new(HibernatePaneSession {
                 client: client.clone(),
                 uuid: meta.uuid.clone(),
                 config_dir: meta.config_dir.clone(),
                 claude_pid: meta.claude_pid,
                 shell_pid: shell_pid_for(*sid),
-                stage: HibernateStage::Killing,
+                stage: HibernateStage::Holding,
                 stage_since: now,
                 spin_phase: 0,
                 claude_seen: false,
@@ -4001,8 +4031,20 @@ mod tests {
         );
         assert_eq!(plugin.dormant[0].uuid, uuid);
 
+        // The signal is sent from the session's own ticks, not from
+        // the policy call: the pane's picture has to be held first,
+        // and that request crosses two process boundaries while a
+        // signal crosses none.  Drive the ticks the way the real host
+        // does.
+        let ticking_host = FakePaneSessionHost { sid: 1 };
+        let tick_all = || {
+            for s in host.sessions.lock().unwrap().iter_mut() {
+                s.on_tick(&ticking_host);
+            }
+        };
         // The signal was real: claude is gone from the pane.
         poll_until("the stand-in claude to be reclaimed", || {
+            tick_all();
             let procs = pidtree::list_all_procs();
             !pidtree::descendants_of(shell_pid, &procs)
                 .iter()
@@ -4165,6 +4207,10 @@ mod tests {
         state_dir: PathBuf,
         status: std::sync::Mutex<HashMap<u64, crate::plugins::PaneStatusView>>,
         begun: std::sync::Mutex<Vec<u64>>,
+        /// The sessions handed over, kept so a test can tick them.
+        /// The real host does exactly this; dropping them on the floor
+        /// made the reclamation look synchronous, which it is not.
+        sessions: std::sync::Mutex<Vec<Box<dyn crate::plugins::PaneSession>>>,
     }
 
     impl FakeHost {
@@ -4173,6 +4219,7 @@ mod tests {
                 state_dir: dir,
                 status: std::sync::Mutex::new(HashMap::new()),
                 begun: std::sync::Mutex::new(Vec::new()),
+                sessions: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn set_status(&self, sid: u64, view: crate::plugins::PaneStatusView) {
@@ -4212,6 +4259,7 @@ mod tests {
             _session: Box<dyn crate::plugins::PaneSession>,
         ) -> Result<(), PluginError> {
             self.begun.lock().unwrap().push(sid);
+            self.sessions.lock().unwrap().push(_session);
             Ok(())
         }
     }
@@ -4307,11 +4355,25 @@ mod tests {
         assert_eq!(plugin.dormant.len(), 1);
         assert_eq!(plugin.dormant[0].uuid, uuid);
 
-        // The signal really went out: the process is gone (SIGTERM
-        // kills /bin/sh + its exec'd sleep).
+        // Nothing has been signalled yet: the session starts in
+        // `Holding`, so the picture is safely held before the process
+        // is touched.  A kill here would race the hold across two
+        // process boundaries and let claude's parting message reach
+        // the screen.
+        assert!(
+            !matches!(child.try_wait(), Ok(Some(_))),
+            "the signal must wait for the hold to land"
+        );
+
+        // Driving the session's ticks is what sends it — the real host
+        // does this from its own loop.
+        let session_host = FakePaneSessionHost { sid: 7 };
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut exited = false;
         while std::time::Instant::now() < deadline {
+            for s in host.sessions.lock().unwrap().iter_mut() {
+                s.on_tick(&session_host);
+            }
             if matches!(child.try_wait(), Ok(Some(_))) {
                 exited = true;
                 break;
