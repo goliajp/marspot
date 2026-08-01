@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.82"  # 输入框里有没写完的话时 autorun 不动 —— 否则会替人把半句提交;详见 CHANGELOG.md
-core    = "0.12.85"  # 标题条的 #k 按屏幕位置算,跨所有窗口;详见 CHANGELOG.md
+core    = "0.12.86"  # 帧率节流的时钟竞态:两次 elapsed() 之间时间在走,减法下溢 panic;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

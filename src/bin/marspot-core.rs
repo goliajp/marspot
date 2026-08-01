@@ -8408,11 +8408,17 @@ fn main() {
                 .windows
                 .iter()
                 .filter(|w| w.needs_render)
+                // One reading of the clock, not two.  The first cut
+                // asked `t.elapsed()` in the guard and again in the
+                // body, and time passes between them: an elapsed that
+                // was a hair under the interval when tested could be a
+                // hair over when subtracted, and `Duration - Duration`
+                // panics on underflow.  It took twelve hours of logs
+                // to hit once — `overflow when subtracting durations`,
+                // straight through `main`, taking the window with it.
                 .map(|w| match w.last_render_at {
-                    Some(t) if t.elapsed() < frame_min_interval => {
-                        frame_min_interval - t.elapsed()
-                    }
-                    _ => Duration::from_millis(0),
+                    Some(t) => frame_min_interval.saturating_sub(t.elapsed()),
+                    None => Duration::ZERO,
                 })
                 .min()
                 .unwrap_or(Duration::from_secs(1));

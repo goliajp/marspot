@@ -1875,7 +1875,26 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.85**
+Current: **0.12.86**
+
+### 0.12.86
+
+**帧率节流里的时钟竞态把整个 app 带走了。**
+
+```rust
+Some(t) if t.elapsed() < frame_min_interval => {
+    frame_min_interval - t.elapsed()      // ← 第二次读时钟
+}
+```
+
+两次 `elapsed()` 之间时间在走:守卫里差一点没到,body 里就过了 ——
+`Duration - Duration` 下溢直接 panic。窗口窄到十二小时的日志里只中一次,
+中的那次是 `overflow when subtracting durations` 打穿 `main`,窗口全没。
+
+改成读一次时钟 + `saturating_sub`:elapsed 已经超过间隔就是 0(立刻画),
+这本来就是这段代码想表达的意思。
+
+会话没受影响 —— L3 自持,core 死了它们照常活着,重开后原样接回来。
 
 ### 0.12.85
 
