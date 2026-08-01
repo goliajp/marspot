@@ -1639,7 +1639,7 @@ pub fn decode_cli_pane_list(payload: &[u8]) -> io::Result<Vec<(u64, String, Stri
     let n = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
     let mut at = 4;
     let mut out = Vec::with_capacity(n);
-    let mut take_str = |at: &mut usize| -> io::Result<String> {
+    let take_str = |at: &mut usize| -> io::Result<String> {
         if payload.len() < *at + 4 {
             return Err(bad());
         }

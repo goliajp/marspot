@@ -1187,16 +1187,6 @@ pub struct Pane {
     /// opens it; `Some` until Esc closes it.  Independent of any
     /// other pane's search state (each pane has its own).
     pub search: Option<PaneSearch>,
-    /// User-set title override.  `None` falls back to the render-time
-    /// placeholder chain (plugin title → cwd basename → ordinal).
-    ///
-    /// Lives on the pane, not in a container-side parallel Vec: RFC-004
-    /// B.3 already established that a title binds to its session by
-    /// identity, not by slot — the old `custom_titles: Vec<Option<String>>`
-    /// had to be hand-permuted in lockstep with every pane reorder, and
-    /// boot carried a by-sid search to repair the pairing.  As a field it
-    /// travels with the pane structurally and both go away.
-    pub custom_title: Option<String>,
 }
 
 /// C5 — per-pane bundle of the search overlay state.  Wraps the
@@ -1242,7 +1232,6 @@ impl Pane {
             tools: Vec::new(),
             active_highlight: None,
             search: None,
-            custom_title: None,
         }
     }
 
@@ -1260,7 +1249,6 @@ impl Pane {
             tools: Vec::new(),
             active_highlight: None,
             search: None,
-            custom_title: None,
         }
     }
 
@@ -1279,7 +1267,6 @@ impl Pane {
             tools: Vec::new(),
             active_highlight: None,
             search: None,
-            custom_title: None,
         }
     }
 
@@ -1311,7 +1298,6 @@ impl Pane {
             tools: Vec::new(),
             active_highlight: None,
             search: None,
-            custom_title: None,
         }
     }
 
@@ -1338,7 +1324,6 @@ impl Pane {
             tools: Vec::new(),
             active_highlight: None,
             search: None,
-            custom_title: None,
         }
     }
 

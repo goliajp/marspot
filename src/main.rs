@@ -46,7 +46,6 @@ enum ContextMenuAction {
     ClearScrollback,
     ClosePane,
     SplitNewPane,
-    RenameTitle,
     ToggleSidebar,
     OpenLayout,
 }
@@ -64,7 +63,6 @@ impl ContextMenuAction {
             x if x == Self::ClearScrollback.tag() => Some(Self::ClearScrollback),
             x if x == Self::ClosePane.tag() => Some(Self::ClosePane),
             x if x == Self::SplitNewPane.tag() => Some(Self::SplitNewPane),
-            x if x == Self::RenameTitle.tag() => Some(Self::RenameTitle),
             x if x == Self::ToggleSidebar.tag() => Some(Self::ToggleSidebar),
             x if x == Self::OpenLayout.tag() => Some(Self::OpenLayout),
             _ => None,
@@ -452,53 +450,6 @@ impl MarspotApp for Marspot {
             return;
         }
 
-        // Title-edit mode intercepts the keyboard before the PTY
-        // mapper sees anything.  Enter commits, Esc cancels,
-        // Backspace pops a char, printable text appends.  Cmd-bound
-        // shortcuts (paste, etc.) still fall through to the PTY
-        // path so we don't break copy/paste while editing.
-        if let Some(idx) = self.editing_title {
-            if event.state == KeyState::Pressed
-                && !modifiers.super_key()
-            {
-                match &event.logical {
-                    LogicalKey::Named(NamedKey::Enter) => {
-                        self.commit_title_edit();
-                        ctx.request_redraw();
-                        return;
-                    }
-                    LogicalKey::Named(NamedKey::Escape) => {
-                        self.cancel_title_edit();
-                        ctx.request_redraw();
-                        return;
-                    }
-                    LogicalKey::Named(NamedKey::Backspace) => {
-                        self.title_edit_buffer.pop();
-                        ctx.request_redraw();
-                        return;
-                    }
-                    _ => {
-                        if let Some(t) = &event.text {
-                            // Filter to printable chars — drop control
-                            // bytes the IME might attach to functional
-                            // keys (Tab, Arrows, etc.).
-                            for ch in t.chars() {
-                                if !ch.is_control() {
-                                    self.title_edit_buffer.push(ch);
-                                }
-                            }
-                            ctx.request_redraw();
-                            return;
-                        }
-                    }
-                }
-            }
-            // Non-pressed events / cmd combos in edit mode: silently
-            // ignore (don't fall through to PTY for the cell that's
-            // currently being edited).
-            let _ = idx;
-            return;
-        }
 
         let term = self.panes[self.focused_idx].session().terminal();
         let app_mode = term.cursor_key_application_mode();
@@ -714,31 +665,17 @@ impl MarspotApp for Marspot {
                 layout.hit_test_cell_pos(x_phys, y_phys, cw, ch)
             });
 
-        // Title-strip click → enter edit mode for that cell.  Also
-        // moves focus to it so the visual highlight + cursor block
-        // line up with what the user is editing.
+        // Title-strip click → focus that cell.  A pane's name is its
+        // directory, so there is nothing to type here.
         if let Some(idx) = title_hit {
             if idx < self.panes.len() {
-                self.commit_title_edit();
                 self.focused_idx = idx;
-                self.editing_title = Some(idx);
-                self.title_edit_buffer = self.panes[idx]
-                    .custom_title
-                    .clone()
-                    .unwrap_or_default();
                 let _ = self.panes[self.focused_idx].snap_to_live();
                 self.selection = None;
                 self.selection_dragging = false;
                 ctx.request_redraw();
                 return;
             }
-        }
-
-        // Click outside the title strip while editing commits the
-        // edit before doing anything else.
-        if self.editing_title.is_some() {
-            self.commit_title_edit();
-            ctx.request_redraw();
         }
 
         // Click in cell body → start a fresh text selection at that
@@ -1157,7 +1094,6 @@ impl Marspot {
                     if close_disabled { mi.disabled() } else { mi }
                 };
                 vec![
-                    MenuItem::entry("Rename…", ContextMenuAction::RenameTitle.tag()),
                     MenuItem::divider(),
                     close,
                 ]
@@ -1228,19 +1164,6 @@ impl Marspot {
                 if self.panes.len() < SESSION_COUNT_HARD_CAP {
                     self.spawn_session();
                     self.rebuild_layout(ctx);
-                }
-            }
-            ContextMenuAction::RenameTitle => {
-                let idx = match region {
-                    ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
-                    _ => self.focused_idx,
-                };
-                if idx < self.panes.len() {
-                    self.editing_title = Some(idx);
-                    self.title_edit_buffer = self.panes[idx]
-                        .custom_title
-                        .clone()
-                        .unwrap_or_default();
                 }
             }
             ContextMenuAction::ToggleSidebar => {
@@ -1395,25 +1318,6 @@ impl Marspot {
             .and_then(|mut f| f.write_all(line.as_bytes()));
     }
 
-    /// Commit the current title edit (if any).  Empty buffer clears
-    /// any custom title for that cell, which falls back to the
-    /// default session label.  Idempotent if not editing.
-    fn commit_title_edit(&mut self) {
-        if let Some(idx) = self.editing_title.take() {
-            if let Some(pane) = self.panes.get_mut(idx) {
-                let trimmed = self.title_edit_buffer.trim().to_string();
-                pane.custom_title =
-                    if trimmed.is_empty() { None } else { Some(trimmed) };
-            }
-            self.title_edit_buffer.clear();
-        }
-    }
-
-    /// Cancel a title edit without committing.  Idempotent.
-    fn cancel_title_edit(&mut self) {
-        self.editing_title = None;
-        self.title_edit_buffer.clear();
-    }
 
     /// Serialise the current text selection (if any) and write it
     /// to the macOS general pasteboard.  Returns true on success
@@ -1698,43 +1602,16 @@ impl Marspot {
         // AND the sidebar row, so both stay in sync).  Edit-mode
         // buffer → user-set custom title → default label.
         // tmux mode short-circuits to the tmux window name (already
-        // in `labels`) and skips the custom-title machinery —
-        // window names are managed by tmux itself.
-        let in_tmux = self.tmux.is_some();
-        let resolved_labels: Vec<String> = (0..self.panes.len()
-            .max(labels.len()))
-            .map(|i| {
-                if !in_tmux && self.editing_title == Some(i) {
-                    self.title_edit_buffer.clone()
-                } else if !in_tmux {
-                    if let Some(custom) = self.panes.get(i)
-                        .and_then(|p| p.custom_title.as_ref())
-                    {
-                        custom.clone()
-                    } else {
-                        labels.get(i).cloned().unwrap_or_default()
-                    }
-                } else {
-                    labels.get(i).cloned().unwrap_or_default()
-                }
-            })
-            .collect();
+        // in `labels`) — window names are managed by tmux itself.
+        let resolved_labels: Vec<String> =
+            (0..self.panes.len().max(labels.len()))
+                .map(|i| labels.get(i).cloned().unwrap_or_default())
+                .collect();
 
-        // Cell-title strings include a caret marker (▏) when the
-        // cell is being edited; sidebar copies the same text but
-        // without the caret + truncated with an ellipsis when it
-        // overflows the sidebar's narrow column.
+        // The sidebar shows the same text, truncated with an ellipsis
+        // when it overflows that narrow column.
         let titles: Vec<String> = (0..self.panes.len())
-            .map(|i| {
-                let mut s = resolved_labels
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_default();
-                if !in_tmux && self.editing_title == Some(i) {
-                    s.push('▏');
-                }
-                s
-            })
+            .map(|i| resolved_labels.get(i).cloned().unwrap_or_default())
             .collect();
         let sidebar_labels: Vec<String> = resolved_labels
             .iter()

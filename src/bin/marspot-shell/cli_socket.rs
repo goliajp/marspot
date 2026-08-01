@@ -203,103 +203,10 @@ pub fn parse_target(target: &str) -> Result<Target, String> {
     Ok(Target::Name(t.to_string()))
 }
 
-/// Give every pane a name, unique by construction.
-///
-/// The name is the working directory's last component.  When several
-/// panes share one, **all of them** get a `#k` — not just the extras —
-/// so a name never silently means "the first one".  `k` ranks by
-/// session id, which is creation order, so the numbering is stable
-/// while the set is; close one and the rest renumber on the next
-/// listing, which is what "no renaming, no duplicates, automatic"
-/// means.  Nothing is stored: the names are derived every time, so
-/// they cannot go stale.
-pub fn assign_names(panes: &[(u64, String)]) -> Vec<(u64, String)> {
-    let base = |cwd: &str| -> String {
-        let b = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-        if b.is_empty() { "?".to_string() } else { b.to_string() }
-    };
-    let mut by_base: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
-    for (sid, cwd) in panes {
-        by_base.entry(base(cwd)).or_default().push(*sid);
-    }
-    for sids in by_base.values_mut() {
-        sids.sort_unstable();
-    }
-    panes
-        .iter()
-        .map(|(sid, cwd)| {
-            let b = base(cwd);
-            let peers = &by_base[&b];
-            let name = if peers.len() == 1 {
-                b
-            } else {
-                let k = peers.iter().position(|s| s == sid).unwrap_or(0) + 1;
-                format!("{b}#{k}")
-            };
-            (*sid, name)
-        })
-        .collect()
-}
-
-/// Resolve a name or a path tail against the panes.
-///
-/// Names first (they are unique by construction), then a path tail —
-/// `goliajp/spg` matches `/w/goliajp/spg` but not `/w/goliajp/spg-old`,
-/// so adding a parent always narrows — then unique substring.
-///
-/// Ambiguity is never resolved by guessing: the cost of guessing wrong
-/// is text typed into someone else's session.  The error names the
-/// candidates with their ids and names, so the next attempt is a
-/// copy-paste rather than an investigation.
-pub fn resolve_name(target: &str, panes: &[(u64, String)]) -> Result<u64, String> {
-    let needle = target.trim().to_lowercase();
-    let named = assign_names(panes);
-    if let Some((sid, _)) = named.iter().find(|(_, n)| n.to_lowercase() == needle) {
-        return Ok(*sid);
-    }
-    let norm = |s: &str| s.trim_end_matches('/').to_lowercase();
-    let candidates: Vec<&(u64, String)> = if needle.contains('/') {
-        panes
-            .iter()
-            .filter(|(_, cwd)| {
-                let c = norm(cwd);
-                c == needle || c.ends_with(&format!("/{needle}"))
-            })
-            .collect()
-    } else {
-        let hit: Vec<&(u64, String)> = panes
-            .iter()
-            .filter(|(_, cwd)| norm(cwd).rsplit('/').next().unwrap_or("") == needle)
-            .collect();
-        if hit.is_empty() {
-            panes.iter().filter(|(_, cwd)| norm(cwd).contains(&needle)).collect()
-        } else {
-            hit
-        }
-    };
-    match candidates.len() {
-        0 => Err(format!("no pane matches {target:?}")),
-        1 => Ok(candidates[0].0),
-        _ => {
-            let name_of = |sid: u64| -> String {
-                named
-                    .iter()
-                    .find(|(s, _)| *s == sid)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_default()
-            };
-            let list = candidates
-                .iter()
-                .map(|(sid, cwd)| format!("  {sid}  {:<20}  {cwd}", name_of(*sid)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Err(format!(
-                "{target:?} matches {} panes — say which:\n{list}",
-                candidates.len()
-            ))
-        }
-    }
-}
+/// Naming and name resolution live in the library — L1 resolves
+/// `--send spg#2` and L2 draws the name on the pane, and two
+/// implementations of a naming rule is two naming rules.
+pub use marspot::pane_name::{assign as assign_names, resolve as resolve_name};
 
 #[cfg(test)]
 mod tests {
@@ -312,48 +219,6 @@ mod tests {
             (384, "/Users/doracawl/workspace/stables/goliajp".into()),
             (386, "/Users/doracawl".into()),
         ]
-    }
-
-    /// Names are automatic, unique, and derived — never stored.
-    #[test]
-    fn duplicate_names_all_get_a_number_not_just_the_extras() {
-        let ps = vec![
-            (390, "/w/goliajp/spg".to_string()),
-            (412, "/w/stables/spg".to_string()),
-            (382, "/w/goliajp/marspot".to_string()),
-        ];
-        let names: std::collections::HashMap<u64, String> =
-            assign_names(&ps).into_iter().collect();
-        // Both, not "spg" and "spg#2": a name must never quietly mean
-        // "whichever one came first".
-        assert_eq!(names[&390], "spg#1");
-        assert_eq!(names[&412], "spg#2");
-        assert_eq!(names[&382], "marspot", "a name with no rival keeps it");
-        // Rank is by session id, i.e. creation order — stable while the
-        // set is.
-        assert!(390 < 412);
-    }
-
-    /// Close one and the numbering follows, with no state to update.
-    #[test]
-    fn closing_a_pane_renumbers_the_rest() {
-        let three = vec![
-            (10, "/w/a/dup".to_string()),
-            (20, "/w/b/dup".to_string()),
-            (30, "/w/c/dup".to_string()),
-        ];
-        let names: std::collections::HashMap<u64, String> =
-            assign_names(&three).into_iter().collect();
-        assert_eq!((&names[&10], &names[&20], &names[&30]), (&"dup#1".into(), &"dup#2".into(), &"dup#3".into()));
-
-        let two: Vec<(u64, String)> = three.into_iter().filter(|(s, _)| *s != 20).collect();
-        let names: std::collections::HashMap<u64, String> = assign_names(&two).into_iter().collect();
-        assert_eq!(names[&10], "dup#1");
-        assert_eq!(names[&30], "dup#2", "the survivors close the gap");
-
-        // And a name that is no longer shared loses its number.
-        let one: Vec<(u64, String)> = two.into_iter().filter(|(s, _)| *s == 10).collect();
-        assert_eq!(assign_names(&one)[0].1, "dup");
     }
 
     /// The three ways of saying which pane.
@@ -371,78 +236,7 @@ mod tests {
         assert!(parse_target("").is_err());
     }
 
-    /// A `#k` name is exact: it must not fall through to the substring
-    /// match and pick up the other one.
-    #[test]
-    fn a_numbered_name_addresses_exactly_one_pane() {
-        let ps = vec![
-            (390, "/w/goliajp/spg".to_string()),
-            (412, "/w/stables/spg".to_string()),
-        ];
-        assert_eq!(resolve_name("spg#1", &ps), Ok(390));
-        assert_eq!(resolve_name("spg#2", &ps), Ok(412));
-        // The bare name belongs to neither now, and says so with both.
-        let e = resolve_name("spg", &ps).unwrap_err();
-        assert!(e.contains("390") && e.contains("412") && e.contains("spg#1"), "{e}");
-    }
-
-    /// The name a person uses is the last path component.
-    #[test]
-    fn a_pane_is_found_by_its_project_name() {
-        assert_eq!(resolve_name("spg", &panes()), Ok(390));
-        assert_eq!(resolve_name("SPG", &panes()), Ok(390), "case is not a distinction");
-        assert_eq!(resolve_name(" marspot ", &panes()), Ok(382));
-    }
-
-    /// An exact directory name beats a substring, so a pane can always
-    /// be addressed by its own name even when another path contains it.
-    #[test]
-    fn an_exact_name_wins_over_a_path_that_merely_contains_it() {
-        // "goliajp" is a directory of its own AND a path component of
-        // two others; the pane actually called that is the answer.
-        assert_eq!(resolve_name("goliajp", &panes()), Ok(384));
-    }
-
-    /// Ambiguity is an error, never a guess: the cost of guessing is
-    /// text typed into someone else's session.  The error has to be
-    /// actionable, so it names the candidates *with their ids*.
-    #[test]
-    fn an_ambiguous_or_missing_name_is_refused_with_the_candidates() {
-        let ps = vec![
-            (1, "/w/alpha-one".to_string()),
-            (2, "/w/alpha-two".to_string()),
-        ];
-        let e = resolve_name("alpha", &ps).unwrap_err();
-        assert!(e.contains("2 panes"), "{e}");
-        // Id, name and directory: everything the next attempt needs.
-        assert!(e.contains("1  alpha-one") && e.contains("/w/alpha-one"), "{e}");
-        assert!(e.contains("2  alpha-two") && e.contains("/w/alpha-two"), "{e}");
-        assert!(resolve_name("nope", &ps).unwrap_err().contains("no pane"));
-        assert!(resolve_name("  ", &ps).is_err());
-    }
-
-    /// Two panes with the same project name is the normal state once
-    /// the same project exists in two trees.  Both are addressable.
-    #[test]
-    fn same_named_panes_are_told_apart_by_path_or_by_id() {
-        let ps = vec![
-            (390, "/Users/x/workspace/goliajp/spg".to_string()),
-            (412, "/Users/x/workspace/stables/spg".to_string()),
-            (413, "/Users/x/workspace/goliajp/spg-old".to_string()),
-        ];
-        // The bare name is refused — and says which two.
-        let e = resolve_name("spg", &ps).unwrap_err();
-        assert!(e.contains("390") && e.contains("412"), "{e}");
-        assert!(!e.contains("413"), "a different directory is not a candidate: {e}");
-
-        // A path tail narrows, and narrows *exactly*: `goliajp/spg`
-        // must not also match `goliajp/spg-old`.
-        assert_eq!(resolve_name("goliajp/spg", &ps), Ok(390));
-        assert_eq!(resolve_name("stables/spg", &ps), Ok(412));
-
-        // Ids are an address in their own right, recognised before any
-        // name matching happens — see `parse_target`.
-        assert_eq!(parse_target("412"), Ok(Target::Id(412)));
-        assert_eq!(parse_target("#390"), Ok(Target::Id(390)));
-    }
+    // The naming rules themselves are the library's, and tested there
+    // (`marspot::pane_name`).  What belongs in this module is the
+    // parsing of the three address forms.
 }

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.74"  # 三种寻址 name / id / w(n,x,y);重名自动带 #k,关一个自动补位;详见 CHANGELOG.md
-core    = "0.12.83"  # 转发 PaneInjectPaste 到 pane 自己的 L3;详见 CHANGELOG.md
+shell   = "0.7.75"  # 删掉 pane 改名:名字纯派生,规则进 lib(pane_name),12 条规格测试;详见 CHANGELOG.md
+core    = "0.12.84"  # 标题条画派生的 pane 名(重名带 #k),改名功能删除;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

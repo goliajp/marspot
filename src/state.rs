@@ -81,6 +81,12 @@ pub struct SavedPane {
     pub flags: u8,
     /// User-set custom title.  Empty = no custom title (cwd basename
     /// or ordinal applies at render time).
+    /// Dead field, kept so the on-disk format does not change: an
+    /// older build must still be able to read what this one writes,
+    /// and vice versa.  Panes are not named by anyone any more — a
+    /// pane's name is derived from its directory
+    /// (`marspot::pane_name`), so nothing sets this and nothing reads
+    /// it back into a pane.
     pub custom_title: String,
     /// Last-known cwd of the pane's shell.  Used as the spawn cwd
     /// when reattach fails — so the user lands in the same project,

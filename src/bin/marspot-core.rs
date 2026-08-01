@@ -386,7 +386,6 @@ enum ContextMenuAction {
     ClearScrollback,
     ClosePane,
     SplitNewPane,
-    RenameTitle,
     ToggleSidebar,
     OpenLayout,
     /// Pass the link text (URL / file path) to `/usr/bin/open`.
@@ -412,7 +411,6 @@ impl ContextMenuAction {
             x if x == Self::ClearScrollback.tag() => Some(Self::ClearScrollback),
             x if x == Self::ClosePane.tag() => Some(Self::ClosePane),
             x if x == Self::SplitNewPane.tag() => Some(Self::SplitNewPane),
-            x if x == Self::RenameTitle.tag() => Some(Self::RenameTitle),
             x if x == Self::ToggleSidebar.tag() => Some(Self::ToggleSidebar),
             x if x == Self::OpenLayout.tag() => Some(Self::OpenLayout),
             x if x == Self::OpenLink.tag() => Some(Self::OpenLink),
@@ -549,7 +547,6 @@ mod window_state_tests {
     fn moving_a_pane_between_windows_carries_its_state() {
         let mut a = win(1, vec![Pane::new_vacant(7, 80, 24)]);
         let mut b = win(2, Vec::new());
-        a.panes[0].custom_title = Some("keep me".into());
         a.panes[0].set_view_offset(42);
 
         let moved = a.panes.remove(0);
@@ -557,7 +554,6 @@ mod window_state_tests {
 
         assert!(a.panes.is_empty(), "source window must give the pane up");
         assert_eq!(b.panes[0].shelld_session_id(), Some(7));
-        assert_eq!(b.panes[0].custom_title.as_deref(), Some("keep me"));
         assert_eq!(
             b.panes[0].view_offset(),
             42,
@@ -837,7 +833,6 @@ mod window_state_tests {
             focus: (1, 0),
             mode: marspot::ui::SelectionMode::Linewise,
         });
-        app.windows[1].editing_title = Some(1);
 
         app.adopt_restored_panes(2, vec![Pane::new_vacant(11, 80, 24)]);
 
@@ -846,7 +841,6 @@ mod window_state_tests {
         assert_eq!(w.panes[0].shelld_session_id(), Some(11));
         assert_eq!(w.focused_idx, 0, "focus clamped to the real pane count");
         assert!(w.selection.is_none(), "placeholder-era selection dropped");
-        assert!(w.editing_title.is_none());
         assert_eq!(app.windows[0].panes.len(), 1, "peer untouched");
 
         // Empty assembly: keep the placeholders rather than blank the
@@ -1080,10 +1074,11 @@ mod window_state_tests {
             app
         };
 
-        // Ending 1 — no travel: the deferred click enters title edit.
+        // Ending 1 — no travel: the click stands, and moves nothing.
+        // (It focused the pane on mouse-down; a pane's name is its
+        // directory, so there is nothing for the click to open.)
         let mut app = mk();
         app.mouse_up(0, 1, 0.0, 0.0);
-        assert_eq!(app.windows[0].editing_title, Some(1), "click = rename");
         assert_eq!(app.windows[0].panes.len(), 2, "nothing moved");
 
         // Ending 2 — travel past the slop, release over window 2.
@@ -1096,7 +1091,6 @@ mod window_state_tests {
         assert_eq!(app.windows[1].panes.len(), 2);
         assert_eq!(app.windows[1].panes[1].shelld_session_id(), Some(11));
         assert_eq!(app.key_window, 1, "landing window becomes key");
-        assert_eq!(app.windows[0].editing_title, None, "a drag never renames");
 
         // Ending 3 — active drag released over nothing (drop id 0)
         // or over its own window: cancelled, everything stays.
@@ -1105,7 +1099,6 @@ mod window_state_tests {
             app.mouse_drag(0, 100.0, 40.0, 0, 0.0, 0.0);
             app.mouse_up(0, drop, 0.0, 0.0);
             assert_eq!(app.windows[0].panes.len(), 2, "drop={drop}: no move");
-            assert_eq!(app.windows[0].editing_title, None, "drop={drop}: no rename");
             assert!(app.pane_drag.is_none(), "drop={drop}: state cleared");
         }
 
@@ -1114,7 +1107,7 @@ mod window_state_tests {
         app.mouse_drag(0, 104.0, 12.0, 0, 0.0, 0.0);
         assert!(!app.pane_drag.unwrap().active, "inside slop = still a click");
         app.mouse_up(0, 1, 0.0, 0.0);
-        assert_eq!(app.windows[0].editing_title, Some(1));
+        assert_eq!(app.windows[0].panes.len(), 2, "a click moves nothing");
     }
 
     /// RFC-006 §1 — zone geometry: 25 % edge bands (≥48 px, ≤⅓),
@@ -1637,32 +1630,21 @@ mod boot_assembly_tests {
         }
     }
 
-    /// Titles bind during assembly, riding the fallback chain: a
-    /// saved slot title wins; an empty saved title falls back to the
-    /// session's own entry.toml title.  The binding lives inside
-    /// `assemble_panes_at_boot` (it used to be a loop in `main()`,
-    /// invisible to these tests) and lands on `Pane::custom_title`,
-    /// so it travels with the pane through any later reorder.
+    /// Assembly binds panes to sessions, and nothing else: a pane's
+    /// name is derived from its directory at render time
+    /// (`marspot::pane_name`), so there is no title to carry across a
+    /// boot.  What used to be tested here — saved title beats
+    /// entry.toml — described a feature that no longer exists.
     #[test]
-    fn titles_bind_at_assembly_saved_over_entry_toml() {
+    fn assembly_binds_the_saved_slots_to_their_sessions() {
         let _sb = Sandbox::new("titles");
         for id in [4u64, 6] {
             write_session_entry(&dead_entry(id)).unwrap();
         }
-        let s = saved(&[(4, "user-title"), (6, "")]);
+        let s = saved(&[(4, ""), (6, "")]);
         let (tx, _rx) = mpsc::channel();
         let (panes, _) = assemble_panes_at_boot(Some(&s), 2, 60, 16, &tx, true, &Default::default());
         assert_eq!(pane_sids(&panes), vec![4, 6]);
-        assert_eq!(
-            panes[0].custom_title.as_deref(),
-            Some("user-title"),
-            "saved slot title must win over entry.toml"
-        );
-        assert_eq!(
-            panes[1].custom_title.as_deref(),
-            Some("saved-title-6"),
-            "empty saved title must fall back to the entry.toml title"
-        );
     }
 
     /// Spawn failure must hold the slot open as a vacant pane carrying
@@ -3006,8 +2988,6 @@ struct WindowState {
     layout: Layout,
     panes: Vec<Pane>,
     focused_idx: usize,
-    editing_title: Option<usize>,
-    title_edit_buffer: String,
     selection: Option<Selection>,
     selection_dragging: bool,
     /// F3+3.0 — grid shape (cols × rows) is now an arbitrary
@@ -3114,8 +3094,6 @@ impl WindowState {
             ),
             panes,
             focused_idx,
-            editing_title: None,
-            title_edit_buffer: String::new(),
             selection: None,
             selection_dragging: false,
             grid_cols,
@@ -3628,7 +3606,9 @@ impl CoreApp {
                     .iter()
                     .map(|p| {
                         let sid = p.shelld_session_id().unwrap_or(0);
-                        let custom_title = p.custom_title.clone().unwrap_or_default();
+                        // The format keeps the field so an older build
+                        // can still read this file; nothing sets it.
+                        let custom_title = String::new();
                         let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
                         let flags = if p.is_dormant() {
                             marspot::state::PANE_FLAG_DORMANT
@@ -3851,8 +3831,6 @@ impl CoreApp {
                     if close_disabled { mi.disabled() } else { mi }
                 };
                 let mut items = vec![
-                    MenuItem::entry("Rename…",
-                        ContextMenuAction::RenameTitle.tag()),
                     MenuItem::divider(),
                     close,
                 ];
@@ -3955,10 +3933,6 @@ impl CoreApp {
                 w.selection = None;
                 w.selection_dragging = false;
             }
-        }
-        if w.editing_title == Some(idx) {
-            w.editing_title = None;
-            w.title_edit_buffer.clear();
         }
         // Landing: appended (sidebar overflows if the grid is full),
         // focused, and the target becomes the key window.
@@ -4202,10 +4176,6 @@ impl CoreApp {
                     w.selection_dragging = false;
                 }
             }
-            if w.editing_title == Some(from_idx) {
-                w.editing_title = None;
-                w.title_edit_buffer.clear();
-            }
             (p, at_idx)
         };
         // Reshape the target grid if it cannot absorb one more pane.
@@ -4340,10 +4310,6 @@ impl CoreApp {
                     w.selection_dragging = false;
                 }
             }
-            if w.editing_title == Some(from_idx) {
-                w.editing_title = None;
-                w.title_edit_buffer.clear();
-            }
         }
         win!(self, to_wi).panes[at_idx] = pane;
         win!(self, to_wi).focused_idx = at_idx;
@@ -4452,15 +4418,6 @@ impl CoreApp {
                 if win!(self, wi).panes.len() < marspot::ui::SESSION_COUNT_HARD_CAP {
                     self.spawn_session(wi);
                     self.rebuild_layout(wi);
-                }
-            }
-            ContextMenuAction::RenameTitle => {
-                let idx = match region {
-                    ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
-                    _ => win!(self, wi).focused_idx,
-                };
-                if idx < win!(self, wi).panes.len() {
-                    win!(self, wi).editing_title = Some(idx);
                 }
             }
             ContextMenuAction::ToggleSidebar => {
@@ -4754,10 +4711,6 @@ impl CoreApp {
                         w.selection_dragging = false;
                     }
                 }
-                if w.editing_title == Some(idx) {
-                    w.editing_title = None;
-                    w.title_edit_buffer.clear();
-                }
                 let mut nw = WindowState::new(
                     window_id, vec![pane], 0, 1, 1, w_phys, h_phys, scale,
                 );
@@ -4919,12 +4872,10 @@ impl CoreApp {
         let n = panes.len();
         win!(self, wi).panes = panes;
         win!(self, wi).focused_idx = win!(self, wi).focused_idx.min(n - 1);
-        // Placeholder-era selection / title edit referred to panes that
-        // no longer exist.
+        // Placeholder-era selection referred to panes that no longer
+        // exist.
         win!(self, wi).selection = None;
         win!(self, wi).selection_dragging = false;
-        win!(self, wi).editing_title = None;
-        win!(self, wi).title_edit_buffer.clear();
         self.rebuild_layout(wi);
         self.save_session_state();
         lx_event!(
@@ -5118,39 +5069,7 @@ impl CoreApp {
                 });
             }
         }
-        match win!(self, wi).editing_title {
-            Some(i) if i == idx => {
-                win!(self, wi).editing_title = None;
-                win!(self, wi).title_edit_buffer.clear();
-            }
-            Some(i) if i > idx => {
-                win!(self, wi).editing_title = Some(i - 1);
-            }
-            _ => {}
-        }
         self.save_session_state();
-    }
-
-    fn commit_title_edit(&mut self, wi: usize) {
-        let w = &mut win!(self, wi);
-        if let Some(idx) = w.editing_title.take() {
-            let trimmed = w.title_edit_buffer.trim().to_string();
-            if let Some(pane) = w.panes.get_mut(idx) {
-                // RFC-003 Phase 6: titles survive an L2 swap via the
-                // L3 process's persisted entry.toml (Amendment 7
-                // reattach path).  The pane's `custom_title` is the
-                // current truth.
-                pane.custom_title =
-                    if trimmed.is_empty() { None } else { Some(trimmed) };
-            }
-            w.title_edit_buffer.clear();
-            self.save_session_state();
-        }
-    }
-
-    fn cancel_title_edit(&mut self, wi: usize) {
-        win!(self, wi).editing_title = None;
-        win!(self, wi).title_edit_buffer.clear();
     }
 
     // ─── C5: scrollback search overlay ────────────────────────────
@@ -5651,43 +5570,6 @@ impl CoreApp {
         {
             win!(self, wi).sidebar_collapsed = !win!(self, wi).sidebar_collapsed;
             self.rebuild_layout(wi);
-            return;
-        }
-
-        // Title-edit mode intercepts the keyboard before the PTY
-        // mapper sees anything.  Enter commits, Esc cancels,
-        // Backspace pops a char, printable text appends.
-        if win!(self, wi).editing_title.is_some() {
-            if event.state == KeyState::Pressed && !modifiers.super_key() {
-                match &event.logical {
-                    LogicalKey::Named(NamedKey::Enter) => {
-                        self.commit_title_edit(wi);
-                        win!(self, wi).needs_render = true;
-                        return;
-                    }
-                    LogicalKey::Named(NamedKey::Escape) => {
-                        self.cancel_title_edit(wi);
-                        win!(self, wi).needs_render = true;
-                        return;
-                    }
-                    LogicalKey::Named(NamedKey::Backspace) => {
-                        win!(self, wi).title_edit_buffer.pop();
-                        win!(self, wi).needs_render = true;
-                        return;
-                    }
-                    _ => {
-                        if let Some(t) = &event.text {
-                            for ch in t.chars() {
-                                if !ch.is_control() {
-                                    win!(self, wi).title_edit_buffer.push(ch);
-                                }
-                            }
-                            win!(self, wi).needs_render = true;
-                            return;
-                        }
-                    }
-                }
-            }
             return;
         }
 
@@ -6412,14 +6294,10 @@ impl CoreApp {
                     }
                 }
             }
-            // Resolve pane name same way the title strip does:
-            // custom > cwd basename > ordinal.
+            // Resolve the pane's name the same way the title strip
+            // does: its directory, numbered when shared.
             let name = {
-                let custom = w.panes.get(pane_idx)
-                    .and_then(|p| p.custom_title.clone())
-                    .filter(|s| !s.is_empty());
-                if let Some(c) = custom { c }
-                else if let Some(p) = self.pane_cwds.get(&sid) {
+                if let Some(p) = self.pane_cwds.get(&sid) {
                     std::path::Path::new(p).file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| format!("sid {sid}"))
@@ -6906,18 +6784,16 @@ impl CoreApp {
 
         // Title-strip press: could be a click (enter title edit) or
         // the start of a pane drag (RFC-005 step 5).  Arm the drag and
-        // defer the edit to mouse-up — the two intents are only
-        // distinguishable by whether the pointer moves.  Focus shifts
-        // immediately either way (clicking focuses).
+        // Focus shifts immediately (clicking focuses); a drag from the
+        // title strip moves the pane.
         if let Some(idx) = title_hit {
             // RFC-006 — a dormant placeholder has no live content to
-            // move or rename; its title press is inert (the CELL
-            // click below is what revives it).
+            // move; its title press is inert (the CELL click below is
+            // what revives it).
             if win!(self, wi).panes.get(idx).is_some_and(|p| p.is_dormant()) {
                 return;
             }
             if idx < win!(self, wi).panes.len() {
-                self.commit_title_edit(wi);
                 self.resolve_pending_on_defocus(wi, idx);
                 win!(self, wi).focused_idx = idx;
                 let _ = win!(self, wi).focused_pane_mut().snap_to_live();
@@ -6932,12 +6808,6 @@ impl CoreApp {
                 });
                 return;
             }
-        }
-
-        // Click outside the title strip while editing commits first.
-        if win!(self, wi).editing_title.is_some() {
-            self.commit_title_edit(wi);
-            win!(self, wi).needs_render = true;
         }
 
         // Auto-link hit-test: a click that lands on an underlined
@@ -7243,18 +7113,10 @@ impl CoreApp {
                 }
                 return;
             }
-            // Never activated: this was the click it looked like —
-            // enter title edit, exactly what mouse-down used to do.
-            let idx = d.idx;
-            let from = d.from_wi;
-            if idx < win!(self, from).panes.len() {
-                win!(self, from).editing_title = Some(idx);
-                win!(self, from).title_edit_buffer = win!(self, from).panes[idx]
-                    .custom_title
-                    .clone()
-                    .unwrap_or_default();
-                win!(self, from).needs_render = true;
-            }
+            // Never activated: this was a click, not a drag.  It has
+            // already focused the pane on mouse-down, and there is
+            // nothing else for a title click to do — a pane's name is
+            // its directory, not something to type.
             return;
         }
         // F3+3.3 — finalize LayoutModal card drag: pick the
@@ -7494,15 +7356,35 @@ impl CoreApp {
             })
             .collect();
 
-        // Resolved label per cell: edit-mode buffer → user-set custom
-        // title → plugin-set title (MsgType::PaneTitle, cc/...) →
-        // cwd basename (dynamic placeholder) → ordinal fallback.
+        // Resolved label per cell: the pane's own name (its directory,
+        // numbered when shared — `marspot::pane_name`) → plugin-set
+        // title (MsgType::PaneTitle, cc/...) → ordinal fallback.
+        //
+        // There is no user-set title any more: a pane's name is derived,
+        // never stored, so it cannot disagree with what `--send` will
+        // accept.  A rename would have made the name a second source of
+        // truth about which pane is which.
+        let pane_names: std::collections::HashMap<u64, String> = marspot::pane_name::assign(
+            &self
+                .windows
+                .iter()
+                .flat_map(|w| w.panes.iter())
+                .filter_map(|p| {
+                    let sid = p.shelld_session_id()?;
+                    Some((sid, self.pane_cwds.get(&sid).cloned().unwrap_or_default()))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .collect();
         let resolved_labels: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
-                if win!(self, wi).editing_title == Some(i) {
-                    win!(self, wi).title_edit_buffer.clone()
-                } else if let Some(custom) = win!(self, wi).panes[i].custom_title.as_ref() {
-                    custom.clone()
+                if let Some(name) = win!(self, wi).panes[i]
+                    .shelld_session_id()
+                    .and_then(|sid| pane_names.get(&sid))
+                    .filter(|n| !n.is_empty() && *n != "?")
+                {
+                    name.clone()
                 } else if let Some(plugin_title) = win!(self, wi).panes[i]
                     .shelld_session_id()
                     .and_then(|sid| self.pane_titles.get(&sid))
@@ -7518,9 +7400,6 @@ impl CoreApp {
         let titles: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 let mut s = resolved_labels.get(i).cloned().unwrap_or_default();
-                if win!(self, wi).editing_title == Some(i) {
-                    s.push('▏');
-                }
                 // RFC-005 step 5 — a pane being dragged wears a ⇢ so
                 // the mode is visible without a ghost overlay: drop it
                 // on another window to move it there, release anywhere
@@ -8090,38 +7969,9 @@ fn assemble_panes_at_boot(
     //
     // RFC-004 B.3 — titles bind by IDENTITY, not index: the
     // positional entry is only trusted when its recorded sid matches
-    // the pane actually sitting in that slot (or the slot was
-    // anonymous, sid == 0, and just received a fresh id).  On
-    // mismatch, search the saved panes for the sid — a title follows
-    // its session wherever the session lands.  Fallback chain:
-    // saved-by-slot → saved-by-sid → entry.toml title → None.
-    for (i, p) in panes.iter_mut().enumerate() {
-        let pane_sid = p.shelld_session_id().unwrap_or(0);
-        p.custom_title = (|| {
-            if let Some(s) = saved_state {
-                if let Some(entry) = s.panes.get(i) {
-                    let slot_matches =
-                        entry.sid == pane_sid || entry.sid == 0;
-                    if slot_matches && !entry.custom_title.is_empty() {
-                        return Some(entry.custom_title.clone());
-                    }
-                }
-                if pane_sid != 0 {
-                    if let Some(entry) =
-                        s.panes.iter().find(|e| e.sid == pane_sid)
-                    {
-                        if !entry.custom_title.is_empty() {
-                            return Some(entry.custom_title.clone());
-                        }
-                    }
-                }
-            }
-            (pane_sid != 0)
-                .then(|| session_titles.get(&pane_sid).cloned())
-                .flatten()
-                .filter(|t| !t.is_empty())
-        })();
-    }
+    // A pane's name is derived from its directory (`pane_name`), so
+    // there is nothing here to restore: what used to be carried across
+    // a swap was the user-set title, and there is no such thing now.
     (panes, reattached_ids)
 }
 
