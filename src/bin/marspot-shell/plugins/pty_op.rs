@@ -76,10 +76,16 @@ pub enum StepKind {
     /// Do nothing for a while.  For letting an earlier effect land —
     /// a hold crosses two process boundaries, a signal crosses none.
     Settle,
-    /// Signal `pid`, escalating if it is still there after a while.
-    Signal { pid: i32, signal: i32, escalate: Option<(Duration, i32)> },
-    /// Wait for `pid` to leave the process table.
-    AwaitGone { pid: i32 },
+    /// Take `pid` down and wait for it to go, escalating if the polite
+    /// signal does not take.
+    ///
+    /// One step rather than "signal" followed by "wait", which is how
+    /// this read at first: the escalation was configured on the signal
+    /// but performed by the wait, so the runner had to look back a step
+    /// to find it and a reader had to know the two were a pair.  They
+    /// are one thing — "make this process go away" — and every caller
+    /// used them together.
+    Terminate { pid: i32, signal: i32, escalate: Option<(Duration, i32)>, sent: bool },
     /// Wait for a descendant of `under` to match.
     AwaitProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
     /// Wait for the user to come back — focus or a keystroke.  The one
@@ -116,24 +122,20 @@ impl Step {
     pub fn settle(d: Duration) -> Self {
         Self { kind: StepKind::Settle, timeout: Some(d), label: "settle" }
     }
-    pub fn signal(pid: i32, signal: i32) -> Self {
+    /// Signal `pid` and wait for it to leave the process table.
+    pub fn terminate(pid: i32, signal: i32) -> Self {
         Self {
-            kind: StepKind::Signal { pid, signal, escalate: None },
-            timeout: Some(Duration::from_secs(1)),
-            label: "signal",
+            kind: StepKind::Terminate { pid, signal, escalate: None, sent: false },
+            timeout: Some(Duration::from_secs(10)),
+            label: "terminate",
         }
     }
-    /// Escalate to `sig` if the process is still alive after `after`.
-    /// Applies to the following `AwaitGone`, which is where the waiting
-    /// happens.
+    /// Escalate to `sig` if the process is still there after `after`.
     pub fn escalate_after(mut self, after: Duration, sig: i32) -> Self {
-        if let StepKind::Signal { escalate, .. } = &mut self.kind {
+        if let StepKind::Terminate { escalate, .. } = &mut self.kind {
             *escalate = Some((after, sig));
         }
         self
-    }
-    pub fn await_gone(pid: i32) -> Self {
-        Self { kind: StepKind::AwaitGone { pid }, timeout: Some(Duration::from_secs(10)), label: "await_gone" }
     }
     pub fn await_process(under: i32, matching: fn(&pidtree::ProcRow) -> bool) -> Self {
         Self {
@@ -385,22 +387,21 @@ impl OpRunner {
         };
         match step.kind {
             StepKind::Settle => elapsed >= step.timeout.unwrap_or_default(),
-            StepKind::Signal { pid, signal, .. } => {
-                self.env.signal(pid, signal);
-                true
-            }
-            StepKind::AwaitGone { pid } => {
+            StepKind::Terminate { pid, signal, escalate, sent } => {
+                if !sent {
+                    self.env.signal(pid, signal);
+                    if let Some(StepKind::Terminate { sent, .. }) =
+                        self.op.steps.get_mut(self.at).map(|s| &mut s.kind)
+                    {
+                        *sent = true;
+                    }
+                }
                 if !self.env.pid_alive(pid) {
                     return true;
                 }
-                // The escalation belongs to the signal that preceded
-                // this wait; look back one step for it rather than
-                // making the caller repeat it.
-                if let Some(Step { kind: StepKind::Signal { pid: p, escalate: Some((after, sig)), .. }, .. }) =
-                    self.at.checked_sub(1).and_then(|i| self.op.steps.get(i))
-                {
-                    if elapsed >= *after {
-                        self.env.signal(*p, *sig);
+                if let Some((after, sig)) = escalate {
+                    if elapsed >= after {
+                        self.env.signal(pid, sig);
                     }
                 }
                 false
@@ -1197,8 +1198,10 @@ mod tests {
             .hold_screen(true)
             .badge("zZ")
             .step(Step::settle(Duration::from_millis(250)))
-            .step(Step::signal(4242, libc::SIGTERM).escalate_after(Duration::from_secs(3), libc::SIGKILL))
-            .step(Step::await_gone(4242))
+            .step(
+                Step::terminate(4242, libc::SIGTERM)
+                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
+            )
             .step(Step::await_user())
             .step(Step::send(b"resume\r".to_vec()))
             .step(Step::await_process(1, |_| true))
@@ -1251,9 +1254,11 @@ mod tests {
     fn a_stubborn_process_gets_escalated() {
         let (state, env, host) = setup();
         state.alive.lock().unwrap().push(7);
-        let op = PtyOp::new("test.kill")
-            .step(Step::signal(7, libc::SIGTERM).escalate_after(Duration::from_secs(3), libc::SIGKILL))
-            .step(Step::await_gone(7).timeout(Duration::from_secs(10)));
+        let op = PtyOp::new("test.kill").step(
+            Step::terminate(7, libc::SIGTERM)
+                .escalate_after(Duration::from_secs(3), libc::SIGKILL)
+                .timeout(Duration::from_secs(10)),
+        );
         let mut r = OpRunner::new(op, env);
         run(&mut r, &host, &state, 1_000);
         assert_eq!(*state.signals.lock().unwrap(), vec![(7, libc::SIGTERM)], "polite first");
@@ -1273,16 +1278,16 @@ mod tests {
         state.alive.lock().unwrap().push(7);
         let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
         let sink = Arc::clone(&finished);
-        let op = PtyOp::new("test.stuck")
-            .hold_screen(true)
-            .step(Step::await_gone(7).timeout(Duration::from_secs(2)));
+        let op = PtyOp::new("test.stuck").hold_screen(true).step(
+            Step::terminate(7, libc::SIGTERM).timeout(Duration::from_secs(2)),
+        );
         let mut r = OpRunner::new(op, env)
             .on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
         run(&mut r, &host, &state, 5_000);
         r.on_end(&host, EndReason::PluginRequested);
         assert_eq!(
             *finished.lock().unwrap(),
-            Some(OpOutcome::TimedOut { step: 0, label: "await_gone" })
+            Some(OpOutcome::TimedOut { step: 0, label: "terminate" })
         );
         assert_eq!(
             *state.holds.lock().unwrap(),

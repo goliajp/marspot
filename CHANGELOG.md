@@ -28,7 +28,17 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.69**
+Current: **0.7.70**
+
+### 0.7.70
+
+`signal` + `await_gone` 合成一个 `terminate` 步骤。
+
+原来的写法是两步:升级策略配在 signal 上,却由后面那个 await_gone 执行 ——
+runner 得往回看一步才能找到它,读的人得知道这两步是一对。它们本来就是
+一件事(「让这个进程消失」),而且两个调用方都是连着用的。
+
+少一个概念,少一处耦合,两条脚本各少一步。
 
 ### 0.7.69
 

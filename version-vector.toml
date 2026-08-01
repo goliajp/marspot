@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.69"  # pty_op 封装成 session 间通信的地基:每 pane 一次一个 + paste 通道 + 投递上限;详见 CHANGELOG.md
+shell   = "0.7.70"  # pty_op:signal + await_gone 合成一个 terminate 步骤;详见 CHANGELOG.md
 core    = "0.12.83"  # 转发 PaneInjectPaste 到 pane 自己的 L3;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

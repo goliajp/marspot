@@ -1401,10 +1401,9 @@ fn reclaim_op(
             // land on screen.
             .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
             .step(
-                pty_op::Step::signal(claude_pid, libc::SIGTERM)
+                pty_op::Step::terminate(claude_pid, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(pty_op::Step::await_gone(claude_pid))
             .step(pty_op::Step::await_user())
             .step(pty_op::Step::send(line).named("resume"))
             .step(pty_op::Step::await_process(shell_pid, looks_like_claudecode))
@@ -1415,7 +1414,7 @@ fn reclaim_op(
 /// Where a re-armed run picks up: an L1 restart replaces this process
 /// while the pane stays parked, so the new run must not kill anything
 /// again — it starts at the step that waits for the user.
-const RECLAIM_PARK_STEP: usize = 3;
+const RECLAIM_PARK_STEP: usize = 2;
 
 /// The profile-cycle script: take the current claude down and bring the
 /// same session back under the next profile.
@@ -1447,10 +1446,9 @@ fn profile_cycle_op(
             .badge(format!("→ P{next_profile}"))
             .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
             .step(
-                pty_op::Step::signal(claude_pid, libc::SIGTERM)
+                pty_op::Step::terminate(claude_pid, libc::SIGTERM)
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
-            .step(pty_op::Step::await_gone(claude_pid))
             .step(pty_op::Step::send(line).named("resume"))
             // Wait for the new claude to draw, exactly as the
             // reclamation does.  The hand-written version settled for a
