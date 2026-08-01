@@ -1581,7 +1581,22 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.80**
+Current: **0.12.81**
+
+### 0.12.81
+
+**每个账号卡片多一行 per-model 上限(当前就是 Fable)。**
+
+feed 里一直有 `model_limits`,是解析器把整个数组丢掉了。这条信息账号级的
+两根 bar 说不出来:2026-08-01 的实测数据里,Claude 3 的 7d 是 64%,而 Fable
+已经 **85%** —— 开工前最该知道的一件事,面板上却看不见。
+
+卡片的 bar 行现在是 `5H / 7D / <模型名>`,形状完全一样(不该为了半张卡片
+再学一种读法);bar 的起点跟着最宽的标签走,不再是写死的第 3 列。卡片和
+面板的高度按「多几行」推导,painter 和 `panel_rect` 用同一个式子。
+
+`"reset": null` 解析成 `None` 而不是 epoch 0 —— 没人碰过的模型没有窗口可
+重置。
 
 ### 0.12.80
 

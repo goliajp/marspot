@@ -13,6 +13,22 @@
 
 use std::path::PathBuf;
 
+/// A per-model cap the feed reports alongside the rolling windows.
+///
+/// The account-level 5h/7d numbers do not cover these: an account can
+/// be at 7 % of its week and still be shut out of one model, which is
+/// the single most useful thing to know before starting a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CcModelLimit {
+    /// Model name as the feed writes it ("Fable").
+    pub label: String,
+    /// 0.0 ..= 1.0 utilization of that model's own window.
+    pub util: f64,
+    /// Unix seconds when it resets; `None` when nothing has been used
+    /// and the window has not started.
+    pub reset: Option<i64>,
+}
+
 /// One Claude account row from the feed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CcAccount {
@@ -27,6 +43,8 @@ pub struct CcAccount {
     /// Unix seconds when each window resets.
     pub reset_5h: i64,
     pub reset_7d: i64,
+    /// Per-model caps, in feed order.  Empty on an older feed.
+    pub model_limits: Vec<CcModelLimit>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,6 +140,7 @@ pub fn parse(body: &str) -> Option<CcUsage> {
             util_7d: num_field(obj, "utilization_7d").unwrap_or(0.0),
             reset_5h: num_field(obj, "reset_5h").unwrap_or(0.0) as i64,
             reset_7d: num_field(obj, "reset_7d").unwrap_or(0.0) as i64,
+            model_limits: model_limits(obj),
         })
         .collect();
     let mut accounts = accounts;
@@ -179,6 +198,24 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 fn strip_zeros(digits: &[u8]) -> &[u8] {
     let start = digits.iter().position(|&d| d != b'0').unwrap_or(digits.len());
     &digits[start..]
+}
+
+/// The `model_limits` array of one account object, if it has one.
+fn model_limits(obj: &str) -> Vec<CcModelLimit> {
+    let Some(arr) = top_level_value(obj, "model_limits") else {
+        return Vec::new();
+    };
+    objects_in_array(arr)
+        .into_iter()
+        .map(|m| CcModelLimit {
+            label: str_field(m, "label").unwrap_or_default(),
+            util: num_field(m, "utilization").unwrap_or(0.0),
+            // `"reset": null` is not a time; a model nobody has touched
+            // has no window to reset.  `num_field` fails on `null`,
+            // which is the answer.
+            reset: num_field(m, "reset").map(|t| t as i64),
+        })
+        .collect()
 }
 
 /// Every `{...}` directly inside the array `s` starts with, with
@@ -336,6 +373,26 @@ pub fn local_mdhm(unix: i64) -> (u32, u32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-model caps are in the feed and must survive parsing.
+    ///
+    /// An account can sit at 7 % of its week and still be shut out of
+    /// a model: on the live feed of 2026-08-01, Claude 3 was at 64 %
+    /// on 7d and **85 %** on Fable.  The account-level bars cannot say
+    /// that, which is why the card carries a row per model.
+    #[test]
+    fn model_limits_survive_the_parse() {
+        let u = parse(NESTED_FEED).expect("feed parses");
+        let m = &u.accounts[1].model_limits;
+        assert_eq!(m.len(), 1, "one model cap per account in this feed");
+        assert_eq!(m[0].label, "Fable");
+        assert!((m[0].util - 0.66).abs() < 1e-9);
+        assert_eq!(m[0].reset, Some(1785704399));
+        // `"reset": null` means the window never started — not epoch 0.
+        let untouched = &u.accounts[0].model_limits[0];
+        assert_eq!(untouched.reset, None);
+        assert_eq!(untouched.util, 0.0);
+    }
 
     /// The live file on this machine, whatever it currently says —
     /// skipped when it is not there (CI, a fresh checkout).

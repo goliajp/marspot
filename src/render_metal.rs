@@ -421,6 +421,10 @@ pub struct CcUsageAccountRender {
     /// "11:50" / "14:00" — timeline bar end labels.
     pub reset_5h_hm: String,
     pub reset_7d_hm: String,
+    /// Per-model caps: (label, utilization).  One row each, under the
+    /// account's own windows — an account can sit at 7 % of its week
+    /// and still be shut out of a model, and the 7D bar cannot say so.
+    pub model_rows: Vec<(String, f32)>,
 }
 
 /// cc — full data for one render of the `Cc` (Claude usage) modal.
@@ -2954,7 +2958,13 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // last row's descent, then pad again.  `ch - ascent` is the
     // descent — the painter reports cell height and ascent, and a
     // monospace cell is exactly the two stacked.
-    let card_h = card_height(ch as f64, ascent as f64);
+    let extra_bar_rows = cc
+        .accounts
+        .iter()
+        .map(|a| a.model_rows.len())
+        .max()
+        .unwrap_or(0);
+    let card_h = card_height(ch as f64, ascent as f64, extra_bar_rows);
     let card_top = y;
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
@@ -3009,12 +3019,29 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         // Full width (not two half-width groups) roughly doubles the
         // resolution of the bar, which is the whole point of the panel.
         let pct_slot = cw as f64 * 4.0; // "100%"
-        for (i, (label, util)) in [("5H", a.util_5h), ("7D", a.util_7d)].into_iter().enumerate() {
-            cy += row_adv[1 + i];
-            text(p, px, cy, label, cc_palette::fg_faint());
+        // The account's own windows, then one row per model cap.  The
+        // model rows are the same shape on purpose: a reader should
+        // not have to learn a second way to read a bar halfway down
+        // the card.
+        let rows: Vec<(String, f32)> = [("5H".to_string(), a.util_5h), ("7D".to_string(), a.util_7d)]
+            .into_iter()
+            .chain(a.model_rows.iter().cloned())
+            .collect();
+        // Labels are no longer all two characters, so the bars start
+        // after the widest one rather than at a fixed column.
+        let label_cols = rows
+            .iter()
+            .map(|(l, _)| l.chars().count())
+            .max()
+            .unwrap_or(2) as f64;
+        for (i, (label, util)) in rows.into_iter().enumerate() {
+            // First bar row steps off the email; every later one uses
+            // the tighter row-to-row advance.
+            cy += if i == 0 { row_adv[1] } else { row_adv[2] };
+            text(p, px, cy, &label, cc_palette::fg_faint());
             let pct = format!("{:.0}%", util * 100.0);
             text(p, row_right - text_w(&pct), cy, &pct, cc_util_color(util));
-            let bar_x = px + cw as f64 * 3.0;
+            let bar_x = px + cw as f64 * (label_cols + 1.0);
             let bar_w = (row_right - pct_slot - cw as f64 - bar_x).max(1.0);
             let bar_h = ch as f64 * metric::BAR_H;
             // Centre the bar on the text's optical middle so the row

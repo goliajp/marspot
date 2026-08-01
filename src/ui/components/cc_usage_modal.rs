@@ -103,11 +103,16 @@ pub fn timeline_range(now: i64, extents: &[(i64, i64)]) -> (f64, f64) {
 /// ascent` is the descent — a monospace cell is exactly the two
 /// stacked.  Writing this as a literal is how the bottom padding got
 /// lost the first time.
-pub fn card_height(cell_h: f64, ascent: f64) -> f64 {
+pub fn card_height(cell_h: f64, ascent: f64, extra_bar_rows: usize) -> f64 {
     let lh = cell_h * metric::LINE_ADVANCE;
     let pad = cell_h * metric::CARD_PAD;
     let rows: f64 = metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).sum();
-    pad * 2.0 + ascent + rows + (cell_h - ascent)
+    // Each per-model cap adds one more bar row, on the same advance the
+    // 5H→7D step uses.  Derived rather than a second literal: a card
+    // whose height and whose painter disagree is the bug this module
+    // exists to prevent.
+    let extra = lh * metric::CARD_ROW_ADVANCES[2] * extra_bar_rows as f64;
+    pad * 2.0 + ascent + rows + extra + (cell_h - ascent)
 }
 
 /// Fixed chrome height of the whole panel, in line advances: the title
@@ -127,6 +132,7 @@ pub const AXIS_LINES: f64 = 4.0;
 /// 94 % of the window; height is the chrome plus one band per account.
 pub fn panel_rect(
     n_accounts: usize,
+    extra_bar_rows: usize,
     w_phys: f64,
     h_phys: f64,
     cell_w: f64,
@@ -139,7 +145,11 @@ pub fn panel_rect(
         .min(n * 52.0 * cell_w + 8.0 * cell_w)
         .max(64.0 * cell_w)
         .min(w_phys - 24.0);
-    let h = (lh * PANEL_CHROME_LINES + n * lh * TIMELINE_ROW_LINES + lh * AXIS_LINES)
+    // The chrome figure covers a card with the two account windows;
+    // per-model rows make every card taller by the same step the
+    // painter uses.
+    let cards_extra = lh * metric::CARD_ROW_ADVANCES[2] * extra_bar_rows as f64;
+    let h = (lh * PANEL_CHROME_LINES + cards_extra + n * lh * TIMELINE_ROW_LINES + lh * AXIS_LINES)
         .min(h_phys * 0.9);
     marspot_term::layout::Rect {
         x: (w_phys - w) / 2.0,
@@ -199,16 +209,21 @@ mod tests {
         let pad = cell_h * metric::CARD_PAD;
         let rows: f64 = metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).sum();
 
-        let h = card_height(cell_h, ascent);
-        // Where the last row's baseline lands, measured from the top.
-        let last_baseline = pad + ascent + rows;
-        let below = h - last_baseline;
-        let descent = cell_h - ascent;
-        assert!(
-            below >= descent + pad - 0.001,
-            "only {below} px below the last baseline; needs descent \
-             ({descent}) + padding ({pad})"
-        );
+        // Checked with and without per-model rows: the extra rows are
+        // exactly the reason a card can outgrow its own box.
+        for extra in [0usize, 1, 3] {
+            let h = card_height(cell_h, ascent, extra);
+            // Where the last row's baseline lands, measured from the top.
+            let last_baseline =
+                pad + ascent + rows + lh * metric::CARD_ROW_ADVANCES[2] * extra as f64;
+            let below = h - last_baseline;
+            let descent = cell_h - ascent;
+            assert!(
+                below >= descent + pad - 0.001,
+                "extra={extra}: only {below} px below the last baseline; \
+                 needs descent ({descent}) + padding ({pad})"
+            );
+        }
     }
 
     /// Padding is one value in one unit, so top and bottom match.
@@ -216,7 +231,7 @@ mod tests {
     fn card_padding_is_symmetric() {
         let (cell_h, ascent) = (20.0, 15.0);
         let pad = cell_h * metric::CARD_PAD;
-        let h = card_height(cell_h, ascent);
+        let h = card_height(cell_h, ascent, 0);
         let lh = cell_h * metric::LINE_ADVANCE;
         let rows: f64 = metric::CARD_ROW_ADVANCES.iter().map(|m| lh * m).sum();
         let top_gap = pad;
@@ -231,7 +246,7 @@ mod tests {
     #[test]
     fn panel_rect_stays_inside_the_window() {
         for n in 1..=8 {
-            let r = panel_rect(n, 1600.0, 1000.0, 8.0, 18.0, 60.0);
+            let r = panel_rect(n, 1, 1600.0, 1000.0, 8.0, 18.0, 60.0);
             assert!(r.x >= 0.0, "n={n} x={}", r.x);
             assert!(r.x + r.w <= 1600.0 + 0.001, "n={n} overflows width");
             assert!(r.y_top >= 60.0, "n={n} must clear the top inset");

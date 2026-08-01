@@ -5953,11 +5953,18 @@ impl CoreApp {
             .and_then(|m| m.data.as_ref())
             .map(|d| d.accounts.len())
             .unwrap_or(1);
+        let extra_bar_rows = win!(self, wi)
+            .cc_usage_modal
+            .as_ref()
+            .and_then(|m| m.data.as_ref())
+            .and_then(|d| d.accounts.iter().map(|a| a.model_limits.len()).max())
+            .unwrap_or(0);
         let (cell_w, cell_h) = self.renderer.cell_dims();
         // Geometry lives with the rest of the modal's metrics so the
         // painter and this rect can't disagree about how tall a card is.
         marspot::ui::components::cc_usage_modal::panel_rect(
             n,
+            extra_bar_rows,
             win!(self, wi).w_phys,
             win!(self, wi).h_phys,
             cell_w as f64,
@@ -6023,6 +6030,11 @@ impl CoreApp {
                         reset_label: format!("reset 5h: {}", fmt_md_hm(a.reset_5h)),
                         reset_5h_hm: fmt_hm(a.reset_5h),
                         reset_7d_hm: fmt_hm(a.reset_7d),
+                        model_rows: a
+                            .model_limits
+                            .iter()
+                            .map(|m| (m.label.to_uppercase(), m.util as f32))
+                            .collect(),
                     })
                     .collect(),
             }),
