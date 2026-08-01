@@ -2178,6 +2178,10 @@ enum CoreEvent {
     /// straight to the pane's L3 — the hold lives there so it survives
     /// this process being replaced by a silent update.
     PaneHoldGrid(u64, bool),
+    /// L1 asks a pane to receive text as a paste.  Forwarded to the
+    /// pane's L3, which is the only layer that knows whether the
+    /// program in it has bracketed paste on.
+    PaneInjectPaste(u64, String),
     /// C5 — L3 → L2 `SearchResults` frame.  Carries the shelld
     /// session id (so we can route to the right pane in a multi-pane
     /// world), the query_id (so a stale batch from a cancelled
@@ -2374,6 +2378,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneSessionEnd => marspot::shell_proto::decode_pane_session_end(&f.payload)
             .ok()
             .map(CoreEvent::PaneSessionEnd),
+        MsgType::PaneInjectPaste => marspot::shell_proto::decode_pane_inject_paste(&f.payload)
+            .ok()
+            .map(|(sid, text)| CoreEvent::PaneInjectPaste(sid, text)),
         MsgType::PaneHoldGrid => marspot::shell_proto::decode_pane_hold_grid(&f.payload)
             .ok()
             .map(|(sid, on)| CoreEvent::PaneHoldGrid(sid, on)),
@@ -3376,6 +3383,16 @@ impl CoreApp {
         for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             if pane.session().l3_session_id() == Some(shelld_session_id) {
                 pane.session_mut().forward_inject_input(bytes);
+                return;
+            }
+        }
+    }
+
+    /// Pass pasted text down to the pane's own L3.
+    fn forward_pane_paste(&mut self, shelld_session_id: u64, text: &str) {
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
+            if pane.session().l3_session_id() == Some(shelld_session_id) {
+                pane.session_mut().forward_paste(text);
                 return;
             }
         }
@@ -8910,6 +8927,9 @@ fn main() {
                 }
                 CoreEvent::PaneHoldGrid(sid, on) => {
                     app.forward_pane_hold_grid(sid, on);
+                }
+                CoreEvent::PaneInjectPaste(sid, text) => {
+                    app.forward_pane_paste(sid, &text);
                 }
 
                 CoreEvent::SearchResults(sid, qid, has_more, _total_seen, hits) => {

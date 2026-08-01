@@ -44,6 +44,13 @@ pub trait PtyIo: Send + Sync {
     fn send(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()>;
     /// Ask L3 to hold this pane's picture where it is (or release it).
     fn hold(&self, sid: u64, on: bool) -> std::io::Result<()>;
+    /// Deliver text the way a paste would arrive.
+    ///
+    /// Not the same as [`send`](Self::send): only L3 knows whether the
+    /// program in the pane has bracketed paste on, and multi-line text
+    /// delivered without it is executed a line at a time.  Anything
+    /// handing a *message* to a running program takes this route.
+    fn paste(&self, sid: u64, text: &str) -> std::io::Result<()>;
 }
 
 /// Everything a running op needs from the world.
@@ -78,8 +85,12 @@ pub enum StepKind {
     /// Wait for the user to come back — focus or a keystroke.  The one
     /// step with no deadline: a parked pane may sit for days.
     AwaitUser,
-    /// Type bytes into the pane's PTY.
+    /// Type bytes into the pane's PTY, verbatim.
     Send(Vec<u8>),
+    /// Deliver text as a paste — mode-aware, and safe for text with
+    /// newlines in it.  This is the one that carries a message to
+    /// whatever is running in the pane.
+    Paste(String),
     /// Wait until the pane has produced output and then gone still for
     /// `still`.
     ///
@@ -136,6 +147,9 @@ impl Step {
     }
     pub fn send(bytes: Vec<u8>) -> Self {
         Self { kind: StepKind::Send(bytes), timeout: Some(Duration::from_secs(5)), label: "send" }
+    }
+    pub fn paste(text: impl Into<String>) -> Self {
+        Self { kind: StepKind::Paste(text.into()), timeout: Some(Duration::from_secs(5)), label: "paste" }
     }
     pub fn await_quiet(still: Duration) -> Self {
         Self {
@@ -223,6 +237,15 @@ impl PtyOp {
         self
     }
 }
+
+/// Most a single step may deliver into a pane.
+///
+/// Not a performance limit — a bound on blast radius.  Everything that
+/// reaches a PTY this way is, from the program's point of view,
+/// something the user typed; a runaway caller pasting megabytes into
+/// someone else's session is the failure worth making impossible before
+/// there are callers rather than after.
+pub const MAX_PAYLOAD: usize = 64 * 1024;
 
 /// Braille spinner — the eight standard frames, one per tick.
 pub fn spinner_frame(phase: u8) -> char {
@@ -386,7 +409,43 @@ impl OpRunner {
                 self.env.find_descendant(under, matching).is_some()
             }
             StepKind::AwaitUser => false, // only `wake()` moves this on
+            StepKind::Paste(text) => {
+                if text.len() > MAX_PAYLOAD {
+                    self.finish(
+                        host,
+                        OpOutcome::Failed {
+                            step: self.at,
+                            label: step.label,
+                            err: format!("{} B exceeds the {MAX_PAYLOAD} B cap", text.len()),
+                        },
+                    );
+                    return true;
+                }
+                host.log(
+                    LogLevel::Info,
+                    &format!("{}.paste", self.op.name),
+                    &format!("sid={sid} bytes={}", text.len()),
+                );
+                if let Err(e) = self.env.io().paste(sid, &text) {
+                    self.finish(
+                        host,
+                        OpOutcome::Failed { step: self.at, label: step.label, err: e.to_string() },
+                    );
+                }
+                true
+            }
             StepKind::Send(bytes) => {
+                if bytes.len() > MAX_PAYLOAD {
+                    self.finish(
+                        host,
+                        OpOutcome::Failed {
+                            step: self.at,
+                            label: step.label,
+                            err: format!("{} B exceeds the {MAX_PAYLOAD} B cap", bytes.len()),
+                        },
+                    );
+                    return true;
+                }
                 if let Err(e) = self.env.io().send(sid, &bytes) {
                     self.finish(
                         host,
@@ -683,6 +742,177 @@ impl OpEnv for RealEnv {
     }
 }
 
+// ── the service ──────────────────────────────────────────────────────
+
+/// Identifies one submitted run, so a caller can recognise its own
+/// outcome later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OpId(pub u64);
+
+/// What a finished run reports back.
+#[derive(Debug, Clone)]
+pub struct OpReport {
+    pub id: OpId,
+    pub sid: u64,
+    pub name: &'static str,
+    pub outcome: OpOutcome,
+}
+
+/// Most runs that may wait their turn on one pane.
+///
+/// A pane is a single-threaded thing — one program, one keyboard — so
+/// the queue exists to serialise, not to buffer.  Anything past this is
+/// a caller in a loop, and dropping the newest with a loud line is a
+/// better failure than growing forever (CLAUDE.md §3).
+const MAX_QUEUED_PER_PANE: usize = 8;
+
+/// The entry point for "do something to a pane".
+///
+/// Everything goes through here rather than each caller reaching for
+/// `begin_pane_session` itself, because the invariant that matters
+/// cannot be enforced anywhere else: **one run at a time per pane**.
+/// Two scripts typing into the same PTY interleave their keystrokes,
+/// and the result is neither of the commands they meant to send.
+///
+/// That invariant is the reason this exists now rather than when there
+/// is a second caller: session-to-session delivery means ops aimed at
+/// panes their sender does not own, arriving whenever the sender feels
+/// like it, at panes that may already be mid-reclamation.
+pub struct PtyOps {
+    io: Arc<dyn PtyIo>,
+    queued: std::collections::HashMap<u64, std::collections::VecDeque<(OpId, PtyOp, usize)>>,
+    active: std::collections::HashMap<u64, (OpId, &'static str)>,
+    /// Where runners post their outcomes; drained by `pump`.
+    sink: Arc<std::sync::Mutex<Vec<OpReport>>>,
+    next_id: u64,
+}
+
+impl PtyOps {
+    pub fn new(io: Arc<dyn PtyIo>) -> Self {
+        Self {
+            io,
+            queued: std::collections::HashMap::new(),
+            active: std::collections::HashMap::new(),
+            sink: Arc::new(std::sync::Mutex::new(Vec::new())),
+            next_id: 1,
+        }
+    }
+
+    /// Queue `op` against `sid`.  Runs immediately if the pane is free.
+    ///
+    /// `None` when the pane's queue is full — the caller is told, and
+    /// can decide whether losing this one matters.
+    pub fn submit(&mut self, sid: u64, op: PtyOp) -> Option<OpId> {
+        self.submit_at(sid, op, 0)
+    }
+
+    /// Queue a run that starts partway in — how a parked script is
+    /// re-armed after the process that owned it was replaced.
+    pub fn submit_at(&mut self, sid: u64, op: PtyOp, step: usize) -> Option<OpId> {
+        let q = self.queued.entry(sid).or_default();
+        if q.len() >= MAX_QUEUED_PER_PANE {
+            return None;
+        }
+        let id = OpId(self.next_id);
+        self.next_id += 1;
+        q.push_back((id, op, step));
+        Some(id)
+    }
+
+    /// Is a run in flight on this pane?
+    pub fn is_busy(&self, sid: u64) -> bool {
+        self.active.contains_key(&sid)
+    }
+
+    /// What is running on this pane, if anything.
+    pub fn running(&self, sid: u64) -> Option<&'static str> {
+        self.active.get(&sid).map(|(_, name)| *name)
+    }
+
+    /// Post an outcome as a runner would.  Test-only: exercising the
+    /// queue's hand-off should not require driving a real script to
+    /// completion.
+    #[cfg(test)]
+    pub fn report_for_test(&self, r: OpReport) {
+        self.sink.lock().unwrap().push(r);
+    }
+
+    /// Start whatever can start, and collect whatever finished.
+    ///
+    /// Called once per plugin tick.  Returns the finished runs so the
+    /// caller can do its own bookkeeping — this module has no opinion
+    /// about what a completed op means.
+    pub fn pump(&mut self, host: &dyn crate::plugins::PluginHost) -> Vec<OpReport> {
+        let done: Vec<OpReport> = std::mem::take(&mut *self.sink.lock().unwrap());
+        for r in &done {
+            // Only clear the slot if the report belongs to the run that
+            // holds it: a late report from a superseded run must not
+            // free a pane someone else is using.
+            if self.active.get(&r.sid).map(|(id, _)| *id) == Some(r.id) {
+                self.active.remove(&r.sid);
+            }
+        }
+        let mut free: Vec<u64> = self
+            .queued
+            .iter()
+            .filter(|(sid, q)| !q.is_empty() && !self.active.contains_key(sid))
+            .map(|(sid, _)| *sid)
+            .collect();
+        // Sorted, because the map's order is not one: two panes going
+        // first in a different order on every tick would make the logs
+        // — and any test of them — read as noise.
+        free.sort_unstable();
+        for sid in free {
+            let Some((id, op, step)) = self.queued.get_mut(&sid).and_then(|q| q.pop_front()) else {
+                continue;
+            };
+            let name = op.name;
+            let sink = Arc::clone(&self.sink);
+            let runner = OpRunner::new(op, Box::new(RealEnv::new(Arc::clone(&self.io))))
+                .start_at(step)
+                .on_finish(move |_, outcome| {
+                    sink.lock().unwrap().push(OpReport {
+                        id,
+                        sid,
+                        name,
+                        outcome: outcome.clone(),
+                    });
+                });
+            match host.begin_pane_session(sid, Box::new(runner)) {
+                Ok(()) => {
+                    self.active.insert(sid, (id, name));
+                    host.log(
+                        LogLevel::Info,
+                        "pty_op.started",
+                        &format!("{name} on pane {sid} (id={})", id.0),
+                    );
+                }
+                Err(e) => {
+                    host.log(
+                        LogLevel::Warn,
+                        "pty_op.begin_failed",
+                        &format!("{name} on pane {sid}: {e}"),
+                    );
+                    self.sink.lock().unwrap().push(OpReport {
+                        id,
+                        sid,
+                        name,
+                        outcome: OpOutcome::Failed {
+                            step: 0,
+                            label: "begin",
+                            err: e.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+        // Panes with nothing left to run are forgotten, so the maps are
+        // bounded by what is actually in flight.
+        self.queued.retain(|_, q| !q.is_empty());
+        done
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -695,6 +925,169 @@ mod tests {
         state: Arc<FakeState>,
     }
 
+    /// One pane runs one script at a time; the rest wait their turn.
+    ///
+    /// This is the invariant the service exists for.  Two scripts
+    /// typing into the same PTY interleave their keystrokes, and what
+    /// arrives is neither command — a failure that only shows up once
+    /// something submits ops it does not own, which is exactly what
+    /// session-to-session delivery is.
+    #[test]
+    fn one_run_at_a_time_per_pane_and_the_rest_queue() {
+        let state = Arc::new(FakeState::default());
+        let mut ops = PtyOps::new(Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>);
+        let host = FakePluginHost::default();
+
+        let first = ops.submit(7, PtyOp::new("test.a").step(Step::settle(Duration::from_secs(1))));
+        let second = ops.submit(7, PtyOp::new("test.b").step(Step::settle(Duration::from_secs(1))));
+        let other_pane = ops.submit(9, PtyOp::new("test.c").step(Step::settle(Duration::from_secs(1))));
+        assert!(first.is_some() && second.is_some() && other_pane.is_some());
+
+        ops.pump(&host);
+        assert_eq!(
+            *host.begun.lock().unwrap(),
+            vec![(7, "test.a".to_string()), (9, "test.c".to_string())],
+            "one per pane starts; a different pane is not blocked by it"
+        );
+        assert_eq!(ops.running(7), Some("test.a"));
+
+        ops.pump(&host);
+        assert_eq!(
+            host.begun.lock().unwrap().len(),
+            2,
+            "the queued run must not start while the first is in flight"
+        );
+
+        // The first finishes; the queued one takes the pane.
+        ops.report_for_test(OpReport {
+            id: first.unwrap(),
+            sid: 7,
+            name: "test.a",
+            outcome: OpOutcome::Done,
+        });
+        let done = ops.pump(&host);
+        assert_eq!(done.len(), 1, "the finished run is reported once");
+        assert_eq!(ops.running(7), Some("test.b"));
+    }
+
+    /// A queue is for serialising, not for buffering.
+    #[test]
+    fn a_pane_queue_is_bounded() {
+        let state = Arc::new(FakeState::default());
+        let mut ops = PtyOps::new(Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>);
+        for _ in 0..MAX_QUEUED_PER_PANE {
+            assert!(ops.submit(1, PtyOp::new("test.x")).is_some());
+        }
+        assert!(
+            ops.submit(1, PtyOp::new("test.x")).is_none(),
+            "past the cap the caller is told, not silently queued forever"
+        );
+    }
+
+    /// A late report from a superseded run must not free a pane that
+    /// someone else has since taken.
+    #[test]
+    fn a_stale_report_does_not_free_someone_elses_pane() {
+        let state = Arc::new(FakeState::default());
+        let mut ops = PtyOps::new(Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>);
+        let host = FakePluginHost::default();
+        let a = ops.submit(3, PtyOp::new("test.a")).unwrap();
+        ops.pump(&host);
+        ops.report_for_test(OpReport { id: a, sid: 3, name: "test.a", outcome: OpOutcome::Done });
+        ops.pump(&host);
+        let b = ops.submit(3, PtyOp::new("test.b")).unwrap();
+        ops.pump(&host);
+        assert_eq!(ops.running(3), Some("test.b"));
+        // `a`'s report arriving again (a duplicate, a retry) must not
+        // release the pane `b` is using.
+        ops.report_for_test(OpReport { id: a, sid: 3, name: "test.a", outcome: OpOutcome::Done });
+        ops.pump(&host);
+        assert_eq!(ops.running(3), Some("test.b"), "still b's pane");
+        assert_ne!(a, b);
+    }
+
+    /// Multi-line text goes as a paste, and oversized payloads are
+    /// refused rather than typed.
+    #[test]
+    fn text_is_delivered_as_a_paste_and_is_size_capped() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.msg").step(Step::paste("first line\nsecond line"));
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 100);
+        assert_eq!(
+            *state.pasted.lock().unwrap(),
+            vec!["first line\nsecond line".to_string()],
+            "text with newlines must not be typed a line at a time"
+        );
+        assert!(state.sent.lock().unwrap().is_empty(), "and not as raw input");
+
+        let (state2, env2, host2) = setup();
+        let huge = "x".repeat(MAX_PAYLOAD + 1);
+        let finished: Arc<Mutex<Option<OpOutcome>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&finished);
+        let mut r = OpRunner::new(PtyOp::new("test.huge").step(Step::paste(huge)), env2)
+            .on_finish(move |_, o| *sink.lock().unwrap() = Some(o.clone()));
+        run(&mut r, &host2, &state2, 100);
+        r.on_end(&host2, EndReason::PluginRequested);
+        assert!(state2.pasted.lock().unwrap().is_empty(), "nothing that big is delivered");
+        assert!(
+            matches!(finished.lock().unwrap().as_ref(), Some(OpOutcome::Failed { .. })),
+            "and the caller is told why"
+        );
+    }
+
+    /// Records which pane got a session, in order.  The op's name is
+    /// read out of the log line the service writes, so the test sees
+    /// what an operator would.
+    #[derive(Default)]
+    struct FakePluginHost {
+        begun: Mutex<Vec<(u64, String)>>,
+    }
+
+    impl crate::plugins::PluginHost for FakePluginHost {
+        fn pane_count(&self) -> usize {
+            0
+        }
+        fn pane_pty_device(
+            &self,
+            _pane: usize,
+        ) -> Result<Option<std::path::PathBuf>, crate::plugins::PluginError> {
+            Ok(None)
+        }
+        fn pane_pty_pid_tree(
+            &self,
+            _pane: usize,
+        ) -> Result<Vec<crate::plugins::PtyChild>, crate::plugins::PluginError> {
+            Ok(Vec::new())
+        }
+        fn pane_focused(&self) -> Option<usize> {
+            None
+        }
+        fn state_dir(&self) -> Result<std::path::PathBuf, crate::plugins::PluginError> {
+            Ok(std::env::temp_dir())
+        }
+        fn log(&self, _l: LogLevel, tag: &str, msg: &str) {
+            if tag == "pty_op.started" {
+                // "<name> on pane <sid> (id=N)"
+                let name = msg.split_whitespace().next().unwrap_or("?").to_string();
+                let sid = msg
+                    .split("on pane ")
+                    .nth(1)
+                    .and_then(|r| r.split_whitespace().next())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                self.begun.lock().unwrap().push((sid, name));
+            }
+        }
+        fn begin_pane_session(
+            &self,
+            _sid: u64,
+            _session: Box<dyn PaneSession>,
+        ) -> Result<(), crate::plugins::PluginError> {
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct FakeState {
         now_ms: Mutex<u64>,
@@ -704,6 +1097,7 @@ mod tests {
         signals: Mutex<Vec<(i32, i32)>>,
         sent: Mutex<Vec<Vec<u8>>>,
         holds: Mutex<Vec<bool>>,
+        pasted: Mutex<Vec<String>>,
     }
 
     struct FakeIo(Arc<FakeState>);
@@ -714,6 +1108,10 @@ mod tests {
         }
         fn hold(&self, _sid: u64, on: bool) -> std::io::Result<()> {
             self.0.holds.lock().unwrap().push(on);
+            Ok(())
+        }
+        fn paste(&self, _sid: u64, text: &str) -> std::io::Result<()> {
+            self.0.pasted.lock().unwrap().push(text.to_string());
             Ok(())
         }
     }

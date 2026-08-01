@@ -52,6 +52,8 @@ pub trait InjectInputProxy: Send + Sync {
     /// stops L2 drawing: that one dies with the core, and every silent
     /// update restarts the core.
     fn hold_grid(&self, session_id: u64, on: bool) -> std::io::Result<()>;
+    /// Deliver text the way a paste would arrive.
+    fn paste(&self, session_id: u64, text: &str) -> std::io::Result<()>;
 }
 
 #[allow(dead_code)]
@@ -70,6 +72,15 @@ impl pty_op::PtyIo for ShelldClient {
     }
     fn hold(&self, sid: u64, on: bool) -> std::io::Result<()> {
         self.hold_grid_of(sid, on)
+    }
+    fn paste(&self, sid: u64, text: &str) -> std::io::Result<()> {
+        match self.host_inject.as_ref() {
+            Some(p) => p.paste(sid, text),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no InjectInputProxy on this host (test build?)",
+            )),
+        }
     }
 }
 
@@ -183,6 +194,9 @@ pub struct ClaudecodePlugin {
     /// attached.  Split from `dormant` so a re-arm after an execv
     /// doesn't stack a second session onto a pane that still has one.
     armed: std::collections::HashSet<u64>,
+    /// Every PTY operation this plugin runs goes through here, so two
+    /// of them can never type into the same pane at once.
+    ops: Option<pty_op::PtyOps>,
     /// Panes this plugin has asked L3 to hold.  Tracked so a hold can
     /// be undone even if the session that asked for it is gone — see
     /// the sweep in `rearm_dormant`.
@@ -754,6 +768,7 @@ impl ClaudecodePlugin {
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: std::collections::HashSet::new(),
+            ops: None,
             cpu_samples: HashMap::new(),
             blocked_reason: HashMap::new(),
             monitors: HashMap::new(),
@@ -1069,15 +1084,11 @@ impl ClaudecodePlugin {
                 continue;
             };
             self.held.insert(*sid);
-            let session = Box::new(pty_op::OpRunner::new(
-                op,
-                Box::new(pty_op::RealEnv::new(client.clone() as Arc<dyn pty_op::PtyIo>)),
-            ));
-            if let Err(e) = host.begin_pane_session(*sid, session) {
+            if self.ops(&client).submit(*sid, op).is_none() {
                 host.log(
                     LogLevel::Warn,
-                    "hibernate.begin_pane_session_failed",
-                    &format!("{e}"),
+                    "hibernate.queue_full",
+                    &format!("pane {sid} already has work queued"),
                 );
                 continue;
             }
@@ -1171,35 +1182,26 @@ impl ClaudecodePlugin {
                 );
                 continue;
             };
-            let session = Box::new(
-                pty_op::OpRunner::new(
-                    op,
-                    Box::new(pty_op::RealEnv::new(client.clone() as Arc<dyn pty_op::PtyIo>)),
-                )
-                .start_at(RECLAIM_PARK_STEP),
-            );
+
             // Idempotent by design: if this pane is already held (the
             // usual case — L3 outlived the L1 that asked), L3 sees no
             // change.  If a *new* L3 came up meanwhile, this is what
             // puts the hold back.
             self.held.insert(d.shelld_sid);
             let _ = client.hold_grid_of(d.shelld_sid, true);
-            match host.begin_pane_session(d.shelld_sid, session) {
-                Ok(()) => {
+            match self.ops(&client).submit_at(d.shelld_sid, op, RECLAIM_PARK_STEP) {
+                Some(_) => {
                     self.armed.insert(d.shelld_sid);
                     host.log(
                         LogLevel::Info,
                         "hibernate.rearmed",
-                        &format!(
-                            "dormant session {} can be woken again",
-                            d.uuid
-                        ),
+                        &format!("dormant session {} can be woken again", d.uuid),
                     );
                 }
-                Err(e) => host.log(
+                None => host.log(
                     LogLevel::Warn,
                     "hibernate.rearm_failed",
-                    &format!("{e}"),
+                    &format!("pane {} already has work queued", d.shelld_sid),
                 ),
             }
         }
@@ -1264,6 +1266,14 @@ impl ClaudecodePlugin {
                 &format!("{} dormant session(s) carried over", self.dormant.len()),
             );
         }
+    }
+
+    /// The op service, built on first use because the client it needs
+    /// only exists once the plugin has one.
+    fn ops(&mut self, client: &Arc<ShelldClient>) -> &mut pty_op::PtyOps {
+        self.ops.get_or_insert_with(|| {
+            pty_op::PtyOps::new(Arc::clone(client) as Arc<dyn pty_op::PtyIo>)
+        })
     }
 
     /// Kick off the profile cycle for `shelld_session_id`.  Called
@@ -1342,15 +1352,11 @@ impl ClaudecodePlugin {
             );
             return;
         };
-        let session = Box::new(pty_op::OpRunner::new(
-            op,
-            Box::new(pty_op::RealEnv::new(client as Arc<dyn pty_op::PtyIo>)),
-        ));
-        if let Err(e) = host.begin_pane_session(shelld_sid, session) {
+        if self.ops(&client).submit(shelld_sid, op).is_none() {
             host.log(
                 LogLevel::Warn,
-                "cycle.begin_pane_session_failed",
-                &format!("{e}"),
+                "cycle.queue_full",
+                &format!("pane {shelld_sid} already has work queued"),
             );
         }
     }
@@ -1834,6 +1840,20 @@ impl Plugin for ClaudecodePlugin {
     }
 
     fn tick(&mut self, host: &dyn PluginHost) {
+        // Start whatever is queued and collect whatever finished, first
+        // thing and unconditionally: a pane left marked busy because
+        // this plugin went uninitialised would never accept another op.
+        if let Some(ops) = self.ops.as_mut() {
+            for r in ops.pump(host) {
+                if !r.outcome.is_done() {
+                    host.log(
+                        LogLevel::Warn,
+                        "pty_op.not_done",
+                        &format!("{} on pane {} ended {:?}", r.name, r.sid, r.outcome),
+                    );
+                }
+            }
+        }
         if !self.initialised {
             return;
         }
@@ -3279,6 +3299,12 @@ mod tests {
             self.holds.lock().unwrap().push(on);
             Ok(())
         }
+
+        fn paste(&self, _sid: u64, text: &str) -> std::io::Result<()> {
+            // Same destination as `inject_input` for the test's
+            // purposes: what matters is the bytes that reach the PTY.
+            self.inject_input(0, text.as_bytes())
+        }
     }
 
     /// Drain a PTY master (set non-blocking by the caller) into a
@@ -3542,11 +3568,14 @@ mod tests {
         );
         assert_eq!(plugin.dormant[0].uuid, uuid);
 
-        // The signal is sent from the session's own ticks, not from
-        // the policy call: the pane's picture has to be held first,
-        // and that request crosses two process boundaries while a
-        // signal crosses none.  Drive the ticks the way the real host
-        // does.
+        // Nothing has run yet: the decision queues an op, the service
+        // starts it on the next tick.  Both halves are production's,
+        // and the test drives them in the same order.
+        plugin.ops.as_mut().expect("the policy built the service").pump(&host);
+        // The signal is sent from the run's own ticks, not from the
+        // policy call: the pane's picture has to be held first, and
+        // that request crosses two process boundaries while a signal
+        // crosses none.  Drive the ticks the way the real host does.
         let ticking_host = FakePaneSessionHost { sid: 1 };
         let tick_all = || {
             for s in host.sessions.lock().unwrap().iter_mut() {
@@ -3871,6 +3900,12 @@ mod tests {
         // Pass 2: same CPU total, sample window wide enough.
         let scan = scan_with(7, pid, uuid);
         plugin.run_idle_policy(&host, &scan);
+        assert!(
+            host.begun.lock().unwrap().is_empty(),
+            "the decision queues the op; starting it is the service's job"
+        );
+        // …which happens on the next tick, exactly as in production.
+        plugin.ops.as_mut().expect("the policy built the service").pump(&host);
         assert_eq!(*host.begun.lock().unwrap(), vec![7], "a wake session is armed");
         assert_eq!(plugin.dormant.len(), 1);
         assert_eq!(plugin.dormant[0].uuid, uuid);

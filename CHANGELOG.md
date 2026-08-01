@@ -28,7 +28,33 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.68**
+Current: **0.7.69**
+
+### 0.7.69
+
+**把 PTY 操作这块封装成能给「session 间通信」当地基的样子。**
+
+补的都是「从『一个 pane 自己的操作』跨到『A 给 B 递东西』时会立刻塌」的
+地方:
+
+- **一个 pane 同时只跑一个脚本**(`PtyOps`)。两段脚本往同一个 PTY 打字会
+  互相穿插,到达的既不是这条命令也不是那条。以前靠「只有两个调用方、而且
+  都是用户手动触发」侥幸成立;session 间投递意味着操作**指向别人的 pane**、
+  **在发送方想发的时候到达**、而那个 pane 可能正在被回收。队列按 pane 排,
+  每 pane 上限 8 条(超了告诉调用方,不是无限堆积),启动顺序按 sid 排定 ——
+  HashMap 的顺序不是顺序,日志会变成噪音。
+- **迟到的完成报告不会释放别人的 pane**:报告要认 id,不认 pane。
+- **`Step::paste` 走 paste 通道**,不是裸写字节。只有 L3 知道 pane 里那个
+  程序开没开 bracketed paste,而多行文本不带它就是一行行当命令执行 ——
+  递「一条消息」给另一个会话必须走这条。新 wire `PaneInjectPaste`(L1 →
+  L2 → L3)。
+- **单次投递上限 64 KB**。不是性能限制,是炸裂半径:从程序的角度看,这条
+  路送进去的一切都是「用户敲的」;在还没有调用方的时候把「有人往别人的
+  session 里灌几 MB」变成不可能,比事后补便宜。
+- 每次投递落一行日志(目标 pane + 字节数)。
+
+claudecode 的两条脚本(回收、profile 切换)现在都从这个服务走,没有绕过
+「一次一个」这条规则的路径。
 
 ### 0.7.68
 
@@ -1613,7 +1639,15 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.82**
+Current: **0.12.83**
+
+### 0.12.83
+
+转发 `PaneInjectPaste` 到 pane 自己的 L3。
+
+跟 `InjectInput` 分开是因为它们不是一回事:后者按字节原样写,而只有 L3
+知道 pane 里的程序开没开 bracketed paste。多行文本不经过这个判断,就会被
+一行行当命令执行。
 
 ### 0.12.82
 

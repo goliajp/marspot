@@ -2265,6 +2265,13 @@ impl ShellApp {
                             on,
                         ),
                     ),
+                    plugins::host::InjectWhat::Paste(text) => conn.send(
+                        MsgType::PaneInjectPaste,
+                        marspot::shell_proto::encode_pane_inject_paste(
+                            req.session_id,
+                            &text,
+                        ),
+                    ),
                 }
             }
         }

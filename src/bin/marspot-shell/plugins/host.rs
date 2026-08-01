@@ -110,6 +110,11 @@ pub struct InjectInputRequest {
 pub enum InjectWhat {
     Input(Vec<u8>),
     HoldGrid(bool),
+    /// Text delivered the way a paste is — see
+    /// `MsgType::PaneInjectPaste`.  What anything handing a *message*
+    /// to a running program wants, because only L3 knows whether that
+    /// program has bracketed paste on.
+    Paste(String),
 }
 
 #[derive(Clone)]
@@ -248,6 +253,10 @@ impl crate::plugins::claudecode::InjectInputProxy for InjectInputForwarder {
 
     fn hold_grid(&self, session_id: u64, on: bool) -> std::io::Result<()> {
         self.send(session_id, InjectWhat::HoldGrid(on))
+    }
+
+    fn paste(&self, session_id: u64, text: &str) -> std::io::Result<()> {
+        self.send(session_id, InjectWhat::Paste(text.to_string()))
     }
 }
 

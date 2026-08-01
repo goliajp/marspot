@@ -418,6 +418,14 @@ pub enum MsgType {
     /// into its terminal at all — so the held picture survives an L2
     /// restart, which every silent update performs.
     PaneHoldGrid = 68,
+    /// L1 → L2: deliver text to a pane the way a paste would.
+    ///
+    /// Distinct from `InjectInput`, which writes bytes verbatim: only
+    /// L3 knows whether the program in the pane has bracketed paste
+    /// on, and multi-line text delivered without it runs line by line
+    /// as commands.  Anything that hands a *message* to whatever is
+    /// running in a pane wants this one.
+    PaneInjectPaste = 69,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -475,6 +483,7 @@ impl MsgType {
             66 => MsgType::PaneFocused,
             67 => MsgType::PaneRecede,
             68 => MsgType::PaneHoldGrid,
+            69 => MsgType::PaneInjectPaste,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1503,6 +1512,33 @@ pub fn decode_pane_hold_grid(payload: &[u8]) -> io::Result<(u64, bool)> {
     Ok((sid, payload[8] != 0))
 }
 
+/// PaneInjectPaste payload: `session_id u64 LE, len u32 LE, utf8`.
+pub fn encode_pane_inject_paste(session_id: u64, text: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12 + text.len());
+    v.extend_from_slice(&session_id.to_le_bytes());
+    v.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    v.extend_from_slice(text.as_bytes());
+    v
+}
+
+pub fn decode_pane_inject_paste(payload: &[u8]) -> io::Result<(u64, String)> {
+    if payload.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneInjectPaste payload too short",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let n = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
+    if payload.len() < 12 + n {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneInjectPaste payload truncated before body",
+        ));
+    }
+    Ok((sid, String::from_utf8_lossy(&payload[12..12 + n]).into_owned()))
+}
+
 /// PaneFocused payload: `session_id u64 LE`.
 pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
     session_id.to_le_bytes().to_vec()
@@ -2220,6 +2256,17 @@ fn u8_to_named(w: WireNamedKey) -> NamedKey {
 mod tests {
 
     #[test]
+    fn pane_inject_paste_round_trips() {
+        let (sid, text) =
+            decode_pane_inject_paste(&encode_pane_inject_paste(7, "line one\nline two")).unwrap();
+        assert_eq!((sid, text.as_str()), (7, "line one\nline two"));
+        // Truncated bodies are an error, not a silently short string.
+        let mut short = encode_pane_inject_paste(7, "hello");
+        short.truncate(14);
+        assert!(decode_pane_inject_paste(&short).is_err());
+    }
+
+    #[test]
     fn pane_hold_grid_round_trips() {
         for on in [true, false] {
             let (sid, got) = decode_pane_hold_grid(&encode_pane_hold_grid(9_001, on)).unwrap();
@@ -2849,6 +2896,7 @@ mod tests {
         assert_eq!(MsgType::from_u32(63), Some(MsgType::WindowFocus));
         assert_eq!(MsgType::from_u32(64), Some(MsgType::WindowOpenRequest));
         assert_eq!(MsgType::from_u32(68), Some(MsgType::PaneHoldGrid));
+        assert_eq!(MsgType::from_u32(69), Some(MsgType::PaneInjectPaste));
 
         assert_eq!(MsgType::from_u32(65), Some(MsgType::WindowCloseRequest));
     }
