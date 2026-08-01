@@ -2933,19 +2933,32 @@ impl ShellApp {
             .collect()
     }
 
+    /// Every pane with the two things naming needs: its directory and
+    /// where it sits.  One place builds this, so the title strip, the
+    /// listing and `--send` cannot disagree about what `spg#2` means.
+    fn pane_refs() -> Vec<marspot::pane_name::PaneRef> {
+        let cells = Self::pane_cells();
+        Self::live_panes()
+            .into_iter()
+            .map(|(sid, cwd, _)| {
+                // `pane_cells` reports (window, x, y); naming sorts in
+                // reading order, which is (window, y, x).
+                let at = cells.get(&sid).map(|(w, x, y)| (*w, *y, *x));
+                marspot::pane_name::PaneRef::new(sid, cwd, at)
+            })
+            .collect()
+    }
+
     /// Every pane as `(id, cwd, address)` — name and cell both, so a
     /// listing answers "how do I say this one again?" without the
     /// reader having to work out the numbering.
     fn addressed_panes() -> Vec<(u64, String, String)> {
-        let live = Self::live_panes();
-        let named: std::collections::HashMap<u64, String> = cli_socket::assign_names(
-            &live.iter().map(|(s, c, _)| (*s, c.clone())).collect::<Vec<_>>(),
-        )
-        .into_iter()
-        .collect();
+        let refs = Self::pane_refs();
+        let named: std::collections::HashMap<u64, String> =
+            cli_socket::assign_names(&refs).into_iter().collect();
         let cells = Self::pane_cells();
-        live.into_iter()
-            .map(|(sid, cwd, _)| {
+        refs.into_iter()
+            .map(|marspot::pane_name::PaneRef { sid, cwd, .. }| {
                 let name = named.get(&sid).cloned().unwrap_or_default();
                 let addr = match cells.get(&sid) {
                     Some((w, x, y)) => format!("{name}  w({w},{x},{y})"),
@@ -2980,13 +2993,10 @@ impl ShellApp {
     /// when it was handed one, and a **cell** when it means "whatever
     /// is in that slot of that window".
     fn resolve_target(&self, target: &str) -> Result<u64, String> {
-        let panes: Vec<(u64, String)> = Self::live_panes()
-            .into_iter()
-            .map(|(sid, cwd, _)| (sid, cwd))
-            .collect();
+        let panes = Self::pane_refs();
         match cli_socket::parse_target(target)? {
             cli_socket::Target::Id(sid) => {
-                if panes.iter().any(|(s, _)| *s == sid) {
+                if panes.iter().any(|p| p.sid == sid) {
                     Ok(sid)
                 } else {
                     Err(format!("no pane with session id {sid}"))

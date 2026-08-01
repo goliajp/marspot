@@ -7364,19 +7364,34 @@ impl CoreApp {
         // never stored, so it cannot disagree with what `--send` will
         // accept.  A rename would have made the name a second source of
         // truth about which pane is which.
-        let pane_names: std::collections::HashMap<u64, String> = marspot::pane_name::assign(
-            &self
-                .windows
-                .iter()
-                .flat_map(|w| w.panes.iter())
-                .filter_map(|p| {
+        // Every pane in every window, with where it sits: the number
+        // in `spg#2` is the pane's position, so a name cannot be
+        // computed from one window alone.
+        let refs: Vec<marspot::pane_name::PaneRef> = self
+            .windows
+            .iter()
+            .enumerate()
+            .flat_map(|(w, win)| {
+                let cols = win.grid_cols.max(1);
+                win.panes.iter().enumerate().filter_map(move |(i, p)| {
                     let sid = p.shelld_session_id()?;
-                    Some((sid, self.pane_cwds.get(&sid).cloned().unwrap_or_default()))
+                    // Panes past the grid overflow into the sidebar and
+                    // have no cell of their own.
+                    let at = (i < cols * win.grid_rows.max(1))
+                        .then(|| (w + 1, i / cols + 1, i % cols + 1));
+                    Some((sid, at))
                 })
-                .collect::<Vec<_>>(),
-        )
-        .into_iter()
-        .collect();
+            })
+            .map(|(sid, at)| {
+                marspot::pane_name::PaneRef::new(
+                    sid,
+                    self.pane_cwds.get(&sid).cloned().unwrap_or_default(),
+                    at,
+                )
+            })
+            .collect();
+        let pane_names: std::collections::HashMap<u64, String> =
+            marspot::pane_name::assign(&refs).into_iter().collect();
         let resolved_labels: Vec<String> = (0..win!(self, wi).panes.len())
             .map(|i| {
                 if let Some(name) = win!(self, wi).panes[i]

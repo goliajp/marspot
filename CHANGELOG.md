@@ -28,7 +28,22 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.75**
+Current: **0.7.76**
+
+### 0.7.76
+
+**编号跟屏幕走,不跟时钟走。** `#1` 是靠上靠左的那个 —— 窗口 → 行 → 列,
+也就是人读它们的顺序。
+
+上一版按 session id(创建顺序)排,在列表里看不出问题,在屏幕上是错的:
+`doracawl#2` 坐在 `doracawl#1` 左边 —— 老的那个被拖到了右边,而没人按
+「谁先开」去数 pane。
+
+连带的语义:**拖动 pane 会换号**,因为号就是位置。这跟 `w(n,x,y)` 是一套
+说法 —— 两者都指「那个格子里的那个」。挤不进网格、落到侧栏的 pane 排在
+所有上屏 pane 之后(按 id),仍然有稳定的名字。
+
+规格补了 4 条(截图那个原例、读序、无格子的 pane、拖动换号),先写测试。
 
 ### 0.7.75
 
@@ -1756,7 +1771,12 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.84**
+Current: **0.12.85**
+
+### 0.12.85
+
+标题条的 `#k` 按屏幕位置算(窗口 → 行 → 列),不再按 session id;计算时要
+看**所有窗口的所有 pane**,因为号是位置,单个窗口算不出来。
 
 ### 0.12.84
 
