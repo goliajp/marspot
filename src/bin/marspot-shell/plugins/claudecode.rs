@@ -319,7 +319,7 @@ fn strip_ansi(line: &[u8]) -> Vec<u8> {
 /// logging.  Buffer-level (not per-line) because claude wraps long
 /// errors across two grid rows — the "Rate limited" marker often
 /// straddles a newline.
-fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
+pub(crate) fn retryable_error_kind(buf: &[u8]) -> Option<&'static str> {
     let stripped = strip_ansi(buf);
     let s = match std::str::from_utf8(&stripped) {
         Ok(s) => s,

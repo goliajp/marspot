@@ -443,6 +443,8 @@ pub enum MsgType {
     CliReadPane = 74,
     /// L1 → CLI: the text asked for.
     CliText = 75,
+    /// CLI → L1: switch the autorun policy for a pane, or ask.
+    CliAutorun = 76,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -507,6 +509,7 @@ impl MsgType {
             73 => MsgType::CliPaneList,
             74 => MsgType::CliReadPane,
             75 => MsgType::CliText,
+            76 => MsgType::CliAutorun,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1695,6 +1698,38 @@ pub fn decode_cli_read_pane(payload: &[u8]) -> io::Result<(String, u32)> {
     Ok((target, extra))
 }
 
+/// CliAutorun payload: `target len u32 + utf8, mode u8`
+/// (0 = ask, 1 = on, 2 = off).
+pub fn encode_cli_autorun(target: &str, on: Option<bool>) -> Vec<u8> {
+    let mut v = Vec::with_capacity(5 + target.len());
+    v.extend_from_slice(&(target.len() as u32).to_le_bytes());
+    v.extend_from_slice(target.as_bytes());
+    v.push(match on {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    });
+    v
+}
+
+pub fn decode_cli_autorun(payload: &[u8]) -> io::Result<(String, Option<bool>)> {
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "CliAutorun payload truncated");
+    if payload.len() < 4 {
+        return Err(bad());
+    }
+    let n = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 5 + n {
+        return Err(bad());
+    }
+    let target = String::from_utf8_lossy(&payload[4..4 + n]).into_owned();
+    let on = match payload[4 + n] {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    };
+    Ok((target, on))
+}
+
 /// CliText payload: `len u32 + utf8`.
 pub fn encode_cli_text(text: &str) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + text.len());
@@ -2432,6 +2467,14 @@ fn u8_to_named(w: WireNamedKey) -> NamedKey {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cli_autorun_round_trips() {
+        for on in [None, Some(true), Some(false)] {
+            let (t, got) = decode_cli_autorun(&encode_cli_autorun("torajs", on)).unwrap();
+            assert_eq!((t.as_str(), got), ("torajs", on));
+        }
+    }
 
     #[test]
     fn cli_read_frames_round_trip() {

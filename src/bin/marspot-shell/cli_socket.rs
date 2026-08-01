@@ -34,6 +34,9 @@ pub enum CliRequest {
     ListPanes { reply: Sender<Vec<(u64, String, String)>> },
     /// What does this pane say?  `Ok(text)` or a reason.
     ReadPane { target: String, extra_lines: u32, reply: Sender<Result<String, String>> },
+    /// Switch the autorun policy on or off for a pane, or (with no
+    /// target) report which panes it is on for.
+    Autorun { target: String, on: Option<bool>, reply: Sender<Result<String, String>> },
 }
 
 pub fn socket_path() -> std::path::PathBuf {
@@ -130,6 +133,30 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
         }
         return;
     }
+    if frame.msg_type == MsgType::CliAutorun {
+        let Ok((target, on)) = marspot_term::shell_proto::decode_cli_autorun(&frame.payload) else {
+            let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "bad request"))
+                .write_to(&mut stream);
+            return;
+        };
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        let sent = tx.send(CliRequest::Autorun { target, on, reply: rtx }).is_ok();
+        let out = if sent {
+            rrx.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap_or_else(|_| Err("shell did not answer in 5 s".into()))
+        } else {
+            Err("shell is shutting down".into())
+        };
+        let frame = match out {
+            Ok(text) => Frame::new(
+                MsgType::CliText,
+                marspot_term::shell_proto::encode_cli_text(&text),
+            ),
+            Err(e) => Frame::new(MsgType::CliResult, encode_cli_result(false, &e)),
+        };
+        let _ = frame.write_to(&mut stream);
+        return;
+    }
     if frame.msg_type != MsgType::CliSendText {
         let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "unknown request"))
             .write_to(&mut stream);
@@ -157,6 +184,38 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
     let _ = Frame::new(MsgType::CliResult, encode_cli_result(ok, &msg)).write_to(&mut stream);
 }
 
+/// Where the autorun opt-in lives.
+///
+/// One working directory per line.  A directory rather than a name or
+/// an id: names change when a twin appears, ids change when a session
+/// is rebuilt, but "the pane for this project" is what a person means
+/// when they switch the thing on.
+pub fn autorun_path() -> std::path::PathBuf {
+    marspot_term::paths::state_root().join("autorun.tsv")
+}
+
+pub fn load_autorun() -> std::collections::HashSet<String> {
+    std::fs::read_to_string(autorun_path())
+        .map(|t| {
+            t.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn save_autorun(on: &std::collections::HashSet<String>) -> io::Result<()> {
+    let mut lines: Vec<&String> = on.iter().collect();
+    lines.sort();
+    let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    let path = autorun_path();
+    let tmp = path.with_extension("tsv.tmp");
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)
+}
+
 /// Client half: ask a running shell what panes it has.
 pub fn list_panes() -> io::Result<Vec<(u64, String, String)>> {
     let mut stream = UnixStream::connect(socket_path())?;
@@ -177,6 +236,27 @@ pub fn read_pane(target: &str, extra_lines: u32) -> io::Result<Result<String, St
     Frame::new(
         MsgType::CliReadPane,
         marspot_term::shell_proto::encode_cli_read_pane(target, extra_lines),
+    )
+    .write_to(&mut stream)?;
+    match Frame::read_from(&mut stream)? {
+        Some(f) if f.msg_type == MsgType::CliText => {
+            Ok(Ok(marspot_term::shell_proto::decode_cli_text(&f.payload)?))
+        }
+        Some(f) if f.msg_type == MsgType::CliResult => {
+            Ok(Err(marspot_term::shell_proto::decode_cli_result(&f.payload)?.1))
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "no reply")),
+    }
+}
+
+/// Client half: switch the autorun policy for a pane, or ask which
+/// panes have it on (`target` empty, `on` None).
+pub fn autorun(target: &str, on: Option<bool>) -> io::Result<Result<String, String>> {
+    let mut stream = UnixStream::connect(socket_path())?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    Frame::new(
+        MsgType::CliAutorun,
+        marspot_term::shell_proto::encode_cli_autorun(target, on),
     )
     .write_to(&mut stream)?;
     match Frame::read_from(&mut stream)? {
