@@ -2293,7 +2293,7 @@ impl ShellApp {
                     let _ = reply.send((ok, msg));
                 }
                 cli_socket::CliRequest::ListPanes { reply } => {
-                    let _ = reply.send(Self::live_panes());
+                    let _ = reply.send(Self::addressed_panes());
                 }
             }
         }
@@ -2933,6 +2933,93 @@ impl ShellApp {
             .collect()
     }
 
+    /// Every pane as `(id, cwd, address)` — name and cell both, so a
+    /// listing answers "how do I say this one again?" without the
+    /// reader having to work out the numbering.
+    fn addressed_panes() -> Vec<(u64, String, String)> {
+        let live = Self::live_panes();
+        let named: std::collections::HashMap<u64, String> = cli_socket::assign_names(
+            &live.iter().map(|(s, c, _)| (*s, c.clone())).collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .collect();
+        let cells = Self::pane_cells();
+        live.into_iter()
+            .map(|(sid, cwd, _)| {
+                let name = named.get(&sid).cloned().unwrap_or_default();
+                let addr = match cells.get(&sid) {
+                    Some((w, x, y)) => format!("{name}  w({w},{x},{y})"),
+                    None => name,
+                };
+                (sid, cwd, addr)
+            })
+            .collect()
+    }
+
+    /// `sid → (window, x, y)`, 1-based, from the layout L2 persists.
+    fn pane_cells() -> std::collections::HashMap<u64, (usize, usize, usize)> {
+        let mut out = std::collections::HashMap::new();
+        let Some(saved) = marspot::state::read() else {
+            return out;
+        };
+        for (wi, win) in saved.windows.iter().enumerate() {
+            let cols = win.grid_cols.max(1) as usize;
+            for (i, p) in win.panes.iter().enumerate() {
+                if p.sid != 0 {
+                    out.insert(p.sid, (wi + 1, i % cols + 1, i / cols + 1));
+                }
+            }
+        }
+        out
+    }
+
+    /// Turn what a caller said into one pane.
+    ///
+    /// Three forms, because the useful address depends on what the
+    /// caller knows: a **name** when it knows the project, an **id**
+    /// when it was handed one, and a **cell** when it means "whatever
+    /// is in that slot of that window".
+    fn resolve_target(&self, target: &str) -> Result<u64, String> {
+        let panes: Vec<(u64, String)> = Self::live_panes()
+            .into_iter()
+            .map(|(sid, cwd, _)| (sid, cwd))
+            .collect();
+        match cli_socket::parse_target(target)? {
+            cli_socket::Target::Id(sid) => {
+                if panes.iter().any(|(s, _)| *s == sid) {
+                    Ok(sid)
+                } else {
+                    Err(format!("no pane with session id {sid}"))
+                }
+            }
+            cli_socket::Target::Name(n) => cli_socket::resolve_name(&n, &panes),
+            cli_socket::Target::Cell { w, x, y } => Self::pane_at_cell(w, x, y),
+        }
+    }
+
+    /// The pane occupying window `w`'s cell `(x, y)`, all 1-based.
+    ///
+    /// Read from the layout L2 persists on every spawn / close / focus
+    /// change / layout apply, which is the only place the arrangement
+    /// is known — L1 owns the windows, L2 decides what sits where.
+    fn pane_at_cell(w: usize, x: usize, y: usize) -> Result<u64, String> {
+        let saved = marspot::state::read()
+            .ok_or_else(|| "no window layout on disk yet".to_string())?;
+        let win = saved
+            .windows
+            .get(w - 1)
+            .ok_or_else(|| format!("there is no window {w} (there are {})", saved.windows.len()))?;
+        let (cols, rows) = (win.grid_cols as usize, win.grid_rows as usize);
+        if x > cols || y > rows {
+            return Err(format!("window {w} is {cols}×{rows}; ({x},{y}) is outside it"));
+        }
+        let idx = (y - 1) * cols + (x - 1);
+        match win.panes.get(idx) {
+            Some(p) if p.sid != 0 => Ok(p.sid),
+            _ => Err(format!("window {w} cell ({x},{y}) is empty")),
+        }
+    }
+
     /// Type `text` into the pane called `target`, then Enter.
     ///
     /// The whole of "session-to-session communication" so far, and
@@ -2942,11 +3029,7 @@ impl ShellApp {
     /// already doing, and putting multi-line text in front of a program
     /// without it being executed a line at a time.
     fn run_cli_send(&mut self, target: &str, text: &str) -> (bool, String) {
-        let panes: Vec<(u64, String)> = Self::live_panes()
-            .into_iter()
-            .map(|(sid, cwd, _)| (sid, cwd))
-            .collect();
-        let sid = match cli_socket::resolve_pane(target, &panes) {
+        let sid = match self.resolve_target(target) {
             Ok(sid) => sid,
             Err(e) => return (false, e),
         };
@@ -4055,14 +4138,14 @@ fn main() {
         }
         Some("--panes") => {
             match cli_socket::list_panes() {
-                Ok(panes) => {
-                    for (sid, cwd, title) in panes {
-                        let name = cwd.rsplit('/').next().unwrap_or("").to_string();
-                        println!("{sid:>6}  {name:<20}  {cwd}{}", if title.is_empty() {
-                            String::new()
-                        } else {
-                            format!("  ({title})")
-                        });
+                Ok(mut panes) => {
+                    // Sorted by address, not by whatever order the
+                    // registry happened to be in: a list you read is a
+                    // list you scan.
+                    panes.sort_by(|a, b| a.2.cmp(&b.2));
+                    println!("{:>6}  {:<34}  {}", "id", "address", "directory");
+                    for (sid, cwd, addr) in panes {
+                        println!("{sid:>6}  {addr:<34}  {cwd}");
                     }
                 }
                 Err(e) => {

@@ -28,7 +28,30 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.73**
+Current: **0.7.74**
+
+### 0.7.74
+
+**三种寻址:name / id / w(n,x,y)**,名字全自动、不许改也不许重。
+
+- **名字**取自工作目录最后一段。**重名时所有同名的都带号** —— `spg#1`
+  `spg#2`,不是「第一个叫 spg、第二个叫 spg#2」;一个名字绝不能悄悄地
+  指「先来的那个」。号按 session id(创建顺序)排,关掉一个,剩下的下次
+  列名单时自动补位;名字不落盘、每次现算,所以不会过期。
+- **id** 是背后那个真地址:永不复用、永不移动,同目录的两个 pane 也只能靠
+  它区分。
+- **w(n,x,y)** 是「第 n 个窗口的第 x 列第 y 行那一格」,全部从 1 数起。它
+  指的是**那个格子里的 pane**,谁在里面就是谁 —— 布局一动它就指向别人,
+  这正是它的用途。格子信息来自 L2 每次开关 / 换焦点 / 改布局时落盘的布局。
+
+`--panes` 现在把三种写法都列出来,照抄即可:
+
+```
+    id  address                             directory
+   390  spg  w(2,1,1)                       /Users/x/workspace/goliajp/spg
+   394  doracawl#1  w(1,3,4)                /Users/x
+   386  doracawl#2  w(1,4,4)                /Users/x
+```
 
 ### 0.7.73
 

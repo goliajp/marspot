@@ -1614,6 +1614,10 @@ pub fn decode_cli_result(payload: &[u8]) -> io::Result<(bool, String)> {
 
 /// CliPaneList payload: `count u32`, then per pane
 /// `sid u64, cwd len u32 + utf8, title len u32 + utf8`.
+///
+/// The title field carries the pane's *address* rather than its window
+/// title: what a listing is for is telling a caller how to name this
+/// pane again, and the window title is already the directory.
 pub fn encode_cli_pane_list(panes: &[(u64, String, String)]) -> Vec<u8> {
     let mut v = Vec::with_capacity(4 + panes.len() * 64);
     v.extend_from_slice(&(panes.len() as u32).to_le_bytes());
