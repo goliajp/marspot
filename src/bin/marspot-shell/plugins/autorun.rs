@@ -179,6 +179,14 @@ pub fn decide(look: &Look, mem: &mut Memory, now: SystemTime) -> (Action, Option
     if mem.exhausted {
         return (Action::Nothing, None);
     }
+    // Someone has started a message and not sent it.  Typing now would
+    // paste onto the end of their half-written line and submit the
+    // whole thing — their words plus ours, as one prompt.  A pane
+    // waiting on its user with something already in the box is not a
+    // pane that needs help.
+    if someone_is_typing(look.screen) {
+        return (Action::Nothing, None);
+    }
     // An error on screen is the most recent thing that happened, so it
     // wins over a rotation marker further up.
     if let Some(kind) = api_error_kind(look.screen) {
@@ -279,6 +287,23 @@ pub fn api_error_kind(screen: &str) -> Option<&'static str> {
         return None;
     }
     super::claudecode::retryable_error_kind(candidates.join("\n").as_bytes())
+}
+
+/// Has someone left a half-written message in the input line?
+///
+/// The prompt is `❯`; anything after it that is not the box's own
+/// right-hand rule is a person's unsent text.  This is the one hazard
+/// the policy cannot undo: a paste lands at the cursor, so acting here
+/// would submit their sentence with ours stapled to the end of it.
+pub fn someone_is_typing(screen: &str) -> bool {
+    screen.lines().any(|l| {
+        // The prompt sits inside a bordered row, so both ends can carry
+        // the box's own rule: `│ ❯ …            │`.
+        let t = l.trim().trim_start_matches(['│', '┃', '|']).trim_start();
+        let Some(rest) = t.strip_prefix('❯') else { return false };
+        let rest = rest.trim().trim_end_matches(['│', '┃', '|']).trim();
+        !rest.is_empty()
+    })
 }
 
 /// Is the program already handling this itself?
@@ -477,6 +502,28 @@ mod tests {
     fn prose_about_errors_is_not_an_error() {
         let screen = "⏺ 现有的 retryable_error_kind 分类器还在(匹配 claude 的 API Error: … · \n                      <kind> 那个形状),当年缺的只是拿到字节的路。";
         assert_eq!(api_error_kind(screen), None);
+    }
+
+    /// A half-written message in the box means hands off.
+    ///
+    /// A paste lands at the cursor and the Enter that follows submits
+    /// the line — so acting here would send someone's unfinished
+    /// sentence with `/clear` stapled to the end of it.  This is the
+    /// one mistake the policy could make that a person cannot undo.
+    #[test]
+    fn a_half_written_message_stops_everything() {
+        let typing = format!("{DONE}\n❯ 我正在写一半的话");
+        let mut mem = Memory::default();
+        let now = ready(&mut mem, &typing);
+        assert_eq!(decide(&quiet(&typing), &mut mem, now).0, Action::Nothing);
+
+        // An empty prompt is not someone typing — that is just the
+        // session waiting, which is exactly when the policy works.
+        assert!(!someone_is_typing("❯"));
+        assert!(!someone_is_typing("❯    "));
+        // …including the bordered form the program draws.
+        assert!(!someone_is_typing("│ ❯                                    │"));
+        assert!(someone_is_typing("│ ❯ half a thought                     │"));
     }
 
     /// A server error is not the session's fault: nudge it to carry
