@@ -28,7 +28,19 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.79**
+Current: **0.7.80**
+
+### 0.7.80
+
+**autorun 只对「等着用户的会话」动手,不是对「安静的 pane」。**
+
+原来的闸是 `quiescent`,而**没有 claude 的 pane 也是安静的** —— 那种情况下
+`/clear` 会被 shell 当成一条不存在的命令执行,接着 `继续 autorun` 再来一条。
+本来是去帮忙的,结果在人家 pane 里留下两个报错。
+
+闸收紧成 `PaneStatus::AwaitingUser` 这一个状态:绑着程序、且它刚打完一轮。
+`Empty`(没有程序)、`Dormant`(已停放)、`Contradiction`、`Unknown` 一律不
+动 —— 这条策略打的字只有正在运行的会话看得懂。
 
 ### 0.7.79
 

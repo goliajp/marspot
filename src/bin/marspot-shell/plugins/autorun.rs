@@ -53,9 +53,16 @@ pub enum Reason {
 
 /// What one look at a pane sees.
 pub struct Look<'a> {
-    /// The pane's own state machine says it is quiet: the program
-    /// finished its turn and the terminal has stopped moving.
-    pub quiescent: bool,
+    /// The pane's state machine says a **bound program finished its
+    /// turn** and is waiting for its user.
+    ///
+    /// Not merely "quiet": a pane with no program in it at all is
+    /// quiet too, and `/clear` typed at a bare shell is a command that
+    /// does not exist, followed by `继续 autorun` as another.  Parked,
+    /// contradictory and unknown are all "not now" for the same
+    /// reason — the policy types things only a running session
+    /// understands.
+    pub awaiting_user: bool,
     /// Something is running underneath it (a build, a watcher).  Even a
     /// quiet pane with work in flight is not finished.
     pub work_in_flight: bool,
@@ -133,7 +140,7 @@ pub const MAX_ATTEMPTS: u32 = 6;
 pub fn decide(look: &Look, mem: &mut Memory, now: SystemTime) -> (Action, Option<Reason>) {
     // Busy is the answer to almost everything: it means the pane is
     // alive, so anything we were waiting on has happened.
-    if !look.quiescent || look.work_in_flight {
+    if !look.awaiting_user || look.work_in_flight {
         mem.last_busy = Some(now);
         mem.acted = None;
         mem.attempts = 0;
@@ -298,7 +305,7 @@ mod tests {
     }
 
     fn quiet(screen: &str) -> Look<'_> {
-        Look { quiescent: true, work_in_flight: false, screen }
+        Look { awaiting_user: true, work_in_flight: false, screen }
     }
 
     const DONE: &str = "⏺ 本轮做完了,可以 /clear 了\n\n❯";
@@ -307,7 +314,7 @@ mod tests {
     /// Bring a pane to the point where the policy is willing to act:
     /// seen busy, then quiet for longer than the settle.
     fn ready(mem: &mut Memory, screen: &str) -> SystemTime {
-        decide(&Look { quiescent: false, work_in_flight: false, screen }, mem, t(0));
+        decide(&Look { awaiting_user: false, work_in_flight: false, screen }, mem, t(0));
         t(SETTLE.as_secs() + 1)
     }
 
@@ -327,15 +334,32 @@ mod tests {
     fn nothing_happens_while_the_pane_is_working() {
         let mut mem = Memory::default();
         let now = ready(&mut mem, DONE);
-        let busy = Look { quiescent: false, work_in_flight: false, screen: DONE };
+        let busy = Look { awaiting_user: false, work_in_flight: false, screen: DONE };
         assert_eq!(decide(&busy, &mut mem, now).0, Action::Nothing);
         // …nor while something is running underneath it, however quiet
         // the terminal looks.  A rotation is not over while its build
         // is still going.
         let mut mem = Memory::default();
         let now = ready(&mut mem, DONE);
-        let working = Look { quiescent: true, work_in_flight: true, screen: DONE };
+        let working = Look { awaiting_user: true, work_in_flight: true, screen: DONE };
         assert_eq!(decide(&working, &mut mem, now).0, Action::Nothing);
+    }
+
+    /// A pane with no session in it is quiet, and must still be left
+    /// alone.
+    ///
+    /// `/clear` typed at a bare shell is a command that does not
+    /// exist, followed by `继续 autorun` as another — two errors in a
+    /// pane the policy was supposed to be helping.  The same goes for
+    /// a parked pane and for one the machine cannot read.
+    #[test]
+    fn a_pane_with_no_session_is_never_typed_into() {
+        let mut mem = Memory::default();
+        // Seen busy, then quiet for long enough — but not a session
+        // waiting for its user.
+        decide(&Look { awaiting_user: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
+        let look = Look { awaiting_user: false, work_in_flight: false, screen: DONE };
+        assert_eq!(decide(&look, &mut mem, t(SETTLE.as_secs() + 1)).0, Action::Nothing);
     }
 
     /// A pane must be quiet for a while first: "finished printing" and
@@ -343,7 +367,7 @@ mod tests {
     #[test]
     fn a_pane_must_settle_before_anything_is_typed() {
         let mut mem = Memory::default();
-        decide(&Look { quiescent: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
+        decide(&Look { awaiting_user: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
         assert_eq!(decide(&quiet(DONE), &mut mem, t(5)).0, Action::Nothing, "5 s is not settled");
         assert_eq!(
             decide(&quiet(DONE), &mut mem, t(SETTLE.as_secs() + 1)).0,
@@ -421,7 +445,7 @@ mod tests {
         assert_eq!(mem.attempts(), 1);
         assert!(mem.is_waiting());
 
-        let busy = Look { quiescent: false, work_in_flight: false, screen: DONE };
+        let busy = Look { awaiting_user: false, work_in_flight: false, screen: DONE };
         decide(&busy, &mut mem, now + Duration::from_secs(5));
         assert_eq!(mem.attempts(), 0, "it moved — nothing is outstanding");
         assert!(!mem.is_waiting());

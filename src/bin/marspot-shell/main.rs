@@ -3107,13 +3107,21 @@ impl ShellApp {
         self.autorun_mem.retain(|sid, _| panes.iter().any(|(s, _)| s == sid));
 
         for (sid, cwd) in panes {
-            let Some((status, _held, quiescent)) = statuses.get(&sid) else { continue };
+            let Some((status, _held, _quiescent)) = statuses.get(&sid) else { continue };
             // The screen, as a person would read it.  Cheap enough at
             // this cadence (one file tail + a replay) and the only way
             // to see what the session actually said.
             let screen = Self::read_pane_screen(sid).unwrap_or_default();
             let look = plugins::autorun::Look {
-                quiescent: *quiescent,
+                // Exactly one state is a pane worth typing into: a
+                // bound session that finished its turn.  Empty, parked,
+                // contradictory and unknown are all quiet too, and
+                // typing `/clear` at any of them is a shell command
+                // that does not exist.
+                awaiting_user: matches!(
+                    status,
+                    marspot::pane_state::PaneStatus::AwaitingUser
+                ),
                 // `Busy` covers both halves of "it is doing something":
                 // a job the shell is holding, and a program that is
                 // still drawing.  A rotation is not over while its
