@@ -993,6 +993,10 @@ struct ShellApp {
     /// pane at once.  Lives here because plugins are not its only
     /// submitter — the `--send` CLI is another.
     pty_ops: plugins::pty_op::PtyOps,
+    /// How that queue starts a run.  Not the plugin host: that one
+    /// checks the current *plugin's* permissions, and a run started by
+    /// the supervisor has no plugin behind it.
+    op_host: SupervisorOpHost,
     /// Receiver for cc-plugin inject-input requests; drained each tick
     /// and forwarded to the active core as `MsgType::InjectInput` frames.
     inject_input_rx: std::sync::mpsc::Receiver<plugins::host::InjectInputRequest>,
@@ -1041,6 +1045,43 @@ struct ShellApp {
 
 /// Bundle: the plugin's session object + the metadata we need to log
 /// + cleanly tear it down (plugin name for log namespace).
+/// Starts the queue's runs.
+///
+/// One method's worth of type, but it must not be the plugin host:
+/// that one gates `begin_pane_session` on the *current plugin's*
+/// permissions, and a run the supervisor starts has no plugin behind
+/// it.  Routing through it denied the first CLI delivery with
+/// `missing permission: PermissionSet(16)` — the supervisor asking
+/// itself for permission it has no identity to hold.
+struct SupervisorOpHost {
+    begin_tx: std::sync::mpsc::Sender<plugins::host::PaneSessionBeginRequest>,
+}
+
+impl plugins::pty_op::OpHost for SupervisorOpHost {
+    fn begin(
+        &self,
+        shelld_session_id: u64,
+        session: Box<dyn plugins::PaneSession>,
+    ) -> Result<(), String> {
+        self.begin_tx
+            .send(plugins::host::PaneSessionBeginRequest {
+                shelld_session_id,
+                plugin_name: "pty_op",
+                session,
+            })
+            .map_err(|_| "main loop dropped".to_string())
+    }
+
+    fn log(&self, level: plugins::LogLevel, tag: &str, msg: &str) {
+        match level {
+            plugins::LogLevel::Warn | plugins::LogLevel::Error => {
+                lx_warn!("shell.pty_op", msg, tag = tag)
+            }
+            _ => lx_info!("shell.pty_op", msg, tag = tag),
+        }
+    }
+}
+
 struct ActivePaneSession {
     session: Box<dyn plugins::PaneSession>,
     plugin_name: &'static str,
@@ -1273,6 +1314,7 @@ impl ShellApp {
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
         let pane_title_tx_clone = pane_title_tx.clone();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
+        let pane_session_begin_tx_for_ops = pane_session_begin_tx.clone();
         let (pty_op_tx, pty_op_rx) = std::sync::mpsc::channel();
         let (cli_tx, cli_rx) = std::sync::mpsc::channel();
         // Best-effort: a shell that cannot bind still runs the
@@ -1342,6 +1384,7 @@ impl ShellApp {
             pane_session_begin_rx,
             pty_op_rx,
             cli_rx,
+            op_host: SupervisorOpHost { begin_tx: pane_session_begin_tx_for_ops },
             pty_ops: plugins::pty_op::PtyOps::new(
                 std::sync::Arc::new(plugins::host::HostPtyIo::new(inject_input_tx_for_ops))
                     as std::sync::Arc<dyn plugins::pty_op::PtyIo>,
@@ -2264,7 +2307,7 @@ impl ShellApp {
                 );
             }
         }
-        for r in self.pty_ops.pump(&self.plugin_host) {
+        for r in self.pty_ops.pump(&self.op_host) {
             if !r.outcome.is_done() {
                 lx_warn!(
                     "shell.pty_op.not_done",

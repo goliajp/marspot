@@ -28,7 +28,23 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.71**
+Current: **0.7.72**
+
+### 0.7.72
+
+**队列起会话不该走插件权限闸** —— 第一次真实投递就被自己人拦下了。
+
+`PtyOps::pump` 通过 `PluginHost::begin_pane_session` 起会话,而那个方法检查
+**当前插件**的权限。CLI 发起时根本没有插件身份,于是:
+
+```
+cli.send on pane 390: missing permission: PermissionSet(16)
+```
+
+—— 主循环向自己申请一个它没有身份去持有的权限,消息没进 pane。
+
+队列改成依赖一个只有两个方法的 `OpHost`(起会话 + 记日志)。插件宿主自动
+满足它(插件那侧照旧走权限闸),主循环用自己的实现 —— 它本来就是授权方。
 
 ### 0.7.71
 

@@ -766,6 +766,32 @@ pub struct OpReport {
     pub outcome: OpOutcome,
 }
 
+/// What the queue needs from whoever owns it.
+///
+/// Deliberately not `PluginHost`: that trait's `begin_pane_session`
+/// checks the *current plugin's* permissions, and the queue has
+/// submitters that are not plugins.  Routing through it denied the
+/// first CLI delivery with `missing permission: PermissionSet(16)` —
+/// the supervisor asking itself for permission it has no identity to
+/// hold.  Plugins still submit through their host; starting the run is
+/// the owner's business.
+pub trait OpHost {
+    fn begin(&self, sid: u64, session: Box<dyn PaneSession>) -> Result<(), String>;
+    fn log(&self, level: LogLevel, tag: &str, msg: &str);
+}
+
+/// Any plugin host is an op host — that is how a plugin's own tests
+/// (and the reclamation path) drive the queue without a supervisor.
+impl<T: crate::plugins::PluginHost + ?Sized> OpHost for T {
+    fn begin(&self, sid: u64, session: Box<dyn PaneSession>) -> Result<(), String> {
+        crate::plugins::PluginHost::begin_pane_session(self, sid, session)
+            .map_err(|e| e.to_string())
+    }
+    fn log(&self, level: LogLevel, tag: &str, msg: &str) {
+        crate::plugins::PluginHost::log(self, level, tag, msg)
+    }
+}
+
 /// Most runs that may wait their turn on one pane.
 ///
 /// A pane is a single-threaded thing — one program, one keyboard — so
@@ -850,7 +876,7 @@ impl PtyOps {
     /// Called once per plugin tick.  Returns the finished runs so the
     /// caller can do its own bookkeeping — this module has no opinion
     /// about what a completed op means.
-    pub fn pump(&mut self, host: &dyn crate::plugins::PluginHost) -> Vec<OpReport> {
+    pub fn pump(&mut self, host: &dyn OpHost) -> Vec<OpReport> {
         let done: Vec<OpReport> = std::mem::take(&mut *self.sink.lock().unwrap());
         for r in &done {
             // Only clear the slot if the report belongs to the run that
@@ -886,7 +912,7 @@ impl PtyOps {
                         outcome: outcome.clone(),
                     });
                 });
-            match host.begin_pane_session(sid, Box::new(runner)) {
+            match host.begin(sid, Box::new(runner)) {
                 Ok(()) => {
                     self.active.insert(sid, (id, name));
                     host.log(
@@ -905,11 +931,7 @@ impl PtyOps {
                         id,
                         sid,
                         name,
-                        outcome: OpOutcome::Failed {
-                            step: 0,
-                            label: "begin",
-                            err: e.to_string(),
-                        },
+                        outcome: OpOutcome::Failed { step: 0, label: "begin", err: e },
                     });
                 }
             }
@@ -1094,6 +1116,34 @@ mod tests {
         ) -> Result<(), crate::plugins::PluginError> {
             Ok(())
         }
+    }
+
+    /// The queue must not need a plugin's permissions to start a run.
+    ///
+    /// This shipped: `pump` went through `PluginHost::begin_pane_session`,
+    /// which checks the *current plugin's* permissions — so the very
+    /// first CLI delivery was refused by the supervisor's own gate with
+    /// `missing permission`, and the text never reached the pane.  The
+    /// queue's owner is the authority; starting a run is its business.
+    #[test]
+    fn the_queue_starts_runs_through_its_owner_not_a_plugin_gate() {
+        struct Owner {
+            started: Mutex<Vec<u64>>,
+        }
+        impl OpHost for Owner {
+            fn begin(&self, sid: u64, _s: Box<dyn PaneSession>) -> Result<(), String> {
+                self.started.lock().unwrap().push(sid);
+                Ok(())
+            }
+            fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
+        }
+        let state = Arc::new(FakeState::default());
+        let mut ops = PtyOps::new(Arc::new(FakeIo(Arc::clone(&state))) as Arc<dyn PtyIo>);
+        let owner = Owner { started: Mutex::new(Vec::new()) };
+        ops.submit(390, PtyOp::new("cli.send").step(Step::paste("hi")));
+        ops.pump(&owner);
+        assert_eq!(*owner.started.lock().unwrap(), vec![390]);
+        assert!(ops.is_busy(390));
     }
 
     #[derive(Default)]
