@@ -28,7 +28,30 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.72**
+Current: **0.7.73**
+
+### 0.7.73
+
+**同名 pane 怎么办** —— 三种说法,外加一份名单。
+
+同名不是意外,是常态:同一个项目在两棵树里各开一个,`spg` 就有两个。原来
+只会回一句「匹配到 2 个,说具体点」—— 等于把问题丢回给调用方。现在:
+
+- **会话 id**(`390` / `#390`)—— 永远唯一。
+- **路径尾**(`goliajp/spg`)—— 精确到段,不会顺带匹配上 `goliajp/spg-old`。
+- **裸名字**(`spg`)—— 先精确匹配最后一段,再退到唯一子串。
+
+歧义仍然拒绝、绝不猜,但错误信息现在**把候选连 id 一起列出来**,下一次尝试
+是复制粘贴而不是调查:
+
+```
+"spg" matches 2 panes — say which:
+   390  /Users/x/workspace/goliajp/spg
+   412  /Users/x/workspace/stables/spg
+```
+
+外加 `marspot-shell --panes` 列全部 pane(id / 名字 / 目录 / 标题)。名单由
+**L1 自己那份视图**回答,不是 CLI 各查各的 —— 名字的含义只能有一个来源。
 
 ### 0.7.72
 

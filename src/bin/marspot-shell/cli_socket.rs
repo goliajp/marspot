@@ -26,10 +26,12 @@ use marspot_term::{lx_info, lx_warn};
 /// The reply channel is part of the request because the answer is not
 /// "we received it" — it is "this pane, or none, and why", which only
 /// the main loop can say.
-pub struct CliRequest {
-    pub target: String,
-    pub text: String,
-    pub reply: Sender<(bool, String)>,
+pub enum CliRequest {
+    /// Type text into a pane and press Enter.
+    SendText { target: String, text: String, reply: Sender<(bool, String)> },
+    /// What panes are there?  Answered from L1's own view, not the
+    /// caller's: one source of truth for what a name means.
+    ListPanes { reply: Sender<Vec<(u64, String, String)>> },
 }
 
 pub fn socket_path() -> std::path::PathBuf {
@@ -81,6 +83,22 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
         Ok(Some(f)) => f,
         _ => return,
     };
+    if frame.msg_type == MsgType::CliListPanes {
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        if tx.send(CliRequest::ListPanes { reply: rtx }).is_ok() {
+            if let Ok(panes) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
+                let _ = Frame::new(
+                    MsgType::CliPaneList,
+                    marspot_term::shell_proto::encode_cli_pane_list(&panes),
+                )
+                .write_to(&mut stream);
+                return;
+            }
+        }
+        let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "no answer"))
+            .write_to(&mut stream);
+        return;
+    }
     if frame.msg_type != MsgType::CliSendText {
         let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "unknown request"))
             .write_to(&mut stream);
@@ -95,7 +113,7 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
         }
     };
     let (rtx, rrx) = std::sync::mpsc::channel();
-    if tx.send(CliRequest { target, text, reply: rtx }).is_err() {
+    if tx.send(CliRequest::SendText { target, text, reply: rtx }).is_err() {
         let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "shell is shutting down"))
             .write_to(&mut stream);
         return;
@@ -106,6 +124,19 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
         .recv_timeout(std::time::Duration::from_secs(5))
         .unwrap_or((false, "shell did not answer in 5 s".into()));
     let _ = Frame::new(MsgType::CliResult, encode_cli_result(ok, &msg)).write_to(&mut stream);
+}
+
+/// Client half: ask a running shell what panes it has.
+pub fn list_panes() -> io::Result<Vec<(u64, String, String)>> {
+    let mut stream = UnixStream::connect(socket_path())?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    Frame::new(MsgType::CliListPanes, Vec::new()).write_to(&mut stream)?;
+    match Frame::read_from(&mut stream)? {
+        Some(f) if f.msg_type == MsgType::CliPaneList => {
+            marspot_term::shell_proto::decode_cli_pane_list(&f.payload)
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "no pane list")),
+    }
 }
 
 /// Client half: ask a running shell to type into a pane.
@@ -127,37 +158,70 @@ pub fn send_text(target: &str, text: &str) -> io::Result<(bool, String)> {
 
 /// Resolve a pane by the name a person would use for it.
 ///
-/// Panes do not have names; they have working directories, and what a
-/// person calls a pane is the last component of one ("spg").  Matching
-/// is exact on that component first, then unique-substring — an
-/// ambiguous name is an error rather than a guess, because the cost of
-/// guessing wrong is text typed into someone else's session.
+/// Panes have no names; they have working directories, and what a
+/// person calls a pane is the last component of one ("spg").  Three
+/// ways to say which one, in order of how specific they are:
+///
+/// - **a session id** (`390`) — always unambiguous, and what the error
+///   below hands back so a caller can retry without thinking;
+/// - **a path tail** (`goliajp/spg`) — for when two panes share a last
+///   component, which is the normal state of affairs once the same
+///   project exists in two trees;
+/// - **a bare name** (`spg`) — exact on the last component first, then
+///   unique substring.
+///
+/// Ambiguity is never resolved by guessing: the cost of guessing wrong
+/// is text typed into someone else's session.  The error names the
+/// candidates *with their ids*, so the next attempt is a copy-paste
+/// rather than an investigation.
 pub fn resolve_pane(target: &str, panes: &[(u64, String)]) -> Result<u64, String> {
-    let needle = target.trim().to_lowercase();
+    let needle = target.trim().trim_start_matches('#').to_lowercase();
     if needle.is_empty() {
         return Err("empty target".into());
     }
-    let base = |cwd: &str| -> String {
-        cwd.rsplit('/').next().unwrap_or(cwd).to_lowercase()
-    };
-    let exact: Vec<u64> = panes
-        .iter()
-        .filter(|(_, cwd)| base(cwd) == needle)
-        .map(|(sid, _)| *sid)
-        .collect();
-    let candidates = if exact.is_empty() {
+    // A session id addresses exactly one pane, always.
+    if let Ok(sid) = needle.parse::<u64>() {
+        return if panes.iter().any(|(s, _)| *s == sid) {
+            Ok(sid)
+        } else {
+            Err(format!("no pane with session id {sid}"))
+        };
+    }
+    let norm = |s: &str| s.trim_end_matches('/').to_lowercase();
+    let candidates: Vec<&(u64, String)> = if needle.contains('/') {
+        // A path tail: `goliajp/spg` matches `/w/goliajp/spg` but not
+        // `/w/goliajp/spg-old`, so adding a parent always narrows.
         panes
             .iter()
-            .filter(|(_, cwd)| cwd.to_lowercase().contains(&needle))
-            .map(|(sid, _)| *sid)
+            .filter(|(_, cwd)| {
+                let c = norm(cwd);
+                c == needle || c.ends_with(&format!("/{needle}"))
+            })
             .collect()
     } else {
-        exact
+        let base = |cwd: &str| -> String { norm(cwd).rsplit('/').next().unwrap_or("").to_string() };
+        let exact: Vec<&(u64, String)> =
+            panes.iter().filter(|(_, cwd)| base(cwd) == needle).collect();
+        if exact.is_empty() {
+            panes.iter().filter(|(_, cwd)| norm(cwd).contains(&needle)).collect()
+        } else {
+            exact
+        }
     };
     match candidates.len() {
         0 => Err(format!("no pane matches {target:?}")),
-        1 => Ok(candidates[0]),
-        n => Err(format!("{target:?} matches {n} panes; be more specific")),
+        1 => Ok(candidates[0].0),
+        _ => {
+            let list = candidates
+                .iter()
+                .map(|(sid, cwd)| format!("  {sid}  {cwd}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(format!(
+                "{target:?} matches {} panes — say which:\n{list}",
+                candidates.len()
+            ))
+        }
     }
 }
 
@@ -192,15 +256,43 @@ mod tests {
     }
 
     /// Ambiguity is an error, never a guess: the cost of guessing is
-    /// text typed into someone else's session.
+    /// text typed into someone else's session.  The error has to be
+    /// actionable, so it names the candidates *with their ids*.
     #[test]
-    fn an_ambiguous_or_missing_name_is_refused() {
+    fn an_ambiguous_or_missing_name_is_refused_with_the_candidates() {
         let ps = vec![
             (1, "/w/alpha-one".to_string()),
             (2, "/w/alpha-two".to_string()),
         ];
-        assert!(resolve_pane("alpha", &ps).unwrap_err().contains("2 panes"));
+        let e = resolve_pane("alpha", &ps).unwrap_err();
+        assert!(e.contains("2 panes"), "{e}");
+        assert!(e.contains("1  /w/alpha-one") && e.contains("2  /w/alpha-two"), "{e}");
         assert!(resolve_pane("nope", &ps).unwrap_err().contains("no pane"));
         assert!(resolve_pane("  ", &ps).is_err());
+    }
+
+    /// Two panes with the same project name is the normal state once
+    /// the same project exists in two trees.  Both are addressable.
+    #[test]
+    fn same_named_panes_are_told_apart_by_path_or_by_id() {
+        let ps = vec![
+            (390, "/Users/x/workspace/goliajp/spg".to_string()),
+            (412, "/Users/x/workspace/stables/spg".to_string()),
+            (413, "/Users/x/workspace/goliajp/spg-old".to_string()),
+        ];
+        // The bare name is refused — and says which two.
+        let e = resolve_pane("spg", &ps).unwrap_err();
+        assert!(e.contains("390") && e.contains("412"), "{e}");
+        assert!(!e.contains("413"), "a different directory is not a candidate: {e}");
+
+        // A path tail narrows, and narrows *exactly*: `goliajp/spg`
+        // must not also match `goliajp/spg-old`.
+        assert_eq!(resolve_pane("goliajp/spg", &ps), Ok(390));
+        assert_eq!(resolve_pane("stables/spg", &ps), Ok(412));
+
+        // The id always works, and is what the error above hands back.
+        assert_eq!(resolve_pane("412", &ps), Ok(412));
+        assert_eq!(resolve_pane("#390", &ps), Ok(390));
+        assert!(resolve_pane("999", &ps).unwrap_err().contains("999"));
     }
 }

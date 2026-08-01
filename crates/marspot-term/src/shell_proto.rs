@@ -433,6 +433,11 @@ pub enum MsgType {
     CliSendText = 70,
     /// L1 → CLI: `ok u8, message`.
     CliResult = 71,
+    /// CLI → L1: what panes are there?  Addressing a pane by name is
+    /// only usable if the names can be looked up.
+    CliListPanes = 72,
+    /// L1 → CLI: the panes, as L1 sees them.
+    CliPaneList = 73,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -493,6 +498,8 @@ impl MsgType {
             69 => MsgType::PaneInjectPaste,
             70 => MsgType::CliSendText,
             71 => MsgType::CliResult,
+            72 => MsgType::CliListPanes,
+            73 => MsgType::CliPaneList,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1605,6 +1612,55 @@ pub fn decode_cli_result(payload: &[u8]) -> io::Result<(bool, String)> {
     Ok((payload[0] != 0, String::from_utf8_lossy(&payload[5..5 + n]).into_owned()))
 }
 
+/// CliPaneList payload: `count u32`, then per pane
+/// `sid u64, cwd len u32 + utf8, title len u32 + utf8`.
+pub fn encode_cli_pane_list(panes: &[(u64, String, String)]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + panes.len() * 64);
+    v.extend_from_slice(&(panes.len() as u32).to_le_bytes());
+    for (sid, cwd, title) in panes {
+        v.extend_from_slice(&sid.to_le_bytes());
+        v.extend_from_slice(&(cwd.len() as u32).to_le_bytes());
+        v.extend_from_slice(cwd.as_bytes());
+        v.extend_from_slice(&(title.len() as u32).to_le_bytes());
+        v.extend_from_slice(title.as_bytes());
+    }
+    v
+}
+
+pub fn decode_cli_pane_list(payload: &[u8]) -> io::Result<Vec<(u64, String, String)>> {
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "CliPaneList payload truncated");
+    if payload.len() < 4 {
+        return Err(bad());
+    }
+    let n = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    let mut at = 4;
+    let mut out = Vec::with_capacity(n);
+    let mut take_str = |at: &mut usize| -> io::Result<String> {
+        if payload.len() < *at + 4 {
+            return Err(bad());
+        }
+        let len = u32::from_le_bytes(payload[*at..*at + 4].try_into().unwrap()) as usize;
+        *at += 4;
+        if payload.len() < *at + len {
+            return Err(bad());
+        }
+        let s = String::from_utf8_lossy(&payload[*at..*at + len]).into_owned();
+        *at += len;
+        Ok(s)
+    };
+    for _ in 0..n {
+        if payload.len() < at + 8 {
+            return Err(bad());
+        }
+        let sid = u64::from_le_bytes(payload[at..at + 8].try_into().unwrap());
+        at += 8;
+        let cwd = take_str(&mut at)?;
+        let title = take_str(&mut at)?;
+        out.push((sid, cwd, title));
+    }
+    Ok(out)
+}
+
 /// PaneFocused payload: `session_id u64 LE`.
 pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
     session_id.to_le_bytes().to_vec()
@@ -2320,6 +2376,18 @@ fn u8_to_named(w: WireNamedKey) -> NamedKey {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cli_pane_list_round_trips() {
+        let panes = vec![
+            (390u64, "/w/goliajp/spg".to_string(), "spg".to_string()),
+            (412, "/w/stables/spg".to_string(), String::new()),
+        ];
+        assert_eq!(decode_cli_pane_list(&encode_cli_pane_list(&panes)).unwrap(), panes);
+        let mut short = encode_cli_pane_list(&panes);
+        short.truncate(20);
+        assert!(decode_cli_pane_list(&short).is_err());
+    }
 
     #[test]
     fn cli_frames_round_trip() {

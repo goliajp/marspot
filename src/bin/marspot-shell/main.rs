@@ -2280,15 +2280,22 @@ impl ShellApp {
         // Answer the command socket.  Before the submit drain, so a
         // request that arrives this pass runs this pass.
         while let Ok(req) = self.cli_rx.try_recv() {
-            let (ok, msg) = self.run_cli_send(&req.target, &req.text);
-            lx_info!(
-                "shell.cli.send",
-                &msg,
-                target = req.target.as_str(),
-                bytes = req.text.len() as u32,
-                ok = ok as u32
-            );
-            let _ = req.reply.send((ok, msg));
+            match req {
+                cli_socket::CliRequest::SendText { target, text, reply } => {
+                    let (ok, msg) = self.run_cli_send(&target, &text);
+                    lx_info!(
+                        "shell.cli.send",
+                        &msg,
+                        target = target.as_str(),
+                        bytes = text.len() as u32,
+                        ok = ok as u32
+                    );
+                    let _ = reply.send((ok, msg));
+                }
+                cli_socket::CliRequest::ListPanes { reply } => {
+                    let _ = reply.send(Self::live_panes());
+                }
+            }
         }
 
         // Take in whatever was submitted, then start what can start and
@@ -2908,6 +2915,24 @@ impl ShellApp {
         }
     }
 
+    /// Every live pane as `(session id, cwd, title)`.
+    ///
+    /// The cwd is read live off the pane's shell rather than taken from
+    /// the registry: the registry's copy is from spawn time and says
+    /// `/Users/doracawl` for every pane that has since cd'd somewhere,
+    /// which is all of them.
+    fn live_panes() -> Vec<(u64, String, String)> {
+        marspot_term::session_registry::list_session_entries()
+            .into_iter()
+            .map(|e| {
+                let cwd = marspot::pidtree::proc_cwd(e.shell_child_pid)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or(e.cwd);
+                (e.id, cwd, e.title)
+            })
+            .collect()
+    }
+
     /// Type `text` into the pane called `target`, then Enter.
     ///
     /// The whole of "session-to-session communication" so far, and
@@ -2917,18 +2942,9 @@ impl ShellApp {
     /// already doing, and putting multi-line text in front of a program
     /// without it being executed a line at a time.
     fn run_cli_send(&mut self, target: &str, text: &str) -> (bool, String) {
-        // A pane's name is the last component of its working directory,
-        // read live off its shell: the registry's copy is from spawn
-        // time and says `/Users/doracawl` for every pane that has since
-        // cd'd somewhere.
-        let panes: Vec<(u64, String)> = marspot_term::session_registry::list_session_entries()
+        let panes: Vec<(u64, String)> = Self::live_panes()
             .into_iter()
-            .map(|e| {
-                let cwd = marspot::pidtree::proc_cwd(e.shell_child_pid)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or(e.cwd);
-                (e.id, cwd)
-            })
+            .map(|(sid, cwd, _)| (sid, cwd))
             .collect();
         let sid = match cli_socket::resolve_pane(target, &panes) {
             Ok(sid) => sid,
@@ -4037,6 +4053,25 @@ fn main() {
             let code = cmd_trigger();
             std::process::exit(code);
         }
+        Some("--panes") => {
+            match cli_socket::list_panes() {
+                Ok(panes) => {
+                    for (sid, cwd, title) in panes {
+                        let name = cwd.rsplit('/').next().unwrap_or("").to_string();
+                        println!("{sid:>6}  {name:<20}  {cwd}{}", if title.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  ({title})")
+                        });
+                    }
+                }
+                Err(e) => {
+                    eprintln!("cannot reach the running shell: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("--send") => {
             // `marspot-shell --send <pane> <text…>` — the rest of argv
             // is the message, joined with spaces, so it can be written
@@ -4070,10 +4105,13 @@ Usage:\n\
   marspot-shell                Start the supervisor (window + core).\n\
   marspot-shell --version      Print version / git / build info.\n\
   marspot-shell --status       Summarise state from supervisor.log + live PIDs.\n\
+  marspot-shell --panes        List panes: session id, name, working directory.\n\
   marspot-shell --send <pane> <text…>\n\
                                Type text into a pane and press Enter.  The pane\n\
                                is named by its working directory's last component\n\
-                               (e.g. `spg`); an ambiguous name is refused.\n\
+                               (e.g. `spg`), a path tail (`goliajp/spg`), or a\n\
+                               session id.  An ambiguous name is refused, and\n\
+                               the error lists the candidates with their ids.\n\
   marspot-shell --trigger      Apply a staged pending update on a running shell\n\
                                (sends SIGUSR1 to the supervisor process).\n\
   marspot-shell --rollback-shell   Quarantine current/marspot-shell, restore prev/.\n\
