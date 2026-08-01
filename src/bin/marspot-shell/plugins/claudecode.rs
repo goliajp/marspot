@@ -194,9 +194,6 @@ pub struct ClaudecodePlugin {
     /// attached.  Split from `dormant` so a re-arm after an execv
     /// doesn't stack a second session onto a pane that still has one.
     armed: std::collections::HashSet<u64>,
-    /// Every PTY operation this plugin runs goes through here, so two
-    /// of them can never type into the same pane at once.
-    ops: Option<pty_op::PtyOps>,
     /// Panes this plugin has asked L3 to hold.  Tracked so a hold can
     /// be undone even if the session that asked for it is gone — see
     /// the sweep in `rearm_dormant`.
@@ -768,7 +765,6 @@ impl ClaudecodePlugin {
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
             held: std::collections::HashSet::new(),
-            ops: None,
             cpu_samples: HashMap::new(),
             blocked_reason: HashMap::new(),
             monitors: HashMap::new(),
@@ -1084,11 +1080,11 @@ impl ClaudecodePlugin {
                 continue;
             };
             self.held.insert(*sid);
-            if self.ops(&client).submit(*sid, op).is_none() {
+            if let Err(e) = host.submit_pty_op(*sid, op) {
                 host.log(
                     LogLevel::Warn,
-                    "hibernate.queue_full",
-                    &format!("pane {sid} already has work queued"),
+                    "hibernate.submit_failed",
+                    &format!("pane {sid}: {e}"),
                 );
                 continue;
             }
@@ -1189,8 +1185,8 @@ impl ClaudecodePlugin {
             // puts the hold back.
             self.held.insert(d.shelld_sid);
             let _ = client.hold_grid_of(d.shelld_sid, true);
-            match self.ops(&client).submit_at(d.shelld_sid, op, RECLAIM_PARK_STEP) {
-                Some(_) => {
+            match host.submit_pty_op_at(d.shelld_sid, op, RECLAIM_PARK_STEP) {
+                Ok(()) => {
                     self.armed.insert(d.shelld_sid);
                     host.log(
                         LogLevel::Info,
@@ -1198,10 +1194,10 @@ impl ClaudecodePlugin {
                         &format!("dormant session {} can be woken again", d.uuid),
                     );
                 }
-                None => host.log(
+                Err(e) => host.log(
                     LogLevel::Warn,
                     "hibernate.rearm_failed",
-                    &format!("pane {} already has work queued", d.shelld_sid),
+                    &format!("pane {}: {e}", d.shelld_sid),
                 ),
             }
         }
@@ -1266,14 +1262,6 @@ impl ClaudecodePlugin {
                 &format!("{} dormant session(s) carried over", self.dormant.len()),
             );
         }
-    }
-
-    /// The op service, built on first use because the client it needs
-    /// only exists once the plugin has one.
-    fn ops(&mut self, client: &Arc<ShelldClient>) -> &mut pty_op::PtyOps {
-        self.ops.get_or_insert_with(|| {
-            pty_op::PtyOps::new(Arc::clone(client) as Arc<dyn pty_op::PtyIo>)
-        })
     }
 
     /// Kick off the profile cycle for `shelld_session_id`.  Called
@@ -1352,11 +1340,11 @@ impl ClaudecodePlugin {
             );
             return;
         };
-        if self.ops(&client).submit(shelld_sid, op).is_none() {
+        if let Err(e) = host.submit_pty_op(shelld_sid, op) {
             host.log(
                 LogLevel::Warn,
-                "cycle.queue_full",
-                &format!("pane {shelld_sid} already has work queued"),
+                "cycle.submit_failed",
+                &format!("pane {shelld_sid}: {e}"),
             );
         }
     }
@@ -1838,20 +1826,6 @@ impl Plugin for ClaudecodePlugin {
     }
 
     fn tick(&mut self, host: &dyn PluginHost) {
-        // Start whatever is queued and collect whatever finished, first
-        // thing and unconditionally: a pane left marked busy because
-        // this plugin went uninitialised would never accept another op.
-        if let Some(ops) = self.ops.as_mut() {
-            for r in ops.pump(host) {
-                if !r.outcome.is_done() {
-                    host.log(
-                        LogLevel::Warn,
-                        "pty_op.not_done",
-                        &format!("{} on pane {} ended {:?}", r.name, r.sid, r.outcome),
-                    );
-                }
-            }
-        }
         if !self.initialised {
             return;
         }
@@ -3495,7 +3469,13 @@ mod tests {
             sent: std::sync::Mutex::new(Vec::new()),
             holds: std::sync::Mutex::new(Vec::new()),
         });
-        let host = FakeHost::new(state.clone());
+        // The host owns the queue, so give it the route to this test's
+        // PTY: otherwise the reclamation half would run against a
+        // no-op client and the test would be watching a shadow.
+        let host = FakeHost::with_io(
+            state.clone(),
+            Arc::new(ShelldClient::new(Some(inject.clone()))) as Arc<dyn pty_op::PtyIo>,
+        );
         host.set_status(
             1,
             crate::plugins::PaneStatusView {
@@ -3569,7 +3549,7 @@ mod tests {
         // Nothing has run yet: the decision queues an op, the service
         // starts it on the next tick.  Both halves are production's,
         // and the test drives them in the same order.
-        plugin.ops.as_mut().expect("the policy built the service").pump(&host);
+        host.pump_ops();
         // The signal is sent from the run's own ticks, not from the
         // policy call: the pane's picture has to be held first, and
         // that request crosses two process boundaries while a signal
@@ -3758,16 +3738,31 @@ mod tests {
         /// The real host does exactly this; dropping them on the floor
         /// made the reclamation look synchronous, which it is not.
         sessions: std::sync::Mutex<Vec<Box<dyn crate::plugins::PaneSession>>>,
+        /// The host owns the op queue in production, so the fake does
+        /// too — a test that pumped a plugin-private queue would be
+        /// testing a shape that no longer exists.
+        ops: std::sync::Mutex<pty_op::PtyOps>,
     }
 
     impl FakeHost {
         fn new(dir: PathBuf) -> Self {
+            Self::with_io(dir, Arc::new(ShelldClient::new(None)) as Arc<dyn pty_op::PtyIo>)
+        }
+
+        fn with_io(dir: PathBuf, io: Arc<dyn pty_op::PtyIo>) -> Self {
             Self {
                 state_dir: dir,
                 status: std::sync::Mutex::new(HashMap::new()),
                 begun: std::sync::Mutex::new(Vec::new()),
                 sessions: std::sync::Mutex::new(Vec::new()),
+                ops: std::sync::Mutex::new(pty_op::PtyOps::new(io)),
             }
+        }
+
+        /// Start what was submitted, as the supervisor loop does.
+        fn pump_ops(&self) {
+            let mut ops = self.ops.lock().unwrap();
+            ops.pump(self);
         }
         fn set_status(&self, sid: u64, view: crate::plugins::PaneStatusView) {
             self.status.lock().unwrap().insert(sid, view);
@@ -3800,6 +3795,20 @@ mod tests {
             Ok(self.state_dir.clone())
         }
         fn log(&self, _: LogLevel, _: &str, _: &str) {}
+        fn submit_pty_op_at(
+            &self,
+            sid: u64,
+            op: pty_op::PtyOp,
+            start_at: usize,
+        ) -> Result<(), PluginError> {
+            self.ops
+                .lock()
+                .unwrap()
+                .submit_at(sid, op, start_at)
+                .map(|_| ())
+                .ok_or_else(|| PluginError::Other("queue full".into()))
+        }
+
         fn begin_pane_session(
             &self,
             sid: u64,
@@ -3903,7 +3912,7 @@ mod tests {
             "the decision queues the op; starting it is the service's job"
         );
         // …which happens on the next tick, exactly as in production.
-        plugin.ops.as_mut().expect("the policy built the service").pump(&host);
+        host.pump_ops();
         assert_eq!(*host.begun.lock().unwrap(), vec![7], "a wake session is armed");
         assert_eq!(plugin.dormant.len(), 1);
         assert_eq!(plugin.dormant[0].uuid, uuid);

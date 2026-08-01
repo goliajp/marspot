@@ -339,6 +339,28 @@ pub trait PluginHost: Send + Sync {
         let _ = (shelld_session_id, session);
         Err(PluginError::Other("begin_pane_session unsupported".into()))
     }
+
+    /// Queue a scripted PTY operation against a pane.
+    ///
+    /// Prefer this over `begin_pane_session` for anything that types:
+    /// it goes through the one queue that keeps two scripts from
+    /// interleaving their keystrokes on the same PTY, and that queue
+    /// has submitters other than plugins.
+    fn submit_pty_op(&self, shelld_session_id: u64, op: pty_op::PtyOp) -> Result<(), PluginError> {
+        self.submit_pty_op_at(shelld_session_id, op, 0)
+    }
+
+    /// Queue an operation that starts partway in — how a parked script
+    /// is re-armed after the process that owned it was replaced.
+    fn submit_pty_op_at(
+        &self,
+        shelld_session_id: u64,
+        op: pty_op::PtyOp,
+        start_at: usize,
+    ) -> Result<(), PluginError> {
+        let _ = (shelld_session_id, op, start_at);
+        Err(PluginError::Other("submit_pty_op unsupported".into()))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -85,6 +85,9 @@ pub struct ShellPluginHost {
     /// state machine to push raw bytes (e.g. `claude5 --resume <uuid>\r`)
     /// at the PTY backing a given session id.  None in tests.
     inject_input_tx: Mutex<Option<Sender<InjectInputRequest>>>,
+    /// Where a submitted PTY operation goes.  The queue itself lives in
+    /// the main loop — see `PtyOpRequest`.
+    pty_op_tx: Mutex<Option<Sender<PtyOpRequest>>>,
     /// Plugin → shell activity reports, feeding the pane state
     /// machines.  Plugins push what they know about the program they
     /// understand; composition with the kernel's view is the shell's
@@ -95,6 +98,53 @@ pub struct ShellPluginHost {
 /// What the main loop receives on its inject_input channel.  The
 /// loop walks active core's control socket and writes an InjectInput
 /// frame carrying these bytes for the named session_id.
+/// Reaches a pane's PTY through the main loop's inject channel.
+///
+/// The queue that runs operations lives in the main loop and has no
+/// plugin behind it, so it needs its own way in — the same one every
+/// plugin uses, rather than a private path.
+pub struct HostPtyIo {
+    tx: Sender<InjectInputRequest>,
+}
+
+impl HostPtyIo {
+    pub fn new(tx: Sender<InjectInputRequest>) -> Self {
+        Self { tx }
+    }
+    fn send_what(&self, session_id: u64, what: InjectWhat) -> std::io::Result<()> {
+        self.tx
+            .send(InjectInputRequest { session_id, what })
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "main loop dropped")
+            })
+    }
+}
+
+impl crate::plugins::pty_op::PtyIo for HostPtyIo {
+    fn send(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()> {
+        self.send_what(sid, InjectWhat::Input(bytes.to_vec()))
+    }
+    fn hold(&self, sid: u64, on: bool) -> std::io::Result<()> {
+        self.send_what(sid, InjectWhat::HoldGrid(on))
+    }
+    fn paste(&self, sid: u64, text: &str) -> std::io::Result<()> {
+        self.send_what(sid, InjectWhat::Paste(text.to_string()))
+    }
+}
+
+/// A PTY operation on its way to the one queue that serialises them.
+///
+/// The queue is in the main loop rather than in whoever submitted:
+/// plugins are not the only submitter any more (the `--send` CLI is
+/// another), and "one operation at a time per pane" is only a rule if
+/// everyone goes through the same door.
+pub struct PtyOpRequest {
+    pub shelld_session_id: u64,
+    pub op: crate::plugins::pty_op::PtyOp,
+    /// Where to start — non-zero when re-arming a parked script.
+    pub start_at: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct InjectInputRequest {
     pub session_id: u64,
@@ -134,6 +184,7 @@ impl ShellPluginHost {
             pane_title_tx: Mutex::new(None),
             pane_session_begin_tx: Mutex::new(None),
             inject_input_tx: Mutex::new(None),
+            pty_op_tx: Mutex::new(None),
             pane_activity_tx: Mutex::new(None),
         }
     }
@@ -160,6 +211,10 @@ impl ShellPluginHost {
 
     /// Wire the channel the shell main loop drains for cc-driven
     /// PTY inject requests.  Called once during shell startup.
+    pub fn attach_pty_op_tx(&self, tx: Sender<PtyOpRequest>) {
+        *self.pty_op_tx.lock().unwrap() = Some(tx);
+    }
+
     pub fn attach_inject_input_tx(&self, tx: Sender<InjectInputRequest>) {
         *self.inject_input_tx.lock().unwrap() = Some(tx);
     }
@@ -386,6 +441,22 @@ impl PluginHost for ShellPluginHost {
         // doesn't have to lock-and-clone on every keystroke.
         let tx = self.inject_input_tx.lock().unwrap().clone()?;
         Some(Arc::new(InjectInputForwarder { tx }))
+    }
+
+    fn submit_pty_op_at(
+        &self,
+        shelld_session_id: u64,
+        op: crate::plugins::pty_op::PtyOp,
+        start_at: usize,
+    ) -> Result<(), PluginError> {
+        // Same permission as `begin_pane_session`: an op *is* a pane
+        // session, declared rather than hand-written.
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        let Some(tx) = self.pty_op_tx.lock().unwrap().clone() else {
+            return Err(PluginError::Other("no L2 wired".into()));
+        };
+        tx.send(PtyOpRequest { shelld_session_id, op, start_at })
+            .map_err(|_| PluginError::Other("main loop dropped".into()))
     }
 
     fn begin_pane_session(

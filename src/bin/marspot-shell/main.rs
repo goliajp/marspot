@@ -568,6 +568,7 @@ use marspot::shell_proto::{
 };
 
 mod banner;
+mod cli_socket;
 mod pane_status;
 mod plugins;
 mod present;
@@ -984,6 +985,14 @@ struct ShellApp {
     /// Receiver for `begin_pane_session` requests.
     pane_session_begin_rx:
         std::sync::mpsc::Receiver<plugins::host::PaneSessionBeginRequest>,
+    /// Submitted PTY operations, on their way into `pty_ops`.
+    pty_op_rx: std::sync::mpsc::Receiver<plugins::host::PtyOpRequest>,
+    /// Requests from the command socket (`marspot-shell --send`).
+    cli_rx: std::sync::mpsc::Receiver<cli_socket::CliRequest>,
+    /// The one queue that keeps two scripts from typing into the same
+    /// pane at once.  Lives here because plugins are not its only
+    /// submitter — the `--send` CLI is another.
+    pty_ops: plugins::pty_op::PtyOps,
     /// Receiver for cc-plugin inject-input requests; drained each tick
     /// and forwarded to the active core as `MsgType::InjectInput` frames.
     inject_input_rx: std::sync::mpsc::Receiver<plugins::host::InjectInputRequest>,
@@ -1264,7 +1273,17 @@ impl ShellApp {
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
         let pane_title_tx_clone = pane_title_tx.clone();
         let (pane_session_begin_tx, pane_session_begin_rx) = std::sync::mpsc::channel();
+        let (pty_op_tx, pty_op_rx) = std::sync::mpsc::channel();
+        let (cli_tx, cli_rx) = std::sync::mpsc::channel();
+        // Best-effort: a shell that cannot bind still runs the
+        // terminal, it just cannot be asked to type into it.
+        if let Err(e) = cli_socket::serve(cli_tx) {
+            lx_warn!("shell.cli.bind_failed", &format!("{e}"));
+        }
         let (inject_input_tx, inject_input_rx) = std::sync::mpsc::channel();
+        // The queue's own route to a PTY: the same channel plugins use,
+        // so nothing has a private path to a pane.
+        let inject_input_tx_for_ops = inject_input_tx.clone();
         let (pane_activity_tx, pane_activity_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
@@ -1289,6 +1308,7 @@ impl ShellApp {
                 h.attach_pane_badge_tx(pane_badge_tx);
                 h.attach_pane_title_tx(pane_title_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
+                h.attach_pty_op_tx(pty_op_tx);
                 h.attach_inject_input_tx(inject_input_tx);
                 h.attach_pane_activity_tx(pane_activity_tx);
                 h
@@ -1320,6 +1340,12 @@ impl ShellApp {
             pane_badge_rx,
             pane_title_rx,
             pane_session_begin_rx,
+            pty_op_rx,
+            cli_rx,
+            pty_ops: plugins::pty_op::PtyOps::new(
+                std::sync::Arc::new(plugins::host::HostPtyIo::new(inject_input_tx_for_ops))
+                    as std::sync::Arc<dyn plugins::pty_op::PtyIo>,
+            ),
             inject_input_rx,
             pane_badge_tx_clone,
             pane_title_tx_clone,
@@ -2208,6 +2234,47 @@ impl ShellApp {
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
 
+        // Answer the command socket.  Before the submit drain, so a
+        // request that arrives this pass runs this pass.
+        while let Ok(req) = self.cli_rx.try_recv() {
+            let (ok, msg) = self.run_cli_send(&req.target, &req.text);
+            lx_info!(
+                "shell.cli.send",
+                &msg,
+                target = req.target.as_str(),
+                bytes = req.text.len() as u32,
+                ok = ok as u32
+            );
+            let _ = req.reply.send((ok, msg));
+        }
+
+        // Take in whatever was submitted, then start what can start and
+        // collect what finished.  Before `process_pane_sessions` so a
+        // run that starts this round gets its first tick immediately.
+        while let Ok(req) = self.pty_op_rx.try_recv() {
+            if self
+                .pty_ops
+                .submit_at(req.shelld_session_id, req.op, req.start_at)
+                .is_none()
+            {
+                lx_warn!(
+                    "shell.pty_op.queue_full",
+                    "dropping a submitted operation",
+                    shelld_session_id = req.shelld_session_id
+                );
+            }
+        }
+        for r in self.pty_ops.pump(&self.plugin_host) {
+            if !r.outcome.is_done() {
+                lx_warn!(
+                    "shell.pty_op.not_done",
+                    &format!("{:?}", r.outcome),
+                    op = r.name,
+                    shelld_session_id = r.sid
+                );
+            }
+        }
+
         // Drain PaneSession begin requests + tick every active
         // session.  Order matters: drain first so a session begun
         // mid-tick still gets its first on_tick this round.
@@ -2795,6 +2862,62 @@ impl ShellApp {
             if end_flag.get() {
                 self.end_pane_session(sid, plugins::EndReason::PluginRequested);
             }
+        }
+    }
+
+    /// Type `text` into the pane called `target`, then Enter.
+    ///
+    /// The whole of "session-to-session communication" so far, and
+    /// deliberately so: it is the same delivery every future protocol
+    /// needs, and everything hard about it is already here — naming a
+    /// pane that has no name, not colliding with whatever that pane is
+    /// already doing, and putting multi-line text in front of a program
+    /// without it being executed a line at a time.
+    fn run_cli_send(&mut self, target: &str, text: &str) -> (bool, String) {
+        // A pane's name is the last component of its working directory,
+        // read live off its shell: the registry's copy is from spawn
+        // time and says `/Users/doracawl` for every pane that has since
+        // cd'd somewhere.
+        let panes: Vec<(u64, String)> = marspot_term::session_registry::list_session_entries()
+            .into_iter()
+            .map(|e| {
+                let cwd = marspot::pidtree::proc_cwd(e.shell_child_pid)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or(e.cwd);
+                (e.id, cwd)
+            })
+            .collect();
+        let sid = match cli_socket::resolve_pane(target, &panes) {
+            Ok(sid) => sid,
+            Err(e) => return (false, e),
+        };
+        if self.pty_ops.is_busy(sid) {
+            // Refuse rather than queue: the caller is a person or a
+            // program that wants to know its message went in *now*, and
+            // a message that lands after a reclamation finishes has
+            // landed somewhere else than the sender meant.
+            return (
+                false,
+                format!(
+                    "pane {sid} is busy ({})",
+                    self.pty_ops.running(sid).unwrap_or("?")
+                ),
+            );
+        }
+        let op = plugins::pty_op::PtyOp::new("cli.send")
+            // Nothing is frozen and no keys are locked: this is a
+            // delivery, not a takeover.  The user can keep typing in
+            // that pane while it happens.
+            .lock_keys(false)
+            .step(plugins::pty_op::Step::paste(text))
+            // Enter separately, and *after* the paste has been handed
+            // over: inside the pasted text it would be part of the
+            // message, and bracketed paste is exactly the mechanism
+            // that stops a newline from submitting.
+            .step(plugins::pty_op::Step::send(b"\r".to_vec()).named("enter"));
+        match self.pty_ops.submit(sid, op) {
+            Some(id) => (true, format!("queued on pane {sid} (id={})", id.0)),
+            None => (false, format!("pane {sid} has too much queued")),
         }
     }
 
@@ -3871,6 +3994,31 @@ fn main() {
             let code = cmd_trigger();
             std::process::exit(code);
         }
+        Some("--send") => {
+            // `marspot-shell --send <pane> <text…>` — the rest of argv
+            // is the message, joined with spaces, so it can be written
+            // without quoting in the common case.
+            let target = args.get(2).cloned().unwrap_or_default();
+            let text = args[3.min(args.len())..].join(" ");
+            if target.is_empty() || text.is_empty() {
+                eprintln!("usage: marspot-shell --send <pane> <text…>");
+                std::process::exit(2);
+            }
+            match cli_socket::send_text(&target, &text) {
+                Ok((true, msg)) => {
+                    println!("{msg}");
+                }
+                Ok((false, msg)) => {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("cannot reach the running shell: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("--help") | Some("-h") => {
             println!(
 "marspot-shell — supervisor for the marspot terminal.\n\
@@ -3879,6 +4027,10 @@ Usage:\n\
   marspot-shell                Start the supervisor (window + core).\n\
   marspot-shell --version      Print version / git / build info.\n\
   marspot-shell --status       Summarise state from supervisor.log + live PIDs.\n\
+  marspot-shell --send <pane> <text…>\n\
+                               Type text into a pane and press Enter.  The pane\n\
+                               is named by its working directory's last component\n\
+                               (e.g. `spg`); an ambiguous name is refused.\n\
   marspot-shell --trigger      Apply a staged pending update on a running shell\n\
                                (sends SIGUSR1 to the supervisor process).\n\
   marspot-shell --rollback-shell   Quarantine current/marspot-shell, restore prev/.\n\

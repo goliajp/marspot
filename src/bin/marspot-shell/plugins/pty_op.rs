@@ -226,6 +226,13 @@ impl PtyOp {
         self.steps.push(s);
         self
     }
+    /// Swallow the user's keys while it runs.  On by default: a script
+    /// that types needs the pane to itself.  Off for a *delivery* — the
+    /// user may keep typing in a pane something was handed to.
+    pub fn lock_keys(mut self, on: bool) -> Self {
+        self.lock_keys = on;
+        self
+    }
     pub fn hold_screen(mut self, on: bool) -> Self {
         self.hold_screen = on;
         self

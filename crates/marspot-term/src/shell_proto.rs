@@ -426,6 +426,13 @@ pub enum MsgType {
     /// as commands.  Anything that hands a *message* to whatever is
     /// running in a pane wants this one.
     PaneInjectPaste = 69,
+    /// CLI → L1: deliver text to a pane named by the caller.
+    ///
+    /// The first thing that types into a pane on behalf of something
+    /// that is not the user sitting in front of it.
+    CliSendText = 70,
+    /// L1 → CLI: `ok u8, message`.
+    CliResult = 71,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -484,6 +491,8 @@ impl MsgType {
             67 => MsgType::PaneRecede,
             68 => MsgType::PaneHoldGrid,
             69 => MsgType::PaneInjectPaste,
+            70 => MsgType::CliSendText,
+            71 => MsgType::CliResult,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1539,6 +1548,63 @@ pub fn decode_pane_inject_paste(payload: &[u8]) -> io::Result<(u64, String)> {
     Ok((sid, String::from_utf8_lossy(&payload[12..12 + n]).into_owned()))
 }
 
+/// CliSendText payload: `target len u32 + utf8, text len u32 + utf8`.
+///
+/// The target is a name, not an id: whoever runs the CLI knows the
+/// project it means ("spg"), not the session number L1 gave it.
+pub fn encode_cli_send_text(target: &str, text: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + target.len() + text.len());
+    v.extend_from_slice(&(target.len() as u32).to_le_bytes());
+    v.extend_from_slice(target.as_bytes());
+    v.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    v.extend_from_slice(text.as_bytes());
+    v
+}
+
+pub fn decode_cli_send_text(payload: &[u8]) -> io::Result<(String, String)> {
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "CliSendText payload truncated");
+    if payload.len() < 4 {
+        return Err(bad());
+    }
+    let t = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 8 + t {
+        return Err(bad());
+    }
+    let target = String::from_utf8_lossy(&payload[4..4 + t]).into_owned();
+    let n = u32::from_le_bytes(payload[4 + t..8 + t].try_into().unwrap()) as usize;
+    if payload.len() < 8 + t + n {
+        return Err(bad());
+    }
+    let text = String::from_utf8_lossy(&payload[8 + t..8 + t + n]).into_owned();
+    Ok((target, text))
+}
+
+/// CliResult payload: `ok u8, message len u32 + utf8`.
+pub fn encode_cli_result(ok: bool, message: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(5 + message.len());
+    v.push(ok as u8);
+    v.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    v.extend_from_slice(message.as_bytes());
+    v
+}
+
+pub fn decode_cli_result(payload: &[u8]) -> io::Result<(bool, String)> {
+    if payload.len() < 5 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CliResult payload too short",
+        ));
+    }
+    let n = u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
+    if payload.len() < 5 + n {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CliResult payload truncated before body",
+        ));
+    }
+    Ok((payload[0] != 0, String::from_utf8_lossy(&payload[5..5 + n]).into_owned()))
+}
+
 /// PaneFocused payload: `session_id u64 LE`.
 pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
     session_id.to_le_bytes().to_vec()
@@ -2254,6 +2320,19 @@ fn u8_to_named(w: WireNamedKey) -> NamedKey {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cli_frames_round_trip() {
+        let (t, x) = decode_cli_send_text(&encode_cli_send_text("spg", "继续 autorun")).unwrap();
+        assert_eq!((t.as_str(), x.as_str()), ("spg", "继续 autorun"));
+        let (ok, msg) = decode_cli_result(&encode_cli_result(true, "queued on pane 390")).unwrap();
+        assert!(ok);
+        assert_eq!(msg, "queued on pane 390");
+        // A truncated body is an error, not a short string.
+        let mut short = encode_cli_send_text("spg", "hello");
+        short.truncate(9);
+        assert!(decode_cli_send_text(&short).is_err());
+    }
 
     #[test]
     fn pane_inject_paste_round_trips() {
