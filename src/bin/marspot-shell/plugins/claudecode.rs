@@ -742,17 +742,16 @@ const WAKE_QUIET_TICKS: u8 = 3;
 /// pane back rather than lock it forever.
 const WAKE_WATCHDOG: Duration = Duration::from_secs(30);
 
-/// May the freeze lift?  The half of the decision that doesn't need the
-/// process table.
+/// May the freeze lift?  Asked only once claude is back, so both
+/// inputs are about claude's own output.
 ///
-/// `drew` is "output has appeared since the resume was sent" and
+/// `drew` is "output has appeared since claude appeared" and
 /// `quiet_ticks` is how long it has been still.  Both are required:
 /// output that hasn't started means claude has not painted, and output
 /// still flowing means it is painting *now* — lifting the freeze in
-/// either case shows the user the resume line and the startup scroll,
-/// which is what the freeze is for.
-fn wake_may_finish(drew: bool, quiet_ticks: u8, elapsed: Duration) -> bool {
-    (drew && quiet_ticks >= WAKE_QUIET_TICKS) || elapsed >= WAKE_WATCHDOG
+/// either case shows the user the machinery the freeze exists to hide.
+fn wake_may_finish(drew: bool, quiet_ticks: u8) -> bool {
+    drew && quiet_ticks >= WAKE_QUIET_TICKS
 }
 
 /// How many bytes this pane's PTY has produced, ever.  L3 appends
@@ -804,10 +803,14 @@ struct HibernatePaneSession {
     stage: HibernateStage,
     stage_since: SystemTime,
     spin_phase: u8,
-    /// Bytelog length when the resume line was sent, and the length at
-    /// the previous tick — how `Waking` knows claude has finished
-    /// painting rather than merely started existing.
-    wake_bytes_at_resume: u64,
+    /// Set once a claude has been seen in the pane again.  Everything
+    /// the wake measures is measured from that moment, not from the
+    /// resume line — see the `Waking` arm of `on_tick`.
+    claude_seen: bool,
+    /// Bytelog length when claude appeared, and the length at the
+    /// previous tick — how `Waking` knows claude has finished painting
+    /// rather than merely started existing.
+    wake_bytes_at_claude: u64,
     wake_bytes_last: u64,
     /// Consecutive ticks with no new output since then.
     wake_quiet_ticks: u8,
@@ -834,9 +837,9 @@ impl HibernatePaneSession {
                 );
                 self.stage = HibernateStage::Waking;
                 self.stage_since = SystemTime::now();
-                let len = bytelog_len(host.shelld_session_id());
-                self.wake_bytes_at_resume = len;
-                self.wake_bytes_last = len;
+                self.claude_seen = false;
+                self.wake_bytes_at_claude = 0;
+                self.wake_bytes_last = 0;
                 self.wake_quiet_ticks = 0;
                 true
             }
@@ -991,18 +994,32 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
                 // fast, a slow one waits, and neither needs a guess at
                 // how many bytes claude's first frame costs.
                 let len = bytelog_len(host.shelld_session_id());
-                if len == self.wake_bytes_last {
-                    self.wake_quiet_ticks = self.wake_quiet_ticks.saturating_add(1);
+                if !self.claude_seen {
+                    // Measure from the moment claude exists, not from
+                    // the resume line.  Nothing before it is claude's:
+                    // not the echo, and not the screen wipe the line
+                    // carries.  Counting those was a black flash on the
+                    // way back — the wipe was "output", the pause after
+                    // it was "quiet", so the freeze lifted onto an
+                    // empty screen a beat before claude drew anything.
+                    if self.claude_is_back() {
+                        self.claude_seen = true;
+                        self.wake_bytes_at_claude = len;
+                        self.wake_bytes_last = len;
+                        self.wake_quiet_ticks = 0;
+                    }
                 } else {
-                    self.wake_bytes_last = len;
-                    self.wake_quiet_ticks = 0;
+                    if len == self.wake_bytes_last {
+                        self.wake_quiet_ticks = self.wake_quiet_ticks.saturating_add(1);
+                    } else {
+                        self.wake_bytes_last = len;
+                        self.wake_quiet_ticks = 0;
+                    }
+                    if wake_may_finish(len > self.wake_bytes_at_claude, self.wake_quiet_ticks) {
+                        host.end();
+                    }
                 }
-                // `claude_is_back` walks the process table, so ask the
-                // two cheap questions first.
-                let drew = len > self.wake_bytes_at_resume;
-                if wake_may_finish(drew, self.wake_quiet_ticks, elapsed)
-                    && (self.claude_is_back() || elapsed >= WAKE_WATCHDOG)
-                {
+                if elapsed >= WAKE_WATCHDOG {
                     host.end();
                 }
             }
@@ -1534,7 +1551,8 @@ impl ClaudecodePlugin {
                 stage: HibernateStage::Killing,
                 stage_since: now,
                 spin_phase: 0,
-                wake_bytes_at_resume: 0,
+                claude_seen: false,
+                wake_bytes_at_claude: 0,
                 wake_bytes_last: 0,
                 wake_quiet_ticks: 0,
             });
@@ -1630,7 +1648,8 @@ impl ClaudecodePlugin {
                 stage: HibernateStage::Dormant,
                 stage_since: SystemTime::now(),
                 spin_phase: 0,
-                wake_bytes_at_resume: 0,
+                claude_seen: false,
+                wake_bytes_at_claude: 0,
                 wake_bytes_last: 0,
                 wake_quiet_ticks: 0,
             });
@@ -3880,7 +3899,8 @@ mod tests {
             stage: HibernateStage::Dormant,
             stage_since: SystemTime::now(),
             spin_phase: 0,
-            wake_bytes_at_resume: 0,
+            claude_seen: false,
+            wake_bytes_at_claude: 0,
             wake_bytes_last: 0,
             wake_quiet_ticks: 0,
         };
@@ -3982,16 +4002,17 @@ mod tests {
     /// instead of holding its last frame until the new one was ready.
     #[test]
     fn the_wake_waits_for_the_repaint_not_just_the_process() {
-        let t = Duration::from_secs(1);
-        // Process may well be up — nothing has been drawn yet.
-        assert!(!wake_may_finish(false, 99, t), "no output yet is not a repaint");
-        // Output started, still flowing: this is claude painting.
-        assert!(!wake_may_finish(true, 0, t));
-        assert!(!wake_may_finish(true, WAKE_QUIET_TICKS - 1, t));
+        // claude is up, but has drawn nothing yet.  This is also the
+        // black-flash case: the resume line's screen wipe is output,
+        // and treating it as claude's made an empty screen look like a
+        // finished repaint — which is why the caller only asks this
+        // question about bytes written *after* claude appeared.
+        assert!(!wake_may_finish(false, 99), "no output yet is not a repaint");
+        // Output started, still flowing: claude is painting.
+        assert!(!wake_may_finish(true, 0));
+        assert!(!wake_may_finish(true, WAKE_QUIET_TICKS - 1));
         // Drew, then went still.
-        assert!(wake_may_finish(true, WAKE_QUIET_TICKS, t));
-        // And a resume that never draws still hands the pane back.
-        assert!(wake_may_finish(false, 0, WAKE_WATCHDOG));
+        assert!(wake_may_finish(true, WAKE_QUIET_TICKS));
     }
 
     /// A `PluginHost` that records what the plugin asked it to do.
