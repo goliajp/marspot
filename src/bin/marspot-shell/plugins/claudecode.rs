@@ -720,6 +720,43 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
         .collect()
 }
 
+/// Ticks of silence (~250 ms each) that mean claude has stopped
+/// drawing.  Three is long enough to bridge the gap between its
+/// banner and its first frame, short enough that the keyboard comes
+/// back before a person finishes looking at the pane.
+const WAKE_QUIET_TICKS: u8 = 3;
+
+/// Upper bound on holding the keyboard.  A resume that never draws
+/// (claude missing, profile dir gone, PATH broken) must still give the
+/// pane back rather than lock it forever.
+const WAKE_WATCHDOG: Duration = Duration::from_secs(30);
+
+/// May the freeze lift?  The half of the decision that doesn't need the
+/// process table.
+///
+/// `drew` is "output has appeared since the resume was sent" and
+/// `quiet_ticks` is how long it has been still.  Both are required:
+/// output that hasn't started means claude has not painted, and output
+/// still flowing means it is painting *now* — lifting the freeze in
+/// either case shows the user the resume line and the startup scroll,
+/// which is what the freeze is for.
+fn wake_may_finish(drew: bool, quiet_ticks: u8, elapsed: Duration) -> bool {
+    (drew && quiet_ticks >= WAKE_QUIET_TICKS) || elapsed >= WAKE_WATCHDOG
+}
+
+/// How many bytes this pane's PTY has produced, ever.  L3 appends
+/// every one of them to the session's bytelog, so its length is the
+/// cheapest possible "has anything been drawn" counter — one `stat`,
+/// and only while a wake is in flight.
+fn bytelog_len(shelld_sid: u64) -> u64 {
+    marspot_term::paths::sessions_dir()
+        .join(shelld_sid.to_string())
+        .join("bytelog")
+        .metadata()
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
 /// Stage of the hibernate → dormant → wake cycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HibernateStage {
@@ -756,6 +793,13 @@ struct HibernatePaneSession {
     stage: HibernateStage,
     stage_since: SystemTime,
     spin_phase: u8,
+    /// Bytelog length when the resume line was sent, and the length at
+    /// the previous tick — how `Waking` knows claude has finished
+    /// painting rather than merely started existing.
+    wake_bytes_at_resume: u64,
+    wake_bytes_last: u64,
+    /// Consecutive ticks with no new output since then.
+    wake_quiet_ticks: u8,
 }
 
 impl HibernatePaneSession {
@@ -779,6 +823,10 @@ impl HibernatePaneSession {
                 );
                 self.stage = HibernateStage::Waking;
                 self.stage_since = SystemTime::now();
+                let len = bytelog_len(host.shelld_session_id());
+                self.wake_bytes_at_resume = len;
+                self.wake_bytes_last = len;
+                self.wake_quiet_ticks = 0;
                 true
             }
             Err(e) => {
@@ -916,12 +964,34 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
                     "zZ→ {}",
                     ProfileCyclePaneSession::spinner_frame(self.spin_phase)
                 ));
-                // Hand the keyboard back the moment claude is really
-                // there.  The first version waited a flat 20 s, so
-                // every keystroke typed in that window was eaten even
-                // after the session was usable again — which is what
-                // "restoring takes forever" actually was.
-                if self.claude_is_back() || elapsed >= Duration::from_secs(30) {
+                // Lift the freeze when claude has finished *painting*,
+                // not when its process appears.
+                //
+                // Those are seconds apart: the shell forks claude in a
+                // few hundred ms, and claude takes a second or more to
+                // draw.  Ending on "the process exists" put the live
+                // grid back in between — so the pane showed the echoed
+                // `claude --resume …` line and the startup output
+                // scrolling past, which is precisely the machinery the
+                // freeze exists to hide.
+                //
+                // "Finished painting" = output happened and then
+                // stopped.  Self-calibrating: a fast resume unfreezes
+                // fast, a slow one waits, and neither needs a guess at
+                // how many bytes claude's first frame costs.
+                let len = bytelog_len(host.shelld_session_id());
+                if len == self.wake_bytes_last {
+                    self.wake_quiet_ticks = self.wake_quiet_ticks.saturating_add(1);
+                } else {
+                    self.wake_bytes_last = len;
+                    self.wake_quiet_ticks = 0;
+                }
+                // `claude_is_back` walks the process table, so ask the
+                // two cheap questions first.
+                let drew = len > self.wake_bytes_at_resume;
+                if wake_may_finish(drew, self.wake_quiet_ticks, elapsed)
+                    && (self.claude_is_back() || elapsed >= WAKE_WATCHDOG)
+                {
                     host.end();
                 }
             }
@@ -1453,6 +1523,9 @@ impl ClaudecodePlugin {
                 stage: HibernateStage::Killing,
                 stage_since: now,
                 spin_phase: 0,
+                wake_bytes_at_resume: 0,
+                wake_bytes_last: 0,
+                wake_quiet_ticks: 0,
             });
             if let Err(e) = host.begin_pane_session(*sid, session) {
                 host.log(
@@ -1546,6 +1619,9 @@ impl ClaudecodePlugin {
                 stage: HibernateStage::Dormant,
                 stage_since: SystemTime::now(),
                 spin_phase: 0,
+                wake_bytes_at_resume: 0,
+                wake_bytes_last: 0,
+                wake_quiet_ticks: 0,
             });
             match host.begin_pane_session(d.shelld_sid, session) {
                 Ok(()) => {
@@ -3793,6 +3869,9 @@ mod tests {
             stage: HibernateStage::Dormant,
             stage_since: SystemTime::now(),
             spin_phase: 0,
+            wake_bytes_at_resume: 0,
+            wake_bytes_last: 0,
+            wake_quiet_ticks: 0,
         };
         let host_session = FakePaneSessionHost { sid: 1 };
         crate::plugins::PaneSession::on_focus(&mut session, &host_session);
@@ -3880,6 +3959,28 @@ mod tests {
     }
 
     // ── the reclamation itself, against a real process ────────────
+
+
+    /// The freeze lifts when claude has finished drawing, not when its
+    /// process appears.
+    ///
+    /// Those are seconds apart, and ending on "the process exists" is
+    /// what the user saw: the pane unfroze onto the echoed
+    /// `claude --resume …` line and the startup output scrolling by,
+    /// instead of holding its last frame until the new one was ready.
+    #[test]
+    fn the_wake_waits_for_the_repaint_not_just_the_process() {
+        let t = Duration::from_secs(1);
+        // Process may well be up — nothing has been drawn yet.
+        assert!(!wake_may_finish(false, 99, t), "no output yet is not a repaint");
+        // Output started, still flowing: this is claude painting.
+        assert!(!wake_may_finish(true, 0, t));
+        assert!(!wake_may_finish(true, WAKE_QUIET_TICKS - 1, t));
+        // Drew, then went still.
+        assert!(wake_may_finish(true, WAKE_QUIET_TICKS, t));
+        // And a resume that never draws still hands the pane back.
+        assert!(wake_may_finish(false, 0, WAKE_WATCHDOG));
+    }
 
     /// A `PluginHost` that records what the plugin asked it to do.
     /// Only the methods the idle policy touches do anything.

@@ -28,7 +28,25 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.62**
+Current: **0.7.63**
+
+### 0.7.63
+
+**唤醒等的是「画完」,不是「进程起来了」。**
+
+冻结画面本来就该盖住整个恢复过程,但 `Waking` 的结束条件是
+`claude_is_back()` —— 进程表里出现 claude 就解冻。而 shell fork 出 claude
+只要几百毫秒,claude 画完自己的界面要一秒多:中间那一秒多冻结已经撤了,
+用户看到的正是回显的 `claude --resume …` 那行和启动输出往上滚,也就是冻结
+本来要挡的东西。
+
+改成等「画完」:记下发 resume 时 bytelog 的长度,之后每 tick 比一次 ——
+**有过输出、并且连续 3 个 tick(约 750 ms)没再增长**,才算这一帧画完,
+这时才解冻并交还键盘。自校准:恢复得快就解冻得快,慢就多等一会儿,不需要
+猜 claude 首帧要写多少字节。
+
+30 秒看门狗保留:resume 根本画不出来(claude 不在 PATH、profile 目录没了)
+时仍然把 pane 还回去,而不是把键盘永远锁住。
 
 ### 0.7.62
 

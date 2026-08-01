@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.62"  # dormant 记录不许被「正在杀 claude 那几秒」的扫描判死;详见 CHANGELOG.md
+shell   = "0.7.63"  # 唤醒等 claude 画完再解冻,不是进程一出现就解冻;详见 CHANGELOG.md
 core    = "0.12.79"  # 时间轴按数据定尺:bar 不再被夹短,标签严格在 bar 终点右侧;详见 CHANGELOG.md
 session = "0.11.33"  # 日志目录被第三方清理软件整个删掉后能自愈(logx reopen 补建目录);详见 CHANGELOG.md
