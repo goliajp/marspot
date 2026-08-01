@@ -189,30 +189,98 @@ pub fn decide(look: &Look, mem: &mut Memory, now: SystemTime) -> (Action, Option
 
 /// Does the screen say the rotation is over and the context can go?
 ///
-/// The wording varies ("可以 /clear 了", "建议 /clear", "you can /clear
-/// now"), so the marker is the command itself.  What makes that safe is
-/// not the phrase but the company it keeps: the pane has been quiet for
-/// a while, nothing is running under it, and the mention is in the last
-/// few lines — the session's parting words, not something it said in
-/// the middle of working.
+/// The wording varies every rotation ("守恒精确)—— 可以 /clear 了",
+/// "建议 /clear", "you can /clear now"), so the marker is the command
+/// itself.  What makes that safe is the company it keeps: the pane has
+/// been quiet a while, nothing runs under it, and the mention is in
+/// the last few lines.
+///
+/// The screen also contains the program's *own* mentions of `/clear`,
+/// and those must never fire.  Taken from this pane's real history:
+///
+/// | line                                            | what it is |
+/// |-------------------------------------------------|------------|
+/// | `守恒精确)—— 可以 /clear 了`                     | the signal |
+/// | `⎿  Tip: Use /clear to start fresh when …`       | a hint the program prints on its own |
+/// | `❯ /clear`                                       | the echo of the command being typed |
+/// | `/clear (reset)  Start a new session with …`     | the command palette |
+///
+/// So: drop the program's furniture, drop anything that *is* the
+/// command rather than talk about it, and match on what is left.  The
+/// tip wraps at the pane's width — it appeared at four different
+/// lengths in one log — so it is recognised by its `Tip:` marker, not
+/// by its text.
 pub fn rotation_finished(screen: &str) -> bool {
     tail_lines(screen, TAIL_LINES)
         .iter()
+        .filter(|l| !is_chrome(l))
         .any(|l| l.contains("/clear"))
+}
+
+/// Is this line the program's own furniture rather than something it
+/// said?
+fn is_chrome(line: &str) -> bool {
+    let t = line.trim();
+    // The command itself: an echo in the input line, a bare retype, or
+    // the palette entry that appears while typing `/`.
+    if t.starts_with("/clear") {
+        return true;
+    }
+    // A hint the program prints unprompted.
+    if t.contains("Tip:") {
+        return true;
+    }
+    // Structural glyphs: tool results (⎿), the input prompt (❯), the
+    // spinner line (✻), the mode line (⏵⏵), box rules.
+    t.starts_with('⎿')
+        || t.starts_with('❯')
+        || t.starts_with('✻')
+        || t.starts_with('⏵')
+        || t.starts_with('│')
+        || t.starts_with('─')
+        || t.starts_with('╭')
+        || t.starts_with('╰')
 }
 
 /// How much of the screen counts as "what it just said".
 const TAIL_LINES: usize = 12;
 
-/// The kind of API error on screen, if any.
+/// The kind of API error the pane is *stuck* on, if any.
 ///
-/// Delegates the pattern to the same classifier the retry monitor uses,
-/// so "what counts as a server error" has one definition.
+/// Two things on a screen mention API errors and neither is a reason
+/// to type anything.  Both were found in this machine's own logs:
+///
+/// - **The program's own retry.**  `✻ API error · Retrying in 0s ·
+///   attempt 1/10` — it retries ten times by itself.  While that line
+///   is up it is working, and a nudge is noise at best.  The moment to
+///   step in is after those ten are spent.
+/// - **A session talking about errors.**  Forty-five of the forty-six
+///   "API Error" lines in these logs are prose: a session explaining
+///   what an error classifier matches.  A policy that fires on the
+///   word would type into any session that discusses its own tooling.
+///
+/// So the classifier only ever sees lines that are neither furniture
+/// nor a retry in progress, and the classifier itself is the
+/// conservative one the retry monitor already used: `API Error` plus a
+/// recognised kind, not the phrase alone.
 pub fn api_error_kind(screen: &str) -> Option<&'static str> {
-    super::claudecode::retryable_error_kind(screen.as_bytes())
+    let candidates: Vec<&str> = tail_lines(screen, TAIL_LINES)
+        .into_iter()
+        .filter(|l| !is_chrome(l) && !is_retrying(l))
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    super::claudecode::retryable_error_kind(candidates.join("\n").as_bytes())
 }
 
-/// The last `n` non-empty lines, oldest first.
+/// Is the program already handling this itself?
+fn is_retrying(line: &str) -> bool {
+    let t = line.trim();
+    t.contains("Retrying in") || (t.contains("attempt ") && t.contains('/'))
+}
+
+/// The last `n` non-empty lines, oldest first./// The last `n` non-empty lines, oldest first.
 fn tail_lines(s: &str, n: usize) -> Vec<&str> {
     let mut lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.len() > n {
@@ -359,6 +427,34 @@ mod tests {
         assert!(!mem.is_waiting());
     }
 
+    /// While the program is retrying on its own, nothing is wrong that
+    /// a nudge would fix.
+    ///
+    /// Verbatim from the logs: claude retries ten times by itself, and
+    /// says so.  Typing into that is noise at best; the moment to step
+    /// in is after those ten are spent.
+    #[test]
+    fn its_own_retry_is_not_our_business() {
+        let screen = "✻ API error · Retrying in 0s · attempt 1/10";
+        assert_eq!(api_error_kind(screen), None);
+        let mut mem = Memory::default();
+        let now = ready(&mut mem, screen);
+        assert_eq!(decide(&quiet(screen), &mut mem, now).0, Action::Nothing);
+    }
+
+    /// A session *talking* about errors is not a session having one.
+    ///
+    /// Forty-five of the forty-six "API Error" lines in this machine's
+    /// logs are exactly this: prose about an error classifier.  A
+    /// policy that fired on the word would have typed into every
+    /// session that discusses its own tooling — including the one that
+    /// wrote this policy.
+    #[test]
+    fn prose_about_errors_is_not_an_error() {
+        let screen = "⏺ 现有的 retryable_error_kind 分类器还在(匹配 claude 的 API Error: … · \n                      <kind> 那个形状),当年缺的只是拿到字节的路。";
+        assert_eq!(api_error_kind(screen), None);
+    }
+
     /// A server error is not the session's fault: nudge it to carry
     /// on, without clearing anything.
     #[test]
@@ -386,7 +482,9 @@ mod tests {
     #[test]
     fn the_rotation_marker_is_the_command_itself() {
         for said in [
-            "可以 /clear 了",
+            // Verbatim from this pane's own history.
+            "守恒精确)—— 可以 /clear 了",
+            "pass 零回归,TRIG 全 PASS)—— 可以 /clear 了。",
             "建议现在 /clear,然后继续",
             "This rotation is done — you can /clear now.",
         ] {
@@ -394,6 +492,33 @@ mod tests {
         }
         assert!(!rotation_finished("still working on the clear-cache path"));
         assert!(!rotation_finished(""));
+    }
+
+    /// The program's own mentions of `/clear` must never fire.
+    ///
+    /// Every one of these was on this pane's screen while it was
+    /// working — the first version of the matcher would have cleared a
+    /// live session on any of them.
+    #[test]
+    fn the_programs_own_furniture_is_not_an_instruction() {
+        for chrome in [
+            // The hint it prints unprompted — and it wraps at the
+            // pane's width, so it appeared at four different lengths
+            // in one log.  Recognised by its marker, not its text.
+            "⎿  Tip: Use /clear to start fresh when switching topics and free up",
+            "⎿  Tip: Use /clear to start fresh when switching",
+            "⎿  Tip: Use /clear to start fresh when",
+            // The echo of the command being typed — including ours.
+            "❯ /clear",
+            "/clear",
+            // The command palette, open while someone types `/`.
+            "/clear (reset)              Start a new session with empty context;",
+        ] {
+            assert!(!rotation_finished(chrome), "{chrome:?} must not fire");
+        }
+        // …and a real message still fires when it sits among them.
+        let screen = "⏺ rotation 272 收官(gate 2304/0/4,双 sweep\n                      守恒精确)—— 可以 /clear 了\n                      ⎿  Tip: Use /clear to start fresh when switching topics\n                      ❯";
+        assert!(rotation_finished(screen), "the signal survives the furniture");
     }
 
     /// …and it has to be recent.  A `/clear` said fifty lines ago is
