@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.80"  # autorun 只对 AwaitingUser 动手 —— 没有会话的 pane 也是安静的;详见 CHANGELOG.md
+shell   = "0.7.81"  # --read 去掉宽字符的 NUL 哨兵 —— 策略读的就是这段文本;详见 CHANGELOG.md
 core    = "0.12.85"  # 标题条的 #k 按屏幕位置算,跨所有窗口;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

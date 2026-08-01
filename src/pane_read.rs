@@ -71,8 +71,7 @@ fn render(term: &Terminal, extra_lines: u16) -> String {
         out.push(scrollback_line(grid, i));
     }
     for row in 0..grid.rows() {
-        let line: String = (0..grid.cols()).map(|c| grid.cell(c, row).ch).collect();
-        out.push(line.trim_end().to_string());
+        out.push(row_text(grid, |c| grid.cell(c, row).ch));
     }
     while out.last().is_some_and(|l| l.is_empty()) {
         out.pop();
@@ -86,10 +85,24 @@ fn scrollback_line(grid: &marspot_term::grid::Grid, back: usize) -> String {
     // viewport row of 0 with an offset of `back + 1` is the line that
     // scrolled off `back` rows ago.
     let off = (back + 1).min(u16::MAX as usize) as u16;
-    let line: String = (0..grid.cols())
-        .map(|c| grid.cell_at_view(off, c, 0).ch)
-        .collect();
-    line.trim_end().to_string()
+    row_text(grid, |c| grid.cell_at_view(off, c, 0).ch)
+}
+
+/// One row as text, minus the grid's own bookkeeping.
+///
+/// A wide character occupies two cells and the second holds NUL as a
+/// sentinel — it is a *layout* fact, not a character.  Collected
+/// verbatim it lands in the middle of every CJK word: `继\0续`, which
+/// a terminal swallows into a space so the damage is invisible until
+/// something tries to match on the text.  And something does: the
+/// autorun policy reads this.
+fn row_text(grid: &marspot_term::grid::Grid, cell: impl Fn(u16) -> char) -> String {
+    (0..grid.cols())
+        .map(cell)
+        .filter(|ch| *ch != '\0')
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -152,6 +165,21 @@ mod tests {
         let six = with_history.find("line 6").unwrap();
         let ten = with_history.find("line 10").unwrap();
         assert!(six < ten, "history must come first: {with_history:?}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// A wide character occupies two cells; the second is a sentinel,
+    /// not a character.
+    ///
+    /// Collected verbatim it lands inside every CJK word (`继\0续`),
+    /// which a terminal swallows into a space — invisible until
+    /// something matches on the text, and the autorun policy does.
+    #[test]
+    fn wide_characters_do_not_leave_a_hole_in_the_text() {
+        let p = write("wide", "可以 /clear 了\r\n继续 autorun\r\n".as_bytes());
+        let text = screen_text(&p, 40, 4, 0).unwrap();
+        assert_eq!(text, "可以 /clear 了\n继续 autorun");
+        assert!(!text.contains('\0'), "no sentinels in what a caller reads");
         let _ = std::fs::remove_file(p);
     }
 
