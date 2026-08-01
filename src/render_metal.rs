@@ -2930,7 +2930,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let upd = &cc.updated_label;
     let upd_baseline = head_top + (ui_line - ch as f64) * 0.5 + ascent as f64;
     text(p, inner_x + inner_w - text_w(upd), upd_baseline, upd, cc_palette::fg_sec());
-    let mut y = head_top + ui_line + lh * 0.3;
+    let mut y = head_top + ui_line + lh * metric::HEADING_GAP;
 
     if cc.feed_missing {
         y += lh;
@@ -3070,7 +3070,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
 
     // ---- timeline ----
     p.ui_text(inner_x as f32, (y + p.ui_ascent() as f64) as f32, "RESOURCE AVAILABILITY", cc_palette::fg());
-    y += p.ui_line_h() as f64 + lh * 0.15;
+    y += p.ui_line_h() as f64 + lh * metric::HEADING_GAP;
     let label_w = cc
         .accounts
         .iter()

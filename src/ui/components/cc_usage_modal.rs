@@ -39,6 +39,19 @@ pub mod metric {
     /// Breathing room between the cards section and the timeline
     /// section.  Two sections, not one continuous list.
     pub const SECTION_BREAK: f64 = 2.2;
+    /// Gap under a section heading, before the content it names.
+    ///
+    /// A heading sitting a third of a line above its own content reads
+    /// as a label stuck to the first card rather than as a heading over
+    /// a group — the same reason `SECTION_BREAK` exists between the two
+    /// sections.  Both headings use this, so they cannot drift apart.
+    ///
+    /// Sized generously (a full line plus a fifth) because the panel is
+    /// a reference surface with room to spare — it already ends well
+    /// short of its own frame — and because the headings are set in the
+    /// larger UI font, so a gap measured in terminal lines looks
+    /// tighter under them than the number suggests.
+    pub const HEADING_GAP: f64 = 1.2;
     /// Horizontal padding inside a status chip, in cell widths.
     pub const CHIP_PAD: f64 = 0.6;
     /// Cap height as a fraction of ascent.  The painter reports ascent,
@@ -116,10 +129,11 @@ pub fn card_height(cell_h: f64, ascent: f64, extra_bar_rows: usize) -> f64 {
 }
 
 /// Fixed chrome height of the whole panel, in line advances: the title
-/// heading, one account card, the section break, the timeline heading,
-/// and the panel's top and bottom margins.  The caller adds one band
-/// per timeline row plus the date axis.
-pub const PANEL_CHROME_LINES: f64 = 15.0;
+/// heading and its gap, one account card, the section break, the
+/// timeline heading and its gap, and the panel's top and bottom
+/// margins.  The caller adds one band per timeline row plus the date
+/// axis.
+pub const PANEL_CHROME_LINES: f64 = 16.8;
 /// One timeline row's band, in line advances.
 pub const TIMELINE_ROW_LINES: f64 = 2.6;
 /// Date axis plus bottom margin, in line advances.
