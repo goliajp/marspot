@@ -32,6 +32,8 @@ pub enum CliRequest {
     /// What panes are there?  Answered from L1's own view, not the
     /// caller's: one source of truth for what a name means.
     ListPanes { reply: Sender<Vec<(u64, String, String)>> },
+    /// What does this pane say?  `Ok(text)` or a reason.
+    ReadPane { target: String, extra_lines: u32, reply: Sender<Result<String, String>> },
 }
 
 pub fn socket_path() -> std::path::PathBuf {
@@ -99,6 +101,35 @@ fn handle(mut stream: UnixStream, tx: Sender<CliRequest>) {
             .write_to(&mut stream);
         return;
     }
+    if frame.msg_type == MsgType::CliReadPane {
+        let reply_err = |stream: &mut UnixStream, msg: &str| {
+            let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, msg))
+                .write_to(stream);
+        };
+        let Ok((target, extra_lines)) =
+            marspot_term::shell_proto::decode_cli_read_pane(&frame.payload)
+        else {
+            reply_err(&mut stream, "bad request");
+            return;
+        };
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        if tx.send(CliRequest::ReadPane { target, extra_lines, reply: rtx }).is_err() {
+            reply_err(&mut stream, "shell is shutting down");
+            return;
+        }
+        match rrx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(text)) => {
+                let _ = Frame::new(
+                    MsgType::CliText,
+                    marspot_term::shell_proto::encode_cli_text(&text),
+                )
+                .write_to(&mut stream);
+            }
+            Ok(Err(e)) => reply_err(&mut stream, &e),
+            Err(_) => reply_err(&mut stream, "shell did not answer in 5 s"),
+        }
+        return;
+    }
     if frame.msg_type != MsgType::CliSendText {
         let _ = Frame::new(MsgType::CliResult, encode_cli_result(false, "unknown request"))
             .write_to(&mut stream);
@@ -136,6 +167,26 @@ pub fn list_panes() -> io::Result<Vec<(u64, String, String)>> {
             marspot_term::shell_proto::decode_cli_pane_list(&f.payload)
         }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "no pane list")),
+    }
+}
+
+/// Client half: ask a running shell what a pane says.
+pub fn read_pane(target: &str, extra_lines: u32) -> io::Result<Result<String, String>> {
+    let mut stream = UnixStream::connect(socket_path())?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    Frame::new(
+        MsgType::CliReadPane,
+        marspot_term::shell_proto::encode_cli_read_pane(target, extra_lines),
+    )
+    .write_to(&mut stream)?;
+    match Frame::read_from(&mut stream)? {
+        Some(f) if f.msg_type == MsgType::CliText => {
+            Ok(Ok(marspot_term::shell_proto::decode_cli_text(&f.payload)?))
+        }
+        Some(f) if f.msg_type == MsgType::CliResult => {
+            Ok(Err(marspot_term::shell_proto::decode_cli_result(&f.payload)?.1))
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidData, "no reply")),
     }
 }
 
@@ -211,15 +262,6 @@ pub use marspot::pane_name::{assign as assign_names, resolve as resolve_name};
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn panes() -> Vec<(u64, String)> {
-        vec![
-            (390, "/Users/doracawl/workspace/goliajp/spg".into()),
-            (382, "/Users/doracawl/workspace/goliajp/marspot".into()),
-            (384, "/Users/doracawl/workspace/stables/goliajp".into()),
-            (386, "/Users/doracawl".into()),
-        ]
-    }
 
     /// The three ways of saying which pane.
     #[test]

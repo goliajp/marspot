@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.76"  # 编号跟屏幕走:#1 是靠上靠左的那个,拖动会换号;详见 CHANGELOG.md
+shell   = "0.7.77"  # 会听了:--read <pane> 重放 bytelog 尾巴,给出人看到的那一屏;详见 CHANGELOG.md
 core    = "0.12.85"  # 标题条的 #k 按屏幕位置算,跨所有窗口;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

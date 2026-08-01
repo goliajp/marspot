@@ -70,6 +70,7 @@ pub mod input;
 pub mod iosurface;
 pub mod pane;
 pub mod pane_name;
+pub mod pane_read;
 pub mod pane_state;
 pub mod pidtree;
 pub mod render_metal;

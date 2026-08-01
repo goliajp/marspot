@@ -2295,6 +2295,20 @@ impl ShellApp {
                 cli_socket::CliRequest::ListPanes { reply } => {
                     let _ = reply.send(Self::addressed_panes());
                 }
+                cli_socket::CliRequest::ReadPane { target, extra_lines, reply } => {
+                    let out = self.run_cli_read(&target, extra_lines);
+                    lx_info!(
+                        "shell.cli.read",
+                        match &out {
+                            Ok(t) => format!("{} bytes", t.len()),
+                            Err(e) => e.clone(),
+                        }
+                        .as_str(),
+                        target = target.as_str(),
+                        ok = out.is_ok() as u32
+                    );
+                    let _ = reply.send(out);
+                }
             }
         }
 
@@ -3028,6 +3042,30 @@ impl ShellApp {
             Some(p) if p.sid != 0 => Ok(p.sid),
             _ => Err(format!("window {w} cell ({x},{y}) is empty")),
         }
+    }
+
+    /// What the pane called `target` says.
+    ///
+    /// Replayed from its bytelog rather than asked of L3: the record is
+    /// already on disk and complete, so reading costs one file tail and
+    /// disturbs nothing — no round trip, no state, and a pane that is
+    /// mid-reclamation answers as readily as one nobody has touched.
+    fn run_cli_read(&self, target: &str, extra_lines: u32) -> Result<String, String> {
+        let sid = self.resolve_target(target)?;
+        let entry = marspot_term::session_registry::list_session_entries()
+            .into_iter()
+            .find(|e| e.id == sid)
+            .ok_or_else(|| format!("pane {sid} is gone"))?;
+        let bytelog = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        marspot::pane_read::screen_text(
+            &bytelog,
+            entry.cols,
+            entry.rows,
+            extra_lines.min(u16::MAX as u32) as u16,
+        )
+        .map_err(|e| format!("cannot read pane {sid}: {e}"))
     }
 
     /// Type `text` into the pane called `target`, then Enter.
@@ -4165,6 +4203,33 @@ fn main() {
             }
             return;
         }
+        Some("--read") => {
+            // `marspot-shell --read <pane> [-n <lines>]` — the pane's
+            // screen, plus that many lines of what scrolled off it.
+            let target = args.get(2).cloned().unwrap_or_default();
+            let extra = args
+                .iter()
+                .position(|a| a == "-n")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+            if target.is_empty() {
+                eprintln!("usage: marspot-shell --read <pane> [-n <lines>]");
+                std::process::exit(2);
+            }
+            match cli_socket::read_pane(&target, extra) {
+                Ok(Ok(text)) => println!("{text}"),
+                Ok(Err(msg)) => {
+                    eprintln!("{msg}");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("cannot reach the running shell: {e}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         Some("--send") => {
             // `marspot-shell --send <pane> <text…>` — the rest of argv
             // is the message, joined with spaces, so it can be written
@@ -4199,6 +4264,9 @@ Usage:\n\
   marspot-shell --version      Print version / git / build info.\n\
   marspot-shell --status       Summarise state from supervisor.log + live PIDs.\n\
   marspot-shell --panes        List panes: session id, name, working directory.\n\
+  marspot-shell --read <pane> [-n <lines>]\n\
+                               Print what the pane says: its screen, plus that\n\
+                               many lines of what has scrolled off it.\n\
   marspot-shell --send <pane> <text…>\n\
                                Type text into a pane and press Enter.  The pane\n\
                                is named by its working directory's last component\n\

@@ -921,9 +921,10 @@ impl ClaudecodePlugin {
         let Some(threshold) = hibernate_after() else {
             return;
         };
-        let Some(client) = self.shelld.as_ref().cloned() else {
+        // Not wired to a shelld yet: nothing to reclaim into.
+        if self.shelld.is_none() {
             return;
-        };
+        }
         for (sid, (cpu_now, sampled_at)) in &result.new_cpu {
             // No "have I already done this one" check: a pane we
             // reclaimed reports `Dormant`, which composes to a state
@@ -1319,14 +1320,14 @@ impl ClaudecodePlugin {
         meta: BindMeta,
         next_profile: u8,
     ) {
-        let Some(client) = self.shelld.as_ref().cloned() else {
+        if self.shelld.is_none() {
             host.log(
                 LogLevel::Warn,
                 "cycle.no_shelld",
                 "no shelld client; cannot start cycle",
             );
             return;
-        };
+        }
         let Some(op) = profile_cycle_op(
             &meta.uuid,
             next_profile,

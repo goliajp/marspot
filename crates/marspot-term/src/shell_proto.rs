@@ -438,6 +438,11 @@ pub enum MsgType {
     CliListPanes = 72,
     /// L1 → CLI: the panes, as L1 sees them.
     CliPaneList = 73,
+    /// CLI → L1: what does this pane say?  The other half of being
+    /// able to type into one.
+    CliReadPane = 74,
+    /// L1 → CLI: the text asked for.
+    CliText = 75,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -500,6 +505,8 @@ impl MsgType {
             71 => MsgType::CliResult,
             72 => MsgType::CliListPanes,
             73 => MsgType::CliPaneList,
+            74 => MsgType::CliReadPane,
+            75 => MsgType::CliText,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1665,6 +1672,51 @@ pub fn decode_cli_pane_list(payload: &[u8]) -> io::Result<Vec<(u64, String, Stri
     Ok(out)
 }
 
+/// CliReadPane payload: `target len u32 + utf8, extra_lines u32`.
+pub fn encode_cli_read_pane(target: &str, extra_lines: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + target.len());
+    v.extend_from_slice(&(target.len() as u32).to_le_bytes());
+    v.extend_from_slice(target.as_bytes());
+    v.extend_from_slice(&extra_lines.to_le_bytes());
+    v
+}
+
+pub fn decode_cli_read_pane(payload: &[u8]) -> io::Result<(String, u32)> {
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "CliReadPane payload truncated");
+    if payload.len() < 4 {
+        return Err(bad());
+    }
+    let n = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 8 + n {
+        return Err(bad());
+    }
+    let target = String::from_utf8_lossy(&payload[4..4 + n]).into_owned();
+    let extra = u32::from_le_bytes(payload[4 + n..8 + n].try_into().unwrap());
+    Ok((target, extra))
+}
+
+/// CliText payload: `len u32 + utf8`.
+pub fn encode_cli_text(text: &str) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + text.len());
+    v.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    v.extend_from_slice(text.as_bytes());
+    v
+}
+
+pub fn decode_cli_text(payload: &[u8]) -> io::Result<String> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "CliText payload too short"));
+    }
+    let n = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    if payload.len() < 4 + n {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CliText payload truncated before body",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&payload[4..4 + n]).into_owned())
+}
+
 /// PaneFocused payload: `session_id u64 LE`.
 pub fn encode_pane_focused(session_id: u64) -> Vec<u8> {
     session_id.to_le_bytes().to_vec()
@@ -2380,6 +2432,16 @@ fn u8_to_named(w: WireNamedKey) -> NamedKey {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn cli_read_frames_round_trip() {
+        let (t, n) = decode_cli_read_pane(&encode_cli_read_pane("spg#2", 40)).unwrap();
+        assert_eq!((t.as_str(), n), ("spg#2", 40));
+        assert_eq!(decode_cli_text(&encode_cli_text("hello\nworld")).unwrap(), "hello\nworld");
+        let mut short = encode_cli_read_pane("spg", 1);
+        short.truncate(5);
+        assert!(decode_cli_read_pane(&short).is_err());
+    }
 
     #[test]
     fn cli_pane_list_round_trips() {
