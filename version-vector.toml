@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.67"  # 回收的冻结改由 L3 持有 —— core 每次装机都重启,冻结活不过去;详见 CHANGELOG.md
+shell   = "0.7.68"  # PTY 注入操作变成基础能力(pty_op),回收与 profile 切换都搬上去;详见 CHANGELOG.md
 core    = "0.12.82"  # 两个小标题下面各留一行间隔;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

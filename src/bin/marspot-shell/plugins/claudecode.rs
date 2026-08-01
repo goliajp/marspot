@@ -62,6 +62,17 @@ struct CcSessionInfo {
     pub title: String,
 }
 
+/// The plugin's route to a pane is also the op runner's, so a script
+/// can be handed the same client the rest of this plugin already uses.
+impl pty_op::PtyIo for ShelldClient {
+    fn send(&self, sid: u64, bytes: &[u8]) -> std::io::Result<()> {
+        self.send_input_to(sid, bytes)
+    }
+    fn hold(&self, sid: u64, on: bool) -> std::io::Result<()> {
+        self.hold_grid_of(sid, on)
+    }
+}
+
 impl ShelldClient {
     fn new(host_inject: Option<Arc<dyn InjectInputProxy>>) -> Self {
         Self { host_inject }
@@ -129,6 +140,7 @@ impl ShelldClient {
 }
 
 use crate::plugins::pidtree;
+use crate::plugins::pty_op;
 use crate::plugins::{
     LogLevel, PermissionSet, Plugin, PluginError, PluginHost, PluginMetadata,
     PLUGIN_API_VERSION,
@@ -351,17 +363,6 @@ struct BindMeta {
     project_basename: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CycleStage {
-    /// SIGTERM not yet sent to the old claude pid.
-    PendingKill,
-    /// SIGTERM delivered; waiting for the pid to vanish from the
-    /// process table.
-    KillSent,
-    /// `claudeN --resume <uuid>\r` written to the PTY; waiting a
-    /// settle window before ending the PaneSession.
-    ResumeSent,
-}
 
 /// How long a pane must hold a quiet state before its claude is
 /// reclaimed, and the knob to change or disable it.
@@ -638,50 +639,7 @@ struct DormantRecord {
     created_at: SystemTime,
 }
 
-/// The resume command for a session, honouring its profile.
-///
-/// P0 is the default config dir, which is what the plain `claude`
-/// entry point uses; every other profile has its own `claudeN`.
-/// Getting this wrong is not cosmetic — a session resumed under
-/// another profile comes back against a different config dir, i.e.
-/// a different account.
-///
-/// An UNKNOWN profile (`u8::MAX`) has no correct command, so there is
-/// no branch for it here: the caller must not reclaim a session it
-/// cannot name the profile of.  See `PROFILE_UNKNOWN`.
-fn resume_command(config_dir: Option<&str>, uuid: &str) -> String {
-    // Wipe the screen first, in the same line.
-    //
-    // The typed line is echoed by the shell and sits under the frozen
-    // frame; the freeze means nobody watches it happen, but it is
-    // still there when the freeze lifts — a shell prompt and a
-    // `claude --resume …` line wedged above the restored session.
-    // Erasing the display as the first thing the line does leaves the
-    // pane showing only what claude paints.  `\033[2J` and nothing
-    // else: `\033[3J` would take the scrollback with it, and the
-    // scrollback is the user's.
-    let clear = "printf '\\033[H\\033[2J'; ";
-    match config_dir.filter(|d| shell_safe(d)) {
-        Some(dir) => format!("{}CLAUDE_CONFIG_DIR='{}' claude --resume {}\r", clear, dir, uuid),
-        // No observed dir: the default profile's own entry point.  The
-        // caller refuses to reclaim a session whose profile it could
-        // not read, so this branch is the genuine P0 case.
-        None => format!("{}claude --resume {}\r", clear, uuid),
-    }
-}
 
-/// A value safe to drop inside single quotes in a shell command.
-///
-/// The config dir goes onto a command line verbatim; a quote or a
-/// newline in it would end the quoting and turn the rest into
-/// something else entirely.  Rejected values fall back to the plain
-/// entry point rather than being escaped — a path this strange is not
-/// one to guess about.
-fn shell_safe(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 512
-        && !s.contains(['\'', '"', '\n', '\r', '\\', '$', '`'])
-}
 
 /// "We could not tell which profile this session belongs to."
 ///
@@ -743,7 +701,7 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
                 // 5th column, added with the config-dir resume; an
                 // older row without it falls back to the plain entry
                 // point, which is the default profile.
-                config_dir: config_dir.filter(|d| !d.is_empty() && shell_safe(d)),
+                config_dir: config_dir.filter(|d| !d.is_empty() && pty_op::shell_safe(d)),
                 created_at,
             })
         })
@@ -769,583 +727,21 @@ const WAKE_QUIET_FOR: Duration = Duration::from_millis(500);
 /// is already showing the frame it will keep.
 const HOLD_SETTLE: Duration = Duration::from_millis(250);
 
-/// How often a dormant pane re-asserts its badge.  Also wall-clock,
-/// and for the same reason: a count of ticks is 1 s or 16 s depending
-/// on what the window happens to be doing.
-const DORMANT_BADGE_EVERY: Duration = Duration::from_secs(8);
 
 /// Upper bound on holding the keyboard.  A resume that never draws
 /// (claude missing, profile dir gone, PATH broken) must still give the
 /// pane back rather than lock it forever.
 const WAKE_WATCHDOG: Duration = Duration::from_secs(30);
 
-/// May the freeze lift?  Asked only once claude is back, so both
-/// inputs are about claude's own output.
-///
-/// `drew` is "output has appeared since claude appeared" and `still`
-/// is how long it has been unchanged.  Both are required: output that
-/// hasn't started means claude has not painted, and output still
-/// flowing means it is painting *now* — lifting the freeze in either
-/// case shows the user the machinery the freeze exists to hide.
-fn wake_may_finish(drew: bool, still: Duration) -> bool {
-    drew && still >= WAKE_QUIET_FOR
-}
 
-/// How many bytes this pane's PTY has produced, ever.  L3 appends
-/// every one of them to the session's bytelog, so its length is the
-/// cheapest possible "has anything been drawn" counter — one `stat`,
-/// and only while a wake is in flight.
-fn elapsed_since(t: SystemTime) -> Duration {
-    SystemTime::now().duration_since(t).unwrap_or_default()
-}
 
-fn bytelog_len(shelld_sid: u64) -> u64 {
-    marspot_term::paths::sessions_dir()
-        .join(shelld_sid.to_string())
-        .join("bytelog")
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or(0)
-}
 
-/// Stage of the hibernate → dormant → wake cycle.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HibernateStage {
-    /// The hold has been asked for; waiting for it to reach L3 before
-    /// anything is allowed to happen on screen.
-    ///
-    /// The request travels L1 → L2 → L3 through channels and sockets,
-    /// while SIGTERM goes straight from here to the process.  Sent in
-    /// the same breath, the signal wins: claude prints its parting
-    /// `Resume this session with: …` and the shell its prompt, both
-    /// before L3 has been told to stop drawing — and those two lines
-    /// are exactly what the user must never see.
-    Holding,
-    /// SIGTERM sent, waiting for the pid to leave the process table.
-    Killing,
-    /// claude is gone; the pane holds its scrollback and waits for a
-    /// keypress.  This is where the memory saving lives, and it can
-    /// last indefinitely.
-    Dormant,
-    /// `claude --resume` written to the PTY; waiting for it to come
-    /// back before handing the keyboard over.
-    Waking,
-}
 
-/// PaneSession that reclaims an idle claude and brings it back on the
-/// next keypress.
-///
-/// It is a PaneSession rather than a plain kill because waking has to
-/// intercept the user's first keystroke: the pane's shell is sitting
-/// at its prompt with claude gone, and a key typed there would run as
-/// a shell command instead of resuming the session.
-struct HibernatePaneSession {
-    client: Arc<ShelldClient>,
-    uuid: String,
-    /// The config dir this session was running under, so the resume
-    /// puts it back in front of the same account.
-    config_dir: Option<String>,
-    /// The pane's shell pid, so the waking stage can see claude come
-    /// back and hand the keyboard over immediately instead of holding
-    /// it for a fixed timeout.
-    shell_pid: i32,
-    /// The pid we are reclaiming; only meaningful in `Killing`.
-    claude_pid: i32,
-    stage: HibernateStage,
-    stage_since: SystemTime,
-    spin_phase: u8,
-    /// Set once a claude has been seen in the pane again.  Everything
-    /// the wake measures is measured from that moment, not from the
-    /// resume line — see the `Waking` arm of `on_tick`.
-    claude_seen: bool,
-    /// Bytelog length when claude appeared, and the length at the
-    /// previous tick — how `Waking` knows claude has finished painting
-    /// rather than merely started existing.
-    wake_bytes_at_claude: u64,
-    wake_bytes_last: u64,
-    /// When that length last changed.
-    wake_still_since: SystemTime,
-    /// When the dormant badge was last re-asserted.
-    last_badge_at: SystemTime,
-}
 
-impl HibernatePaneSession {
-    /// Send the resume line and move to `Waking`.  Shared by the two
-    /// things that mean "the user is back": focus and a keystroke.
-    fn begin_wake(
-        &mut self,
-        host: &dyn crate::plugins::PaneSessionHost,
-        trigger: &str,
-    ) -> bool {
-        let cmd = resume_command(self.config_dir.as_deref(), &self.uuid);
-        match self.client.send_input_to(host.shelld_session_id(), cmd.as_bytes()) {
-            Ok(()) => {
-                host.log(
-                    crate::plugins::LogLevel::Info,
-                    "hibernate.waking",
-                    // The command verbatim: which profile a session
-                    // comes back under is the one thing about this
-                    // path that cannot be inferred afterwards.
-                    &format!("{} woke session {} with `{}`", trigger, self.uuid, cmd.trim_end()),
-                );
-                self.stage = HibernateStage::Waking;
-                self.stage_since = SystemTime::now();
-                self.claude_seen = false;
-                self.wake_bytes_at_claude = 0;
-                self.wake_bytes_last = 0;
-                self.wake_still_since = SystemTime::now();
-                true
-            }
-            Err(e) => {
-                host.log(
-                    crate::plugins::LogLevel::Warn,
-                    "hibernate.resume_send_failed",
-                    &format!("{e}"),
-                );
-                false
-            }
-        }
-    }
 
-    /// Is a claude running in this pane again?  Cheap enough for a
-    /// tick: one proc-table walk only while a wake is in flight.
-    fn claude_is_back(&self) -> bool {
-        if self.shell_pid <= 0 {
-            return false;
-        }
-        let procs = pidtree::list_all_procs();
-        pidtree::descendants_of(self.shell_pid, &procs)
-            .iter()
-            .any(looks_like_claudecode)
-    }
 
-    /// Let the pane draw again.  Safe to call twice — L3 ignores a
-    /// hold that doesn't change.
-    fn release_hold(&self, host: &dyn crate::plugins::PaneSessionHost) {
-        if let Err(e) = self.client.hold_grid_of(host.shelld_session_id(), false) {
-            host.log(
-                crate::plugins::LogLevel::Warn,
-                "hibernate.release_failed",
-                &format!("{e}"),
-            );
-        }
-    }
 
-    fn pid_alive(pid: i32) -> bool {
-        unsafe {
-            if libc::kill(pid, 0) == 0 {
-                return true;
-            }
-            *libc::__error() != libc::ESRCH
-        }
-    }
-}
 
-impl crate::plugins::PaneSession for HibernatePaneSession {
-    fn caps(&self) -> u32 {
-        // FREEZE_GRID from the moment the reclamation starts.
-        //
-        // Without it the user watches the machinery: claude's exit,
-        // the shell prompt coming back, and later the
-        // `claude --resume …` line being typed into it.  None of that
-        // is theirs to care about — what they left on screen is.  With
-        // the grid frozen, the pane holds the picture it had, the kill
-        // and the resume happen behind it, and the live grid returns
-        // only when claude has repainted.
-        //
-        // (I left this out first, reasoning that a dormant pane should
-        // keep showing its scrollback.  It does — the frozen frame IS
-        // that scrollback; what it also showed was the plumbing.)
-        marspot::shell_proto::PANE_SESSION_CAP_INPUT
-            | marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS
-            | marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID
-    }
-
-    fn on_focus(&mut self, host: &dyn crate::plugins::PaneSessionHost) {
-        // Looking at the pane is the earliest honest signal that the
-        // user wants it back.  Starting here means claude's startup
-        // overlaps with them reading the screen, instead of beginning
-        // after they have already typed.
-        if self.stage == HibernateStage::Dormant {
-            self.begin_wake(host, "focus");
-        }
-    }
-
-    fn on_user_key(
-        &mut self,
-        host: &dyn crate::plugins::PaneSessionHost,
-        _ev: &marspot::shell_proto::WireKeyEvent,
-    ) -> crate::plugins::KeyHandling {
-        match self.stage {
-            HibernateStage::Dormant => {
-                // A key still wakes it — focus is the usual trigger,
-                // but a pane can receive input without a focus change
-                // (already focused when it was parked).  The key
-                // itself is swallowed: it was meant for claude, and
-                // claude is about to exist again; replaying it into
-                // the shell first would run it as a command.
-                if !self.begin_wake(host, "keypress") {
-                    // Hand the pane back rather than trapping the
-                    // user's keyboard in a session that cannot wake.
-                    return crate::plugins::KeyHandling::EndSession;
-                }
-                crate::plugins::KeyHandling::Swallow
-            }
-            // Mid-kill or mid-resume: swallow so a keystroke cannot
-            // land in the shell between claude dying and coming back.
-            _ => crate::plugins::KeyHandling::Swallow,
-        }
-    }
-
-    fn on_tick(&mut self, host: &dyn crate::plugins::PaneSessionHost) {
-        self.spin_phase = self.spin_phase.wrapping_add(1);
-        let elapsed = SystemTime::now()
-            .duration_since(self.stage_since)
-            .unwrap_or_default();
-        match self.stage {
-            HibernateStage::Holding => {
-                host.set_badge("zZ …");
-                if elapsed < HOLD_SETTLE {
-                    return;
-                }
-                // SIGTERM directly, not `/exit` through the PTY: the
-                // same reasoning as the profile cycle — no echo lands
-                // in the grid, and claude's own exit path is not a
-                // request we can be sure it will honour while idle.
-                unsafe { libc::kill(self.claude_pid, libc::SIGTERM) };
-                self.stage = HibernateStage::Killing;
-                self.stage_since = SystemTime::now();
-            }
-            HibernateStage::Killing => {
-                if !Self::pid_alive(self.claude_pid) {
-                    host.log(
-                        crate::plugins::LogLevel::Info,
-                        "hibernate.dormant",
-                        &format!("claude reclaimed; session {} is dormant", self.uuid),
-                    );
-                    self.stage = HibernateStage::Dormant;
-                    self.stage_since = SystemTime::now();
-                    host.set_badge(&format!("zZ {}", self.uuid));
-                    return;
-                }
-                if elapsed >= Duration::from_secs(3) {
-                    // Same escalation the profile cycle uses: SIGTERM
-                    // is the polite ask, SIGKILL is the deadline.
-                    unsafe { libc::kill(self.claude_pid, libc::SIGKILL) };
-                    host.log(
-                        crate::plugins::LogLevel::Warn,
-                        "hibernate.escalated_sigkill",
-                        &format!("pid={}", self.claude_pid),
-                    );
-                }
-                host.set_badge("zZ …");
-            }
-            HibernateStage::Dormant => {
-                // Re-assert the badge periodically rather than every
-                // tick: a core that respawned (silent update, crash)
-                // comes up with no badges, but this state can last
-                // hours, and a wire frame per pane per tick for a pane
-                // that is doing nothing is the definition of background
-                // creep.  Timed, not counted — the tick is 16 ms while
-                // the window is busy and ~250 ms when it isn't, so a
-                // count is a different interval every time.
-                if elapsed_since(self.last_badge_at) >= DORMANT_BADGE_EVERY {
-                    self.last_badge_at = SystemTime::now();
-                    host.set_badge(&format!("zZ {}", self.uuid));
-                }
-            }
-            HibernateStage::Waking => {
-                host.set_badge(&format!(
-                    "zZ→ {}",
-                    ProfileCyclePaneSession::spinner_frame(self.spin_phase)
-                ));
-                // Lift the freeze when claude has finished *painting*,
-                // not when its process appears.
-                //
-                // Those are seconds apart: the shell forks claude in a
-                // few hundred ms, and claude takes a second or more to
-                // draw.  Ending on "the process exists" put the live
-                // grid back in between — so the pane showed the echoed
-                // `claude --resume …` line and the startup output
-                // scrolling past, which is precisely the machinery the
-                // freeze exists to hide.
-                //
-                // "Finished painting" = output happened and then
-                // stopped.  Self-calibrating: a fast resume unfreezes
-                // fast, a slow one waits, and neither needs a guess at
-                // how many bytes claude's first frame costs.
-                let len = bytelog_len(host.shelld_session_id());
-                if !self.claude_seen {
-                    // Measure from the moment claude exists, not from
-                    // the resume line.  Nothing before it is claude's:
-                    // not the echo, and not the screen wipe the line
-                    // carries.  Counting those was a black flash on the
-                    // way back — the wipe was "output", the pause after
-                    // it was "quiet", so the freeze lifted onto an
-                    // empty screen a beat before claude drew anything.
-                    if self.claude_is_back() {
-                        self.claude_seen = true;
-                        self.wake_bytes_at_claude = len;
-                        self.wake_bytes_last = len;
-                        self.wake_still_since = SystemTime::now();
-                    }
-                } else {
-                    if len != self.wake_bytes_last {
-                        self.wake_bytes_last = len;
-                        self.wake_still_since = SystemTime::now();
-                    }
-                    let still = SystemTime::now()
-                        .duration_since(self.wake_still_since)
-                        .unwrap_or_default();
-                    if wake_may_finish(len > self.wake_bytes_at_claude, still) {
-                        self.release_hold(host);
-                        host.end();
-                    }
-                }
-                if elapsed >= WAKE_WATCHDOG {
-                    self.release_hold(host);
-                    host.end();
-                }
-            }
-        }
-    }
-
-    fn on_end(&mut self, host: &dyn crate::plugins::PaneSessionHost, reason: crate::plugins::EndReason) {
-        // Whatever ended this — the wake finishing, the Esc hatch, the
-        // pane closing — the pane must not be left holding a picture
-        // with nobody to release it.  The exception is a *dormant*
-        // session ending because L1 itself is going away: the pane is
-        // still parked and a fresh L1 will re-arm it, so the hold has
-        // to outlive this process.
-        if self.stage != HibernateStage::Dormant
-            || reason != crate::plugins::EndReason::PluginRequested
-        {
-            self.release_hold(host);
-        }
-        // The reason is half the story: a wake that ends because
-        // claude finished painting and one that ends because the host
-        // tore the session down look identical without it, and the
-        // second is how a freeze gets lifted early.
-        host.log(
-            crate::plugins::LogLevel::Info,
-            "hibernate.ended",
-            &format!(
-                "session {} stage={:?} reason={:?} claude_seen={} still_ms={}",
-                self.uuid,
-                self.stage,
-                reason,
-                self.claude_seen,
-                elapsed_since(self.wake_still_since).as_millis()
-            ),
-        );
-    }
-}
-
-/// RFC-003 §10 PaneSession that drives the claudecode profile cycle:
-/// freeze the pane visually, lock the keyboard, exit → resume.
-struct ProfileCyclePaneSession {
-    client: Arc<ShelldClient>,
-    next_profile: u8,
-    uuid: String,
-    /// claude pid we're waiting to die before sending the resume
-    /// command.
-    old_claude_pid: i32,
-    stage: CycleStage,
-    /// Used as a per-stage timer + overall watchdog.
-    started_at: SystemTime,
-    /// Tick counter for the badge spinner cycle.
-    spin_phase: u8,
-}
-
-impl ProfileCyclePaneSession {
-    /// Braille spinner — 8 frames, advanced one step per on_tick.
-    /// Standard 1/8 turn frames, same characters most CLI spinners use.
-    fn spinner_frame(phase: u8) -> char {
-        const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
-        FRAMES[(phase as usize) % FRAMES.len()]
-    }
-
-    fn pid_alive(pid: i32) -> bool {
-        // kill(pid, 0) — no signal, just permission/existence check.
-        // 0 = process exists and we can signal; -1 with ESRCH = gone.
-        unsafe {
-            if libc::kill(pid, 0) == 0 {
-                return true;
-            }
-            *libc::__error() != libc::ESRCH
-        }
-    }
-}
-
-impl crate::plugins::PaneSession for ProfileCyclePaneSession {
-    fn caps(&self) -> u32 {
-        marspot::shell_proto::PANE_SESSION_CAP_INPUT
-            | marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS
-            | marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID
-    }
-
-    fn on_user_key(
-        &mut self,
-        _host: &dyn crate::plugins::PaneSessionHost,
-        ev: &marspot::shell_proto::WireKeyEvent,
-    ) -> crate::plugins::KeyHandling {
-        // Esc → bail out; everything else gets swallowed so the
-        // user can't pollute the resume command mid-cycle.
-        if matches!(
-            ev.kind,
-            marspot::shell_proto::WireLogicalKind::Named,
-        ) && ev.key_data
-            == marspot::shell_proto::WireNamedKey::Escape as u32
-        {
-            crate::plugins::KeyHandling::EndSession
-        } else {
-            crate::plugins::KeyHandling::Swallow
-        }
-    }
-
-    fn on_tick(&mut self, host: &dyn crate::plugins::PaneSessionHost) {
-        let sid = host.shelld_session_id();
-        let now = SystemTime::now();
-        let elapsed = now
-            .duration_since(self.started_at)
-            .unwrap_or_default();
-        // Advance the spinner every tick, then refresh the badge so
-        // the user sees motion even when the state machine is
-        // mid-stage (e.g. waiting for the claude pid to die).
-        self.spin_phase = self.spin_phase.wrapping_add(1);
-        match self.stage {
-            CycleStage::KillSent => host.set_badge(&format!(
-                "→ P{} {}",
-                self.next_profile,
-                Self::spinner_frame(self.spin_phase)
-            )),
-            CycleStage::ResumeSent => host.set_badge(&format!(
-                "P{} starting {}",
-                self.next_profile,
-                Self::spinner_frame(self.spin_phase)
-            )),
-            CycleStage::PendingKill => {} // first tick sets it below
-        }
-        // Global watchdog: 30 s of no-progress kills the session.
-        if elapsed > std::time::Duration::from_secs(30) {
-            host.log(
-                crate::plugins::LogLevel::Warn,
-                "cycle.timed_out",
-                "stale cycle; aborting",
-            );
-            host.end();
-            return;
-        }
-        match self.stage {
-            CycleStage::PendingKill => {
-                // SIGTERM directly to the claude PID — bypass the
-                // PTY entirely so no `Bye!` / `/exit` echo lands in
-                // the grid.  `bare exit` round-trip was ambiguous
-                // (claude treats it as a user message and replies
-                // politely without quitting), `/exit` works but
-                // prints "Bye!", SIGTERM kills cleanly.
-                let r = unsafe { libc::kill(self.old_claude_pid, libc::SIGTERM) };
-                if r != 0 {
-                    let errno = unsafe { *libc::__error() };
-                    if errno == libc::ESRCH {
-                        // Already gone — race with normal exit.
-                        // Treat as success.
-                    } else {
-                        host.log(
-                            crate::plugins::LogLevel::Warn,
-                            "cycle.kill_failed",
-                            &format!("errno={}", errno),
-                        );
-                        host.end();
-                        return;
-                    }
-                }
-                host.log(
-                    crate::plugins::LogLevel::Info,
-                    "cycle.kill_sent",
-                    &format!(
-                        "shelld_session={} → P{} (uuid={}, claude_pid={})",
-                        sid, self.next_profile, self.uuid, self.old_claude_pid
-                    ),
-                );
-                host.set_badge(&format!(
-                    "→ P{} {}",
-                    self.next_profile,
-                    Self::spinner_frame(self.spin_phase)
-                ));
-                self.stage = CycleStage::KillSent;
-                self.started_at = now;
-            }
-            CycleStage::KillSent => {
-                if !Self::pid_alive(self.old_claude_pid) {
-                    let cmd = format!(
-                        "claude{} --resume {}\r",
-                        self.next_profile, self.uuid
-                    );
-                    if let Err(e) = self.client.send_input_to(sid, cmd.as_bytes()) {
-                        host.log(
-                            crate::plugins::LogLevel::Warn,
-                            "cycle.resume_send_failed",
-                            &format!("{e}"),
-                        );
-                        host.end();
-                        return;
-                    }
-                    host.log(
-                        crate::plugins::LogLevel::Info,
-                        "cycle.resume_sent",
-                        &format!(
-                            "shelld_session={} P{} resume (uuid={})",
-                            sid, self.next_profile, self.uuid
-                        ),
-                    );
-                    host.set_badge(&format!(
-                        "P{} starting {}",
-                        self.next_profile,
-                        Self::spinner_frame(self.spin_phase)
-                    ));
-                    self.stage = CycleStage::ResumeSent;
-                    self.started_at = now;
-                } else if elapsed >= std::time::Duration::from_secs(3) {
-                    // SIGTERM didn't take in 3 s — escalate to SIGKILL.
-                    let r = unsafe { libc::kill(self.old_claude_pid, libc::SIGKILL) };
-                    host.log(
-                        crate::plugins::LogLevel::Warn,
-                        "cycle.escalated_sigkill",
-                        &format!("pid={} kill_r={}", self.old_claude_pid, r),
-                    );
-                }
-            }
-            CycleStage::ResumeSent => {
-                // Short settle so the spawn echo doesn't flash.  Was
-                // 2 s — but on big sessions claude's first frame takes
-                // 10 s+ anyway (317 MB jsonl parse measured
-                // 2026-07-13), so a long freeze here buys nothing and
-                // just adds to the perceived switch lag; small
-                // sessions paint within ~600 ms.
-                if elapsed >= std::time::Duration::from_millis(600) {
-                    host.end();
-                }
-            }
-        }
-    }
-
-    fn on_end(
-        &mut self,
-        host: &dyn crate::plugins::PaneSessionHost,
-        reason: crate::plugins::EndReason,
-    ) {
-        host.log(
-            crate::plugins::LogLevel::Info,
-            "cycle.end",
-            &format!("sid={} reason={:?}", host.shelld_session_id(), reason),
-        );
-        // Don't clear the badge here — the regular plugin tick will
-        // re-bind the new claude pid → re-issue a fresh badge with
-        // the new profile tag.  Clearing causes a brief blank between
-        // end and next tick.
-    }
-}
 
 impl ClaudecodePlugin {
     pub fn new() -> Self {
@@ -1517,7 +913,6 @@ impl ClaudecodePlugin {
         let Some(client) = self.shelld.as_ref().cloned() else {
             return;
         };
-        let now = SystemTime::now();
         for (sid, (cpu_now, sampled_at)) in &result.new_cpu {
             // No "have I already done this one" check: a pane we
             // reclaimed reports `Dormant`, which composes to a state
@@ -1657,29 +1052,27 @@ impl ClaudecodePlugin {
             //
             // The signal itself is sent from the `Holding` stage, once
             // this request has had time to land — see that variant.
-            self.held.insert(*sid);
-            if let Err(e) = client.hold_grid_of(*sid, true) {
+            let Some(op) = reclaim_op(
+                &meta.uuid,
+                meta.config_dir.as_deref(),
+                meta.claude_pid,
+                shell_pid_for(*sid),
+            ) else {
                 host.log(
                     LogLevel::Warn,
-                    "hibernate.hold_failed",
-                    &format!("{e}"),
+                    "hibernate.no_resume_line",
+                    &format!(
+                        "refusing to reclaim {}: its profile cannot be quoted",
+                        meta.uuid
+                    ),
                 );
-            }
-            let session = Box::new(HibernatePaneSession {
-                client: client.clone(),
-                uuid: meta.uuid.clone(),
-                config_dir: meta.config_dir.clone(),
-                claude_pid: meta.claude_pid,
-                shell_pid: shell_pid_for(*sid),
-                stage: HibernateStage::Holding,
-                stage_since: now,
-                spin_phase: 0,
-                claude_seen: false,
-                wake_bytes_at_claude: 0,
-                wake_bytes_last: 0,
-                wake_still_since: SystemTime::now(),
-                last_badge_at: SystemTime::UNIX_EPOCH,
-            });
+                continue;
+            };
+            self.held.insert(*sid);
+            let session = Box::new(pty_op::OpRunner::new(
+                op,
+                Box::new(pty_op::RealEnv::new(client.clone() as Arc<dyn pty_op::PtyIo>)),
+            ));
             if let Err(e) = host.begin_pane_session(*sid, session) {
                 host.log(
                     LogLevel::Warn,
@@ -1762,22 +1155,29 @@ impl ClaudecodePlugin {
             .cloned()
             .collect();
         for d in rearm {
-            let session = Box::new(HibernatePaneSession {
-                client: client.clone(),
-                uuid: d.uuid.clone(),
-                config_dir: d.config_dir.clone(),
-                claude_pid: 0,
-                shell_pid: shell_pid_for(d.shelld_sid),
-                // Straight to Dormant: there is nothing left to kill.
-                stage: HibernateStage::Dormant,
-                stage_since: SystemTime::now(),
-                spin_phase: 0,
-                claude_seen: false,
-                wake_bytes_at_claude: 0,
-                wake_bytes_last: 0,
-                wake_still_since: SystemTime::now(),
-                last_badge_at: SystemTime::UNIX_EPOCH,
-            });
+            // The same script, started at the park: there is nothing
+            // left to kill, and the pid it would have signalled died
+            // with the process that armed it.
+            let Some(op) = reclaim_op(
+                &d.uuid,
+                d.config_dir.as_deref(),
+                0,
+                shell_pid_for(d.shelld_sid),
+            ) else {
+                host.log(
+                    LogLevel::Warn,
+                    "hibernate.no_resume_line",
+                    &format!("cannot re-arm {}: its profile cannot be quoted", d.uuid),
+                );
+                continue;
+            };
+            let session = Box::new(
+                pty_op::OpRunner::new(
+                    op,
+                    Box::new(pty_op::RealEnv::new(client.clone() as Arc<dyn pty_op::PtyIo>)),
+                )
+                .start_at(RECLAIM_PARK_STEP),
+            );
             // Idempotent by design: if this pane is already held (the
             // usual case — L3 outlived the L1 that asked), L3 sees no
             // change.  If a *new* L3 came up meanwhile, this is what
@@ -1929,15 +1329,23 @@ impl ClaudecodePlugin {
             );
             return;
         };
-        let session = Box::new(ProfileCyclePaneSession {
-            client,
+        let Some(op) = profile_cycle_op(
+            &meta.uuid,
             next_profile,
-            uuid: meta.uuid,
-            old_claude_pid: meta.claude_pid,
-            stage: CycleStage::PendingKill,
-            started_at: SystemTime::now(),
-            spin_phase: 0,
-        });
+            meta.claude_pid,
+            shell_pid_for(shelld_sid),
+        ) else {
+            host.log(
+                LogLevel::Warn,
+                "cycle.no_command",
+                &format!("cannot build a P{next_profile} resume line for {}", meta.uuid),
+            );
+            return;
+        };
+        let session = Box::new(pty_op::OpRunner::new(
+            op,
+            Box::new(pty_op::RealEnv::new(client as Arc<dyn pty_op::PtyIo>)),
+        ));
         if let Err(e) = host.begin_pane_session(shelld_sid, session) {
             host.log(
                 LogLevel::Warn,
@@ -1947,6 +1355,109 @@ impl ClaudecodePlugin {
         }
     }
 
+}
+
+
+/// The reclamation script: hold the picture, take claude down, park
+/// until the user comes back, then put it back the way it was.
+///
+/// This was a 200-line state machine.  What is left is the two things
+/// that are actually claudecode's opinion — the command line, and what
+/// counts as "claude is back" — with the sequencing, the deadlines, the
+/// escalation and the cleanup owned by [`pty_op`](crate::plugins::pty_op).
+///
+/// `None` when the session's profile cannot be quoted: a session that
+/// comes back under a *different account* is worse than one left
+/// running, so there is no fallback line here.
+fn reclaim_op(
+    uuid: &str,
+    config_dir: Option<&str>,
+    claude_pid: i32,
+    shell_pid: i32,
+) -> Option<pty_op::PtyOp> {
+    let mut cmd = pty_op::PtyCommand::new("claude").clear_screen_first(true);
+    if let Some(dir) = config_dir {
+        cmd = cmd.env("CLAUDE_CONFIG_DIR", dir);
+    }
+    let line = cmd.arg("--resume").arg(uuid).to_bytes()?;
+    Some(
+        pty_op::PtyOp::new("cc.reclaim")
+            .hold_screen(true)
+            // No Esc hatch: bailing out mid-park would leave a pane with
+            // no claude and no wake armed, which is strictly worse than
+            // waiting.  The wake itself takes ~2 s.
+            .escape_hatch(false)
+            .badge(format!("zZ {uuid}"))
+            // Let the hold reach L3 before anything can draw.  That
+            // request crosses two process boundaries; the signal crosses
+            // none, and sent together the signal wins — claude's parting
+            // `Resume this session with: …` and the shell's prompt both
+            // land on screen.
+            .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
+            .step(
+                pty_op::Step::signal(claude_pid, libc::SIGTERM)
+                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
+            )
+            .step(pty_op::Step::await_gone(claude_pid))
+            .step(pty_op::Step::await_user())
+            .step(pty_op::Step::send(line).named("resume"))
+            .step(pty_op::Step::await_process(shell_pid, looks_like_claudecode))
+            .step(pty_op::Step::await_quiet(WAKE_QUIET_FOR).timeout(WAKE_WATCHDOG)),
+    )
+}
+
+/// Where a re-armed run picks up: an L1 restart replaces this process
+/// while the pane stays parked, so the new run must not kill anything
+/// again — it starts at the step that waits for the user.
+const RECLAIM_PARK_STEP: usize = 3;
+
+/// The profile-cycle script: take the current claude down and bring the
+/// same session back under the next profile.
+///
+/// SIGTERM straight to the pid rather than `/exit` through the PTY:
+/// bare `exit` is ambiguous (claude treats it as a message and replies
+/// politely without quitting), `/exit` works but prints `Bye!`, and both
+/// echo into the grid.  A signal echoes nothing.
+///
+/// `claudeN` is an interactive alias in the user's rc file, so the
+/// script sets the variable the alias would have set — same effect,
+/// without depending on that file still defining it.
+fn profile_cycle_op(
+    uuid: &str,
+    next_profile: u8,
+    claude_pid: i32,
+    shell_pid: i32,
+) -> Option<pty_op::PtyOp> {
+    let home = std::env::var("HOME").ok()?;
+    let line = pty_op::PtyCommand::new("claude")
+        .env("CLAUDE_CONFIG_DIR", format!("{home}/.claude-profile-{next_profile}"))
+        .arg("--resume")
+        .arg(uuid)
+        .clear_screen_first(true)
+        .to_bytes()?;
+    Some(
+        pty_op::PtyOp::new("cc.profile_cycle")
+            .hold_screen(true)
+            .badge(format!("→ P{next_profile}"))
+            .step(pty_op::Step::settle(HOLD_SETTLE).named("hold_settle"))
+            .step(
+                pty_op::Step::signal(claude_pid, libc::SIGTERM)
+                    .escalate_after(Duration::from_secs(3), libc::SIGKILL),
+            )
+            .step(pty_op::Step::await_gone(claude_pid))
+            .step(pty_op::Step::send(line).named("resume"))
+            // Wait for the new claude to draw, exactly as the
+            // reclamation does.  The hand-written version settled for a
+            // flat 600 ms and unfroze onto whatever was there — fine for
+            // a small session, a visible flash of shell for a big one (a
+            // 317 MB transcript took 10 s+ to paint, measured
+            // 2026-07-13).
+            .step(
+                pty_op::Step::await_process(shell_pid, looks_like_claudecode)
+                    .timeout(Duration::from_secs(20)),
+            )
+            .step(pty_op::Step::await_quiet(WAKE_QUIET_FOR).timeout(WAKE_WATCHDOG)),
+    )
 }
 
 /// Scan `$HOME` for `.claude-profile-N` directories and return the
@@ -4065,30 +3576,27 @@ mod tests {
         // (A keypress works too — same path — but waiting for one
         // starts the restore after they have already tried to use the
         // pane.)
-        // The session the policy armed knows the profile; rebuild it
-        // the same way here to drive the wake directly.
-        let mut session = HibernatePaneSession {
-            client: Arc::new(ShelldClient::new(Some(inject.clone()))),
-            uuid: uuid.to_string(),
-            config_dir: Some(profile_dir.to_string_lossy().into_owned()),
-            claude_pid: 0,
-            shell_pid,
-            stage: HibernateStage::Dormant,
-            stage_since: SystemTime::now(),
-            spin_phase: 0,
-            claude_seen: false,
-            wake_bytes_at_claude: 0,
-            wake_bytes_last: 0,
-            wake_still_since: SystemTime::now(),
-            last_badge_at: SystemTime::UNIX_EPOCH,
-        };
+        // The run the policy armed is this same script, parked.  Rebuild
+        // it at the park step — which is exactly what a re-arm after an
+        // L1 restart does — and drive the wake directly.
+        let client = Arc::new(ShelldClient::new(Some(inject.clone())));
+        let op = reclaim_op(uuid, Some(&profile_dir.to_string_lossy()), 0, shell_pid)
+            .expect("a quotable profile builds a script");
+        let mut session = pty_op::OpRunner::new(
+            op,
+            Box::new(pty_op::RealEnv::new(client as Arc<dyn pty_op::PtyIo>)),
+        )
+        .start_at(RECLAIM_PARK_STEP);
         let host_session = FakePaneSessionHost { sid: 1 };
+        assert!(session.is_awaiting_user(), "a re-armed run parks at the wake");
         crate::plugins::PaneSession::on_focus(&mut session, &host_session);
-        assert_eq!(
-            session.stage,
-            HibernateStage::Waking,
-            "focusing a dormant pane starts the restore"
+        assert!(
+            !session.is_awaiting_user(),
+            "focusing a parked pane starts the restore"
         );
+        // One tick to run the step the focus unblocked — the host's
+        // loop is what drives a script forward.
+        crate::plugins::PaneSession::on_tick(&mut session, &host_session);
         // A keystroke arriving mid-wake is swallowed rather than run
         // as a shell command.
         let handling = crate::plugins::PaneSession::on_user_key(
@@ -4177,28 +3685,40 @@ mod tests {
     /// Those are seconds apart, and ending on "the process exists" is
     /// what the user saw: the pane unfroze onto the echoed
     /// `claude --resume …` line and the startup output scrolling by,
-    /// instead of holding its last frame until the new one was ready.
+    /// The wake waits for claude to finish *painting*, and only counts
+    /// output that arrives after claude exists.
+    ///
+    /// Both halves shipped broken.  Ending on "the process exists"
+    /// unfroze the pane onto the echoed resume line and the startup
+    /// scroll; then counting ticks instead of milliseconds made the
+    /// still-window 48 ms (`on_tick` rides the redraw pump: 16 ms while
+    /// a pane is drawing, ~250 ms when the window is idle), which lands
+    /// inside claude's own startup pause.  The rule itself now lives in
+    /// `pty_op::StepKind::AwaitQuiet`; what stays claudecode's to choose
+    /// is how long, and that it comes after the process check.
     #[test]
-    fn the_wake_waits_for_the_repaint_not_just_the_process() {
-        // claude is up, but has drawn nothing yet.  This is also the
-        // black-flash case: the resume line's screen wipe is output,
-        // and treating it as claude's made an empty screen look like a
-        // finished repaint — which is why the caller only asks this
-        // question about bytes written *after* claude appeared.
+    fn the_wake_waits_for_the_repaint_after_the_process_appears() {
+        let op = reclaim_op("u", None, 1, 2).expect("script builds");
+        let kinds: Vec<&pty_op::StepKind> = op.steps.iter().map(|s| &s.kind).collect();
+        let process_at = kinds
+            .iter()
+            .position(|k| matches!(k, pty_op::StepKind::AwaitProcess { .. }))
+            .expect("waits for claude to come back");
+        let quiet_at = kinds
+            .iter()
+            .position(|k| matches!(k, pty_op::StepKind::AwaitQuiet { .. }))
+            .expect("waits for it to finish drawing");
         assert!(
-            !wake_may_finish(false, Duration::from_secs(9)),
-            "no output yet is not a repaint"
+            process_at < quiet_at,
+            "output before claude exists is the shell's, not claude's"
         );
-        // Output started, still flowing: claude is painting.
-        assert!(!wake_may_finish(true, Duration::ZERO));
-        assert!(!wake_may_finish(true, WAKE_QUIET_FOR - Duration::from_millis(1)));
-        // Drew, then went still.
-        assert!(wake_may_finish(true, WAKE_QUIET_FOR));
-        // The window is wall-clock, so the tick cadence cannot change
-        // it: at 16 ms per tick — which is what the redraw pump does
-        // while a pane is drawing — a three-tick rule was 48 ms, and
-        // the freeze lifted inside claude's own startup pause.
-        assert!(!wake_may_finish(true, Duration::from_millis(48)));
+        assert!(
+            matches!(
+                kinds[quiet_at],
+                pty_op::StepKind::AwaitQuiet { still } if *still >= Duration::from_millis(400)
+            ),
+            "a still-window measured in tens of ms lands inside claude's startup pause"
+        );
     }
 
     /// A `PluginHost` that records what the plugin asked it to do.
@@ -4887,34 +4407,46 @@ mod tests {
     /// number has to produce a binary that exists — `claude255` was
     /// what a naive format produced for "no profile".
     /// The profile decides which config dir — which account — the
-    /// session comes back under, so the resume line has to carry it.
+    /// The reclamation types the session back under the profile it was
+    /// running.
+    ///
+    /// `claudeN` is an interactive alias in the user's rc file
+    /// (`alias claude1='CLAUDE_CONFIG_DIR=~/.claude-profile-1 claude'`),
+    /// so reproducing the alias would depend on that file still defining
+    /// it; setting the variable is the same thing without the
+    /// dependency.  Read off the script itself — that is what runs.
     #[test]
-    fn resume_command_carries_the_session_profile() {
-        // The observed config dir goes back verbatim.  `claudeN` is an
-        // interactive alias in the user's rc file
-        // (`alias claude1='CLAUDE_CONFIG_DIR=~/.claude-profile-1 claude'`),
-        // so reproducing the alias would depend on that file still
-        // defining it; setting the variable is the same thing without
-        // the dependency.
+    fn the_reclamation_resumes_under_the_profile_it_was_running() {
+        let line = |dir: Option<&str>| -> String {
+            let op = reclaim_op("abc-123", dir, 1, 2).expect("script builds");
+            let bytes = op
+                .steps
+                .iter()
+                .find_map(|s| match &s.kind {
+                    pty_op::StepKind::Send(b) => Some(b.clone()),
+                    _ => None,
+                })
+                .expect("the script types something");
+            String::from_utf8(bytes).unwrap()
+        };
         assert_eq!(
-            resume_command(Some("/Users/x/.claude-profile-3"), "abc-123"),
-            "printf '\\033[H\\033[2J'; \
-             CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' claude --resume abc-123\r"
+            line(Some("/Users/x/.claude-profile-3")),
+            "printf '\\033[H\\033[2J'; CLAUDE_CONFIG_DIR='/Users/x/.claude-profile-3' \
+             claude --resume abc-123\r"
         );
         // No dir observed = the default profile's own entry point.
-        assert_eq!(
-            resume_command(None, "abc-123"),
-            "printf '\\033[H\\033[2J'; claude --resume abc-123\r"
-        );
-        // The screen wipe never takes the scrollback with it — that is
-        // the user's history, not the plumbing's to clear.
-        assert!(!resume_command(None, "u").contains("[3J"));
+        assert_eq!(line(None), "printf '\\033[H\\033[2J'; claude --resume abc-123\r");
     }
 
     /// The dir lands inside single quotes on a real command line, so a
-    /// value that could close them is refused rather than escaped.
+    /// A profile that cannot be quoted stops the whole reclamation.
+    ///
+    /// The old code fell back to a plain `claude --resume`, which brings
+    /// the session back under a *different account* — worse than leaving
+    /// it running.  Now the command refuses to build and the script is
+    /// never created.
     #[test]
-    fn a_config_dir_that_could_break_out_of_quoting_is_refused() {
+    fn a_config_dir_that_could_break_out_of_quoting_blocks_the_whole_op() {
         for bad in [
             "/tmp/a'; rm -rf ~; '",
             "/tmp/a\nclaude --dangerously",
@@ -4922,14 +4454,12 @@ mod tests {
             "/tmp/`id`",
             "",
         ] {
-            assert!(!shell_safe(bad), "{bad:?} should be refused");
-            let cmd = resume_command(Some(bad), "u");
             assert!(
-                cmd.ends_with("claude --resume u\r") && !cmd.contains("CLAUDE_CONFIG_DIR"),
-                "a refused dir falls back to the plain entry point, got {cmd:?}"
+                reclaim_op("u", Some(bad), 1, 2).is_none(),
+                "{bad:?} should stop the reclamation"
             );
         }
-        assert!(shell_safe("/Users/doracawl/.claude-profile-1"));
+        assert!(reclaim_op("u", Some("/Users/doracawl/.claude-profile-1"), 1, 2).is_some());
     }
 
     /// A session whose profile could not be read must not be

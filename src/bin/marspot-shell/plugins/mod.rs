@@ -54,6 +54,7 @@ use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 
 pub mod claudecode;
 pub mod host;
+pub mod pty_op;
 // F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2
 // (marspot-core) can use the same libproc walker for the process-
 // tree panel.  Re-export under the old path keeps L1 plugin code
