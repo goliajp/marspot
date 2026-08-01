@@ -28,7 +28,26 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.65**
+Current: **0.7.66**
+
+### 0.7.66
+
+**「静止 3 个 tick」实际是 48 毫秒** —— tick 不是 250 ms,是 16 ms。
+
+`on_tick` 跑在重绘泵上:窗口闲着时 ~250 ms,而**有 pane 在出帧时 16 ms**
+—— 唤醒正处在后一种情况。所以上一版写的「连续 3 个 tick 静止 ≈ 750 ms」
+真实只有 48 ms,刚好落在 claude 打完 banner、还没画出第一帧的那个停顿里,
+冻结就在那儿撤了。真机日志:resume 发出后 **357 ms** 会话就结束了。
+
+判据换成挂钟时间:claude 出现后,输出静止满 **500 ms** 才算这一帧画完。
+时长不受 cadence 影响,tick 快慢都一样。
+
+同一个毛病顺手修掉:dormant pane 重申 badge 用的是 `spin_phase % 64`,
+按 16 ms 算是每秒一帧 wire —— 一个什么都不做的 pane 每秒发一帧,正是它
+自己注释里说要避免的 background creep。改成每 8 秒一次的挂钟判断。
+
+`hibernate.ended` 现在带上 `reason=` / `claude_seen=` / `still_ms=`:
+「claude 画完了」和「宿主把会话拆了」以前在日志里长得一模一样。
 
 ### 0.7.65
 

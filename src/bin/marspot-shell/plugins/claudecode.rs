@@ -731,11 +731,21 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
         .collect()
 }
 
-/// Ticks of silence (~250 ms each) that mean claude has stopped
-/// drawing.  Three is long enough to bridge the gap between its
-/// banner and its first frame, short enough that the keyboard comes
-/// back before a person finishes looking at the pane.
-const WAKE_QUIET_TICKS: u8 = 3;
+/// How long claude's output must stay still before its first frame
+/// counts as finished.
+///
+/// Wall-clock, not ticks.  `on_tick` rides the redraw pump: ~250 ms
+/// when the window is idle, but 16 ms while a pane is producing
+/// frames — which is exactly the situation a wake is in.  Counting
+/// three ticks meant 48 ms of silence, short enough to land in the
+/// pause between claude's banner and its first paint, and the freeze
+/// lifted there.  A duration is the same length whatever the cadence.
+const WAKE_QUIET_FOR: Duration = Duration::from_millis(500);
+
+/// How often a dormant pane re-asserts its badge.  Also wall-clock,
+/// and for the same reason: a count of ticks is 1 s or 16 s depending
+/// on what the window happens to be doing.
+const DORMANT_BADGE_EVERY: Duration = Duration::from_secs(8);
 
 /// Upper bound on holding the keyboard.  A resume that never draws
 /// (claude missing, profile dir gone, PATH broken) must still give the
@@ -745,19 +755,23 @@ const WAKE_WATCHDOG: Duration = Duration::from_secs(30);
 /// May the freeze lift?  Asked only once claude is back, so both
 /// inputs are about claude's own output.
 ///
-/// `drew` is "output has appeared since claude appeared" and
-/// `quiet_ticks` is how long it has been still.  Both are required:
-/// output that hasn't started means claude has not painted, and output
-/// still flowing means it is painting *now* — lifting the freeze in
-/// either case shows the user the machinery the freeze exists to hide.
-fn wake_may_finish(drew: bool, quiet_ticks: u8) -> bool {
-    drew && quiet_ticks >= WAKE_QUIET_TICKS
+/// `drew` is "output has appeared since claude appeared" and `still`
+/// is how long it has been unchanged.  Both are required: output that
+/// hasn't started means claude has not painted, and output still
+/// flowing means it is painting *now* — lifting the freeze in either
+/// case shows the user the machinery the freeze exists to hide.
+fn wake_may_finish(drew: bool, still: Duration) -> bool {
+    drew && still >= WAKE_QUIET_FOR
 }
 
 /// How many bytes this pane's PTY has produced, ever.  L3 appends
 /// every one of them to the session's bytelog, so its length is the
 /// cheapest possible "has anything been drawn" counter — one `stat`,
 /// and only while a wake is in flight.
+fn elapsed_since(t: SystemTime) -> Duration {
+    SystemTime::now().duration_since(t).unwrap_or_default()
+}
+
 fn bytelog_len(shelld_sid: u64) -> u64 {
     marspot_term::paths::sessions_dir()
         .join(shelld_sid.to_string())
@@ -812,8 +826,10 @@ struct HibernatePaneSession {
     /// rather than merely started existing.
     wake_bytes_at_claude: u64,
     wake_bytes_last: u64,
-    /// Consecutive ticks with no new output since then.
-    wake_quiet_ticks: u8,
+    /// When that length last changed.
+    wake_still_since: SystemTime,
+    /// When the dormant badge was last re-asserted.
+    last_badge_at: SystemTime,
 }
 
 impl HibernatePaneSession {
@@ -840,7 +856,7 @@ impl HibernatePaneSession {
                 self.claude_seen = false;
                 self.wake_bytes_at_claude = 0;
                 self.wake_bytes_last = 0;
-                self.wake_quiet_ticks = 0;
+                self.wake_still_since = SystemTime::now();
                 true
             }
             Err(e) => {
@@ -966,10 +982,13 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
                 // Re-assert the badge periodically rather than every
                 // tick: a core that respawned (silent update, crash)
                 // comes up with no badges, but this state can last
-                // hours and the tick is ~250 ms — one wire frame per
-                // pane per 250 ms for a pane that is doing nothing
-                // would be the definition of background creep.
-                if self.spin_phase % 64 == 0 {
+                // hours, and a wire frame per pane per tick for a pane
+                // that is doing nothing is the definition of background
+                // creep.  Timed, not counted — the tick is 16 ms while
+                // the window is busy and ~250 ms when it isn't, so a
+                // count is a different interval every time.
+                if elapsed_since(self.last_badge_at) >= DORMANT_BADGE_EVERY {
+                    self.last_badge_at = SystemTime::now();
                     host.set_badge(&format!("zZ {}", self.uuid));
                 }
             }
@@ -1006,16 +1025,17 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
                         self.claude_seen = true;
                         self.wake_bytes_at_claude = len;
                         self.wake_bytes_last = len;
-                        self.wake_quiet_ticks = 0;
+                        self.wake_still_since = SystemTime::now();
                     }
                 } else {
-                    if len == self.wake_bytes_last {
-                        self.wake_quiet_ticks = self.wake_quiet_ticks.saturating_add(1);
-                    } else {
+                    if len != self.wake_bytes_last {
                         self.wake_bytes_last = len;
-                        self.wake_quiet_ticks = 0;
+                        self.wake_still_since = SystemTime::now();
                     }
-                    if wake_may_finish(len > self.wake_bytes_at_claude, self.wake_quiet_ticks) {
+                    let still = SystemTime::now()
+                        .duration_since(self.wake_still_since)
+                        .unwrap_or_default();
+                    if wake_may_finish(len > self.wake_bytes_at_claude, still) {
                         host.end();
                     }
                 }
@@ -1026,11 +1046,22 @@ impl crate::plugins::PaneSession for HibernatePaneSession {
         }
     }
 
-    fn on_end(&mut self, host: &dyn crate::plugins::PaneSessionHost, _reason: crate::plugins::EndReason) {
+    fn on_end(&mut self, host: &dyn crate::plugins::PaneSessionHost, reason: crate::plugins::EndReason) {
+        // The reason is half the story: a wake that ends because
+        // claude finished painting and one that ends because the host
+        // tore the session down look identical without it, and the
+        // second is how a freeze gets lifted early.
         host.log(
             crate::plugins::LogLevel::Info,
             "hibernate.ended",
-            &format!("session {} stage={:?}", self.uuid, self.stage),
+            &format!(
+                "session {} stage={:?} reason={:?} claude_seen={} still_ms={}",
+                self.uuid,
+                self.stage,
+                reason,
+                self.claude_seen,
+                elapsed_since(self.wake_still_since).as_millis()
+            ),
         );
     }
 }
@@ -1554,7 +1585,8 @@ impl ClaudecodePlugin {
                 claude_seen: false,
                 wake_bytes_at_claude: 0,
                 wake_bytes_last: 0,
-                wake_quiet_ticks: 0,
+                wake_still_since: SystemTime::now(),
+                last_badge_at: SystemTime::UNIX_EPOCH,
             });
             if let Err(e) = host.begin_pane_session(*sid, session) {
                 host.log(
@@ -1651,7 +1683,8 @@ impl ClaudecodePlugin {
                 claude_seen: false,
                 wake_bytes_at_claude: 0,
                 wake_bytes_last: 0,
-                wake_quiet_ticks: 0,
+                wake_still_since: SystemTime::now(),
+                last_badge_at: SystemTime::UNIX_EPOCH,
             });
             match host.begin_pane_session(d.shelld_sid, session) {
                 Ok(()) => {
@@ -3902,7 +3935,8 @@ mod tests {
             claude_seen: false,
             wake_bytes_at_claude: 0,
             wake_bytes_last: 0,
-            wake_quiet_ticks: 0,
+            wake_still_since: SystemTime::now(),
+            last_badge_at: SystemTime::UNIX_EPOCH,
         };
         let host_session = FakePaneSessionHost { sid: 1 };
         crate::plugins::PaneSession::on_focus(&mut session, &host_session);
@@ -4007,12 +4041,20 @@ mod tests {
         // and treating it as claude's made an empty screen look like a
         // finished repaint — which is why the caller only asks this
         // question about bytes written *after* claude appeared.
-        assert!(!wake_may_finish(false, 99), "no output yet is not a repaint");
+        assert!(
+            !wake_may_finish(false, Duration::from_secs(9)),
+            "no output yet is not a repaint"
+        );
         // Output started, still flowing: claude is painting.
-        assert!(!wake_may_finish(true, 0));
-        assert!(!wake_may_finish(true, WAKE_QUIET_TICKS - 1));
+        assert!(!wake_may_finish(true, Duration::ZERO));
+        assert!(!wake_may_finish(true, WAKE_QUIET_FOR - Duration::from_millis(1)));
         // Drew, then went still.
-        assert!(wake_may_finish(true, WAKE_QUIET_TICKS));
+        assert!(wake_may_finish(true, WAKE_QUIET_FOR));
+        // The window is wall-clock, so the tick cadence cannot change
+        // it: at 16 ms per tick — which is what the redraw pump does
+        // while a pane is drawing — a three-tick rule was 48 ms, and
+        // the freeze lifted inside claude's own startup pause.
+        assert!(!wake_may_finish(true, Duration::from_millis(48)));
     }
 
     /// A `PluginHost` that records what the plugin asked it to do.
