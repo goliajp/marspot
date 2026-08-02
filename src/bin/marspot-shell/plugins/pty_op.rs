@@ -274,6 +274,18 @@ impl PtyOp {
 /// there are callers rather than after.
 pub const MAX_PAYLOAD: usize = 64 * 1024;
 
+/// How often a spinner advances.  Eight frames at this rate is one
+/// turn a second, which reads as motion without being a strobe — and
+/// it decouples the animation from the tick, which is 16 ms while a
+/// pane is drawing and ~250 ms when the window is idle.
+const SPINNER_FRAME: Duration = Duration::from_millis(125);
+
+/// How often a parked run re-asserts its badge.
+///
+/// Nothing is animating, so this exists only so a core that came up
+/// with no badges (a silent update, a crash) gets them back.
+const PARKED_BADGE_EVERY: Duration = Duration::from_secs(8);
+
 /// Braille spinner — the eight standard frames, one per tick.
 pub fn spinner_frame(phase: u8) -> char {
     const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -307,6 +319,8 @@ pub struct OpRunner {
     /// second.
     started: bool,
     spin_phase: u8,
+    /// When the badge was last sent — see the throttle in `on_tick`.
+    badge_at: SystemTime,
     on_finish: Option<Box<dyn FnMut(&dyn PaneSessionHost, &OpOutcome) + Send>>,
 }
 
@@ -325,6 +339,7 @@ impl OpRunner {
             cleaned: false,
             started: false,
             spin_phase: 0,
+            badge_at: SystemTime::UNIX_EPOCH,
             on_finish: None,
         }
     }
@@ -609,7 +624,40 @@ impl PaneSession for OpRunner {
             self.enter_step(host);
         }
         if let Some(b) = &self.op.badge {
-            host.set_badge(&format!("{b} {}", spinner_frame(self.spin_phase)));
+            // A wire frame per pane per tick would be background creep
+            // — and `on_tick` rides the redraw pump, so "per tick" is
+            // 16 ms while anything is drawing.  A step that waits for
+            // the user can hold that for hours.
+            //
+            // While a step is *working* the spinner has to turn, so the
+            // badge is re-sent as fast as it changes; on the parked
+            // step there is nothing to animate, so it is re-asserted
+            // only often enough to survive a core that restarted with
+            // no badges.
+            let idle = matches!(
+                self.op.steps.get(self.at).map(|s| &s.kind),
+                Some(StepKind::AwaitUser)
+            );
+            // The run's own clock, not the wall's: mixing the two is
+            // how the first cut of this throttle did nothing at all
+            // (625 badge frames in a ten-second test — `badge_at` came
+            // from `env.now()` and the comparison from
+            // `SystemTime::now()`, so every tick looked overdue).
+            let since = self
+                .env
+                .now()
+                .duration_since(self.badge_at)
+                .unwrap_or_default();
+            let due = since >= if idle { PARKED_BADGE_EVERY } else { SPINNER_FRAME };
+            if due {
+                self.badge_at = self.env.now();
+                let text = if idle {
+                    b.clone()
+                } else {
+                    format!("{b} {}", spinner_frame(self.spin_phase))
+                };
+                host.set_badge(&text);
+            }
         }
         let elapsed = self
             .env
@@ -1345,6 +1393,35 @@ mod tests {
 
         r.on_end(&host, EndReason::PluginRequested);
         assert_eq!(*state.holds.lock().unwrap(), vec![true, false], "released exactly once");
+    }
+
+    /// A parked run must not send a badge every tick.
+    ///
+    /// `on_tick` rides the redraw pump — 16 ms while anything is
+    /// drawing — and the step that waits for the user can hold for
+    /// hours.  A wire frame per pane per tick for a pane that is doing
+    /// nothing is the definition of background creep (CLAUDE.md §3);
+    /// the hand-written version this replaced had an 8-second throttle
+    /// for exactly this reason, and the move to scripts lost it.
+    #[test]
+    fn a_parked_run_does_not_re_send_its_badge_every_tick() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.park").badge("zZ").step(Step::await_user());
+        let mut r = OpRunner::new(op, env);
+        // Ten seconds of ticks while parked.
+        run(&mut r, &host, &state, 10_000);
+        let sent = host.badges.lock().unwrap().len();
+        assert!(
+            sent <= 3,
+            "10 s parked should re-assert a handful of times, sent {sent}"
+        );
+        assert!(sent >= 1, "and at least once, so a fresh core gets it back");
+        // Parked means no spinner: there is nothing to animate.
+        assert!(
+            host.badges.lock().unwrap().iter().all(|b| b == "zZ"),
+            "got {:?}",
+            host.badges.lock().unwrap()
+        );
     }
 
     /// A run that exists to bring something back must not do it twice.

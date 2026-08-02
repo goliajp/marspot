@@ -1440,7 +1440,10 @@ fn reclaim_op(
             // no claude and no wake armed, which is strictly worse than
             // waiting.  The wake itself takes ~2 s.
             .escape_hatch(false)
-            .badge(format!("zZ {uuid}"))
+            // `zZ` is the whole message: this pane is parked.  Which
+            // session it is parked on is in the log and in
+            // `dormant.tsv`, not in the corner of the screen.
+            .badge("zZ")
             // Let the hold reach L3 before anything can draw.  That
             // request crosses two process boundaries; the signal crosses
             // none, and sent together the signal wins — claude's parting
@@ -2624,10 +2627,20 @@ impl WorkerCtx {
                 let cutoff = self.model_cutoff_for(p, f.claude_pid);
                 tail_model_short(p, cutoff)
             });
+            // The session uuid used to ride along here.  It is 36
+            // characters of hex that no one can act on — it names the
+            // session for a *machine*, and every machine that needs it
+            // (the log, `dormant.tsv`, the resume line) has it already.
+            // On screen it crowded out the pane's own title and told
+            // the reader nothing.
             let badge = match (tag, model) {
-                (Some(t), Some(m)) => format!("{}@{} {}", t, m, sid_uuid),
-                (Some(t), None) => format!("{} {}", t, sid_uuid),
-                (None, _) => sid_uuid.clone(),
+                (Some(t), Some(m)) => format!("{t}@{m}"),
+                (Some(t), None) => t,
+                // No profile readable, but we know what it is running:
+                // better than an empty corner, which reads as "nothing
+                // bound here".
+                (None, Some(m)) => m,
+                (None, None) => String::new(),
             };
             let project_basename = f
                 .cwd
