@@ -2658,7 +2658,15 @@ impl WorkerCtx {
                 // better than an empty corner, which reads as "nothing
                 // bound here".
                 (None, Some(m)) => m,
-                (None, None) => String::new(),
+                // Neither readable — but the badge must not go empty
+                // on a bound session.  The core reads "this pane has a
+                // badge" as "the cc plugin owns this pane" and uses it
+                // to turn on the link scanner's fixed-width hard-wrap
+                // merge; an empty string clears the entry, and a
+                // wrapped path in this pane would quietly stop being
+                // clickable.  Two characters is the price of keeping
+                // that signal true.
+                (None, None) => "cc".to_string(),
             };
             let project_basename = f
                 .cwd

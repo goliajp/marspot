@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.89"  # 解冻要等真画完:await_quiet 加 2KB 字节下限,不然停在清屏那一刻;详见 CHANGELOG.md
+shell   = "0.7.90"  # badge 不许空:空 badge 会关掉这个 pane 的 cc 链接合并;详见 CHANGELOG.md
 core    = "0.12.88"  # 路径后面紧跟散文(`a.md;memory`)不再吃掉链接:标点当候选终点重试;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

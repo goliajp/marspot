@@ -28,7 +28,20 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.89**
+Current: **0.7.90**
+
+### 0.7.90
+
+**badge 不许空** —— 昨天把 session uuid 从 badge 里拿掉时,顺手让
+「profile 和 model 都读不到」落到空字符串。看起来无害,其实拆了一条
+不成文的契约:core 拿「这个 pane 有 badge」当「cc 插件认领了这个
+pane」,空字符串会把整条记录删掉,于是这个 pane 的链接扫描器悄悄退回
+非 cc 模式 —— claudecode 的定宽硬换行不再合并,**跨行的路径就此不可
+点**,而屏幕上没有任何迹象说明为什么。
+
+两者都读不到的条件是进程环境里根本没有 `CLAUDE_CONFIG_DIR`(`claudeN`
+别名都会设,所以现网这条路今天没被踩到)。落到 `"cc"`:两个字符,把
+契约重新立住,顺带告诉读的人这个角落里是个 claude 会话。
 
 ### 0.7.89
 
