@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.85"  # 唤醒前复查会话是否已回来(stop_if_process);回收路径也标记 armed;详见 CHANGELOG.md
+shell   = "0.7.86"  # 挂着唤醒的 pane 不许被自愈逻辑解冻 —— 扫描比杀晚 2 秒;详见 CHANGELOG.md
 core    = "0.12.87"  # 变暗缓动 220ms,变亮瞬间;动画会结束,空闲仍不出帧;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

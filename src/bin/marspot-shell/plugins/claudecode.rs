@@ -1267,6 +1267,14 @@ impl ClaudecodePlugin {
             .held
             .iter()
             .copied()
+            // A pane with a wake armed is one we are deliberately
+            // holding — leave it alone.  The scan's mapping is up to
+            // two seconds old, so the pass right after a reclamation
+            // still shows the claude we just killed; acting on that
+            // released the hold six milliseconds into the park, and
+            // the pane spent its whole parked life showing a shell
+            // prompt instead of the frame the user left.
+            .filter(|sid| !self.armed.contains(sid))
             .filter(|sid| result.new_mapping.contains_key(sid))
             .collect();
         for sid in back {
