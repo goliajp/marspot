@@ -28,7 +28,32 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.82**
+Current: **0.7.83**
+
+### 0.7.83
+
+**回收从来没触发过 —— 我们量错了时钟。**
+
+用户问:inputx、devops 这些十几个小时都没动过,为什么没被回收?查下去:
+
+```
+23:10:47  awaiting_user held_s=1767 → busy:output
+23:40:47  awaiting_user held_s=1768 → busy:output   ← 整整 30 分钟后
+```
+
+`1767` 秒 = 距 1800 秒门槛**差 33 秒**,每次都差这么一点。真凶在 bytelog
+最后几十个字节里:`Checking for updates` —— **claude 自己每 30 分钟查一次
+更新**,在角落里写一行再擦掉。一个 pane 的日志里出现 **23 次**。
+
+这几十个字节让终端「忙」半分钟,把安静时钟清零。而门槛正好也是 30 分钟,
+于是这是一场更新检查每次都赢的比赛 —— 调低门槛也没用,任何门槛都会被这个
+周期性写入清零。
+
+**改的是量什么**:回收的时钟换成**会话自己的记录文件的年龄**。终端的家具
+不会写 transcript。inputx 的记录最后一条是 12:22,而它的终端 23:44 还在
+「忙」—— 前者才是「这个会话闲了多久」的答案。
+
+`hibernate.waiting` 现在两个数都报:`idle 40000s of 1800s (terminal quiet 1s)`。
 
 ### 0.7.82
 

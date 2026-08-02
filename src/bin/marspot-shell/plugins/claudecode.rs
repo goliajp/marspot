@@ -372,6 +372,16 @@ struct BindMeta {
     /// Empty when basename couldn't be resolved (e.g. process exited
     /// between scan and tick).
     project_basename: String,
+    /// When this session's transcript was last written.
+    ///
+    /// The honest answer to "how long has this session been idle".
+    /// The pane's own quiet clock is not: claude prints `Checking for
+    /// updates` in the corner every thirty minutes, which makes the
+    /// terminal busy for half a minute and resets that clock — on this
+    /// machine it fired 23 times in one pane's log, so a session idle
+    /// for eleven hours never once accumulated thirty quiet minutes.
+    /// Chrome does not touch the transcript.
+    transcript_at: SystemTime,
 }
 
 
@@ -507,7 +517,20 @@ struct IdleEvidence {
     /// there is no claude here to reclaim.
     awaiting_user: bool,
     /// How long that state has held.
+    ///
+    /// Kept for the log, no longer the clock that decides.  See
+    /// `idle_for`.
     held: Duration,
+    /// How long since the session itself did anything — the age of its
+    /// transcript.
+    ///
+    /// This is the clock that decides.  The pane's own quiet clock
+    /// cannot be: claude writes `Checking for updates` into the corner
+    /// every thirty minutes, which makes the terminal busy for half a
+    /// minute and resets it.  Measured here: 23 of those in one pane's
+    /// log, so a session idle for eleven hours never once accumulated
+    /// thirty quiet minutes, and reclamation could not fire at all.
+    idle_for: Duration,
     /// CPU the claude subtree consumed since the previous sample, and
     /// how long ago that sample was taken.
     cpu_delta_ns: u64,
@@ -557,10 +580,15 @@ fn blocking_reason(
             "waiting on a timer it set itself".to_string(),
         ));
     }
-    Some(if e.held < threshold {
+    Some(if e.idle_for < threshold {
         (
             "below_threshold",
-            format!("idle {}s of {}s", e.held.as_secs(), threshold.as_secs()),
+            format!(
+                "idle {}s of {}s (terminal quiet {}s)",
+                e.idle_for.as_secs(),
+                threshold.as_secs(),
+                e.held.as_secs()
+            ),
         )
     } else if e.since_sample < Duration::from_secs(30) {
         (
@@ -594,7 +622,12 @@ fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
         // Both mean the pane is not resting, it is between steps.
         && !e.work_in_flight
         && !e.own_timer
-        && e.held >= threshold
+        // The session's own clock, not the terminal's.  `held` resets
+        // every time anything writes to the pane, and something does:
+        // claude's thirty-minute update check.  With a thirty-minute
+        // threshold that is a race the check always wins — measured
+        // repeatedly at `held_s=1767`, thirty-three seconds short.
+        && e.idle_for >= threshold
         // A CPU sample only means something once it spans real time;
         // the first sample after a restart spans none.  Half the
         // baseline window, so a pane becomes eligible partway through
@@ -951,6 +984,17 @@ impl ClaudecodePlugin {
                     marspot::pane_state::PaneStatus::AwaitingUser
                 ),
                 held: view.held,
+                idle_for: result
+                    .new_meta
+                    .get(sid)
+                    .map(|m| {
+                        SystemTime::now()
+                            .duration_since(m.transcript_at)
+                            .unwrap_or_default()
+                    })
+                    // No transcript for this pane means no evidence of
+                    // idleness, not permission to act on none.
+                    .unwrap_or_default(),
                 cpu_delta_ns: cpu_now.saturating_sub(cpu_prev),
                 since_sample: sampled_at.duration_since(prev_at).unwrap_or_default(),
             };
@@ -2622,6 +2666,11 @@ impl WorkerCtx {
                     uuid: sid_uuid,
                     claude_pid: f.claude_pid,
                     project_basename,
+                    transcript_at: jsonl_path
+                        .as_ref()
+                        .and_then(|p| p.metadata().ok())
+                        .and_then(|m| m.modified().ok())
+                        .unwrap_or(SystemTime::UNIX_EPOCH),
                 },
             );
             // No log line here on purpose — `session.bound` is
@@ -3510,6 +3559,9 @@ mod tests {
         for m in first.new_meta.values_mut() {
             m.profile_num = 9;
             m.config_dir = Some(profile_dir.to_string_lossy().into_owned());
+            // The clock that decides is the transcript's age; this
+            // fixture's session has been idle for hours.
+            m.transcript_at = SystemTime::now() - Duration::from_secs(7200);
         }
         first.new_cpu.insert(
             1,
@@ -3859,6 +3911,9 @@ mod tests {
                 uuid: uuid.to_string(),
                 claude_pid,
                 project_basename: "proj".into(),
+                // Long enough ago that the transcript clock is not what
+                // any of these tests are about.
+                transcript_at: SystemTime::now() - Duration::from_secs(7200),
             },
         );
         let mut new_cpu = HashMap::new();
@@ -3974,13 +4029,22 @@ mod tests {
         plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
 
         let t0 = SystemTime::now() - Duration::from_secs(120);
-        let mut scan = scan_with(7, std::process::id() as i32, "u");
+        // Recent transcript: the session did something a moment ago,
+        // so the policy keeps looking rather than reclaiming — which is
+        // when the baseline handling is what's under test.
+        let recent = |mut scan: ScanResult| -> ScanResult {
+            if let Some(m) = scan.new_meta.get_mut(&7) {
+                m.transcript_at = SystemTime::now();
+            }
+            scan
+        };
+        let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (1_000, t0));
         plugin.run_idle_policy(&host, &scan);
         assert_eq!(plugin.cpu_samples.get(&7).map(|(c, _)| *c), Some(1_000));
 
         // A scan two seconds later must NOT move the baseline.
-        let mut scan = scan_with(7, std::process::id() as i32, "u");
+        let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (2_000, t0 + Duration::from_secs(2)));
         plugin.run_idle_policy(&host, &scan);
         assert_eq!(
@@ -3990,7 +4054,7 @@ mod tests {
         );
 
         // Past the window, it rolls forward.
-        let mut scan = scan_with(7, std::process::id() as i32, "u");
+        let mut scan = recent(scan_with(7, std::process::id() as i32, "u"));
         scan.new_cpu.insert(7, (3_000, t0 + CPU_BASELINE_WINDOW + Duration::from_secs(1)));
         plugin.run_idle_policy(&host, &scan);
         assert_eq!(
@@ -4207,8 +4271,11 @@ mod tests {
     const HOUR: Duration = Duration::from_secs(3600);
     const HALF_HOUR: Duration = Duration::from_secs(1800);
 
+    /// Evidence for a session that has been idle `secs` seconds — by
+    /// its own transcript, which is the clock that decides.
     fn idle_for(secs: u64) -> IdleEvidence {
         IdleEvidence {
+            idle_for: Duration::from_secs(secs),
             quiescent: true,
             awaiting_user: true,
             held: Duration::from_secs(secs),
@@ -4264,12 +4331,51 @@ mod tests {
             // `Dormant` is quiet but is not `AwaitingUser`.
             awaiting_user: false,
             held: Duration::from_secs(86_400),
+            idle_for: Duration::from_secs(86_400),
             cpu_delta_ns: 0,
             since_sample: Duration::from_secs(300),
             work_in_flight: false,
             own_timer: false,
         };
         assert!(!should_hibernate(e, HOUR));
+    }
+
+    /// The clock that decides is the session's, not the terminal's.
+    ///
+    /// claude prints `Checking for updates` into the corner every
+    /// thirty minutes.  Those few dozen bytes make the pane busy for
+    /// half a minute, which resets the terminal's quiet clock — and
+    /// with a thirty-minute threshold that is a race the update check
+    /// always wins.  Measured on this machine: panes idle for eleven
+    /// hours, `held_s=1767` at every reset (thirty-three seconds
+    /// short), 23 update checks in one pane's log, zero reclamations.
+    ///
+    /// The transcript does not move for chrome, so it is what counts.
+    #[test]
+    fn chrome_that_keeps_the_terminal_busy_does_not_stop_reclamation() {
+        let half_hour = Duration::from_secs(1800);
+        // Exactly the observed shape: the session has done nothing for
+        // eleven hours, but the pane went quiet again only moments ago
+        // because the update check just fired.
+        let e = IdleEvidence {
+            idle_for: Duration::from_secs(11 * 3600),
+            held: Duration::from_secs(1),
+            ..idle_for(0)
+        };
+        assert!(
+            should_hibernate(e, half_hour),
+            "eleven idle hours is idle, whatever the terminal was doing"
+        );
+
+        // And the converse still holds: a session that has been
+        // working is not reclaimed just because its pane is quiet
+        // while it thinks.
+        let e = IdleEvidence {
+            idle_for: Duration::from_secs(60),
+            held: Duration::from_secs(11 * 3600),
+            ..idle_for(0)
+        };
+        assert!(!should_hibernate(e, half_hour));
     }
 
     /// The log has to be able to say why a candidate is still waiting.

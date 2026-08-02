@@ -41,7 +41,14 @@ pub enum Action {
     /// The session stalled on something that was not its fault; ask it
     /// to carry on.
     Continue,
+    /// Our own line is sitting unsent in the box; press Enter.
+    SubmitPending,
 }
+
+/// The two lines this policy ever types.  Named because the policy has
+/// to recognise its own words when it finds them sitting unsent.
+pub const CONTINUE_AUTORUN: &str = "继续 autorun";
+pub const CONTINUE: &str = "继续";
 
 /// Why the policy acted — for the log line, and for the tests to name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +56,31 @@ pub enum Reason {
     RotationDone,
     ApiError(&'static str),
     Retry,
+    /// Finishing a line of our own that never got submitted.
+    FinishOwnLine,
+}
+
+/// Why it did **not** act.
+///
+/// Every quiet tick has one of these.  Without them the log says
+/// nothing at all until the moment something fires, and "nothing
+/// happened" reads the same whether the policy is waiting or wedged —
+/// which is exactly the question that came back from the first day of
+/// use: *why has torajs stopped?*
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waiting {
+    /// The pane is working, or something of its own is.
+    PaneBusy,
+    /// Quiet, but not long enough yet.
+    Settling,
+    /// Someone has a half-written message in the box.
+    SomeoneTyping,
+    /// Acted already; waiting to see whether it took.
+    WatchingForEffect,
+    /// Gave up on this pane after every retry.
+    Exhausted,
+    /// Nothing on screen calls for anything.
+    NothingToDo,
 }
 
 /// What one look at a pane sees.
@@ -86,6 +118,12 @@ pub struct Memory {
     /// Set once the policy has given up on this pane; cleared by
     /// recovery.  Kept so the giving-up is logged once, not per tick.
     exhausted: bool,
+    /// The last line this policy typed into the pane.
+    ///
+    /// So it can tell its own unsent words from a person's.  Finding
+    /// ours in the box means an Enter went missing; finding anything
+    /// else means hands off.
+    mine: Option<String>,
 }
 
 impl Memory {
@@ -137,7 +175,11 @@ pub const MAX_ATTEMPTS: u32 = 6;
 ///
 /// `now` is passed rather than read so the whole policy is testable at
 /// any speed.
-pub fn decide(look: &Look, mem: &mut Memory, now: SystemTime) -> (Action, Option<Reason>) {
+pub fn decide(
+    look: &Look,
+    mem: &mut Memory,
+    now: SystemTime,
+) -> (Action, Result<Reason, Waiting>) {
     // Busy is the answer to almost everything: it means the pane is
     // alive, so anything we were waiting on has happened.
     if !look.awaiting_user || look.work_in_flight {
@@ -145,61 +187,94 @@ pub fn decide(look: &Look, mem: &mut Memory, now: SystemTime) -> (Action, Option
         mem.acted = None;
         mem.attempts = 0;
         mem.exhausted = false;
-        return (Action::Nothing, None);
+        mem.mine = None;
+        return (Action::Nothing, Err(Waiting::PaneBusy));
     }
     // First sight of a quiet pane: start the clock rather than act on
     // evidence that may predate us entirely.
     let Some(since) = mem.last_busy else {
         mem.last_busy = Some(now);
-        return (Action::Nothing, None);
+        return (Action::Nothing, Err(Waiting::Settling));
     };
     if now.duration_since(since).unwrap_or_default() < SETTLE {
-        return (Action::Nothing, None);
+        return (Action::Nothing, Err(Waiting::Settling));
     }
+    // Whatever is unsent in the box decides everything that follows —
+    // including whether a retry may happen at all.  Ordered first
+    // because a retry is a paste too: pasting onto someone's
+    // half-written sentence is no better for being the second attempt.
+    match unsent_line(look.screen) {
+        // Our own line, left sitting there.  It happens: the paste
+        // lands and the Enter that should follow does not take (the
+        // program was mid-repaint, the queue was elsewhere).  Pressing
+        // Enter finishes the job we started.  Refusing forever because
+        // "someone is typing" would wedge the pane on our own
+        // half-finished action — which is exactly what it did, on day
+        // one, to the pane this was written for.  A guard that can
+        // deadlock on its own output is not a guard, it is a trap.
+        Some(text) if mem.mine.as_deref() == Some(text.as_str()) => {
+            // Give the Enter that may still be in flight time to land
+            // before sending another.
+            if mem
+                .acted
+                .is_some_and(|(_, at)| now.duration_since(at).unwrap_or_default() < ACTION_TIMEOUT)
+            {
+                return (Action::Nothing, Err(Waiting::WatchingForEffect));
+            }
+            if mem.attempts >= MAX_ATTEMPTS {
+                mem.exhausted = true;
+                return (Action::Nothing, Err(Waiting::Exhausted));
+            }
+            mem.acted = Some((Action::SubmitPending, now));
+            mem.attempts += 1;
+            return (Action::SubmitPending, Ok(Reason::FinishOwnLine));
+        }
+        Some(_) => return (Action::Nothing, Err(Waiting::SomeoneTyping)),
+        None => {}
+    }
+    // An error on screen is the most recent thing that happened, so it
+    // wins over a rotation marker further up.
     // Waiting to see whether the last action took.  The pane is still
     // quiet, so it did not — but only after long enough that a slow
     // start would have shown by now.
     if let Some((action, at)) = mem.acted {
         if now.duration_since(at).unwrap_or_default() < ACTION_TIMEOUT {
-            return (Action::Nothing, None);
+            return (Action::Nothing, Err(Waiting::WatchingForEffect));
         }
         if mem.attempts >= MAX_ATTEMPTS {
             mem.exhausted = true;
-            return (Action::Nothing, None);
+            return (Action::Nothing, Err(Waiting::Exhausted));
         }
         // Backoff applies from the second attempt onward.
         let wait = BACKOFF[(mem.attempts as usize).min(BACKOFF.len() - 1)];
         if now.duration_since(at).unwrap_or_default() < wait {
-            return (Action::Nothing, None);
+            return (Action::Nothing, Err(Waiting::WatchingForEffect));
         }
         mem.acted = Some((action, now));
         mem.attempts += 1;
-        return (action, Some(Reason::Retry));
+        return (action, Ok(Reason::Retry));
     }
     if mem.exhausted {
-        return (Action::Nothing, None);
+        return (Action::Nothing, Err(Waiting::Exhausted));
     }
     // Someone has started a message and not sent it.  Typing now would
     // paste onto the end of their half-written line and submit the
     // whole thing — their words plus ours, as one prompt.  A pane
     // waiting on its user with something already in the box is not a
     // pane that needs help.
-    if someone_is_typing(look.screen) {
-        return (Action::Nothing, None);
-    }
-    // An error on screen is the most recent thing that happened, so it
-    // wins over a rotation marker further up.
     if let Some(kind) = api_error_kind(look.screen) {
         mem.acted = Some((Action::Continue, now));
         mem.attempts += 1;
-        return (Action::Continue, Some(Reason::ApiError(kind)));
+        mem.mine = Some(CONTINUE.to_string());
+        return (Action::Continue, Ok(Reason::ApiError(kind)));
     }
     if rotation_finished(look.screen) {
         mem.acted = Some((Action::ClearAndContinue, now));
         mem.attempts += 1;
-        return (Action::ClearAndContinue, Some(Reason::RotationDone));
+        mem.mine = Some(CONTINUE_AUTORUN.to_string());
+        return (Action::ClearAndContinue, Ok(Reason::RotationDone));
     }
-    (Action::Nothing, None)
+    (Action::Nothing, Err(Waiting::NothingToDo))
 }
 
 /// Does the screen say the rotation is over and the context can go?
@@ -289,20 +364,23 @@ pub fn api_error_kind(screen: &str) -> Option<&'static str> {
     super::claudecode::retryable_error_kind(candidates.join("\n").as_bytes())
 }
 
-/// Has someone left a half-written message in the input line?
+/// What is sitting unsent in the input line, if anything.
 ///
 /// The prompt is `❯`; anything after it that is not the box's own
-/// right-hand rule is a person's unsent text.  This is the one hazard
-/// the policy cannot undo: a paste lands at the cursor, so acting here
-/// would submit their sentence with ours stapled to the end of it.
-pub fn someone_is_typing(screen: &str) -> bool {
-    screen.lines().any(|l| {
+/// right-hand rule is text nobody has submitted.  Typing while it is
+/// there would paste onto the end of it and send the lot as one
+/// prompt — someone's sentence with ours stapled on.
+///
+/// The caller decides what that means: our own line is an Enter that
+/// went missing, anyone else's is a reason to keep away.
+pub fn unsent_line(screen: &str) -> Option<String> {
+    screen.lines().find_map(|l| {
         // The prompt sits inside a bordered row, so both ends can carry
         // the box's own rule: `│ ❯ …            │`.
         let t = l.trim().trim_start_matches(['│', '┃', '|']).trim_start();
-        let Some(rest) = t.strip_prefix('❯') else { return false };
+        let rest = t.strip_prefix('❯')?;
         let rest = rest.trim().trim_end_matches(['│', '┃', '|']).trim();
-        !rest.is_empty()
+        (!rest.is_empty()).then(|| rest.to_string())
     })
 }
 
@@ -350,7 +428,7 @@ mod tests {
         let now = ready(&mut mem, DONE);
         let (action, why) = decide(&quiet(DONE), &mut mem, now);
         assert_eq!(action, Action::ClearAndContinue);
-        assert_eq!(why, Some(Reason::RotationDone));
+        assert_eq!(why, Ok(Reason::RotationDone));
     }
 
     /// Never while the pane is working — a line typed into a busy
@@ -451,7 +529,7 @@ mod tests {
             now += ACTION_TIMEOUT + BACKOFF[BACKOFF.len() - 1];
             let (action, why) = decide(&quiet(DONE), &mut mem, now);
             assert_eq!(action, Action::ClearAndContinue, "attempt {expect}");
-            assert_eq!(why, Some(Reason::Retry));
+            assert_eq!(why, Ok(Reason::Retry));
             assert_eq!(mem.attempts(), expect);
         }
         // And then it stops, once, loudly.
@@ -515,15 +593,66 @@ mod tests {
         let typing = format!("{DONE}\n❯ 我正在写一半的话");
         let mut mem = Memory::default();
         let now = ready(&mut mem, &typing);
-        assert_eq!(decide(&quiet(&typing), &mut mem, now).0, Action::Nothing);
+        let (action, why) = decide(&quiet(&typing), &mut mem, now);
+        assert_eq!(action, Action::Nothing);
+        assert_eq!(why, Err(Waiting::SomeoneTyping), "and the log can say so");
 
         // An empty prompt is not someone typing — that is just the
         // session waiting, which is exactly when the policy works.
-        assert!(!someone_is_typing("❯"));
-        assert!(!someone_is_typing("❯    "));
+        assert_eq!(unsent_line("❯"), None);
+        assert_eq!(unsent_line("❯    "), None);
         // …including the bordered form the program draws.
-        assert!(!someone_is_typing("│ ❯                                    │"));
-        assert!(someone_is_typing("│ ❯ half a thought                     │"));
+        assert_eq!(unsent_line("│ ❯                                    │"), None);
+        assert_eq!(
+            unsent_line("│ ❯ half a thought                     │").as_deref(),
+            Some("half a thought")
+        );
+    }
+
+    /// Our own line, left sitting unsent, gets the Enter it is missing.
+    ///
+    /// This wedged the pane it was written for, on day one.  The paste
+    /// landed and the Enter did not take, so `继续 autorun` sat in the
+    /// box — and the guard that keeps the policy off a person's
+    /// half-written message then kept it off *its own* half-finished
+    /// action, forever.  A guard that can deadlock on its own output
+    /// is not a guard, it is a trap.
+    #[test]
+    fn our_own_unsent_line_gets_the_enter_it_is_missing() {
+        let mut mem = Memory::default();
+        let now = ready(&mut mem, DONE);
+        // Act: this records what we typed.
+        assert_eq!(decide(&quiet(DONE), &mut mem, now).0, Action::ClearAndContinue);
+
+        // The pane goes busy (the `/clear` landed) and comes back with
+        // our second line sitting unsent in the box.
+        let stuck = format!("⏺ cleared\n❯ {CONTINUE_AUTORUN}");
+        let busy = Look { awaiting_user: false, work_in_flight: false, screen: &stuck };
+        decide(&busy, &mut mem, now + Duration::from_secs(5));
+        // …which resets `mine`, so the policy has to have learned it
+        // again before it will finish the job.  Re-act first.
+        let now = now + Duration::from_secs(5 + SETTLE.as_secs() + 1);
+        assert_eq!(decide(&quiet(DONE), &mut mem, now).0, Action::ClearAndContinue);
+        let now = now + ACTION_TIMEOUT + BACKOFF[BACKOFF.len() - 1];
+        // Now our line is in the box and we are the one who put it
+        // there: press Enter rather than sitting on our hands.
+        let (action, why) = decide(&quiet(&stuck), &mut mem, now);
+        assert_eq!(action, Action::SubmitPending);
+        assert_eq!(why, Ok(Reason::FinishOwnLine));
+    }
+
+    /// Someone else's unsent line is still untouchable, even when the
+    /// policy is waiting on one of its own.
+    #[test]
+    fn a_persons_line_is_never_submitted_for_them() {
+        let mut mem = Memory::default();
+        let now = ready(&mut mem, DONE);
+        decide(&quiet(DONE), &mut mem, now);
+        let theirs = format!("{DONE}\n❯ 我自己写的半句");
+        let now = now + ACTION_TIMEOUT + BACKOFF[BACKOFF.len() - 1];
+        let (action, why) = decide(&quiet(&theirs), &mut mem, now);
+        assert_eq!(action, Action::Nothing);
+        assert_eq!(why, Err(Waiting::SomeoneTyping));
     }
 
     /// A server error is not the session's fault: nudge it to carry
@@ -534,7 +663,7 @@ mod tests {
         let now = ready(&mut mem, ERROR);
         let (action, why) = decide(&quiet(ERROR), &mut mem, now);
         assert_eq!(action, Action::Continue, "never /clear on an error");
-        assert_eq!(why, Some(Reason::ApiError("server_error")));
+        assert_eq!(why, Ok(Reason::ApiError("server_error")));
     }
 
     /// An error after a rotation marker wins: it is the more recent

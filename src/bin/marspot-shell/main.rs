@@ -995,6 +995,9 @@ struct ShellApp {
     autorun_panes: std::collections::HashSet<String>,
     /// Per-pane memory for that policy.
     autorun_mem: std::collections::HashMap<u64, plugins::autorun::Memory>,
+    /// The last reason logged for each pane, so a steady state is one
+    /// line rather than one every thirty seconds.
+    autorun_why: std::collections::HashMap<u64, String>,
     /// When the panes were last looked at.  Once a minute is plenty:
     /// every trigger requires the pane to have been quiet for longer
     /// than that already.
@@ -1396,6 +1399,7 @@ impl ShellApp {
             cli_rx,
             autorun_panes: cli_socket::load_autorun(),
             autorun_mem: std::collections::HashMap::new(),
+            autorun_why: std::collections::HashMap::new(),
             autorun_last_look: None,
             op_host: SupervisorOpHost { begin_tx: pane_session_begin_tx_for_ops },
             pty_ops: plugins::pty_op::PtyOps::new(
@@ -3140,13 +3144,35 @@ impl ShellApp {
                     cwd = cwd.as_str()
                 );
             }
-            if action == plugins::autorun::Action::Nothing {
+            if let Err(waiting) = why {
+                // Say why, once per change of reason.  Without this the
+                // log is silent until something fires, and "nothing
+                // happened" reads the same whether the policy is
+                // waiting or wedged.  That question came back on day
+                // one — *why has torajs stopped?* — and there was
+                // nothing to answer it with.
+                let reason = format!("{waiting:?}");
+                if self.autorun_why.get(&sid) != Some(&reason) {
+                    lx_info!(
+                        "shell.autorun.waiting",
+                        &reason,
+                        shelld_session_id = sid,
+                        cwd = cwd.as_str()
+                    );
+                    self.autorun_why.insert(sid, reason);
+                }
                 continue;
             }
+            self.autorun_why.remove(&sid);
             let lines: Vec<&str> = match action {
-                plugins::autorun::Action::ClearAndContinue => vec!["/clear", "继续 autorun"],
-                plugins::autorun::Action::Continue => vec!["继续"],
-                plugins::autorun::Action::Nothing => unreachable!(),
+                plugins::autorun::Action::ClearAndContinue => {
+                    vec!["/clear", plugins::autorun::CONTINUE_AUTORUN]
+                }
+                plugins::autorun::Action::Continue => vec![plugins::autorun::CONTINUE],
+                // The line is already in the box; all it needs is the
+                // Enter that went missing.
+                plugins::autorun::Action::SubmitPending => vec![""],
+                plugins::autorun::Action::Nothing => continue,
             };
             lx_info!(
                 "shell.autorun.act",
@@ -3181,6 +3207,11 @@ impl ShellApp {
             // mid-sequence keeps control of their own session.
             .lock_keys(false);
         for (i, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                // Just the Enter: the text is already in the box.
+                op = op.step(plugins::pty_op::Step::send(b"\r".to_vec()).named("enter"));
+                continue;
+            }
             if i > 0 {
                 // Let the previous line land and the UI settle before
                 // the next one.  Typing `继续 autorun` into a session
