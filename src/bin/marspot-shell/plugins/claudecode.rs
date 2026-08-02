@@ -1896,6 +1896,7 @@ impl Plugin for ClaudecodePlugin {
             shelld,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
         };
         let handle = std::thread::Builder::new()
             .name("claudecode-scan".into())
@@ -2348,6 +2349,12 @@ struct WorkerCtx {
     /// offset from which its model may be read.  See
     /// `model_cutoff_for`.
     model_cutoff: HashMap<PathBuf, (i32, u64)>,
+    /// Per-jsonl: the last model actually read out of it.
+    ///
+    /// The fence answers "what may I read right now", which is not
+    /// the same question as "what is this session running".  See
+    /// `model_for`.
+    last_model: HashMap<PathBuf, String>,
 }
 
 /// How many of a project's session files stay in `seen`.
@@ -2456,6 +2463,7 @@ impl WorkerCtx {
         // the per-file model fence leaves with it.
         self.seen.retain(|p, _| alive.contains(p));
         self.model_cutoff.retain(|p, _| alive.contains(p));
+        self.last_model.retain(|p, _| alive.contains(p));
         if newly_seen > 0 || updates > 0 {
             log_lines.push((
                 LogLevel::Debug,
@@ -2500,6 +2508,34 @@ impl WorkerCtx {
                 self.model_cutoff.insert(path.to_path_buf(), (claude_pid, cutoff));
                 cutoff
             }
+        }
+    }
+
+    /// The model to show for this session.
+    ///
+    /// `tail_model_short` answers "what may I read right now", which
+    /// is a different question.  A resumed process writes nothing that
+    /// names a model until it finishes a turn — the records it does
+    /// write at startup are `mode` and `permission-mode`, neither of
+    /// which carries one — and the fence sits at end-of-file, so
+    /// between a profile switch and the session's next answer there is
+    /// nothing readable at all.  On a parked pane that gap is hours.
+    ///
+    /// Rendering it as *no model* is a lie by omission: the session has
+    /// one, we simply have not watched it write since.  So the last
+    /// model actually observed is kept and shown until a newer record
+    /// replaces it.  The cost is a stale token in the one case where a
+    /// resume really does change model, for as long as it takes the
+    /// session to answer once — against a badge that loses half its
+    /// content every time a pane is reclaimed or cycled.
+    fn model_for(&mut self, path: &std::path::Path, claude_pid: i32) -> Option<String> {
+        let cutoff = self.model_cutoff_for(path, claude_pid);
+        match tail_model_short(path, cutoff) {
+            Some(m) => {
+                self.last_model.insert(path.to_path_buf(), m.clone());
+                Some(m)
+            }
+            None => self.last_model.get(path).cloned(),
         }
     }
 }
@@ -2639,12 +2675,11 @@ impl WorkerCtx {
             // `"model"` field, `/model` local_command output) —
             // the latter makes an interactive switch show up on
             // the very next tick instead of after the next
-            // assistant turn.  A session named by argv but not yet
+            // assistant turn — falling back to the last one seen
+            // when the fence has nothing readable behind it (see
+            // `model_for`).  A session named by argv but not yet
             // scanned has no path — badge without the model half.
-            let model = jsonl_path.as_ref().and_then(|p| {
-                let cutoff = self.model_cutoff_for(p, f.claude_pid);
-                tail_model_short(p, cutoff)
-            });
+            let model = jsonl_path.as_ref().and_then(|p| self.model_for(p, f.claude_pid));
             // The session uuid used to ride along here.  It is 36
             // characters of hex that no one can act on — it names the
             // session for a *machine*, and every machine that needs it
@@ -3081,6 +3116,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen,
             model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
         }
     }
 
@@ -3166,6 +3202,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
         };
         let mut logs = Vec::new();
         // Two panes in alpha: the project is walked once, not twice.
@@ -3232,6 +3269,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
         };
 
         // First sighting: nothing is fenced — those records belong to
@@ -3245,6 +3283,62 @@ mod tests {
         // And it stays put while that process lives.
         fs::write(&path, "x".repeat(500)).unwrap();
         assert_eq!(ctx.model_cutoff_for(&path, 222), 200);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-08-02 report: after a profile switch the badge lost its
+    /// model half and kept it lost.
+    ///
+    /// The fence is right — the old process's records do not describe
+    /// the new one — but a resumed claude writes nothing that names a
+    /// model until it finishes a turn (`mode` / `permission-mode` are
+    /// what it does write), so between the switch and the session's
+    /// next answer there is nothing behind the fence to read.  On a
+    /// parked pane that is hours of a badge saying `P4` alone.
+    #[test]
+    fn a_switched_profile_keeps_showing_the_last_model_it_saw() {
+        let dir = std::env::temp_dir().join("cc-model-carry-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let assistant =
+            |m: &str| format!("{{\"role\":\"assistant\",\"model\":\"claude-{m}\",\"x\":1}}\n");
+        fs::write(&path, assistant("fable-5")).unwrap();
+
+        let mut ctx = WorkerCtx {
+            projects_root: dir.clone(),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
+        };
+        assert_eq!(ctx.model_for(&path, 111).as_deref(), Some("fable-5"));
+
+        // The switch: new pid, so the fence lands at end of file — and
+        // the startup records a resumed process writes name no model.
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{{\"type\":\"mode\",\"mode\":\"default\"}}").unwrap();
+        writeln!(f, "{{\"type\":\"permission-mode\"}}").unwrap();
+        drop(f);
+        assert_eq!(
+            ctx.model_for(&path, 222).as_deref(),
+            Some("fable-5"),
+            "the badge keeps what it last saw rather than going blank"
+        );
+
+        // …and yields the moment the new process actually says so.
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(f, "{}", assistant("opus-5")).unwrap();
+        drop(f);
+        assert_eq!(ctx.model_for(&path, 222).as_deref(), Some("opus-5"));
+
+        // A session that has never named one has nothing to show, and
+        // nothing is invented for it.
+        let fresh = dir.join("fresh.jsonl");
+        fs::write(&fresh, "{\"type\":\"mode\"}\n").unwrap();
+        assert_eq!(ctx.model_for(&fresh, 333), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3541,6 +3635,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
         };
         let mut scan = worker.scan_once();
         poll_until("the scan to bind the pane", || {

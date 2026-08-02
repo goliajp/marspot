@@ -417,7 +417,7 @@ mod tests {
     /// Bring a pane to the point where the policy is willing to act:
     /// seen busy, then quiet for longer than the settle.
     fn ready(mem: &mut Memory, screen: &str) -> SystemTime {
-        decide(&Look { awaiting_user: false, work_in_flight: false, screen }, mem, t(0));
+        let _ = decide(&Look { awaiting_user: false, work_in_flight: false, screen }, mem, t(0));
         t(SETTLE.as_secs() + 1)
     }
 
@@ -460,7 +460,7 @@ mod tests {
         let mut mem = Memory::default();
         // Seen busy, then quiet for long enough — but not a session
         // waiting for its user.
-        decide(&Look { awaiting_user: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
+        let _ = decide(&Look { awaiting_user: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
         let look = Look { awaiting_user: false, work_in_flight: false, screen: DONE };
         assert_eq!(decide(&look, &mut mem, t(SETTLE.as_secs() + 1)).0, Action::Nothing);
     }
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn a_pane_must_settle_before_anything_is_typed() {
         let mut mem = Memory::default();
-        decide(&Look { awaiting_user: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
+        let _ = decide(&Look { awaiting_user: false, work_in_flight: false, screen: DONE }, &mut mem, t(0));
         assert_eq!(decide(&quiet(DONE), &mut mem, t(5)).0, Action::Nothing, "5 s is not settled");
         assert_eq!(
             decide(&quiet(DONE), &mut mem, t(SETTLE.as_secs() + 1)).0,
@@ -544,12 +544,12 @@ mod tests {
     fn the_pane_doing_something_resets_the_policy() {
         let mut mem = Memory::default();
         let now = ready(&mut mem, DONE);
-        decide(&quiet(DONE), &mut mem, now);
+        let _ = decide(&quiet(DONE), &mut mem, now);
         assert_eq!(mem.attempts(), 1);
         assert!(mem.is_waiting());
 
         let busy = Look { awaiting_user: false, work_in_flight: false, screen: DONE };
-        decide(&busy, &mut mem, now + Duration::from_secs(5));
+        let _ = decide(&busy, &mut mem, now + Duration::from_secs(5));
         assert_eq!(mem.attempts(), 0, "it moved — nothing is outstanding");
         assert!(!mem.is_waiting());
     }
@@ -628,7 +628,7 @@ mod tests {
         // our second line sitting unsent in the box.
         let stuck = format!("⏺ cleared\n❯ {CONTINUE_AUTORUN}");
         let busy = Look { awaiting_user: false, work_in_flight: false, screen: &stuck };
-        decide(&busy, &mut mem, now + Duration::from_secs(5));
+        let _ = decide(&busy, &mut mem, now + Duration::from_secs(5));
         // …which resets `mine`, so the policy has to have learned it
         // again before it will finish the job.  Re-act first.
         let now = now + Duration::from_secs(5 + SETTLE.as_secs() + 1);
@@ -647,7 +647,7 @@ mod tests {
     fn a_persons_line_is_never_submitted_for_them() {
         let mut mem = Memory::default();
         let now = ready(&mut mem, DONE);
-        decide(&quiet(DONE), &mut mem, now);
+        let _ = decide(&quiet(DONE), &mut mem, now);
         let theirs = format!("{DONE}\n❯ 我自己写的半句");
         let now = now + ACTION_TIMEOUT + BACKOFF[BACKOFF.len() - 1];
         let (action, why) = decide(&quiet(&theirs), &mut mem, now);
