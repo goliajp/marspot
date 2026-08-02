@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.91"  # 切 profile 后 model 不再消失:记住最后一次真读到的,读不到就沿用;详见 CHANGELOG.md
+shell   = "0.7.92"  # 进了 claude 就有 badge:等不到会话文件也先报 profile;详见 CHANGELOG.md
 core    = "0.12.88"  # 路径后面紧跟散文(`a.md;memory`)不再吃掉链接:标点当候选终点重试;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

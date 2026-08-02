@@ -28,7 +28,24 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.91**
+Current: **0.7.92**
+
+### 0.7.92
+
+**进了 claudecode,右上角什么都没有** —— 不是慢半拍,是要等到你说第一句话。
+
+badge 一直挂在「认出这个 pane 的会话」上,而会话文件是 claude 答完第一轮
+才写的。启动到第一次提问之间往往隔着好几分钟,这段时间里 pane 明明在跑
+claude,角落却是空的 —— 看起来像 marspot 没认出来。
+
+会话 uuid 早就不显示在 badge 上了(那 36 个十六进制字符对人没有意义),
+badge 现在只有 profile 和 model 两半。profile 从进程的 `CLAUDE_CONFIG_DIR`
+一直读得到 —— 所以这段时间里诚实的答案是 `P1`:账号是知道的,model 还
+不知道,等会话文件出现的下一个 tick 再补上 `@model`。
+
+代价是这样的 pane 没有 uuid,而回收和 profile 切换都要靠 `--resume <uuid>`
+才能把会话原样带回来。两条路径现在都在空 uuid 上直接停手并说明原因 ——
+把一个还没落盘的会话拿下来再 resume 一个「空」,是唯一无法挽回的错。
 
 ### 0.7.91
 

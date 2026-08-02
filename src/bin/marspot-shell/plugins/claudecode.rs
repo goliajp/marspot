@@ -1055,6 +1055,25 @@ impl ClaudecodePlugin {
                 }
                 continue;
             }
+            // Badged from its profile alone — claude is running but has
+            // not written a session file yet, so there is no uuid to
+            // resume.  Reclaiming would take the pane down with no way
+            // back; leave it running.
+            if meta.uuid.is_empty() {
+                if self.blocked_reason.get(sid).map(String::as_str)
+                    != Some("unknown_session")
+                {
+                    host.log(
+                        LogLevel::Warn,
+                        "hibernate.unknown_session",
+                        &format!(
+                            "shelld_session={sid} — no session file yet; not reclaiming"
+                        ),
+                    );
+                    self.blocked_reason.insert(*sid, "unknown_session".to_string());
+                }
+                continue;
+            }
             // Re-verify the pid immediately before signalling it.
             // `last_meta` is up to one scan old, pids are recycled by
             // the kernel, and the consequence of acting on a stale one
@@ -1428,6 +1447,12 @@ fn reclaim_op(
     claude_pid: i32,
     shell_pid: i32,
 ) -> Option<pty_op::PtyOp> {
+    // Same rule as `profile_cycle_op`: a session we cannot name cannot
+    // be brought back, and taking claude down without a resume line
+    // would lose it outright.
+    if uuid.is_empty() {
+        return None;
+    }
     let mut cmd = pty_op::PtyCommand::new("claude").clear_screen_first(true);
     if let Some(dir) = config_dir {
         cmd = cmd.env("CLAUDE_CONFIG_DIR", dir);
@@ -1508,6 +1533,13 @@ fn profile_cycle_op(
     claude_pid: i32,
     shell_pid: i32,
 ) -> Option<pty_op::PtyOp> {
+    // No uuid, no cycle.  A pane whose session file has not appeared
+    // yet is badged from its profile alone (see `scan_once`); there is
+    // nothing to `--resume`, and resuming *nothing* would drop the
+    // conversation the user is looking at.
+    if uuid.is_empty() {
+        return None;
+    }
     let home = std::env::var("HOME").ok()?;
     let line = pty_op::PtyCommand::new("claude")
         .env("CLAUDE_CONFIG_DIR", format!("{home}/.claude-profile-{next_profile}"))
@@ -2658,8 +2690,25 @@ impl WorkerCtx {
             }
         }
 
-        for (i, sid_uuid, jsonl_path) in bound {
-            let f = &facts[i];
+        // Every pane running claude gets an entry, bound or not.
+        //
+        // Binding needs a session file, and claude writes that file on
+        // the first turn — so between `claude` starting and the user's
+        // first prompt (minutes, in practice) a pane used to have no
+        // badge at all, which reads as "marspot didn't notice".  The
+        // profile is readable from the process the whole time, so the
+        // honest badge in that window is `P1`: the account is known,
+        // the model is not, and `@model` fills in on the tick after
+        // the session file appears.
+        let bound: HashMap<usize, (String, Option<PathBuf>)> = bound
+            .into_iter()
+            .map(|(i, uuid, path)| (i, (uuid, path)))
+            .collect();
+        for (i, f) in facts.iter().enumerate() {
+            let (sid_uuid, jsonl_path) = match bound.get(&i) {
+                Some((uuid, path)) => (uuid.clone(), path.clone()),
+                None => (String::new(), None),
+            };
             let (tag, profile_num) = match profile_tag_for(f.claude_pid) {
                 Some(t) => {
                     let n = t
@@ -4087,6 +4136,73 @@ mod tests {
             sessions_seen: vec![sid],
             log_lines: Vec::new(),
         }
+    }
+
+    /// The 2026-08-03 report: a pane running claudecode with no badge
+    /// at all.  claude writes its session file on the first turn, so
+    /// between `claude` starting and the user's first prompt there was
+    /// nothing to bind to and the corner stayed empty for minutes.
+    ///
+    /// The profile is readable from the process the whole time, so
+    /// that window badges `P<n>` and gains `@model` once the session
+    /// file shows up.  What such a pane must NOT do is get taken down
+    /// and resumed — there is no session to resume.
+    #[test]
+    fn a_pane_with_no_session_file_yet_is_badged_but_never_reclaimed() {
+        assert!(
+            reclaim_op("", Some("/Users/x/.claude-profile-2"), 4242, 4200).is_none(),
+            "no uuid ⇒ no resume line ⇒ claude must not be taken down"
+        );
+        assert!(
+            profile_cycle_op("", 3, 4242, 4200).is_none(),
+            "…and the badge-click cycle refuses for the same reason"
+        );
+        // The same call with a uuid is the normal path, so the guard
+        // above is the only thing being tested here.
+        assert!(reclaim_op("u-1", None, 4242, 4200).is_some());
+        assert!(profile_cycle_op("u-1", 3, 4242, 4200).is_some());
+    }
+
+    /// …and the idle policy stops before signalling such a pane, with
+    /// a reason, rather than building a broken resume line.
+    #[test]
+    fn the_idle_policy_leaves_an_unbound_pane_running() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-hib-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = spawn_fake_claude(&dir);
+        let pid = child.id() as i32;
+        let host = FakeHost::new(dir.clone());
+        host.set_status(7, idle_view(Duration::from_secs(7200)));
+
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+
+        // Two passes — the second is the one that would decide.
+        let mut scan = scan_with(7, pid, "");
+        scan.new_cpu.insert(7, (1_000, SystemTime::now() - Duration::from_secs(120)));
+        plugin.run_idle_policy(&host, &scan);
+        let scan = scan_with(7, pid, "");
+        plugin.run_idle_policy(&host, &scan);
+        host.pump_ops();
+
+        assert!(host.begun.lock().unwrap().is_empty(), "nothing was reclaimed");
+        assert!(plugin.dormant.is_empty());
+        assert_eq!(
+            plugin.blocked_reason.get(&7).map(String::as_str),
+            Some("unknown_session"),
+            "and it says why"
+        );
+        assert!(
+            !matches!(child.try_wait(), Ok(Some(_))),
+            "the process is left alone"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The whole reclamation path, with a real process on the other
