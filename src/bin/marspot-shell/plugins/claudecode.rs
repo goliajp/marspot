@@ -1464,9 +1464,27 @@ fn reclaim_op(
             .step(pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             .step(pty_op::Step::send(line).named("resume"))
             .step(pty_op::Step::await_process(shell_pid, looks_like_claudecode))
-            .step(pty_op::Step::await_quiet(WAKE_QUIET_FOR).timeout(WAKE_WATCHDOG)),
+            .step(
+                pty_op::Step::await_quiet(WAKE_QUIET_FOR)
+                    .after_bytes(FIRST_FRAME_BYTES)
+                    .timeout(WAKE_WATCHDOG),
+            ),
     )
 }
+
+/// How much output counts as "it has drawn its first frame".
+///
+/// The process exists within milliseconds of the resume line — a fork
+/// and an exec — but claude then reads the whole transcript before it
+/// paints, and that pause is seconds long.  During it the terminal has
+/// seen only the screen clear and a handful of mode sets, so "output
+/// happened and then stopped" is true while the screen is *blank*.
+/// Lifting the freeze there is the black flash the user kept seeing.
+///
+/// A real first frame is tens of kilobytes of text and colour; startup
+/// noise is a few hundred bytes.  Two kilobytes sits between them with
+/// room on both sides.
+const FIRST_FRAME_BYTES: u64 = 2048;
 
 /// Where a re-armed run picks up: an L1 restart replaces this process
 /// while the pane stays parked, so the new run must not kill anything
@@ -3811,9 +3829,11 @@ mod tests {
         assert!(
             matches!(
                 kinds[quiet_at],
-                pty_op::StepKind::AwaitQuiet { still } if *still >= Duration::from_millis(400)
+                pty_op::StepKind::AwaitQuiet { still, min_bytes }
+                    if *still >= Duration::from_millis(400) && *min_bytes > 0
             ),
-            "a still-window measured in tens of ms lands inside claude's startup pause"
+            "a still-window measured in tens of ms lands inside claude's \
+             startup pause, and silence alone lands inside its load"
         );
     }
 

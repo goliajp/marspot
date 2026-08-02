@@ -107,14 +107,21 @@ pub enum StepKind {
     /// newlines in it.  This is the one that carries a message to
     /// whatever is running in the pane.
     Paste(String),
-    /// Wait until the pane has produced output and then gone still for
-    /// `still`.
+    /// Wait until the pane has drawn at least `min_bytes` and then
+    /// gone still for `still`.
     ///
     /// Measured from this step's own start, which is what makes it
     /// composable: put it after `AwaitProcess` and it means "wait for
-    /// the thing that just appeared to finish drawing", with no need
-    /// to guess how many bytes a first frame costs.
-    AwaitQuiet { still: Duration },
+    /// the thing that just appeared to finish drawing".
+    ///
+    /// `min_bytes` is what makes it *true*.  A program that has just
+    /// started emits a trickle — mode sets, a cursor query, a screen
+    /// clear — and then goes quiet for as long as it takes to load
+    /// whatever it is resuming.  With a byte floor of zero, that pause
+    /// reads as "finished drawing", and the freeze lifts onto the
+    /// screen it just cleared: **the black flash**.  A first frame is
+    /// tens of kilobytes; startup noise is a few hundred bytes.
+    AwaitQuiet { still: Duration, min_bytes: u64 },
 }
 
 /// One step: what to do, how long it may take, and what to call it in
@@ -173,10 +180,18 @@ impl Step {
     }
     pub fn await_quiet(still: Duration) -> Self {
         Self {
-            kind: StepKind::AwaitQuiet { still },
+            kind: StepKind::AwaitQuiet { still, min_bytes: 0 },
             timeout: Some(Duration::from_secs(30)),
             label: "await_quiet",
         }
+    }
+    /// Require this much output before the quiet counts — see
+    /// [`StepKind::AwaitQuiet`].
+    pub fn after_bytes(mut self, n: u64) -> Self {
+        if let StepKind::AwaitQuiet { min_bytes, .. } = &mut self.kind {
+            *min_bytes = n;
+        }
+        self
     }
     pub fn timeout(mut self, d: Duration) -> Self {
         self.timeout = Some(d);
@@ -301,7 +316,9 @@ pub struct OpRunner {
     /// When the current step started — every deadline is relative to
     /// this, so one slow step cannot eat the next one's budget.
     entered: SystemTime,
-    /// `AwaitQuiet` bookkeeping: output length and when it last moved.
+    /// `AwaitQuiet` bookkeeping: the output length when the step
+    /// started, the length now, and when it last moved.
+    entered_len: u64,
     seen_len: u64,
     still_since: SystemTime,
     drew: bool,
@@ -332,6 +349,7 @@ impl OpRunner {
             env,
             at: 0,
             entered: now,
+            entered_len: 0,
             seen_len: 0,
             still_since: now,
             drew: false,
@@ -400,6 +418,7 @@ impl OpRunner {
         self.entered = self.env.now();
         self.still_since = self.entered;
         self.seen_len = self.env.output_len(host.shelld_session_id());
+        self.entered_len = self.seen_len;
         self.drew = false;
         if let Some(s) = self.op.steps.get(self.at) {
             host.log(
@@ -519,7 +538,7 @@ impl OpRunner {
                 }
                 true
             }
-            StepKind::AwaitQuiet { still } => {
+            StepKind::AwaitQuiet { still, min_bytes } => {
                 let len = self.env.output_len(sid);
                 if len != self.seen_len {
                     self.seen_len = len;
@@ -531,7 +550,8 @@ impl OpRunner {
                     .now()
                     .duration_since(self.still_since)
                     .unwrap_or_default();
-                self.drew && quiet >= still
+                let drawn = self.seen_len.saturating_sub(self.entered_len);
+                self.drew && drawn >= min_bytes && quiet >= still
             }
         }
     }
@@ -1422,6 +1442,40 @@ mod tests {
             "got {:?}",
             host.badges.lock().unwrap()
         );
+    }
+
+    /// Silence is not the same as "it has drawn".
+    ///
+    /// A program that has just started emits a trickle — mode sets, a
+    /// cursor query, a screen clear — and then goes quiet for as long
+    /// as it takes to load whatever it is resuming.  With no byte
+    /// floor that pause reads as "finished", and the freeze lifts onto
+    /// the screen it just cleared: the black flash the user saw twice
+    /// after two different fixes, because both fixes were about *when*
+    /// the clock starts rather than *what* counts as drawn.
+    #[test]
+    fn a_startup_trickle_then_a_pause_is_not_a_finished_frame() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.wake").step(
+            Step::await_quiet(Duration::from_millis(500)).after_bytes(2048),
+        );
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 50);
+
+        // The clear plus a few mode sets: real output, but not a frame.
+        *state.out_len.lock().unwrap() = 300;
+        run(&mut r, &host, &state, 2_000);
+        assert!(
+            !*host.ended.lock().unwrap(),
+            "300 bytes and two seconds of silence is a program still loading"
+        );
+
+        // Now it actually paints.
+        *state.out_len.lock().unwrap() = 300 + 40_000;
+        run(&mut r, &host, &state, 200);
+        assert!(!*host.ended.lock().unwrap(), "still settling");
+        run(&mut r, &host, &state, 600);
+        assert!(*host.ended.lock().unwrap(), "drawn, and still — now release");
     }
 
     /// A run that exists to bring something back must not do it twice.

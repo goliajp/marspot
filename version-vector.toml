@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.88"  # badge 去掉 session uuid;停放中的 badge 不再每 tick 重发;详见 CHANGELOG.md
+shell   = "0.7.89"  # 解冻要等真画完:await_quiet 加 2KB 字节下限,不然停在清屏那一刻;详见 CHANGELOG.md
 core    = "0.12.87"  # 变暗缓动 220ms,变亮瞬间;动画会结束,空闲仍不出帧;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md
