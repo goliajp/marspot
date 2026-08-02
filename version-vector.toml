@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.84"  # autorun 说得出为什么不动手;自己没发出去的那句补一个回车;详见 CHANGELOG.md
+shell   = "0.7.85"  # 唤醒前复查会话是否已回来(stop_if_process);回收路径也标记 armed;详见 CHANGELOG.md
 core    = "0.12.86"  # 帧率节流的时钟竞态:两次 elapsed() 之间时间在走,减法下溢 panic;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md

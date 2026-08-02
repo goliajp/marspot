@@ -88,6 +88,16 @@ pub enum StepKind {
     Terminate { pid: i32, signal: i32, escalate: Option<(Duration, i32)>, sent: bool },
     /// Wait for a descendant of `under` to match.
     AwaitProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
+    /// Finish the run early, successfully, if the process is already
+    /// there.
+    ///
+    /// "What we were about to arrange has already happened."  A script
+    /// that parks a session and later types it back has a gap between
+    /// deciding to type and typing — the user's own click is in that
+    /// gap — and in that gap the session can return by other means.
+    /// Typing then puts the command into the running program's prompt,
+    /// where it sits as text the user has to delete.
+    StopIfProcess { under: i32, matching: fn(&pidtree::ProcRow) -> bool },
     /// Wait for the user to come back — focus or a keystroke.  The one
     /// step with no deadline: a parked pane may sit for days.
     AwaitUser,
@@ -136,6 +146,14 @@ impl Step {
             *escalate = Some((after, sig));
         }
         self
+    }
+    /// Finish here if `matching` is already running under `under`.
+    pub fn stop_if_process(under: i32, matching: fn(&pidtree::ProcRow) -> bool) -> Self {
+        Self {
+            kind: StepKind::StopIfProcess { under, matching },
+            timeout: Some(Duration::from_secs(5)),
+            label: "stop_if_process",
+        }
     }
     pub fn await_process(under: i32, matching: fn(&pidtree::ProcRow) -> bool) -> Self {
         Self {
@@ -415,6 +433,17 @@ impl OpRunner {
             }
             StepKind::AwaitProcess { under, matching } => {
                 self.env.find_descendant(under, matching).is_some()
+            }
+            StepKind::StopIfProcess { under, matching } => {
+                if self.env.find_descendant(under, matching).is_some() {
+                    host.log(
+                        LogLevel::Info,
+                        &format!("{}.already_done", self.op.name),
+                        "the process is already there; nothing left to do",
+                    );
+                    self.finish(host, OpOutcome::Done);
+                }
+                true
             }
             StepKind::AwaitUser => false, // only `wake()` moves this on
             StepKind::Paste(text) => {
@@ -1303,6 +1332,52 @@ mod tests {
 
         r.on_end(&host, EndReason::PluginRequested);
         assert_eq!(*state.holds.lock().unwrap(), vec![true, false], "released exactly once");
+    }
+
+    /// A run that exists to bring something back must not do it twice.
+    ///
+    /// The gap between parking a session and typing it back holds the
+    /// user's own click, and in that gap the session can return by
+    /// other means — a second wake armed on the same pane, or the user
+    /// starting it themselves.  Typing then puts `claude --resume …`
+    /// into the running session's prompt, as text they have to delete.
+    /// Seen on the real machine twice in one day, which is what this
+    /// step is for.
+    #[test]
+    fn a_run_stops_when_what_it_was_arranging_has_already_happened() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.wake")
+            .step(Step::await_user())
+            .step(Step::stop_if_process(1, |_| true))
+            .step(Step::send(b"resume\r".to_vec()));
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 100);
+        assert!(r.is_awaiting_user());
+
+        // It came back on its own while we were parked.
+        state.present.lock().unwrap().push(99);
+        r.on_focus(&host);
+        run(&mut r, &host, &state, 100);
+        assert!(
+            state.sent.lock().unwrap().is_empty(),
+            "nothing to type — it is already back"
+        );
+        assert!(*host.ended.lock().unwrap(), "and the run is over, successfully");
+    }
+
+    /// …and when it has not, the run carries on as before.
+    #[test]
+    fn a_run_carries_on_when_nothing_has_come_back() {
+        let (state, env, host) = setup();
+        let op = PtyOp::new("test.wake")
+            .step(Step::await_user())
+            .step(Step::stop_if_process(1, |_| true))
+            .step(Step::send(b"resume\r".to_vec()));
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 100);
+        r.on_focus(&host);
+        run(&mut r, &host, &state, 100);
+        assert_eq!(*state.sent.lock().unwrap(), vec![b"resume\r".to_vec()]);
     }
 
     /// A signal that doesn't take gets escalated, and the wait that

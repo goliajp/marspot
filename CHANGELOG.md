@@ -28,7 +28,37 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.84**
+Current: **0.7.85**
+
+### 0.7.85
+
+**唤醒把 `claude --resume …` 打进了一个活着的会话** —— 今天出现了好几次。
+
+现场:pane 一点就能用(说明它根本没被回收,或者早就回来了),但输入框里
+躺着一整句 `printf '\033[H\033[2J'; CLAUDE_CONFIG_DIR='…' claude --resume
+06a6587d-…`,要用户自己删掉。
+
+日志把两个 bug 都摊开了:
+
+```
+00:06:39  reclaiming pid 94718        ← 回收开始
+00:06:40  terminate → await_user      ← 0.6s 后 claude 死了,停放
+00:06:41  dormant … can be woken      ← 又武装了第二个唤醒
+00:08:44  by focus → 4/6 resume       ← 点击,打出 resume
+00:08:46  Done + cc.reclaim(id=2) 又起
+```
+
+**① 同一个 pane 被武装两次。** 回收路径提交了 run 却没把 pane 标记成
+`armed`,于是两秒后的重挂扫描看到一条「没人管」的 dormant 记录,又起一个
+run —— 后者顶掉前者,两条路抢着打同一句话。
+
+**② 打字之前不复查。** 停放到用户回来之间隔着任意长的时间,而**用户的那次
+点击就在这个间隔里**;这期间会话可能已经由别的途径回来了。新增步骤
+`stop_if_process`:要安排的事情如果已经发生,这个 run 就地成功结束,一个字
+都不打。
+
+第二条是通用原语,不是补丁:任何「把某个东西弄回来」的脚本都需要在动手前
+问一句「它是不是已经回来了」。
 
 ### 0.7.84
 

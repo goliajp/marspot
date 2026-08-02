@@ -1133,6 +1133,12 @@ impl ClaudecodePlugin {
                 );
                 continue;
             }
+            // This run *is* the pane's wake path, so mark it armed.
+            // Without this the re-arm sweep sees an un-armed dormant
+            // record two seconds later and starts a second run on the
+            // same pane — which replaces the first mid-park, and leaves
+            // two paths racing to type the same line.  Observed live.
+            self.armed.insert(*sid);
             self.dormant.push(DormantRecord {
                 shelld_sid: *sid,
                 uuid: meta.uuid,
@@ -1438,6 +1444,13 @@ fn reclaim_op(
                     .escalate_after(Duration::from_secs(3), libc::SIGKILL),
             )
             .step(pty_op::Step::await_user())
+            // Between parking and the user coming back, the session can
+            // return by other means — a second wake armed on the same
+            // pane, the user starting it themselves.  Typing then puts
+            // `claude --resume …` into the running session's prompt,
+            // where it sits as text they have to delete.  Seen on the
+            // real machine, twice in one day.
+            .step(pty_op::Step::stop_if_process(shell_pid, looks_like_claudecode))
             .step(pty_op::Step::send(line).named("resume"))
             .step(pty_op::Step::await_process(shell_pid, looks_like_claudecode))
             .step(pty_op::Step::await_quiet(WAKE_QUIET_FOR).timeout(WAKE_WATCHDOG)),
@@ -3654,8 +3667,10 @@ mod tests {
             !session.is_awaiting_user(),
             "focusing a parked pane starts the restore"
         );
-        // One tick to run the step the focus unblocked — the host's
-        // loop is what drives a script forward.
+        // Two ticks: one runs the "has it come back by itself?" check
+        // the focus unblocked, the next types.  The host's loop is what
+        // drives a script forward, one step per tick.
+        crate::plugins::PaneSession::on_tick(&mut session, &host_session);
         crate::plugins::PaneSession::on_tick(&mut session, &host_session);
         // A keystroke arriving mid-wake is swallowed rather than run
         // as a shell command.
