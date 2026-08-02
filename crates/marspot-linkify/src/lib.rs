@@ -848,6 +848,17 @@ fn scan_line_into_matches(
                         continue;
                     }
                 }
+                // Punctuation before the seam: cutting at a mark keeps
+                // the whole token and drops the prose, where cutting at
+                // the seam throws the continuation away — and a seam
+                // prefix that happens to be a real *directory* would
+                // otherwise win over the file the line is pointing at.
+                if let Some(b) = retry_file_at_punctuation(chars, i, end) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
+                    continue;
+                }
                 if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
                     let text: String = chars[i..b].iter().collect();
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
@@ -869,6 +880,12 @@ fn scan_line_into_matches(
                 if is_real_path(&text) {
                     emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
                     i = end;
+                    continue;
+                }
+                if let Some(b) = retry_file_at_punctuation(chars, i, end) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
                     continue;
                 }
                 if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
@@ -1014,6 +1031,48 @@ fn first_zero_indent_boundary(
         .filter(|s| s.cc_zero_indent)
         .map(|s| s.char_offset)
         .find(|&b| b > lo && b < hi)
+}
+
+/// The sentence resumed straight after the path, with no space.
+///
+/// `scan_until_path_terminator` trims a *trailing* run of `,.;:)]}!?`,
+/// which is enough when the path ends the clause — but not when the
+/// clause continues: `…/reply-b-section-2.md;memory 已记` is one token
+/// to the scanner, the stat fails on it, and the whole line loses its
+/// link.  Chinese written with ASCII punctuation does this on nearly
+/// every line: the mark carries the pause, so nothing follows it.
+///
+/// So every such mark inside the span is a candidate end.  Tried
+/// longest-first, and only after the full span has already failed, so
+/// a filename that genuinely contains one — legal on every filesystem
+/// we target — still wins outright.
+fn retry_file_at_punctuation(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
+    // `:` is deliberately not a cut point.  `path:note` is the shape
+    // `strip_line_col_suffix` already arbitrates when it is a line
+    // number, and the 2026-07-13 report settled the rest of that
+    // family as 宁可漏 — no link beats a guessed one.
+    for cut in (lo + 1..hi).rev() {
+        if !matches!(chars[cut], ',' | ';' | '!' | '?' | ']' | '}') {
+            continue;
+        }
+        // `a.md;` cuts to `a.md`, not to `a.md` plus the mark: the
+        // same trailing trim the terminator scan would have applied
+        // had the sentence simply ended there.
+        let mut end = cut;
+        while end > lo && matches!(chars[end - 1], ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?')
+        {
+            end -= 1;
+        }
+        let prefix = &chars[lo..end];
+        if !looks_like_path(prefix) {
+            continue;
+        }
+        let text: String = prefix.iter().collect();
+        if is_real_path(&text) {
+            return Some(end);
+        }
+    }
+    None
 }
 
 fn retry_file_at_segment_boundaries(
@@ -2028,6 +2087,79 @@ mod tests {
         assert_eq!(v[0].text, bin.display().to_string());
     }
 
+
+    /// 2026-08-02 field report: a `⏺` summary ending
+    /// `…/sentori-feedback-reply-b-section-2.md;memory 已记(…)` showed
+    /// no link at all.  The path was real, the wrap merge was right —
+    /// the sentence simply resumed straight after the `;`, so the
+    /// scanner stat'ed `…-2.md;memory` and got nothing.  Chinese
+    /// written with ASCII punctuation puts no space after the mark, so
+    /// this is not an edge case in this codebase; it is most lines.
+    #[test]
+    fn prose_resuming_after_a_mark_does_not_swallow_the_path() {
+        let bin = std::env::current_exe().unwrap();
+        let p = bin.display().to_string();
+        for line in [
+            format!("- 回执:{p};memory 已记"),
+            format!("- 回执:{p},另见下条"),
+            format!("见 {p}!下一条"),
+        ] {
+            let v = scan(&line);
+            let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "no link in {line:?}");
+            assert_eq!(files[0].text, p, "wrong span in {line:?}");
+        }
+    }
+
+    /// …and the mark is only a *candidate* end.  A filename that
+    /// really contains one is legal, and the full span is stat'ed
+    /// before any cut is tried, so it still wins outright.
+    #[test]
+    fn a_filename_that_really_contains_a_mark_still_wins() {
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-a;b,c-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        let v = scan(&format!("see {text} today"));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].text, text, "the whole name, marks and all");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The field report's actual shape: the path hard-wrapped at the
+    /// pane edge *and* the sentence resumed after the `;`.  Both
+    /// repairs have to hold at once — the merge to reach the second
+    /// row, the cut to drop what follows.
+    #[test]
+    fn a_wrapped_path_with_prose_glued_to_its_end_is_one_link() {
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-wrapped-reply-b-section-2-{}.md",
+            std::process::id()
+        ));
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        // Split the path so the first row ends flush at the right
+        // edge, which is what claudecode's fixed-width wrap does.
+        let split = text.len() - 12;
+        let head = format!("  - note:{}", &text[..split]);
+        let cols = head.chars().count() as u16;
+        let tail = format!("  {};memory noted", &text[split..]);
+        let src = StrSource::new(&[&head, &tail], cols);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let files: Vec<&LinkRange> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
+        assert!(!files.is_empty(), "wrapped path found no link at all");
+        assert!(
+            files.iter().all(|l| l.text == text),
+            "every segment carries the whole path: {:?}",
+            files.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        // One segment per physical row it crosses.
+        assert_eq!(files.len(), 2, "both rows underline");
+        let _ = std::fs::remove_file(&p);
+    }
 
     #[test]
     fn absolute_path_nonexistent_is_rejected() {
