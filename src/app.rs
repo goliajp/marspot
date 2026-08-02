@@ -1124,7 +1124,19 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
         // A window that has already been torn down can still have an
         // event in flight from AppKit; dropping it is correct, and is
         // not an error worth logging on a hot path.
-        let Some(i) = state.window_index(window_id) else { return };
+        //
+        // Except a wake, which is about the *process* — bytes arrived
+        // from the core — and merely addressed to the boot window by
+        // convention (`source_perform`).  Dropping those when the boot
+        // window is the one that closed stops the app draining the
+        // core at all: the windows still open freeze on their last
+        // frame, and the supervisor stops ticking.  Any live window
+        // can carry it, so use whichever is still here.
+        let i = match state.window_index(window_id) {
+            Some(i) => i,
+            None if matches!(kind, EventKind::UserEvent) && !state.windows.is_empty() => 0,
+            None => return,
+        };
         let AppState { app, windows } = state;
         let ctx = &mut windows[i];
 
@@ -1684,6 +1696,12 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
     if let Some((x, y, w, h)) = attrs.frame_pt {
         let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
         window.setFrame_display(rect, false);
+    } else {
+        // No saved frame — a first launch, or the one after the user
+        // closed everything.  `initWithContentRect` put the window at
+        // the screen's bottom-left corner; centre it, the same as any
+        // window opened later without a frame.
+        window.center();
     }
 
     // Show + focus + activate.  `activate()` replaces the deprecated

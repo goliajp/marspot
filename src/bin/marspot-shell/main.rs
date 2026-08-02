@@ -583,6 +583,12 @@ use supervisor::{BinaryTree, ProbeVerdict, SupervisorState};
 const DEFAULT_TITLE: &str = "Marspot";
 const DEFAULT_W_PT: f64 = 1200.0;
 const DEFAULT_H_PT: f64 = 800.0;
+/// Size of the window a launch with no saved layout opens — a first
+/// run, or the launch after the user closed everything.  Smaller than
+/// `DEFAULT_*` on purpose: one pane, so a window sized for a wall of
+/// them would be mostly empty.
+const FRESH_W_PT: f64 = 800.0;
+const FRESH_H_PT: f64 = 600.0;
 // Safety-net only: the shell presents on the core's per-frame
 // `FrameRendered` poke, so this timer just guarantees forward progress if a
 // poke is ever missed (it never freezes).  Was 16 ms (~60 fps blind
@@ -816,6 +822,17 @@ struct ShellWindow {
     /// Matches the id the view/delegate tag their events with, and the
     /// id carried on the wire.
     window_id: u32,
+    /// Which entry of `window-state.bin` this window's geometry lives
+    /// in — and, by construction, which entry of `shell-state.bin`'s
+    /// window list holds its panes (the core keeps the same number in
+    /// `WindowState::frame_index`).
+    ///
+    /// Fixed for the window's life, deliberately not its position in
+    /// `self.windows`: writing frames by position meant closing a
+    /// window shifted every later window down a slot, so the survivors
+    /// wrote over the closed window's geometry and inherited each
+    /// other's on the next launch.
+    frame_index: usize,
     /// Currently-displayed IOSurface pair — the presenter samples
     /// whichever half `current_idx` points at.
     surfaces: Option<SurfacePair>,
@@ -872,9 +889,10 @@ struct ShellWindow {
 }
 
 impl ShellWindow {
-    fn new(window_id: u32) -> Self {
+    fn new(window_id: u32, frame_index: usize) -> Self {
         Self {
             window_id,
+            frame_index,
             surfaces: None,
             pending_surfaces: None,
             presenter: None,
@@ -892,6 +910,11 @@ struct ShellApp {
     /// One entry per open native window, in creation order.  Never
     /// empty while the app runs; `windows[0]` is the boot window.
     windows: Vec<ShellWindow>,
+    /// Slot promised to a window that has been asked for but has not
+    /// opened yet, keyed by the id it will carry.  A restore knows its
+    /// slot (the core named it); a Cmd-N window takes the next free
+    /// one.  Consumed by `window_opened`.
+    pending_frame_index: std::collections::HashMap<u32, usize>,
     /// Next id to hand a window.  Monotonic and never reused within a
     /// run: the core keys `WindowState` off it, and a recycled id
     /// would let a closed window's frames land in its successor.
@@ -939,6 +962,17 @@ struct ShellApp {
     /// to be reachable from a test somehow.  Unset in the installed
     /// app.
     dev_close_extra: bool,
+    /// Dev seam only (`MARSPOT_DEV_CLOSE_SEQUENCE=2,1`): press the red
+    /// button on these windows in this order, one every couple of
+    /// seconds, once they have all painted.  Exists because "which
+    /// window you closed first changed what survived" is the shape of
+    /// the 2026-08-03 report, and the only way to reproduce it is to
+    /// actually close windows in a given order and quit.  Unset in the
+    /// installed app.
+    dev_close_sequence: std::collections::VecDeque<u32>,
+    /// When the next entry of `dev_close_sequence` is due.  `None`
+    /// until every window named in it is up.
+    dev_close_next_at: Option<Instant>,
     /// How many cores this shell has spawned.  1 = the boot core; any
     /// higher value means a replacement (silent update, crash
     /// respawn), which must not re-run the saved-window restore.
@@ -1156,7 +1190,48 @@ impl ShellApp {
     /// panic on re-entry), and `window_opened` finishes the job.
     fn open_new_window(&mut self) {
         // No saved frame: a new window is centred, not restored.
-        self.open_window_with_frame(None);
+        self.open_window_with_frame(None, None);
+    }
+
+    /// Close the gap a window discarded for good left behind: drop its
+    /// geometry and move every slot above it down one.
+    ///
+    /// A window that merely *closed* keeps its slot — it is parked and
+    /// coming back.  Only a window whose panes the user closed is
+    /// forgotten, and then both saved lists have to shorten together
+    /// or the windows above it inherit each other's frames.  The core
+    /// runs the same compaction on its half (`CoreApp::forget_slot`).
+    fn forget_slot(&mut self, slot: usize) {
+        if slot < self.saved_window_frames.len() {
+            self.saved_window_frames.remove(slot);
+        }
+        for w in &mut self.windows {
+            if w.frame_index > slot {
+                w.frame_index -= 1;
+            }
+        }
+        for s in self.pending_frame_index.values_mut() {
+            if *s > slot {
+                *s -= 1;
+            }
+        }
+        self.save_window_frames();
+    }
+
+    /// The slot a brand-new window takes: one past every slot already
+    /// spoken for, on disk or in flight.  Monotonic, so a window the
+    /// user opens now can never take the geometry entry of a window
+    /// that is merely closed and waiting to be restored.
+    fn next_frame_index(&self) -> usize {
+        let live = self.windows.iter().map(|w| w.frame_index);
+        let pending = self.pending_frame_index.values().copied();
+        live.chain(pending)
+            .chain(std::iter::once(
+                self.saved_window_frames.len().saturating_sub(1),
+            ))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0)
     }
 
     /// RFC-005 step 6b — reopen a window the last session had, at the
@@ -1206,7 +1281,7 @@ impl ShellApp {
                 frame_index = frame_index
             );
         }
-        self.open_window_with_frame(frame);
+        self.open_window_with_frame(frame, Some(frame_index as usize));
         lx_event!(
             "WINDOW_RESTORE",
             "core asked for a saved window to be reopened",
@@ -1219,9 +1294,15 @@ impl ShellApp {
     /// Only *asks*.  The window is created after this dispatch returns
     /// (AppKit calls made while the app-state borrow is live panic on
     /// re-entry), and `window_opened` finishes the job.
-    fn open_window_with_frame(&mut self, frame_pt: Option<(f64, f64, f64, f64)>) {
+    fn open_window_with_frame(
+        &mut self,
+        frame_pt: Option<(f64, f64, f64, f64)>,
+        frame_index: Option<usize>,
+    ) {
         let window_id = self.next_window_id;
         self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
+        let slot = frame_index.unwrap_or_else(|| self.next_frame_index());
+        self.pending_frame_index.insert(window_id, slot);
         let attrs = WindowAttrs {
             title: DEFAULT_TITLE.to_string(),
             width_logical: DEFAULT_W_PT,
@@ -1342,15 +1423,23 @@ impl ShellApp {
         let (pane_activity_tx, pane_activity_rx) = std::sync::mpsc::channel();
         Self {
             proxy,
+            // The boot window is always entry 0 of both saved lists.
             windows: vec![ShellWindow::new(
                 marspot::shell_proto::FIRST_WINDOW_ID,
+                0,
             )],
+            pending_frame_index: std::collections::HashMap::new(),
             next_window_id: marspot::shell_proto::FIRST_WINDOW_ID + 1,
             active: None,
             redraw_thread_started: false,
             binaries,
             safe_mode: std::env::var("MARSPOT_SAFE_MODE").is_ok(),
             dev_close_extra: false,
+            dev_close_sequence: std::env::var("MARSPOT_DEV_CLOSE_SEQUENCE")
+                .ok()
+                .map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect())
+                .unwrap_or_default(),
+            dev_close_next_at: None,
             core_generation: 0,
             sup_state: SupervisorState::Idle,
             probe_rx: None,
@@ -2292,6 +2381,7 @@ impl ShellApp {
         }
         self.sweep_pane_status();
         self.sweep_autorun();
+        self.dev_drive_close_sequence();
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
 
@@ -2685,6 +2775,84 @@ impl ShellApp {
         self.dev_close_extra_if_armed(i);
     }
 
+    /// Shut marspot down.
+    ///
+    /// **The running sessions are deliberately left alone.**  Quitting
+    /// is putting marspot away, not ending the work in it: every L3
+    /// keeps its PTY, its shell and whatever is running inside, and
+    /// the next launch reattaches to them from the registry.  That is
+    /// what makes "close the windows, come back tomorrow" keep the
+    /// sessions — and it has to hold whichever window was closed last,
+    /// which is why closing a window parks it rather than retiring it.
+    ///
+    /// This used to SIGTERM every L3 on the way out (RFC-003 §6
+    /// Amendment 15, "user-driven quit = clean account").  The panes
+    /// came back — reincarnated from state.bin + bytelog — but as new
+    /// shells in the old directory, so anything actually running in
+    /// them was gone.
+    ///
+    /// L3s that outlive their usefulness are still collected: one that
+    /// no window claims is retired by the next boot's assembly sweep,
+    /// and one whose session dir goes away exits on its own.
+    fn quit(&mut self, ctx: &MarspotAppCtx) {
+        // RFC-001: clean plugin shutdown FIRST, so plugins releasing
+        // host resources (notifications, fs watchers) don't race
+        // against the rest of the teardown.
+        self.plugin_registry.stop_all_with(&self.plugin_host);
+
+        // RFC-003 §6 Amendment 15.2 — pgrep sweep for orphan L3s.
+        // Resurrect / silent-update spawn races can leave behind L3
+        // processes whose entry.toml got overwritten by a later
+        // sibling: unreachable, so nothing will ever reattach to them.
+        // Registered sessions are skipped — those are the ones we are
+        // keeping.
+        let entries = marspot_term::session_registry::list_session_entries();
+        let known_pids: std::collections::HashSet<i32> =
+            entries.iter().map(|e| e.pid).collect();
+        let mut orphans_killed = 0usize;
+        if let Ok(out) = std::process::Command::new("/usr/bin/pgrep")
+            .args(["-f", "marspot-session"])
+            .output()
+        {
+            if out.status.success() {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        if pid == std::process::id() as i32 {
+                            continue;
+                        }
+                        if known_pids.contains(&pid) {
+                            continue;
+                        }
+                        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+                            orphans_killed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        lx_event!(
+            "SHELL_QUIT_CLEANUP",
+            "quitting; registered sessions kept running, orphans swept",
+            n_kept = entries.len(),
+            n_orphans_killed = orphans_killed
+        );
+
+        // Drop control socket first — gives the core a clean EOF on
+        // its read side so it can shut down gracefully before SIGKILL.
+        self.shutdown_active("window close_requested");
+        // App quit: release every window's surfaces, not just the one
+        // whose close button was pressed.
+        for w in &mut self.windows {
+            if let Some(pair) = w.surfaces.take() {
+                pair.release();
+            }
+            if let Some(stale) = w.pending_surfaces.take() {
+                stale.release();
+            }
+        }
+        ctx.exit();
+    }
+
     /// Close ONE window: tell the core, drop our side, ask AppKit.
     ///
     /// Extracted from `close_requested` so the dev seam that a test
@@ -2692,16 +2860,20 @@ impl ShellApp {
     /// the bug it guards against (over-released NSWindow) lives in
     /// what happens after `app::close_window`, so a paraphrase would
     /// not have caught it.
-    fn close_window_by_id(&mut self, window_id: u32) {
-        // Tell the core first: it retires the window's sessions
-        // while the surfaces are still alive, so nothing renders
-        // into a released pair on the way out.
+    fn close_window_by_id(&mut self, window_id: u32, discard: bool) {
+        // Tell the core first: it parks or discards the window while
+        // the surfaces are still alive, so nothing renders into a
+        // released pair on the way out.
         self.send(
             MsgType::WindowClosed,
             marspot::shell_proto::encode_window_closed(window_id),
         );
+        self.pending_frame_index.remove(&window_id);
         if let Some(i) = self.window_index(window_id) {
             let w = self.windows.remove(i);
+            if discard {
+                self.forget_slot(w.frame_index);
+            }
             if let Some(p) = w.surfaces {
                 p.release();
             }
@@ -2741,6 +2913,40 @@ impl ShellApp {
         // calls back into `close_requested` while AppKit is still
         // inside its close machinery, which is the shape the red
         // button has and the shape that crashed.
+        marspot::app::perform_close(window_id);
+    }
+
+    /// Dev seam (`MARSPOT_DEV_CLOSE_SEQUENCE`): work through the list,
+    /// one red button every couple of seconds, starting once every
+    /// window named in it has painted.  The last entry is the last
+    /// window, so the sequence ends in a real quit.
+    fn dev_drive_close_sequence(&mut self) {
+        if self.dev_close_sequence.is_empty() {
+            return;
+        }
+        let Some(due) = self.dev_close_next_at else {
+            let all_up = self.dev_close_sequence.iter().all(|id| {
+                self.windows
+                    .iter()
+                    .any(|w| w.window_id == *id && w.first_frame_ready)
+            });
+            if all_up {
+                self.dev_close_next_at =
+                    Some(Instant::now() + Duration::from_secs(2));
+            }
+            return;
+        };
+        if Instant::now() < due {
+            return;
+        }
+        let window_id = self.dev_close_sequence.pop_front().unwrap_or(0);
+        self.dev_close_next_at = Some(Instant::now() + Duration::from_secs(2));
+        lx_event!(
+            "DEV_CLOSE_SEQUENCE",
+            "pressing this window's close button (dev seam)",
+            window_id = window_id,
+            remaining = self.dev_close_sequence.len()
+        );
         marspot::app::perform_close(window_id);
     }
 
@@ -2874,17 +3080,37 @@ impl ShellApp {
                             DEFAULT_H_PT,
                         )
                     });
-                    self.open_window_with_frame(frame);
+                    self.open_window_with_frame(frame, None);
                 } else {
                     self.restore_window(frame_index);
                 }
             }
             ShellInbox::WindowCloseRequest(window_id) => {
-                // The core asked because this window emptied out.  The
-                // last window never closes this way — that is app
-                // teardown, which stays user-driven.
+                // The core asked because this window emptied out — its
+                // last pane was closed, or moved away.  Either way
+                // there is nothing left in it.
+                //
+                // When it is the last window, an empty window means an
+                // empty app: the user closed the final pane, and
+                // marspot goes with it.  The core has already dropped
+                // the saved layout; drop the saved geometry to match,
+                // so the next launch opens a default window instead of
+                // reusing the frame of what was just dismantled.
                 if marspot::app::window_count() > 1 {
-                    self.close_window_by_id(window_id);
+                    // The core only asks when the window emptied out:
+                    // its panes are gone for good, so its slot goes too.
+                    self.close_window_by_id(window_id, true);
+                } else {
+                    lx_event!(
+                        "WINDOW_CLOSE_LAST_PANE",
+                        "last pane of the last window closed — quitting",
+                        window_id = window_id
+                    );
+                    if let Err(e) = marspot::state::clear_windows() {
+                        lx_warn!("shell.window_state.clear_failed", &format!("{e}"));
+                    }
+                    self.saved_window_frames.clear();
+                    self.quit(ctx);
                 }
             }
             ShellInbox::DevPanelToggle => {
@@ -3473,13 +3699,66 @@ fn merge_window_frames(
     out
 }
 
+/// Lay the open windows out by their own slot, ready to be merged
+/// over what is already on disk.
+///
+/// Indexed by `frame_index`, not by position: a window that closed
+/// leaves a gap here, and the gap is what keeps the windows that are
+/// still open pointing at their own geometry.  Writing by position
+/// meant closing the first of two windows moved the second into slot
+/// 0 — so the two swapped frames on the next launch.
+fn live_frames_by_slot(
+    windows: impl Iterator<Item = (usize, Option<marspot::state::SavedWindow>)>,
+    saved_len: usize,
+) -> Vec<Option<marspot::state::SavedWindow>> {
+    let mut out: Vec<Option<marspot::state::SavedWindow>> = vec![None; saved_len];
+    for (slot, frame) in windows {
+        if out.len() <= slot {
+            out.resize(slot + 1, None);
+        }
+        out[slot] = frame;
+    }
+    out
+}
+
 #[cfg(test)]
 mod window_frame_merge_tests {
-    use super::merge_window_frames;
+    use super::{live_frames_by_slot, merge_window_frames};
     use marspot::state::SavedWindow;
 
     fn win(x: f64) -> SavedWindow {
         SavedWindow { display_id: 1, x, y: 10.0, w: 1200.0, h: 800.0 }
+    }
+
+    /// The 2026-08-03 half of the same bug: close the FIRST of two
+    /// windows and the survivor used to write itself into slot 0,
+    /// overwriting the closed window's geometry — so when the closed
+    /// window came back (it is parked, not discarded) the two had
+    /// swapped places.
+    #[test]
+    fn a_closed_window_keeps_its_slot_for_the_window_still_open() {
+        let prev = vec![win(0.0), win(872.0)];
+        // Window 0 closed; window 1 is still open and still slot 1.
+        let live = live_frames_by_slot(
+            [(1usize, Some(win(880.0)))].into_iter(),
+            prev.len(),
+        );
+        let out = merge_window_frames(&prev, &live);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].x, 0.0, "the closed window's geometry is untouched");
+        assert_eq!(out[1].x, 880.0, "the open one wrote its own slot");
+    }
+
+    /// A window opened past everything on disk grows the list.
+    #[test]
+    fn a_window_in_a_new_slot_extends_the_list() {
+        let live = live_frames_by_slot(
+            [(0usize, Some(win(1.0))), (2usize, Some(win(2.0)))].into_iter(),
+            1,
+        );
+        assert_eq!(live.len(), 3);
+        assert!(live[1].is_none(), "the gap stays a gap");
+        assert_eq!(live[2].as_ref().unwrap().x, 2.0);
     }
 
     /// The silent-update regression: one live window, two on disk.
@@ -3573,15 +3852,17 @@ impl ShellApp {
     /// drives restores from its own per-window layout records, and
     /// nothing asks for an index it has no window for.
     fn save_window_frames(&mut self) {
-        let live: Vec<Option<marspot::state::SavedWindow>> = self
-            .windows
-            .iter()
-            .map(|w| {
-                w.last_saved_window.map(|(x, y, w, h, display_id)| {
-                    marspot::state::SavedWindow { display_id, x, y, w, h }
-                })
-            })
-            .collect();
+        let live = live_frames_by_slot(
+            self.windows.iter().map(|w| {
+                (
+                    w.frame_index,
+                    w.last_saved_window.map(|(x, y, ww, h, display_id)| {
+                        marspot::state::SavedWindow { display_id, x, y, w: ww, h }
+                    }),
+                )
+            }),
+            self.saved_window_frames.len(),
+        );
         let frames = merge_window_frames(&self.saved_window_frames, &live);
         if frames.is_empty() {
             return;
@@ -3977,7 +4258,11 @@ impl MarspotApp for ShellApp {
             }
         };
         let (f, b) = pair.ids();
-        let mut win = ShellWindow::new(window_id);
+        let slot = self
+            .pending_frame_index
+            .remove(&window_id)
+            .unwrap_or_else(|| self.next_frame_index());
+        let mut win = ShellWindow::new(window_id, slot);
         // The presenter is what actually puts the IOSurface on the
         // NSView — the boot window gets one in `resumed()`, and a
         // window without one is a permanently black rectangle no
@@ -4044,90 +4329,15 @@ impl MarspotApp for ShellApp {
         // wears, so it always lands on the boot window and falls
         // through to the quit path below when it is the only one left.
         if marspot::app::window_count() > 1 {
-            self.close_window_by_id(Self::event_window(ctx));
+            // The red button / Cmd-W: putting a window away, not
+            // dismantling it.  Its slot is kept so the layout and
+            // the geometry both come back on the next launch.
+            self.close_window_by_id(Self::event_window(ctx), false);
             return;
         }
-
-        // RFC-001: clean plugin shutdown FIRST, so plugins releasing
-        // host resources (notifications, fs watchers) don't race
-        // against the rest of the teardown.
-        self.plugin_registry.stop_all_with(&self.plugin_host);
-
-        // RFC-003 §6 Amendment 15 — user-driven quit = clean account.
-        // Tell every L3 to retire (SIGTERM kicks their handler, which
-        // writes state.bin and exits without SIGHUP); then drain the
-        // fd-vault, which closes our last reference to each PTY
-        // master fd → the kernel object's refcount drops to zero →
-        // the shell child receives SIGHUP from the kernel and exits.
-        // The marspot-quit-then-reopen path reincarnates panes from
-        // their persisted state.bin / bytelog (resurrect mode); the
-        // sessions/<id>/ directories deliberately survive on disk.
-        let mut signalled = 0usize;
-        let entries = marspot_term::session_registry::list_session_entries();
-        let mut known_pids: std::collections::HashSet<i32> =
-            std::collections::HashSet::new();
-        for entry in &entries {
-            if unsafe { libc::kill(entry.pid, libc::SIGTERM) } == 0 {
-                signalled += 1;
-            }
-            known_pids.insert(entry.pid);
-        }
-        // RFC-003 §6 Amendment 15.2 — pgrep sweep for orphan L3s.
-        // Resurrect / silent-update spawn races can leave behind L3
-        // processes whose entry.toml got overwritten by a later
-        // sibling; entry-only SIGTERM misses them.  Walk pgrep
-        // marspot-session, drop pids we already covered, SIGTERM
-        // the rest so they don't accumulate across marspot quits.
-        let mut orphans_killed = 0usize;
-        if let Ok(out) = std::process::Command::new("/usr/bin/pgrep")
-            .args(["-f", "marspot-session"])
-            .output()
-        {
-            if out.status.success() {
-                for line in String::from_utf8_lossy(&out.stdout).lines() {
-                    if let Ok(pid) = line.trim().parse::<i32>() {
-                        if pid == std::process::id() as i32 {
-                            continue;
-                        }
-                        if known_pids.contains(&pid) {
-                            continue;
-                        }
-                        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-                            orphans_killed += 1;
-                        }
-                    }
-                }
-            }
-        }
-        // Brief wait so SIGTERM handlers have a chance to land their
-        // state.bin write.  Don't block long — we're exiting anyway,
-        // and the launchd reaping path catches any stragglers.
-        if signalled + orphans_killed > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-        lx_event!(
-            "SHELL_QUIT_CLEANUP",
-            "SIGTERM'd L3s + orphans for clean user quit",
-            n_signalled = signalled,
-            n_orphans_killed = orphans_killed,
-            n_entries = entries.len()
-        );
-
-        // Drop control socket first — gives the core a clean EOF on
-        // its read side so it can shut down gracefully before SIGKILL.
-        self.shutdown_active("window close_requested");
-        // App quit: release every window's surfaces, not just the one
-        // whose close button was pressed.
-        for w in &mut self.windows {
-            if let Some(pair) = w.surfaces.take() {
-                pair.release();
-            }
-            if let Some(stale) = w.pending_surfaces.take() {
-                stale.release();
-            }
-        }
-        ctx.exit();
+        self.quit(ctx);
     }
+
 
     fn dev_window_changed(&mut self, ctx: &MarspotAppCtx) {
         // User dragged / resized the dev window or moved it between
@@ -4642,10 +4852,19 @@ Usage:\n\
         let w = marspot::state::read_windows()?.into_iter().next()?;
         if w.w > 50.0 && w.h > 50.0 { Some((w.x, w.y, w.w, w.h)) } else { None }
     });
+    // With nothing to restore this is a first run — or the launch
+    // after the user closed the last pane of the last window, which
+    // deletes both saved files.  A modest window centred on the main
+    // screen is the right thing to hand someone with no layout of
+    // their own yet; `run_app` centres it because there is no frame.
+    let (boot_w, boot_h) = match restore_frame {
+        Some(_) => (DEFAULT_W_PT, DEFAULT_H_PT),
+        None => (FRESH_W_PT, FRESH_H_PT),
+    };
     let attrs = WindowAttrs {
         title: DEFAULT_TITLE.to_string(),
-        width_logical: DEFAULT_W_PT,
-        height_logical: DEFAULT_H_PT,
+        width_logical: boot_w,
+        height_logical: boot_h,
         frame_pt: restore_frame,
         // Terminal-black from the first paint: a core (L2) swap that
         // briefly uncovers the layer must show steady black, never a

@@ -260,6 +260,11 @@ n_presented=$(grep 'WINDOW_FIRST_PRESENT' "$APPLOG" | grep -o 'window_id=[0-9]*'
 
 # The new window comes up 1x1 with one pane, and — the 2026-07-26
 # incident — must not shrink what the boot window persisted.
+#
+# A launch with no saved layout opens ONE window with ONE pane (a
+# first run, or the launch after the user closed everything), so the
+# boot window here is 1x1 too; what phase 5 pins is that the new
+# window is appended rather than replacing it.
 python3 - "$MARSPOT_STATE_DIR" <<'PY' || fail "the fresh window damaged the saved layout"
 import struct, sys, pathlib
 b = (pathlib.Path(sys.argv[1]) / 'shell-state.bin').read_bytes()
@@ -277,7 +282,7 @@ for _ in range(n):
     shapes.append((c, r, np))
 print(f'saved: {n} window(s) {shapes}, key_window={key}')
 assert n == 2, f'expected both windows saved, got {n}'
-assert shapes[0][2] >= 2, f'boot window lost panes: {shapes[0]}'
+assert shapes[0] == (1, 1, 1), f'virgin boot window should be 1x1 with one pane: {shapes[0]}'
 assert shapes[1] == (1, 1, 1), f'fresh window should be 1x1 with one pane: {shapes[1]}'
 PY
 

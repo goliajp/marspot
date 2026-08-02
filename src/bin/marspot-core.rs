@@ -684,6 +684,10 @@ mod window_state_tests {
             drop_target: None,
             pending_move_sid: None,
             saved_windows: std::collections::VecDeque::new(),
+            parked_windows: Vec::new(),
+            dev_close_panes: 0,
+            dev_close_panes_at: None,
+            layout_discarded: false,
             windows,
             key_window: 0,
         }
@@ -798,7 +802,7 @@ mod window_state_tests {
             ],
         };
         let mut app = app_with(vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
-        app.saved_windows.push_back(record);
+        app.saved_windows.push_back((1, record));
 
         app.adopt_window(2, 800.0, 600.0, 2.0);
 
@@ -1013,6 +1017,151 @@ mod window_state_tests {
         );
     }
 
+    /// Closing a window is putting it away, not throwing it out.
+    ///
+    /// The 2026-08-03 report: two windows, close either one, quit,
+    /// come back — and the closed window's sessions were gone, while
+    /// the other window's survived.  Whichever window you closed first
+    /// was the one you lost, which is not a rule anybody can hold in
+    /// their head.  A closed window's layout is parked and saved, so
+    /// the next launch reattaches it exactly like the window that was
+    /// still open at quit.
+    #[test]
+    fn closing_a_window_parks_it_for_the_next_launch() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24), Pane::new_vacant(21, 80, 24)]),
+        ]);
+        app.windows[1].frame_index = 1;
+
+        app.close_window(2);
+
+        assert_eq!(app.windows.len(), 1, "the window is gone from the live set");
+        assert_eq!(app.parked_windows.len(), 1, "…and parked, not discarded");
+        assert_eq!(app.parked_windows[0].0, 1, "parked at the slot it held");
+
+        let saved = marspot::state::read().expect("state written");
+        assert_eq!(saved.windows.len(), 2, "both windows are still saved");
+        let sids: Vec<Vec<u64>> = saved
+            .windows
+            .iter()
+            .map(|w| w.panes.iter().map(|p| p.sid).collect())
+            .collect();
+        assert_eq!(sids, vec![vec![10], vec![20, 21]], "in slot order");
+    }
+
+    /// The slot, not the position: a parked window holds its entry in
+    /// the saved list, so the windows that stayed open keep their own
+    /// geometry (`window-state.bin` is paired by index).
+    #[test]
+    fn a_parked_window_holds_its_slot() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+            win(3, vec![Pane::new_vacant(30, 80, 24)]),
+        ]);
+        app.windows[1].frame_index = 1;
+        app.windows[2].frame_index = 2;
+
+        app.close_window(2);
+
+        let saved = marspot::state::read().expect("state written");
+        let sids: Vec<u64> =
+            saved.windows.iter().map(|w| w.panes[0].sid).collect();
+        assert_eq!(sids, vec![10, 20, 30], "the middle window keeps slot 1");
+        assert_eq!(
+            app.next_frame_index(),
+            3,
+            "a new window goes past the parked one, never on top of it"
+        );
+    }
+
+    /// Closing panes is the destructive gesture — that is how a window
+    /// is actually got rid of.  A window whose last pane closes is not
+    /// parked, and asks L1 to close it.
+    #[test]
+    fn closing_the_last_pane_closes_the_window() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+        ]);
+        app.windows[1].frame_index = 1;
+
+        app.close_session(1, 0);
+
+        assert!(
+            app.pending_to_shell
+                .iter()
+                .any(|(ty, _)| *ty == MsgType::WindowCloseRequest),
+            "the emptied window asks L1 to close it"
+        );
+        assert!(
+            app.windows[1].panes.iter().all(|p| p.is_dormant()),
+            "a placeholder holds the window together until L1 answers"
+        );
+
+        // L1 answers.  Nothing is parked: the user dismantled it.
+        app.close_window(2);
+        assert!(app.parked_windows.is_empty(), "an emptied window is not parked");
+        let saved = marspot::state::read().expect("state written");
+        assert_eq!(saved.windows.len(), 1, "only the surviving window is saved");
+    }
+
+    /// A discarded window's slot is closed up, not left as a hole.
+    /// `shell-state.bin` and `window-state.bin` are paired by position,
+    /// so a hole in one would hand every window above it its
+    /// neighbour's geometry on the next launch.
+    #[test]
+    fn discarding_a_window_compacts_the_slots_above_it() {
+        let mut app = app_with(vec![
+            win(1, vec![Pane::new_vacant(10, 80, 24)]),
+            win(2, vec![Pane::new_vacant(20, 80, 24)]),
+            win(3, vec![Pane::new_vacant(30, 80, 24)]),
+        ]);
+        app.windows[1].frame_index = 1;
+        app.windows[2].frame_index = 2;
+
+        // Empty the middle window, then let L1's close land.
+        app.close_session(1, 0);
+        app.close_window(2);
+
+        assert_eq!(app.windows.len(), 2);
+        assert_eq!(app.windows[0].frame_index, 0);
+        assert_eq!(app.windows[1].frame_index, 1, "window 3 moved down a slot");
+        let saved = marspot::state::read().expect("state written");
+        let sids: Vec<u64> =
+            saved.windows.iter().map(|w| w.panes[0].sid).collect();
+        assert_eq!(sids, vec![10, 30], "no hole left behind");
+    }
+
+    /// …and the last pane of the last window takes marspot with it.
+    /// The saved layout goes too, so the next launch opens a fresh
+    /// default window instead of restoring what was just dismantled.
+    #[test]
+    fn closing_the_last_pane_of_the_last_window_discards_the_layout() {
+        let mut app = app_with(vec![win(1, vec![Pane::new_vacant(10, 80, 24)])]);
+        app.save_session_state();
+        assert!(marspot::state::read().is_some(), "precondition: a layout exists");
+
+        app.close_session(0, 0);
+
+        assert!(
+            app.pending_to_shell
+                .iter()
+                .any(|(ty, _)| *ty == MsgType::WindowCloseRequest),
+            "L1 is asked to close the last window, which quits the app"
+        );
+        assert!(app.layout_discarded);
+        assert!(
+            marspot::state::read().is_none(),
+            "the saved layout is deleted, not left behind"
+        );
+
+        // Anything that saves afterwards must not put it back.
+        app.save_session_state();
+        assert!(marspot::state::read().is_none(), "and stays deleted");
+    }
+
     /// "Move to New Window": the pane is parked by sid, and the next
     /// unseen `SurfaceAttachWindow` builds the window around the MOVED
     /// pane — no fresh spawn, and it outranks the restore queue.
@@ -1023,10 +1172,10 @@ mod window_state_tests {
             Pane::new_vacant(11, 80, 24),
         ])]);
         // A stale restore record is also waiting — the user action wins.
-        app.saved_windows.push_back(marspot::state::SavedWindowLayout {
+        app.saved_windows.push_back((1, marspot::state::SavedWindowLayout {
             grid_cols: 2, grid_rows: 2, focused_idx: 0,
             panes: vec![marspot::state::SavedPane { sid: 99, ..Default::default() }],
-        });
+        }));
         app.pending_move_sid = Some(11);
 
         app.adopt_window(7, 800.0, 600.0, 2.0);
@@ -2964,6 +3113,17 @@ struct WindowState {
     /// L1-allocated, monotonic.  Stable across a core swap because
     /// L1 replays one `SurfaceAttach` per window into the new core.
     window_id: u32,
+    /// This window's slot in the persisted lists — entry `frame_index`
+    /// of `shell-state.bin`'s window list and of `window-state.bin`'s
+    /// frame list, which is what pairs a window's layout with its
+    /// geometry across a launch.
+    ///
+    /// Stable for the window's whole life, deliberately NOT its
+    /// position in `self.windows`: closing a window used to shift
+    /// every later window's slot down by one, so the survivors
+    /// inherited each other's geometry.  L1 keeps the same invariant
+    /// on its side (`ShellWindow::frame_index`).
+    frame_index: usize,
     /// This window's paint target.  `None` between the window's birth
     /// and its first successful attach (a stale id from a mid-spawn
     /// surface rotation), during which the window simply isn't
@@ -3077,6 +3237,9 @@ impl WindowState {
     ) -> Self {
         Self {
             window_id,
+            // Callers that know the slot set it right after; 0 is only
+            // ever correct for the boot window, which is entry 0.
+            frame_index: 0,
             surfaces: None,
             last_render_at: None,
             painted_once: false,
@@ -3278,7 +3441,27 @@ struct CoreApp {
     /// L1 to reopen them.  Each `SurfaceAttachWindow` for an unseen id
     /// pops the front record, so the queue is also what distinguishes
     /// "restoring a window" from "the user pressed Cmd-N".
-    saved_windows: std::collections::VecDeque<marspot::state::SavedWindowLayout>,
+    saved_windows: std::collections::VecDeque<(usize, marspot::state::SavedWindowLayout)>,
+    /// Windows the user closed while they still held live panes,
+    /// keyed by the slot they occupied.
+    ///
+    /// Closing a window is *putting it away*, not throwing it out: its
+    /// L3s keep running and its record keeps being written to
+    /// `shell-state.bin`, so the next launch brings the window back
+    /// with its sessions attached.  The way to actually be rid of a
+    /// window is to close its panes — a window whose last pane closed
+    /// has nothing to park and is discarded.
+    parked_windows: Vec<(usize, marspot::state::SavedWindowLayout)>,
+    /// Dev seam only (`MARSPOT_DEV_CLOSE_PANES`): how many more panes
+    /// to close, and when the next one is due.  Unset in the installed
+    /// app; see `dev_drive_close_panes`.
+    dev_close_panes: usize,
+    dev_close_panes_at: Option<Instant>,
+    /// Set once the user closed the last pane of the last window.  The
+    /// saved layout has been deleted at that point and the app is on
+    /// its way out; any later save would resurrect what they just
+    /// dismantled.
+    layout_discarded: bool,
     /// Index into `windows` of the window with keyboard focus.
     key_window: usize,
 }
@@ -3588,47 +3771,147 @@ impl CoreApp {
     /// state on disk.  ~50 us per call (memcpy + atomic rename); no
     /// debounce because we never call this on the render hot path.
     fn save_session_state(&self) {
-        use marspot::state::{SavedPane, SavedState, SavedWindowLayout};
-        // RFC-005 step 6 — every window, in creation order.  Saving
-        // only the key window is what made opening a second window
+        use marspot::state::SavedState;
+        // The user closed the last pane of the last window — the saved
+        // layout is gone on purpose and this process is being torn
+        // down.  Writing now would put it back.
+        if self.layout_discarded {
+            return;
+        }
+        // RFC-005 step 6 — every window, in slot order.  Saving only
+        // the key window is what made opening a second window
         // destructive: the new window became key the instant it
         // appeared, and the next save replaced a 16-pane record with
         // its single pane.
-        let windows: Vec<SavedWindowLayout> = self
+        //
+        // Parked windows (closed, but still holding live sessions) are
+        // merged back in at the slot they had, so their geometry in
+        // `window-state.bin` still lines up and the next launch brings
+        // them back where they were.
+        let mut slots: Vec<(usize, marspot::state::SavedWindowLayout)> = self
             .windows
             .iter()
-            .map(|w| SavedWindowLayout {
-                grid_cols: w.grid_cols as u16,
-                grid_rows: w.grid_rows as u16,
-                focused_idx: w.focused_idx as u16,
-                panes: w
-                    .panes
-                    .iter()
-                    .map(|p| {
-                        let sid = p.shelld_session_id().unwrap_or(0);
-                        // The format keeps the field so an older build
-                        // can still read this file; nothing sets it.
-                        let custom_title = String::new();
-                        let last_cwd = self.pane_cwds.get(&sid).cloned().unwrap_or_default();
-                        let flags = if p.is_dormant() {
-                            marspot::state::PANE_FLAG_DORMANT
-                        } else {
-                            0
-                        };
-                        SavedPane { sid, flags, custom_title, last_cwd }
-                    })
-                    .collect(),
-            })
+            .map(|w| (w.frame_index, self.window_layout_record(w)))
+            .chain(self.parked_windows.iter().cloned())
             .collect();
+        slots.sort_by_key(|(slot, _)| *slot);
+        // `key_window` indexes the live list; the saved list is the
+        // merged one, so translate through the slot.
+        let key_slot = self
+            .windows
+            .get(self.key_window)
+            .map(|w| w.frame_index)
+            .unwrap_or(0);
+        let key_window = slots
+            .iter()
+            .position(|(slot, _)| *slot == key_slot)
+            .unwrap_or(0) as u16;
         let saved = SavedState {
-            windows,
-            key_window: self.key_window as u16,
+            windows: slots.into_iter().map(|(_, r)| r).collect(),
+            key_window,
         };
         if let Err(e) = marspot::state::write(&saved) {
             lx_warn!(
                 "core.state_file.write_failed",
                 &format!("{e}; saved state not persisted this tick")
             );
+        }
+    }
+
+    /// Dev seam (`MARSPOT_DEV_CLOSE_PANES=n`) — see the call site.
+    fn dev_drive_close_panes(&mut self) {
+        if self.dev_close_panes == 0 {
+            return;
+        }
+        match self.dev_close_panes_at {
+            Some(t) if Instant::now() < t => return,
+            _ => {}
+        }
+        self.dev_close_panes -= 1;
+        self.dev_close_panes_at = Some(Instant::now() + Duration::from_secs(1));
+        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
+        let idx = win!(self, wi).focused_idx;
+        lx_event!(
+            "DEV_CLOSE_PANE",
+            "closing a pane (dev seam)",
+            window_id = win!(self, wi).window_id,
+            pane_idx = idx as u32,
+            remaining = self.dev_close_panes as u32
+        );
+        self.close_session(wi, idx);
+        if wi < self.windows.len() {
+            self.rebuild_layout(wi);
+        }
+    }
+
+    /// Close the gap a discarded window left: everything above it
+    /// moves down one.  Mirrored by `ShellApp::forget_slot`, which
+    /// does the same to `window-state.bin` — the two lists are paired
+    /// by position, so they compact together or not at all.
+    fn forget_slot(&mut self, slot: usize) {
+        for w in &mut self.windows {
+            if w.frame_index > slot {
+                w.frame_index -= 1;
+            }
+        }
+        for (s, _) in &mut self.parked_windows {
+            if *s > slot {
+                *s -= 1;
+            }
+        }
+        for (s, _) in &mut self.saved_windows {
+            if *s > slot {
+                *s -= 1;
+            }
+        }
+    }
+
+    /// The slot a brand-new window takes: one past every slot spoken
+    /// for, whether by an open window, a parked one, or a saved record
+    /// still waiting for L1 to reopen it.  Monotonic, so a new window
+    /// can never land on top of a window that is merely away.
+    fn next_frame_index(&self) -> usize {
+        let live = self.windows.iter().map(|w| w.frame_index);
+        let parked = self.parked_windows.iter().map(|(slot, _)| *slot);
+        let pending = self.saved_windows.iter().map(|(slot, _)| *slot);
+        live.chain(parked)
+            .chain(pending)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0)
+    }
+
+    /// One window's persistable shape — grid, focus, and its panes in
+    /// slot order.  Shared by the live save and by the snapshot taken
+    /// when a window is parked, so a parked window is byte-identical
+    /// to what it would have saved while open.
+    fn window_layout_record(
+        &self,
+        w: &WindowState,
+    ) -> marspot::state::SavedWindowLayout {
+        use marspot::state::{SavedPane, SavedWindowLayout};
+        SavedWindowLayout {
+            grid_cols: w.grid_cols as u16,
+            grid_rows: w.grid_rows as u16,
+            focused_idx: w.focused_idx as u16,
+            panes: w
+                .panes
+                .iter()
+                .map(|p| {
+                    let sid = p.shelld_session_id().unwrap_or(0);
+                    // The format keeps the field so an older build can
+                    // still read this file; nothing sets it.
+                    let custom_title = String::new();
+                    let last_cwd =
+                        self.pane_cwds.get(&sid).cloned().unwrap_or_default();
+                    let flags = if p.is_dormant() {
+                        marspot::state::PANE_FLAG_DORMANT
+                    } else {
+                        0
+                    };
+                    SavedPane { sid, flags, custom_title, last_cwd }
+                })
+                .collect(),
         }
     }
 
@@ -3796,13 +4079,11 @@ impl CoreApp {
         use marspot::ui::components::MenuItem;
         match region {
             ContextRegion::Pane(_) => {
-                let close_disabled = win!(self, wi).panes.len() <= 1;
-                let close = {
-                    let mi = MenuItem::entry(
-                        "Close pane", ContextMenuAction::ClosePane.tag(),
-                    );
-                    if close_disabled { mi.disabled() } else { mi }
-                };
+                // Never disabled: closing a window's last pane closes
+                // the window, and the last window's last pane quits.
+                let close = MenuItem::entry(
+                    "Close pane", ContextMenuAction::ClosePane.tag(),
+                );
                 let copy = MenuItem::entry(
                     "Copy", ContextMenuAction::CopySelection.tag(),
                 ).with_shortcut("⌘C");
@@ -3823,13 +4104,9 @@ impl CoreApp {
                 items
             }
             ContextRegion::SidebarSlot(_) => {
-                let close_disabled = win!(self, wi).panes.len() <= 1;
-                let close = {
-                    let mi = MenuItem::entry(
-                        "Close pane", ContextMenuAction::ClosePane.tag(),
-                    );
-                    if close_disabled { mi.disabled() } else { mi }
-                };
+                let close = MenuItem::entry(
+                    "Close pane", ContextMenuAction::ClosePane.tag(),
+                );
                 let mut items = vec![
                     MenuItem::divider(),
                     close,
@@ -4363,15 +4640,12 @@ impl CoreApp {
     /// window); this is also what makes "drag the sole pane of a 1×1
     /// window away" read as the window following its pane.
     fn request_close_if_empty(&mut self, wi: usize) {
-        if win!(self, wi).panes.iter().any(|p| !p.is_dormant()) {
-            return;
-        }
-        self.pending_to_shell.push((
-            MsgType::WindowCloseRequest,
-            marspot::shell_proto::encode_window_close_request(
-                win!(self, wi).window_id,
-            ),
-        ));
+        // Same rule, same path as a window emptied by closing its
+        // panes: nothing live left ⇒ the window goes.  (A move-out
+        // cannot empty the *last* window — the destination window
+        // exists by the time this runs — so the quit branch inside is
+        // unreachable from here.)
+        self.close_window_if_emptied(wi);
     }
 
     fn dispatch_context_action(
@@ -4409,9 +4683,15 @@ impl CoreApp {
                     ContextRegion::Pane(i) | ContextRegion::SidebarSlot(i) => i,
                     _ => win!(self, wi).focused_idx,
                 };
-                if win!(self, wi).panes.len() > 1 && idx < win!(self, wi).panes.len() {
+                // No floor on the pane count: closing the last pane of
+                // a window closes the window, and closing the last
+                // pane of the last window quits marspot.  Both are
+                // driven from `close_session` → `close_window_if_emptied`.
+                if idx < win!(self, wi).panes.len() {
                     self.close_session(wi, idx);
-                    self.rebuild_layout(wi);
+                    if wi < self.windows.len() {
+                        self.rebuild_layout(wi);
+                    }
                 }
             }
             ContextMenuAction::SplitNewPane => {
@@ -4714,6 +4994,7 @@ impl CoreApp {
                 let mut nw = WindowState::new(
                     window_id, vec![pane], 0, 1, 1, w_phys, h_phys, scale,
                 );
+                nw.frame_index = self.next_frame_index();
                 nw.render.mark_bg_clear_required();
                 self.windows.push(nw);
                 let wi = self.windows.len() - 1;
@@ -4738,8 +5019,8 @@ impl CoreApp {
         // window comes up with its saved grid and one "starting…"
         // placeholder per saved slot; the assembly worker replaces
         // them with the real panes.
-        if let Some(record) = self.saved_windows.pop_front() {
-            self.adopt_restored_window(window_id, record, w_phys, h_phys, scale);
+        if let Some((slot, record)) = self.saved_windows.pop_front() {
+            self.adopt_restored_window(window_id, slot, record, w_phys, h_phys, scale);
             return;
         }
         let (cell_w, cell_h) = self.renderer.cell_dims();
@@ -4762,6 +5043,7 @@ impl CoreApp {
             h_phys,
             scale,
         );
+        w.frame_index = self.next_frame_index();
         // A brand-new window has never been painted.
         w.render.mark_bg_clear_required();
         self.windows.push(w);
@@ -4788,6 +5070,7 @@ impl CoreApp {
     fn adopt_restored_window(
         &mut self,
         window_id: u32,
+        slot: usize,
         record: marspot::state::SavedWindowLayout,
         w_phys: f64,
         h_phys: f64,
@@ -4834,6 +5117,7 @@ impl CoreApp {
             h_phys,
             scale,
         );
+        w.frame_index = slot;
         w.render.mark_bg_clear_required();
         self.windows.push(w);
         let wi = self.windows.len() - 1;
@@ -4997,12 +5281,22 @@ impl CoreApp {
             .or_else(|| self.window_index(frame_window))
     }
 
-    /// A window closed: retire every session it held and drop its
-    /// `WindowState`.
+    /// A window closed: park its layout (if it still held live panes)
+    /// and drop its `WindowState`.
     ///
-    /// The last window is left alone — L1 owns app teardown
-    /// (`close_requested` already SIGTERMs every session and exits),
-    /// and tearing the state down here first would race it.
+    /// Closing a window does NOT retire its sessions.  The window is
+    /// being put away, so its L3s keep running, its record keeps being
+    /// saved, and the next launch reattaches them — which is what
+    /// makes "close the windows, quit, come back" lossless regardless
+    /// of the order the windows were closed in.  Discarding a window
+    /// for good is what closing its *panes* does.
+    ///
+    /// A window with nothing but dormant placeholders left (its last
+    /// live pane was moved out, or its last pane was closed) has
+    /// nothing worth restoring and is not parked.
+    ///
+    /// The last window is left alone — L1 owns app teardown, and
+    /// tearing the state down here first would race it.
     fn close_window(&mut self, window_id: u32) {
         let Some(i) = self.window_index(window_id) else { return };
         // Window indices shift below; any in-flight drag is stale.
@@ -5015,15 +5309,18 @@ impl CoreApp {
             );
             return;
         }
-        let doomed: Vec<(u64, bool)> = self.windows[i]
-            .panes
-            .iter()
-            .filter_map(|p| p.shelld_session_id().map(|id| (id, p.is_l3())))
-            .collect();
-        for (id, is_l3) in doomed {
-            self.retire_pane_session(id, is_l3);
-        }
         let gone = self.windows.remove(i);
+        let parked = gone.panes.iter().any(|p| !p.is_dormant());
+        if parked {
+            let record = self.window_layout_record(&gone);
+            self.parked_windows.push((gone.frame_index, record));
+        } else {
+            // Discarded for good, so its slot goes too — both saved
+            // lists are positional, and a hole in one of them would
+            // hand every window above it the geometry of its
+            // neighbour.  L1 compacts its own list to match.
+            self.forget_slot(gone.frame_index);
+        }
         // Balance the `increment_use` from this window's last attach;
         // without it the IOSurface pair leaks for the life of the core.
         if let Some(s) = gone.surfaces.as_ref() {
@@ -5032,10 +5329,12 @@ impl CoreApp {
         self.key_window = self.key_window.min(self.windows.len() - 1);
         lx_event!(
             "WINDOW_CLOSED",
-            "window and its panes retired",
+            "window closed",
             window_id = window_id,
-            remaining = self.windows.len()
+            remaining = self.windows.len(),
+            parked = parked as u32
         );
+        self.save_session_state();
     }
 
     fn close_session(&mut self, wi: usize, idx: usize) {
@@ -5048,7 +5347,21 @@ impl CoreApp {
             let is_l3 = win!(self, wi).panes[idx].is_l3();
             self.retire_pane_session(id, is_l3);
         }
+        let (pc, pr) = {
+            let g = win!(self, wi).panes[idx].session().grid();
+            (g.cols(), g.rows())
+        };
         win!(self, wi).panes.remove(idx);
+        if win!(self, wi).panes.is_empty() {
+            // Closing the window is L1's call and arrives a few frames
+            // from now (`close_window_if_emptied`).  Until then the
+            // window is still on screen and still being rendered, and
+            // every pane lookup here indexes rather than `get`s — so
+            // leave the same dormant placeholder a moved-out pane
+            // leaves.  It renders as an empty slot, it is not parked,
+            // and it is not restored.
+            win!(self, wi).panes.push(Pane::new_dormant(pc, pr));
+        }
         if !win!(self, wi).panes.is_empty() {
             if win!(self, wi).focused_idx == idx {
                 win!(self, wi).focused_idx = idx.min(win!(self, wi).panes.len() - 1);
@@ -5070,6 +5383,51 @@ impl CoreApp {
             }
         }
         self.save_session_state();
+        self.close_window_if_emptied(wi);
+    }
+
+    /// A window whose last pane the user just closed goes away with it
+    /// — and if it was the last window, so does marspot.
+    ///
+    /// Closing panes is the deliberate, destructive gesture (closing
+    /// the *window* parks it instead), so nothing here is remembered:
+    /// the window is not parked, and emptying the last window wipes
+    /// the saved layout so the next launch opens a fresh default
+    /// window rather than resurrecting what was just dismantled.
+    ///
+    /// L1 owns windows and app teardown, so both cases are a request.
+    fn close_window_if_emptied(&mut self, wi: usize) {
+        if wi >= self.windows.len() {
+            return;
+        }
+        if win!(self, wi).panes.iter().any(|p| !p.is_dormant()) {
+            return;
+        }
+        let window_id = win!(self, wi).window_id;
+        if self.windows.len() == 1 {
+            // The app is going away.  Drop the layout first: L1 tears
+            // the core down moments after the request lands, and a
+            // save racing that would restore an empty window.
+            self.layout_discarded = true;
+            if let Err(e) = marspot::state::clear() {
+                lx_warn!("core.state_file.clear_failed", &format!("{e}"));
+            }
+            lx_event!(
+                "WINDOW_EMPTY_LAST",
+                "last pane of the last window closed — asking L1 to quit",
+                window_id = window_id
+            );
+        } else {
+            lx_event!(
+                "WINDOW_EMPTY",
+                "last pane closed — asking L1 to close the window",
+                window_id = window_id
+            );
+        }
+        self.pending_to_shell.push((
+            MsgType::WindowCloseRequest,
+            marspot::shell_proto::encode_window_close_request(window_id),
+        ));
     }
 
     // ─── C5: scrollback search overlay ────────────────────────────
@@ -6724,9 +7082,12 @@ impl CoreApp {
 
         // Sidebar close-[×]: refuse to close the last session.
         if let Some(idx) = close_session_hit {
-            if win!(self, wi).panes.len() > 1 && idx < win!(self, wi).panes.len() {
+            // The last pane closes too — see `close_window_if_emptied`.
+            if idx < win!(self, wi).panes.len() {
                 self.close_session(wi, idx);
-                self.rebuild_layout(wi);
+                if wi < self.windows.len() {
+                    self.rebuild_layout(wi);
+                }
             }
             return;
         }
@@ -8110,19 +8471,28 @@ fn main() {
     // takes windows[0]; the rest are restored as L1 opens them (each
     // `SurfaceAttachWindow` for an unseen id pops the next record).
     let saved_state = marspot::state::read();
-    let mut saved_windows: std::collections::VecDeque<marspot::state::SavedWindowLayout> =
-        saved_state.map(|s| s.windows.into()).unwrap_or_default();
-    let boot_window = saved_windows.pop_front();
+    // Each record keeps the slot it was read from — that index is what
+    // pairs it with `window-state.bin`'s geometry list, and it has to
+    // survive windows being closed and parked.
+    let mut saved_windows: std::collections::VecDeque<(usize, marspot::state::SavedWindowLayout)> =
+        saved_state
+            .map(|s| s.windows.into_iter().enumerate().collect())
+            .unwrap_or_default();
+    let boot_window = saved_windows.pop_front().map(|(_, r)| r);
+    // No saved layout means a first run, or the launch after the user
+    // closed the last pane of the last window.  Both want one window
+    // with one shell in it — a 3×3 wall of nine shells is a layout the
+    // user asks for, not one to be handed on arrival.
     let (grid_cols, grid_rows): (usize, usize) = match boot_window.as_ref() {
         Some(s) if s.grid_cols > 0 && s.grid_rows > 0 => (
             (s.grid_cols as usize).clamp(1, 6),
             (s.grid_rows as usize).clamp(1, 6),
         ),
-        _ => (3, 3),
+        _ => (1, 1),
     };
     let n_sessions = match boot_window.as_ref() {
         Some(s) => s.panes.len().clamp(1, SESSION_COUNT_HARD_CAP),
-        None => grid_cols * grid_rows,
+        None => 1,
     };
     let (boot_cols, boot_rows) = {
         let (cell_w, cell_h) = renderer.cell_dims();
@@ -8181,7 +8551,7 @@ fn main() {
         // they are simply waiting for their own window to be opened.
         let reserved_sids: std::collections::HashSet<u64> = saved_windows
             .iter()
-            .flat_map(|w| w.panes.iter())
+            .flat_map(|(_, w)| w.panes.iter())
             .map(|p| p.sid)
             .filter(|sid| *sid != 0)
             .collect();
@@ -8262,6 +8632,13 @@ fn main() {
         drop_target: None,
         pending_move_sid: None,
         saved_windows,
+        parked_windows: Vec::new(),
+        dev_close_panes: std::env::var("MARSPOT_DEV_CLOSE_PANES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        dev_close_panes_at: Some(Instant::now() + Duration::from_secs(3)),
+        layout_discarded: false,
         windows: vec![{
             let mut w = WindowState::new(
                 FIRST_WINDOW_ID,
@@ -8290,10 +8667,12 @@ fn main() {
     // Safe-mode boot: L1 would refuse these anyway; not asking keeps
     // the intent visible on both sides of the wire.
     if std::env::var("MARSPOT_SAFE_MODE").is_err() {
-        for i in 0..app.saved_windows.len() {
+        let slots: Vec<u32> =
+            app.saved_windows.iter().map(|(slot, _)| *slot as u32).collect();
+        for slot in slots {
             app.pending_to_shell.push((
                 MsgType::WindowOpenRequest,
-                marspot::shell_proto::encode_window_open_request(i as u32 + 1),
+                marspot::shell_proto::encode_window_open_request(slot),
             ));
         }
     }
@@ -8450,6 +8829,12 @@ fn main() {
         // The process panel is per-window: two windows can each have
         // one open, and a kill pending in an unfocused window still has
         // to escalate on schedule.
+        // Dev seam (`MARSPOT_DEV_CLOSE_PANES=n`): close the focused
+        // pane of the key window n times, a second apart.  A script
+        // cannot click the pane's [×], and "closing the last pane
+        // closes the window / quits the app" is otherwise untestable.
+        // Unset in the installed app.
+        app.dev_drive_close_panes();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)

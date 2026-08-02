@@ -160,6 +160,21 @@ pub fn read_windows() -> Option<Vec<SavedWindow>> {
     Some(out)
 }
 
+/// Forget every saved window frame.
+///
+/// Called on the one teardown that means "there is nothing to come
+/// back to": the user closed the last pane of the last window.  The
+/// next launch then has no geometry to restore and opens the default
+/// window centred, rather than reusing the frame of a layout the user
+/// just dismantled.
+pub fn clear_windows() -> io::Result<()> {
+    refuse_if_test_binary("window-state.bin")?;
+    match std::fs::remove_file(window_state_file_path()) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
 /// Refuse to write the real, installed app's state from a test
 /// binary.
 ///
@@ -414,6 +429,19 @@ pub fn write(s: &SavedState) -> io::Result<()> {
     }
     std::fs::rename(&tmp, &path)?;
     Ok(())
+}
+
+/// Forget the saved layout — the pane/window half of `clear_windows`.
+///
+/// Removing the file rather than writing an empty record matters: an
+/// empty *list* and a missing file both boot to defaults, but only the
+/// missing file survives a downgrade to a build that reads v1.
+pub fn clear() -> io::Result<()> {
+    refuse_if_test_binary("shell-state.bin")?;
+    match std::fs::remove_file(state_file_path()) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
 }
 
 fn write_string(out: &mut Vec<u8>, s: &str) {
