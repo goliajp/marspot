@@ -28,7 +28,15 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.86**
+Current: **0.7.87**
+
+### 0.7.87
+
+`pty_op` 的每一行日志带上 pane id。
+
+三次唤醒、两次回收,而日志读不出哪次属于哪个 pane —— 两条 run 在两个 pane
+上交错,读起来像一条不可能的 run。排查「有没有打错 pane」的时候发现日志
+本身分不清 pane,那就得先补这个。
 
 ### 0.7.86
 

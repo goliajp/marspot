@@ -359,7 +359,7 @@ impl OpRunner {
         host.log(
             if outcome.is_done() { LogLevel::Info } else { LogLevel::Warn },
             &format!("{}.outcome", self.op.name),
-            &format!("{outcome:?}"),
+            &format!("pane {} {outcome:?}", host.shelld_session_id()),
         );
         self.finished = Some(outcome);
     }
@@ -390,7 +390,17 @@ impl OpRunner {
             host.log(
                 LogLevel::Info,
                 &format!("{}.step", self.op.name),
-                &format!("{}/{} {}", self.at + 1, self.op.steps.len(), s.label),
+                // The pane, always.  Two runs on two panes interleave
+                // in the log, and without this the sequence reads as
+                // one impossible run — three wakes for two parked
+                // panes, with no way to tell which was which.
+                &format!(
+                    "pane {} {}/{} {}",
+                    host.shelld_session_id(),
+                    self.at + 1,
+                    self.op.steps.len(),
+                    s.label
+                ),
             );
         }
     }
@@ -439,7 +449,10 @@ impl OpRunner {
                     host.log(
                         LogLevel::Info,
                         &format!("{}.already_done", self.op.name),
-                        "the process is already there; nothing left to do",
+                        &format!(
+                            "pane {} already has one; nothing left to do",
+                            host.shelld_session_id()
+                        ),
                     );
                     self.finish(host, OpOutcome::Done);
                 }
@@ -520,7 +533,7 @@ impl OpRunner {
         host.log(
             LogLevel::Info,
             &format!("{}.woken", self.op.name),
-            &format!("by {trigger}"),
+            &format!("pane {} by {trigger}", host.shelld_session_id()),
         );
         self.advance(host);
         true
