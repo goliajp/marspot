@@ -804,7 +804,7 @@ mod window_state_tests {
         let mut app = app_with(vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
         app.saved_windows.push_back((1, record));
 
-        app.adopt_window(2, 800.0, 600.0, 2.0);
+        app.adopt_window(2, 800.0, 600.0, 2.0, Some(1));
 
         assert_eq!(app.windows.len(), 2, "the window exists immediately");
         let w = &app.windows[1];
@@ -1178,7 +1178,7 @@ mod window_state_tests {
         }));
         app.pending_move_sid = Some(11);
 
-        app.adopt_window(7, 800.0, 600.0, 2.0);
+        app.adopt_window(7, 800.0, 600.0, 2.0, Some(1));
 
         assert_eq!(app.windows.len(), 2);
         let nw = &app.windows[1];
@@ -2218,7 +2218,7 @@ enum CoreEvent {
     Focus(bool),
     /// RFC-005 — window-aware surface attach.  A `window_id` the core
     /// has not seen before *is* that window's birth event.
-    SurfaceAttachWindow(u32, u32, f64, f64, f64, u32),
+    SurfaceAttachWindow(u32, u32, f64, f64, f64, u32, Option<u32>),
     /// RFC-005 step 6b — a restore worker finished assembling a saved
     /// window's panes; they replace that window's placeholders.
     WindowRestoreFinished(u32, RestoredPanes),
@@ -2475,8 +2475,8 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .map(|(x, y, paths, win)| CoreEvent::FileDrop(x, y, paths, win)),
         MsgType::SurfaceAttachWindow => decode_surface_attach_window(&f.payload)
             .ok()
-            .map(|(fr, bk, w, h, sc, win)| {
-                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win)
+            .map(|(fr, bk, w, h, sc, win, slot)| {
+                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot)
             }),
         MsgType::WindowClosed => decode_window_closed(&f.payload)
             .ok()
@@ -3793,6 +3793,12 @@ impl CoreApp {
             .iter()
             .map(|w| (w.frame_index, self.window_layout_record(w)))
             .chain(self.parked_windows.iter().cloned())
+            // Records whose window L1 has not opened yet are part of
+            // the layout too.  Without them the boot save — which runs
+            // before any restore lands — rewrote the file with just
+            // the boot window, and a crash in that gap lost every
+            // other window.
+            .chain(self.saved_windows.iter().cloned())
             .collect();
         slots.sort_by_key(|(slot, _)| *slot);
         // `key_window` indexes the live list; the saved list is the
@@ -3863,6 +3869,20 @@ impl CoreApp {
             if *s > slot {
                 *s -= 1;
             }
+        }
+    }
+
+    /// The slot for a window with no saved record: the one L1 named,
+    /// unless something already holds it.
+    fn slot_for_new_window(&self, announced: Option<usize>) -> usize {
+        let taken = |s: usize| {
+            self.windows.iter().any(|w| w.frame_index == s)
+                || self.parked_windows.iter().any(|(q, _)| *q == s)
+                || self.saved_windows.iter().any(|(q, _)| *q == s)
+        };
+        match announced {
+            Some(s) if !taken(s) => s,
+            _ => self.next_frame_index(),
         }
     }
 
@@ -4962,7 +4982,14 @@ impl CoreApp {
     /// RFC-005: a fresh window starts as a 1×1 grid with one pane.
     /// The pane is spawned off-loop like `[+]` does — a window opening
     /// must not freeze the panes of the windows already up.
-    fn adopt_window(&mut self, window_id: u32, w_phys: f64, h_phys: f64, scale: f64) {
+    fn adopt_window(
+        &mut self,
+        window_id: u32,
+        w_phys: f64,
+        h_phys: f64,
+        scale: f64,
+        slot: Option<usize>,
+    ) {
         // RFC-005 step 5 — a parked "Move to New Window" pane claims
         // the window before the restore queue gets a look: the user
         // just asked for this window, a boot leftover did not.
@@ -4994,7 +5021,7 @@ impl CoreApp {
                 let mut nw = WindowState::new(
                     window_id, vec![pane], 0, 1, 1, w_phys, h_phys, scale,
                 );
-                nw.frame_index = self.next_frame_index();
+                nw.frame_index = self.slot_for_new_window(slot);
                 nw.render.mark_bg_clear_required();
                 self.windows.push(nw);
                 let wi = self.windows.len() - 1;
@@ -5019,7 +5046,20 @@ impl CoreApp {
         // window comes up with its saved grid and one "starting…"
         // placeholder per saved slot; the assembly worker replaces
         // them with the real panes.
-        if let Some((slot, record)) = self.saved_windows.pop_front() {
+        // Prefer the record L1 named.  Arrival order is only a valid
+        // pairing while every saved window is being reopened, which is
+        // a cold boot; a core swap re-announces the windows that are
+        // already up, so a window merely parked would otherwise hand
+        // its record to the next live window that showed up.
+        let queued = slot
+            .and_then(|s| self.saved_windows.iter().position(|(q, _)| *q == s))
+            .and_then(|i| self.saved_windows.remove(i))
+            .or_else(|| {
+                // No slot on the wire (an older shell), or a slot we
+                // hold no record for — the window is new.
+                slot.is_none().then(|| self.saved_windows.pop_front()).flatten()
+            });
+        if let Some((slot, record)) = queued {
             self.adopt_restored_window(window_id, slot, record, w_phys, h_phys, scale);
             return;
         }
@@ -5043,7 +5083,7 @@ impl CoreApp {
             h_phys,
             scale,
         );
-        w.frame_index = self.next_frame_index();
+        w.frame_index = self.slot_for_new_window(slot);
         // A brand-new window has never been painted.
         w.render.mark_bg_clear_required();
         self.windows.push(w);
@@ -8955,7 +8995,7 @@ fn main() {
                     app.adopt_restored_panes(win, panes.0)
                 }
                 CoreEvent::WindowClosed(win) => app.close_window(win),
-                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win) => {
+                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot) => {
                     // Same staging as the legacy frame — the id only
                     // says which window it is about.  From the first
                     // one of these onward the legacy frame is ignored,
@@ -8968,7 +9008,7 @@ fn main() {
                         // has no separate "create window" frame, so a
                         // window that appears after a core swap is
                         // adopted by the same path that created it.
-                        app.adopt_window(win, w, h, sc);
+                        app.adopt_window(win, w, h, sc, slot.map(|s| s as usize));
                     }
                     queue_attach(pending_attach, win, (fr, bk, w, h, sc));
                 }

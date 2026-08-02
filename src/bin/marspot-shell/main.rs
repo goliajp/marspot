@@ -1385,9 +1385,19 @@ impl ShellApp {
                 encode_surface_attach(f, b, w_phys, h_phys, scale),
             );
         }
+        // The slot rides along so the core can match this window to
+        // its saved record by name rather than by arrival order — see
+        // `encode_surface_attach_window`.  A window we have not taken
+        // on yet (this runs during the replay into a fresh core too)
+        // falls back to 0, which the core reads as "no opinion".
+        let slot = self
+            .window_index(window_id)
+            .map(|i| self.windows[i].frame_index)
+            .or_else(|| self.pending_frame_index.get(&window_id).copied())
+            .unwrap_or(0) as u32;
         self.send(
             MsgType::SurfaceAttachWindow,
-            encode_surface_attach_window(f, b, w_phys, h_phys, scale, window_id),
+            encode_surface_attach_window(f, b, w_phys, h_phys, scale, window_id, slot),
         );
     }
 

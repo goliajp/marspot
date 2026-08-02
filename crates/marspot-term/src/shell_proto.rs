@@ -1271,6 +1271,15 @@ pub fn decode_surface_attach(
 ///
 /// A frame naming a `window_id` the core has not seen is that
 /// window's birth event; there is no separate "create window" message.
+/// A second trailing `u32` carries the window's **slot** — its entry
+/// in `window-state.bin` / `shell-state.bin`.  Without it the core
+/// matched a window to its saved record by arrival order, which is
+/// only right while every saved window is being reopened.  A core swap
+/// reopens nothing (the windows are already up, L1 just re-announces
+/// them), so a window that is merely *closed and parked* left its
+/// record at the front of the queue for the next live window to adopt
+/// — and two windows swapped panes.  An older shell omits it and the
+/// core falls back to arrival order, exactly as before.
 pub fn encode_surface_attach_window(
     front_id: u32,
     back_id: u32,
@@ -1278,15 +1287,19 @@ pub fn encode_surface_attach_window(
     h_phys: f64,
     scale: f64,
     window_id: u32,
+    frame_index: u32,
 ) -> Vec<u8> {
     let mut v = encode_surface_attach(front_id, back_id, w_phys, h_phys, scale);
     v.extend_from_slice(&window_id.to_le_bytes());
+    v.extend_from_slice(&frame_index.to_le_bytes());
     v
 }
 
+/// Returns `(front, back, w, h, scale, window_id, frame_index)`, with
+/// `frame_index` `None` when the sender predates it.
 pub fn decode_surface_attach_window(
     payload: &[u8],
-) -> io::Result<(u32, u32, f64, f64, f64, u32)> {
+) -> io::Result<(u32, u32, f64, f64, f64, u32, Option<u32>)> {
     if payload.len() < 36 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1294,7 +1307,9 @@ pub fn decode_surface_attach_window(
         ));
     }
     let (front, back, w, h, scale) = decode_surface_attach(&payload[..32])?;
-    Ok((front, back, w, h, scale, trailing_window_id(payload, 32)))
+    let frame_index = (payload.len() >= 40)
+        .then(|| u32::from_le_bytes(payload[36..40].try_into().unwrap()));
+    Ok((front, back, w, h, scale, trailing_window_id(payload, 32), frame_index))
 }
 
 /// A window closed.  The core drops that `WindowState` — and with it
@@ -3125,16 +3140,25 @@ mod tests {
         assert_eq!(legacy.len(), 32, "growing this breaks every old core");
         assert!(decode_surface_attach(&legacy).is_ok());
 
-        let p = encode_surface_attach_window(11, 22, 800.0, 600.0, 2.0, 5);
-        assert_eq!(p.len(), 36);
+        let p = encode_surface_attach_window(11, 22, 800.0, 600.0, 2.0, 5, 3);
+        assert_eq!(p.len(), 40);
         assert_eq!(&p[..32], &legacy[..], "prefix must stay legacy-shaped");
         assert!(
             decode_surface_attach(&p).is_err(),
             "the strict legacy decoder rejects the longer body — which \
              is exactly why this needed its own msg type"
         );
-        let (f, b, w, h, sc, win) = decode_surface_attach_window(&p).unwrap();
+        let (f, b, w, h, sc, win, slot) = decode_surface_attach_window(&p).unwrap();
         assert_eq!((f, b, w, h, sc, win), (11, 22, 800.0, 600.0, 2.0, 5));
+        assert_eq!(slot, Some(3));
+
+        // A shell from before the slot existed sends 36 bytes.  The
+        // core has to keep reading those — during a swap the two sides
+        // are different builds by definition.
+        let old = &p[..36];
+        let (.., win, slot) = decode_surface_attach_window(old).unwrap();
+        assert_eq!(win, 5, "the window id still decodes");
+        assert_eq!(slot, None, "and the missing slot is absent, not garbage");
     }
 
     /// The window lifecycle messages must be decodable by number, and

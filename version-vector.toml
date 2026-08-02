@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.93"  # 关窗口=收起(会话照跑),关 pane=拆掉;退出不再杀会话;详见 CHANGELOG.md
-core    = "0.12.89"  # 关掉最后一个 pane 会关掉窗口;关窗口的顺序不再决定谁活下来;详见 CHANGELOG.md
+shell   = "0.7.94"  # SurfaceAttachWindow 带上窗口的槽位;详见 CHANGELOG.md
+core    = "0.12.90"  # 按槽位认领存档窗口,不按到达顺序;还没打开的记录也照存;详见 CHANGELOG.md
 session = "0.11.34"  # grid hold:PTY 照读、画面停住,释放时一次喂完;详见 CHANGELOG.md
