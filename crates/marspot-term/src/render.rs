@@ -150,6 +150,13 @@ pub struct SessionView<'a> {
     /// moved out") because they are different facts that happen to
     /// share a scrim.  Both can be true; the deeper one wins.
     pub recede: u32,
+    /// The dim to actually paint, already eased.
+    ///
+    /// `recede` is the *step* the pane is on; this is where the picture
+    /// has got to on its way there.  The renderer takes the number
+    /// rather than deriving it, because easing needs memory between
+    /// frames and the renderer has none.
+    pub scrim: f32,
     /// RFC-001 plugin badge — a short tag drawn at the right edge of
     /// the title strip (left of the optional refresh affordance) so
     /// plugins can surface per-pane metadata without overloading the

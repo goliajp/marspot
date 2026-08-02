@@ -7511,6 +7511,15 @@ impl CoreApp {
         // Cap views to the layout's cell count — sessions past it
         // stay alive in the sidebar without a main-area cell.
         let cell_count = win!(self, wi).layout.cells.len();
+        // Advance every pane's dim towards where its attention level
+        // says it belongs, and keep the frames coming while any of them
+        // is still moving.  Nothing here is a timer: when the last one
+        // arrives this stops asking, and the window is idle again.
+        let now = Instant::now();
+        let mut fading = false;
+        for (i, p) in win!(self, wi).panes.iter_mut().enumerate().take(cell_count) {
+            fading |= p.aim_scrim(i == focused, now);
+        }
         let views: Vec<SessionView> = win!(self, wi)
             .panes
             .iter()
@@ -7554,7 +7563,10 @@ impl CoreApp {
             focused,
         );
         win!(self, wi).render = wr;
-        win!(self, wi).needs_render = false;
+        // Cleared here, then set again if a dim is still on its way:
+        // the order matters, because this reset runs after the frame
+        // and would otherwise wipe the request for the next one.
+        win!(self, wi).needs_render = fading;
         // One INFO per window, the first time it paints.  Emitted here
         // rather than in the render pass because the attach branch
         // renders too — and that is precisely how the boot window gets

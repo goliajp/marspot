@@ -2253,7 +2253,10 @@ fn build_instances(
         let dimming = [
             (drag_source == Some(i)).then_some(DRAG_SOURCE_SCRIM),
             view.dormant.then_some(EMPTY_SEAT_SCRIM),
-            Some(attention_scrim(view.focused, view.recede)),
+            // Already eased by the pane — see `ScrimFade`.  The step
+            // it is heading for is `attention_scrim(focused, recede)`;
+            // what arrives here is where it has got to.
+            Some(view.scrim),
         ]
         .into_iter()
         .flatten()
@@ -2663,7 +2666,11 @@ const EMPTY_SEAT_SCRIM: f32 = 0.22;
 /// The focused pane is never dimmed at any level: whatever the state
 /// machine thinks of it, a pane the user is looking at is not
 /// receding from where they sit.
-fn attention_scrim(focused: bool, recede: u32) -> f32 {
+/// The dim a pane's attention level calls for.
+///
+/// The *target*, not what is painted: `Pane`'s `ScrimFade` eases
+/// towards it, and the view carries the eased value.
+pub fn attention_scrim(focused: bool, recede: u32) -> f32 {
     if focused {
         return 0.0;
     }
@@ -7639,7 +7646,7 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant: false, recede: 0,
+            dormant: false, recede: 0, scrim: 0.0,
         };
         let mut overlay_rects = Vec::new();
         build_instances(
@@ -7728,7 +7735,7 @@ mod tests {
             title: "", selection: None, ime_preedit: "", update_pending: false,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[], search_overlay: None, seq: 0,
-            dormant, recede,
+            dormant, recede, scrim: attention_scrim(focused, recede),
         };
         let mut scrim_alphas = |view: SessionView| -> Vec<f32> {
             let mut overlay_rects = Vec::new();
@@ -7825,6 +7832,7 @@ mod tests {
             update_pending: false,
             dormant: false,
             recede: 0,
+            scrim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -7933,6 +7941,7 @@ mod tests {
             update_pending: false,
             dormant: false,
             recede: 0,
+            scrim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -8014,6 +8023,7 @@ mod tests {
             update_pending: false,
             dormant: false,
             recede: 0,
+            scrim: 0.0,
             right_badge: "",
             top_fixed_h_cells: top_fixed,
             bot_fixed_h_cells: 0,
@@ -8119,6 +8129,7 @@ mod tests {
             update_pending: false,
             dormant: false,
             recede: 0,
+            scrim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -8138,6 +8149,7 @@ mod tests {
             update_pending: view.update_pending,
             dormant: false,
             recede: 0,
+            scrim: 0.0,
             right_badge: view.right_badge,
             top_fixed_h_cells: view.top_fixed_h_cells,
             bot_fixed_h_cells: view.bot_fixed_h_cells,
@@ -8245,6 +8257,7 @@ mod tests {
             update_pending: false,
             dormant: false,
             recede: 0,
+            scrim: 0.0,
             right_badge: "",
             top_fixed_h_cells: 0,
             bot_fixed_h_cells: 0,
@@ -8316,6 +8329,7 @@ mod tests {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
                                                                                 recede: 0,
+                scrim: 0.0,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 0,
             highlight_spans: &[],
             search_overlay: None,
@@ -8325,6 +8339,7 @@ mod tests {
             grid: &grid, view_offset: 0, cursor_visible: false, focused: true,
             title: "", selection: None, ime_preedit: "", update_pending: false, dormant: false,
                                                                                 recede: 0,
+                scrim: 0.0,
             right_badge: "", top_fixed_h_cells: 0, bot_fixed_h_cells: 2,
             highlight_spans: &[],
             search_overlay: None,

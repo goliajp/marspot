@@ -2283,6 +2283,7 @@ fn bench_metal_render(arg: &str) {
     );
     let view = SessionView {
         recede: 0,
+        scrim: 0.0,
         grid: terminal.grid(),
         view_offset: 0,
         cursor_visible: true,
