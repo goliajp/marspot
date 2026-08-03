@@ -3665,6 +3665,11 @@ impl ShellApp {
             return;
         };
         let plugin_name = active.plugin_name;
+        // Read before `on_end` — that is where the hold is released,
+        // and after it this session no longer speaks for the pane.
+        let froze_picture = active.session.caps()
+            & marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID
+            != 0;
         let end_flag = std::cell::Cell::new(false);
         let host = ConcretePaneSessionHost {
             sid,
@@ -3688,6 +3693,23 @@ impl ShellApp {
             plugin = plugin_name,
             reason = format!("{:?}", reason)
         );
+        // The freeze just lifted.  `sweep_pane_status` held this pane's
+        // brightness for as long as its picture was held, so the pane
+        // is still wearing the level it was parked at — and the sweep
+        // that would notice is up to a second away.  A second is long
+        // enough to watch the content come back and the pane light up
+        // afterwards as two separate events.
+        //
+        // Sweeping *here* rather than sending a level from the last
+        // snapshot: that snapshot describes the parked pane (the
+        // machines kept running while only the presentation was
+        // frozen), so it would dim the pane at the exact moment its
+        // program came back.  Stepping the machines first is what makes
+        // the level true.
+        if froze_picture {
+            self.pane_status.force_next_sweep();
+            self.sweep_pane_status();
+        }
     }
 
 }

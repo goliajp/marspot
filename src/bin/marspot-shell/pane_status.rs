@@ -259,6 +259,17 @@ impl PaneStateTracker {
             .collect()
     }
 
+    /// Let the next [`sweep`](Self::sweep) run whatever the interval
+    /// gate would have said.
+    ///
+    /// For the moments where waiting up to `SWEEP_INTERVAL` is
+    /// visible: a pane whose picture was frozen has been wearing a
+    /// frozen brightness with it, and both have to come back in the
+    /// same beat as the program that was restored into it.
+    pub fn force_next_sweep(&mut self) {
+        self.last_sweep = None;
+    }
+
     /// Step every live session's machine, at most once per
     /// [`SWEEP_INTERVAL`].
     ///
@@ -627,6 +638,19 @@ mod tests {
             "a second sweep inside the window must be a no-op"
         );
         assert!(t.sweep(base + SWEEP_INTERVAL).is_some());
+
+        // …and the one caller that cannot wait out the window: a pane
+        // whose picture has just been unfrozen needs its brightness
+        // back in the same beat as its content, not up to a second
+        // later.
+        let just_after = base + SWEEP_INTERVAL + Duration::from_millis(10);
+        assert!(t.sweep(just_after).is_none(), "still inside the window");
+        t.force_next_sweep();
+        assert!(t.sweep(just_after).is_some(), "forced through the gate");
+        assert!(
+            t.sweep(just_after).is_none(),
+            "and the gate closes again behind it"
+        );
     }
 
     /// A plugin's report is used by the NEXT sweep, and replaces the

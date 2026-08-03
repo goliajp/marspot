@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.96"  # 回收不再报 zZ:徽章冻在回收前那一个;唤醒等画完再放开;详见 CHANGELOG.md
+shell   = "0.7.97"  # 冻结一放开就立刻重扫:亮度跟内容同一拍回来;详见 CHANGELOG.md
 core    = "0.12.90"  # 按槽位认领存档窗口,不按到达顺序;还没打开的记录也照存;详见 CHANGELOG.md
 session = "0.11.35"  # hold 上限按「重画一整屏」定,不按「一个提示符」;详见 CHANGELOG.md
