@@ -212,6 +212,15 @@ pub struct ClaudecodePlugin {
     /// Last logged "why not yet" per candidate pane, so the reason is
     /// logged on change rather than every scan.
     blocked_reason: HashMap<u64, String>,
+    /// The pane the user's cursor is in, from `on_pane_focused`.
+    ///
+    /// The seat they left.  Reclamation is otherwise blind to where
+    /// the user is: it reads the *session's* clock (transcript age),
+    /// and a pane can be thirty minutes idle by that clock while the
+    /// user is sitting in it reading.  Parking it there means the next
+    /// keystroke costs a wake — which, now that a reclamation is
+    /// invisible, reads as marspot going unresponsive for no reason.
+    focused_sid: Option<u64>,
     /// RFC-003 C7 auto-retry monitor: one entry per shelld session
     /// currently running claudecode.  Created when a session first
     /// binds, dropped when the bind goes away.  See `MonitorState`.
@@ -549,6 +558,14 @@ struct IdleEvidence {
     /// The session is waiting on a timer it set itself (a `/loop`
     /// autorun), not on the user.
     own_timer: bool,
+    /// The user's cursor is in this pane right now.
+    ///
+    /// The one thing the session's own clock cannot see.  A pane can
+    /// be half an hour idle by its transcript while the user sits in
+    /// it reading the last answer, and reclaiming it there charges
+    /// them a three-second wake for their next keystroke — with no
+    /// warning, because a reclamation is deliberately invisible.
+    user_here: bool,
 }
 
 /// Why a candidate pane was not reclaimed on this pass, as
@@ -574,6 +591,12 @@ fn blocking_reason(
     }
     if !(e.quiescent && e.awaiting_user) {
         return None; // not a candidate; not this log's business
+    }
+    if e.user_here {
+        return Some((
+            "user_here",
+            "the user's cursor is in this pane".to_string(),
+        ));
     }
     if e.work_in_flight {
         return Some((
@@ -624,6 +647,9 @@ fn blocking_reason(
 fn should_hibernate(e: IdleEvidence, threshold: Duration) -> bool {
     e.quiescent
         && e.awaiting_user
+        // Never the seat the user is in.  Everything else here is
+        // about the session; this is the one clause about the person.
+        && !e.user_here
         // Two vetoes the clock cannot see: something of the session's
         // own is running, or the session is waiting on its own timer.
         // Both mean the pane is not resting, it is between steps.
@@ -830,6 +856,7 @@ impl ClaudecodePlugin {
             held: HashMap::new(),
             cpu_samples: HashMap::new(),
             blocked_reason: HashMap::new(),
+            focused_sid: None,
             monitors: HashMap::new(),
             monitor_unsupported: false,
             worker: None,
@@ -1008,6 +1035,7 @@ impl ClaudecodePlugin {
             let evidence = IdleEvidence {
                 work_in_flight,
                 own_timer,
+                user_here: self.focused_sid == Some(*sid),
                 quiescent: view.quiescent,
                 awaiting_user: matches!(
                     view.status,
@@ -1135,9 +1163,16 @@ impl ClaudecodePlugin {
                 LogLevel::Info,
                 "hibernate.start",
                 &format!(
-                    "shelld_session={} uuid={} idle={}s cpu_delta={}ms over {}s — reclaiming pid {}",
+                    // `idle` is the clock that DECIDES (the session's
+                    // transcript age).  It used to print `held` — the
+                    // pane's own state clock — which reads 0s or 1s on
+                    // a session that has been idle for hours, so the
+                    // log said the policy had fired on nothing.
+                    "shelld_session={} uuid={} idle={}s (pane state held {}s) \
+                     cpu_delta={}ms over {}s — reclaiming pid {}",
                     sid,
                     meta.uuid,
+                    evidence.idle_for.as_secs(),
                     evidence.held.as_secs(),
                     evidence.cpu_delta_ns / 1_000_000,
                     evidence.since_sample.as_secs(),
@@ -2188,6 +2223,18 @@ impl Plugin for ClaudecodePlugin {
         // no-op in steady state.
         self.refresh_monitors(host);
         self.pump_monitors(host);
+    }
+
+    /// Where the user is.
+    ///
+    /// The only input this plugin has about the *person* rather than
+    /// the session.  Everything else it weighs — transcript age, CPU,
+    /// child processes — describes what claude is doing, and none of it
+    /// can tell "half an hour since the last turn" apart from "half an
+    /// hour since the last turn, and they are sitting right here
+    /// reading it".
+    fn on_pane_focused(&mut self, _host: &dyn PluginHost, shelld_session_id: u64) {
+        self.focused_sid = Some(shelld_session_id);
     }
 
     fn on_pane_badge_click(
@@ -4721,6 +4768,7 @@ mod tests {
             held: Duration::from_secs(secs),
             cpu_delta_ns: 0,
             since_sample: Duration::from_secs(120),
+            user_here: false,
             work_in_flight: false,
             own_timer: false,
         }
@@ -4761,6 +4809,32 @@ mod tests {
         );
     }
 
+    /// 2026-08-03 report: come back to marspot after a short break and
+    /// the first pane you touch takes seconds before it answers.
+    ///
+    /// It had been reclaimed.  The clock that decides is the session's
+    /// transcript age, and that clock knows nothing about where the
+    /// user is — so the pane they were sitting in, reading the last
+    /// answer, was parked out from under them and the next keystroke
+    /// paid for a wake.  Invisibly, since a reclamation is deliberately
+    /// silent: it reads as marspot simply going unresponsive.
+    #[test]
+    fn the_pane_the_user_is_sitting_in_is_never_reclaimed() {
+        // Idle for two hours by its own clock, and eligible on every
+        // other count.
+        let e = IdleEvidence { user_here: true, ..idle_for(7200) };
+        assert!(!should_hibernate(e, HOUR));
+        assert_eq!(
+            blocking_reason(e, HOUR).map(|(cat, _)| cat),
+            Some("user_here"),
+            "and it says so, rather than looking like a policy that never fires"
+        );
+
+        // The same pane, once they move to another one.
+        let gone = IdleEvidence { user_here: false, ..e };
+        assert!(should_hibernate(gone, HOUR));
+    }
+
     /// The reclamation gate excludes an already-parked pane on the
     /// same evidence it uses for everything else — no private "have I
     /// done this one" flag.
@@ -4774,6 +4848,7 @@ mod tests {
             idle_for: Duration::from_secs(86_400),
             cpu_delta_ns: 0,
             since_sample: Duration::from_secs(300),
+            user_here: false,
             work_in_flight: false,
             own_timer: false,
         };
