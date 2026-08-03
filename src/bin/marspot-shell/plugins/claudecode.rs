@@ -194,10 +194,17 @@ pub struct ClaudecodePlugin {
     /// attached.  Split from `dormant` so a re-arm after an execv
     /// doesn't stack a second session onto a pane that still has one.
     armed: std::collections::HashSet<u64>,
-    /// Panes this plugin has asked L3 to hold.  Tracked so a hold can
-    /// be undone even if the session that asked for it is gone — see
-    /// the sweep in `rearm_dormant`.
-    held: std::collections::HashSet<u64>,
+    /// Panes this plugin has asked L3 to hold, and the look each one
+    /// is frozen at.  Tracked so a hold can be undone even if the
+    /// session that asked for it is gone (see the sweep in
+    /// `rearm_dormant`) — and so the pane's chrome does not move while
+    /// its picture is standing still.
+    ///
+    /// The badge belongs to the frozen frame as much as the cells do:
+    /// claude going away drops the pane out of the scan's mapping, and
+    /// the mapping is what clears badges.  A parked pane would blank
+    /// its corner, which is the reclamation announcing itself.
+    held: HashMap<u64, FrozenLook>,
     /// `shelld_session_id → (claude subtree CPU ns, sampled at)` from
     /// the previous scan, so the idle policy can look at a delta
     /// rather than an absolute.
@@ -663,6 +670,18 @@ fn activity_for_unbound(sid: u64, dormant: &[DormantRecord]) -> CcActivity {
     }
 }
 
+/// The chrome a held pane is frozen at.
+///
+/// A reclamation is supposed to be invisible: the picture stands still
+/// at the frame the user left, and everything drawn *around* that
+/// picture has to stand still with it, or the pane announces what is
+/// happening to it even though its cells never moved.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct FrozenLook {
+    badge: String,
+    title: String,
+}
+
 /// What a dormant pane needs to wake itself up again, persisted so it
 /// survives an L1 self-execv (which drops every PaneSession).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -761,7 +780,18 @@ fn decode_dormant(text: &str) -> Vec<DormantRecord> {
 /// three ticks meant 48 ms of silence, short enough to land in the
 /// pause between claude's banner and its first paint, and the freeze
 /// lifted there.  A duration is the same length whatever the cadence.
-const WAKE_QUIET_FOR: Duration = Duration::from_millis(500);
+///
+/// 2026-08-03 — raised from 500 ms.  claude does not paint a resumed
+/// session in one go: it draws, pauses to read more of the transcript,
+/// redraws, settles.  Half a second of silence is inside those pauses,
+/// so the freeze lifted onto a half-built screen and the user watched
+/// the rest of it arrive — the wake was over in 1.9 s on a session
+/// that takes several to settle.  The point of the freeze is that the
+/// only transition anyone sees is old frame → finished frame, so the
+/// still-window has to be longer than claude's own pauses.  Waiting
+/// too long costs nothing visible: what is on screen is the picture
+/// the user left.  `WAKE_WATCHDOG` bounds the pathological case.
+const WAKE_QUIET_FOR: Duration = Duration::from_millis(1_500);
 
 /// How long the hold gets to reach L3 before the signal is sent.
 ///
@@ -797,7 +827,7 @@ impl ClaudecodePlugin {
             last_activity: HashMap::new(),
             dormant: Vec::new(),
             armed: std::collections::HashSet::new(),
-            held: std::collections::HashSet::new(),
+            held: HashMap::new(),
             cpu_samples: HashMap::new(),
             blocked_reason: HashMap::new(),
             monitors: HashMap::new(),
@@ -1143,7 +1173,21 @@ impl ClaudecodePlugin {
                 );
                 continue;
             };
-            self.held.insert(*sid);
+            // Freeze the chrome at the same instant as the picture:
+            // this scan still sees the claude we are about to take
+            // down, so it is the last one that knows what the corner
+            // of this pane says.
+            self.held.insert(
+                *sid,
+                FrozenLook {
+                    badge: result
+                        .new_mapping
+                        .get(sid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("P{}", meta.profile_num)),
+                    title: meta.project_basename.clone(),
+                },
+            );
             if let Err(e) = host.submit_pty_op(*sid, op) {
                 host.log(
                     LogLevel::Warn,
@@ -1172,6 +1216,67 @@ impl ClaudecodePlugin {
             .retain(|sid, _| result.sessions_seen.contains(sid));
         self.blocked_reason
             .retain(|sid, _| result.sessions_seen.contains(sid));
+    }
+
+    /// Push every pane's badge + title for this scan.
+    ///
+    /// Three populations, and the middle one is why this is its own
+    /// method: panes that just lost their claude (clear), panes we are
+    /// deliberately holding (keep exactly what they were frozen with),
+    /// and panes running claude now (the live badge).
+    ///
+    /// Re-pushed every tick rather than on change: L2 can spawn /
+    /// crash / respawn between ticks (CORE_BOOT_LOOP, silent update),
+    /// and transition-only would leave a fresh core with no badges
+    /// until something moved.  Per tick ≤ 9 small frames.
+    fn publish_looks(&self, host: &dyn PluginHost, result: &ScanResult) {
+        for (sh_sid, cc_sid) in &self.last_mapping {
+            if result.new_mapping.contains_key(sh_sid) {
+                continue;
+            }
+            // A held pane lost its claude because WE took it down.
+            // Clearing its corner would be the reclamation announcing
+            // itself on a pane whose whole point is standing still —
+            // the frozen look is re-asserted below instead.
+            if self.held.contains_key(sh_sid) {
+                continue;
+            }
+            host.log(
+                LogLevel::Info,
+                "session.unbound",
+                &format!("shelld_session={} (was sid={})", sh_sid, cc_sid),
+            );
+            let _ = host.set_pane_badge(*sh_sid, "");
+            let _ = host.set_pane_title(*sh_sid, "");
+        }
+        // Held panes wear the badge and title they were frozen with.
+        for (sh_sid, look) in &self.held {
+            if result.new_mapping.contains_key(sh_sid) {
+                continue;
+            }
+            let _ = host.set_pane_badge(*sh_sid, &look.badge);
+            if !look.title.is_empty() {
+                let _ = host.set_pane_title(*sh_sid, &look.title);
+            }
+        }
+        for (sh_sid, cc_sid) in &result.new_mapping {
+            if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
+                host.log(LogLevel::Warn, "pane_badge.set_failed", &format!("{e}"));
+            }
+            // Title 只用 project basename — profile 已经在 badge 里
+            // ("P3 …"),title 再重复就冗余.
+            if let Some(meta) = result.new_meta.get(sh_sid) {
+                if !meta.project_basename.is_empty() {
+                    if let Err(e) = host.set_pane_title(*sh_sid, &meta.project_basename) {
+                        host.log(
+                            LogLevel::Warn,
+                            "pane_title.set_failed",
+                            &format!("{e}"),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Put the wake path back after it was lost.
@@ -1253,7 +1358,19 @@ impl ClaudecodePlugin {
             // usual case — L3 outlived the L1 that asked), L3 sees no
             // change.  If a *new* L3 came up meanwhile, this is what
             // puts the hold back.
-            self.held.insert(d.shelld_sid);
+            // The look this pane is frozen at, rebuilt from the
+            // record: an L1 self-execv dropped whatever the badge said
+            // in full, and the profile is the half that survives.  It
+            // is what the badge would read anyway until the model is
+            // read back off the resumed session.
+            self.held.entry(d.shelld_sid).or_insert_with(|| FrozenLook {
+                badge: if d.profile_num == PROFILE_UNKNOWN {
+                    "cc".to_string()
+                } else {
+                    format!("P{}", d.profile_num)
+                },
+                title: String::new(),
+            });
             let _ = client.hold_grid_of(d.shelld_sid, true);
             match host.submit_pty_op_at(d.shelld_sid, op, RECLAIM_PARK_STEP) {
                 Ok(()) => {
@@ -1284,7 +1401,7 @@ impl ClaudecodePlugin {
         // fixing something: `held` is empty in the ordinary case.
         let back: Vec<u64> = self
             .held
-            .iter()
+            .keys()
             .copied()
             // A pane with a wake armed is one we are deliberately
             // holding — leave it alone.  The scan's mapping is up to
@@ -1465,10 +1582,12 @@ fn reclaim_op(
             // no claude and no wake armed, which is strictly worse than
             // waiting.  The wake itself takes ~2 s.
             .escape_hatch(false)
-            // `zZ` is the whole message: this pane is parked.  Which
-            // session it is parked on is in the log and in
-            // `dormant.tsv`, not in the corner of the screen.
-            .badge("zZ")
+            // No badge of its own.  A reclamation the user can see is
+            // a reclamation that happened *to* them; this one is
+            // supposed to be indistinguishable from the pane sitting
+            // there untouched, so the corner keeps saying what it said
+            // before (`ClaudecodePlugin::held` re-asserts it).  Which
+            // pane is parked is in the log and in `dormant.tsv`.
             // Let the hold reach L3 before anything can draw.  That
             // request crosses two process boundaries; the signal crosses
             // none, and sent together the signal wins — claude's parting
@@ -2005,51 +2124,7 @@ impl Plugin for ClaudecodePlugin {
                     );
                 }
             }
-            for (sh_sid, cc_sid) in &self.last_mapping {
-                if !result.new_mapping.contains_key(sh_sid) {
-                    host.log(
-                        LogLevel::Info,
-                        "session.unbound",
-                        &format!(
-                            "shelld_session={} (was sid={})",
-                            sh_sid, cc_sid
-                        ),
-                    );
-                    let _ = host.set_pane_badge(*sh_sid, "");
-                    let _ = host.set_pane_title(*sh_sid, "");
-                }
-            }
-            // Re-push every active badge + title every tick (idempotent).
-            // Why not transition-only: L2 core can spawn/crash/
-            // respawn between ticks (CORE_BOOT_LOOP, silent update);
-            // transition-only would leave the fresh core with no
-            // badges until something changes.  Per tick ≤ 9 small
-            // frames = a few hundred bytes.
-            for (sh_sid, cc_sid) in &result.new_mapping {
-                if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
-                    host.log(
-                        LogLevel::Warn,
-                        "pane_badge.set_failed",
-                        &format!("{e}"),
-                    );
-                }
-                if let Some(meta) = result.new_meta.get(sh_sid) {
-                    if !meta.project_basename.is_empty() {
-                        // Title 只用 project basename — profile 已经在
-                        // badge 里("P3 …"),title 再重复就冗余.
-                        if let Err(e) = host.set_pane_title(
-                            *sh_sid,
-                            &meta.project_basename,
-                        ) {
-                            host.log(
-                                LogLevel::Warn,
-                                "pane_title.set_failed",
-                                &format!("{e}"),
-                            );
-                        }
-                    }
-                }
-            }
+            self.publish_looks(host, &result);
             // Report this layer to the shell, which owns the state
             // machine.  The plugin does NOT compose its view with the
             // kernel's and does not decide what is actionable — it
@@ -4003,6 +4078,9 @@ mod tests {
         /// too — a test that pumped a plugin-private queue would be
         /// testing a shape that no longer exists.
         ops: std::sync::Mutex<pty_op::PtyOps>,
+        /// Every badge / title push, in order.
+        pane_badges: std::sync::Mutex<Vec<(u64, String)>>,
+        pane_titles: std::sync::Mutex<Vec<(u64, String)>>,
     }
 
     impl FakeHost {
@@ -4017,6 +4095,8 @@ mod tests {
                 begun: std::sync::Mutex::new(Vec::new()),
                 sessions: std::sync::Mutex::new(Vec::new()),
                 ops: std::sync::Mutex::new(pty_op::PtyOps::new(io)),
+                pane_badges: std::sync::Mutex::new(Vec::new()),
+                pane_titles: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -4031,6 +4111,28 @@ mod tests {
     }
 
     impl PluginHost for FakeHost {
+        fn set_pane_badge(
+            &self,
+            shelld_session_id: u64,
+            text: &str,
+        ) -> Result<(), PluginError> {
+            self.pane_badges
+                .lock()
+                .unwrap()
+                .push((shelld_session_id, text.to_string()));
+            Ok(())
+        }
+        fn set_pane_title(
+            &self,
+            shelld_session_id: u64,
+            text: &str,
+        ) -> Result<(), PluginError> {
+            self.pane_titles
+                .lock()
+                .unwrap()
+                .push((shelld_session_id, text.to_string()));
+            Ok(())
+        }
         fn pane_count(&self) -> usize {
             1
         }
@@ -4203,6 +4305,69 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-08-03 report: the reclamation is visible.
+    ///
+    /// The picture stands still, but killing claude drops the pane out
+    /// of the scan's mapping — and the mapping is what clears badges.
+    /// A parked pane blanked its corner and then wore `zZ`, which is
+    /// the reclamation announcing itself on a pane whose whole point is
+    /// that nothing about it moved.
+    #[test]
+    fn a_held_pane_keeps_the_badge_it_was_frozen_with() {
+        let dir = std::env::temp_dir()
+            .join(format!("marspot-look-{}-{}", std::process::id(), line!()));
+        fs::create_dir_all(&dir).unwrap();
+        let host = FakeHost::new(dir.clone());
+        let mut plugin = ClaudecodePlugin::new();
+
+        // Two panes wore a badge last tick; one of them is now held.
+        plugin.last_mapping.insert(7, "P2@opus-5".to_string());
+        plugin.last_mapping.insert(8, "P1@fable-5".to_string());
+        plugin.held.insert(
+            7,
+            FrozenLook { badge: "P2@opus-5".into(), title: "proj".into() },
+        );
+
+        // This scan sees neither: pane 7 because we killed its claude,
+        // pane 8 because the user quit it themselves.
+        plugin.publish_looks(&host, &empty_scan());
+
+        let badges = host.pane_badges.lock().unwrap().clone();
+        assert!(
+            badges.contains(&(7, "P2@opus-5".to_string())),
+            "the held pane keeps exactly what it was frozen with: {badges:?}"
+        );
+        assert!(
+            !badges.iter().any(|(sid, text)| *sid == 7 && text.is_empty()),
+            "and is never blanked: {badges:?}"
+        );
+        assert!(
+            badges.contains(&(8, String::new())),
+            "a pane that lost claude on its own still clears: {badges:?}"
+        );
+        assert!(
+            host.pane_titles
+                .lock()
+                .unwrap()
+                .contains(&(7, "proj".to_string())),
+            "its title is frozen too"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn empty_scan() -> ScanResult {
+        ScanResult {
+            new_mapping: HashMap::new(),
+            new_meta: HashMap::new(),
+            new_activity: HashMap::new(),
+            new_cpu: HashMap::new(),
+            new_vetoes: HashMap::new(),
+            scanned_at: SystemTime::now(),
+            sessions_seen: Vec::new(),
+            log_lines: Vec::new(),
+        }
     }
 
     /// The whole reclamation path, with a real process on the other
