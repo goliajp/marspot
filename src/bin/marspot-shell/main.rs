@@ -910,6 +910,25 @@ struct ShellApp {
     /// One entry per open native window, in creation order.  Never
     /// empty while the app runs; `windows[0]` is the boot window.
     windows: Vec<ShellWindow>,
+    /// Panes to wake now that the user is back, one at a time.
+    ///
+    /// Coming back to marspot after a while means every parked pane is
+    /// about to be wanted, and each wake costs seconds — claude has to
+    /// start and read its whole transcript before it paints.  Paying
+    /// that on the click is what reads as "the first pane I touch
+    /// hangs".  Paid on the way in instead, it overlaps with the user
+    /// reading whatever they came back for.
+    ///
+    /// Staggered rather than fanned out: sixteen claudes starting at
+    /// once is a CPU spike on a machine whose whole point is not
+    /// having one.
+    wake_queue: std::collections::VecDeque<u64>,
+    /// When the next entry of `wake_queue` may go.
+    wake_next_at: Option<Instant>,
+    /// Was the app focused at the last `focused` callback?  The queue
+    /// is filled on the *edge* — a click inside an already-focused
+    /// window is not a return.
+    app_focused: bool,
     /// Slot promised to a window that has been asked for but has not
     /// opened yet, keyed by the id it will carry.  A restore knows its
     /// slot (the core named it); a Cmd-N window takes the next free
@@ -1438,6 +1457,9 @@ impl ShellApp {
                 marspot::shell_proto::FIRST_WINDOW_ID,
                 0,
             )],
+            wake_queue: std::collections::VecDeque::new(),
+            wake_next_at: None,
+            app_focused: true,
             pending_frame_index: std::collections::HashMap::new(),
             next_window_id: marspot::shell_proto::FIRST_WINDOW_ID + 1,
             active: None,
@@ -2314,6 +2336,70 @@ impl ShellApp {
     /// Step every pane's state machine (gated to
     /// `pane_status::SWEEP_INTERVAL` inside the tracker), publish the
     /// result for plugins, and log the committed transitions.
+    /// How long between two prefetch wakes.
+    ///
+    /// One claude starting is a fork, an exec and a transcript read;
+    /// sixteen of them together is a stall on the machine the user just
+    /// came back to.  A second apart spreads a full window over the
+    /// time it takes to read one pane, which is the window that matters
+    /// — by the third click the third pane is already up.
+    const WAKE_STAGGER: Duration = Duration::from_millis(1_000);
+
+    /// The user is back: line up every parked pane to be woken.
+    ///
+    /// `MARSPOT_NO_WAKE_PREFETCH=1` turns it off — the wakes then
+    /// happen on the click, as they did before.
+    fn queue_parked_wakes(&mut self) {
+        if std::env::var_os("MARSPOT_NO_WAKE_PREFETCH").is_some() {
+            return;
+        }
+        let parked: Vec<u64> = self
+            .active_pane_sessions
+            .iter()
+            .filter(|(_, a)| a.session.parked())
+            .map(|(sid, _)| *sid)
+            .collect();
+        if parked.is_empty() {
+            return;
+        }
+        for sid in &parked {
+            if !self.wake_queue.contains(sid) {
+                self.wake_queue.push_back(*sid);
+            }
+        }
+        // First one now; the rest follow on the stagger.
+        self.wake_next_at = Some(Instant::now());
+        lx_event!(
+            "WAKE_PREFETCH",
+            "user is back; waking the parked panes ahead of the click",
+            panes = parked.len()
+        );
+    }
+
+    /// Release one queued wake per [`Self::WAKE_STAGGER`].
+    fn drive_wake_queue(&mut self) {
+        if self.wake_queue.is_empty() {
+            return;
+        }
+        match self.wake_next_at {
+            Some(t) if Instant::now() < t => return,
+            _ => {}
+        }
+        let Some(sid) = self.wake_queue.pop_front() else { return };
+        self.wake_next_at = Some(Instant::now() + Self::WAKE_STAGGER);
+        // Still parked?  The user may have clicked it themselves in the
+        // meantime, and waking a run that has moved on is not harmless
+        // — it would be typing at whatever is there now.
+        if !self
+            .active_pane_sessions
+            .get(&sid)
+            .is_some_and(|a| a.session.parked())
+        {
+            return;
+        }
+        self.dispatch_pane_session_focus(sid);
+    }
+
     /// Is this pane's picture currently frozen by a PaneSession?
     ///
     /// The op that asked for the freeze is the one wearing
@@ -2416,6 +2502,7 @@ impl ShellApp {
         self.sweep_pane_status();
         self.sweep_autorun();
         self.dev_drive_close_sequence();
+        self.drive_wake_queue();
         self.last_plugin_tick = Instant::now();
         self.plugin_registry.tick_all_with(&self.plugin_host);
 
@@ -4271,6 +4358,11 @@ impl MarspotApp for ShellApp {
 
     fn focused(&mut self, _ctx: &MarspotAppCtx, focused: bool) {
         self.send(MsgType::Focus, encode_focus(focused));
+        let returning = focused && !self.app_focused;
+        self.app_focused = focused;
+        if returning {
+            self.queue_parked_wakes();
+        }
         // Silent-update trigger: the user just left marspot's window
         // (cmd-tab, click on another app, minimise).  If a pending
         // binary is staged in `binaries/pending/`, this is the

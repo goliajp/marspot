@@ -100,7 +100,19 @@ claude 进程。裸 shell、vim、ssh、任何别的东西:
 
 ---
 
-## 4. 唤醒要多久
+## 4. 回到 marspot 时会预热
+
+离开一会儿再回来,你要碰的每个 pane 都是停放着的,一个 3 秒。所以**这笔
+账在进门时就开始还**:app 重新获得焦点的那一刻,marspot 就开始按顺序唤醒
+所有停放的 pane,**每秒一个**。
+
+- 顺序无关紧要,反正你读第一个 pane 的时间里,后面几个已经好了
+- 不并发:十六个 claude 同时启动是一次 CPU 尖峰,而这台机器的卖点就是
+  没有尖峰
+- 中途你自己点开了某个 pane,它从队列里跳过,不会被再唤醒一次
+- `MARSPOT_NO_WAKE_PREFETCH=1` 关掉,回到「点哪个唤醒哪个」
+
+## 5. 唤醒要多久
 
 约 3 秒,几乎全花在 claude 自己身上(启动 + 读完整个记录 + 画第一帧)。
 拆开:
@@ -117,6 +129,8 @@ claude 进程。裸 shell、vim、ssh、任何别的东西:
 
 ---
 
+`WAKE_PREFETCH` 是它在日志里的名字。
+
 ## 相关常量
 
 | 常量 | 值 | 文件 |
@@ -130,6 +144,7 @@ claude 进程。裸 shell、vim、ssh、任何别的东西:
 | `HOLD_SETTLE` | 250 ms | 同上 |
 | `WAKE_WATCHDOG` | 30 s | 同上 |
 | `HOLD_CAP` | 4 MiB | `crates/marspot-session/src/local_session.rs` |
+| `WAKE_STAGGER` | 1000 ms | `src/bin/marspot-shell/main.rs` |
 
 ## 怎么看它有没有按表干活
 

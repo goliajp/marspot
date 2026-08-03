@@ -484,6 +484,17 @@ pub trait PaneSession: Send {
     /// screen.
     fn on_focus(&mut self, _host: &dyn PaneSessionHost) {}
 
+    /// Is this session parked, waiting for the user to come back?
+    ///
+    /// The one bit of a session's internals the shell needs from the
+    /// outside: coming back to marspot after a while means every parked
+    /// pane is about to be wanted, and waking them costs seconds each.
+    /// Starting that on the way in rather than on the click is the
+    /// difference between "it was ready" and "it hung".
+    fn parked(&self) -> bool {
+        false
+    }
+
     fn on_pty_bytes(&mut self, host: &dyn PaneSessionHost, bytes: &[u8]) {
         let _ = (host, bytes);
     }

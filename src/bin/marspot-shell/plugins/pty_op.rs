@@ -602,6 +602,10 @@ impl PaneSession for OpRunner {
         self.wake(host, "focus");
     }
 
+    fn parked(&self) -> bool {
+        self.is_awaiting_user()
+    }
+
     fn on_user_key(
         &mut self,
         host: &dyn PaneSessionHost,
@@ -1380,6 +1384,11 @@ mod tests {
         r.on_tick(&host);
         assert_eq!(*state.holds.lock().unwrap(), vec![true]);
         assert!(state.signals.lock().unwrap().is_empty(), "settle first");
+        assert!(
+            !PaneSession::parked(&r),
+            "a run still working is not parked — the shell wakes only \
+             the ones waiting for the user"
+        );
 
         run(&mut r, &host, &state, 300);
         assert_eq!(*state.signals.lock().unwrap(), vec![(4242, libc::SIGTERM)]);
@@ -1388,6 +1397,11 @@ mod tests {
         state.alive.lock().unwrap().clear();
         run(&mut r, &host, &state, 200);
         assert!(r.is_awaiting_user(), "the script parks here");
+        assert!(
+            PaneSession::parked(&r),
+            "…and says so from the outside, which is what the \
+             come-back-to-marspot prefetch walks"
+        );
         advance(&state, 3_600_000);
         run(&mut r, &host, &state, 100);
         assert!(r.is_awaiting_user(), "an hour later, still parked");
@@ -1398,6 +1412,10 @@ mod tests {
         run(&mut r, &host, &state, 100);
         assert_eq!(state.sent.lock().unwrap().len(), 1, "the line goes out");
         assert_eq!(state.sent.lock().unwrap()[0], b"resume\r");
+        assert!(
+            !PaneSession::parked(&r),
+            "woken: a second prefetch pass must not type at it again"
+        );
 
         // Still waiting: the process is not there yet.
         run(&mut r, &host, &state, 200);
