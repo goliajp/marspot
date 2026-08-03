@@ -2314,6 +2314,17 @@ impl ShellApp {
     /// Step every pane's state machine (gated to
     /// `pane_status::SWEEP_INTERVAL` inside the tracker), publish the
     /// result for plugins, and log the committed transitions.
+    /// Is this pane's picture currently frozen by a PaneSession?
+    ///
+    /// The op that asked for the freeze is the one wearing
+    /// `FREEZE_GRID`, so the capability is the answer — no second
+    /// bookkeeping to keep in step with the first.
+    fn pane_picture_held(&self, sid: u64) -> bool {
+        self.active_pane_sessions.get(&sid).is_some_and(|s| {
+            s.session.caps() & marspot::shell_proto::PANE_SESSION_CAP_FREEZE_GRID != 0
+        })
+    }
+
     fn sweep_pane_status(&mut self) {
         // None = interval gate; the machines weren't stepped.
         let now = Instant::now();
@@ -2341,6 +2352,19 @@ impl ShellApp {
         // that has been resting for an hour costs one frame, not one
         // per second.
         for (sid, (status, held, _)) in &snapshot {
+            // A pane whose picture is held keeps the brightness it was
+            // held at.  The hold stops the *cells* moving, not the byte
+            // traffic underneath — reclaiming a pane kills the program
+            // in it, which produces output, which reads as "busy" and
+            // pulled the pane to full brightness, then to dormant a few
+            // seconds later.  Observed 2026-08-03: content perfectly
+            // still, pane visibly flashing bright and then dimming two
+            // steps.  Everything drawn around a frozen picture has to
+            // be frozen with it or the pane announces what is being
+            // done to it.
+            if self.pane_picture_held(*sid) {
+                continue;
+            }
             let level = pane_status::recede_level_for(status, *held);
             if self.pane_recede.get(sid).copied() != Some(level) {
                 self.pane_recede.insert(*sid, level);

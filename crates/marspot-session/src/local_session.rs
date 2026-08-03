@@ -118,13 +118,19 @@ pub struct LocalSession {
 
 /// Most a held pane may accumulate before the hold is abandoned.
 ///
-/// A pane is held because the thing that was drawing it has been
-/// reclaimed, so the expected volume is a shell prompt and a resume
-/// line — hundreds of bytes.  Half a megabyte means something is very
-/// much alive down there, and the honest response is to show it rather
-/// than to keep growing a buffer for the life of the process
-/// (CLAUDE.md §3: every queue is bounded).
-const HOLD_CAP: usize = 512 * 1024;
+/// Two very different volumes go through here.  A *parked* pane is
+/// showing a shell prompt nobody is typing at — hundreds of bytes for
+/// however long it sits.  A *waking* pane is a program repainting a
+/// whole session from scratch, and every one of those repaints is held
+/// so that the only transition the user sees is old frame → finished
+/// frame.  That is tens to hundreds of kilobytes, several times over.
+///
+/// So the cap is sized for the wake, not the park: it is here to stop
+/// unbounded growth (CLAUDE.md §3: every queue is bounded), not to
+/// second-guess a repaint.  Tripping it drops the freeze mid-paint,
+/// which is exactly the flash the freeze exists to prevent — hence the
+/// headroom, and hence the log line when it happens.
+const HOLD_CAP: usize = 4 * 1024 * 1024;
 
 impl LocalSession {
     /// Spawn a fresh shell on a new PTY and start the reader thread.
@@ -326,6 +332,13 @@ impl LocalSession {
                         self.held_bytes += bytes.len();
                         self.held.push(bytes);
                         if self.held_bytes >= HOLD_CAP {
+                            marspot_term::lx_warn!(
+                                "l3.hold.cap_reached",
+                                "held output hit the cap; releasing the freeze \
+                                 mid-paint — the pane will visibly jump",
+                                held_bytes = self.held_bytes as u64,
+                                cap = HOLD_CAP as u64
+                            );
                             self.hold_grid(false);
                         }
                     } else {
