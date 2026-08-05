@@ -418,10 +418,15 @@ mod grid_tests {
 
 
     /// 2026-07-13 report: a wrapped path immediately followed by
-    /// `(Ask 12:…` prose lost its link — `(` wasn't a terminator, so
-    /// the token became `….md(Ask`, stat failed, and the boundary
-    /// retry only had the half-path prefix to offer.  Paths must
-    /// hard-stop at `(` and CJK fullwidth punctuation.
+    /// `(Ask 12:…` prose lost its link.
+    ///
+    /// The first fix made `(` and the CJK fullwidth family hard
+    /// terminators.  That over-corrected — a name containing one
+    /// became unlinkable (2026-08-05) — so the scan is greedy again
+    /// and the filesystem decides where the name ended.  Every case
+    /// below still resolves to the same span, by asking rather than
+    /// by guessing; `:note` still stays unlinked, which is the one
+    /// shape this report settled as 宁可漏.
     #[test]
     fn path_terminates_at_paren_and_cjk_punct() {
         // Single-row cases through the scan_line path.

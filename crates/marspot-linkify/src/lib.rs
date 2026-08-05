@@ -826,48 +826,20 @@ fn scan_line_into_matches(
         let at_seg_start = segments.iter().any(|s| s.char_offset == i);
 
         if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(&chars, i)) {
-            let end = scan_until_path_terminator(&chars, i);
-            let span = &chars[i..end];
-            if looks_like_path(span) {
-                // Longest first: the name may run on through a bracket
-                // group the terminator scan stopped at, and a real file
-                // beats the directory that prefixes it.
-                if let Some(b) = extend_file_through_brackets(&chars, i, end) {
-                    let text: String = chars[i..b].iter().collect();
-                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
-                    i = b;
-                    continue;
-                }
-                let text: String = span.iter().collect();
-                if is_real_path(&text) {
-                    emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
-                    i = end;
-                    continue;
-                }
-                // rustc / panic output habitually appends `:line:col`.
-                let stripped = strip_line_col_suffix(&chars, i, end);
-                if stripped < end {
-                    let text: String = chars[i..stripped].iter().collect();
-                    if is_real_path(&text) {
-                        emit_match(
-                            out, segments, col_map, cols_per_row, i, stripped,
-                            LinkKind::File, text,
-                        );
-                        i = end;
-                        continue;
-                    }
-                }
-                // Punctuation before the seam: cutting at a mark keeps
-                // the whole token and drops the prose, where cutting at
-                // the seam throws the continuation away — and a seam
-                // prefix that happens to be a real *directory* would
-                // otherwise win over the file the line is pointing at.
-                if let Some(b) = retry_file_at_punctuation(chars, i, end) {
-                    let text: String = chars[i..b].iter().collect();
-                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
-                    i = b;
-                    continue;
-                }
+            let end = scan_path_candidate(&chars, i);
+            // Greedy scan, filesystem arbitration — `resolve_path_end`
+            // is the whole decision.  The seam retry stays separate:
+            // its candidates are cc hard-wrap boundaries, not prose
+            // marks, and a seam prefix that happens to be a real
+            // *directory* must not win over the file the line points
+            // at, so it is tried only after every prose cut has.
+            if let Some(b) = resolve_path_end(&chars, i, end) {
+                let text: String = chars[i..b].iter().collect();
+                emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                i = b.max(i + 1);
+                continue;
+            }
+            if looks_like_path(&chars[i..end]) {
                 if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
                     let text: String = chars[i..b].iter().collect();
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
@@ -882,32 +854,21 @@ fn scan_line_into_matches(
             && chars[i + 1] == '/'
             && (at_seg_start || !is_left_boundary_alnum(&chars, i))
         {
-            let end = scan_until_path_terminator(&chars, i);
-            let span = &chars[i..end];
-            if span.len() >= 3 && looks_like_path(span) {
-                if let Some(b) = extend_file_through_brackets(&chars, i, end) {
+            let end = scan_path_candidate(&chars, i);
+            if end - i >= 3 {
+                if let Some(b) = resolve_path_end(&chars, i, end) {
                     let text: String = chars[i..b].iter().collect();
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
-                    i = b;
+                    i = b.max(i + 1);
                     continue;
                 }
-                let text: String = span.iter().collect();
-                if is_real_path(&text) {
-                    emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
-                    i = end;
-                    continue;
-                }
-                if let Some(b) = retry_file_at_punctuation(chars, i, end) {
-                    let text: String = chars[i..b].iter().collect();
-                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
-                    i = b;
-                    continue;
-                }
-                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
-                    let text: String = chars[i..b].iter().collect();
-                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
-                    i = b;
-                    continue;
+                if looks_like_path(&chars[i..end]) {
+                    if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
+                        let text: String = chars[i..b].iter().collect();
+                        emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                        i = b;
+                        continue;
+                    }
                 }
             }
         }
@@ -1046,125 +1007,6 @@ fn first_zero_indent_boundary(
         .filter(|s| s.cc_zero_indent)
         .map(|s| s.char_offset)
         .find(|&b| b > lo && b < hi)
-}
-
-/// The sentence resumed straight after the path, with no space.
-///
-/// `scan_until_path_terminator` trims a *trailing* run of `,.;:)]}!?`,
-/// which is enough when the path ends the clause — but not when the
-/// clause continues: `…/reply-b-section-2.md;memory 已记` is one token
-/// to the scanner, the stat fails on it, and the whole line loses its
-/// link.  Chinese written with ASCII punctuation does this on nearly
-/// every line: the mark carries the pause, so nothing follows it.
-///
-/// So every such mark inside the span is a candidate end.  Tried
-/// longest-first, and only after the full span has already failed, so
-/// a filename that genuinely contains one — legal on every filesystem
-/// we target — still wins outright.
-/// The closing half of a bracket the path scan treats as a
-/// terminator, or `None` if this char is not an opening bracket.
-fn closing_bracket_for(open: char) -> Option<char> {
-    Some(match open {
-        '(' => ')',
-        '\u{FF08}' => '\u{FF09}', // （）
-        '\u{3008}' => '\u{3009}', // 〈〉
-        '\u{300A}' => '\u{300B}', // 《》
-        '\u{300C}' => '\u{300D}', // 「」
-        '\u{300E}' => '\u{300F}', // 『』
-        '\u{3010}' => '\u{3011}', // 【】
-        '\u{3014}' => '\u{3015}', // 〔〕
-        '\u{3016}' => '\u{3017}', // 〖〗
-        '\u{3018}' => '\u{3019}', // 〘〙
-        '\u{301A}' => '\u{301B}', // 〚〛
-        _ => return None,
-    })
-}
-
-/// Longest a bracket group may be and still be part of a filename.
-/// Past this it is prose, and letting the scan run on costs a stat on
-/// a span nobody meant.
-const BRACKET_GROUP_MAX: usize = 128;
-
-/// The path ran into a bracket, and the bracket was part of the name.
-///
-/// `scan_until_path_terminator` stops at `(` and the fullwidth CJK
-/// bracket family because prose glues those onto paths constantly —
-/// 宁可漏不可错.  But sometimes the name really does contain them, and
-/// in Japanese it is the house style for documents:
-/// `株主総会議事録（役員報酬改定・20260805）.pdf` (2026-08-05 report).
-/// The scan cut that at `（`, the prefix was not a real path, and the
-/// line lost its link entirely.
-///
-/// So: walk the balanced pair, keep scanning past it, and let the
-/// filesystem arbitrate.  This cannot invent a false link — a prose
-/// parenthetical does not name a file that exists — which is exactly
-/// why the longer span is tried FIRST: when both stat, the file the
-/// line is pointing at beats the directory that happens to prefix it.
-fn extend_file_through_brackets(
-    chars: &[char],
-    lo: usize,
-    stopped_at: usize,
-) -> Option<usize> {
-    let mut i = stopped_at;
-    // Two groups is `name（a）（b）.ext`, which exists in the wild.
-    // Three is prose that happens to be full of brackets.
-    for _ in 0..2 {
-        let open = *chars.get(i)?;
-        let close = closing_bracket_for(open)?;
-        let mut depth = 0usize;
-        let mut j = i;
-        let after = loop {
-            let c = *chars.get(j)?;
-            if j - i > BRACKET_GROUP_MAX {
-                return None;
-            }
-            if c == open {
-                depth += 1;
-            } else if c == close {
-                depth -= 1;
-                if depth == 0 {
-                    break j + 1;
-                }
-            }
-            j += 1;
-        };
-        // Carry on the ordinary scan — that is what picks up `.pdf`.
-        i = scan_until_path_terminator(chars, after).max(after);
-        let text: String = chars[lo..i].iter().collect();
-        if is_real_path(&text) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-fn retry_file_at_punctuation(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
-    // `:` is deliberately not a cut point.  `path:note` is the shape
-    // `strip_line_col_suffix` already arbitrates when it is a line
-    // number, and the 2026-07-13 report settled the rest of that
-    // family as 宁可漏 — no link beats a guessed one.
-    for cut in (lo + 1..hi).rev() {
-        if !matches!(chars[cut], ',' | ';' | '!' | '?' | ']' | '}') {
-            continue;
-        }
-        // `a.md;` cuts to `a.md`, not to `a.md` plus the mark: the
-        // same trailing trim the terminator scan would have applied
-        // had the sentence simply ended there.
-        let mut end = cut;
-        while end > lo && matches!(chars[end - 1], ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?')
-        {
-            end -= 1;
-        }
-        let prefix = &chars[lo..end];
-        if !looks_like_path(prefix) {
-            continue;
-        }
-        let text: String = prefix.iter().collect();
-        if is_real_path(&text) {
-            return Some(end);
-        }
-    }
-    None
 }
 
 fn retry_file_at_segment_boundaries(
@@ -1662,13 +1504,26 @@ fn try_scan_uuid(chars: &[char], start: usize) -> Option<usize> {
     Some(i)
 }
 
-/// Path-flavoured terminator scan: additionally hard-stops at `(`,
-/// `)`, and the fullwidth CJK punctuation family.  CJK prose
-/// habitually glues those straight onto a path (`…visibility.md(Ask
-/// 12…`, `…plan.md、`) and a filename CONTAINING them is far rarer
-/// than prose abutting them (宁可漏不可错).  CJK ideographs / kana in
-/// filenames stay linkable; only punctuation terminates.
-fn scan_until_path_terminator(chars: &[char], start: usize) -> usize {
+/// Widest run that could still be one filesystem path.
+///
+/// Stops only where a path genuinely **cannot** continue: whitespace,
+/// control characters, and the quoting / redirection metacharacters a
+/// shell would need escaped anyway.
+///
+/// Punctuation is deliberately NOT a stop — not ASCII `(`, not the
+/// fullwidth CJK family.  It used to be, on the reasoning that CJK
+/// prose glues those onto paths far more often than filenames contain
+/// them (宁可漏不可错).  That reasoning is sound only for a scanner
+/// with no way to check its answer, and this one has the best check
+/// there is: **a path link is only ever emitted for a path that
+/// exists on disk.**  Guessing narrow could only ever lose true
+/// positives — which it did: a Japanese document named
+/// `株主総会議事録（役員報酬改定・20260805）.pdf` was cut at `（`,
+/// and the line lost its link entirely (2026-08-05 report).
+///
+/// So: scan greedily, and let [`resolve_path_end`] ask the filesystem
+/// where the name really ended.
+fn scan_path_candidate(chars: &[char], start: usize) -> usize {
     let mut i = start;
     while i < chars.len() {
         let c = chars[i];
@@ -1678,35 +1533,117 @@ fn scan_until_path_terminator(chars: &[char], start: usize) -> usize {
         if matches!(c, '<' | '>' | '"' | '\'' | '`' | '|') {
             break;
         }
-        if matches!(
-            c,
-            '(' | ')'
-                | '\u{3001}' // 、
-                | '\u{3002}' // 。
-                | '\u{FF08}' // （
-                | '\u{FF09}' // ）
-                | '\u{FF0C}' // ，
-                | '\u{FF1A}' // ：
-                | '\u{FF1B}' // ；
-                | '\u{FF01}' // ！
-                | '\u{FF1F}' // ？
-                | '\u{3008}'..='\u{301B}' // 〈〉《》「」『』【】〔〕〖〗〘〙〚〛
-                | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}' // 弯引号
-                | '\u{2026}' // …
-        ) {
-            break;
-        }
         i += 1;
     }
-    while i > start {
-        let last = chars[i - 1];
-        if matches!(last, ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?') {
-            i -= 1;
-        } else {
+    i
+}
+
+/// Could prose have started here?
+///
+/// Every such position is a candidate end for the path — nothing
+/// more.  Being generous costs one `stat` that the cache mostly
+/// absorbs; being stingy costs a link the user can see is missing.
+///
+/// `:` is the one mark deliberately left out.  `path:120:5` is
+/// already arbitrated by [`strip_line_col_suffix`], and the rest of
+/// that family — `path:note`, `host:path` — was settled as 宁可漏 by
+/// the 2026-07-13 report.  Cutting there would reach past what this
+/// change is about: the greedy scan exists so that punctuation stops
+/// **terminating** names, not so that every mark becomes a place to
+/// chop one.
+fn is_prose_cut_point(c: char) -> bool {
+    matches!(
+        c,
+        ',' | '.' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+    ) || matches!(
+        c,
+        '\u{3001}'..='\u{3003}'   // 、。〃
+            | '\u{3008}'..='\u{301F}' // 〈〉《》「」『』【】〔〕〖〗〘〙〚〛〜〝〞
+            | '\u{FF01}'            // ！
+            | '\u{FF08}' | '\u{FF09}' // （）
+            | '\u{FF0C}'            // ，
+            | '\u{FF1A}' | '\u{FF1B}' // ：；
+            | '\u{FF1F}'            // ？
+            | '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}' // 弯引号
+            | '\u{2026}'            // …
+            | '\u{30FB}'            // ・
+    )
+}
+
+/// Most candidate ends we will `stat` for one token.
+///
+/// This runs on the render path — `build_instances` scans every
+/// visible pane every frame — so the greedy scan has to come with a
+/// ceiling.  A real path glued to prose resolves within the first two
+/// or three tries; a line of pure punctuation is what the cap is for.
+const MAX_PATH_CANDIDATES: usize = 24;
+
+/// Trim the trailing marks that end a sentence rather than a name.
+///
+/// Tried as a *variant* of each candidate, never instead of it: a
+/// filename really ending in one of these is legal, and the untrimmed
+/// form is offered to the filesystem first.
+fn trim_sentence_tail(chars: &[char], lo: usize, mut end: usize) -> usize {
+    while end > lo
+        && matches!(chars[end - 1], ',' | '.' | ';' | ':' | ')' | ']' | '}' | '!' | '?')
+    {
+        end -= 1;
+    }
+    end
+}
+
+/// Where did the path actually end?  Ask the disk, longest first.
+///
+/// The scan is deliberately greedy, so this is the whole arbitration:
+/// each candidate end is offered to `is_real_path`, longest first, and
+/// the first one that exists wins.  Longest-first matters — when both
+/// a file and the directory prefixing it exist, the line is pointing
+/// at the file.
+///
+/// Cannot invent a link: prose does not name files that exist.
+fn resolve_path_end(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
+    let mut tried = 0usize;
+    let mut last: Option<usize> = None;
+    let consider = |end: usize, tried: &mut usize, last: &mut Option<usize>| -> bool {
+        if end <= lo || *last == Some(end) || *tried >= MAX_PATH_CANDIDATES {
+            return false;
+        }
+        *last = Some(end);
+        *tried += 1;
+        let span = &chars[lo..end];
+        if !looks_like_path(span) {
+            return false;
+        }
+        let text: String = span.iter().collect();
+        is_real_path(&text)
+    };
+    // The whole token, then the whole token minus its sentence tail.
+    if consider(hi, &mut tried, &mut last) {
+        return Some(hi);
+    }
+    let trimmed = trim_sentence_tail(chars, lo, hi);
+    if trimmed < hi && consider(trimmed, &mut tried, &mut last) {
+        return Some(trimmed);
+    }
+    // rustc / panic output habitually appends `:line(:col)`.
+    let stripped = strip_line_col_suffix(chars, lo, hi);
+    if stripped < hi && consider(stripped, &mut tried, &mut last) {
+        return Some(stripped);
+    }
+    // Then every point prose could have started, longest first.
+    for cut in (lo + 1..hi).rev() {
+        if tried >= MAX_PATH_CANDIDATES {
             break;
         }
+        if !is_prose_cut_point(chars[cut]) {
+            continue;
+        }
+        let end = trim_sentence_tail(chars, lo, cut);
+        if consider(end, &mut tried, &mut last) {
+            return Some(end);
+        }
     }
-    i
+    None
 }
 
 /// Does this slice look enough like a path that it's WORTH the
@@ -2221,17 +2158,20 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
-    /// 2026-08-05 report: a Japanese document path went unlinked.
+    /// 2026-08-05 report: a Japanese document path went unlinked —
+    /// and the design lesson behind the fix.
     ///
-    /// `株主総会議事録（役員報酬改定・20260805）.pdf` — the fullwidth
-    /// brackets are house style for Japanese office documents, and the
-    /// path scan stops at them because CJK prose glues them onto paths
-    /// constantly.  The span became `~/Downloads/株主総会議事録`, which
-    /// is not a real path, and the line lost its link entirely.
+    /// `株主総会議事録（役員報酬改定・20260805）.pdf`.  The scan used to
+    /// stop at `（`, because CJK prose glues brackets onto paths
+    /// constantly and a filename containing them was judged rarer
+    /// (宁可漏不可错).  But that trade only makes sense for a scanner
+    /// that cannot check its answer, and this one can: **a path link
+    /// is only emitted for a path that exists.**  Guessing narrow
+    /// could therefore only ever lose true positives.
     ///
-    /// The filesystem is the arbiter: extending through the bracket
-    /// pair can only ever produce a link when the longer name really
-    /// is a file.
+    /// So the scan is greedy and the filesystem decides.  This test
+    /// pins the reported case; `punctuation_inside_a_real_name_is_not
+    /// _a_terminator` pins the principle it is an instance of.
     #[test]
     fn a_filename_with_fullwidth_brackets_is_one_link() {
         let dir = std::env::temp_dir().join(format!(
@@ -2267,6 +2207,59 @@ mod tests {
         assert_eq!(files[0].text, dir.display().to_string(), "prose stays prose");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The principle, not the instance: **no punctuation terminates a
+    /// path**, because the filesystem is a better judge than any table
+    /// of characters.
+    ///
+    /// Each of these names contains a character the old scan treated
+    /// as a hard stop, so none of them could be linked at all — the
+    /// span was cut inside the name, the prefix did not exist, and the
+    /// line lost its link.  Each is also followed by prose glued on
+    /// with the *same* character, which is the case that table was
+    /// protecting against; the greedy scan gets both right by asking.
+    #[test]
+    fn punctuation_inside_a_real_name_is_not_a_terminator() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-punct-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // (name, the prose glued straight onto it)
+        let cases = [
+            ("plan(v2).md", "、然后再说"),
+            ("a,b.txt", ",这句话继续"),
+            ("sec；1.md", ";memory 已记"),
+            ("note【草稿】.md", "。下一步"),
+        ];
+        for (name, tail) in cases {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            let text = p.display().to_string();
+            let v = scan(&format!("见 {text}{tail}"));
+            let files: Vec<&LinkRange> =
+                v.iter().filter(|r| r.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "no link for {name:?}");
+            assert_eq!(
+                files[0].text, text,
+                "{name:?} lost part of its name to the prose after it"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The greedy scan runs on the render path, so it comes with a
+    /// ceiling: a token that is nothing but cut points must not turn
+    /// into a `stat` storm, and must still link nothing.
+    #[test]
+    fn a_token_of_pure_punctuation_is_bounded_and_links_nothing() {
+        let junk: String = std::iter::repeat("/a、").take(200).collect();
+        let v = scan(&format!("见 {junk} 完"));
+        assert!(
+            v.iter().all(|r| r.kind != LinkKind::File),
+            "nothing here exists, so nothing here is a link"
+        );
     }
 
     /// The field report's actual shape: the path hard-wrapped at the
