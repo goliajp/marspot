@@ -829,6 +829,15 @@ fn scan_line_into_matches(
             let end = scan_until_path_terminator(&chars, i);
             let span = &chars[i..end];
             if looks_like_path(span) {
+                // Longest first: the name may run on through a bracket
+                // group the terminator scan stopped at, and a real file
+                // beats the directory that prefixes it.
+                if let Some(b) = extend_file_through_brackets(&chars, i, end) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
+                    continue;
+                }
                 let text: String = span.iter().collect();
                 if is_real_path(&text) {
                     emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
@@ -876,6 +885,12 @@ fn scan_line_into_matches(
             let end = scan_until_path_terminator(&chars, i);
             let span = &chars[i..end];
             if span.len() >= 3 && looks_like_path(span) {
+                if let Some(b) = extend_file_through_brackets(&chars, i, end) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b;
+                    continue;
+                }
                 let text: String = span.iter().collect();
                 if is_real_path(&text) {
                     emit_match(out, segments, col_map, cols_per_row, i, end, LinkKind::File, text);
@@ -1046,6 +1061,83 @@ fn first_zero_indent_boundary(
 /// longest-first, and only after the full span has already failed, so
 /// a filename that genuinely contains one — legal on every filesystem
 /// we target — still wins outright.
+/// The closing half of a bracket the path scan treats as a
+/// terminator, or `None` if this char is not an opening bracket.
+fn closing_bracket_for(open: char) -> Option<char> {
+    Some(match open {
+        '(' => ')',
+        '\u{FF08}' => '\u{FF09}', // （）
+        '\u{3008}' => '\u{3009}', // 〈〉
+        '\u{300A}' => '\u{300B}', // 《》
+        '\u{300C}' => '\u{300D}', // 「」
+        '\u{300E}' => '\u{300F}', // 『』
+        '\u{3010}' => '\u{3011}', // 【】
+        '\u{3014}' => '\u{3015}', // 〔〕
+        '\u{3016}' => '\u{3017}', // 〖〗
+        '\u{3018}' => '\u{3019}', // 〘〙
+        '\u{301A}' => '\u{301B}', // 〚〛
+        _ => return None,
+    })
+}
+
+/// Longest a bracket group may be and still be part of a filename.
+/// Past this it is prose, and letting the scan run on costs a stat on
+/// a span nobody meant.
+const BRACKET_GROUP_MAX: usize = 128;
+
+/// The path ran into a bracket, and the bracket was part of the name.
+///
+/// `scan_until_path_terminator` stops at `(` and the fullwidth CJK
+/// bracket family because prose glues those onto paths constantly —
+/// 宁可漏不可错.  But sometimes the name really does contain them, and
+/// in Japanese it is the house style for documents:
+/// `株主総会議事録（役員報酬改定・20260805）.pdf` (2026-08-05 report).
+/// The scan cut that at `（`, the prefix was not a real path, and the
+/// line lost its link entirely.
+///
+/// So: walk the balanced pair, keep scanning past it, and let the
+/// filesystem arbitrate.  This cannot invent a false link — a prose
+/// parenthetical does not name a file that exists — which is exactly
+/// why the longer span is tried FIRST: when both stat, the file the
+/// line is pointing at beats the directory that happens to prefix it.
+fn extend_file_through_brackets(
+    chars: &[char],
+    lo: usize,
+    stopped_at: usize,
+) -> Option<usize> {
+    let mut i = stopped_at;
+    // Two groups is `name（a）（b）.ext`, which exists in the wild.
+    // Three is prose that happens to be full of brackets.
+    for _ in 0..2 {
+        let open = *chars.get(i)?;
+        let close = closing_bracket_for(open)?;
+        let mut depth = 0usize;
+        let mut j = i;
+        let after = loop {
+            let c = *chars.get(j)?;
+            if j - i > BRACKET_GROUP_MAX {
+                return None;
+            }
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    break j + 1;
+                }
+            }
+            j += 1;
+        };
+        // Carry on the ordinary scan — that is what picks up `.pdf`.
+        i = scan_until_path_terminator(chars, after).max(after);
+        let text: String = chars[lo..i].iter().collect();
+        if is_real_path(&text) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 fn retry_file_at_punctuation(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
     // `:` is deliberately not a cut point.  `path:note` is the shape
     // `strip_line_col_suffix` already arbitrates when it is a line
@@ -2127,6 +2219,54 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].text, text, "the whole name, marks and all");
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// 2026-08-05 report: a Japanese document path went unlinked.
+    ///
+    /// `株主総会議事録（役員報酬改定・20260805）.pdf` — the fullwidth
+    /// brackets are house style for Japanese office documents, and the
+    /// path scan stops at them because CJK prose glues them onto paths
+    /// constantly.  The span became `~/Downloads/株主総会議事録`, which
+    /// is not a real path, and the line lost its link entirely.
+    ///
+    /// The filesystem is the arbiter: extending through the bracket
+    /// pair can only ever produce a link when the longer name really
+    /// is a file.
+    #[test]
+    fn a_filename_with_fullwidth_brackets_is_one_link() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-brackets-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("株主総会議事録（役員報酬改定・20260805）.pdf");
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+
+        // Exactly the reported line: prose in ASCII parens glued to
+        // the end, a fullwidth stop after that.
+        let v = scan(&format!("一页收好了。{text}(docx 同目录同名)。"));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(files.len(), 1, "no link in the reported line");
+        assert_eq!(files[0].text, text, "the whole name, brackets and all");
+
+        // The same shape naming a file that does NOT exist stays
+        // unlinked — the extension is not a licence to guess.
+        let ghost = dir.join("株主総会議事録（不存在）.pdf");
+        let v = scan(&format!("见 {}", ghost.display()));
+        assert!(
+            v.iter().all(|r| r.kind != LinkKind::File),
+            "a bracket group that names nothing must not become a link"
+        );
+
+        // And a genuine prose parenthetical after a real directory
+        // still links only the directory.
+        let v = scan(&format!("见 {}（说明）的东西", dir.display()));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].text, dir.display().to_string(), "prose stays prose");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The field report's actual shape: the path hard-wrapped at the
