@@ -3120,6 +3120,38 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 Current: **0.11.34**
 
+### 0.11.36
+
+**圈圈数字为什么那么小 —— 量清楚了,以及唯一的那个杠杆。**
+
+```
+char_width('①')            = 1 格      ← MARSPOT_AMBIGUOUS_WIDE 默认关
+解析到的字体                 PingFang SC,ink 11.71 × 11.71
+格子                        7.20 × 16.00
+rasterise_glyph             11.71 > 7.20 → oversized → 缩到 61%
+```
+
+**换字体救不了。** 圈圈数字是方的,缩放的约束边永远是格子宽,所以在 1 格里
+它最多 ~7.2 px;这台机器上最窄的 `①`(STIXGeneral,8.21)落到屏幕上还是
+那个 ~7.2 px。而汉字占 2 格 = 14.4 px。**要跟 CJK 同体量就必须占 2 格,
+没有别的杠杆。**
+
+而 2 格正是默认关掉的东西:别的 wcwidth(zsh / less / claudecode 的
+`string-width` / Python `wcwidth`)都把歧义宽度当窄的,marspot 认宽就会
+累积 CUP 偏移,画面几次编辑之后就对不上了。
+
+所以开关多一档中间值,只放宽**这一族**:
+
+```
+MARSPOT_AMBIGUOUS_WIDE=0        (默认) 全窄,什么都不变
+MARSPOT_AMBIGUOUS_WIDE=circled  只有 ①②③ ❶❷❸ ⓪ … 变宽
+MARSPOT_AMBIGUOUS_WIDE=1        整张歧义表变宽
+```
+
+`circled` 的错位面只剩「含 ① 的那几行」,比每个 `°` `→` `★` 都参与要小得
+多。这一族的范围也比歧义表自己那一段(`0x2460..=0x24E9`)宽:`⓪` 和到
+U+24FF 的尾巴是同一家、同一个抱怨,`❶..➓` 也是同样的字面度量。
+
 ### 0.11.35
 
 hold 的上限从 512 KB 提到 4 MB,并在触顶时留一行 WARN。

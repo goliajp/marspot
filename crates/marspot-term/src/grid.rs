@@ -85,25 +85,62 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 ///   requires the parser to look ahead one codepoint and adjust width
 ///   on-the-fly — separate from per-char width.
 /// - ZWJ sequences, regional indicators (flag pairs), modifier bases.
-/// Whether East-Asian Ambiguous codepoints should be rendered at
-/// width 2.  Off by default — every TUI app's wcwidth (zsh, less,
-/// claudecode's Node `string-width`, Python's `wcwidth`) treats
-/// Ambiguous as narrow, so making marspot Wide creates a cumulative
-/// CUP offset and the screen falls out of sync after a handful of
-/// edits.  Turn it on with `MARSPOT_AMBIGUOUS_WIDE=1` if you want
-/// the larger circled-digit / star / triangle glyphs and accept the
-/// drift trade-off in apps that don't agree.
+/// How much of the East-Asian Ambiguous table should be rendered at
+/// width 2.
+///
+/// Off by default, and that default is load-bearing: every other
+/// wcwidth in the stack (zsh, less, claudecode's Node `string-width`,
+/// Python's `wcwidth`) treats Ambiguous as **narrow**, so widening
+/// here makes marspot disagree with the program drawing the screen —
+/// a cumulative CUP offset, and the picture falls out of sync after a
+/// handful of edits.
+///
+/// The cost of the default is that a glyph designed for two cells is
+/// squeezed into one.  Measured 2026-08-08: PingFang's `①` has a
+/// 11.71 px ink box against a 7.20 px cell, so `rasterise_glyph`
+/// scale-to-fits it to 61 % — and because circled digits are square,
+/// the *width* is always the binding constraint.  No font fixes this:
+/// the narrowest `①` on this machine (STIXGeneral, 8.21 px) still
+/// lands at the same ~7.2 px on screen.  **Matching CJK size requires
+/// two cells; there is no other lever.**
+///
+/// So the flag has a middle setting.  `circled` widens only the
+/// enclosed alphanumerics — the glyphs the size complaint is actually
+/// about — and leaves `°` `±` `→` `★` and the rest of the table
+/// narrow.  Drift is then confined to lines that contain `①`, which
+/// is a far smaller surface than every degree sign and arrow.
+///
+///   MARSPOT_AMBIGUOUS_WIDE=0        (default) everything narrow
+///   MARSPOT_AMBIGUOUS_WIDE=circled  only ①②③ ❶❷❸ ⓪ … wide
+///   MARSPOT_AMBIGUOUS_WIDE=1        the whole Ambiguous table wide
 ///
 /// One-shot OnceLock load: per-process env var read at first call,
-/// then a single relaxed-bool branch on the hot path.
-fn ambiguous_wide_enabled() -> bool {
+/// then a single relaxed branch on the hot path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AmbiguousWide {
+    Off,
+    Circled,
+    All,
+}
+
+fn ambiguous_wide_mode() -> AmbiguousWide {
     use std::sync::OnceLock;
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        std::env::var("MARSPOT_AMBIGUOUS_WIDE")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false)
+    static FLAG: OnceLock<AmbiguousWide> = OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("MARSPOT_AMBIGUOUS_WIDE") {
+        Ok(v) if v.eq_ignore_ascii_case("circled") => AmbiguousWide::Circled,
+        Ok(v) if v != "0" && !v.is_empty() => AmbiguousWide::All,
+        _ => AmbiguousWide::Off,
     })
+}
+
+/// The circled / enclosed alphanumerics, as one range test.
+///
+/// Deliberately wider than the Ambiguous table's own slice of them
+/// (`0x2460..=0x24E9`): `⓪` (U+24EA) and the parenthesised and
+/// double-circled tail through U+24FF are the same family and the same
+/// complaint, and the dingbat set `❶..➓` is drawn to the same metrics.
+fn is_enclosed_alphanumeric(cp: u32) -> bool {
+    matches!(cp, 0x2460..=0x24FF | 0x2776..=0x2793)
 }
 
 pub fn char_width(ch: char) -> u8 {
@@ -199,8 +236,13 @@ pub fn char_width(ch: char) -> u8 {
         | 0x1F18F..=0x1F190
         | 0x1F19B..=0x1F1AC
     );
+    let ambiguous_wide = match ambiguous_wide_mode() {
+        AmbiguousWide::Off => false,
+        AmbiguousWide::Circled => is_enclosed_alphanumeric(cp),
+        AmbiguousWide::All => east_asian_ambiguous || is_enclosed_alphanumeric(cp),
+    };
     if east_asian_wide
-        || (east_asian_ambiguous && ambiguous_wide_enabled())
+        || ambiguous_wide
         || crate::emoji_presentation::has_emoji_presentation(cp)
     {
         2
@@ -223,6 +265,27 @@ mod char_width_tests {
         assert_eq!(char_width('①'), 1);
         assert_eq!(char_width('②'), 1);
         assert_eq!(char_width('⑳'), 1);
+    }
+
+    /// The `circled` middle setting acts on this set, so its extent is
+    /// the thing worth pinning — the mode itself is a one-shot
+    /// `OnceLock` and cannot be flipped inside a test process.
+    ///
+    /// Deliberately wider than the Ambiguous table's own slice
+    /// (`0x2460..=0x24E9`): `⓪` and the tail through U+24FF are the
+    /// same family and the same size complaint.
+    #[test]
+    fn the_circled_set_covers_the_whole_family() {
+        use super::is_enclosed_alphanumeric as f;
+        for c in ['①', '⑳', 'Ⓐ', 'ⓐ', '⓪', '⓿', '❶', '➓'] {
+            assert!(f(c as u32), "{c} U+{:04X} must be in the circled set", c as u32);
+        }
+        // Neighbours that are NOT: the arrow below the block, the
+        // geometric shapes above it, and the box drawing that must
+        // stay in a mono font whatever happens.
+        for c in ['→', '★', '●', '─', '╭', '㉈'] {
+            assert!(!f(c as u32), "{c} U+{:04X} must stay out of it", c as u32);
+        }
     }
 
     #[test]

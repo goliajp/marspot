@@ -29,4 +29,4 @@
 
 shell   = "0.7.100"  # 切 profile 时把 resume 的 uuid 记进日志;详见 CHANGELOG.md
 core    = "0.12.94"  # Cc 时间轴两端对齐到本地整日,末尾那天画得出来;localhost:port 认成链接;详见 CHANGELOG.md
-session = "0.11.35"  # hold 上限按「重画一整屏」定,不按「一个提示符」;详见 CHANGELOG.md
+session = "0.11.36"  # 圈圈数字的宽度多一档:只放宽这一族,不放宽整个歧义表;详见 CHANGELOG.md
