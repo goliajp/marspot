@@ -370,9 +370,103 @@ pub fn local_mdhm(unix: i64) -> (u32, u32, u32, u32) {
     )
 }
 
+/// The local midnight at or before `unix`.
+///
+/// The day grid in the timeline is *labelled* with local dates, so it
+/// has to be *placed* on local days.  It used to step in flat 86 400 s
+/// from a UTC-aligned start, which put every rule the timezone's
+/// offset away from the date written under it — nine hours, in JST.
+/// A 7-day window resetting at 00:00 on the 8th therefore ended
+/// visibly to the LEFT of the rule labelled `8/8`, and the bar and its
+/// own label disagreed with the axis (2026-08-07 report, long-standing).
+pub fn local_day_start(unix: i64) -> i64 {
+    let t = unix as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    // Let libc decide DST for that wall-clock instant rather than
+    // carrying over the flag from the time we started from.
+    tm.tm_isdst = -1;
+    unsafe { libc::mktime(&mut tm) as i64 }
+}
+
+/// The local midnight strictly after `unix`.
+///
+/// One *calendar* day on, which is 23 or 25 hours across a DST
+/// boundary — never assume 86 400.  `mktime` normalises the overflowed
+/// `tm_mday` for us, so month and year ends need no special case.
+pub fn next_local_day_start(unix: i64) -> i64 {
+    let t = unix as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    tm.tm_mday += 1;
+    tm.tm_hour = 0;
+    tm.tm_min = 0;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+    unsafe { libc::mktime(&mut tm) as i64 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The 2026-08-07 report: a bar ending at 00:00 on the 8th drew to
+    /// the left of the rule labelled `8/8`.
+    ///
+    /// The rules are labelled by `local_mdhm`, so they have to land on
+    /// the instants `local_mdhm` calls midnight.  Asserted against
+    /// whatever timezone the test runs in — that is the point: the old
+    /// code was correct only at UTC+0.
+    #[test]
+    fn the_day_grid_lands_on_local_midnight() {
+        // A few instants spread across a fortnight, plus one in the
+        // small hours where a UTC-aligned grid is furthest off.
+        let base = 1_786_114_800; // 2026-08-08 00:00 JST on the dev box
+        for offset in [0, 3_600, 47_000, 86_400, 5 * 86_400, 13 * 86_400] {
+            let t = base + offset;
+            let start = local_day_start(t);
+            assert!(start <= t, "day start must not be in the future of t");
+            assert!(t - start < 25 * 3_600, "…and must be the same day");
+            let (_, _, h, mi) = local_mdhm(start);
+            assert_eq!((h, mi), (0, 0), "a day starts at local 00:00");
+
+            let next = next_local_day_start(t);
+            assert!(next > t, "the next day start is strictly after t");
+            let (_, _, h, mi) = local_mdhm(next);
+            assert_eq!((h, mi), (0, 0), "…and is also a local midnight");
+            let step = next - start;
+            assert!(
+                (23 * 3_600..=25 * 3_600).contains(&step),
+                "one calendar day, DST included, got {step}s"
+            );
+        }
+    }
+
+    /// Stepping the grid must walk every day exactly once — no
+    /// duplicate rule, no skipped date.
+    #[test]
+    fn stepping_the_grid_visits_each_day_once() {
+        let t0 = 1_786_114_800 - 3 * 86_400 + 12_345;
+        let t1 = t0 + 10 * 86_400;
+        let mut seen = Vec::new();
+        let mut t = local_day_start(t0);
+        if t < t0 {
+            t = next_local_day_start(t);
+        }
+        while t < t1 {
+            seen.push(local_mdhm(t));
+            let n = next_local_day_start(t);
+            assert!(n > t, "the walk must make progress");
+            t = n;
+        }
+        assert_eq!(seen.len(), 10, "ten days in ten days: {seen:?}");
+        let mut uniq = seen.clone();
+        uniq.dedup();
+        assert_eq!(uniq.len(), seen.len(), "a date drawn twice: {seen:?}");
+    }
 
     /// The per-model caps are in the feed and must survive parsing.
     ///

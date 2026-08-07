@@ -3136,8 +3136,17 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // in place.  Dashed, and faint, because it is a background
     // reference: a solid rule at this density competes with the bars,
     // and the one line that must stay solid is NOW.
-    let day = 86_400.0;
-    let first_day = (t0 / day).ceil() * day;
+    // Local days, not 86 400 s steps from a UTC-aligned start: these
+    // rules are labelled with local dates below, so they have to land
+    // where those dates begin.  Stepping in UTC put every rule the
+    // timezone offset away from its own label — nine hours in JST, so
+    // a 7-day window resetting at 00:00 on the 8th ended visibly left
+    // of the rule reading `8/8`.
+    let first_day = {
+        let s = crate::cc_usage::local_day_start(t0 as i64);
+        (if (s as f64) < t0 { crate::cc_usage::next_local_day_start(s) } else { s }) as f64
+    };
+    let next_day = |t: f64| crate::cc_usage::next_local_day_start(t as i64) as f64;
     let dash = ch as f64 * metric::GRID_DASH;
     let gap = ch as f64 * metric::GRID_GAP;
     let grid_top = rows_top - lh * 0.35;
@@ -3153,7 +3162,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             );
             gy += dash + gap;
         }
-        t_grid += day;
+        t_grid = next_day(t_grid);
     }
     for (i, a) in cc.accounts.iter().enumerate() {
         let ry = rows_top + i as f64 * row_h;
@@ -3215,7 +3224,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
         let lbl = format!("{mo}/{d}");
         text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, cc_palette::fg_faint());
-        t += day;
+        t = next_day(t);
     }
 }
 
