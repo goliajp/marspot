@@ -1570,6 +1570,21 @@ impl ClaudecodePlugin {
             );
             return;
         };
+        // The one fact this path never recorded: WHICH session it is
+        // about to resume.  Everything else was logged — the pane, the
+        // profiles, all five steps — so "did switching profile lose my
+        // context?" could not be answered from the log at all, only
+        // guessed at (2026-08-07).  A pane whose project holds six real
+        // conversations, which torajs does, makes that the only
+        // question worth asking.
+        host.log(
+            LogLevel::Info,
+            "cycle.resuming",
+            &format!(
+                "pane {shelld_sid} → P{next_profile} resuming uuid={}",
+                meta.uuid
+            ),
+        );
         if let Err(e) = host.submit_pty_op(shelld_sid, op) {
             host.log(
                 LogLevel::Warn,
@@ -2283,8 +2298,8 @@ impl Plugin for ClaudecodePlugin {
             LogLevel::Info,
             "cycle.menu_pick",
             &format!(
-                "shelld_session={} P{} → P{}",
-                shelld_session_id, meta.profile_num, target
+                "shelld_session={} P{} → P{} uuid={}",
+                shelld_session_id, meta.profile_num, target, meta.uuid
             ),
         );
         self.start_profile_cycle_to(host, shelld_session_id, meta, target);

@@ -28,7 +28,20 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.99**
+Current: **0.7.100**
+
+### 0.7.100
+
+切 profile 时把**要 resume 的那个 uuid** 记进日志。
+
+报告:torajs 换 profile 好像会丢当前的 ctx。查不了 —— 日志把 pane、两个
+profile、五个步骤全记了,唯独没记**它 resume 的是哪一段会话**,而那正是
+唯一要紧的事。torajs 的项目目录里躺着 6 段**真**对话(1152 / 632 / 547 …
+个 assistant 回合,各几 MB,`/clear` 轮转攒下来的),所以「绑的是哪一段」
+不是细节,是全部。
+
+现在两行都带上:`cycle.menu_pick … uuid=…` 和新的
+`cycle.resuming pane N → P2 resuming uuid=…`。
 
 ### 0.7.99
 
