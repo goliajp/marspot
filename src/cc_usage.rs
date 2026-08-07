@@ -409,9 +409,45 @@ pub fn next_local_day_start(unix: i64) -> i64 {
     unsafe { libc::mktime(&mut tm) as i64 }
 }
 
+/// Widen `[t0, t1]` out to the local midnights that bracket it.
+///
+/// The plot's margin and its readability rule in one: every bar then
+/// has a dated rule on both sides of it.  Without this the range ended
+/// wherever the data did, so the last bar ran past the final rule with
+/// nothing behind it to read against — `7d 19% 12:00` sitting to the
+/// right of `8/14`, and no `8/15` drawn (2026-08-07 report).
+pub fn snap_range_to_local_days(t0: f64, t1: f64) -> (f64, f64) {
+    let lo = local_day_start(t0 as i64);
+    let hi = {
+        let s = local_day_start(t1 as i64);
+        if (s as f64) < t1 { next_local_day_start(s) } else { s }
+    };
+    (lo as f64, hi as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both ends land on a local midnight, and the data stays inside.
+    #[test]
+    fn the_range_is_bracketed_by_day_boundaries() {
+        // 8/1 00:00 → 8/14 12:00 on the dev box: a right edge mid-day,
+        // which is the shape that had no rule after it.
+        let lo = 1_785_855_600.0;
+        let hi = 1_786_676_400.0;
+        let (t0, t1) = snap_range_to_local_days(lo, hi);
+        assert!(t0 <= lo && t1 >= hi, "the data must stay inside");
+        for edge in [t0, t1] {
+            let (_, _, h, mi) = local_mdhm(edge as i64);
+            assert_eq!((h, mi), (0, 0), "an edge that is not a local midnight");
+        }
+        assert!(t1 > hi, "a right edge mid-day gains the day after it");
+        // …and a range already on the boundary is left alone rather
+        // than gaining a whole empty day.
+        let (a, b) = snap_range_to_local_days(t0, t1);
+        assert_eq!((a, b), (t0, t1));
+    }
 
     /// The 2026-08-07 report: a bar ending at 00:00 on the 8th drew to
     /// the left of the rule labelled `8/8`.

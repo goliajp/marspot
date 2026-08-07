@@ -74,9 +74,6 @@ pub mod metric {
 /// around now, in seconds.  Real spans come from [`timeline_range`].
 pub const TIMELINE_SPAN_SECS: f64 = 12.0 * 86_400.0;
 
-/// Breathing room at each end of the plot, as a fraction of the span,
-/// so the outermost bar's rounded cap isn't flush against the axis.
-const RANGE_PAD: f64 = 0.02;
 
 /// The instants the plot must cover: every bar's full extent, plus now.
 ///
@@ -105,8 +102,11 @@ pub fn timeline_range(now: i64, extents: &[(i64, i64)]) -> (f64, f64) {
         let n = now as f64;
         return (n - TIMELINE_SPAN_SECS / 2.0, n + TIMELINE_SPAN_SECS / 2.0);
     }
-    let pad = (hi - lo) * RANGE_PAD;
-    (lo - pad, hi + pad)
+    // No percentage padding: the caller snaps this outward to local
+    // day boundaries, and that IS the margin — one mechanism instead
+    // of two.  A percentage pad on top only ever pushed the snap a
+    // whole further day out, wasting plot width.
+    (lo, hi)
 }
 
 /// Height of one account card in physical px.

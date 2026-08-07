@@ -1785,19 +1785,42 @@ fn looks_like_url(span: &[char]) -> bool {
     if first == '.' || first == '-' || last == '.' || last == '-' {
         return false;
     }
-    // Must contain at least one dot in the host (no `localhost` etc;
-    // the typical false-positive in chat output is `https://x` style
-    // examples that don't actually resolve).
-    if !host.iter().any(|c| *c == '.') {
-        return false;
-    }
     // Host characters must be a sane subset.
     if !host.iter().all(|c| {
         c.is_ascii_alphanumeric() || matches!(*c, '.' | '-' | ':')
     }) {
         return false;
     }
-    true
+    // Split off an explicit port so the name and the port can be
+    // judged separately — which is the whole of the rule below.
+    let (name, port) = match host.iter().position(|c| *c == ':') {
+        Some(i) => (&host[..i], Some(&host[i + 1..])),
+        None => (host, None),
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let port_ok = match port {
+        // `http://host:port` — the placeholder people actually write —
+        // stays rejected, because `port` is not a number.
+        Some(p) => !p.is_empty() && p.len() <= 5 && p.iter().all(|c| c.is_ascii_digit()),
+        None => false,
+    };
+    // A dotted name is the ordinary case.  An explicit numeric port is
+    // the other one, and it is what a dev terminal is full of:
+    // `localhost:6014`, `myserver:8080`.  A port is what separates a
+    // real address from the `https://x` placeholders this filter exists
+    // to reject — those never carry one, and the `http://host:port`
+    // people actually type fails the digits test above.
+    //
+    // 2026-08-07 report: `http://localhost:6014/tools/documents` went
+    // unlinked.  The rule was written as "no dot, no digits" and
+    // implemented as "no dot" — the digits half was never there.
+    //
+    // Bare `https://localhost` stays rejected.  That was settled
+    // separately (`url_without_dot_in_host_rejected`: it is the shape
+    // chat examples take), and a port is all this report needs.
+    name.iter().any(|c| *c == '.') || port_ok
 }
 
 /// Walk backwards from an `@` to find the start of the local part.
@@ -2207,6 +2230,55 @@ mod tests {
         assert_eq!(files[0].text, dir.display().to_string(), "prose stays prose");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 2026-08-07 report: `http://localhost:6014/tools/documents` was
+    /// not a link.
+    ///
+    /// The host filter demanded a dot, so every dev-server URL a
+    /// terminal is full of failed it.  The rule was *written* as "no
+    /// dot, no digits" and *implemented* as "no dot" — the digits half
+    /// had never been there.
+    ///
+    /// There is no filesystem oracle for URLs, so the structure has to
+    /// carry the decision — here, an explicit numeric port.  That is
+    /// what separates a real address from the `https://x` placeholders
+    /// this filter rejects, and it is all this report needs: bare
+    /// `https://localhost` is left rejected, as `url_without_dot_in
+    /// _host_rejected` settled.
+    #[test]
+    fn a_dev_server_url_is_a_link_and_a_placeholder_is_not() {
+        for good in [
+            "http://localhost:6014/tools/documents",
+            "http://localhost:3000",
+            "http://myserver:8080/api",
+            "http://127.0.0.1:6014/x",
+            "https://example.com/a",
+        ] {
+            let v = scan(&format!("打开 {good} 看看"));
+            let urls: Vec<&LinkRange> =
+                v.iter().filter(|r| r.kind == LinkKind::Url).collect();
+            assert_eq!(urls.len(), 1, "no link for {good:?}: {v:?}");
+            assert_eq!(urls[0].text, good);
+        }
+        for bad in [
+            "https://x",
+            "https://foo",
+            // Settled separately, and left alone: without a port this
+            // is the shape chat examples take.
+            "https://localhost",
+            // The placeholder people actually write — `port` is not a
+            // number, so it is still not an address.
+            "http://host:port",
+            "https://.",
+            "https://-",
+        ] {
+            let v = scan(&format!("比如 {bad} 之类"));
+            assert!(
+                v.iter().all(|r| r.kind != LinkKind::Url),
+                "{bad:?} must stay unlinked: {v:?}"
+            );
+        }
     }
 
     /// The principle, not the instance: **no punctuation terminates a

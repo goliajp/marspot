@@ -3120,6 +3120,16 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         })
         .collect();
     let (t0, t1) = timeline_range(cc.now_unix, &extents);
+    // Snap the range outward to local day boundaries.
+    //
+    // Two things at once.  It is the plot's margin — a bar no longer
+    // starts or ends flush against the edge — and, more importantly,
+    // it guarantees a dated rule on BOTH sides of every bar end.  The
+    // range used to stop wherever the data did plus a few percent, so
+    // the last bar ended past the final rule with nothing behind it to
+    // read against: `7d 19% 12:00` sat to the right of `8/14` and the
+    // next day was never drawn (2026-08-07 report).
+    let (t0, t1) = crate::cc_usage::snap_range_to_local_days(t0, t1);
     let span_s = t1 - t0;
     let x_of = |t: f64| -> f64 { tl_x + ((t - t0) / span_s).clamp(0.0, 1.0) * tl_w };
     let bar_h = ch as f64 * metric::BAR_H;
@@ -3151,7 +3161,9 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let gap = ch as f64 * metric::GRID_GAP;
     let grid_top = rows_top - lh * 0.35;
     let mut t_grid = first_day;
-    while t_grid < t0 + span_s {
+    // `<=`: the range now ends ON a day boundary, and that last rule is
+    // the one a bar ending in the final day is read against.
+    while t_grid <= t1 {
         let x = x_of(t_grid);
         let mut gy = grid_top;
         while gy < rows_bottom {
@@ -3219,7 +3231,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     // Date labels along the axis.  No tick stubs — each date's dashed
     // rule already lands on the axis, so a stub would just double it.
     let mut t = first_day;
-    while t < t0 + span_s {
+    while t <= t1 {
         let x = x_of(t);
         let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
         let lbl = format!("{mo}/{d}");

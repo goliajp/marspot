@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.99"  # 回到 marspot 就开始预热停放的 pane,每秒一个;详见 CHANGELOG.md
-core    = "0.12.93"  # Cc 时间轴的日期线改按本地午夜落点,不再差一个时区;详见 CHANGELOG.md
+core    = "0.12.94"  # Cc 时间轴两端对齐到本地整日,末尾那天画得出来;localhost:port 认成链接;详见 CHANGELOG.md
 session = "0.11.35"  # hold 上限按「重画一整屏」定,不按「一个提示符」;详见 CHANGELOG.md
