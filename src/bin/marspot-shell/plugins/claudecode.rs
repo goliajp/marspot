@@ -4845,6 +4845,7 @@ mod tests {
             reclaim_enabled: true,
             reclaim_idle_minutes: 45,
             reclaim_prefetch: true,
+            ..marspot::settings::Settings::default()
         });
         assert_eq!(hibernate_after(), Some(Duration::from_secs(45 * 60)));
 

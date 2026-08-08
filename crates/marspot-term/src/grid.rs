@@ -131,7 +131,14 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 /// (`may_overflow_cell`), which costs no disagreement at all; a *run*
 /// of them stays small, and that is the price of a correct screen.
 ///
-///   MARSPOT_AMBIGUOUS_WIDE=0        (default) everything narrow
+/// The circled half is a **setting** (`appearance.circled_wide`,
+/// off) rather than a constant, because which of the two hurts more —
+/// a run of unreadably small glyphs, or a wrap point that disagrees
+/// with the program drawing the screen — is genuinely the user's call.
+/// The panel writes its cost next to it.  The env var still overrides,
+/// and still adds the `1` level that no panel offers.
+///
+///   MARSPOT_AMBIGUOUS_WIDE=0        everything narrow
 ///   MARSPOT_AMBIGUOUS_WIDE=circled  only ①②③ ❶❷❸ ⓪ … wide
 ///   MARSPOT_AMBIGUOUS_WIDE=1        the whole Ambiguous table wide
 ///
@@ -145,17 +152,25 @@ enum AmbiguousWide {
 }
 
 fn ambiguous_wide_mode() -> AmbiguousWide {
+    // The env override is read once — it names this process, this run,
+    // and cannot change under it.  The setting is read live, because
+    // the panel is allowed to change it while the terminal is open.
     use std::sync::OnceLock;
-    static FLAG: OnceLock<AmbiguousWide> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("MARSPOT_AMBIGUOUS_WIDE") {
-        Ok(v) if v == "0" => AmbiguousWide::Off,
-        Ok(v) if v.eq_ignore_ascii_case("circled") => AmbiguousWide::Circled,
-        Ok(v) if !v.is_empty() => AmbiguousWide::All,
-        // Default: agree with everyone else.  See the note above —
-        // the 2026-08-08 experiment measured the cost on a real
-        // screen and it was worse than predicted.
-        _ => AmbiguousWide::Off,
-    })
+    static ENV: OnceLock<Option<AmbiguousWide>> = OnceLock::new();
+    let env = *ENV.get_or_init(|| match std::env::var("MARSPOT_AMBIGUOUS_WIDE") {
+        Ok(v) if v == "0" => Some(AmbiguousWide::Off),
+        Ok(v) if v.eq_ignore_ascii_case("circled") => Some(AmbiguousWide::Circled),
+        Ok(v) if !v.is_empty() => Some(AmbiguousWide::All),
+        _ => None,
+    });
+    if let Some(mode) = env {
+        return mode;
+    }
+    if crate::settings::get().appearance_circled_wide {
+        AmbiguousWide::Circled
+    } else {
+        AmbiguousWide::Off
+    }
 }
 
 /// The circled / enclosed alphanumerics, as one range test.
@@ -316,6 +331,39 @@ mod char_width_tests {
     /// Deliberately wider than the Ambiguous table's own slice
     /// (`0x2460..=0x24E9`): `⓪` and the tail through U+24FF are the
     /// same family and the same size complaint.
+    /// The width follows the setting, live.
+    ///
+    /// This is the one entry in the panel that changes the terminal's
+    /// *semantics* rather than its looks, so it is the one worth
+    /// pinning: the default must stay narrow (agreeing with every
+    /// other wcwidth), and turning it on must reach `char_width`
+    /// without a restart.
+    #[test]
+    fn the_circled_width_follows_the_setting() {
+        // SAFETY: nextest runs one test per process.
+        unsafe { std::env::remove_var("MARSPOT_AMBIGUOUS_WIDE") };
+
+        crate::settings::set_for_test(crate::settings::Settings::default());
+        assert_eq!(char_width('①'), 1, "default agrees with everyone else");
+
+        crate::settings::set_for_test(crate::settings::Settings {
+            appearance_circled_wide: true,
+            ..crate::settings::Settings::default()
+        });
+        assert_eq!(char_width('①'), 2, "the setting reaches char_width");
+        assert_eq!(char_width('⓪'), 2);
+        assert_eq!(char_width('❶'), 2);
+        // …and only that family.  The rest of the Ambiguous table
+        // stays in agreement, because only the circled one appears in
+        // runs where overflow cannot help.
+        assert_eq!(char_width('★'), 1);
+        assert_eq!(char_width('●'), 1);
+        assert_eq!(char_width('°'), 1);
+
+        crate::settings::set_for_test(crate::settings::Settings::default());
+        assert_eq!(char_width('①'), 1, "and back again, with nothing restarted");
+    }
+
     #[test]
     fn the_circled_set_covers_the_whole_family() {
         use super::is_enclosed_alphanumeric as f;

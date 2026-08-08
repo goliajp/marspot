@@ -1464,6 +1464,20 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         };
         if last_entry_check.elapsed() >= ENTRY_CHECK_INTERVAL {
             last_entry_check = Instant::now();
+            // Same `stat` cadence the reachability check already pays
+            // for.  L3 owns character width, so the settings that
+            // change it have to reach here — new content is parsed
+            // with the new rule; cells already on screen keep the
+            // width they were laid out with, and heal as the program
+            // redraws them.
+            if marspot_term::settings::reload_if_changed() {
+                lx_event!(
+                    "SETTINGS_RELOADED",
+                    "settings.toml changed on disk",
+                    circled_wide =
+                        marspot_term::settings::get().appearance_circled_wide as u64
+                );
+            }
             let unreachable = if !my_entry_path.exists() {
                 Some("entry.toml removed")
             } else if !my_socket_path.exists() {

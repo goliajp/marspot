@@ -52,6 +52,7 @@ pub enum Row {
     ReclaimEnabled,
     ReclaimIdleMinutes,
     ReclaimPrefetch,
+    CircledWide,
 }
 
 /// A row's control shape.
@@ -102,6 +103,17 @@ pub const SECTIONS: &[Section] = &[Section {
             cost: "进门就开始唤醒停放的 pane,每秒一个",
         },
     ],
+},
+Section {
+    heading: "文字",
+    rows: &[RowSpec {
+        row: Row::CircledWide,
+        label: "圈圈数字占 2 格",
+        // The line this whole day bought.  Shipped as a default once,
+        // reverted within the hour — so it is offered with what it
+        // costs written next to it, and off.
+        cost: "①②③ 跟汉字一样大,但会移动换行点 —— 滚过它的段落可能掉字",
+    }],
 }];
 
 impl Row {
@@ -121,6 +133,7 @@ impl Row {
                     .unwrap_or(usize::MAX),
             },
             Row::ReclaimPrefetch => Control::Toggle(s.reclaim_prefetch),
+            Row::CircledWide => Control::Toggle(s.appearance_circled_wide),
         }
     }
 
@@ -131,7 +144,9 @@ impl Row {
     /// hidden so the panel does not change height under the cursor.
     pub fn disabled_by(self, s: &Settings) -> bool {
         match self {
-            Row::ReclaimEnabled => false,
+            // A different section: reclamation being off says nothing
+            // about how text is drawn.
+            Row::ReclaimEnabled | Row::CircledWide => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
     }
@@ -147,6 +162,7 @@ impl Row {
         match self {
             Row::ReclaimEnabled => next.reclaim_enabled = !s.reclaim_enabled,
             Row::ReclaimPrefetch => next.reclaim_prefetch = !s.reclaim_prefetch,
+            Row::CircledWide => next.appearance_circled_wide = !s.appearance_circled_wide,
             Row::ReclaimIdleMinutes => {
                 next.reclaim_idle_minutes = *IDLE_CHOICES.get(seg)?;
             }

@@ -56,6 +56,17 @@ pub struct Settings {
     /// On coming back to marspot, start waking the parked panes
     /// instead of waiting for the click that wants one.
     pub reclaim_prefetch: bool,
+    /// Give the circled family (`①②③ Ⓐ ⓪ ❶`) two cells instead of one.
+    ///
+    /// Off, and the reason is the panel's own cost line: every other
+    /// wcwidth on the machine calls them narrow, so widening moves the
+    /// **wrap point** — a paragraph that merely scrolled past one comes
+    /// back with characters stranded in the left margin (measured
+    /// 2026-08-08, shipped and reverted within the hour).  Left as a
+    /// setting rather than deleted because at one cell a run like
+    /// `①②③` cannot be drawn at a readable size at all, and which of
+    /// the two hurts more is genuinely the user's call.
+    pub appearance_circled_wide: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +75,7 @@ impl Default for Settings {
             reclaim_enabled: true,
             reclaim_idle_minutes: 30,
             reclaim_prefetch: true,
+            appearance_circled_wide: false,
         }
     }
 }
@@ -156,6 +168,7 @@ const KEYS: &[&str] = &[
     "reclaim.enabled",
     "reclaim.idle_minutes",
     "reclaim.prefetch_on_return",
+    "appearance.circled_wide",
 ];
 
 fn value_of(s: &Settings, key: &str) -> String {
@@ -163,6 +176,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "reclaim.enabled" => s.reclaim_enabled.to_string(),
         "reclaim.idle_minutes" => s.reclaim_idle_minutes.to_string(),
         "reclaim.prefetch_on_return" => s.reclaim_prefetch.to_string(),
+        "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
         _ => String::new(),
     }
 }
@@ -188,6 +202,9 @@ pub fn parse(body: &str) -> Settings {
                 s.reclaim_idle_minutes = v.parse().unwrap_or(s.reclaim_idle_minutes)
             }
             "reclaim.prefetch_on_return" => s.reclaim_prefetch = parse_bool(v, s.reclaim_prefetch),
+            "appearance.circled_wide" => {
+                s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
+            }
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -321,7 +338,7 @@ mod tests {
 reclaim.idle_minutes = 15
 
 # a key from a newer build
-appearance.circled_wide = true
+appearance.font_size = 13
 reclaim.enabled = true
 ";
         let mut s = parse(existing);
@@ -332,7 +349,7 @@ reclaim.enabled = true
 
         assert!(out.contains("# my own note"), "comment lost:\n{out}");
         assert!(
-            out.contains("appearance.circled_wide = true"),
+            out.contains("appearance.font_size = 13"),
             "unknown key lost — a downgrade would eat it:\n{out}"
         );
         assert!(out.contains("reclaim.idle_minutes = 45"), "{out}");
@@ -340,7 +357,7 @@ reclaim.enabled = true
         // In place, not appended: the user's ordering is theirs.
         let i_note = out.find("# my own note").unwrap();
         let i_idle = out.find("reclaim.idle_minutes").unwrap();
-        let i_unknown = out.find("appearance.circled_wide").unwrap();
+        let i_unknown = out.find("appearance.font_size").unwrap();
         assert!(i_note < i_idle && i_idle < i_unknown, "reordered:\n{out}");
         // A key the file lacked is appended, not dropped.
         assert!(out.contains("reclaim.prefetch_on_return = "), "{out}");

@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
-core    = "0.12.97"  # 设置面板落地:工具栏第 6 个按钮,每一项都写出它的代价;详见 CHANGELOG.md
-session = "0.11.39"  # 回退 0.11.38:加宽会移动换行点,把字留在左边缝里;详见 CHANGELOG.md
+core    = "0.12.98"  # 面板加「文字」组:圈圈数字占 2 格(默认关,代价写在旁边);详见 CHANGELOG.md
+session = "0.11.40"  # 字符宽度跟着设置走,L3 自己重读,不用重启;详见 CHANGELOG.md

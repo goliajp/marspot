@@ -67,6 +67,7 @@ pub mod parser;
 pub mod paths;
 pub mod pty;
 pub mod render;
+pub mod settings;
 pub mod scrollback;
 pub mod session;
 pub mod session_registry;
