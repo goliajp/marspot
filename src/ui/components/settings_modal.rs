@@ -34,71 +34,61 @@ use crate::settings::Settings;
 /// it is sized like the rest of the system's chrome, in points, and
 /// [`crate::ui::core::ViewPainter::PX_PER_PT`] takes it to pixels.
 pub mod metric {
-    /// Panel width.  Wide enough that the longest cost line clears the
-    /// widest control on the same row with room to spare — the panel
-    /// reading as cramped was the whole complaint.
-    pub const PANEL_W: f64 = 620.0;
+    use crate::ui::theme::PanelText;
+
+    /// Panel width.  Sized for the longest cost line plus the widest
+    /// control on the same row, with room to spare.
+    pub const PANEL_W: f64 = 440.0;
     /// Panel margin, left and right.
-    pub const PAD_X: f64 = 24.0;
-    pub const PAD_TOP: f64 = 22.0;
-    pub const PAD_BOTTOM: f64 = 20.0;
+    pub const PAD_X: f64 = 18.0;
+    pub const PAD_TOP: f64 = 16.0;
+    pub const PAD_BOTTOM: f64 = 14.0;
 
-    /// Panel title.
-    pub const TITLE_PT: f64 = 17.0;
-    pub const TITLE_WEIGHT: u16 = 700;
     /// Title baseline to the first group heading's baseline.
-    pub const TITLE_TO_GROUP: f64 = 26.0;
-
-    /// Group heading — sits *above* its card, like the system's own
-    /// settings groups, rather than inline with the rows.  That is
-    /// what makes a group read as a group without a box around the
-    /// heading too.
-    pub const GROUP_PT: f64 = 12.0;
-    pub const GROUP_WEIGHT: u16 = 600;
+    pub const TITLE_TO_GROUP: f64 = 20.0;
     /// Group baseline to the top of its card.
-    pub const GROUP_TO_CARD: f64 = 10.0;
+    pub const GROUP_TO_CARD: f64 = 7.0;
 
     /// The card holding a group's rows.
-    pub const CARD_RADIUS: f64 = 9.0;
+    pub const CARD_RADIUS: f64 = 7.0;
     /// Row inset inside the card.
-    pub const CARD_PAD_X: f64 = 16.0;
+    pub const CARD_PAD_X: f64 = 12.0;
     /// Card bottom to the next group's baseline.
-    pub const CARD_TO_GROUP: f64 = 24.0;
+    pub const CARD_TO_GROUP: f64 = 18.0;
     /// Card bottom to the footer baseline's line box.
-    pub const CARD_TO_FOOTER: f64 = 22.0;
+    pub const CARD_TO_FOOTER: f64 = 16.0;
 
     /// Row padding above the title line and below the cost line.
-    pub const ROW_PAD_Y: f64 = 10.0;
-    /// The title line's height — sized to the tallest control so
-    /// every row in a card is the same height whatever it holds.  A
-    /// card whose rows jump between two heights reads as broken.
-    pub const ROW_BAND_H: f64 = 22.0;
+    pub const ROW_PAD_Y: f64 = 8.0;
+    /// The title line's height — sized to the tallest control so every
+    /// row in a card is the same height whatever it holds.  A card
+    /// whose rows jump between two heights reads as broken.
+    pub const ROW_BAND_H: f64 = 16.0;
     /// Title line to the cost line.
-    pub const DESC_GAP: f64 = 4.0;
-    /// Hairline between rows, and how far it is inset from the left.
-    /// Flush to the card's right edge, inset on the left to the row
-    /// text — the list convention everywhere in the OS.
+    pub const DESC_GAP: f64 = 3.0;
+    /// Hairline between rows, in physical px — one device pixel, which
+    /// is what a hairline is.
     pub const SEP_H: f64 = 1.0;
 
-    pub const LABEL_PT: f64 = 13.0;
-    pub const LABEL_WEIGHT: u16 = 500;
-    /// The cost line: genuinely smaller, not merely dimmer.  Same size
-    /// in a different colour is two competing lines, not a hierarchy.
-    pub const DESC_PT: f64 = 11.0;
-    pub const DESC_WEIGHT: u16 = 400;
-    pub const FOOTER_PT: f64 = 10.5;
-    pub const FOOTER_WEIGHT: u16 = 400;
+    // Type comes from the shared panel ladder, never from numbers
+    // here: the settings panel's labels used to be set at the size of
+    // every other panel's *title*, which is the whole reason
+    // `PanelText` exists.
+    pub const TITLE: PanelText = PanelText::Title;
+    pub const GROUP: PanelText = PanelText::Section;
+    pub const LABEL: PanelText = PanelText::Label;
+    pub const DESC: PanelText = PanelText::Secondary;
+    pub const FOOTER: PanelText = PanelText::Caption;
+    pub const SEGMENT: PanelText = PanelText::Secondary;
 
     /// Switch, at the system's proportions.
-    pub const TOGGLE_H: f64 = 16.0;
-    pub const TOGGLE_W: f64 = 28.0;
+    pub const TOGGLE_H: f64 = 12.0;
+    pub const TOGGLE_W: f64 = 21.0;
     /// Segmented control.  Each segment is sized to its own measured
     /// label — equal thirds spilled `Never` out of its button.
-    pub const SEG_H: f64 = 22.0;
-    pub const SEG_PT: f64 = 11.0;
-    pub const SEG_WEIGHT: u16 = 500;
-    pub const SEG_PAD_X: f64 = 10.0;
-    pub const SEG_GAP: f64 = 4.0;
+    pub const SEG_H: f64 = 16.0;
+    pub const SEG_PAD_X: f64 = 8.0;
+    pub const SEG_GAP: f64 = 3.0;
 }
 
 /// Which setting a row edits.  One variant per row — the panel has no
@@ -328,24 +318,14 @@ use marspot_term::layout::Rect;
 /// how the label came to overrun the button drawn to hold it.
 pub type Measure<'a> = &'a mut dyn FnMut(&str, f64, u16) -> f64;
 
-/// Cap height of a run at `pt`, in pt.
-fn cap(pt: f64) -> f64 {
-    crate::ui::view::type_scale::sf_pro_cap_height(pt)
-}
-
-/// Rough descender depth, for the space under a last line.
-fn descent(pt: f64) -> f64 {
-    pt * 0.22
-}
-
 /// One row's height — constant across a card whatever control it
 /// holds, so the card does not step.
 fn row_h() -> f64 {
     metric::ROW_PAD_Y * 2.0
         + metric::ROW_BAND_H
         + metric::DESC_GAP
-        + cap(metric::DESC_PT)
-        + descent(metric::DESC_PT)
+        + metric::DESC.cap()
+        + metric::DESC.descent()
 }
 
 /// Walk the panel in draw order.  **One walker**, shared by the
@@ -364,7 +344,7 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
 
     // `y` walks in pt from the panel's top edge.
     let mut y = metric::PAD_TOP;
-    let title_baseline = y + cap(metric::TITLE_PT);
+    let title_baseline = y + metric::TITLE.cap();
     on(Slot::Title { baseline: rect.y_top + title_baseline * px });
     y = title_baseline;
 
@@ -392,9 +372,9 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
             let band_top = row_top + metric::ROW_PAD_Y;
             // Label optically centred in the band, so a 13pt label and
             // a 22pt control share one centre line.
-            let label_baseline = band_top + (metric::ROW_BAND_H + cap(metric::LABEL_PT)) * 0.5;
+            let label_baseline = band_top + (metric::ROW_BAND_H + metric::LABEL.cap()) * 0.5;
             let desc_baseline =
-                band_top + metric::ROW_BAND_H + metric::DESC_GAP + cap(metric::DESC_PT);
+                band_top + metric::ROW_BAND_H + metric::DESC_GAP + metric::DESC.cap();
             let ctl_h = match spec.row.control(s) {
                 Control::Toggle(_) => metric::TOGGLE_H,
                 Control::Segmented { .. } => metric::SEG_H,
@@ -432,7 +412,7 @@ pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) 
         y = card_top + card_h;
     }
 
-    y += metric::CARD_TO_FOOTER + cap(metric::FOOTER_PT);
+    y += metric::CARD_TO_FOOTER + metric::FOOTER.cap();
     on(Slot::Footer { baseline: rect.y_top + y * px });
 }
 
@@ -446,7 +426,7 @@ fn panel_h_pt(s: &Settings, m: Measure<'_>) -> f64 {
     let mut bottom = 0.0f64;
     walk(probe, s, m, |slot| {
         if let Slot::Footer { baseline } = slot {
-            bottom = baseline / px + descent(metric::FOOTER_PT) + metric::PAD_BOTTOM;
+            bottom = baseline / px + metric::FOOTER.descent() + metric::PAD_BOTTOM;
         }
     });
     bottom
@@ -486,7 +466,7 @@ pub fn control_width(row: Row, s: &Settings, m: Measure<'_>) -> f64 {
 /// A segment, sized to its own measured label.
 fn segment_width(label: &str, m: Measure<'_>) -> f64 {
     let px = crate::ui::core::ViewPainter::PX_PER_PT;
-    m(label, metric::SEG_PT, metric::SEG_WEIGHT) + 2.0 * metric::SEG_PAD_X * px
+    m(label, metric::SEGMENT.pt(), metric::SEGMENT.weight()) + 2.0 * metric::SEG_PAD_X * px
 }
 
 /// The `n`th segment of a segmented control.
@@ -719,13 +699,13 @@ mod tests {
                     // Two-tier text: the cost line is under the label,
                     // and it is *smaller*, not merely dimmer.
                     assert!(desc_baseline > label_baseline, "{row:?} cost line above its label");
-                    assert!(metric::DESC_PT < metric::LABEL_PT, "no type scale");
+                    assert!(metric::DESC.pt() < metric::LABEL.pt(), "no type scale");
                     // The control clears the cost line under it — the
                     // reason the label line is a band, not a baseline.
                     assert!(
                         control.y_top + control.h
                             <= desc_baseline
-                                - crate::ui::view::type_scale::sf_pro_cap_height(metric::DESC_PT)
+                                - metric::DESC.cap()
                                     * px
                                 + 1e-9,
                         "{row:?} control overlaps its own cost line"
@@ -739,7 +719,7 @@ mod tests {
                     if let Control::Segmented { options, .. } = row.control(&s) {
                         for (n, label) in options.iter().enumerate() {
                             let sr = segment_rect(*control, n, options, &mut m);
-                            let ink = fake_measure()(label, metric::SEG_PT, metric::SEG_WEIGHT);
+                            let ink = fake_measure()(label, metric::SEGMENT.pt(), metric::SEGMENT.weight());
                             assert!(sr.w > ink, "{label:?} needs {ink:.1}, button is {:.1}", sr.w);
                         }
                         let last =
@@ -778,17 +758,22 @@ mod tests {
         let bottom = rect.y_top + rect.h;
         assert!(foot < bottom, "footer outside the panel");
         assert!(
-            bottom - foot < (metric::PAD_BOTTOM + metric::FOOTER_PT) * px,
+            bottom - foot < (metric::PAD_BOTTOM + metric::FOOTER.pt()) * px,
             "dead space under the footer: {:.1}px",
             bottom - foot
         );
     }
 
-    /// The panel is roomy on purpose — the complaint that started this
-    /// rewrite was that everything was crammed together.  Guard the
-    /// two numbers that decide it, so a later tightening is deliberate.
+    /// The panel is roomy on purpose — one of the two complaints that
+    /// started this rewrite was that everything was crammed together.
+    ///
+    /// Stated **relative to the type**, not in absolute points: the
+    /// first cut asserted "a row is at least 44pt", which fired the
+    /// moment the type came down a rung even though the proportions
+    /// were unchanged.  A test that has to be edited whenever the
+    /// scale moves is not guarding the thing it claims to guard.
     #[test]
-    fn the_panel_stays_roomy() {
+    fn a_row_is_mostly_space_not_text() {
         let s = Settings::default();
         let rect = test_rect(2400.0, 1800.0, &s);
         let px = crate::ui::core::ViewPainter::PX_PER_PT;
@@ -801,16 +786,25 @@ mod tests {
             })
             .collect();
         for w in rows.windows(2) {
-            // Rows inside a card are flush; across cards there is a gap.
             let gap = w[1].y_top - (w[0].y_top + w[0].h);
             assert!(gap >= -1e-9, "rows overlap");
         }
+        // Ink versus room: the two lines of a row must not fill it.
+        let ink = metric::LABEL.cap() + metric::DESC_GAP + metric::DESC.cap();
+        let row_h = rows[0].h / px;
         assert!(
-            rows[0].h >= 44.0 * px,
-            "a two-line row under 44pt is the cramped panel again: {:.1}pt",
-            rows[0].h / px
+            ink / row_h < 0.62,
+            "a row is {:.0}% text — that is the cramped panel again",
+            ink / row_h * 100.0,
         );
-        assert!(rect.w >= 560.0 * px, "panel too narrow: {:.1}pt", rect.w / px);
+        // And the text column holds a real sentence at the label size,
+        // whatever that size currently is.
+        let column = (rect.w / px) - 2.0 * (metric::PAD_X + metric::CARD_PAD_X);
+        assert!(
+            column > 30.0 * metric::LABEL.cap(),
+            "text column {column:.0}pt is narrow for {:.1}pt type",
+            metric::LABEL.pt(),
+        );
     }
 
     /// The same geometry, measured with the **real font**.
@@ -845,7 +839,7 @@ mod tests {
                     let text_left = card.x + metric::CARD_PAD_X * px;
                     // The cost line is the long text in this panel: it
                     // must fit the card, or it runs out of the box.
-                    let cost_w = m(spec.cost, metric::DESC_PT, metric::DESC_WEIGHT);
+                    let cost_w = m(spec.cost, metric::DESC.pt(), metric::DESC.weight());
                     assert!(
                         text_left + cost_w <= card.x + card.w - metric::CARD_PAD_X * px,
                         "{:?}: cost line needs {:.0}pt and the card gives {:.0}pt",
@@ -855,7 +849,7 @@ mod tests {
                     );
                     // The label and the control share one line and must
                     // not collide.
-                    let label_w = m(spec.label, metric::LABEL_PT, metric::LABEL_WEIGHT);
+                    let label_w = m(spec.label, metric::LABEL.pt(), metric::LABEL.weight());
                     assert!(
                         text_left + label_w + 12.0 * px <= control.x,
                         "{:?}: label runs into its control",
@@ -864,7 +858,7 @@ mod tests {
                     if let Control::Segmented { options, .. } = row.control(&s) {
                         for (n, label) in options.iter().enumerate() {
                             let seg = segment_rect(*control, n, options, &mut m);
-                            let ink = m(label, metric::SEG_PT, metric::SEG_WEIGHT);
+                            let ink = m(label, metric::SEGMENT.pt(), metric::SEGMENT.weight());
                             assert!(
                                 seg.w >= ink + 2.0 * metric::SEG_PAD_X * px - 0.5,
                                 "{label:?} ink {:.0}pt vs button {:.0}pt",

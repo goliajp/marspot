@@ -14,8 +14,10 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+pub mod panel_type;
 pub mod token;
 
+pub use panel_type::PanelText;
 pub use token::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -282,6 +282,33 @@ impl<'a> ViewPainter<'a> {
         );
     }
 
+    /// A run in one of the panel type roles — the size ladder every
+    /// panel shares.  See [`crate::ui::theme::PanelText`].
+    ///
+    /// Prefer this over [`Self::ui_text_at`] with numbers: a panel
+    /// that names a size is a panel that will disagree with the next
+    /// one, which is how the settings panel came to set its row labels
+    /// at the size of every other panel's title.
+    pub fn panel_text(
+        &mut self,
+        role: crate::ui::theme::PanelText,
+        x: f32,
+        baseline_y: f32,
+        s: &str,
+        color: [f32; 4],
+    ) {
+        self.ui_text_at(x, baseline_y, s, role.pt(), role.weight(), color);
+    }
+
+    /// Width of `s` in `role`, physical px.
+    pub fn panel_text_width(
+        &mut self,
+        role: crate::ui::theme::PanelText,
+        s: &str,
+    ) -> f32 {
+        self.ui_text_width_at(s, role.pt(), role.weight())
+    }
+
     /// The system UI font at an explicit **pt size and weight**.
     ///
     /// `ui_text` above is one size (the startup chrome pt) at one

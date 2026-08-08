@@ -3038,9 +3038,9 @@ fn push_settings_panel_via_view(
                         sm::text_x(sp.rect) as f32,
                         baseline as f32,
                         "Settings",
-                        sm::metric::TITLE_PT,
-                        sm::metric::TITLE_WEIGHT,
-                        cc_palette::fg(),
+                        sm::metric::TITLE.pt(),
+                        sm::metric::TITLE.weight(),
+                        panel_palette::fg(),
                     );
                 }
                 Slot::Group { heading, baseline } => {
@@ -3048,18 +3048,18 @@ fn push_settings_panel_via_view(
                         sm::text_x(sp.rect) as f32,
                         baseline as f32,
                         heading,
-                        sm::metric::GROUP_PT,
-                        sm::metric::GROUP_WEIGHT,
-                        cc_palette::fg(),
+                        sm::metric::GROUP.pt(),
+                        sm::metric::GROUP.weight(),
+                        panel_palette::fg(),
                     );
                 }
                 Slot::Card { rect } => {
                     // The card is what makes a group read as a group.
                     p.fill_rounded_rect(
                         rect,
-                        settings_skin::card_bg(),
+                        panel_palette::card_bg(),
                         (sm::metric::CARD_RADIUS * px) as f32,
-                        (settings_skin::card_border(), 1.0),
+                        (panel_palette::card_border(), 1.0),
                     );
                 }
                 Slot::Separator { rect } => {
@@ -3069,25 +3069,25 @@ fn push_settings_panel_via_view(
                     // hairline submitted after the card was painted
                     // under it and vanished.  Same pass, later
                     // submission, visible.
-                    p.fill_rounded_rect(rect, settings_skin::separator(), 0.0, ([0.0; 4], 0.0));
+                    p.fill_rounded_rect(rect, panel_palette::separator(), 0.0, ([0.0; 4], 0.0));
                 }
                 Slot::Row { row, spec, label_baseline, desc_baseline, control, .. } => {
                     let dim = row.disabled_by(&sp.settings);
                     let (fg, sec) = if dim {
-                        (cc_palette::fg_faint(), cc_palette::fg_faint())
+                        (panel_palette::fg_faint(), panel_palette::fg_faint())
                     } else {
-                        (cc_palette::fg(), cc_palette::fg_muted())
+                        (panel_palette::fg(), panel_palette::fg_muted())
                     };
                     let x = sm::text_x(sp.rect) as f32;
                     p.ui_text_at(
                         x, label_baseline as f32, spec.label,
-                        sm::metric::LABEL_PT, sm::metric::LABEL_WEIGHT, fg,
+                        sm::metric::LABEL.pt(), sm::metric::LABEL.weight(), fg,
                     );
                     // Genuinely smaller, not merely dimmer: same size
                     // in a paler grey is two competing lines.
                     p.ui_text_at(
                         x, desc_baseline as f32, spec.cost,
-                        sm::metric::DESC_PT, sm::metric::DESC_WEIGHT, sec,
+                        sm::metric::DESC.pt(), sm::metric::DESC.weight(), sec,
                     );
                     match row.control(&sp.settings) {
                         Control::Toggle(on) => {
@@ -3096,9 +3096,9 @@ fn push_settings_panel_via_view(
                             // reads as decoration, a pill as a switch.
                             let r = control.h * 0.5;
                             let bg = if !dim && on {
-                                cc_palette::ok()
+                                panel_palette::ok()
                             } else {
-                                cc_palette::track()
+                                panel_palette::track()
                             };
                             p.fill_rounded_rect(control, bg, r as f32, ([0.0; 4], 0.0));
                             let knob_d = control.h * 0.74;
@@ -3115,7 +3115,7 @@ fn push_settings_panel_via_view(
                                     w: knob_d,
                                     h: knob_d,
                                 },
-                                cc_palette::fg(),
+                                panel_palette::fg(),
                                 (knob_d * 0.5) as f32,
                                 ([0.0; 4], 0.0),
                             );
@@ -3135,11 +3135,11 @@ fn push_settings_panel_via_view(
                                 };
                                 let picked = !dim && n == chosen;
                                 let (bg, border, fg) = if picked {
-                                    (cc_palette::ok(), cc_palette::ok(), [1.0, 1.0, 1.0, 1.0])
+                                    (panel_palette::ok(), panel_palette::ok(), [1.0, 1.0, 1.0, 1.0])
                                 } else if dim {
-                                    (settings_skin::segment_bg(), settings_skin::card_border(), cc_palette::fg_faint())
+                                    (panel_palette::segment_bg(), panel_palette::card_border(), panel_palette::fg_faint())
                                 } else {
-                                    (settings_skin::segment_bg(), settings_skin::card_border(), cc_palette::fg())
+                                    (panel_palette::segment_bg(), panel_palette::card_border(), panel_palette::fg())
                                 };
                                 p.fill_rounded_rect(
                                     seg, bg, (5.0 * px) as f32, (border, 1.0),
@@ -3148,17 +3148,17 @@ fn push_settings_panel_via_view(
                                 // measured — the label overran its
                                 // button when width came from a count.
                                 let tw = p.ui_text_width_at(
-                                    label, sm::metric::SEG_PT, sm::metric::SEG_WEIGHT,
+                                    label, sm::metric::SEGMENT.pt(), sm::metric::SEGMENT.weight(),
                                 );
                                 let baseline = p.ui_baseline_centred(
-                                    seg.y_top as f32, seg.h as f32, sm::metric::SEG_PT,
+                                    seg.y_top as f32, seg.h as f32, sm::metric::SEGMENT.pt(),
                                 );
                                 p.ui_text_at(
                                     (seg.x + (seg.w - tw as f64) * 0.5) as f32,
                                     baseline,
                                     label,
-                                    sm::metric::SEG_PT,
-                                    sm::metric::SEG_WEIGHT,
+                                    sm::metric::SEGMENT.pt(),
+                                    sm::metric::SEGMENT.weight(),
                                     fg,
                                 );
                             }
@@ -3172,9 +3172,9 @@ fn push_settings_panel_via_view(
                         sm::text_x(sp.rect) as f32,
                         baseline as f32,
                         &sp.path,
-                        sm::metric::FOOTER_PT,
-                        sm::metric::FOOTER_WEIGHT,
-                        cc_palette::fg_faint(),
+                        sm::metric::FOOTER.pt(),
+                        sm::metric::FOOTER.weight(),
+                        panel_palette::fg_faint(),
                     );
                 }
             }
@@ -3182,27 +3182,19 @@ fn push_settings_panel_via_view(
     });
 }
 
-/// The settings panel's four surfaces, all from the theme's own
-/// levels rather than hand-mixed RGB — the panel sits on `SURFACE_2`,
-/// so its cards take the next level up and the controls the one after
-/// that.  `HAIRLINE`, not `DIVIDER`: the first cut used the fainter
-/// token at one physical pixel and the line was invisible, which left
-/// the rows looking exactly as undivided as before.
-mod settings_skin {
-    use crate::ui::theme::token::color;
-    /// The card a group's rows sit in.
-    pub fn card_bg() -> [f32; 4] { color::SURFACE_3.to_rgba_f32() }
-    pub fn card_border() -> [f32; 4] { color::BORDER.to_rgba_f32() }
-    /// Between two rows of one card.
-    pub fn separator() -> [f32; 4] { color::HAIRLINE.to_rgba_f32() }
-    /// An unpicked segment.
-    pub fn segment_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
-}
 
-/// cc — modal palette comes from the UI theme tokens (the same
-/// system dev panel / buttons draw from), not hand-rolled RGB.  The
-/// only local decisions are which token maps to which role.
-mod cc_palette {
+/// The palette every panel draws from.
+///
+/// It started life as the `Cc` panel's private colours and was named
+/// for it; the settings panel then grew a second, near-identical set
+/// under its own name, and the two drifted — one drew its cards a
+/// level *above* the panel, the other a level *below*, so the same
+/// object looked raised in one panel and inset in the next.  One
+/// module now, named for what it is.
+///
+/// Every colour is a theme token.  The only local decisions are which
+/// token plays which role.
+mod panel_palette {
     use crate::ui::theme::token::color;
     /// Primary — account names, headings, percentages.
     pub fn fg() -> [f32; 4] { color::FG.to_rgba_f32() }
@@ -3228,8 +3220,17 @@ mod cc_palette {
     /// track has to separate from the card it sits on (`SURFACE_1`),
     /// otherwise "0 %" and "no data" look identical.
     pub fn track() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
-    pub fn card_bg() -> [f32; 4] { color::SURFACE_1.to_rgba_f32() }
+    /// A card sits **on** its panel, so it takes the surface level
+    /// above the panel's own — the same step in every panel.
+    pub fn card_bg() -> [f32; 4] { color::SURFACE_3.to_rgba_f32() }
     pub fn card_border() -> [f32; 4] { color::BORDER.to_rgba_f32() }
+    /// Between two rows of one card.  `HAIRLINE`, not `DIVIDER`: the
+    /// fainter token at one device pixel is invisible, which leaves
+    /// the rows looking exactly as undivided as no line at all.
+    pub fn separator() -> [f32; 4] { color::HAIRLINE.to_rgba_f32() }
+    /// An unpicked segment of a segmented control — one level above
+    /// the card it sits on.
+    pub fn segment_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
     pub fn now() -> [f32; 4] { color::ACCENT.to_rgba_f32() }
     /// Day rules running up through the plot.  Low alpha rather than a
     /// dim solid colour so the rule reads as behind the bars on both
@@ -3253,9 +3254,9 @@ mod cc_palette {
 /// 2 = refused / unknown.
 fn cc_severity_color(severity: u8) -> [f32; 4] {
     match severity {
-        0 => cc_palette::ok(),
-        1 => cc_palette::warn(),
-        _ => cc_palette::danger(),
+        0 => panel_palette::ok(),
+        1 => panel_palette::warn(),
+        _ => panel_palette::danger(),
     }
 }
 
@@ -3275,11 +3276,11 @@ fn fit_ellipsis(s: &str, cols: f64) -> String {
 
 fn cc_util_color(util: f32) -> [f32; 4] {
     if util < 0.5 {
-        cc_palette::ok()
+        panel_palette::ok()
     } else if util < 0.85 {
-        cc_palette::warn()
+        panel_palette::warn()
     } else {
-        cc_palette::danger()
+        panel_palette::danger()
     }
 }
 
@@ -3310,15 +3311,24 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     let head_top = r.y_top + pad;
     let ui_line = p.ui_line_h() as f64;
     let title = format!("CLAUDE ACCOUNTS  {}", cc.accounts.len());
-    p.ui_text(inner_x as f32, (head_top + p.ui_ascent() as f64) as f32, &title, cc_palette::fg());
+    // Same role, same code path as every other panel's title — the
+    // point of the ladder is that "title" means one size app-wide.
+    let title_role = crate::ui::theme::PanelText::Title;
+    p.panel_text(
+        title_role,
+        inner_x as f32,
+        (head_top + p.ui_ascent() as f64) as f32,
+        &title,
+        panel_palette::fg(),
+    );
     let upd = &cc.updated_label;
     let upd_baseline = head_top + (ui_line - ch as f64) * 0.5 + ascent as f64;
-    text(p, inner_x + inner_w - text_w(upd), upd_baseline, upd, cc_palette::fg_sec());
+    text(p, inner_x + inner_w - text_w(upd), upd_baseline, upd, panel_palette::fg_sec());
     let mut y = head_top + ui_line + lh * metric::HEADING_GAP;
 
     if cc.feed_missing {
         y += lh;
-        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", cc_palette::fg_sec());
+        text(p, inner_x, y, "no usage feed at ~/.local/state/devops/claude-usage.json", panel_palette::fg_sec());
         return;
     }
 
@@ -3353,7 +3363,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     for (i, a) in cc.accounts.iter().enumerate() {
         let cx = inner_x + i as f64 * (card_w + gap);
         let card = Rect { x: cx, y_top: card_top, w: card_w, h: card_h };
-        p.fill_rounded_rect(card, cc_palette::card_bg(), 6.0, (cc_palette::card_border(), 1.0));
+        p.fill_rounded_rect(card, panel_palette::card_bg(), 6.0, (panel_palette::card_border(), 1.0));
         let px = cx + card_pad;
         let row_right = cx + card_w - card_pad;
         let mut cy = card_top + card_pad + ascent as f64;
@@ -3387,17 +3397,17 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
                 w: text_w(&chip_text) + chip_pad * 2.0,
                 h: chip_h,
             },
-            cc_palette::chip_bg(a.status_severity), 3.0, ([0.0; 4], 0.0),
+            panel_palette::chip_bg(a.status_severity), 3.0, ([0.0; 4], 0.0),
         );
         text(p, chip_text_x, cy, &chip_text, cc_severity_color(a.status_severity));
         let name_budget = (chip_text_x - chip_pad - cw as f64 - px) / cw as f64;
-        text(p, px, cy, &fit_ellipsis(&a.name, name_budget), cc_palette::fg());
+        text(p, px, cy, &fit_ellipsis(&a.name, name_budget), panel_palette::fg());
 
         // r2 — email, one full line of its own.  Cramming it beside the
         // name is what produced the collisions; a dedicated line also
         // lets a long address show in full.
         cy += row_adv[0];
-        text(p, px, cy, &fit_ellipsis(&a.email, (row_right - px) / cw as f64), cc_palette::fg_sec());
+        text(p, px, cy, &fit_ellipsis(&a.email, (row_right - px) / cw as f64), panel_palette::fg_sec());
 
         // r3/r4 — one full-width bar per window: `5H [========----] 55%`.
         // Full width (not two half-width groups) roughly doubles the
@@ -3422,7 +3432,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             // First bar row steps off the email; every later one uses
             // the tighter row-to-row advance.
             cy += if i == 0 { row_adv[1] } else { row_adv[2] };
-            text(p, px, cy, &label, cc_palette::fg_faint());
+            text(p, px, cy, &label, panel_palette::fg_faint());
             let pct = format!("{:.0}%", util * 100.0);
             text(p, row_right - text_w(&pct), cy, &pct, cc_util_color(util));
             let bar_x = px + cw as f64 * (label_cols + 1.0);
@@ -3433,7 +3443,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             let bar_y = cy - ascent as f64 * 0.36 - bar_h / 2.0;
             p.fill_rounded_rect(
                 Rect { x: bar_x, y_top: bar_y, w: bar_w, h: bar_h },
-                cc_palette::track(), 2.0, ([0.0; 4], 0.0),
+                panel_palette::track(), 2.0, ([0.0; 4], 0.0),
             );
             let fill_w = bar_w * util.clamp(0.0, 1.0) as f64;
             if fill_w > 0.5 {
@@ -3446,14 +3456,20 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
 
         // r5 — reset times.
         cy += row_adv[3];
-        text(p, px, cy, &fit_ellipsis(&a.reset_label, (row_right - px) / cw as f64), cc_palette::fg_sec());
+        text(p, px, cy, &fit_ellipsis(&a.reset_label, (row_right - px) / cw as f64), panel_palette::fg_sec());
     }
     // Two sections, not one continuous list — give the boundary enough
     // room to read as a break.
     y = card_top + card_h + lh * metric::SECTION_BREAK;
 
     // ---- timeline ----
-    p.ui_text(inner_x as f32, (y + p.ui_ascent() as f64) as f32, "RESOURCE AVAILABILITY", cc_palette::fg());
+    p.panel_text(
+        crate::ui::theme::PanelText::Title,
+        inner_x as f32,
+        (y + p.ui_ascent() as f64) as f32,
+        "RESOURCE AVAILABILITY",
+        panel_palette::fg(),
+    );
     y += p.ui_line_h() as f64 + lh * metric::HEADING_GAP;
     let label_w = cc
         .accounts
@@ -3547,7 +3563,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             let h = dash.min(rows_bottom - gy);
             p.fill_rounded_rect(
                 Rect { x, y_top: gy, w: 1.0, h },
-                cc_palette::grid(), 0.0, ([0.0; 4], 0.0),
+                panel_palette::grid(), 0.0, ([0.0; 4], 0.0),
             );
             gy += dash + gap;
         }
@@ -3556,7 +3572,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
     for (i, a) in cc.accounts.iter().enumerate() {
         let ry = rows_top + i as f64 * row_h;
         let name_baseline = ry + bar_h + bar_gap / 2.0 + ascent as f64 * 0.5;
-        text(p, inner_x, name_baseline, &a.name, cc_palette::fg());
+        text(p, inner_x, name_baseline, &a.name, panel_palette::fg());
         for (idx, (span, reset, util, hm)) in [
             (5.0 * 3_600.0, a.reset_5h_unix as f64, a.util_5h, &a.reset_5h_hm),
             (7.0 * 86_400.0, a.reset_7d_unix as f64, a.util_7d, &a.reset_7d_hm),
@@ -3574,7 +3590,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             if wx1 - wx0 > 0.5 {
                 p.fill_rounded_rect(
                     Rect { x: wx0, y_top: by, w: wx1 - wx0, h: bar_h },
-                    cc_palette::track(), 2.0, ([0.0; 4], 0.0),
+                    panel_palette::track(), 2.0, ([0.0; 4], 0.0),
                 );
             }
             let ux1 = x_of(reset - span + span * util.clamp(0.0, 1.0) as f64);
@@ -3595,16 +3611,16 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
             // so the furthest-right bar's tag still has its room.
             let tag_x = wx1 + cw as f64 * 0.7;
             let tag_baseline = by + bar_h / 2.0 + ascent as f64 * 0.42;
-            text(p, tag_x, tag_baseline, &tag, cc_palette::fg_sec());
+            text(p, tag_x, tag_baseline, &tag, panel_palette::fg_sec());
         }
     }
     // NOW marker.
     let nx = x_of(cc.now_unix as f64);
     p.fill_rounded_rect(
         Rect { x: nx, y_top: rows_top - lh * 0.4, w: 1.5, h: rows_bottom - rows_top + lh * 0.4 },
-        cc_palette::now(), 0.0, ([0.0; 4], 0.0),
+        panel_palette::now(), 0.0, ([0.0; 4], 0.0),
     );
-    text(p, nx - text_w("NOW") / 2.0, rows_top - lh * 0.5, "NOW", cc_palette::now());
+    text(p, nx - text_w("NOW") / 2.0, rows_top - lh * 0.5, "NOW", panel_palette::now());
     // Date labels along the axis.  No tick stubs — each date's dashed
     // rule already lands on the axis, so a stub would just double it.
     let mut t = first_day;
@@ -3612,7 +3628,7 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
         let x = x_of(t);
         let (mo, d, _, _) = crate::cc_usage::local_mdhm(t as i64);
         let lbl = format!("{mo}/{d}");
-        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, cc_palette::fg_faint());
+        text(p, x - text_w(&lbl) / 2.0, rows_bottom + lh * 0.7, &lbl, panel_palette::fg_faint());
         t = next_day(t);
     }
 }

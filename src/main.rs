@@ -1996,8 +1996,21 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                 path: marspot::settings::path().display().to_string(),
             }));
         }
+        Some("cc") => {
+            let rect = marspot::ui::components::cc_usage_modal::panel_rect(
+                2, 2, phys_w as f64, phys_h as f64, cell_w, cell_h, layout.top_inset,
+            );
+            renderer.set_cc_usage(Some(demo_cc_usage(rect)));
+        }
+        Some("process") => {
+            renderer.set_process_panel(Some(demo_process_panel(
+                phys_w as f64, phys_h as f64, layout.top_inset,
+            )));
+        }
         Some(other) => {
-            eprintln!("--snapshot: unknown panel {other:?} (known: settings)");
+            eprintln!(
+                "--snapshot: unknown panel {other:?} (known: settings, cc, process)"
+            );
             std::process::exit(2);
         }
     }
@@ -2029,6 +2042,133 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         std::process::exit(2);
     }
     println!("{path} ({phys_w}x{phys_h}, {} bytes)", png.len());
+}
+
+
+/// Stand-in data for `--snapshot --panel cc`.
+///
+/// Fixed values, never the live feed: a snapshot whose content moves
+/// cannot be compared against the one before it, and comparing is the
+/// whole point — the panels are supposed to look like one program.
+fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::render_metal::CcUsageRender {
+    use marspot::render_metal::{CcUsageAccountRender, CcUsageRender};
+    // A fixed instant, so the timeline lands in the same place every
+    // run: 2026-01-02 03:00:00 UTC.
+    let now = 1_767_322_800i64;
+    let account = |name: &str, email: &str, status: &str, sev: u8, a: f32, b: f32| {
+        CcUsageAccountRender {
+            name: name.to_string(),
+            email: email.to_string(),
+            status_label: status.to_string(),
+            status_severity: sev,
+            util_5h: a,
+            util_7d: b,
+            reset_5h_unix: now + 3 * 3600,
+            reset_7d_unix: now + 4 * 24 * 3600,
+            reset_label: "resets 06:00".to_string(),
+            reset_5h_hm: "06:00".to_string(),
+            reset_7d_hm: "01/06".to_string(),
+            model_rows: vec![
+                ("opus".to_string(), a),
+                ("sonnet".to_string(), b * 0.5),
+            ],
+        }
+    };
+    CcUsageRender {
+        rect,
+        updated_label: "updated 01/02 03:00".to_string(),
+        accounts: vec![
+            account("primary", "one@example.com", "ok", 0, 0.42, 0.61),
+            account("spare", "two@example.com", "near limit", 1, 0.88, 0.35),
+        ],
+        now_unix: now,
+        feed_missing: false,
+    }
+}
+
+/// Stand-in data for `--snapshot --panel process`.
+fn demo_process_panel(
+    w_phys: f64,
+    h_phys: f64,
+    top_inset: f64,
+) -> marspot::render_metal::ProcessPanelRender {
+    use marspot::render_metal::{
+        ProcessPanelPaneRow, ProcessPanelRender, ProcessPanelRow,
+    };
+    use marspot::ui::components::modal_frame::{ModalFrame, ModalLayoutSpec};
+    let frame = ModalFrame::layout(
+        w_phys,
+        h_phys,
+        ModalLayoutSpec {
+            default_w: 760.0 * 2.0,
+            default_h: 460.0 * 2.0,
+            title_bar_h: 56.0,
+            tab_strip_h: 0.0,
+            maximized: false,
+            max_w_ratio: 0.95,
+            max_h_ratio: 0.90,
+            minimized: false,
+            with_tab_strip: false,
+            pos_offset: (0.0, 0.0),
+            top_obstruction: top_inset,
+        },
+    );
+    let pane = |name: &str, sid: u64, n: u32, cpu: f32, rss: u64, busy: &str| {
+        ProcessPanelPaneRow {
+            name: name.to_string(),
+            sid,
+            n_pids: n,
+            cpu_pct: cpu,
+            rss_kb: rss,
+            busy: busy.to_string(),
+        }
+    };
+    let row = |depth: u8, pid: i32, comm: &str, cpu: f32, rss: u64, header: bool| {
+        ProcessPanelRow {
+            depth,
+            pid,
+            comm: comm.to_string(),
+            cpu_pct: cpu,
+            rss_kb: rss,
+            is_header: header,
+        }
+    };
+    ProcessPanelRender {
+        rect: frame.frame,
+        title: "Process Monitor".to_string(),
+        pane_rows: vec![
+            pane("marspot", 101, 4, 1.2, 86_000, ""),
+            pane("torajs", 102, 9, 34.5, 512_000, "cargo test"),
+            pane("kevy", 103, 2, 0.0, 12_400, ""),
+        ],
+        selected_pane: 1,
+        rows: vec![
+            row(0, 0, "PID  COMMAND", 0.0, 0, true),
+            row(0, 4211, "zsh", 0.0, 3_200, false),
+            row(1, 4288, "cargo", 2.1, 48_000, false),
+            row(2, 4301, "rustc", 32.4, 460_000, false),
+            row(2, 4302, "rustc", 0.0, 900, false),
+        ],
+        minimized: false,
+        // Traffic lights: small circles in the title bar.  Passing the
+        // whole frame here (the first cut) paints one enormous pill
+        // over the body — a snapshot that looks broken while the
+        // panel is fine.
+        light_rects: {
+            let d = 24.0;
+            let y = frame.frame.y_top + (56.0 - d) * 0.5;
+            let mk = |n: f64| marspot_term::layout::Rect {
+                x: frame.frame.x + 20.0 + n * (d + 12.0),
+                y_top: y,
+                w: d,
+                h: d,
+            };
+            [mk(0.0), mk(1.0), mk(2.0)]
+        },
+        title_bar_hovered: false,
+        scroll_y: 0.0,
+        draw_backdrop: true,
+    }
 }
 
 /// Headless benchmark dispatcher.  Spec is `<mode>:<arg>`.
