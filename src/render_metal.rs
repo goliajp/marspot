@@ -135,13 +135,51 @@ fn box_drawing_key(ch: char, metrics: &SlotMetrics) -> GlyphKey {
 /// line in the rasteriser).
 #[inline]
 fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFont) -> GlyphKey {
+    text_glyph_key_with(font_id, glyph, ct_font, false)
+}
+
+/// `text_glyph_key`, plus the two-cell overflow variant — see
+/// [`GlyphKey::FLAG_OVERFLOW`].
+fn text_glyph_key_with(
+    font_id: u32,
+    glyph: CGGlyph,
+    ct_font: &core_text::font::CTFont,
+    overflow: bool,
+) -> GlyphKey {
+    let mut flags = GlyphKey::FLAG_SMOOTH;
+    if overflow {
+        flags |= GlyphKey::FLAG_OVERFLOW;
+    }
     GlyphKey::new(
         font_id,
         glyph,
         GlyphKey::size_q_for(ct_font.pt_size()),
         0,
-        GlyphKey::FLAG_SMOOTH,
+        flags,
     )
+}
+
+/// May this cell's glyph be drawn at its natural size, overflowing to
+/// the right, instead of being scaled down to fit one cell?
+///
+/// Three conditions, all necessary:
+///
+/// * the grid gives it **one** cell — a two-cell glyph already has the
+///   room it was designed for;
+/// * it is East Asian **Ambiguous** — precisely the set whose glyphs
+///   the owning font draws on a two-cell em square while we render
+///   them narrow, so precisely the set that gets squeezed;
+/// * the cell to the right is **blank**, so the overflow lands on
+///   nothing.  This is WezTerm's `WhenFollowedBySpace`, and the reason
+///   it is the default there: overflow that covers a neighbour is
+///   worse than a small glyph, overflow onto a space is free.
+///
+/// The last column never overflows — there is no neighbour to check,
+/// and spilling past the pane edge is not an option.
+fn may_overflow_cell(ch: char, right: Option<char>) -> bool {
+    crate::grid::char_width(ch) == 1
+        && crate::grid::is_ambiguous_width(ch)
+        && matches!(right, Some(' ') | Some('\0'))
 }
 
 /// Like `resolve_cell_glyph`, but routes colour glyphs (Apple Color Emoji)
@@ -149,6 +187,7 @@ fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFon
 /// atlas.  Returns `(entry, is_color)` so the caller can pick the matching
 /// glyph buffer + atlas dims.  Box-drawing / block-element glyphs are always
 /// mono (we rasterise those ourselves).
+#[allow(clippy::too_many_arguments)]
 fn resolve_cell_glyph_routed(
     atlas: &mut GlyphAtlas,
     color_atlas: &mut GlyphAtlas,
@@ -157,6 +196,7 @@ fn resolve_cell_glyph_routed(
     bold: bool,
     italic: bool,
     metrics: SlotMetrics,
+    overflow: bool,
 ) -> Option<(AtlasEntry, bool)> {
     if box_drawing_arms(ch).is_some() || block_element_rects(ch).is_some() {
         return resolve_cell_glyph(atlas, font, ch, bold, italic, metrics).map(|e| (e, false));
@@ -166,8 +206,15 @@ fn resolve_cell_glyph_routed(
         return None;
     }
     let ct_font = font.font(font_idx).clone();
-    let key = text_glyph_key(font_idx as u32, glyph, &ct_font);
-    let n_cells = crate::grid::char_width(ch).max(1) as u16;
+    let key = text_glyph_key_with(font_idx as u32, glyph, &ct_font, overflow);
+    // The overflow raster is simply the same glyph given the two-cell
+    // slot it was designed for; `rasterise_glyph`'s own oversized test
+    // then finds it fits and takes the natural-size path.
+    let n_cells = if overflow {
+        2
+    } else {
+        crate::grid::char_width(ch).max(1) as u16
+    };
     if font.is_color_font(font_idx) {
         color_atlas
             .get_or_rasterize(key, &ct_font, metrics, n_cells)
@@ -4599,6 +4646,12 @@ fn push_session(
                 cell_h: cell_h.round() as u32,
                 baseline_from_top: ascent.round() as u32,
             };
+            // A glyph the grid gives one cell but the font drew for
+            // two may borrow the cell to its right when that cell is
+            // blank — see `may_overflow_cell`.
+            let right = (c + 1 < cols)
+                .then(|| grid.cell_at_view(view.view_offset, (c + 1) as u16, r).ch);
+            let overflow = may_overflow_cell(cell.ch, right);
             let (entry, is_color) = match resolve_cell_glyph_routed(
                 atlas,
                 color_atlas,
@@ -4607,6 +4660,7 @@ fn push_session(
                 cell.attrs.bold,
                 cell.attrs.italic,
                 metrics,
+                overflow,
             ) {
                 Some(e) => e,
                 None => continue,
@@ -7734,6 +7788,48 @@ mod tests {
         assert!((1.0 - UNFOCUSED_SCRIM - 0.75).abs() < 1e-6, "75 % opacity");
         assert!((1.0 - RESTING_SCRIM - 0.50).abs() < 1e-6, "50 % opacity");
         assert!((1.0 - PARKED_SCRIM - 0.25).abs() < 1e-6, "25 % opacity");
+    }
+
+    /// 2026-08-08 report: `①` renders at a fraction of the CJK beside
+    /// it.  Measured cause — PingFang draws it 11.71 px wide against a
+    /// 7.20 px cell, so `rasterise_glyph` scale-to-fits it to 61 %, and
+    /// because circled digits are square the *width* always binds: no
+    /// font on the machine escapes it (the narrowest `①`, STIXGeneral
+    /// at 8.21 px, lands at the same ~7.2 px on screen).
+    ///
+    /// Widening the cell is not the answer — every other wcwidth in
+    /// the stack calls these narrow, so marspot would drift.  What
+    /// every other terminal does instead is let the glyph overflow;
+    /// WezTerm's `allow_square_glyphs_to_overflow_width` defaults to
+    /// `WhenFollowedBySpace`.  This pins that rule.
+    #[test]
+    fn a_squeezed_glyph_may_borrow_a_blank_neighbour() {
+        // The reported characters, followed by a blank.
+        for ch in ['①', '③', 'Ⓐ', '★', '●'] {
+            assert!(
+                may_overflow_cell(ch, Some(' ')),
+                "{ch} is drawn on a two-cell em square and has room to its right"
+            );
+            assert!(
+                may_overflow_cell(ch, Some('\0')),
+                "{ch}: an unwritten cell is as blank as a space"
+            );
+            // …but never over something.  Overflow that covers a
+            // neighbour is worse than a small glyph.
+            assert!(!may_overflow_cell(ch, Some('x')));
+            assert!(!may_overflow_cell(ch, Some('中')));
+            // The last column has no neighbour to borrow.
+            assert!(!may_overflow_cell(ch, None));
+        }
+        // Two-cell glyphs already have the room they were designed
+        // for; ASCII was designed for one.  Neither may overflow, or
+        // every wide char on screen would claim a third cell.
+        for ch in ['中', '汉', 'あ', 'A', 'x', '─', '╭'] {
+            assert!(
+                !may_overflow_cell(ch, Some(' ')),
+                "{ch} must not overflow — it is not in the squeezed set"
+            );
+        }
     }
 
     /// The scrim primitive is shared by every reason a pane recedes,

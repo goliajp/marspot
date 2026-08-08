@@ -149,17 +149,37 @@ impl GlyphKey {
     /// shape.
     pub const FLAG_SUBPX_AA: u8 = 1 << 1;
 
+    /// Bit 2 — rasterise into a **two-cell** slot even though the grid
+    /// reserves one, so a glyph designed on a CJK em square renders at
+    /// its natural size and overflows to the right instead of being
+    /// scale-to-fitted down to the cell.
+    ///
+    /// A separate key, not a separate atlas: the same glyph can need
+    /// both rasters on one screen — overflowing where the next cell is
+    /// blank, fitted where it is not.
+    ///
+    /// This is how every other terminal makes `①` look right.  WezTerm
+    /// names it `allow_square_glyphs_to_overflow_width`, default
+    /// `WhenFollowedBySpace`; marspot had only the `Never` behaviour,
+    /// which is why circled digits came out at 61 % of their design
+    /// size while the CJK beside them did not (2026-08-08 report).
+    pub const FLAG_OVERFLOW: u8 = 1 << 2;
+
     // Bit layout constants — keep colocated with `new()` / accessors
     // so the packing scheme is one block to audit.
+    // The 64 bits were fully spoken for — font_id took 32 of them for
+    // a registry that never holds more than a few dozen fonts.  Trimmed
+    // to 24 (16 M) so `flags` has room to grow; 6 bits are left spare.
     const FONT_ID_SHIFT: u32 = 0;
-    const GLYPH_SHIFT: u32 = 32;
-    const SIZE_Q_SHIFT: u32 = 48;
-    const SUBPX_X_SHIFT: u32 = 60;
-    const FLAGS_SHIFT: u32 = 62;
+    const GLYPH_SHIFT: u32 = 24;
+    const SIZE_Q_SHIFT: u32 = 40;
+    const SUBPX_X_SHIFT: u32 = 52;
+    const FLAGS_SHIFT: u32 = 54;
 
+    const FONT_ID_MASK: u64 = 0x00FF_FFFF; // 24 bits
     const SIZE_Q_MASK: u64 = 0x0FFF; // 12 bits
     const SUBPX_X_MASK: u64 = 0x03; //  2 bits
-    const FLAGS_MASK: u64 = 0x03; //  2 bits
+    const FLAGS_MASK: u64 = 0x0F; //  4 bits
 
     /// Pack the 5 logical fields into the 64-bit key.  Debug builds
     /// assert no field exceeds its allotted bit width — production
@@ -178,9 +198,13 @@ impl GlyphKey {
         );
         debug_assert!(
             (flags as u64) <= Self::FLAGS_MASK,
-            "flags {flags:#x} > 0x3 — packing scheme overflow"
+            "flags {flags:#x} > 0xF — packing scheme overflow"
         );
-        let packed = ((font_id as u64) << Self::FONT_ID_SHIFT)
+        debug_assert!(
+            (font_id as u64) <= Self::FONT_ID_MASK,
+            "font_id {font_id} > 16 M — packing scheme overflow"
+        );
+        let packed = (((font_id as u64) & Self::FONT_ID_MASK) << Self::FONT_ID_SHIFT)
             | ((glyph as u64) << Self::GLYPH_SHIFT)
             | (((size_q as u64) & Self::SIZE_Q_MASK) << Self::SIZE_Q_SHIFT)
             | (((subpx_x as u64) & Self::SUBPX_X_MASK) << Self::SUBPX_X_SHIFT)
@@ -190,12 +214,18 @@ impl GlyphKey {
 
     #[inline]
     pub fn font_id(self) -> FontId {
-        (self.0 >> Self::FONT_ID_SHIFT) as u32
+        ((self.0 >> Self::FONT_ID_SHIFT) & Self::FONT_ID_MASK) as u32
     }
 
     #[inline]
     pub fn glyph(self) -> CGGlyph {
         (self.0 >> Self::GLYPH_SHIFT) as u16
+    }
+
+    /// Does this key ask for the two-cell overflow raster?
+    #[inline]
+    pub fn overflows(self) -> bool {
+        (self.flags() & Self::FLAG_OVERFLOW) != 0
     }
 
     #[inline]
@@ -1292,6 +1322,33 @@ mod tests {
     use super::*;
     use crate::render_metal::system_default_device;
     use core_text::font::new_from_name;
+
+    /// The key was fully packed — font_id owned 32 bits for a registry
+    /// that holds a few dozen fonts — so making room for
+    /// `FLAG_OVERFLOW` meant re-cutting it.  Every field has to survive
+    /// that, and the overflow variant must be a *different* key: the
+    /// same glyph needs both rasters on one screen, fitted where a
+    /// neighbour is in the way and natural-size where it is not.
+    #[test]
+    fn the_repacked_key_keeps_every_field_and_separates_the_variants() {
+        let k = GlyphKey::new(0x00AB_CDEF, 0xBEEF, 4095, 3, GlyphKey::FLAGS_MASK as u8);
+        assert_eq!(k.font_id(), 0x00AB_CDEF, "font_id");
+        assert_eq!(k.glyph(), 0xBEEF, "glyph");
+        assert_eq!(k.size_q(), 4095, "size_q");
+        assert_eq!(k.subpx_x(), 3, "subpx_x");
+        assert_eq!(k.flags(), GlyphKey::FLAGS_MASK as u8, "flags");
+
+        let plain = GlyphKey::new(7, 42, 52, 0, GlyphKey::FLAG_SMOOTH);
+        let over = GlyphKey::new(
+            7, 42, 52, 0,
+            GlyphKey::FLAG_SMOOTH | GlyphKey::FLAG_OVERFLOW,
+        );
+        assert_ne!(plain, over, "the two rasters must not share a cache slot");
+        assert!(!plain.overflows());
+        assert!(over.overflows());
+        assert_eq!(over.font_id(), 7);
+        assert_eq!(over.glyph(), 42);
+    }
 
     fn make_font() -> CTFont {
         new_from_name("Menlo", 13.0).expect("Menlo present on macOS")

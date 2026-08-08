@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.100"  # 切 profile 时把 resume 的 uuid 记进日志;详见 CHANGELOG.md
-core    = "0.12.94"  # Cc 时间轴两端对齐到本地整日,末尾那天画得出来;localhost:port 认成链接;详见 CHANGELOG.md
-session = "0.11.36"  # 圈圈数字的宽度多一档:只放宽这一族,不放宽整个歧义表;详见 CHANGELOG.md
+core    = "0.12.95"  # 被压小的字形可以借用右边的空白格,不再缩到 61%;详见 CHANGELOG.md
+session = "0.11.37"  # 暴露歧义宽度集合,供渲染侧判断谁可以溢出;详见 CHANGELOG.md

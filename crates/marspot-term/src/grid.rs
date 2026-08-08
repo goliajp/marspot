@@ -143,41 +143,17 @@ fn is_enclosed_alphanumeric(cp: u32) -> bool {
     matches!(cp, 0x2460..=0x24FF | 0x2776..=0x2793)
 }
 
-pub fn char_width(ch: char) -> u8 {
+/// East Asian Ambiguous (EAW=A per UAX #11) — narrow in Western
+/// contexts, drawn wide by CJK fonts.
+///
+/// Public because it names exactly the population that gets *squeezed*:
+/// we render these at one cell (see [`ambiguous_wide_mode`]) while the
+/// font that owns the glyph designed it on a two-cell em square.  The
+/// renderer uses this set to decide which glyphs may overflow their
+/// cell rather than be scaled down to fit it.
+pub fn is_ambiguous_width(ch: char) -> bool {
     let cp = ch as u32;
-    if cp == 0 {
-        // The trail half of a wide pair uses NUL as a sentinel; it has
-        // no inherent width of its own.
-        return 0;
-    }
-    let east_asian_wide = matches!(
-        cp,
-        0x1100..=0x115F        // Hangul Jamo
-        | 0x2E80..=0x303E      // CJK Radicals … CJK Symbols & Punctuation
-        | 0x3041..=0x33FF      // Hiragana, Katakana, …, CJK Compatibility
-        | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
-        | 0x4E00..=0x9FFF      // CJK Unified Ideographs
-        | 0xA000..=0xA4CF      // Yi Syllables
-        | 0xAC00..=0xD7A3      // Hangul Syllables
-        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
-        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
-        | 0xFF00..=0xFF60      // Halfwidth & Fullwidth Forms (fullwidth half)
-        | 0xFFE0..=0xFFE6      // Fullwidth Sign Forms
-        | 0x20000..=0x2FFFD    // CJK Extension B–F
-        | 0x30000..=0x3FFFD    // CJK Extension G–H
-    );
-    // East Asian Ambiguous (EAW=A per UAX #11): chars that are narrow
-    // in Western contexts but rendered wide in CJK fonts.  iTerm2
-    // exposes this as "Ambiguous Characters are Double-Width" (default
-    // ON when locale is CJK).  marspot is CJK-locale-first (lihao@golia.jp
-    // is the only user) so default it to wide.
-    //
-    // The 2026-06-15 user report: circled digits like ① ② ③ (Enclosed
-    // Alphanumerics, U+2460-U+24FF) rendered "好小好小" because we
-    // squeezed a 2-cell-wide glyph into 1 cell — the rasteriser shrank
-    // it to fit.  Same fix lifts geometric shapes (▲ ●), misc symbols
-    // (☆ ★ ☀ ☁), and dingbats (✓ ✗) up to the right cell footprint.
-    let east_asian_ambiguous = matches!(
+    matches!(
         cp,
         0x00A1 | 0x00A4 | 0x00A7..=0x00A8 | 0x00AA | 0x00AD..=0x00AE
         | 0x00B0..=0x00B4 | 0x00B6..=0x00BA | 0x00BC..=0x00BF
@@ -235,7 +211,44 @@ pub fn char_width(ch: char) -> u8 {
         | 0x1F170..=0x1F18D
         | 0x1F18F..=0x1F190
         | 0x1F19B..=0x1F1AC
+    )
+}
+
+pub fn char_width(ch: char) -> u8 {
+    let cp = ch as u32;
+    if cp == 0 {
+        // The trail half of a wide pair uses NUL as a sentinel; it has
+        // no inherent width of its own.
+        return 0;
+    }
+    let east_asian_wide = matches!(
+        cp,
+        0x1100..=0x115F        // Hangul Jamo
+        | 0x2E80..=0x303E      // CJK Radicals … CJK Symbols & Punctuation
+        | 0x3041..=0x33FF      // Hiragana, Katakana, …, CJK Compatibility
+        | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF      // CJK Unified Ideographs
+        | 0xA000..=0xA4CF      // Yi Syllables
+        | 0xAC00..=0xD7A3      // Hangul Syllables
+        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
+        | 0xFF00..=0xFF60      // Halfwidth & Fullwidth Forms (fullwidth half)
+        | 0xFFE0..=0xFFE6      // Fullwidth Sign Forms
+        | 0x20000..=0x2FFFD    // CJK Extension B–F
+        | 0x30000..=0x3FFFD    // CJK Extension G–H
     );
+    // East Asian Ambiguous (EAW=A per UAX #11): chars that are narrow
+    // in Western contexts but rendered wide in CJK fonts.  iTerm2
+    // exposes this as "Ambiguous Characters are Double-Width" (default
+    // ON when locale is CJK).  marspot is CJK-locale-first (lihao@golia.jp
+    // is the only user) so default it to wide.
+    //
+    // The 2026-06-15 user report: circled digits like ① ② ③ (Enclosed
+    // Alphanumerics, U+2460-U+24FF) rendered "好小好小" because we
+    // squeezed a 2-cell-wide glyph into 1 cell — the rasteriser shrank
+    // it to fit.  Same fix lifts geometric shapes (▲ ●), misc symbols
+    // (☆ ★ ☀ ☁), and dingbats (✓ ✗) up to the right cell footprint.
+    let east_asian_ambiguous = is_ambiguous_width(ch);
     let ambiguous_wide = match ambiguous_wide_mode() {
         AmbiguousWide::Off => false,
         AmbiguousWide::Circled => is_enclosed_alphanumeric(cp),
