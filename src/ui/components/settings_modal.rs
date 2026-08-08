@@ -2,9 +2,10 @@
 //! does.
 //!
 //! Same split as the other modals (`cc_usage_modal` is the reference):
-//! shape and behaviour here, painting in `render_metal`.  Everything
-//! is a multiple of the painter's cell metrics, so the panel tracks
-//! font size without a second set of numbers.
+//! shape and behaviour here, painting in `render_metal`.  The layout
+//! is a list of cards, each holding rows separated by a hairline —
+//! the shape the OS uses for exactly this job, and the shape a flat
+//! stack of same-sized lines could never be spaced into.
 //!
 //! ## The rows are data
 //!
@@ -139,12 +140,12 @@ pub struct Section {
     pub rows: &'static [RowSpec],
 }
 
-/// English, like every other panel in the app — and the cost lines
-/// are set in the terminal font, where a proportional CJK string sat
-/// on mono cells and came out visibly loose.
+/// English, like every other panel in the app.  Group headings are
+/// sentence case, not shouted: they sit above their card at 12pt
+/// semibold, where all-caps only adds noise.
 pub const SECTIONS: &[Section] = &[
     Section {
-        heading: "IDLE RECLAMATION",
+        heading: "Idle reclamation",
         rows: &[
             RowSpec {
                 row: Row::ReclaimEnabled,
@@ -164,7 +165,7 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     Section {
-        heading: "TEXT",
+        heading: "Text",
         rows: &[RowSpec {
             row: Row::CircledWide,
             label: "Circled digits take two cells",
@@ -753,6 +754,74 @@ mod tests {
             rows[0].h / px
         );
         assert!(rect.w >= 560.0 * px, "panel too narrow: {:.1}pt", rect.w / px);
+    }
+
+    /// The same geometry, measured with the **real font**.
+    ///
+    /// `fake_measure` proves the layout is self-consistent; it cannot
+    /// prove SF Pro fits, and "the button is narrower than the label
+    /// inside it" is precisely a real-metrics failure.  Skipped rather
+    /// than failed if the font stack will not build.
+    #[test]
+    fn the_real_font_fits_the_boxes_drawn_for_it() {
+        let Ok(mut font) = crate::font_cache::FontCache::build() else {
+            eprintln!("no font stack; skipping");
+            return;
+        };
+        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let s = Settings::default();
+        let mut m = |t: &str, pt: f64, w: u16| {
+            font.measure_ui_text_at_size(
+                t, w, crate::font_shape::ShapeOptions::default(), pt,
+            )
+        };
+        let rect = panel_rect(2000.0, 1500.0, &s, &mut m, 30.0);
+
+        let mut slots = Vec::new();
+        walk(rect, &s, &mut m, |slot| slots.push(slot));
+
+        let mut card = Rect { x: 0.0, y_top: 0.0, w: 0.0, h: 0.0 };
+        for slot in &slots {
+            match slot {
+                Slot::Card { rect: c } => card = *c,
+                Slot::Row { row, spec, control, .. } => {
+                    let text_left = card.x + metric::CARD_PAD_X * px;
+                    // The cost line is the long text in this panel: it
+                    // must fit the card, or it runs out of the box.
+                    let cost_w = m(spec.cost, metric::DESC_PT, metric::DESC_WEIGHT);
+                    assert!(
+                        text_left + cost_w <= card.x + card.w - metric::CARD_PAD_X * px,
+                        "{:?}: cost line needs {:.0}pt and the card gives {:.0}pt",
+                        row,
+                        cost_w / px,
+                        (card.w - 2.0 * metric::CARD_PAD_X * px) / px,
+                    );
+                    // The label and the control share one line and must
+                    // not collide.
+                    let label_w = m(spec.label, metric::LABEL_PT, metric::LABEL_WEIGHT);
+                    assert!(
+                        text_left + label_w + 12.0 * px <= control.x,
+                        "{:?}: label runs into its control",
+                        row
+                    );
+                    if let Control::Segmented { options, .. } = row.control(&s) {
+                        for (n, label) in options.iter().enumerate() {
+                            let seg = segment_rect(*control, n, options, &mut m);
+                            let ink = m(label, metric::SEG_PT, metric::SEG_WEIGHT);
+                            assert!(
+                                seg.w >= ink + 2.0 * metric::SEG_PAD_X * px - 0.5,
+                                "{label:?} ink {:.0}pt vs button {:.0}pt",
+                                ink / px,
+                                seg.w / px,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // And the panel it all sits in is the size it claims.
+        assert!(rect.w > 0.0 && rect.h > 0.0);
     }
 
     #[test]

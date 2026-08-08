@@ -2238,7 +2238,18 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.101**
+Current: **0.12.102**
+
+### 0.12.102
+
+**分组标题改成句首大写**(`IDLE RECLAMATION` → `Idle reclamation`)。全大写是
+分组标题挤在行里、只能靠字重区分时的写法;现在它有自己的字号、坐在卡片
+上方,全大写只剩噪音。
+
+**沙箱多一个 dev seam:`MARSPOT_DEV_OPEN_SETTINGS=1`** —— 启动两秒后自动
+打开设置面板。面板「好不好看」没有测试能替,唯一的办法是看;而在沙箱里
+用脚本点工具栏需要辅助功能权限。跟 `MARSPOT_DEV_CLOSE_PANES` 同族,装出去
+的 app 里不设。
 
 ### 0.12.101
 

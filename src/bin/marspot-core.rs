@@ -690,6 +690,7 @@ mod window_state_tests {
             parked_windows: Vec::new(),
             dev_close_panes: 0,
             dev_close_panes_at: None,
+            dev_open_settings_at: None,
             layout_discarded: false,
             windows,
             key_window: 0,
@@ -3464,6 +3465,10 @@ struct CoreApp {
     /// app; see `dev_drive_close_panes`.
     dev_close_panes: usize,
     dev_close_panes_at: Option<Instant>,
+    /// Dev seam only (`MARSPOT_DEV_OPEN_SETTINGS`): when to open the
+    /// settings panel, cleared once it has.  See
+    /// `dev_drive_open_settings`.
+    dev_open_settings_at: Option<Instant>,
     /// Set once the user closed the last pane of the last window.  The
     /// saved layout has been deleted at that point and the app is on
     /// its way out; any later save would resurrect what they just
@@ -3829,6 +3834,17 @@ impl CoreApp {
                 &format!("{e}; saved state not persisted this tick")
             );
         }
+    }
+
+    /// Dev seam (`MARSPOT_DEV_OPEN_SETTINGS`) — see the call site.
+    fn dev_drive_open_settings(&mut self) {
+        match self.dev_open_settings_at {
+            Some(t) if Instant::now() >= t => {}
+            _ => return,
+        }
+        self.dev_open_settings_at = None;
+        let wi = self.key_window.min(self.windows.len().saturating_sub(1));
+        self.toggle_settings_modal(wi);
     }
 
     /// Dev seam (`MARSPOT_DEV_CLOSE_PANES=n`) — see the call site.
@@ -8802,6 +8818,9 @@ fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
         dev_close_panes_at: Some(Instant::now() + Duration::from_secs(3)),
+        dev_open_settings_at: std::env::var("MARSPOT_DEV_OPEN_SETTINGS")
+            .is_ok()
+            .then(|| Instant::now() + Duration::from_secs(2)),
         layout_discarded: false,
         windows: vec![{
             let mut w = WindowState::new(
@@ -8999,6 +9018,13 @@ fn main() {
         // closes the window / quits the app" is otherwise untestable.
         // Unset in the installed app.
         app.dev_drive_close_panes();
+        // Dev seam (`MARSPOT_DEV_OPEN_SETTINGS=1`): open the settings
+        // panel once, shortly after boot, so a sandbox run can be
+        // screenshotted.  How a panel *looks* has no test — the only
+        // check is to look at it, and driving the toolbar click from a
+        // script needs accessibility permission the sandbox has not
+        // got.  Unset in the installed app.
+        app.dev_drive_open_settings();
         for wi in 0..app.windows.len() {
             app.tick_process_panel_kills(wi);
             let due = win!(app, wi)

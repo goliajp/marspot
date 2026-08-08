@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
-core    = "0.12.101"  # 设置面板改成分组卡片 + 卡内细线 + 三级字号;详见 CHANGELOG.md
+core    = "0.12.102"  # 分组标题改句首大写 + 沙箱可直接开设置面板看一眼;详见 CHANGELOG.md
 session = "0.11.41"  # 字符宽度跟着设置走 + 每字节路径用原子镜像;详见 CHANGELOG.md
