@@ -62,7 +62,26 @@ scrim 是盖在 pane 上的一层黑,`0.25` 表示不透明度 75%。
 | 6 | 不是在等自己设的定时器(`/loop` autorun) | 那是「在两步之间」,不是闲置 |
 | 7 | CPU 增量 ≤ 容差,且采样跨度 ≥ 15 秒 | 一次采样得先跨过真实时间才有意义 |
 
-阈值 30 分钟可调:`MARSPOT_CC_IDLE_HIBERNATE_S`,设 `0` 完全关掉。
+### 怎么改
+
+**工具栏第 6 个按钮**(两条带滑块的横轨)。开关、阈值、预热三项都在那儿,
+每一项旁边写着它的代价。点一下写进
+`~/Library/Caches/marspot/settings.toml`,**一秒内生效,什么都不重启**。
+
+那个文件也可以直接手改 —— 面板是编辑它的一种方式,不是唯一的:
+
+```toml
+reclaim.enabled = true
+reclaim.idle_minutes = 30        # 15 / 30 / 60 / 120,或 0 = 从不
+reclaim.prefetch_on_return = true
+```
+
+重写会**原样保留它读不懂的东西**(未知的键、注释、顺序),所以降级或用旧
+构建打开一次面板不会把配置吃掉。
+
+环境变量仍然压过文件(`MARSPOT_CC_IDLE_HIBERNATE_S`、
+`MARSPOT_NO_WAKE_PREFETCH`):沙箱脚本和 soak 用的是它们,而 env 说的是
+「这一次运行」,文件说的是「用户一直想要的」。
 
 ### 条件 3 是 2026-08-03 补的
 
@@ -110,7 +129,8 @@ claude 进程。裸 shell、vim、ssh、任何别的东西:
 - 不并发:十六个 claude 同时启动是一次 CPU 尖峰,而这台机器的卖点就是
   没有尖峰
 - 中途你自己点开了某个 pane,它从队列里跳过,不会被再唤醒一次
-- `MARSPOT_NO_WAKE_PREFETCH=1` 关掉,回到「点哪个唤醒哪个」
+- 面板里的「回到 marspot 时预热」关掉,回到「点哪个唤醒哪个」
+  (`MARSPOT_NO_WAKE_PREFETCH=1` 仍然是压过它的 env 覆盖)
 
 ## 5. 唤醒要多久
 
@@ -131,6 +151,23 @@ claude 进程。裸 shell、vim、ssh、任何别的东西:
 
 `WAKE_PREFETCH` 是它在日志里的名字。
 
+## 6. 圈圈数字为什么小,以及那个开关
+
+`①` 的字形是按**两格 em 方框**画的(PingFang 里 ink 11.71 px),而格子只有
+7.20 px,于是光栅器把它缩到 61%。**换字体救不了** —— 圈圈数字是方的,缩放
+的约束边永远是格子宽,这台机器上最窄的 `①`(STIXGeneral 8.21)落到屏幕上
+还是那个 ~7.2 px。
+
+两条路:
+
+- **溢出**(默认,零分歧):右邻格是空白时,按自然尺寸画、溢出过去。
+  孤立的 `①` `★` `●` 因此是大的。这是 WezTerm 的
+  `allow_square_glyphs_to_overflow_width` 模型。连着写的 `①②③` 借不到空白,
+  仍然小。
+- **占 2 格**(面板里,默认关):连着也一样大,**代价是移动换行点** ——
+  `Bun.stringWidth('①')` 是 1(claudecode 用的就是它),所以滚过它的段落
+  可能有字被落在左边的缝里。2026-08-08 当过一次默认值,一小时后回退。
+
 ## 相关常量
 
 | 常量 | 值 | 文件 |
@@ -139,7 +176,7 @@ claude 进程。裸 shell、vim、ssh、任何别的东西:
 | `SWEEP_INTERVAL` | 1 s | 同上 |
 | `PTY_QUIET_AFTER` | 30 s | 同上 |
 | `UNFOCUSED/RESTING/PARKED_SCRIM` | .25 / .50 / .75 | `src/render_metal.rs` |
-| `hibernate_after()` 默认 | 1800 s | `src/bin/marspot-shell/plugins/claudecode.rs` |
+| `reclaim.idle_minutes` 默认 | 30 分 | `settings.toml` / `crates/marspot-term/src/settings.rs` |
 | `WAKE_QUIET_FOR` | 1500 ms | 同上 |
 | `HOLD_SETTLE` | 250 ms | 同上 |
 | `WAKE_WATCHDOG` | 30 s | 同上 |
