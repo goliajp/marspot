@@ -2006,7 +2006,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             renderer.set_layout_modal(Some(marspot::render_metal::LayoutModalRender {
                 cols: 3,
                 rows: 3,
-                scale: marspot::ui::CHROME_PX_PER_PT,
+                scale: 2.0,
                 slot_titles: vec![
                     "marspot".into(), "torajs".into(), "kevy".into(),
                     "spg".into(), "".into(), "mailrs".into(),
@@ -2030,13 +2030,15 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                 divider: true,
             };
             renderer.set_context_menu(Some(ContextMenuRender {
-                // `MARSPOT_SHOT_SCALE` reproduces the pre-fix bug on
-                // demand (a non-HiDPI window reported 1.0 here); the
-                // app itself now always passes the chrome unit.
+                // `MARSPOT_SHOT_SCALE` reproduces a non-HiDPI display,
+                // where the window reports `backingScaleFactor == 1`.
+                // Chrome boxes scale with it and panel text does not,
+                // so it is the only way to see, from a retina dev
+                // machine, what that display actually gets.
                 scale: std::env::var("MARSPOT_SHOT_SCALE")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(marspot::ui::CHROME_PX_PER_PT),
+                    .unwrap_or(2.0),
                 anchor_phys: (420.0, 300.0),
                 top_inset: layout.top_inset,
                 items: vec![
@@ -2150,8 +2152,8 @@ fn demo_process_panel(
         w_phys,
         h_phys,
         ModalLayoutSpec {
-            default_w: 760.0 * marspot::ui::CHROME_PX_PER_PT,
-            default_h: 460.0 * marspot::ui::CHROME_PX_PER_PT,
+            default_w: 760.0 * 2.0,
+            default_h: 460.0 * 2.0,
             title_bar_h: 56.0,
             tab_strip_h: 0.0,
             maximized: false,

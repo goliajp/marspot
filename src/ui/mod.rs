@@ -104,28 +104,6 @@ pub enum SelectionMode {
     Blockwise,
 }
 
-/// Physical pixels per typographic point, for **chrome**.
-///
-/// Not the window's `backingScaleFactor`.  The renderer's text is
-/// fixed in physical pixels: the glyph atlas rasterises at 2× and the
-/// quad is drawn at the rasterised size, so a run asked for at 13 pt
-/// is 26 physical pixels tall on every display.  The terminal cell is
-/// fixed the same way.
-///
-/// Chrome geometry used to multiply its point constants by
-/// `backingScaleFactor` instead.  On the retina displays this was
-/// developed on the two numbers agree and nothing was visibly wrong.
-/// On a 4K panel run without HiDPI — `backingScaleFactor == 1` — every
-/// box came out **half** the size of the text inside it: menu labels
-/// overran the menu, the sidebar was half-width, the header half its
-/// height (reported 2026-08-09, reproduced offscreen with
-/// `--snapshot --panel menu` and `MARSPOT_SHOT_SCALE=1`).
-///
-/// So chrome uses the same unit as the text it holds.  On a HiDPI
-/// display this changes nothing; on a non-HiDPI one it stops the
-/// layout from disagreeing with the type.
-pub const CHROME_PX_PER_PT: f64 = crate::ui::core::ViewPainter::PX_PER_PT;
-
 /// Scroll prefs: direction from the environment, speed from the
 /// settings file.
 ///

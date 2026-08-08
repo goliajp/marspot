@@ -2238,39 +2238,28 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.110**
+Current: **0.12.111**
 
-### 0.12.110
+### 0.12.111
 
-启动路径(env 握手)也打 `SURFACE_SCALE_DIVERGES` 了。修本来就在 —— 启动窗口
-走 `WindowState::new`,它直接用 chrome 单位 —— 但那条说明分歧的日志只加在了
-`attach_surfaces` 一侧,而**用户实际在看的那个窗口通常来自启动路径**。一个
-只在一半路径上说话的日志,比没有更容易让人下错判断。
+**撤回 0.12.109 / 0.12.110。方向搞反了。**
 
-### 0.12.109
+上一版我发现 chrome 的盒子乘窗口 `backingScaleFactor`、而文字不乘,就把
+**盒子**改成跟文字同一个单位 —— 结果整套 chrome 在非 HiDPI 屏上都变大了一倍。
+用户的判断是对的:**原来的盒子尺寸才是对的**。终端 cell 也是 1 物理像素/点,
+chrome 跟着 `scale` 走本来就与它一致;不一致的是**文字**。
 
-**根因:chrome 的盒子乘窗口 `backingScaleFactor`,而文字不乘。**
+真正的毛病要小得多:**菜单宽度的估算用错了单位**。它按「每字符 × scale」算,
+而它估的那段文字是按 `pt × 2` 画的 —— 在 `scale == 1` 的屏上少估了一半,于是
+菜单按一半的宽度建出来,标签冲出去。估算改成物理像素(`Item.pt() × 0.52 ×
+PX_PER_PT`),与被估的对象同单位。
 
-渲染器的文字是**固定物理像素**的:字形按 2× 光栅化、按光栅尺寸出 quad,所以
-一段 13pt 的文字在任何显示器上都是 26 物理像素高;终端 cell 同理固定。而
-chrome 的几何常量(菜单行高、侧栏宽、标题栏高、模态默认尺寸)一直乘的是
-窗口的 `backingScaleFactor`。
+顺带:菜单项拿到了自己的角色 `PanelText::Item` —— 和 `Label` 同字号但
+**字重 400**。标签要压住它下面的说明,所以是 600;菜单项没有要压的东西,
+一列半粗的菜单项读起来像一列标题。系统菜单也都是常规字重。
 
-在开发用的 retina 屏上这两个数都是 2,一致,所以什么都看不出来。在**没开
-HiDPI 的 4K 屏**上 `backingScaleFactor == 1` —— 每个盒子只有它里面文字该有
-的**一半**:菜单标签冲出菜单、侧栏半宽、标题栏半高。
-
-用 `--snapshot --panel menu` 配 `MARSPOT_SHOT_SCALE=1` **离屏复现了**,和用户
-截图逐项吻合(行距 26px、标签 cap 12px)。
-
-修法:chrome 用它所盛放的文字的那个单位 —— `marspot::ui::CHROME_PX_PER_PT`。
-HiDPI 屏上**没有任何变化**;非 HiDPI 屏上布局不再和字体各说各话。窗口仍然
-把真实的 surface scale 报上来,只是 chrome 不拿它当尺;两者不同时打一条
-`SURFACE_SCALE_DIVERGES`,让这件事留在日志里而不是留在传说里。
-
-`WindowState::new` 的 `scale` 参数就此删掉 —— 一个没人用的参数会让下一个人
-以为它有用。回归测试钉住:新窗口的 chrome 单位 == 文字路径的单位,且实际
-建出来的标题栏高度等于 `HEADER_PT × 该单位`。
+`--snapshot` 保留 `MARSPOT_SHOT_SCALE` —— 从 retina 开发机上复现非 HiDPI 屏,
+这是唯一的手段,这一轮的两次判断都靠它。
 
 ### 0.12.108
 

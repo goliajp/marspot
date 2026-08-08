@@ -3747,7 +3747,7 @@ fn build_context_menu_canvas(
         // the baseline from the run's own ascent, so the y that puts
         // the *cap* on the row's centre line is
         // `centre - (ascent - cap/2)`.
-        let role = crate::ui::theme::PanelText::Label;
+        let role = crate::ui::theme::PanelText::Item;
         let px = crate::ui::core::ViewPainter::PX_PER_PT;
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(role.pt());
         let text_y_phys = item.y_top + item.h * 0.5

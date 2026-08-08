@@ -32,6 +32,14 @@ pub enum PanelText {
     Section,
     /// The thing a row is about.
     Label,
+    /// A row you *pick* — a menu item, a list entry.
+    ///
+    /// Same size as [`Self::Label`], lighter.  A label sits above an
+    /// explanation and has to win against it; a menu item has nothing
+    /// to win against, and at semibold a column of them reads as a
+    /// column of headings.  Every native menu on the machine sets
+    /// these at regular weight.
+    Item,
     /// The sentence under a label: what it costs, what it means.
     Secondary,
     /// Footnote — a file path, a timestamp.  Same size as
@@ -46,7 +54,7 @@ impl PanelText {
         match self {
             PanelText::Title => UiSize::Title.sf_pro_pt(),
             PanelText::Section => UiSize::Heading.sf_pro_pt(),
-            PanelText::Label => UiSize::Body.sf_pro_pt(),
+            PanelText::Label | PanelText::Item => UiSize::Body.sf_pro_pt(),
             PanelText::Secondary | PanelText::Caption => UiSize::Small.sf_pro_pt(),
         }
     }
@@ -62,6 +70,7 @@ impl PanelText {
             PanelText::Title => 700,
             PanelText::Section => 600,
             PanelText::Label => 600,
+            PanelText::Item => 400,
             PanelText::Secondary | PanelText::Caption => 400,
         }
     }
@@ -100,8 +109,16 @@ mod tests {
                 w[0], w[0].pt(), w[1], w[1].pt(),
             );
         }
-        // The footnote shares Secondary's size on purpose.
+        // The footnote shares Secondary's size on purpose, and a menu
+        // item shares Label's — both are set apart by weight or
+        // colour, not by a rung nobody could see.
         assert_eq!(PanelText::Caption.pt(), PanelText::Secondary.pt());
+        assert_eq!(PanelText::Item.pt(), PanelText::Label.pt());
+        assert!(
+            PanelText::Item.weight() < PanelText::Label.weight(),
+            "a menu item must be lighter than a label, or a column of \
+             them reads as a column of headings",
+        );
     }
 
     /// A panel's row label must not come out the size of another
