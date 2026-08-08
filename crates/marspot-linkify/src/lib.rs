@@ -834,14 +834,14 @@ fn scan_line_into_matches(
             // *directory* must not win over the file the line points
             // at, so it is tried only after every prose cut has.
             if let Some(b) = resolve_path_end(&chars, i, end) {
-                let text: String = chars[i..b].iter().collect();
+                let text = unquote_path(&chars[i..b].iter().collect::<String>());
                 emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                 i = b.max(i + 1);
                 continue;
             }
             if looks_like_path(&chars[i..end]) {
                 if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
-                    let text: String = chars[i..b].iter().collect();
+                    let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                     i = b;
                     continue;
@@ -857,14 +857,14 @@ fn scan_line_into_matches(
             let end = scan_path_candidate(&chars, i);
             if end - i >= 3 {
                 if let Some(b) = resolve_path_end(&chars, i, end) {
-                    let text: String = chars[i..b].iter().collect();
+                    let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                     i = b.max(i + 1);
                     continue;
                 }
                 if looks_like_path(&chars[i..end]) {
                     if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
-                        let text: String = chars[i..b].iter().collect();
+                        let text = unquote_path(&chars[i..b].iter().collect::<String>());
                         emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                         i = b;
                         continue;
@@ -1527,6 +1527,27 @@ fn scan_path_candidate(chars: &[char], start: usize) -> usize {
     let mut i = start;
     while i < chars.len() {
         let c = chars[i];
+        // A quoted run, or an escaped space.  A path with a space in
+        // it is not rare — it is what `~/Library/Safari/"Favicon
+        // Cache"` looks like the moment anyone pastes a command that
+        // touches one — and stopping at the quote leaves the link
+        // ending mid-name (2026-08-09 report).  Both shells' spellings
+        // are accepted; [`unquote_path`] takes them back off before
+        // anything is asked of the filesystem.
+        if (c == '"' || c == '\'') && i > start {
+            match closing_quote(chars, i) {
+                Some(close) => {
+                    i = close + 1;
+                    continue;
+                }
+                // An unmatched quote is prose, not a name.
+                None => break,
+            }
+        }
+        if c == '\\' && i + 1 < chars.len() && chars[i + 1] == ' ' {
+            i += 2;
+            continue;
+        }
         if c.is_whitespace() || c == '\0' || (c.is_control() && c != '\t') {
             break;
         }
@@ -1536,6 +1557,49 @@ fn scan_path_candidate(chars: &[char], start: usize) -> usize {
         i += 1;
     }
     i
+}
+
+/// The partner of the quote at `open`, if it is on this line and
+/// close enough to be one.
+///
+/// Bounded because an unpaired quote is common in prose (`don't`,
+/// `"as we said"`) and an unbounded search would happily pair one
+/// with another sentence's, swallowing the line between them.  The
+/// bound is generous — names with spaces are still names, not
+/// paragraphs — and anything it lets through still has to survive
+/// `stat`.
+fn closing_quote(chars: &[char], open: usize) -> Option<usize> {
+    const MAX_QUOTED_LEN: usize = 96;
+    let q = chars[open];
+    let hi = (open + 1 + MAX_QUOTED_LEN).min(chars.len());
+    (open + 1..hi).find(|&j| chars[j] == q)
+}
+
+/// Take shell quoting back off a candidate before the filesystem is
+/// asked about it.
+///
+/// The screen shows `~/Library/Safari/"Favicon Cache"`; the thing on
+/// disk is `~/Library/Safari/Favicon Cache`.  The link's *span* stays
+/// on what is drawn — that is what the user points at — while its
+/// target is what this returns.
+fn unquote_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(c) = it.next() {
+        match c {
+            // Inside single quotes a backslash is literal, as in sh.
+            '\\' if quote != Some('\'') => {
+                if let Some(n) = it.next() {
+                    out.push(n);
+                }
+            }
+            '"' | '\'' if quote.is_none() => quote = Some(c),
+            c if Some(c) == quote => quote = None,
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Could prose have started here?
@@ -1555,6 +1619,11 @@ fn is_prose_cut_point(c: char) -> bool {
     matches!(
         c,
         ',' | '.' | ';' | '!' | '?' | '(' | ')' | '[' | ']' | '{' | '}'
+            // A quote both opens a name-with-spaces and closes one, so
+            // it is also where a name can end and prose resume.  The
+            // greedy scan pairs them; this is what lets the arbitration
+            // back out when the pairing was wrong.
+            | '"' | '\''
     ) || matches!(
         c,
         '\u{3001}'..='\u{3003}'   // 、。〃
@@ -1615,7 +1684,7 @@ fn resolve_path_end(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
             return false;
         }
         let text: String = span.iter().collect();
-        is_real_path(&text)
+        is_real_path(&unquote_path(&text))
     };
     // The whole token, then the whole token minus its sentence tail.
     if consider(hi, &mut tried, &mut last) {
@@ -2316,6 +2385,82 @@ mod tests {
             assert_eq!(
                 files[0].text, text,
                 "{name:?} lost part of its name to the prose after it"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name with a space in it, spelled the way a shell spells it.
+    ///
+    /// 2026-08-09 report: `rm -rf ~/Library/Safari/"Favicon Cache"`
+    /// linked nothing.  The scan stopped at the quote, so the
+    /// candidate was `~/Library/Safari/` — a real directory, but not
+    /// the thing the line points at, and not what the user was
+    /// pointing their cursor at either.
+    ///
+    /// Both spellings are exercised, and both halves of the contract:
+    /// the **span** covers what is drawn (quotes and all — that is
+    /// what the user clicks), the **text** is what opens.
+    #[test]
+    fn a_quoted_or_escaped_space_is_part_of_the_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-space-{}",
+            std::process::id()
+        ));
+        let inner = dir.join("Favicon Cache");
+        std::fs::create_dir_all(&inner).unwrap();
+        let real = inner.display().to_string();
+        let parent = dir.display().to_string();
+
+        // Each spelling, and what the drawn text is.
+        let drawn = [
+            format!("{parent}/\"Favicon Cache\""),
+            format!("{parent}/'Favicon Cache'"),
+            format!("{parent}/Favicon\\ Cache"),
+        ];
+        for d in drawn {
+            let line = format!("rm -rf {d}");
+            let v = scan(&line);
+            let files: Vec<&LinkRange> =
+                v.iter().filter(|r| r.kind == LinkKind::File).collect();
+            assert_eq!(files.len(), 1, "no link for {d:?}");
+            assert_eq!(
+                files[0].text, real,
+                "{d:?} must open the real path, not the quoted spelling"
+            );
+            // The span ends where the drawn text ends — including the
+            // closing quote, so the whole thing underlines rather than
+            // stopping mid-name.
+            let last = line.chars().count() as u16 - 1;
+            assert!(
+                files[0].col_end >= last,
+                "{d:?}: underline stops at col {} but the name runs to {last}",
+                files[0].col_end
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unpaired quote is prose, not the start of a name — and the
+    /// arbitration has to be able to back out of a pairing that
+    /// swallowed too much.
+    #[test]
+    fn an_unpaired_quote_does_not_swallow_the_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "marspot-linkify-quote-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.display().to_string();
+        // The directory is real; the quote after it opens nothing.
+        let v = scan(&format!("cd {d}/\" then he said \"hello\" and left"));
+        let files: Vec<&LinkRange> =
+            v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        for f in &files {
+            assert!(
+                !f.text.contains("hello"),
+                "a quote pairing swallowed the sentence: {:?}",
+                f.text
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
