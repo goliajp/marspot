@@ -482,6 +482,19 @@ pub struct CcUsageAccountRender {
 /// cc — full data for one render of the `Cc` (Claude usage) modal.
 /// Renderer pulls this via `set_cc_usage`.  `None` = closed.
 #[derive(Debug, Clone)]
+/// The settings panel's render data — its rect and the values in
+/// force when the frame was built.
+///
+/// A snapshot, not a live read: the painter must draw one consistent
+/// set of values, and re-reading mid-panel could show a toggle from
+/// before a click and a segment from after it.
+pub struct SettingsRender {
+    pub rect: marspot_term::layout::Rect,
+    pub settings: crate::settings::Settings,
+    /// Shown in the footer so the file is findable.
+    pub path: String,
+}
+
 pub struct CcUsageRender {
     /// Modal frame rect (physical px), centered by L2.
     pub rect: Rect,
@@ -791,6 +804,7 @@ pub struct MetalRenderer {
     /// tens of entries.
     process_panel: Option<ProcessPanelRender>,
     cc_usage: Option<CcUsageRender>,
+    settings_panel: Option<SettingsRender>,
     /// F3+3.0 / 3.3 — LayoutModal render state.  `Some(_)` when
     /// open, `None` when closed.  See `LayoutModalRender` below.
     layout_modal_state: Option<LayoutModalRender>,
@@ -962,7 +976,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -1026,7 +1040,7 @@ impl MetalRenderer {
             color_glyphs_scratch: Vec::new(),
             window_focused: true,
             hover_chrome_btn: None,
-            process_panel: None, cc_usage: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -1042,6 +1056,10 @@ impl MetalRenderer {
     /// row counts are < 200 and we're just storing the Vec.
     pub fn set_cc_usage(&mut self, data: Option<CcUsageRender>) {
         self.cc_usage = data;
+    }
+
+    pub fn set_settings_panel(&mut self, data: Option<SettingsRender>) {
+        self.settings_panel = data;
     }
 
     pub fn set_process_panel(&mut self, data: Option<ProcessPanelRender>) {
@@ -1420,6 +1438,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             ref process_panel,
             ref cc_usage,
+            ref settings_panel,
             width_px,
             height_px,
             ..
@@ -1443,6 +1462,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             process_panel.as_ref(),
             cc_usage.as_ref(),
+            settings_panel.as_ref(),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
             self.drag_source,
@@ -1642,6 +1662,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             ref process_panel,
             ref cc_usage,
+            ref settings_panel,
             ..
         } = *self;
 
@@ -1663,6 +1684,7 @@ impl MetalRenderer {
             hover_chrome_btn,
             process_panel.as_ref(),
             cc_usage.as_ref(),
+            settings_panel.as_ref(),
             self.layout_modal_state.as_ref(),
             self.drop_preview,
             self.drag_source,
@@ -2242,6 +2264,7 @@ fn build_instances(
     hover_chrome_btn: Option<u8>,
     process_panel: Option<&ProcessPanelRender>,
     cc_usage: Option<&CcUsageRender>,
+    settings_panel: Option<&SettingsRender>,
     layout_modal_state: Option<&LayoutModalRender>,
     drop_preview: Option<((f64, f64, f64, f64), bool)>,
     drag_source: Option<usize>,
@@ -2671,6 +2694,17 @@ fn build_instances(
         );
     }
 
+    // The settings panel.  Same overlay + backdrop treatment.
+    if let Some(sp) = settings_panel {
+        push_settings_panel_via_view(
+            sp,
+            layout.top_inset,
+            cell_w, cell_h, ascent, atlas_w_f, atlas_h_f,
+            layout.window_w, layout.window_h,
+            font, atlas, overlay_cells, overlay_glyphs, overlay_ui_rects,
+        );
+    }
+
     // F3+3.0 — LayoutModal: cols/rows steppers + Apply.  Overlay
     // scratches → renders on top of grid, modal-style backdrop dims
     // everything below the title strip.
@@ -2877,6 +2911,151 @@ fn push_cc_usage_via_view(
     };
     view.paint(&mut painter, |p| {
         paint_cc_usage_content(cc, p);
+    });
+}
+
+
+/// The settings panel.
+///
+/// Every row is label / cost / control, walked by
+/// `settings_modal::walk` — the same walker the hit-test uses, which
+/// is what makes a control clickable exactly where it is drawn.
+#[allow(clippy::too_many_arguments)]
+fn push_settings_panel_via_view(
+    sp: &SettingsRender,
+    top_inset: f64,
+    cell_w: f32,
+    cell_h: f32,
+    ascent: f32,
+    atlas_w: f32,
+    atlas_h: f32,
+    window_w: f64,
+    window_h: f64,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    cells: &mut Vec<CellInstance>,
+    glyphs: &mut Vec<GlyphInstance>,
+    ui_rects: &mut Vec<UiRectInstance>,
+) {
+    use crate::ui::components::settings_modal as sm;
+    use crate::ui::core::view::{Backdrop, View, ViewPainter, ViewStyle};
+    let mut painter = ViewPainter {
+        cell_w, cell_h, ascent, atlas_w, atlas_h,
+        window_w, window_h,
+        font, atlas, cells, glyphs, ui_rects,
+    };
+    let view = View {
+        rect: sp.rect,
+        style: ViewStyle {
+            bg: PROCESS_PANEL_BG,
+            border_color: PROCESS_PANEL_BORDER,
+            border_width: 1.0,
+            corner_radius: PROCESS_PANEL_CORNER_RADIUS,
+            shadow_blur: 16.0,
+            shadow_alpha: 0.45,
+            padding: 0.0,
+            backdrop: Backdrop::Dim {
+                color: [0.0, 0.0, 0.0, 0.45],
+                exclude_above_y: top_inset,
+            },
+        },
+    };
+    view.paint(&mut painter, |p| {
+        let cw = p.cell_w as f64;
+        let ch = p.cell_h as f64;
+        let asc = p.ascent as f64;
+        let text = |p: &mut ViewPainter, x: f64, baseline: f64, s: &str, c: [f32; 4]| {
+            p.text(x as f32, baseline as f32, s, c);
+        };
+        let x_left = sm::text_x(sp.rect, cw);
+        // Title, then the rows.
+        p.ui_text(
+            x_left as f32,
+            (sp.rect.y_top + ch * sm::metric::PANEL_PAD + p.ui_ascent() as f64) as f32,
+            "SETTINGS",
+            cc_palette::fg(),
+        );
+        // Collect first, paint after: the walker hands out two
+        // callbacks and the painter is one exclusive borrow.
+        let mut headings: Vec<(&'static str, f64)> = Vec::new();
+        let mut geo: Vec<sm::RowGeometry> = Vec::new();
+        sm::walk(
+            sp.rect,
+            cw,
+            ch,
+            |h, baseline| headings.push((h, baseline)),
+            |g| geo.push(g),
+        );
+        for (h, baseline) in headings {
+            p.ui_text(x_left as f32, baseline as f32, h, cc_palette::fg());
+        }
+        for g in geo {
+            let spec = sm::rows().find(|r| r.row == g.row).expect("row spec");
+            let dim = g.row.disabled_by(&sp.settings);
+            let (fg, sec) = if dim {
+                (cc_palette::fg_faint(), cc_palette::fg_faint())
+            } else {
+                (cc_palette::fg(), cc_palette::fg_sec())
+            };
+            text(p, x_left, g.label_baseline, spec.label, fg);
+            text(p, x_left, g.cost_baseline, spec.cost, sec);
+            match g.row.control(&sp.settings) {
+                sm::Control::Toggle(on) => {
+                    // A pill with the knob at one end.  Drawn, not
+                    // written: a checkbox at this size reads as
+                    // decoration, a pill reads as a switch.
+                    let track = g.control;
+                    let r = track.h * 0.5;
+                    let w = (track.h * 1.9).min(track.w);
+                    let pill = marspot_term::layout::Rect {
+                        x: track.x + track.w - w,
+                        y_top: track.y_top,
+                        w,
+                        h: track.h,
+                    };
+                    let bg = if !dim && on { cc_palette::ok() } else { cc_palette::track() };
+                    p.fill_rounded_rect(pill, bg, r as f32, ([0.0; 4], 0.0));
+                    let knob_d = track.h * 0.72;
+                    let pad = (track.h - knob_d) * 0.5;
+                    let kx = if on { pill.x + pill.w - knob_d - pad } else { pill.x + pad };
+                    p.fill_rounded_rect(
+                        marspot_term::layout::Rect {
+                            x: kx,
+                            y_top: pill.y_top + pad,
+                            w: knob_d,
+                            h: knob_d,
+                        },
+                        cc_palette::fg(),
+                        (knob_d * 0.5) as f32,
+                        ([0.0; 4], 0.0),
+                    );
+                }
+                sm::Control::Segmented { options, chosen } => {
+                    for (n, label) in options.iter().enumerate() {
+                        let seg = sm::segment_rect(g.control, n, options.len(), cw);
+                        let picked = n == chosen;
+                        let bg = if !dim && picked {
+                            cc_palette::ok()
+                        } else {
+                            cc_palette::track()
+                        };
+                        p.fill_rounded_rect(seg, bg, 3.0, ([0.0; 4], 0.0));
+                        let tw = label.chars().count() as f64 * cw;
+                        text(
+                            p,
+                            seg.x + (seg.w - tw) * 0.5,
+                            seg.y_top + seg.h * 0.5 + asc * 0.35,
+                            label,
+                            if dim { cc_palette::fg_faint() } else { cc_palette::fg() },
+                        );
+                    }
+                }
+            }
+        }
+        // Footer: where the file is.  The panel is one way to edit it,
+        // not the only one.
+        let foot = sp.rect.y_top + sp.rect.h - ch * sm::metric::PANEL_PAD * 0.6;
+        text(p, x_left, foot, &sp.path, cc_palette::fg_faint());
     });
 }
 
@@ -7735,7 +7914,9 @@ mod tests {
             &[],
             0,
             true,
-            None, None, None, None, None,
+            None, None, None,
+            None, // settings panel
+            None, None,
             Some(0), // this pane is being dragged
             None,
             &mut font,
@@ -7873,7 +8054,7 @@ mod tests {
                 &[],
                 0,
                 true,
-                None, None, None, None, None, None, None,
+                None, None, None, None, None, None, None, None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -7979,6 +8160,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -8095,6 +8277,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -8169,6 +8352,7 @@ mod tests {
             &[],
             0,
             true,
+            None,
             None,
             None,
             None,
@@ -8303,6 +8487,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &mut font,
                 &mut atlas,
                 &mut color_atlas,
@@ -8410,6 +8595,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut font,
             &mut atlas,
             &mut color_atlas,
@@ -8484,6 +8670,7 @@ mod tests {
                 &[],
                 0,
                 true,
+                None,
                 None,
                 None,
                 None,

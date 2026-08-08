@@ -164,6 +164,8 @@ enum ChromeBtn {
     DevPanel,
     /// cc — Claude usage modal toggle.
     CcUsage,
+    /// The settings panel.
+    Settings,
 }
 
 /// Convert the typed hover-button to the renderer's wire shape
@@ -177,6 +179,7 @@ fn map_hover_to_u8(h: Option<ChromeBtn>) -> Option<u8> {
         Some(ChromeBtn::ProcessTree) => Some(2),
         Some(ChromeBtn::DevPanel) => Some(3),
         Some(ChromeBtn::CcUsage) => Some(4),
+        Some(ChromeBtn::Settings) => Some(5),
         None => None,
     }
 }
@@ -3196,6 +3199,9 @@ struct WindowState {
     /// `CoreApp` it was drawn into EVERY window at once, because each
     /// window publishes the modal state right before it paints.
     cc_usage_modal: Option<CcUsageModalState>,
+    /// The settings panel, open in this window.  Per window like
+    /// every other modal — opening it in one must not blank another.
+    settings_modal_open: bool,
     ime_preedit: String,
     /// Window physical dims + scale, updated by Resize frames.
     w_phys: f64,
@@ -3271,6 +3277,7 @@ impl WindowState {
             hover_chrome_btn: None,
             process_panel: None,
             cc_usage_modal: None,
+            settings_modal_open: false,
             drop_preview: None,
             ime_preedit: String::new(),
             w_phys,
@@ -5860,6 +5867,18 @@ impl CoreApp {
             }
         }
 
+        // Esc / Cmd-W closes the settings panel, same semantics.
+        if win!(self, wi).settings_modal_open && event.state == KeyState::Pressed {
+            let is_esc = matches!(event.logical, LogicalKey::Named(NamedKey::Escape));
+            let is_cmd_w = matches!(event.logical, LogicalKey::Char('w'))
+                && modifiers.super_;
+            if is_esc || is_cmd_w {
+                win!(self, wi).settings_modal_open = false;
+                win!(self, wi).needs_render = true;
+                return;
+            }
+        }
+
         // cc — Cmd+Shift+C toggles the usage modal.
         //
         // Placement is load-bearing twice over.  It sits ahead of the
@@ -6241,6 +6260,27 @@ impl CoreApp {
             }),
         };
         win!(self, wi).needs_render = true;
+    }
+
+    fn toggle_settings_modal(&mut self, wi: usize) {
+        win!(self, wi).settings_modal_open = !win!(self, wi).settings_modal_open;
+        if win!(self, wi).settings_modal_open {
+            // Pick up anything edited by hand since the last look, so
+            // the panel never shows a value the file disagrees with.
+            marspot::settings::reload_if_changed();
+        }
+        win!(self, wi).needs_render = true;
+    }
+
+    fn settings_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
+        let (cell_w, cell_h) = self.renderer.cell_dims();
+        marspot::ui::components::settings_modal::panel_rect(
+            win!(self, wi).w_phys,
+            win!(self, wi).h_phys,
+            cell_w as f64,
+            cell_h as f64,
+            win!(self, wi).layout.top_inset,
+        )
     }
 
     fn cc_usage_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
@@ -6759,6 +6799,8 @@ impl CoreApp {
             Some(ChromeBtn::ProcessTree)
         } else if win!(self, wi).layout.hit_test_dev_panel_button(x_phys, y_phys) {
             Some(ChromeBtn::DevPanel)
+        } else if win!(self, wi).layout.hit_test_settings_button(x_phys, y_phys) {
+            Some(ChromeBtn::Settings)
         } else if win!(self, wi).layout.hit_test_cc_button(x_phys, y_phys) {
             Some(ChromeBtn::CcUsage)
         } else {
@@ -6978,6 +7020,54 @@ impl CoreApp {
         // cc — toolbar `Cc` button toggles the Claude usage modal.
         if win!(self, wi).layout.hit_test_cc_button(x_phys, y_phys) {
             self.toggle_cc_usage_modal(wi);
+            return;
+        }
+        // Toolbar button #6 — the settings panel.
+        if win!(self, wi).layout.hit_test_settings_button(x_phys, y_phys) {
+            self.toggle_settings_modal(wi);
+            return;
+        }
+        // Settings panel: hit-test its controls, swallow anything else
+        // inside the frame, close on a click outside.
+        if win!(self, wi).settings_modal_open {
+            let rect = self.settings_modal_rect(wi);
+            if !rect.contains(x_phys, y_phys) {
+                win!(self, wi).settings_modal_open = false;
+                win!(self, wi).needs_render = true;
+                return;
+            }
+            let (cell_w, cell_h) = self.renderer.cell_dims();
+            let hit = marspot::ui::components::settings_modal::hit_test(
+                rect, cell_w as f64, cell_h as f64, x_phys, y_phys,
+            );
+            if let Some((row, seg)) = hit {
+                let cur = marspot::settings::get();
+                if let Some(next) = row.apply(&cur, seg) {
+                    // Write, then adopt.  If the disk write fails the
+                    // panel must keep showing what the file says, not
+                    // what the click asked for — a control that lies
+                    // about having saved is worse than one that does
+                    // not move.
+                    match marspot::settings::write(&next) {
+                        Ok(()) => {
+                            marspot::settings::reload_if_changed();
+                            lx_event!(
+                                "SETTINGS_CHANGED",
+                                "settings panel wrote a new value",
+                                row = format!("{:?}", row),
+                                reclaim = next.reclaim_enabled as u32,
+                                idle_min = next.reclaim_idle_minutes as u64,
+                                prefetch = next.reclaim_prefetch as u32
+                            );
+                        }
+                        Err(e) => lx_warn!(
+                            "core.settings.write_failed",
+                            &format!("{e}; the panel keeps showing the file's values")
+                        ),
+                    }
+                }
+            }
+            win!(self, wi).needs_render = true;
             return;
         }
         // cc — while the usage modal is open, any click outside its
@@ -7844,6 +7934,17 @@ impl CoreApp {
         // feed at most every 5 s while open; zero I/O when closed).
         let cc_data = self.build_cc_usage_render(wi);
         self.renderer.set_cc_usage(cc_data);
+        // The settings panel.  A snapshot per frame — one consistent
+        // set of values, so a toggle and a segment can never be drawn
+        // from either side of the same click.
+        let settings_data = win!(self, wi).settings_modal_open.then(|| {
+            marspot::render_metal::SettingsRender {
+                rect: self.settings_modal_rect(wi),
+                settings: (*marspot::settings::get()).clone(),
+                path: marspot::settings::path().display().to_string(),
+            }
+        });
+        self.renderer.set_settings_panel(settings_data);
         // F3+9 — publish ContextMenu render state every frame.
         // Dev panel renders into its own NSWindow, owned by L1
         // (marspot-shell), not by L2.  L2's only job re: dev panel

@@ -187,6 +187,8 @@ pub struct Layout {
     pub dev_panel_button_rect: Rect,
     /// cc — toolbar `Cc` button (Claude profile usage modal).
     pub cc_button_rect: Rect,
+    /// Toolbar button #6 — the settings panel.
+    pub settings_button_rect: Rect,
     // F3+3.0 — picker popup removed.  The toolbar layout button
     // now opens a `LayoutModal` (see `src/ui/components/`) where
     // the user sets arbitrary cols × rows.  The modal is rendered
@@ -358,6 +360,7 @@ impl Layout {
             process_button_rect: Rect::ZERO,
             dev_panel_button_rect: Rect::ZERO,
             cc_button_rect: Rect::ZERO,
+            settings_button_rect: Rect::ZERO,
             close_session_rects: Vec::new(),
             add_session_button_rect: Rect::ZERO,
             sidebar_top_pad_phys,
@@ -406,6 +409,7 @@ impl Layout {
         let process_btn_x = layout_btn_x + btn_size + btn_gap;
         let dev_panel_btn_x = process_btn_x + btn_size + btn_gap;
         let cc_btn_x = dev_panel_btn_x + btn_size + btn_gap;
+        let settings_btn_x = cc_btn_x + btn_size + btn_gap;
         self.sidebar_button_rect = Rect {
             x: sidebar_btn_x,
             y_top: btn_y,
@@ -432,6 +436,12 @@ impl Layout {
         };
         self.cc_button_rect = Rect {
             x: cc_btn_x,
+            y_top: btn_y,
+            w: btn_w,
+            h: btn_h,
+        };
+        self.settings_button_rect = Rect {
+            x: settings_btn_x,
             y_top: btn_y,
             w: btn_w,
             h: btn_h,
@@ -508,6 +518,10 @@ impl Layout {
     /// (Claude usage modal) button.
     pub fn hit_test_cc_button(&self, px: f64, py: f64) -> bool {
         self.cc_button_rect.contains(px, py)
+    }
+
+    pub fn hit_test_settings_button(&self, px: f64, py: f64) -> bool {
+        self.settings_button_rect.contains(px, py)
     }
 
     // F3+3.0 — `hit_test_picker_option` / `hit_test_picker_panel`
