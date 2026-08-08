@@ -7794,18 +7794,21 @@ mod tests {
     /// it.  Measured cause — PingFang draws it 11.71 px wide against a
     /// 7.20 px cell, so `rasterise_glyph` scale-to-fits it to 61 %, and
     /// because circled digits are square the *width* always binds: no
-    /// font on the machine escapes it (the narrowest `①`, STIXGeneral
-    /// at 8.21 px, lands at the same ~7.2 px on screen).
+    /// font on the machine escapes it.
     ///
-    /// Widening the cell is not the answer — every other wcwidth in
-    /// the stack calls these narrow, so marspot would drift.  What
-    /// every other terminal does instead is let the glyph overflow;
-    /// WezTerm's `allow_square_glyphs_to_overflow_width` defaults to
-    /// `WhenFollowedBySpace`.  This pins that rule.
+    /// What every other terminal does is let the glyph overflow rather
+    /// than shrink it — WezTerm's
+    /// `allow_square_glyphs_to_overflow_width`, default
+    /// `WhenFollowedBySpace`.  This pins that rule, and with it the
+    /// division of labour it left behind: overflow serves the
+    /// Ambiguous characters that stay **narrow**, while the circled
+    /// family — which appears in runs, where there is no blank
+    /// neighbour to borrow — is given two cells outright instead.
     #[test]
     fn a_squeezed_glyph_may_borrow_a_blank_neighbour() {
-        // The reported characters, followed by a blank.
-        for ch in ['①', '③', 'Ⓐ', '★', '●'] {
+        // Narrow Ambiguous glyphs, followed by a blank.
+        for ch in ['★', '☆', '●', '▲', '▼'] {
+            assert_eq!(crate::grid::char_width(ch), 1, "{ch} is drawn narrow");
             assert!(
                 may_overflow_cell(ch, Some(' ')),
                 "{ch} is drawn on a two-cell em square and has room to its right"
@@ -7820,6 +7823,13 @@ mod tests {
             assert!(!may_overflow_cell(ch, Some('中')));
             // The last column has no neighbour to borrow.
             assert!(!may_overflow_cell(ch, None));
+        }
+        // The circled family is WIDE now, so it never takes this path:
+        // borrowing only ever produced a uniform size when the glyph
+        // happened to be followed by a blank, and `①②③` never is.
+        for ch in ['①', '③', 'Ⓐ', '⓪', '❶'] {
+            assert_eq!(crate::grid::char_width(ch), 2, "{ch} gets its own two cells");
+            assert!(!may_overflow_cell(ch, Some(' ')));
         }
         // Two-cell glyphs already have the room they were designed
         // for; ASCII was designed for one.  Neither may overflow, or

@@ -104,14 +104,25 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 /// lands at the same ~7.2 px on screen.  **Matching CJK size requires
 /// two cells; there is no other lever.**
 ///
-/// So the flag has a middle setting.  `circled` widens only the
-/// enclosed alphanumerics — the glyphs the size complaint is actually
-/// about — and leaves `°` `±` `→` `★` and the rest of the table
-/// narrow.  Drift is then confined to lines that contain `①`, which
-/// is a far smaller surface than every degree sign and arrow.
+/// Letting the glyph overflow into a blank neighbour
+/// (`may_overflow_cell` in the renderer) fixes the *isolated* case
+/// without any disagreement at all, and that is what the rest of the
+/// Ambiguous table gets.  But it cannot fix a **run**: in `①②③` every
+/// neighbour is itself a glyph, so there is nothing to borrow and the
+/// three come out at different sizes depending on what follows them.
+/// Uniform full size for N square glyphs in N one-cell slots is not
+/// available — they would overlap by 4.5 px each.  Two cells is the
+/// only way, and it is a disagreement by construction.
 ///
-///   MARSPOT_AMBIGUOUS_WIDE=0        (default) everything narrow
-///   MARSPOT_AMBIGUOUS_WIDE=circled  only ①②③ ❶❷❸ ⓪ … wide
+/// So the default widens exactly one family: the enclosed
+/// alphanumerics.  Measured 2026-08-08 — `Bun.stringWidth('①')` is 1
+/// (claudecode is a Bun binary and that is the function it uses), so
+/// this genuinely does drift, and the size of the bet is what makes it
+/// worth taking: drift is confined to lines that *contain* `①`, while
+/// every `°` `±` `→` `★` in the table stays narrow and in agreement.
+///
+///   MARSPOT_AMBIGUOUS_WIDE=0        everything narrow (the old default)
+///   MARSPOT_AMBIGUOUS_WIDE=circled  (default) only ①②③ ❶❷❸ ⓪ … wide
 ///   MARSPOT_AMBIGUOUS_WIDE=1        the whole Ambiguous table wide
 ///
 /// One-shot OnceLock load: per-process env var read at first call,
@@ -127,9 +138,13 @@ fn ambiguous_wide_mode() -> AmbiguousWide {
     use std::sync::OnceLock;
     static FLAG: OnceLock<AmbiguousWide> = OnceLock::new();
     *FLAG.get_or_init(|| match std::env::var("MARSPOT_AMBIGUOUS_WIDE") {
+        Ok(v) if v == "0" => AmbiguousWide::Off,
         Ok(v) if v.eq_ignore_ascii_case("circled") => AmbiguousWide::Circled,
-        Ok(v) if v != "0" && !v.is_empty() => AmbiguousWide::All,
-        _ => AmbiguousWide::Off,
+        Ok(v) if !v.is_empty() => AmbiguousWide::All,
+        // Default: the circled family only.  See the note above on why
+        // this one set is worth disagreeing with everyone else about,
+        // and why the rest of the table is not.
+        _ => AmbiguousWide::Circled,
     })
 }
 
@@ -269,15 +284,19 @@ mod char_width_tests {
     use super::char_width;
 
     #[test]
-    fn circled_digits_default_narrow() {
+    fn circled_digits_are_wide_by_default() {
         // U+2460..U+2473 = ① ② ③ … ⑳ (Enclosed Alphanumerics).
-        // EAW=A per UAX #11 — narrow by default because every TUI
-        // app's wcwidth treats Ambiguous as narrow.  Opt in to Wide
-        // with MARSPOT_AMBIGUOUS_WIDE=1 (one-shot OnceLock — can't
-        // exercise here without process isolation).
-        assert_eq!(char_width('①'), 1);
-        assert_eq!(char_width('②'), 1);
-        assert_eq!(char_width('⑳'), 1);
+        // EAW=A per UAX #11, which every other wcwidth calls narrow —
+        // measured, not assumed: `Bun.stringWidth('①')` is 1, and
+        // claudecode is a Bun binary.  We disagree on purpose, for
+        // this family only: at one cell a run like `①②③` cannot be
+        // drawn at a uniform readable size at all (see
+        // `ambiguous_wide_mode`).  `MARSPOT_AMBIGUOUS_WIDE=0` reverts.
+        assert_eq!(char_width('①'), 2);
+        assert_eq!(char_width('②'), 2);
+        assert_eq!(char_width('⑳'), 2);
+        assert_eq!(char_width('⓪'), 2, "the tail of the block counts too");
+        assert_eq!(char_width('❶'), 2, "…and the dingbat set");
     }
 
     /// The `circled` middle setting acts on this set, so its extent is
@@ -302,16 +321,18 @@ mod char_width_tests {
     }
 
     #[test]
-    fn circled_letters_default_narrow() {
-        assert_eq!(char_width('Ⓐ'), 1); // U+24B6
-        assert_eq!(char_width('ⓐ'), 1); // U+24D0
+    fn circled_letters_are_wide_by_default() {
+        assert_eq!(char_width('Ⓐ'), 2); // U+24B6
+        assert_eq!(char_width('ⓐ'), 2); // U+24D0
     }
 
     #[test]
     fn geometric_shapes_misc_default_narrow() {
-        // ★ ☆ ● ▲ ▼ — Ambiguous, narrow by default.  Same trade-off
-        // as the circled digits: smaller glyph, but no CUP drift
-        // against every other app's wcwidth.
+        // ★ ☆ ● ▲ ▼ — Ambiguous, and these stay narrow: they are in
+        // agreement with every other wcwidth, and the renderer's
+        // overflow-into-a-blank-neighbour path covers the isolated
+        // case without any disagreement at all.  Only the circled
+        // family, which shows up in runs, is worth the drift.
         assert_eq!(char_width('★'), 1); // U+2605
         assert_eq!(char_width('☆'), 1); // U+2606
         assert_eq!(char_width('●'), 1); // U+25CF
