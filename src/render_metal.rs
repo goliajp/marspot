@@ -2963,7 +2963,6 @@ fn push_settings_panel_via_view(
     view.paint(&mut painter, |p| {
         let cw = p.cell_w as f64;
         let ch = p.cell_h as f64;
-        let asc = p.ascent as f64;
         let text = |p: &mut ViewPainter, x: f64, baseline: f64, s: &str, c: [f32; 4]| {
             p.text(x as f32, baseline as f32, s, c);
         };
@@ -3043,7 +3042,7 @@ fn push_settings_panel_via_view(
                     // not read as a different program's dialog.
                     let base = crate::ui::components::ButtonStyle::chrome();
                     for (n, label) in options.iter().enumerate() {
-                        let seg = sm::segment_rect(g.control, n, options.len(), cw);
+                        let seg = sm::segment_rect(g.control, n, options, cw);
                         let picked = !dim && n == chosen;
                         let mut style = base;
                         if picked {
@@ -3066,10 +3065,11 @@ fn push_settings_panel_via_view(
                 }
             }
         }
-        // Footer: where the file is.  The panel is one way to edit it,
-        // not the only one.
-        let foot = sp.rect.y_top + sp.rect.h - ch * sm::metric::PANEL_PAD * 0.9;
-        text(p, x_left, foot, &sp.path, cc_palette::fg_faint());
+        // Footer: where the file is.  The panel is one way to edit
+        // it, not the only one.  Positioned by the same walk as
+        // everything else rather than measured up from the bottom
+        // edge — that is what left it floating in dead space before.
+        text(p, x_left, sm::footer_baseline(sp.rect, ch), &sp.path, cc_palette::fg_faint());
     });
 }
 

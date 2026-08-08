@@ -27,24 +27,44 @@ use crate::settings::Settings;
 pub mod metric {
     /// Line advance, as a multiple of cell height.
     pub const LINE_ADVANCE: f64 = 1.35;
+    // The rhythm is the whole layout problem here, so the numbers are
+    // written as one scale rather than tuned one at a time.
+    //
+    // A row is *two lines that belong together* — a label and what it
+    // costs — and rows must read as separate from each other.  The
+    // first cut spaced them 0.95 and 2.2, a ratio of 2.3, and at that
+    // ratio a cost line sits almost as close to the NEXT label as to
+    // its own: the eye groups them wrongly and the panel reads as six
+    // crowded lines instead of three rows.  Widening the outer gap
+    // and tightening the inner one puts the ratio near 3.
+
+    /// Line advance, as a multiple of cell height.
+    pub const LINE_ADVANCE_: () = ();
     /// Panel margin inside its own frame.
-    pub const PANEL_PAD: f64 = 1.4;
-    /// Gap under a section heading.
-    pub const HEADING_GAP: f64 = 1.15;
-    /// Gap between one section's last row and the next heading.
-    pub const SECTION_BREAK: f64 = 1.5;
-    /// Baseline advance from a row's label to its cost line.
-    pub const COST_ADVANCE: f64 = 0.95;
-    /// Advance from one row's label to the next row's label.
-    pub const ROW_ADVANCE: f64 = 2.2;
-    /// Control column width, in cell widths.  Sized for the widest
-    /// control (the five-way segment) so the column edge is straight
-    /// down the panel whatever a row happens to hold.
-    pub const CONTROL_W: f64 = 26.0;
+    pub const PANEL_PAD: f64 = 1.7;
+    /// Title baseline to the first section heading.
+    pub const TITLE_BREAK: f64 = 1.9;
+    /// Gap under a section heading, before its first row.
+    pub const HEADING_GAP: f64 = 1.35;
+    /// Gap between one section's last cost line and the next heading.
+    pub const SECTION_BREAK: f64 = 2.1;
+    /// Label baseline to its own cost line.  Tight: they are one unit.
+    pub const COST_ADVANCE: f64 = 0.9;
+    /// Cost line to the next row's label.  Nearly three times the
+    /// inner gap, so the grouping is unambiguous.
+    pub const ROW_GAP: f64 = 1.7;
+    /// Last cost line to the footer path.
+    pub const FOOTER_BREAK: f64 = 2.0;
     /// Height of a control, as a multiple of cell height.
-    pub const CONTROL_H: f64 = 1.45;
-    /// Gap between the segments of a segmented control.
-    pub const SEGMENT_GAP: f64 = 0.3;
+    pub const CONTROL_H: f64 = 1.5;
+    /// Padding inside a segment, in cell widths, each side.  Segments
+    /// are sized to their own label — equal thirds made `Never` spill
+    /// out of its button while `1h` swam in one.
+    pub const SEGMENT_PAD: f64 = 1.1;
+    /// Gap between segments.
+    pub const SEGMENT_GAP: f64 = 0.4;
+    /// Toggle width, as a multiple of its height.
+    pub const TOGGLE_ASPECT: f64 = 1.85;
 }
 
 /// Which setting a row edits.  One variant per row — the panel has no
@@ -187,10 +207,46 @@ pub fn rows() -> impl Iterator<Item = &'static RowSpec> {
 /// above and below them.  Derived height uses this so "the panel is
 /// too short" is one edit.
 const CHROME_LINES: f64 = 4.4;
-/// Lines a section costs beyond its rows: the heading plus its gap.
-const SECTION_LINES: f64 = 1.0 + metric::HEADING_GAP + metric::SECTION_BREAK;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Title,
+    Heading(usize),
+    Row(usize, usize),
+    Footer,
+}
 
-/// The panel's rect, centred, derived from what it has to draw.
+/// Vertical layout, walked once — the single source for both where
+/// things go and how tall the panel is.
+///
+/// Returns the total height consumed.  `on` is called with every
+/// slot's baseline, measured from the panel's top edge.
+fn layout_lines(cell_h: f64, mut on: impl FnMut(Slot, f64)) -> f64 {
+    let lh = cell_h * metric::LINE_ADVANCE;
+    let pad = cell_h * metric::PANEL_PAD;
+    let mut y = pad + lh;
+    on(Slot::Title, y);
+    for (si, section) in SECTIONS.iter().enumerate() {
+        y += lh * if si == 0 { metric::TITLE_BREAK } else { metric::SECTION_BREAK };
+        on(Slot::Heading(si), y);
+        y += lh * metric::HEADING_GAP;
+        for ri in 0..section.rows.len() {
+            on(Slot::Row(si, ri), y);
+            y += lh * (metric::COST_ADVANCE + metric::ROW_GAP);
+        }
+        // The last row in a section counted a row gap; the section
+        // break (or the footer break) replaces it.
+        y -= lh * metric::ROW_GAP;
+    }
+    y += lh * metric::FOOTER_BREAK;
+    on(Slot::Footer, y);
+    y + pad
+}
+
+/// The panel's rect, centred, **sized by what it actually draws**.
+///
+/// Height comes from the same walk the painter uses, so the two
+/// cannot disagree — the first cut guessed it from a constant and
+/// left a dead band two rows tall at the bottom.
 pub fn panel_rect(
     w_phys: f64,
     h_phys: f64,
@@ -198,12 +254,13 @@ pub fn panel_rect(
     cell_h: f64,
     top_inset: f64,
 ) -> marspot_term::layout::Rect {
-    let lh = cell_h * metric::LINE_ADVANCE;
-    let n_rows = rows().count() as f64;
-    let n_sections = SECTIONS.len() as f64;
-    let w = (76.0 * cell_w).min(w_phys * 0.9).max(48.0 * cell_w);
-    let h = (lh * (CHROME_LINES + n_sections * SECTION_LINES + n_rows * metric::ROW_ADVANCE))
-        .min(h_phys * 0.9);
+    // The cost lines are the long text and the labels are short, so
+    // they are what sets the panel's width.
+    let longest = rows().map(|r| r.cost.chars().count()).max().unwrap_or(48) as f64;
+    let w = ((longest + 2.0 * metric::PANEL_PAD + 6.0) * cell_w)
+        .max(56.0 * cell_w)
+        .min(w_phys * 0.9);
+    let h = layout_lines(cell_h, |_, _| {}).min(h_phys * 0.9);
     marspot_term::layout::Rect {
         x: (w_phys - w) / 2.0,
         y_top: ((h_phys - h) / 2.0).max(top_inset + 8.0),
@@ -229,8 +286,10 @@ pub struct RowGeometry {
     pub control: marspot_term::layout::Rect,
 }
 
-/// Walk the panel, calling `f` with each heading baseline and each
-/// row's geometry, in draw order.
+/// Walk the panel: each heading with its baseline, each row with its
+/// geometry, in draw order.  Shares [`layout_lines`] with
+/// [`panel_rect`], so what is drawn and how tall the panel is can
+/// never disagree.
 pub fn walk(
     rect: marspot_term::layout::Rect,
     cell_w: f64,
@@ -239,54 +298,88 @@ pub fn walk(
     mut row: impl FnMut(RowGeometry),
 ) {
     let lh = cell_h * metric::LINE_ADVANCE;
-    let pad = cell_h * metric::PANEL_PAD;
-    let x_left = rect.x + cell_w * metric::PANEL_PAD;
-    let control_w = cell_w * metric::CONTROL_W;
-    let control_x = rect.x + rect.w - cell_w * metric::PANEL_PAD - control_w;
-    // Title line, then a break before the first heading.
-    let mut y = rect.y_top + pad + lh;
-    for section in SECTIONS {
-        y += lh * metric::SECTION_BREAK;
-        heading(section.heading, y);
-        y += lh * metric::HEADING_GAP;
-        for spec in section.rows {
-            let label_baseline = y;
-            row(RowGeometry {
-                row: spec.row,
-                label_baseline,
-                cost_baseline: label_baseline + lh * metric::COST_ADVANCE,
-                control: marspot_term::layout::Rect {
-                    x: control_x,
-                    y_top: label_baseline - cell_h * metric::CONTROL_H * 0.75,
-                    w: control_w,
-                    h: cell_h * metric::CONTROL_H,
-                },
-            });
-            y += lh * metric::ROW_ADVANCE;
+    // The control column is right-aligned on the same edge the text
+    // starts from on the left, so the panel has two clean margins.
+    let right = rect.x + rect.w - cell_w * metric::PANEL_PAD;
+    layout_lines(cell_h, |slot, y| {
+        let y = rect.y_top + y;
+        match slot {
+            Slot::Heading(si) => heading(SECTIONS[si].heading, y),
+            Slot::Row(si, ri) => {
+                let spec = &SECTIONS[si].rows[ri];
+                let h = cell_h * metric::CONTROL_H;
+                let w = control_width(spec.row, cell_w, cell_h);
+                row(RowGeometry {
+                    row: spec.row,
+                    label_baseline: y,
+                    cost_baseline: y + lh * metric::COST_ADVANCE,
+                    control: marspot_term::layout::Rect {
+                        x: right - w,
+                        // Centred on the label's line, not hung off its
+                        // baseline: a control is as tall as two glyphs
+                        // and sitting it on the baseline pushes it
+                        // into the cost line underneath.
+                        y_top: y - cell_h * 0.72 - (h - cell_h) * 0.5,
+                        w,
+                        h,
+                    },
+                });
+            }
+            _ => {}
         }
-    }
-    let _ = x_left;
+    });
 }
 
-/// Left edge for a row's text, matching [`walk`]'s control column.
+/// How wide this row's control needs to be.
+///
+/// Sized to content, not to a column constant: `Never` spilled out of
+/// an equal-thirds button while `1h` swam in one.
+pub fn control_width(row: Row, cell_w: f64, cell_h: f64) -> f64 {
+    match row.control(&crate::settings::get()) {
+        Control::Toggle(_) => cell_h * metric::CONTROL_H * metric::TOGGLE_ASPECT,
+        Control::Segmented { options, .. } => {
+            let gaps = cell_w * metric::SEGMENT_GAP * (options.len().saturating_sub(1)) as f64;
+            options.iter().map(|l| segment_width(l, cell_w)).sum::<f64>() + gaps
+        }
+    }
+}
+
+fn segment_width(label: &str, cell_w: f64) -> f64 {
+    (label.chars().count() as f64 + 2.0 * metric::SEGMENT_PAD) * cell_w
+}
+
+/// Baseline for the footer path, from the same walk.
+pub fn footer_baseline(rect: marspot_term::layout::Rect, cell_h: f64) -> f64 {
+    let mut y = rect.y_top + rect.h;
+    layout_lines(cell_h, |slot, at| {
+        if slot == Slot::Footer {
+            y = rect.y_top + at;
+        }
+    });
+    y
+}
+
+/// Left edge for a row's text.
 pub fn text_x(rect: marspot_term::layout::Rect, cell_w: f64) -> f64 {
     rect.x + cell_w * metric::PANEL_PAD
 }
 
-/// The `n`th segment of a segmented control inside `control`.
+/// The `n`th segment of a segmented control, sized to its own label.
 pub fn segment_rect(
     control: marspot_term::layout::Rect,
     n: usize,
-    of: usize,
+    labels: &[&str],
     cell_w: f64,
 ) -> marspot_term::layout::Rect {
-    let of = of.max(1) as f64;
     let gap = cell_w * metric::SEGMENT_GAP;
-    let seg_w = (control.w - gap * (of - 1.0)) / of;
+    let mut x = control.x;
+    for l in labels.iter().take(n) {
+        x += segment_width(l, cell_w) + gap;
+    }
     marspot_term::layout::Rect {
-        x: control.x + (seg_w + gap) * n as f64,
+        x,
         y_top: control.y_top,
-        w: seg_w,
+        w: labels.get(n).map(|l| segment_width(l, cell_w)).unwrap_or(0.0),
         h: control.h,
     }
 }
@@ -320,7 +413,7 @@ pub fn hit_test(
                 }
                 Control::Segmented { options, .. } => {
                     for n in 0..options.len() {
-                        if segment_rect(g.control, n, options.len(), cell_w).contains(px, py) {
+                        if segment_rect(g.control, n, options, cell_w).contains(px, py) {
                             hit = Some((g.row, n));
                             return;
                         }
@@ -428,7 +521,7 @@ mod tests {
                 }
                 Control::Segmented { options, .. } => {
                     for n in 0..options.len() {
-                        let sr = segment_rect(g.control, n, options.len(), cw);
+                        let sr = segment_rect(g.control, n, options, cw);
                         let hit =
                             hit_test(rect, cw, ch, sr.x + sr.w / 2.0, sr.y_top + sr.h / 2.0);
                         assert_eq!(hit, Some((g.row, n)), "segment {n} of {:?}", g.row);
@@ -457,6 +550,75 @@ mod tests {
         );
         // A click in the panel's empty space hits nothing.
         assert_eq!(hit_test(rect, cw, ch, rect.x + 2.0, rect.y_top + 2.0), None);
+    }
+
+    /// The two complaints the layout was rebuilt for, as assertions.
+    ///
+    /// 1. A row's own cost line must sit much closer to its label than
+    ///    to the next row's — otherwise the eye groups them wrongly
+    ///    and three rows read as six crowded lines.
+    /// 2. Nothing may overflow: a segment has to be wide enough for
+    ///    its own label (`Never` spilled out of an equal-thirds
+    ///    button), and the panel must not end in dead space.
+    #[test]
+    fn the_rhythm_groups_rows_and_nothing_overflows() {
+        crate::settings::set_for_test(Settings::default());
+        let (cw, ch) = (8.0, 16.0);
+        let rect = panel_rect(1400.0, 900.0, cw, ch, 30.0);
+
+        let mut geo: Vec<RowGeometry> = Vec::new();
+        walk(rect, cw, ch, |_, _| {}, |g| geo.push(g));
+
+        for w in geo.windows(2) {
+            let inner = w[0].cost_baseline - w[0].label_baseline;
+            let outer = w[1].label_baseline - w[0].cost_baseline;
+            assert!(
+                outer > inner * 1.6,
+                "rows do not read as separate: inner {inner:.1} vs outer {outer:.1}"
+            );
+        }
+
+        for g in &geo {
+            // Controls right-align on one edge.
+            let right = g.control.x + g.control.w;
+            let want = rect.x + rect.w - cw * metric::PANEL_PAD;
+            assert!((right - want).abs() < 0.5, "{:?} control off the column", g.row);
+            // A segment fits its own label.
+            if let Control::Segmented { options, .. } = g.row.control(&Settings::default()) {
+                for (n, label) in options.iter().enumerate() {
+                    let sr = segment_rect(g.control, n, options, cw);
+                    let ink = label.chars().count() as f64 * cw;
+                    assert!(
+                        sr.w > ink,
+                        "{label:?} needs {ink:.1} and its button is {:.1}",
+                        sr.w
+                    );
+                }
+                let last = segment_rect(g.control, options.len() - 1, options, cw);
+                assert!(
+                    last.x + last.w <= g.control.x + g.control.w + 0.5,
+                    "the last segment runs past the control"
+                );
+            }
+            // Control sits on the label's line, not over the cost line.
+            assert!(
+                g.control.y_top + g.control.h < g.cost_baseline,
+                "{:?} control overlaps its own cost line",
+                g.row
+            );
+        }
+
+        // No dead band: the footer is near the bottom, and the last
+        // row is above it.
+        let foot = footer_baseline(rect, ch);
+        let bottom = rect.y_top + rect.h;
+        assert!(foot < bottom, "footer outside the panel");
+        assert!(
+            bottom - foot < ch * 3.0,
+            "dead space under the footer: {:.1}px",
+            bottom - foot
+        );
+        assert!(geo.last().unwrap().cost_baseline < foot);
     }
 
     #[test]
