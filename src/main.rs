@@ -2015,6 +2015,37 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                 drag: None,
             }));
         }
+        Some("menu") => {
+            use marspot::render_metal::{ContextMenuRender, ContextMenuRow};
+            let item = |label: &str, hint: &str, enabled: bool| ContextMenuRow {
+                label: label.to_string(),
+                shortcut_hint: hint.to_string(),
+                enabled,
+                divider: false,
+            };
+            let divider = || ContextMenuRow {
+                label: String::new(),
+                shortcut_hint: String::new(),
+                enabled: false,
+                divider: true,
+            };
+            renderer.set_context_menu(Some(ContextMenuRender {
+                scale: 2.0,
+                anchor_phys: (420.0, 300.0),
+                top_inset: layout.top_inset,
+                items: vec![
+                    item("Split right", "⌘D", true),
+                    item("Split down", "⇧⌘D", true),
+                    divider(),
+                    item("Never reclaim this pane", "", true),
+                    item("Copy pane title", "", true),
+                    divider(),
+                    item("Close pane", "⌘W", true),
+                    item("Close other panes", "", false),
+                ],
+                hovered_idx: Some(3),
+            }));
+        }
         Some("process") => {
             renderer.set_process_panel(Some(demo_process_panel(
                 phys_w as f64, phys_h as f64, layout.top_inset,
@@ -2022,7 +2053,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         }
         Some(other) => {
             eprintln!(
-                "--snapshot: unknown panel {other:?} (known: settings, cc, process, layout)"
+                "--snapshot: unknown panel {other:?} (known: settings, cc, process, layout, menu)"
             );
             std::process::exit(2);
         }

@@ -3646,6 +3646,13 @@ fn paint_cc_usage_content(cc: &CcUsageRender, p: &mut crate::ui::core::view::Vie
 /// the menu through its own canvas + `encode_canvas` puts every
 /// primitive on a submission-order timeline regardless of which
 /// pipeline carries it.
+/// SF Pro's ascent as a fraction of its point size — measured from
+/// the interned CTFont at startup and stable across sizes.  Used only
+/// where a run has to be centred against a box whose height came from
+/// somewhere else (menu rows); anything drawing into a `ViewPainter`
+/// should use `ui_baseline_centred` instead, which asks the font.
+const SF_PRO_ASCENT_RATIO: f64 = 0.75;
+
 fn build_context_menu_canvas(
     state: &ContextMenuRender,
     window_w: f64,
@@ -3735,17 +3742,30 @@ fn build_context_menu_canvas(
                 .draw();
         }
         let fg = if row.enabled { label_fg } else { label_disab };
-        let text_y_phys = item.y_top + (item.h - chrome_cell_h as f64) * 0.5;
+        // Menu labels are prose — the same role every other panel sets
+        // a label in.  The canvas path takes a top-of-em y and derives
+        // the baseline from the run's own ascent, so the y that puts
+        // the *cap* on the row's centre line is
+        // `centre - (ascent - cap/2)`.
+        let role = crate::ui::theme::PanelText::Label;
+        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let size_q = crate::glyph_atlas::GlyphKey::size_q_for(role.pt());
+        let text_y_phys = item.y_top + item.h * 0.5
+            - (SF_PRO_ASCENT_RATIO * role.pt() - role.cap() * 0.5) * px;
         canvas.text(
             pt_phys(item.x + side_pad_phys),
             pt_phys(text_y_phys),
             &row.label,
-        ).color(fg).draw();
+        ).color(fg).ui().ui_size_q(size_q).weight(role.weight()).draw();
         if !row.shortcut_hint.is_empty() {
+            // The shortcut is a glyph cluster (⌘⇧W), not prose — it
+            // stays mono, where the symbols keep their own width and
+            // right-align cleanly.
             let hint_w = label_w_phys(&row.shortcut_hint);
+            let hint_y = item.y_top + (item.h - chrome_cell_h as f64) * 0.5;
             canvas.text(
                 pt_phys(item.x + item.w - side_pad_phys - hint_w),
-                pt_phys(text_y_phys),
+                pt_phys(hint_y),
                 &row.shortcut_hint,
             ).color(hint_fg).draw();
         }

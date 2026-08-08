@@ -106,10 +106,23 @@ const BOT_PAD_LOGICAL: f64 = 6.0;
 /// Margin from anchor point to menu edge — keeps the menu from
 /// covering the exact pixel under the cursor.
 const ANCHOR_OFFSET_LOGICAL: f64 = 2.0;
-/// Average char width / cell width hint for sizing labels before
-/// the painter knows the real metrics.  Sized for the chrome font;
-/// menu width is clamped against `MENU_MAX_W_LOGICAL` regardless.
-const LABEL_CH_W_LOGICAL: f64 = 7.0;
+/// Average advance per character, for sizing the menu before the
+/// painter knows the real metrics.
+///
+/// Derived from the label's own role rather than written down, so the
+/// menu narrows or widens with the type instead of keeping a number
+/// that was right for a font it no longer uses — it held 7.0, sized
+/// for the mono chrome cell, which left every menu ~75 % wider than
+/// its text once the labels moved to the panel role.  SF Pro's mean
+/// advance is close to half its point size for mixed-case text.
+///
+/// It is an estimate on purpose: menu width is clamped between
+/// `MENU_MIN_W_LOGICAL` and `MENU_MAX_W_LOGICAL`, and row hit-testing
+/// is by row height, never by text width — so being a few percent out
+/// costs a few percent of padding and nothing else.
+fn label_ch_w_logical() -> f64 {
+    crate::ui::theme::PanelText::Label.pt() * 0.52
+}
 
 impl ContextMenu {
     /// Layout a menu anchored at `(anchor_x, anchor_y)` in physical
@@ -138,7 +151,7 @@ impl ContextMenu {
         let anchor_offset = ANCHOR_OFFSET_LOGICAL * scale;
         let min_w = MENU_MIN_W_LOGICAL * scale;
         let max_w = MENU_MAX_W_LOGICAL * scale;
-        let label_ch = LABEL_CH_W_LOGICAL * scale;
+        let label_ch = label_ch_w_logical() * scale;
 
         // Width: widest item label + shortcut hint, clamped.  Shortcut
         // hint sits at the right edge with `side_pad` between it and
