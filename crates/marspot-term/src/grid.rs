@@ -166,7 +166,9 @@ fn ambiguous_wide_mode() -> AmbiguousWide {
     if let Some(mode) = env {
         return mode;
     }
-    if crate::settings::get().appearance_circled_wide {
+    // The per-byte mirror, not `get()` — this runs once per parsed
+    // character and a lock here is a measurable parse regression.
+    if crate::settings::circled_wide() {
         AmbiguousWide::Circled
     } else {
         AmbiguousWide::Off

@@ -32,6 +32,7 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
@@ -125,8 +126,45 @@ fn mtime() -> Option<SystemTime> {
 }
 
 /// The current settings.  Cheap — clones an `Arc`.
+///
+/// "Cheap" still means a lock and a refcount, which is fine per frame
+/// or per tick and **not** fine per byte.  A value read on a per-byte
+/// path gets a mirror like [`circled_wide`] instead.
 pub fn get() -> Arc<Settings> {
     Arc::clone(&cache().read().unwrap_or_else(|p| p.into_inner()).settings)
+}
+
+/// Per-byte mirror of `appearance.circled_wide`.
+///
+/// `char_width` runs once per character of everything the terminal
+/// parses — the `cat-cjk` bench pushes ~200 MB/s through it — so it
+/// cannot take a lock and bump a refcount to answer "how wide".  A
+/// relaxed atomic, republished whenever the settings change, is the
+/// whole cost.
+///
+/// 0 = unread, 1 = false, 2 = true.  Three states rather than a bool
+/// so the first call still goes through `get()` and picks up a file
+/// that was parsed before this mirror existed.
+static CIRCLED_WIDE: AtomicU8 = AtomicU8::new(0);
+
+/// `appearance.circled_wide`, safe to call per character.
+#[inline]
+pub fn circled_wide() -> bool {
+    match CIRCLED_WIDE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let v = get().appearance_circled_wide;
+            CIRCLED_WIDE.store(1 + v as u8, Ordering::Relaxed);
+            v
+        }
+    }
+}
+
+/// Republish the per-byte mirrors.  Called wherever `settings` are
+/// installed, so a mirror can never be staler than the snapshot.
+fn publish_mirrors(s: &Settings) {
+    CIRCLED_WIDE.store(1 + s.appearance_circled_wide as u8, Ordering::Relaxed);
 }
 
 /// Re-read the file if it has changed on disk.  Returns true when the
@@ -148,6 +186,7 @@ pub fn reload_if_changed() -> bool {
     let mut c = cache().write().unwrap_or_else(|p| p.into_inner());
     c.seen = now;
     let changed = *c.settings != *parsed;
+    publish_mirrors(&parsed);
     c.settings = parsed;
     changed
 }
@@ -157,6 +196,7 @@ pub fn reload_if_changed() -> bool {
 #[doc(hidden)]
 pub fn set_for_test(s: Settings) {
     let mut c = cache().write().unwrap_or_else(|p| p.into_inner());
+    publish_mirrors(&s);
     c.settings = Arc::new(s);
     c.seen = None;
 }
@@ -364,6 +404,20 @@ reclaim.enabled = true
 
         // And the round trip is stable.
         assert_eq!(parse(&out), s);
+    }
+
+    /// The mirror exists because `char_width` runs per parsed
+    /// character; if it can go stale, the terminal draws with one
+    /// width and lays out with another.
+    #[test]
+    fn the_per_byte_mirror_tracks_the_snapshot() {
+        set_for_test(Settings { appearance_circled_wide: true, ..Settings::default() });
+        assert!(circled_wide());
+        assert_eq!(circled_wide(), get().appearance_circled_wide);
+
+        set_for_test(Settings { appearance_circled_wide: false, ..Settings::default() });
+        assert!(!circled_wide());
+        assert_eq!(circled_wide(), get().appearance_circled_wide);
     }
 
     #[test]

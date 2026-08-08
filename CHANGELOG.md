@@ -3213,6 +3213,17 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 Current: **0.11.34**
 
+### 0.11.41
+
+`char_width` 读设置改用**原子镜像**,不是 `get()`。
+
+第一版直接在 `char_width` 里 `settings::get()` —— 一次 RwLock 读加一次
+`Arc` 引用计数,**每个解析到的字符一次**。mini 上 `cat-cjk` 195.2 /
+`cat-emoji` 58.8,双双跌破地板。改成一个 relaxed 原子(设置变更时重新发布),
+同一台机器空闲复测 231.0 / 72.4,**GATE 11/11**。
+
+"便宜"是相对的:一把锁每帧一次没问题,每字节一次就是回归。
+
 ### 0.11.40
 
 字符宽度跟着 `appearance.circled_wide` 走,**L3 自己重读**。
