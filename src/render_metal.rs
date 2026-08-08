@@ -2061,6 +2061,60 @@ fn encode_passes(
 /// because we never read the bytes back in the bench path; for
 /// readback (existing offscreen render_cells_bg_offscreen / fg)
 /// the caller still allocates Managed + blit-synchronizes.
+/// A render target whose bytes can be read back on the CPU.
+///
+/// [`make_target_texture`] asks for `Private` storage — right for a
+/// texture only the GPU ever looks at, and unreadable by `getBytes`.
+/// Anything that wants the pixels afterwards (the offscreen `--shot`
+/// path, the snapshot tests) needs `Managed`, plus a blit
+/// `synchronizeResource` before the read.
+pub fn make_readback_texture(
+    device: &ProtocolObject<dyn MTLDevice>,
+    width: u32,
+    height: u32,
+) -> Result<Retained<ProtocolObject<dyn MTLTexture>>, String> {
+    let descriptor = unsafe {
+        objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            TARGET_FORMAT,
+            width as usize,
+            height as usize,
+            false,
+        )
+    };
+    descriptor.setUsage(
+        objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+    );
+    descriptor.setStorageMode(objc2_metal::MTLStorageMode::Managed);
+    device
+        .newTextureWithDescriptor(&descriptor)
+        .ok_or_else(|| "newTextureWithDescriptor returned nil".to_string())
+}
+
+/// Copy a Managed texture's pixels out, BGRA, top-left origin.
+///
+/// The caller must have synchronised the resource already — every
+/// call site here does it inside the command buffer that drew, which
+/// is the only place it can be done without a second submit.
+pub fn texture_bytes_bgra(texture: &ProtocolObject<dyn MTLTexture>) -> Vec<u8> {
+    let width = texture.width();
+    let height = texture.height();
+    let bytes_per_row = width * 4;
+    let mut bytes = vec![0u8; bytes_per_row * height];
+    let region = objc2_metal::MTLRegion {
+        origin: objc2_metal::MTLOrigin { x: 0, y: 0, z: 0 },
+        size: objc2_metal::MTLSize { width, height, depth: 1 },
+    };
+    unsafe {
+        texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+            NonNull::new(bytes.as_mut_ptr() as *mut c_void).unwrap(),
+            bytes_per_row,
+            region,
+            0,
+        );
+    }
+    bytes
+}
+
 pub fn make_target_texture(
     device: &ProtocolObject<dyn MTLDevice>,
     width: u32,
@@ -2088,6 +2142,33 @@ impl MetalRenderer {
     /// render-target texture without a public `device` field.
     pub fn device(&self) -> &ProtocolObject<dyn MTLDevice> {
         &self.device
+    }
+
+    /// Flush a Managed render target's GPU writes to the CPU side and
+    /// hand back its pixels, BGRA.
+    ///
+    /// A second command buffer, because `render_layout_to_texture` has
+    /// already committed its own — the cost of one extra submit buys
+    /// callers that do not have to thread a blit through the render
+    /// path they are borrowing.
+    pub fn read_target(
+        &self,
+        texture: &ProtocolObject<dyn MTLTexture>,
+    ) -> Result<Vec<u8>, String> {
+        let cmd = self
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| "commandBuffer returned nil".to_string())?;
+        let blit = cmd
+            .blitCommandEncoder()
+            .ok_or_else(|| "blitCommandEncoder returned nil".to_string())?;
+        let resource: &ProtocolObject<dyn objc2_metal::MTLResource> =
+            ProtocolObject::from_ref(texture);
+        blit.synchronizeResource(resource);
+        blit.endEncoding();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        Ok(texture_bytes_bgra(texture))
     }
 
     /// Bench helper (perf-attack B3/B4): rasterise each char into the
@@ -2963,27 +3044,33 @@ fn push_settings_panel_via_view(
                         heading,
                         sm::metric::GROUP_PT,
                         sm::metric::GROUP_WEIGHT,
-                        cc_palette::fg_sec(),
+                        cc_palette::fg(),
                     );
                 }
                 Slot::Card { rect } => {
                     // The card is what makes a group read as a group.
                     p.fill_rounded_rect(
                         rect,
-                        SETTINGS_CARD_BG,
+                        settings_skin::card_bg(),
                         (sm::metric::CARD_RADIUS * px) as f32,
-                        (SETTINGS_CARD_BORDER, 1.0),
+                        (settings_skin::card_border(), 1.0),
                     );
                 }
                 Slot::Separator { rect } => {
-                    p.fill_rect(rect, SETTINGS_SEPARATOR);
+                    // `fill_rounded_rect`, not `fill_rect`: the two go
+                    // to different pipelines, and the whole cells pass
+                    // is drawn *before* the whole ui_rects pass — so a
+                    // hairline submitted after the card was painted
+                    // under it and vanished.  Same pass, later
+                    // submission, visible.
+                    p.fill_rounded_rect(rect, settings_skin::separator(), 0.0, ([0.0; 4], 0.0));
                 }
                 Slot::Row { row, spec, label_baseline, desc_baseline, control, .. } => {
                     let dim = row.disabled_by(&sp.settings);
                     let (fg, sec) = if dim {
                         (cc_palette::fg_faint(), cc_palette::fg_faint())
                     } else {
-                        (cc_palette::fg(), cc_palette::fg_sec())
+                        (cc_palette::fg(), cc_palette::fg_muted())
                     };
                     let x = sm::text_x(sp.rect) as f32;
                     p.ui_text_at(
@@ -3044,9 +3131,9 @@ fn push_settings_panel_via_view(
                                 let (bg, border, fg) = if picked {
                                     (cc_palette::ok(), cc_palette::ok(), [1.0, 1.0, 1.0, 1.0])
                                 } else if dim {
-                                    (SETTINGS_SEG_BG, SETTINGS_CARD_BORDER, cc_palette::fg_faint())
+                                    (settings_skin::segment_bg(), settings_skin::card_border(), cc_palette::fg_faint())
                                 } else {
-                                    (SETTINGS_SEG_BG, SETTINGS_CARD_BORDER, cc_palette::fg())
+                                    (settings_skin::segment_bg(), settings_skin::card_border(), cc_palette::fg())
                                 };
                                 p.fill_rounded_rect(
                                     seg, bg, (5.0 * px) as f32, (border, 1.0),
@@ -3089,14 +3176,22 @@ fn push_settings_panel_via_view(
     });
 }
 
-/// The settings card — one step lighter than the panel it sits on, so
-/// a group reads as a group without needing a heavy border.
-const SETTINGS_CARD_BG: [f32; 4] = [0.118, 0.129, 0.149, 1.0];
-const SETTINGS_CARD_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
-/// The hairline between rows inside a card.
-const SETTINGS_SEPARATOR: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
-/// An unpicked segment.
-const SETTINGS_SEG_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.05];
+/// The settings panel's four surfaces, all from the theme's own
+/// levels rather than hand-mixed RGB — the panel sits on `SURFACE_2`,
+/// so its cards take the next level up and the controls the one after
+/// that.  `HAIRLINE`, not `DIVIDER`: the first cut used the fainter
+/// token at one physical pixel and the line was invisible, which left
+/// the rows looking exactly as undivided as before.
+mod settings_skin {
+    use crate::ui::theme::token::color;
+    /// The card a group's rows sit in.
+    pub fn card_bg() -> [f32; 4] { color::SURFACE_3.to_rgba_f32() }
+    pub fn card_border() -> [f32; 4] { color::BORDER.to_rgba_f32() }
+    /// Between two rows of one card.
+    pub fn separator() -> [f32; 4] { color::HAIRLINE.to_rgba_f32() }
+    /// An unpicked segment.
+    pub fn segment_bg() -> [f32; 4] { color::SURFACE_4.to_rgba_f32() }
+}
 
 /// cc — modal palette comes from the UI theme tokens (the same
 /// system dev panel / buttons draw from), not hand-rolled RGB.  The
@@ -3114,6 +3209,12 @@ mod cc_palette {
     /// Tertiary — date axis, tick marks.  Chart furniture, reads as
     /// background once you've found your row.
     pub fn fg_faint() -> [f32; 4] { color::FG_MUTED.to_rgba_f32() }
+    /// A line that must recede behind the one above it — an
+    /// explanation, not a label.  Same token as `fg_faint`; the two
+    /// names are kept apart because one means "this control is off"
+    /// and the other means "this is secondary text", and they will not
+    /// always want the same colour.
+    pub fn fg_muted() -> [f32; 4] { color::FG_MUTED.to_rgba_f32() }
     pub fn ok() -> [f32; 4] { color::SUCCESS.to_rgba_f32() }
     pub fn warn() -> [f32; 4] { color::WARN.to_rgba_f32() }
     pub fn danger() -> [f32; 4] { color::DANGER.to_rgba_f32() }

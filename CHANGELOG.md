@@ -2238,7 +2238,33 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.103**
+Current: **0.12.104**
+
+### 0.12.104
+
+**先把「我看不见」这件事解决掉。** 面板好不好看没有测试能替,而这一整天每
+看一眼都得麻烦你截图、或者把窗口提到你正在做的事情前面。`--snapshot` 这个
+开关其实早就在,只是被停用着,注释写的正是缺的三样:Managed 纹理、getBytes
+回读、BGRA→RGBA。三样都补上了:
+
+    marspot --snapshot out.png --panel settings
+
+离屏渲染一帧写成 PNG。PNG 编码器自己写(`src/png.rs`,~100 行 std)——
+DEFLATE 有 stored block,zlib 收,于是「压缩」就是照抄字节再写对长度;
+省下的是一整棵压缩依赖树。CRC32 / Adler-32 对公开向量,块结构按解码器的
+走法走一遍,都有测试。
+
+**然后修了两个只有看到才知道的毛病:**
+
+1. **卡内的分隔线根本没画出来。** `fill_rect` 走 cells 管线、`fill_rounded_rect`
+   走 ui_rects,而**整趟 cells 在整趟 ui_rects 之前**画 —— 线虽然是在卡片
+   之后提交的,却被卡片盖住了。改到同一趟就出来了。
+2. **颜色全部换成主题 token**,不再手调 RGB:卡片 `SURFACE_3`(面板是
+   `SURFACE_2`,正好高一级)、分段控件 `SURFACE_4`、分隔线 `HAIRLINE`
+   (第一版用了更淡的 `DIVIDER`,1 物理像素配 0.08 等于没有)、说明行
+   `FG_MUTED`(原来只比标签暗一点,两行在打架),分组标题提到 `FG`。
+
+`marspot` 二进制因此涨了 17.5 KB(1514624 → 1532160),距离地板还剩 8.8 KB。
 
 ### 0.12.103
 

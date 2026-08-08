@@ -1718,7 +1718,8 @@ fn main() {
     marspot::logx::init("gui");
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {
-        run_snapshot(&path);
+        let panel = parse_named_arg(&args, "--panel");
+        run_snapshot(&path, panel.as_deref());
         return;
     }
     if let Some(spec) = parse_named_arg(&args, "--bench") {
@@ -1902,22 +1903,132 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
     None
 }
 
-/// Headless render: build a Renderer with no view, render one frame into
-/// an offscreen bitmap, encode as PNG, write to `path`. The terminal is
-/// pre-loaded with a demo banner so the snapshot has visible content
-/// without needing a live PTY.
-fn run_snapshot(path: &str) {
-    // The AppKit Renderer (and its CGBitmapContext-based `snapshot`
-    // method) was removed when mcli switched to Metal. A Metal-based
-    // snapshot path needs Managed-storage MTLTexture + getBytes
-    // readback + BGRA → RGBA conversion; not implemented yet.
-    let _ = path;
-    eprintln!(
-        "--snapshot is temporarily disabled — the AppKit offscreen \
-         renderer was removed; a Metal-based snapshot path will be \
-         added if/when needed (raise an issue)."
+/// Headless render: one frame into an offscreen texture, out as a PNG.
+///
+/// `--snapshot <path>` draws a demo terminal frame; `--panel settings`
+/// opens a panel over it first.
+///
+/// This existed as a stub for months with a note saying a Metal path
+/// "needs Managed-storage MTLTexture + getBytes readback + BGRA → RGBA
+/// conversion".  It was finished the day it became the shortest way to
+/// answer a question that kept coming back: *how does this panel
+/// actually look?*  There is no test for that — the only check is to
+/// look — and every previous look cost either a user screenshot or
+/// raising a window over whatever they were doing.  Now it is a file.
+fn run_snapshot(path: &str, panel: Option<&str>) {
+    use marspot::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
+    use marspot_term::layout::Layout;
+
+    let (phys_w, phys_h): (u32, u32) = (1600, 1100);
+    let mut renderer = match MetalRenderer::new_headless() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("--snapshot: no headless Metal renderer: {e}");
+            std::process::exit(2);
+        }
+    };
+    let target = match make_readback_texture(renderer.device(), phys_w, phys_h) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("--snapshot: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    let (cell_w, cell_h) = renderer.cell_dims();
+    let cols = ((phys_w as f64 / cell_w) as u16).max(8);
+    let rows = ((phys_h as f64 / cell_h) as u16).max(4);
+    let mut terminal = Terminal::new(cols, rows);
+    // Something to sit behind the panel, so the backdrop dim is
+    // visible for what it is.
+    for i in 0..rows.saturating_sub(1) as usize {
+        terminal.feed(
+            format!(
+                "\x1b[3{}m{:>3} \x1b[0mthe quick brown fox jumps over the lazy dog                   ①②③ 汉字 ABC 0123456789\r\n",
+                1 + (i % 6),
+                i
+            )
+            .as_bytes(),
+        );
+    }
+
+    let layout = Layout::build(
+        phys_w as f64, phys_h as f64, 0.0, 0.0, 0.0, 1, 1, cell_w, cell_h,
     );
-    std::process::exit(2);
+    let view = SessionView {
+        recede: 0,
+        scrim: 0.0,
+        grid: terminal.grid(),
+        view_offset: 0,
+        cursor_visible: true,
+        focused: true,
+        title: "snapshot",
+        selection: None,
+        ime_preedit: "",
+        update_pending: false,
+        dormant: false,
+        right_badge: "",
+        top_fixed_h_cells: 0,
+        bot_fixed_h_cells: 0,
+        highlight_spans: &[],
+        search_overlay: None,
+        seq: 0,
+    };
+
+    match panel {
+        None => {}
+        Some("settings") => {
+            let settings = marspot::settings::get();
+            let rect = {
+                let font = renderer.font_mut();
+                let mut measure = |s: &str, pt: f64, weight: u16| {
+                    font.measure_ui_text_at_size(
+                        s, weight, marspot::font_shape::ShapeOptions::default(), pt,
+                    )
+                };
+                marspot::ui::components::settings_modal::panel_rect(
+                    phys_w as f64, phys_h as f64, &settings, &mut measure, layout.top_inset,
+                )
+            };
+            renderer.set_settings_panel(Some(marspot::render_metal::SettingsRender {
+                rect,
+                settings: (*settings).clone(),
+                path: marspot::settings::path().display().to_string(),
+            }));
+        }
+        Some(other) => {
+            eprintln!("--snapshot: unknown panel {other:?} (known: settings)");
+            std::process::exit(2);
+        }
+    }
+
+    let mut wr = WindowRender::new();
+    let views = std::slice::from_ref(&view);
+    // Twice: the first frame populates the glyph atlas, and glyphs
+    // rasterised mid-frame land in the *next* one.  A one-frame
+    // snapshot of a cold atlas is a picture of missing text.
+    renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
+    renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
+
+    let bgra = match renderer.read_target(&target) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("--snapshot: readback failed: {e}");
+            std::process::exit(2);
+        }
+    };
+    let png = match marspot::png::encode_bgra(phys_w, phys_h, &bgra) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("--snapshot: encode failed: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = std::fs::write(path, &png) {
+        eprintln!("--snapshot: write {path}: {e}");
+        std::process::exit(2);
+    }
+    println!("{path} ({phys_w}x{phys_h}, {} bytes)", png.len());
 }
 
 /// Headless benchmark dispatcher.  Spec is `<mode>:<arg>`.

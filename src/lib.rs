@@ -73,6 +73,7 @@ pub mod pane_name;
 pub mod pane_read;
 pub mod pane_state;
 pub mod pidtree;
+pub mod png;
 pub mod render_metal;
 /// Shared with L3, so it lives in the stone crate — every layer
 /// reads the same file, and only one of them parses it.

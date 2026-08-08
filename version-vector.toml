@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
-core    = "0.12.103"  # 圈圈数字不再看邻居定大小 —— 一格就是一格,全大靠设置;详见 CHANGELOG.md
+core    = "0.12.104"  # 面板改用主题 token + 分隔线画进对的那一趟;--snapshot 复活成离屏截图;详见 CHANGELOG.md
 session = "0.11.41"  # 字符宽度跟着设置走 + 每字节路径用原子镜像;详见 CHANGELOG.md
