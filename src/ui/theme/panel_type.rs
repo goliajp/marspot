@@ -34,11 +34,19 @@ pub enum PanelText {
     Label,
     /// A row you *pick* — a menu item, a list entry.
     ///
-    /// Same size as [`Self::Label`], lighter.  A label sits above an
-    /// explanation and has to win against it; a menu item has nothing
-    /// to win against, and at semibold a column of them reads as a
-    /// column of headings.  Every native menu on the machine sets
-    /// these at regular weight.
+    /// Set to sit at the **terminal's own density**, not above it.
+    /// The measurement that fixed this: a menu's shortcut hints are
+    /// mono and were never converted, so they are a ruler standing
+    /// right next to the labels — 9 px of ink.  Before the labels
+    /// became proportional they were that same mono font, so 9 px is
+    /// what the user had and asked to get back; at [`Self::Label`]'s
+    /// size they came out 11 px (2026-08-09, measured off a
+    /// screenshot).
+    ///
+    /// Lighter than a label, too.  A label sits above an explanation
+    /// and has to win against it; a menu item has nothing to win
+    /// against, and at semibold a column of them reads as a column of
+    /// headings.  Every native menu on the machine sets these regular.
     Item,
     /// The sentence under a label: what it costs, what it means.
     Secondary,
@@ -54,8 +62,10 @@ impl PanelText {
         match self {
             PanelText::Title => UiSize::Title.sf_pro_pt(),
             PanelText::Section => UiSize::Heading.sf_pro_pt(),
-            PanelText::Label | PanelText::Item => UiSize::Body.sf_pro_pt(),
-            PanelText::Secondary | PanelText::Caption => UiSize::Small.sf_pro_pt(),
+            PanelText::Label => UiSize::Body.sf_pro_pt(),
+            PanelText::Item | PanelText::Secondary | PanelText::Caption => {
+                UiSize::Small.sf_pro_pt()
+            }
         }
     }
 
@@ -113,11 +123,23 @@ mod tests {
         // item shares Label's — both are set apart by weight or
         // colour, not by a rung nobody could see.
         assert_eq!(PanelText::Caption.pt(), PanelText::Secondary.pt());
-        assert_eq!(PanelText::Item.pt(), PanelText::Label.pt());
+        assert!(
+            PanelText::Item.pt() < PanelText::Label.pt(),
+            "a menu item sits at the terminal's density, below a label",
+        );
         assert!(
             PanelText::Item.weight() < PanelText::Label.weight(),
             "a menu item must be lighter than a label, or a column of \
              them reads as a column of headings",
+        );
+        // The ruler that settled it: the shortcut hints beside a menu
+        // item are mono and unconverted, and they are ~9 px of ink.
+        // Anything that drifts this role far from that will be visibly
+        // out of step with the column next to it.
+        let item_cap_px = PanelText::Item.cap() * crate::ui::core::ViewPainter::PX_PER_PT;
+        assert!(
+            (8.0..=10.0).contains(&item_cap_px),
+            "menu item cap is {item_cap_px:.1} px; the mono column beside it is ~9",
         );
     }
 
