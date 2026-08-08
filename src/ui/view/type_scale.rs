@@ -100,6 +100,19 @@ impl UiSize {
     }
 }
 
+/// Cap height of SF Pro at an arbitrary pt size — the inverse of
+/// [`UiSize::sf_pro_pt`], for surfaces that pick a pt directly.
+///
+/// Optical vertical centring uses cap height, not the em box: a line
+/// box is ascent + descent, and centring on it hangs short text high
+/// by the descender it never uses.  Every chrome row that centres a
+/// label in a box goes through here so they all sit on the same
+/// optical line.
+#[inline]
+pub fn sf_pro_cap_height(size_pt: f64) -> f64 {
+    size_pt * SF_PRO_CAP_RATIO
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

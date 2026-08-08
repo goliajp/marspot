@@ -282,6 +282,62 @@ impl<'a> ViewPainter<'a> {
         );
     }
 
+    /// The system UI font at an explicit **pt size and weight**.
+    ///
+    /// `ui_text` above is one size (the startup chrome pt) at one
+    /// weight (600).  A surface built only from it has no type scale:
+    /// a label and its explanatory line come out the same size and can
+    /// differ only in colour, which is not a hierarchy — it is two
+    /// equal lines, one of them harder to read.  This is the sized
+    /// path the canvas system has had since Phase 10c, exposed to the
+    /// direct painter.
+    ///
+    /// `baseline_y` is a real baseline in physical px; see
+    /// [`Self::ui_baseline_centred`] for putting one in the middle of
+    /// a box.
+    pub fn ui_text_at(
+        &mut self,
+        x: f32,
+        baseline_y: f32,
+        s: &str,
+        size_pt: f64,
+        weight: u16,
+        color: [f32; 4],
+    ) {
+        crate::render_metal::push_text_run_ui_sized(
+            s, x, baseline_y, color, size_pt, weight,
+            self.atlas_w, self.atlas_h,
+            self.font, self.atlas, self.glyphs,
+        );
+    }
+
+    /// Advance width of `s` at an explicit pt size and weight,
+    /// physical px.  Pairs with [`Self::ui_text_at`] — measuring at a
+    /// different size than you draw is how a label overruns the button
+    /// drawn to hold it.
+    pub fn ui_text_width_at(&mut self, s: &str, size_pt: f64, weight: u16) -> f32 {
+        self.font.measure_ui_text_at_size(
+            s, weight, crate::font_shape::ShapeOptions::default(), size_pt,
+        ) as f32
+    }
+
+    /// Baseline that optically centres `size_pt` text in a box whose
+    /// top and height are given, in physical px.
+    ///
+    /// Centres on **cap height**, not the em box — see
+    /// [`crate::ui::view::type_scale::sf_pro_cap_height`].
+    pub fn ui_baseline_centred(&self, box_top: f32, box_h: f32, size_pt: f64) -> f32 {
+        let cap = (crate::ui::view::type_scale::sf_pro_cap_height(size_pt)
+            * Self::PX_PER_PT) as f32;
+        box_top + (box_h + cap) * 0.5
+    }
+
+    /// Physical pixels per typographic point — the retina scale baked
+    /// into the atlas raster path, which the UI text path assumes.
+    /// Chrome laid out in pt multiplies by this to reach the physical
+    /// rects the painter takes.
+    pub const PX_PER_PT: f64 = 2.0;
+
     /// Advance width of `s` in the system UI font, physical px — pairs
     /// with `ui_text` for right-aligning or centring a heading.
     pub fn ui_text_width(&mut self, s: &str) -> f32 {

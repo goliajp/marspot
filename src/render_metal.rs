@@ -2961,117 +2961,176 @@ fn push_settings_panel_via_view(
         },
     };
     view.paint(&mut painter, |p| {
-        let cw = p.cell_w as f64;
-        let ch = p.cell_h as f64;
-        let text = |p: &mut ViewPainter, x: f64, baseline: f64, s: &str, c: [f32; 4]| {
-            p.text(x as f32, baseline as f32, s, c);
-        };
-        let x_left = sm::text_x(sp.rect, cw);
-        // Title, then the rows.
-        // Same treatment as the Cc panel's own title — UI font, one
-        // per panel, so the two read as the same surface family.
-        p.ui_text(
-            x_left as f32,
-            (sp.rect.y_top + ch * sm::metric::PANEL_PAD + p.ui_ascent() as f64) as f32,
-            "SETTINGS",
-            cc_palette::fg(),
-        );
-        // Collect first, paint after: the walker hands out two
-        // callbacks and the painter is one exclusive borrow.
-        let mut headings: Vec<(&'static str, f64)> = Vec::new();
-        let mut geo: Vec<sm::RowGeometry> = Vec::new();
-        sm::walk(
-            sp.rect,
-            cw,
-            ch,
-            |h, baseline| headings.push((h, baseline)),
-            |g| geo.push(g),
-        );
-        // Section headings in the terminal font, not the UI font: the
-        // Cc panel sets its body in cells and only its two top-level
-        // titles in UI type, and a UI-font heading every three rows
-        // made this panel read as three panels stacked.
-        for (h, baseline) in headings {
-            text(p, x_left, baseline, h, cc_palette::fg_sec());
-        }
-        for g in geo {
-            let spec = sm::rows().find(|r| r.row == g.row).expect("row spec");
-            let dim = g.row.disabled_by(&sp.settings);
-            let (fg, sec) = if dim {
-                (cc_palette::fg_faint(), cc_palette::fg_faint())
-            } else {
-                (cc_palette::fg(), cc_palette::fg_sec())
+        use crate::ui::components::settings_modal::{Control, Slot};
+        let px = ViewPainter::PX_PER_PT;
+        // The walker needs a measurer and the painter owns the font,
+        // so collect the geometry first and paint from it.  Both this
+        // and the hit-test measure through the same path, which is
+        // what keeps a segment as wide as the label inside it.
+        let mut slots: Vec<Slot> = Vec::new();
+        {
+            let font = &mut *p.font;
+            let mut m = |s: &str, pt: f64, w: u16| {
+                font.measure_ui_text_at_size(
+                    s, w, crate::font_shape::ShapeOptions::default(), pt,
+                )
             };
-            text(p, x_left, g.label_baseline, spec.label, fg);
-            text(p, x_left, g.cost_baseline, spec.cost, sec);
-            match g.row.control(&sp.settings) {
-                sm::Control::Toggle(on) => {
-                    // A pill with the knob at one end.  Drawn, not
-                    // written: a checkbox at this size reads as
-                    // decoration, a pill reads as a switch.
-                    let track = g.control;
-                    let r = track.h * 0.5;
-                    let w = (track.h * 1.9).min(track.w);
-                    let pill = marspot_term::layout::Rect {
-                        x: track.x + track.w - w,
-                        y_top: track.y_top,
-                        w,
-                        h: track.h,
-                    };
-                    let bg = if !dim && on { cc_palette::ok() } else { cc_palette::track() };
-                    p.fill_rounded_rect(pill, bg, r as f32, ([0.0; 4], 0.0));
-                    let knob_d = track.h * 0.72;
-                    let pad = (track.h - knob_d) * 0.5;
-                    let kx = if on { pill.x + pill.w - knob_d - pad } else { pill.x + pad };
-                    p.fill_rounded_rect(
-                        marspot_term::layout::Rect {
-                            x: kx,
-                            y_top: pill.y_top + pad,
-                            w: knob_d,
-                            h: knob_d,
-                        },
+            sm::walk(sp.rect, &sp.settings, &mut m, |slot| slots.push(slot));
+        }
+
+        for slot in slots {
+            match slot {
+                Slot::Title { baseline } => {
+                    p.ui_text_at(
+                        sm::text_x(sp.rect) as f32,
+                        baseline as f32,
+                        "Settings",
+                        sm::metric::TITLE_PT,
+                        sm::metric::TITLE_WEIGHT,
                         cc_palette::fg(),
-                        (knob_d * 0.5) as f32,
-                        ([0.0; 4], 0.0),
                     );
                 }
-                sm::Control::Segmented { options, chosen } => {
-                    // The app's Button, not a hand-rolled rect: same
-                    // corner radius, border and hover treatment as the
-                    // toolbar and the layout modal, so the panel does
-                    // not read as a different program's dialog.
-                    let base = crate::ui::components::ButtonStyle::chrome();
-                    for (n, label) in options.iter().enumerate() {
-                        let seg = sm::segment_rect(g.control, n, options, cw);
-                        let picked = !dim && n == chosen;
-                        let mut style = base;
-                        if picked {
-                            style.bg = cc_palette::ok();
-                            style.fg = [1.0, 1.0, 1.0, 1.0];
-                            style.border_color = cc_palette::ok();
-                        } else if dim {
-                            style.fg = cc_palette::fg_faint();
+                Slot::Group { heading, baseline } => {
+                    p.ui_text_at(
+                        sm::text_x(sp.rect) as f32,
+                        baseline as f32,
+                        heading,
+                        sm::metric::GROUP_PT,
+                        sm::metric::GROUP_WEIGHT,
+                        cc_palette::fg_sec(),
+                    );
+                }
+                Slot::Card { rect } => {
+                    // The card is what makes a group read as a group.
+                    p.fill_rounded_rect(
+                        rect,
+                        SETTINGS_CARD_BG,
+                        (sm::metric::CARD_RADIUS * px) as f32,
+                        (SETTINGS_CARD_BORDER, 1.0),
+                    );
+                }
+                Slot::Separator { rect } => {
+                    p.fill_rect(rect, SETTINGS_SEPARATOR);
+                }
+                Slot::Row { row, spec, label_baseline, desc_baseline, control, .. } => {
+                    let dim = row.disabled_by(&sp.settings);
+                    let (fg, sec) = if dim {
+                        (cc_palette::fg_faint(), cc_palette::fg_faint())
+                    } else {
+                        (cc_palette::fg(), cc_palette::fg_sec())
+                    };
+                    let x = sm::text_x(sp.rect) as f32;
+                    p.ui_text_at(
+                        x, label_baseline as f32, spec.label,
+                        sm::metric::LABEL_PT, sm::metric::LABEL_WEIGHT, fg,
+                    );
+                    // Genuinely smaller, not merely dimmer: same size
+                    // in a paler grey is two competing lines.
+                    p.ui_text_at(
+                        x, desc_baseline as f32, spec.cost,
+                        sm::metric::DESC_PT, sm::metric::DESC_WEIGHT, sec,
+                    );
+                    match row.control(&sp.settings) {
+                        Control::Toggle(on) => {
+                            // A pill with the knob at one end.  Drawn,
+                            // not written: a checkbox at this size
+                            // reads as decoration, a pill as a switch.
+                            let r = control.h * 0.5;
+                            let bg = if !dim && on {
+                                cc_palette::ok()
+                            } else {
+                                cc_palette::track()
+                            };
+                            p.fill_rounded_rect(control, bg, r as f32, ([0.0; 4], 0.0));
+                            let knob_d = control.h * 0.74;
+                            let pad = (control.h - knob_d) * 0.5;
+                            let kx = if on {
+                                control.x + control.w - knob_d - pad
+                            } else {
+                                control.x + pad
+                            };
+                            p.fill_rounded_rect(
+                                marspot_term::layout::Rect {
+                                    x: kx,
+                                    y_top: control.y_top + pad,
+                                    w: knob_d,
+                                    h: knob_d,
+                                },
+                                cc_palette::fg(),
+                                (knob_d * 0.5) as f32,
+                                ([0.0; 4], 0.0),
+                            );
                         }
-                        crate::ui::components::Button {
-                            rect: seg,
-                            label: Some(label),
-                            icon: None,
-                            icon_position: crate::ui::components::IconPosition::Only,
-                            hovered: false,
-                            style,
+                        Control::Segmented { options, chosen } => {
+                            for (n, label) in options.iter().enumerate() {
+                                let seg = {
+                                    let font = &mut *p.font;
+                                    let mut m = |s: &str, pt: f64, w: u16| {
+                                        font.measure_ui_text_at_size(
+                                            s, w,
+                                            crate::font_shape::ShapeOptions::default(),
+                                            pt,
+                                        )
+                                    };
+                                    sm::segment_rect(control, n, options, &mut m)
+                                };
+                                let picked = !dim && n == chosen;
+                                let (bg, border, fg) = if picked {
+                                    (cc_palette::ok(), cc_palette::ok(), [1.0, 1.0, 1.0, 1.0])
+                                } else if dim {
+                                    (SETTINGS_SEG_BG, SETTINGS_CARD_BORDER, cc_palette::fg_faint())
+                                } else {
+                                    (SETTINGS_SEG_BG, SETTINGS_CARD_BORDER, cc_palette::fg())
+                                };
+                                p.fill_rounded_rect(
+                                    seg, bg, (5.0 * px) as f32, (border, 1.0),
+                                );
+                                // Measured, then centred on what was
+                                // measured — the label overran its
+                                // button when width came from a count.
+                                let tw = p.ui_text_width_at(
+                                    label, sm::metric::SEG_PT, sm::metric::SEG_WEIGHT,
+                                );
+                                let baseline = p.ui_baseline_centred(
+                                    seg.y_top as f32, seg.h as f32, sm::metric::SEG_PT,
+                                );
+                                p.ui_text_at(
+                                    (seg.x + (seg.w - tw as f64) * 0.5) as f32,
+                                    baseline,
+                                    label,
+                                    sm::metric::SEG_PT,
+                                    sm::metric::SEG_WEIGHT,
+                                    fg,
+                                );
+                            }
                         }
-                        .paint(p);
                     }
+                }
+                Slot::Footer { baseline } => {
+                    // Where the file is.  The panel is one way to edit
+                    // it, not the only one.
+                    p.ui_text_at(
+                        sm::text_x(sp.rect) as f32,
+                        baseline as f32,
+                        &sp.path,
+                        sm::metric::FOOTER_PT,
+                        sm::metric::FOOTER_WEIGHT,
+                        cc_palette::fg_faint(),
+                    );
                 }
             }
         }
-        // Footer: where the file is.  The panel is one way to edit
-        // it, not the only one.  Positioned by the same walk as
-        // everything else rather than measured up from the bottom
-        // edge — that is what left it floating in dead space before.
-        text(p, x_left, sm::footer_baseline(sp.rect, ch), &sp.path, cc_palette::fg_faint());
     });
 }
+
+/// The settings card — one step lighter than the panel it sits on, so
+/// a group reads as a group without needing a heavy border.
+const SETTINGS_CARD_BG: [f32; 4] = [0.118, 0.129, 0.149, 1.0];
+const SETTINGS_CARD_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
+/// The hairline between rows inside a card.
+const SETTINGS_SEPARATOR: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
+/// An unpicked segment.
+const SETTINGS_SEG_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.05];
 
 /// cc — modal palette comes from the UI theme tokens (the same
 /// system dev panel / buttons draw from), not hand-rolled RGB.  The
@@ -4401,6 +4460,65 @@ pub(crate) fn push_text_run_ui_shaped_mono(
         });
     }
     let _ = ascent;
+}
+
+/// SF Pro at an explicit pt size and weight, into the mono atlas.
+///
+/// [`push_text_run_ui_shaped_mono`] above is locked to the startup
+/// `UI_FONT_POINT` at weight 600 — one size, one weight, which is why
+/// every chrome surface built on `ViewPainter` had a single type size
+/// and had to signal hierarchy with colour alone.  The canvas path
+/// (`push_text_run_ui_shaped`) has taken a size since Phase 10c; this
+/// is the same capability for the direct painter, minus the colour
+/// atlas the canvas path also routes (chrome labels are latin).
+///
+/// `baseline_y` is a real baseline in physical px — the caller knows
+/// its own line box.  Physical px per pt is the 2× retina scale baked
+/// into the atlas raster path, same as the canvas path assumes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_text_run_ui_sized(
+    text: &str,
+    x_start: f32,
+    baseline_y: f32,
+    color: [f32; 4],
+    size_pt: f64,
+    weight: u16,
+    atlas_w: f32,
+    atlas_h: f32,
+    font: &mut FontCache,
+    atlas: &mut GlyphAtlas,
+    glyphs: &mut Vec<GlyphInstance>,
+) {
+    let shaped = font.shape_ui_weighted_opts_at_size(
+        text, weight, crate::font_shape::ShapeOptions::default(), size_pt,
+    );
+    if shaped.is_empty() {
+        return;
+    }
+    let baseline_y_q = baseline_y.round();
+    let x_start_floor = x_start.floor() as i32;
+    for sg in shaped {
+        let ct_font = font.font(sg.font_id as usize).clone();
+        let key = GlyphKey::new(
+            sg.font_id,
+            sg.glyph_id,
+            GlyphKey::size_q_for(ct_font.pt_size()),
+            sg.subpx_x,
+            GlyphKey::FLAG_SMOOTH,
+        );
+        let Some(entry) = atlas.get_or_rasterize_natural(key, &ct_font) else {
+            continue;
+        };
+        let pen_x = (x_start_floor + sg.pen_x_px) as f32;
+        let (origin, size) = entry.quad(pen_x, baseline_y_q);
+        glyphs.push(GlyphInstance {
+            origin,
+            size,
+            uv0: [entry.u0 as f32 / atlas_w, entry.v0 as f32 / atlas_h],
+            uv1: [entry.u1 as f32 / atlas_w, entry.v1 as f32 / atlas_h],
+            color,
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

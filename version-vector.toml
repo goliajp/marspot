@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
-core    = "0.12.100"  # 设置面板重排:节奏、按内容定宽的分段、高度由同一次 walk 得出;详见 CHANGELOG.md
+core    = "0.12.101"  # 设置面板改成分组卡片 + 卡内细线 + 三级字号;详见 CHANGELOG.md
 session = "0.11.41"  # 字符宽度跟着设置走 + 每字节路径用原子镜像;详见 CHANGELOG.md

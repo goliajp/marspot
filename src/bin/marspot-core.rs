@@ -6272,14 +6272,27 @@ impl CoreApp {
         win!(self, wi).needs_render = true;
     }
 
-    fn settings_modal_rect(&self, wi: usize) -> marspot_term::layout::Rect {
-        let (cell_w, cell_h) = self.renderer.cell_dims();
-        marspot::ui::components::settings_modal::panel_rect(
+    /// The settings panel's rect.
+    ///
+    /// Needs the font: the panel sizes itself to measured text, and
+    /// the hit-test measures through this same path — a segment
+    /// clickable somewhere other than where it is drawn is exactly
+    /// what a second, approximate measurement would produce.
+    fn settings_modal_rect(&mut self, wi: usize) -> marspot_term::layout::Rect {
+        let (w_phys, h_phys, top_inset) = (
             win!(self, wi).w_phys,
             win!(self, wi).h_phys,
-            cell_w as f64,
-            cell_h as f64,
             win!(self, wi).layout.top_inset,
+        );
+        let settings = marspot::settings::get();
+        let font = self.renderer.font_mut();
+        let mut measure = |s: &str, pt: f64, weight: u16| {
+            font.measure_ui_text_at_size(
+                s, weight, marspot::font_shape::ShapeOptions::default(), pt,
+            )
+        };
+        marspot::ui::components::settings_modal::panel_rect(
+            w_phys, h_phys, &settings, &mut measure, top_inset,
         )
     }
 
@@ -7036,10 +7049,18 @@ impl CoreApp {
                 win!(self, wi).needs_render = true;
                 return;
             }
-            let (cell_w, cell_h) = self.renderer.cell_dims();
-            let hit = marspot::ui::components::settings_modal::hit_test(
-                rect, cell_w as f64, cell_h as f64, x_phys, y_phys,
-            );
+            let cur_settings = marspot::settings::get();
+            let hit = {
+                let font = self.renderer.font_mut();
+                let mut measure = |s: &str, pt: f64, weight: u16| {
+                    font.measure_ui_text_at_size(
+                        s, weight, marspot::font_shape::ShapeOptions::default(), pt,
+                    )
+                };
+                marspot::ui::components::settings_modal::hit_test(
+                    rect, &cur_settings, &mut measure, x_phys, y_phys,
+                )
+            };
             if let Some((row, seg)) = hit {
                 let cur = marspot::settings::get();
                 if let Some(next) = row.apply(&cur, seg) {
@@ -7937,13 +7958,15 @@ impl CoreApp {
         // The settings panel.  A snapshot per frame — one consistent
         // set of values, so a toggle and a segment can never be drawn
         // from either side of the same click.
-        let settings_data = win!(self, wi).settings_modal_open.then(|| {
-            marspot::render_metal::SettingsRender {
+        let settings_data = if win!(self, wi).settings_modal_open {
+            Some(marspot::render_metal::SettingsRender {
                 rect: self.settings_modal_rect(wi),
                 settings: (*marspot::settings::get()).clone(),
                 path: marspot::settings::path().display().to_string(),
-            }
-        });
+            })
+        } else {
+            None
+        };
         self.renderer.set_settings_panel(settings_data);
         // F3+9 — publish ContextMenu render state every frame.
         // Dev panel renders into its own NSWindow, owned by L1

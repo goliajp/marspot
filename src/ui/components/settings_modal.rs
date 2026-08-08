@@ -23,48 +23,81 @@
 
 use crate::settings::Settings;
 
-/// Multipliers on the painter's cell metrics.
+/// Every measurement in this panel, in **typographic points**.
+///
+/// The first cut expressed the panel as multiples of the terminal's
+/// cell so it would track font size.  That coupling is what made it
+/// look wrong: a cell is one size, so every line came out one size,
+/// and a settings panel that cannot set a label apart from the
+/// sentence explaining it has no hierarchy at all.  Chrome is chrome —
+/// it is sized like the rest of the system's chrome, in points, and
+/// [`crate::ui::core::ViewPainter::PX_PER_PT`] takes it to pixels.
 pub mod metric {
-    /// Line advance, as a multiple of cell height.
-    pub const LINE_ADVANCE: f64 = 1.35;
-    // The rhythm is the whole layout problem here, so the numbers are
-    // written as one scale rather than tuned one at a time.
-    //
-    // A row is *two lines that belong together* — a label and what it
-    // costs — and rows must read as separate from each other.  The
-    // first cut spaced them 0.95 and 2.2, a ratio of 2.3, and at that
-    // ratio a cost line sits almost as close to the NEXT label as to
-    // its own: the eye groups them wrongly and the panel reads as six
-    // crowded lines instead of three rows.  Widening the outer gap
-    // and tightening the inner one puts the ratio near 3.
+    /// Panel width.  Wide enough that the longest cost line clears the
+    /// widest control on the same row with room to spare — the panel
+    /// reading as cramped was the whole complaint.
+    pub const PANEL_W: f64 = 620.0;
+    /// Panel margin, left and right.
+    pub const PAD_X: f64 = 24.0;
+    pub const PAD_TOP: f64 = 22.0;
+    pub const PAD_BOTTOM: f64 = 20.0;
 
-    /// Line advance, as a multiple of cell height.
-    pub const LINE_ADVANCE_: () = ();
-    /// Panel margin inside its own frame.
-    pub const PANEL_PAD: f64 = 1.7;
-    /// Title baseline to the first section heading.
-    pub const TITLE_BREAK: f64 = 1.9;
-    /// Gap under a section heading, before its first row.
-    pub const HEADING_GAP: f64 = 1.35;
-    /// Gap between one section's last cost line and the next heading.
-    pub const SECTION_BREAK: f64 = 2.1;
-    /// Label baseline to its own cost line.  Tight: they are one unit.
-    pub const COST_ADVANCE: f64 = 0.9;
-    /// Cost line to the next row's label.  Nearly three times the
-    /// inner gap, so the grouping is unambiguous.
-    pub const ROW_GAP: f64 = 1.7;
-    /// Last cost line to the footer path.
-    pub const FOOTER_BREAK: f64 = 2.0;
-    /// Height of a control, as a multiple of cell height.
-    pub const CONTROL_H: f64 = 1.5;
-    /// Padding inside a segment, in cell widths, each side.  Segments
-    /// are sized to their own label — equal thirds made `Never` spill
-    /// out of its button while `1h` swam in one.
-    pub const SEGMENT_PAD: f64 = 1.1;
-    /// Gap between segments.
-    pub const SEGMENT_GAP: f64 = 0.4;
-    /// Toggle width, as a multiple of its height.
-    pub const TOGGLE_ASPECT: f64 = 1.85;
+    /// Panel title.
+    pub const TITLE_PT: f64 = 17.0;
+    pub const TITLE_WEIGHT: u16 = 700;
+    /// Title baseline to the first group heading's baseline.
+    pub const TITLE_TO_GROUP: f64 = 26.0;
+
+    /// Group heading — sits *above* its card, like the system's own
+    /// settings groups, rather than inline with the rows.  That is
+    /// what makes a group read as a group without a box around the
+    /// heading too.
+    pub const GROUP_PT: f64 = 12.0;
+    pub const GROUP_WEIGHT: u16 = 600;
+    /// Group baseline to the top of its card.
+    pub const GROUP_TO_CARD: f64 = 10.0;
+
+    /// The card holding a group's rows.
+    pub const CARD_RADIUS: f64 = 9.0;
+    /// Row inset inside the card.
+    pub const CARD_PAD_X: f64 = 16.0;
+    /// Card bottom to the next group's baseline.
+    pub const CARD_TO_GROUP: f64 = 24.0;
+    /// Card bottom to the footer baseline's line box.
+    pub const CARD_TO_FOOTER: f64 = 22.0;
+
+    /// Row padding above the title line and below the cost line.
+    pub const ROW_PAD_Y: f64 = 10.0;
+    /// The title line's height — sized to the tallest control so
+    /// every row in a card is the same height whatever it holds.  A
+    /// card whose rows jump between two heights reads as broken.
+    pub const ROW_BAND_H: f64 = 22.0;
+    /// Title line to the cost line.
+    pub const DESC_GAP: f64 = 4.0;
+    /// Hairline between rows, and how far it is inset from the left.
+    /// Flush to the card's right edge, inset on the left to the row
+    /// text — the list convention everywhere in the OS.
+    pub const SEP_H: f64 = 1.0;
+
+    pub const LABEL_PT: f64 = 13.0;
+    pub const LABEL_WEIGHT: u16 = 500;
+    /// The cost line: genuinely smaller, not merely dimmer.  Same size
+    /// in a different colour is two competing lines, not a hierarchy.
+    pub const DESC_PT: f64 = 11.0;
+    pub const DESC_WEIGHT: u16 = 400;
+    pub const FOOTER_PT: f64 = 10.5;
+    pub const FOOTER_WEIGHT: u16 = 400;
+
+    /// Switch, at the system's proportions.
+    pub const TOGGLE_H: f64 = 16.0;
+    pub const TOGGLE_W: f64 = 28.0;
+    /// Segmented control.  Each segment is sized to its own measured
+    /// label — equal thirds spilled `Never` out of its button.
+    pub const SEG_H: f64 = 22.0;
+    pub const SEG_PT: f64 = 11.0;
+    pub const SEG_WEIGHT: u16 = 500;
+    pub const SEG_PAD_X: f64 = 10.0;
+    pub const SEG_GAP: f64 = 4.0;
 }
 
 /// Which setting a row edits.  One variant per row — the panel has no
@@ -203,65 +236,176 @@ pub fn rows() -> impl Iterator<Item = &'static RowSpec> {
     SECTIONS.iter().flat_map(|s| s.rows.iter())
 }
 
-/// Lines of panel chrome: title, the footer path, and the padding
-/// above and below them.  Derived height uses this so "the panel is
-/// too short" is one edit.
-const CHROME_LINES: f64 = 4.4;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    Title,
-    Heading(usize),
-    Row(usize, usize),
-    Footer,
+/// A piece of the panel, with where it goes.  The walker emits these
+/// in draw order; the painter draws them and the hit-test looks at
+/// them, so a control cannot be clickable anywhere but where it is
+/// drawn.
+pub enum Slot {
+    Title { baseline: f64 },
+    Group { heading: &'static str, baseline: f64 },
+    /// A group's card.  Emitted before the rows it contains.
+    Card { rect: Rect },
+    Row {
+        row: Row,
+        spec: &'static RowSpec,
+        /// The row's full band inside the card — what a hover would
+        /// highlight, and what the hairline sits at the bottom of.
+        band: Rect,
+        label_baseline: f64,
+        desc_baseline: f64,
+        /// Right-aligned in the card, centred on the title line.
+        control: Rect,
+    },
+    /// Hairline between two rows of the same card.
+    Separator { rect: Rect },
+    Footer { baseline: f64 },
 }
 
-/// Vertical layout, walked once — the single source for both where
-/// things go and how tall the panel is.
+use marspot_term::layout::Rect;
+
+/// Measures a string in the UI font: `(text, pt, weight) -> width`.
 ///
-/// Returns the total height consumed.  `on` is called with every
-/// slot's baseline, measured from the panel's top edge.
-fn layout_lines(cell_h: f64, mut on: impl FnMut(Slot, f64)) -> f64 {
-    let lh = cell_h * metric::LINE_ADVANCE;
-    let pad = cell_h * metric::PANEL_PAD;
-    let mut y = pad + lh;
-    on(Slot::Title, y);
+/// Threaded in rather than approximated from a character count: the
+/// panel sizes segments to their labels, and a count-based guess is
+/// how the label came to overrun the button drawn to hold it.
+pub type Measure<'a> = &'a mut dyn FnMut(&str, f64, u16) -> f64;
+
+/// Cap height of a run at `pt`, in pt.
+fn cap(pt: f64) -> f64 {
+    crate::ui::view::type_scale::sf_pro_cap_height(pt)
+}
+
+/// Rough descender depth, for the space under a last line.
+fn descent(pt: f64) -> f64 {
+    pt * 0.22
+}
+
+/// One row's height — constant across a card whatever control it
+/// holds, so the card does not step.
+fn row_h() -> f64 {
+    metric::ROW_PAD_Y * 2.0
+        + metric::ROW_BAND_H
+        + metric::DESC_GAP
+        + cap(metric::DESC_PT)
+        + descent(metric::DESC_PT)
+}
+
+/// Walk the panel in draw order.  **One walker**, shared by the
+/// painter, the hit-test and the height calculation — the alternative
+/// is a layout pass plus a matching set of coordinates in the click
+/// handler, which is how a control ends up reacting a row above where
+/// it is drawn with nothing in a screenshot to say which is wrong.
+///
+/// `rect` is the panel in physical px; everything below is computed in
+/// pt and scaled on the way out.
+pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) {
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let card_x = rect.x + metric::PAD_X * px;
+    let card_w = rect.w - 2.0 * metric::PAD_X * px;
+    let text_x = card_x + metric::CARD_PAD_X * px;
+
+    // `y` walks in pt from the panel's top edge.
+    let mut y = metric::PAD_TOP;
+    let title_baseline = y + cap(metric::TITLE_PT);
+    on(Slot::Title { baseline: rect.y_top + title_baseline * px });
+    y = title_baseline;
+
     for (si, section) in SECTIONS.iter().enumerate() {
-        y += lh * if si == 0 { metric::TITLE_BREAK } else { metric::SECTION_BREAK };
-        on(Slot::Heading(si), y);
-        y += lh * metric::HEADING_GAP;
-        for ri in 0..section.rows.len() {
-            on(Slot::Row(si, ri), y);
-            y += lh * (metric::COST_ADVANCE + metric::ROW_GAP);
+        y += if si == 0 { metric::TITLE_TO_GROUP } else { metric::CARD_TO_GROUP };
+        on(Slot::Group {
+            heading: section.heading,
+            baseline: rect.y_top + y * px,
+        });
+        y += metric::GROUP_TO_CARD;
+
+        let card_top = y;
+        let card_h = row_h() * section.rows.len() as f64;
+        on(Slot::Card {
+            rect: Rect {
+                x: card_x,
+                y_top: rect.y_top + card_top * px,
+                w: card_w,
+                h: card_h * px,
+            },
+        });
+
+        for (ri, spec) in section.rows.iter().enumerate() {
+            let row_top = card_top + row_h() * ri as f64;
+            let band_top = row_top + metric::ROW_PAD_Y;
+            // Label optically centred in the band, so a 13pt label and
+            // a 22pt control share one centre line.
+            let label_baseline = band_top + (metric::ROW_BAND_H + cap(metric::LABEL_PT)) * 0.5;
+            let desc_baseline =
+                band_top + metric::ROW_BAND_H + metric::DESC_GAP + cap(metric::DESC_PT);
+            let ctl_h = match spec.row.control(s) {
+                Control::Toggle(_) => metric::TOGGLE_H,
+                Control::Segmented { .. } => metric::SEG_H,
+            };
+            let ctl_w = control_width(spec.row, s, m) / px;
+            on(Slot::Row {
+                row: spec.row,
+                spec,
+                band: Rect {
+                    x: card_x,
+                    y_top: rect.y_top + row_top * px,
+                    w: card_w,
+                    h: row_h() * px,
+                },
+                label_baseline: rect.y_top + label_baseline * px,
+                desc_baseline: rect.y_top + desc_baseline * px,
+                control: Rect {
+                    x: card_x + card_w - (metric::CARD_PAD_X + ctl_w) * px,
+                    y_top: rect.y_top + (band_top + (metric::ROW_BAND_H - ctl_h) * 0.5) * px,
+                    w: ctl_w * px,
+                    h: ctl_h * px,
+                },
+            });
+            if ri + 1 < section.rows.len() {
+                on(Slot::Separator {
+                    rect: Rect {
+                        x: text_x,
+                        y_top: rect.y_top + (row_top + row_h()) * px,
+                        w: card_x + card_w - text_x,
+                        h: metric::SEP_H,
+                    },
+                });
+            }
         }
-        // The last row in a section counted a row gap; the section
-        // break (or the footer break) replaces it.
-        y -= lh * metric::ROW_GAP;
+        y = card_top + card_h;
     }
-    y += lh * metric::FOOTER_BREAK;
-    on(Slot::Footer, y);
-    y + pad
+
+    y += metric::CARD_TO_FOOTER + cap(metric::FOOTER_PT);
+    on(Slot::Footer { baseline: rect.y_top + y * px });
+}
+
+/// The panel's height in pt, from the same walk that draws it — so
+/// "the panel has a dead band at the bottom" is not expressible.
+fn panel_h_pt(s: &Settings, m: Measure<'_>) -> f64 {
+    // The walk needs a rect; height does not depend on it, so any
+    // origin does.
+    let probe = Rect { x: 0.0, y_top: 0.0, w: metric::PANEL_W, h: 0.0 };
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let mut bottom = 0.0f64;
+    walk(probe, s, m, |slot| {
+        if let Slot::Footer { baseline } = slot {
+            bottom = baseline / px + descent(metric::FOOTER_PT) + metric::PAD_BOTTOM;
+        }
+    });
+    bottom
 }
 
 /// The panel's rect, centred, **sized by what it actually draws**.
-///
-/// Height comes from the same walk the painter uses, so the two
-/// cannot disagree — the first cut guessed it from a constant and
-/// left a dead band two rows tall at the bottom.
 pub fn panel_rect(
     w_phys: f64,
     h_phys: f64,
-    cell_w: f64,
-    cell_h: f64,
+    s: &Settings,
+    m: Measure<'_>,
     top_inset: f64,
-) -> marspot_term::layout::Rect {
-    // The cost lines are the long text and the labels are short, so
-    // they are what sets the panel's width.
-    let longest = rows().map(|r| r.cost.chars().count()).max().unwrap_or(48) as f64;
-    let w = ((longest + 2.0 * metric::PANEL_PAD + 6.0) * cell_w)
-        .max(56.0 * cell_w)
-        .min(w_phys * 0.9);
-    let h = layout_lines(cell_h, |_, _| {}).min(h_phys * 0.9);
-    marspot_term::layout::Rect {
+) -> Rect {
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let w = (metric::PANEL_W * px).min(w_phys * 0.94);
+    let h = (panel_h_pt(s, m) * px).min(h_phys * 0.94);
+    Rect {
         x: (w_phys - w) / 2.0,
         y_top: ((h_phys - h) / 2.0).max(top_inset + 8.0),
         w,
@@ -269,160 +413,79 @@ pub fn panel_rect(
     }
 }
 
-/// Where each row's pieces land inside the panel.
-///
-/// **One walker, used by both the painter and the hit-test.**  The
-/// alternative — a layout pass and a matching set of coordinates in
-/// the click handler — is how a control ends up reacting a row above
-/// where it is drawn, and nothing in a screenshot says which of the
-/// two is wrong.
-pub struct RowGeometry {
-    pub row: Row,
-    /// Baseline for the label.
-    pub label_baseline: f64,
-    /// Baseline for the cost line under it.
-    pub cost_baseline: f64,
-    /// The control's box, right-aligned in the panel.
-    pub control: marspot_term::layout::Rect,
-}
-
-/// Walk the panel: each heading with its baseline, each row with its
-/// geometry, in draw order.  Shares [`layout_lines`] with
-/// [`panel_rect`], so what is drawn and how tall the panel is can
-/// never disagree.
-pub fn walk(
-    rect: marspot_term::layout::Rect,
-    cell_w: f64,
-    cell_h: f64,
-    mut heading: impl FnMut(&'static str, f64),
-    mut row: impl FnMut(RowGeometry),
-) {
-    let lh = cell_h * metric::LINE_ADVANCE;
-    // The control column is right-aligned on the same edge the text
-    // starts from on the left, so the panel has two clean margins.
-    let right = rect.x + rect.w - cell_w * metric::PANEL_PAD;
-    layout_lines(cell_h, |slot, y| {
-        let y = rect.y_top + y;
-        match slot {
-            Slot::Heading(si) => heading(SECTIONS[si].heading, y),
-            Slot::Row(si, ri) => {
-                let spec = &SECTIONS[si].rows[ri];
-                let h = cell_h * metric::CONTROL_H;
-                let w = control_width(spec.row, cell_w, cell_h);
-                row(RowGeometry {
-                    row: spec.row,
-                    label_baseline: y,
-                    cost_baseline: y + lh * metric::COST_ADVANCE,
-                    control: marspot_term::layout::Rect {
-                        x: right - w,
-                        // Centred on the label's line, not hung off its
-                        // baseline: a control is as tall as two glyphs
-                        // and sitting it on the baseline pushes it
-                        // into the cost line underneath.
-                        y_top: y - cell_h * 0.72 - (h - cell_h) * 0.5,
-                        w,
-                        h,
-                    },
-                });
-            }
-            _ => {}
-        }
-    });
-}
-
-/// How wide this row's control needs to be.
-///
-/// Sized to content, not to a column constant: `Never` spilled out of
-/// an equal-thirds button while `1h` swam in one.
-pub fn control_width(row: Row, cell_w: f64, cell_h: f64) -> f64 {
-    match row.control(&crate::settings::get()) {
-        Control::Toggle(_) => cell_h * metric::CONTROL_H * metric::TOGGLE_ASPECT,
+/// How wide this row's control needs to be, in physical px.
+pub fn control_width(row: Row, s: &Settings, m: Measure<'_>) -> f64 {
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    match row.control(s) {
+        Control::Toggle(_) => metric::TOGGLE_W * px,
         Control::Segmented { options, .. } => {
-            let gaps = cell_w * metric::SEGMENT_GAP * (options.len().saturating_sub(1)) as f64;
-            options.iter().map(|l| segment_width(l, cell_w)).sum::<f64>() + gaps
+            let gaps = metric::SEG_GAP * px * options.len().saturating_sub(1) as f64;
+            options.iter().map(|l| segment_width(l, m)).sum::<f64>() + gaps
         }
     }
 }
 
-fn segment_width(label: &str, cell_w: f64) -> f64 {
-    (label.chars().count() as f64 + 2.0 * metric::SEGMENT_PAD) * cell_w
+/// A segment, sized to its own measured label.
+fn segment_width(label: &str, m: Measure<'_>) -> f64 {
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    m(label, metric::SEG_PT, metric::SEG_WEIGHT) + 2.0 * metric::SEG_PAD_X * px
 }
 
-/// Baseline for the footer path, from the same walk.
-pub fn footer_baseline(rect: marspot_term::layout::Rect, cell_h: f64) -> f64 {
-    let mut y = rect.y_top + rect.h;
-    layout_lines(cell_h, |slot, at| {
-        if slot == Slot::Footer {
-            y = rect.y_top + at;
-        }
-    });
-    y
-}
-
-/// Left edge for a row's text.
-pub fn text_x(rect: marspot_term::layout::Rect, cell_w: f64) -> f64 {
-    rect.x + cell_w * metric::PANEL_PAD
-}
-
-/// The `n`th segment of a segmented control, sized to its own label.
-pub fn segment_rect(
-    control: marspot_term::layout::Rect,
-    n: usize,
-    labels: &[&str],
-    cell_w: f64,
-) -> marspot_term::layout::Rect {
-    let gap = cell_w * metric::SEGMENT_GAP;
+/// The `n`th segment of a segmented control.
+pub fn segment_rect(control: Rect, n: usize, labels: &[&str], m: Measure<'_>) -> Rect {
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let gap = metric::SEG_GAP * px;
     let mut x = control.x;
     for l in labels.iter().take(n) {
-        x += segment_width(l, cell_w) + gap;
+        x += segment_width(l, m) + gap;
     }
-    marspot_term::layout::Rect {
+    Rect {
         x,
         y_top: control.y_top,
-        w: labels.get(n).map(|l| segment_width(l, cell_w)).unwrap_or(0.0),
+        w: labels.get(n).map(|l| segment_width(l, m)).unwrap_or(0.0),
         h: control.h,
     }
 }
 
-/// Which row and segment `(px, py)` lands on, if any.
-///
-/// Walks the same geometry the painter does, so a control cannot be
-/// clickable anywhere but where it is drawn.
+/// Left edge for a row's text.
+pub fn text_x(rect: Rect) -> f64 {
+    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    rect.x + (metric::PAD_X + metric::CARD_PAD_X) * px
+}
+
+/// Which row and segment `(px_x, py)` lands on, if any.
 pub fn hit_test(
-    rect: marspot_term::layout::Rect,
-    cell_w: f64,
-    cell_h: f64,
-    px: f64,
+    rect: Rect,
+    s: &Settings,
+    m: Measure<'_>,
+    px_x: f64,
     py: f64,
 ) -> Option<(Row, usize)> {
-    let mut hit = None;
-    walk(
-        rect,
-        cell_w,
-        cell_h,
-        |_, _| {},
-        |g| {
-            if hit.is_some() {
-                return;
-            }
-            match g.row.control(&crate::settings::get()) {
-                Control::Toggle(_) => {
-                    if g.control.contains(px, py) {
-                        hit = Some((g.row, 0));
-                    }
+    // Collect first: the walker borrows `m` for the duration, and the
+    // segment geometry needs it again.
+    let mut controls: Vec<(Row, Rect)> = Vec::new();
+    walk(rect, s, m, |slot| {
+        if let Slot::Row { row, control, .. } = slot {
+            controls.push((row, control));
+        }
+    });
+    for (row, control) in controls {
+        match row.control(s) {
+            Control::Toggle(_) => {
+                if control.contains(px_x, py) {
+                    return Some((row, 0));
                 }
-                Control::Segmented { options, .. } => {
-                    for n in 0..options.len() {
-                        if segment_rect(g.control, n, options, cell_w).contains(px, py) {
-                            hit = Some((g.row, n));
-                            return;
-                        }
+            }
+            Control::Segmented { options, .. } => {
+                for n in 0..options.len() {
+                    if segment_rect(control, n, options, m).contains(px_x, py) {
+                        return Some((row, n));
                     }
                 }
             }
-        },
-    );
-    hit
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -496,135 +559,207 @@ mod tests {
         assert_eq!(s.reclaim_idle_minutes, 45);
     }
 
+    /// Stand-in for the font: SF Pro's average advance is close
+    /// enough to 0.5 em for a geometry test, and the point of these
+    /// assertions is that widths *come from a measurement* at all.
+    fn fake_measure() -> impl FnMut(&str, f64, u16) -> f64 {
+        |s: &str, pt: f64, w: u16| {
+            let bold = if w >= 600 { 1.05 } else { 1.0 };
+            s.chars().count() as f64 * pt * 0.5 * bold
+                * crate::ui::core::ViewPainter::PX_PER_PT
+        }
+    }
+
+    fn collect(rect: Rect, s: &Settings) -> Vec<Slot> {
+        let mut m = fake_measure();
+        let mut out = Vec::new();
+        walk(rect, s, &mut m, |slot| out.push(slot));
+        out
+    }
+
+    fn rows_of(slots: &[Slot]) -> Vec<&Slot> {
+        slots.iter().filter(|s| matches!(s, Slot::Row { .. })).collect()
+    }
+
+    fn test_rect(w: f64, h: f64, s: &Settings) -> Rect {
+        let mut m = fake_measure();
+        panel_rect(w, h, s, &mut m, 30.0)
+    }
+
     /// The claim `walk` is built on: a control is clickable exactly
-    /// where it is drawn.  Walk the rows, aim at the middle of each
-    /// control the painter would paint, and the hit-test must name
-    /// that same row.
+    /// where it is drawn.  Aim at the middle of each control the
+    /// painter would paint, and the hit-test must name that same row.
     #[test]
     fn every_control_is_clickable_where_it_is_drawn() {
-        crate::settings::set_for_test(Settings::default());
-        let (cw, ch) = (8.0, 16.0);
-        let rect = panel_rect(1200.0, 800.0, cw, ch, 30.0);
+        let s = Settings::default();
+        let rect = test_rect(1600.0, 1200.0, &s);
+        let slots = collect(rect, &s);
+        let mut m = fake_measure();
 
-        let mut seen: Vec<Row> = Vec::new();
-        walk(rect, cw, ch, |_, _| {}, |g| seen.push(g.row));
-        assert_eq!(seen.len(), rows().count(), "every row is walked once");
+        assert_eq!(rows_of(&slots).len(), rows().count(), "every row is walked once");
 
-        let mut geo: Vec<RowGeometry> = Vec::new();
-        walk(rect, cw, ch, |_, _| {}, |g| geo.push(g));
-        for g in &geo {
-            match g.row.control(&Settings::default()) {
+        for slot in &slots {
+            let Slot::Row { row, control, .. } = slot else { continue };
+            match row.control(&s) {
                 Control::Toggle(_) => {
-                    let c = g.control;
-                    let hit = hit_test(rect, cw, ch, c.x + c.w / 2.0, c.y_top + c.h / 2.0);
-                    assert_eq!(hit, Some((g.row, 0)), "toggle {:?}", g.row);
+                    let hit = hit_test(
+                        rect, &s, &mut m,
+                        control.x + control.w / 2.0,
+                        control.y_top + control.h / 2.0,
+                    );
+                    assert_eq!(hit, Some((*row, 0)), "toggle {row:?}");
                 }
                 Control::Segmented { options, .. } => {
                     for n in 0..options.len() {
-                        let sr = segment_rect(g.control, n, options, cw);
-                        let hit =
-                            hit_test(rect, cw, ch, sr.x + sr.w / 2.0, sr.y_top + sr.h / 2.0);
-                        assert_eq!(hit, Some((g.row, n)), "segment {n} of {:?}", g.row);
+                        let sr = segment_rect(*control, n, options, &mut m);
+                        let hit = hit_test(
+                            rect, &s, &mut m,
+                            sr.x + sr.w / 2.0,
+                            sr.y_top + sr.h / 2.0,
+                        );
+                        assert_eq!(hit, Some((*row, n)), "segment {n} of {row:?}");
                     }
                 }
             }
-            // Rows must not overlap each other's controls.
-            assert!(
-                g.control.x >= rect.x && g.control.x + g.control.w <= rect.x + rect.w + 1e-9,
-                "{:?} control escapes the panel",
-                g.row
-            );
-            assert!(
-                g.cost_baseline > g.label_baseline,
-                "{:?} cost line must sit under its label",
-                g.row
-            );
         }
-        // Every row is inside the panel vertically, cost line included.
-        let last = geo.last().unwrap();
-        assert!(
-            last.cost_baseline < rect.y_top + rect.h,
-            "the last row falls outside the panel: {} vs {}",
-            last.cost_baseline,
-            rect.y_top + rect.h
-        );
         // A click in the panel's empty space hits nothing.
-        assert_eq!(hit_test(rect, cw, ch, rect.x + 2.0, rect.y_top + 2.0), None);
+        assert_eq!(hit_test(rect, &s, &mut m, rect.x + 2.0, rect.y_top + 2.0), None);
     }
 
-    /// The two complaints the layout was rebuilt for, as assertions.
-    ///
-    /// 1. A row's own cost line must sit much closer to its label than
-    ///    to the next row's — otherwise the eye groups them wrongly
-    ///    and three rows read as six crowded lines.
-    /// 2. Nothing may overflow: a segment has to be wide enough for
-    ///    its own label (`Never` spilled out of an equal-thirds
-    ///    button), and the panel must not end in dead space.
+    /// What the panel was rebuilt for, as assertions: rows must read
+    /// as separate items inside a card, and nothing may overflow.
     #[test]
-    fn the_rhythm_groups_rows_and_nothing_overflows() {
-        crate::settings::set_for_test(Settings::default());
-        let (cw, ch) = (8.0, 16.0);
-        let rect = panel_rect(1400.0, 900.0, cw, ch, 30.0);
+    fn rows_are_separated_and_nothing_overflows() {
+        let s = Settings::default();
+        let rect = test_rect(1800.0, 1400.0, &s);
+        let slots = collect(rect, &s);
+        let mut m = fake_measure();
+        let px = crate::ui::core::ViewPainter::PX_PER_PT;
 
-        let mut geo: Vec<RowGeometry> = Vec::new();
-        walk(rect, cw, ch, |_, _| {}, |g| geo.push(g));
-
-        for w in geo.windows(2) {
-            let inner = w[0].cost_baseline - w[0].label_baseline;
-            let outer = w[1].label_baseline - w[0].cost_baseline;
-            assert!(
-                outer > inner * 1.6,
-                "rows do not read as separate: inner {inner:.1} vs outer {outer:.1}"
-            );
-        }
-
-        for g in &geo {
-            // Controls right-align on one edge.
-            let right = g.control.x + g.control.w;
-            let want = rect.x + rect.w - cw * metric::PANEL_PAD;
-            assert!((right - want).abs() < 0.5, "{:?} control off the column", g.row);
-            // A segment fits its own label.
-            if let Control::Segmented { options, .. } = g.row.control(&Settings::default()) {
-                for (n, label) in options.iter().enumerate() {
-                    let sr = segment_rect(g.control, n, options, cw);
-                    let ink = label.chars().count() as f64 * cw;
+        // Every row sits inside the card that was announced for it, and
+        // every card inside the panel.
+        let mut card: Option<Rect> = None;
+        let mut rows_in_card = 0usize;
+        for slot in &slots {
+            match slot {
+                Slot::Card { rect: c } => {
                     assert!(
-                        sr.w > ink,
-                        "{label:?} needs {ink:.1} and its button is {:.1}",
-                        sr.w
+                        c.x >= rect.x && c.x + c.w <= rect.x + rect.w + 1e-9,
+                        "card escapes the panel"
                     );
+                    card = Some(*c);
+                    rows_in_card = 0;
                 }
-                let last = segment_rect(g.control, options.len() - 1, options, cw);
-                assert!(
-                    last.x + last.w <= g.control.x + g.control.w + 0.5,
-                    "the last segment runs past the control"
-                );
+                Slot::Row { row, band, label_baseline, desc_baseline, control, .. } => {
+                    let c = card.expect("a row before any card");
+                    rows_in_card += 1;
+                    assert!(
+                        band.y_top >= c.y_top - 1e-9
+                            && band.y_top + band.h <= c.y_top + c.h + 1e-9,
+                        "{row:?} band escapes its card"
+                    );
+                    // Two-tier text: the cost line is under the label,
+                    // and it is *smaller*, not merely dimmer.
+                    assert!(desc_baseline > label_baseline, "{row:?} cost line above its label");
+                    assert!(metric::DESC_PT < metric::LABEL_PT, "no type scale");
+                    // The control clears the cost line under it — the
+                    // reason the label line is a band, not a baseline.
+                    assert!(
+                        control.y_top + control.h
+                            <= desc_baseline
+                                - crate::ui::view::type_scale::sf_pro_cap_height(metric::DESC_PT)
+                                    * px
+                                + 1e-9,
+                        "{row:?} control overlaps its own cost line"
+                    );
+                    // Right-aligned on one column, inside the card.
+                    let want = c.x + c.w - metric::CARD_PAD_X * px;
+                    assert!(
+                        (control.x + control.w - want).abs() < 0.5,
+                        "{row:?} control off the column"
+                    );
+                    if let Control::Segmented { options, .. } = row.control(&s) {
+                        for (n, label) in options.iter().enumerate() {
+                            let sr = segment_rect(*control, n, options, &mut m);
+                            let ink = fake_measure()(label, metric::SEG_PT, metric::SEG_WEIGHT);
+                            assert!(sr.w > ink, "{label:?} needs {ink:.1}, button is {:.1}", sr.w);
+                        }
+                        let last =
+                            segment_rect(*control, options.len() - 1, options, &mut m);
+                        assert!(
+                            last.x + last.w <= control.x + control.w + 0.5,
+                            "the last segment runs past the control"
+                        );
+                    }
+                }
+                Slot::Separator { rect: sep } => {
+                    let c = card.expect("a separator before any card");
+                    assert!(
+                        sep.x > c.x,
+                        "the hairline must be inset from the card's left edge"
+                    );
+                    assert!(rows_in_card >= 1, "a hairline before the first row");
+                }
+                _ => {}
             }
-            // Control sits on the label's line, not over the cost line.
-            assert!(
-                g.control.y_top + g.control.h < g.cost_baseline,
-                "{:?} control overlaps its own cost line",
-                g.row
-            );
         }
 
-        // No dead band: the footer is near the bottom, and the last
-        // row is above it.
-        let foot = footer_baseline(rect, ch);
+        // A single-row card gets no hairline; a three-row card gets two.
+        let seps = slots.iter().filter(|s| matches!(s, Slot::Separator { .. })).count();
+        let expect: usize = SECTIONS.iter().map(|s| s.rows.len() - 1).sum();
+        assert_eq!(seps, expect, "one hairline between each pair of rows, none at the edges");
+
+        // No dead band: the footer sits just above the bottom edge.
+        let foot = slots
+            .iter()
+            .find_map(|s| match s {
+                Slot::Footer { baseline } => Some(*baseline),
+                _ => None,
+            })
+            .expect("footer");
         let bottom = rect.y_top + rect.h;
         assert!(foot < bottom, "footer outside the panel");
         assert!(
-            bottom - foot < ch * 3.0,
+            bottom - foot < (metric::PAD_BOTTOM + metric::FOOTER_PT) * px,
             "dead space under the footer: {:.1}px",
             bottom - foot
         );
-        assert!(geo.last().unwrap().cost_baseline < foot);
+    }
+
+    /// The panel is roomy on purpose — the complaint that started this
+    /// rewrite was that everything was crammed together.  Guard the
+    /// two numbers that decide it, so a later tightening is deliberate.
+    #[test]
+    fn the_panel_stays_roomy() {
+        let s = Settings::default();
+        let rect = test_rect(2400.0, 1800.0, &s);
+        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let slots = collect(rect, &s);
+        let rows: Vec<_> = rows_of(&slots)
+            .iter()
+            .map(|s| match s {
+                Slot::Row { band, .. } => *band,
+                _ => unreachable!(),
+            })
+            .collect();
+        for w in rows.windows(2) {
+            // Rows inside a card are flush; across cards there is a gap.
+            let gap = w[1].y_top - (w[0].y_top + w[0].h);
+            assert!(gap >= -1e-9, "rows overlap");
+        }
+        assert!(
+            rows[0].h >= 44.0 * px,
+            "a two-line row under 44pt is the cramped panel again: {:.1}pt",
+            rows[0].h / px
+        );
+        assert!(rect.w >= 560.0 * px, "panel too narrow: {:.1}pt", rect.w / px);
     }
 
     #[test]
     fn the_panel_fits_the_window_it_is_centred_in() {
+        let s = Settings::default();
         for (w, h) in [(1200.0, 800.0), (400.0, 300.0), (3840.0, 2160.0)] {
-            let r = panel_rect(w, h, 8.0, 16.0, 30.0);
+            let r = panel_rect(w, h, &s, &mut fake_measure(), 30.0);
             assert!(r.w <= w, "wider than the window at {w}x{h}");
             assert!(r.h <= h, "taller than the window at {w}x{h}");
             assert!(r.x >= 0.0 && r.y_top >= 0.0, "off-screen at {w}x{h}");
