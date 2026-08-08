@@ -539,7 +539,7 @@ mod window_state_tests {
     use super::*;
 
     fn win(id: u32, panes: Vec<Pane>) -> WindowState {
-        WindowState::new(id, panes, 0, 1, 1, 800.0, 600.0, 2.0)
+        WindowState::new(id, panes, 0, 1, 1, 800.0, 600.0)
     }
 
     /// RFC-005's load-bearing claim: a pane carries everything that is
@@ -1453,11 +1453,43 @@ mod window_state_tests {
         assert_eq!(app.key_window, 1);
     }
 
+    /// Chrome is laid out in the unit its text is drawn in, never in
+    /// the window's backing scale.
+    ///
+    /// 2026-08-09: a 4K panel run without HiDPI reports
+    /// `backingScaleFactor == 1`, and every chrome box was multiplied
+    /// by it while text stayed fixed at 2 physical pixels per point —
+    /// so menu labels overran their menu, the sidebar was half-width
+    /// and the header half its height.  The two numbers agree on every
+    /// retina display, which is why it went unseen for so long.
+    #[test]
+    fn chrome_is_laid_out_in_the_unit_its_text_is_drawn_in() {
+        let w = WindowState::new(3, Vec::new(), 0, 1, 1, 800.0, 600.0);
+        assert_eq!(
+            w.scale,
+            marspot::ui::CHROME_PX_PER_PT,
+            "a fresh window must lay chrome out in the chrome unit",
+        );
+        // And that unit is what the text path uses, not a second
+        // constant that could drift from it.
+        assert_eq!(
+            marspot::ui::CHROME_PX_PER_PT,
+            marspot::ui::core::ViewPainter::PX_PER_PT,
+        );
+        // The header the layout actually built is that many pixels.
+        assert!(
+            (w.layout.top_inset - HEADER_PT * marspot::ui::CHROME_PX_PER_PT).abs() < 1e-6,
+            "header {} vs {}",
+            w.layout.top_inset,
+            HEADER_PT * marspot::ui::CHROME_PX_PER_PT,
+        );
+    }
+
     /// The modal's slot map is sized from the window's own grid, so a
     /// window created with a non-default shape starts consistent.
     #[test]
     fn card_slots_match_the_grid_the_window_was_built_with() {
-        let w = WindowState::new(3, Vec::new(), 0, 4, 2, 800.0, 600.0, 2.0);
+        let w = WindowState::new(3, Vec::new(), 0, 4, 2, 800.0, 600.0);
         assert_eq!(w.card_slots.len(), 8);
         assert_eq!(w.pending_grid_cols, 4);
         assert_eq!(w.pending_grid_rows, 2);
@@ -3204,7 +3236,7 @@ struct WindowState {
     /// every other modal — opening it in one must not blank another.
     settings_modal_open: bool,
     ime_preedit: String,
-    /// Window physical dims + scale, updated by Resize frames.
+    /// Window physical dims.  Updated by Resize frames.
     w_phys: f64,
     h_phys: f64,
     scale: f64,
@@ -3240,7 +3272,6 @@ impl WindowState {
         grid_rows: usize,
         w_phys: f64,
         h_phys: f64,
-        scale: f64,
     ) -> Self {
         Self {
             window_id,
@@ -3255,8 +3286,8 @@ impl WindowState {
                 w_phys,
                 h_phys,
                 0.0,
-                HEADER_PT * scale,
-                CELL_TITLE_PT * scale,
+                HEADER_PT * marspot::ui::CHROME_PX_PER_PT,
+                CELL_TITLE_PT * marspot::ui::CHROME_PX_PER_PT,
                 3,
                 3,
                 8.0,
@@ -3283,7 +3314,10 @@ impl WindowState {
             ime_preedit: String::new(),
             w_phys,
             h_phys,
-            scale,
+            // See `marspot::ui::CHROME_PX_PER_PT` — chrome is laid out
+            // in the unit its text is drawn in, not the window's
+            // backing scale.
+            scale: marspot::ui::CHROME_PX_PER_PT,
             needs_render: true,
             last_caret_sent: None,
         }
@@ -5042,7 +5076,7 @@ impl CoreApp {
                     }
                 }
                 let mut nw = WindowState::new(
-                    window_id, vec![pane], 0, 1, 1, w_phys, h_phys, scale,
+                    window_id, vec![pane], 0, 1, 1, w_phys, h_phys,
                 );
                 nw.frame_index = self.slot_for_new_window(slot);
                 nw.render.mark_bg_clear_required();
@@ -5104,7 +5138,6 @@ impl CoreApp {
             1,
             w_phys,
             h_phys,
-            scale,
         );
         w.frame_index = self.slot_for_new_window(slot);
         // A brand-new window has never been painted.
@@ -5178,7 +5211,6 @@ impl CoreApp {
             grid_rows,
             w_phys,
             h_phys,
-            scale,
         );
         w.frame_index = slot;
         w.render.mark_bg_clear_required();
@@ -5310,7 +5342,22 @@ impl CoreApp {
         }
         win!(self, wi).w_phys = w_phys;
         win!(self, wi).h_phys = h_phys;
-        win!(self, wi).scale = scale;
+        // The surface's own scale is deliberately **not** what chrome
+        // is laid out in — see `marspot::ui::CHROME_PX_PER_PT`.  Text
+        // is fixed in physical pixels, so boxes have to be too, or a
+        // display without HiDPI gets half-size boxes around full-size
+        // type.  Logged when the two differ so the divergence is
+        // visible rather than folklore.
+        if (scale - marspot::ui::CHROME_PX_PER_PT).abs() > 1e-6 {
+            lx_event!(
+                "SURFACE_SCALE_DIVERGES",
+                "surface backing scale differs from the chrome unit; chrome uses the chrome unit",
+                window_id = window_id as u64,
+                surface_scale = format!("{scale:.2}"),
+                chrome_px_per_pt = format!("{:.2}", marspot::ui::CHROME_PX_PER_PT)
+            );
+        }
+        win!(self, wi).scale = marspot::ui::CHROME_PX_PER_PT;
         self.rebuild_layout(wi);
         Some(wi)
     }
@@ -8831,7 +8878,6 @@ fn main() {
                 grid_rows,
                 w_phys,
                 h_phys,
-                scale,
             );
             // The boot window's pair comes from the env handshake, so
             // it has a paint target before the first frame; every
