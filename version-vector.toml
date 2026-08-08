@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.100"  # 切 profile 时把 resume 的 uuid 记进日志;详见 CHANGELOG.md
-core    = "0.12.95"  # 被压小的字形可以借用右边的空白格,不再缩到 61%;详见 CHANGELOG.md
-session = "0.11.38"  # 圈圈数字默认占 2 格:连着写也一样大;详见 CHANGELOG.md
+core    = "0.12.96"  # 溢出集合补上圈圈家族的尾巴(⓪ ❶..➓);详见 CHANGELOG.md
+session = "0.11.39"  # 回退 0.11.38:加宽会移动换行点,把字留在左边缝里;详见 CHANGELOG.md

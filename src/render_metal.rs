@@ -178,7 +178,12 @@ fn text_glyph_key_with(
 /// and spilling past the pane edge is not an option.
 fn may_overflow_cell(ch: char, right: Option<char>) -> bool {
     crate::grid::char_width(ch) == 1
-        && crate::grid::is_ambiguous_width(ch)
+        // The Ambiguous table, plus the circled family's tail that it
+        // stops short of (`⓪` and everything to U+24FF, `❶..➓`).
+        // Same design, same em square, same squeeze — the table's cut
+        // at U+24E9 is UAX #11's business, not a rendering opinion.
+        && (crate::grid::is_ambiguous_width(ch)
+            || crate::grid::is_enclosed_alphanumeric(ch as u32))
         && matches!(right, Some(' ') | Some('\0'))
 }
 
@@ -7806,8 +7811,11 @@ mod tests {
     /// neighbour to borrow — is given two cells outright instead.
     #[test]
     fn a_squeezed_glyph_may_borrow_a_blank_neighbour() {
-        // Narrow Ambiguous glyphs, followed by a blank.
-        for ch in ['★', '☆', '●', '▲', '▼'] {
+        // Narrow Ambiguous glyphs, followed by a blank.  The circled
+        // family is in here too: widening it was tried and reverted
+        // (it moves the wrap point), so overflow is the whole of what
+        // they get — full size when isolated, small in a run.
+        for ch in ['★', '☆', '●', '▲', '▼', '①', '③', 'Ⓐ', '⓪', '❶'] {
             assert_eq!(crate::grid::char_width(ch), 1, "{ch} is drawn narrow");
             assert!(
                 may_overflow_cell(ch, Some(' ')),
@@ -7823,13 +7831,6 @@ mod tests {
             assert!(!may_overflow_cell(ch, Some('中')));
             // The last column has no neighbour to borrow.
             assert!(!may_overflow_cell(ch, None));
-        }
-        // The circled family is WIDE now, so it never takes this path:
-        // borrowing only ever produced a uniform size when the glyph
-        // happened to be followed by a blank, and `①②③` never is.
-        for ch in ['①', '③', 'Ⓐ', '⓪', '❶'] {
-            assert_eq!(crate::grid::char_width(ch), 2, "{ch} gets its own two cells");
-            assert!(!may_overflow_cell(ch, Some(' ')));
         }
         // Two-cell glyphs already have the room they were designed
         // for; ASCII was designed for one.  Neither may overflow, or

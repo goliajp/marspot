@@ -114,15 +114,25 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 /// available — they would overlap by 4.5 px each.  Two cells is the
 /// only way, and it is a disagreement by construction.
 ///
-/// So the default widens exactly one family: the enclosed
-/// alphanumerics.  Measured 2026-08-08 — `Bun.stringWidth('①')` is 1
-/// (claudecode is a Bun binary and that is the function it uses), so
-/// this genuinely does drift, and the size of the bet is what makes it
-/// worth taking: drift is confined to lines that *contain* `①`, while
-/// every `°` `±` `→` `★` in the table stays narrow and in agreement.
+/// Widening the circled family was tried as the default on
+/// 2026-08-08 and **reverted the same hour**.  The prediction was that
+/// drift would be confined to lines *containing* `①` — annoying but
+/// bounded.  On a real screen it was not bounded: the disagreement
+/// moves the **wrap point**, so a paragraph that merely scrolled past
+/// a circled digit came back with stray characters stranded in the
+/// left margin and the input box drawn over itself.  A terminal that
+/// loses its wrapping is not trading a little alignment for a nicer
+/// glyph; it is broken.
 ///
-///   MARSPOT_AMBIGUOUS_WIDE=0        everything narrow (the old default)
-///   MARSPOT_AMBIGUOUS_WIDE=circled  (default) only ①②③ ❶❷❸ ⓪ … wide
+/// `Bun.stringWidth('①')` is 1 — claudecode is a Bun binary and that
+/// is the function it uses — and agreeing with the program drawing
+/// the screen is worth more than any glyph size.  The isolated case
+/// is served instead by letting the glyph overflow a blank neighbour
+/// (`may_overflow_cell`), which costs no disagreement at all; a *run*
+/// of them stays small, and that is the price of a correct screen.
+///
+///   MARSPOT_AMBIGUOUS_WIDE=0        (default) everything narrow
+///   MARSPOT_AMBIGUOUS_WIDE=circled  only ①②③ ❶❷❸ ⓪ … wide
 ///   MARSPOT_AMBIGUOUS_WIDE=1        the whole Ambiguous table wide
 ///
 /// One-shot OnceLock load: per-process env var read at first call,
@@ -141,10 +151,10 @@ fn ambiguous_wide_mode() -> AmbiguousWide {
         Ok(v) if v == "0" => AmbiguousWide::Off,
         Ok(v) if v.eq_ignore_ascii_case("circled") => AmbiguousWide::Circled,
         Ok(v) if !v.is_empty() => AmbiguousWide::All,
-        // Default: the circled family only.  See the note above on why
-        // this one set is worth disagreeing with everyone else about,
-        // and why the rest of the table is not.
-        _ => AmbiguousWide::Circled,
+        // Default: agree with everyone else.  See the note above —
+        // the 2026-08-08 experiment measured the cost on a real
+        // screen and it was worse than predicted.
+        _ => AmbiguousWide::Off,
     })
 }
 
@@ -154,7 +164,7 @@ fn ambiguous_wide_mode() -> AmbiguousWide {
 /// (`0x2460..=0x24E9`): `⓪` (U+24EA) and the parenthesised and
 /// double-circled tail through U+24FF are the same family and the same
 /// complaint, and the dingbat set `❶..➓` is drawn to the same metrics.
-fn is_enclosed_alphanumeric(cp: u32) -> bool {
+pub fn is_enclosed_alphanumeric(cp: u32) -> bool {
     matches!(cp, 0x2460..=0x24FF | 0x2776..=0x2793)
 }
 
@@ -284,19 +294,19 @@ mod char_width_tests {
     use super::char_width;
 
     #[test]
-    fn circled_digits_are_wide_by_default() {
+    fn circled_digits_default_narrow() {
         // U+2460..U+2473 = ① ② ③ … ⑳ (Enclosed Alphanumerics).
         // EAW=A per UAX #11, which every other wcwidth calls narrow —
         // measured, not assumed: `Bun.stringWidth('①')` is 1, and
-        // claudecode is a Bun binary.  We disagree on purpose, for
-        // this family only: at one cell a run like `①②③` cannot be
-        // drawn at a uniform readable size at all (see
-        // `ambiguous_wide_mode`).  `MARSPOT_AMBIGUOUS_WIDE=0` reverts.
-        assert_eq!(char_width('①'), 2);
-        assert_eq!(char_width('②'), 2);
-        assert_eq!(char_width('⑳'), 2);
-        assert_eq!(char_width('⓪'), 2, "the tail of the block counts too");
-        assert_eq!(char_width('❶'), 2, "…and the dingbat set");
+        // claudecode is a Bun binary.  Disagreeing was tried as the
+        // default and reverted within the hour: it moves the WRAP
+        // POINT, which strands characters in the left margin of any
+        // paragraph that scrolled past one.  See `ambiguous_wide_mode`.
+        assert_eq!(char_width('①'), 1);
+        assert_eq!(char_width('②'), 1);
+        assert_eq!(char_width('⑳'), 1);
+        assert_eq!(char_width('⓪'), 1);
+        assert_eq!(char_width('❶'), 1);
     }
 
     /// The `circled` middle setting acts on this set, so its extent is
@@ -321,9 +331,9 @@ mod char_width_tests {
     }
 
     #[test]
-    fn circled_letters_are_wide_by_default() {
-        assert_eq!(char_width('Ⓐ'), 2); // U+24B6
-        assert_eq!(char_width('ⓐ'), 2); // U+24D0
+    fn circled_letters_default_narrow() {
+        assert_eq!(char_width('Ⓐ'), 1); // U+24B6
+        assert_eq!(char_width('ⓐ'), 1); // U+24D0
     }
 
     #[test]
