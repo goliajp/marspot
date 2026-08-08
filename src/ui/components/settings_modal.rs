@@ -28,21 +28,23 @@ pub mod metric {
     /// Line advance, as a multiple of cell height.
     pub const LINE_ADVANCE: f64 = 1.35;
     /// Panel margin inside its own frame.
-    pub const PANEL_PAD: f64 = 1.6;
+    pub const PANEL_PAD: f64 = 1.4;
     /// Gap under a section heading.
-    pub const HEADING_GAP: f64 = 1.0;
+    pub const HEADING_GAP: f64 = 1.15;
     /// Gap between one section's last row and the next heading.
-    pub const SECTION_BREAK: f64 = 1.6;
+    pub const SECTION_BREAK: f64 = 1.5;
     /// Baseline advance from a row's label to its cost line.
-    pub const COST_ADVANCE: f64 = 1.0;
+    pub const COST_ADVANCE: f64 = 0.95;
     /// Advance from one row's label to the next row's label.
-    pub const ROW_ADVANCE: f64 = 2.35;
-    /// Control column width, in cell widths.
-    pub const CONTROL_W: f64 = 22.0;
+    pub const ROW_ADVANCE: f64 = 2.2;
+    /// Control column width, in cell widths.  Sized for the widest
+    /// control (the five-way segment) so the column edge is straight
+    /// down the panel whatever a row happens to hold.
+    pub const CONTROL_W: f64 = 26.0;
     /// Height of a control, as a multiple of cell height.
-    pub const CONTROL_H: f64 = 1.5;
+    pub const CONTROL_H: f64 = 1.45;
     /// Gap between the segments of a segmented control.
-    pub const SEGMENT_GAP: f64 = 0.35;
+    pub const SEGMENT_GAP: f64 = 0.3;
 }
 
 /// Which setting a row edits.  One variant per row — the panel has no
@@ -70,7 +72,7 @@ pub enum Control {
 /// the number down should find the end of the range where they expect
 /// it, not have to notice a different control.
 pub const IDLE_CHOICES: &[u32] = &[15, 30, 60, 120, 0];
-pub const IDLE_LABELS: &[&str] = &["15 分", "30 分", "1 时", "2 时", "从不"];
+pub const IDLE_LABELS: &[&str] = &["15m", "30m", "1h", "2h", "Never"];
 
 pub struct RowSpec {
     pub row: Row,
@@ -84,37 +86,42 @@ pub struct Section {
     pub rows: &'static [RowSpec],
 }
 
-pub const SECTIONS: &[Section] = &[Section {
-    heading: "闲置回收",
-    rows: &[
-        RowSpec {
-            row: Row::ReclaimEnabled,
-            label: "回收闲置的 claude pane",
-            cost: "回来时那个 pane 要等约 3 秒重新载入会话",
-        },
-        RowSpec {
-            row: Row::ReclaimIdleMinutes,
-            label: "闲置多久算闲置",
-            cost: "按会话记录的年龄算,不是终端安静的时长",
-        },
-        RowSpec {
-            row: Row::ReclaimPrefetch,
-            label: "回到 marspot 时预热",
-            cost: "进门就开始唤醒停放的 pane,每秒一个",
-        },
-    ],
-},
-Section {
-    heading: "文字",
-    rows: &[RowSpec {
-        row: Row::CircledWide,
-        label: "圈圈数字占 2 格",
-        // The line this whole day bought.  Shipped as a default once,
-        // reverted within the hour — so it is offered with what it
-        // costs written next to it, and off.
-        cost: "①②③ 跟汉字一样大,但会移动换行点 —— 滚过它的段落可能掉字",
-    }],
-}];
+/// English, like every other panel in the app — and the cost lines
+/// are set in the terminal font, where a proportional CJK string sat
+/// on mono cells and came out visibly loose.
+pub const SECTIONS: &[Section] = &[
+    Section {
+        heading: "IDLE RECLAMATION",
+        rows: &[
+            RowSpec {
+                row: Row::ReclaimEnabled,
+                label: "Reclaim idle claude panes",
+                cost: "coming back to one costs ~3s while its session reloads",
+            },
+            RowSpec {
+                row: Row::ReclaimIdleMinutes,
+                label: "Idle for",
+                cost: "measured by the session transcript's age, not terminal quiet",
+            },
+            RowSpec {
+                row: Row::ReclaimPrefetch,
+                label: "Warm up on return",
+                cost: "wakes parked panes one per second as you come back",
+            },
+        ],
+    },
+    Section {
+        heading: "TEXT",
+        rows: &[RowSpec {
+            row: Row::CircledWide,
+            label: "Circled digits take two cells",
+            // The line this whole day bought.  Shipped as a default
+            // once, reverted within the hour — so it is offered with
+            // what it costs written next to it, and off.
+            cost: "sized like CJK, but moves the wrap point: text can strand",
+        }],
+    },
+];
 
 impl Row {
     /// This row's control, given the settings in force.
@@ -179,7 +186,7 @@ pub fn rows() -> impl Iterator<Item = &'static RowSpec> {
 /// Lines of panel chrome: title, the footer path, and the padding
 /// above and below them.  Derived height uses this so "the panel is
 /// too short" is one edit.
-const CHROME_LINES: f64 = 5.6;
+const CHROME_LINES: f64 = 4.4;
 /// Lines a section costs beyond its rows: the heading plus its gap.
 const SECTION_LINES: f64 = 1.0 + metric::HEADING_GAP + metric::SECTION_BREAK;
 
@@ -194,7 +201,7 @@ pub fn panel_rect(
     let lh = cell_h * metric::LINE_ADVANCE;
     let n_rows = rows().count() as f64;
     let n_sections = SECTIONS.len() as f64;
-    let w = (68.0 * cell_w).min(w_phys * 0.9).max(40.0 * cell_w);
+    let w = (76.0 * cell_w).min(w_phys * 0.9).max(48.0 * cell_w);
     let h = (lh * (CHROME_LINES + n_sections * SECTION_LINES + n_rows * metric::ROW_ADVANCE))
         .min(h_phys * 0.9);
     marspot_term::layout::Rect {

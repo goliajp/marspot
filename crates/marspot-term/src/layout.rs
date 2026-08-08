@@ -524,6 +524,26 @@ impl Layout {
         self.settings_button_rect.contains(px, py)
     }
 
+    /// Every toolbar button, in left-to-right order.
+    ///
+    /// The painter iterates **this**, zipped against a same-length
+    /// array of icons, so a button that exists in the layout cannot be
+    /// left undrawn — which is exactly what happened when the settings
+    /// button was added (2026-08-08: the rect was laid out, the
+    /// hit-test worked, and nothing was painted, so the toolbar had an
+    /// invisible sixth button for an hour).  A mismatched icon list
+    /// now fails to compile.
+    pub fn toolbar_buttons(&self) -> [Rect; 6] {
+        [
+            self.sidebar_button_rect,
+            self.layout_button_rect,
+            self.process_button_rect,
+            self.dev_panel_button_rect,
+            self.cc_button_rect,
+            self.settings_button_rect,
+        ]
+    }
+
     // F3+3.0 — `hit_test_picker_option` / `hit_test_picker_panel`
     // removed alongside the popup picker.  The toolbar layout
     // button now opens a `LayoutModal` whose hit-tests live in
@@ -703,6 +723,47 @@ impl Layout {
 
 #[cfg(test)]
 mod tests {
+
+    /// The toolbar's buttons must be laid out where a user can hit
+    /// them, in order, without overlapping — and `toolbar_buttons()`
+    /// must list every one of them.
+    ///
+    /// The list is what the painter iterates.  A button missing from
+    /// it is a button that exists (it has a rect, its hit-test works)
+    /// and is never drawn — which is how the settings button shipped
+    /// invisible on 2026-08-08.
+    #[test]
+    fn every_toolbar_button_is_laid_out_and_listed() {
+        // `with_chrome` is what lays the toolbar out; `build` alone
+        // makes the chrome-less layout the bench and snapshot paths use.
+        let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
+            .with_chrome(2.0, 2);
+        let btns = l.toolbar_buttons();
+        assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
+        for (i, b) in btns.iter().enumerate() {
+            assert!(b.w > 0.0 && b.h > 0.0, "button {i} has no area");
+            assert!(b.x >= 0.0, "button {i} starts off-screen");
+            assert!(
+                b.x + b.w <= l.window_w,
+                "button {i} runs past the window edge"
+            );
+            if i > 0 {
+                let prev = btns[i - 1];
+                assert!(
+                    b.x >= prev.x + prev.w,
+                    "button {i} overlaps its neighbour"
+                );
+            }
+        }
+        // Each one's own hit-test agrees with its rect in the list.
+        let mid = |r: Rect| (r.x + r.w / 2.0, r.y_top + r.h / 2.0);
+        let (x, y) = mid(btns[5]);
+        assert!(l.hit_test_settings_button(x, y), "settings");
+        assert!(!l.hit_test_cc_button(x, y), "and only settings");
+        let (x, y) = mid(btns[4]);
+        assert!(l.hit_test_cc_button(x, y), "cc");
+        assert!(!l.hit_test_settings_button(x, y));
+    }
     use super::*;
 
     #[test]

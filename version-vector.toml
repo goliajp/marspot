@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
-core    = "0.12.98"  # 面板加「文字」组:圈圈数字占 2 格(默认关,代价写在旁边);详见 CHANGELOG.md
+core    = "0.12.99"  # 工具栏第 6 个图标真的画出来了 + 面板改用组件库和英文;详见 CHANGELOG.md
 session = "0.11.41"  # 字符宽度跟着设置走 + 每字节路径用原子镜像;详见 CHANGELOG.md

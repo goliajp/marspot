@@ -2969,6 +2969,8 @@ fn push_settings_panel_via_view(
         };
         let x_left = sm::text_x(sp.rect, cw);
         // Title, then the rows.
+        // Same treatment as the Cc panel's own title — UI font, one
+        // per panel, so the two read as the same surface family.
         p.ui_text(
             x_left as f32,
             (sp.rect.y_top + ch * sm::metric::PANEL_PAD + p.ui_ascent() as f64) as f32,
@@ -2986,8 +2988,12 @@ fn push_settings_panel_via_view(
             |h, baseline| headings.push((h, baseline)),
             |g| geo.push(g),
         );
+        // Section headings in the terminal font, not the UI font: the
+        // Cc panel sets its body in cells and only its two top-level
+        // titles in UI type, and a UI-font heading every three rows
+        // made this panel read as three panels stacked.
         for (h, baseline) in headings {
-            p.ui_text(x_left as f32, baseline as f32, h, cc_palette::fg());
+            text(p, x_left, baseline, h, cc_palette::fg_sec());
         }
         for g in geo {
             let spec = sm::rows().find(|r| r.row == g.row).expect("row spec");
@@ -3031,30 +3037,38 @@ fn push_settings_panel_via_view(
                     );
                 }
                 sm::Control::Segmented { options, chosen } => {
+                    // The app's Button, not a hand-rolled rect: same
+                    // corner radius, border and hover treatment as the
+                    // toolbar and the layout modal, so the panel does
+                    // not read as a different program's dialog.
+                    let base = crate::ui::components::ButtonStyle::chrome();
                     for (n, label) in options.iter().enumerate() {
                         let seg = sm::segment_rect(g.control, n, options.len(), cw);
-                        let picked = n == chosen;
-                        let bg = if !dim && picked {
-                            cc_palette::ok()
-                        } else {
-                            cc_palette::track()
-                        };
-                        p.fill_rounded_rect(seg, bg, 3.0, ([0.0; 4], 0.0));
-                        let tw = label.chars().count() as f64 * cw;
-                        text(
-                            p,
-                            seg.x + (seg.w - tw) * 0.5,
-                            seg.y_top + seg.h * 0.5 + asc * 0.35,
-                            label,
-                            if dim { cc_palette::fg_faint() } else { cc_palette::fg() },
-                        );
+                        let picked = !dim && n == chosen;
+                        let mut style = base;
+                        if picked {
+                            style.bg = cc_palette::ok();
+                            style.fg = [1.0, 1.0, 1.0, 1.0];
+                            style.border_color = cc_palette::ok();
+                        } else if dim {
+                            style.fg = cc_palette::fg_faint();
+                        }
+                        crate::ui::components::Button {
+                            rect: seg,
+                            label: Some(label),
+                            icon: None,
+                            icon_position: crate::ui::components::IconPosition::Only,
+                            hovered: false,
+                            style,
+                        }
+                        .paint(p);
                     }
                 }
             }
         }
         // Footer: where the file is.  The panel is one way to edit it,
         // not the only one.
-        let foot = sp.rect.y_top + sp.rect.h - ch * sm::metric::PANEL_PAD * 0.6;
+        let foot = sp.rect.y_top + sp.rect.h - ch * sm::metric::PANEL_PAD * 0.9;
         text(p, x_left, foot, &sp.path, cc_palette::fg_faint());
     });
 }
@@ -4114,7 +4128,7 @@ fn push_layout_chrome(
     p: &mut crate::ui::core::view::ViewPainter,
 ) {
     use crate::ui::components::{Button, ButtonStyle, IconSpec, IconPosition};
-    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon};
+    use crate::ui::system::macos::icons::{SidebarIcon, GridIcon, ListTreeIcon, DevPanelIcon, UsageBarsIcon, SlidersIcon};
 
     // F3+1.12 — chrome hairline seams (sidebar↔grid + header↔grid).
     // Same SEAM tone as GridSeams; routed through the painter (UI
@@ -4142,49 +4156,42 @@ fn push_layout_chrome(
         }
     }
 
-    // Three toolbar Buttons — sidebar / layout / process tree.
-    // Each is a Button with chrome() style + an IconComponent.  No
-    // raw paint code lives in this function any more (vs. F3+1.10
-    // which still had push_rect + push_border + push_<icon>).
+    // Every toolbar button, painted from one list.
+    //
+    // `layout.toolbar_buttons()` is the layout's own order, zipped
+    // against a same-length icon array — so a button the layout knows
+    // about cannot be left unpainted.  The settings button was added
+    // without this and shipped invisible: the rect was laid out and
+    // the hit-test worked, so clicking the empty space opened a panel
+    // nobody could see a button for.
     let sidebar_collapsed = layout.sidebar_w == 0.0;
     let sidebar_icon = SidebarIcon { collapsed: sidebar_collapsed };
     let grid_icon = GridIcon { cols: layout.grid_cols, rows: layout.grid_rows };
     let list_tree_icon = ListTreeIcon;
     let dev_panel_icon = DevPanelIcon;
+    let usage_icon = UsageBarsIcon;
+    let sliders_icon = SlidersIcon;
+    let icons: [&dyn crate::ui::core::IconComponent; 6] = [
+        &sidebar_icon,
+        &grid_icon,
+        &list_tree_icon,
+        &dev_panel_icon,
+        &usage_icon,
+        &sliders_icon,
+    ];
     let chrome = ButtonStyle::chrome();
-    for (rect, hover_id, icon) in [
-        (layout.sidebar_button_rect, 0u8,
-         &sidebar_icon as &dyn crate::ui::core::IconComponent),
-        (layout.layout_button_rect, 1u8,
-         &grid_icon as &dyn crate::ui::core::IconComponent),
-        (layout.process_button_rect, 2u8,
-         &list_tree_icon as &dyn crate::ui::core::IconComponent),
-        (layout.dev_panel_button_rect, 3u8,
-         &dev_panel_icon as &dyn crate::ui::core::IconComponent),
-    ] {
+    for (i, (rect, icon)) in layout.toolbar_buttons().into_iter().zip(icons).enumerate() {
+        // A zero-width rect is a button this layout does not show
+        // (snapshot / bench paths build a chrome-less layout).
+        if rect.w <= 0.0 {
+            continue;
+        }
         let btn = Button {
             rect,
             label: None,
             icon: Some(IconSpec::Component(icon)),
             icon_position: IconPosition::Only,
-            hovered: hover_chrome_btn == Some(hover_id),
-            style: chrome,
-        };
-        btn.paint(p);
-    }
-    // cc — 5th toolbar button opens the Claude usage modal.  Uses
-    // the same stroked-geometry icon family as its four neighbours
-    // (a text "Cc" label read as the odd one out).
-    if layout.cc_button_rect.w > 0.0 {
-        let usage_icon = UsageBarsIcon;
-        let btn = Button {
-            rect: layout.cc_button_rect,
-            label: None,
-            icon: Some(IconSpec::Component(
-                &usage_icon as &dyn crate::ui::core::IconComponent,
-            )),
-            icon_position: IconPosition::Only,
-            hovered: hover_chrome_btn == Some(4),
+            hovered: hover_chrome_btn == Some(i as u8),
             style: chrome,
         };
         btn.paint(p);
