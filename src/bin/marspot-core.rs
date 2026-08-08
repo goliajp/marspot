@@ -8649,6 +8649,18 @@ fn main() {
         h_phys = h_phys,
         scale = scale
     );
+    // The boot window comes through here rather than through
+    // `attach_surfaces`, so the same note belongs on both paths — the
+    // window the user actually looks at is usually this one.  See
+    // `marspot::ui::CHROME_PX_PER_PT`.
+    if (scale - marspot::ui::CHROME_PX_PER_PT).abs() > 1e-6 {
+        lx_event!(
+            "SURFACE_SCALE_DIVERGES",
+            "surface backing scale differs from the chrome unit; chrome uses the chrome unit",
+            surface_scale = format!("{scale:.2}"),
+            chrome_px_per_pt = format!("{:.2}", marspot::ui::CHROME_PX_PER_PT)
+        );
+    }
 
     let renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
     // Double-buffer: the boot window owns a (surface, texture) pair.

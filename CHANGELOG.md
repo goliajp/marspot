@@ -2238,7 +2238,14 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.109**
+Current: **0.12.110**
+
+### 0.12.110
+
+启动路径(env 握手)也打 `SURFACE_SCALE_DIVERGES` 了。修本来就在 —— 启动窗口
+走 `WindowState::new`,它直接用 chrome 单位 —— 但那条说明分歧的日志只加在了
+`attach_surfaces` 一侧,而**用户实际在看的那个窗口通常来自启动路径**。一个
+只在一半路径上说话的日志,比没有更容易让人下错判断。
 
 ### 0.12.109
 
