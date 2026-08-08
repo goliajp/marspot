@@ -135,57 +135,31 @@ fn box_drawing_key(ch: char, metrics: &SlotMetrics) -> GlyphKey {
 /// line in the rasteriser).
 #[inline]
 fn text_glyph_key(font_id: u32, glyph: CGGlyph, ct_font: &core_text::font::CTFont) -> GlyphKey {
-    text_glyph_key_with(font_id, glyph, ct_font, false)
-}
-
-/// `text_glyph_key`, plus the two-cell overflow variant — see
-/// [`GlyphKey::FLAG_OVERFLOW`].
-fn text_glyph_key_with(
-    font_id: u32,
-    glyph: CGGlyph,
-    ct_font: &core_text::font::CTFont,
-    overflow: bool,
-) -> GlyphKey {
-    let mut flags = GlyphKey::FLAG_SMOOTH;
-    if overflow {
-        flags |= GlyphKey::FLAG_OVERFLOW;
-    }
     GlyphKey::new(
         font_id,
         glyph,
         GlyphKey::size_q_for(ct_font.pt_size()),
         0,
-        flags,
+        GlyphKey::FLAG_SMOOTH,
     )
 }
 
-/// May this cell's glyph be drawn at its natural size, overflowing to
-/// the right, instead of being scaled down to fit one cell?
+/// How wide a cell's glyph is drawn is decided by the width table
+/// alone — never by what happens to sit next to it.
 ///
-/// Three conditions, all necessary:
+/// There was a rule here that let a squeezed glyph spill into the cell
+/// on its right when that cell was blank (WezTerm's
+/// `WhenFollowedBySpace`).  It is gone: `①` came out full-size before a
+/// space and small before a character, so the *same* character changed
+/// size as the line around it was written, which reads as a rendering
+/// fault whichever size you preferred.  A cell now looks the way it
+/// looks because of what is in it.
 ///
-/// * the grid gives it **one** cell — a two-cell glyph already has the
-///   room it was designed for;
-/// * it is East Asian **Ambiguous** — precisely the set whose glyphs
-///   the owning font draws on a two-cell em square while we render
-///   them narrow, so precisely the set that gets squeezed;
-/// * the cell to the right is **blank**, so the overflow lands on
-///   nothing.  This is WezTerm's `WhenFollowedBySpace`, and the reason
-///   it is the default there: overflow that covers a neighbour is
-///   worse than a small glyph, overflow onto a space is free.
-///
-/// The last column never overflows — there is no neighbour to check,
-/// and spilling past the pane edge is not an option.
-fn may_overflow_cell(ch: char, right: Option<char>) -> bool {
-    crate::grid::char_width(ch) == 1
-        // The Ambiguous table, plus the circled family's tail that it
-        // stops short of (`⓪` and everything to U+24FF, `❶..➓`).
-        // Same design, same em square, same squeeze — the table's cut
-        // at U+24E9 is UAX #11's business, not a rendering opinion.
-        && (crate::grid::is_ambiguous_width(ch)
-            || crate::grid::is_enclosed_alphanumeric(ch as u32))
-        && matches!(right, Some(' ') | Some('\0'))
-}
+/// The circled family is genuinely too wide for one cell — PingFang
+/// draws `①` 11.71 px against a 7.20 px cell — so one cell means
+/// scaled down, always.  Full size costs a second cell, which moves
+/// the wrap point; that is a decision with a real downside, so it is
+/// the settings panel's `appearance_circled_wide`, off by default.
 
 /// Like `resolve_cell_glyph`, but routes colour glyphs (Apple Color Emoji)
 /// to the colour (`BGRA8`) atlas and everything else to the mono (`R8`)
@@ -201,7 +175,6 @@ fn resolve_cell_glyph_routed(
     bold: bool,
     italic: bool,
     metrics: SlotMetrics,
-    overflow: bool,
 ) -> Option<(AtlasEntry, bool)> {
     if box_drawing_arms(ch).is_some() || block_element_rects(ch).is_some() {
         return resolve_cell_glyph(atlas, font, ch, bold, italic, metrics).map(|e| (e, false));
@@ -211,15 +184,8 @@ fn resolve_cell_glyph_routed(
         return None;
     }
     let ct_font = font.font(font_idx).clone();
-    let key = text_glyph_key_with(font_idx as u32, glyph, &ct_font, overflow);
-    // The overflow raster is simply the same glyph given the two-cell
-    // slot it was designed for; `rasterise_glyph`'s own oversized test
-    // then finds it fits and takes the natural-size path.
-    let n_cells = if overflow {
-        2
-    } else {
-        crate::grid::char_width(ch).max(1) as u16
-    };
+    let key = text_glyph_key(font_idx as u32, glyph, &ct_font);
+    let n_cells = crate::grid::char_width(ch).max(1) as u16;
     if font.is_color_font(font_idx) {
         color_atlas
             .get_or_rasterize(key, &ct_font, metrics, n_cells)
@@ -4955,12 +4921,6 @@ fn push_session(
                 cell_h: cell_h.round() as u32,
                 baseline_from_top: ascent.round() as u32,
             };
-            // A glyph the grid gives one cell but the font drew for
-            // two may borrow the cell to its right when that cell is
-            // blank — see `may_overflow_cell`.
-            let right = (c + 1 < cols)
-                .then(|| grid.cell_at_view(view.view_offset, (c + 1) as u16, r).ch);
-            let overflow = may_overflow_cell(cell.ch, right);
             let (entry, is_color) = match resolve_cell_glyph_routed(
                 atlas,
                 color_atlas,
@@ -4969,7 +4929,6 @@ fn push_session(
                 cell.attrs.bold,
                 cell.attrs.italic,
                 metrics,
-                overflow,
             ) {
                 Some(e) => e,
                 None => continue,
@@ -8101,52 +8060,82 @@ mod tests {
         assert!((1.0 - PARKED_SCRIM - 0.25).abs() < 1e-6, "25 % opacity");
     }
 
-    /// 2026-08-08 report: `①` renders at a fraction of the CJK beside
-    /// it.  Measured cause — PingFang draws it 11.71 px wide against a
+    /// 2026-08-08, two reports one after the other.
+    ///
+    /// The first: `①` renders at a fraction of the CJK beside it.
+    /// Measured cause — PingFang draws it 11.71 px wide against a
     /// 7.20 px cell, so `rasterise_glyph` scale-to-fits it to 61 %, and
     /// because circled digits are square the *width* always binds: no
-    /// font on the machine escapes it.
+    /// font on the machine escapes it.  The fix taken was WezTerm's
+    /// `allow_square_glyphs_to_overflow_width` = `WhenFollowedBySpace`:
+    /// spill into the next cell when it is blank.
     ///
-    /// What every other terminal does is let the glyph overflow rather
-    /// than shrink it — WezTerm's
-    /// `allow_square_glyphs_to_overflow_width`, default
-    /// `WhenFollowedBySpace`.  This pins that rule, and with it the
-    /// division of labour it left behind: overflow serves the
-    /// Ambiguous characters that stay **narrow**, while the circled
-    /// family — which appears in runs, where there is no blank
-    /// neighbour to borrow — is given two cells outright instead.
+    /// The second, on that build: *圈圈文字先小后大…要么全大要么全小.*
+    /// And that is what the rule guarantees — `① ` is full size, `①消`
+    /// is 61 %, so the same character changes size with whatever gets
+    /// written next to it.  Whichever size you prefer, watching one
+    /// turn into the other reads as a fault.
+    ///
+    /// So: **a cell's glyph does not depend on its neighbours.**  One
+    /// cell means scaled to one cell.  Full size costs a second cell
+    /// and moves the wrap point, which is a real decision with a real
+    /// downside — so it is a setting, not a guess made per character.
     #[test]
-    fn a_squeezed_glyph_may_borrow_a_blank_neighbour() {
-        // Narrow Ambiguous glyphs, followed by a blank.  The circled
-        // family is in here too: widening it was tried and reverted
-        // (it moves the wrap point), so overflow is the whole of what
-        // they get — full size when isolated, small in a run.
+    fn a_glyph_is_drawn_the_same_whatever_sits_next_to_it() {
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 512, 512).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 64, 64).expect("color atlas");
+        let metrics = SlotMetrics { cell_w: 7, cell_h: 16, baseline_from_top: 12 };
+
+        // The set the old rule fired on: narrow Ambiguous glyphs and
+        // the circled family.  Each is rasterised once, and asking for
+        // it again — whatever the line around it looks like — must give
+        // the identical slot, because there is nothing left to vary.
         for ch in ['★', '☆', '●', '▲', '▼', '①', '③', 'Ⓐ', '⓪', '❶'] {
             assert_eq!(crate::grid::char_width(ch), 1, "{ch} is drawn narrow");
-            assert!(
-                may_overflow_cell(ch, Some(' ')),
-                "{ch} is drawn on a two-cell em square and has room to its right"
+            let first = resolve_cell_glyph_routed(
+                &mut atlas, &mut color_atlas, &mut font, ch, false, false, metrics,
             );
-            assert!(
-                may_overflow_cell(ch, Some('\0')),
-                "{ch}: an unwritten cell is as blank as a space"
+            let again = resolve_cell_glyph_routed(
+                &mut atlas, &mut color_atlas, &mut font, ch, false, false, metrics,
             );
-            // …but never over something.  Overflow that covers a
-            // neighbour is worse than a small glyph.
-            assert!(!may_overflow_cell(ch, Some('x')));
-            assert!(!may_overflow_cell(ch, Some('中')));
-            // The last column has no neighbour to borrow.
-            assert!(!may_overflow_cell(ch, None));
+            match (first, again) {
+                (Some((a, _)), Some((b, _))) => assert_eq!(
+                    (a.u0, a.v0, a.u1, a.v1),
+                    (b.u0, b.v0, b.u1, b.v1),
+                    "{ch} rasterised to two different slots",
+                ),
+                (None, None) => {}
+                _ => panic!("{ch}: resolved once and not the other time"),
+            }
         }
-        // Two-cell glyphs already have the room they were designed
-        // for; ASCII was designed for one.  Neither may overflow, or
-        // every wide char on screen would claim a third cell.
-        for ch in ['中', '汉', 'あ', 'A', 'x', '─', '╭'] {
-            assert!(
-                !may_overflow_cell(ch, Some(' ')),
-                "{ch} must not overflow — it is not in the squeezed set"
-            );
+    }
+
+    /// The way to get circled digits at full size is the setting, and
+    /// it works by giving them a second cell — not by borrowing one.
+    #[test]
+    fn the_wide_setting_is_what_makes_circled_digits_full_size() {
+        crate::settings::set_for_test(crate::settings::Settings {
+            appearance_circled_wide: false,
+            ..Default::default()
+        });
+        for ch in ['①', '⑨', 'Ⓐ', '⓪', '❶'] {
+            assert_eq!(crate::grid::char_width(ch), 1, "{ch} off");
         }
+        crate::settings::set_for_test(crate::settings::Settings {
+            appearance_circled_wide: true,
+            ..Default::default()
+        });
+        for ch in ['①', '⑨', 'Ⓐ', '⓪', '❶'] {
+            assert_eq!(crate::grid::char_width(ch), 2, "{ch} on");
+        }
+        // …and it is a decision about the *grid*, so it is the same
+        // decision wherever the character appears — never per-neighbour.
+        crate::settings::set_for_test(crate::settings::Settings::default());
     }
 
     /// The scrim primitive is shared by every reason a pane recedes,

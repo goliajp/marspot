@@ -149,21 +149,6 @@ impl GlyphKey {
     /// shape.
     pub const FLAG_SUBPX_AA: u8 = 1 << 1;
 
-    /// Bit 2 — rasterise into a **two-cell** slot even though the grid
-    /// reserves one, so a glyph designed on a CJK em square renders at
-    /// its natural size and overflows to the right instead of being
-    /// scale-to-fitted down to the cell.
-    ///
-    /// A separate key, not a separate atlas: the same glyph can need
-    /// both rasters on one screen — overflowing where the next cell is
-    /// blank, fitted where it is not.
-    ///
-    /// This is how every other terminal makes `①` look right.  WezTerm
-    /// names it `allow_square_glyphs_to_overflow_width`, default
-    /// `WhenFollowedBySpace`; marspot had only the `Never` behaviour,
-    /// which is why circled digits came out at 61 % of their design
-    /// size while the CJK beside them did not (2026-08-08 report).
-    pub const FLAG_OVERFLOW: u8 = 1 << 2;
 
     // Bit layout constants — keep colocated with `new()` / accessors
     // so the packing scheme is one block to audit.
@@ -220,12 +205,6 @@ impl GlyphKey {
     #[inline]
     pub fn glyph(self) -> CGGlyph {
         (self.0 >> Self::GLYPH_SHIFT) as u16
-    }
-
-    /// Does this key ask for the two-cell overflow raster?
-    #[inline]
-    pub fn overflows(self) -> bool {
-        (self.flags() & Self::FLAG_OVERFLOW) != 0
     }
 
     #[inline]
@@ -1324,11 +1303,9 @@ mod tests {
     use core_text::font::new_from_name;
 
     /// The key was fully packed — font_id owned 32 bits for a registry
-    /// that holds a few dozen fonts — so making room for
-    /// `FLAG_OVERFLOW` meant re-cutting it.  Every field has to survive
-    /// that, and the overflow variant must be a *different* key: the
-    /// same glyph needs both rasters on one screen, fitted where a
-    /// neighbour is in the way and natural-size where it is not.
+    /// that holds a few dozen fonts — so it was re-cut to 24, leaving
+    /// room for flags to grow.  Every field has to survive that, and
+    /// two keys differing only in flags must not share a cache slot.
     #[test]
     fn the_repacked_key_keeps_every_field_and_separates_the_variants() {
         let k = GlyphKey::new(0x00AB_CDEF, 0xBEEF, 4095, 3, GlyphKey::FLAGS_MASK as u8);
@@ -1339,15 +1316,10 @@ mod tests {
         assert_eq!(k.flags(), GlyphKey::FLAGS_MASK as u8, "flags");
 
         let plain = GlyphKey::new(7, 42, 52, 0, GlyphKey::FLAG_SMOOTH);
-        let over = GlyphKey::new(
-            7, 42, 52, 0,
-            GlyphKey::FLAG_SMOOTH | GlyphKey::FLAG_OVERFLOW,
-        );
-        assert_ne!(plain, over, "the two rasters must not share a cache slot");
-        assert!(!plain.overflows());
-        assert!(over.overflows());
-        assert_eq!(over.font_id(), 7);
-        assert_eq!(over.glyph(), 42);
+        let flagged = GlyphKey::new(7, 42, 52, 0, GlyphKey::FLAGS_MASK as u8);
+        assert_ne!(plain, flagged, "flags must not collide in one cache slot");
+        assert_eq!(flagged.font_id(), 7);
+        assert_eq!(flagged.glyph(), 42);
     }
 
     fn make_font() -> CTFont {
