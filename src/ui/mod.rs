@@ -104,23 +104,35 @@ pub enum SelectionMode {
     Blockwise,
 }
 
-/// Scroll prefs from env, read once:
-///   MARSPOT_SCROLL_INVERT=1   flip direction
-///   MARSPOT_SCROLL_FACTOR=<f> multiplier; default 1.0
+/// Scroll prefs: direction from the environment, speed from the
+/// settings file.
+///
+///   MARSPOT_SCROLL_INVERT=1   flip direction (read once — it names
+///                             the machine, and machines do not change
+///                             which way their mouse works mid-run)
+///   MARSPOT_SCROLL_FACTOR=<f> multiplier; overrides the setting
+///
+/// The factor is read **per gesture** rather than cached, which is
+/// what lets the settings panel change it with the wheel already under
+/// the user's finger.  A wheel event is not a hot path; a lock here
+/// costs nothing measurable.
 pub fn scroll_config() -> (bool, f64) {
     use std::sync::OnceLock;
-    static CFG: OnceLock<(bool, f64)> = OnceLock::new();
-    *CFG.get_or_init(|| {
-        let invert = std::env::var("MARSPOT_SCROLL_INVERT")
+    static INVERT: OnceLock<bool> = OnceLock::new();
+    static ENV_FACTOR: OnceLock<Option<f64>> = OnceLock::new();
+    let invert = *INVERT.get_or_init(|| {
+        std::env::var("MARSPOT_SCROLL_INVERT")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let factor = std::env::var("MARSPOT_SCROLL_FACTOR")
+            .unwrap_or(false)
+    });
+    let env_factor = *ENV_FACTOR.get_or_init(|| {
+        std::env::var("MARSPOT_SCROLL_FACTOR")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|f| *f > 0.0 && *f < 100.0)
-            .unwrap_or(1.0);
-        (invert, factor)
-    })
+    });
+    let factor = env_factor.unwrap_or_else(|| crate::settings::get().scroll_factor as f64);
+    (invert, factor)
 }
 
 /// Wheel/trackpad delta → signed line count for `apply_scroll_lines`.

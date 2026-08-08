@@ -2238,7 +2238,28 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.104**
+Current: **0.12.105**
+
+### 0.12.105
+
+**面板加两项**,都是「有真代价、没有正确答案」那一类,也都实时生效:
+
+- **Dim the panes you are not in**(Off / Light / Normal / Deep)——
+  注意力阶梯本身(未聚焦 → 静置 → 已回收)**不是设置**:它的顺序说的是
+  marspot 对每个 pane 的判断,不归用户改。可调的是它**说话的音量** ——
+  一屏九宫格要小声,两个 pane 要大声,两个答案都不错。`Off` 是一个取值,
+  不是第二个开关(和 `Never` 同一个道理)。
+- **Wheel speed**(Slow / Normal / Fast / Faster)—— 方向**没有**放进来:
+  方向有正确答案,就是用户在 macOS 里已经选过的那个(`MARSPOT_SCROLL_INVERT`
+  留给那台不对劲的机器)。速度没有正确答案,它取决于鼠标。
+
+`scroll_config()` 原来整个用 `OnceLock` 缓存,于是改了要重启 —— 违反面板
+第二条规矩。现在方向仍读一次(机器不会中途换鼠标),**倍率每次手势读一次**,
+所以滚轮还在手指底下时改设置就生效了。滚轮事件不是热路径。
+
+设置文件多了两个浮点键(`appearance.dim_scale` / `input.scroll_factor`)。
+越界当**手误**忽略而不是夹到边界:`scroll_factor = 100` 更可能是敲错,悄悄
+按 8 给他反而什么都教不会。`1.0` 写成 `1`,不给手编的文件添噪音。
 
 ### 0.12.104
 
@@ -3338,6 +3359,12 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 ## L3  marspot-session
 
 Current: **0.11.34**
+
+### 0.11.42
+
+设置结构多两个浮点字段(`dim_scale` / `scroll_factor`)+ 浮点键的解析与
+回写。L3 自己不读这两项 —— 但 `marspot-term` 是三层共用的那一份,所以它
+的二进制跟着变。
 
 ### 0.11.41
 

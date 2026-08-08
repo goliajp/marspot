@@ -2807,11 +2807,17 @@ pub fn attention_scrim(focused: bool, recede: u32) -> f32 {
     if focused {
         return 0.0;
     }
-    match recede {
+    let rung = match recede {
         0 => UNFOCUSED_SCRIM,
         1 => RESTING_SCRIM,
         _ => PARKED_SCRIM,
-    }
+    };
+    // The *ladder* is not a setting — its order says what marspot knows
+    // about each pane.  How loudly it says it is: a wide grid wants
+    // less, a pair of panes wants more.  Read per call, which is once
+    // per pane per frame — the cheap end of `get()`, unlike the
+    // per-byte path that had to grow an atomic mirror.
+    (rung * crate::settings::get().dim_scale).clamp(0.0, 0.92)
 }
 
 /// Empty-cell BG tint.  Painted over `layout.cells[views.len()..]`

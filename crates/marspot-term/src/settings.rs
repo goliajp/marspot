@@ -68,6 +68,22 @@ pub struct Settings {
     /// `①②③` cannot be drawn at a readable size at all, and which of
     /// the two hurts more is genuinely the user's call.
     pub appearance_circled_wide: bool,
+    /// How far a pane that is not the one you are in steps back,
+    /// as a multiplier on the attention ladder.
+    ///
+    /// The ladder itself (unfocused → resting → parked) is not a
+    /// setting: it says what marspot knows about each pane, and the
+    /// order is not the user's to change.  *How loudly it says it* is —
+    /// a wide grid of panes wants less, a pair of panes wants more,
+    /// and neither answer is wrong.  `0.0` turns it off entirely.
+    pub dim_scale: f32,
+    /// Multiplier on wheel / trackpad scrolling.
+    ///
+    /// Not a direction: that one has a right answer, and it is
+    /// whichever the user already chose in macOS (`MARSPOT_SCROLL_INVERT`
+    /// stays for the machine where it is wrong).  Speed has no right
+    /// answer — it depends on the mouse.
+    pub scroll_factor: f32,
 }
 
 impl Default for Settings {
@@ -77,6 +93,8 @@ impl Default for Settings {
             reclaim_idle_minutes: 30,
             reclaim_prefetch: true,
             appearance_circled_wide: false,
+            dim_scale: 1.0,
+            scroll_factor: 1.0,
         }
     }
 }
@@ -209,6 +227,8 @@ const KEYS: &[&str] = &[
     "reclaim.idle_minutes",
     "reclaim.prefetch_on_return",
     "appearance.circled_wide",
+    "appearance.dim_scale",
+    "input.scroll_factor",
 ];
 
 fn value_of(s: &Settings, key: &str) -> String {
@@ -217,6 +237,8 @@ fn value_of(s: &Settings, key: &str) -> String {
         "reclaim.idle_minutes" => s.reclaim_idle_minutes.to_string(),
         "reclaim.prefetch_on_return" => s.reclaim_prefetch.to_string(),
         "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
+        "appearance.dim_scale" => fmt_f32(s.dim_scale),
+        "input.scroll_factor" => fmt_f32(s.scroll_factor),
         _ => String::new(),
     }
 }
@@ -245,6 +267,12 @@ pub fn parse(body: &str) -> Settings {
             "appearance.circled_wide" => {
                 s.appearance_circled_wide = parse_bool(v, s.appearance_circled_wide)
             }
+            "appearance.dim_scale" => {
+                s.dim_scale = parse_f32(v, s.dim_scale, 0.0, 2.0)
+            }
+            "input.scroll_factor" => {
+                s.scroll_factor = parse_f32(v, s.scroll_factor, 0.1, 8.0)
+            }
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer
             // marspot's settings must survive an older one reading
@@ -253,6 +281,26 @@ pub fn parse(body: &str) -> Settings {
         }
     }
     s
+}
+
+/// A float, clamped to a range the rest of the program can survive.
+///
+/// Out of range is treated as a typo and ignored rather than clamped:
+/// `scroll_factor = 100` is far more likely a slip than a wish, and
+/// silently honouring a tenth of it teaches nothing.
+fn parse_f32(v: &str, fallback: f32, lo: f32, hi: f32) -> f32 {
+    match v.parse::<f32>() {
+        Ok(f) if f.is_finite() && f >= lo && f <= hi => f,
+        _ => fallback,
+    }
+}
+
+/// Trailing-zero-free, so `1.0` writes as `1` and a hand-edited file
+/// does not grow noise every time the panel rewrites it.
+fn fmt_f32(f: f32) -> String {
+    let s = format!("{f:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() { "0".to_string() } else { s.to_string() }
 }
 
 fn parse_bool(v: &str, fallback: bool) -> bool {
@@ -330,6 +378,41 @@ pub fn write(s: &Settings) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Numbers go out and come back the same, and a value the panel
+    /// has no button for survives being looked at — the file is
+    /// hand-editable, so a rewrite must not quietly round it.
+    #[test]
+    fn floats_survive_the_round_trip_and_a_hand_edited_one_is_kept() {
+        let s = Settings { dim_scale: 0.6, scroll_factor: 2.5, ..Settings::default() };
+        let back = parse(&render(&s, ""));
+        assert_eq!(back, s, "round trip");
+        // 1.0 writes without a trailing `.00`.
+        assert!(render(&Settings::default(), "").contains("appearance.dim_scale = 1\n"));
+        // A value between the buttons is a value.
+        let odd = parse("appearance.dim_scale = 0.85\ninput.scroll_factor = 3\n");
+        assert!((odd.dim_scale - 0.85).abs() < 1e-6);
+        assert!((odd.scroll_factor - 3.0).abs() < 1e-6);
+        assert_eq!(parse(&render(&odd, "")), odd, "and it survives a rewrite");
+    }
+
+    /// Out of range is a typo, not a wish: honouring a clamped tenth
+    /// of `scroll_factor = 100` would leave the user with a setting
+    /// they did not ask for and no way to tell why.
+    #[test]
+    fn a_value_outside_the_range_is_ignored_not_clamped() {
+        for body in [
+            "input.scroll_factor = 100",
+            "input.scroll_factor = 0",
+            "input.scroll_factor = -1",
+            "input.scroll_factor = fast",
+            "appearance.dim_scale = 9",
+            "appearance.dim_scale = -0.5",
+        ] {
+            let s = parse(body);
+            assert_eq!(s, Settings::default(), "{body:?} must leave the defaults alone");
+        }
+    }
 
     #[test]
     fn a_missing_file_is_the_defaults() {

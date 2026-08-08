@@ -108,7 +108,9 @@ pub enum Row {
     ReclaimEnabled,
     ReclaimIdleMinutes,
     ReclaimPrefetch,
+    DimScale,
     CircledWide,
+    ScrollFactor,
 }
 
 /// A row's control shape.
@@ -127,6 +129,16 @@ pub enum Control {
 /// it, not have to notice a different control.
 pub const IDLE_CHOICES: &[u32] = &[15, 30, 60, 120, 0];
 pub const IDLE_LABELS: &[&str] = &["15m", "30m", "1h", "2h", "Never"];
+
+/// How far an inactive pane steps back, as a multiplier on the
+/// attention ladder.  `0` is off — offered as a value rather than a
+/// second switch, same reasoning as `Never` above.
+pub const DIM_CHOICES: &[f32] = &[0.0, 0.6, 1.0, 1.4];
+pub const DIM_LABELS: &[&str] = &["Off", "Light", "Normal", "Deep"];
+
+/// Wheel / trackpad multiplier.
+pub const SCROLL_CHOICES: &[f32] = &[0.5, 1.0, 1.5, 2.5];
+pub const SCROLL_LABELS: &[&str] = &["Slow", "Normal", "Fast", "Faster"];
 
 pub struct RowSpec {
     pub row: Row,
@@ -165,17 +177,49 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     Section {
-        heading: "Text",
-        rows: &[RowSpec {
+        heading: "Appearance",
+        rows: &[
+            RowSpec {
+                row: Row::DimScale,
+                label: "Dim the panes you are not in",
+                // The ladder's *order* is not offered — it says what
+                // marspot knows about each pane.  Only its volume is.
+                cost: "deeper tells you at a glance what has drifted; \
+                       shallower keeps it readable",
+            },
+            RowSpec {
             row: Row::CircledWide,
             label: "Circled digits take two cells",
             // The line this whole day bought.  Shipped as a default
             // once, reverted within the hour — so it is offered with
             // what it costs written next to it, and off.
             cost: "sized like CJK, but moves the wrap point: text can strand",
+            },
+        ],
+    },
+    Section {
+        heading: "Scrolling",
+        rows: &[RowSpec {
+            row: Row::ScrollFactor,
+            label: "Wheel speed",
+            cost: "faster gets there in fewer flicks and overshoots in one",
         }],
     },
 ];
+
+/// Index of the chosen value in a float choice list, or `usize::MAX`
+/// when the file holds something the panel has no button for.
+///
+/// Compared with a tolerance rather than `==`: the value made the
+/// round trip through a decimal string in the file, and a button that
+/// stops lighting up because `0.6` came back as `0.60000002` would be
+/// a bug nobody could see the cause of.
+fn chosen_f32(choices: &[f32], have: f32) -> usize {
+    choices
+        .iter()
+        .position(|c| (c - have).abs() < 1e-3)
+        .unwrap_or(usize::MAX)
+}
 
 impl Row {
     /// This row's control, given the settings in force.
@@ -195,6 +239,14 @@ impl Row {
             },
             Row::ReclaimPrefetch => Control::Toggle(s.reclaim_prefetch),
             Row::CircledWide => Control::Toggle(s.appearance_circled_wide),
+            Row::DimScale => Control::Segmented {
+                options: DIM_LABELS,
+                chosen: chosen_f32(DIM_CHOICES, s.dim_scale),
+            },
+            Row::ScrollFactor => Control::Segmented {
+                options: SCROLL_LABELS,
+                chosen: chosen_f32(SCROLL_CHOICES, s.scroll_factor),
+            },
         }
     }
 
@@ -207,7 +259,10 @@ impl Row {
         match self {
             // A different section: reclamation being off says nothing
             // about how text is drawn.
-            Row::ReclaimEnabled | Row::CircledWide => false,
+            Row::ReclaimEnabled
+            | Row::CircledWide
+            | Row::DimScale
+            | Row::ScrollFactor => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
     }
@@ -227,6 +282,8 @@ impl Row {
             Row::ReclaimIdleMinutes => {
                 next.reclaim_idle_minutes = *IDLE_CHOICES.get(seg)?;
             }
+            Row::DimScale => next.dim_scale = *DIM_CHOICES.get(seg)?,
+            Row::ScrollFactor => next.scroll_factor = *SCROLL_CHOICES.get(seg)?,
         }
         (next != *s).then_some(next)
     }
