@@ -2350,7 +2350,9 @@ impl ShellApp {
     /// `MARSPOT_NO_WAKE_PREFETCH=1` turns it off — the wakes then
     /// happen on the click, as they did before.
     fn queue_parked_wakes(&mut self) {
-        if std::env::var_os("MARSPOT_NO_WAKE_PREFETCH").is_some() {
+        if std::env::var_os("MARSPOT_NO_WAKE_PREFETCH").is_some()
+            || !marspot::settings::get().reclaim_prefetch
+        {
             return;
         }
         let parked: Vec<u64> = self
@@ -2498,6 +2500,19 @@ impl ShellApp {
         // — which read the fresh state back through the host.
         while let Ok((sid, activity)) = self.pane_activity_rx.try_recv() {
             self.pane_status.report_activity(sid, activity);
+        }
+        // One `stat` a tick.  This is what makes the settings file
+        // live: edit it by hand or from the panel and the next sweep
+        // is already using the new values, with nothing restarted.
+        if marspot::settings::reload_if_changed() {
+            let s = marspot::settings::get();
+            lx_event!(
+                "SETTINGS_RELOADED",
+                "settings.toml changed on disk",
+                reclaim = s.reclaim_enabled as u32,
+                idle_min = s.reclaim_idle_minutes as u64,
+                prefetch = s.reclaim_prefetch as u32
+            );
         }
         self.sweep_pane_status();
         self.sweep_autorun();

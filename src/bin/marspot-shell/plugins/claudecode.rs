@@ -410,14 +410,22 @@ struct BindMeta {
 /// covered — but that cost is bounded and one-off, while 340 MB per
 /// session is not, and a session woken by focus pays it anyway.
 ///
-/// `MARSPOT_CC_IDLE_HIBERNATE_S=0` turns it off entirely.
+/// The user owns this one, so it comes from `settings.toml` and is
+/// re-read on the pane sweep — changing it takes effect within the
+/// second, with nothing restarted.
+///
+/// `MARSPOT_CC_IDLE_HIBERNATE_S` still overrides, and still wins: the
+/// sandbox scripts and soak tests set it, and an env var is the right
+/// shape for "this process, this run" against a file that means "what
+/// the user wants, always".  `=0` turns it off entirely.
 fn hibernate_after() -> Option<Duration> {
-    const DEFAULT_S: u64 = 1800;
-    let secs = std::env::var("MARSPOT_CC_IDLE_HIBERNATE_S")
+    if let Some(secs) = std::env::var("MARSPOT_CC_IDLE_HIBERNATE_S")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_S);
-    (secs > 0).then(|| Duration::from_secs(secs))
+    {
+        return (secs > 0).then(|| Duration::from_secs(secs));
+    }
+    marspot::settings::get().reclaim_after()
 }
 
 /// How far back the CPU baseline is kept before being replaced.
@@ -4822,6 +4830,41 @@ mod tests {
             )
             .owes_restore()
         );
+    }
+
+    /// The threshold is the user's, so it comes from the settings
+    /// file — and the env var still overrides it, because the sandbox
+    /// scripts and soak tests set that and mean "this run", not "what
+    /// the user wants".
+    #[test]
+    fn the_reclaim_threshold_follows_the_settings_file() {
+        // SAFETY: nextest runs one test per process.
+        unsafe { std::env::remove_var("MARSPOT_CC_IDLE_HIBERNATE_S") };
+
+        marspot::settings::set_for_test(marspot::settings::Settings {
+            reclaim_enabled: true,
+            reclaim_idle_minutes: 45,
+            reclaim_prefetch: true,
+        });
+        assert_eq!(hibernate_after(), Some(Duration::from_secs(45 * 60)));
+
+        // Both ways of saying never.
+        marspot::settings::set_for_test(marspot::settings::Settings {
+            reclaim_enabled: false,
+            ..marspot::settings::Settings::default()
+        });
+        assert_eq!(hibernate_after(), None, "the switch");
+        marspot::settings::set_for_test(marspot::settings::Settings {
+            reclaim_idle_minutes: 0,
+            ..marspot::settings::Settings::default()
+        });
+        assert_eq!(hibernate_after(), None, "the zero");
+
+        // And the env var wins over any of it.
+        // SAFETY: as above.
+        unsafe { std::env::set_var("MARSPOT_CC_IDLE_HIBERNATE_S", "60") };
+        assert_eq!(hibernate_after(), Some(Duration::from_secs(60)));
+        unsafe { std::env::remove_var("MARSPOT_CC_IDLE_HIBERNATE_S") };
     }
 
     /// 2026-08-03 report: come back to marspot after a short break and

@@ -28,7 +28,33 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.100**
+Current: **0.7.101**
+
+### 0.7.101
+
+**`settings.toml` 落地** —— 设置面板的地基,先把回收那一组接上。
+
+`~/Library/Caches/marspot/settings.toml`,行式 `key = value`,可手改。三项:
+
+```
+reclaim.enabled = true
+reclaim.idle_minutes = 30
+reclaim.prefetch_on_return = true
+```
+
+**改完一秒内生效,什么都不用重启。** 每次 pane sweep(本来就每秒跑)多一次
+`stat`;文件动了才重新解析。
+
+**重写会原样保留它读不懂的东西** —— 未知的键、注释、顺序。这是这个会话里
+反复学到的那条规则,搬到配置文件上:降一次级、或者用一个还不认识某个键的
+构建打开一次面板,都不该把它悄悄删掉。
+
+判据也写进文件头了:**只有「没有普适正确答案」的决定才配住在这里**。回收
+的那几条安全规则(不动有焦点的 pane、有活在跑就不动)不是设置,是正确性 ——
+把它们放进来只会招人破坏。
+
+环境变量仍然压过文件(`MARSPOT_CC_IDLE_HIBERNATE_S` 等):沙箱脚本和 soak
+测试用的是它,而 env 表达的是「这一次运行」,文件表达的是「用户一直想要的」。
 
 ### 0.7.100
 

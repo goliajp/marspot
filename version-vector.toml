@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.100"  # 切 profile 时把 resume 的 uuid 记进日志;详见 CHANGELOG.md
+shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
 core    = "0.12.96"  # 溢出集合补上圈圈家族的尾巴(⓪ ❶..➓);详见 CHANGELOG.md
 session = "0.11.39"  # 回退 0.11.38:加宽会移动换行点,把字留在左边缝里;详见 CHANGELOG.md

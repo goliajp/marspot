@@ -74,6 +74,7 @@ pub mod pane_read;
 pub mod pane_state;
 pub mod pidtree;
 pub mod render_metal;
+pub mod settings;
 pub mod state;
 pub mod tools;
 pub mod ui;
