@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.101"  # settings.toml 落地:回收那一组由它驱动,改完一秒内生效;详见 CHANGELOG.md
-core    = "0.12.106"  # 面板字号收进共用角色表(PanelText);cc 与设置面板同一梯;详见 CHANGELOG.md
+core    = "0.12.107"  # 进程/布局面板与所有按钮标签接入同一角色表;布局卡片改主题 token;详见 CHANGELOG.md
 session = "0.11.42"  # 设置结构多两个字段(浮点键的解析/回写);详见 CHANGELOG.md

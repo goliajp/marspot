@@ -2002,6 +2002,19 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             );
             renderer.set_cc_usage(Some(demo_cc_usage(rect)));
         }
+        Some("layout") => {
+            renderer.set_layout_modal(Some(marspot::render_metal::LayoutModalRender {
+                cols: 3,
+                rows: 3,
+                scale: 2.0,
+                slot_titles: vec![
+                    "marspot".into(), "torajs".into(), "kevy".into(),
+                    "spg".into(), "".into(), "mailrs".into(),
+                    "".into(), "luna".into(), "".into(),
+                ],
+                drag: None,
+            }));
+        }
         Some("process") => {
             renderer.set_process_panel(Some(demo_process_panel(
                 phys_w as f64, phys_h as f64, layout.top_inset,
@@ -2009,7 +2022,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         }
         Some(other) => {
             eprintln!(
-                "--snapshot: unknown panel {other:?} (known: settings, cc, process)"
+                "--snapshot: unknown panel {other:?} (known: settings, cc, process, layout)"
             );
             std::process::exit(2);
         }

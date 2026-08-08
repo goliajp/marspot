@@ -309,6 +309,29 @@ impl<'a> ViewPainter<'a> {
         self.ui_text_width_at(s, role.pt(), role.weight())
     }
 
+    /// Anchor-aligned text in a panel role — the proportional
+    /// counterpart to [`Self::text_in`].
+    ///
+    /// `text_in` sizes its box as `chars * cell_w`, which is only true
+    /// for the mono cell font; using it for a proportional run puts a
+    /// centred title off-centre by however much the string's real
+    /// width differs from its character count.  This measures.
+    pub fn panel_text_in(
+        &mut self,
+        role: crate::ui::theme::PanelText,
+        rect: Rect,
+        s: &str,
+        color: [f32; 4],
+        align: Alignment,
+    ) {
+        let w = self.panel_text_width(role, s) as f64;
+        let cap = (crate::ui::view::type_scale::sf_pro_cap_height(role.pt())
+            * Self::PX_PER_PT) as f64;
+        let box_rect = rect.place(w, cap, align);
+        // `place` gave the cap box; the baseline is its bottom.
+        self.panel_text(role, box_rect.x as f32, (box_rect.y_top + cap) as f32, s, color);
+    }
+
     /// The system UI font at an explicit **pt size and weight**.
     ///
     /// `ui_text` above is one size (the startup chrome pt) at one

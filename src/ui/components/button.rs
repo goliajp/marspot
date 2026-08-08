@@ -16,6 +16,12 @@
 
 use marspot_term::layout::Rect;
 use crate::ui::core::{ViewPainter, IconComponent};
+use crate::ui::theme::PanelText;
+
+/// Every button label in the app, one role.  A button says a word to
+/// the user; it is the same kind of text as a row's label, and it is
+/// set the same size wherever the button is.
+const BUTTON_LABEL: PanelText = PanelText::Label;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ButtonStyle {
@@ -194,16 +200,21 @@ impl<'a> Button<'a> {
                 paint_icon(p, icon, icon_rect, fg, cell_w, cell_h, ascent);
             }
             (None, _, Some(label)) => {
-                // Text only.
-                let label_chars = label.chars().count() as f32;
-                let label_w = (label_chars * cell_w).min(inner_w);
+                // Text only.  The label is prose — a word the user
+                // reads, not a column of figures — so it takes the
+                // shared panel role, measured rather than counted.
+                // Counting characters and multiplying by the mono cell
+                // (what this did) leaves a proportional label
+                // off-centre by however much the two disagree.
+                let label_w = p.panel_text_width(BUTTON_LABEL, label).min(inner_w);
                 let label_x = inner_x + (inner_w - label_w) * 0.5;
-                let baseline = cy - cell_h * 0.5 + ascent;
-                p.text(label_x, baseline, label, fg);
+                let baseline = p.ui_baseline_centred(
+                    self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
+                );
+                p.panel_text(BUTTON_LABEL, label_x, baseline, label, fg);
             }
             (Some(icon), pos, Some(label)) => {
-                let label_chars = label.chars().count() as f32;
-                let label_w = label_chars * cell_w;
+                let label_w = p.panel_text_width(BUTTON_LABEL, label);
                 let group_w = (icon_size + self.style.icon_gap + label_w).min(inner_w);
                 let group_x = inner_x + (inner_w - group_w) * 0.5;
                 let (icon_x, label_x) = match pos {
@@ -232,8 +243,10 @@ impl<'a> Button<'a> {
                     h: icon_size as f64,
                 };
                 paint_icon(p, icon, icon_rect, fg, cell_w, cell_h, ascent);
-                let baseline = cy - cell_h * 0.5 + ascent;
-                p.text(label_x, baseline, label, fg);
+                let baseline = p.ui_baseline_centred(
+                    self.rect.y_top as f32, self.rect.h as f32, BUTTON_LABEL.pt(),
+                );
+                p.panel_text(BUTTON_LABEL, label_x, baseline, label, fg);
             }
             (None, _, None) => {
                 // Bare button — just the BG fill.  Caller probably has

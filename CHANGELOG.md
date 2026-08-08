@@ -2238,7 +2238,28 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.106**
+Current: **0.12.107**
+
+### 0.12.107
+
+把上一版建好的角色表铺完剩下的面板:
+
+- **进程面板的标题**原来是等宽字按字符数居中,现在走 `PanelText::Title`
+  并**实测宽度**居中 —— 字符数 × 等宽格宽对比例字来说是错的,居中会偏。
+  它的正文**不动**:进程树是表格,等宽让列自然对齐。
+- **布局面板**:标题 → Title,`Columns` / `Rows` → Label,
+  `Total: 3×3 = 9 panes` → Secondary(它是散文,不是数字列)。
+- **所有按钮的标签**(`Button` 组件本身)→ Label。改组件而不是改调用点:
+  按钮说的是给人读的词,在哪个面板都该是同一号字。
+- **布局面板的卡片颜色**是六个手调 RGB 字面量,已换成 token
+  (卡片 `SURFACE_3`、拖起来的那个坑 `BG`、落点 `BG_SELECTED`)——
+  同一种东西在两个面板必须长得一样,六个字面量就是六次走样的机会。
+
+`dev panel` 不用改:它直接用 `UiSize::Heading` / `UiSize::Body`,而这两个
+正是 `PanelText::Section` / `Label` 的来源 —— 已经在同一把尺上,只是叫法
+不同。
+
+`--snapshot` 再添 `--panel layout`。
 
 ### 0.12.106
 

@@ -3852,7 +3852,13 @@ fn paint_layout_modal_content(
         w: modal.title_bar.w - title_pad_left,
         h: modal.title_bar.h,
     };
-    p.text_in(title_inner, "Layout", title_fg, Alignment::CenterLeft);
+    p.panel_text_in(
+        crate::ui::theme::PanelText::Title,
+        title_inner,
+        "Layout",
+        title_fg,
+        Alignment::CenterLeft,
+    );
     // Close [×] glyph, fully centered in its hit-target.
     p.text_in(modal.close_btn, "×", muted_fg, Alignment::Center);
     // Stepper buttons: cols [-] [+], rows [-] [+].
@@ -3894,14 +3900,30 @@ fn paint_layout_modal_content(
         w: modal.rows_value.x - modal.frame.x - label_pad,
         h: modal.rows_value.h,
     };
-    p.text_in(cols_label_rect, "Columns", title_fg, Alignment::CenterLeft);
-    p.text_in(rows_label_rect, "Rows", title_fg, Alignment::CenterLeft);
+    // Prose labels take the shared Label role; the numbers between
+    // them stay mono, where digits keep their column.
+    p.panel_text_in(
+        crate::ui::theme::PanelText::Label,
+        cols_label_rect, "Columns", title_fg, Alignment::CenterLeft,
+    );
+    p.panel_text_in(
+        crate::ui::theme::PanelText::Label,
+        rows_label_rect, "Rows", title_fg, Alignment::CenterLeft,
+    );
     // Footer: "Total: N panes" centered.
     let total = pending_cols * pending_rows;
     let total_str = format!("Total: {}×{} = {} pane{}",
         pending_cols, pending_rows, total,
         if total == 1 { "" } else { "s" });
-    p.text_in(modal.total_label, &total_str, muted_fg, Alignment::Center);
+    // Prose, not a column of figures — the secondary role, like the
+    // sentence under a settings row.
+    p.panel_text_in(
+        crate::ui::theme::PanelText::Secondary,
+        modal.total_label,
+        &total_str,
+        muted_fg,
+        Alignment::Center,
+    );
     // Cache atlas-driven metrics needed by the card-paint block.
     let cell_w = p.cell_w;
     let cell_h = p.cell_h;
@@ -3934,12 +3956,17 @@ fn paint_layout_modal_content(
     // matters: BG cards first, then drop-target highlight on the
     // hovered slot, then the dragged card on top so it floats
     // above everything.
-    let card_bg = [0.13, 0.15, 0.18, 1.0];
-    let card_bg_drag_origin = [0.10, 0.12, 0.14, 1.0];
-    let card_bg_drop_target = [0.22, 0.36, 0.52, 1.0];
-    let card_border = [0.30, 0.34, 0.40, 1.0];
-    let card_fg = [0.80, 0.85, 0.90, 1.0];
-    let card_fg_drag_origin = [0.40, 0.45, 0.50, 1.0];
+    // Theme tokens, not hand-mixed RGB: a card here has to be the
+    // same object as a card in the settings panel, and six literals
+    // are six chances for it not to be.
+    let card_bg = panel_palette::card_bg();
+    // The slot you lifted a pane out of — recessed to the base
+    // surface, so it reads as a hole rather than a card.
+    let card_bg_drag_origin = crate::ui::theme::token::color::BG.to_rgba_f32();
+    let card_bg_drop_target = crate::ui::theme::token::color::BG_SELECTED.to_rgba_f32();
+    let card_border = panel_palette::card_border();
+    let card_fg = panel_palette::fg();
+    let card_fg_drag_origin = panel_palette::fg_faint();
     // Drop target: only highlighted while a drag is active AND
     // the drop target differs from the source slot.
     let drop_target_slot: Option<usize> = state.drag.as_ref().and_then(|d| {
@@ -4031,11 +4058,16 @@ fn paint_process_panel_content(
     // Traffic lights (3 SDF discs anchored title-bar left).
 
     tl::paint_discs(p.ui_rects, &panel.light_rects, panel.title_bar_hovered);
-    // Centered title text.
-    let title_w_chars = panel.title.chars().count() as f32;
-    let title_x = px + (pw - title_w_chars * p.cell_w) * 0.5;
-    let title_baseline = py + (title_h - p.cell_h) * 0.5 + p.ascent;
-    p.text(title_x, title_baseline, &panel.title, PROCESS_PANEL_TITLE_FG);
+    // Centred title text, in the shared panel role — a panel's name
+    // is set the same way in every panel.  The body below stays mono:
+    // it is a process table, and columns line up for free there.
+    p.panel_text_in(
+        crate::ui::theme::PanelText::Title,
+        Rect { x: px as f64, y_top: py as f64, w: pw as f64, h: title_h as f64 },
+        &panel.title,
+        PROCESS_PANEL_TITLE_FG,
+        Alignment::Center,
+    );
 
     if panel.minimized {
         return;
