@@ -28,7 +28,16 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.102**
+Current: **0.7.103**
+
+### 0.7.103
+
+**一个 pane,一次读。** `CLAUDE_CONFIG_DIR` 原来每次扫描要读三遍:profile
+标签一遍、transcript 根一遍(上一版新加的)、`BindMeta.config_dir` 一遍。
+三次独立的读正是上一条 bug 的形状 —— 标签说 P3、扫描去了默认目录。
+
+现在在每个 pane 的 facts 里读一次,三处共用。顺带省掉每 pane 每 2 秒两次
+`KERN_PROCARGS2`(整块 argv+env 的拷贝);16 个 pane 就是 24 次/秒 → 8 次/秒。
 
 ### 0.7.102
 

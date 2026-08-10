@@ -1982,10 +1982,19 @@ fn short_model(raw: &str) -> String {
 ///   * `Some("P1")` for `/Users/.../.claude-profile-1`
 ///   * `Some("P0")` for the default `/Users/.../.claude` (no -profile-N)
 ///   * `None`       when the env var isn't set / the read failed
-fn profile_tag_for(claude_pid: i32) -> Option<String> {
-    let dir = pidtree::proc_env_value(claude_pid, "CLAUDE_CONFIG_DIR")?;
+/// The profile tag for a pane, from the config dir it was started
+/// with.
+///
+/// Takes the directory rather than the pid because everything a pane
+/// says about its profile — the tag, where its transcripts live, the
+/// `--config-dir` a resume line has to quote — has to come from **one
+/// read**.  Three separate reads is how the tag came to say `P3`
+/// while the transcript walk looked under the default profile and
+/// found nothing (2026-08-10).
+fn profile_tag_from(config_dir: Option<&str>) -> Option<String> {
+    let dir = config_dir?;
     // Trailing slash tolerant; basename only.
-    let base = std::path::Path::new(&dir).file_name()?.to_string_lossy().into_owned();
+    let base = std::path::Path::new(dir).file_name()?.to_string_lossy().into_owned();
     if let Some(num) = base.strip_prefix(".claude-profile-") {
         return Some(format!("P{}", num));
     }
@@ -1997,15 +2006,10 @@ fn profile_tag_for(claude_pid: i32) -> Option<String> {
     Some("P?".to_string())
 }
 
-/// Where this claude process keeps its transcripts.
-///
-/// `CLAUDE_CONFIG_DIR` is the same env var the profile tag is read
-/// from, so a pane whose badge can say `P3` can always say where its
-/// jsonl lives; the two answers must come from one place or they
-/// disagree, which is exactly what happened.
-fn projects_root_for(claude_pid: i32) -> Option<PathBuf> {
-    let dir = pidtree::proc_env_value(claude_pid, "CLAUDE_CONFIG_DIR")?;
-    let dir = dir.trim();
+/// Where this pane keeps its transcripts, from the same one read as
+/// [`profile_tag_from`].
+fn projects_root_from(config_dir: Option<&str>) -> Option<PathBuf> {
+    let dir = config_dir?.trim();
     if dir.is_empty() {
         return None;
     }
@@ -2793,6 +2797,10 @@ impl WorkerCtx {
             cwd: PathBuf,
             encoded: String,
             argv_uuid: Option<String>,
+            /// `CLAUDE_CONFIG_DIR` as this pane's claude was started
+            /// with — read **once** here and used for everything that
+            /// depends on it.
+            config_dir: Option<String>,
             /// Where *this* pane's transcripts live.
             ///
             /// `~/.claude/projects` is only right for a pane running
@@ -2821,7 +2829,8 @@ impl WorkerCtx {
             let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
                 continue;
             };
-            let projects_root = projects_root_for(claude.pid)
+            let config_dir = pidtree::proc_env_value(claude.pid, "CLAUDE_CONFIG_DIR");
+            let projects_root = projects_root_from(config_dir.as_deref())
                 .unwrap_or_else(|| self.projects_root.clone());
             facts.push(PaneFacts {
                 shelld_sid: s.session_id,
@@ -2831,6 +2840,7 @@ impl WorkerCtx {
                 encoded: encode_project_dir(&cwd),
                 cwd,
                 argv_uuid: argv_session_uuid(claude.pid, &descendants),
+                config_dir,
                 projects_root,
             });
         }
@@ -2888,7 +2898,7 @@ impl WorkerCtx {
                 Some((uuid, path)) => (uuid.clone(), path.clone()),
                 None => (String::new(), None),
             };
-            let (tag, profile_num) = match profile_tag_for(f.claude_pid) {
+            let (tag, profile_num) = match profile_tag_from(f.config_dir.as_deref()) {
                 Some(t) => {
                     let n = t
                         .strip_prefix('P')
@@ -2982,10 +2992,7 @@ impl WorkerCtx {
                 f.shelld_sid,
                 BindMeta {
                     profile_num,
-                    config_dir: pidtree::proc_env_value(
-                        f.claude_pid,
-                        "CLAUDE_CONFIG_DIR",
-                    ),
+                    config_dir: f.config_dir.clone(),
                     uuid: sid_uuid,
                     claude_pid: f.claude_pid,
                     project_basename,
