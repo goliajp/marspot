@@ -1303,6 +1303,26 @@ impl ClaudecodePlugin {
             }
         }
         for (sh_sid, cc_sid) in &result.new_mapping {
+            // Dev-cycle diagnostic.  The badge is assembled from four
+            // separate lookups (profile tag, bound uuid, transcript
+            // path, model) and any one going quiet leaves a half-badge
+            // that says nothing about which — `P3` with no `@model`
+            // took a screenshot and a manual dig to explain
+            // (2026-08-10).  Logged only when it *changes*, so a
+            // steady screen costs nothing.
+            if self.last_mapping.get(sh_sid) != Some(cc_sid) {
+                let meta = result.new_meta.get(sh_sid);
+                host.log(
+                    LogLevel::Info,
+                    "badge.changed",
+                    &format!(
+                        "sid={sh_sid} badge={cc_sid:?} was={:?} cfg={:?} uuid={:?}",
+                        self.last_mapping.get(sh_sid).map(|s| s.as_str()).unwrap_or("-"),
+                        meta.and_then(|m| m.config_dir.as_deref()).unwrap_or("-"),
+                        meta.map(|m| m.uuid.as_str()).unwrap_or("-"),
+                    ),
+                );
+            }
             if let Err(e) = host.set_pane_badge(*sh_sid, cc_sid) {
                 host.log(LogLevel::Warn, "pane_badge.set_failed", &format!("{e}"));
             }

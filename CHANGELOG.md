@@ -28,7 +28,17 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.103**
+Current: **0.7.104**
+
+### 0.7.104
+
+**badge 变化时打一行诊断。** 角标由四个各自独立的查找拼出来(profile 标签、
+绑定的 uuid、transcript 路径、model),任何一个哑掉都只留下一个**半截角标**,
+而半截角标不说明是哪一个哑了 —— 上一条 bug 花了一张截图加一轮手工挖掘才
+定位到"扫错了目录"。
+
+只在角标**改变**时打(`sid / badge / was / cfg / uuid`),稳定的屏幕零成本;
+下次再出现半截角标,日志里直接能看出是四个里的哪一个。
 
 ### 0.7.103
 
