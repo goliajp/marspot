@@ -3774,6 +3774,28 @@ fn build_context_menu_canvas(
     canvas
 }
 
+/// Cut a mono string to what `box_w` holds, ellipsised.
+///
+/// `pad` is the same per-side padding the card was *sized* with — cut
+/// with a different one and a name that was measured to fit still
+/// loses its tail.  `…` (one cell) marks anything dropped: silently
+/// truncating reads as a different project name, which on a pane
+/// picker is worse than an obviously shortened one.
+fn fit_mono(s: &str, box_w: f64, cell_w: f64, pad: f64) -> String {
+    if cell_w <= 0.0 {
+        return String::new();
+    }
+    let budget = ((box_w - 2.0 * pad) / cell_w).floor().max(0.0) as usize;
+    let n = s.chars().count();
+    if n <= budget {
+        return s.to_string();
+    }
+    if budget <= 1 {
+        return "…".to_string();
+    }
+    s.chars().take(budget - 1).chain(std::iter::once('…')).collect()
+}
+
 /// F3+3.0 — paint the `LayoutModal` overlay.  Same plumbing as
 /// `push_process_panel_via_view`: routes through a `ViewPainter`
 /// → overlay scratches so it lands on top of the grid.  Geometry
@@ -3798,9 +3820,18 @@ fn push_layout_modal_via_view(
 ) {
     use crate::ui::core::view::{View, ViewStyle, ViewPainter, Backdrop};
     use crate::ui::components::LayoutModal;
+    // The widest label decides how wide a card wants to be; the
+    // renderer is where both the labels and the cell metrics are.
+    let widest_label = state
+        .slot_titles
+        .iter()
+        .map(|t| t.chars().count())
+        .max()
+        .unwrap_or(0) as f64
+        * cell_w as f64;
     let modal = LayoutModal::layout(
         window_w, window_h, state.scale, top_inset,
-        state.cols, state.rows,
+        state.cols, state.rows, widest_label,
     );
     let mut painter = ViewPainter {
         cell_w, cell_h, ascent, atlas_w, atlas_h,
@@ -4011,11 +4042,18 @@ fn paint_layout_modal_content(
             card_bg
         };
         p.fill_rounded_rect(*rect, bg, 6.0, (card_border, 1.0));
-        // Title text centered in the card via text_in.
+        // Title centred in the card, cut to what the card holds.
+        // Project names are as long as their directory (`lab36-
+        // continus`, `lab38-golialab`) and a card is as wide as the
+        // grid leaves it, so "draw it and hope" put 101 px of name in
+        // an 80 px card and let the rest run over its neighbour.
         if let Some(title) = state.slot_titles.get(slot) {
             if !title.is_empty() {
                 let fg = if is_drag_origin { card_fg_drag_origin } else { card_fg };
-                p.text_in(*rect, title, fg, Alignment::Center);
+                let pad = crate::ui::components::layout_modal::CARD_LABEL_PAD_LOGICAL
+                    * state.scale;
+                let fitted = fit_mono(title, rect.w, p.cell_w as f64, pad);
+                p.text_in(*rect, &fitted, fg, Alignment::Center);
             }
         }
     }

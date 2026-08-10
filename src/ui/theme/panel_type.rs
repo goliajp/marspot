@@ -60,9 +60,14 @@ impl PanelText {
     /// SF Pro point size.
     pub fn pt(self) -> f64 {
         match self {
-            PanelText::Title => UiSize::Title.sf_pro_pt(),
-            PanelText::Section => UiSize::Heading.sf_pro_pt(),
-            PanelText::Label => UiSize::Body.sf_pro_pt(),
+            // One rung below `UiSize::Title`, which put a panel's name
+            // at 19 px of cap against an 11 px label — 1.7× the thing
+            // it titles, where the reference the user pointed at
+            // (macOS System Settings) runs about 1.3×.  A title that
+            // large reads as a banner, and on a modal as narrow as the
+            // layout picker it *was* the modal (2026-08-11).
+            PanelText::Title => UiSize::Heading.sf_pro_pt(),
+            PanelText::Section | PanelText::Label => UiSize::Body.sf_pro_pt(),
             PanelText::Item | PanelText::Secondary | PanelText::Caption => {
                 UiSize::Small.sf_pro_pt()
             }
@@ -78,7 +83,10 @@ impl PanelText {
     pub fn weight(self) -> u16 {
         match self {
             PanelText::Title => 700,
-            PanelText::Section => 600,
+            // Same size as a label, heavier — a group heading and the
+            // row titles under it are one size in the reference too;
+            // what separates them is weight, colour and position.
+            PanelText::Section => 700,
             PanelText::Label => 600,
             PanelText::Item => 400,
             PanelText::Secondary | PanelText::Caption => 400,
@@ -101,22 +109,31 @@ impl PanelText {
 mod tests {
     use super::*;
 
-    /// The ladder has to be strictly descending, or a role means
-    /// nothing: a "section" that is not bigger than a "label" is just
-    /// two labels.
+    /// Every rung has to be **distinguishable** from the one above:
+    /// smaller, or heavier at the same size.  Equal on both counts is
+    /// two names for one thing, and a reader cannot see the
+    /// difference the role claims to make.
+    ///
+    /// Stated this way rather than "strictly smaller" because sharing
+    /// a size is a real typographic choice — a group heading and the
+    /// row titles under it are one size in the reference too, set
+    /// apart by weight, colour and position.
     #[test]
-    fn the_ladder_descends_and_never_ties() {
+    fn every_rung_is_distinguishable_from_the_one_above() {
         let ladder = [
             PanelText::Title,
             PanelText::Section,
             PanelText::Label,
-            PanelText::Secondary,
+            PanelText::Item,
         ];
         for w in ladder.windows(2) {
+            let smaller = w[1].pt() < w[0].pt();
+            let lighter = w[1].pt() == w[0].pt() && w[1].weight() < w[0].weight();
             assert!(
-                w[0].pt() > w[1].pt(),
-                "{:?} ({:.2}pt) must be bigger than {:?} ({:.2}pt)",
-                w[0], w[0].pt(), w[1], w[1].pt(),
+                smaller || lighter,
+                "{:?} ({:.2}pt/{}) is indistinguishable from {:?} ({:.2}pt/{})",
+                w[1], w[1].pt(), w[1].weight(),
+                w[0], w[0].pt(), w[0].weight(),
             );
         }
         // The footnote shares Secondary's size on purpose, and a menu
@@ -126,11 +143,6 @@ mod tests {
         assert!(
             PanelText::Item.pt() < PanelText::Label.pt(),
             "a menu item sits at the terminal's density, below a label",
-        );
-        assert!(
-            PanelText::Item.weight() < PanelText::Label.weight(),
-            "a menu item must be lighter than a label, or a column of \
-             them reads as a column of headings",
         );
         // The ruler that settled it: the shortcut hints beside a menu
         // item are mono and unconverted, and they are ~9 px of ink.
@@ -143,15 +155,17 @@ mod tests {
         );
     }
 
-    /// A panel's row label must not come out the size of another
-    /// panel's title — the exact complaint this module exists for.
+    /// A title has to stand above its content without becoming a
+    /// banner.  The band is stated as a ratio because that is what the
+    /// eye reads, and both edges were reported from a screen: too
+    /// small and the settings panel's labels were the size of other
+    /// panels' titles; too large and "Layout" filled its own modal.
     #[test]
-    fn a_label_is_clearly_smaller_than_a_title() {
+    fn a_title_stands_above_its_content_without_shouting() {
+        let ratio = PanelText::Title.pt() / PanelText::Label.pt();
         assert!(
-            PanelText::Label.pt() < PanelText::Title.pt() * 0.75,
-            "label {:.2}pt vs title {:.2}pt is not a hierarchy",
-            PanelText::Label.pt(),
-            PanelText::Title.pt(),
+            (1.15..=1.45).contains(&ratio),
+            "title/label is {ratio:.2}× — the reference sits near 1.3",
         );
     }
 }

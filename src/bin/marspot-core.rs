@@ -3164,6 +3164,16 @@ struct WindowState {
     /// click toggles it.  Modal contents (cols/rows +/- controls
     /// + preview) live in the modal component.
     layout_modal_open: bool,
+    /// Width the widest layout-modal card label needed, physical px,
+    /// as of the last published frame.
+    ///
+    /// Cards size themselves to their labels, so the hit-test has to
+    /// use the same number the painter did — and the number the
+    /// painter used is the one on screen right now, which is exactly
+    /// what a click is aimed at.  Recomputing it here from a
+    /// different pass would be a second opinion about geometry the
+    /// user can see.
+    layout_modal_label_w: f64,
     /// F3+9 — right-click ContextMenu live state.  `None` when closed.
     /// Set by `mouse_right_down`; cleared by `mouse_down` outside
     /// the menu, Esc key, or after dispatching an action.
@@ -3269,6 +3279,7 @@ impl WindowState {
             grid_cols,
             grid_rows,
             layout_modal_open: false,
+            layout_modal_label_w: 0.0,
             context_menu: None,
             pending_grid_cols: grid_cols,
             pending_grid_rows: grid_rows,
@@ -7128,6 +7139,7 @@ impl CoreApp {
                 win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
                 HEADER_PT * win!(self, wi).scale,
                 win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
+                win!(self, wi).layout_modal_label_w,
             );
             // F3+3.3 — card drag start has priority over the
             // generic hit_test below (which would otherwise classify
@@ -7656,6 +7668,7 @@ impl CoreApp {
                 win!(self, wi).w_phys, win!(self, wi).h_phys, win!(self, wi).scale,
                 HEADER_PT * win!(self, wi).scale,
                 win!(self, wi).pending_grid_cols, win!(self, wi).pending_grid_rows,
+                win!(self, wi).layout_modal_label_w,
             );
             // Drop position = card origin (mouse - grab_offset),
             // plus card center offset so the lookup tracks visual
@@ -8035,6 +8048,13 @@ impl CoreApp {
                         .unwrap_or_default()
                 })
                 .collect();
+            let (cell_w, _) = self.renderer.cell_dims();
+            win!(self, wi).layout_modal_label_w = slot_titles
+                .iter()
+                .map(|t| t.chars().count())
+                .max()
+                .unwrap_or(0) as f64
+                * cell_w;
             Some(LayoutModalRender {
                 cols: win!(self, wi).pending_grid_cols,
                 rows: win!(self, wi).pending_grid_rows,

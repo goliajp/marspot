@@ -76,6 +76,9 @@ const MODAL_W_LOGICAL: f64 = 440.0;
 /// vertically beyond this when the card grid needs more room.
 const MODAL_MIN_H_LOGICAL: f64 = 380.0;
 const TITLE_BAR_H_LOGICAL: f64 = 28.0;
+/// Title bar height as a multiple of the title's own line — the
+/// breathing room a bar needs around the text it holds.
+const TITLE_BAR_LEADING: f64 = 1.9;
 const STEPPER_BTN_LOGICAL: f64 = 28.0;
 const STEPPER_VALUE_W_LOGICAL: f64 = 56.0;
 const APPLY_BTN_H_LOGICAL: f64 = 32.0;
@@ -88,6 +91,16 @@ const SIDE_PAD_LOGICAL: f64 = 16.0;
 /// scale (typical workdir basename).
 const CARD_GAP_LOGICAL: f64 = 8.0;
 const CARD_MIN_W_LOGICAL: f64 = 80.0;
+/// How much of the window the modal may take when its card block
+/// needs more than the ideal width.
+const MODAL_MAX_W_RATIO: f64 = 0.92;
+/// Space between a card's label and its edge, each side.
+///
+/// Public because the painter's ellipsis budget must use the *same*
+/// number: sizing the card with one padding and cutting the text with
+/// another means a name that was measured to fit still gets an
+/// ellipsis.
+pub const CARD_LABEL_PAD_LOGICAL: f64 = 10.0;
 const CARD_MIN_H_LOGICAL: f64 = 44.0;
 /// Aspect-ratio target for one card (width / height).  2.4 ≈
 /// 12:5 keeps cards readably flat across the cols range
@@ -108,6 +121,15 @@ impl LayoutModal {
     /// regardless of display density.  `cols/rows` carry the
     /// PENDING grid shape (modal state) — the preview card grid
     /// matches those dims, not the committed ones.
+    /// `label_w` is the width the widest card label needs, in
+    /// physical px — pass `0.0` when the caller has no labels (the
+    /// hit-test paths, which only need the rects).
+    ///
+    /// A card is a button with a project name on it, so the name is
+    /// what decides how wide it wants to be.  Sizing to a constant and
+    /// letting the name run over was the 2026-08-11 report; sizing to
+    /// the name means `lab38-golialab` is readable whenever the window
+    /// can hold it, and only gets an ellipsis when it truly cannot.
     pub fn layout(
         window_w: f64,
         window_h: f64,
@@ -115,8 +137,18 @@ impl LayoutModal {
         top_obstruction: f64,
         cols: usize,
         rows: usize,
+        label_w: f64,
     ) -> Self {
-        let title_h = TITLE_BAR_H_LOGICAL * scale;
+        // The bar has to hold its own title.  28 pt was picked when
+        // the title was drawn in the terminal cell font; a panel title
+        // is now set in `PanelText::Title`, whose cap alone is 19 px
+        // on a display where the bar is 28 — so the title filled the
+        // bar edge to edge and read as a banner (2026-08-11).  Chrome
+        // that holds text is sized from the text.
+        let title_type = crate::ui::theme::PanelText::Title;
+        let title_line_px = (title_type.cap() + title_type.descent())
+            * crate::ui::core::ViewPainter::PX_PER_PT;
+        let title_h = (TITLE_BAR_H_LOGICAL * scale).max(title_line_px * TITLE_BAR_LEADING);
         let side_pad = SIDE_PAD_LOGICAL * scale;
         let row_gap = ROW_GAP_LOGICAL * scale;
         let stepper_btn = STEPPER_BTN_LOGICAL * scale;
@@ -132,13 +164,39 @@ impl LayoutModal {
         // modal.  Width: cards fill body width by default; min card
         // size is the lower bound so tiny grids still get readable
         // cells.
-        let modal_w = MODAL_W_LOGICAL * scale;
-        let body_w = modal_w - 2.0 * side_pad;
         let cards_in = cols.max(1);
         let rows_in = rows.max(1);
+        // Width: the modal is as wide as its widest row of cards, not
+        // a constant the cards then overflow.
+        //
+        // It used to take `MODAL_W_LOGICAL` and divide what was left
+        // among the columns — but with a floor of `CARD_MIN_W`, so at
+        // six columns the block came out 520 pt inside a 408 pt body
+        // and simply drew past the modal's own edge (2026-08-11
+        // screenshot: the last column half outside the frame).  A
+        // minimum that a container does not grow to honour is not a
+        // minimum, it is an overflow.
+        let ideal_w = MODAL_W_LOGICAL * scale;
+        // What one card wants: never below the readable minimum, and
+        // enough for the longest name plus its padding.
+        let want_card_w = (CARD_MIN_W_LOGICAL * scale)
+            .max(label_w + 2.0 * CARD_LABEL_PAD_LOGICAL * scale);
+        let min_block_w = cards_in as f64 * want_card_w
+            + (cards_in - 1) as f64 * card_gap;
+        let modal_w = (min_block_w + 2.0 * side_pad)
+            .max(ideal_w)
+            // …but never wider than the window will hold.
+            .min(window_w * MODAL_MAX_W_RATIO);
+        let body_w = modal_w - 2.0 * side_pad;
         let natural_card_w = (body_w - (cards_in - 1) as f64 * card_gap)
             / cards_in as f64;
-        let card_w = natural_card_w.max(CARD_MIN_W_LOGICAL * scale);
+        // With the modal grown, the natural width is normally already
+        // at or above the minimum; the floor stays for the case where
+        // even the window is too narrow, and there the cards are then
+        // clipped to the body rather than to nothing.
+        let card_w = natural_card_w
+            .max((CARD_MIN_W_LOGICAL * scale).min(body_w))
+            .max(1.0);
         let aspect_card_h = card_w / CARD_ASPECT;
         let ideal_card_h = aspect_card_h
             .max(CARD_MIN_H_LOGICAL * scale)
@@ -350,7 +408,7 @@ mod tests {
 
     #[test]
     fn modal_centers_in_window() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3, 0.0);
         // Frame should be roughly centered.
         let cx = m.frame.x + m.frame.w * 0.5;
         let cy = m.frame.y_top + m.frame.h * 0.5;
@@ -360,7 +418,7 @@ mod tests {
 
     #[test]
     fn close_btn_is_inside_title_bar() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3, 0.0);
         assert!(m.title_bar.contains(
             m.close_btn.x + 1.0,
             m.close_btn.y_top + 1.0,
@@ -369,7 +427,7 @@ mod tests {
 
     #[test]
     fn hit_test_dispatches_close() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3, 0.0);
         let cx = m.close_btn.x + m.close_btn.w * 0.5;
         let cy = m.close_btn.y_top + m.close_btn.h * 0.5;
         assert_eq!(m.hit_test(cx, cy), Some(LayoutModalHit::Close));
@@ -377,7 +435,7 @@ mod tests {
 
     #[test]
     fn hit_test_dispatches_apply() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3, 0.0);
         let cx = m.apply_btn.x + m.apply_btn.w * 0.5;
         let cy = m.apply_btn.y_top + m.apply_btn.h * 0.5;
         assert_eq!(m.hit_test(cx, cy), Some(LayoutModalHit::Apply));
@@ -385,7 +443,7 @@ mod tests {
 
     #[test]
     fn outside_returns_none() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 3, 0.0);
         assert_eq!(m.hit_test(0.0, 0.0), None);
     }
 
@@ -399,7 +457,7 @@ mod tests {
     fn last_row_bottom_clears_total_label_when_window_squishes_modal() {
         // 660pt is a typical-ish short window; 3×4 modal at scale=1
         // wants ~640pt, which gets clamped to 660 * 0.95 = 627.
-        let m = LayoutModal::layout(800.0, 660.0, 1.0, 0.0, 3, 4);
+        let m = LayoutModal::layout(800.0, 660.0, 1.0, 0.0, 3, 4, 0.0);
         let last = m.cards.last().expect("4 rows × 3 cols → 12 cards");
         let last_bottom = last.y_top + last.h;
         assert!(
@@ -415,7 +473,7 @@ mod tests {
     /// nice 4:3 aspect.
     #[test]
     fn card_h_keeps_ideal_size_when_window_has_room() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 4);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 3, 4, 0.0);
         let card = m.cards.first().expect("≥ 1 card");
         // Ideal: card_w / CARD_ASPECT, card_w ≈ (440-32-16)/3 ≈
         // 130.67, CARD_ASPECT 2.4 → card_h ≈ 54.4.  Within [MIN=44,
@@ -428,9 +486,65 @@ mod tests {
 
     /// 1-col case used to be a tall banner (body_w / CARD_ASPECT
     /// ≈ 170pt).  The MAX cap clamps it to 96pt.
+    /// Cards live **inside** the modal, at every grid shape and every
+    /// label length.
+    ///
+    /// 2026-08-11 report: at six columns the block came out 520 pt in
+    /// a 408 pt body and drew straight over the frame's right edge,
+    /// and long project names (`lab38-golialab`) ran past their own
+    /// cards on top of that.  A minimum a container does not grow to
+    /// honour is not a minimum.
+    #[test]
+    fn the_card_block_never_escapes_the_modal() {
+        for (win_w, win_h) in [(2160.0, 1300.0), (900.0, 700.0), (600.0, 500.0)] {
+            for cols in GRID_MIN..=GRID_MAX {
+                for rows in GRID_MIN..=GRID_MAX {
+                    // 0 pt (no labels) through a long project name.
+                    for label_w in [0.0, 60.0, 101.0, 400.0] {
+                        let m = LayoutModal::layout(
+                            win_w, win_h, 1.0, 0.0, cols, rows, label_w,
+                        );
+                        let f = m.frame;
+                        assert!(
+                            f.w <= win_w + 1e-6 && f.h <= win_h + 1e-6,
+                            "{cols}x{rows} @{win_w}x{win_h} label={label_w}: \
+                             modal {}x{} is bigger than the window",
+                            f.w, f.h,
+                        );
+                        for (i, c) in m.cards.iter().enumerate() {
+                            assert!(
+                                c.x >= f.x - 1e-6
+                                    && c.x + c.w <= f.x + f.w + 1e-6,
+                                "{cols}x{rows} @{win_w}x{win_h} label={label_w}: \
+                                 card {i} spans {}..{} outside {}..{}",
+                                c.x, c.x + c.w, f.x, f.x + f.w,
+                            );
+                            assert!(c.w > 0.0 && c.h > 0.0, "card {i} has no area");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A longer name buys a wider card — until the window says no.
+    #[test]
+    fn a_longer_label_widens_the_card_up_to_the_window() {
+        let narrow = LayoutModal::layout(2160.0, 1300.0, 1.0, 0.0, 3, 2, 40.0);
+        let wide = LayoutModal::layout(2160.0, 1300.0, 1.0, 0.0, 3, 2, 300.0);
+        assert!(
+            wide.cards[0].w > narrow.cards[0].w,
+            "a 300 pt label must get a wider card than a 40 pt one",
+        );
+        // …and on a window that cannot hold it, the modal stops at the
+        // window rather than the label.
+        let capped = LayoutModal::layout(500.0, 700.0, 1.0, 0.0, 6, 2, 300.0);
+        assert!(capped.frame.w <= 500.0 * MODAL_MAX_W_RATIO + 1e-6);
+    }
+
     #[test]
     fn card_h_capped_at_max_for_single_column() {
-        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 1, 4);
+        let m = LayoutModal::layout(1920.0, 1080.0, 1.0, 0.0, 1, 4, 0.0);
         let card = m.cards.first().expect("≥ 1 card");
         assert!(
             (card.h - 96.0).abs() < 0.5,

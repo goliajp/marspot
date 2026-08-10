@@ -2003,14 +2003,20 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             renderer.set_cc_usage(Some(demo_cc_usage(rect)));
         }
         Some("layout") => {
+            // Six columns and long project names — the shape that
+            // overflowed its own modal (2026-08-11).
             renderer.set_layout_modal(Some(marspot::render_metal::LayoutModalRender {
-                cols: 3,
-                rows: 3,
-                scale: 2.0,
+                cols: 6,
+                rows: 2,
+                scale: std::env::var("MARSPOT_SHOT_SCALE")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2.0),
                 slot_titles: vec![
-                    "marspot".into(), "torajs".into(), "kevy".into(),
-                    "spg".into(), "".into(), "mailrs".into(),
-                    "".into(), "luna".into(), "".into(),
+                    "marspot".into(), "torajs".into(), "spg".into(),
+                    "smix".into(), "devops".into(), "insight".into(),
+                    "mailrs".into(), "sentori".into(), "lab36-continus".into(),
+                    "goliajp".into(), "kevy".into(), "lab38-golialab".into(),
                 ],
                 drag: None,
             }));
