@@ -30,6 +30,13 @@ cd "$ROOT"
 # history (bit us 2026-07-03: session 347's scrollback truncated to
 # test residue).  Unset it before any test process spawns.
 unset MARSPOT_SESSION_ID
+# 2026-08-10:同一类事故的另一半。`unset MARSPOT_SESSION_ID` 只挡住了
+# 测试**写**真实 scrollback;测试**读**真实状态一样有害 —— settings 落地
+# 之后,一条断言默认回收阈值的测试在作者从面板里把回收关掉那天开始失败,
+# 而且只在他的机器上失败。测试报告的是它所在机器的状态,不是代码的状态。
+# 整个测试进程树钉在沙箱状态目录上;需要真实目录的测试自己覆盖。
+export MARSPOT_STATE_DIR="${MARSPOT_STATE_DIR:-/tmp/marspot-test-state}"
+mkdir -p "$MARSPOT_STATE_DIR"
 # 2026-07-28 事故:nextest 默认并发 = 核数(此机 14),811 个测试里
 # 一批要各自初始化 Metal / CoreText 的重进程(每个 ~130MB)齐发,
 # 32 个测试二进制两分钟内并发拉起,16 个同时抢一把内核 rwlock 写锁,

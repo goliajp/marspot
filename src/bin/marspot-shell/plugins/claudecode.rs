@@ -1997,6 +1997,21 @@ fn profile_tag_for(claude_pid: i32) -> Option<String> {
     Some("P?".to_string())
 }
 
+/// Where this claude process keeps its transcripts.
+///
+/// `CLAUDE_CONFIG_DIR` is the same env var the profile tag is read
+/// from, so a pane whose badge can say `P3` can always say where its
+/// jsonl lives; the two answers must come from one place or they
+/// disagree, which is exactly what happened.
+fn projects_root_for(claude_pid: i32) -> Option<PathBuf> {
+    let dir = pidtree::proc_env_value(claude_pid, "CLAUDE_CONFIG_DIR")?;
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(dir).join("projects"))
+}
+
 /// Encode a filesystem path into claude's project directory naming
 /// convention (`/Users/foo/bar` → `-Users-foo-bar`).
 fn encode_project_dir(cwd: &std::path::Path) -> String {
@@ -2558,18 +2573,22 @@ impl WorkerCtx {
     /// keeping four files each instead of one.
     fn refresh_seen<'a>(
         &mut self,
-        wanted: impl Iterator<Item = &'a str>,
+        wanted: impl Iterator<Item = (&'a std::path::Path, &'a str)>,
         log_lines: &mut Vec<(LogLevel, &'static str, String)>,
     ) {
         let mut newly_seen = 0usize;
         let mut updates = 0usize;
         let mut alive: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for project_dir in wanted {
-            if !done.insert(project_dir.to_string()) {
+        let mut done: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        for (root, project_dir) in wanted {
+            let project_path = root.join(project_dir);
+            // Keyed by the full path, not the project name: the same
+            // project open under two profiles is two directories, and
+            // de-duping on the name alone would walk only whichever
+            // pane happened to come first.
+            if !done.insert(project_path.clone()) {
                 continue; // two panes, one project — walk it once
             }
-            let project_path = self.projects_root.join(project_dir);
             let Ok(dir) = fs::read_dir(&project_path) else { continue };
             let mut cands: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
             for f in dir.flatten() {
@@ -2774,6 +2793,18 @@ impl WorkerCtx {
             cwd: PathBuf,
             encoded: String,
             argv_uuid: Option<String>,
+            /// Where *this* pane's transcripts live.
+            ///
+            /// `~/.claude/projects` is only right for a pane running
+            /// the default profile.  A pane started with
+            /// `CLAUDE_CONFIG_DIR=~/.claude-profile-3` writes under
+            /// that directory instead, so scanning the default one
+            /// found no transcript, and the badge lost its `@model`
+            /// half for every non-default profile (2026-08-10 report:
+            /// `torajs` on P3 — the tag was right because it reads the
+            /// same env var, the model was missing because this did
+            /// not).
+            projects_root: PathBuf,
         }
         let mut facts: Vec<PaneFacts> = Vec::new();
         for s in &sessions {
@@ -2790,6 +2821,8 @@ impl WorkerCtx {
             let Some(cwd) = pidtree::proc_cwd(claude.pid) else {
                 continue;
             };
+            let projects_root = projects_root_for(claude.pid)
+                .unwrap_or_else(|| self.projects_root.clone());
             facts.push(PaneFacts {
                 shelld_sid: s.session_id,
                 claude_pid: claude.pid,
@@ -2798,6 +2831,7 @@ impl WorkerCtx {
                 encoded: encode_project_dir(&cwd),
                 cwd,
                 argv_uuid: argv_session_uuid(claude.pid, &descendants),
+                projects_root,
             });
         }
         // Stable order so an ambiguous project resolves the same way on
@@ -2807,7 +2841,7 @@ impl WorkerCtx {
 
         // -- jsonl pass, scoped to the projects that have panes -------
         self.refresh_seen(
-            facts.iter().map(|f| f.encoded.as_str()),
+            facts.iter().map(|f| (f.projects_root.as_path(), f.encoded.as_str())),
             &mut log_lines,
         );
 
@@ -3400,7 +3434,15 @@ mod tests {
         };
         let mut logs = Vec::new();
         // Two panes in alpha: the project is walked once, not twice.
-        ctx.refresh_seen(["-p-alpha", "-p-beta", "-p-alpha"].into_iter(), &mut logs);
+        ctx.refresh_seen(
+            [
+                (root.as_path(), "-p-alpha"),
+                (root.as_path(), "-p-beta"),
+                (root.as_path(), "-p-alpha"),
+            ]
+            .into_iter(),
+            &mut logs,
+        );
 
         let alpha: Vec<_> = ctx
             .seen
@@ -3426,7 +3468,7 @@ mod tests {
 
         // Beta's pane goes away: its entries must leave the map.
         let mut logs2 = Vec::new();
-        ctx.refresh_seen(["-p-alpha"].into_iter(), &mut logs2);
+        ctx.refresh_seen([(root.as_path(), "-p-alpha")].into_iter(), &mut logs2);
         assert_eq!(ctx.seen.len(), SESSIONS_KEPT_PER_PROJECT);
         assert!(ctx.seen.values().all(|s| s.project_dir == "-p-alpha"));
 
@@ -5265,8 +5307,93 @@ mod tests {
         );
     }
 
+    /// A pane on a non-default profile keeps both halves of its badge.
+    ///
+    /// 2026-08-10 report: `torajs` showed `P3` and never `P3@model`.
+    /// The tag comes from the process's `CLAUDE_CONFIG_DIR`, so it was
+    /// right; the transcript walk was pinned to `~/.claude/projects`,
+    /// so for any profile but the default it found nothing and the
+    /// model half was simply absent.  Two answers about the same pane
+    /// have to come from the same place.
+    #[test]
+    fn a_second_profile_is_scanned_under_its_own_config_dir() {
+        let base = std::env::temp_dir().join(format!(
+            "marspot-cc-profiles-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        // Two profiles, the same project open under each, a different
+        // session id in each — exactly the shape on the machine.
+        let mk = |profile: &str, uuid: &str| -> PathBuf {
+            let dir = base.join(profile).join("projects").join("-p-torajs");
+            fs::create_dir_all(&dir).unwrap();
+            let p = dir.join(format!("{uuid}.jsonl"));
+            fs::write(&p, format!("{{\"sessionId\":\"{uuid}\"}}\n")).unwrap();
+            p
+        };
+        let default_path = mk(".claude", "11111111-1111-1111-1111-111111111111");
+        let third_path = mk(".claude-profile-3", "33333333-3333-3333-3333-333333333333");
+
+        let mut ctx = WorkerCtx {
+            projects_root: base.join(".claude").join("projects"),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
+        };
+        let mut logs = Vec::new();
+        // The default root alone sees only the default profile's file.
+        ctx.refresh_seen(
+            [(ctx.projects_root.clone(), "-p-torajs")]
+                .iter()
+                .map(|(r, d)| (r.as_path(), *d))
+                .collect::<Vec<_>>()
+                .into_iter(),
+            &mut logs,
+        );
+        assert!(ctx.seen.contains_key(&default_path));
+        assert!(
+            !ctx.seen.contains_key(&third_path),
+            "the default root cannot see another profile — that is the bug"
+        );
+
+        // Both roots, one pass — which is how the scan calls it: every
+        // live pane contributes its own root, and `seen` is pruned to
+        // what this pass walked.  The same project under two profiles
+        // is two directories and two files, not one walked twice.
+        let default_root = base.join(".claude").join("projects");
+        let third_root = base.join(".claude-profile-3").join("projects");
+        ctx.refresh_seen(
+            [
+                (default_root.as_path(), "-p-torajs"),
+                (third_root.as_path(), "-p-torajs"),
+            ]
+            .into_iter(),
+            &mut logs,
+        );
+        assert!(
+            ctx.seen.contains_key(&third_path),
+            "a pane on profile 3 must find its own transcript"
+        );
+        assert!(
+            ctx.seen.contains_key(&default_path),
+            "and the default profile's pane keeps its own"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn hibernate_can_be_turned_off_and_tuned() {
+        // Pin the settings this test reasons about.
+        //
+        // `hibernate_after` reads the settings file when the env knob
+        // is unset, and with nothing pinned that is the **developer's
+        // own** `~/Library/Caches/marspot/settings.toml`.  This test
+        // passed until the day its author turned reclamation off in
+        // the panel, and then failed on their machine and nobody
+        // else's — a test that reports the state of the machine it
+        // runs on rather than the state of the code.
+        marspot::settings::set_for_test(marspot::settings::Settings::default());
         // Serialised through the env, so keep the assertions in one
         // test rather than racing sibling tests in the same process.
         let key = "MARSPOT_CC_IDLE_HIBERNATE_S";

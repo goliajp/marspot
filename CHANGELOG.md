@@ -28,7 +28,29 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.101**
+Current: **0.7.102**
+
+### 0.7.102
+
+**非默认 profile 的 pane 找不到自己的 transcript**,所以 badge 只有 `P3`、
+没有 `@model`(2026-08-10 报告:torajs)。
+
+profile 标签读的是进程的 `CLAUDE_CONFIG_DIR`,所以它是对的;而 transcript
+的扫描**写死在 `~/.claude/projects`**,于是除默认 profile 外一律扫空。同一个
+pane 的两个答案必须出自同一处,否则就会像这样一半对一半错 —— 实测:torajs
+的 jsonl 在 `~/.claude-profile-3/projects/…/f7a8a54b….jsonl`(3.9 MB,里面
+最后 256 KB 有 67 条带 model 的记录),而插件在另一个目录里找。
+
+每个 pane 现在带上自己的 projects 根(`CLAUDE_CONFIG_DIR/projects`,读不到
+就退回默认),扫描按 (根, 项目目录) 成对去重 —— 同一个项目开在两个 profile
+下是**两个目录**,只按项目名去重会只走先来的那个。
+
+**顺带修了一条会看人下菜碟的测试。** `bin/test.sh` 从不设 `MARSPOT_STATE_DIR`,
+所以任何读设置的测试读的都是**开发者自己**的 `settings.toml`;那条断言默认
+回收阈值的测试,在作者从面板里把回收关掉那天开始失败,而且只在他的机器上
+失败 —— 测试报告的是它所在机器的状态,不是代码的状态。整个测试进程树钉到
+沙箱状态目录(和 2026-07-03 `unset MARSPOT_SESSION_ID` 是同一类事故的另一半),
+那条测试自己也显式钉住设置。
 
 ### 0.7.101
 
