@@ -17,13 +17,21 @@
 use marspot_term::layout::{Rect, Alignment};
 use super::modal_frame::{ModalFrame, ModalLayoutSpec};
 
-/// Caps for cols / rows.  Practical maximum tied to readability —
-/// a 6×6 grid at 1920×1080 leaves cells ~300×180 px which is
-/// roughly the lower bound where a terminal stays usable.  Going
-/// higher is allowed by the data path (Layout::build doesn't cap),
-/// the modal just gates the UI affordance.
+/// Caps for cols / rows.
+///
+/// The data path never capped this — `Layout::build` takes any shape —
+/// so the number here is only how far the modal's steppers will go.
+/// It was 6, chosen against a 1920×1080 window where 6×6 leaves cells
+/// around 300×180 px.  Raised to 9 by request: the displays this runs
+/// on are 4K and larger, where 9 columns still leaves a cell wider
+/// than most terminals ever get.
+///
+/// `SESSION_COUNT_HARD_CAP` is kept at `GRID_MAX²` so the modal can
+/// never offer a shape the app would refuse to fill.  Note that a
+/// grid is *slots*, not sessions: a 9×9 window with three panes has
+/// three processes and 78 empty seats.
 pub const GRID_MIN: usize = 1;
-pub const GRID_MAX: usize = 6;
+pub const GRID_MAX: usize = 9;
 
 /// Modal hit-test result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

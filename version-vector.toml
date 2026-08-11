@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.111"  # 刚开的 pane 从启动横幅读 model,不用等第一次回答;详见 CHANGELOG.md
-core    = "0.12.123"  # 面板几何按两个密度各测一遍 —— 当场逮到 Layout 卡片在小窗口 retina 下又溢出;详见 CHANGELOG.md
+core    = "0.12.124"  # 布局网格上限 6 → 9(会话上限同步到 9×9=81);详见 CHANGELOG.md
 session = "0.11.44"  # 随 marspot-term(新增 WindowChrome 消息);详见 CHANGELOG.md

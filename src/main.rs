@@ -2070,15 +2070,23 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             // Six columns and long project names — the shape that
             // overflowed its own modal (2026-08-11).
             renderer.set_layout_modal(Some(marspot::render_metal::LayoutModalRender {
-                cols: 6,
-                rows: 2,
+                cols: std::env::var("MARSPOT_SHOT_COLS")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(6),
+                rows: std::env::var("MARSPOT_SHOT_ROWS")
+                    .ok().and_then(|v| v.parse().ok()).unwrap_or(2),
                 scale: shot_scale(),
-                slot_titles: vec![
-                    "marspot".into(), "torajs".into(), "spg".into(),
-                    "smix".into(), "devops".into(), "insight".into(),
-                    "mailrs".into(), "sentori".into(), "lab36-continus".into(),
-                    "goliajp".into(), "kevy".into(), "lab38-golialab".into(),
-                ],
+                slot_titles: {
+                    let names = [
+                        "marspot", "torajs", "spg", "smix", "devops", "insight",
+                        "mailrs", "sentori", "lab36-continus", "goliajp", "kevy",
+                        "lab38-golialab",
+                    ];
+                    let n = std::env::var("MARSPOT_SHOT_COLS")
+                        .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(6)
+                        * std::env::var("MARSPOT_SHOT_ROWS")
+                            .ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2);
+                    (0..n).map(|i| names[i % names.len()].to_string()).collect()
+                },
                 drag: None,
             }));
         }

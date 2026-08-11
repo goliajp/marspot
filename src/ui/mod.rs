@@ -52,12 +52,18 @@ pub const CELL_TITLE_PT: f64 = 22.0;
 /// label, plays nicer with the user's preference than `…`).
 pub const MAX_SIDEBAR_LABEL_CHARS: usize = 22;
 
-/// Hard cap on how many sessions marspot permits at once.  Sized
-/// to match the LayoutModal's GRID_MAX² (6×6 = 36) — the modal
-/// won't offer a shape past this, and the sidebar [+] button is
+/// Hard cap on how many sessions marspot permits at once.
+///
+/// Sized to match the `LayoutModal`'s `GRID_MAX²` (9×9 = 81) — the
+/// modal won't offer a shape past this, and the sidebar `[+]` is
 /// disabled past it.  Pre-F3+3.0 this was 9 (locked to the fixed
-/// Nine grid); freed once arbitrary cols × rows landed.
-pub const SESSION_COUNT_HARD_CAP: usize = 36;
+/// Nine grid), then 36 when the grid capped at 6×6.
+///
+/// It is a **ceiling on live sessions**, not a target: a grid is
+/// slots, and empty seats cost nothing.  Reaching it means 81
+/// `marspot-session` processes, which is a lot of PTYs — the cap
+/// exists so the number is chosen rather than stumbled into.
+pub const SESSION_COUNT_HARD_CAP: usize = 81;
 
 /// Truncate a sidebar label to at most `max_chars` total characters,
 /// replacing the dropped tail with three ASCII dots.  Counts
