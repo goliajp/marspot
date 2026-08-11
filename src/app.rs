@@ -181,6 +181,20 @@ pub struct MarspotAppCtx {
     _delegate: Retained<MarspotWindowDelegate>,
     redraw_pending: Cell<bool>,
     exit_requested: Cell<bool>,
+    /// Where the window-button cluster ended the last time this window
+    /// was **not** in full screen.
+    ///
+    /// Kept so the toolbar can get out of the way at the *start* of
+    /// the exit transition.  `windowDidExitFullScreen:` fires when the
+    /// animation is over, but the buttons come back during it — so
+    /// waiting for "did" leaves the toolbar sitting on them for the
+    /// length of the animation (2026-08-11: "让出位置比较慢").
+    last_windowed_lights_right: Cell<f64>,
+    /// Set between `windowWillExitFullScreen:` and the matching
+    /// `did`.  While it is set the measurement answers with the cached
+    /// windowed edge: the style mask still says full screen, but we
+    /// know where this window is going.
+    exiting_full_screen: Cell<bool>,
 }
 
 impl MarspotAppCtx {
@@ -228,6 +242,14 @@ impl MarspotAppCtx {
         // that slides in on hover — so asking only the buttons left
         // the toolbar sitting to the right of a hole.  The checks
         // below stay as belt and braces for the ways it *is* visible.
+        // Leaving: the style mask still says full screen for the whole
+        // animation, but the buttons are already sliding back in.
+        // Answer for where the window is *going*, so the toolbar
+        // clears the corner as the transition starts rather than a
+        // beat after it ends.
+        if self.exiting_full_screen.get() {
+            return self.last_windowed_lights_right.get();
+        }
         if self
             .nswindow
             .styleMask()
@@ -237,7 +259,7 @@ impl MarspotAppCtx {
         }
         let scale = self.scale();
         let view_h = self.ns_view().bounds().size.height;
-        [
+        let measured = [
             NSWindowButton::CloseButton,
             NSWindowButton::MiniaturizeButton,
             NSWindowButton::ZoomButton,
@@ -271,7 +293,22 @@ impl MarspotAppCtx {
             let _ = view_h;
             Some(p.x * scale)
         })
-        .fold(0.0f64, f64::max)
+        .fold(0.0f64, f64::max);
+        if measured > 0.0 {
+            self.last_windowed_lights_right.set(measured);
+        }
+        measured
+    }
+
+    /// `windowWillExitFullScreen:` → answer with the windowed cluster
+    /// edge from now until the transition finishes.
+    pub fn begin_exit_full_screen(&self) {
+        self.exiting_full_screen.set(true);
+    }
+
+    /// `windowDidExitFullScreen:` → back to measuring.
+    pub fn end_exit_full_screen(&self) {
+        self.exiting_full_screen.set(false);
     }
 
     /// Schedule a `MarspotApp::redraw` after the current event handler
@@ -1072,9 +1109,20 @@ define_class!(
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
         }
 
+        #[unsafe(method(windowWillExitFullScreen:))]
+        fn window_will_exit_full_screen(&self, _notification: &NSNotification) {
+            dispatch_event_for(
+                self.ivars().window_id.get(),
+                EventKind::FullScreenWillExit,
+            );
+        }
+
         #[unsafe(method(windowDidExitFullScreen:))]
         fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
-            dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
+            dispatch_event_for(
+                self.ivars().window_id.get(),
+                EventKind::FullScreenDidExit,
+            );
         }
 
         #[unsafe(method(windowDidBecomeKey:))]
@@ -1118,6 +1166,10 @@ define_class!(
 
 pub enum EventKind {
     UserEvent,
+    /// `windowWillExitFullScreen:` — the transition is starting.
+    FullScreenWillExit,
+    /// `windowDidExitFullScreen:` — it is over.
+    FullScreenDidExit,
     Key(MarspotKeyEvent, Modifiers),
     MouseDown { x: f64, y: f64, mods: Modifiers },
     MouseRightDown { x: f64, y: f64, mods: Modifiers },
@@ -1248,6 +1300,20 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
             EventKind::Scroll { dx, dy, precise } => app.scroll(ctx, dx, dy, precise),
             EventKind::FileDrop { x, y, paths } => app.file_drop(ctx, x, y, &paths),
             EventKind::Resized => {
+                let (w, h) = ctx.inner_size_phys();
+                app.resized(ctx, w, h);
+            }
+            // Leaving full screen: republish the chrome *now*, at the
+            // start of the transition, with the window's own size —
+            // the buttons come back during the animation and the
+            // toolbar has to be out of their corner before they land.
+            EventKind::FullScreenWillExit => {
+                ctx.begin_exit_full_screen();
+                let (w, h) = ctx.inner_size_phys();
+                app.resized(ctx, w, h);
+            }
+            EventKind::FullScreenDidExit => {
+                ctx.end_exit_full_screen();
                 let (w, h) = ctx.inner_size_phys();
                 app.resized(ctx, w, h);
             }
@@ -1579,6 +1645,8 @@ fn drain_pending_windows() {
                     _delegate: delegate,
                     redraw_pending: Cell::new(false),
                     exit_requested: Cell::new(false),
+                    last_windowed_lights_right: Cell::new(0.0),
+                    exiting_full_screen: Cell::new(false),
                 };
                 let added = APP_STATE.with(|cell| {
                     let mut slot = cell.borrow_mut();
@@ -1780,6 +1848,8 @@ pub fn run_app<A: MarspotApp>(app: A, proxy: EventProxy, attrs: WindowAttrs) {
         _delegate: delegate.clone(),
         redraw_pending: Cell::new(false),
         exit_requested: Cell::new(false),
+        last_windowed_lights_right: Cell::new(0.0),
+        exiting_full_screen: Cell::new(false),
     };
 
     // Restore an exact predecessor frame BEFORE first show, so the
