@@ -1719,8 +1719,20 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = parse_named_arg(&args, "--snapshot") {
         let panel = parse_named_arg(&args, "--panel");
-        run_snapshot(&path, panel.as_deref());
-        return;
+        #[cfg(feature = "snapshot")]
+        {
+            run_snapshot(&path, panel.as_deref());
+            return;
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = (path, panel);
+            eprintln!(
+                "--snapshot needs a build with the tool compiled in:\n  \
+                 cargo build --features snapshot --bin marspot"
+            );
+            std::process::exit(2);
+        }
     }
     if let Some(spec) = parse_named_arg(&args, "--bench") {
         run_bench(&spec);
@@ -1903,6 +1915,7 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+#[cfg(feature = "snapshot")]
 /// Headless render: one frame into an offscreen texture, out as a PNG.
 ///
 /// `--snapshot <path>` draws a demo terminal frame; `--panel settings`
@@ -2103,6 +2116,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
 }
 
 
+#[cfg(feature = "snapshot")]
 /// Stand-in data for `--snapshot --panel cc`.
 ///
 /// Fixed values, never the live feed: a snapshot whose content moves
@@ -2144,6 +2158,7 @@ fn demo_cc_usage(rect: marspot_term::layout::Rect) -> marspot::render_metal::CcU
     }
 }
 
+#[cfg(feature = "snapshot")]
 /// Stand-in data for `--snapshot --panel process`.
 fn demo_process_panel(
     w_phys: f64,

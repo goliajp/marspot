@@ -43,5 +43,11 @@ mkdir -p "$MARSPOT_STATE_DIR"
 # tccd 跟着卡进不可中断等待,WindowServer 主线程同步等 tccd 40 秒 →
 # 被 watchdogd 击杀,整机强制重启。上限压到 6(可用 MARSPOT_TEST_JOBS
 # 覆盖);测试墙钟略增,换的是"跑测试不会把宿主机跑死"。
-exec cargo nextest run --workspace --all-targets \
+# --all-features so optional code still gets tested.  `--snapshot` and
+# its PNG writer live behind the `snapshot` feature to keep them out of
+# the shipped binary (2026-08-11); off by default they also vanished
+# from the suite, and a tool whose checksums nobody checks is a tool
+# that writes files no viewer opens.  Shipping lean and testing full
+# are not in conflict.
+exec cargo nextest run --workspace --all-targets --all-features \
   --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@"

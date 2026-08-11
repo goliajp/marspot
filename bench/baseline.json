@@ -62,9 +62,9 @@
     "p99_us_max": 4
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  Relocked 2026-07-11 at mini-measured current x 1.10: the Jun15-Jul10 feature month (+650KB: UI system, dev panel, SF Pro shaping, unicode tables, Phase 9) is acknowledged cost per user call '\u6027\u80fd\u548c\u5185\u5b58\u91cd\u8981,size \u4e0d\u7528\u5361\u592a\u7d27'.  Slimming (lib split / feature-gating so mcli stops linking the full GUI lib) is a separate project if ever wanted.  Previous ceilings 485830/778008 dated 2026-06-06.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.",
-    "mcli": 1370000,
-    "marspot": 1541000
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  RESOLUTION: on arm64 macOS the __TEXT segment is 16 KiB page-aligned, so these numbers move in ~16 KiB steps whatever the source change was - 2026-08-11 a ~2 KB chrome-layout change (measured: __text +2036 B, every other section flat) grew mcli by 16512 B = one page + 128 B of code signature.  A jump under ~20 KiB says nothing; read the section table (`size -m`) before calling it bloat.  Relocked 2026-08-11 at mini-measured current x 1.06 (one page of headroom, not a percentage): mcli 1375488, marspot 1515840.  marspot came DOWN 34 KB in the same commit by moving `--snapshot` + the PNG writer behind the `snapshot` cargo feature - a development tool has no business in the shipped binary.  Previous ceilings 1370000/1541000 dated 2026-07-11.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.",
+    "mcli": 1392000,
+    "marspot": 1533000
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",

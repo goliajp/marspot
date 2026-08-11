@@ -17,6 +17,17 @@ members = ["crates/marspot-term", "crates/marspot-session", "crates/marspot-link
 # commands cover the whole workspace; scripts still pass --workspace.
 default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates/marspot-linkify"]
 
+[features]
+# Offscreen panel screenshots — `marspot --snapshot out.png --panel X`.
+#
+# A development tool, and off by default because the shipped binary
+# should not carry it: the PNG encoder plus the snapshot path is ~17 KB,
+# which is most of the headroom the size gate leaves, and nothing a user
+# runs ever calls it.  Build it when you need to look at a panel:
+#
+#     cargo build --features snapshot --bin marspot
+snapshot = []
+
 [dependencies]
 # The zero-GUI terminal engine (parser/grid/terminal/pty/shelld/...).
 # Extracted (target #4) so a light, Metal-free per-session process (L3)
