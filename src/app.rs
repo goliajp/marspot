@@ -1052,6 +1052,31 @@ define_class!(
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Moved);
         }
 
+        /// Full screen entered / left — **after** the transition, which
+        /// is the whole point.
+        ///
+        /// `windowDidResize:` fires during the animation, and AppKit
+        /// does not set the `FullScreen` style bit until the animation
+        /// ends: anything measured from the resize callback describes
+        /// the window on its way, not where it landed.  That is why
+        /// the toolbar kept the windowed cluster edge through a full
+        /// screen toggle (2026-08-11 — the measurement rode the resize
+        /// and read 69 both times).
+        ///
+        /// Re-dispatching `Resized` rather than inventing an event:
+        /// the resize path already re-measures the chrome and sends
+        /// it, so this is the same work at the one moment it is
+        /// correct.
+        #[unsafe(method(windowDidEnterFullScreen:))]
+        fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
+        }
+
+        #[unsafe(method(windowDidExitFullScreen:))]
+        fn window_did_exit_full_screen(&self, _notification: &NSNotification) {
+            dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
+        }
+
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _notification: &NSNotification) {
             dispatch_event_for(self.ivars().window_id.get(), EventKind::Focused(true));
