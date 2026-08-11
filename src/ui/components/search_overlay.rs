@@ -137,7 +137,17 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
         close_btn.paint(p);
         // Aa toggle: text-only button.  FG accents when case-sensitive
         // (on); dim otherwise — handled via a per-frame style mutation.
-        let aa_x = close_x - 3.0 * cell_w;
+        //
+        // Width measured, not counted: button labels are set in the
+        // shared panel role now, and a proportional `Aa` is wider than
+        // the two cells this used to reserve — it grew into the `×`
+        // beside it (2026-08-11).  A control sized to its own label
+        // cannot collide with its neighbour.
+        let aa_w = p
+            .panel_text_width(crate::ui::theme::PanelText::Label, "Aa")
+            + cell_w;
+        let aa_gap = cell_w * 0.75;
+        let aa_x = close_x - aa_gap - aa_w;
         let mut aa_style = ButtonStyle::ghost();
         if overlay.case_sensitive {
             aa_style.fg = ACCENT_FG;
@@ -147,7 +157,7 @@ pub fn paint_search_overlay(p: &mut ViewPainter, params: SearchOverlayParams<'_>
             rect: Rect {
                 x: aa_x as f64,
                 y_top: inner_top as f64,
-                w: (cell_w * 2.5) as f64,
+                w: aa_w as f64,
                 h: cell_h as f64,
             },
             label: Some("Aa"),

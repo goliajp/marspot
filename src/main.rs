@@ -1968,6 +1968,27 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
     let layout = Layout::build(
         phys_w as f64, phys_h as f64, 0.0, 0.0, 0.0, 1, 1, cell_w, cell_h,
     );
+    // The search bar is painted *inside* a pane, not as a modal, so it
+    // rides on the view rather than on a renderer slot.
+    let search = (panel == Some("search")).then(|| {
+        use marspot_term::render::{SearchHitView, SearchOverlayView};
+        let hit = |snippet: &str, focused: bool| SearchHitView {
+            snippet: snippet.to_string(),
+            is_focused: focused,
+        };
+        SearchOverlayView {
+            query: "reclaim".to_string(),
+            query_cursor: 7,
+            case_sensitive: false,
+            counter: Some((2, 17)),
+            hits: vec![
+                hit("  reclaim.enabled = false", false),
+                hit("fn reclaim_op(uuid: &str, config_dir: Option<&str>) -> Option<PtyOp> {", true),
+                hit("    // A pane whose session file has not appeared yet", false),
+                hit("hibernate.start … idle=1800s reclaim=on", false),
+            ],
+        }
+    });
     let view = SessionView {
         recede: 0,
         scrim: 0.0,
@@ -1984,7 +2005,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         top_fixed_h_cells: 0,
         bot_fixed_h_cells: 0,
         highlight_spans: &[],
-        search_overlay: None,
+        search_overlay: search,
         seq: 0,
     };
 
@@ -2015,6 +2036,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             );
             renderer.set_cc_usage(Some(demo_cc_usage(rect)));
         }
+        Some("search") => {} // rides on the view above
         Some("layout") => {
             // Six columns and long project names — the shape that
             // overflowed its own modal (2026-08-11).
@@ -2080,7 +2102,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
         }
         Some(other) => {
             eprintln!(
-                "--snapshot: unknown panel {other:?} (known: settings, cc, process, layout, menu)"
+                "--snapshot: unknown panel {other:?} (known: settings, cc, process, layout, menu, search)"
             );
             std::process::exit(2);
         }

@@ -252,7 +252,7 @@ impl MarspotAppCtx {
             // the first cut asked the button and got a cluster edge in
             // full screen, so the toolbar never moved).  Ask whether
             // anything in the chain is hidden.
-            let hidden = unsafe { btn.isHiddenOrHasHiddenAncestor() };
+            let hidden = btn.isHiddenOrHasHiddenAncestor();
             let on_window = btn
                 .window()
                 .map(|w| std::ptr::eq(&*w, &*self.nswindow))

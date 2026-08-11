@@ -67,8 +67,7 @@ impl<'a> ListView<'a> {
         let ascent = p.ascent;
         let visible_h = self.rect.h as f32;
         let max_visible = (visible_h / self.row_h).floor() as usize;
-        let max_chars = ((self.rect.w as f32
-            - 2.0 * self.text_pad_left) / cell_w).floor().max(1.0) as usize;
+
         for (i, row) in self.rows.iter().enumerate().take(max_visible) {
             let row_y = self.rect.y_top as f32 + (i as f32) * self.row_h;
             if row.is_focused {
@@ -84,7 +83,15 @@ impl<'a> ListView<'a> {
                     ([0.0, 0.0, 0.0, 0.0], 0.0),
                 );
             }
-            let display: String = row.label.chars().take(max_chars).collect();
+            // Ellipsised, not chopped: a snippet that ran out of room
+            // used to end mid-word with no mark, which reads as a
+            // snippet that ended there (2026-08-11, search results).
+            let display = crate::ui::core::fit_mono(
+                row.label,
+                self.rect.w,
+                cell_w as f64,
+                self.text_pad_left as f64,
+            );
             let baseline = row_y + (self.row_h - cell_h) * 0.5 + ascent;
             let fg = if row.is_focused {
                 self.style.fg_focused

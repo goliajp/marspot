@@ -3774,28 +3774,6 @@ fn build_context_menu_canvas(
     canvas
 }
 
-/// Cut a mono string to what `box_w` holds, ellipsised.
-///
-/// `pad` is the same per-side padding the card was *sized* with — cut
-/// with a different one and a name that was measured to fit still
-/// loses its tail.  `…` (one cell) marks anything dropped: silently
-/// truncating reads as a different project name, which on a pane
-/// picker is worse than an obviously shortened one.
-fn fit_mono(s: &str, box_w: f64, cell_w: f64, pad: f64) -> String {
-    if cell_w <= 0.0 {
-        return String::new();
-    }
-    let budget = ((box_w - 2.0 * pad) / cell_w).floor().max(0.0) as usize;
-    let n = s.chars().count();
-    if n <= budget {
-        return s.to_string();
-    }
-    if budget <= 1 {
-        return "…".to_string();
-    }
-    s.chars().take(budget - 1).chain(std::iter::once('…')).collect()
-}
-
 /// F3+3.0 — paint the `LayoutModal` overlay.  Same plumbing as
 /// `push_process_panel_via_view`: routes through a `ViewPainter`
 /// → overlay scratches so it lands on top of the grid.  Geometry
@@ -4052,7 +4030,9 @@ fn paint_layout_modal_content(
                 let fg = if is_drag_origin { card_fg_drag_origin } else { card_fg };
                 let pad = crate::ui::components::layout_modal::CARD_LABEL_PAD_LOGICAL
                     * state.scale;
-                let fitted = fit_mono(title, rect.w, p.cell_w as f64, pad);
+                let fitted = crate::ui::core::fit_mono(
+                    title, rect.w, p.cell_w as f64, pad,
+                );
                 p.text_in(*rect, &fitted, fg, Alignment::Center);
             }
         }
