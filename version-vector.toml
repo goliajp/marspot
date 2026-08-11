@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.111"  # 刚开的 pane 从启动横幅读 model,不用等第一次回答;详见 CHANGELOG.md
+shell   = "0.7.112"  # 看门狗的 PONG 计时从握手完成起算,并放过自己没在跑的那段时间;详见 CHANGELOG.md
 core    = "0.12.124"  # 布局网格上限 6 → 9(会话上限同步到 9×9=81);详见 CHANGELOG.md
 session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md

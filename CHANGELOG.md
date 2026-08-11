@@ -28,7 +28,49 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.111**
+Current: **0.7.112**
+
+### 0.7.112
+
+**唤醒设备,窗口冻在一条「Marspot stopped — please restart the app」后面。**
+
+日志里这条横幅只有一个来源:崩溃预算被打爆(5 分钟内 4 次)。而 4 次重启是
+同一个形状 —— 2026-08-11T13:21–13:22Z 三次连着,每次都是「spawn → 十几秒后
+HELLO_ACK → 几百毫秒内 PONG_TIMEOUT」。
+
+根因在计时的起点。`last_pong_at` 在 spawn 那一刻就开表,注释写的是「freebie
+until first ping」,但启动不是白送的:附 surface、reattach 十三个 L3、建
+layout,机器一忙就要十几二十秒。等核心终于能应答时,15 秒的 deadline 早过完
+了,于是它刚握完手就被判「卡死」——实测握手后 184 毫秒。杀掉重开,新核心撞
+同一堵墙,四次之后预算见底。**一个在对方能开口之前就起跑的 deadline,量的是
+我们的启动,不是它的死活。**
+
+三处改动:
+
+1. **PONG 计时从 HelloAck 起算。**核心真正能应答的那一刻才开表,整整一个
+   `PONG_DEADLINE` 归它。
+2. **看门狗先看自己有没有在跑。**新增 `SUPERVISOR_STALL_GAP`(= 一个 ping
+   周期,约标称节拍的 20 倍):两次 tick 之间超过这个数,说明 shell 自己被
+   挂起了 —— 系统睡眠、编译风暴占满核心、主线程卡在 AppKit。这段时间里的
+   「沉默」不是证据,因为根本没人在听;deadline 把这段时间**还回去**,而不
+   是记在核心账上。日志出 `SUPERVISOR_STALL`。
+3. **预算见底不再是死路。**原来 `auto_restart_disabled` 一旦置上就没有任何
+   代码清得掉,横幅挂到用户自己退出 app 为止 —— 所以「唤醒设备总能看到」:
+   风暴发生在半夜,横幅一直等到早上。改成冷却重试,首次等一个 `CRASH_WINDOW`
+   (5 分钟,此时崩溃记录本来也过期了),每再爆一次翻倍,封顶 8×。重启**速
+   率**依然有界(预算的本意),但坏掉的只是一阵负载时,它自己会回来。
+
+横幅同步改名 `UpdateFailed` → `RestartsPaused`,文案改成「Marspot's core
+keeps stopping — it will retry on its own」:没有任何更新失败,退出 app 也
+从来不是解法。
+
+判定逻辑抽成三个自由函数(`pong_overdue` / `forgive_stall` /
+`restart_cooldown`)配单测 —— 原来它埋在 AppKit 结构体里,没法在没有窗口的
+情况下验证,这也是这个 bug 活到今天的原因之一。
+
+**未修**:触发第一次重启的是 L2 单次 render 阶段耗时 41.14 秒(核心自己的
+`l2.loop.stall` 报的)。那是独立的性能问题,需要单独 decomposition,没有在
+这次一并动。
 
 ### 0.7.111
 

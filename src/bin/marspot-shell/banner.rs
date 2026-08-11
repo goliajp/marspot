@@ -38,9 +38,14 @@ use objc2_metal::{
 /// the IOSurface like usual."
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BannerKind {
-    /// Crash budget has been blown.  We're not restarting the core
-    /// automatically; user has to relaunch or fix the binary.
-    UpdateFailed,
+    /// Crash budget has been blown, so restarts are paused for a
+    /// cool-down.  Named for the state, not for a cause: it used to
+    /// be `UpdateFailed`, and said "please restart the app", but the
+    /// commonest way to reach it is a machine so loaded that four
+    /// consecutive cores missed their handshake deadline — nothing
+    /// failed to update, and quitting the app was never the fix.  The
+    /// shell tries again on its own once the cool-down expires.
+    RestartsPaused,
     /// Core died and we're spawning a fresh one.  Shown for the
     /// ~100 ms gap while the new process boots + attaches.
     ///
@@ -61,7 +66,7 @@ impl BannerKind {
     /// developer tool first, polished UI later.
     pub fn text(self) -> &'static str {
         match self {
-            BannerKind::UpdateFailed => "Marspot stopped — please restart the app",
+            BannerKind::RestartsPaused => "Marspot's core keeps stopping — it will retry on its own",
             BannerKind::Recovering => "Marspot is recovering…",
             BannerKind::CrashLoop => {
                 "Marspot crashed repeatedly — safe mode (sessions kept, nothing new spawned)"

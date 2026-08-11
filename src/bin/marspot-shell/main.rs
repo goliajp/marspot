@@ -666,11 +666,99 @@ const PING_INTERVAL: Duration = Duration::from_secs(5);
 /// the core hung.  3 = 15 s, which gives plenty of slack for a busy
 /// terminal session without making a real hang feel sticky.
 const PONG_DEADLINE: Duration = Duration::from_secs(15);
+/// A supervisor tick that arrives this long after the previous one
+/// means **we** stopped running — the machine slept, a build storm
+/// took every core, the main thread sat in AppKit.  Silence measured
+/// across such a gap says nothing about the core, because nobody was
+/// listening; a watchdog has to know whether it was awake before it
+/// accuses anyone else of being asleep.  Deadlines are handed the gap
+/// back rather than charged for it.
+///
+/// Nominal cadence is ~250 ms, so one ping interval is 20× nominal:
+/// far outside ordinary jitter, far inside a real hang.
+const SUPERVISOR_STALL_GAP: Duration = PING_INTERVAL;
 /// Crash-budget window.  More than `MAX_CRASHES_IN_WINDOW` in this
 /// span and we stop auto-restarting (binary is broken; user needs
 /// to roll back or reinstall).
 const CRASH_WINDOW: Duration = Duration::from_secs(300); // 5 min
 const MAX_CRASHES_IN_WINDOW: usize = 3;
+
+/// Has this core missed its PONG deadline?
+///
+/// A free function so the rule can be stated once and tested without
+/// an AppKit window: the whole 2026-08-11 cascade was this predicate
+/// being fed an anchor that predated the core's ability to answer.
+fn pong_overdue(hello_acked: bool, last_pong_at: Instant, now: Instant) -> bool {
+    hello_acked && now.duration_since(last_pong_at) > PONG_DEADLINE
+}
+
+/// Move a deadline anchor forward by a stall we didn't witness,
+/// never past `now` — the core gets the time back, but no credit it
+/// hasn't earned yet.
+fn forgive_stall(anchor: Instant, gap: Duration, now: Instant) -> Instant {
+    (anchor + gap).min(now)
+}
+
+/// How long to stay hands-off after the crash budget trips.
+///
+/// One `CRASH_WINDOW`, doubling per trip up to 8×.  The first wait is
+/// the natural unit: after `CRASH_WINDOW` of quiet the crash record
+/// would have aged out anyway, so trying again then is exactly as
+/// safe as never having tripped.  The doubling is what stops a
+/// genuinely broken binary turning this into a slow loop — four
+/// restarts per five minutes, then per ten, per twenty, per forty,
+/// and there it stays.
+fn restart_cooldown(trips: u32) -> Duration {
+    CRASH_WINDOW * (1 << trips.saturating_sub(1).min(3))
+}
+
+#[cfg(test)]
+mod supervisor_deadline_tests {
+    use super::*;
+
+    /// 2026-08-11 的原形:核心启动慢,握手完成时 spawn 锚点已经过
+    /// 期,于是它刚说完 hello 就被判"卡死"。
+    #[test]
+    fn a_slow_boot_still_gets_a_full_window_to_answer() {
+        let hello = Instant::now();
+        // 旧行为:锚点在 spawn。握手花了 20 秒 → 握手当场就超期。
+        let spawned = hello - Duration::from_secs(20);
+        assert!(
+            pong_overdue(true, spawned, hello),
+            "spawn 锚点会让慢启动的核心在握手瞬间被判死 —— 这正是要修的",
+        );
+        // 新行为:锚点在 HelloAck。整整一个 PONG_DEADLINE 都归它。
+        assert!(!pong_overdue(true, hello, hello + PONG_DEADLINE));
+        assert!(pong_overdue(true, hello, hello + PONG_DEADLINE + Duration::from_secs(1)));
+        // 还没握上手的核心归 HELLO_TIMEOUT 管,不归这里。
+        assert!(!pong_overdue(false, spawned, hello));
+    }
+
+    /// 我们自己没在跑的那段时间,不能记在对方账上。
+    #[test]
+    fn time_we_did_not_witness_is_handed_back() {
+        let now = Instant::now();
+        let anchor = now - Duration::from_secs(60);
+        // 整整 60 秒的停摆:锚点回到 now,立刻重新计时,不判超期。
+        let forgiven = forgive_stall(anchor, Duration::from_secs(60), now);
+        assert!(!pong_overdue(true, forgiven, now));
+        // 但不许推到未来 —— 那等于白送一个 deadline。
+        assert_eq!(forgive_stall(anchor, Duration::from_secs(600), now), now);
+        // 停摆只有 1 秒,就只还 1 秒:真卡死仍然抓得到。
+        let barely = forgive_stall(anchor, Duration::from_secs(1), now);
+        assert!(pong_overdue(true, barely, now));
+    }
+
+    /// 冷却时间翻倍、封顶,且永远不为零 —— 为零就等于没有预算。
+    #[test]
+    fn the_cool_down_doubles_then_stops_doubling() {
+        assert_eq!(restart_cooldown(0), CRASH_WINDOW);
+        assert_eq!(restart_cooldown(1), CRASH_WINDOW);
+        assert_eq!(restart_cooldown(2), CRASH_WINDOW * 2);
+        assert_eq!(restart_cooldown(4), CRASH_WINDOW * 8);
+        assert_eq!(restart_cooldown(99), CRASH_WINDOW * 8, "封顶后不再增长");
+    }
+}
 
 /// Everything tied to one live core process: its child handle, the
 /// control socket (both directions), and the liveness-handshake
@@ -705,7 +793,11 @@ struct CoreConn {
     /// different nonce are stale and ignored.  Per-conn: a fresh core
     /// gets its own channel, so a previous core's Pong can't reach it.
     last_ping_nonce: u32,
-    /// When the most recent matching Pong arrived.
+    /// When the most recent matching Pong arrived — or, until the
+    /// first one does, when the core became **able** to answer at all
+    /// (its HelloAck).  Seeding this at spawn instead is what turned
+    /// one slow boot into a bricked window: see the reset in the
+    /// `HelloAck` arm.
     last_pong_at: Instant,
 }
 
@@ -963,9 +1055,20 @@ struct ShellApp {
     /// flapping.
     crashes: std::collections::VecDeque<Instant>,
     /// True if the crash budget has been blown.  We stop trying to
-    /// restart until something external changes (manual update,
-    /// shell relaunch).
+    /// restart until the cool-down below expires.
     auto_restart_disabled: bool,
+    /// When the budget tripped, and how many times it has tripped
+    /// this boot.  Together they set the cool-down before we try
+    /// again — because "stop restarting" used to mean *forever*, and
+    /// a load storm that passed in ninety seconds left the window
+    /// frozen behind a banner until the user noticed and quit the
+    /// app.  Every extra trip doubles the wait, so a genuinely broken
+    /// binary still can't loop.
+    disabled_at: Option<Instant>,
+    budget_trips: u32,
+    /// When `poll_supervisor` last ran — the witness for
+    /// [`SUPERVISOR_STALL_GAP`].
+    last_tick_at: Instant,
     /// Currently-displayed banner, or `None` for clear.  Kept on
     /// the shell so `poll_supervisor` can recompute it from state
     /// transitions and call `presenter.set_banner` only when it
@@ -1487,6 +1590,9 @@ impl ShellApp {
             probe_rx: None,
             crashes: std::collections::VecDeque::new(),
             auto_restart_disabled: false,
+            disabled_at: None,
+            budget_trips: 0,
+            last_tick_at: Instant::now(),
             banner_kind: None,
             core_boot_ring: std::collections::VecDeque::with_capacity(16),
             plugin_host: {
@@ -2229,7 +2335,7 @@ impl ShellApp {
         let want = if self.safe_mode {
             Some(BannerKind::CrashLoop)
         } else if self.auto_restart_disabled {
-            Some(BannerKind::UpdateFailed)
+            Some(BannerKind::RestartsPaused)
         } else if !self.core_alive() && any_attached {
             // Active core process is gone (just SIGKILL'd or died and we
             // haven't respawned yet).  Show the recovering banner while
@@ -2270,6 +2376,8 @@ impl ShellApp {
         );
         if self.crashes.len() > MAX_CRASHES_IN_WINDOW {
             self.auto_restart_disabled = true;
+            self.disabled_at = Some(now);
+            self.budget_trips = self.budget_trips.saturating_add(1);
             lx_event!(
                 "BUDGET_EXCEEDED",
                 "crash budget exceeded; auto-restart disabled until manual intervention",
@@ -2675,6 +2783,59 @@ impl ShellApp {
             }
         }
 
+        // 0a. Were *we* running?  Everything below judges the core by
+        // how long it has been quiet, which is only evidence if
+        // somebody was listening the whole time.  When the gap between
+        // two ticks blows past `SUPERVISOR_STALL_GAP` the shell itself
+        // was descheduled — the machine slept, or a build storm took
+        // the cores — and the core's deadlines get that time handed
+        // back instead of charged.  `next_ping_at` is deliberately
+        // left alone: the next tick pings immediately, which is how we
+        // find out what actually happened.
+        let tick_now = Instant::now();
+        let tick_gap = tick_now.duration_since(self.last_tick_at);
+        self.last_tick_at = tick_now;
+        if tick_gap > SUPERVISOR_STALL_GAP {
+            if let Some(c) = self.active.as_mut() {
+                c.spawned_at = forgive_stall(c.spawned_at, tick_gap, tick_now);
+                c.last_pong_at = forgive_stall(c.last_pong_at, tick_gap, tick_now);
+            }
+            lx_event!(
+                "SUPERVISOR_STALL",
+                "supervisor tick was late — deadlines forgiven, not charged",
+                gap_ms = tick_gap.as_millis() as u64
+            );
+        }
+
+        // 0b. Cool-down after a blown crash budget.  Not "until manual
+        // intervention" any more: the four restarts that trip the
+        // budget are usually a machine under load, and the load
+        // passes.  Waiting one `CRASH_WINDOW` before the next attempt
+        // keeps the restart *rate* bounded — the whole point of the
+        // budget — without leaving the window frozen behind a banner
+        // for the rest of the day.
+        let cooldown = restart_cooldown(self.budget_trips);
+        if self.auto_restart_disabled
+            && self.disabled_at.is_some_and(|t| t.elapsed() >= cooldown)
+        {
+            lx_event!(
+                "BUDGET_RECOVERED",
+                "cool-down elapsed; trying the core once more",
+                trips = self.budget_trips,
+                cooldown_s = cooldown.as_secs()
+            );
+            sup_log::log(
+                "BUDGET_RECOVERED",
+                &format!("trips={} cooldown_s={}", self.budget_trips, cooldown.as_secs()),
+            );
+            self.auto_restart_disabled = false;
+            self.disabled_at = None;
+            self.crashes.clear();
+            self.restart_core(ctx);
+            self.refresh_banner(ctx);
+            return;
+        }
+
         // 1. Active core liveness — the core the user is looking at.
         let active_exited = match self.active.as_mut().and_then(|c| c.child.as_mut()) {
             Some(c) => matches!(c.try_wait(), Ok(Some(_))),
@@ -2731,7 +2892,7 @@ impl ShellApp {
         let pong_timed_out = self
             .active
             .as_ref()
-            .map(|c| c.hello_acked && now.duration_since(c.last_pong_at) > PONG_DEADLINE)
+            .map(|c| pong_overdue(c.hello_acked, c.last_pong_at, now))
             .unwrap_or(false);
         if pong_timed_out {
             lx_event!(
@@ -3107,6 +3268,26 @@ impl ShellApp {
                 if v == PROTO_VERSION {
                     if let Some(c) = self.active.as_mut() {
                         c.hello_acked = true;
+                        // The PONG deadline starts **here**, not at
+                        // spawn.  `last_pong_at` is seeded at spawn as
+                        // a freebie, but booting is not free: attach
+                        // the surfaces, reattach thirteen L3s, build
+                        // the layout.  On a loaded machine that took
+                        // 20 s, so the moment this core became able to
+                        // answer, its deadline had already expired and
+                        // step 4 killed it in the same tick — 184 ms
+                        // after the handshake it had just completed.
+                        // The replacement hit the same wall, and the
+                        // one after that, until the crash budget
+                        // tripped and the window bricked behind
+                        // "please restart the app"
+                        // (2026-08-11T13:21–13:22Z, four restarts, one
+                        // signature).  A deadline that starts before
+                        // the peer can reply measures our boot, not
+                        // its health.
+                        let now = Instant::now();
+                        c.last_pong_at = now;
+                        c.next_ping_at = now + PING_INTERVAL;
                     }
                     lx_event!("HELLO_ACK", "core handshake OK", v = v);
                     sup_log::log("HELLO_ACK", &format!("v={v}"));
