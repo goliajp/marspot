@@ -1288,18 +1288,26 @@ pub fn encode_surface_attach_window(
     scale: f64,
     window_id: u32,
     frame_index: u32,
+    lights_right_phys: f64,
 ) -> Vec<u8> {
     let mut v = encode_surface_attach(front_id, back_id, w_phys, h_phys, scale);
     v.extend_from_slice(&window_id.to_le_bytes());
     v.extend_from_slice(&frame_index.to_le_bytes());
+    v.extend_from_slice(&lights_right_phys.to_le_bytes());
     v
 }
 
-/// Returns `(front, back, w, h, scale, window_id, frame_index)`, with
-/// `frame_index` `None` when the sender predates it.
+/// Returns `(front, back, w, h, scale, window_id, frame_index,
+/// lights_right_phys)`.
+///
+/// The two trailing fields are `None` when the sender predates them —
+/// appended, never inserted, and read only when the payload is long
+/// enough.  A core from before this field keeps its old constant; one
+/// from after it, talking to an older shell, keeps it too.  Same rule
+/// every frame here follows.
 pub fn decode_surface_attach_window(
     payload: &[u8],
-) -> io::Result<(u32, u32, f64, f64, f64, u32, Option<u32>)> {
+) -> io::Result<(u32, u32, f64, f64, f64, u32, Option<u32>, Option<f64>)> {
     if payload.len() < 36 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1309,7 +1317,14 @@ pub fn decode_surface_attach_window(
     let (front, back, w, h, scale) = decode_surface_attach(&payload[..32])?;
     let frame_index = (payload.len() >= 40)
         .then(|| u32::from_le_bytes(payload[36..40].try_into().unwrap()));
-    Ok((front, back, w, h, scale, trailing_window_id(payload, 32), frame_index))
+    let lights_right = (payload.len() >= 48)
+        .then(|| f64::from_le_bytes(payload[40..48].try_into().unwrap()));
+    Ok((
+        front, back, w, h, scale,
+        trailing_window_id(payload, 32),
+        frame_index,
+        lights_right,
+    ))
 }
 
 /// A window closed.  The core drops that `WindowState` — and with it
@@ -3140,25 +3155,35 @@ mod tests {
         assert_eq!(legacy.len(), 32, "growing this breaks every old core");
         assert!(decode_surface_attach(&legacy).is_ok());
 
-        let p = encode_surface_attach_window(11, 22, 800.0, 600.0, 2.0, 5, 3);
-        assert_eq!(p.len(), 40);
+        let p = encode_surface_attach_window(11, 22, 800.0, 600.0, 2.0, 5, 3, 138.0);
+        assert_eq!(p.len(), 48);
         assert_eq!(&p[..32], &legacy[..], "prefix must stay legacy-shaped");
         assert!(
             decode_surface_attach(&p).is_err(),
             "the strict legacy decoder rejects the longer body — which \
              is exactly why this needed its own msg type"
         );
-        let (f, b, w, h, sc, win, slot) = decode_surface_attach_window(&p).unwrap();
+        let (f, b, w, h, sc, win, slot, lights) =
+            decode_surface_attach_window(&p).unwrap();
         assert_eq!((f, b, w, h, sc, win), (11, 22, 800.0, 600.0, 2.0, 5));
         assert_eq!(slot, Some(3));
+        assert_eq!(lights, Some(138.0));
 
-        // A shell from before the slot existed sends 36 bytes.  The
-        // core has to keep reading those — during a swap the two sides
-        // are different builds by definition.
-        let old = &p[..36];
-        let (.., win, slot) = decode_surface_attach_window(old).unwrap();
+        // A shell from before the slot existed sends 36 bytes; one from
+        // before the traffic-light measurement sends 40.  The core has
+        // to keep reading both — during a swap the two sides are
+        // different builds by definition, and each missing field has to
+        // come back absent rather than as garbage read off the end.
+        let (.., win, slot, lights) =
+            decode_surface_attach_window(&p[..36]).unwrap();
         assert_eq!(win, 5, "the window id still decodes");
         assert_eq!(slot, None, "and the missing slot is absent, not garbage");
+        assert_eq!(lights, None);
+
+        let (.., win, slot, lights) =
+            decode_surface_attach_window(&p[..40]).unwrap();
+        assert_eq!((win, slot), (5, Some(3)));
+        assert_eq!(lights, None, "a shell that predates the field says nothing");
     }
 
     /// The window lifecycle messages must be decodable by number, and

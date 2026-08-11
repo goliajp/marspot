@@ -207,6 +207,55 @@ impl MarspotAppCtx {
         self.nswindow.backingScaleFactor() as f64
     }
 
+    /// Right edge of the macOS traffic-light cluster, in **physical
+    /// px** from the window's left edge — `0.0` when the cluster is
+    /// not on screen.
+    ///
+    /// Asked of AppKit rather than assumed.  The toolbar used to start
+    /// at a constant 84 pt, a number obtained by screen-capturing the
+    /// live window and measuring the discs; in full screen AppKit
+    /// takes the cluster away and that reservation became a hole the
+    /// toolbar sat to the right of (2026-08-11 report).  The buttons
+    /// know where they are and whether they are hidden, so the layout
+    /// asks them.
+    pub fn traffic_lights_right_phys(&self) -> f64 {
+        use objc2_app_kit::NSWindowButton;
+        let scale = self.scale();
+        let view_h = self.ns_view().bounds().size.height;
+        [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ]
+        .into_iter()
+        .filter_map(|b| self.nswindow.standardWindowButton(b))
+        .filter(|btn| {
+            // Full screen leaves the buttons *present* but hidden, and
+            // parents them into an overlay that slides in on hover —
+            // a hidden button's frame is still its old one, so the
+            // hidden flag is the part that matters.
+            let hidden = btn.isHidden();
+            let on_window = btn
+                .window()
+                .map(|w| std::ptr::eq(&*w, &*self.nswindow))
+                .unwrap_or(false);
+            !hidden && on_window
+        })
+        .filter_map(|btn| {
+            let f = btn.frame();
+            let sup = unsafe { btn.superview() }?;
+            // Button frame is in its superview's coords; convert to
+            // the window's, which is what the layout measures from.
+            let p = sup.convertPoint_toView(
+                NSPoint::new(f.origin.x + f.size.width, f.origin.y),
+                None,
+            );
+            let _ = view_h;
+            Some(p.x * scale)
+        })
+        .fold(0.0f64, f64::max)
+    }
+
     /// Schedule a `MarspotApp::redraw` after the current event handler
     /// returns.  Coalesced — multiple calls per event collapse.
     pub fn request_redraw(&self) {

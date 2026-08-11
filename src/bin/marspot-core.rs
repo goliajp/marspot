@@ -2222,7 +2222,7 @@ enum CoreEvent {
     Focus(bool),
     /// RFC-005 — window-aware surface attach.  A `window_id` the core
     /// has not seen before *is* that window's birth event.
-    SurfaceAttachWindow(u32, u32, f64, f64, f64, u32, Option<u32>),
+    SurfaceAttachWindow(u32, u32, f64, f64, f64, u32, Option<u32>, Option<f64>),
     /// RFC-005 step 6b — a restore worker finished assembling a saved
     /// window's panes; they replace that window's placeholders.
     WindowRestoreFinished(u32, RestoredPanes),
@@ -2479,8 +2479,8 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .map(|(x, y, paths, win)| CoreEvent::FileDrop(x, y, paths, win)),
         MsgType::SurfaceAttachWindow => decode_surface_attach_window(&f.payload)
             .ok()
-            .map(|(fr, bk, w, h, sc, win, slot)| {
-                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot)
+            .map(|(fr, bk, w, h, sc, win, slot, lights)| {
+                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot, lights)
             }),
         MsgType::WindowClosed => decode_window_closed(&f.payload)
             .ok()
@@ -3164,6 +3164,10 @@ struct WindowState {
     /// click toggles it.  Modal contents (cols/rows +/- controls
     /// + preview) live in the modal component.
     layout_modal_open: bool,
+    /// Right edge of the OS's traffic-light cluster, physical px from
+    /// the window's left edge; `0.0` when it is not on screen (full
+    /// screen takes it away).  The toolbar starts after it.
+    lights_right_phys: f64,
     /// Width the widest layout-modal card label needed, physical px,
     /// as of the last published frame.
     ///
@@ -3279,6 +3283,7 @@ impl WindowState {
             grid_cols,
             grid_rows,
             layout_modal_open: false,
+            lights_right_phys: 0.0,
             layout_modal_label_w: 0.0,
             context_menu: None,
             pending_grid_cols: grid_cols,
@@ -3662,6 +3667,7 @@ impl CoreApp {
         .with_chrome(
             win!(self, wi).scale,
             win!(self, wi).panes.len(),
+            win!(self, wi).lights_right_phys,
         );
         for (i, p) in win!(self, wi).panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
@@ -9165,7 +9171,7 @@ fn main() {
                     app.adopt_restored_panes(win, panes.0)
                 }
                 CoreEvent::WindowClosed(win) => app.close_window(win),
-                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot) => {
+                CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot, lights) => {
                     // Same staging as the legacy frame — the id only
                     // says which window it is about.  From the first
                     // one of these onward the legacy frame is ignored,
@@ -9179,6 +9185,18 @@ fn main() {
                         // window that appears after a core swap is
                         // adopted by the same path that created it.
                         app.adopt_window(win, w, h, sc, slot.map(|s| s as usize));
+                    }
+                    // Where the OS's own window buttons end, as the
+                    // shell measured them.  `None` = a shell that
+                    // predates the field; keep whatever we had.
+                    if let Some(px) = lights {
+                        if let Some(wi) = app.window_index(win) {
+                            if (win!(app, wi).lights_right_phys - px).abs() > 0.5 {
+                                win!(app, wi).lights_right_phys = px;
+                                app.rebuild_layout(wi);
+                                win!(app, wi).needs_render = true;
+                            }
+                        }
                     }
                     queue_attach(pending_attach, win, (fr, bk, w, h, sc));
                 }

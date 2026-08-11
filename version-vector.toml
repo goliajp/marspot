@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.105"  # argv 是起点不是现状:/clear 之后绑定跟上活的 session;详见 CHANGELOG.md
-core    = "0.12.114"  # Layout 面板:卡片不再溢出、按内容定宽、标题栏随标题字号;标题梯子下调一档;详见 CHANGELOG.md
-session = "0.11.42"  # 设置结构多两个字段(浮点键的解析/回写);详见 CHANGELOG.md
+shell   = "0.7.106"  # 把红绿灯的真实右边界量给 L2(全屏时为 0);详见 CHANGELOG.md
+core    = "0.12.115"  # 工具栏跟着红绿灯走 —— 全屏后自动挪进空出来的位置;详见 CHANGELOG.md
+session = "0.11.43"  # 随 marspot-term(wire 追加一个字段 + layout 签名);详见 CHANGELOG.md

@@ -1345,11 +1345,17 @@ impl ShellApp {
     /// swap invisible with more than one window open.
     fn announce_windows_to_new_core(&self, ctx: &MarspotAppCtx) {
         let scale = ctx.scale();
+        let lights = ctx.traffic_lights_right_phys();
         for i in 1..self.windows.len() {
             let Some(s) = self.windows[i].surfaces.as_ref() else { continue };
             let (f, b) = s.ids();
             let (w, h) = (s.width() as f64, s.height() as f64);
-            self.send_surface_attach(self.windows[i].window_id, f, b, w, h, scale);
+            // Replay into a fresh core: `ctx` names one window, and
+            // its cluster measurement stands in for the rest.  Every
+            // window's next resize / attach carries its own.
+            self.send_surface_attach(
+                self.windows[i].window_id, f, b, w, h, scale, lights,
+            );
             lx_event!(
                 "WINDOW_REANNOUNCED",
                 "replayed a window's surface pair into the new core",
@@ -1397,6 +1403,7 @@ impl ShellApp {
         w_phys: f64,
         h_phys: f64,
         scale: f64,
+        lights_right_phys: f64,
     ) {
         if window_id == marspot::shell_proto::FIRST_WINDOW_ID {
             self.send(
@@ -1416,7 +1423,9 @@ impl ShellApp {
             .unwrap_or(0) as u32;
         self.send(
             MsgType::SurfaceAttachWindow,
-            encode_surface_attach_window(f, b, w_phys, h_phys, scale, window_id, slot),
+            encode_surface_attach_window(
+                f, b, w_phys, h_phys, scale, window_id, slot, lights_right_phys,
+            ),
         );
     }
 
@@ -2320,6 +2329,7 @@ impl ShellApp {
                             w_px as f64,
                             h_px as f64,
                             scale,
+                            ctx.traffic_lights_right_phys(),
                         );
                     }
                     Err(e) => {
@@ -4354,7 +4364,10 @@ impl MarspotApp for ShellApp {
                 }
                 let (f, b) = pair.ids();
                 self.windows[wi].pending_surfaces = Some(pair);
-                self.send_surface_attach(Self::event_window(ctx), f, b, w_phys, h_phys, scale);
+                self.send_surface_attach(
+                    Self::event_window(ctx), f, b, w_phys, h_phys, scale,
+                    ctx.traffic_lights_right_phys(),
+                );
             }
             Err(e) => {
                 lx_error!("shell.resize.pair_create_failed", &format!("{e}"));
@@ -4475,7 +4488,10 @@ impl MarspotApp for ShellApp {
         // A `SurfaceAttachWindow` naming a window the core has not seen
         // IS that window's birth event — there is no separate create
         // frame.
-        self.send_surface_attach(window_id, f, b, w_phys, h_phys, scale);
+        self.send_surface_attach(
+            window_id, f, b, w_phys, h_phys, scale,
+            ctx.traffic_lights_right_phys(),
+        );
         lx_event!(
             "WINDOW_OPENED",
             "new window announced to core",

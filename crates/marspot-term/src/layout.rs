@@ -237,6 +237,14 @@ pub const TRAFFIC_LIGHT_CENTER_Y_LOGICAL: f64 = 16.0;
 /// this leaves a 15pt gap — wide enough that the OS's cluster and ours
 /// read as two groups instead of one crowded run of controls.
 const TOOLBAR_LEFT_LOGICAL: f64 = 84.0;
+/// Gap between the OS's window-button cluster and our first icon —
+/// wide enough that the two read as two groups rather than one
+/// crowded run of controls.  (The old constant above bakes the same
+/// 15 pt in against a measured cluster edge of 69.)
+const TOOLBAR_LIGHTS_GAP_LOGICAL: f64 = 15.0;
+/// Left margin when there is no cluster to clear.  The same breathing
+/// room the cluster itself gets from the window edge.
+const TOOLBAR_EDGE_MARGIN_LOGICAL: f64 = 9.0;
 
 /// Sidebar geometry, all in physical pixels.  Renderer reads
 /// `Layout::sidebar_top_pad_phys` (computed at build time so the
@@ -376,10 +384,13 @@ impl Layout {
     /// from `ctx.scale()`); we use it for the button + picker
     /// (logical-pt sizing).  `n_sessions` populates the close-[×]
     /// rects (one per row).
+    /// `lights_right_phys` is where the OS's own window buttons end,
+    /// measured by the shell (`0.0` when they are not on screen).
     pub fn with_chrome(
         mut self,
         scale: f64,
         n_sessions: usize,
+        lights_right_phys: f64,
     ) -> Self {
         let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
         let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
@@ -400,7 +411,18 @@ impl Layout {
         // sidebar is shown or collapsed.
         let btn_w = btn_size;
         let btn_h = btn_size;
-        let sidebar_btn_x = TOOLBAR_LEFT_LOGICAL * scale;
+        // The toolbar starts after the OS's cluster, wherever that
+        // ends — and when the cluster is gone (full screen), it starts
+        // at the window's own margin instead of leaving a hole where
+        // the buttons used to be (2026-08-11 report).
+        //
+        // `TOOLBAR_LEFT_LOGICAL` survives only as the fallback for a
+        // shell too old to send the measurement.
+        let sidebar_btn_x = if lights_right_phys > 0.0 {
+            lights_right_phys + TOOLBAR_LIGHTS_GAP_LOGICAL * scale
+        } else {
+            TOOLBAR_EDGE_MARGIN_LOGICAL * scale
+        };
         let layout_btn_x = sidebar_btn_x + btn_size + btn_gap;
         // F3+1 — process-tree toggle sits immediately right of layout
         // picker, anchored to the left toolbar group.  Keeps all three
@@ -737,7 +759,7 @@ mod tests {
         // `with_chrome` is what lays the toolbar out; `build` alone
         // makes the chrome-less layout the bench and snapshot paths use.
         let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
-            .with_chrome(2.0, 2);
+            .with_chrome(2.0, 2, 138.0);
         let btns = l.toolbar_buttons();
         assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
         for (i, b) in btns.iter().enumerate() {
@@ -840,6 +862,39 @@ mod tests {
         assert_eq!(l.hit_test(250.0, 400.0), Some(2));
         // Click in bottom-right cell
         assert_eq!(l.hit_test(800.0, 400.0), Some(3));
+    }
+
+    /// Full screen takes the OS's window buttons away; the toolbar
+    /// has to move into the space they left rather than sit to the
+    /// right of a hole (2026-08-11 report).
+    #[test]
+    fn the_toolbar_follows_the_window_buttons() {
+        let windowed = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
+            .with_chrome(2.0, 1, 138.0);
+        let full = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
+            .with_chrome(2.0, 1, 0.0);
+
+        let w0 = windowed.toolbar_buttons()[0];
+        let f0 = full.toolbar_buttons()[0];
+        assert!(
+            w0.x > 138.0,
+            "windowed: the toolbar starts after the cluster, not on it",
+        );
+        assert!(
+            f0.x < w0.x,
+            "full screen: the toolbar moves left into the freed space \
+             ({:.0} should be left of {:.0})",
+            f0.x, w0.x,
+        );
+        assert!(f0.x > 0.0, "…but keeps a margin off the window edge");
+        // Everything shifts together — the group keeps its shape.
+        let wb = windowed.toolbar_buttons();
+        let fb = full.toolbar_buttons();
+        let shift = wb[0].x - fb[0].x;
+        for (a, b) in wb.iter().zip(fb.iter()) {
+            assert!((a.x - b.x - shift).abs() < 1e-6, "the toolbar came apart");
+            assert!((a.y_top - b.y_top).abs() < 1e-6, "and it stays on its row");
+        }
     }
 
     #[test]

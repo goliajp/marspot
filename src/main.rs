@@ -998,7 +998,7 @@ impl Marspot {
             phys_w, phys_h, sidebar_phys, header_phys, title_phys,
             lc, lr, cell_w, cell_h,
         )
-        .with_chrome(scale, self.panes.len());
+        .with_chrome(scale, self.panes.len(), 0.0);
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);
