@@ -29,4 +29,4 @@
 
 shell   = "0.7.111"  # 刚开的 pane 从启动横幅读 model,不用等第一次回答;详见 CHANGELOG.md
 core    = "0.12.124"  # 布局网格上限 6 → 9(会话上限同步到 9×9=81);详见 CHANGELOG.md
-session = "0.11.44"  # 随 marspot-term(新增 WindowChrome 消息);详见 CHANGELOG.md
+session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md

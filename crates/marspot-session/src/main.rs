@@ -1453,6 +1453,22 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let my_pid = std::process::id() as i32;
     let mut last_entry_check = Instant::now();
     const ENTRY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+    // The settings stat gets its own, faster beat.
+    //
+    // It used to ride the reachability check, so a setting L3 owns —
+    // character width — took up to five seconds to bite, and the way
+    // you notice a setting is by using it immediately after flipping
+    // it.  One `stat` a second per session is nothing next to the
+    // parse loop it sits beside.
+    //
+    // A wire frame from the panel would be instant rather than
+    // ≤1 s, and was deliberately not built: the file is the single
+    // source of truth (it is also hand-editable), and a frame that
+    // carried values would be a second path that can disagree with
+    // it.  Every unit bug this codebase has had was two paths
+    // answering one question.
+    let mut last_settings_check = Instant::now();
+    const SETTINGS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
     loop {
         let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(ev) => Some(ev),
@@ -1462,14 +1478,12 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 break;
             }
         };
-        if last_entry_check.elapsed() >= ENTRY_CHECK_INTERVAL {
-            last_entry_check = Instant::now();
-            // Same `stat` cadence the reachability check already pays
-            // for.  L3 owns character width, so the settings that
-            // change it have to reach here — new content is parsed
-            // with the new rule; cells already on screen keep the
-            // width they were laid out with, and heal as the program
-            // redraws them.
+        // A setting L3 owns — character width — bites as soon as the
+        // file says so.  New content is parsed with the new rule;
+        // cells already on screen keep the width they were laid out
+        // with, and heal as the program redraws them.
+        if last_settings_check.elapsed() >= SETTINGS_CHECK_INTERVAL {
+            last_settings_check = Instant::now();
             if marspot_term::settings::reload_if_changed() {
                 lx_event!(
                     "SETTINGS_RELOADED",
@@ -1478,6 +1492,15 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         marspot_term::settings::get().appearance_circled_wide as u64
                 );
             }
+        }
+        if last_entry_check.elapsed() >= ENTRY_CHECK_INTERVAL {
+            last_entry_check = Instant::now();
+            // Same `stat` cadence the reachability check already pays
+            // for.  L3 owns character width, so the settings that
+            // change it have to reach here — new content is parsed
+            // with the new rule; cells already on screen keep the
+            // width they were laid out with, and heal as the program
+            // redraws them.
             let unreachable = if !my_entry_path.exists() {
                 Some("entry.toml removed")
             } else if !my_socket_path.exists() {
