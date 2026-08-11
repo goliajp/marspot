@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.106"  # 把红绿灯的真实右边界量给 L2(全屏时为 0);详见 CHANGELOG.md
-core    = "0.12.117"  # 列表截断带省略号(搜索结果不再中途断掉);Aa/× 不再挤在一起;详见 CHANGELOG.md
+core    = "0.12.118"  # 单进程渲染器也接上红绿灯测量(沙箱因此才能复现全屏);详见 CHANGELOG.md
 session = "0.11.43"  # 随 marspot-term(wire 追加一个字段 + layout 签名);详见 CHANGELOG.md

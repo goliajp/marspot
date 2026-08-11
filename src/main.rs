@@ -998,7 +998,16 @@ impl Marspot {
             phys_w, phys_h, sidebar_phys, header_phys, title_phys,
             lc, lr, cell_w, cell_h,
         )
-        .with_chrome(scale, self.panes.len(), None);
+        // The standalone renderer has the window right here, so it
+        // asks directly — no wire hop.  Passing `None` (what this did
+        // first) pinned the toolbar to the fallback constant, which is
+        // also why the sandbox could not reproduce the full-screen
+        // report: `bin/run.sh` runs *this* binary, not the L1/L2 pair.
+        .with_chrome(
+            scale,
+            self.panes.len(),
+            Some(ctx.traffic_lights_right_phys()),
+        );
         for (i, p) in self.panes.iter_mut().enumerate() {
             if let Some(rect) = layout.cells.get(i) {
                 p.resize(rect.cols, rect.rows);
