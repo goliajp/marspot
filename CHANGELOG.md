@@ -28,7 +28,17 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.112**
+Current: **0.7.113**
+
+### 0.7.113
+
+0.7.112 装机后,日志里立刻出现一条 `SUPERVISOR_STALL gap_ms=16139` —— 那 16
+秒是 shell 从构造到第一次 supervisor pass 的**启动过程**,不是看门狗迟到。
+`last_tick_at` 改成 `Option`,首次 tick 不参与判定。
+
+后果不在行为(那一刻要「宽恕」的 deadline 本来就是刚设的),在于**日志**:
+一条每次开机都出现的假 stall,会让以后任何读日志的人从错误的地方开始查。测
+量装置的失效长得跟数据一模一样,这条也一样 —— 只不过方向反过来。
 
 ### 0.7.112
 

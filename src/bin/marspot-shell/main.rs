@@ -1067,8 +1067,12 @@ struct ShellApp {
     disabled_at: Option<Instant>,
     budget_trips: u32,
     /// When `poll_supervisor` last ran — the witness for
-    /// [`SUPERVISOR_STALL_GAP`].
-    last_tick_at: Instant,
+    /// [`SUPERVISOR_STALL_GAP`].  `None` until the first tick: the
+    /// sixteen seconds between constructing this struct and the first
+    /// supervisor pass are the shell *booting*, not the supervisor
+    /// falling behind, and logging that as a stall would leave a
+    /// false witness in every log for anyone who later reads one.
+    last_tick_at: Option<Instant>,
     /// Currently-displayed banner, or `None` for clear.  Kept on
     /// the shell so `poll_supervisor` can recompute it from state
     /// transitions and call `presenter.set_banner` only when it
@@ -1592,7 +1596,7 @@ impl ShellApp {
             auto_restart_disabled: false,
             disabled_at: None,
             budget_trips: 0,
-            last_tick_at: Instant::now(),
+            last_tick_at: None,
             banner_kind: None,
             core_boot_ring: std::collections::VecDeque::with_capacity(16),
             plugin_host: {
@@ -2793,9 +2797,9 @@ impl ShellApp {
         // left alone: the next tick pings immediately, which is how we
         // find out what actually happened.
         let tick_now = Instant::now();
-        let tick_gap = tick_now.duration_since(self.last_tick_at);
-        self.last_tick_at = tick_now;
-        if tick_gap > SUPERVISOR_STALL_GAP {
+        let since_last = self.last_tick_at.map(|t| tick_now.duration_since(t));
+        self.last_tick_at = Some(tick_now);
+        if let Some(tick_gap) = since_last.filter(|g| *g > SUPERVISOR_STALL_GAP) {
             if let Some(c) = self.active.as_mut() {
                 c.spawned_at = forgive_stall(c.spawned_at, tick_gap, tick_now);
                 c.last_pong_at = forgive_stall(c.last_pong_at, tick_gap, tick_now);
