@@ -726,6 +726,9 @@ pub struct MetalRenderer {
     ui_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     /// Shared font handling — same data the AppKit renderer uses.
     font: FontCache,
+    /// The `ui::chrome_scale` the fonts above were built for.  A
+    /// display swap changes it; see `rebuild_fonts_if_scale_changed`.
+    fonts_built_at_scale: f64,
     /// Glyph atlas backing the FG pass.  Constructed in `new` /
     /// `new_headless`; grows lazily as cells reference new glyphs.
     atlas: GlyphAtlas,
@@ -917,6 +920,7 @@ impl MetalRenderer {
         }
 
         Ok(Self {
+            fonts_built_at_scale: crate::ui::chrome_scale(),
             device,
             queue,
             layer: Some(layer),
@@ -981,6 +985,7 @@ impl MetalRenderer {
         // packer + atomic-rebuild-on-full bound as the mono atlas.
         let color_atlas = GlyphAtlas::new_color(&device, 1024, 1024)?;
         Ok(Self {
+            fonts_built_at_scale: crate::ui::chrome_scale(),
             device,
             queue,
             layer: None,
@@ -1129,6 +1134,35 @@ impl MetalRenderer {
     /// Phase 10c — borrow the `FontCache` mutably for chrome
     /// measurement.  Used by `chrome_measure::ChromeMeasure::new`
     /// to wrap the cache in a `RefCell` for the view layout pass.
+    /// Re-derive the fonts for the display scale in force, if it has
+    /// changed since they were built.
+    ///
+    /// The terminal cell comes out of `FontCache::build`, which reads
+    /// `ui::chrome_scale` — so a window moved between displays of
+    /// different densities needs the cache rebuilt or the grid keeps
+    /// the old density's cell.  Returns whether anything changed, so
+    /// the caller only reflows when it must.
+    ///
+    /// Cheap enough to call on every scale report and no cheaper: it
+    /// re-opens the font stack (~ms) and empties both atlases, which
+    /// the next frame re-fills for the glyphs actually on screen.
+    pub fn rebuild_fonts_if_scale_changed(&mut self) -> bool {
+        let want = crate::ui::chrome_scale();
+        if (self.fonts_built_at_scale - want).abs() < 1e-9 {
+            return false;
+        }
+        let Ok(font) = FontCache::build() else {
+            // Keep the fonts we have: a cell of the wrong density is
+            // legible, and no cell at all is not.
+            return false;
+        };
+        self.font = font;
+        self.atlas.drop_all_glyphs();
+        self.color_atlas.drop_all_glyphs();
+        self.fonts_built_at_scale = want;
+        true
+    }
+
     pub fn font_mut(&mut self) -> &mut FontCache {
         &mut self.font
     }
@@ -8329,6 +8363,37 @@ mod tests {
         // …and it is a decision about the *grid*, so it is the same
         // decision wherever the character appears — never per-neighbour.
         crate::settings::set_for_test(crate::settings::Settings::default());
+    }
+
+    /// Rebuilding the fonts is what makes a display swap land, and it
+    /// must be a no-op when nothing moved — it runs on every attach,
+    /// and throwing both atlases away per resize step would make a
+    /// window drag re-rasterise the screen continuously.
+    #[test]
+    fn fonts_rebuild_only_when_the_scale_actually_moves() {
+        let saved = crate::ui::chrome_scale();
+        let Ok(mut r) = MetalRenderer::new_headless() else { return };
+        let (w0, h0) = r.cell_dims();
+
+        assert!(!r.rebuild_fonts_if_scale_changed(), "nothing moved");
+        assert_eq!(r.cell_dims(), (w0, h0));
+
+        crate::ui::set_chrome_scale(2.0);
+        assert!(r.rebuild_fonts_if_scale_changed(), "a new density rebuilds");
+        let (w2, h2) = r.cell_dims();
+        assert!(
+            (w2 - w0 * 2.0).abs() < 0.5 && (h2 - h0 * 2.0).abs() < 0.5,
+            "the cell has to double with the density: {w0:.2}x{h0:.2} -> {w2:.2}x{h2:.2}",
+        );
+        assert!(!r.rebuild_fonts_if_scale_changed(), "and settle");
+
+        crate::ui::set_chrome_scale(saved);
+        assert!(r.rebuild_fonts_if_scale_changed());
+        let (w1, h1) = r.cell_dims();
+        assert!(
+            (w1 - w0).abs() < 0.01 && (h1 - h0).abs() < 0.01,
+            "and come back exactly: {w0:.2}x{h0:.2} -> {w1:.2}x{h1:.2}",
+        );
     }
 
     /// The scrim primitive is shared by every reason a pane recedes,

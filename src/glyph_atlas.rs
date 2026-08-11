@@ -737,6 +737,17 @@ impl GlyphAtlas {
         self.rebuild_count += 1;
     }
 
+    /// Throw every glyph away because the *font* changed underneath —
+    /// a display swap re-derives the terminal cell, so what is packed
+    /// here was rasterised for sizes nothing will ask for again.
+    ///
+    /// Keys carry the point size, so stale entries would never be
+    /// *hit*; they would simply occupy the sheet until eviction got
+    /// round to them, and on a swap that is the whole sheet.
+    pub fn drop_all_glyphs(&mut self) {
+        self.rebuild();
+    }
+
     /// Find a position for a `(w, h)` glyph using the shelf packer.
     /// Returns `(x, y, shelf_idx)` — the latter so the caller can
     /// record the placed entry's key on its shelf for LRU eviction.

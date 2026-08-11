@@ -5366,11 +5366,13 @@ impl CoreApp {
         win!(self, wi).w_phys = w_phys;
         win!(self, wi).h_phys = h_phys;
         // A window that moved to a display of another density reports
-        // it here.  The chrome follows immediately; the terminal cell
-        // does not — it is baked into the font cache at build time,
-        // which is the known limit written on `chrome_scale`.
+        // it here.  Chrome follows from the next layout; the terminal
+        // cell has to come out of a rebuilt font cache, because its
+        // size is the font's metrics and those were taken at the old
+        // density.
         marspot::ui::set_chrome_scale(scale);
         win!(self, wi).scale = marspot::ui::chrome_scale();
+        self.adopt_display_scale();
         self.rebuild_layout(wi);
         Some(wi)
     }
@@ -6354,6 +6356,34 @@ impl CoreApp {
     /// the hit-test measures through this same path — a segment
     /// clickable somewhere other than where it is drawn is exactly
     /// what a second, approximate measurement would produce.
+    /// Re-derive everything that was sized for the old display.
+    ///
+    /// A MacBook Pro and a 4K panel run without HiDPI are two
+    /// densities, and a window gets dragged between them — so this is
+    /// a normal event, not a corner case.  The font cache holds the
+    /// terminal cell, so it is rebuilt first; then every window
+    /// relayouts, which resizes its panes, which is what tells each
+    /// PTY its new size.  No-op when the scale did not actually move,
+    /// which is the common case (this runs on every attach).
+    fn adopt_display_scale(&mut self) {
+        if !self.renderer.rebuild_fonts_if_scale_changed() {
+            return;
+        }
+        let (cell_w, cell_h) = self.renderer.cell_dims();
+        lx_event!(
+            "DISPLAY_SCALE_ADOPTED",
+            "fonts rebuilt for a new display density; grids reflow",
+            chrome_scale = format!("{:.2}", marspot::ui::chrome_scale()),
+            cell_w = format!("{cell_w:.2}"),
+            cell_h = format!("{cell_h:.2}"),
+            windows = self.windows.len() as u64
+        );
+        for wi in 0..self.windows.len() {
+            self.rebuild_layout(wi);
+            win!(self, wi).needs_render = true;
+        }
+    }
+
     /// Adopt a new window-button cluster edge and relay it out.
     ///
     /// Shared by the attach path and the chrome-only frame so the two
