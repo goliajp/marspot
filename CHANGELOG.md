@@ -28,7 +28,22 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.108**
+Current: **0.7.109**
+
+### 0.7.109
+
+**退出全屏还是重叠约一秒 —— 数据早就到了,慢的是画面。**
+
+日志显示 `windowWillExitFullScreen:` 在转场**开始**时就送出了 69.0(退出结束
+是 600ms 之后)。所以位置信息不晚,晚的是那一帧。
+
+原因是我把这个通知接到了 `resized` 上:它会**重建一对 IOSurface**,而此刻窗口
+尺寸根本没变。这一趟换面要走 L1→L2→渲染→L1 的整趟握手,于是动画期间呈现的
+仍是旧帧 —— 工具栏还压在刚滑回来的按钮上。
+
+新增一条只说这件事的消息 `WindowChrome`(12 字节:window_id + 边界)。
+**chrome 变了、像素没变**,就不该动 surface。老 core 读不懂这个类型会跳过,
+而跳过的语义正好对:保留它已有的 chrome。
 
 ### 0.7.108
 

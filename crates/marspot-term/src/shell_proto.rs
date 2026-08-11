@@ -445,6 +445,20 @@ pub enum MsgType {
     CliText = 75,
     /// CLI → L1: switch the autorun policy for a pane, or ask.
     CliAutorun = 76,
+    /// L1 → L2: window chrome geometry changed, nothing else did.
+    ///
+    /// Today that is where the OS's window-button cluster ends, which
+    /// moves when a window enters or leaves full screen.  It rides its
+    /// own message rather than the surface attach it used to because
+    /// attaching **recreates the IOSurface pair** — free during a real
+    /// resize, but during a full-screen transition the size has not
+    /// changed and the churn made the presented frame lag the
+    /// animation: the toolbar kept sitting on the buttons for about a
+    /// second after they slid back in (2026-08-11).
+    ///
+    /// An older core skips an unknown type, which is exactly the
+    /// behaviour wanted: it keeps its previous chrome.
+    WindowChrome = 77,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -510,6 +524,7 @@ impl MsgType {
             74 => MsgType::CliReadPane,
             75 => MsgType::CliText,
             76 => MsgType::CliAutorun,
+            77 => MsgType::WindowChrome,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1324,6 +1339,26 @@ pub fn decode_surface_attach_window(
         trailing_window_id(payload, 32),
         frame_index,
         lights_right,
+    ))
+}
+
+/// `(window_id, lights_right_phys)` — see [`MsgType::WindowChrome`].
+pub fn encode_window_chrome(window_id: u32, lights_right_phys: f64) -> Vec<u8> {
+    let mut v = window_id.to_le_bytes().to_vec();
+    v.extend_from_slice(&lights_right_phys.to_le_bytes());
+    v
+}
+
+pub fn decode_window_chrome(payload: &[u8]) -> io::Result<(u32, f64)> {
+    if payload.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WINDOW_CHROME payload < 12 bytes",
+        ));
+    }
+    Ok((
+        u32::from_le_bytes(payload[0..4].try_into().unwrap()),
+        f64::from_le_bytes(payload[4..12].try_into().unwrap()),
     ))
 }
 
@@ -3204,6 +3239,26 @@ mod tests {
         assert_eq!(MsgType::from_u32(69), Some(MsgType::PaneInjectPaste));
 
         assert_eq!(MsgType::from_u32(65), Some(MsgType::WindowCloseRequest));
+    }
+
+    /// The chrome frame is small, decodes by number, and an older
+    /// peer skips it rather than choking — which for this message is
+    /// exactly right: a core that cannot read it keeps the chrome it
+    /// already had.
+    #[test]
+    fn window_chrome_round_trips_and_is_skippable() {
+        let p = encode_window_chrome(7, 138.0);
+        assert_eq!(p.len(), 12, "12 bytes: a u32 and an f64");
+        assert_eq!(decode_window_chrome(&p).unwrap(), (7, 138.0));
+        // Zero is a real answer (full screen), not a missing one.
+        assert_eq!(decode_window_chrome(&encode_window_chrome(1, 0.0)).unwrap(), (1, 0.0));
+        // Short payloads are refused rather than read off the end.
+        assert!(decode_window_chrome(&p[..11]).is_err());
+        assert!(decode_window_chrome(&[]).is_err());
+        // The number is stable — changing it silently retargets the
+        // message on one side of a swap.
+        assert_eq!(MsgType::WindowChrome as u32, 77);
+        assert_eq!(MsgType::from_u32(77), Some(MsgType::WindowChrome));
     }
 
     #[test]

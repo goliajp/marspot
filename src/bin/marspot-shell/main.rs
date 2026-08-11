@@ -561,7 +561,8 @@ use marspot::iosurface::IOSurface;
 use marspot::shell_proto::{
     decode_caret_rect, decode_hello_ack, decode_pong, decode_surface_ready, encode_file_drop,
     encode_focus, encode_hello, encode_key_event, encode_mouse, encode_ping, encode_preedit,
-    encode_scroll, encode_surface_attach, encode_surface_attach_window, event_to_wire,
+    encode_scroll, encode_surface_attach, encode_surface_attach_window,
+    encode_window_chrome, event_to_wire,
     struct_to_mods_byte, Frame, MsgType,
     DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT, ENV_SURFACE_ID,
     ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
@@ -4323,6 +4324,19 @@ impl MarspotApp for ShellApp {
     fn scroll(&mut self, ctx: &MarspotAppCtx, dx: f64, dy: f64, precise: bool) {
         let w = Self::event_window(ctx);
         self.send(MsgType::Scroll, encode_scroll(dx, dy, precise, w));
+    }
+
+    /// The OS's own controls moved (full-screen transition) while the
+    /// window's pixels did not.  One small frame, no surface churn —
+    /// see `MsgType::WindowChrome`.
+    fn chrome_changed(&mut self, ctx: &MarspotAppCtx) {
+        self.send(
+            MsgType::WindowChrome,
+            encode_window_chrome(
+                Self::event_window(ctx),
+                ctx.traffic_lights_right_phys(),
+            ),
+        );
     }
 
     fn resized(&mut self, ctx: &MarspotAppCtx, w_phys: f64, h_phys: f64) {

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.108"  # 退出全屏在转场开始时就让位,不等动画结束;详见 CHANGELOG.md
-core    = "0.12.118"  # 单进程渲染器也接上红绿灯测量(沙箱因此才能复现全屏);详见 CHANGELOG.md
-session = "0.11.43"  # 随 marspot-term(wire 追加一个字段 + layout 签名);详见 CHANGELOG.md
+shell   = "0.7.109"  # chrome 变化走自己的轻量帧,不再重建 IOSurface;详见 CHANGELOG.md
+core    = "0.12.119"  # 收 WindowChrome 帧;测量的落地收成一处;详见 CHANGELOG.md
+session = "0.11.44"  # 随 marspot-term(新增 WindowChrome 消息);详见 CHANGELOG.md

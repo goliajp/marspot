@@ -124,6 +124,11 @@ pub trait MarspotApp: 'static {
     /// of a live resize plus once after the window is initially shown.
     fn resized(&mut self, ctx: &MarspotAppCtx, width_phys: f64, height_phys: f64);
 
+    /// Window chrome moved — the OS's own controls are somewhere new,
+    /// while the window's pixels are not.  Read it with
+    /// `ctx.traffic_lights_right_phys()`.  Default no-op.
+    fn chrome_changed(&mut self, _ctx: &MarspotAppCtx) {}
+
     /// F3+6.1 — fired on `windowDidMove:` so apps can persist window
     /// frame on drag.  Default no-op so existing apps don't have to
     /// care.  Use `ctx.window_frame_pt()` to read the new frame.
@@ -1106,7 +1111,10 @@ define_class!(
         /// correct.
         #[unsafe(method(windowDidEnterFullScreen:))]
         fn window_did_enter_full_screen(&self, _notification: &NSNotification) {
-            dispatch_event_for(self.ivars().window_id.get(), EventKind::Resized);
+            dispatch_event_for(
+                self.ivars().window_id.get(),
+                EventKind::FullScreenDidEnter,
+            );
         }
 
         #[unsafe(method(windowWillExitFullScreen:))]
@@ -1166,6 +1174,8 @@ define_class!(
 
 pub enum EventKind {
     UserEvent,
+    /// `windowDidEnterFullScreen:` — the cluster is gone.
+    FullScreenDidEnter,
     /// `windowWillExitFullScreen:` — the transition is starting.
     FullScreenWillExit,
     /// `windowDidExitFullScreen:` — it is over.
@@ -1303,19 +1313,20 @@ fn dispatch_event_for(window_id: u32, kind: EventKind) {
                 let (w, h) = ctx.inner_size_phys();
                 app.resized(ctx, w, h);
             }
-            // Leaving full screen: republish the chrome *now*, at the
-            // start of the transition, with the window's own size —
-            // the buttons come back during the animation and the
-            // toolbar has to be out of their corner before they land.
+            // Full-screen transitions change the chrome, not the
+            // size — so they say *that*, and nothing else.  Routing
+            // them through `resized` (the first cut) recreated the
+            // IOSurface pair for a window whose pixels had not moved,
+            // and the extra churn is what left the toolbar sitting on
+            // the buttons for the length of the exit animation.
+            EventKind::FullScreenDidEnter => app.chrome_changed(ctx),
             EventKind::FullScreenWillExit => {
                 ctx.begin_exit_full_screen();
-                let (w, h) = ctx.inner_size_phys();
-                app.resized(ctx, w, h);
+                app.chrome_changed(ctx);
             }
             EventKind::FullScreenDidExit => {
                 ctx.end_exit_full_screen();
-                let (w, h) = ctx.inner_size_phys();
-                app.resized(ctx, w, h);
+                app.chrome_changed(ctx);
             }
             EventKind::Moved => app.moved(ctx),
             EventKind::Focused(f) => app.focused(ctx, f),

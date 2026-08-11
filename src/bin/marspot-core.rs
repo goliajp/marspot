@@ -43,7 +43,8 @@ use marspot::session_registry::{
 use marspot::shell_proto::{
     decode_file_drop, decode_focus, decode_hello, decode_key_event, decode_mouse, decode_ping,
     decode_preedit, decode_resize, decode_scroll, decode_selection_text, decode_surface_attach,
-    decode_surface_attach_window, decode_window_closed, decode_window_focus,
+    decode_surface_attach_window, decode_window_chrome, decode_window_closed,
+    decode_window_focus,
     encode_caret_rect, encode_hello_ack, encode_pong, encode_surface_ready, mods_to_struct,
     wire_to_event, Frame, MsgType, DEFAULT_CONTROL_FD, ENV_CONTROL_FD, ENV_SURFACE_HEIGHT,
     ENV_SURFACE_ID, ENV_SURFACE_ID_BACK, ENV_SURFACE_SCALE, ENV_SURFACE_WIDTH, PROTO_VERSION,
@@ -2223,6 +2224,8 @@ enum CoreEvent {
     /// RFC-005 — window-aware surface attach.  A `window_id` the core
     /// has not seen before *is* that window's birth event.
     SurfaceAttachWindow(u32, u32, f64, f64, f64, u32, Option<u32>, Option<f64>),
+    /// `(window_id, lights_right_phys)` — chrome moved, pixels did not.
+    WindowChrome(u32, f64),
     /// RFC-005 step 6b — a restore worker finished assembling a saved
     /// window's panes; they replace that window's placeholders.
     WindowRestoreFinished(u32, RestoredPanes),
@@ -2482,6 +2485,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
             .map(|(fr, bk, w, h, sc, win, slot, lights)| {
                 CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot, lights)
             }),
+        MsgType::WindowChrome => decode_window_chrome(&f.payload)
+            .ok()
+            .map(|(win, lights)| CoreEvent::WindowChrome(win, lights)),
         MsgType::WindowClosed => decode_window_closed(&f.payload)
             .ok()
             .map(CoreEvent::WindowClosed),
@@ -6316,6 +6322,34 @@ impl CoreApp {
     /// the hit-test measures through this same path — a segment
     /// clickable somewhere other than where it is drawn is exactly
     /// what a second, approximate measurement would produce.
+    /// Adopt a new window-button cluster edge and relay it out.
+    ///
+    /// Shared by the attach path and the chrome-only frame so the two
+    /// cannot disagree about what a measurement means.
+    fn apply_window_chrome(&mut self, window_id: u32, right_phys: f64) {
+        let Some(wi) = self.window_index(window_id) else { return };
+        let changed = win!(self, wi)
+            .lights_right_phys
+            .map(|old| (old - right_phys).abs() > 0.5)
+            .unwrap_or(true);
+        lx_event!(
+            "TRAFFIC_LIGHTS",
+            "window-button cluster edge as measured by the shell",
+            window_id = window_id as u64,
+            right_phys = format!("{right_phys:.1}"),
+            was = win!(self, wi)
+                .lights_right_phys
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "unmeasured".into()),
+            changed = changed as u32
+        );
+        if changed {
+            win!(self, wi).lights_right_phys = Some(right_phys);
+            self.rebuild_layout(wi);
+            win!(self, wi).needs_render = true;
+        }
+    }
+
     fn settings_modal_rect(&mut self, wi: usize) -> marspot_term::layout::Rect {
         let (w_phys, h_phys, top_inset) = (
             win!(self, wi).w_phys,
@@ -9175,6 +9209,9 @@ fn main() {
                 CoreEvent::WindowRestoreFinished(win, panes) => {
                     app.adopt_restored_panes(win, panes.0)
                 }
+                CoreEvent::WindowChrome(win, lights) => {
+                    app.apply_window_chrome(win, lights);
+                }
                 CoreEvent::WindowClosed(win) => app.close_window(win),
                 CoreEvent::SurfaceAttachWindow(fr, bk, w, h, sc, win, slot, lights) => {
                     // Same staging as the legacy frame — the id only
@@ -9195,27 +9232,7 @@ fn main() {
                     // shell measured them.  `None` = a shell that
                     // predates the field; keep whatever we had.
                     if let Some(px) = lights {
-                        if let Some(wi) = app.window_index(win) {
-                            lx_event!(
-                                "TRAFFIC_LIGHTS",
-                                "window-button cluster edge as measured by the shell",
-                                window_id = win as u64,
-                                right_phys = format!("{px:.1}"),
-                                was = win!(app, wi)
-                                    .lights_right_phys
-                                    .map(|v| format!("{v:.1}"))
-                                    .unwrap_or_else(|| "unmeasured".into())
-                            );
-                            let changed = win!(app, wi)
-                                .lights_right_phys
-                                .map(|old| (old - px).abs() > 0.5)
-                                .unwrap_or(true);
-                            if changed {
-                                win!(app, wi).lights_right_phys = Some(px);
-                                app.rebuild_layout(wi);
-                                win!(app, wi).needs_render = true;
-                            }
-                        }
+                        app.apply_window_chrome(win, px);
                     }
                     queue_attach(pending_attach, win, (fr, bk, w, h, sc));
                 }
