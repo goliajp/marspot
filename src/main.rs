@@ -985,7 +985,9 @@ impl Marspot {
     fn rebuild_layout_at(&mut self, ctx: &MarspotAppCtx, phys_w: f64, phys_h: f64) {
         let Some(r) = self.renderer.as_ref() else { return };
         let (cell_w, cell_h) = r.cell_dims();
-        let scale = ctx.scale();
+        // Chrome's unit, not the display's — see
+        // `marspot::ui::CHROME_SCALE`.
+        let scale = marspot::ui::CHROME_SCALE;
         let sidebar_phys = if self.sidebar_collapsed {
             0.0
         } else {
@@ -1924,6 +1926,17 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+/// The chrome unit a snapshot draws with.  Defaults to what the app
+/// uses; `MARSPOT_SHOT_SCALE` overrides it to reproduce the
+/// display-scaled behaviour chrome had before 2026-08-11.
+#[cfg(feature = "snapshot")]
+fn shot_scale() -> f64 {
+    std::env::var("MARSPOT_SHOT_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(marspot::ui::CHROME_SCALE)
+}
+
 #[cfg(feature = "snapshot")]
 /// Headless render: one frame into an offscreen texture, out as a PNG.
 ///
@@ -2052,10 +2065,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             renderer.set_layout_modal(Some(marspot::render_metal::LayoutModalRender {
                 cols: 6,
                 rows: 2,
-                scale: std::env::var("MARSPOT_SHOT_SCALE")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(2.0),
+                scale: shot_scale(),
                 slot_titles: vec![
                     "marspot".into(), "torajs".into(), "spg".into(),
                     "smix".into(), "devops".into(), "insight".into(),
@@ -2080,15 +2090,11 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
                 divider: true,
             };
             renderer.set_context_menu(Some(ContextMenuRender {
-                // `MARSPOT_SHOT_SCALE` reproduces a non-HiDPI display,
-                // where the window reports `backingScaleFactor == 1`.
-                // Chrome boxes scale with it and panel text does not,
-                // so it is the only way to see, from a retina dev
-                // machine, what that display actually gets.
-                scale: std::env::var("MARSPOT_SHOT_SCALE")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(2.0),
+                // The app always lays chrome out in
+                // `marspot::ui::CHROME_SCALE`; `MARSPOT_SHOT_SCALE`
+                // remains only to reproduce what the display-scaled
+                // version used to draw.
+                scale: shot_scale(),
                 anchor_phys: (420.0, 300.0),
                 top_inset: layout.top_inset,
                 items: vec![
@@ -2204,8 +2210,8 @@ fn demo_process_panel(
         w_phys,
         h_phys,
         ModalLayoutSpec {
-            default_w: 760.0 * 2.0,
-            default_h: 460.0 * 2.0,
+            default_w: 760.0 * shot_scale(),
+            default_h: 460.0 * shot_scale(),
             title_bar_h: 56.0,
             tab_strip_h: 0.0,
             maximized: false,

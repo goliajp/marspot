@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.109"  # chrome 变化走自己的轻量帧,不再重建 IOSurface;详见 CHANGELOG.md
-core    = "0.12.119"  # 收 WindowChrome 帧;测量的落地收成一处;详见 CHANGELOG.md
+core    = "0.12.120"  # chrome 不再乘显示器 scale —— 盒子和它的文字回到同一个单位;详见 CHANGELOG.md
 session = "0.11.44"  # 随 marspot-term(新增 WindowChrome 消息);详见 CHANGELOG.md

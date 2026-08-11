@@ -104,6 +104,41 @@ pub enum SelectionMode {
     Blockwise,
 }
 
+/// The multiplier chrome geometry applies to its own constants: **one**.
+///
+/// Everything marspot draws is authored in *physical pixels*.  The
+/// terminal cell is a fixed 7.2 × 16.0 px whatever display it lands
+/// on (`FONT_POINT` is a constant and its metrics are used as pixels);
+/// panel text is a fixed pt × 2 px; the chrome constants — menu row
+/// height, modal padding, sidebar width — were tuned by eye against
+/// those, on a display whose `backingScaleFactor` is 1.
+///
+/// Chrome nonetheless multiplied them by that factor.  Measured
+/// 2026-08-11, same menu rendered at both scales:
+///
+/// | | scale 1 | scale 2 |
+/// |---|---|---|
+/// | menu box | 180 × 184 px | 356 × 368 px |
+/// | row pitch | 26 px | 52 px |
+/// | **label ink** | **12 px** | **12 px** |
+///
+/// The box doubles, the text it holds does not.  The app is therefore
+/// only self-consistent where the factor happens to be 1 — it looked
+/// right for the reason a stopped clock does.
+///
+/// So chrome stops multiplying.  On a `backingScaleFactor == 1`
+/// display this changes **nothing** (that is the test); anywhere else
+/// it stops the boxes drifting away from their contents.
+///
+/// What must still track the display is anything that lines up with
+/// the OS's own controls — the window-button cluster — and that is
+/// *measured* now rather than assumed, so it is right at any scale.
+///
+/// Making the app scale properly on a retina display is a different
+/// project: the terminal cell would have to scale too, and that is a
+/// product decision about how big text should be, not a unit bug.
+pub const CHROME_SCALE: f64 = 1.0;
+
 /// Scroll prefs: direction from the environment, speed from the
 /// settings file.
 ///
