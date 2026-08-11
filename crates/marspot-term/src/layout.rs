@@ -385,12 +385,21 @@ impl Layout {
     /// (logical-pt sizing).  `n_sessions` populates the close-[×]
     /// rects (one per row).
     /// `lights_right_phys` is where the OS's own window buttons end,
-    /// measured by the shell (`0.0` when they are not on screen).
+    /// as measured by the shell: `Some(0.0)` when they are not on
+    /// screen, and **`None` when nobody has measured yet**.
+    ///
+    /// Those two are not the same thing and collapsing them put the
+    /// toolbar straight on top of the buttons: a freshly built window
+    /// has no measurement, `0.0` was read as "no cluster", and the
+    /// icons drew over the OS's own (2026-08-11).  Unknown falls back
+    /// to the historical constant, which is right for the overwhelming
+    /// case (a normal window) and wrong only until the first frame
+    /// arrives.
     pub fn with_chrome(
         mut self,
         scale: f64,
         n_sessions: usize,
-        lights_right_phys: f64,
+        lights_right_phys: Option<f64>,
     ) -> Self {
         let btn_size = ICON_BUTTON_LOGICAL_SIZE * scale;
         let btn_gap = ICON_BUTTON_LOGICAL_GAP * scale;
@@ -418,10 +427,10 @@ impl Layout {
         //
         // `TOOLBAR_LEFT_LOGICAL` survives only as the fallback for a
         // shell too old to send the measurement.
-        let sidebar_btn_x = if lights_right_phys > 0.0 {
-            lights_right_phys + TOOLBAR_LIGHTS_GAP_LOGICAL * scale
-        } else {
-            TOOLBAR_EDGE_MARGIN_LOGICAL * scale
+        let sidebar_btn_x = match lights_right_phys {
+            Some(right) if right > 0.0 => right + TOOLBAR_LIGHTS_GAP_LOGICAL * scale,
+            Some(_) => TOOLBAR_EDGE_MARGIN_LOGICAL * scale,
+            None => TOOLBAR_LEFT_LOGICAL * scale,
         };
         let layout_btn_x = sidebar_btn_x + btn_size + btn_gap;
         // F3+1 — process-tree toggle sits immediately right of layout
@@ -759,7 +768,7 @@ mod tests {
         // `with_chrome` is what lays the toolbar out; `build` alone
         // makes the chrome-less layout the bench and snapshot paths use.
         let l = Layout::build(1400.0, 900.0, 0.0, 40.0, 20.0, 2, 2, 8.0, 16.0)
-            .with_chrome(2.0, 2, 138.0);
+            .with_chrome(2.0, 2, Some(138.0));
         let btns = l.toolbar_buttons();
         assert_eq!(btns.len(), 6, "add the icon too, or it will not be painted");
         for (i, b) in btns.iter().enumerate() {
@@ -870,9 +879,17 @@ mod tests {
     #[test]
     fn the_toolbar_follows_the_window_buttons() {
         let windowed = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
-            .with_chrome(2.0, 1, 138.0);
+            .with_chrome(2.0, 1, Some(138.0));
         let full = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
-            .with_chrome(2.0, 1, 0.0);
+            .with_chrome(2.0, 1, Some(0.0));
+        // Not measured yet is its own answer: keep clear of where the
+        // buttons normally are, rather than assuming they are gone.
+        let unknown = Layout::build(1600.0, 900.0, 0.0, 40.0, 0.0, 1, 1, 8.0, 16.0)
+            .with_chrome(2.0, 1, None);
+        assert!(
+            unknown.toolbar_buttons()[0].x >= 84.0 * 2.0 - 1e-6,
+            "an unmeasured window must not put its toolbar on the OS's buttons",
+        );
 
         let w0 = windowed.toolbar_buttons()[0];
         let f0 = full.toolbar_buttons()[0];

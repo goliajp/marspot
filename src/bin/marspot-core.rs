@@ -3165,9 +3165,14 @@ struct WindowState {
     /// + preview) live in the modal component.
     layout_modal_open: bool,
     /// Right edge of the OS's traffic-light cluster, physical px from
-    /// the window's left edge; `0.0` when it is not on screen (full
-    /// screen takes it away).  The toolbar starts after it.
-    lights_right_phys: f64,
+    /// the window's left edge; `Some(0.0)` when it is not on screen
+    /// (full screen takes it away), **`None` until the shell has
+    /// measured**.  The toolbar starts after it.
+    ///
+    /// `None` is not `Some(0.0)`: a window that has not been measured
+    /// yet must keep clear of where the buttons normally are, or its
+    /// first frames draw the toolbar on top of them.
+    lights_right_phys: Option<f64>,
     /// Width the widest layout-modal card label needed, physical px,
     /// as of the last published frame.
     ///
@@ -3283,7 +3288,7 @@ impl WindowState {
             grid_cols,
             grid_rows,
             layout_modal_open: false,
-            lights_right_phys: 0.0,
+            lights_right_phys: None,
             layout_modal_label_w: 0.0,
             context_menu: None,
             pending_grid_cols: grid_cols,
@@ -9191,8 +9196,22 @@ fn main() {
                     // predates the field; keep whatever we had.
                     if let Some(px) = lights {
                         if let Some(wi) = app.window_index(win) {
-                            if (win!(app, wi).lights_right_phys - px).abs() > 0.5 {
-                                win!(app, wi).lights_right_phys = px;
+                            lx_event!(
+                                "TRAFFIC_LIGHTS",
+                                "window-button cluster edge as measured by the shell",
+                                window_id = win as u64,
+                                right_phys = format!("{px:.1}"),
+                                was = win!(app, wi)
+                                    .lights_right_phys
+                                    .map(|v| format!("{v:.1}"))
+                                    .unwrap_or_else(|| "unmeasured".into())
+                            );
+                            let changed = win!(app, wi)
+                                .lights_right_phys
+                                .map(|old| (old - px).abs() > 0.5)
+                                .unwrap_or(true);
+                            if changed {
+                                win!(app, wi).lights_right_phys = Some(px);
                                 app.rebuild_layout(wi);
                                 win!(app, wi).needs_render = true;
                             }

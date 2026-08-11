@@ -220,6 +220,21 @@ impl MarspotAppCtx {
     /// asks them.
     pub fn traffic_lights_right_phys(&self) -> f64 {
         use objc2_app_kit::NSWindowButton;
+        // Full screen is the case this exists for, and it is the one
+        // signal that does not depend on how AppKit chose to get the
+        // cluster off the screen this release.  Measured 2026-08-11:
+        // in full screen the buttons are neither `isHidden` nor
+        // reparented — they live in an auto-hiding titlebar accessory
+        // that slides in on hover — so asking only the buttons left
+        // the toolbar sitting to the right of a hole.  The checks
+        // below stay as belt and braces for the ways it *is* visible.
+        if self
+            .nswindow
+            .styleMask()
+            .contains(NSWindowStyleMask::FullScreen)
+        {
+            return 0.0;
+        }
         let scale = self.scale();
         let view_h = self.ns_view().bounds().size.height;
         [
@@ -230,11 +245,14 @@ impl MarspotAppCtx {
         .into_iter()
         .filter_map(|b| self.nswindow.standardWindowButton(b))
         .filter(|btn| {
-            // Full screen leaves the buttons *present* but hidden, and
-            // parents them into an overlay that slides in on hover —
-            // a hidden button's frame is still its old one, so the
-            // hidden flag is the part that matters.
-            let hidden = btn.isHidden();
+            // Full screen leaves the buttons *present* but not on
+            // screen, and what AppKit actually hides is the titlebar
+            // container they live in — the buttons themselves report
+            // `isHidden == false` throughout (measured 2026-08-11:
+            // the first cut asked the button and got a cluster edge in
+            // full screen, so the toolbar never moved).  Ask whether
+            // anything in the chain is hidden.
+            let hidden = unsafe { btn.isHiddenOrHasHiddenAncestor() };
             let on_window = btn
                 .window()
                 .map(|w| std::ptr::eq(&*w, &*self.nswindow))
