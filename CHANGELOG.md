@@ -28,7 +28,35 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.104**
+Current: **0.7.105**
+
+### 0.7.105
+
+**切 profile 会 resume 到几小时前的 session。** 根因:**argv 说的是进程
+「起步于」哪个 session,不是它「现在在」哪个。**
+
+`claude --resume X` 把 X 写进 argv 并留在那里一辈子。而 `/clear` 会在**同一个
+进程里**开一个新 session,`/resume` 也会换一个 —— argv 冻在原地。插件把 argv
+当作唯一的铁证,于是这个 pane 一直报着一个**没人再写的** transcript:
+
+- 角标的 model 读的是那份死文件
+- 回收后 resume 的是那场旧对话
+- 切 profile 带回来的是用户几小时前离开的 session ← 用户报的这个
+
+实测:torajs 的 argv 是 `--resume f7a8a54b`,而真正在被追加的是
+`e024458b`,新 3 分钟且还在长。
+
+**能证明「哪个 session 是活的」的只有一件事:哪个 transcript 正在被写** ——
+claude 每次写完就关文件,没有 fd 可查。所以 argv 之后再问一句:这个项目里
+有没有一个**未被别的 pane 认领、且这个 claude 启动之后被写过、且明显比 argv
+那份更新**的 session?有就是它。
+
+5 秒的余量防止启动瞬间两份文件同时被碰而来回跳;真的 `/clear` 之后旧
+transcript 从此不动,这个余量不花任何代价。
+
+已知边界:**同一个项目开两个 pane** 时这个办法分不出谁是谁 —— 两边看到的
+最新文件是同一个。认领集合把它给 `shelld_sid` 小的那个,另一个保留自己的
+argv;这和猜测路径一直以来的平手规则相同。
 
 ### 0.7.104
 

@@ -2880,11 +2880,19 @@ impl WorkerCtx {
             std::collections::HashSet::new();
         let mut bound: Vec<(usize, String, Option<PathBuf>)> = Vec::new();
         for (i, f) in facts.iter().enumerate() {
-            if let Some(uuid) = &f.argv_uuid {
-                if claimed.insert(uuid.clone()) {
-                    let path = self.session_by_uuid(uuid).map(|s| s.jsonl_path.clone());
-                    bound.push((i, uuid.clone(), path));
-                }
+            let Some(argv_uuid) = &f.argv_uuid else { continue };
+            // argv says where this process *started*.  Inside the
+            // session the user can move on — `/clear` opens a new
+            // session, `/resume` picks another — and argv stays frozen
+            // at whatever it was launched with.  So argv is a starting
+            // position, and the session actually in front of the user
+            // is the one being written.
+            let uuid = self
+                .successor_session(&f.encoded, &claimed, f.claude_start, argv_uuid)
+                .unwrap_or_else(|| argv_uuid.clone());
+            if claimed.insert(uuid.clone()) {
+                let path = self.session_by_uuid(&uuid).map(|s| s.jsonl_path.clone());
+                bound.push((i, uuid, path));
             }
         }
         for (i, f) in facts.iter().enumerate() {
@@ -3075,6 +3083,67 @@ impl WorkerCtx {
             }
         }
         newest.map(|(_, s)| (s.session_id.clone(), s.jsonl_path.clone()))
+    }
+
+    /// The session that has superseded `argv_uuid` in this project, if
+    /// one has.
+    ///
+    /// **Why argv is not enough.** `claude --resume X` puts X in argv
+    /// and leaves it there for the life of the process.  A `/clear`
+    /// starts a different session in the same process; so does an
+    /// in-session `/resume`.  Bind by argv alone and the pane keeps
+    /// naming a transcript nobody is writing any more — the badge
+    /// tails a dead file for its model, reclamation parks and resumes
+    /// the wrong conversation, and switching profile brings back a
+    /// session the user left hours ago (2026-08-11 report: `torajs`,
+    /// argv `--resume f7a8a54b` while the live transcript was
+    /// `e024458b`, 3 minutes newer and still growing).
+    ///
+    /// The only evidence available is which transcript is being
+    /// appended to — claude closes the file between writes, so there
+    /// is no descriptor to inspect.  So: the newest unclaimed session
+    /// of this project, provided it has been written **since this
+    /// claude started** (older ones belong to other runs) and is
+    /// clearly newer than the argv one.
+    ///
+    /// `SUPERSEDE_MARGIN` keeps a pane from flip-flopping between two
+    /// files touched in the same instant at startup; a real `/clear`
+    /// leaves the old transcript untouched from then on, so the margin
+    /// costs nothing there.
+    ///
+    /// Known limit: two panes on **one** project cannot be told apart
+    /// this way — both see the same newest file.  The claim set hands
+    /// it to the lower `shelld_sid` and the other keeps its argv, which
+    /// is the same tie-break the guess path has always used.
+    fn successor_session(
+        &self,
+        encoded_dir: &str,
+        claimed: &std::collections::HashSet<String>,
+        claude_start: SystemTime,
+        argv_uuid: &str,
+    ) -> Option<String> {
+        const SUPERSEDE_MARGIN: Duration = Duration::from_secs(5);
+        let argv_mtime = self.session_by_uuid(argv_uuid).map(|s| s.last_mtime);
+        let mut best: Option<(SystemTime, &SessionInfo)> = None;
+        for s in self.seen.values() {
+            if s.project_dir != encoded_dir
+                || s.session_id == argv_uuid
+                || claimed.contains(&s.session_id)
+                || s.last_mtime < claude_start
+            {
+                continue;
+            }
+            if let Some(t) = argv_mtime {
+                if s.last_mtime < t + SUPERSEDE_MARGIN {
+                    continue;
+                }
+            }
+            match best {
+                Some((t, _)) if t >= s.last_mtime => {}
+                _ => best = Some((s.last_mtime, s)),
+            }
+        }
+        best.map(|(_, s)| s.session_id.clone())
     }
 
     /// Look a session up by uuid — the argv-authoritative path knows
@@ -5331,6 +5400,81 @@ mod tests {
                 config_dir: None,
                 created_at: std::time::UNIX_EPOCH,
             }]
+        );
+    }
+
+    /// `/clear` moves the session on; argv does not.
+    ///
+    /// 2026-08-11 report: switching profile on `torajs` resumed a
+    /// session from hours earlier.  argv said `--resume f7a8a54b`
+    /// (where the process started); the transcript actually being
+    /// written was `e024458b`, three minutes newer.  Every downstream
+    /// use of the binding was therefore aimed at the wrong
+    /// conversation — the model in the badge, the reclamation resume
+    /// line, and the profile cycle.
+    #[test]
+    fn a_cleared_session_supersedes_the_one_named_in_argv() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mk = |uuid: &str, mtime_off: u64| SessionInfo {
+            session_id: uuid.to_string(),
+            project_dir: "-p-torajs".into(),
+            jsonl_path: PathBuf::from(format!("/tmp/{uuid}.jsonl")),
+            last_mtime: t0 + Duration::from_secs(mtime_off),
+            last_size: 1,
+            last_message_kind: None,
+        };
+        let mut ctx = WorkerCtx {
+            projects_root: PathBuf::from("/fake"),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            last_model: HashMap::new(),
+        };
+        // argv's session, and the one `/clear` started after it.
+        ctx.seen.insert(PathBuf::from("/tmp/argv.jsonl"), mk("argv-uuid", 10));
+        ctx.seen.insert(PathBuf::from("/tmp/live.jsonl"), mk("live-uuid", 200));
+        let none = std::collections::HashSet::new();
+
+        assert_eq!(
+            ctx.successor_session("-p-torajs", &none, t0, "argv-uuid").as_deref(),
+            Some("live-uuid"),
+            "the transcript being written is the session in front of the user"
+        );
+
+        // A session that stopped before this claude started belongs to
+        // an earlier run and must not be adopted.
+        let later_start = t0 + Duration::from_secs(500);
+        assert_eq!(
+            ctx.successor_session("-p-torajs", &none, later_start, "argv-uuid"),
+            None,
+            "nothing here has been written since this process started"
+        );
+
+        // Already spoken for by another pane — leave it alone.
+        let mut taken = std::collections::HashSet::new();
+        taken.insert("live-uuid".to_string());
+        assert_eq!(
+            ctx.successor_session("-p-torajs", &taken, t0, "argv-uuid"),
+            None,
+        );
+
+        // Two files touched in the same instant at startup must not
+        // make the binding flip: within the margin, argv keeps it.
+        ctx.seen.insert(PathBuf::from("/tmp/tie.jsonl"), mk("tie-uuid", 12));
+        ctx.seen.remove(&PathBuf::from("/tmp/live.jsonl"));
+        assert_eq!(
+            ctx.successor_session("-p-torajs", &none, t0, "argv-uuid"),
+            None,
+            "2 s apart is the same instant, not a succession"
+        );
+
+        // Another project's session is never a successor.
+        let mut other = mk("other-uuid", 900);
+        other.project_dir = "-p-elsewhere".into();
+        ctx.seen.insert(PathBuf::from("/tmp/other.jsonl"), other);
+        assert_eq!(
+            ctx.successor_session("-p-torajs", &none, t0, "argv-uuid"),
+            None,
         );
     }
 
