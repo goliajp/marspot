@@ -112,7 +112,7 @@ const ANCHOR_OFFSET_LOGICAL: f64 = 2.0;
 /// Physical pixels, and deliberately **not** multiplied by the
 /// window's scale like every other constant in this file — because
 /// the thing it is estimating is not.  Panel text is drawn at
-/// `pt × ViewPainter::PX_PER_PT` physical pixels whatever the display
+/// `pt × ViewPainter::px_per_pt()` physical pixels whatever the display
 /// reports; the boxes around it are laid out in `logical × scale`.
 /// On a display where those two agree (any retina Mac) the mistake is
 /// invisible.  On one where the scale is 1 the estimate came out half
@@ -133,7 +133,7 @@ const ANCHOR_OFFSET_LOGICAL: f64 = 2.0;
 fn label_ch_w_phys() -> f64 {
     crate::ui::theme::PanelText::Item.pt()
         * 0.52
-        * crate::ui::core::ViewPainter::PX_PER_PT
+        * crate::ui::core::ViewPainter::px_per_pt()
 }
 
 impl ContextMenu {

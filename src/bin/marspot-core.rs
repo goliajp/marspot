@@ -1466,14 +1466,14 @@ mod window_state_tests {
     #[test]
     fn chrome_is_never_laid_out_in_the_display_scale() {
         let w = WindowState::new(3, Vec::new(), 0, 1, 1, 800.0, 600.0);
-        assert_eq!(w.scale, marspot::ui::CHROME_SCALE);
-        assert_eq!(marspot::ui::CHROME_SCALE, 1.0, "chrome is authored in px");
+        assert_eq!(w.scale, marspot::ui::chrome_scale());
+        assert_eq!(marspot::ui::chrome_scale(), 1.0, "chrome is authored in px");
         // The header the layout actually built follows the same unit.
         assert!(
-            (w.layout.top_inset - HEADER_PT * marspot::ui::CHROME_SCALE).abs() < 1e-6,
+            (w.layout.top_inset - HEADER_PT * marspot::ui::chrome_scale()).abs() < 1e-6,
             "header {} vs {}",
             w.layout.top_inset,
-            HEADER_PT * marspot::ui::CHROME_SCALE,
+            HEADER_PT * marspot::ui::chrome_scale(),
         );
     }
 
@@ -3255,7 +3255,7 @@ struct WindowState {
     /// Window physical dims, updated by Resize frames.
     w_phys: f64,
     h_phys: f64,
-    /// Chrome's own unit — always `marspot::ui::CHROME_SCALE`.
+    /// Chrome's own unit — always `marspot::ui::chrome_scale()`.
     ///
     /// Named `scale` for the layout API it feeds, but deliberately
     /// **not** the window's `backingScaleFactor`: chrome constants are
@@ -3309,8 +3309,8 @@ impl WindowState {
                 w_phys,
                 h_phys,
                 0.0,
-                HEADER_PT * marspot::ui::CHROME_SCALE,
-                CELL_TITLE_PT * marspot::ui::CHROME_SCALE,
+                HEADER_PT * marspot::ui::chrome_scale(),
+                CELL_TITLE_PT * marspot::ui::chrome_scale(),
                 3,
                 3,
                 8.0,
@@ -3339,7 +3339,7 @@ impl WindowState {
             ime_preedit: String::new(),
             w_phys,
             h_phys,
-            scale: marspot::ui::CHROME_SCALE,
+            scale: marspot::ui::chrome_scale(),
             needs_render: true,
             last_caret_sent: None,
         }
@@ -5365,9 +5365,12 @@ impl CoreApp {
         }
         win!(self, wi).w_phys = w_phys;
         win!(self, wi).h_phys = h_phys;
-        // `scale` (the window's backing factor) deliberately does not
-        // land here — see the field's own note.
-        let _ = scale;
+        // A window that moved to a display of another density reports
+        // it here.  The chrome follows immediately; the terminal cell
+        // does not — it is baked into the font cache at build time,
+        // which is the known limit written on `chrome_scale`.
+        marspot::ui::set_chrome_scale(scale);
+        win!(self, wi).scale = marspot::ui::chrome_scale();
         self.rebuild_layout(wi);
         Some(wi)
     }
@@ -8697,6 +8700,11 @@ fn main() {
         scale = scale
     );
 
+    // Adopt the display's scale **before** the renderer exists: the
+    // font cache bakes it into the terminal cell at build time, and a
+    // cell built at the wrong scale would have to reflow every grid to
+    // correct.  See `marspot::ui::chrome_scale`.
+    marspot::ui::set_chrome_scale(scale);
     let renderer = MetalRenderer::new_headless().expect("[core] MetalRenderer::new_headless");
     // Double-buffer: the boot window owns a (surface, texture) pair.
     // Per-frame render alternates its `writing_idx`; the shell's

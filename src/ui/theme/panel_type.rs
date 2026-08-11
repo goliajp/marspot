@@ -148,7 +148,7 @@ mod tests {
         // item are mono and unconverted, and they are ~9 px of ink.
         // Anything that drifts this role far from that will be visibly
         // out of step with the column next to it.
-        let item_cap_px = PanelText::Item.cap() * crate::ui::core::ViewPainter::PX_PER_PT;
+        let item_cap_px = PanelText::Item.cap() * crate::ui::core::ViewPainter::px_per_pt();
         assert!(
             (8.0..=10.0).contains(&item_cap_px),
             "menu item cap is {item_cap_px:.1} px; the mono column beside it is ~9",

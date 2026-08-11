@@ -3015,7 +3015,7 @@ fn push_settings_panel_via_view(
     };
     view.paint(&mut painter, |p| {
         use crate::ui::components::settings_modal::{Control, Slot};
-        let px = ViewPainter::PX_PER_PT;
+        let px = ViewPainter::px_per_pt();
         // The walker needs a measurer and the painter owns the font,
         // so collect the geometry first and paint from it.  Both this
         // and the hit-test measure through the same path, which is
@@ -3748,7 +3748,7 @@ fn build_context_menu_canvas(
         // the *cap* on the row's centre line is
         // `centre - (ascent - cap/2)`.
         let role = crate::ui::theme::PanelText::Item;
-        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let px = crate::ui::core::ViewPainter::px_per_pt();
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(role.pt());
         let text_y_phys = item.y_top + item.h * 0.5
             - (SF_PRO_ASCENT_RATIO * role.pt() - role.cap() * 0.5) * px;

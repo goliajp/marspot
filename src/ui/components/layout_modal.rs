@@ -147,7 +147,7 @@ impl LayoutModal {
         // that holds text is sized from the text.
         let title_type = crate::ui::theme::PanelText::Title;
         let title_line_px = (title_type.cap() + title_type.descent())
-            * crate::ui::core::ViewPainter::PX_PER_PT;
+            * crate::ui::core::ViewPainter::px_per_pt();
         let title_h = (TITLE_BAR_H_LOGICAL * scale).max(title_line_px * TITLE_BAR_LEADING);
         let side_pad = SIDE_PAD_LOGICAL * scale;
         let row_gap = ROW_GAP_LOGICAL * scale;

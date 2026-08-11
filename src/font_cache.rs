@@ -298,8 +298,13 @@ const CHAR_CACHE_CAP: usize = 8192;
 
 impl FontCache {
     pub fn build() -> Result<Self, String> {
-        let font = new_from_name(FONT_NAME, FONT_POINT)
-            .or_else(|_| new_from_name("Menlo", FONT_POINT))
+        // The terminal cell is the other half of the same rule: its
+        // metrics are used as physical pixels, so the point size that
+        // produces them has to carry the display's scale or the grid
+        // comes out half physical size on a retina Mac.
+        let font_point = FONT_POINT * crate::ui::chrome_scale();
+        let font = new_from_name(FONT_NAME, font_point)
+            .or_else(|_| new_from_name("Menlo", font_point))
             .map_err(|_| "could not load font".to_string())?;
 
         let cell_w = compute_cell_width(&font);
@@ -349,7 +354,7 @@ impl FontCache {
         ];
         let mut text_fallback_idxs: Vec<usize> = Vec::new();
         for name in TEXT_FALLBACK_NAMES {
-            if let Ok(f) = new_from_name(name, FONT_POINT) {
+            if let Ok(f) = new_from_name(name, font_point) {
                 let idx = fonts.intern(f);
                 text_fallback_idxs.push(idx);
             }
@@ -361,7 +366,7 @@ impl FontCache {
         // terminal font so UI still renders (with mono spacing).
         let mut ui_font_opt: Option<CTFont> = None;
         for name in UI_FONT_NAMES {
-            if let Ok(f) = new_from_name(name, UI_FONT_POINT) {
+            if let Ok(f) = new_from_name(name, UI_FONT_POINT * crate::ui::chrome_scale()) {
                 ui_font_opt = Some(f);
                 break;
             }
@@ -708,6 +713,12 @@ impl FontCache {
         if self.ui_font_idx == 0 {
             return None;
         }
+        // Every UI size that reaches the font is a *logical* point —
+        // the numbers were tuned against a display whose backing scale
+        // is 1, where this multiplication is the identity.  Applied
+        // here, at the one place a CTFont is materialised, so shaping
+        // and measuring cannot disagree about how big the run is.
+        let size_pt = size_pt * crate::ui::chrome_scale();
         let bucket = match weight_q {
             100 | 200 | 300 | 400 | 500 | 600 | 700 | 800 | 900 => weight_q,
             other => ((other as i32).clamp(100, 900) as u16 + 50) / 100 * 100,
@@ -715,7 +726,13 @@ impl FontCache {
         let size_q = crate::glyph_atlas::GlyphKey::size_q_for(size_pt);
         // Short-circuit only for the EXACT startup-interned pair
         // (weight 400 at UI_FONT_POINT).
-        let base_size_q = crate::glyph_atlas::GlyphKey::size_q_for(UI_FONT_POINT);
+        // The startup font was interned at the scaled size too, so the
+        // short-circuit has to compare against the same scaling — at
+        // scale 2 an unscaled constant here would miss and quietly
+        // build a second font for the size we already have.
+        let base_size_q = crate::glyph_atlas::GlyphKey::size_q_for(
+            UI_FONT_POINT * crate::ui::chrome_scale(),
+        );
         if bucket == 400 && size_q == base_size_q {
             return Some(self.ui_font_idx);
         }

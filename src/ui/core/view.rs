@@ -326,7 +326,7 @@ impl<'a> ViewPainter<'a> {
     ) {
         let w = self.panel_text_width(role, s) as f64;
         let cap = (crate::ui::view::type_scale::sf_pro_cap_height(role.pt())
-            * Self::PX_PER_PT) as f64;
+            * Self::px_per_pt()) as f64;
         let box_rect = rect.place(w, cap, align);
         // `place` gave the cap box; the baseline is its bottom.
         self.panel_text(role, box_rect.x as f32, (box_rect.y_top + cap) as f32, s, color);
@@ -378,15 +378,19 @@ impl<'a> ViewPainter<'a> {
     /// [`crate::ui::view::type_scale::sf_pro_cap_height`].
     pub fn ui_baseline_centred(&self, box_top: f32, box_h: f32, size_pt: f64) -> f32 {
         let cap = (crate::ui::view::type_scale::sf_pro_cap_height(size_pt)
-            * Self::PX_PER_PT) as f32;
+            * Self::px_per_pt()) as f32;
         box_top + (box_h + cap) * 0.5
     }
 
-    /// Physical pixels per typographic point — the retina scale baked
-    /// into the atlas raster path, which the UI text path assumes.
-    /// Chrome laid out in pt multiplies by this to reach the physical
-    /// rects the painter takes.
-    pub const PX_PER_PT: f64 = 2.0;
+    /// Physical pixels per point, for panels laid out in points.
+    ///
+    /// Two parts: the atlas rasterises at 2×, which is the unit the
+    /// panel constants were written in, and the display's own scale on
+    /// top of that (`marspot::ui::chrome_scale`).  At `scale == 1` this
+    /// is the 2.0 it has always been.
+    pub fn px_per_pt() -> f64 {
+        2.0 * crate::ui::chrome_scale()
+    }
 
     /// Advance width of `s` in the system UI font, physical px — pairs
     /// with `ui_text` for right-aligning or centring a heading.

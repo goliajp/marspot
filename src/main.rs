@@ -986,8 +986,8 @@ impl Marspot {
         let Some(r) = self.renderer.as_ref() else { return };
         let (cell_w, cell_h) = r.cell_dims();
         // Chrome's unit, not the display's — see
-        // `marspot::ui::CHROME_SCALE`.
-        let scale = marspot::ui::CHROME_SCALE;
+        // `marspot::ui::chrome_scale()`.
+        let scale = marspot::ui::chrome_scale();
         let sidebar_phys = if self.sidebar_collapsed {
             0.0
         } else {
@@ -1931,10 +1931,7 @@ fn parse_named_arg(args: &[String], name: &str) -> Option<String> {
 /// display-scaled behaviour chrome had before 2026-08-11.
 #[cfg(feature = "snapshot")]
 fn shot_scale() -> f64 {
-    std::env::var("MARSPOT_SHOT_SCALE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(marspot::ui::CHROME_SCALE)
+    marspot::ui::chrome_scale()
 }
 
 #[cfg(feature = "snapshot")]
@@ -1953,6 +1950,16 @@ fn shot_scale() -> f64 {
 fn run_snapshot(path: &str, panel: Option<&str>) {
     use marspot::render_metal::{make_readback_texture, MetalRenderer, WindowRender};
     use marspot_term::layout::Layout;
+
+    // `MARSPOT_SHOT_SCALE` renders as a display of that density would.
+    // Set before the renderer: the font cache bakes the scale into the
+    // terminal cell when it is built.
+    if let Some(s) = std::env::var("MARSPOT_SHOT_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        marspot::ui::set_chrome_scale(s);
+    }
 
     let (phys_w, phys_h): (u32, u32) = (1600, 1100);
     let mut renderer = match MetalRenderer::new_headless() {
@@ -2091,7 +2098,7 @@ fn run_snapshot(path: &str, panel: Option<&str>) {
             };
             renderer.set_context_menu(Some(ContextMenuRender {
                 // The app always lays chrome out in
-                // `marspot::ui::CHROME_SCALE`; `MARSPOT_SHOT_SCALE`
+                // `marspot::ui::chrome_scale()`; `MARSPOT_SHOT_SCALE`
                 // remains only to reproduce what the display-scaled
                 // version used to draw.
                 scale: shot_scale(),

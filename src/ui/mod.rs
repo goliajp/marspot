@@ -104,17 +104,21 @@ pub enum SelectionMode {
     Blockwise,
 }
 
-/// The multiplier chrome geometry applies to its own constants: **one**.
+/// The display's backing scale, as everything marspot draws must use it.
 ///
-/// Everything marspot draws is authored in *physical pixels*.  The
-/// terminal cell is a fixed 7.2 × 16.0 px whatever display it lands
-/// on (`FONT_POINT` is a constant and its metrics are used as pixels);
-/// panel text is a fixed pt × 2 px; the chrome constants — menu row
-/// height, modal padding, sidebar width — were tuned by eye against
-/// those, on a display whose `backingScaleFactor` is 1.
+/// **The rule.** Every pixel number in this program was tuned by eye
+/// on a display whose `backingScaleFactor` is 1 — so every one of them
+/// is a *logical point*, and the physical size it should occupy is
+/// `that number × this`.  Terminal cell, panel text, menu rows, modal
+/// padding: all of it, one multiplier.
 ///
-/// Chrome nonetheless multiplied them by that factor.  Measured
-/// 2026-08-11, same menu rendered at both scales:
+/// At 1 that is the identity, which is why adopting the rule changed
+/// nothing on the display it was tuned on (verified: the panel
+/// snapshots came out byte-identical).  At 2 — any retina Mac —
+/// everything doubles **together**, which is the point: the previous
+/// arrangement doubled the boxes and left their contents alone.
+///
+/// Measured 2026-08-11, one menu at both scales before the rule:
 ///
 /// | | scale 1 | scale 2 |
 /// |---|---|---|
@@ -122,22 +126,26 @@ pub enum SelectionMode {
 /// | row pitch | 26 px | 52 px |
 /// | **label ink** | **12 px** | **12 px** |
 ///
-/// The box doubles, the text it holds does not.  The app is therefore
-/// only self-consistent where the factor happens to be 1 — it looked
-/// right for the reason a stopped clock does.
-///
-/// So chrome stops multiplying.  On a `backingScaleFactor == 1`
-/// display this changes **nothing** (that is the test); anywhere else
-/// it stops the boxes drifting away from their contents.
-///
-/// What must still track the display is anything that lines up with
-/// the OS's own controls — the window-button cluster — and that is
-/// *measured* now rather than assumed, so it is right at any scale.
-///
-/// Making the app scale properly on a retina display is a different
-/// project: the terminal cell would have to scale too, and that is a
-/// product decision about how big text should be, not a unit bug.
-pub const CHROME_SCALE: f64 = 1.0;
+/// One value for the process, not one per window: the renderer keeps a
+/// single `FontCache` and a single terminal cell size, so two windows
+/// on displays of different densities are already outside what this
+/// architecture expresses.  Set it before the renderer is built.
+static CHROME_SCALE_BITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1.0f64.to_bits());
+
+/// Physical pixels per logical point.
+pub fn chrome_scale() -> f64 {
+    f64::from_bits(CHROME_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Adopt the display's backing scale.  Ignores nonsense (0, negative,
+/// NaN) rather than letting it reach the layout — a bad scale there
+/// collapses every rect in the app to nothing.
+pub fn set_chrome_scale(scale: f64) {
+    if scale.is_finite() && scale >= 0.5 && scale <= 4.0 {
+        CHROME_SCALE_BITS.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// Scroll prefs: direction from the environment, speed from the
 /// settings file.

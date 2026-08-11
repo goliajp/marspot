@@ -28,7 +28,11 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.109**
+Current: **0.7.110**
+
+### 0.7.110
+
+随 `ui::chrome_scale` —— 显示器缩放成为全局单位,shell 侧只是链接到它。
 
 ### 0.7.109
 

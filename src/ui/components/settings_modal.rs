@@ -32,7 +32,7 @@ use crate::settings::Settings;
 /// and a settings panel that cannot set a label apart from the
 /// sentence explaining it has no hierarchy at all.  Chrome is chrome —
 /// it is sized like the rest of the system's chrome, in points, and
-/// [`crate::ui::core::ViewPainter::PX_PER_PT`] takes it to pixels.
+/// [`crate::ui::core::ViewPainter::px_per_pt`] takes it to pixels.
 pub mod metric {
     use crate::ui::theme::PanelText;
 
@@ -337,7 +337,7 @@ fn row_h() -> f64 {
 /// `rect` is the panel in physical px; everything below is computed in
 /// pt and scaled on the way out.
 pub fn walk(rect: Rect, s: &Settings, m: Measure<'_>, mut on: impl FnMut(Slot)) {
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     let card_x = rect.x + metric::PAD_X * px;
     let card_w = rect.w - 2.0 * metric::PAD_X * px;
     let text_x = card_x + metric::CARD_PAD_X * px;
@@ -422,7 +422,7 @@ fn panel_h_pt(s: &Settings, m: Measure<'_>) -> f64 {
     // The walk needs a rect; height does not depend on it, so any
     // origin does.
     let probe = Rect { x: 0.0, y_top: 0.0, w: metric::PANEL_W, h: 0.0 };
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     let mut bottom = 0.0f64;
     walk(probe, s, m, |slot| {
         if let Slot::Footer { baseline } = slot {
@@ -440,7 +440,7 @@ pub fn panel_rect(
     m: Measure<'_>,
     top_inset: f64,
 ) -> Rect {
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     let w = (metric::PANEL_W * px).min(w_phys * 0.94);
     let h = (panel_h_pt(s, m) * px).min(h_phys * 0.94);
     Rect {
@@ -453,7 +453,7 @@ pub fn panel_rect(
 
 /// How wide this row's control needs to be, in physical px.
 pub fn control_width(row: Row, s: &Settings, m: Measure<'_>) -> f64 {
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     match row.control(s) {
         Control::Toggle(_) => metric::TOGGLE_W * px,
         Control::Segmented { options, .. } => {
@@ -465,13 +465,13 @@ pub fn control_width(row: Row, s: &Settings, m: Measure<'_>) -> f64 {
 
 /// A segment, sized to its own measured label.
 fn segment_width(label: &str, m: Measure<'_>) -> f64 {
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     m(label, metric::SEGMENT.pt(), metric::SEGMENT.weight()) + 2.0 * metric::SEG_PAD_X * px
 }
 
 /// The `n`th segment of a segmented control.
 pub fn segment_rect(control: Rect, n: usize, labels: &[&str], m: Measure<'_>) -> Rect {
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     let gap = metric::SEG_GAP * px;
     let mut x = control.x;
     for l in labels.iter().take(n) {
@@ -487,7 +487,7 @@ pub fn segment_rect(control: Rect, n: usize, labels: &[&str], m: Measure<'_>) ->
 
 /// Left edge for a row's text.
 pub fn text_x(rect: Rect) -> f64 {
-    let px = crate::ui::core::ViewPainter::PX_PER_PT;
+    let px = crate::ui::core::ViewPainter::px_per_pt();
     rect.x + (metric::PAD_X + metric::CARD_PAD_X) * px
 }
 
@@ -604,7 +604,7 @@ mod tests {
         |s: &str, pt: f64, w: u16| {
             let bold = if w >= 600 { 1.05 } else { 1.0 };
             s.chars().count() as f64 * pt * 0.5 * bold
-                * crate::ui::core::ViewPainter::PX_PER_PT
+                * crate::ui::core::ViewPainter::px_per_pt()
         }
     }
 
@@ -672,7 +672,7 @@ mod tests {
         let rect = test_rect(1800.0, 1400.0, &s);
         let slots = collect(rect, &s);
         let mut m = fake_measure();
-        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let px = crate::ui::core::ViewPainter::px_per_pt();
 
         // Every row sits inside the card that was announced for it, and
         // every card inside the panel.
@@ -776,7 +776,7 @@ mod tests {
     fn a_row_is_mostly_space_not_text() {
         let s = Settings::default();
         let rect = test_rect(2400.0, 1800.0, &s);
-        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let px = crate::ui::core::ViewPainter::px_per_pt();
         let slots = collect(rect, &s);
         let rows: Vec<_> = rows_of(&slots)
             .iter()
@@ -819,7 +819,7 @@ mod tests {
             eprintln!("no font stack; skipping");
             return;
         };
-        let px = crate::ui::core::ViewPainter::PX_PER_PT;
+        let px = crate::ui::core::ViewPainter::px_per_pt();
         let s = Settings::default();
         let mut m = |t: &str, pt: f64, w: u16| {
             font.measure_ui_text_at_size(
