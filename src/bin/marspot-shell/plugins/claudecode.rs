@@ -2144,6 +2144,7 @@ impl Plugin for ClaudecodePlugin {
             shelld,
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
         let handle = std::thread::Builder::new()
@@ -2565,6 +2566,10 @@ struct WorkerCtx {
     /// offset from which its model may be read.  See
     /// `model_cutoff_for`.
     model_cutoff: HashMap<PathBuf, (i32, u64)>,
+    /// When this pane's screen was last searched for a startup banner.
+    /// Bounds `model_from_banner` to one bytelog replay per pane per
+    /// window, so a pane that will never show one costs nothing.
+    banner_tried: HashMap<u64, Instant>,
     /// Per-jsonl: the last model actually read out of it.
     ///
     /// The fence answers "what may I read right now", which is not
@@ -2758,6 +2763,51 @@ impl WorkerCtx {
             None => self.last_model.get(path).cloned(),
         }
     }
+
+    /// The model a **freshly started** pane is on, read off its own
+    /// screen.
+    ///
+    /// A session names its model in the transcript only from the first
+    /// assistant turn onward — records 1..10 are `mode`,
+    /// `permission-mode`, attachments, none of which carry it
+    /// (checked on a live file 2026-08-11).  So between opening a pane
+    /// and its first answer the transcript genuinely cannot say, and
+    /// the badge showed a bare `P1` for as long as the user took to
+    /// type — which reads as "marspot has not noticed this pane".
+    ///
+    /// But claude prints it, in the banner, in the first frame:
+    ///
+    /// ```text
+    /// Claude Code v2.1.227
+    /// Opus 5 (1M context) with high effort · Claude Max
+    /// ```
+    ///
+    /// The pane's own screen is therefore the earliest source there
+    /// is, and `pane_read` already knows how to replay a bytelog into
+    /// a grid.  Read only while the model is unknown — the transcript
+    /// takes over the moment it has one, and a fresh session's bytelog
+    /// is small, so the replay this costs is a young pane's alone.
+    fn model_from_banner(&mut self, sid: u64) -> Option<String> {
+        // At most one replay per pane per BANNER_RETRY window: a pane
+        // that never shows a banner (not claude at all, screen already
+        // scrolled past it) must not buy a 512 KB replay every scan.
+        const BANNER_RETRY: Duration = Duration::from_secs(30);
+        let now = Instant::now();
+        if let Some(&t) = self.banner_tried.get(&sid) {
+            if now.duration_since(t) < BANNER_RETRY {
+                return None;
+            }
+        }
+        self.banner_tried.insert(sid, now);
+        let entry = marspot_term::session_registry::list_session_entries()
+            .into_iter()
+            .find(|e| e.id == sid)?;
+        let bytelog = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        let screen = marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()?;
+        parse_banner_model(&screen)
+    }
 }
 
 /// Worker thread entry.  Lives until the request channel is dropped
@@ -2945,7 +2995,12 @@ impl WorkerCtx {
             // when the fence has nothing readable behind it (see
             // `model_for`).  A session named by argv but not yet
             // scanned has no path — badge without the model half.
-            let model = jsonl_path.as_ref().and_then(|p| self.model_for(p, f.claude_pid));
+            let model = jsonl_path
+                .as_ref()
+                .and_then(|p| self.model_for(p, f.claude_pid))
+                // Nothing in the transcript yet — a pane opened and
+                // not yet answered.  Its own screen already says.
+                .or_else(|| self.model_from_banner(f.shelld_sid));
             // The session uuid used to ride along here.  It is 36
             // characters of hex that no one can act on — it names the
             // session for a *machine*, and every machine that needs it
@@ -3153,6 +3208,42 @@ impl WorkerCtx {
     fn session_by_uuid(&self, uuid: &str) -> Option<&SessionInfo> {
         self.seen.values().find(|s| s.session_id == uuid)
     }
+}
+
+/// The model out of claude's own startup banner, if this screen has
+/// one on it.
+///
+/// The line sits directly under `Claude Code vX.Y.Z` and reads like
+/// `Opus 5 (1M context) with high effort · Claude Max`.  Everything
+/// after the model name is a remark — context window, effort, plan —
+/// and `short_model` already drops parenthesised remarks and
+/// lowercases, because it was written for `/model` output of the same
+/// shape.  Cut at the first `·` so the plan name cannot leak in.
+///
+/// Anchored on the version line rather than on the model line's own
+/// words: the model names change with every release, the frame around
+/// them does not.
+fn parse_banner_model(screen: &str) -> Option<String> {
+    let mut lines = screen.lines();
+    while let Some(line) = lines.next() {
+        if !line.contains("Claude Code v") {
+            continue;
+        }
+        // The next non-blank line is the model line.
+        for next in lines.by_ref().take(3) {
+            let t = next.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let head = t.split('·').next().unwrap_or(t);
+            let name = short_model(head);
+            if !name.is_empty() {
+                return Some(name);
+            }
+            break;
+        }
+    }
+    None
 }
 
 /// The live session uuid as stated by the claude process tree's own
@@ -3440,6 +3531,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen,
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         }
     }
@@ -3526,6 +3618,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
         let mut logs = Vec::new();
@@ -3601,6 +3694,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
 
@@ -3643,6 +3737,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
         assert_eq!(ctx.model_for(&path, 111).as_deref(), Some("fable-5"));
@@ -3967,6 +4062,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
         let mut scan = worker.scan_once();
@@ -5403,6 +5499,43 @@ mod tests {
         );
     }
 
+    /// The banner is the only place a just-opened pane says its model.
+    ///
+    /// The sample is the real thing off a screenshot (2026-08-11) — a
+    /// pane that had been open for a minute with a bare `P1` badge
+    /// while `Opus 5` sat on its own first line.
+    #[test]
+    fn a_startup_banner_names_the_model_before_the_transcript_can() {
+        let screen = "\
+ devops                                                    P1
+
+   Claude Code v2.1.227
+   Opus 5 (1M context) with high effort · Claude Max
+   ~/workspace/goliajp/devops
+
+";
+        assert_eq!(parse_banner_model(screen).as_deref(), Some("opus-5"));
+
+        // The remark after `·` is a plan, not a model.
+        assert_eq!(
+            parse_banner_model("Claude Code v2.0.1\nSonnet 4.5 · Claude Pro\n").as_deref(),
+            Some("sonnet-4-5"),
+        );
+        // No parenthesised remark, no separator — still just the name.
+        assert_eq!(
+            parse_banner_model("Claude Code v9\nFable 5\n").as_deref(),
+            Some("fable-5"),
+        );
+        // A screen with no banner says nothing rather than guessing —
+        // most panes are not claude, and every one of them reaches
+        // here while its badge is being decided.
+        assert_eq!(parse_banner_model("$ ls -la\ntotal 0\n"), None);
+        assert_eq!(parse_banner_model(""), None);
+        // A version line with nothing under it must not read the next
+        // screenful as a model name.
+        assert_eq!(parse_banner_model("Claude Code v1\n\n\n\n"), None);
+    }
+
     /// `/clear` moves the session on; argv does not.
     ///
     /// 2026-08-11 report: switching profile on `torajs` resumed a
@@ -5428,6 +5561,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
         // argv's session, and the one `/clear` started after it.
@@ -5510,6 +5644,7 @@ mod tests {
             shelld: Arc::new(ShelldClient::new(None)),
             seen: HashMap::new(),
             model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
         let mut logs = Vec::new();

@@ -28,7 +28,30 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.110**
+Current: **0.7.111**
+
+### 0.7.111
+
+**刚开的 pane 角标只有 `P1`,没有 `@model`。**
+
+session 要到**第一次回答**才在 transcript 里写下模型:实测一份活文件的前 10
+条记录是 `mode` / `permission-mode` / 若干 attachment,`"model"` 最早出现在
+第 11 行。所以从开一个 pane 到它答第一句话之间,transcript 是真的说不出来 ——
+而这段时间取决于用户什么时候打字,可以很长。角标空着一半,读起来像
+「marspot 没注意到这个 pane」。
+
+但 claude **第一帧就把它印在屏上了**:
+
+    Claude Code v2.1.227
+    Opus 5 (1M context) with high effort · Claude Max
+
+pane 自己的屏幕因此是最早的信源,而 `pane_read` 本来就会把 bytelog 重放成
+一张网格。**只在 model 读不到时才读屏**,transcript 一旦说得出就接管;解析锚
+在版本行上而不是模型名上(模型名每个版本都变,它周围的框架不变),`·` 之后
+是套餐名不是模型,切掉。
+
+每个 pane 每 30 秒最多重放一次:不是 claude 的 pane、或者横幅已经滚过去的
+pane,不该为此每次扫描买一次 512KB 重放。
 
 ### 0.7.110
 

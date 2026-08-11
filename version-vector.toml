@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.110"  # 随 ui::chrome_scale(显示器缩放成为全局单位);详见 CHANGELOG.md
+shell   = "0.7.111"  # 刚开的 pane 从启动横幅读 model,不用等第一次回答;详见 CHANGELOG.md
 core    = "0.12.121"  # retina:终端与面板一起随显示器缩放,scale=1 逐字节不变;详见 CHANGELOG.md
 session = "0.11.44"  # 随 marspot-term(新增 WindowChrome 消息);详见 CHANGELOG.md
