@@ -875,6 +875,84 @@ mod tests {
         assert!(rect.w > 0.0 && rect.h > 0.0);
     }
 
+    /// Every geometric promise this panel makes, at **both** densities.
+    ///
+    /// The panels were only ever laid out and eyeballed on a display
+    /// whose backing scale is 1; every scale bug this session had —
+    /// the toolbar on the traffic lights, the cards outside their
+    /// modal, boxes doubling while their text stood still — was a
+    /// second density nobody had rendered.  So the invariants run at
+    /// both, and `chrome_scale` is a process global that nextest's
+    /// per-test process isolation makes safe to set here.
+    #[test]
+    fn the_panel_holds_together_at_every_density() {
+        for scale in [1.0f64, 2.0] {
+            crate::ui::set_chrome_scale(scale);
+            let px = crate::ui::core::ViewPainter::px_per_pt();
+            let s = Settings::default();
+            let rect = test_rect(2400.0 * scale, 1800.0 * scale, &s);
+            let slots = collect(rect, &s);
+            let mut m = fake_measure();
+
+            // The panel scales with the density rather than staying a
+            // fixed pixel count — a panel that did not would be half
+            // its intended size on a retina Mac.
+            assert!(
+                (rect.w - metric::PANEL_W * px).abs() < 1.0,
+                "scale {scale}: panel {:.0}px is not {:.0}pt",
+                rect.w, metric::PANEL_W,
+            );
+
+            let mut card: Option<Rect> = None;
+            let mut rows = 0usize;
+            for slot in &slots {
+                match slot {
+                    Slot::Card { rect: c } => {
+                        assert!(
+                            c.x >= rect.x - 1e-6
+                                && c.x + c.w <= rect.x + rect.w + 1e-6,
+                            "scale {scale}: card escapes the panel",
+                        );
+                        card = Some(*c);
+                    }
+                    Slot::Row { row, band, control, desc_baseline, .. } => {
+                        let c = card.expect("row before card");
+                        rows += 1;
+                        assert!(
+                            band.y_top >= c.y_top - 1e-6
+                                && band.y_top + band.h <= c.y_top + c.h + 1e-6,
+                            "scale {scale}: {row:?} band escapes its card",
+                        );
+                        assert!(
+                            control.x + control.w <= c.x + c.w + 1e-6,
+                            "scale {scale}: {row:?} control escapes its card",
+                        );
+                        assert!(
+                            control.y_top + control.h <= *desc_baseline + 1e-6,
+                            "scale {scale}: {row:?} control overlaps its cost line",
+                        );
+                        if let Control::Segmented { options, .. } = row.control(&s) {
+                            let last = segment_rect(
+                                *control, options.len() - 1, options, &mut m,
+                            );
+                            assert!(
+                                last.x + last.w <= control.x + control.w + 0.5,
+                                "scale {scale}: the last segment runs past the control",
+                            );
+                        }
+                    }
+                    Slot::Footer { baseline } => assert!(
+                        *baseline < rect.y_top + rect.h,
+                        "scale {scale}: the footer fell out of the panel",
+                    ),
+                    _ => {}
+                }
+            }
+            assert_eq!(rows, super::rows().count(), "scale {scale}: rows lost");
+        }
+        crate::ui::set_chrome_scale(1.0);
+    }
+
     #[test]
     fn the_panel_fits_the_window_it_is_centred_in() {
         let s = Settings::default();

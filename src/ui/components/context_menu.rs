@@ -344,6 +344,54 @@ mod tests {
         assert_eq!(hit, ContextMenuHit::Outside);
     }
 
+    /// The menu holds its own rows, and its labels fit, at **both**
+    /// densities.
+    ///
+    /// This one has a foot in each unit by construction: the box is
+    /// `logical × scale`, the labels are drawn at `pt × px_per_pt` —
+    /// which is what put the labels outside the menu on a display
+    /// whose scale is 1 (2026-08-11).  Both are exercised here.
+    #[test]
+    fn the_menu_holds_its_rows_and_labels_at_every_density() {
+        for scale in [1.0f64, 2.0] {
+            crate::ui::set_chrome_scale(scale);
+            let items = sample_items();
+            for (w, h) in [(2160.0 * scale, 1300.0 * scale), (700.0, 500.0)] {
+                for (ax, ay) in [(10.0, 10.0), (w - 20.0, h - 20.0), (w * 0.5, h * 0.5)] {
+                    let m = ContextMenu::layout(w, h, scale, ax, ay, 0.0, &items);
+                    let f = m.frame;
+                    assert!(
+                        f.x >= -1e-6 && f.y_top >= -1e-6
+                            && f.x + f.w <= w + 1e-6 && f.y_top + f.h <= h + 1e-6,
+                        "scale {scale} @{ax},{ay}: menu escapes the window",
+                    );
+                    for (i, r) in m.item_rects.iter().enumerate() {
+                        assert!(
+                            r.y_top >= f.y_top - 1e-6
+                                && r.y_top + r.h <= f.y_top + f.h + 1e-6,
+                            "scale {scale}: row {i} outside the menu",
+                        );
+                    }
+                    // The widest label plus its padding has to fit the
+                    // frame the estimate produced.
+                    let widest = items
+                        .iter()
+                        .filter(|i| !i.divider)
+                        .map(|i| i.label.chars().count())
+                        .max()
+                        .unwrap_or(0) as f64
+                        * label_ch_w_phys();
+                    assert!(
+                        widest <= f.w + 1e-6,
+                        "scale {scale}: {widest:.0}px of label in a {:.0}px menu",
+                        f.w,
+                    );
+                }
+            }
+        }
+        crate::ui::set_chrome_scale(1.0);
+    }
+
     #[test]
     fn width_grows_with_longest_label() {
         let mut items = sample_items();

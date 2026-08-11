@@ -190,13 +190,17 @@ impl LayoutModal {
         let body_w = modal_w - 2.0 * side_pad;
         let natural_card_w = (body_w - (cards_in - 1) as f64 * card_gap)
             / cards_in as f64;
-        // With the modal grown, the natural width is normally already
-        // at or above the minimum; the floor stays for the case where
-        // even the window is too narrow, and there the cards are then
-        // clipped to the body rather than to nothing.
-        let card_w = natural_card_w
-            .max((CARD_MIN_W_LOGICAL * scale).min(body_w))
-            .max(1.0);
+        // No floor here on purpose.  The modal already grew to honour
+        // `CARD_MIN_W` whenever the window allowed it, so on a window
+        // with room `natural_card_w` is *already* at or above the
+        // minimum.  When the window did not allow it the modal was
+        // clamped — and re-asserting the minimum then would put the
+        // block back outside the frame it was just fitted into, which
+        // is the overflow this was supposed to end (caught at 6×6 on a
+        // 900 pt window at scale 2 by the density test below).  A
+        // window too narrow for readable cards gets narrow cards; the
+        // labels ellipsise.
+        let card_w = natural_card_w.max(1.0);
         let aspect_card_h = card_w / CARD_ASPECT;
         let ideal_card_h = aspect_card_h
             .max(CARD_MIN_H_LOGICAL * scale)
@@ -540,6 +544,46 @@ mod tests {
         // window rather than the label.
         let capped = LayoutModal::layout(500.0, 700.0, 1.0, 0.0, 6, 2, 300.0);
         assert!(capped.frame.w <= 500.0 * MODAL_MAX_W_RATIO + 1e-6);
+    }
+
+    /// The card block stays inside its modal at **both** densities.
+    ///
+    /// `scale` reaches this module as a parameter, so a caller that
+    /// passes the display's number and a caller that passes 1 both
+    /// have to work — and the labels arrive in physical pixels, which
+    /// scale independently of it.  That pairing is where a modal
+    /// stops holding its own cards.
+    #[test]
+    fn the_modal_holds_its_cards_at_every_density() {
+        for scale in [1.0f64, 2.0] {
+            for (win_w, win_h) in [(2160.0 * scale, 1300.0 * scale), (900.0, 700.0)] {
+                for (cols, rows) in [(1, 1), (3, 2), (GRID_MAX, GRID_MAX)] {
+                    for label_w in [0.0, 101.0 * scale, 400.0] {
+                        let m = LayoutModal::layout(
+                            win_w, win_h, scale, 0.0, cols, rows, label_w,
+                        );
+                        let f = m.frame;
+                        assert!(
+                            f.w <= win_w + 1e-6 && f.h <= win_h + 1e-6,
+                            "scale {scale} {cols}x{rows} @{win_w}x{win_h}: modal \
+                             {:.0}x{:.0} bigger than the window",
+                            f.w, f.h,
+                        );
+                        for (i, c) in m.cards.iter().enumerate() {
+                            assert!(
+                                c.x >= f.x - 1e-6 && c.x + c.w <= f.x + f.w + 1e-6,
+                                "scale {scale} {cols}x{rows}: card {i} outside the modal",
+                            );
+                            assert!(c.w > 0.0 && c.h > 0.0, "card {i} has no area");
+                        }
+                        assert!(
+                            m.apply_btn.y_top + m.apply_btn.h <= f.y_top + f.h + 1e-6,
+                            "scale {scale}: Apply fell out of the modal",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
