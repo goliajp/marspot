@@ -261,7 +261,19 @@ pub struct GlyphInstance {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderSplit {
     pub build_us: u64,
+    /// Blocked inside `queue.commandBuffer()`.  Split out from
+    /// `encode_us` because the first real-workload numbers put
+    /// 96–396 ms in "encode" — a phase that only assembles a command
+    /// buffer on the CPU and has no business taking that long — and
+    /// "encode" as one number cannot say whether the time went into
+    /// *obtaining* the buffer or *filling* it.
+    pub cmdbuf_us: u64,
+    /// Filling the buffer: the four render passes.
     pub encode_us: u64,
+    /// The dev-panel and context-menu canvases, built and encoded
+    /// after the passes.  Zero unless one of them is open — which is
+    /// itself worth knowing when a frame goes long.
+    pub canvas_us: u64,
     pub gpu_wait_us: u64,
     pub glyphs_rasterised: u32,
     /// Shelf evictions and whole-atlas rebuilds *during this frame*.
@@ -278,9 +290,11 @@ impl RenderSplit {
     /// log line, so the three numbers always travel together.
     pub fn summary(&self) -> String {
         format!(
-            "build_{:.1}ms encode_{:.1}ms gpu_{:.1}ms glyphs_{}",
+            "build_{:.1}ms cmdbuf_{:.1}ms encode_{:.1}ms canvas_{:.1}ms gpu_{:.1}ms glyphs_{}",
             self.build_us as f64 / 1000.0,
+            self.cmdbuf_us as f64 / 1000.0,
             self.encode_us as f64 / 1000.0,
+            self.canvas_us as f64 / 1000.0,
             self.gpu_wait_us as f64 / 1000.0,
             self.glyphs_rasterised,
         ) + &if self.evictions > 0 || self.rebuilds > 0 {
@@ -1764,11 +1778,12 @@ impl MetalRenderer {
             .saturating_sub(evict0);
         let rebuilds = (atlas.rebuild_count + color_atlas.rebuild_count)
             .saturating_sub(rebuild0);
-        let t_encode0 = std::time::Instant::now();
+        let t_cmdbuf0 = std::time::Instant::now();
         let cmd = match queue.commandBuffer() {
             Some(c) => c,
             None => return,
         };
+        let t_encode0 = std::time::Instant::now();
         encode_passes(
             &cmd,
             target,
@@ -1796,6 +1811,7 @@ impl MetalRenderer {
             // `mark_bg_clear_required` (e.g. resize, layout change).
             clear_bg,
         );
+        let t_canvas0 = std::time::Instant::now();
         // Dev panel + ContextMenu canvases (same shape as render_layout).
         let chrome_cell_w = font.cell_w as f32;
         let chrome_cell_h = font.cell_h as f32;
@@ -1838,6 +1854,7 @@ impl MetalRenderer {
                 false,
             );
         }
+        let t_commit0 = std::time::Instant::now();
         cmd.commit();
         let t_gpu0 = std::time::Instant::now();
         { cmd.waitUntilCompleted() };
@@ -1847,8 +1864,10 @@ impl MetalRenderer {
         // `waitUntilCompleted` are opaque calls with side effects, and
         // the quantities being separated are milliseconds apart.
         self.last_render_split = RenderSplit {
-            build_us: (t_encode0 - t_build0).as_micros() as u64,
-            encode_us: (t_gpu0 - t_encode0).as_micros() as u64,
+            build_us: (t_cmdbuf0 - t_build0).as_micros() as u64,
+            cmdbuf_us: (t_encode0 - t_cmdbuf0).as_micros() as u64,
+            encode_us: (t_canvas0 - t_encode0).as_micros() as u64,
+            canvas_us: (t_commit0 - t_canvas0).as_micros() as u64,
             gpu_wait_us: (t_end - t_gpu0).as_micros() as u64,
             glyphs_rasterised,
             evictions,

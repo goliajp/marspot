@@ -2726,11 +2726,13 @@ fn bench_first_frame(arg: &str) {
     let warm = renderer.last_render_split();
 
     println!(
-        r#"{{"mode":"first-frame","panes":{},"charset":"{}","cols":86,"rows":63,"phys":[{},{}],"cold":{{"total_ms":{:.2},"build_ms":{:.2},"encode_ms":{:.2},"gpu_ms":{:.2},"glyphs":{},"evict":{},"rebuild":{}}},"warm":{{"total_ms":{:.2},"build_ms":{:.2},"encode_ms":{:.2},"gpu_ms":{:.2},"glyphs":{}}}}}"#,
+        r#"{{"mode":"first-frame","panes":{},"charset":"{}","cols":86,"rows":63,"phys":[{},{}],"cold":{{"total_ms":{:.2},"build_ms":{:.2},"cmdbuf_ms":{:.2},"encode_ms":{:.2},"canvas_ms":{:.2},"gpu_ms":{:.2},"glyphs":{},"evict":{},"rebuild":{}}},"warm":{{"total_ms":{:.2},"build_ms":{:.2},"encode_ms":{:.2},"gpu_ms":{:.2},"glyphs":{}}}}}"#,
         panes, charset, phys_w, phys_h,
         cold_ns as f64 / 1e6,
         cold.build_us as f64 / 1e3,
+        cold.cmdbuf_us as f64 / 1e3,
         cold.encode_us as f64 / 1e3,
+        cold.canvas_us as f64 / 1e3,
         cold.gpu_wait_us as f64 / 1e3,
         cold.glyphs_rasterised,
         cold.evictions,
@@ -2738,6 +2740,7 @@ fn bench_first_frame(arg: &str) {
         warm_ns as f64 / 1e6,
         warm.build_us as f64 / 1e3,
         warm.encode_us as f64 / 1e3,
+
         warm.gpu_wait_us as f64 / 1e3,
         warm.glyphs_rasterised,
     );
