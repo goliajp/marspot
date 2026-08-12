@@ -221,3 +221,28 @@ allocates 2.12 MB once, in 0.03 ms.
   8,661 glyphs, on the frame a fresh core draws before it can answer a
   PING.  It sits behind the allocation fix in the queue, not in front
   of it.
+
+## After the fix — measured on the same machine
+
+Eleven minutes on the live app, load 3.8–8.3:
+
+```
+388ms  build_387.3  cmdbuf_0.0  encode_0.1 (instbuf_0.0 / 0.0MB)  gpu_1.2   glyphs_0
+ 81ms  build_  0.3  cmdbuf_0.0  encode_0.1 (instbuf_0.0 / 0.0MB)  gpu_81.1  glyphs_0
+```
+
+**Two stalls, and `instbuf` is `0.0 ms / 0.0 MB` in both** — the
+steady-state frame now allocates nothing, which is the part of this
+that is certain regardless of what the machine is doing.
+
+Before the fix the comparable window held twelve stalls, nine of them
+allocation-dominated at 84–290 ms.  That drop is *not* a controlled
+comparison: the machine's load fell from ~7–10 to ~3.8–8.3 over the
+same period.  What can be claimed is the mechanism, not the ratio.
+
+Two modes survive, both pre-existing and both rarer:
+
+* **`build` 387 ms with `glyphs_0`** — a pure CPU walk of 13 panes'
+  cells being descheduled under load.  New only in the sense that it
+  is now the largest thing left.
+* **`gpu_wait` 81 ms** — the second mode from the original twelve.
