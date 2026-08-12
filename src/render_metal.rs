@@ -281,6 +281,21 @@ pub struct RenderSplit {
     /// itself worth knowing when a frame goes long.
     pub canvas_us: u64,
     pub gpu_wait_us: u64,
+    /// What the GPU itself reports it spent executing this frame
+    /// (`GPUEndTime - GPUStartTime`), against `gpu_wait_us`'s wall
+    /// clock.  A large wait with a small exec means we were queued or
+    /// descheduled, not that the work is heavy — and those two want
+    /// completely different fixes.
+    pub gpu_exec_us: u64,
+    /// Of `build_us`, the per-pane loop vs everything else (chrome,
+    /// sidebar, panels, modals, overlays).
+    pub build_panes_us: u64,
+    /// Panes that missed the per-pane instance cache and were rebuilt
+    /// this frame, out of how many were considered.  A frame that
+    /// rebuilds all of them every time is a cache that isn't working,
+    /// which no timing on its own would reveal.
+    pub panes_rebuilt: u32,
+    pub panes_total: u32,
     pub glyphs_rasterised: u32,
     /// Shelf evictions and whole-atlas rebuilds *during this frame*.
     /// Non-zero means the frame's own working set did not fit, so it
@@ -296,14 +311,18 @@ impl RenderSplit {
     /// log line, so the three numbers always travel together.
     pub fn summary(&self) -> String {
         format!(
-            "build_{:.1}ms cmdbuf_{:.1}ms encode_{:.1}ms(instbuf_{:.1}ms/{:.1}MB) canvas_{:.1}ms gpu_{:.1}ms glyphs_{}",
+            "build_{:.1}ms(panes_{:.1}ms_{}/{}rebuilt) cmdbuf_{:.1}ms encode_{:.1}ms(instbuf_{:.1}ms/{:.1}MB) canvas_{:.1}ms gpu_{:.1}ms(exec_{:.1}ms) glyphs_{}",
             self.build_us as f64 / 1000.0,
+            self.build_panes_us as f64 / 1000.0,
+            self.panes_rebuilt,
+            self.panes_total,
             self.cmdbuf_us as f64 / 1000.0,
             self.encode_us as f64 / 1000.0,
             self.instbuf_us as f64 / 1000.0,
             self.instbuf_bytes as f64 / 1048576.0,
             self.canvas_us as f64 / 1000.0,
             self.gpu_wait_us as f64 / 1000.0,
+            self.gpu_exec_us as f64 / 1000.0,
             self.glyphs_rasterised,
         ) + &if self.evictions > 0 || self.rebuilds > 0 {
             format!(" evict_{} rebuild_{}", self.evictions, self.rebuilds)
@@ -1759,7 +1778,7 @@ impl MetalRenderer {
         overlay_glyphs_scratch.clear();
         overlay_color_glyphs_scratch.clear();
         overlay_ui_rects_scratch.clear();
-        build_instances(
+        let build_stats = build_instances(
             layout,
             views,
             sidebar,
@@ -1883,6 +1902,13 @@ impl MetalRenderer {
         let t_gpu0 = std::time::Instant::now();
         { cmd.waitUntilCompleted() };
         let t_end = std::time::Instant::now();
+        // The GPU's own account of the frame, for comparison with the
+        // wall-clock wait above.  Both are only valid after the buffer
+        // has completed, which is why they are read here.
+        let gpu_exec_us = {
+            let (s, e) = unsafe { (cmd.GPUStartTime(), cmd.GPUEndTime()) };
+            ((e - s).max(0.0) * 1e6) as u64
+        };
         // Bracketing is sound here even though sub-microsecond timers
         // can be defeated by reordering: `commit` and
         // `waitUntilCompleted` are opaque calls with side effects, and
@@ -1895,6 +1921,10 @@ impl MetalRenderer {
             instbuf_bytes,
             canvas_us: (t_commit0 - t_canvas0).as_micros() as u64,
             gpu_wait_us: (t_end - t_gpu0).as_micros() as u64,
+            gpu_exec_us,
+            build_panes_us: build_stats.panes_us,
+            panes_rebuilt: build_stats.rebuilt,
+            panes_total: build_stats.considered,
             glyphs_rasterised,
             evictions,
             rebuilds,
@@ -2476,6 +2506,14 @@ const STATE_EXITED: (f32, f32, f32) = (0.85, 0.30, 0.30);
 /// &mut Vec<…>` arguments don't conflict with the GPU references
 /// the encoder needs to hold.
 #[allow(clippy::too_many_arguments)]
+/// What `build_instances` measured about itself.
+#[derive(Clone, Copy, Debug, Default)]
+struct BuildStats {
+    panes_us: u64,
+    rebuilt: u32,
+    considered: u32,
+}
+
 fn build_instances(
     layout: &Layout,
     views: &[SessionView],
@@ -2502,7 +2540,7 @@ fn build_instances(
     overlay_cells: &mut Vec<CellInstance>,
     overlay_glyphs: &mut Vec<GlyphInstance>,
     overlay_ui_rects: &mut Vec<UiRectInstance>,
-) {
+) -> BuildStats {
     let cell_w = font.cell_w as f32;
     let cell_h = font.cell_h as f32;
     let ascent = font.ascent as f32;
@@ -2594,11 +2632,15 @@ fn build_instances(
         pane_caches.push(PaneInstanceCache::default());
     }
 
+    let t_panes0 = std::time::Instant::now();
+    let mut rebuilt = 0u32;
+    let mut considered = 0u32;
     for (i, view) in views.iter().enumerate() {
         let rect = match layout.cells.get(i) {
             Some(r) => r,
             None => continue,
         };
+        considered += 1;
         // F1+13 — per-pane instance cache.  Hash the inputs that
         // affect `push_session`'s output.  Hit ⇒ memcpy cached
         // slices into the global accumulators (cheap).  Miss ⇒
@@ -2622,6 +2664,7 @@ fn build_instances(
             color_glyphs.extend_from_slice(&cache.color_glyphs);
             continue;
         }
+        rebuilt += 1;
         let cells_start = cells.len();
         let glyphs_start = glyphs.len();
         let color_glyphs_start = color_glyphs.len();
@@ -2662,6 +2705,7 @@ fn build_instances(
         cache.color_glyphs.extend_from_slice(&color_glyphs[color_glyphs_start..]);
         cache.primed = true;
     }
+    let panes_us = t_panes0.elapsed().as_micros() as u64;
 
     // F3+1.13 — all post-pane main-scratch UI in one ViewPainter
     // scope: empty cells, sidebar, chrome toolbar, close × / add +
@@ -2945,6 +2989,8 @@ fn build_instances(
     // `encode_canvas` to draw in submission-order.  The variable
     // is consumed there.
     let _ = context_menu_state;
+
+    BuildStats { panes_us, rebuilt, considered }
 }
 
 /// The attention ladder: how present a pane is, from whether the user
