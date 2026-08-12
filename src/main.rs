@@ -2762,6 +2762,13 @@ fn bench_first_frame(arg: &str) {
 ///   * No CPU-side pixel readback (the texture is StorageModePrivate).
 ///     The AppKit path's `snapshot` does include the BGRA copy-out.
 fn bench_metal_render(arg: &str) {
+    // `MARSPOT_QOS=1` raises this thread to USER_INTERACTIVE before
+    // the run, so the same binary produces both halves of the A/B.
+    if std::env::var("MARSPOT_QOS").as_deref() == Ok("1")
+        && !marspot::qos::raise_current_thread_to_user_interactive()
+    {
+        eprintln!("bench: QoS request refused");
+    }
     let n: u32 = arg.parse().unwrap_or_else(|_| {
         eprintln!("bench: metal-render needs an integer iteration count");
         std::process::exit(2);
@@ -2829,24 +2836,49 @@ fn bench_metal_render(arg: &str) {
     }
 
     let mut samples: Vec<u64> = Vec::with_capacity(n as usize);
+    // Per-component samples alongside the total.  The gate only reads
+    // `p99_ns`, but a frame that got slower is a question, not an
+    // answer, and answering it used to mean shipping a new build with
+    // new timers.  `gpu_exec` in particular is the GPU's own account
+    // of the work against `gpu_wait`'s wall clock: when the two
+    // diverge, the frame was queued or descheduled rather than heavy,
+    // and that distinction decides what to fix.
+    let mut build: Vec<u64> = Vec::with_capacity(n as usize);
+    let mut encode: Vec<u64> = Vec::with_capacity(n as usize);
+    let mut gpu_wait: Vec<u64> = Vec::with_capacity(n as usize);
+    let mut gpu_exec: Vec<u64> = Vec::with_capacity(n as usize);
     for _ in 0..n {
         let t0 = std::time::Instant::now();
         renderer.render_layout_to_texture(&mut wr, &target, &layout, views, &[], 0);
         samples.push(t0.elapsed().as_nanos() as u64);
+        let sp = renderer.last_render_split();
+        build.push(sp.build_us);
+        encode.push(sp.cmdbuf_us + sp.encode_us + sp.canvas_us);
+        gpu_wait.push(sp.gpu_wait_us);
+        gpu_exec.push(sp.gpu_exec_us);
     }
     samples.sort_unstable();
+    let pct = |v: &mut Vec<u64>, q: f64| -> u64 {
+        v.sort_unstable();
+        let idx = ((v.len() as f64) * q) as usize;
+        v[idx.min(v.len() - 1)]
+    };
     let p = |q: f64| -> u64 {
         let idx = ((samples.len() as f64) * q) as usize;
         samples[idx.min(samples.len() - 1)]
     };
     println!(
-        r#"{{"mode":"metal-render","iterations":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{}}}"#,
+        r#"{{"mode":"metal-render","iterations":{},"p50_ns":{},"p95_ns":{},"p99_ns":{},"min_ns":{},"max_ns":{},"build_p50_us":{},"build_p99_us":{},"encode_p50_us":{},"encode_p99_us":{},"gpu_wait_p50_us":{},"gpu_wait_p99_us":{},"gpu_exec_p50_us":{},"gpu_exec_p99_us":{}}}"#,
         n,
         p(0.50),
         p(0.95),
         p(0.99),
         samples[0],
         samples[samples.len() - 1],
+        pct(&mut build, 0.50), pct(&mut build, 0.99),
+        pct(&mut encode, 0.50), pct(&mut encode, 0.99),
+        pct(&mut gpu_wait, 0.50), pct(&mut gpu_wait, 0.99),
+        pct(&mut gpu_exec, 0.50), pct(&mut gpu_exec, 0.99),
     );
 }
 

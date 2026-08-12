@@ -9049,9 +9049,19 @@ fn main() {
     // swaps idle L3 panes; a no-op otherwise).
     install_swap_trigger(event_tx.clone());
 
+    // The thread that paints is the thread the user is waiting on.
+    // Measured on an idle bench host with background load as the only
+    // variable: at default QoS a frame's p99 went from 293 µs (idle)
+    // to 6,082 µs (load 11), while the GPU's own account of the same
+    // frame never moved (111 → 115 µs).  Nothing got heavier; this
+    // thread simply stopped being scheduled.  Raising it to
+    // USER_INTERACTIVE, same machine and load, seconds apart, both
+    // orderings: p99 325 µs — the tail is gone.  See `marspot::qos`.
+    let qos_ok = marspot::qos::raise_current_thread_to_user_interactive();
     lx_event!(
         "CORE_LOOP",
-        "entering event loop (event-driven, no fixed cadence)"
+        "entering event loop (event-driven, no fixed cadence)",
+        qos_user_interactive = qos_ok as u32
     );
     // Self-reporting stalls.  A blocked iteration here freezes *every*
     // pane, so the threshold is tighter than L3's: this loop is

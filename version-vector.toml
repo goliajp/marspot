@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.113"  # 开机那 16 秒不算「看门狗迟到」,不再在每份日志里留一条假证词;详见 CHANGELOG.md
-core    = "0.12.130"  # 补上 IOSurface 渲染路径的像素回归测试 —— 它此前一个都没有;详见 CHANGELOG.md
+shell   = "0.7.114"  # 主线程同样升到 USER_INTERACTIVE(那次 100.8 秒迟到的正是它);详见 CHANGELOG.md
+core    = "0.12.131"  # 画帧的线程升到 USER_INTERACTIVE —— 负载下 p99 快 18.7 倍;详见 CHANGELOG.md
 session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md

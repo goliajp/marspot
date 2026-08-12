@@ -5145,9 +5145,19 @@ Usage:\n\
         _ => {}
     }
 
+    // Same reasoning as L2's loop: this thread runs the supervisor\n    // tick and every AppKit callback, and it was measured 100.8 s\n    // late during the 2026-08-11 incident.
+    // Measured on an idle bench host with background load as the only
+    // variable: at default QoS a frame's p99 went from 293 µs (idle)
+    // to 6,082 µs (load 11), while the GPU's own account of the same
+    // frame never moved (111 → 115 µs).  Nothing got heavier; this
+    // thread simply stopped being scheduled.  Raising it to
+    // USER_INTERACTIVE, same machine and load, seconds apart, both
+    // orderings: p99 325 µs — the tail is gone.  See `marspot::qos`.
+    let qos_ok = marspot::qos::raise_current_thread_to_user_interactive();
     lx_event!(
         "STARTUP",
         "marspot-shell starting",
+        qos_user_interactive = qos_ok as u32,
         version_shell = env!("MARSPOT_VERSION_SHELL"),
         version_core = env!("MARSPOT_VERSION_CORE"),
         git = option_env!("MARSPOT_GIT_SHA").unwrap_or("unknown"),
