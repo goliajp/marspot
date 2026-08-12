@@ -1906,7 +1906,7 @@ impl MetalRenderer {
         // wall-clock wait above.  Both are only valid after the buffer
         // has completed, which is why they are read here.
         let gpu_exec_us = {
-            let (s, e) = unsafe { (cmd.GPUStartTime(), cmd.GPUEndTime()) };
+            let (s, e) = (cmd.GPUStartTime(), cmd.GPUEndTime());
             ((e - s).max(0.0) * 1e6) as u64
         };
         // Bracketing is sound here even though sub-microsecond timers
@@ -5789,9 +5789,8 @@ impl InstanceBufferPool {
             // reallocate — the allocation is the thing being avoided.
             let cap = bytes.len().next_power_of_two().max(64 * 1024);
             let t0 = std::time::Instant::now();
-            let buf = unsafe {
-                device.newBufferWithLength_options(cap, MTLResourceOptions::StorageModeShared)
-            };
+            let buf =
+                device.newBufferWithLength_options(cap, MTLResourceOptions::StorageModeShared);
             INSTANCE_BUF_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
             INSTANCE_BUF_BYTES.fetch_add(cap as u64, Ordering::Relaxed);
             self.slots[slot] = buf;
@@ -8331,6 +8330,142 @@ mod tests {
             out_path.display(),
             w_px,
             h_px,
+        );
+    }
+
+    /// End-to-end pixel guard for the reused instance buffers.
+    ///
+    /// Nothing covered this path before: the suite's only
+    /// `render_layout_to_texture` remark says a real readback "needs a
+    /// `StorageModeShared` target texture that the renderer doesn't
+    /// currently expose", and left it there — so the frame L2 actually
+    /// paints had no pixel assertion at all.  That was tolerable while
+    /// every pass allocated a fresh buffer; it is not tolerable now
+    /// that they are refilled in place, because the way that fails is
+    /// silently, in pixels, on the frame after a bigger one.
+    ///
+    /// The contract stated as a test: **a frame drawn into reused
+    /// buffers is byte-identical to the same frame drawn into fresh
+    /// ones**, including when a larger frame ran in between and left
+    /// its tail in the buffer.
+    #[test]
+    fn reused_instance_buffers_paint_the_same_pixels() {
+        use crate::grid::{Cell, Grid};
+        use crate::layout::Layout;
+
+        let mut renderer = match MetalRenderer::new_headless() {
+            Ok(r) => r,
+            Err(_) => return, // no Metal on this machine
+        };
+        // Shared storage so the CPU can read it back without a blit —
+        // the thing the old comment said was missing.
+        let device = renderer.device().to_owned();
+        let (w, h) = (320u32, 160u32);
+        let desc = unsafe {
+            objc2_metal::MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                TARGET_FORMAT, w as usize, h as usize, false,
+            )
+        };
+        desc.setUsage(
+            objc2_metal::MTLTextureUsage::RenderTarget | objc2_metal::MTLTextureUsage::ShaderRead,
+        );
+        desc.setStorageMode(objc2_metal::MTLStorageMode::Shared);
+        let target = match device.newTextureWithDescriptor(&desc) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let (cell_w, cell_h) = renderer.cell_dims();
+        let layout = Layout::build(w as f64, h as f64, 0.0, 0.0, 0.0, 1, 1, cell_w, cell_h);
+        let mut wr = WindowRender::new();
+
+        let scene = |text: &str, cols: u16, rows: u16| -> Grid {
+            let mut g = Grid::new(cols, rows);
+            for (r, line) in text.lines().enumerate() {
+                for (c, ch) in line.chars().enumerate() {
+                    g.set_cell(c as u16, r as u16, Cell { ch, attrs: Default::default() });
+                }
+            }
+            g
+        };
+        // `seq` is what the per-pane instance cache fingerprints —
+        // the grid's contents are never hashed, because the session
+        // bumps `seq` whenever they change.  A first draft of this
+        // test held `seq` at 0 while swapping the grid underneath,
+        // and every frame came back identical: the cache was right
+        // and the test was lying to it.
+        fn view_of(g: &Grid, seq: u64) -> SessionView<'_> {
+            SessionView {
+                grid: g,
+                view_offset: 0,
+                cursor_visible: false,
+                focused: true,
+                title: "",
+                selection: None,
+                ime_preedit: "",
+                update_pending: false,
+                dormant: false,
+                recede: 0,
+                scrim: 0.0,
+                right_badge: "",
+                top_fixed_h_cells: 0,
+                bot_fixed_h_cells: 0,
+                highlight_spans: &[],
+                search_overlay: None,
+                seq,
+            }
+        }
+
+        let small = scene("hi", 20, 6);
+        let big = scene(
+            "MMMMMMMMMMMMMMMMMMMM\nMMMMMMMMMMMMMMMMMMMM\nMMMMMMMMMMMMMMMMMMMM\nMMMMMMMMMMMMMMMMMMMM\nMMMMMMMMMMMMMMMMMMMM\nMMMMMMMMMMMMMMMMMMMM",
+            20, 6,
+        );
+
+        // Frame 1: cold pool — every buffer is freshly allocated.
+        let v = view_of(&small, 1);
+        renderer.render_layout_to_texture(&mut wr, &target, &layout, std::slice::from_ref(&v), &[], 0);
+        let fresh = texture_bytes_bgra(&target);
+        {
+            // Diagnostic: the BG pass always clears to SIDEBAR_BG, a
+            // dark grey — pure black everywhere means the render never
+            // reached this texture, which is a broken test rig, not a
+            // broken renderer.
+            let mut distinct = std::collections::HashSet::new();
+            for px in fresh.chunks_exact(4) {
+                distinct.insert([px[0], px[1], px[2], px[3]]);
+                if distinct.len() > 8 { break }
+            }
+            let sample: Vec<_> = distinct.iter().take(4).collect();
+            assert!(
+                distinct.len() > 1,
+                "frame has one colour only: {sample:?} (SIDEBAR_BG is {:?})",
+                SIDEBAR_BG_F,
+            );
+        }
+
+        // Frame 2: same scene, warm pool — buffers are refilled, not
+        // reallocated.  Same pixels, or the reuse is wrong.
+        let v = view_of(&small, 1);
+        renderer.render_layout_to_texture(&mut wr, &target, &layout, std::slice::from_ref(&v), &[], 0);
+        let reused = texture_bytes_bgra(&target);
+        assert_eq!(fresh, reused, "a refilled buffer must paint what a fresh one painted");
+
+        // A bigger frame grows the buffers; going back to the small
+        // one must not leave the big one's tail behind.  Instance
+        // counts are what bound the draw, so a stale tail is exactly
+        // the bug that would survive every other test here.
+        let v = view_of(&big, 2);
+        renderer.render_layout_to_texture(&mut wr, &target, &layout, std::slice::from_ref(&v), &[], 0);
+        let full = texture_bytes_bgra(&target);
+        assert_ne!(full, fresh, "the two scenes must actually differ, or this proves nothing");
+
+        let v = view_of(&small, 1);
+        renderer.render_layout_to_texture(&mut wr, &target, &layout, std::slice::from_ref(&v), &[], 0);
+        let after_shrink = texture_bytes_bgra(&target);
+        assert_eq!(
+            fresh, after_shrink,
+            "a smaller frame after a larger one must not inherit its leftovers",
         );
     }
 
