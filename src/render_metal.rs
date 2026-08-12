@@ -247,6 +247,50 @@ pub struct GlyphInstance {
 /// are rasterised once at `FONT_POINT` and the atlas key carries the
 /// quantised size, so one atlas already serves windows on displays of
 /// different backing scales.
+/// Where one IOSurface frame spent its time.
+///
+/// A frame that took 41 seconds is not a finding — "render is slow"
+/// cannot be attacked.  These three numbers can: they separate CPU
+/// instance-building (which includes rasterising every glyph the
+/// atlas has never seen) from command encoding from the GPU wait, and
+/// they are bracketed by calls the compiler cannot reorder across.
+/// `glyphs_rasterised` is the companion witness — a large `build_us`
+/// with a large glyph count is a cold atlas; the same `build_us` with
+/// none is something else entirely, and without the count the two
+/// look identical.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderSplit {
+    pub build_us: u64,
+    pub encode_us: u64,
+    pub gpu_wait_us: u64,
+    pub glyphs_rasterised: u32,
+    /// Shelf evictions and whole-atlas rebuilds *during this frame*.
+    /// Non-zero means the frame's own working set did not fit, so it
+    /// threw away glyphs it went on to need again — a different
+    /// failure from "there were simply a lot of new glyphs", and the
+    /// two are indistinguishable from timing alone.
+    pub evictions: u64,
+    pub rebuilds: u64,
+}
+
+impl RenderSplit {
+    /// `build=..ms encode=..ms gpu=..ms glyphs=..` — one field for a
+    /// log line, so the three numbers always travel together.
+    pub fn summary(&self) -> String {
+        format!(
+            "build_{:.1}ms encode_{:.1}ms gpu_{:.1}ms glyphs_{}",
+            self.build_us as f64 / 1000.0,
+            self.encode_us as f64 / 1000.0,
+            self.gpu_wait_us as f64 / 1000.0,
+            self.glyphs_rasterised,
+        ) + &if self.evictions > 0 || self.rebuilds > 0 {
+            format!(" evict_{} rebuild_{}", self.evictions, self.rebuilds)
+        } else {
+            String::new()
+        }
+    }
+}
+
 pub struct WindowRender {
     pane_caches: Vec<PaneInstanceCache>,
     /// Should the next render to an IOSurface target start with a
@@ -792,6 +836,9 @@ pub struct MetalRenderer {
     /// Dev-panel state.  `Some` while visible.  Owned by L2;
     /// renderer just reads it to build a Canvas and encode.
     dev_panel_state: Option<crate::ui::components::DevPanelState>,
+    /// Where the last IOSurface frame spent its time.  See
+    /// [`RenderSplit`].
+    last_render_split: RenderSplit,
     /// F3+1.6 — overlay scratches.  Anything pushed here gets
     /// encoded in EXTRA UI + FG passes AFTER the main grid render,
     /// so it lands on top of all grid pixels regardless of which
@@ -947,6 +994,7 @@ impl MetalRenderer {
             window_focused: true,
             hover_chrome_btn: None,
             process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -1012,6 +1060,7 @@ impl MetalRenderer {
             window_focused: true,
             hover_chrome_btn: None,
             process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
+            last_render_split: RenderSplit::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -1666,6 +1715,9 @@ impl MetalRenderer {
             ..
         } = *self;
 
+        let evict0 = atlas.evictions + color_atlas.evictions;
+        let rebuild0 = atlas.rebuild_count + color_atlas.rebuild_count;
+        let t_build0 = std::time::Instant::now();
         cells_scratch.clear();
         glyphs_scratch.clear();
         color_glyphs_scratch.clear();
@@ -1703,6 +1755,16 @@ impl MetalRenderer {
             overlay_ui_rects_scratch,
         );
 
+        // Glyph work is charged to `build`: `build_instances` is what
+        // calls `get_or_rasterize`, so a cold atlas shows up as build
+        // time and the counter says how much of it that was.
+        let glyphs_rasterised =
+            atlas.take_rasterised() + color_atlas.take_rasterised();
+        let evictions = (atlas.evictions + color_atlas.evictions)
+            .saturating_sub(evict0);
+        let rebuilds = (atlas.rebuild_count + color_atlas.rebuild_count)
+            .saturating_sub(rebuild0);
+        let t_encode0 = std::time::Instant::now();
         let cmd = match queue.commandBuffer() {
             Some(c) => c,
             None => return,
@@ -1777,7 +1839,26 @@ impl MetalRenderer {
             );
         }
         cmd.commit();
+        let t_gpu0 = std::time::Instant::now();
         { cmd.waitUntilCompleted() };
+        let t_end = std::time::Instant::now();
+        // Bracketing is sound here even though sub-microsecond timers
+        // can be defeated by reordering: `commit` and
+        // `waitUntilCompleted` are opaque calls with side effects, and
+        // the quantities being separated are milliseconds apart.
+        self.last_render_split = RenderSplit {
+            build_us: (t_encode0 - t_build0).as_micros() as u64,
+            encode_us: (t_gpu0 - t_encode0).as_micros() as u64,
+            gpu_wait_us: (t_end - t_gpu0).as_micros() as u64,
+            glyphs_rasterised,
+            evictions,
+            rebuilds,
+        };
+    }
+
+    /// Where the last IOSurface frame spent its time.
+    pub fn last_render_split(&self) -> RenderSplit {
+        self.last_render_split
     }
 }
 

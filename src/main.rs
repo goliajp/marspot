@@ -2365,6 +2365,7 @@ fn run_bench(spec: &str) {
         "scroll-cold" => bench_scroll(arg, /* cold */ true),
         "scrollaccess" => bench_scrollaccess(arg),
         "glyphraster" => bench_glyphraster(arg),
+        "first-frame" => bench_first_frame(arg),
         "rss-format-dump" => bench_rss_format_dump(arg),
         other => {
             eprintln!("unknown bench mode: {other}");
@@ -2602,6 +2603,143 @@ fn bench_parse(path: &str) {
         bytes.len(),
         elapsed_ns,
         bytes_per_sec
+    );
+}
+
+/// `--bench first-frame:<panes>[:<charset>]` — what the **first**
+/// frame after a core boot costs.
+///
+/// Every other render bench warms up first: `bench_metal_render`
+/// renders five throwaway frames precisely so the glyph atlas and the
+/// GPU caches are hot before the stopwatch starts.  That is the right
+/// call for a steady-state gate, and it is why no measurement in this
+/// repo has ever covered the frame that actually hurts — the one a
+/// freshly spawned core draws into a newly attached IOSurface with an
+/// atlas containing nothing at all.  A core is killed and respawned on
+/// every crash, hang verdict, silent update and window attach, so this
+/// frame is not an edge case; it is the recovery path.
+///
+/// Reports the cold frame and the next (warm) one side by side, each
+/// split into CPU instance-building / command encoding / GPU wait,
+/// with the number of glyphs rasterised.  `charset` picks how much
+/// glyph diversity the panes hold: `ascii` (~95 distinct), `cjk`
+/// (thousands), `mixed` (default) — the spread between them is the
+/// answer to "how much of this is the cold atlas".
+fn bench_first_frame(arg: &str) {
+    let mut parts = arg.split(':');
+    let panes: usize = parts.next().unwrap_or("13").parse().unwrap_or_else(|_| {
+        eprintln!("bench: first-frame needs <panes>[:<charset>]");
+        std::process::exit(2);
+    });
+    let charset = parts.next().unwrap_or("mixed");
+    // The dims from the incident this bench exists for: a 4K window,
+    // 13 panes on a 6×2 grid + 1, 86×63 cells each.
+    let phys_w: u32 = 3840;
+    let phys_h: u32 = 2130;
+    let grid_cols = 6usize;
+    let grid_rows = ((panes + grid_cols - 1) / grid_cols).max(1);
+
+    // Fill every pane with text of the requested diversity.  CJK
+    // sweeps a contiguous CJK block so each cell is a glyph the atlas
+    // has never seen; ASCII repeats the printable range.
+    // CJK Unified Ideographs, and nothing past it.  The first version
+    // of this bench walked `0x4E00 + pane * 4096` unbounded, which ran
+    // off the end of the block into musical symbols and emoji by pane
+    // 4 — and emoji rasterise at ~630 µs against CJK's ~11 µs, so the
+    // "cjk" row was reporting a per-glyph cost 15× the real one.  A
+    // measurement instrument that silently changes what it measures
+    // looks exactly like a finding.
+    const CJK_LO: u32 = 0x4E00;
+    const CJK_HI: u32 = 0x9FFF;
+    let cjk_span = CJK_HI - CJK_LO + 1;
+    let mut terminals: Vec<Terminal> = Vec::with_capacity(panes);
+    for p in 0..panes {
+        let mut t = Terminal::new(86, 63);
+        let mut payload: Vec<u8> = Vec::with_capacity(64 * 1024);
+        // Panes start at different offsets so they don't all draw the
+        // same glyphs, but every one stays inside the block.
+        let mut cjk_i: u32 = (p as u32).wrapping_mul(4096) % cjk_span;
+        for r in 0..63u16 {
+            for c in 0..86u16 {
+                let want_cjk = match charset {
+                    "ascii" => false,
+                    "cjk" => true,
+                    _ => (r as usize + c as usize) % 3 == 0,
+                };
+                if want_cjk {
+                    let ch = char::from_u32(CJK_LO + cjk_i).unwrap_or('中');
+                    cjk_i = (cjk_i + 1) % cjk_span;
+                    let mut buf = [0u8; 4];
+                    payload.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                } else {
+                    payload.push(((c % 95) as u8) + 32);
+                }
+            }
+            if r + 1 < 63 {
+                payload.extend_from_slice(b"\r\n");
+            }
+        }
+        t.feed(&payload);
+        terminals.push(t);
+    }
+
+    let mut renderer = MetalRenderer::new_headless().expect("headless metal renderer");
+    let target = make_target_texture(renderer.device(), phys_w, phys_h)
+        .expect("render-target texture");
+    let (cell_w, cell_h) = renderer.cell_dims();
+    let layout = Layout::build(
+        phys_w as f64, phys_h as f64, 0.0, 0.0, 0.0,
+        grid_cols, grid_rows, cell_w, cell_h,
+    );
+    let views: Vec<SessionView> = terminals
+        .iter()
+        .map(|t| SessionView {
+            recede: 0,
+            scrim: 0.0,
+            grid: t.grid(),
+            view_offset: 0,
+            cursor_visible: true,
+            focused: false,
+            title: "",
+            selection: None,
+            ime_preedit: "",
+            update_pending: false,
+            dormant: false,
+            right_badge: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
+            highlight_spans: &[],
+            search_overlay: None,
+            seq: 0,
+        })
+        .collect();
+
+    let mut wr = WindowRender::new();
+    // No warm-up.  That is the entire point.
+    let t0 = std::time::Instant::now();
+    renderer.render_layout_to_texture(&mut wr, &target, &layout, &views, &[], 0);
+    let cold_ns = t0.elapsed().as_nanos() as u64;
+    let cold = renderer.last_render_split();
+    let t1 = std::time::Instant::now();
+    renderer.render_layout_to_texture(&mut wr, &target, &layout, &views, &[], 0);
+    let warm_ns = t1.elapsed().as_nanos() as u64;
+    let warm = renderer.last_render_split();
+
+    println!(
+        r#"{{"mode":"first-frame","panes":{},"charset":"{}","cols":86,"rows":63,"phys":[{},{}],"cold":{{"total_ms":{:.2},"build_ms":{:.2},"encode_ms":{:.2},"gpu_ms":{:.2},"glyphs":{},"evict":{},"rebuild":{}}},"warm":{{"total_ms":{:.2},"build_ms":{:.2},"encode_ms":{:.2},"gpu_ms":{:.2},"glyphs":{}}}}}"#,
+        panes, charset, phys_w, phys_h,
+        cold_ns as f64 / 1e6,
+        cold.build_us as f64 / 1e3,
+        cold.encode_us as f64 / 1e3,
+        cold.gpu_wait_us as f64 / 1e3,
+        cold.glyphs_rasterised,
+        cold.evictions,
+        cold.rebuilds,
+        warm_ns as f64 / 1e6,
+        warm.build_us as f64 / 1e3,
+        warm.encode_us as f64 / 1e3,
+        warm.gpu_wait_us as f64 / 1e3,
+        warm.glyphs_rasterised,
     );
 }
 

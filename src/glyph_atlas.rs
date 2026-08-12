@@ -346,6 +346,8 @@ pub struct GlyphAtlas {
     /// place the requested glyph, e.g. the glyph is wider than any
     /// existing shelf).  Should stay 0 in steady state.
     pub rebuild_count: u64,
+    /// Shelf evictions since construction — see `evict_lru_shelf`.
+    pub evictions: u64,
     /// Phase 6 — per-shelf evictions.  Each LRU eviction recycles
     /// one shelf's slot space (without dropping the rest of the
     /// atlas), so this number can climb harmlessly while the working
@@ -364,6 +366,15 @@ pub struct GlyphAtlas {
     /// CoreText directly — Phase 10 plumbs only the chrome / natural
     /// path.
     rasteriser: Box<dyn crate::font_trait::Rasteriser>,
+    /// Glyphs actually rasterised since the last [`Self::take_rasterised`].
+    ///
+    /// A cache miss here is a CoreText rasterise plus a texture
+    /// upload — orders of magnitude more than a hit — and a freshly
+    /// spawned core starts with every one of them ahead of it.  Frame
+    /// timings alone cannot separate "the GPU was busy" from "we drew
+    /// four thousand glyphs for the first time"; this counter is what
+    /// makes the two distinguishable in a stall report.
+    rasterised: u32,
 }
 
 /// 1-px padding on every side of every glyph; prevents linear
@@ -474,7 +485,9 @@ impl GlyphAtlas {
             bpp,
             shelves: Vec::new(),
             cache: FxHashMap::default(),
+            rasterised: 0,
             rebuild_count: 0,
+            evictions: 0,
             evict_count: 0,
             current_frame: 0,
             rasteriser,
@@ -489,6 +502,14 @@ impl GlyphAtlas {
     /// harness when the test cares about eviction order).
     pub fn begin_frame(&mut self, frame_id: u64) {
         self.current_frame = frame_id;
+    }
+
+    /// Read and reset the miss counter — how many glyphs this atlas
+    /// had to rasterise since the last call.  Reset-on-read so the
+    /// caller gets a per-frame number without having to remember a
+    /// previous total.
+    pub fn take_rasterised(&mut self) -> u32 {
+        std::mem::take(&mut self.rasterised)
     }
 
     pub fn texture(&self) -> &ProtocolObject<dyn MTLTexture> {
@@ -602,6 +623,11 @@ impl GlyphAtlas {
     /// the legacy whole-atlas rebuild.  Returns `(x, y, shelf_idx)` on
     /// success so the caller can record the new entry on its shelf.
     fn place_or_evict(&mut self, w: u32, h: u32) -> Option<(u32, u32, usize)> {
+        // Every insert path funnels through here — the CT rasteriser,
+        // the natural-bbox one, and the custom-buffer one — so this is
+        // the single place a miss can be counted without three
+        // bookkeeping sites drifting apart.
+        self.rasterised = self.rasterised.saturating_add(1);
         if let Some(p) = self.place(w, h) {
             return Some(p);
         }
@@ -629,6 +655,13 @@ impl GlyphAtlas {
         if needed_w > self.width {
             return false;
         }
+        // Counted because a single frame can both fill the atlas and
+        // evict from it: 17k distinct CJK glyphs do not fit in 4096²
+        // at 2× rasterisation, so the frame starts throwing away
+        // glyphs it will need again before it ends.  Without this
+        // number, that shows up only as "the per-glyph cost tripled"
+        // and gets mistaken for the rasteriser being slow.
+        self.evictions = self.evictions.saturating_add(1);
         let mut best: Option<(usize, u64)> = None;
         for (idx, shelf) in self.shelves.iter().enumerate() {
             if shelf.h < needed_h {

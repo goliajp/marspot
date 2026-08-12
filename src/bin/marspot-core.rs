@@ -7970,6 +7970,12 @@ impl CoreApp {
     /// Render the full UI into `target_tex` and return the focused-
     /// pane caret rect (view-local physical pixels) for the IME
     /// candidate window, or `None` when the cursor is hidden.
+    /// Where the renderer's last IOSurface frame spent its time —
+    /// forwarded so the loop's stall report can carry it.
+    fn renderer_split(&self) -> marspot::render_metal::RenderSplit {
+        self.renderer.last_render_split()
+    }
+
     fn render(
         &mut self,
         wi: usize,
@@ -9739,12 +9745,19 @@ fn main() {
         }
 
         if let Some(r) = watch.end() {
+            // `render` being the slowest phase is where the trail used
+            // to go cold — "render took 41 s" names no cost you can
+            // attack.  The split rides along on every stall report so
+            // the next one arrives already decomposed into CPU
+            // instance-building (glyph rasterisation included, with a
+            // count), command encoding, and the GPU wait.
             lx_warn!(
                 "l2.loop.stall",
                 &r.summary(),
                 slowest = r.slowest,
                 slowest_ms = r.slowest_took.as_millis(),
                 breakdown = r.breakdown(),
+                render_split = app.renderer_split().summary(),
                 panes = app.total_panes(),
                 stalls_total = watch.stall_count()
             );
