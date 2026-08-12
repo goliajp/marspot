@@ -2436,7 +2436,42 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.127**
+Current: **0.12.128**
+
+### 0.12.128
+
+**找到了:每帧新建 MTLBuffer,在负载中的机器上要 83–289 毫秒。**
+
+0.12.127 装机后收到的 12 条真实卡顿,9 条是同一个形状:
+
+```
+290ms  encode_289.2ms (instbuf_289.0ms / 1.0MB)  gpu_1.1ms
+216ms  encode_215.0ms (instbuf_214.9ms / 1.0MB)  gpu_1.1ms
+175ms  encode_173.3ms (instbuf_173.2ms / 1.0MB)  gpu_1.1ms
+...
+```
+
+`instbuf` 占 `encode` 的 **99.9%**,`encode` 占整帧的 **99%**。同样是分配 1 MB,
+空闲 mini 上 0.09 ms,负载中的开发机上 83–289 ms —— **单个调用被拉长一千到三千
+倍**。`newBufferWithBytes` 要向内核申请并锁定内存、再向 GPU 驱动注册;它一阻塞,
+**每个 pane 都冻住,而看门狗的 PONG 倒计时正在跑**。这就是那条"please restart
+the app"横幅的上游。
+
+修法是 `CLAUDE.md` 本来就写着的那条:**每帧热路径零分配**。新增
+`InstanceBufferPool` —— 每个 pass 一个常驻缓冲,容量向上取到 2 的幂只增不减,
+`StorageModeShared` 直接 memcpy 进去。稳态一次分配都没有。
+
+**安全边界**(写进类型文档):就地重填只在 GPU 已经用完上一帧时成立。IOSurface
+路径每帧以 `waitUntilCompleted` 收尾,成立;活的 `CAMetalLayer` 路径只等到
+*scheduled*,不成立 —— 那条路径传 `None`,继续每帧分配。
+
+合成验证:热帧 encode 0.21 ms → **0.05 ms**;冷帧一次性分配 2.12 MB 用 0.03 ms。
+
+`encode_canvas_into`(dev panel / 右键菜单)仍走每帧分配 —— 实测 `canvas` 恒为
+0.0 ms,不在这次的攻击面里,而且它的缓冲是按切片循环出来的,槽位不固定。
+
+完整拆解 + 三次被实测否掉的假设(GPU 管线 / 冷字形图集 / `commandBuffer()` 阻塞)
+见 `docs/PERF-2026-08-12-first-frame-decomposition.md`。
 
 ### 0.12.127
 

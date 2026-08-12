@@ -1,9 +1,10 @@
 # The first frame after a core boot — decomposition
 
-**Status**: Phase A complete (read-only + instrumentation + synthetic
-measurement).  **No attack has been implemented**, deliberately: the
-Pre-Phase-B gate wants the target verified against the *real* workload,
-and the instrument that produces those numbers only just shipped.
+**Status**: Phase A complete, **Phase B landed** (L2 0.12.128).  The
+answer is at the bottom, under "What the real machine said" — and it
+is not what this document's synthetic section predicted.  That section
+is kept verbatim, because being wrong in a legible way is the point of
+writing the prediction down first.
 
 ## Why this exists
 
@@ -148,3 +149,75 @@ next real stall on the user's machine supplies:
 Candidate 1 is the one that turns a 40× frame into a non-event without
 making any of it faster, which is usually the sign that the others are
 optimisations and this one is the fix.
+
+
+---
+
+# What the real machine said
+
+The instrument shipped in 0.12.125–0.12.127 and the answer arrived
+within the hour.  Twelve stalls on the live app (13 panes, load ~7–10),
+nine of one shape:
+
+```
+290ms  build_0.2  cmdbuf_0.0  encode_289.2 (instbuf_289.0 / 1.0MB)  canvas_0.0  gpu_1.1  glyphs_0
+216ms  build_0.3  cmdbuf_0.0  encode_215.0 (instbuf_214.9 / 1.0MB)  canvas_0.0  gpu_1.1  glyphs_0
+175ms  build_0.4  cmdbuf_0.0  encode_173.3 (instbuf_173.2 / 1.0MB)  canvas_0.0  gpu_1.1  glyphs_0
+158ms  151ms  145ms  112ms  108ms  84ms — same shape
+```
+
+The other three were GPU-wait dominated (85–120 ms), a smaller second
+mode.
+
+**`instbuf` is 99.9 % of `encode`, and `encode` is 99 % of the frame.**
+Allocating **1.0 MB** of Metal instance buffers took **83–289 ms**.
+The same allocation on an idle mini is **0.09 ms for 1.6 MB** — the
+one call stretches by a factor of a thousand to three thousand under
+load.  `newBufferWithBytes` asks the kernel for wired memory and
+registers it with the GPU driver; while it blocks, every pane is
+frozen and the supervisor's PONG deadline is running.  That is the
+upstream of the "please restart the app" banner.
+
+## Every hypothesis this refuted
+
+| hypothesis | how it died |
+|---|---|
+| L2 and L1 both parked on the display pipeline | `gpu_wait` flat at 6.4–6.7 ms across a 40× swing in frame cost |
+| cold glyph atlas (this document's own headline) | real stalls: `build` 0.2–0.7 ms, `glyphs` **0**, every time |
+| atlas thrashing above capacity | `evict` / `rebuild` **0** even at 17,642 distinct glyphs |
+| `queue.commandBuffer()` blocking | `cmdbuf` **0.0 ms**, every sample |
+| dev-panel / context-menu canvases | `canvas` **0.0 ms**, every sample |
+
+Five hypotheses, five refutations, one survivor — and the survivor was
+found by a counter, not by reading the code.  The code reading did
+produce the suspicion (`make_instance_buffer` is plainly a per-frame
+allocation, plainly against `CLAUDE.md`'s own hot-path rule), but the
+same reading produced four other suspicions that were wrong.
+
+## The fix
+
+`InstanceBufferPool`: one persistent `MTLBuffer` per pass, capacity
+rounded up to a power of two and only ever grown, refilled by `memcpy`
+into `contents()`.  Steady state allocates nothing.
+
+Sound only where the GPU has finished with the previous frame's
+contents.  The IOSurface path ends every frame in `waitUntilCompleted`,
+so it qualifies; the live `CAMetalLayer` path waits only until
+*scheduled* and keeps allocating per frame.  The parameter is
+`Option<&mut InstanceBufferPool>` so the distinction is visible at both
+call sites rather than remembered.
+
+Synthetic: warm-frame encode **0.21 ms → 0.05 ms**; the cold frame
+allocates 2.12 MB once, in 0.03 ms.
+
+## Still open
+
+* **The GPU-wait mode** — 85–120 ms in `waitUntilCompleted` on three
+  of twelve samples.  Untouched, unexplained, smaller.
+* **`encode_canvas_into`** still allocates per frame.  Measured at
+  0.0 ms because the panels are usually closed; its buffers come from
+  a loop over slices, so they have no fixed slot.
+* **The cold-atlas cost is real but was never the stall** — 122 ms for
+  8,661 glyphs, on the frame a fresh core draws before it can answer a
+  PING.  It sits behind the allocation fix in the queue, not in front
+  of it.

@@ -49,6 +49,7 @@ use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
+use objc2_metal::MTLBuffer;
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
 use crate::glyph_atlas::{AtlasEntry, GlyphAtlas, GlyphKey, SlotMetrics, BOX_DRAWING_FONT_ID};
@@ -860,6 +861,9 @@ pub struct MetalRenderer {
     /// Where the last IOSurface frame spent its time.  See
     /// [`RenderSplit`].
     last_render_split: RenderSplit,
+    /// Per-pass instance buffers, reused frame to frame on the
+    /// IOSurface path.  See [`InstanceBufferPool`].
+    instance_pool: InstanceBufferPool,
     /// F3+1.6 — overlay scratches.  Anything pushed here gets
     /// encoded in EXTRA UI + FG passes AFTER the main grid render,
     /// so it lands on top of all grid pixels regardless of which
@@ -1016,6 +1020,7 @@ impl MetalRenderer {
             hover_chrome_btn: None,
             process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             last_render_split: RenderSplit::default(),
+            instance_pool: InstanceBufferPool::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -1082,6 +1087,7 @@ impl MetalRenderer {
             hover_chrome_btn: None,
             process_panel: None, cc_usage: None, settings_panel: None, layout_modal_state: None, drop_preview: None, drag_source: None, context_menu_state: None, dev_panel_state: None,
             last_render_split: RenderSplit::default(),
+            instance_pool: InstanceBufferPool::default(),
             top_inset_phys: 0.0,
             frame_id: 0,
         })
@@ -1588,6 +1594,10 @@ impl MetalRenderer {
             // CAMetalLayer drawable, same process — no cross-process
             // race possible.  Always Clear for the full hard-fill.
             true,
+            // This path waits only until *scheduled*, so the GPU may
+            // still be reading last frame's instances — refilling in
+            // place would race it.  Allocate per frame here.
+            None,
         );
 
         // Dev panel — Canvas-based overlay. Encoded BEFORE the
@@ -1733,6 +1743,7 @@ impl MetalRenderer {
             ref process_panel,
             ref cc_usage,
             ref settings_panel,
+            ref mut instance_pool,
             ..
         } = *self;
 
@@ -1818,6 +1829,10 @@ impl MetalRenderer {
             // is used in steady state.  Consume the flag set by
             // `mark_bg_clear_required` (e.g. resize, layout change).
             clear_bg,
+            // Safe to refill in place: this path ends in
+            // `waitUntilCompleted` below, so the GPU is finished with
+            // the previous frame's instances before this one writes.
+            Some(instance_pool),
         );
         let t_canvas0 = std::time::Instant::now();
         // Dev panel + ContextMenu canvases (same shape as render_layout).
@@ -1928,7 +1943,21 @@ fn encode_passes(
     // the cross-process flash race documented on
     // `MetalRenderer::clear_bg_required`).
     clear_bg: bool,
+    // `Some` = refill persistent buffers (only sound on a path that
+    // ends in `waitUntilCompleted`); `None` = allocate per frame.
+    pool: Option<&mut InstanceBufferPool>,
 ) {
+    let mut pool = pool;
+    /// Slot `$slot`'s instances, from the pool when there is one.
+    macro_rules! inst {
+        ($slot:expr, $bytes:expr) => {{
+            let bytes = $bytes;
+            match &mut pool {
+                Some(p) => p.upload(device, $slot, bytes),
+                None => make_instance_buffer(device, bytes),
+            }
+        }};
+    }
     let viewport: [f32; 2] = [viewport_w, viewport_h];
     let viewport_ptr = NonNull::new(viewport.as_ptr() as *mut c_void).unwrap();
     let viewport_len = std::mem::size_of::<[f32; 2]>();
@@ -1959,7 +1988,7 @@ fn encode_passes(
             alpha: 1.0,
         });
     }
-    let bg_buffer = make_instance_buffer(device, cells_as_bytes(cells));
+    let bg_buffer = inst!(0, cells_as_bytes(cells));
     let bg_encoder = cmd
         .renderCommandEncoderWithDescriptor(&bg_pass)
         .expect("bg encoder");
@@ -1991,7 +2020,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let dot_buffer = make_instance_buffer(device, cells_as_bytes(dots));
+        let dot_buffer = inst!(1, cells_as_bytes(dots));
         let dot_encoder = cmd
             .renderCommandEncoderWithDescriptor(&dot_pass)
             .expect("dot encoder");
@@ -2024,7 +2053,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let ui_buffer = make_instance_buffer(device, ui_rects_as_bytes(ui_rects));
+        let ui_buffer = inst!(2, ui_rects_as_bytes(ui_rects));
         let ui_encoder = cmd
             .renderCommandEncoderWithDescriptor(&ui_pass)
             .expect("ui encoder");
@@ -2052,7 +2081,7 @@ fn encode_passes(
         color.setLoadAction(MTLLoadAction::Load);
         color.setStoreAction(MTLStoreAction::Store);
     }
-    let fg_buffer = make_instance_buffer(device, glyphs_as_bytes(glyphs));
+    let fg_buffer = inst!(3, glyphs_as_bytes(glyphs));
     let fg_encoder = cmd
         .renderCommandEncoderWithDescriptor(&fg_pass)
         .expect("fg encoder");
@@ -2087,7 +2116,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let cfg_buffer = make_instance_buffer(device, glyphs_as_bytes(color_glyphs));
+        let cfg_buffer = inst!(4, glyphs_as_bytes(color_glyphs));
         let cfg_encoder = cmd
             .renderCommandEncoderWithDescriptor(&cfg_pass)
             .expect("color fg encoder");
@@ -2124,7 +2153,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let buf = make_instance_buffer(device, cells_as_bytes(overlay_cells));
+        let buf = inst!(5, cells_as_bytes(overlay_cells));
         let enc = cmd
             .renderCommandEncoderWithDescriptor(&pass)
             .expect("overlay cells encoder");
@@ -2151,7 +2180,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let buf = make_instance_buffer(device, ui_rects_as_bytes(overlay_ui_rects));
+        let buf = inst!(6, ui_rects_as_bytes(overlay_ui_rects));
         let enc = cmd
             .renderCommandEncoderWithDescriptor(&pass)
             .expect("overlay ui encoder");
@@ -2178,7 +2207,7 @@ fn encode_passes(
             color.setLoadAction(MTLLoadAction::Load);
             color.setStoreAction(MTLStoreAction::Store);
         }
-        let buf = make_instance_buffer(device, glyphs_as_bytes(overlay_glyphs));
+        let buf = inst!(7, glyphs_as_bytes(overlay_glyphs));
         let enc = cmd
             .renderCommandEncoderWithDescriptor(&pass)
             .expect("overlay fg encoder");
@@ -5659,6 +5688,81 @@ pub fn take_instance_buffer_cost() -> (u64, u64) {
     )
 }
 
+
+/// Instance buffers that outlive the frame that fills them.
+///
+/// Every pass used to hand its instances to `newBufferWithBytes`,
+/// which allocates a fresh `MTLBuffer` — a kernel round trip to wire
+/// memory and register it with the GPU driver.  On an idle machine
+/// that is 90 µs for 1.6 MB and invisible.  On a machine under real
+/// load it was measured at **83–289 ms for 1.0 MB** — a thousandfold
+/// stretch of one call, accounting for 99 % of nine out of twelve
+/// sampled stalls (2026-08-12, 13 panes, load ~7–10).  While it
+/// blocks, every pane is frozen and the supervisor's PONG deadline is
+/// running.
+///
+/// So the buffers are allocated once and refilled in place.
+/// `StorageModeShared` means `contents()` is CPU-writable, and the
+/// capacity only ever grows — rounded up to a power of two so growth
+/// stops happening after the first few frames.  Steady state performs
+/// no allocation at all, which is what `CLAUDE.md` asks of a
+/// per-frame path in the first place.
+///
+/// **Safety contract**: refilling in place is only sound if the GPU
+/// is done with the previous frame's contents.  The IOSurface path
+/// ends every frame in `waitUntilCompleted`, so it is; the live
+/// `CAMetalLayer` path only waits until *scheduled*, so it keeps
+/// allocating per frame and passes `None`.
+pub struct InstanceBufferPool {
+    slots: [Option<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>>; INSTANCE_SLOTS],
+    caps: [usize; INSTANCE_SLOTS],
+}
+
+/// One slot per draw the IOSurface path encodes.
+pub const INSTANCE_SLOTS: usize = 8;
+
+impl Default for InstanceBufferPool {
+    fn default() -> Self {
+        Self { slots: Default::default(), caps: [0; INSTANCE_SLOTS] }
+    }
+}
+
+impl InstanceBufferPool {
+    /// Copy `bytes` into slot `slot`, growing it if need be.
+    fn upload(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        slot: usize,
+        bytes: &[u8],
+    ) -> Option<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>> {
+        if bytes.is_empty() || slot >= INSTANCE_SLOTS {
+            return None;
+        }
+        if self.caps[slot] < bytes.len() || self.slots[slot].is_none() {
+            // Round up so a grid that grows by one row does not
+            // reallocate — the allocation is the thing being avoided.
+            let cap = bytes.len().next_power_of_two().max(64 * 1024);
+            let t0 = std::time::Instant::now();
+            let buf = unsafe {
+                device.newBufferWithLength_options(cap, MTLResourceOptions::StorageModeShared)
+            };
+            INSTANCE_BUF_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+            INSTANCE_BUF_BYTES.fetch_add(cap as u64, Ordering::Relaxed);
+            self.slots[slot] = buf;
+            self.caps[slot] = if self.slots[slot].is_some() { cap } else { 0 };
+        }
+        let buf = self.slots[slot].as_ref()?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                buf.contents().as_ptr() as *mut u8,
+                bytes.len(),
+            );
+        }
+        Some(buf.clone())
+    }
+}
+
 fn make_instance_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
@@ -8182,6 +8286,60 @@ mod tests {
             w_px,
             h_px,
         );
+    }
+
+    /// The pool has one job — never allocate twice for the same
+    /// shape — and one hazard: refilling a buffer the GPU might still
+    /// be reading.  The hazard is handled by only using it on the
+    /// path that waits for completion (see `InstanceBufferPool`);
+    /// this covers the job.
+    #[test]
+    fn the_instance_pool_grows_once_and_then_stops_allocating() {
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return, // no Metal on this machine
+        };
+        let mut pool = InstanceBufferPool::default();
+        let _ = take_instance_buffer_cost();
+
+        // First upload allocates; capacity is rounded up, so a
+        // slightly larger second frame must NOT allocate again — that
+        // is the whole point, and a naive `cap < len` on an exact-fit
+        // buffer would reallocate on every frame that grew by a byte.
+        let small = vec![7u8; 1000];
+        let buf = pool.upload(&device, 0, &small).expect("first upload");
+        let (_, bytes_after_first) = take_instance_buffer_cost();
+        assert!(bytes_after_first > 0, "the first upload has to allocate");
+        // The bytes actually landed.
+        let got = unsafe {
+            std::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, small.len())
+        };
+        assert_eq!(got, &small[..], "contents must be what we uploaded");
+
+        let bigger = vec![9u8; 60_000];
+        pool.upload(&device, 0, &bigger).expect("second upload");
+        let (_, bytes_after_second) = take_instance_buffer_cost();
+        assert_eq!(
+            bytes_after_second, 0,
+            "growth inside the rounded-up capacity must not reallocate",
+        );
+
+        // Past the capacity it must grow — silently truncating would
+        // corrupt the frame instead of costing an allocation.
+        let huge = vec![1u8; 300_000];
+        let buf = pool.upload(&device, 0, &huge).expect("third upload");
+        let (_, bytes_after_third) = take_instance_buffer_cost();
+        assert!(bytes_after_third >= huge.len() as u64, "must reallocate to fit");
+        let got = unsafe {
+            std::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, huge.len())
+        };
+        assert_eq!(got.len(), huge.len());
+        assert!(got.iter().all(|&b| b == 1), "the whole payload must land");
+
+        // Empty input is not a buffer, and an out-of-range slot is
+        // refused rather than panicking.
+        assert!(pool.upload(&device, 0, &[]).is_none());
+        assert!(pool.upload(&device, INSTANCE_SLOTS, &small).is_none());
     }
 
     /// Verify the basic Metal plumbing works on this machine — proves
