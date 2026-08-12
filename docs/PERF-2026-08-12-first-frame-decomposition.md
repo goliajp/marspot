@@ -1,6 +1,7 @@
 # The first frame after a core boot — decomposition
 
-**Status**: Phase A complete, **Phase B landed** (L2 0.12.128).  The
+**Status**: two attacks landed — per-frame buffer allocation
+(L2 0.12.128) and scheduler priority (L1 0.7.114 / L2 0.12.131).  The
 answer is at the bottom, under "What the real machine said" — and it
 is not what this document's synthetic section predicted.  That section
 is kept verbatim, because being wrong in a legible way is the point of
@@ -246,3 +247,76 @@ Two modes survive, both pre-existing and both rarer:
   cells being descheduled under load.  New only in the sense that it
   is now the largest thing left.
 * **`gpu_wait` 81 ms** — the second mode from the original twelve.
+
+
+---
+
+# The second attack: it was never the work, it was the scheduling
+
+`gpu_exec_us` — the command buffer's own `GPUEndTime - GPUStartTime`
+— was added (0.12.129) to answer one question: when a frame waits a
+long time, is the GPU busy, or are we simply not being run?
+
+## The controlled sweep
+
+Idle bench host, one variable (background CPU hogs), 2000 frames each:
+
+| load | frame p99 | **GPU exec p99** | **GPU wait p99** |
+|---|---:|---:|---:|
+| idle | 293 µs | 111 µs | 279 µs |
+| 14 hogs (load 6.2) | 7,453 µs | **117 µs** | **7,425 µs** |
+| 42 hogs (load 22.9) | 1,720 µs | **115 µs** | 1,546 µs |
+
+**The GPU's own account of the frame does not move.**  111 µs idle,
+117 µs under load.  The wall clock around the same wait grows 27×.
+The work never got heavier; the thread waiting for it stopped being
+scheduled — and while it is not scheduled, every pane is frozen and
+the supervisor's PONG deadline is running.
+
+An instrument failure worth recording: the first attempt at this
+sweep used `timeout` to bound the hogs, which does not exist on
+macOS.  No hog ever started, and the run produced perfectly
+plausible "under load" numbers that were really idle numbers.  It was
+caught only because the script printed `load1` alongside each row —
+a witness unrelated to the thing being measured.  Without it the
+sweep would have "shown" that load doesn't matter.
+
+## The fix, and its A/B
+
+macOS schedules by QoS class.  A process spawned from a shell gets an
+unspecified/default class — the same tier as the batch work competing
+with it.  A terminal's render loop is the definition of
+`USER_INTERACTIVE`.
+
+Same machine, same load, seconds apart, both orderings:
+
+| | frame p99 | GPU wait p99 | worst frame |
+|---|---:|---:|---:|
+| default QoS | 4,953–6,082 µs | 4,912–6,042 | 9.28 ms |
+| `USER_INTERACTIVE` | **323–325 µs** | 308–310 | 0.34 ms |
+
+**p99 improves 15–18.7×, the worst frame 21×**, and under load 11–15
+the result matches the *idle* baseline (293 µs).  Run order reversed
+and repeated (ON 323 → OFF 4,953 → ON 324), so it is not warm-up.
+
+Applied to the two threads a person is waiting on — L2's render loop
+and L1's main thread — and to neither anything else.  Worker threads
+that read transcripts or sweep state keep the default: promoting
+everything promotes nothing.  L3 is deliberately excluded; a window
+can hold 81 of them, and no measurement says they need it.
+
+L1's inclusion is the one with a receipt: during the 2026-08-11
+incident its own tick was measured **100.8 s late**, and that thread
+runs the supervisor tick and every AppKit callback.  Default QoS was
+the first link in the chain that ended in "please restart the app".
+
+## What this leaves
+
+* The `build` mode (42–539 ms of a CPU walk that costs 0.04 ms idle)
+  was the same disease — a thread not being run — and should now be
+  covered by the same cure.  **Unverified**: it needs the machine to
+  be loaded again to show up at all.
+* `MARSPOT_QOS=1` on the bench binary raises its own thread the same
+  way.  Turning it on by default would make the gate far less
+  load-flaky (three re-runs were lost to that tonight), but it changes
+  what the gate measures, so it is left off and left documented.
