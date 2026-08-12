@@ -48,6 +48,7 @@ use objc2_app_kit::NSColor;
 use objc2_quartz_core::{kCAGravityTopLeft, CAMetalDrawable, CAMetalLayer};
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::font_cache::{resolve_attrs, FontCache, BG};
 use crate::glyph_atlas::{AtlasEntry, GlyphAtlas, GlyphKey, SlotMetrics, BOX_DRAWING_FONT_ID};
@@ -270,6 +271,10 @@ pub struct RenderSplit {
     pub cmdbuf_us: u64,
     /// Filling the buffer: the four render passes.
     pub encode_us: u64,
+    /// Of `encode_us`, the part spent allocating fresh per-frame
+    /// instance buffers, and how many bytes that was.
+    pub instbuf_us: u64,
+    pub instbuf_bytes: u64,
     /// The dev-panel and context-menu canvases, built and encoded
     /// after the passes.  Zero unless one of them is open — which is
     /// itself worth knowing when a frame goes long.
@@ -290,10 +295,12 @@ impl RenderSplit {
     /// log line, so the three numbers always travel together.
     pub fn summary(&self) -> String {
         format!(
-            "build_{:.1}ms cmdbuf_{:.1}ms encode_{:.1}ms canvas_{:.1}ms gpu_{:.1}ms glyphs_{}",
+            "build_{:.1}ms cmdbuf_{:.1}ms encode_{:.1}ms(instbuf_{:.1}ms/{:.1}MB) canvas_{:.1}ms gpu_{:.1}ms glyphs_{}",
             self.build_us as f64 / 1000.0,
             self.cmdbuf_us as f64 / 1000.0,
             self.encode_us as f64 / 1000.0,
+            self.instbuf_us as f64 / 1000.0,
+            self.instbuf_bytes as f64 / 1048576.0,
             self.canvas_us as f64 / 1000.0,
             self.gpu_wait_us as f64 / 1000.0,
             self.glyphs_rasterised,
@@ -1778,6 +1785,7 @@ impl MetalRenderer {
             .saturating_sub(evict0);
         let rebuilds = (atlas.rebuild_count + color_atlas.rebuild_count)
             .saturating_sub(rebuild0);
+        let _ = take_instance_buffer_cost(); // zero the accumulator
         let t_cmdbuf0 = std::time::Instant::now();
         let cmd = match queue.commandBuffer() {
             Some(c) => c,
@@ -1855,6 +1863,7 @@ impl MetalRenderer {
             );
         }
         let t_commit0 = std::time::Instant::now();
+        let (instbuf_us, instbuf_bytes) = take_instance_buffer_cost();
         cmd.commit();
         let t_gpu0 = std::time::Instant::now();
         { cmd.waitUntilCompleted() };
@@ -1867,6 +1876,8 @@ impl MetalRenderer {
             build_us: (t_cmdbuf0 - t_build0).as_micros() as u64,
             cmdbuf_us: (t_encode0 - t_cmdbuf0).as_micros() as u64,
             encode_us: (t_canvas0 - t_encode0).as_micros() as u64,
+            instbuf_us,
+            instbuf_bytes,
             canvas_us: (t_commit0 - t_canvas0).as_micros() as u64,
             gpu_wait_us: (t_end - t_gpu0).as_micros() as u64,
             glyphs_rasterised,
@@ -5628,6 +5639,26 @@ fn push_session(
 
 /// Build a Shared-storage MTLBuffer over `bytes`.  Returns `None`
 /// for an empty payload so the caller can skip the bind/draw.
+/// Microseconds spent in `newBufferWithBytes` and bytes handed to it,
+/// since the last `take_instance_buffer_cost`.
+///
+/// Every pass allocates a *fresh* `MTLBuffer` for its instances on
+/// every frame — several megabytes a frame across the passes — which
+/// is exactly what `CLAUDE.md` says a per-frame hot path must not do.
+/// Whether that is what the real machine's 100–220 ms `encode` is
+/// made of, though, is a question for a number, not for a reading of
+/// the code: these two counters are that number.
+static INSTANCE_BUF_US: AtomicU64 = AtomicU64::new(0);
+static INSTANCE_BUF_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Read and reset the allocation cost accumulated since the last call.
+pub fn take_instance_buffer_cost() -> (u64, u64) {
+    (
+        INSTANCE_BUF_US.swap(0, Ordering::Relaxed),
+        INSTANCE_BUF_BYTES.swap(0, Ordering::Relaxed),
+    )
+}
+
 fn make_instance_buffer(
     device: &ProtocolObject<dyn MTLDevice>,
     bytes: &[u8],
@@ -5635,13 +5666,17 @@ fn make_instance_buffer(
     if bytes.is_empty() {
         return None;
     }
-    unsafe {
+    let t0 = std::time::Instant::now();
+    let out = unsafe {
         device.newBufferWithBytes_length_options(
             NonNull::new(bytes.as_ptr() as *mut c_void).unwrap(),
             bytes.len(),
             MTLResourceOptions::StorageModeShared,
         )
-    }
+    };
+    INSTANCE_BUF_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+    INSTANCE_BUF_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    out
 }
 
 /// Compile `cells.metal` once.  Both the BG and FG pipelines pull

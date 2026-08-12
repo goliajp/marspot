@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.113"  # 开机那 16 秒不算「看门狗迟到」,不再在每份日志里留一条假证词;详见 CHANGELOG.md
-core    = "0.12.126"  # 真实卡顿说成本在 encode 不在 build,于是把 encode 再切三段;详见 CHANGELOG.md
+core    = "0.12.127"  # 给每帧新建实例缓冲单独计时 —— 猜它贵不算数;详见 CHANGELOG.md
 session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md

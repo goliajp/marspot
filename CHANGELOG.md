@@ -2436,7 +2436,23 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.126**
+Current: **0.12.127**
+
+### 0.12.127
+
+0.12.126 的细分把范围收到了 `encode_passes` 本体:真实卡顿里 `cmdbuf` 和
+`canvas` **恒为 0.0 ms**,"`queue.commandBuffer()` 阻塞"和"面板画布"两个假设一起
+出局,96–220 ms 全在四个 pass 的编码里。
+
+读代码看到一个显眼的嫌疑:`make_instance_buffer` 每帧、每个 pass 都
+`newBufferWithBytes` 新建一个 MTLBuffer —— 13 个 pane 一帧好几 MB 的新分配,正是
+`CLAUDE.md` 里"每帧热路径零分配"禁止的形状。但**看代码得出的嫌疑不算数**,给它
+单独计时:`instbuf_us` / `instbuf_bytes`。
+
+空闲 mini 上分配 1.59 MB 只要 0.09 ms。所以真实机器上要么这个数会炸,要么成本
+在编码器创建/draw call 那边 —— 下一批日志直接判。
+
+仍然**没有实施任何优化**。
 
 ### 0.12.126
 
