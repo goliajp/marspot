@@ -2788,13 +2788,34 @@ impl WorkerCtx {
     /// takes over the moment it has one, and a fresh session's bytelog
     /// is small, so the replay this costs is a young pane's alone.
     fn model_from_banner(&mut self, sid: u64) -> Option<String> {
-        // At most one replay per pane per BANNER_RETRY window: a pane
-        // that never shows a banner (not claude at all, screen already
-        // scrolled past it) must not buy a 512 KB replay every scan.
+        // A pane that never shows a banner (not claude at all, screen
+        // already scrolled past it) must not buy a replay every scan,
+        // so attempts are rate-limited.  But the interval keys off the
+        // bytelog's size rather than being one number, because the two
+        // cases the limit serves are opposites: the pane that has just
+        // opened is exactly the one we most want to read, and its log
+        // is a few KB, so replaying it costs almost nothing.  A flat
+        // 30 s meant a first attempt landing a moment before claude
+        // painted its banner left the badge model-less for the next
+        // half minute — the whole window in which the user is looking
+        // at a freshly opened pane.
         const BANNER_RETRY: Duration = Duration::from_secs(30);
+        const YOUNG_RETRY: Duration = Duration::from_secs(3);
+        /// A log this small is a pane that has barely started; the
+        /// replay is bounded by it, so frequent retries are bounded
+        /// too.
+        const YOUNG_BYTELOG: u64 = 256 * 1024;
+        let bytelog = marspot_term::paths::sessions_dir()
+            .join(sid.to_string())
+            .join("bytelog");
+        // One stat on the file we were going to read anyway.
+        let young = std::fs::metadata(&bytelog)
+            .map(|m| m.len() <= YOUNG_BYTELOG)
+            .unwrap_or(false);
+        let retry = if young { YOUNG_RETRY } else { BANNER_RETRY };
         let now = Instant::now();
         if let Some(&t) = self.banner_tried.get(&sid) {
-            if now.duration_since(t) < BANNER_RETRY {
+            if now.duration_since(t) < retry {
                 return None;
             }
         }
@@ -2802,9 +2823,6 @@ impl WorkerCtx {
         let entry = marspot_term::session_registry::list_session_entries()
             .into_iter()
             .find(|e| e.id == sid)?;
-        let bytelog = marspot_term::paths::sessions_dir()
-            .join(sid.to_string())
-            .join("bytelog");
         let screen = marspot::pane_read::screen_text(&bytelog, entry.cols, entry.rows, 0).ok()?;
         parse_banner_model(&screen)
     }
@@ -3235,15 +3253,85 @@ fn parse_banner_model(screen: &str) -> Option<String> {
             if t.is_empty() {
                 continue;
             }
-            let head = t.split('·').next().unwrap_or(t);
-            let name = short_model(head);
-            if !name.is_empty() {
+            if let Some(name) = banner_model_token(t) {
                 return Some(name);
             }
             break;
         }
     }
     None
+}
+
+/// Pull the model out of a banner line, which is not the same thing
+/// as cleaning the line up.
+///
+/// The line is decoration, name and qualifiers all at once:
+///
+/// ```text
+///   ▛▀▜  Fable 5 with high effort · Claude Max
+///        Opus 5 (1M context) with high effort · Claude Max
+///        Sonnet 4.5 · Claude Pro
+/// ```
+///
+/// Handing the whole thing to [`short_model`] used to fail two ways
+/// at once, and the screenshot that prompted this had both.  The
+/// ASCII-art logo shares these rows, and `short_model` rejects any
+/// line containing a non-ASCII char — so the badge showed **no**
+/// model.  And with the logo out of the way it produced
+/// `fable-5-with-hig`: the effort suffix became part of the name and
+/// then hit the 16-char cap.  The parenthesised form only ever
+/// worked by accident — dropping everything from `(` happened to
+/// drop ` with high effort` too, which is why `Opus 5 (1M context)`
+/// looked fine while `Fable 5 with high effort` did not.
+///
+/// So this takes the name instead of trimming around it: skip
+/// decoration, take the family word(s), take the version, and stop
+/// at the first word that is neither.  Anything the banner adds
+/// after the version — today `with high effort`, tomorrow something
+/// else — ends the name rather than joining it.
+fn banner_model_token(line: &str) -> Option<String> {
+    let head = line.split('·').next().unwrap_or(line);
+    let head = match head.find('(') {
+        Some(i) => &head[..i],
+        None => head,
+    };
+    let mut name: Vec<&str> = Vec::new();
+    let mut seen_version = false;
+    for tok in head.split_whitespace() {
+        // Strip decoration clinging to a word (`▟Fable`), then skip
+        // tokens that are only decoration.
+        let t = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        if t.is_empty() {
+            continue;
+        }
+        if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+            // Mixed-script junk: before the name it is more
+            // decoration, after it the name has ended.
+            if name.is_empty() {
+                continue;
+            }
+            break;
+        }
+        let is_version = t.chars().any(|c| c.is_ascii_digit());
+        if is_version {
+            seen_version = true;
+            name.push(t);
+            continue;
+        }
+        // Words are part of the name only until the version arrives —
+        // "Claude Opus 5" is a name, "Fable 5 with" is a name and a
+        // qualifier.
+        if seen_version {
+            break;
+        }
+        name.push(t);
+    }
+    if name.is_empty() {
+        return None;
+    }
+    let joined = name.join(" ");
+    let short = short_model(&joined);
+    if short.is_empty() { None } else { Some(short) }
 }
 
 /// The live session uuid as stated by the claude process tree's own
@@ -5536,6 +5624,34 @@ mod tests {
         assert_eq!(parse_banner_model("Claude Code v1\n\n\n\n"), None);
     }
 
+
+    /// The banner as claudecode v2.1.232 actually draws it — logo
+    /// glyphs sharing the row, and an effort qualifier after the
+    /// version.  Both broke it, in opposite directions: the logo made
+    /// the whole line non-ASCII and produced *no* model, and without
+    /// the logo the qualifier produced `fable-5-with-hig`.
+    #[test]
+    fn a_banner_with_a_logo_and_an_effort_suffix_still_names_the_model() {
+        let with_logo = "  ▛▀▜  Claude Code v2.1.232\n  ▙▄▟  Fable 5 with high effort · Claude Max\n";
+        assert_eq!(parse_banner_model(with_logo).as_deref(), Some("fable-5"));
+
+        let bare = "Claude Code v2.1.232\nFable 5 with high effort · Claude Max\n";
+        assert_eq!(parse_banner_model(bare).as_deref(), Some("fable-5"));
+
+        // The parenthesised form used to work only because dropping
+        // everything from `(` also dropped the qualifier.  It has to
+        // keep working now that the qualifier is handled on purpose.
+        let paren = "Claude Code v2.1.227\nOpus 5 (1M context) with high effort · Claude Max\n";
+        assert_eq!(parse_banner_model(paren).as_deref(), Some("opus-5"));
+
+        // A two-word family name survives; the version still ends it.
+        let two_word = "Claude Code v9\nClaude Opus 5 with high effort · Claude Max\n";
+        assert_eq!(parse_banner_model(two_word).as_deref(), Some("claude-opus-5"));
+
+        // No model line at all is still None, not a guess.
+        assert_eq!(parse_banner_model("Claude Code v9\n\n\n\n").as_deref(), None);
+    }
+
     /// `/clear` moves the session on; argv does not.
     ///
     /// 2026-08-11 report: switching profile on `torajs` resumed a
@@ -6114,3 +6230,4 @@ fn tail_last_message_type(path: &PathBuf) -> Option<String> {
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
 }
+

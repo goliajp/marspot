@@ -28,7 +28,38 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.114**
+Current: **0.7.115**
+
+### 0.7.115
+
+**刚进 cc 的 pane 角标还是只有 `P3`,没有 `@model`。**
+
+banner 明明写着 `Fable 5 with high effort`。问题在于取法:原来是把整行交给
+`short_model` 洗干净,而那一行同时是装饰、名字和限定词:
+
+```
+  ▛▀▜  Claude Code v2.1.232
+  ▙▄▟  Fable 5 with high effort · Claude Max
+```
+
+两处同时坏,截图里两处都中:
+
+- **ASCII 艺术 logo 跟文字同一行。**`short_model` 见到任何非 ASCII 字符就整条
+  拒绝 → 返回空 → **一个字都取不到**(这就是截图的现象)。
+- **去掉 logo 也不对。**`Fable 5 with high effort` 会被整段变成名字,再撞 16 字
+  上限 → `fable-5-with-hig`。
+
+带括号那种 `Opus 5 (1M context) with high effort` **一直是靠巧合работать的** ——
+截断括号顺手把 ` with high effort` 也切了。所以只有新版这种不带括号的 banner 露馅。
+
+改成**取出**名字,而不是在名字周围修剪:跳过装饰 → 取家族词 → 取版本 → 在第一个
+既不是家族词也不是版本的词处停下。banner 以后再加什么后缀,都只会让名字提前结束,
+不会混进来。
+
+**时机**同步修:`BANNER_RETRY` 原来是固定 30 秒。若第一次尝试正好赶在 claude 画出
+banner 之前,角标就要空整整半分钟 —— 而那恰好是用户盯着一个新开 pane 的那半分钟。
+改成按 bytelog 大小分档:≤256 KB(刚开的 pane)每 3 秒重试,重放成本本来就被这个
+大小兜住;大了才退回 30 秒。这条限流服务的两种情况本来就是相反的。
 
 ### 0.7.114
 

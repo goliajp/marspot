@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.114"  # 主线程同样升到 USER_INTERACTIVE(那次 100.8 秒迟到的正是它);详见 CHANGELOG.md
+shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
 core    = "0.12.133"  # 恢复布局时不再夹回 6 列 —— 第 7 列每次换核心都被吃掉;详见 CHANGELOG.md
 session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md
