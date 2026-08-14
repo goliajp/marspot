@@ -632,25 +632,100 @@ fn drop_shadowed_ranges(out: &mut Vec<LinkRange>) {
     });
 }
 
-/// Locate claudecode's composer box in the visible grid.  Returns the
-/// (top_row, bottom_row) inclusive range of the bottom-most rounded
-/// box (`╭…╮` at the top, `╰…╯` at the bottom).  Returns `None` when
-/// no such box exists in view — normal chat scrollback, tool-call
-/// output, or a non-claudecode pane just falls through.
+/// Locate claudecode's composer in the visible grid, as an inclusive
+/// `(top_row, bottom_row)` range to exclude from link scanning.
 ///
-/// Rules:
-///   - the bottom border is the closest `╰` or `╯` when walking rows
-///     from the last row upward
-///   - the matching top border is the next `╭` or `╮` above that
-///     bottom row
-///   - either corner glyph counts on either side (some claudecode
-///     versions draw only the leftmost / rightmost corner on
-///     truncated widths)
+/// **This used to look for a rounded box** (`╭…╮` / `╰…╯`) and return
+/// `None` when it found none.  That has now failed twice, for the
+/// same reason both times: the thing it keyed on was *decoration*,
+/// and claudecode redecorates.  v2.1.212 dropped the box, which made
+/// the bottom-most box the welcome banner (fixed then by requiring
+/// the caret or a bottom-hugging position).  The current version
+/// draws no box at all — two grey `─` rules with the prompt between
+/// them — so corner detection finds nothing, the exemption never
+/// fires, and the composer gets scanned like body text: a path
+/// underlines itself while you are still typing it.
 ///
-/// The scan checks the whole row rather than fixed columns, because
-/// the box may be indented or padded depending on pane width; only
-/// looking at col 0 / last col would miss narrow layouts.
+/// So the anchor is the **caret**.  A caret is protocol, not
+/// styling; no redesign can remove it, and in a claudecode pane it
+/// lives in the composer.  The composer is bottom-anchored in every
+/// version we have seen, so:
+///
+///   - the caret must sit in the bottom third of the view — higher
+///     than that and it is somewhere in the output, not the input,
+///     and exempting downward from it would swallow real text;
+///   - the range runs from the caret's row to the last row: below
+///     the composer there is only claudecode's own footer;
+///   - it widens *upward* to the nearest separator row (a run of box
+///     horizontals, which covers both the `─` rules of today and the
+///     `╭` of the old box) so a multi-line prompt is covered whole,
+///     not just the line the caret happens to be on.  The search is
+///     bounded, and finding nothing simply means the caret's row
+///     alone — under-exempting is recoverable, swallowing output is
+///     not.
+///
+/// The legacy corner scan is kept as a fallback for the one case the
+/// caret cannot speak for: a scrolled-back view, where the caret is
+/// outside the window entirely.
 fn find_input_box_rows<S: CellSource>(
+    src: &S,
+    rows: u16,
+    cols: u16,
+) -> Option<(u16, u16)> {
+    let (_, caret_row) = src.cursor();
+    if caret_row < rows {
+        // "Near the bottom", expressed as a distance rather than a
+        // fraction: the composer is at most `MAX_COMPOSER_ROWS` tall,
+        // and never more than half the view — a fraction alone
+        // degenerates on short panes, where a third of ten rows is
+        // three and the composer is half the screen.
+        let reach = MAX_COMPOSER_ROWS.min(rows / 2);
+        if caret_row + reach >= rows {
+            let mut top = caret_row;
+            let mut r = caret_row;
+            let mut walked = 0u16;
+            while r > 0 && walked < MAX_COMPOSER_ROWS {
+                r -= 1;
+                walked += 1;
+                if is_separator_row(src, r, cols) {
+                    top = r;
+                    break;
+                }
+            }
+            return Some((top, rows - 1));
+        }
+    }
+    find_rounded_box_rows(src, rows, cols)
+}
+
+/// How far above the caret to look for the composer's opening rule.
+/// Generous enough for a multi-line prompt, short enough that a
+/// missing separator cannot eat a screenful of output.
+const MAX_COMPOSER_ROWS: u16 = 12;
+
+/// A row that is drawn rule, not text: box horizontals and corners
+/// with nothing else on it.  Both claudecode chromes qualify — the
+/// old `╭────╮` and the current bare `────`.
+fn is_separator_row<S: CellSource>(src: &S, row: u16, cols: u16) -> bool {
+    let mut rule = 0u16;
+    let mut other = 0u16;
+    for c in 0..cols {
+        match src.char_at(c, row) {
+            ' ' | '\0' => {}
+            '─' | '━' | '═' | '╭' | '╮' | '╰' | '╯' | '┌' | '┐' | '└' | '┘' | '│' | '├' | '┤'
+            | '┬' | '┴' | '┼' => rule += 1,
+            _ => other += 1,
+        }
+    }
+    // Half the width of rule glyphs and nothing else: the composer's
+    // divider spans most of the pane, while a table row of the same
+    // glyphs carries text between them.
+    other == 0 && rule >= cols / 2
+}
+
+/// The pre-2026-08 detection, kept for the scrolled-back case where
+/// the caret is not in view.  Returns the bottom-most rounded box.
+fn find_rounded_box_rows<S: CellSource>(
     src: &S,
     rows: u16,
     cols: u16,
@@ -1977,6 +2052,102 @@ fn is_email_local_char(c: char) -> bool {
 mod tests {
     use super::*;
 
+    /// claudecode's composer as it is drawn **today** — two grey
+    /// rules with the prompt between them, no rounded corners
+    /// anywhere.  Captured off the wire from a live pane
+    /// (2026-08-14): `…/effort ␛[1B ─────… ␛[1B ❯ ␛[6G␛[K ␛[1B
+    /// ─────… ⏵⏵ bypass permissions on`.
+    ///
+    /// The path being typed must not underline itself, and the path
+    /// in the output *above* the composer must still be a link —
+    /// exempting the composer is not permission to stop scanning.
+    #[test]
+    fn the_composer_is_exempt_even_when_it_has_no_box() {
+        // Real paths on both sides: a span only survives the scan if
+        // it exists on disk, so a fixture of invented names would
+        // pass whether or not the exemption worked.
+        let rule: String = "─".repeat(40);
+        let rows = [
+            "wrote /etc/hosts just now",
+            "",
+            "  Ran 1 shell command",
+            "",
+            "some more output",
+            rule.as_str(),
+            "❯ /usr/bin",
+            rule.as_str(),
+            "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ];
+        let mut src = StrSource::new(&rows, 46);
+        src.cursor = (10, 6); // caret in the prompt row
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        assert!(
+            links.iter().all(|l| l.row != 2),
+            "the composer must not be scanned: {links:?}",
+        );
+        assert!(
+            links.iter().any(|l| l.row == 0 && l.text.contains("/etc/hosts")),
+            "output above the composer is still linkable: {links:?}",
+        );
+    }
+
+    /// The shape claudecode shipped in v2.1.212 — no box, no rules,
+    /// just the prompt line.  There is nothing above the caret to
+    /// widen to, so the caret's own row is the exemption, and the
+    /// bounded upward walk must not swallow the output above it.
+    #[test]
+    fn a_composer_with_no_chrome_at_all_still_exempts_its_own_row() {
+        let rows = [
+            "see /etc/hosts for details",
+            "and /usr/share too",
+            "❯ /usr/bin",
+        ];
+        let mut src = StrSource::new(&rows, 40);
+        src.cursor = (10, 2);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        assert!(links.iter().all(|l| l.row != 2), "caret row exempt: {links:?}");
+        assert!(
+            links.iter().filter(|l| l.row == 0 || l.row == 1).count() >= 2,
+            "both output rows keep their links: {links:?}",
+        );
+    }
+
+    /// A caret parked up in the output — which happens mid-repaint —
+    /// must not exempt everything below it.  This is the failure the
+    /// bottom-third guard exists to prevent, and it is worse than the
+    /// bug being fixed: it would silently drop links from real text.
+    #[test]
+    fn a_caret_in_the_output_does_not_blank_the_rows_below_it() {
+        let rows = [
+            "line one",
+            "see /etc/hosts here",
+            "see /usr/bin here",
+            "see /usr/lib here",
+            "see /var/log here",
+            "see /usr/share here",
+        ];
+        let mut src = StrSource::new(&rows, 30);
+        src.cursor = (0, 1); // top of the view, nowhere near a composer
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        for r in 1..=5u16 {
+            assert!(
+                links.iter().any(|l| l.row == r),
+                "row {r} lost its link to a bogus exemption: {links:?}",
+            );
+        }
+    }
+
+    /// A separator row is drawn rule and nothing else.  A table row
+    /// built from the same glyphs carries text between them and must
+    /// not be mistaken for one, or the upward walk would stop early
+    /// and leave part of a multi-line prompt scanned.
+    #[test]
+    fn a_table_row_is_not_a_separator() {
+        let src = StrSource::new(&["│ name │ size │", "──────────────"], 15);
+        assert!(!is_separator_row(&src, 0, 15), "text between rules is a table");
+        assert!(is_separator_row(&src, 1, 15), "a bare rule is a separator");
+    }
+
     /// Minimal CellSource over plain rows of text — what a test needs
     /// and nothing more.  Wide chars are "everything above ASCII that
     /// the terminal would render double-width"; for tests the CJK +
@@ -2898,3 +3069,4 @@ mod tests {
         );
     }
 }
+
