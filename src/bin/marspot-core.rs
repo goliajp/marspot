@@ -36,6 +36,7 @@ use marspot::layout::Layout;
 use marspot::pane::{L3Conn, L3Spawn, Pane};
 use marspot::render::{SessionView, SidebarEntry};
 use marspot::render_metal::MetalRenderer;
+use marspot::ui::components::{GRID_MAX, GRID_MIN};
 use marspot::session::SessionState;
 use marspot::session_registry::{
     self, allocate_next_session_id, list_session_entries,
@@ -782,6 +783,41 @@ mod window_state_tests {
         app.all_exited = false;
         app.pump_all();
         assert!(app.all_exited, "every pane of every window has exited");
+    }
+
+    /// A layout wider than the old six-column ceiling has to come
+    /// back the width it was saved at.
+    ///
+    /// The picker went to 9 columns, but two `clamp(1, 6)` literals
+    /// stayed behind in the restore paths — copies of a bound that
+    /// had moved.  The save side was fine, so the file on disk said
+    /// 7 while every core swap put 6 on screen; nothing looked
+    /// broken except the number of columns, and only the user could
+    /// see that.  Parameterised over the whole range so the next
+    /// change to `GRID_MAX` cannot leave a copy behind again.
+    #[test]
+    fn a_restored_window_keeps_every_column_it_was_saved_with() {
+        use marspot::ui::components::{GRID_MAX, GRID_MIN};
+        // SAFETY: nextest runs one test per process.
+        unsafe {
+            std::env::set_var("MARSPOT_SESSION_BIN", "/nonexistent/marspot-session");
+        }
+        for cols in GRID_MIN..=GRID_MAX {
+            let record = marspot::state::SavedWindowLayout {
+                grid_cols: cols as u16,
+                grid_rows: 2,
+                focused_idx: 0,
+                panes: vec![marspot::state::SavedPane { sid: 11, ..Default::default() }],
+            };
+            let mut app = app_with(vec![win(1, vec![Pane::new_vacant(1, 80, 24)])]);
+            app.saved_windows.push_back((1, record));
+            app.adopt_window(2, 1600.0, 900.0, 2.0, Some(1));
+            assert_eq!(
+                app.windows[1].grid_cols, cols,
+                "saved {cols} columns, restored {} — a bound was copied instead of shared",
+                app.windows[1].grid_cols,
+            );
+        }
     }
 
     /// RFC-005 step 6b — a window being restored is on screen with its
@@ -5195,8 +5231,12 @@ impl CoreApp {
         h_phys: f64,
         scale: f64,
     ) {
-        let grid_cols = (record.grid_cols as usize).clamp(1, 6);
-        let grid_rows = (record.grid_rows as usize).clamp(1, 6);
+        // Clamp to the *shared* bound, not a copy of it.  A literal
+        // `6` here outlived the day the picker went to 9: a restored
+        // window came back squeezed into 6 columns, and because the
+        // save side was fine, the file said 7 while the screen said 6.
+        let grid_cols = (record.grid_cols as usize).clamp(GRID_MIN, GRID_MAX);
+        let grid_rows = (record.grid_rows as usize).clamp(GRID_MIN, GRID_MAX);
         // Cell dims for this window's own grid — a restored 3×3 window
         // must hand its L3s the size they will actually be shown at,
         // exactly as the boot path does.
@@ -8802,9 +8842,12 @@ fn main() {
     // with one shell in it — a 3×3 wall of nine shells is a layout the
     // user asks for, not one to be handed on arrival.
     let (grid_cols, grid_rows): (usize, usize) = match boot_window.as_ref() {
+        // Same shared bound as the picker and the restore path — see
+        // `restore_saved_window`.  This is the copy that ate the
+        // user's 7th column on every core swap.
         Some(s) if s.grid_cols > 0 && s.grid_rows > 0 => (
-            (s.grid_cols as usize).clamp(1, 6),
-            (s.grid_rows as usize).clamp(1, 6),
+            (s.grid_cols as usize).clamp(GRID_MIN, GRID_MAX),
+            (s.grid_rows as usize).clamp(GRID_MIN, GRID_MAX),
         ),
         _ => (1, 1),
     };
