@@ -317,7 +317,38 @@ fn is_hard_wrap_continuation_in<S: CellSource>(
     // field report).  A prose row ending in `/` is rare enough that
     // the wider window stays conservative; File candidates keep the
     // stat + boundary-retry arbitration either way.
-    let flush_slack: u16 = if last_nb_ch == '/' { 8 } else { 2 };
+    // Does the row end in the middle of a *path*?  Walk back over the
+    // trailing url/path-class run and look for a separator: a token
+    // carrying `/` that runs to the end of the row is a path the
+    // renderer cut, not a word that happened to finish there.
+    //
+    // This is the same observation the `/`-ending case above was
+    // built on, generalised.  That one only caught a break landing
+    // exactly on a separator; a break one character later — inside
+    // `…-e18-ve` / `rdict.md` — fell back to 2 cells of slack, missed
+    // by one, and the link stopped at the last directory that
+    // happened to exist on disk (2026-08-16 field report).  Which
+    // character the wrap lands on is not something the path controls.
+    let trailing_is_path = {
+        let mut c = last_nb_col;
+        let mut has_sep = false;
+        loop {
+            let ch = src.char_at(c, prev_row);
+            if !is_url_path_class(ch) {
+                break;
+            }
+            if ch == '/' {
+                has_sep = true;
+                break;
+            }
+            if c == left {
+                break;
+            }
+            c -= 1;
+        }
+        has_sep
+    };
+    let flush_slack: u16 = if last_nb_ch == '/' || trailing_is_path { 8 } else { 2 };
     if last_nb_col < cols.saturating_sub(flush_slack) {
         return false;
     }
@@ -2052,6 +2083,59 @@ fn is_email_local_char(c: char) -> bool {
 mod tests {
     use super::*;
 
+    /// A path wrapped mid-token, with the break landing on an
+    /// ordinary character rather than on a separator.
+    ///
+    /// The merge used to demand the first row end within 2 cells of
+    /// the pane edge, relaxing to 8 only when the row ended in `/`.
+    /// claudecode's `●`/`⎿` blocks wrap at a content width several
+    /// cells short of the pane, so where the break lands decides
+    /// whether the path survives — and the path does not get a say in
+    /// that.  Here it landed inside `…-e18-ve` / `rdict.md`: the
+    /// halves stayed separate, the first half named nothing that
+    /// exists, and the link fell back to the last directory that did
+    /// (`~/workspace/labs/lab36-continus/`), which is exactly what the
+    /// user saw underlined (2026-08-16).
+    ///
+    /// Swept across the gap widths a real pane produces, because a
+    /// fixture at one width only proves that width.
+    #[test]
+    fn a_path_wrapped_mid_token_is_still_one_path() {
+        let dir = std::env::temp_dir().join("marspot-linkify-wrap-test");
+        let deep = dir.join("reports");
+        if std::fs::create_dir_all(&deep).is_err() {
+            return; // no temp dir: nothing to assert against
+        }
+        let file = deep.join("2026-08-16-e18-verdict.md");
+        if std::fs::write(&file, b"x").is_err() {
+            return;
+        }
+        let full = file.to_string_lossy().into_owned();
+        // Cut the path mid-token, two characters before the end.
+        let cut = full.len() - 8;
+        let r0 = format!("● Write({}", &full[..cut]);
+        let r1 = format!("  {})", &full[cut..]);
+        let width = r0.chars().count() as u16;
+
+        // Gaps of 0..=7 columns between the text and the pane edge.
+        // Seven is what the slack buys; the case that prompted this
+        // was a gap of two, which the old slack of 2 already refused
+        // (it tolerated one), so the margin is real rather than
+        // fitted to the one report.
+        for gap in 0..=7u16 {
+            let cols = width + gap;
+            let mut src = StrSource::new(&[r0.as_str(), r1.as_str(), ""], cols);
+            src.cursor = (0, 2);
+            let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+            assert!(
+                links.iter().any(|l| l.text == full),
+                "gap {gap}: the two halves must rejoin into {full:?}, got {:?}",
+                links.iter().map(|l| &l.text).collect::<Vec<_>>(),
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// claudecode's composer as it is drawn **today** — two grey
     /// rules with the prompt between them, no rounded corners
     /// anywhere.  Captured off the wire from a live pane
@@ -3069,4 +3153,5 @@ mod tests {
         );
     }
 }
+
 
