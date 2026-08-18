@@ -247,3 +247,41 @@ restore_focus_to() {
   osascript -e "tell application \"System Events\" to set frontmost of first process whose name is \"$app\" to true" \
     >/dev/null 2>&1 || true
 }
+
+# ---- live measurement sizing --------------------------------------------
+# Minimum bytes a LIVE trial must push through a terminal.
+#
+# The `time cat` trick only measures a terminal once `cat` starts
+# blocking on PTY writes.  Below that the kernel buffer swallows the
+# file and `cat` returns having measured nothing — a 64 KiB scenario
+# reports 0 ms on every terminal — while a few-MiB one spends most of
+# its window in the warm-up region.  Measured 2026-08-18 on the emoji
+# corpus: one binary reported 56 MB/s at 8 MiB and 140 MB/s at 67 MiB.
+# A pipeline cannot have two throughputs; the small sample was lying,
+# and it lies WORSE the faster the terminal is — the wrong bias for
+# this repo.
+#
+# Every live consumer (bin/measure.sh for marspot, bin/measure-other.sh
+# for the competitors) cat's each scenario as many times as it takes to
+# clear this bar, so both sides of a cross-terminal comparison push the
+# same number of bytes.  The scenario FILES keep their original sizes:
+# `--bench parse` feeds bytes directly with no PTY in the loop, so the
+# headless floors in bench/baseline.json stay comparable across this
+# change.
+LIVE_MIN_BYTES=$((32 * 1024 * 1024))
+
+# Repeat count for one scenario file to clear LIVE_MIN_BYTES.
+live_repeat() {
+  local size
+  size=$(stat -f%z "$1")
+  local n=$(( (LIVE_MIN_BYTES + size - 1) / size ))
+  [[ "$n" -lt 1 ]] && n=1
+  echo "$n"
+}
+
+# The repeated argument list: "<path> <path> ..." n times.
+live_cat_args() {
+  local path=$1 n=$2 out="" i=1
+  while [[ $i -le $n ]]; do out="$out $path"; i=$((i + 1)); done
+  echo "$out"
+}

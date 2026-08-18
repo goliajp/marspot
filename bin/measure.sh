@@ -17,12 +17,22 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCENARIOS_DIR="$ROOT/bench/scenarios"
 RESULTS_DIR="$ROOT/bench/results"
 mkdir -p "$RESULTS_DIR"
+# LIVE_MIN_BYTES / live_repeat / live_cat_args — the live-sizing rule
+# both this script and bin/measure-other.sh must agree on.
+source "$ROOT/bin/_lib.sh"
+# Every trial spawns a real mcli, which opens a session and writes
+# scrollback in whatever MARSPOT_STATE_DIR names.  Unsourced, that is
+# the state dir of the terminal the user actually lives in — the exact
+# shape of the 2026-07-03 incident where a test run truncated a live
+# pane's history.  On the bench host it makes no difference; on a dev
+# box it is the difference between a measurement and an accident.
+source "$ROOT/bin/_dev-sandbox.sh"
 
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 # AppleScript dispatch to iTerm/Warp/Terminal.app is fragile (AppleEvent
-# timeouts, profile-specific shell init differences), so for now we
-# automate marspot and print paste-ready commands for the others — see
-# docs/perf.md → "Cross-terminal comparison" for the manual flow.
+# timeouts, profile-specific shell init differences), so this script
+# automates marspot only; the competitors go through
+# bin/measure-other.sh, which shares the live sizing rule via _lib.sh.
 TERMINALS=(marspot)
 
 # Number of trials per (terminal, scenario).  We keep only the median.
@@ -54,9 +64,12 @@ run_in_marspot() {
   # would be ~1/9 of the real per-session number.  The product-level
   # multi-session test lives in `bin/scenarios/multi-session-9x.sh`.
   local cmd_script="/tmp/marspot-bench-cmd.sh"
+  local reps args
+  reps=$(live_repeat "$scenario")
+  args=$(live_cat_args "$scenario" "$reps")
   cat > "$cmd_script" <<EOF
 #!/bin/sh
-/usr/bin/time -p /bin/cat "$scenario" 2> "$marker"
+/usr/bin/time -p /bin/cat $args 2> "$marker"
 EOF
   chmod +x "$cmd_script"
 
@@ -92,12 +105,15 @@ run_in_iterm() {
   local scenario=$1
   local marker=$2
 
+  local reps args
+  reps=$(live_repeat "$scenario")
+  args=$(live_cat_args "$scenario" "$reps")
   osascript <<APPLESCRIPT >/dev/null
 tell application "iTerm"
   activate
   create window with default profile
   tell current session of current window
-    write text "/usr/bin/time -p /bin/cat $scenario 2> $marker; sleep 0.2; exit"
+    write text "/usr/bin/time -p /bin/cat $args 2> $marker; sleep 0.2; exit"
   end tell
 end tell
 APPLESCRIPT
@@ -169,7 +185,11 @@ for scenario in "${SCENARIOS[@]}"; do
     echo "missing $scenario_path — run bin/gen-scenarios.sh first" >&2
     exit 2
   fi
-  scenario_bytes=$(stat -f%z "$scenario_path")
+  # Bytes actually pushed through the terminal this trial — the file
+  # size times the repeat count, NOT the file size.
+  scenario_reps=$(live_repeat "$scenario_path")
+  scenario_bytes=$(( $(stat -f%z "$scenario_path") * scenario_reps ))
+  echo "$scenario_bytes" > "$RUN_DIR/${scenario}.bytes"
 
   for terminal in "${TERMINALS[@]}"; do
     for trial in $(seq 1 $TRIALS); do
@@ -206,7 +226,10 @@ scenarios = scenarios_str.split()
 terminals = terminals_str.split()
 out = {}
 for scenario in scenarios:
-    bytes_total = os.path.getsize(os.path.join(scenarios_dir, scenario + ".bin"))
+    # Written by the shell loop: file size x live repeat count.
+    bpath = os.path.join(run_dir, scenario + ".bytes")
+    bytes_total = (int(open(bpath).read().strip()) if os.path.exists(bpath)
+                   else os.path.getsize(os.path.join(scenarios_dir, scenario + ".bin")))
     out[scenario] = {"bytes": bytes_total}
     for term in terminals:
         path = os.path.join(run_dir, f"{term}__{scenario}.ns")
@@ -233,7 +256,9 @@ echo "and capture each /tmp/<terminal>-<scenario>.txt as a marker file."
 echo "(See docs/perf.md for how to fold the numbers in.)"
 for s in "${SCENARIOS[@]}"; do
   spath="$SCENARIOS_DIR/$s.bin"
+  reps=$(live_repeat "$spath")
+  args=$(live_cat_args "$spath" "$reps")
   echo
-  echo "  $s ($(stat -f%z "$spath") bytes):"
-  echo "    /usr/bin/time -p /bin/cat $spath 2> /tmp/<terminal>-$s.txt"
+  echo "  $s ($(( $(stat -f%z "$spath") * reps )) bytes = ${reps}x the file):"
+  echo "    /usr/bin/time -p /bin/cat$args 2> /tmp/<terminal>-$s.txt"
 done

@@ -155,6 +155,52 @@ We do not pretend to compare what isn't comparable.
   total **CPU** instead, which are the user-visible cost of running
   9 sessions.
 
+### 2b. What a live `time cat` trial actually measures (2026-08-18)
+
+Three things make a live number wrong in a way that still looks like a
+number.  All three cost real time before they were understood, so they
+are written down rather than re-derived.
+
+**The sample has to be big enough to block `cat`.**  The trick works
+because `cat` blocks on PTY writes when the terminal can't keep up — so
+below the point where it blocks, the run measures the kernel buffer,
+not the terminal.  A 64 KiB scenario times **0 ms on every terminal**.
+An 8 MiB one spends most of its window in the warm-up region: the same
+binary reported **56 MB/s at 8 MiB and 140 MB/s at 67 MiB**.  A
+pipeline cannot have two throughputs; the small sample was lying, and
+it lies *worse the faster the terminal is*, which is precisely the
+wrong bias for this repo.  `LIVE_MIN_BYTES` in `bin/_lib.sh` (32 MiB)
+is the floor both `bin/measure.sh` and `bin/measure-other.sh` apply, by
+cat'ing each scenario file as many times as it takes; the scenario
+FILES stay their original size so every headless parse floor stays
+comparable.  32 MiB clears the buffer but still carries some warm-up —
+for a steady-state reading use the size ladder in `bin/ab-live.py`.
+
+**The bench host is shared, so one number is not a measurement.**  The
+same commit measured 130 ms and 290 ms an hour apart, because another
+project was compiling.  A `git bisect` run on numbers like that
+confidently blamed a 13-line keyboard-mapping commit for a `cat`
+throughput regression.  Two habits fix it, and `bin/ab-live.py`
+enforces both: **interleave** the arms (A,B,A,B,… so drift hits both)
+and take the **minimum**, not the median — load can only ADD time, so
+the minimum is the least-contaminated sample while a median still
+carries the contamination.  N=3 is not enough: the same pair of
+binaries came out −25 % at N=3 and ±0 % at N=5 on the same afternoon.
+**Report N, and if two runs disagree, raise N rather than picking.**
+
+**A live trial writes real scrollback.**  Each one spawns a terminal
+that opens a session in whatever `MARSPOT_STATE_DIR` names.  Unset,
+that is the state dir of the terminal the user is sitting in — the
+shape of the 2026-07-03 incident where a test run truncated a live
+pane's history.  `bin/measure.sh` sources `bin/_dev-sandbox.sh`;
+`bin/ab-live.py` gives every trial a fresh temporary dir.
+
+The reason this section exists at all: acting on live numbers taken
+without these three produced a confident "the live pipeline regressed
+1.38× since June" that a properly interleaved N=5 run flatly
+contradicted (it had regressed 2.1× in the **parser**, and nowhere
+else).  See `docs/perf.md`.
+
 ---
 
 ## 3. Driver design

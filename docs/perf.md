@@ -310,13 +310,36 @@ codepoint space and re-derives the class from the tables themselves —
 a Unicode update adding a third exception fails the build instead of
 silently splitting a cluster.
 
-**Still open**: `scroll_up` + `memmove` is now ~20 % of emoji parse
-(one 122-cell copy into scrollback plus a 122-cell blank per line,
-while the corpus only fills 47 columns).  The headless bench runs the
-Memory scrollback variant; production runs the File variant with a
-different cost shape, so the next round should profile the live path
-(mcli under samply) rather than optimise what this bench happens to
-measure.
+**Correction, same day.**  The paragraph that used to stand here said
+the live pipeline was still 1.38× behind June and named `scroll_up` as
+the next target.  Both halves came from measurements taken without
+interleaving at N=3, and a proper interleaved N=5 run contradicts them:
+
+| corpus | t5 vs the 6-08 build, live, N=5 |
+|---|---|
+| cat-emoji | ±0.0 % |
+| cat-cjk | +20.8 % |
+
+The live pipeline is **not** behind; `MARSPOT_DISK_SCROLLBACK=0` moves
+it by ±4 %, i.e. inside the noise.  What had genuinely regressed was
+the parser, by 2.1×, and that is what the five changes above fixed.
+The same three-arm ladder (`bin/ab-live.py old=… head=… t5=…`) shows
+emoji live at 69.5 → 147.5 MB/s across 134 MB, matching the 2.17×
+measured headless.
+
+Two runs of the *same binaries* an hour apart said −25 % and ±0 %.
+That gap is the whole lesson: on a shared host, a live A/B needs
+interleaved arms, the minimum rather than the median, and N raised
+until two runs agree — never a pick between them.  The mechanics are
+in `docs/bench.md` §2b; the tool that enforces them is
+`bin/ab-live.py`.
+
+**Actually still open**: `scroll_up` + `memmove` is ~20 % of emoji
+parse in the headless profile (one 122-cell copy into scrollback plus
+a 122-cell blank per line, while the corpus fills only 47 columns).
+That profile runs the Memory scrollback variant; production runs the
+File variant, so this needs a live-path profile before it earns an
+attack — the §11 pre-Phase-B gate, not a guess.
 
 ---
 

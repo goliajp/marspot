@@ -22,6 +22,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCENARIOS_DIR="$ROOT/bench/scenarios"
 RESULTS_DIR="$ROOT/bench/results"
+# LIVE_MIN_BYTES / live_repeat / live_cat_args — the same live-sizing
+# rule bin/measure.sh applies to marspot, so both sides of the
+# comparison push the same number of bytes.
+source "$ROOT/bin/_lib.sh"
 mkdir -p "$RESULTS_DIR"
 
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
@@ -65,7 +69,7 @@ build_command() {
     local trial
     for ((trial = 1; trial <= TRIALS; trial++)); do
       cmd+="echo '==SCN== $s' >> $marker; "
-      cmd+="/usr/bin/time -p /bin/cat $SCENARIOS_DIR/$s.bin 2>> $marker; "
+      cmd+="/usr/bin/time -p /bin/cat$(live_cat_args "$SCENARIOS_DIR/$s.bin" "$(live_repeat "$SCENARIOS_DIR/$s.bin")") 2>> $marker; "
     done
   done
   cmd+="echo '==ALL_DONE==' >> $marker"
@@ -189,7 +193,9 @@ for t in "${OTHER_TERMINALS[@]}"; do
     inner=1
     while IFS=":" read -r scenario ns; do
       [[ -z "$scenario" ]] && continue
-      bytes=$(stat -f%z "$SCENARIOS_DIR/$scenario.bin")
+      # Bytes actually pushed: file size x live repeat count.
+      bytes=$(( $(stat -f%z "$SCENARIOS_DIR/$scenario.bin") \
+                * $(live_repeat "$SCENARIOS_DIR/$scenario.bin") ))
       bps=$(( bytes * 1000000000 / ns ))
       mb=$(echo "scale=1; $bps/1048576" | bc)
       [[ $inner -eq 0 ]] && printf "," >> "$OUT_JSON"
