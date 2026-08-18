@@ -335,6 +335,21 @@ def _l3_throughput():
     return _L3_THROUGHPUT
 
 def load_live(scenario):
+    # The SHIPPED path first.  `vs_best_other` asks "how does marspot
+    # compare to the best other terminal", and the honest subject of
+    # that question is what a user's pane does (core -> L3, file-backed
+    # scrollback), not mcli.  Until 2026-08-19 this could only be the
+    # mcli number, because the L3 probe was broken and the two metrics
+    # were not comparable anyway; both are fixed now — same certified
+    # protocol on both sides.
+    l3 = _l3_throughput()
+    if l3 is not None:
+        bps = l3.get(scenario, {}).get("bytes_per_sec", 0)
+        if bps > 0:
+            return bps / 1e6
+    return _load_live_mcli(scenario)
+
+def _load_live_mcli(scenario):
     # marspot's live cat-* number for the vs-best-other comparison.  MUST
     # be the same metric as the competitors it's compared against — the
     # `time cat` ABSORPTION rate co-measured in competitors_snapshot. (The

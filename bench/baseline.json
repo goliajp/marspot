@@ -24,35 +24,35 @@
       "bytes": 33554570,
       "mars_parse_MBps_min": 173,
       "mars_live_MBps_min": 94,
-      "mars_vs_best_other_min": 0.98,
-      "mars_l3_MBps_min": 97.4,
-      "_l3_note": "mars_l3_MBps_min: the SHIPPED path (core -> L3, file-backed scrollback), measured by bin/measure-l3.sh, run and gated by --full since 2026-08-19.  Relocked the same day after buffering the scrollback index: 40.9/35.0/39.8/39.7 -> 111/97.5/98.5/83.9 MB/s (2.1-2.8x).  Floors are the LOWEST of three mini trials x0.90.  The number rides on disk behaviour and on whatever else the --full run just wrote, so it is noisier than the headless floors - an idle solo run reads high enough to fire on the gate's own context.",
-      "_live_note": "mars_live_MBps_min / mars_vs_best_other_min are the mcli path (one process, in-RAM scrollback), relocked 2026-08-19 under the certified protocol: 32 MiB per trial and a DSR round-trip so the number covers work the terminal confirmed it consumed.  The previous values (137/131/144/144, ratios 1.37/1.39/1.08/1.26) came from the old protocol - single un-repeated files, no confirmation - and are not comparable; keeping them would have failed every run forever.  vs_best_other is now BELOW 1.0 on cjk (0.66) and emoji (0.77) because that is where marspot actually stands against ghostty.  A gate floor records where you are so it can catch you falling; where you want to be lives in docs/perf.md."
+      "mars_vs_best_other_min": 1.81,
+      "mars_l3_MBps_min": 116.2,
+      "_l3_note": "mars_l3_MBps_min: the SHIPPED path (core -> L3, file-backed scrollback), measured by bin/measure-l3.sh, run and gated by --full since 2026-08-19.  Relocked the same day after the throughput work: 40.9/35.0/39.8/39.7 -> 194.5/167.8/165.7/123.1 MB/s (2.9-4.8x), which puts all four corpora ahead of ghostty (101.7/101.7/145.9/115.7) on the shipped path rather than on mcli.  Floors are the LOWEST of three idle mini trials x0.90 - the ascii low (123.1 MiB/s vs 185.5 for the other two) is a cold first trial, kept rather than discarded so the floor survives one.  Two of the four corpora reported identical times across all three trials, which is what this metric looks like when the host is actually idle; anything noisier means re-measure rather than re-lock.",
+      "_live_note": "mars_vs_best_other_min compares the SHIPPED path (L3) against the best other terminal, as of 2026-08-19.  It used to compare mcli, because the L3 probe was broken and the two numbers were not the same metric anyway; both are fixed - same certified protocol (32 MiB, DSR round-trip) on both sides.  Idle mini: L3 194.5/167.8/165.7/123.1 vs ghostty 101.7/101.7/145.9/115.7 = 1.91/1.65/1.14/1.06, floors at x0.95.  These floors are now ABOVE 1.0 on all four corpora, i.e. the gate fails if the product stops beating the fastest competitor measured - which is the requirement, not an aspiration.  mars_live_MBps_min still tracks mcli separately as a diagnostic (it isolates the parser+pty from the L3 architecture)."
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
       "mars_parse_MBps_min": 167,
       "mars_live_MBps_min": 92,
-      "mars_vs_best_other_min": 0.95,
-      "mars_l3_MBps_min": 85.7
+      "mars_vs_best_other_min": 1.57,
+      "mars_l3_MBps_min": 147.3
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
       "mars_parse_MBps_min": 208,
       "mars_live_MBps_min": 92,
-      "mars_vs_best_other_min": 0.66,
-      "mars_l3_MBps_min": 88.1
+      "mars_vs_best_other_min": 1.08,
+      "mars_l3_MBps_min": 149.1
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
       "mars_parse_MBps_min": 135,
       "mars_live_MBps_min": 84,
-      "mars_vs_best_other_min": 0.77,
+      "mars_vs_best_other_min": 1.01,
       "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in docs/perf.md.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting.",
-      "mars_l3_MBps_min": 74.6
+      "mars_l3_MBps_min": 110.8
     }
   ],
   "render_full_repaint": {
@@ -68,9 +68,9 @@
     "p99_us_max": 4
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  RESOLUTION: on arm64 macOS the __TEXT segment is 16 KiB page-aligned, so these numbers move in ~16 KiB steps whatever the source change was - 2026-08-11 a ~2 KB chrome-layout change (measured: __text +2036 B, every other section flat) grew mcli by 16512 B = one page + 128 B of code signature.  A jump under ~20 KiB says nothing; read the section table (`size -m`) before calling it bloat.  Relocked 2026-08-11 at mini-measured current x 1.06 (one page of headroom, not a percentage): mcli 1375488, marspot 1515840.  marspot came DOWN 34 KB in the same commit by moving `--snapshot` + the PNG writer behind the `snapshot` cargo feature - a development tool has no business in the shipped binary.  Previous ceilings 1370000/1541000 dated 2026-07-11.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.  Relocked 2026-08-12 (marspot only): 1533000 -> 1549776 = mini-measured 1533392 + one 16 KiB page.  The old ceiling sat 72 B above the then-current build - zero headroom - so the next ordinary commit tripped it: a same-machine A/B minutes apart (git stash) showed __TEXT UNCHANGED at 1245184 and __text +3548 B absorbed inside the page, with the 464 B file delta living in linkedit + signature.  That is the sub-page noise this comment already says to ignore, and a floor that fires on it teaches you to relock rather than to look.  mcli's ceiling already carried exactly one page of headroom (1392000 vs 1376160); marspot's now matches the same rule.  Relocked 2026-08-18 (marspot only): 1549776 -> 1567136 = mini-measured 1550752 + one 16 KiB page.  The emoji fast-path commit moved the binary by exactly 16512 B - one page plus 128 B of signature, the same quantum this comment records for 2026-08-11 - i.e. the sub-page noise it already says to ignore.",
-    "mcli": 1392000,
-    "marspot": 1567136
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  RESOLUTION: on arm64 macOS the __TEXT segment is 16 KiB page-aligned, so these numbers move in ~16 KiB steps whatever the source change was - 2026-08-11 a ~2 KB chrome-layout change (measured: __text +2036 B, every other section flat) grew mcli by 16512 B = one page + 128 B of code signature.  A jump under ~20 KiB says nothing; read the section table (`size -m`) before calling it bloat.  Relocked 2026-08-11 at mini-measured current x 1.06 (one page of headroom, not a percentage): mcli 1375488, marspot 1515840.  marspot came DOWN 34 KB in the same commit by moving `--snapshot` + the PNG writer behind the `snapshot` cargo feature - a development tool has no business in the shipped binary.  Previous ceilings 1370000/1541000 dated 2026-07-11.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.  Relocked 2026-08-12 (marspot only): 1533000 -> 1549776 = mini-measured 1533392 + one 16 KiB page.  The old ceiling sat 72 B above the then-current build - zero headroom - so the next ordinary commit tripped it: a same-machine A/B minutes apart (git stash) showed __TEXT UNCHANGED at 1245184 and __text +3548 B absorbed inside the page, with the 464 B file delta living in linkedit + signature.  That is the sub-page noise this comment already says to ignore, and a floor that fires on it teaches you to relock rather than to look.  mcli's ceiling already carried exactly one page of headroom (1392000 vs 1376160); marspot's now matches the same rule.  Relocked 2026-08-18 (marspot only): 1549776 -> 1567136 = mini-measured 1550752 + one 16 KiB page.  The emoji fast-path commit moved the binary by exactly 16512 B - one page plus 128 B of signature, the same quantum this comment records for 2026-08-11 - i.e. the sub-page noise it already says to ignore.  Relocked 2026-08-19: mcli 1392000 -> 1452592, marspot 1567136 -> 1626608 (mini-measured + one 16 KiB page).  Both grew ~43 KB in one commit range, which is past the ~20 KB this comment says to ignore, so it was read rather than waved through: the growth is the `async_writer` module plus the reworked scrollback and bytelog paths, and it bought 2.9-4.8x on the shipped path.",
+    "mcli": 1452592,
+    "marspot": 1626608
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
