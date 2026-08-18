@@ -341,6 +341,68 @@ That profile runs the Memory scrollback variant; production runs the
 File variant, so this needs a live-path profile before it earns an
 attack — the §11 pre-Phase-B gate, not a guess.
 
+## Where marspot actually stands (2026-08-18, certified)
+
+The first cross-terminal numbers in this repo that survive their own
+methodology.  Same host, 11 minutes apart, 32 MiB per trial, each trial
+ending with a DSR round-trip so the terminal certifies it consumed the
+corpus (see `docs/bench.md` §2b for why every earlier live number is
+suspect).
+
+| corpus | marspot live | ghostty live | | marspot headless parse |
+|---|---|---|---|---|
+| cat-ascii | 104.9 MB/s | 101.7 | +3.0 % | 393–411 |
+| cat-mixed | 101.7 | 101.7 | ±0 | 240–260 |
+| **cat-cjk** | **101.7** | **145.9** | **−43.5 %** | 224–236 |
+| **cat-emoji** | **93.2** | **115.7** | **−24.1 %** | 139–153 |
+
+Two things to read off this, neither of which the old harness could
+have said:
+
+**We lose CJK and emoji.**  That is the gap to close, and it is not the
+parser: headless parse does 224–236 MB/s on CJK while the live pipeline
+delivers 101.7.
+
+**ascii and mixed both sit at ~101 MB/s for BOTH terminals**, which
+looks like a tie and probably isn't — two independent implementations
+landing on the same number usually means something else is the
+constraint.  It is not the pipe, because ghostty reaches 145.9 on CJK
+through the same PTY.  Worth identifying before reading either column
+as a win.
+
+### Next round: decompose the live pipeline, not the parser
+
+The parser is now 2.17× faster on emoji and within noise of the June
+build everywhere else, and headless parse runs 2.3–3.9× faster than
+the live pipeline delivers.  **That ratio is the target.**  Per
+`.claude/rules/perf-attack.md` the shape of the work is fixed:
+
+1. **Phase A, read-only.**  Split one `cat` of a corpus into 18+ stages
+   from `read()` on the PTY to the frame on screen, side by side with
+   ghostty's equivalent path — it is open source (Zig), so this is
+   reading, not guessing.  Budget must reconcile to ±20 % of measured
+   wall time or the decomposition is not finished.
+2. **Pre-Phase-B gate.**  `perf record` the live path (not the headless
+   bench — they run different scrollback variants) and confirm the
+   top attack owns ≥ 10 pp of self-time.  The §11 gate exists because
+   an earlier project spent five commits removing a memcpy that was a
+   tax, not a bottleneck.
+3. **Then attack**, priced per change, with the whole corpus matrix
+   re-measured after each.
+
+Known input to Phase A, already measured: `scroll_up` + `memmove` is
+~20 % of emoji parse in the headless profile (a 122-cell copy into
+scrollback plus a 122-cell blank per line, on a corpus that fills 47
+columns).  It is a candidate, not a conclusion — the live path runs the
+File scrollback variant with a different cost shape.
+
+Still unmeasured: iTerm2 / Warp / Terminal.app under the certified
+protocol.  They cannot be driven from ssh (AppleEvent −1712 under both
+plain ssh and `launchctl asuser` for iTerm), so their rows in
+`bench/baseline.json` remain 2026-06-07 numbers taken under the old,
+uncertified, mixed-byte-count protocol.  One console run of
+`bin/measure-other.sh` on the bench host refreshes all three.
+
 ---
 
 ## Gaps & fixability triage
