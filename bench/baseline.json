@@ -12,7 +12,7 @@
     "Warp comparison drifts.",
     "",
     "F gate-lock 2026-05-05 (perf-attack F): clean-machine numbers from",
-    "bench-run + measure-other (3-trial), \u00d7 0.93 (parse) / 0.90 (live,",
+    "bench-run + measure-other (3-trial), × 0.93 (parse) / 0.90 (live,",
     "ratios) safety margin.  Earlier same-day floors were over-loose due",
     "to godot CPU contention skewing measurements ~30% slower than truth.",
     "These are the *minimum* marspot must hold while A/B/C/D attack work is",
@@ -43,14 +43,14 @@
     {
       "id": "cat-emoji",
       "bytes": 8388720,
-      "mars_parse_MBps_min": 61,
+      "mars_parse_MBps_min": 135,
       "mars_live_MBps_min": 144,
       "mars_vs_best_other_min": 1.26,
-      "_note": "Relocked 2026-07-11: the old floor 194 was measured on the pre-82d74b6 parser whose emoji WIDTHS WERE WRONG (codepoint advance, no UAX #29 clusters - VS16/ZWJ/flags mis-sized). Correct cluster segmentation is a hard product requirement; pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter. After the packed-props table + quad decode lane the honest ceiling is ~66 MB/s on the mini (3-run median 65.7, stdev ~2%); floor = 65.7 x 0.93 = 61. mars_live_MBps_min / vs_best_other for this scenario are STALE (locked against the wrong-width parser) - re-measure on the next --full run before trusting."
+      "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in docs/perf.md.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting."
     }
   ],
   "render_full_repaint": {
-    "_comment": "p99 across 1000 iterations \u00d7 median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs \u2014 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
+    "_comment": "p99 across 1000 iterations × median of 3 trials.  Real-world swing on a hot mac is up to ~2 ms (observed range 1.0-1.4 ms across one day's bench runs — 30 % spread driven by GPU thermal + scheduler noise).  Ceiling at 1.8 ms catches an actual regression (1.5x current median) while tolerating that noise.  --update-baseline applies the default 1.10 margin which collapses to the noise floor; manually widened.",
     "p99_us_max": 1301
   },
   "scroll_repaint": {
@@ -58,13 +58,13 @@
     "p99_us_max": 4
   },
   "scroll_cold_repaint": {
-    "_comment": "Sister gate to scroll_repaint, forced to disk-backed (MARS_DISK_SCROLLBACK=1) and with pages evicted via madvise(DONTNEED) before the walk.  Catches disk-path regressions that the default-env scroll bench misses when memory is the default.  Cold-cache p99 measured ~3-5 \u00b5s; same 30 % run-to-run noise as the warm gate, manually widened to ~2x current median.",
+    "_comment": "Sister gate to scroll_repaint, forced to disk-backed (MARS_DISK_SCROLLBACK=1) and with pages evicted via madvise(DONTNEED) before the walk.  Catches disk-path regressions that the default-env scroll bench misses when memory is the default.  Cold-cache p99 measured ~3-5 µs; same 30 % run-to-run noise as the warm gate, manually widened to ~2x current median.",
     "p99_us_max": 4
   },
   "binary_size_bytes_max": {
-    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  RESOLUTION: on arm64 macOS the __TEXT segment is 16 KiB page-aligned, so these numbers move in ~16 KiB steps whatever the source change was - 2026-08-11 a ~2 KB chrome-layout change (measured: __text +2036 B, every other section flat) grew mcli by 16512 B = one page + 128 B of code signature.  A jump under ~20 KiB says nothing; read the section table (`size -m`) before calling it bloat.  Relocked 2026-08-11 at mini-measured current x 1.06 (one page of headroom, not a percentage): mcli 1375488, marspot 1515840.  marspot came DOWN 34 KB in the same commit by moving `--snapshot` + the PNG writer behind the `snapshot` cargo feature - a development tool has no business in the shipped binary.  Previous ceilings 1370000/1541000 dated 2026-07-11.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.  Relocked 2026-08-12 (marspot only): 1533000 -> 1549776 = mini-measured 1533392 + one 16 KiB page.  The old ceiling sat 72 B above the then-current build - zero headroom - so the next ordinary commit tripped it: a same-machine A/B minutes apart (git stash) showed __TEXT UNCHANGED at 1245184 and __text +3548 B absorbed inside the page, with the 464 B file delta living in linkedit + signature.  That is the sub-page noise this comment already says to ignore, and a floor that fires on it teaches you to relock rather than to look.  mcli's ceiling already carried exactly one page of headroom (1392000 vs 1376160); marspot's now matches the same rule.",
+    "_comment": "Release binary size ceiling (after lto=fat strip).  Purpose: flag ACCIDENTAL code-size jumps (a heavy dep sneaking in, a forgotten debug table) - NOT a hard product budget.  RESOLUTION: on arm64 macOS the __TEXT segment is 16 KiB page-aligned, so these numbers move in ~16 KiB steps whatever the source change was - 2026-08-11 a ~2 KB chrome-layout change (measured: __text +2036 B, every other section flat) grew mcli by 16512 B = one page + 128 B of code signature.  A jump under ~20 KiB says nothing; read the section table (`size -m`) before calling it bloat.  Relocked 2026-08-11 at mini-measured current x 1.06 (one page of headroom, not a percentage): mcli 1375488, marspot 1515840.  marspot came DOWN 34 KB in the same commit by moving `--snapshot` + the PNG writer behind the `snapshot` cargo feature - a development tool has no business in the shipped binary.  Previous ceilings 1370000/1541000 dated 2026-07-11.  NB: measure on the canonical bench host (idle mini); dev-box toolchains can differ.  Relocked 2026-08-12 (marspot only): 1533000 -> 1549776 = mini-measured 1533392 + one 16 KiB page.  The old ceiling sat 72 B above the then-current build - zero headroom - so the next ordinary commit tripped it: a same-machine A/B minutes apart (git stash) showed __TEXT UNCHANGED at 1245184 and __text +3548 B absorbed inside the page, with the 464 B file delta living in linkedit + signature.  That is the sub-page noise this comment already says to ignore, and a floor that fires on it teaches you to relock rather than to look.  mcli's ceiling already carried exactly one page of headroom (1392000 vs 1376160); marspot's now matches the same rule.  Relocked 2026-08-18 (marspot only): 1549776 -> 1567136 = mini-measured 1550752 + one 16 KiB page.  The emoji fast-path commit moved the binary by exactly 16512 B - one page plus 128 B of signature, the same quantum this comment records for 2026-08-11 - i.e. the sub-page noise it already says to ignore.",
     "mcli": 1392000,
-    "marspot": 1549776
+    "marspot": 1567136
   },
   "memory_idle_kb_max": {
     "_comment": "RSS in KiB, sampled 1.5 s after launch with no input.  Lazy-alloc scrollback ring (commit landed in this branch) means idle pays only for sessions' immediate state, not the worst-case 19 MiB ring.  20 % headroom over current.",
@@ -135,7 +135,7 @@
       "scrollback-1m).  Read from bench/results/cross-terminal.json (latest",
       "bench-run.sh snapshot).  Two checks per scenario: marspot's own absolute",
       "throughput floor, and the marspot-vs-best-other ratio floor.  The ratio",
-      "floor is the structural protection \u2014 without it, marspot and competitors",
+      "floor is the structural protection — without it, marspot and competitors",
       "can both slow down and the gate stays green even though our relative",
       "advantage shrunk.",
       "",
@@ -143,7 +143,7 @@
       "  multi-session-9x: marspot 104.6 / iterm 18.2 / terminal 60.1 MiB/s",
       "  scrollback-1m:    marspot 97.7  / iterm 71.8 / terminal 91.6 MiB/s",
       "10% safety margin.  Re-lock via `bin/bench.sh --full --update-baseline`",
-      "after re-running `bin/bench-run.sh` \u22653\u00d7 to populate snapshots."
+      "after re-running `bin/bench-run.sh` ≥3× to populate snapshots."
     ],
     "snapshot_max_age_hours": 168,
     "scenarios": {
