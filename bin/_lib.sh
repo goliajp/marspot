@@ -285,3 +285,82 @@ live_cat_args() {
   while [[ $i -le $n ]]; do out="$out $path"; i=$((i + 1)); done
   echo "$out"
 }
+
+# ---- live trial scripts --------------------------------------------------
+# Why a script file rather than a command string: every terminal here is
+# driven differently (a wrapper script for marspot/Ghostty, AppleScript
+# `write text` for iTerm, System Events keystrokes for Warp), and the
+# only way to guarantee they all do byte-identical work is to hand them
+# all the same path to run.  It also ends the quoting spiral of building
+# a multi-KB one-liner.
+#
+# What the trial does, and why the second half matters:
+#
+#     cat <scenario> ... <scenario>     # LIVE_MIN_BYTES worth
+#     printf '\033[6n'; read until R    # ask where the cursor is
+#
+# `cat` returning only proves the bytes reached the PTY.  A terminal
+# that drops or coalesces under pressure lets `cat` finish early and
+# "wins" the benchmark — measured 2026-08-18: the same terminal timed
+# 0.27 s and 0.08 s for the same corpus on the same day, which is not
+# a load story.  A DSR (`CSI 6 n`) cannot be answered until everything
+# queued ahead of it has been processed, so the reply is the terminal
+# certifying that it actually consumed the corpus.
+#
+# A terminal that never answers times out after 5 s and writes an empty
+# `cpr=` line; parsers must treat that trial as INVALID rather than
+# folding a 5 s timeout into the throughput number.
+
+# write_live_trial_script <out> <marker> <scenario-path>
+# One scenario, one trial; stderr (the `time` output plus the cpr line)
+# goes to <marker>.
+write_live_trial_script() {
+  local out=$1 marker=$2 scenario=$3
+  local reps args
+  reps=$(live_repeat "$scenario")
+  args=$(live_cat_args "$scenario" "$reps")
+  cat > "$out" <<TRIAL
+#!/bin/bash
+exec 2> "$marker"
+/usr/bin/time -p /bin/bash -c '
+  /bin/cat$args
+  stty raw -echo 2>/dev/null
+  printf "\033[6n" > /dev/tty
+  IFS="[;" read -t 5 -srd R _ _row _col < /dev/tty
+  stty sane 2>/dev/null
+  printf "cpr=%s,%s\n" "\$_row" "\$_col" >&2
+'
+TRIAL
+  chmod 0755 "$out"
+}
+
+# write_live_matrix_script <out> <marker> <trials> <scenario-path>...
+# The whole matrix in one terminal session, appending `==SCN== <id>`
+# headers so one marker can be parsed per scenario.  Ends with
+# `==ALL_DONE==` so a poller knows it is safe to read.
+write_live_matrix_script() {
+  local out=$1 marker=$2 trials=$3
+  shift 3
+  {
+    echo '#!/bin/bash'
+    echo "rm -f \"$marker\""
+    local scenario reps args t
+    for scenario in "$@"; do
+      reps=$(live_repeat "$scenario")
+      args=$(live_cat_args "$scenario" "$reps")
+      for ((t = 1; t <= trials; t++)); do
+        echo "echo '==SCN== $(basename "$scenario" .bin)' >> \"$marker\""
+        echo "{ /usr/bin/time -p /bin/bash -c '"
+        echo "  /bin/cat$args"
+        echo '  stty raw -echo 2>/dev/null'
+        echo '  printf "\033[6n" > /dev/tty'
+        echo '  IFS="[;" read -t 5 -srd R _ _row _col < /dev/tty'
+        echo '  stty sane 2>/dev/null'
+        echo '  printf "cpr=%s,%s\n" "$_row" "$_col" >&2'
+        echo "'; } 2>> \"$marker\""
+      done
+    done
+    echo "echo '==ALL_DONE==' >> \"$marker\""
+  } > "$out"
+  chmod 0755 "$out"
+}

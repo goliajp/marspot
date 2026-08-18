@@ -72,8 +72,8 @@
     "marspot": 95981
   },
   "competitors_snapshot": {
-    "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).",
-    "captured_at": "2026-06-07",
+    "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).  2026-08-18: ghostty + marspot re-measured under a NEW protocol and are NOT comparable with the 2026-06-07 rows above them.  Two changes: (1) every terminal now pushes LIVE_MIN_BYTES (32 MiB) by cat'ing the scenario file as many times as needed — a single 8 MiB pass never blocks `cat` long enough to measure a fast terminal, and the old rows mix per-scenario byte counts; (2) each trial ends with a DSR round-trip (`CSI 6 n`), so the number covers work the terminal has CONFIRMED it consumed.  Without (2) a terminal that drops or coalesces under pressure finishes early and wins — the reason marspot grew DSR support the same day (L2 0.12.138).  iterm/warp/terminal cannot be driven from an ssh session (AppleEvent -1712 under both plain ssh and launchctl asuser for iTerm); they need a console run of bin/measure-other.sh and are stale until then.",
+    "captured_at": "2026-08-18 (ghostty+marspot only; iterm/warp/terminal still 2026-06-07)",
     "host": {
       "name": "mini",
       "arch": "arm64 (Darwin 25.5.0)",
@@ -102,12 +102,12 @@
     "ghostty": {
       "version": "1.3.1 (build 15212)",
       "bundle_id": "com.mitchellh.ghostty",
-      "captured_at": "2026-06-07",
-      "method": "console / Screen Sharing",
-      "cat-ascii_MBps": 100.0,
-      "cat-mixed_MBps": 94.1,
-      "cat-cjk_MBps": 133.3,
-      "cat-emoji_MBps": 114.3
+      "captured_at": "2026-08-18",
+      "method": "ssh + launchctl asuser, 32 MiB, DSR-certified",
+      "cat-ascii_MBps": 101.7,
+      "cat-mixed_MBps": 101.7,
+      "cat-cjk_MBps": 145.9,
+      "cat-emoji_MBps": 115.7
     },
     "terminal": {
       "version": "2.15 (build 470.2)",
@@ -121,12 +121,13 @@
     },
     "marspot": {
       "bundle_id": "com.goliajp.marspot",
-      "captured_at": "2026-06-07",
-      "method": "console / Screen Sharing",
-      "cat-ascii_MBps": 152.4,
-      "cat-mixed_MBps": 145.5,
-      "cat-cjk_MBps": 160.0,
-      "cat-emoji_MBps": 160.0
+      "captured_at": "2026-08-18",
+      "method": "ssh, 32 MiB, DSR-certified (bin/measure.sh)",
+      "cat-ascii_MBps": 104.9,
+      "cat-mixed_MBps": 101.7,
+      "cat-cjk_MBps": 101.7,
+      "cat-emoji_MBps": 93.2,
+      "_note": "vs ghostty on the same host 11 minutes apart: ascii +3.0%, mixed +-0, cjk -43.5%, emoji -24.1%.  ascii and mixed both land on ~101 MB/s for BOTH terminals, which smells like a shared ceiling rather than a tie — but ghostty reaches 145.9 on cjk, so that ceiling is not the pipe.  The gap to close is cjk and emoji; the ~4x between marspot's headless parse (411/257/236/153) and its live numbers is the decomposition target, not the parser."
     }
   },
   "multi_session_thresholds": {

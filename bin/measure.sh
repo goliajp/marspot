@@ -63,15 +63,11 @@ run_in_marspot() {
   # cats), so the per-scenario "live throughput" timed via marker
   # would be ~1/9 of the real per-session number.  The product-level
   # multi-session test lives in `bin/scenarios/multi-session-9x.sh`.
+  # Shared with the competitor harness (bin/_lib.sh): cat enough bytes
+  # to clear LIVE_MIN_BYTES, then make the terminal certify it consumed
+  # them by answering a DSR.  Same script shape for every terminal.
   local cmd_script="/tmp/marspot-bench-cmd.sh"
-  local reps args
-  reps=$(live_repeat "$scenario")
-  args=$(live_cat_args "$scenario" "$reps")
-  cat > "$cmd_script" <<EOF
-#!/bin/sh
-/usr/bin/time -p /bin/cat $args 2> "$marker"
-EOF
-  chmod +x "$cmd_script"
+  write_live_trial_script "$cmd_script" "$marker" "$scenario"
 
   # Forward MARSPOT_PROFILE through if set, so a profiling run can
   # capture per-trial counters under the harness.
@@ -202,6 +198,14 @@ for scenario in "${SCENARIOS[@]}"; do
         continue
       fi
 
+      # The DSR reply is the terminal certifying it consumed the
+      # corpus; without it the elapsed time only says how fast the
+      # PTY buffer drained.  An empty `cpr=` means the read timed out
+      # — drop the trial rather than fold a 5 s timeout into MB/s.
+      if ! grep -q '^cpr=[0-9]' "$marker" 2>/dev/null; then
+        echo "    no DSR reply — trial dropped (terminal never confirmed)"
+        continue
+      fi
       ns=$(parse_real_ns "$marker")
       if [[ -z "$ns" || "$ns" == "0" ]]; then
         echo "    couldn't parse timing from $marker"

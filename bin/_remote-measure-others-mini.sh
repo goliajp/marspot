@@ -17,6 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+source "$ROOT/bin/_lib.sh"   # LIVE_MIN_BYTES + write_live_matrix_script
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
 TRIALS=3
 # Console mode drives all four terminals. ssh mode falls back to
@@ -96,18 +97,32 @@ if [[ ! -f bench/scenarios/cat-ascii.bin ]]; then
 fi
 
 build_one_cmd() {
+  # Was: one `cat` of the scenario file per trial, inlined into a
+  # multi-KB command string.  Two things were wrong with it and both
+  # showed up as competitor numbers that could not be reconciled with
+  # each other (2026-08-18: the same terminal, the same day, 0.27 s and
+  # 0.08 s for "cat-cjk" — different byte counts, not different loads).
+  #
+  #   - byte count.  A single pass of an 8 MiB scenario does not keep
+  #     `cat` blocked long enough to measure a fast terminal at all;
+  #     bin/measure.sh had already moved to LIVE_MIN_BYTES and this
+  #     script had not, so the two sides of the comparison were pushing
+  #     different amounts of data.
+  #   - certification.  `cat` returning proves the bytes reached the
+  #     PTY, not that the terminal processed them; a terminal that
+  #     drops under pressure finishes early and wins.
+  #
+  # write_live_matrix_script (bin/_lib.sh) fixes both and hands every
+  # terminal the same file to run.
   local marker=$1
-  local cmd="rm -f $marker; "
-  local s t
+  local script="/tmp/marspot-live-matrix-$$.sh"
+  local paths=()
+  local s
   for s in "${SCENARIOS[@]}"; do
-    for ((t=1; t<=TRIALS; t++)); do
-      cmd+="echo '==SCN== $s' >> $marker; "
-      cmd+="/usr/bin/time -p /bin/cat $ROOT/bench/scenarios/$s.bin 2>> $marker; "
-    done
+    paths+=("$ROOT/bench/scenarios/$s.bin")
   done
-  cmd+="echo '==ALL_DONE==' >> $marker; "
-  cmd+="exit"
-  echo "$cmd"
+  write_live_matrix_script "$script" "$marker" "$TRIALS" "${paths[@]}"
+  echo "bash $script; exit"
 }
 
 # ---- pre-flight inventory + trap cleanup ----------------------------
@@ -210,6 +225,7 @@ cleanup() {
   # falls through to sudo -n if NOPASSWD is configured, else best-
   # effort plain rm.
   rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
+  rm -f /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
   rm -f /tmp/measure-*-all.txt 2>/dev/null || sudo -n rm -f /tmp/measure-*-all.txt 2>/dev/null || true
   rm -rf "$SESSION_DIR" 2>/dev/null || true
   echo "==> cleanup done (script rc=$rc)" >&2
@@ -344,7 +360,7 @@ done
 # Parse markers → JSON on stdout. Markers may be root-owned (when the
 # surface ran under sudo asuser); they're mode 0644 world-readable so
 # this user-mode parse can still read them.
-python3 - "${SCENARIOS[@]}" <<'PY'
+LIVE_MIN_BYTES="$LIVE_MIN_BYTES" python3 - "${SCENARIOS[@]}" <<'PY'
 import json, re, os, sys, datetime, subprocess, platform
 SCENARIOS = sys.argv[1:]
 # Internal driver / marker names use "iterm" (matches iterm.sh); the
@@ -433,6 +449,9 @@ def probe_host():
     return out
 
 ROOT = os.environ.get("PWD", os.getcwd())
+# Mirrors LIVE_MIN_BYTES in bin/_lib.sh — passed through the
+# environment by the shell half so the two cannot drift apart.
+LIVE_MIN_BYTES = int(os.environ.get("LIVE_MIN_BYTES", 32 * 1024 * 1024))
 today = datetime.date.today().isoformat()
 out = {"host": probe_host()}
 for t in TERMS:
@@ -441,13 +460,23 @@ for t in TERMS:
         continue
     by_scn = {s: [] for s in SCENARIOS}
     current = None
+    certified = False
     for line in open(marker, errors="replace"):
         m = re.match(r"^==SCN== (\S+)", line)
         if m:
             current = m.group(1)
             continue
+        # `cpr=<row>,<col>` is the terminal's DSR reply, written just
+        # before time's output.  Empty means the read timed out: the
+        # terminal never confirmed it consumed the corpus, so its
+        # elapsed time measures the PTY buffer.  Drop that trial.
+        m = re.match(r"^cpr=(.*)$", line.strip())
+        if m:
+            certified = bool(re.match(r"^\d", m.group(1)))
+            continue
         m = re.match(r"^real\s+(.+)$", line.strip())
-        if m and current and current in by_scn:
+        if m and current and current in by_scn and certified:
+            certified = False
             s = m.group(1)
             if "m" in s:
                 a, b = s.split("m", 1)
@@ -468,8 +497,13 @@ for t in TERMS:
             continue
         vs.sort()
         med = vs[len(vs) // 2]
+        # Bytes actually pushed = file size x the live repeat count the
+        # trial script used, NOT the file size.  Getting this wrong is
+        # how one afternoon produced a "419 MB/s" competitor reading
+        # that was really 105.
         size = os.path.getsize(f"{ROOT}/bench/scenarios/{s}.bin")
-        bps = size * 1_000_000_000 // med
+        reps = max(1, -(-LIVE_MIN_BYTES // size))
+        bps = size * reps * 1_000_000_000 // med
         rec[f"{s}_MBps"] = round(bps / 1048576, 1)
     # Only emit if we got at least one MBps measurement; metadata alone
     # isn't worth surfacing.
