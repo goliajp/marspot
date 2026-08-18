@@ -238,6 +238,88 @@ gate but is what stops those exact bugs from coming back.
 
 ---
 
+## emoji parse — 2.17× (2026-08-18)
+
+The scenario that had quietly rotted.  Worth recording in full: the
+measurement mistakes cost more time than the fix did.
+
+**What raised it.**  A live `cat` of `cat-emoji.bin` on mini took
+175 ms; the 6-08 binary, rebuilt and run on the same host on the same
+day against the same file, took 110 ms.
+
+**Two装置 checks before believing that.**  (1) A GUI session
+(`sudo launchctl asuser 501 …`, so the process lands in the Aqua
+bootstrap namespace) produced sample-for-sample identical numbers to a
+plain ssh run — the ssh environment was not the cause.  (2) `git
+bisect` over the 542-commit window "found" a 13-line keyboard-mapping
+commit, which cannot affect `cat` throughput.  It was right about the
+numbers and wrong about the cause: another project was compiling on
+mini, and the same commit measured 130 ms and 290 ms depending on when
+it ran.  **Interleaved A/B taking the minimum** (load can only add
+time) gave a clean separation: old 110 ms, HEAD 180 ms, five rounds,
+zero overlap.
+
+**Classification before attack.**  Headless parse, same host, same day:
+
+| scenario | 6-08 | HEAD |
+|---|---|---|
+| cat-ascii | 183 MB/s | 429 MB/s |
+| cat-mixed | 182 | 257 |
+| cat-cjk | 222 | 232 |
+| **cat-emoji** | **208 (40.3 ms)** | **75 (111.2 ms)** |
+
+Parse alone lost 71 ms; live lost 70 ms.  The regression was entirely
+in the parser's emoji path — everything downstream was innocent, and
+three of the four scenarios had got substantially *faster* over the
+same period.
+
+**What the profile said, and what the corpus said.**  `sample` put
+38 % of the time in Unicode table lookups.  The corpus explained why:
+`🚀 ✨ 🎉` is single-codepoint emoji separated by *single spaces* —
+**zero ZWJ, zero VS16** — so the ASCII lane (needs ≥ 2 chars) and the
+quad lane (needs ≥ 8 bytes) both came up short on every glyph, and
+each one paid the full UAX #29 cluster machine: 84 ns per non-ASCII
+character, against 12.9 ns for CJK, which reaches the wide lane.
+
+**Five changes, priced separately** (local interleaved A/B, min-of-5,
+ms for one pass over the 8 MB corpus):
+
+| | change | ms | gain |
+|---|---|---|---|
+| — | baseline | 113 | — |
+| 1 | `char_width` no longer computes `is_ambiguous_width` unconditionally | 105 | +7 % |
+| 2 | single-codepoint emoji admitted to the fast class | 81.6 | +22 % |
+| 3 | quad lane threshold 8 → 4 bytes | 70.5 | +13 % |
+| 4 | fast class `gbp()` lookup → two range exclusions | 54.5 | +23 % |
+| 5 | lanes dispatched on the first byte | 52.5 | +4 % |
+
+**2.17× cumulative, no corpus slower**: ascii +1.2 %, mixed +6.5 %,
+cjk +3.7 %.  A shared hot path has to be re-measured across the whole
+corpus matrix — measuring only the corpus the change was aimed at
+cannot see an icache or layout tax landing on the others.
+
+**Why #2 and #4 are safe.**  The fast class's existing invariant is
+that a batch commit always leaves the LAST character buffered, so a
+VS16 / ZWJ / skin-tone modifier arriving next still meets an open
+cluster on the slow path.  What must be excluded is anything whose
+boundary depends on a neighbour: regional indicators (GB12/13 pairs
+🇯🇵 into ONE cluster) and skin-tone modifiers (GBP=Extend).  #4
+replaces a table lookup with ranges, which can go stale, so
+`the_fast_pictograph_class_never_outruns_the_tables` walks the entire
+codepoint space and re-derives the class from the tables themselves —
+a Unicode update adding a third exception fails the build instead of
+silently splitting a cluster.
+
+**Still open**: `scroll_up` + `memmove` is now ~20 % of emoji parse
+(one 122-cell copy into scrollback plus a 122-cell blank per line,
+while the corpus only fills 47 columns).  The headless bench runs the
+Memory scrollback variant; production runs the File variant with a
+different cost shape, so the next round should profile the live path
+(mcli under samply) rather than optimise what this bench happens to
+measure.
+
+---
+
 ## Gaps & fixability triage
 
 Filled in as `bin/measure.sh` results land. Each row gets:
