@@ -377,8 +377,50 @@ fn is_hard_wrap_continuation_in<S: CellSource>(
     if lead >= right {
         return false;
     }
+    // A wrap cuts a token in half, so the row below opens with the
+    // REST of that token.  A lone `-` / `*` / `1.` followed by a
+    // blank is not a token tail — it is a list marker the renderer
+    // put there.  Geometry cannot see the difference (a nested list
+    // item carries the same 1..=4 cell indent a hanging wrap does,
+    // and the item above can end flush at the edge on a path char),
+    // and joining a marker can only ever bolt one punctuation char
+    // onto the row above: the 2026-08-18 field report was a bullet's
+    // URL coming out as `…/village/index-`, having swallowed the `-`
+    // that opened the NEXT bullet.
+    if starts_list_marker(src, curr_row, lead, right) {
+        return false;
+    }
     let first = src.char_at(lead, curr_row);
     is_url_path_class(first)
+}
+
+/// Does `row` open a list item at `from` — a bullet (`-`, `*`, `+`,
+/// `>`, …) or an ordered marker (`1.`, `2)`) standing alone before a
+/// blank?  Anything longer than a marker, or not followed by a
+/// blank, is ordinary text: a wrapped token resumes as one run of
+/// characters, it does not spell a one-character word.
+fn starts_list_marker<S: CellSource>(src: &S, row: u16, from: u16, right: u16) -> bool {
+    let mut tok = ['\0'; 6];
+    let mut n = 0usize;
+    let mut c = from;
+    while c < right && n < tok.len() {
+        let ch = src.char_at(c, row);
+        if ch == ' ' || ch == '\0' {
+            break;
+        }
+        tok[n] = ch;
+        n += 1;
+        c += 1;
+    }
+    // Ran to the buffer's end without hitting a blank — too long to
+    // be a marker, and the cell after `c` was never examined.
+    if n == 0 || n == tok.len() {
+        return false;
+    }
+    if n == 1 {
+        return !tok[0].is_alphanumeric();
+    }
+    tok[..n - 1].iter().all(|c| c.is_ascii_digit()) && matches!(tok[n - 1], '.' | ')')
 }
 
 /// The horizontal rules a table draws between its rows.  A row made
@@ -2390,6 +2432,47 @@ mod tests {
         // Without tui_mode the composer URL is scanned too.
         let all = scan_visible_links(&src, ScanOpts::default());
         assert!(all.iter().any(|l| l.text == "https://foo.com"), "{all:?}");
+    }
+
+    /// 2026-08-18 field report: the URL ending one bullet came out
+    /// with the NEXT bullet's `-` glued to its tail.  The item above
+    /// ends flush at the pane edge on a path character, and a nested
+    /// item's indent is indistinguishable from a hanging wrap indent
+    /// — geometry says "continuation", the marker says otherwise.
+    #[test]
+    fn a_following_list_marker_is_not_a_wrap_continuation() {
+        let head = "- 村子 → http://192.168.50.20:6031/index.html?page=pages/village/index";
+        let cols = head.chars().count() as u16; // flush at the edge
+        for next in [
+            "  - 阿云的屋 → http://a.example/x", // the field report, verbatim
+            "- room -> http://a.example/x",      // no indent
+            "  - room -> http://a.example/x",    // hanging-indent shape
+            "  * room -> http://a.example/x",
+            "  2. room -> http://a.example/x",
+        ] {
+            let src = StrSource::new(&[head, next], cols);
+            let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+            assert!(
+                links.iter().any(|l| l.text
+                    == "http://192.168.50.20:6031/index.html?page=pages/village/index"),
+                "next={next:?} must not extend the bullet above, got {links:?}"
+            );
+        }
+    }
+
+    /// The marker gate must not cost the merge its real job: a row
+    /// that resumes mid-token still joins, marker chars or not.
+    #[test]
+    fn a_mid_token_continuation_still_joins_after_the_marker_gate() {
+        let head = "- 村子 → http://192.168.50.20:6031/index.html?page=pages/village/index";
+        let cols = head.chars().count() as u16;
+        let src = StrSource::new(&[head, "  -more/parts here"], cols);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        assert!(
+            links.iter().any(|l| l.text
+                == "http://192.168.50.20:6031/index.html?page=pages/village/index-more/parts"),
+            "a token tail that merely starts with `-` still belongs to the row above, got {links:?}"
+        );
     }
 
     fn scan(s: &str) -> Vec<LinkRange> {
