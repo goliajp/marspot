@@ -458,7 +458,60 @@ at a client that never listened, and 75 % of its samples sat in `write`.
 That reads like a damning finding about L3 and was a bug in the harness.
 Both readings had the same shape; only the witness told them apart.
 
-### Next round: the write amplification, not the parser
+### Result (2026-08-19): the shipped path beats every competitor measured
+
+| corpus | before | after | | ghostty | |
+|---|---:|---:|---|---:|---|
+| cat-ascii | 40.9 | **194.5** | 4.8× | 101.7 | **+91 %** |
+| cat-mixed | 35.0 | **167.8** | 4.8× | 101.7 | **+65 %** |
+| cat-cjk | 39.8 | **165.7** | 4.2× | 145.9 | **+13.6 %** |
+| cat-emoji | 39.7 | **123.1** | 3.1× | 115.7 | **+6.4 %** |
+
+Idle mini, certified protocol, three trials each — two of the four
+corpora reported *identical* times all three times.  `--full` now gates
+this: `mars_vs_best_other_min` is 1.81 / 1.57 / 1.08 / 1.01, so the
+build goes red if the product stops beating the fastest terminal we
+have measured.
+
+**The four changes, priced separately** (local, one bench per step):
+
+| # | change | cjk |
+|---|---|---:|
+| — | start | ~27 |
+| 1 | scrollback index writer buffered, sized against `bin`'s | 83.9 |
+| 2 | bytelog writes moved off the parse thread | 98.7 |
+| 3 | scrollback writes moved off too, record encoding flattened | 115.7 |
+| 4 | ring push stops allocating a `Vec` per line | 129.1 |
+
+**What made this possible was reframing the problem.**  ghostty does
+not write to disk at all — its scrollback is a 10 000-line RAM ring.
+marspot writes every byte twice: raw to the bytelog (so a silent update
+can replay it) and encoded to the scrollback (so history outlives the
+ring).  Both are product promises.  So the gap could never be closed by
+writing less; it closed by not making the **parse thread** wait for the
+disk.  After that, throughput is `max(cpu, disk)` rather than `cpu +
+disk`, and the disk side has room the cpu side does not — 630 MB/s of
+measured writes against a corpus arriving at ~150.
+
+Two of the four were plain violations of rules this repo already has
+written down: "hot paths allocate zero" (a `Vec` per pushed line) and,
+in the scrollback index, a comment claiming one syscall per line was
+"well within budget" — an estimate that was correct and a budget that
+had been measured on interactive output, not on 200 000 lines a second.
+
+### Still open
+
+`FileScrollback::push_line` is still 38.7 % of the parse thread.  Most
+of what remains is the trailing-blank trim comparing `Cell`s field by
+field (two enums and five bools).  Going further means changing `Cell`'s
+layout, which reaches everywhere; not attempted here.
+
+The SSIM gate (`font_v5_showcase`, 0.9723 vs 0.98) has been red since
+before this work — same species as the L3 gate that had been dead for
+two months: it only runs under `--full`, and nobody was running
+`--full`.
+
+### The round that got here: write amplification, not the parser
 
 Every byte a pane produces is written to disk 1.8× **on the thread that
 parses**.  Neither write is deletable — `scrollback.bin` is the
