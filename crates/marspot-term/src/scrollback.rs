@@ -502,7 +502,7 @@ pub struct FileScrollback {
     // of the RAM ring but is still in BufWriter's user-space buffer
     // would not be visible to mmap, breaking the "ring miss ⇒ file
     // hit" invariant.
-    bin: std::cell::RefCell<std::io::BufWriter<std::fs::File>>,
+    bin: std::cell::RefCell<crate::async_writer::AsyncWriter>,
     /// Buffered, like `bin`.  It was a raw `File` until 2026-08-19,
     /// on the reasoning that 8 B per push is one syscall (~5 µs),
     /// "well within budget".  The estimate was right and the budget
@@ -519,7 +519,7 @@ pub struct FileScrollback {
     /// lose the same tail instead of different ones, and the flush
     /// order (bin, then idx) keeps the index from ever pointing past
     /// the data it indexes.
-    idx: std::cell::RefCell<std::io::BufWriter<std::fs::File>>,
+    idx: std::cell::RefCell<crate::async_writer::AsyncWriter>,
     /// Separate read-only fd for cold reads.  Reads of recent lines
     /// hit the RAM ring, so missing-from-file isn't observable.
     bin_for_read: std::fs::File,
@@ -671,10 +671,10 @@ impl FileScrollback {
             }
         }
 
-        let mut bin = std::io::BufWriter::with_capacity(BIN_BUF_BYTES, bin_w);
+        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, 4);
         if !bin_existed {
             Self::write_header(&mut bin)?;
-            bin.flush()?;
+            bin.flush();
         }
 
         let bin_for_read = std::fs::OpenOptions::new().read(true).open(&bin_path)?;
@@ -825,7 +825,7 @@ impl FileScrollback {
             cols,
             ram_capacity,
             bin: std::cell::RefCell::new(bin),
-            idx: std::cell::RefCell::new(std::io::BufWriter::with_capacity(IDX_BUF_BYTES, idx)),
+            idx: std::cell::RefCell::new(crate::async_writer::AsyncWriter::new(idx, IDX_BUF_BYTES, 4)),
             bin_for_read,
             idx_for_read,
             bin_mmap_ptr: std::cell::Cell::new(std::ptr::null_mut()),
@@ -851,8 +851,7 @@ impl FileScrollback {
         })
     }
 
-    fn write_header(bin: &mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()> {
-        use std::io::Write;
+    fn write_header(bin: &mut crate::async_writer::AsyncWriter) -> std::io::Result<()> {
         let mut hdr = [0u8; FILE_HEADER_BYTES as usize];
         hdr[0..4].copy_from_slice(&FILE_MAGIC.to_le_bytes());
         hdr[4..8].copy_from_slice(&FILE_VERSION.to_le_bytes());
@@ -864,7 +863,8 @@ impl FileScrollback {
             .unwrap_or(0);
         hdr[16..24].copy_from_slice(&now_ns.to_le_bytes());
         hdr[24..32].copy_from_slice(&0u64.to_le_bytes());
-        bin.write_all(&hdr)
+        bin.write(&hdr);
+        Ok(())
     }
 
 
@@ -929,8 +929,8 @@ impl FileScrollback {
             return Ok(());
         }
         // 1) Flush writer buffers so the rename captures complete data.
-        self.bin.borrow_mut().flush()?;
-        self.idx.borrow_mut().flush()?;
+        self.bin.borrow_mut().flush();
+        self.idx.borrow_mut().flush();
         // 2) Drop everything that holds an fd / mmap to the hot
         //    files, so rename / unlink can succeed on platforms that
         //    care (we're macOS so unlink-while-open is OK, but a
@@ -966,11 +966,11 @@ impl FileScrollback {
         // Take ownership of the writers' inner BufWriters so they drop here.
         let _ = std::mem::replace(
             &mut *self.bin.borrow_mut(),
-            std::io::BufWriter::with_capacity(BIN_BUF_BYTES, dev_null_file()?),
+            crate::async_writer::AsyncWriter::new(dev_null_file()?, BIN_BUF_BYTES, 4),
         );
         let _ = std::mem::replace(
             &mut *self.idx.borrow_mut(),
-            std::io::BufWriter::with_capacity(IDX_BUF_BYTES, dev_null_file()?),
+            crate::async_writer::AsyncWriter::new(dev_null_file()?, IDX_BUF_BYTES, 4),
         );
         // Replace read fds with placeholders; we rebuild them post-rename.
         self.bin_for_read = dev_null_file()?;
@@ -988,9 +988,9 @@ impl FileScrollback {
             .append(true)
             .create(true)
             .open(&self.bin_path)?;
-        let mut bin = std::io::BufWriter::with_capacity(BIN_BUF_BYTES, bin_w);
+        let mut bin = crate::async_writer::AsyncWriter::new(bin_w, BIN_BUF_BYTES, 4);
         Self::write_header(&mut bin)?;
-        bin.flush()?;
+        bin.flush();
         let idx_w = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1001,7 +1001,7 @@ impl FileScrollback {
         let bin_for_read = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
         let idx_for_read = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
         *self.bin.borrow_mut() = bin;
-        *self.idx.borrow_mut() = std::io::BufWriter::with_capacity(IDX_BUF_BYTES, idx_w);
+        *self.idx.borrow_mut() = crate::async_writer::AsyncWriter::new(idx_w, IDX_BUF_BYTES, 4);
         self.bin_for_read = bin_for_read;
         self.idx_for_read = idx_for_read;
         self.bin_tail_offset = FILE_HEADER_BYTES;
@@ -1074,16 +1074,14 @@ impl FileScrollback {
         // I/O failure here = disk full / fs error; panic loudly so
         // the user knows storage broke instead of silently losing
         // history.
-        self.bin.borrow_mut().write_all(&self.scratch)
-            .expect("scrollback bin write");
+        self.bin.borrow_mut().write(&self.scratch);
         self.bin_tail_offset += total_bytes as u64;
         // Both writers are buffered; `ensure_flushed` / handoff /
         // Drop push them out in order (bin first) so the index never
         // references bytes the data file does not have.  open()'s
         // tail-truncate scan reconciles whatever an unclean kill
         // left behind, as it always has.
-        self.idx.borrow_mut().write_all(&rec_offset.to_le_bytes())
-            .expect("scrollback idx write");
+        self.idx.borrow_mut().write(&rec_offset.to_le_bytes());
         self.has_unflushed.set(true);
 
         self.push_into_ring(line, wrapped);
@@ -1444,33 +1442,13 @@ impl FileScrollback {
         self.ram_wrapped.clear();
         self.ram_head = 0;
         self.ram_len = 0;
-        // Flush any buffered records first so the BufWriter can't
-        // resurrect pre-clear rows into the truncated file later.
-        let _ = self.bin.borrow_mut().flush();
-        // Truncate hot pair to an empty (header-only) state.  The
-        // writers are append-mode fds, so subsequent pushes land at
-        // the new EOF automatically.
-        if let Err(e) = self
-            .bin
-            .borrow_mut()
-            .get_mut()
-            .set_len(FILE_HEADER_BYTES)
-        {
-            crate::lx_warn!(
-                "scrollback.clear_truncate_failed",
-                &format!("{e}"),
-                bin = self.bin_path.display()
-            );
-        }
-        {
-            // Buffered now: drop whatever is pending before truncating,
-            // or the next flush would write stale offsets past the new
-            // end of a file that no longer has the data behind them.
-            let mut idx = self.idx.borrow_mut();
-            use std::io::Write;
-            let _ = idx.flush();
-            let _ = idx.get_ref().set_len(0);
-        }
+        // Truncate the hot pair to an empty (header-only) state.
+        // `truncate` runs on the writer thread behind everything
+        // already queued, and drops what is still buffered — records
+        // from before the clear must not resurrect past the new end.
+        // The fds are append-mode, so later pushes land at the new EOF.
+        self.bin.borrow_mut().truncate(FILE_HEADER_BYTES);
+        self.idx.borrow_mut().truncate(0);
         self.bin_tail_offset = FILE_HEADER_BYTES;
         self.total_lines = 0;
         self.hot_first_line = 0;
@@ -1603,8 +1581,8 @@ impl FileScrollback {
     /// `total_lines`).
     pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
         use std::io::Write;
-        self.bin.borrow_mut().flush()?;
-        self.idx.borrow_mut().flush()?;
+        self.bin.borrow_mut().flush();
+        self.idx.borrow_mut().flush();
         let bin = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;
         let idx = std::fs::OpenOptions::new().read(true).open(&self.idx_path)?;
         Ok(FileSnapshot {
@@ -2512,6 +2490,19 @@ mod tests {
         // does to the old L3 process image.  The fd handles leak too;
         // tmp dir cleanup at the end of the test reclaims everything.
         std::mem::forget(sb);
+
+        // Writes are handed to a writer thread, and `forget` does not
+        // stop it — it only skips the `Drop` that would have flushed.
+        // Give it a moment to drain what was already handed over, so
+        // this test measures the buffered tail that was lost rather
+        // than a race against a thread still writing.
+        //
+        // The real `execv` is harsher: it replaces the process image,
+        // so in-flight buffers die with the thread.  That is exactly
+        // why `flush_for_handoff` exists and why the L3 swap path
+        // calls it — this test covers the case where nothing flushed
+        // at all, which is the original execv-gap bug.
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Reopen.  Post-F3+10c, every surfaced row must decode to
         // its expected character — no blank-by-tolerant-load rows

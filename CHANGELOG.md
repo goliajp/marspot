@@ -2475,7 +2475,12 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.143**
+Current: **0.12.144**
+
+### 0.12.144
+
+**同 L3 0.11.51:磁盘写移出解析线程(`async_writer`)。** 收益整个落在 L3(只有真实
+pane 用文件 scrollback 与 bytelog),实现与契约变化记在那条。
 
 ### 0.12.143
 
@@ -4384,7 +4389,35 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.50**
+Current: **0.11.51**
+
+### 0.11.51
+
+**磁盘不再占着解析线程 —— 新增 `async_writer`,bytelog 与 scrollback 都改异步。**
+
+每个字节要落两次盘:原样进 bytelog(为静默更新后重放),编码后进 scrollback(为历史
+活过 RAM ring)。两者都是产品特性,都不能删。**能改的是谁在等磁盘** —— 此前是解析
+线程,bulk `cat` 下它 46% 的样本在 `write`。
+
+`async_writer::AsyncWriter`:
+
+- **双缓冲,不是小写入队列**。生产者填一个 `Vec`,满了整个交给写线程,自己从空闲表
+  取一个新的。缓冲在两个线程间循环,稳态零分配。
+- **有界,所以不会变成内存泄漏**。通道容量固定;磁盘落后时生产者阻塞在 `send`,背压
+  沿着 pty 队列传回子进程 —— 写得比磁盘快的 pane 会变慢,但不会变胖(CLAUDE.md 的
+  「不能越跑越慢」)。
+- **`flush()` 是屏障不是提示**。要回读文件的调用方(冷读 scrollback、execv 前的
+  handoff)必须看见字节,所以 flush 等写线程确认。
+- `swap_file` / `truncate` 也走队列,所以轮换与清空不会插到已排队的写前面。
+
+定价(本机,cjk,同一批测法):83.9 → 98.7(bytelog 异步)→ 108.2(scrollback 也异步)。
+
+**契约变化,已在测试里钉住**:写入在 flush 之前对读者不可见。`bytelog` 的两个测试
+原本在 flush 前统计文件大小、flush 后读内容再断言两者相等 —— 同步写时恒成立,异步
+下就是时序假设错了。`file_torn_write_no_past_eof_orphans` 则暴露另一件事:
+`mem::forget` **不会**终止写线程(真正的 `execv` 才会),所以它撞的是竞态而非缓冲
+丢失;测试等写线程排空后再 reopen,并把这层区别写进注释 —— `flush_for_handoff` 正是
+为真 execv 那条路存在的。
 
 ### 0.11.50
 

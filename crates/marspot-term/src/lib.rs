@@ -12,6 +12,7 @@
 //! surface (`pub use marspot_term::*`) so existing `marspot::grid::...`
 //! paths keep resolving.  See `docs/per-session-l3.md`.
 
+pub mod async_writer;
 pub mod binary_tree;
 pub mod bytelog;
 pub mod emoji_presentation;

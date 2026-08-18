@@ -31,8 +31,8 @@
 //! `marspot-term` so L3 (`marspot-session`) can own a bytelog directly
 //! without going through L4 (RFC-003).
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::fs::OpenOptions;
+use std::io;
 use std::path::PathBuf;
 
 use crate::paths::sessions_dir;
@@ -46,9 +46,20 @@ pub const BYTELOG_SEGMENT_BYTES: u64 = 50 * 1024 * 1024;
 /// for several seconds doesn't fill it.
 pub const BYTELOG_CAP_BYTES: u64 = 2 * BYTELOG_SEGMENT_BYTES;
 
+/// Handoff size to the writer thread.  64 KiB matches the pty reader's
+/// own buffer, so a busy pane hands over roughly one gathered batch at
+/// a time; an idle one hands over on flush.
+const BYTELOG_WRITE_BUF: usize = 64 * 1024;
+
 pub struct ByteLog {
     path: PathBuf,
-    file: File,
+    /// Appends go to a writer thread (see `async_writer`).  This used
+    /// to be a bare `File` written straight from `pump`, which meant
+    /// the thread that parses a pane's output also waited for its
+    /// disk: on a bulk `cat` that was 28 % of the parse thread's
+    /// samples, and removing the write entirely measured +13.5 %.
+    /// The bytes still all get written — just not on this thread.
+    file: crate::async_writer::AsyncWriter,
     bytes_written: u64,
 }
 
@@ -63,7 +74,11 @@ impl ByteLog {
             .read(true)
             .open(&path)?;
         let bytes_written = file.metadata()?.len();
-        let mut log = Self { path, file, bytes_written };
+        let mut log = Self {
+            path,
+            file: crate::async_writer::AsyncWriter::new(file, BYTELOG_WRITE_BUF, 4),
+            bytes_written,
+        };
         // Logs written by the pre-rotation scheme can be up to the full
         // 100 MiB ceiling in a single file.  Retire such a segment on
         // open rather than letting it keep growing on top of its
@@ -77,7 +92,7 @@ impl ByteLog {
     }
 
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.file.write_all(bytes)?;
+        self.file.write(bytes);
         self.bytes_written += bytes.len() as u64;
         if self.bytes_written > BYTELOG_SEGMENT_BYTES {
             // Best-effort rotation: on failure the live segment just
@@ -100,6 +115,14 @@ impl ByteLog {
             .collect()
     }
 
+    /// Make every appended byte visible to a reader of the segment
+    /// files.  Callers that are about to read the log back (replay
+    /// after a silent update) must call this first — the writer thread
+    /// is not otherwise synchronised with them.
+    pub fn flush(&mut self) {
+        self.file.flush();
+    }
+
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
     }
@@ -111,17 +134,24 @@ impl ByteLog {
     /// Retire the live segment and start a fresh one.  Two syscalls,
     /// no data movement — this is the whole point of the design.
     fn rotate(&mut self) -> io::Result<()> {
+        // Everything queued belongs to the segment being retired.
+        self.file.flush();
         let retired = self.path.with_extension("1");
         // `rename` replaces an existing `.1` atomically, so the
         // generation before last is dropped here.
         std::fs::rename(&self.path, &retired)?;
         // Fresh live segment.  The old fd pointed at the now-retired
-        // inode, so it has to be reopened, not reused.
-        self.file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&self.path)?;
+        // inode, so it has to be reopened, not reused.  `swap_file`
+        // drains what is still queued into the OLD file first, so the
+        // byte stream stays ordered across the boundary even though
+        // the producer never waited for it.
+        self.file.swap_file(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&self.path)?,
+        );
         self.bytes_written = 0;
         Ok(())
     }
@@ -145,6 +175,9 @@ mod tests {
         dir
     }
 
+    /// Read the log back from disk.  Appends go through a writer
+    /// thread, so a test that wants to see them must flush first —
+    /// same contract the recovery tooling follows.
     fn read_all(session_id: u64) -> Vec<u8> {
         let mut out = Vec::new();
         for p in ByteLog::segment_paths(session_id) {
@@ -186,6 +219,12 @@ mod tests {
                 trigger = t0.elapsed();
             }
         }
+
+        // Appends go through a writer thread, so the on-disk sizes
+        // below are only meaningful once everything handed over has
+        // landed.  (This used to be implicit: the write was synchronous
+        // and the file was always current.)
+        log.flush();
 
         // It rotated: a `.1` exists and the live segment restarted.
         let seg = ByteLog::segment_paths(id);
@@ -264,6 +303,7 @@ mod tests {
         let mut log = ByteLog::open(id).unwrap();
         log.append(b"hello ").unwrap();
         log.append(b"world").unwrap();
+        log.flush();
         assert_eq!(ByteLog::segment_paths(id).len(), 1);
         assert_eq!(read_all(id), b"hello world");
         let _ = std::fs::remove_dir_all(dir);
