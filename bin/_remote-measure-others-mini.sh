@@ -192,6 +192,16 @@ quit_app_if_we_spawned() {
     # does). Match the binary path to avoid friendly fire on similarly-
     # named user processes.
     pkill -f "$pat" 2>/dev/null || true
+    # In ssh mode the app was spawned through `sudo -n launchctl asuser`
+    # and therefore runs as ROOT — a plain pkill from this shell cannot
+    # touch it, so this cleanup silently left every Ghostty it started
+    # alive (found 2026-08-18: four of them, plus their wrapper scripts,
+    # surviving several runs).  Retry through the same privilege the
+    # spawn used.  Harmless when $ASUSER is empty.
+    if [[ -n "${ASUSER:-}" ]] && pgrep -f "$pat" >/dev/null 2>&1; then
+      # shellcheck disable=SC2086
+      $ASUSER /usr/bin/pkill -9 -f "$pat" 2>/dev/null || true
+    fi
     echo "==> cleanup: quit $name (we spawned it)" >&2
   else
     echo "==> cleanup: leaving $name running (was up before this run)" >&2
@@ -226,6 +236,15 @@ cleanup() {
   # effort plain rm.
   rm -f /tmp/iterm-wrapper-* /tmp/terminal-wrapper-* /tmp/ghostty-wrapper-* /tmp/warp-wrapper-* 2>/dev/null || true
   rm -f /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
+  # Same story as the processes: anything a root-spawned terminal wrote
+  # (wrappers, markers) is root-owned, and /tmp is sticky — this shell
+  # can neither delete nor overwrite it, and a stale root-owned marker
+  # blocks the NEXT run rather than this one.
+  if [[ -n "${ASUSER:-}" ]]; then
+    # shellcheck disable=SC2086
+    $ASUSER /bin/rm -f /tmp/measure-*-all.txt /tmp/ghostty-wrapper-* \
+                        /tmp/marspot-live-matrix-*.sh 2>/dev/null || true
+  fi
   rm -f /tmp/measure-*-all.txt 2>/dev/null || sudo -n rm -f /tmp/measure-*-all.txt 2>/dev/null || true
   rm -rf "$SESSION_DIR" 2>/dev/null || true
   echo "==> cleanup done (script rc=$rc)" >&2
