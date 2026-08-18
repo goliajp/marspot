@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.144"  # 同 L3 0.11.51:磁盘写移出解析线程;详见 CHANGELOG.md
-session = "0.11.51"  # async_writer:bytelog 与 scrollback 的写不再占解析线程;详见 CHANGELOG.md
+core    = "0.12.145"  # 同 L3 0.11.52:scrollback 推行零分配 + 扁平编码;详见 CHANGELOG.md
+session = "0.11.52"  # scrollback 推行路径:每行一次 Vec 分配与逐 cell 追加都消掉;详见 CHANGELOG.md

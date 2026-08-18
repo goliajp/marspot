@@ -2475,7 +2475,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.144**
+Current: **0.12.145**
+
+### 0.12.145
+
+**同 L3 0.11.52:scrollback 推行路径的零分配与扁平编码。**
 
 ### 0.12.144
 
@@ -4389,7 +4393,31 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.51**
+Current: **0.11.52**
+
+### 0.11.52
+
+**磁盘让开之后,轮到解析线程自己的两处浪费。**
+
+`async_writer` 把写盘挪走后,profile 里最大的一项变成 `FileScrollback::push_line`
+本身(解析线程 32%)。两处,都是「写法」而非「算法」:
+
+- **每行一次 `Vec` 分配。** `push_into_ring` 走 `pad_or_clip`,那个函数返回一个新
+  `Vec` —— 于是每推一行就是一次 malloc 加一次多余的整行拷贝,再 `copy_from_slice`
+  进 ring。CLAUDE.md 对热路径的要求是**零分配**,而一次 bulk `cat` 从这里推过去
+  二十多万行。改成直接写进 ring 槽位(`copy_from_slice` + `fill`),中间那个 `Vec`
+  消失。
+- **每个 cell 两次 `extend_from_slice`。** 记录编码原本是逐 cell 追加 4+4 字节,
+  每次都要查容量、改长度;一行 122 列就是 244 次。改成先 `resize` 到记录大小,再在
+  切片上 `chunks_exact_mut` 平铺填充。
+
+定价(本机,同一批测法):
+
+| | cjk | emoji | ascii |
+|---|---:|---:|---:|
+| async_writer 之后 | 108.2 | 93.2 | 125.4 |
+| + 扁平编码 | 115.7 | 95.9 | — |
+| + ring 零分配 | **129.1** | **108.2** | **156.1** |
 
 ### 0.11.51
 

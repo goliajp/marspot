@@ -1050,14 +1050,22 @@ impl FileScrollback {
         let cols_u16 = line.len() as u16;
         let rec_len = (1 + 2 + line.len() * crate::terminal::CELL_BYTES_PUB) as u32;
         let total_bytes = 4 + rec_len as usize;
+        // Size the record once, then fill it in place.  The obvious
+        // spelling — two `extend_from_slice` per cell — re-checks
+        // capacity and updates the length 2x per cell, and this is the
+        // single hottest thing the parse thread does once the disk
+        // writes moved off it (32 % of its samples).  A 122-column row
+        // is 244 of those calls; this is one `resize` and a flat loop
+        // over a slice the compiler knows the length of.
         self.scratch.clear();
-        self.scratch.reserve(total_bytes);
-        self.scratch.extend_from_slice(&rec_len.to_le_bytes());
-        self.scratch.push(wrapped as u8);
-        self.scratch.extend_from_slice(&cols_u16.to_le_bytes());
-        for c in line {
-            self.scratch.extend_from_slice(&(c.ch as u32).to_le_bytes());
-            self.scratch.extend_from_slice(&crate::terminal::serialize_attrs_pub(c.attrs));
+        self.scratch.resize(total_bytes, 0);
+        self.scratch[0..4].copy_from_slice(&rec_len.to_le_bytes());
+        self.scratch[4] = wrapped as u8;
+        self.scratch[5..7].copy_from_slice(&cols_u16.to_le_bytes());
+        let body = &mut self.scratch[7..];
+        for (slot, c) in body.chunks_exact_mut(crate::terminal::CELL_BYTES_PUB).zip(line) {
+            slot[0..4].copy_from_slice(&(c.ch as u32).to_le_bytes());
+            slot[4..].copy_from_slice(&crate::terminal::serialize_attrs_pub(c.attrs));
         }
 
         // F2+5 — hot → cold rotation when the next record would
@@ -1216,17 +1224,27 @@ impl FileScrollback {
         if self.ram_capacity == 0 {
             return;
         }
-        let row = pad_or_clip(line, self.cols);
+        // Straight into the ring.  This used to go through
+        // `pad_or_clip`, which returns a `Vec` — one allocation and one
+        // extra copy of the row, per pushed line, on the parse thread.
+        // CLAUDE.md's rule for hot paths is zero allocations; a bulk
+        // `cat` pushes a quarter of a million lines through here.
+        let cols = self.cols;
+        let take = line.len().min(cols);
         if self.ram_len < self.ram_capacity {
-            self.ram_cells.extend_from_slice(&row);
+            self.ram_cells.extend_from_slice(&line[..take]);
+            self.ram_cells
+                .resize(self.ram_cells.len() + (cols - take), crate::grid::Cell::default());
             self.ram_wrapped.push(wrapped);
             self.ram_len += 1;
             return;
         }
         let slot = self.ram_head;
         self.ram_head = (self.ram_head + 1) % self.ram_capacity;
-        let start = slot * self.cols;
-        self.ram_cells[start..start + self.cols].copy_from_slice(&row);
+        let start = slot * cols;
+        let dst = &mut self.ram_cells[start..start + cols];
+        dst[..take].copy_from_slice(&line[..take]);
+        dst[take..].fill(crate::grid::Cell::default());
         self.ram_wrapped[slot] = wrapped;
     }
 
