@@ -418,7 +418,60 @@ useful part of the result: on this path the sleeps were not the cost.
 Shipped anyway (real, zero-risk), but it is not the answer to the
 24-43 % gap.
 
-### Next round: why parse does not hide behind gather
+### The number that matters (2026-08-19)
+
+Everything above — and every cross-terminal comparison in this repo
+before it — measured `mcli`: one process, one thread, in-RAM
+scrollback.  The product is L3: a process per pane, file-backed
+scrollback.  Measured through the shipped path, on the same host, same
+certified protocol:
+
+| corpus | L3 (product) | mcli (what the gate reported) | ghostty | product vs ghostty |
+|---|---:|---:|---:|---:|
+| cat-ascii | 40.9 | 104.9 | 101.7 | **−59.8 %** |
+| cat-mixed | 35.0 | 101.7 | 101.7 | **−65.6 %** |
+| cat-cjk | 39.8 | 101.7 | 145.9 | **−72.7 %** |
+| cat-emoji | 39.7 | 93.2 | 115.7 | **−65.7 %** |
+
+**Why the probe is believable this time.**  Not because it grew
+features — because its number can be explained and the explanation has
+evidence that timing cannot fake:
+
+- **Profile**: 63 % of the session's main-thread samples in
+  `Grid::scroll_up → FileScrollback::push_line → File::write_all →
+  write`.
+- **Witness** (the probe prints it every run): one pass of a 33.5 MB
+  corpus writes `scrollback.bin` 26.8 MB + `bytelog` 34.1 MB = **61 MB**,
+  a 1.8× write amplification.  61 MB in 1.22 s ≈ 50 MB/s, which is what
+  a disk looks like.
+- **Fingerprint**: all four corpora land at 35–41 MB/s, *nearly
+  independent of content*.  A parse-bound system cannot do that — its
+  ascii parse is 3× its emoji parse.  A disk-bandwidth-bound system does
+  exactly that.
+- **Stability**: three trials on an idle mini spread 0.1–0.6 %.  The
+  18/26/29 scatter seen earlier was a dev box's disk and load, not the
+  probe.
+
+The first version of this probe was *not* believable and said so
+loudly: it never read the control socket, so L3 blocked writing frames
+at a client that never listened, and 75 % of its samples sat in `write`.
+That reads like a damning finding about L3 and was a bug in the harness.
+Both readings had the same shape; only the witness told them apart.
+
+### Next round: the write amplification, not the parser
+
+Every byte a pane produces is written to disk 1.8× **on the thread that
+parses**.  Neither write is deletable — `scrollback.bin` is the
+unlimited-history feature, `bytelog` is what makes execv replay work.
+The question is *when* and *on which thread*, not *whether*.
+`MARSPOT_BYTELOG=0` prices half of it (+5 %); the scrollback half has no
+switch, and building one is step zero.
+
+Also open, and the same species as the L3 gate: the SSIM gate has been
+failing (`font_v5_showcase`, 0.9723 vs 0.98) since before any of this
+work — it only runs under `--full`, and nobody was running `--full`.
+
+### Why parse does not hide behind gather (still open)
 
 The parser is now 2.17× faster on emoji and within noise of the June
 build everywhere else, and headless parse runs 2.3–3.9× faster than
