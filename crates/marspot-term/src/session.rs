@@ -162,6 +162,25 @@ use crate::terminal::Terminal;
 /// dispatch cost on the caller's main loop.
 const READ_BUF: usize = 64 * 1024;
 
+/// PTY reader instrumentation, for `--bench pty-drain` / `pty-feed`.
+///
+/// The question these answer: how many bytes does one `read(2)` on a
+/// pty master actually return, and how many of them does one wakeup
+/// gather?  On macOS the kernel tty output queue hands the master
+/// roughly a kilobyte at a time regardless of the buffer offered, so a
+/// reader that sleeps in `poll` after every drained queue runs in
+/// lockstep with the writer at ~1 KiB per wakeup — a shape that is
+/// invisible in throughput numbers alone and obvious in these counts.
+///
+/// Relaxed adds on a path that is already making a syscall; the cost
+/// does not show up against a `read`.
+#[cfg(feature = "bench-pty")]
+pub static PTY_READ_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "bench-pty")]
+pub static PTY_READ_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "bench-pty")]
+pub static PTY_GATHER_BATCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Bounded capacity of each session's PTY → caller channel.  When full
 /// the reader thread blocks on send, propagating backpressure to the
 /// kernel pipe buffer to the child's writes — bounded memory cost no
@@ -494,6 +513,14 @@ where
                         buf.len(),
                     )
                 };
+                #[cfg(feature = "bench-pty")]
+                {
+                    PTY_GATHER_BATCHES.fetch_add(1, Ordering::Relaxed);
+                    PTY_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+                    if n > 0 {
+                        PTY_READ_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                }
                 if n <= 0 {
                     exited.store(true, Ordering::Release);
                     wake();
@@ -523,6 +550,13 @@ where
                             buf.len() - total,
                         )
                     };
+                    #[cfg(feature = "bench-pty")]
+                    {
+                        PTY_READ_CALLS.fetch_add(1, Ordering::Relaxed);
+                        if n2 > 0 {
+                            PTY_READ_BYTES.fetch_add(n2 as u64, Ordering::Relaxed);
+                        }
+                    }
                     if n2 <= 0 {
                         break;
                     }

@@ -2358,6 +2358,22 @@ fn run_bench(spec: &str) {
     };
     match mode {
         "parse" => bench_parse(arg),
+        // Two cuts through the LIVE pipeline, so the gap between
+        // `parse` (no PTY, no window) and what a real terminal
+        // delivers can be attributed instead of guessed:
+        //   pty-drain  PTY + reader thread only — bytes read and
+        //              dropped.  The ceiling any terminal on this
+        //              machine can reach through a pty.
+        //   pty-feed   the above plus Terminal::feed — everything a
+        //              terminal does except draw.
+        // `live` (bin/measure.sh) adds the event loop and Metal on
+        // top of pty-feed.
+        #[cfg(feature = "bench-pty")]
+        "pty-raw" => bench_pty_raw(arg),
+        #[cfg(feature = "bench-pty")]
+        "pty-drain" => bench_pty(arg, /* feed */ false),
+        #[cfg(feature = "bench-pty")]
+        "pty-feed" => bench_pty(arg, /* feed */ true),
         // `render` and `metal-render` are now aliases — the AppKit
         // CGImage renderer was removed, Metal is the only live path.
         "render" | "metal-render" => bench_metal_render(arg),
@@ -2581,18 +2597,42 @@ fn bench_rss_format_dump(arg: &str) {
 }
 
 fn bench_parse(spec: &str) {
-    // `parse:<path>` or `parse:<path>:<repeat>`.  A single pass over an
-    // 8 MB scenario is ~100 ms — too short a window for a sampling
-    // profiler to say anything about *which* work dominates.  `repeat`
-    // feeds the same bytes N times, each into a fresh terminal, and
-    // reports the throughput over the whole run.  Timing covers only
-    // `feed`, so terminal construction never lands in the number.
-    let (path, repeat) = match spec.rsplit_once(':') {
-        Some((p, n)) => match n.parse::<u32>() {
-            Ok(n) if n > 0 => (p, n),
-            _ => (spec, 1),
-        },
-        None => (spec, 1),
+    // `parse:<path>[:<repeat>[:<chunk_bytes>]]`
+    //
+    // `repeat` — a single pass over an 8 MB scenario is ~100 ms, too
+    // short a window for a sampling profiler to say which work
+    // dominates.  Feeds the same bytes N times, each into a fresh
+    // terminal.  Timing covers only `feed`, so terminal construction
+    // never lands in the number.
+    //
+    // `chunk_bytes` — feed in slices of this size instead of one call.
+    // The live pipeline never hands the parser a whole corpus: the
+    // reader thread delivers READ_BUF (64 KiB) at a time and `pump`
+    // calls `feed` once per chunk.  That matters because the batch
+    // lanes are scans over a contiguous slice — a run that would have
+    // spanned a chunk boundary gets split, and the tail of every chunk
+    // falls back to the scalar path.  Measuring one-shot feed and
+    // calling it "the parser's speed" overstates what the live path
+    // can reach.  0 (default) = one call, i.e. the old behaviour.
+    let (path, repeat, chunk) = {
+        let mut rest = spec;
+        let mut nums: Vec<usize> = Vec::new();
+        while nums.len() < 2 {
+            match rest.rsplit_once(':') {
+                Some((head, tail)) => match tail.parse::<usize>() {
+                    Ok(n) => {
+                        nums.push(n);
+                        rest = head;
+                    }
+                    Err(_) => break,
+                },
+                None => break,
+            }
+        }
+        nums.reverse();
+        let repeat = nums.first().copied().filter(|&n| n > 0).unwrap_or(1) as u32;
+        let chunk = nums.get(1).copied().unwrap_or(0);
+        (rest, repeat, chunk)
     };
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("bench: read {path}: {e}");
@@ -2605,7 +2645,13 @@ fn bench_parse(spec: &str) {
     for _ in 0..repeat {
         let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
         let t0 = std::time::Instant::now();
-        terminal.feed(&bytes);
+        if chunk == 0 {
+            terminal.feed(&bytes);
+        } else {
+            for slice in bytes.chunks(chunk) {
+                terminal.feed(slice);
+            }
+        }
         elapsed_ns += t0.elapsed().as_nanos() as u64;
     }
     let total = bytes.len() as u128 * repeat as u128;
@@ -2615,9 +2661,237 @@ fn bench_parse(spec: &str) {
         0
     };
     println!(
-        r#"{{"mode":"parse","path":"{}","bytes":{},"repeat":{},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
+        r#"{{"mode":"parse","path":"{}","bytes":{},"repeat":{},"chunk":{},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
         path,
         bytes.len(),
+        repeat,
+        chunk,
+        elapsed_ns,
+        bytes_per_sec
+    );
+}
+
+/// `--bench pty-raw:<path>[:<repeat>]` — the floor of the bytes path.
+///
+/// `cat <path>` under a pty, drained by a bare blocking `read(2)` loop
+/// on the master: no reader thread, no channel, no `Vec` per batch, no
+/// probe polls.  Everything left in the number belongs to the child's
+/// `write`s, the kernel tty layer (including the ONLCR expansion that
+/// makes the reader see more bytes than are on disk) and the read
+/// syscalls themselves.
+///
+/// It exists to keep the decomposition honest.  `pty-drain` costs
+/// 5.7 ms/MB on cjk while ghostty's WHOLE pipeline costs 6.9 — which
+/// either means our gather architecture is nearly all of the gap, or
+/// means most of that 5.7 is kernel work both terminals pay.  The
+/// difference decides which subsystem is worth attacking, and no
+/// amount of reading either codebase settles it.
+#[cfg(feature = "bench-pty")]
+fn bench_pty_raw(spec: &str) {
+    let (path, repeat) = match spec.rsplit_once(':') {
+        Some((p, n)) => match n.parse::<u32>() {
+            Ok(n) if n > 0 => (p, n),
+            _ => (spec, 1),
+        },
+        None => (spec, 1),
+    };
+    let bytes_on_disk = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            eprintln!("bench: stat {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    let abs = match std::fs::canonicalize(path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("bench: resolve {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    let mut elapsed_ns: u64 = 0;
+    let mut total_read: u64 = 0;
+    let mut reads: u64 = 0;
+    for _ in 0..repeat {
+        let pty = match marspot_term::pty::Pty::spawn(marspot_term::pty::PtyConfig {
+            program: "/bin/cat".into(),
+            args: vec![abs.clone()],
+            size: marspot_term::pty::TerminalSize {
+                cols: GRID_COLS,
+                rows: GRID_ROWS,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            argv0: None,
+            cwd: None,
+            env_remove_prefixes: Vec::new(),
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("bench: spawn cat under pty: {e}");
+                std::process::exit(2);
+            }
+        };
+        let fd = pty.raw_master();
+        let mut buf = vec![0u8; 64 * 1024];
+        let round_start = total_read;
+        let t0 = std::time::Instant::now();
+        while total_read - round_start < bytes_on_disk {
+            let n = unsafe {
+                libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            };
+            if n <= 0 {
+                break;
+            }
+            reads += 1;
+            total_read += n as u64;
+        }
+        elapsed_ns += t0.elapsed().as_nanos() as u64;
+        drop(pty);
+    }
+    let bytes_per_sec = if elapsed_ns > 0 {
+        (total_read as u128 * 1_000_000_000 / elapsed_ns as u128) as u64
+    } else {
+        0
+    };
+    println!(
+        r#"{{"mode":"pty-raw","path":"{}","bytes":{},"repeat":{},"reads":{},"bytes_per_read":{:.1},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
+        path,
+        total_read,
+        repeat,
+        reads,
+        if reads > 0 { total_read as f64 / reads as f64 } else { 0.0 },
+        elapsed_ns,
+        bytes_per_sec
+    );
+}
+
+/// `--bench pty-drain:<path>[:<repeat>]` / `pty-feed:<path>[:<repeat>]`
+///
+/// Runs `cat <path>` under a real PTY and drains it the way the live
+/// pipeline does — reader thread, 64 KiB reads, channel — either
+/// dropping the bytes (`pty-drain`) or feeding them to a terminal
+/// (`pty-feed`).  No window, no renderer, no event loop.
+///
+/// Why both: `--bench parse` says how fast the parser is with the
+/// corpus already in memory, and `bin/measure.sh` says what a user
+/// gets.  Between those two numbers sit the pty, the reader thread,
+/// the parser, the event loop and the GPU, and a single ratio cannot
+/// say which of them owns the difference.  These two cuts split it:
+/// drain is the pty's own ceiling, feed adds the parser, and whatever
+/// is left over in the live number belongs to the window.
+#[cfg(feature = "bench-pty")]
+fn bench_pty(spec: &str, feed: bool) {
+    let (path, repeat) = match spec.rsplit_once(':') {
+        Some((p, n)) => match n.parse::<u32>() {
+            Ok(n) if n > 0 => (p, n),
+            _ => (spec, 1),
+        },
+        None => (spec, 1),
+    };
+    let bytes_on_disk = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) => {
+            eprintln!("bench: stat {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    // The child is spawned with cwd=$HOME (Session's rule, so a user's
+    // shell opens somewhere sensible), so a relative path here would
+    // reach `cat` as a path relative to the wrong directory.  It fails
+    // in the most confusing way available: `cat` writes its error to
+    // the pty, the drain loop counts those 61 bytes as corpus, and the
+    // bench reports a timeout instead of "no such file".
+    let abs = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("bench: resolve {path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    let abs = abs.to_string_lossy().into_owned();
+    let mut elapsed_ns: u64 = 0;
+    let mut total_read: u64 = 0;
+    for _ in 0..repeat {
+        // Block on the reader's wake instead of spinning.  A spin loop
+        // here competes with the reader thread and `cat` for cores and
+        // then reports the result as "the pty's throughput" — the
+        // measurement would be of the measurement.  `wake` fires from
+        // the reader thread whenever bytes land.
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+        let mut session = match marspot_term::session::Session::spawn_with(
+            "/bin/cat",
+            &[abs.as_str()],
+            GRID_COLS,
+            GRID_ROWS,
+            move || {
+                let _ = wake_tx.send(());
+            },
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("bench: spawn cat under pty: {e}");
+                std::process::exit(2);
+            }
+        };
+        let t0 = std::time::Instant::now();
+        // Spin rather than sleep: a sleep would measure the sleep.
+        // The child is `cat`, so this loop is never long-lived.
+        //
+        // Termination is by byte count, NOT by `is_exited`: the pty
+        // keeps the slave fd open for its own lifetime, so the master
+        // never sees EOF just because the child left, and waiting for
+        // that flag hangs until the timeout.  Counting up to the file
+        // size is sound in the other direction — the line discipline's
+        // ONLCR turns every \n into \r\n, so the reader always sees at
+        // least as many bytes as are on disk.
+        let round_start = total_read;
+        loop {
+            if feed {
+                total_read += session.pump() as u64;
+            } else {
+                total_read += session.drain_raw().len() as u64;
+            }
+            if total_read - round_start >= bytes_on_disk {
+                break;
+            }
+            if t0.elapsed().as_secs() > 120 {
+                eprintln!("bench: pty drain timed out");
+                break;
+            }
+            // Drain first, then park until the reader says there is
+            // more.  The timeout only exists so a lost wake cannot
+            // hang the bench.
+            let _ = wake_rx.recv_timeout(std::time::Duration::from_millis(50));
+        }
+        elapsed_ns += t0.elapsed().as_nanos() as u64;
+    }
+    let bytes_per_sec = if elapsed_ns > 0 {
+        (total_read as u128 * 1_000_000_000 / elapsed_ns as u128) as u64
+    } else {
+        0
+    };
+    // How the bytes arrived, not just how fast: `bytes_per_read` is
+    // the kernel tty queue's real handout size, and `bytes_per_batch`
+    // is how much one wakeup gathered.  If the second is barely larger
+    // than the first, the reader is sleeping once per kilobyte.
+    use std::sync::atomic::Ordering as AtomicOrdering;
+    let reads = marspot_term::session::PTY_READ_CALLS.load(AtomicOrdering::Relaxed);
+    let batches = marspot_term::session::PTY_GATHER_BATCHES.load(AtomicOrdering::Relaxed);
+    let read_bytes = marspot_term::session::PTY_READ_BYTES.load(AtomicOrdering::Relaxed);
+    println!(
+        r#"{{"reads":{},"batches":{},"read_bytes":{},"bytes_per_read":{:.1},"bytes_per_batch":{:.1}}}"#,
+        reads,
+        batches,
+        read_bytes,
+        if reads > 0 { read_bytes as f64 / reads as f64 } else { 0.0 },
+        if batches > 0 { read_bytes as f64 / batches as f64 } else { 0.0 },
+    );
+    println!(
+        r#"{{"mode":"{}","path":"{}","bytes":{},"repeat":{},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
+        if feed { "pty-feed" } else { "pty-drain" },
+        path,
+        total_read,
         repeat,
         elapsed_ns,
         bytes_per_sec

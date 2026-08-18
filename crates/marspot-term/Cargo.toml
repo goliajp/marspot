@@ -34,5 +34,7 @@ marspot-linkify = { path = "../marspot-linkify" }
 flate2 = { version = "1.1", optional = true }
 
 [features]
+# Reader-thread read/gather counters (see src/session.rs).
+bench-pty = []
 default = ["compress"]
 compress = ["dep:flate2"]

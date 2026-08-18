@@ -28,6 +28,18 @@ default-members = [".", "crates/marspot-term", "crates/marspot-session", "crates
 #     cargo build --features snapshot --bin marspot
 snapshot = []
 
+# PTY-path decomposition benches — `marspot --bench pty-raw|pty-drain|
+# pty-feed:<corpus>`, plus the reader-thread read/gather counters they
+# report.
+#
+# Same reasoning as `snapshot`: these answer "where does the live
+# pipeline's time go", which is a question for whoever is working on
+# it, not for the shipped binary — and the size gate's headroom is
+# measured in kilobytes.  Build them when decomposing:
+#
+#     cargo build --features bench-pty --bin marspot
+bench-pty = ["marspot-term/bench-pty"]
+
 [dependencies]
 # The zero-GUI terminal engine (parser/grid/terminal/pty/shelld/...).
 # Extracted (target #4) so a light, Metal-free per-session process (L3)

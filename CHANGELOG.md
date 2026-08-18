@@ -2475,7 +2475,48 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.138**
+Current: **0.12.139**
+
+### 0.12.139
+
+**把「live 管道」拆成能分别测量的四段。**
+
+竞品对照说 marspot 在 cjk 输 43%、emoji 输 24%,而 headless parse 是 224–236 MB/s、
+live 只交付 101.7 —— 中间那 2.3× 里同时坐着 pty、reader 线程、parser、事件循环和
+GPU,一个比值说不出是谁。
+
+三个只在 `bench-pty` feature 下编译的模式,各切一刀:
+
+- `pty-raw` —— `cat` 跑在真 pty 下,用最朴素的阻塞 `read(2)` 循环排空,没有线程、
+  没有 channel、没有每批一个 Vec。剩下的全是子进程的 write、内核 tty 层(含把
+  `\n` 变 `\r\n` 的 ONLCR 膨胀)和 read 系统调用本身。
+- `pty-drain` —— 换成真实的 reader 线程 + channel,但不解析。
+- `pty-feed` —— 再加上 `Terminal::feed`。差 live 一个窗口。
+
+`--bench parse` 另加 `:<chunk>`:live 从不把整个语料交给 parser,reader 每次送
+READ_BUF(64KB),`pump` 每块调一次 `feed`。批量车道是对连续切片的扫描,跨块的 run
+会被切断 —— 一次性喂完再叫它「parser 的速度」是虚报。(实测:虚报得不多,64KB 分块
+与一次性喂差 <1%,四条语料都是。这条**推翻了**「分块是 live 损失的原因」这个假设。)
+
+第一批读数(cjk):
+
+| 段 | ms/MB |
+|---|---:|
+| pty-raw | 5.7 |
+| pty-drain | 5.7 |
+| + parse | 8.1 |
+| live | 9.8 |
+
+**pty-raw ≈ pty-drain** —— 我们的 gather 架构(线程/channel/Vec/探测 poll)几乎不
+花钱,那 5.7 基本是内核与 `cat` 的共通成本,ghostty 同样要付。而 ghostty 的**全程**
+是 6.85 ms/MB,低于我们光 gather 的开销 —— 它只可能是把 parse 藏进了 gather 的
+影子里,而我们实测是两者相加。这是下一轮的靶,写在 docs/perf.md。
+
+顺带一个关于计量的教训:这些计数器第一版直接编在 release 里,每次 read 三个原子加。
+8.4MB 语料 = 8360 次 read,gate 上 cjk/emoji 各掉 0.5% —— **贴着地板 FAIL**。移到
+feature 后面立刻回来(cjk 224.4 / emoji 147.4,还是在 load 8.8 的机器上)。二进制也
+从 1571168 降回 1551424 字节。**开发工具不该进 shipped binary**,这条 `snapshot`
+feature 的注释早就写过了。
 
 ### 0.12.138
 
