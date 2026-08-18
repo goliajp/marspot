@@ -2736,6 +2736,46 @@ impl<'a> ParserCallbacks for Handler<'a> {
                 self.pending_response.extend_from_slice(b"\x1b[>41;330;0c");
                 self.record_response("DA2");
             }
+            b'n' if intermediates.is_empty() => {
+                // DSR — Device Status Report.  `CSI 5 n` asks whether
+                // the terminal is alive; `CSI 6 n` (CPR) asks where the
+                // cursor is and expects `CSI <row> ; <col> R`, 1-based,
+                // in the CURRENT origin.
+                //
+                // Not an exotic sequence: readline redraws a wrapped
+                // prompt by asking for the column, and a program that
+                // gets no answer waits for one — the reason this was
+                // worth adding is that a terminal which never replies
+                // makes its own throughput unmeasurable from outside
+                // (a writer cannot tell "consumed" from "dropped"), and
+                // it hangs any app that asks.
+                match params.first().copied().unwrap_or(0) {
+                    5 => {
+                        self.pending_response.extend_from_slice(b"\x1b[0n");
+                        self.record_response("DSR-status");
+                    }
+                    6 => {
+                        // `Grid::cursor` is (col, row), 0-based; CPR is
+                        // (row, col), 1-based.  No DECOM here because
+                        // marspot has no origin mode to be relative to
+                        // — absolute is the only reading available, and
+                        // it is what every app assumes when DECOM is
+                        // off (the default everywhere).
+                        let (c0, r0) = self.grid.cursor();
+                        let (row, col) = (r0 + 1, c0 + 1);
+                        let mut buf = [0u8; 24];
+                        let n = {
+                            use std::io::Write;
+                            let mut w = &mut buf[..];
+                            let _ = write!(w, "\x1b[{row};{col}R");
+                            24 - w.len()
+                        };
+                        self.pending_response.extend_from_slice(&buf[..n]);
+                        self.record_response("DSR-CPR");
+                    }
+                    _ => {}
+                }
+            }
             b'q' if intermediates == b">" => {
                 // XTQVERSION — `CSI > 0 q`. App wants the terminal's
                 // name+version string. Respond with a DCS reply:
@@ -4068,6 +4108,27 @@ mod tests {
     }
 
     #[test]
+    /// DSR / CPR: `CSI 6 n` must answer with the cursor's 1-based
+    /// position, and `CSI 5 n` with a bare OK.  An app that asks and
+    /// is ignored waits forever — readline does this to redraw a
+    /// wrapped prompt — and a writer outside the terminal has no way
+    /// to tell "consumed my bytes" from "dropped them" without it.
+    #[test]
+    fn dsr_reports_cursor_position_and_status() {
+        let mut t = Terminal::new(20, 5);
+        t.feed(b"abc");                       // cursor now col 3, row 0
+        t.feed(b"\x1b[6n");
+        assert_eq!(t.take_response(), b"\x1b[1;4R".to_vec());
+        t.feed(b"\x1b[2;7H\x1b[6n");          // move, then ask again
+        assert_eq!(t.take_response(), b"\x1b[2;7R".to_vec());
+        t.feed(b"\x1b[5n");
+        assert_eq!(t.take_response(), b"\x1b[0n".to_vec());
+        // An unknown DSR parameter is silently ignored, not answered
+        // with a malformed report.
+        t.feed(b"\x1b[99n");
+        assert!(t.take_response().is_empty());
+    }
+
     fn da1_burst_tracking_records_per_response() {
         // Five DA1 queries inside the parser's single feed call should
         // surface five responses in pending_response (concatenated)

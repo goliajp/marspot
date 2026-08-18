@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.137"  # emoji parse 2.17× —— 两条批量车道全落空,每个字形都走完整 cluster 状态机;详见 CHANGELOG.md
-session = "0.11.46"  # 同 L2 0.12.137:parser 的 emoji 路径 2.17×;详见 CHANGELOG.md
+core    = "0.12.138"  # 补上 DSR/CPR(CSI 5n / 6n),问光标在哪的程序不再等到沉默;详见 CHANGELOG.md
+session = "0.11.47"  # 同 L2 0.12.138:DSR/CPR;详见 CHANGELOG.md
