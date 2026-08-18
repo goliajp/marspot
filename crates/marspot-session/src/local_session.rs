@@ -224,9 +224,21 @@ impl LocalSession {
 
         // Best-effort bytelog open — a failure means we lose history
         // replay for this session but the session itself still runs.
-        let bytelog = match ByteLog::open(id) {
-            Ok(b) => Some(b),
-            Err(_) => None,
+        //
+        // `MARSPOT_BYTELOG=0` opts out, mirroring
+        // `MARSPOT_DISK_SCROLLBACK=0`.  It exists to price the log:
+        // every byte a pane produces is written to disk here, on the
+        // same thread that parses, and a profile of a bulk `cat`
+        // through L3 puts 75 % of that thread's samples in `write`.
+        // Whether that is the bytelog, the scrollback, or both is not
+        // a question source-reading answers.
+        let bytelog = if std::env::var("MARSPOT_BYTELOG").as_deref() == Ok("0") {
+            None
+        } else {
+            match ByteLog::open(id) {
+                Ok(b) => Some(b),
+                Err(_) => None,
+            }
         };
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
@@ -352,7 +364,37 @@ impl LocalSession {
         if total > 0 {
             self.last_output = Some(Instant::now());
         }
+        self.flush_capability_responses();
         total
+    }
+
+    /// Send back whatever the parser queued in reply to a capability
+    /// query (DA1 `CSI c`, DA2, XTQVERSION, DSR `CSI 6 n`, …).
+    ///
+    /// L3 owns the pty in the shipped architecture, so if this does not
+    /// happen here it does not happen at all — and until 2026-08-19 it
+    /// did not.  The in-process path
+    /// (`marspot_term::session::Session::pump`, which is what mcli and
+    /// the bench harness drive) has always forwarded them, so every
+    /// test and every measurement saw a terminal that answers while
+    /// every real pane ran one that stays silent.
+    ///
+    /// The cost of silence is not a missing feature, it is a stall: an
+    /// app that asks and waits gets nothing until its own timeout, and
+    /// the usual fallback is a degraded rendering path (extra blank
+    /// rows, misaligned chrome).  Found by a bench probe that asked the
+    /// session to confirm it had consumed a corpus and never got an
+    /// answer.
+    ///
+    /// Deliberately outside the `total > 0` guard: a reply can be
+    /// pending from a feed that returned no new bytes this round (a
+    /// held grid releasing, for one), and a write of an empty response
+    /// is free.
+    fn flush_capability_responses(&mut self) {
+        let response = self.terminal.take_response();
+        if !response.is_empty() {
+            let _ = self.write(&response);
+        }
     }
 
     /// Hold the grid exactly where it is (or let it go).
@@ -380,6 +422,9 @@ impl LocalSession {
                 self.terminal.feed(&chunk);
             }
             self.held_bytes = 0;
+            // The backlog can contain capability queries; a release is
+            // a feed like any other.
+            self.flush_capability_responses();
         }
     }
 
@@ -646,6 +691,46 @@ mod tests {
         assert!(
             text(&s).contains("DURING"),
             "releasing replays the backlog in one pass, no extra pump needed"
+        );
+    }
+
+    /// A capability query must be answered.
+    ///
+    /// L3 owns the pty in the shipped architecture, so a reply that
+    /// this `pump` does not send is never sent — and until 2026-08-19
+    /// none were.  The in-process path
+    /// (`marspot_term::session::Session::pump`) always forwarded them,
+    /// which is why every test and every bench saw a terminal that
+    /// answers while every real pane ran one that did not.  An app
+    /// that asks and waits (DA1 is the common one) gets nothing until
+    /// its own timeout and then falls back to a degraded rendering
+    /// path.
+    ///
+    /// The assertion is that `pump` CONSUMES the queued reply, not
+    /// that the child observed it: reading it back would mean
+    /// replacing `$SHELL` with a control-character-visible filter for
+    /// the duration, and this suite runs concurrently — a
+    /// process-global `set_var` is not worth the coverage.  Delivery
+    /// itself is `self.write`, which the input paths already exercise.
+    #[test]
+    fn pump_answers_capability_queries() {
+        let mut s = LocalSession::spawn(9, 80, 24, "", || {}).expect("spawn");
+        assert!(
+            pump_until(&mut s, |s| s.terminal().grid().cursor() != (0, 0), Duration::from_secs(5)),
+            "shell should come up"
+        );
+        // Straight into the terminal: what matters is that a reply is
+        // queued, not which pty byte produced it.
+        s.terminal.feed(b"\x1b[c");
+        assert!(
+            !s.terminal.take_response().is_empty(),
+            "DA1 should queue a reply — if this fails the parser changed, not the pump"
+        );
+        s.terminal.feed(b"\x1b[c");
+        s.pump();
+        assert!(
+            s.terminal.take_response().is_empty(),
+            "pump must forward the queued reply to the child, not leave it sitting"
         );
     }
 

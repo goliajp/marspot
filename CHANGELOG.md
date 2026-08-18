@@ -2475,7 +2475,33 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.140**
+Current: **0.12.141**
+
+### 0.12.141
+
+**重建 `l3_throughput` 探针 —— 产品路径的 gate 空转了两个月。**
+
+`bin/measure-l3.sh` 测的是「用户真正体验的那条路」(shell → core → L3),
+`bin/bench.sh --full` 读它的结果。RFC-003 Phase 6g(`888bf1b`,2026-06-17)删掉 L4
+shelld 时,连带删掉了 `crates/marspot-session/examples/l3_throughput.rs` ——
+**但没删调用它的脚本**。于是脚本一直去跑 `target/release/examples/l3_throughput`
+这个 shelld 时代的残留二进制,每个 trial 都失败,而
+`bench/results/l3-throughput.json` 停在最后一次成功(2026-06-14),看起来跟新鲜数据
+一模一样。又一次「测量装置的失效长得跟数据一样」。
+
+按三层架构重写:spawn 一个 L3、UDS 握手、GridResize(**不发它的话 session 永远不开
+PTY**)、通过 `$SHELL` 交给它一个 trial 脚本(L3 走 `local_session` 直接 spawn
+`$SHELL`,**不认 `MARSPOT_SHELL`** —— 那是 in-process 那条路的覆盖),脚本以 DSR 往返
+收尾。
+
+**探针尚未可信,数字先不入账。** 一个真正的 core 还会读 shm、回 SurfaceReady;第一版
+探针连 UDS 都不读,于是 L3 往一个没人收的 socket 写帧、被 backpressure 卡在 `write`
+上 —— profile 显示它 75% 的样本在 `write`,读起来像是「L3 慢 3.5 倍」的铁证,实际是
+harness 的 bug。补上排空线程后同一配置三次给出 26 / 29 / 18 MB/s。在探针能完整扮演
+L2 之前,产品路径的吞吐**记作未测**,而不是记一个难看的数。
+
+顺带加了 `MARSPOT_BYTELOG=0`(对称于 `MARSPOT_DISK_SCROLLBACK=0`),用来给 L3 那两份
+磁盘写定价。
 
 ### 0.12.140
 
@@ -4279,7 +4305,29 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.48**
+Current: **0.11.49**
+
+### 0.11.49
+
+**程序问终端「你是谁」「光标在哪」,在出厂架构下从来没人回答。**
+
+`marspot_term::session::Session::pump` 一直会把 parser 排队的能力查询回复
+(DA1 `CSI c`、DA2、XTQVERSION、以及刚补的 DSR)写回 PTY。**L3 的
+`LocalSession::pump` 从来没做过这件事。** 而 L3 自 2026-06-13 起就是默认架构 ——
+它自己持有 PTY,这里不发就等于没发。
+
+于是形成一个最难发现的组合:mcli、单元测试、bench harness 走的都是 in-process 那条
+路(会回答),而**用户的每一个 pane 走的是不会回答的那条**。终端里的注释早写了代价:
+「apps that stall waiting for a DA response fall back to degraded rendering paths
+(extra blank rows, misaligned chrome)」—— 不是少个功能,是**卡住**:程序问完就等,
+等到自己超时,然后退化渲染。
+
+修法是 `pump` 末尾把回复交给 PTY,并且**不放在 `total > 0` 的条件里** —— 回复可能
+来自一次没有新字节的 feed(held grid 释放就是),而空回复的写入是免费的。释放 hold
+的那条路径同样补上。
+
+怎么发现的:重建 `bin/measure-l3.sh` 的探针时,让 session 在 cat 完语料后回一个 DSR
+自证「我确实消费完了」,结果**它永远不回**。装置照出了产品的洞。
 
 ### 0.11.48
 

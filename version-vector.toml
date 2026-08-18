@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.140"  # 同 L3 0.11.48:pty reader 空探测桥接;详见 CHANGELOG.md
-session = "0.11.48"  # pty reader 的空探测桥接:批次降 6.4×,吞吐 +4-6%;详见 CHANGELOG.md
+core    = "0.12.141"  # 重建 l3_throughput 探针(产品路径 gate 空转两月);详见 CHANGELOG.md
+session = "0.11.49"  # L3 终于回答能力查询(DA1/DSR/XTQVERSION);详见 CHANGELOG.md
