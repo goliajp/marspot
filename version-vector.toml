@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.136"  # --bench parse 支持重复次数,给采样器一个秒级窗口;详见 CHANGELOG.md
-session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md
+core    = "0.12.137"  # emoji parse 2.17× —— 两条批量车道全落空,每个字形都走完整 cluster 状态机;详见 CHANGELOG.md
+session = "0.11.46"  # 同 L2 0.12.137:parser 的 emoji 路径 2.17×;详见 CHANGELOG.md

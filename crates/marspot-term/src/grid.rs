@@ -290,11 +290,15 @@ pub fn char_width(ch: char) -> u8 {
     // squeezed a 2-cell-wide glyph into 1 cell — the rasteriser shrank
     // it to fit.  Same fix lifts geometric shapes (▲ ●), misc symbols
     // (☆ ★ ☀ ☁), and dingbats (✓ ✗) up to the right cell footprint.
-    let east_asian_ambiguous = is_ambiguous_width(ch);
+    // Computed INSIDE the `All` arm on purpose: `is_ambiguous_width` is
+    // a several-hundred-arm range match, and the other two modes never
+    // read it.  Hoisted out (as it was until 2026-08-18) every printable
+    // character paid for a table walk whose result the default mode
+    // throws away.
     let ambiguous_wide = match ambiguous_wide_mode() {
         AmbiguousWide::Off => false,
         AmbiguousWide::Circled => is_enclosed_alphanumeric(cp),
-        AmbiguousWide::All => east_asian_ambiguous || is_enclosed_alphanumeric(cp),
+        AmbiguousWide::All => is_ambiguous_width(ch) || is_enclosed_alphanumeric(cp),
     };
     if east_asian_wide
         || ambiguous_wide

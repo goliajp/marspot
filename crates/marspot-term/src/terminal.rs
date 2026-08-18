@@ -526,6 +526,15 @@ impl Terminal {
             // Predictions must be empty — the per-byte loop is what
             // validates them.
             if parser.in_ground_plain() && self.predictions.is_empty() {
+                // Which lane can possibly apply is decided by the
+                // first byte — all three scans below start by
+                // rejecting anything outside their own leading-byte
+                // range, so running them in sequence asked the same
+                // question three times per character.  Emoji prose
+                // alternates 4-byte scalars with single spaces, i.e.
+                // it takes this path twice per glyph.
+                let b0 = bytes[i];
+                if (0x20..=0x7E).contains(&b0) {
                 // ASCII lane: longest 0x20..=0x7E run.
                 let run_len = bytes[i..]
                     .iter()
@@ -536,6 +545,7 @@ impl Terminal {
                     i += run_len;
                     continue;
                 }
+                } else if (0xE0..=0xEF).contains(&b0) {
                 // Wide lane: longest run of 3-byte UTF-8 sequences
                 // decoding to boring width-2 chars (CJK / kana /
                 // fullwidth).  Scan and commit each decode once —
@@ -547,6 +557,7 @@ impl Terminal {
                     i += wide_len;
                     continue;
                 }
+                } else if (0xF0..=0xF4).contains(&b0) {
                 // Decode lane: a run of structurally-valid 4-byte
                 // UTF-8 sequences (emoji plane).  Unlike the lanes
                 // above this commits NOTHING early — `print` sees
@@ -555,8 +566,17 @@ impl Terminal {
                 // replacement-char behaviour), so cluster semantics
                 // are untouched; only the 4× per-byte dispatch is
                 // skipped.
+                // Threshold is one sequence, not two.  Emoji prose is
+                // `🚀 ✨ 🎉` — a 4-byte scalar between single spaces,
+                // so a run of two never occurs and this lane sat idle
+                // on the one workload it was built for, leaving four
+                // per-byte state-machine dispatches per glyph (37 % of
+                // parse time, 2026-08-18 sample).  One sequence is
+                // already worth decoding directly: the lane commits
+                // nothing early, so the trade is 4 dispatches for 1
+                // decode with the codepoint stream unchanged.
                 let quad_len = quad_run_len(&bytes[i..]);
-                if quad_len >= 8 {
+                if quad_len >= 4 {
                     for chunk in bytes[i..i + quad_len].chunks_exact(4) {
                         let cp = (((chunk[0] & 0x07) as u32) << 18)
                             | (((chunk[1] & 0x3F) as u32) << 12)
@@ -569,6 +589,7 @@ impl Terminal {
                     }
                     i += quad_len;
                     continue;
+                }
                 }
             }
             parser.advance(&mut handler, bytes[i]);
@@ -1731,7 +1752,63 @@ fn fast_width(ch: char) -> Option<u8> {
     if matches!(ch as u32, 0xAC00..=0xD7A3) {
         return Some(2); // Hangul syllables (LV / LVT)
     }
-    None
+    fast_pict_width(ch)
+}
+
+/// A pictograph that can only ever be a cluster of its own — the
+/// emoji half of the fast class.
+///
+/// `cat` of emoji-dense output was the one scenario the batch lanes
+/// never reached: a 4-byte scalar surrounded by single spaces makes
+/// both the ASCII run (needs ≥ 2) and the quad run (needs ≥ 8) come
+/// up short, so every glyph took the segmenter — three table walks
+/// (`cluster_props` on the way in, `char_width` per codepoint on the
+/// way out) to decide something the codepoint alone settles.
+/// Measured 84 ns per non-ASCII character against 12.9 ns for CJK,
+/// which reaches the wide lane.
+///
+/// Admitting one here is the same bargain `fast_width`'s doc
+/// describes: the pair (this, anything in the fast class) has an
+/// unconditional UAX #29 boundary, and the last character of a fast
+/// commit always stays buffered, so a VS16 / ZWJ / skin-tone
+/// modifier arriving next still meets an open cluster on the slow
+/// path.  What must be excluded is anything whose boundary depends
+/// on a neighbour:
+///
+///   - Regional indicators (GB12/13 pair into flags: 🇯🇵 is ONE cluster)
+///   - Any codepoint that is not GBP=Other (Extend / ZWJ /
+///     SpacingMark / Prepend all join across the boundary)
+///
+/// Width comes from the same `has_emoji_presentation` table
+/// `char_width` consults, so the fast and slow paths cannot disagree
+/// about how many cells the glyph takes.  A text-presentation
+/// pictograph (⚠ without VS16) is deliberately NOT admitted: its
+/// width depends on a variation selector that may still be coming.
+#[inline]
+fn fast_pict_width(ch: char) -> Option<u8> {
+    let cp = ch as u32;
+    // Below the symbol blocks nothing has emoji presentation, and
+    // this is the branch every ASCII / Latin / CJK character takes.
+    if cp < 0x2190 {
+        return None;
+    }
+    // The two exclusions are ranges rather than a `gbp()` call: that
+    // lookup was 23 % of emoji parse time once the fast path started
+    // taking it per glyph, and across the whole codepoint space the
+    // only emoji-presentation characters that are NOT GBP=Other are
+    // these two blocks.  `the_fast_pictograph_class_never_outruns_the_tables`
+    // re-derives that from the tables themselves, so a Unicode update
+    // that adds a third one fails the build instead of silently
+    // splitting a cluster.
+    if (0x1F1E6..=0x1F1FF).contains(&cp)     // regional indicator — GB12/13 pairs it
+        || (0x1F3FB..=0x1F3FF).contains(&cp) // skin-tone modifier — GBP=Extend
+    {
+        return None;
+    }
+    if !crate::emoji_presentation::has_emoji_presentation(cp) {
+        return None;
+    }
+    Some(2)
 }
 
 impl<'a> Handler<'a> {
@@ -2950,6 +3027,42 @@ fn parse_extended_color(rest: &[u16]) -> Option<(Color, usize)> {
 
 #[cfg(test)]
 mod tests {
+    /// The fast pictograph class is allowed to commit a character as
+    /// a cluster of its own without asking the segmenter.  That is
+    /// only sound while every character it admits is (a) GBP=Other,
+    /// so no neighbour can join across the boundary, and (b) two
+    /// cells wide by the same table `char_width` reads — otherwise
+    /// the fast and slow paths would disagree about layout.
+    ///
+    /// Walks the entire codepoint space rather than a sample: the
+    /// class is defined by range exclusions, and the thing that
+    /// would break it is a Unicode update adding a character the
+    /// ranges do not cover.  A sample of today's emoji cannot see
+    /// that; this can.
+    #[test]
+    fn the_fast_pictograph_class_never_outruns_the_tables() {
+        use crate::unicode_data::{gbp, GBP};
+        for cp in 0..0x11_0000u32 {
+            let Some(ch) = char::from_u32(cp) else { continue };
+            let Some(w) = super::fast_pict_width(ch) else { continue };
+            assert_eq!(
+                gbp(cp),
+                GBP::Other,
+                "U+{cp:04X} admitted to the fast class but joins its neighbours"
+            );
+            assert!(
+                crate::emoji_presentation::has_emoji_presentation(cp),
+                "U+{cp:04X} admitted without emoji presentation"
+            );
+            assert_eq!(w, 2, "U+{cp:04X} fast width disagrees with itself");
+            assert_eq!(
+                crate::grid::char_width(ch),
+                2,
+                "U+{cp:04X} fast width disagrees with char_width"
+            );
+        }
+    }
+
     use super::*;
 
     fn term_with(cols: u16, rows: u16, bytes: &[u8]) -> Terminal {
