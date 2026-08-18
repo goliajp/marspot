@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.142"  # L3 探针可信:产品路径四条语料全输 ghostty 60-73%,瓶颈是 1.8× 写放大;详见 CHANGELOG.md
-session = "0.11.49"  # L3 终于回答能力查询(DA1/DSR/XTQVERSION);详见 CHANGELOG.md
+core    = "0.12.143"  # 产品路径 2.1-2.8×:scrollback 索引不再每行一次 8 字节 syscall;详见 CHANGELOG.md
+session = "0.11.50"  # 同 L2 0.12.143:scrollback 索引改缓冲;详见 CHANGELOG.md
