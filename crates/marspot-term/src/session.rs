@@ -460,6 +460,16 @@ where
         .name("marspot-pty-reader".into())
         .spawn(move || {
             let mut buf = [0u8; READ_BUF];
+            // How many empty probes to bridge before sleeping in the
+            // blocking poll.  Read once per reader thread: it names
+            // this process for its lifetime, and it is a knob for
+            // measuring the trade (0 = the pre-2026-08-19 behaviour of
+            // sleeping on the first empty probe), not a per-read
+            // decision.
+            let bridge_spin_max: u32 = std::env::var("MARSPOT_PTY_BRIDGE_SPIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16);
             loop {
                 // Block on either fd via poll() so we can be woken
                 // out of an idle wait without anyone closing
@@ -533,6 +543,24 @@ where
                 // on bulk output without adding latency to interactive
                 // output (single byte sent immediately because poll
                 // says "no more").
+                //
+                // …plus a bridge spin when the stream is saturated.
+                // macOS hands the pty master ~1 KiB per read whatever
+                // buffer it is offered (measured: 1009 B/read over
+                // 209 066 reads), so a bulk stream is thousands of
+                // reads punctuated by microsecond refill gaps.  Going
+                // back to the blocking poll on the first empty probe
+                // pays a sleep-and-wake for every one of those gaps,
+                // and the profile says that is where the time goes:
+                // the reader thread spends 81-85 % of its samples in
+                // poll and 15 % in read.  Spinning the probe a bounded
+                // number of times bridges the gap instead.
+                //
+                // Only on a stream that already gathered a full kernel
+                // queue: an interactive trickle must not pay spins,
+                // and by definition never reaches the threshold.
+                const BRIDGE_THRESHOLD: usize = 1024;
+                let mut spins: u32 = 0;
                 while total < buf.len() {
                     let mut pfd = libc::pollfd {
                         fd: master_fd,
@@ -541,8 +569,14 @@ where
                     };
                     let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
                     if ready <= 0 {
+                        if total >= BRIDGE_THRESHOLD && spins < bridge_spin_max {
+                            spins += 1;
+                            std::hint::spin_loop();
+                            continue;
+                        }
                         break;
                     }
+                    spins = 0;
                     let n2 = unsafe {
                         libc::read(
                             master_fd,
