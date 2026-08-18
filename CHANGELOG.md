@@ -2475,7 +2475,21 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.135**
+Current: **0.12.136**
+
+### 0.12.136
+
+**`--bench parse` 加重复次数:100 ms 的窗口,采样器看不清里面有什么。**
+
+一趟 8 MB 语料 ~100 ms。要问"这段时间到底花在哪一类工作上",采样器需要的是秒级
+窗口,而不是一百毫秒。此前每次想 profile 都得手工套循环,而每轮一个新进程,采样
+落在进程启动上的比落在 parser 上的还多。
+
+`parse:<path>:<repeat>` —— 同一份字节喂 N 遍,每遍一个全新 terminal,计时只圈
+`feed`,构造成本不进数字。语法向后兼容:不带 `:N` 就是原来的一遍。
+
+这条本身不改任何运行时行为,是下一条(emoji parse 攻坚)的前提 —— 没有它,
+`sample` 拿到的全是噪声。
 
 ### 0.12.135
 

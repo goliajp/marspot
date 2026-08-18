@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.135"  # 列表项的 URL 不再把下一条的 `-` 吃进去;详见 CHANGELOG.md
+core    = "0.12.136"  # --bench parse 支持重复次数,给采样器一个秒级窗口;详见 CHANGELOG.md
 session = "0.11.45"  # 设置的 stat 有了自己的 1 秒节拍,不再搭 5 秒可达性检查;详见 CHANGELOG.md

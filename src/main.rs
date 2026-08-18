@@ -2580,7 +2580,20 @@ fn bench_rss_format_dump(arg: &str) {
     }
 }
 
-fn bench_parse(path: &str) {
+fn bench_parse(spec: &str) {
+    // `parse:<path>` or `parse:<path>:<repeat>`.  A single pass over an
+    // 8 MB scenario is ~100 ms — too short a window for a sampling
+    // profiler to say anything about *which* work dominates.  `repeat`
+    // feeds the same bytes N times, each into a fresh terminal, and
+    // reports the throughput over the whole run.  Timing covers only
+    // `feed`, so terminal construction never lands in the number.
+    let (path, repeat) = match spec.rsplit_once(':') {
+        Some((p, n)) => match n.parse::<u32>() {
+            Ok(n) if n > 0 => (p, n),
+            _ => (spec, 1),
+        },
+        None => (spec, 1),
+    };
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("bench: read {path}: {e}");
         std::process::exit(2);
@@ -2588,19 +2601,24 @@ fn bench_parse(path: &str) {
     // Use the same grid dimensions as a typical marspot window (auto-fit
     // 122×39 on the user's default 960×600 layout) so the parser path
     // exercises wrap / scroll the way it does in real use.
-    let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
-    let t0 = std::time::Instant::now();
-    terminal.feed(&bytes);
-    let elapsed_ns = t0.elapsed().as_nanos() as u64;
+    let mut elapsed_ns: u64 = 0;
+    for _ in 0..repeat {
+        let mut terminal = Terminal::new(GRID_COLS, GRID_ROWS);
+        let t0 = std::time::Instant::now();
+        terminal.feed(&bytes);
+        elapsed_ns += t0.elapsed().as_nanos() as u64;
+    }
+    let total = bytes.len() as u128 * repeat as u128;
     let bytes_per_sec = if elapsed_ns > 0 {
-        (bytes.len() as u128 * 1_000_000_000 / elapsed_ns as u128) as u64
+        (total * 1_000_000_000 / elapsed_ns as u128) as u64
     } else {
         0
     };
     println!(
-        r#"{{"mode":"parse","path":"{}","bytes":{},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
+        r#"{{"mode":"parse","path":"{}","bytes":{},"repeat":{},"elapsed_ns":{},"bytes_per_sec":{}}}"#,
         path,
         bytes.len(),
+        repeat,
         elapsed_ns,
         bytes_per_sec
     );
