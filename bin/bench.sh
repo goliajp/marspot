@@ -237,6 +237,21 @@ if [[ $MODE == "full" ]]; then
   # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
   (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
   cp "$ROOT/bench/results/cross-terminal.json" "$CUR_DIR/live.json" || true
+
+  # ...and the SHIPPED path.  measure.sh drives mcli: one process, one
+  # thread, in-RAM scrollback.  Every pane a user has is an L3 with a
+  # file-backed scrollback, and on 2026-08-19 that path measured 35-41
+  # MB/s against mcli's 93-105 - the gate was watching a pipeline
+  # nobody runs.
+  #
+  # This was never wired up: the script existed, bench.sh only ever
+  # READ its output file, and the probe that produced it had been
+  # deleted with the L4 shelld (888bf1b) - so the file went stale, then
+  # past the 7-day guard, and the product path vanished from the gate
+  # entirely.  Running it here closes that loop.
+  echo "==> live PTY through L3 (the shipped path)"
+  (cd "$ROOT" && ./bin/measure-l3.sh > "$CUR_DIR/measure-l3.log" 2>&1) || true
+  cp "$ROOT/bench/results/l3-throughput.json" "$CUR_DIR/l3.json" || true
 fi
 
 # ---- gate evaluation ---------------------------------------------------
@@ -288,17 +303,22 @@ def _l3_throughput():
     # scroll_push throughput), produced by bin/measure-l3.sh. INFORMATIONAL
     # ONLY — printed by --full, NOT fed into the live / vs-best gate.
     #
-    # Why not the gate: the cross-terminal cat-* numbers (competitors AND
-    # competitors_snapshot.marspot) are `time cat` ABSORPTION rates — how
-    # fast cat dumps into the terminal's buffers, which it does fast (cat
-    # doesn't fully block; parse catches up async).  l3-throughput.json is
-    # the PARSE rate (when the grid actually finishes ingesting), ~0.4× the
-    # absorption rate (mini: L3 parse ~63 vs snapshot absorption ~152).
-    # Gating the absorption-rate competitor comparison against marspot's
-    # parse rate is apples-to-oranges.  So load_live keeps using the
-    # absorption-comparable snapshot; this number rides along as a separate
-    # internal-health signal (catch an L3 parse regression). Stale guard 7
-    # days; gitignored/transient so absence just means "don't print".
+    # It used to say here that this could not be gated: the competitor
+    # numbers were `time cat` ABSORPTION rates (cat dumps into buffers
+    # and returns, parse catches up async) while this is the PARSE rate,
+    # ~0.4x of it — apples-to-oranges, and true at the time.
+    #
+    # It stopped being true on 2026-08-19, when every live trial (all
+    # terminals, this probe included) grew a DSR round-trip: `CSI 6 n`
+    # cannot be answered until everything queued ahead of it has been
+    # processed, so both sides now report work the terminal has
+    # CONFIRMED it consumed.  Same metric, so it gates — see
+    # `mars_l3_MBps_min` in the baseline.
+    #
+    # The 0.4x did not go away.  It is the real distance between mcli
+    # and a shipped pane, and the shipped pane is the number a user
+    # lives with.  Stale guard 7 days; gitignored/transient so absence
+    # just means "skip".
     global _L3_THROUGHPUT, _L3_LOADED
     if _L3_LOADED:
         return _L3_THROUGHPUT
@@ -368,12 +388,20 @@ def fmt_num(n):
     if isinstance(n, str): return n
     return f"{n:.1f}"
 
-# Live gate uses the absorption-rate snapshot (see load_live).  If a fresh
-# l3-throughput.json is present, print the L3 PARSE rates alongside — an
-# informational internal-health signal, NOT gated (different metric).
+# The shipped path.  Gated since 2026-08-19 (see `_l3_throughput` for why
+# it could not be before): this is what a user's pane does, and it had
+# been invisible to the gate for two months.
 if mode == "full":
     l3 = _l3_throughput()
     if l3 is not None:
+        for entry in baseline["scenarios"]:
+            sid = entry["id"]
+            floor = entry.get("mars_l3_MBps_min")
+            if not isinstance(floor, (int, float)) or floor <= 0:
+                continue
+            bps = l3.get(sid, {}).get("bytes_per_sec", 0)
+            cur = bps / 1e6 if bps > 0 else None
+            check(f"L3 {sid}", cur, float(floor))
         parts = []
         for sid in ("cat-ascii", "cat-mixed", "cat-cjk", "cat-emoji"):
             bps = l3.get(sid, {}).get("bytes_per_sec", 0)

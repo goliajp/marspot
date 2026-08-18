@@ -23,30 +23,36 @@
       "id": "cat-ascii",
       "bytes": 33554570,
       "mars_parse_MBps_min": 173,
-      "mars_live_MBps_min": 137,
-      "mars_vs_best_other_min": 1.37
+      "mars_live_MBps_min": 94,
+      "mars_vs_best_other_min": 0.98,
+      "mars_l3_MBps_min": 28.9,
+      "_l3_note": "mars_l3_MBps_min: the SHIPPED path (core -> L3, file-backed scrollback), measured by bin/measure-l3.sh, run and gated by --full since 2026-08-19.  Floors are the LOWEST of three observations x0.90, and the three spread 25% (ascii 32.1 / 39.1 / 40.9) because this number rides on disk behaviour and on whatever else the --full run just wrote.  A floor set from an idle solo run fires on the gate's own context; taken from the gate's context it still catches a real regression, which is the job.  The bottleneck it watches: 33.5 MB of corpus produces 26.8 MB of scrollback.bin + 34.1 MB of bytelog, written on the parse thread - 1.8x write amplification.",
+      "_live_note": "mars_live_MBps_min / mars_vs_best_other_min are the mcli path (one process, in-RAM scrollback), relocked 2026-08-19 under the certified protocol: 32 MiB per trial and a DSR round-trip so the number covers work the terminal confirmed it consumed.  The previous values (137/131/144/144, ratios 1.37/1.39/1.08/1.26) came from the old protocol - single un-repeated files, no confirmation - and are not comparable; keeping them would have failed every run forever.  vs_best_other is now BELOW 1.0 on cjk (0.66) and emoji (0.77) because that is where marspot actually stands against ghostty.  A gate floor records where you are so it can catch you falling; where you want to be lives in docs/perf.md."
     },
     {
       "id": "cat-mixed",
       "bytes": 16777256,
       "mars_parse_MBps_min": 167,
-      "mars_live_MBps_min": 131,
-      "mars_vs_best_other_min": 1.39
+      "mars_live_MBps_min": 92,
+      "mars_vs_best_other_min": 0.95,
+      "mars_l3_MBps_min": 27.1
     },
     {
       "id": "cat-cjk",
       "bytes": 8388690,
       "mars_parse_MBps_min": 208,
-      "mars_live_MBps_min": 144,
-      "mars_vs_best_other_min": 1.08
+      "mars_live_MBps_min": 92,
+      "mars_vs_best_other_min": 0.66,
+      "mars_l3_MBps_min": 30.2
     },
     {
       "id": "cat-emoji",
       "bytes": 8388720,
       "mars_parse_MBps_min": 135,
-      "mars_live_MBps_min": 144,
-      "mars_vs_best_other_min": 1.26,
-      "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in docs/perf.md.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting."
+      "mars_live_MBps_min": 84,
+      "mars_vs_best_other_min": 0.77,
+      "_note": "Relocked 2026-08-18 after the emoji fast-path attack: floor = 135.  Two mini runs an hour apart gave 153.2 (idle) and 145.0 (load1 4.3); 135 is the loaded run x 0.93, so the gate reports a real regression rather than whoever else happens to be compiling on the bench host.  This REPLACES the 2026-07-11 note, whose reasoning was disproved rather than merely outgrown.  That note read: 'pictographic codepoints cannot take the batch lanes (a following VS16/ZWJ changes width), so they pay the segmenter... the honest ceiling is ~66 MB/s'.  The premise is right and the conclusion does not follow: the fast class already guarantees that a batch commit leaves the LAST character buffered, so a following VS16 / ZWJ / skin-tone modifier still meets an OPEN cluster on the slow path and re-decides its width there.  What genuinely cannot be admitted is a character whose boundary depends on a neighbour - regional indicators (GB12/13) and skin-tone modifiers (GBP=Extend) - and those are two ranges, pinned against the tables by `the_fast_pictograph_class_never_outruns_the_tables` over the whole codepoint space.  Measured 61 -> 153.2 MB/s = 2.15x, with ascii / mixed / cjk unchanged or better.  Full decomposition and the per-change prices are in docs/perf.md.  mars_live_MBps_min / vs_best_other for this scenario are STILL stale (locked against the wrong-width parser) - re-measure on the next --full run before trusting.",
+      "mars_l3_MBps_min": 31.5
     }
   ],
   "render_full_repaint": {
@@ -73,7 +79,7 @@
   },
   "competitors_snapshot": {
     "_comment": "Per-terminal version + captured_at. Each entry self-describes when and against what version it was measured, so a snapshot that drifts (one terminal refreshed today, another stuck at an older date) is auditable. `host` describes the bench host all measurements were taken on. bench.sh `vs-best-other` iterates entries with *_MBps keys; `host` / `_comment` are skipped automatically (no key match). terminal.app excluded from the denominator by design (OS-vendor reference floor, not a competitor).  2026-08-18: ghostty + marspot re-measured under a NEW protocol and are NOT comparable with the 2026-06-07 rows above them.  Two changes: (1) every terminal now pushes LIVE_MIN_BYTES (32 MiB) by cat'ing the scenario file as many times as needed — a single 8 MiB pass never blocks `cat` long enough to measure a fast terminal, and the old rows mix per-scenario byte counts; (2) each trial ends with a DSR round-trip (`CSI 6 n`), so the number covers work the terminal has CONFIRMED it consumed.  Without (2) a terminal that drops or coalesces under pressure finishes early and wins — the reason marspot grew DSR support the same day (L2 0.12.138).  iterm/warp/terminal cannot be driven from an ssh session (AppleEvent -1712 under both plain ssh and launchctl asuser for iTerm); they need a console run of bin/measure-other.sh and are stale until then.",
-    "captured_at": "2026-08-18 (ghostty+marspot only; iterm/warp/terminal still 2026-06-07)",
+    "captured_at": "2026-08-18",
     "host": {
       "name": "mini",
       "arch": "arm64 (Darwin 25.5.0)",
@@ -128,7 +134,8 @@
       "cat-cjk_MBps": 101.7,
       "cat-emoji_MBps": 93.2,
       "_note": "vs ghostty on the same host 11 minutes apart: ascii +3.0%, mixed +-0, cjk -43.5%, emoji -24.1%.  ascii and mixed both land on ~101 MB/s for BOTH terminals, which smells like a shared ceiling rather than a tie — but ghostty reaches 145.9 on cjk, so that ceiling is not the pipe.  The gap to close is cjk and emoji; the ~4x between marspot's headless parse (411/257/236/153) and its live numbers is the decomposition target, not the parser."
-    }
+    },
+    "_captured_at_note": "ghostty + marspot re-measured 2026-08-18 under the certified protocol; iterm2 / warp / terminal are still 2026-06-07 under the old one and are NOT comparable with them — see _comment."
   },
   "multi_session_thresholds": {
     "_comment": [
