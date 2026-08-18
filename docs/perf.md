@@ -370,7 +370,55 @@ constraint.  It is not the pipe, because ghostty reaches 145.9 on CJK
 through the same PTY.  Worth identifying before reading either column
 as a win.
 
-### Next round: decompose the live pipeline, not the parser
+### Phase A, first pass (2026-08-19)
+
+Done with `--bench pty-raw|pty-drain|pty-feed` (the `bench-pty`
+feature) plus a `:<chunk>` argument on `--bench parse`.  Per corpus,
+converted to ms/MB so the segments add up:
+
+| segment | cjk | what it adds |
+|---|---:|---|
+| `pty-raw` | 5.7 | child `write`s + kernel tty + `read` syscalls |
+| `pty-drain` | 5.7 | reader thread, channel, per-batch `Vec` |
+| `pty-feed` | 8.1 | `Terminal::feed` |
+| live | 9.8 | event loop + Metal |
+| **ghostty, whole pipeline** | **6.85** | |
+
+Three findings, two of which killed a hypothesis:
+
+**Chunking is not the problem.**  The live path feeds the parser
+64 KiB at a time and the batch lanes scan contiguous slices, so a run
+spanning a chunk boundary is lost — a plausible story for why CJK
+suffers most.  Measured: 64 KiB chunks are within 1 % of one-shot feed
+on all four corpora.  Dead.
+
+**Our gather architecture is nearly free.**  `pty-raw` (a bare
+blocking `read` loop, no thread, no channel, no `Vec`) matches
+`pty-drain` (the real reader thread) to within noise.  So the 5.7
+ms/MB is the kernel and `cat`, which ghostty pays too.
+
+**Which makes ghostty's 6.85 ms/MB for the WHOLE pipeline the finding.**
+It is less than our gather stage alone.  Since neither implementation
+can undercut the kernel, the only way it fits is if ghostty's parse
+runs in the shadow of its gather — its own comments describe a gather
+stage running up to 4 buffers ahead of a parse stage.  Ours are on
+separate threads too (reader thread gathers, main thread feeds), and
+the channel is 64 batches deep, so the pipelining *should* already
+happen — but `pty-feed` measures as gather **plus** parse (8.1 = 5.7
++ 2.4), not the max.  **Why the overlap does not materialise is the
+next question**, and it is worth ~2.4 ms/MB on CJK, which is most of
+the gap to ghostty.
+
+Also measured and shipped: the reader thread was spending 85 % of its
+samples in `poll`, because macOS hands a pty master ~1 KiB per read
+(1009.2 B measured over 209 066 reads) and the loop slept on the first
+empty probe.  Bridging up to 16 empty probes cut gather batches 6.4×
+(4362 → 677) — and bought only +4-6 % throughput, which is itself the
+useful part of the result: on this path the sleeps were not the cost.
+Shipped anyway (real, zero-risk), but it is not the answer to the
+24-43 % gap.
+
+### Next round: why parse does not hide behind gather
 
 The parser is now 2.17× faster on emoji and within noise of the June
 build everywhere else, and headless parse runs 2.3–3.9× faster than
