@@ -190,6 +190,22 @@ fn main() {
         .find_map(|l| l.strip_prefix("real"))
         .and_then(|v| v.trim().parse::<f64>().ok())
         .unwrap_or_else(|| die("could not parse `real` from the trial marker"));
+    // Corroborate with something the timing cannot fake: how much the
+    // session actually wrote to disk this run.  A throughput number
+    // whose explanation is "the scrollback write" is only worth
+    // believing if the file grew.
+    let sess_dir = sandbox.join("sessions").join(session_id.to_string());
+    let sz = |name: &str| {
+        std::fs::metadata(sess_dir.join(name))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
+    eprintln!(
+        "witness: scrollback.bin={} bytelog={} state.bin={}",
+        sz("scrollback.bin"),
+        sz("bytelog"),
+        sz("state.bin")
+    );
     println!("{}", (secs * 1e9) as u64);
     let _ = std::fs::remove_dir_all(&sandbox);
 }

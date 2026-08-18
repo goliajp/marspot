@@ -28,12 +28,11 @@ source "$ROOT/bin/_lib.sh"          # marspot_bin → CARGO_TARGET_DIR-aware pat
 # shellcheck source=/dev/null
 source "$ROOT/bin/_dev-sandbox.sh"
 
-# Re-point the sandbox shelld at the resolved target dir.  _dev-sandbox.sh
-# hardcodes $ROOT/target/release, but bench-remote.sh exports a dedicated
-# CARGO_TARGET_DIR on the mini — so the dev binaries live elsewhere there.
-# dev_ensure_shelld / dev_kill_shell_core read these globals at call time.
-DEV_TARGET="$(dirname "$(marspot_bin marspot-shelld)")"
-DEV_SHELLD="$(marspot_bin marspot-shelld)"
+# No shelld here: RFC-003 retired L4, and the probe spawns the L3 it
+# measures in a sandbox of its own.  The two lines that used to resolve
+# a shelld binary are gone with it — `marspot_bin marspot-shelld` now
+# names a file that is never built, which is exactly the kind of
+# leftover that kept this script "running" while every trial failed.
 
 SCENARIOS_DIR="$ROOT/bench/scenarios"
 RESULTS_DIR="$ROOT/bench/results"
@@ -58,18 +57,13 @@ fail() { echo "measure-l3: $*" >&2; exit 1; }
 [[ -x "$SESSION_BIN" ]] || fail "marspot-session not built at $SESSION_BIN"
 [[ -x "$PROBE_BIN" ]]   || fail "probe not built at $PROBE_BIN"
 
-# Bring up a sandbox shelld.  The socket occasionally goes stale between
-# runs (a prior aborted session left a dead socket file) — the probe then
-# fails with "Connection refused".  Reset-and-retry once before giving up.
-reset_shelld() {
-  dev_stop_shelld
+# Between trials, make sure no session from a previous one is still
+# holding a pty.  The probe sandboxes itself per run, so this is only
+# about orphans from an aborted trial.
+reset_sessions() {
   pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true
-  rm -f "$DEV_SOCK"
-  rm -rf "$MARSPOT_STATE_DIR/sessions"
-  sleep 0.4
-  dev_ensure_shelld || fail "shelld did not come up after reset"
+  sleep 0.3
 }
-dev_ensure_shelld || reset_shelld
 
 cleanup() { pkill -9 -f "$SESSION_BIN( |\$)" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
@@ -96,9 +90,9 @@ for scenario in "${SCENARIOS[@]}"; do
     echo "==> $scenario ×$repeats ($((total_bytes/1048576)) MiB) trial $trial/$TRIALS"
     ns=$(run_one "$spath" "$repeats")
     if [[ -z "$ns" || "$ns" == "0" ]]; then
-      # One stale-socket retry, in case the shelld died mid-suite.
-      echo "    probe failed — resetting shelld and retrying" >&2
-      reset_shelld
+      # One retry, in case an orphaned session held the pty.
+      echo "    probe failed — clearing orphans and retrying" >&2
+      reset_sessions
       ns=$(run_one "$spath" "$repeats")
     fi
     if [[ -z "$ns" || "$ns" == "0" ]]; then

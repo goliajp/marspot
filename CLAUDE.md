@@ -286,7 +286,12 @@ The `RFC-NNN` step tag stays optional and lives after the scope —
 - `src/term/` — terminal emulator (VT/xterm escape parser; self-built, grown iteratively against real apps)
 - `src/render/` — Metal renderer with glyph atlas (instanced quads, custom)
 - `src/pty/` — PTY management (libc syscalls directly, no wrapper crate)
-- `src/scrollback.rs` — disk-backed scrollback (mmap'd ring file, default-on; `MARSPOT_DISK_SCROLLBACK=0` opts out)
+- `src/scrollback.rs` — disk-backed scrollback (mmap'd ring file).  On
+  whenever `MARSPOT_SESSION_ID` is set, i.e. in every L3 pane; mcli,
+  `--snapshot` and tests fall through to the in-RAM variant.  The old
+  `MARSPOT_DISK_SCROLLBACK=0` opt-out was removed after F1 soaked —
+  documented here until 2026-08-19, and measured against twice before
+  anyone noticed the switch did nothing
 - `src/tabs/` — multi-terminal lifecycle and shared GPU resources
 
 These modules are created as features are added, not preemptively.

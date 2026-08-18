@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.141"  # 重建 l3_throughput 探针(产品路径 gate 空转两月);详见 CHANGELOG.md
+core    = "0.12.142"  # L3 探针可信:产品路径四条语料全输 ghostty 60-73%,瓶颈是 1.8× 写放大;详见 CHANGELOG.md
 session = "0.11.49"  # L3 终于回答能力查询(DA1/DSR/XTQVERSION);详见 CHANGELOG.md
