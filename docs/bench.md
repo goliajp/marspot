@@ -201,6 +201,48 @@ without these three produced a confident "the live pipeline regressed
 contradicted (it had regressed 2.1× in the **parser**, and nowhere
 else).  See `docs/perf.md`.
 
+### 2c. Measuring on a host that has a permanent tenant (2026-08-19)
+
+The bench host is not idle and has not been for some time — another
+project's test suite runs on it most of the day.  Three habits make the
+numbers survive that; none of them is "widen the floor".
+
+**Take the minimum, not the median.**  Load can only ADD time, so the
+fastest trial is the least-contaminated one while a median still
+carries the neighbours.  One batch of three read **28.7 / 72.3 / 160.0
+MiB/s** for the same scenario: the median reports the tenant, the
+minimum reports marspot.  `bin/measure-l3.sh` now keeps the best trial
+(the JSON key stays `median_ns` because consumers read it; a `stat`
+field says what it really is, and every sample is still recorded so a
+wide spread stays visible).
+
+**Buy more tickets.**  Once you keep the fastest trial, each trial is a
+lottery ticket for an uncontended window.  Three tickets missed
+entirely on one corpus (127.8 MB/s, where the same build reaches
+162–172 when it gets a window).  Five costs ~50 % of that script's wall
+clock.
+
+**Say "not measured" when the host is too busy to measure.**  The probe
+records `_host_load1`; above 5 the L3 and vs-best checks report *skip*.
+The same build read 169.9 MB/s at load1 4.5 and 115.7 at load1 6.3 — 
+reporting the second as a regression is worse than reporting nothing,
+because a red that means "someone else was compiling" teaches people to
+ignore reds.
+
+**Let the machine settle between stages.**  A fat-LTO release build
+pins every core for minutes and they are still hot the instant it
+exits; the per-scenario warm-up trial pays the cold-*cache* cost, which
+is a different thing.  Headless parse inside `--full` read cjk 187.2 /
+emoji 126.6 against 215.7 / 140.7 measured by hand minutes later — 
+13–15 %, enough to fail floors nothing had regressed past.  `bench.sh`
+now sleeps `BENCH_SETTLE_S` (8 s) after the build and between live
+stages, because by the L3 stage the run has already pushed hundreds of
+MB through a pty and written the disk hard.
+
+Net effect: a `--full` at load1 5.23 produced L3 176.6 / 157.9 / 172.1
+/ 125.4 MB/s and passed all 25 checks — numbers that match what the
+same build produces on an idle host.
+
 ---
 
 ## 3. Driver design
