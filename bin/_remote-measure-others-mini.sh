@@ -96,6 +96,16 @@ if [[ ! -f bench/scenarios/cat-ascii.bin ]]; then
   ./bin/gen-scenarios.sh >&2
 fi
 
+# Our short terminal id -> the name AppleScript knows it by.
+applescript_name() {
+  case "$1" in
+    iterm)    echo "iTerm" ;;
+    warp)     echo "Warp" ;;
+    terminal) echo "Terminal" ;;
+    *)        echo "$1" ;;
+  esac
+}
+
 build_one_cmd() {
   # Was: one `cat` of the scenario file per trial, inlined into a
   # multi-KB command string.  Two things were wrong with it and both
@@ -317,12 +327,24 @@ close_one() {
 # contention is zero. Every cell is the terminal vs an idle mini —
 # the only condition under which vs-best-other ratios are honest.
 for t in "${TERMS[@]}"; do
-  # In ssh mode, only Ghostty + marspot can be driven directly (Ghostty
-  # via sudo asuser, marspot via direct binary). The other three need
-  # the LaunchAgent route for ssh-from-dev-box driving.
+  # Ghostty (via `sudo asuser`) and marspot (a direct binary) always
+  # work from ssh.  The AppleScript-driven three used to be skipped
+  # here on the assumption that an ssh session can never reach them —
+  # which is true only while the app is not already running in the
+  # user's GUI session.  Once it IS running, `osascript` from ssh
+  # reaches it fine (verified 2026-08-19: `tell application "iTerm" to
+  # count windows` answered from a plain ssh shell).  So ask instead of
+  # assuming: one cheap AppleEvent decides, and the skip message says
+  # what actually failed.
   if [[ $SSH_MODE -eq 1 && "$t" != "ghostty" && "$t" != "marspot" ]]; then
-    echo "==> [${t}] skip (ssh mode — use LaunchAgent trigger for full refresh)" >&2
-    continue
+    ae_app="$(applescript_name "$t")"
+    if ! osascript -e "with timeout of 5 seconds" \
+                   -e "tell application \"$ae_app\" to count windows" \
+                   -e "end timeout" >/dev/null 2>&1; then
+      echo "==> [${t}] skip (ssh cannot reach it — open $ae_app on the bench host first)" >&2
+      continue
+    fi
+    echo "==> [${t}] reachable over ssh (already running in the GUI session)" >&2
   fi
 
   marker="/tmp/measure-${t}-all.txt"
