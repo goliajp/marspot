@@ -987,7 +987,22 @@ fn scan_line_into_matches(
                 i = b.max(i + 1);
                 continue;
             }
-            if looks_like_path(&chars[i..end]) {
+            // No `looks_like_path` guard on the whole span here.  The
+            // span NOT looking like a path is precisely the case this
+            // retry exists for: rows merged at a wrap seam produce
+            // things like `…/join-bugs.sql/Users/…/describe/` — one
+            // real path with another glued to its tail — and asking
+            // whether the concatenation looks like a path answers no,
+            // which is right and which is why the answer must not
+            // gate the retry.  `retry_file_at_segment_boundaries`
+            // applies `looks_like_path` to each candidate PREFIX,
+            // where the question is the one worth asking.
+            //
+            // 2026-08-19 field report: three consecutive absolute
+            // paths, each ending within the 8-column slack of the
+            // right edge, merged into one logical line; the retry had
+            // the correct answer at every step and never got asked.
+            {
                 if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
                     let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
@@ -2473,6 +2488,61 @@ mod tests {
                 == "http://192.168.50.20:6031/index.html?page=pages/village/index-more/parts"),
             "a token tail that merely starts with `-` still belongs to the row above, got {links:?}"
         );
+    }
+
+    /// Three complete paths in a row, each ending a few columns shy
+    /// of the right edge, must stay three links.
+    ///
+    /// 2026-08-19 field report: a `ls`-style listing inside a TUI (two
+    /// spaces of indent, absolute paths) came out with the first and
+    /// second entries unlinked and the third linked.  The merge is
+    /// working as designed — a row ending within the path slack of the
+    /// edge, followed by an indented row, is exactly the shape of a
+    /// wrapped path — so the three rows become one logical line whose
+    /// text is `…/a.sql/…/bb//…/ccc/`.  Nothing is wrong with that;
+    /// the seam retry exists to take such a line apart again.
+    ///
+    /// What was wrong: the retry sat behind `looks_like_path(whole
+    /// span)`, and the whole span is a concatenation of paths, which
+    /// does not look like a path.  The guard therefore rejected
+    /// precisely the input the retry was written for, and it had the
+    /// right answer at every step without ever being asked.
+    #[test]
+    fn consecutive_near_flush_paths_stay_separate_links() {
+        let dir = std::env::temp_dir().join("marspot-linkify-seam-rows");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("bb")).expect("mkdir bb");
+        std::fs::create_dir_all(dir.join("ccc")).expect("mkdir ccc");
+        std::fs::write(dir.join("a.sql"), b"x").expect("write a.sql");
+        let d = format!("{}/", dir.to_string_lossy());
+
+        let rows = vec![
+            format!("  {d}a.sql"),
+            format!("  {d}bb/"),
+            format!("  {d}ccc/"),
+        ];
+        // Two columns wider than the longest row: every row now ends
+        // inside the slack, which is what triggers the merge.
+        let cols = (rows.iter().map(|r| r.chars().count()).max().unwrap() + 2) as u16;
+        let refs: Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
+        let src = StrSource::new(&refs, cols);
+
+        let mut texts: Vec<String> = scan_visible_links(&src, ScanOpts { tui_mode: true })
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        texts.sort();
+        texts.dedup();
+        assert_eq!(
+            texts,
+            vec![
+                format!("{d}a.sql"),
+                format!("{d}bb/"),
+                format!("{d}ccc/"),
+            ],
+            "each row is a complete path and must keep its own link"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn scan(s: &str) -> Vec<LinkRange> {

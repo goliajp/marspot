@@ -2475,7 +2475,44 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.148**
+Current: **0.12.149**
+
+### 0.12.149
+
+**连着三条路径,中间两条没有下划线。**
+
+```
+  /Users/…/spg-repro/替换验收标准.md          ← 有
+  /Users/…/spg-repro/SENTORI_2026-08-        ← 有(跨行)
+18_REPORT_5.md
+  /Users/…/spg-repro/drop-column-che         ← 有(跨行)
+ck.sql
+  /Users/…/spg-repro/join-bugs.sql           ← 没有
+  /Users/…/spg-repro/describe/               ← 没有
+  /Users/…/spg-repro/bind/                   ← 有
+```
+
+六个路径**都存在**,所以不是 stat 的事。
+
+**合并本身没做错。** 这是 cc 的 TUI 输出(bytelog 里是 `\x1b[H  /Users/…`:绝对定位 +
+两格缩进),`join-bugs.sql` 那行距右边缘 2 列、`describe/` 那行距 6 列,都落在路径的
+8 列宽容内;而下一行有 2 格缩进 —— **这正是「一个路径被切断后带悬挂缩进续行」的形状**。
+三行于是合并成一条逻辑行:`…/join-bugs.sql/Users/…/describe//Users/…/bind/`。
+
+拆开它是「接缝重试」的活:逻辑行在**行接缝**处切一刀,看前缀是不是真路径。它算得
+完全正确 —— 实测每一步都返回了正确的切点(71、136)。**但它从来没被调用**:
+
+```rust
+if looks_like_path(&chars[i..end]) {          // ← 检查的是整条合并串
+    if let Some(b) = retry_file_at_segment_boundaries(…)
+```
+
+而整条合并串是几个路径首尾相接,**当然不像路径**。这道守卫恰好挡掉了这个函数唯一
+存在的理由。它内部本来就对每个候选**前缀**做了 `looks_like_path` —— 那才是该问的
+问题。去掉外层守卫。
+
+回归测试自建三个临时文件/目录,按同样的几何(每行距右边缘 2 列、下一行 2 格缩进)排
+成三行,断言三条各自成链。
 
 ### 0.12.148
 

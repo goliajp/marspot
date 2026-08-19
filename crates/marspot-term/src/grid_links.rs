@@ -74,6 +74,7 @@ mod grid_tests {
     // if it passes but the user's `echo` still shows broken wrap, the
     // bug is in render-side coords or some upstream layer.
     #[test]
+    #[test]
     fn scan_visible_links_via_real_parser() {
         use crate::terminal::Terminal;
         const COLS: u16 = 30;
