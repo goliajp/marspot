@@ -362,6 +362,15 @@ def _l3_throughput():
                 _L3_THROUGHPUT = None
     return _L3_THROUGHPUT
 
+def live_measurement_is_trustworthy():
+    # `vs_best_other` divides the L3 number by a frozen competitor
+    # figure, so it inherits the L3 measurement's conditions exactly.
+    l3 = _l3_throughput()
+    if l3 is None:
+        return True
+    hl = l3.get("_host_load1", -1.0)
+    return not (isinstance(hl, (int, float)) and hl > 5.0)
+
 def load_live(scenario):
     # The SHIPPED path first.  `vs_best_other` asks "how does marspot
     # compare to the best other terminal", and the honest subject of
@@ -437,6 +446,15 @@ def fmt_num(n):
 if mode == "full":
     l3 = _l3_throughput()
     if l3 is not None:
+        # A contended host cannot measure this.  The probe keeps the
+        # fastest of five trials precisely to survive a busy machine,
+        # but past a point every window is contended and the number
+        # stops being about marspot: the same build read 169.9 MB/s at
+        # load1 4.5 and 115.7 at load1 6.3 on cjk.  Report that as
+        # "not measured", not as a regression — a red that means
+        # "someone else was compiling" trains people to ignore reds.
+        host_load = l3.get("_host_load1", -1.0)
+        too_busy = isinstance(host_load, (int, float)) and host_load > 5.0
         for entry in baseline["scenarios"]:
             sid = entry["id"]
             floor = entry.get("mars_l3_MBps_min")
@@ -444,6 +462,11 @@ if mode == "full":
                 continue
             bps = l3.get(sid, {}).get("bytes_per_sec", 0)
             cur = bps / 1e6 if bps > 0 else None
+            if too_busy:
+                results["pass"].append(
+                    ("skip", f"L3 {sid}", f"host busy (load1 {host_load})", None)
+                )
+                continue
             check(f"L3 {sid}", cur, float(floor))
         parts = []
         for sid in ("cat-ascii", "cat-mixed", "cat-cjk", "cat-emoji"):
@@ -463,11 +486,16 @@ for entry in baseline["scenarios"]:
 
     if mode == "full":
         cur_live = load_live(sid)
-        check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"])
-        best_other = best_other_mbps(baseline, sid)
-        if cur_live is not None and best_other > 0:
-            ratio = cur_live / best_other
-            check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"])
+        trust = live_measurement_is_trustworthy()
+        if not trust:
+            results["pass"].append(("skip", f"live  {sid:10}", "host busy", None))
+            results["pass"].append(("skip", f"vs-best {sid:10}", "host busy", None))
+        else:
+            check(f"live  {sid:10}", cur_live, entry["mars_live_MBps_min"])
+            best_other = best_other_mbps(baseline, sid)
+            if cur_live is not None and best_other > 0:
+                ratio = cur_live / best_other
+                check(f"vs-best {sid:10}", ratio, entry["mars_vs_best_other_min"])
 
 # Render
 render = load_render()

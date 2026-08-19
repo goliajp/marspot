@@ -42,7 +42,15 @@ OUT_JSON="$RESULTS_DIR/l3-throughput.json"
 mkdir -p "$RESULTS_DIR"
 
 SCENARIOS=(cat-ascii cat-mixed cat-cjk cat-emoji)
-TRIALS="${TRIALS:-3}"
+# Five, not three.  The probe keeps the fastest trial (load can only
+# add time), so trials are lottery tickets for an uncontended window on
+# a host that has a permanent tenant.  Measured 2026-08-19: with three,
+# one batch came back 28.7 / 72.3 / 160.0 MiB/s for the same scenario —
+# it took all three to find one clean run — and the next batch missed
+# entirely on cjk (127.8 vs the 162-172 the same build reaches when it
+# gets a window).  Two more tickets cost ~50 % of this script's wall
+# clock and buy back a metric that otherwise reports the neighbours.
+TRIALS="${TRIALS:-5}"
 # Target drain payload per trial.  ~128 MiB → ~0.3-0.9 s window on Apple
 # Silicon: long enough that 10 ms polling resolves it to ~1-3 %, short
 # enough to keep the whole gate run under a minute.
@@ -109,7 +117,15 @@ done
 python3 - "$RUN_DIR" "$OUT_JSON" "${SCENARIOS[*]}" <<'PY'
 import json, os, sys
 run_dir, out_json, scenarios_str = sys.argv[1:4]
-out = {}
+# Record what the host was doing, so a consumer can tell "marspot got
+# slower" from "the bench host was busy".  Without it a contended run
+# is indistinguishable from a regression, and this host has a permanent
+# tenant.
+try:
+    load1 = os.getloadavg()[0]
+except OSError:
+    load1 = -1.0
+out = {"_host_load1": round(load1, 2)}
 for scenario in scenarios_str.split():
     ns_path = os.path.join(run_dir, f"{scenario}.ns")
     by_path = os.path.join(run_dir, f"{scenario}.bytes")
@@ -120,11 +136,24 @@ for scenario in scenarios_str.split():
         out[scenario] = {"bytes": 0, "median_ns": 0, "bytes_per_sec": 0, "samples": []}
         continue
     total_bytes = int(open(by_path).read().strip())
-    med = samples[len(samples) // 2]
-    bps = total_bytes * 1_000_000_000 // med if med > 0 else 0
+    # MINIMUM, not median.  Load can only ADD time, so the fastest
+    # trial is the least-contaminated one, while a median still carries
+    # whatever else the host was doing.  docs/bench.md §2b argues this
+    # for A/B comparisons; it matters at least as much here, because
+    # this host has a permanent tenant — the same build read 194.5 and
+    # 106.5 MB/s on ascii within one afternoon, and a median of three
+    # trials taken during the bad half reports the tenant, not marspot.
+    #
+    # `median_ns` keeps its name because bench.sh and the JSON's
+    # consumers read that key; the value is now the best trial.  Every
+    # sample is still recorded, so a wide spread stays visible instead
+    # of being averaged into a plausible-looking number.
+    best = samples[0]
+    bps = total_bytes * 1_000_000_000 // best if best > 0 else 0
     out[scenario] = {
         "bytes": total_bytes,
-        "median_ns": med,
+        "median_ns": best,
+        "stat": "min-of-%d" % len(samples),
         "bytes_per_sec": bps,
         "samples": samples,
     }
