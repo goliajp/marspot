@@ -541,6 +541,18 @@ pub struct FileScrollback {
     // RAM ring: zero-alloc flat-Vec mirror of the newest `ram_capacity`
     // lines, with parallel wrapped flags.
     ram_cells: Vec<crate::grid::Cell>,
+    /// How many of each slot's `cols` cells were actually written.
+    ///
+    /// The ring stores fixed-width rows, but the rows themselves are
+    /// not: a 122-column grid showing emoji prose fills ~47 of them.
+    /// Padding every slot out to `cols` on the way in costs a memset
+    /// of the remainder per pushed line — on the parse thread, for a
+    /// tier whose whole purpose is to be read *rarely* (it is the
+    /// front-line cache; a miss just goes to the file).  Recording the
+    /// length instead moves that work to the reader, which is the side
+    /// that can afford it.  Stale cells past `ram_lens[slot]` are
+    /// whatever the slot held before and must never be handed out.
+    ram_lens: Vec<u16>,
     ram_wrapped: Vec<bool>,
     ram_head: usize,
     ram_len: usize,
@@ -776,6 +788,7 @@ impl FileScrollback {
         let total_lines = hot_count.saturating_add(cold_total_lines);
 
         let mut ram_cells = Vec::with_capacity(ram_capacity.saturating_mul(cols));
+        let mut ram_lens: Vec<u16> = Vec::with_capacity(ram_capacity);
         let mut ram_wrapped = Vec::with_capacity(ram_capacity);
         // RAM ring loads the tail of HOT only.  Cold tier is read on
         // demand via cold fds; we don't pre-load it into the hot ring
@@ -816,6 +829,7 @@ impl FileScrollback {
                     }
                 };
                 ram_cells.extend_from_slice(&row);
+                ram_lens.push(row.len() as u16);
             }
         }
 
@@ -834,6 +848,7 @@ impl FileScrollback {
             idx_mmap_len: std::cell::Cell::new(0),
             has_unflushed: std::cell::Cell::new(false),
             ram_cells,
+            ram_lens,
             ram_wrapped,
             ram_head: 0,
             ram_len: load_n,
@@ -1233,8 +1248,11 @@ impl FileScrollback {
         let take = line.len().min(cols);
         if self.ram_len < self.ram_capacity {
             self.ram_cells.extend_from_slice(&line[..take]);
+            // The slot still has to BE `cols` wide for the indexing
+            // arithmetic; it just does not have to be written twice.
             self.ram_cells
                 .resize(self.ram_cells.len() + (cols - take), crate::grid::Cell::default());
+            self.ram_lens.push(take as u16);
             self.ram_wrapped.push(wrapped);
             self.ram_len += 1;
             return;
@@ -1242,9 +1260,8 @@ impl FileScrollback {
         let slot = self.ram_head;
         self.ram_head = (self.ram_head + 1) % self.ram_capacity;
         let start = slot * cols;
-        let dst = &mut self.ram_cells[start..start + cols];
-        dst[..take].copy_from_slice(&line[..take]);
-        dst[take..].fill(crate::grid::Cell::default());
+        self.ram_cells[start..start + take].copy_from_slice(&line[..take]);
+        self.ram_lens[slot] = take as u16;
         self.ram_wrapped[slot] = wrapped;
     }
 
@@ -1269,6 +1286,11 @@ impl FileScrollback {
             let ring_idx = line_idx - ram_first;
             let slot = (self.ram_head + ring_idx) % self.ram_capacity.max(1);
             let start = slot * self.cols;
+            // Past what this slot actually holds is a blank, not the
+            // previous occupant's cell.
+            if col >= self.ram_lens.get(slot).copied().unwrap_or(0) as usize {
+                return Some(crate::grid::Cell::default());
+            }
             return self.ram_cells.get(start + col).copied();
         }
         // F2+5 — when the requested line is older than hot's first row,
@@ -1386,7 +1408,10 @@ impl FileScrollback {
             let ring_idx = idx - ram_first;
             let slot = (self.ram_head + ring_idx) % self.ram_capacity.max(1);
             let start = slot * self.cols;
-            return Some(self.ram_cells[start..start + self.cols].to_vec());
+            let used = self.ram_lens.get(slot).copied().unwrap_or(0) as usize;
+            let mut row = self.ram_cells[start..start + used.min(self.cols)].to_vec();
+            row.resize(self.cols, crate::grid::Cell::default());
+            return Some(row);
         }
         // F2+5 — cold tier fallthrough.
         if (idx as u64) < self.hot_first_line {

@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.146"  # gate 改用产品路径跟竞品比,并锁在「必须赢」;详见 CHANGELOG.md
-session = "0.11.52"  # scrollback 推行路径:每行一次 Vec 分配与逐 cell 追加都消掉;详见 CHANGELOG.md
+core    = "0.12.147"  # 同 L3 0.11.53:RAM ring 写入不再补齐整行;详见 CHANGELOG.md
+session = "0.11.53"  # RAM ring 记录每槽实际长度,写侧不再 memset 尾部;详见 CHANGELOG.md
