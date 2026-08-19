@@ -126,6 +126,25 @@ fi
 echo "==> building marspot (release)"
 ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
 
+# Let the machine come down off the build before measuring anything.
+#
+# The per-scenario warm-up trial below already pays the cold-CACHE cost,
+# which is a different thing: a `cargo build --release` with fat LTO
+# pins every core for minutes, and the cores are still hot (and clocked
+# down) the instant it exits.  Measured 2026-08-19 on mini: headless
+# parse inside `--full` read cjk 187.2 / emoji 126.6, while the same
+# binary re-measured by hand a few minutes later read 215.7 / 140.7 —
+# 13-15 % apart, enough to fail floors that nothing had regressed past.
+#
+# This does not fix a bench host with a permanent tenant (mini runs
+# another project's test suite most of the day); it fixes the part
+# this script causes itself.  `BENCH_SETTLE_S=0` opts out.
+BENCH_SETTLE_S="${BENCH_SETTLE_S:-8}"
+if [[ "$BENCH_SETTLE_S" != "0" ]]; then
+  echo "==> settling ${BENCH_SETTLE_S}s after build"
+  sleep "$BENCH_SETTLE_S"
+fi
+
 # ---- collect current measurements ---------------------------------------
 
 CUR_DIR=$(mktemp -d)
@@ -237,6 +256,15 @@ if [[ $MODE == "full" ]]; then
   # mcli lifecycle by PID; that's sufficient.  perf-attack E7.
   (cd "$ROOT" && ./bin/measure.sh > "$CUR_DIR/measure.log" 2>&1) || true
   cp "$ROOT/bench/results/cross-terminal.json" "$CUR_DIR/live.json" || true
+
+  # Same settle between stages, for the same reason as after the build:
+  # by this point the run has already pushed a few hundred MB through a
+  # pty and written the disk hard, and the stage that follows is the one
+  # most sensitive to both.  Without it the L3 numbers came out 40 %
+  # below what the identical binary produced when `bin/measure-l3.sh`
+  # was run on its own (106.5 vs 194.5 MB/s on ascii) — a measurement
+  # reporting the run's own wake, not the product.
+  [[ "$BENCH_SETTLE_S" != "0" ]] && sleep "$BENCH_SETTLE_S"
 
   # ...and the SHIPPED path.  measure.sh drives mcli: one process, one
   # thread, in-RAM scrollback.  Every pane a user has is an L3 with a
