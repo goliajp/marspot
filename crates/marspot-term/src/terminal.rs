@@ -545,6 +545,18 @@ impl Terminal {
                     i += run_len;
                     continue;
                 }
+                // A lone printable — the shape emoji prose takes, where
+                // every glyph is separated by exactly one space, so the
+                // run lane never applies and each space fell through to
+                // the per-byte state machine.  In plain Ground with no
+                // predictions pending, a byte in 0x20..=0x7E dispatches
+                // to `print` and nothing else, so calling it directly
+                // is the same work minus the dispatch.
+                if run_len == 1 {
+                    handler.print(b0 as char);
+                    i += 1;
+                    continue;
+                }
                 } else if (0xE0..=0xEF).contains(&b0) {
                 // Wide lane: longest run of 3-byte UTF-8 sequences
                 // decoding to boring width-2 chars (CJK / kana /

@@ -2475,7 +2475,11 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.147**
+Current: **0.12.148**
+
+### 0.12.148
+
+**同 L3 0.11.54:孤立可打印字符直接派发,不过状态机。**
 
 ### 0.12.147
 
@@ -4423,7 +4427,31 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.53**
+Current: **0.11.54**
+
+### 0.11.54
+
+**孤立的可打印字符不再过状态机。**
+
+emoji 散文长这样:`🚀 ✨ 🎉` —— 每个字形之间**恰好一个空格**。于是 ASCII 批量车道
+(要 ≥2 个字符)永远接不住那些空格,每一个都掉回逐字节状态机;而 emoji 语料里空格的
+数量与 emoji 一样多。profile 里 `Terminal::feed` 自身占 emoji 解析的 **29.9%**,是
+最大的一项。
+
+等价性是可论证的,不是赌的:这段代码只在 `parser.in_ground_plain() &&
+predictions.is_empty()` 时才运行,而在 Ground 状态下,一个 0x20..=0x7E 的字节除了
+派发到 `print` 不做别的。所以直接调 `print` 是同样的工作**减去**那次派发。
+
+实测(mini,headless parse,min-of-3):
+
+| 语料 | 之前 | 之后 |
+|---|---:|---:|
+| ascii | ~423 | **432.6** |
+| cjk | ~236 | **245.9** |
+| emoji | ~154.6 | **158.6** |
+
+三条语料一起涨,因为「孤立可打印字符」不是 emoji 独有的形状 —— 任何标点、空格、单
+字符提示符都走这里。
 
 ### 0.11.53
 
