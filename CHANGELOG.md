@@ -2475,7 +2475,32 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.149**
+Current: **0.12.150**
+
+### 0.12.150
+
+**焦点框的右边和下边不是高亮白 —— 被邻居的遮罩压暗了。**
+
+用户的描述几乎就是答案:「似乎被右、下、右下三个 pane 的半透明 border 盖住了一半」。
+不是 border(未聚焦的 pane 不画边框,`GridItem::paint` 在 `!focused` 时直接 return),
+是 **scrim** —— RFC-006 那层「未聚焦即退后」的半透明黑,盖住整块 pane 矩形。
+
+为什么只有右和下:焦点环画在**接缝**上,而接缝的几何是不对称的。接缝厚度是
+`gutter × 4`,间隙只有 `gutter`:
+
+    左边线覆盖 [x-g, x+3g]   → 3g 落在自己身上(focused,scrim = 0)
+    右边线覆盖 [x+w, x+w+4g] → 整条落在右邻居的矩形里
+
+而 scrim 走 **overlay pass**,焦点环走 **BG pass** —— overlay 在后。于是最该亮的两条
+边,恰好是被邻居调暗的两条。左和上没事,纯粹因为它们画在自己身上。
+
+修法不是把环挪进 overlay 了事:那条管线是 SDF 的,`smoothstep(-aa, aa, d)` 会给硬边
+镶一圈 AA,而这个环的注释里写着它要 pixel-perfect 地**替换**灰接缝的颜色。所以**画
+两遍**:BG 那遍照旧(像素精确),scrim 之后在 overlay 再画一遍同位置同色的。第二遍的
+AA 边缘混合的是它自己下面那条一模一样的矩形,所以看不出来。
+
+回归测试搭一个 2×2、三个邻居都带 scrim 的布局,断言 overlay 里有那 8 个矩形**且排在
+所有 scrim 之后**(顺序才是关键,不然等于没画)。红-绿验过:把第二遍去掉,测试立刻失败。
 
 ### 0.12.149
 

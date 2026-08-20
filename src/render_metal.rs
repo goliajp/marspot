@@ -2766,7 +2766,7 @@ fn build_instances(
             for (idx, rect) in pane_rects.iter().enumerate().take(views.len()) {
                 let r = idx / cols;
                 let c = idx % cols;
-                GridItem {
+                let item = GridItem {
                     rect: *rect,
                     focused: idx == focused_idx,
                     outline: focus_outline,
@@ -2777,8 +2777,31 @@ fn build_instances(
                         bottom: r == rows - 1,
                         left:   c == 0,
                     },
+                };
+                item.paint(&mut painter);
+                // …and again in the overlay pass.  The ring's right and
+                // bottom sides sit in the seam, which lies INSIDE the
+                // neighbouring cells' rects — and every unfocused pane
+                // draws a full-cell scrim in the overlay pass, i.e.
+                // after this one.  So the two sides that mark the focus
+                // most clearly were the two the neighbours dimmed
+                // (2026-08-20 report).  Repainting the same rects after
+                // the scrims restores them; the copy is antialiased and
+                // the original is not, but they are the same rect in the
+                // same colour, so the fringe blends into itself.
+                for rr in item.ring_rects() {
+                    overlay_ui_rects.push(UiRectInstance {
+                        origin: [rr.x as f32, rr.y_top as f32],
+                        size: [rr.w as f32, rr.h as f32],
+                        fill_color: focus_outline.color,
+                        border_color: [0.0; 4],
+                        corner_radius: 0.0,
+                        border_width: 0.0,
+                        shadow_blur: 0.0,
+                        shadow_alpha: 0.0,
+                        shadow_color: [0.0; 4],
+                    });
                 }
-                .paint(&mut painter);
             }
         }
 
@@ -8938,6 +8961,99 @@ mod tests {
         let deep = both.iter().filter(|a| **a >= EMPTY_SEAT_SCRIM).count();
         assert_eq!(deep, 1, "exactly one scrim, got {both:?}");
         assert!(both.iter().any(|a| (*a - PARKED_SCRIM).abs() < 1e-6));
+    }
+
+    /// The focus ring survives the neighbours' scrims.
+    ///
+    /// The ring is painted in the BG pass at the seam, and the seam on
+    /// the right/bottom sides lies inside the NEIGHBOURING cells'
+    /// rects.  Every unfocused pane covers its whole rect with a scrim
+    /// in the overlay pass — which runs later — so those two sides
+    /// came out dimmed while left and top stayed bright (2026-08-20
+    /// report).  The fix repaints the ring into the overlay pass after
+    /// the scrims; this pins that it is still there.
+    #[test]
+    fn focus_ring_is_repainted_over_neighbour_scrims() {
+        use crate::grid::Grid;
+        use crate::layout::Layout;
+
+        let device = match system_default_device() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut font = FontCache::build().expect("font");
+        let mut atlas = GlyphAtlas::new(&device, 256, 256).expect("atlas");
+        let mut color_atlas = GlyphAtlas::new_color(&device, 256, 256).expect("color atlas");
+
+        let grid = Grid::new(10, 4);
+        // 2x2 with a gutter: gutter > 0 is what turns the ring on.
+        let layout = Layout::build(
+            font.cell_w * 24.0,
+            font.cell_h * 10.0,
+            0.0,
+            0.0,
+            2.0,
+            2,
+            2,
+            font.cell_w,
+            font.cell_h,
+        );
+        let mk = |focused: bool, scrim: f32| SessionView {
+            grid: &grid,
+            view_offset: 0,
+            cursor_visible: true,
+            focused,
+            title: "",
+            selection: None,
+            ime_preedit: "",
+            update_pending: false,
+            dormant: false,
+            recede: 0,
+            scrim,
+            right_badge: "",
+            top_fixed_h_cells: 0,
+            bot_fixed_h_cells: 0,
+            highlight_spans: &[],
+            search_overlay: None,
+            seq: 0,
+        };
+        // Pane 0 focused; its right / bottom / bottom-right neighbours
+        // all carry a scrim, which is the situation that hid the ring.
+        let views = vec![mk(true, 0.0), mk(false, 0.35), mk(false, 0.35), mk(false, 0.35)];
+
+        let mut overlay_ui: Vec<UiRectInstance> = Vec::new();
+        build_instances(
+            &layout, &views, &[], 0, true,
+            None, None, None, None, None, None, None, None,
+            &mut font, &mut atlas, &mut color_atlas,
+            // cells, glyphs, color_glyphs, _dots
+            &mut Vec::new(), &mut Vec::new(), &mut Vec::new(), &mut Vec::new(),
+            // ui_rects, pane_caches
+            &mut Vec::new(), &mut Vec::new(),
+            // overlay_cells, overlay_glyphs, overlay_ui_rects
+            &mut Vec::new(), &mut Vec::new(), &mut overlay_ui,
+        );
+
+        let ring = [0.72f32, 0.76, 0.82, 1.0];
+        let ring_at: Vec<usize> = overlay_ui
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.fill_color == ring)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(ring_at.len(), 8, "expected the 8 ring rects in the overlay pass, got {ring_at:?}");
+
+        // Order is what makes it visible: every scrim must be pushed
+        // before the ring, or the ring is dimmed again.
+        let last_scrim = overlay_ui
+            .iter()
+            .rposition(|r| r.fill_color[3] > 0.0 && r.fill_color[0] == 0.0
+                        && r.fill_color[1] == 0.0 && r.fill_color[2] == 0.0)
+            .expect("unfocused panes should have pushed scrims");
+        assert!(
+            ring_at[0] > last_scrim,
+            "ring must be painted after the scrims (ring at {ring_at:?}, last scrim {last_scrim})"
+        );
     }
 
     #[test]

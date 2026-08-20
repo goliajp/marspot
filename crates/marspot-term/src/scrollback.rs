@@ -638,7 +638,6 @@ impl FileScrollback {
         cols: usize,
         ram_capacity: usize,
     ) -> std::io::Result<Self> {
-        use std::io::Write;
         if let Some(parent) = bin_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -935,7 +934,6 @@ impl FileScrollback {
     /// older history is unrecoverable.  RAM ring contents are
     /// preserved (in-memory state is independent of the file).
     fn rotate_to_cold(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
         // Capture the count of rows about to leave hot for cold.
         let hot_count_before = self.total_lines - self.hot_first_line;
         if hot_count_before == 0 {
@@ -1042,7 +1040,6 @@ impl FileScrollback {
 
     /// Append one line.  Hot path.
     pub fn push_line(&mut self, line: &[crate::grid::Cell], wrapped: bool) {
-        use std::io::Write;
         // F3+11.1 — trim trailing cells equal to `Cell::default()`
         // before encoding.  This is pure disk-size optimisation; the
         // semantic is unchanged from the dumb-store model: every
@@ -1118,7 +1115,6 @@ impl FileScrollback {
     /// burst because `has_unflushed` clears here and only `push_line`
     /// re-sets it.
     fn ensure_flushed(&self) {
-        use std::io::Write;
         if !self.has_unflushed.get() {
             return;
         }
@@ -1139,7 +1135,6 @@ impl FileScrollback {
     /// recent rows hit the file directly instead of having to wait
     /// for the next push_line to spill.
     pub fn flush_for_handoff(&self) {
-        use std::io::Write;
         let _ = self.bin.borrow_mut().flush();
         self.has_unflushed.set(false);
     }
@@ -1469,7 +1464,6 @@ impl FileScrollback {
     }
 
     pub fn clear(&mut self) {
-        use std::io::Write;
         // CSI 3 J = the user's EXPLICIT "wipe my history" instruction
         // — it must reach the persistent tier, or `clear` + app
         // restart resurrects everything from disk (2026-07-17 field
@@ -1533,7 +1527,7 @@ impl FileScrollback {
 
 impl Drop for FileScrollback {
     fn drop(&mut self) {
-        use std::io::{Seek, SeekFrom, Write};
+        use std::io::{Seek, SeekFrom};
         // Flush BufWriters so any buffered bytes hit the page cache
         // before our fds close.  No fsync.  Dense idx — no sentinel.
         let _ = self.bin.borrow_mut().flush();
@@ -1623,7 +1617,6 @@ impl FileScrollback {
     /// snapshot's view (appends only grow the file past
     /// `total_lines`).
     pub fn snapshot_for_search(&self) -> std::io::Result<FileSnapshot> {
-        use std::io::Write;
         self.bin.borrow_mut().flush();
         self.idx.borrow_mut().flush();
         let bin = std::fs::OpenOptions::new().read(true).open(&self.bin_path)?;

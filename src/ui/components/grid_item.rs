@@ -108,13 +108,34 @@ impl GridItem {
     /// the outline overlays the gray seam and visually REPLACES
     /// its color in the seam's exact footprint.
     pub fn paint(&self, p: &mut ViewPainter) {
+        for r in self.ring_rects() {
+            p.fill_rect(r, self.outline.color);
+        }
+    }
+
+    /// The ring's eight rects, in paint order — empty when this cell
+    /// is not focused.
+    ///
+    /// Exposed separately because the ring has to be painted TWICE,
+    /// into two different passes.  The BG-pipeline copy is the real
+    /// one: `fill_rect` there is pixel-exact, which is what lets the
+    /// ring replace the gray seam without an AA fringe.  But the
+    /// unfocused panes' scrim is an overlay-pass rect covering their
+    /// whole cell, and the ring's right/bottom sides sit INSIDE those
+    /// neighbours — so the scrim lands on top and dims exactly the two
+    /// sides that should be brightest (2026-08-20 report: "right and
+    /// bottom aren't the highlighted white").  A second copy in the
+    /// overlay pass, after the scrims, restores them.  That pass is
+    /// SDF-based and antialiases its edges, which would normally be
+    /// visible on a hard-edged ring; here it blends into the identical
+    /// rect already sitting underneath it, so it is not.
+    pub fn ring_rects(&self) -> Vec<Rect> {
         if !self.focused || self.outline.width <= 0.0 {
-            return;
+            return Vec::new();
         }
         let r = self.rect;
         let t = self.outline.width;   // = base seam thickness
         let g = self.gutter;          // = grid gutter
-        let col = self.outline.color;
         let e = self.edges;
         // Side origins.  When the cell is NOT at the grid edge for
         // a given side, the outline overlays the base seam (which
@@ -128,16 +149,18 @@ impl GridItem {
         let bottom_y = if e.bottom { r.y_top + r.h - t    } else { r.y_top + r.h };
         let left_x   = if e.left   { r.x                  } else { r.x - g };
         let right_x  = if e.right  { r.x + r.w - t        } else { r.x + r.w };
-        // 4 sides span the rect's perpendicular extent (cell.w/cell.h).
-        p.fill_rect(Rect { x: r.x,    y_top: top_y,    w: r.w, h: t   }, col);
-        p.fill_rect(Rect { x: r.x,    y_top: bottom_y, w: r.w, h: t   }, col);
-        p.fill_rect(Rect { x: left_x, y_top: r.y_top,  w: t,   h: r.h }, col);
-        p.fill_rect(Rect { x: right_x,y_top: r.y_top,  w: t,   h: r.h }, col);
-        // 4 corners: t×t squares at base-seam intersections.
-        p.fill_rect(Rect { x: left_x,  y_top: top_y,    w: t, h: t }, col);
-        p.fill_rect(Rect { x: right_x, y_top: top_y,    w: t, h: t }, col);
-        p.fill_rect(Rect { x: left_x,  y_top: bottom_y, w: t, h: t }, col);
-        p.fill_rect(Rect { x: right_x, y_top: bottom_y, w: t, h: t }, col);
+        vec![
+            // 4 sides span the rect's perpendicular extent (cell.w/cell.h).
+            Rect { x: r.x,     y_top: top_y,    w: r.w, h: t   },
+            Rect { x: r.x,     y_top: bottom_y, w: r.w, h: t   },
+            Rect { x: left_x,  y_top: r.y_top,  w: t,   h: r.h },
+            Rect { x: right_x, y_top: r.y_top,  w: t,   h: r.h },
+            // 4 corners: t×t squares at base-seam intersections.
+            Rect { x: left_x,  y_top: top_y,    w: t, h: t },
+            Rect { x: right_x, y_top: top_y,    w: t, h: t },
+            Rect { x: left_x,  y_top: bottom_y, w: t, h: t },
+            Rect { x: right_x, y_top: bottom_y, w: t, h: t },
+        ]
     }
 }
 
