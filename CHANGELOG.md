@@ -2475,7 +2475,38 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.150**
+Current: **0.12.151**
+
+### 0.12.151
+
+**`~/…` 的文件链接,点「Open file」永远没反应。**
+
+```
+$ /usr/bin/open '~/Downloads/x.pdf'
+The file /Users/doracawl/workspace/goliajp/marspot/~/Downloads/x.pdf does not exist.
+```
+
+`~` 是 shell 的语法,shell 之下没人展开它 —— `open(1)` 把它当成 cwd 底下一个**名叫
+`~` 的目录**。而 linkify 判断路径存不存在时**是**展开的(`path_exists` 里拼 HOME),
+于是链接照常带下划线、点下去什么也不发生。**每一个 `~/` 开头的文件链接都是这样**,
+不是某个文件的问题。
+
+两处一起修:
+
+1. **展开移进 `marspot-linkify::expand_user_path`,由 `grid_links` re-export。** 检测
+   和动作必须对「`~/…` 是什么」有同一个答案;两份实现迟早漂移,这次就是漂了。
+2. **失败不再无声。** `spawn` 只报告「进程起不来」;`open(1)` 自己失败(通常是路径没
+   了)只是退出码非零 + 一行没人读的 stderr。现在动作前若路径不存在,记一条
+   `core.link_open_missing` —— 链接是 stat 过才画的,所以这种情况意味着**文件在那一帧
+   之后被移走了,而那一行没有重绘过**(按需重绘是 idle CPU ≈ 0 的前提,不是 bug)。
+
+顺带把 open 参数的计算从上下文菜单的事件路径里提成自由函数 `open_arg_for`,否则唯一
+真正出错的那条分支从外面根本测不到。红-绿验过:把展开去掉,测试立刻 FAIL。
+
+**本次报告的那个文件另有原因**:`~/Downloads/Maintained-but-Not-Internalised_ICLR2027
+-submission-draft_2026-08-21.pdf` 磁盘上确实没有 —— 现存的是
+`Maintained-but-Not-Internalised_ICLR2027.pdf`(少了 `-submission-draft_2026-08-21`)。
+即便修好展开,那条链接也打不开,因为目标不存在;新加的日志正是为了让这种情况说得出话。
 
 ### 0.12.150
 

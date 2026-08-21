@@ -1963,20 +1963,35 @@ fn is_real_path(path: &str) -> bool {
     ok
 }
 
+/// Turn a link's text into a path the OS will accept.
+///
+/// `~` is shell syntax, not filesystem syntax: nothing below the shell
+/// expands it.  This matters beyond the existence check — whoever ACTS
+/// on a file link (opening it, revealing it) has to hand the same
+/// expanded path to the OS, or the link resolves here and fails there.
+/// That was live until 2026-08-21: every `~/…` file link stat'ed fine,
+/// underlined, and then did nothing when opened, because
+/// `/usr/bin/open` took `~` for a directory name and looked for it
+/// under the process's cwd.
+///
+/// Returns `None` only when `~/` is present and `HOME` is not — there
+/// is no sensible path to hand back in that case.
+pub fn expand_user_path(path: &str) -> Option<PathBuf> {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|home| {
+            let mut p = PathBuf::from(home);
+            p.push(rest);
+            p
+        }),
+        None => Some(PathBuf::from(path)),
+    }
+}
+
 fn path_exists(path: &str) -> bool {
-    let expanded = if let Some(rest) = path.strip_prefix("~/") {
-        match std::env::var_os("HOME") {
-            Some(home) => {
-                let mut p = PathBuf::from(home);
-                p.push(rest);
-                p
-            }
-            None => return false,
-        }
-    } else {
-        PathBuf::from(path)
-    };
-    std::fs::symlink_metadata(&expanded).is_ok()
+    match expand_user_path(path) {
+        Some(expanded) => std::fs::symlink_metadata(&expanded).is_ok(),
+        None => false,
+    }
 }
 
 /// Structural URL filter.  The `http://` / `https://` prefix is the

@@ -105,7 +105,83 @@ mod ip_bracket_tests {
 /// default app for the file's UTI.  Fire and forget; we don't wait
 /// on the child.  Stderr inherited so a malformed arg surfaces in
 /// marspot.log via the usual stderr pipe instead of vanishing.
+/// What `open(1)` should be handed for a clicked link, or `None` when
+/// the kind has no open action.
+///
+/// A free function so it can be tested: the caller is buried in the
+/// context-menu event path, and the one case that actually broke was
+/// invisible from there.
+fn open_arg_for(kind: marspot::grid_links::LinkKind, text: &str) -> Option<String> {
+    let link_text = text;
+    match kind {
+        marspot::grid_links::LinkKind::Email => {
+            Some(format!("mailto:{}", link_text))
+        }
+        // Bare IP (`47.96.114.231`, `::1`,
+        // `2001:db8::1`, `[fe80::1]:8080/foo`) needs an
+        // `http://` scheme so `open(1)` routes it —
+        // defaults to port 80.  Bare IPv6 without
+        // brackets gets wrapped so URL parsers accept
+        // it (colons in a hostname are ambiguous with
+        // `host:port` otherwise).
+        marspot::grid_links::LinkKind::Ip => {
+            Some(if link_text.starts_with('[')
+                || !ip_text_is_bare_ipv6(&link_text)
+            {
+                format!("http://{}", link_text)
+            } else {
+                format!("http://[{}]", link_text)
+            })
+        }
+        marspot::grid_links::LinkKind::Url => {
+            let head: String = link_text
+                .chars()
+                .take(8)
+                .flat_map(char::to_lowercase)
+                .collect();
+            Some(
+                if head.starts_with("http://")
+                    || head.starts_with("https://")
+                {
+                    link_text.to_string()
+                } else {
+                    format!("http://{}", link_text)
+                },
+            )
+        }
+        // UUID has no Open action (menu doesn't offer
+        // it); if a stale click reaches here, no-op.
+        marspot::grid_links::LinkKind::Uuid => None,
+        // Expand `~` here, not at the call site: `open(1)` does not do
+        // shell expansion, so it read `~` as a directory name under the
+        // process cwd and reported the file missing — silently, since
+        // `spawn` only fails when the process cannot START.  Every
+        // `~/…` file link underlined correctly (linkify expands for its
+        // stat) and then did nothing when clicked.
+        marspot::grid_links::LinkKind::File => marspot::grid_links::expand_user_path(link_text)
+            .map(|p| p.to_string_lossy().into_owned()),
+    }
+}
+
 fn spawn_open(arg: &str) {
+    // `spawn` only reports that the process could not START.  When
+    // `open(1)` itself fails — the usual reason being a path that no
+    // longer exists — it exits non-zero and prints to a stderr nobody
+    // reads, so a click that does nothing leaves no trace at all.  A
+    // link is only drawn after linkify stats the path, so a miss here
+    // means the file moved between the frame and the click; say so.
+    if !arg.starts_with("http://")
+        && !arg.starts_with("https://")
+        && !arg.starts_with("mailto:")
+        && std::fs::symlink_metadata(arg).is_err()
+    {
+        lx_warn!(
+            "core.link_open_missing",
+            "link target is gone — the pane still shows it because \
+             nothing has redrawn that row since",
+            arg = arg
+        );
+    }
     if let Err(e) = std::process::Command::new("/usr/bin/open")
         .arg(arg)
         .stdin(std::process::Stdio::null())
@@ -2137,6 +2213,30 @@ mod link_menu_tests {
         assert_eq!(items[0].action_tag, ContextMenuAction::CopyLink.tag());
         assert_eq!(items[1].label, "Open URL");
         assert_eq!(items[1].action_tag, ContextMenuAction::OpenLink.tag());
+    }
+
+    /// A `~/…` file link must reach `open(1)` already expanded.
+    ///
+    /// `open(1)` does no shell expansion — handed `~/x`, it looks for a
+    /// directory literally named `~` under its cwd and reports the file
+    /// missing.  linkify DOES expand `~` for its existence check, so
+    /// such links underlined normally and then did nothing when
+    /// clicked (2026-08-21 report).  Nothing surfaced the failure
+    /// either: `spawn` succeeds as long as the process starts.
+    #[test]
+    fn a_tilde_file_link_is_expanded_before_open() {
+        let home = std::env::var("HOME").expect("HOME");
+        let arg = open_arg_for(marspot::grid_links::LinkKind::File, "~/Downloads/x.pdf")
+            .expect("file links have an open action");
+        assert!(
+            !arg.contains('~'),
+            "open(1) gets no shell: `~` must already be gone, got {arg:?}"
+        );
+        assert_eq!(arg, format!("{home}/Downloads/x.pdf"));
+
+        // An absolute path is passed through untouched.
+        let abs = open_arg_for(marspot::grid_links::LinkKind::File, "/tmp/y.log").unwrap();
+        assert_eq!(abs, "/tmp/y.log");
     }
 
     #[test]
@@ -4845,50 +4945,7 @@ impl CoreApp {
             }
             ContextMenuAction::OpenLink => {
                 if let Some(link) = link_snapshot.as_ref() {
-                    let arg = match link.kind {
-                        marspot::grid_links::LinkKind::Email => {
-                            Some(format!("mailto:{}", link.text))
-                        }
-                        // Bare IP (`47.96.114.231`, `::1`,
-                        // `2001:db8::1`, `[fe80::1]:8080/foo`) needs an
-                        // `http://` scheme so `open(1)` routes it —
-                        // defaults to port 80.  Bare IPv6 without
-                        // brackets gets wrapped so URL parsers accept
-                        // it (colons in a hostname are ambiguous with
-                        // `host:port` otherwise).
-                        marspot::grid_links::LinkKind::Ip => {
-                            Some(if link.text.starts_with('[')
-                                || !ip_text_is_bare_ipv6(&link.text)
-                            {
-                                format!("http://{}", link.text)
-                            } else {
-                                format!("http://[{}]", link.text)
-                            })
-                        }
-                        marspot::grid_links::LinkKind::Url => {
-                            let head: String = link
-                                .text
-                                .chars()
-                                .take(8)
-                                .flat_map(char::to_lowercase)
-                                .collect();
-                            Some(
-                                if head.starts_with("http://")
-                                    || head.starts_with("https://")
-                                {
-                                    link.text.clone()
-                                } else {
-                                    format!("http://{}", link.text)
-                                },
-                            )
-                        }
-                        // UUID has no Open action (menu doesn't offer
-                        // it); if a stale click reaches here, no-op.
-                        marspot::grid_links::LinkKind::Uuid => None,
-                        marspot::grid_links::LinkKind::File => {
-                            Some(link.text.clone())
-                        }
-                    };
+                    let arg = open_arg_for(link.kind, &link.text);
                     if let Some(a) = arg {
                         spawn_open(&a);
                     }

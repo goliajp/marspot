@@ -15,6 +15,12 @@
 
 use crate::grid::Grid;
 use marspot_linkify::CellSource;
+
+/// Re-exported for whoever ACTS on a file link.  Detection and action
+/// have to agree on what `~/…` means: linkify expands it to decide the
+/// path exists, so the opener must expand it too or the link resolves
+/// in one place and fails in the other.
+pub use marspot_linkify::expand_user_path;
 pub use marspot_linkify::{LinkKind, LinkRange};
 
 /// Options that tune `scan_visible_links` for the calling pane.  All

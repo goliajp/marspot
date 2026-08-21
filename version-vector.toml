@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.115"  # 从 banner 里「取出」model,而不是把整行洗干净;详见 CHANGELOG.md
-core    = "0.12.150"  # 焦点框右/下两边被邻居 scrim 压暗:overlay 里补画一遍;详见 CHANGELOG.md
+core    = "0.12.151"  # ~/… 文件链接点开无反应:open(1) 不展开 ~;详见 CHANGELOG.md
 session = "0.11.54"  # 孤立可打印字符不再过状态机(parse 全语料 +2-4%);详见 CHANGELOG.md
