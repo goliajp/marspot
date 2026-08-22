@@ -6335,7 +6335,26 @@ impl CoreApp {
             .map(|b| !b.is_empty())
             .unwrap_or(false);
         let opts = marspot::grid_links::ScanOpts { cc_mode };
-        let links = marspot::grid_links::scan_visible_links(grid, view_offset, opts);
+        // The same non-blocking oracle the render pass uses, for two
+        // reasons.  The obvious one: this runs on the main loop's
+        // `events` phase, and the blocking default turns one click
+        // into a full-screen stat sweep — caught in the field at
+        // 6.39 s with every pane frozen, `mouse_down →
+        // hit_test_link_at_xy → FsOracle::probe → lstat` accounting
+        // for 948 of 1556 samples.
+        //
+        // The less obvious one is correctness: a link is clickable
+        // because it is *painted*, and it is painted because the
+        // render pass got `Exists` from this cache.  Asking a
+        // different oracle here lets the hit-test disagree with what
+        // is on screen in both directions — an underline that does
+        // nothing, or a click that fires on a row showing no link.
+        let links = marspot::grid_links::scan_visible_links_with(
+            grid,
+            view_offset,
+            opts,
+            marspot::link_probe::oracle(),
+        );
         links.into_iter().find(|link| {
             link.row == row && col >= link.col_start && col <= link.col_end
         })

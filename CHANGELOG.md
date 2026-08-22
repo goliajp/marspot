@@ -2599,6 +2599,27 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 Current: **0.12.151**
 
+### 0.12.154
+
+The click hit-test uses the async oracle too.
+
+0.12.152 moved the *render* pass off the filesystem and the render
+stalls stopped dead — but `l2.loop.stall` immediately started
+reporting the `events` phase instead, at 3.44 s / 5.47 s / 6.39 s.
+Sampling the core the moment it logged `l2.loop.stalling` caught it:
+`mouse_down → hit_test_link_at_xy → FsOracle::probe → lstat`, 948 of
+1556 samples.  Every click in a pane was doing a full-screen blocking
+stat sweep.  (The call site was missed on the first pass because the
+grep that was supposed to find every caller was truncated by a
+`head -20` — grid_links.rs's own tests filled the window.)
+
+Beyond not blocking, this is the correct oracle for the hit-test on
+its own merits: a link is clickable because it is *painted*, and it is
+painted because the render pass got `Exists` from this same cache.
+Asking a different oracle lets the two disagree in both directions —
+an underline that does nothing, or a click firing on a row that shows
+no link.
+
 ### 0.12.153
 
 `link_probe` bumps its generation only when a verdict is new or
