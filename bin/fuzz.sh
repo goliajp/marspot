@@ -32,6 +32,14 @@ fi
 # cargo-fuzz needs nightly (-Z sanitizer flags); it also defaults to
 # x86_64-apple-darwin on Apple Silicon (cargo-fuzz <=0.13.x), so pin
 # the host triple explicitly to avoid an unwanted Rosetta build.
+#
+# The pin covers what cargo-fuzz *builds*, not what it *is*: a
+# cargo-fuzz installed under Rosetta is itself an x86_64 binary, and
+# running it launches a translated process.  macOS attributes that to
+# the terminal's bundle — every child of a pane is `responsible_path=
+# .../Marspot.app/...` — which is how a clean, arm64-only Marspot
+# ends up showing "Intel app support will end soon".  Keep the driver
+# native; `lipo -archs "$(command -v cargo-fuzz)"` must say arm64.
 HOST_TRIPLE="$(rustc -vV | awk '/host:/ {print $2}')"
 
 while IFS= read -r t; do
