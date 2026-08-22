@@ -28,7 +28,32 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.116**
+Current: **0.7.117**
+
+### 0.7.117
+
+**未知 flag 不再当成一次启动。**
+
+0.7.116 的 status-line hook 把 `marspot-shell --cc-statusline` 写进了 cc 的
+settings.json,而 bundle 里那个 binary 可能是旧的(装的时候它正在被运行中的 app
+占着,覆盖要等下次冷启动)。实测 0.7.82 拿到这个它不认识的 flag:一路穿过
+所有 CLI 分支,**起了一个完整的 supervisor** —— shell.pid、控制 socket、
+session 目录都建了,只能 SIGKILL。claude 每次重绘调一次,也就是每次重绘一个窗口。
+
+两头都堵:
+
+- `Some(a) if a.starts_with('-')` 落在 CLI match 的最后:未知选项打一行到
+  stderr、exit 2,不再往下走到 GUI 启动。裸 `marspot-shell` 仍是启动,位置
+  参数仍然穿过去。
+- `bin/install-cc-statusline.sh` 不再假定 bundle 认得这个 flag,而是**核对
+  版本**:候选依次是 bundle 和 `binaries/current/`,取第一个 ≥ 0.7.116 的;
+  一个都没有就不装 hook(角标回落到 transcript 扫描)。已经装过但指向旧
+  binary 的,会被重新指向。
+
+顺带修一个会让 hook **完全不触发**的坑:claude 是**过 shell** 执行
+`statusLine.command` 的,而 `binaries/current/` 的路径里带空格
+(`Application Support`)。不加引号时 claude 一次都不会调它 —— 两种写法都
+实测过。现在路径带引号写入。
 
 ### 0.7.116
 

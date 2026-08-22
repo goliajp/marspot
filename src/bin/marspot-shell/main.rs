@@ -5151,6 +5151,21 @@ Usage:\n\
             );
             return;
         }
+        // An unrecognised option is a mistake, not a launch.
+        //
+        // Falling through to the GUI start meant `marspot-shell
+        // --typo` opened a window; harmless enough for a typo, and
+        // not at all harmless for a Claude Code status-line hook,
+        // which runs on every render — pointed at a binary too old to
+        // know `--cc-statusline`, that is one window per render.
+        // (Measured: an 0.7.82 shell handed the flag came up as a
+        // full supervisor — shell.pid, control socket, session dir —
+        // and had to be killed.)  A bare `marspot-shell` is still the
+        // GUI launch, and positional arguments still fall through.
+        Some(a) if a.starts_with('-') => {
+            eprintln!("marspot-shell: unknown option `{a}` — see --help");
+            std::process::exit(2);
+        }
         _ => {}
     }
 
