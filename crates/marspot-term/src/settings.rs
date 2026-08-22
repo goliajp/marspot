@@ -84,6 +84,21 @@ pub struct Settings {
     /// stays for the machine where it is wrong).  Speed has no right
     /// answer — it depends on the mouse.
     pub scroll_factor: f32,
+    /// Let Claude Code tell marspot which model each pane is on, by
+    /// registering a status-line hook in Claude Code's own settings.
+    ///
+    /// Off, and the reason is whose file it is.  Turning it on edits
+    /// `~/.claude*/settings.json` — somebody else's configuration —
+    /// so it is a thing the user asks for, never a thing installing
+    /// marspot does to them.  Off, the badge still names the model:
+    /// it reads the session transcript and the pane's own startup
+    /// banner.  On, it stops being a turn behind in the cases those
+    /// two are silent about — a `/model` switch on a parked pane, and
+    /// the moment just after a profile cycle.
+    ///
+    /// A status line the user already wrote is not taken away; it is
+    /// chained, and put back when this goes off again.
+    pub cc_statusline_hook: bool,
 }
 
 impl Default for Settings {
@@ -95,6 +110,7 @@ impl Default for Settings {
             appearance_circled_wide: false,
             dim_scale: 1.0,
             scroll_factor: 1.0,
+            cc_statusline_hook: false,
         }
     }
 }
@@ -229,6 +245,7 @@ const KEYS: &[&str] = &[
     "appearance.circled_wide",
     "appearance.dim_scale",
     "input.scroll_factor",
+    "claudecode.statusline_hook",
 ];
 
 fn value_of(s: &Settings, key: &str) -> String {
@@ -239,6 +256,7 @@ fn value_of(s: &Settings, key: &str) -> String {
         "appearance.circled_wide" => s.appearance_circled_wide.to_string(),
         "appearance.dim_scale" => fmt_f32(s.dim_scale),
         "input.scroll_factor" => fmt_f32(s.scroll_factor),
+        "claudecode.statusline_hook" => s.cc_statusline_hook.to_string(),
         _ => String::new(),
     }
 }
@@ -272,6 +290,9 @@ pub fn parse(body: &str) -> Settings {
             }
             "input.scroll_factor" => {
                 s.scroll_factor = parse_f32(v, s.scroll_factor, 0.1, 8.0)
+            }
+            "claudecode.statusline_hook" => {
+                s.cc_statusline_hook = parse_bool(v, s.cc_statusline_hook)
             }
             // Anything else is a key this build does not know.  Left
             // alone here and preserved verbatim by `render` — a newer

@@ -28,7 +28,32 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.118**
+Current: **0.7.119**
+
+### 0.7.119
+
+**hook 的开关进了设置面板,注册由 L1 自己对账,安装脚本退役。**
+
+0.7.118 把 hook 改成了 opt-in,但 opt-in 的入口是 `bin/install-cc-statusline.sh`
+—— 一个**仓库里的**脚本。装了 marspot 的人手上没有它,所以那个 opt-in 对他们
+等于不存在。而且它是第二个写 cc settings.json 的人,跟别的写入方会打架。
+
+现在只有一个真相:设置项 `claudecode.statusline_hook`(默认 **off**)。
+
+- 设置面板多一个 "Claude Code" 分组、一个开关,cost 行直说这是别人的文件。
+- L1 的 claudecode 插件在自己的 sweep 里**对账**:开关开着而 cc 那边没有 →
+  装上;关掉而装着 → 摘掉;装着但 binary 换了地方 → 重新指向。开关没动时
+  一分钟才核一次,两秒的扫描上只多一次 map 查找。
+- 注册逻辑整套从 shell 脚本搬进 Rust(settings.json 的定位 / 剪切 / 写回、
+  软链穿透、`sh -c` 引号、串联的编解码),所以它跟着二进制走,不跟着仓库走。
+- `bin/install-cc-statusline.sh` 删除;`bin/install-local.sh` 不再碰 cc 的
+  配置 —— 装 marspot 不再有这个副作用。
+
+写回前有一道结构校验(括号 / 引号 / 逗号配平),不通过就**拒绝写**并记一行。
+`settings.json` 写坏会把人锁在自己的工具外面,这是不能赌的一处。
+
+三种文件形状(单行 / 缩进 / 末位成员)开→关 round-trip 逐字节还原;别人已有的
+status line 连空格带引号原样交回。
 
 ### 0.7.118
 

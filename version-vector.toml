@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.118"  # 横幅排到 last_model 之前(零配置修 profile 轮换);hook 改 opt-in 且能串联;详见 CHANGELOG.md
+shell   = "0.7.119"  # hook 的开关进设置面板,L1 自己对账,脚本退役;详见 CHANGELOG.md
 core    = "0.12.151"  # ~/… 文件链接点开无反应:open(1) 不展开 ~;详见 CHANGELOG.md
 session = "0.11.54"  # 孤立可打印字符不再过状态机(parse 全语料 +2-4%);详见 CHANGELOG.md

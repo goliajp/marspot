@@ -101,6 +101,7 @@ pub enum Row {
     DimScale,
     CircledWide,
     ScrollFactor,
+    CcStatuslineHook,
 }
 
 /// A row's control shape.
@@ -188,6 +189,19 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     Section {
+        heading: "Claude Code",
+        rows: &[RowSpec {
+            row: Row::CcStatuslineHook,
+            label: "Let Claude Code report its model",
+            // Says whose file it is, because that is the whole cost.
+            // Off, the badge still names the model — from the session
+            // transcript and the pane's own banner — it is just a turn
+            // behind where those go quiet.
+            cost: "adds a status-line entry to Claude Code's settings; \
+                   yours, if any, is chained and restored",
+        }],
+    },
+    Section {
         heading: "Scrolling",
         rows: &[RowSpec {
             row: Row::ScrollFactor,
@@ -228,6 +242,7 @@ impl Row {
                     .unwrap_or(usize::MAX),
             },
             Row::ReclaimPrefetch => Control::Toggle(s.reclaim_prefetch),
+            Row::CcStatuslineHook => Control::Toggle(s.cc_statusline_hook),
             Row::CircledWide => Control::Toggle(s.appearance_circled_wide),
             Row::DimScale => Control::Segmented {
                 options: DIM_LABELS,
@@ -252,7 +267,8 @@ impl Row {
             Row::ReclaimEnabled
             | Row::CircledWide
             | Row::DimScale
-            | Row::ScrollFactor => false,
+            | Row::ScrollFactor
+            | Row::CcStatuslineHook => false,
             Row::ReclaimIdleMinutes | Row::ReclaimPrefetch => !s.reclaim_enabled,
         }
     }
@@ -268,6 +284,7 @@ impl Row {
         match self {
             Row::ReclaimEnabled => next.reclaim_enabled = !s.reclaim_enabled,
             Row::ReclaimPrefetch => next.reclaim_prefetch = !s.reclaim_prefetch,
+            Row::CcStatuslineHook => next.cc_statusline_hook = !s.cc_statusline_hook,
             Row::CircledWide => next.appearance_circled_wide = !s.appearance_circled_wide,
             Row::ReclaimIdleMinutes => {
                 next.reclaim_idle_minutes = *IDLE_CHOICES.get(seg)?;
