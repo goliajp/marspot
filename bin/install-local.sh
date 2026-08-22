@@ -571,4 +571,12 @@ fi
 # this section is intentionally empty so the daemon is never
 # resurrected via install-local.
 
+# ── 8. Claude Code status-line hook ───────────────────────────────
+# The pane badge's model comes from claude itself through this hook
+# rather than from tailing the transcript.  Idempotent and additive;
+# never touches a config that already has its own statusLine.
+echo "==> claudecode status-line hook"
+MARSPOT_APP="$APP" "$(dirname "$0")/install-cc-statusline.sh" || \
+  echo "    WARN: status-line hook not installed — badge falls back to the transcript" >&2
+
 echo "==> done."
