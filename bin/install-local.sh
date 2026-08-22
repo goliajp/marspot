@@ -572,12 +572,10 @@ fi
 # resurrected via install-local.
 
 # ── 8. Claude Code status-line hook ───────────────────────────────
-# --refresh only: if the hook is already registered, keep it pointed at
-# a binary that knows the flag.  It never installs one — that edits
-# Claude Code's settings.json, which is somebody else's configuration
-# and is opt-in via `bin/install-cc-statusline.sh`.
-echo "==> claudecode status-line hook (refresh)"
-MARSPOT_APP="$APP" "$(dirname "$0")/install-cc-statusline.sh" --refresh || \
-  echo "    WARN: could not refresh the status-line hook" >&2
+# Nothing to do here.  The hook's registration follows the
+# `claudecode.statusline_hook` setting, which the running shell
+# reconciles on its own sweep — including repointing an installed hook
+# at this build's binary.  Installing marspot does not touch Claude
+# Code's settings; the switch in the settings panel does.
 
 echo "==> done."
