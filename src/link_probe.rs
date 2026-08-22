@@ -176,9 +176,21 @@ impl LinkProbe {
             };
             let mut c = self.cache.lock().expect("link-probe cache poisoned");
             c.inflight.remove(&path);
+            // Only a verdict the renderer has not already drawn is
+            // worth a generation bump: the counter invalidates EVERY
+            // pane's instance cache, so re-confirming the same answer
+            // when a TTL lapses would rebuild all 14 panes on a timer
+            // for no visible change.  A path we have never answered,
+            // or one whose answer flipped, is the real signal.
+            let changed = match c.hot.get(&path).or_else(|| c.cold.get(&path)) {
+                Some(prev) => prev.exists != entry.exists,
+                None => true,
+            };
             insert_hot(&mut c, path, entry);
             drop(c);
-            self.generation.fetch_add(1, Ordering::Relaxed);
+            if changed {
+                self.generation.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -302,6 +314,45 @@ mod tests {
         let c = probe.cache.lock().unwrap();
         assert!(c.queue.len() <= QUEUE_CAP, "queue grew to {}", c.queue.len());
         assert!(c.inflight.len() <= QUEUE_CAP);
+    }
+
+    /// Re-confirming a verdict the renderer already drew must not
+    /// invalidate every pane — otherwise the instance cache is
+    /// defeated on the TTL's schedule rather than by real change.
+    #[test]
+    fn unchanged_verdict_does_not_bump_generation() {
+        let probe: &'static LinkProbe = Box::leak(Box::new(LinkProbe::new()));
+        std::thread::spawn(move || probe.run());
+
+        // First answer: new information, so it must bump.
+        let g0 = probe.generation();
+        assert_eq!(probe.probe("/"), PathVerdict::Unknown);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && probe.probe("/") == PathVerdict::Unknown {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(probe.probe("/"), PathVerdict::Exists);
+        let g1 = probe.generation();
+        assert!(g1 > g0, "a first answer must invalidate");
+
+        // Age the entry out so the next ask re-queues it, and check
+        // that landing the SAME answer changes nothing.
+        {
+            let mut c = probe.cache.lock().unwrap();
+            let stale = Entry {
+                exists: true,
+                at: Instant::now() - TTL - Duration::from_secs(1),
+                ttl: TTL,
+            };
+            c.hot.insert("/".into(), stale);
+        }
+        assert_eq!(probe.probe("/"), PathVerdict::Unknown);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && probe.probe("/") == PathVerdict::Unknown {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(probe.probe("/"), PathVerdict::Exists);
+        assert_eq!(probe.generation(), g1, "re-confirmation must not invalidate");
     }
 
     /// Cache rotation keeps a live entry reachable instead of

@@ -2599,6 +2599,17 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 Current: **0.12.151**
 
+### 0.12.153
+
+`link_probe` bumps its generation only when a verdict is new or
+flipped, not on every landed probe.
+
+The counter invalidates *every* pane's instance cache, and a verdict
+expires on a 5 s TTL, so re-confirming an answer the renderer had
+already drawn would rebuild all 14 panes on that timer — the instance
+cache defeated by a clock rather than by change.  Caught reading the
+first post-fix stall line, which showed `13/14rebuilt`.
+
 ### 0.12.152
 
 Link scanning no longer stats the filesystem from the render thread.
