@@ -67,6 +67,7 @@ pub mod font_shape;
 pub mod font_trait;
 pub mod glyph_atlas;
 pub mod input;
+pub mod link_probe;
 pub mod iosurface;
 pub mod pane;
 pub mod pane_name;

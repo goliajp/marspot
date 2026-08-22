@@ -9,10 +9,7 @@
 //! (with a small TTL cache) arbitrates; URLs are structurally
 //! validated instead.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 /// The cell surface a scan reads.  Coordinates are viewport-local
 /// (`0..cols() × 0..rows()`).  Implementors decide what a "row" is —
@@ -115,6 +112,18 @@ pub struct ScanOpts {
 /// hit a link menu.  The exemption is structural (based on grid
 /// content), so it's inert on non-claudecode grids.
 pub fn scan_visible_links<S: CellSource>(src: &S, opts: ScanOpts) -> Vec<LinkRange> {
+    scan_visible_links_with(src, opts, &FsOracle)
+}
+
+/// [`scan_visible_links`] with an explicit path oracle.  The render
+/// loop uses this with an async, cached oracle so the scan never
+/// blocks on the filesystem; everything else can keep the blocking
+/// default.
+pub fn scan_visible_links_with<S: CellSource>(
+    src: &S,
+    opts: ScanOpts,
+    oracle: &dyn PathOracle,
+) -> Vec<LinkRange> {
     let mut out = Vec::new();
     let rows = src.rows();
     let cols = src.cols();
@@ -171,7 +180,7 @@ pub fn scan_visible_links<S: CellSource>(src: &S, opts: ScanOpts) -> Vec<LinkRan
         if let Some((lo, hi)) = exempt_range {
             if r >= lo && r <= hi {
                 if !segments.is_empty() {
-                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out);
+                    scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle);
                     chars.clear();
                     col_map.clear();
                     segments.clear();
@@ -187,7 +196,7 @@ pub fn scan_visible_links<S: CellSource>(src: &S, opts: ScanOpts) -> Vec<LinkRan
             && is_hard_wrap_continuation(src, r - 1, r, cols);
         let is_continuation = decawm_cont || cc_cont;
         if !is_continuation && !segments.is_empty() {
-            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out);
+            scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle);
             chars.clear();
             col_map.clear();
             segments.clear();
@@ -235,11 +244,11 @@ pub fn scan_visible_links<S: CellSource>(src: &S, opts: ScanOpts) -> Vec<LinkRan
         char_offset = chars.len();
     }
     if !segments.is_empty() {
-        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out);
+        scan_logical_line(&chars, &col_map, &segments, cols as usize, &mut out, oracle);
     }
     if opts.tui_mode && rule_cols.len() >= 4 {
         let before = out.len();
-        scan_table_cells(src, cols, &rule_cols, &mut out);
+        scan_table_cells(src, cols, &rule_cols, &mut out, oracle);
         // Nothing crossed a cell boundary — leave the row pass's
         // output exactly as it was, sort and all.
         if out.len() != before {
@@ -515,6 +524,7 @@ fn scan_table_cells<S: CellSource>(
     cols: u16,
     rule_cols: &[(u16, u16)],
     out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
 ) {
     if rule_cols.len() < 4 {
         return;
@@ -549,7 +559,7 @@ fn scan_table_cells<S: CellSource>(
         }
         // This row does not extend the block — close what we have.
         if block_rows.len() >= 2 && shared.len() >= 2 {
-            scan_table_block(src, &block_rows, &shared, cols, out);
+            scan_table_block(src, &block_rows, &shared, cols, out, oracle);
         }
         block_rows.clear();
         shared.clear();
@@ -558,7 +568,7 @@ fn scan_table_cells<S: CellSource>(
         row_start = row_end;
     }
     if block_rows.len() >= 2 && shared.len() >= 2 {
-        scan_table_block(src, &block_rows, &shared, cols, out);
+        scan_table_block(src, &block_rows, &shared, cols, out, oracle);
     }
 }
 
@@ -569,6 +579,7 @@ fn scan_table_block<S: CellSource>(
     rules: &[u16],
     cols: u16,
     out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
 ) {
     let mut chars: Vec<char> = Vec::new();
     let mut col_map: Vec<u16> = Vec::new();
@@ -586,7 +597,7 @@ fn scan_table_block<S: CellSource>(
             if is_rule_row(src, r, left, right) {
                 // A separator between table rows: whatever follows is
                 // a different cell, so nothing crosses it.
-                flush_table_line(&chars, &col_map, &segments, cols, out);
+                flush_table_line(&chars, &col_map, &segments, cols, out, oracle);
                 chars.clear();
                 col_map.clear();
                 segments.clear();
@@ -598,7 +609,7 @@ fn scan_table_block<S: CellSource>(
                     && !starts_new_scheme(src, r, left, right)
             });
             if !joins {
-                flush_table_line(&chars, &col_map, &segments, cols, out);
+                flush_table_line(&chars, &col_map, &segments, cols, out, oracle);
                 chars.clear();
                 col_map.clear();
                 segments.clear();
@@ -640,7 +651,7 @@ fn scan_table_block<S: CellSource>(
             }
             prev_row = Some(r);
         }
-        flush_table_line(&chars, &col_map, &segments, cols, out);
+        flush_table_line(&chars, &col_map, &segments, cols, out, oracle);
     }
 }
 
@@ -652,12 +663,13 @@ fn flush_table_line(
     segments: &[LineSegment],
     cols: u16,
     out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
 ) {
     if segments.len() < 2 {
         return;
     }
     let before = out.len();
-    scan_logical_line(chars, col_map, segments, cols as usize, out);
+    scan_logical_line(chars, col_map, segments, cols as usize, out, oracle);
     // A match confined to one row is one the row pass already had.
     let mut i = before;
     while i < out.len() {
@@ -907,6 +919,7 @@ fn scan_logical_line(
     segments: &[LineSegment],
     cols_per_row: usize,
     out: &mut Vec<LinkRange>,
+    oracle: &dyn PathOracle,
 ) {
     if segments.is_empty() {
         return;
@@ -916,7 +929,7 @@ fn scan_logical_line(
     // showed up as ~250 samples in the input-lag profile (15 s, 9
     // panes typing).  emit_match is the only producer, append-only,
     // so passing `out` straight through is safe and saves the alloc.
-    scan_line_into_matches(chars, col_map, out, segments, cols_per_row);
+    scan_line_into_matches(chars, col_map, out, segments, cols_per_row, oracle);
 }
 
 /// Original pattern scanner, but the per-row emit step now consults
@@ -930,6 +943,7 @@ fn scan_line_into_matches(
     out: &mut Vec<LinkRange>,
     segments: &[LineSegment],
     cols_per_row: usize,
+    oracle: &dyn PathOracle,
 ) {
     if segments.is_empty() {
         return;
@@ -981,7 +995,7 @@ fn scan_line_into_matches(
             // marks, and a seam prefix that happens to be a real
             // *directory* must not win over the file the line points
             // at, so it is tried only after every prose cut has.
-            if let Some(b) = resolve_path_end(&chars, i, end) {
+            if let Some(b) = resolve_path_end(&chars, i, end, oracle) {
                 let text = unquote_path(&chars[i..b].iter().collect::<String>());
                 emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                 i = b.max(i + 1);
@@ -1003,7 +1017,7 @@ fn scan_line_into_matches(
             // right edge, merged into one logical line; the retry had
             // the correct answer at every step and never got asked.
             {
-                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
+                if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
                     let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                     i = b;
@@ -1019,14 +1033,14 @@ fn scan_line_into_matches(
         {
             let end = scan_path_candidate(&chars, i);
             if end - i >= 3 {
-                if let Some(b) = resolve_path_end(&chars, i, end) {
+                if let Some(b) = resolve_path_end(&chars, i, end, oracle) {
                     let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                     i = b.max(i + 1);
                     continue;
                 }
                 if looks_like_path(&chars[i..end]) {
-                    if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end) {
+                    if let Some(b) = retry_file_at_segment_boundaries(chars, segments, i, end, oracle) {
                         let text = unquote_path(&chars[i..b].iter().collect::<String>());
                         emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                         i = b;
@@ -1177,6 +1191,7 @@ fn retry_file_at_segment_boundaries(
     segments: &[LineSegment],
     lo: usize,
     hi: usize,
+    oracle: &dyn PathOracle,
 ) -> Option<usize> {
     for seg in segments.iter().rev() {
         let b = seg.char_offset;
@@ -1188,7 +1203,7 @@ fn retry_file_at_segment_boundaries(
             continue;
         }
         let text: String = prefix.iter().collect();
-        if is_real_path(&text) {
+        if is_real_path(oracle, &text) {
             return Some(b);
         }
     }
@@ -1287,7 +1302,7 @@ fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
         char_offset: 0,
         cc_zero_indent: false,
     }];
-    scan_line_into_matches(&chars, &col_map, out, &segments, cols);
+    scan_line_into_matches(&chars, &col_map, out, &segments, cols, &FsOracle);
 }
 
 /// True when `chars[start..]` begins with `prefix`.  All known
@@ -1833,7 +1848,12 @@ fn trim_sentence_tail(chars: &[char], lo: usize, mut end: usize) -> usize {
 /// at the file.
 ///
 /// Cannot invent a link: prose does not name files that exist.
-fn resolve_path_end(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
+fn resolve_path_end(
+    chars: &[char],
+    lo: usize,
+    hi: usize,
+    oracle: &dyn PathOracle,
+) -> Option<usize> {
     let mut tried = 0usize;
     let mut last: Option<usize> = None;
     let consider = |end: usize, tried: &mut usize, last: &mut Option<usize>| -> bool {
@@ -1847,7 +1867,7 @@ fn resolve_path_end(chars: &[char], lo: usize, hi: usize) -> Option<usize> {
             return false;
         }
         let text: String = span.iter().collect();
-        is_real_path(&unquote_path(&text))
+        is_real_path(oracle, &unquote_path(&text))
     };
     // The whole token, then the whole token minus its sentence tail.
     if consider(hi, &mut tried, &mut last) {
@@ -1925,42 +1945,15 @@ fn looks_like_path(chars: &[char]) -> bool {
     true
 }
 
-/// Stat the candidate path (with `~/` expanded) and cache the
-/// verdict for a short window so per-frame scanning doesn't fire a
-/// fresh syscall on every visible row.  Returns true iff the path
-/// resolves to an existing filesystem entry (file, directory,
-/// symlink target — anything `metadata()` is OK with).
-fn is_real_path(path: &str) -> bool {
-    thread_local! {
-        static CACHE: RefCell<HashMap<String, (Instant, bool)>> = RefCell::new(HashMap::new());
-    }
-    const TTL: Duration = Duration::from_secs(2);
-    const CAP: usize = 256;
-
-    let now = Instant::now();
-    let cached = CACHE.with(|c| {
-        c.borrow()
-            .get(path)
-            .and_then(|(t, ok)| {
-                if now.duration_since(*t) < TTL {
-                    Some(*ok)
-                } else {
-                    None
-                }
-            })
-    });
-    if let Some(ok) = cached {
-        return ok;
-    }
-    let ok = path_exists(path);
-    CACHE.with(|c| {
-        let mut m = c.borrow_mut();
-        if m.len() >= CAP {
-            m.clear();
-        }
-        m.insert(path.to_string(), (now, ok));
-    });
-    ok
+/// Ask the oracle whether the candidate path is real.  Only
+/// `Exists` makes a link: `Unknown` — the async oracle has not
+/// resolved this path yet — reads exactly like `Missing` here, so a
+/// path the oracle has not seen simply is not underlined on this
+/// frame.  It becomes a link on a later frame, once the answer
+/// lands.  That collapse is the whole point of the three-state
+/// verdict: the scanner needs no notion of "pending".
+fn is_real_path(oracle: &dyn PathOracle, path: &str) -> bool {
+    matches!(oracle.probe(path), PathVerdict::Exists)
 }
 
 /// Turn a link's text into a path the OS will accept.
@@ -1987,10 +1980,59 @@ pub fn expand_user_path(path: &str) -> Option<PathBuf> {
     }
 }
 
-fn path_exists(path: &str) -> bool {
-    match expand_user_path(path) {
-        Some(expanded) => std::fs::symlink_metadata(&expanded).is_ok(),
-        None => false,
+/// What the oracle knows about one candidate path.
+///
+/// `Unknown` exists so an oracle can answer without touching the
+/// filesystem.  `scan_visible_links` runs inside `build_instances`,
+/// once per pane per frame; an oracle that blocks on `lstat` there
+/// puts a syscall — and a page-cache miss, and whatever the disk is
+/// doing — on the render thread.  On 2026-08-22 that cost a live
+/// 14-pane window frames of 2.1 s to 13.6 s (`l2.loop.stall`,
+/// build-bound), with 79.5 % of render self-time in `lstat` under
+/// this call.  An async oracle answers `Unknown` on a miss, queues
+/// the probe, and the link appears a frame or two later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathVerdict {
+    /// The path resolves to a filesystem entry.
+    Exists,
+    /// The path was checked and does not resolve.
+    Missing,
+    /// Not checked yet.  Never blocks; treated as "no link, for now".
+    Unknown,
+}
+
+/// Decides whether a candidate path is real.  Injected so the stone
+/// crate itself performs no I/O: the scanner is pure over
+/// (cells, opts, oracle), which is also what makes it testable
+/// without a filesystem.
+pub trait PathOracle {
+    fn probe(&self, path: &str) -> PathVerdict;
+}
+
+/// The blocking oracle: one `symlink_metadata` per call, no cache.
+///
+/// Correct for one-shot callers (tests, `scan_text_line`, snapshot
+/// rendering) where a handful of stats is cheaper than any cache.
+/// NOT for the render loop — see [`PathVerdict::Unknown`].
+pub struct FsOracle;
+
+impl PathOracle for FsOracle {
+    fn probe(&self, path: &str) -> PathVerdict {
+        match expand_user_path(path) {
+            Some(expanded) if std::fs::symlink_metadata(&expanded).is_ok() => PathVerdict::Exists,
+            _ => PathVerdict::Missing,
+        }
+    }
+}
+
+/// An oracle that answers `Unknown` for everything — no link is ever
+/// a file link.  For callers that want URL/email/IP detection with
+/// zero filesystem access.
+pub struct NoFsOracle;
+
+impl PathOracle for NoFsOracle {
+    fn probe(&self, _path: &str) -> PathVerdict {
+        PathVerdict::Unknown
     }
 }
 
@@ -3064,7 +3106,7 @@ mod tests {
         // col_map: chars 0..9 → row-0 cols 0..9; chars 10..12 → row-1 cols 0..2.
         let col_map: Vec<u16> = (0..10).chain(0..3).collect();
         let chars: Vec<char> = line.chars().collect();
-        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10);
+        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, 10, &super::FsOracle);
         // One match, fanned into 2 LinkRanges (one per physical row).
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].kind, LinkKind::Url);
@@ -3093,7 +3135,14 @@ mod tests {
         let mut out = Vec::new();
         let chars: Vec<char> = line.chars().collect();
         let col_map: Vec<u16> = (0..chars.len() as u16).collect();
-        super::scan_line_into_matches(&chars, &col_map, &mut out, &segments, chars.len());
+        super::scan_line_into_matches(
+            &chars,
+            &col_map,
+            &mut out,
+            &segments,
+            chars.len(),
+            &super::FsOracle,
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].row, 7);
         assert_eq!(out[0].kind, LinkKind::Url);

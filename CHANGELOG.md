@@ -2599,6 +2599,54 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 Current: **0.12.151**
 
+### 0.12.152
+
+Link scanning no longer stats the filesystem from the render thread.
+
+`build_instances` scans every rebuilt pane for clickable spans on every
+frame, and deciding whether a token is a *file* link meant calling
+`lstat` right there.  On a machine with network mounts that is not a
+syscall, it is a network round trip.  Measured on the dev box:
+`lstat` on a missing path under an SMB-over-Tailscale mount has a
+median of 1.3 us and a **maximum of 6.13 s**; `/Volumes/home` peaked at
+5.98 s; a `/home/...` path — any line mentioning a Linux path — goes
+through the `auto_home` autofs map and costs 17.8–22.7 ms *every*
+scan even when the network is healthy.
+
+That is what the live 14-pane window was dying of on 2026-08-22: the
+core logged 110 build-bound `l2.loop.stall` frames in two hours,
+64.3 s of build time against 0.5 s of GPU, single frames of 2.1 s to
+13.6 s, with `l2.loop.stalling — every pane is frozen right now`
+throughout.  A `sample` of the core put 675 of 849 render samples
+(79.5 %) inside `lstat` beneath the link scan.  The shell's watchdog
+then read the stalls as a hung core and killed it four times in
+90 seconds, ending in a five-minute gap with no core at all.
+
+Volume was never the problem — replaying each pane's real bytelog
+(`examples/link_scan_probe`) puts the whole window at 0–37 probes per
+scan.  Tail latency was.  So no cache fixes this; only not waiting
+does:
+
+- `marspot-linkify` performs no I/O at all any more.  Existence is
+  decided by an injected `PathOracle` returning `Exists` / `Missing` /
+  `Unknown`.  The scanner treats `Unknown` exactly like `Missing`, so
+  "not resolved yet" needs no notion of pending anywhere downstream.
+- `marspot::link_probe` is the render path's oracle: an all-memory
+  lookup that answers immediately, queues misses to one worker
+  thread, and never holds a lock across a syscall.  Bounded by
+  construction — two 4096-entry cache generations that rotate and
+  promote instead of the old wholesale `clear()` at 256, a 512-entry
+  queue that drops on overflow, and a 5-minute TTL for any probe that
+  took over 20 ms so a stalled mount is paid for once, not on a timer.
+- Its generation counter is folded into the per-pane instance-cache
+  fingerprint, so a pane whose grid did not change still rebuilds once
+  when link answers land and the underline actually appears.
+
+Steady-state scan of a grid holding `/home/kevybench/boxpre.log`, 30
+scans, median of 4 runs: **19.3 ms → 0.028 ms** (~690x), and now
+constant across local / autofs / SMB / NFS paths instead of tracking
+whatever the mount is doing.
+
 ### 0.12.151
 
 **`~/…` 的文件链接,点「Open file」永远没反应。**

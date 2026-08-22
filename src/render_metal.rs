@@ -397,6 +397,12 @@ struct PaneInstanceCache {
     fingerprint: u64,
     atlas_gen: u64,
     color_atlas_gen: u64,
+    /// `link_probe::generation()` at the time this slot was built.
+    /// Link verdicts land asynchronously, so a pane whose grid did
+    /// not change still has to rebuild once when new answers arrive
+    /// — otherwise a resolved file link never gets underlined until
+    /// something else dirties the pane.
+    link_gen: u64,
     cells: Vec<CellInstance>,
     glyphs: Vec<GlyphInstance>,
     color_glyphs: Vec<GlyphInstance>,
@@ -2653,11 +2659,13 @@ fn build_instances(
         );
         let cur_atlas_gen = atlas.rebuild_count;
         let cur_color_gen = color_atlas.rebuild_count;
+        let cur_link_gen = crate::link_probe::generation();
         let cache = &mut pane_caches[i];
         let hit = cache.primed
             && cache.fingerprint == fp
             && cache.atlas_gen == cur_atlas_gen
-            && cache.color_atlas_gen == cur_color_gen;
+            && cache.color_atlas_gen == cur_color_gen
+            && cache.link_gen == cur_link_gen;
         if hit {
             cells.extend_from_slice(&cache.cells);
             glyphs.extend_from_slice(&cache.glyphs);
@@ -2697,6 +2705,7 @@ fn build_instances(
         cache.fingerprint = fp;
         cache.atlas_gen = atlas.rebuild_count;
         cache.color_atlas_gen = color_atlas.rebuild_count;
+        cache.link_gen = cur_link_gen;
         cache.cells.clear();
         cache.cells.extend_from_slice(&cells[cells_start..]);
         cache.glyphs.clear();
@@ -5265,7 +5274,16 @@ fn push_session(
     let link_opts = marspot_term::grid_links::ScanOpts {
         cc_mode: !view.right_badge.is_empty(),
     };
-    let links = marspot_term::grid_links::scan_visible_links(grid, view.view_offset, link_opts);
+    // The oracle is what keeps this call off the filesystem: on the
+    // render thread a single `lstat` under a network mount or the
+    // `auto_home` autofs map has been measured at six seconds.  See
+    // `marspot::link_probe`.
+    let links = marspot_term::grid_links::scan_visible_links_with(
+        grid,
+        view.view_offset,
+        link_opts,
+        crate::link_probe::oracle(),
+    );
     let in_link = |row: u16, col: u16| -> bool {
         links
             .iter()

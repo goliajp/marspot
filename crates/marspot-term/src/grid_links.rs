@@ -21,7 +21,7 @@ use marspot_linkify::CellSource;
 /// path exists, so the opener must expand it too or the link resolves
 /// in one place and fails in the other.
 pub use marspot_linkify::expand_user_path;
-pub use marspot_linkify::{LinkKind, LinkRange};
+pub use marspot_linkify::{FsOracle, LinkKind, LinkRange, NoFsOracle, PathOracle, PathVerdict};
 
 /// Options that tune `scan_visible_links` for the calling pane.  All
 /// fields default to off so the existing call path stays opt-in.
@@ -61,9 +61,22 @@ impl CellSource for GridSource<'_> {
 /// Walk the visible grid and return every detected span.  See the
 /// stone crate's `scan_visible_links` for the full semantics.
 pub fn scan_visible_links(grid: &Grid, view_offset: u16, opts: ScanOpts) -> Vec<LinkRange> {
-    marspot_linkify::scan_visible_links(
+    scan_visible_links_with(grid, view_offset, opts, &FsOracle)
+}
+
+/// [`scan_visible_links`] with an explicit path oracle.  The render
+/// loop passes a non-blocking, cached one — see `marspot::link_probe`
+/// — so `build_instances` issues no filesystem syscalls.
+pub fn scan_visible_links_with(
+    grid: &Grid,
+    view_offset: u16,
+    opts: ScanOpts,
+    oracle: &dyn PathOracle,
+) -> Vec<LinkRange> {
+    marspot_linkify::scan_visible_links_with(
         &GridSource { grid, view_offset },
         marspot_linkify::ScanOpts { tui_mode: opts.cc_mode },
+        oracle,
     )
 }
 

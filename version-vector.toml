@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.119"  # hook 的开关进设置面板,L1 自己对账,脚本退役;详见 CHANGELOG.md
-core    = "0.12.151"  # ~/… 文件链接点开无反应:open(1) 不展开 ~;详见 CHANGELOG.md
+core    = "0.12.152"  # 链接扫描不再在渲染线程上 lstat（网络挂载单次可达 6 秒）；详见 CHANGELOG.md
 session = "0.11.54"  # 孤立可打印字符不再过状态机(parse 全语料 +2-4%);详见 CHANGELOG.md

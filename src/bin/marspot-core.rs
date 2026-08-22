@@ -8791,6 +8791,11 @@ fn main() {
     // RFC-004 D.1 — must precede logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
     marspot::logx::init("core");
+    // Start the async path oracle before the first frame.  Without it
+    // `link_probe::oracle()` falls back to the blocking `FsOracle`,
+    // which is correct for one-shot renderers and catastrophic for a
+    // render loop — see the module docs.
+    marspot::link_probe::install();
 
     // Must run before any env is read — see `parse_log_event`.
     if let Some((tag, detail)) = parse_log_event(&args) {
