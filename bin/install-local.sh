@@ -572,11 +572,12 @@ fi
 # resurrected via install-local.
 
 # ── 8. Claude Code status-line hook ───────────────────────────────
-# The pane badge's model comes from claude itself through this hook
-# rather than from tailing the transcript.  Idempotent and additive;
-# never touches a config that already has its own statusLine.
-echo "==> claudecode status-line hook"
-MARSPOT_APP="$APP" "$(dirname "$0")/install-cc-statusline.sh" || \
-  echo "    WARN: status-line hook not installed — badge falls back to the transcript" >&2
+# --refresh only: if the hook is already registered, keep it pointed at
+# a binary that knows the flag.  It never installs one — that edits
+# Claude Code's settings.json, which is somebody else's configuration
+# and is opt-in via `bin/install-cc-statusline.sh`.
+echo "==> claudecode status-line hook (refresh)"
+MARSPOT_APP="$APP" "$(dirname "$0")/install-cc-statusline.sh" --refresh || \
+  echo "    WARN: could not refresh the status-line hook" >&2
 
 echo "==> done."

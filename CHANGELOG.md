@@ -28,7 +28,41 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.117**
+Current: **0.7.118**
+
+### 0.7.118
+
+**pane 自己的横幅排到 `last_model` 前面 —— profile 轮换后的过期 model,不用
+任何配置就修好了。**
+
+0.7.116 用 cc 的 status line 拿到了权威来源,但那条通道要往 cc 的
+settings.json 里写一行。给别人装的时候它会在好几处直接哑掉:对方已经配了
+statusLine(我们原本一律不动)、托管配置里 `disableAllHooks: true`、workspace
+trust 没接受、config dir 布局不一样、以及卸载 marspot 之后留下一个指向不存在
+二进制的命令。所以它不能当主路径。
+
+而查下来,零配置那条路本来就有一个次序 bug。`model_from_banner` 会把 pane 的
+屏幕重放成 grid、从启动横幅里读 model —— 这正是 `--resume` 之后唯一说得出话
+的信源。但它挂在调用点的 `.or_else()` 上,而 `model_for` 在围栏后面读不到东西
+时**先返回了 `last_model`**(上一个 profile 的 model)。于是新横幅明明就在屏
+幕上,永远轮不到它。
+
+`model_for` 现在按信源质量排:
+
+1. claude 自己报的(status line hook)—— 没有围栏、不落后,但默认没装
+2. 围栏之后的 transcript —— 说话时权威,只在轮次边界和 `/model` 说话
+3. **pane 自己的屏幕** —— resume 之后答案一直在这儿
+4. 最后才是上次见过的 model
+
+**hook 同时降级成 opt-in**:
+
+- `bin/install-local.sh` 只跑 `--refresh` —— 已经装了的保持指向对的 binary,
+  但绝不会替谁装上。改别人的 settings.json 不该是装 marspot 的副作用。
+- **已有 statusLine 的不再被跳过,而是串联**:原命令搬进 `--chain <command>`,
+  hook 记完自己的之后用同一份 payload 跑它、原样转发它的输出。cc 只允许一条
+  status line,而最想要这个功能的人往往正是已经写了一条的人。
+- `--uninstall` 把键删掉,串联过的原命令放回去。三种文件形状(单行 / 缩进 /
+  末位成员)round-trip 都逐字节还原。
 
 ### 0.7.117
 

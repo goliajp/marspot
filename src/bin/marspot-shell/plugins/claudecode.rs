@@ -2060,7 +2060,46 @@ pub fn statusline_ingest() -> i32 {
         let _ = fs::rename(&tmp, dir.join(&sid));
     }
     prune_model_pushes(&dir);
+    run_chained_statusline(&payload);
     0
+}
+
+/// Run the status line this hook replaced, if there was one.
+///
+/// Claude Code allows exactly one status-line command, so installing
+/// over somebody's own line would silently take it away — and the
+/// people most likely to want the model in the badge are the ones who
+/// already care enough to have written a status line.  So the
+/// installer does not take it: it moves the original into
+/// `--chain <command>` and this runs it with the same payload,
+/// relaying its output as if nothing were in between.
+///
+/// The command is carried in argv rather than in state of our own so
+/// that the settings file stays the single description of what runs —
+/// which is also what makes uninstalling it a matter of putting the
+/// original string back.
+fn run_chained_statusline(payload: &str) {
+    let mut args = std::env::args().skip(1);
+    let Some(cmd) = args
+        .find(|a| a == "--chain")
+        .and_then(|_| args.next())
+        .filter(|c| !c.is_empty())
+    else {
+        return;
+    };
+    use std::io::Write;
+    let Ok(mut child) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(payload.as_bytes());
+    }
+    let _ = child.wait();
 }
 
 /// Pull `(session uuid, transcript path, short model)` out of a
@@ -2868,42 +2907,51 @@ impl WorkerCtx {
         }
     }
 
-    /// The model to show for this session.
+    /// The model to show for this session, best source first.
     ///
-    /// `tail_model_short` answers "what may I read right now", which
-    /// is a different question.  A resumed process writes nothing that
-    /// names a model until it finishes a turn — the records it does
-    /// write at startup are `mode` and `permission-mode`, neither of
-    /// which carries one — and the fence sits at end-of-file, so
-    /// between a profile switch and the session's next answer there is
-    /// nothing readable at all.  On a parked pane that gap is hours.
-    ///
-    /// Rendering it as *no model* is a lie by omission: the session has
-    /// one, we simply have not watched it write since.  So the last
-    /// model actually observed is kept and shown until a newer record
-    /// replaces it.  The cost is a stale token in the one case where a
-    /// resume really does change model, for as long as it takes the
-    /// session to answer once — against a badge that loses half its
-    /// content every time a pane is reclaimed or cycled.
-    fn model_for(&mut self, path: &std::path::Path, claude_pid: i32) -> Option<String> {
-        // What claude itself reports wins over anything read out of
-        // the transcript: it is current rather than turn-lagged, and
-        // it needs no fence — a resumed process re-reports on its
-        // first render, which is the case the fence exists for.  The
-        // scan below stays for sessions started before the hook was
-        // installed, and for a claude old enough not to have one.
+    /// 1. **What claude reports.**  Its status-line hook carries the
+    ///    model claude currently believes it is on, pushed on state
+    ///    change.  Needs no fence and is never turn-lagged — but it
+    ///    only exists where the hook is installed, which is nowhere by
+    ///    default, so everything below has to stand on its own.
+    /// 2. **The transcript, behind the fence.**  Authoritative when it
+    ///    speaks, and it speaks only at turn boundaries and at
+    ///    `/model`.  A resumed process writes nothing that names a
+    ///    model until it finishes a turn (the startup records are
+    ///    `mode` and `permission-mode`, neither carries one) and the
+    ///    fence sits at end-of-file, so right after a profile switch
+    ///    there is nothing readable here at all.
+    /// 3. **The pane's own screen.**  Which is where the answer has
+    ///    been all along in exactly that case: a resumed claude
+    ///    reprints its startup banner, and the banner names the model.
+    ///    This used to sit behind `last_model` at the call site and so
+    ///    was never reached — the badge kept showing the model of the
+    ///    profile that had just been cycled away from, for as long as
+    ///    the pane stayed parked.  It is a replay, so it is rate
+    ///    limited by `model_from_banner` itself.
+    /// 4. **The last model actually seen.**  Rendering no model at all
+    ///    is a lie by omission: the session has one, we simply have
+    ///    not watched it say so.  Last resort, and only now.
+    fn model_for(
+        &mut self,
+        path: &std::path::Path,
+        claude_pid: i32,
+        sid: u64,
+    ) -> Option<String> {
         if let Some(m) = pushed_model(path) {
             self.last_model.insert(path.to_path_buf(), m.clone());
             return Some(m);
         }
         let cutoff = self.model_cutoff_for(path, claude_pid);
-        match tail_model_short(path, cutoff) {
-            Some(m) => {
-                self.last_model.insert(path.to_path_buf(), m.clone());
-                Some(m)
-            }
-            None => self.last_model.get(path).cloned(),
+        if let Some(m) = tail_model_short(path, cutoff) {
+            self.last_model.insert(path.to_path_buf(), m.clone());
+            return Some(m);
         }
+        if let Some(m) = self.model_from_banner(sid) {
+            self.last_model.insert(path.to_path_buf(), m.clone());
+            return Some(m);
+        }
+        self.last_model.get(path).cloned()
     }
 
     /// The model a **freshly started** pane is on, read off its own
@@ -3155,12 +3203,12 @@ impl WorkerCtx {
             // when the fence has nothing readable behind it (see
             // `model_for`).  A session named by argv but not yet
             // scanned has no path — badge without the model half.
-            let model = jsonl_path
-                .as_ref()
-                .and_then(|p| self.model_for(p, f.claude_pid))
-                // Nothing in the transcript yet — a pane opened and
-                // not yet answered.  Its own screen already says.
-                .or_else(|| self.model_from_banner(f.shelld_sid));
+            let model = match jsonl_path.as_ref() {
+                Some(p) => self.model_for(p, f.claude_pid, f.shelld_sid),
+                // Named by argv but not yet scanned, so there is no
+                // transcript to consult.  Its own screen already says.
+                None => self.model_from_banner(f.shelld_sid),
+            };
             // The session uuid used to ride along here.  It is 36
             // characters of hex that no one can act on — it names the
             // session for a *machine*, and every machine that needs it
@@ -3718,7 +3766,7 @@ mod tests {
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
-        assert_eq!(ctx.model_for(&path, 111).as_deref(), Some("opus-5"));
+        assert_eq!(ctx.model_for(&path, 111, 0).as_deref(), Some("opus-5"));
 
         let push = model_push_dir();
         fs::create_dir_all(&push).unwrap();
@@ -3729,7 +3777,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            ctx.model_for(&path, 111).as_deref(),
+            ctx.model_for(&path, 111, 0).as_deref(),
             Some("fable-5"),
             "the badge follows claude, not the last completed turn"
         );
@@ -3742,7 +3790,84 @@ mod tests {
             "{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"x\":1}\n",
         )
         .unwrap();
-        assert_eq!(ctx.model_for(&other, 222).as_deref(), Some("sonnet-5"));
+        assert_eq!(ctx.model_for(&other, 222, 0).as_deref(), Some("sonnet-5"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The profile-switch case, from the other side.
+    ///
+    /// The transcript still says `opus-5` — the model the profile that
+    /// was just cycled away from served with — and the fence correctly
+    /// refuses to read it.  The answer is on the pane's own screen:
+    /// the resumed claude reprinted its banner and the banner names
+    /// Fable.  Before the reorder `last_model` answered first and the
+    /// badge kept saying `opus-5` for as long as the pane stayed
+    /// parked.
+    #[test]
+    fn a_resumed_pane_reads_its_banner_before_falling_back() {
+        use marspot_term::session_registry::{write_session_entry, SessionEntry};
+        let root = std::env::temp_dir().join("cc-banner-order-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+
+        let dir = root.join("projects");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        fs::write(
+            &path,
+            "{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"x\":1}\n",
+        )
+        .unwrap();
+
+        let sid = 4242u64;
+        write_session_entry(&SessionEntry {
+            id: sid,
+            pid: 1,
+            socket: root.join("s.sock"),
+            cols: 100,
+            rows: 30,
+            title: "t".into(),
+            cwd: "/tmp".into(),
+            proto_version: 1,
+            created_at_unix: 0,
+            shm_name: String::new(),
+            shell_child_pid: 0,
+        })
+        .unwrap();
+        fs::write(
+            marspot_term::paths::sessions_dir().join(sid.to_string()).join("bytelog"),
+            "  \u{2599}\u{2584}\u{259f}  Claude Code v2.1.239\r\n\
+             \u{2599}\u{2584}\u{259f}  Fable 5 with high effort \u{b7} Claude Max\r\n\
+             ~/workspace/goliajp/marspot\r\n",
+        )
+        .unwrap();
+
+        let mut ctx = WorkerCtx {
+            projects_root: dir.clone(),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
+            last_model: HashMap::new(),
+        };
+        // First sighting: the transcript is this process's own.
+        assert_eq!(ctx.model_for(&path, 111, sid).as_deref(), Some("opus-5"));
+
+        // The switch: new pid, fence at end of file, and the records a
+        // resumed process writes at startup name no model.
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(f, "{{\"type\":\"mode\",\"mode\":\"default\"}}").unwrap();
+        drop(f);
+
+        assert_eq!(
+            ctx.model_for(&path, 222, sid).as_deref(),
+            Some("fable-5"),
+            "the banner on the pane's own screen outranks the model \
+             the previous profile happened to leave behind"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -4065,7 +4190,7 @@ mod tests {
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
-        assert_eq!(ctx.model_for(&path, 111).as_deref(), Some("fable-5"));
+        assert_eq!(ctx.model_for(&path, 111, 0).as_deref(), Some("fable-5"));
 
         // The switch: new pid, so the fence lands at end of file — and
         // the startup records a resumed process writes name no model.
@@ -4075,7 +4200,7 @@ mod tests {
         writeln!(f, "{{\"type\":\"permission-mode\"}}").unwrap();
         drop(f);
         assert_eq!(
-            ctx.model_for(&path, 222).as_deref(),
+            ctx.model_for(&path, 222, 0).as_deref(),
             Some("fable-5"),
             "the badge keeps what it last saw rather than going blank"
         );
@@ -4084,13 +4209,13 @@ mod tests {
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         write!(f, "{}", assistant("opus-5")).unwrap();
         drop(f);
-        assert_eq!(ctx.model_for(&path, 222).as_deref(), Some("opus-5"));
+        assert_eq!(ctx.model_for(&path, 222, 0).as_deref(), Some("opus-5"));
 
         // A session that has never named one has nothing to show, and
         // nothing is invented for it.
         let fresh = dir.join("fresh.jsonl");
         fs::write(&fresh, "{\"type\":\"mode\"}\n").unwrap();
-        assert_eq!(ctx.model_for(&fresh, 333), None);
+        assert_eq!(ctx.model_for(&fresh, 333, 0), None);
 
         let _ = fs::remove_dir_all(&dir);
     }
