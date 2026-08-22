@@ -28,7 +28,45 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.115**
+Current: **0.7.116**
+
+### 0.7.116
+
+**角标的 model 一直是错的,而且从来不更新。**
+
+角标写 `P3@opus-5`,cc 的 `/model` 菜单里勾在 `Fable`。不是显示慢了一拍 ——
+是这个事实**还不在我们读的那个文件里**。
+
+model 一直是从 session transcript 反推出来的,而 transcript 只在两个时刻
+写下 model:一次 assistant 轮次结束时,以及 `/model` 打印确认时。中间的空档
+里它什么也不说。于是:
+
+- 在一个停着的 pane 上切了 model → 下一次回答之前 transcript 里没有任何痕迹
+- profile 轮换(`claude<N> --resume <uuid>`)→ 新进程启动时写的 `mode` /
+  `permission-mode` 记录都不带 model,围栏后面读不到东西,角标退回
+  `last_model`,也就是**上一个 profile 的** model,并且一直挂在那儿
+
+把 tail 扫得再勤也治不了 —— 2 秒扫一次和 20 秒扫一次读到的是同一个空档。
+
+改成让 claude 自己说。Claude Code 的 status line 是唯一一条载有「claude 此刻
+认为自己是哪个 model」的通道:它把 `model.display_name` 放在 JSON 里交给
+配置的命令,并且是**状态变化时触发**,不是定时轮询(实测 2.1.239:空闲 session
+约 14 秒一次,启动时立刻一次 —— 后者正好补上 resume 的空档)。
+
+- `marspot-shell --cc-statusline` 读 stdin,把 `<short-model>` 落到
+  `<state>/plugins/claudecode/model/<session-uuid>`,rename 落盘,不打印任何
+  东西。它在 `main()` 里**排在 logx 和 current/ 转发之前** —— claude 每次
+  重绘都会跑它,它必须始终是一个「读 stdin 写一个文件」的进程。
+- 角标优先读这份记录,读不到才回落到原来的 transcript 扫描(装 hook 之前
+  就已经在跑的 session、以及没有这条通道的旧 claude 走这条路)。
+- 记录按 3 天 TTL 由写入侧自己清,不会无界增长。
+- `bin/install-cc-statusline.sh` 把 hook 写进 cc 的 settings.json(profile 之间
+  是同一个共享文件的软链,realpath 去重后只改一次),**已有 statusLine 的配置
+  一律不动**。屏幕上不多任何东西:hook 无输出,而 claude 把空的 status line
+  渲染成没有这一行(对 2.1.239 实测过)。
+
+`short_model` 吃 `display_name` 而不是 `id` —— 前者跟 `/model` 菜单里的字
+一模一样,后者带 `claude-opus-5[1m]` 这种后缀,会被整条丢掉。
 
 ### 0.7.115
 

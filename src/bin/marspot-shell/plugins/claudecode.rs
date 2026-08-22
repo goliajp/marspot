@@ -1997,6 +1997,138 @@ fn short_model(raw: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// Where the status-line hook drops per-session model records: one
+/// file per session, named by the session uuid — which is also the
+/// transcript's file stem, so the badge side can look a record up
+/// from the path it already computed.
+fn model_push_dir() -> PathBuf {
+    marspot_term::paths::state_root()
+        .join("plugins")
+        .join("claudecode")
+        .join("model")
+}
+
+/// How long a model record outlives its last write.
+///
+/// A session that ends simply stops re-writing its file, and nothing
+/// else in the system knows the directory exists — so the writer
+/// prunes, and every surviving session's next render clears out what
+/// the dead ones left behind.  Three days is long enough that a
+/// laptop closed over a weekend still finds its panes' records where
+/// it left them.
+const MODEL_PUSH_TTL: Duration = Duration::from_secs(3 * 24 * 3600);
+
+/// `marspot-shell --cc-statusline` — claudecode's status-line hook.
+///
+/// Every other route to "which model is this pane on" is an inference
+/// from a lagging artefact.  The transcript names a model when an
+/// assistant turn completes, or when `/model` prints its
+/// confirmation, and says nothing in between: a switch made on a
+/// parked pane, or a `--resume` under a different profile, left the
+/// badge stating the *previous* model with full confidence until the
+/// session next answered.  Tailing it faster cannot fix that — the
+/// fact is not in the file yet.
+///
+/// Claude Code's status line is the one channel that carries what
+/// claude itself currently believes.  It hands the command a JSON
+/// payload containing `model.display_name` and re-runs it on state
+/// change rather than on a timer (measured: one invocation per ~14 s
+/// on an idle session, and one immediately at startup — which is what
+/// closes the resume gap).
+///
+/// Prints nothing: claude renders empty status-line output as no line
+/// at all, so installing this changes nothing on screen.  Always
+/// exits 0 — a hook that fails is a warning inside the user's
+/// session, and there is nothing here worth interrupting them for.
+pub fn statusline_ingest() -> i32 {
+    use std::io::Read;
+    let mut payload = String::new();
+    if std::io::stdin().read_to_string(&mut payload).is_err() {
+        return 0;
+    }
+    let Some((sid, transcript, model)) = statusline_fields(&payload) else {
+        return 0;
+    };
+    let dir = model_push_dir();
+    if fs::create_dir_all(&dir).is_err() {
+        return 0;
+    }
+    // Rename so a badge reading mid-write sees the old record rather
+    // than half of the new one.
+    let tmp = dir.join(format!(".{sid}.tmp"));
+    if fs::write(&tmp, format!("{model}\n{transcript}\n")).is_ok() {
+        let _ = fs::rename(&tmp, dir.join(&sid));
+    }
+    prune_model_pushes(&dir);
+    0
+}
+
+/// Pull `(session uuid, transcript path, short model)` out of a
+/// status-line payload.
+///
+/// `display_name` and not `id`: the display name is what the `/model`
+/// menu shows, so the badge and the menu agree word for word, and the
+/// id carries suffixes (`claude-opus-5[1m]`) that `short_model`
+/// rejects outright.
+fn statusline_fields(payload: &str) -> Option<(String, String, String)> {
+    let sid = json_string_field(payload, "\"session_id\":\"")?;
+    // The record's file name — reject anything that is not the uuid
+    // shape rather than letting a payload name a path.
+    if sid.is_empty()
+        || !sid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return None;
+    }
+    let transcript = json_string_field(payload, "\"transcript_path\":\"")?;
+    let at = payload.find("\"model\":{")?;
+    let name = json_string_field(&payload[at..], "\"display_name\":\"")?;
+    let model = short_model(&name);
+    if model.is_empty() {
+        return None;
+    }
+    Some((sid, transcript, model))
+}
+
+/// First string value for `key` (given with its quotes and colon).
+/// The payload's strings are paths and display names — no embedded
+/// quotes — so the first `"` ends the value.
+fn json_string_field(hay: &str, key: &str) -> Option<String> {
+    let start = hay.find(key)? + key.len();
+    let rest = &hay[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn prune_model_pushes(dir: &std::path::Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > MODEL_PUSH_TTL);
+        if stale {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
+/// The model claude last reported for this session through its
+/// status-line hook, or None when the hook is not installed or has
+/// not fired for this session yet.
+fn pushed_model(jsonl: &std::path::Path) -> Option<String> {
+    let sid = jsonl.file_stem()?.to_str()?;
+    let raw = fs::read_to_string(model_push_dir().join(sid)).ok()?;
+    let model = raw.lines().next()?.trim();
+    (!model.is_empty()).then(|| model.to_string())
+}
+
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
 /// short profile tag.  Returns:
 ///   * `Some("P1")` for `/Users/.../.claude-profile-1`
@@ -2754,6 +2886,16 @@ impl WorkerCtx {
     /// session to answer once — against a badge that loses half its
     /// content every time a pane is reclaimed or cycled.
     fn model_for(&mut self, path: &std::path::Path, claude_pid: i32) -> Option<String> {
+        // What claude itself reports wins over anything read out of
+        // the transcript: it is current rather than turn-lagged, and
+        // it needs no fence — a resumed process re-reports on its
+        // first render, which is the case the fence exists for.  The
+        // scan below stays for sessions started before the hook was
+        // installed, and for a claude old enough not to have one.
+        if let Some(m) = pushed_model(path) {
+            self.last_model.insert(path.to_path_buf(), m.clone());
+            return Some(m);
+        }
         let cutoff = self.model_cutoff_for(path, claude_pid);
         match tail_model_short(path, cutoff) {
             Some(m) => {
@@ -3508,6 +3650,101 @@ mod tests {
         assert_eq!(short_model("Default (recommended)"), "default");
         // ANSI-bold display name straight out of /model's stdout.
         assert_eq!(short_model("\u{1b}[1mFable 5\u{1b}[22m"), "fable-5");
+    }
+
+    /// A real status-line payload, captured from claude 2.1.239 by
+    /// pointing `--settings` at a command that dumps stdin.  Kept
+    /// verbatim so a change in the payload's shape shows up here
+    /// rather than as a badge that quietly stops updating.
+    const REAL_STATUSLINE_PAYLOAD: &str = concat!(
+        r#"{"session_id":"b0b0b0b0-1111-2222-3333-444444444444","#,
+        r#""transcript_path":"/Users/x/.claude-profile-3/projects/-p/"#,
+        r#"b0b0b0b0-1111-2222-3333-444444444444.jsonl","#,
+        r#""cwd":"/Users/x/p","effort":{"level":"high"},"#,
+        r#""model":{"id":"claude-opus-5[1m]","display_name":"Opus 5 (1M context)"},"#,
+        r#""version":"2.1.239","exceeds_200k_tokens":false}"#,
+    );
+
+    #[test]
+    fn a_status_line_payload_yields_the_session_and_its_model() {
+        let (sid, transcript, model) =
+            statusline_fields(REAL_STATUSLINE_PAYLOAD).expect("payload parses");
+        assert_eq!(sid, "b0b0b0b0-1111-2222-3333-444444444444");
+        assert!(transcript.ends_with("b0b0b0b0-1111-2222-3333-444444444444.jsonl"));
+        // `display_name`, not `id`: the id's `[1m]` suffix is not a
+        // model name and `short_model` throws the whole thing out.
+        assert_eq!(model, "opus-5");
+        assert_eq!(short_model("claude-opus-5[1m]"), "");
+    }
+
+    #[test]
+    fn a_status_line_payload_that_names_a_path_is_refused() {
+        let bad = REAL_STATUSLINE_PAYLOAD
+            .replace("b0b0b0b0-1111-2222-3333-444444444444\",", "../../etc/passwd\",");
+        assert_eq!(statusline_fields(&bad), None);
+    }
+
+    /// The reported bug, as a test.
+    ///
+    /// The transcript's newest word on the subject is `opus-5` — the
+    /// model that served the last turn.  The user has since switched
+    /// to Fable, which claude knows and the transcript will not
+    /// record until the session answers again.  Before the hook the
+    /// badge read `opus-5` and stayed there; now claude's own report
+    /// is what the badge shows.
+    #[test]
+    fn claudes_own_report_beats_the_transcripts_last_word() {
+        let root = std::env::temp_dir().join("cc-pushed-model-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // Process-global, and nextest gives every test its own
+        // process — this is why the suite runs under nextest.
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+
+        let dir = root.join("projects");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("11111111-2222-3333-4444-555555555555.jsonl");
+        fs::write(
+            &path,
+            "{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"x\":1}\n",
+        )
+        .unwrap();
+
+        let mut ctx = WorkerCtx {
+            projects_root: dir.clone(),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
+            last_model: HashMap::new(),
+        };
+        assert_eq!(ctx.model_for(&path, 111).as_deref(), Some("opus-5"));
+
+        let push = model_push_dir();
+        fs::create_dir_all(&push).unwrap();
+        fs::write(
+            push.join("11111111-2222-3333-4444-555555555555"),
+            format!("fable-5\n{}\n", path.display()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            ctx.model_for(&path, 111).as_deref(),
+            Some("fable-5"),
+            "the badge follows claude, not the last completed turn"
+        );
+
+        // And a session claude has said nothing about still reads its
+        // transcript rather than borrowing someone else's record.
+        let other = dir.join("99999999-2222-3333-4444-555555555555.jsonl");
+        fs::write(
+            &other,
+            "{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"x\":1}\n",
+        )
+        .unwrap();
+        assert_eq!(ctx.model_for(&other, 222).as_deref(), Some("sonnet-5"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// The profile-switch case.

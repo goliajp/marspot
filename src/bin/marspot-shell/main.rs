@@ -4953,6 +4953,15 @@ fn main() {
     // RFC-004 D.1 — one-time Caches → Application Support state-root
     // migration.  Must run before logx / any path computation.
     marspot::paths::migrate_legacy_state_root();
+    // The claudecode status-line hook dispatches before everything
+    // else — before logx, before the redirect into current/.  Claude
+    // runs it on every render of every cc pane, so it stays a
+    // read-stdin-write-one-file process: no log stream to open, no
+    // supervisor bookkeeping, no window.  It needs the migration
+    // above only so it computes the same state root the badge reads.
+    if std::env::args().nth(1).as_deref() == Some("--cc-statusline") {
+        std::process::exit(plugins::claudecode::statusline_ingest());
+    }
     // Make `println!` to a closed pipe (e.g. `marspot-shell --status |
     // head`) exit cleanly with the standard EPIPE convention instead
     // of panicking with a Rust backtrace.  SIG_DFL on macOS for SIGPIPE
