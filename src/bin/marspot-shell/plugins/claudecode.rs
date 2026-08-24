@@ -2646,7 +2646,7 @@ fn write_through_symlink(path: &std::path::Path, text: &str) -> std::io::Result<
 /// The model claude last reported for this session through its
 /// status-line hook, or None when the hook is not installed or has
 /// not fired for this session yet.
-fn pushed_model(jsonl: &std::path::Path) -> Option<ModelBadge> {
+fn pushed_model(jsonl: &std::path::Path) -> Option<(ModelBadge, EffortSaid)> {
     let sid = jsonl.file_stem()?.to_str()?;
     let raw = fs::read_to_string(model_push_dir().join(sid)).ok()?;
     let mut lines = raw.lines();
@@ -2654,8 +2654,25 @@ fn pushed_model(jsonl: &std::path::Path) -> Option<ModelBadge> {
     if model.is_empty() {
         return None;
     }
-    let effort = lines.nth(1).and_then(short_effort);
-    Some(ModelBadge::new(model.to_string(), effort))
+    // Two lines is a record from 0.7.116-0.7.119, which had no third
+    // line to write.  That is *unknown*, not *none* — and the
+    // difference matters, because a parked pane can hold such a
+    // record for days: claude only re-runs the hook when it redraws,
+    // and a pane nobody is in never does.  Reported as unknown so the
+    // effort half falls through to the transcript, which does know.
+    let (said, effort) = match lines.nth(1) {
+        Some(line) => (EffortSaid::Yes, short_effort(line)),
+        None => (EffortSaid::No, None),
+    };
+    Some((ModelBadge::new(model.to_string(), effort), said))
+}
+
+/// Whether a pushed record stated an effort at all — including
+/// stating that there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffortSaid {
+    Yes,
+    No,
 }
 
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
@@ -3455,11 +3472,23 @@ impl WorkerCtx {
         claude_pid: i32,
         sid: u64,
     ) -> Option<ModelBadge> {
-        if let Some(m) = pushed_model(path) {
+        let pushed = pushed_model(path);
+        let cutoff = self.model_cutoff_for(path, claude_pid);
+        if let Some((mut m, said)) = pushed {
+            if said == EffortSaid::No {
+                // Fill only the half the record could not carry, and
+                // only from a record naming the same model — an
+                // effort read off a turn served by a different model
+                // would be a number about something else.
+                if let Some(t) = tail_model_short(path, cutoff) {
+                    if t.model == m.model {
+                        m.effort = t.effort;
+                    }
+                }
+            }
             self.last_model.insert(path.to_path_buf(), m.clone());
             return Some(m);
         }
-        let cutoff = self.model_cutoff_for(path, claude_pid);
         if let Some(m) = tail_model_short(path, cutoff) {
             self.last_model.insert(path.to_path_buf(), m.clone());
             return Some(m);
@@ -4531,22 +4560,84 @@ mod tests {
         fs::write(push.join(name), "opus-5\n/some/path.jsonl\n").unwrap();
         assert_eq!(
             pushed_model(&jsonl),
-            Some(ModelBadge::new("opus-5".into(), None))
+            Some((ModelBadge::new("opus-5".into(), None), EffortSaid::No)),
+            "two lines is a record that could not say, not one saying no"
         );
 
-        // Three lines, third blank: claude reported no effort.
+        // Three lines, third blank: claude reported no effort, and
+        // that is an answer — nothing falls through to fill it in.
         fs::write(push.join(name), "opus-5\n/some/path.jsonl\n\n").unwrap();
         assert_eq!(
             pushed_model(&jsonl),
-            Some(ModelBadge::new("opus-5".into(), None))
+            Some((ModelBadge::new("opus-5".into(), None), EffortSaid::Yes))
         );
 
         // Three lines with one.
         fs::write(push.join(name), "opus-5\n/some/path.jsonl\nxhigh\n").unwrap();
         assert_eq!(
-            pushed_model(&jsonl).map(|b| b.render()).as_deref(),
+            pushed_model(&jsonl).map(|(b, _)| b.render()).as_deref(),
             Some("opus-5\u{b7}xhigh")
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A parked pane still gains the effort it never got pushed.
+    ///
+    /// The reported case: claude re-runs the status-line hook only
+    /// when it redraws, so a pane nobody is in keeps whatever record
+    /// it last wrote — here one from a build with no effort line at
+    /// all.  Short-circuiting on it would hide the effort the pane's
+    /// own transcript is stating plainly, for as long as the pane
+    /// stays parked.
+    #[test]
+    fn a_record_too_old_to_carry_the_effort_takes_it_from_the_transcript() {
+        let root = std::env::temp_dir().join("cc-effort-fill-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let dir = root.join("projects");
+        fs::create_dir_all(&dir).unwrap();
+        let name = "22222222-2222-2222-2222-222222222222";
+        let path = dir.join(format!("{name}.jsonl"));
+        fs::write(
+            &path,
+            "{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"effort\":\"high\"}\n",
+        )
+        .unwrap();
+        let push = model_push_dir();
+        fs::create_dir_all(&push).unwrap();
+
+        let mut ctx = WorkerCtx {
+            statusline_state: None,
+            projects_root: dir.clone(),
+            shelld: Arc::new(ShelldClient::new(None)),
+            seen: HashMap::new(),
+            model_cutoff: HashMap::new(),
+            banner_tried: HashMap::new(),
+            last_model: HashMap::new(),
+        };
+
+        // The old two-line shape.
+        fs::write(push.join(name), format!("opus-5\n{}\n", path.display())).unwrap();
+        assert_eq!(
+            rendered(ctx.model_for(&path, 111, 0)).as_deref(),
+            Some("opus-5\u{b7}high"),
+            "the pushed model stands, and the transcript fills the half it could not carry"
+        );
+
+        // Claude having actually reported no effort is different, and
+        // is left alone — the transcript's older turn does not get to
+        // overrule what claude said a moment ago.
+        fs::write(push.join(name), format!("opus-5\n{}\n\n", path.display())).unwrap();
+        ctx.last_model.clear();
+        assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("opus-5"));
+
+        // Nor is an effort borrowed across a model change: the
+        // transcript's turn was served by something else.
+        fs::write(push.join(name), format!("fable-5\n{}\n", path.display())).unwrap();
+        ctx.last_model.clear();
+        assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("fable-5"));
+
         let _ = fs::remove_dir_all(&root);
     }
 

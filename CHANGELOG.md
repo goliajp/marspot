@@ -28,7 +28,29 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.120**
+Current: **0.7.121**
+
+### 0.7.121
+
+**停着的 pane 拿不到 effort。**
+
+0.7.120 上完之后,只有 4 个 pane 的角标带上了 effort,其余十几个没有。
+
+原因不在 effort 本身,在**推送记录的旧形状**。claude 只在重绘时才重跑 hook,
+而没人在里面的 pane 不重绘 —— 于是它一直留着 0.7.116-0.7.119 写的那份**两行**
+记录。读的时候两行被当成「claude 说了:没有 effort」,阶梯就此短路,而那个
+pane 自己的 transcript 里 `"effort":"high"` 明摆着(实测三个空闲 session,
+三个都有)。
+
+两行是**那个版本没有这一行**,也就是**不知道**,不是**没有**。现在分开:
+
+- 三行(第三行可以是空的)= claude 说了,照说的算
+- 两行 = 说不出来 → effort 这一半落到 transcript 上补
+
+只补缺的那一半,而且只在两边说的是**同一个 model** 时才补 —— 别的 model 服务
+的那一轮的 effort,是关于另一件事的数字。
+
+parked pane 可以停好几天,所以这不是「等一会儿就好了」;红-绿验过。
 
 ### 0.7.120
 
