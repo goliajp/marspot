@@ -1839,7 +1839,7 @@ const MODEL_TAIL_BYTES: u64 = 262_144;
 /// Returns None when neither appears in the tail window (fresh
 /// session, or a single giant record swamping the window) — the
 /// badge then renders without the `@model` part.
-fn tail_model_short(path: &std::path::Path, min_offset: u64) -> Option<String> {
+fn tail_model_short(path: &std::path::Path, min_offset: u64) -> Option<ModelBadge> {
     use std::cell::RefCell;
     // (mtime, size)-keyed memo so the 2 s scan tick only re-reads a
     // session's tail when the jsonl actually grew — idle panes cost
@@ -1847,7 +1847,7 @@ fn tail_model_short(path: &std::path::Path, min_offset: u64) -> Option<String> {
     // capped so dead sessions can't accumulate entries forever.
     thread_local! {
         static CACHE: RefCell<
-            HashMap<PathBuf, (SystemTime, u64, u64, Option<String>)>,
+            HashMap<PathBuf, (SystemTime, u64, u64, Option<ModelBadge>)>,
         > = RefCell::new(HashMap::new());
     }
     const CACHE_CAP: usize = 64;
@@ -1873,7 +1873,7 @@ fn tail_model_short(path: &std::path::Path, min_offset: u64) -> Option<String> {
     result
 }
 
-fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64) -> Option<String> {
+fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64) -> Option<ModelBadge> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
@@ -1913,7 +1913,11 @@ fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64) -> Option<
                 }
                 let name = short_model(&rest[..end]);
                 if !name.is_empty() {
-                    return Some(name);
+                    // `/model` says nothing about effort.  Leaving it
+                    // off is the honest reading: the model just
+                    // changed, and what effort the new one runs at is
+                    // something only the next turn will say.
+                    return Some(ModelBadge::new(name, None));
                 }
             }
         }
@@ -1923,7 +1927,15 @@ fn tail_model_short_uncached(path: &std::path::Path, min_offset: u64) -> Option<
                 if let Some(end) = rest.find('"') {
                     let name = short_model(&rest[..end]);
                     if !name.is_empty() {
-                        return Some(name);
+                        // The record carries the effort it ran at as
+                        // a sibling of its own uuid, so the same line
+                        // answers both halves.
+                        let effort = line
+                            .find("\"effort\":\"")
+                            .map(|j| &line[j + 10..])
+                            .and_then(|r| r.find('"').map(|e| &r[..e]))
+                            .and_then(short_effort);
+                        return Some(ModelBadge::new(name, effort));
                     }
                 }
             }
@@ -1997,6 +2009,53 @@ fn short_model(raw: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// What the badge says about a pane's claude, past the profile tag.
+///
+/// The two travel together because every source that names one names
+/// the other in the same breath — the status line's payload, the
+/// assistant record, the startup banner's `Fable 5 with high effort`
+/// — and splitting them would mean each source answering half a
+/// question twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelBadge {
+    model: String,
+    /// `None` where the source did not say: a model with no effort
+    /// setting at all, or a claude too old to report one.  Rendered
+    /// as absence rather than as a guess.
+    effort: Option<String>,
+}
+
+impl ModelBadge {
+    fn new(model: String, effort: Option<String>) -> Self {
+        Self { model, effort }
+    }
+
+    /// `opus-5` / `opus-5·high`.
+    ///
+    /// The interpunct is claude's own separator on the banner line it
+    /// reads this off (`Fable 5 with high effort · Claude Max`), so
+    /// the badge and the screen it describes are punctuated alike.
+    fn render(&self) -> String {
+        match &self.effort {
+            Some(e) => format!("{}\u{b7}{e}", self.model),
+            None => self.model.clone(),
+        }
+    }
+}
+
+/// Normalise an effort level (`high`, `xhigh`, `medium`, …).
+///
+/// Same shape as `short_model` and for the same reason: anything that
+/// is not a plain ASCII word is prose we grabbed by accident, and the
+/// badge is better off saying nothing than saying that.
+fn short_effort(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() || t.len() > 8 || !t.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(t.to_ascii_lowercase())
+}
+
 /// Where the status-line hook drops per-session model records: one
 /// file per session, named by the session uuid — which is also the
 /// transcript's file stem, so the badge side can look a record up
@@ -2046,7 +2105,7 @@ pub fn statusline_ingest() -> i32 {
     if std::io::stdin().read_to_string(&mut payload).is_err() {
         return 0;
     }
-    let Some((sid, transcript, model)) = statusline_fields(&payload) else {
+    let Some((sid, transcript, badge)) = statusline_fields(&payload) else {
         return 0;
     };
     let dir = model_push_dir();
@@ -2056,7 +2115,11 @@ pub fn statusline_ingest() -> i32 {
     // Rename so a badge reading mid-write sees the old record rather
     // than half of the new one.
     let tmp = dir.join(format!(".{sid}.tmp"));
-    if fs::write(&tmp, format!("{model}\n{transcript}\n")).is_ok() {
+    // Line 3 is the effort, blank when claude did not report one —
+    // a record written before this field existed simply has two
+    // lines, and reads back as "no effort said".
+    let effort = badge.effort.clone().unwrap_or_default();
+    if fs::write(&tmp, format!("{}\n{transcript}\n{effort}\n", badge.model)).is_ok() {
         let _ = fs::rename(&tmp, dir.join(&sid));
     }
     prune_model_pushes(&dir);
@@ -2109,7 +2172,7 @@ fn run_chained_statusline(payload: &str) {
 /// menu shows, so the badge and the menu agree word for word, and the
 /// id carries suffixes (`claude-opus-5[1m]`) that `short_model`
 /// rejects outright.
-fn statusline_fields(payload: &str) -> Option<(String, String, String)> {
+fn statusline_fields(payload: &str) -> Option<(String, String, ModelBadge)> {
     let sid = json_string_field(payload, "\"session_id\":\"")?;
     // The record's file name — reject anything that is not the uuid
     // shape rather than letting a payload name a path.
@@ -2127,7 +2190,13 @@ fn statusline_fields(payload: &str) -> Option<(String, String, String)> {
     if model.is_empty() {
         return None;
     }
-    Some((sid, transcript, model))
+    // Claude only sends `effort` for models that have one, so its
+    // absence is an answer rather than a gap.
+    let effort = payload
+        .find("\"effort\":{")
+        .and_then(|at| json_string_field(&payload[at..], "\"level\":\""))
+        .and_then(|v| short_effort(&v));
+    Some((sid, transcript, ModelBadge::new(model, effort)))
 }
 
 /// First string value for `key` (given with its quotes and colon).
@@ -2577,11 +2646,16 @@ fn write_through_symlink(path: &std::path::Path, text: &str) -> std::io::Result<
 /// The model claude last reported for this session through its
 /// status-line hook, or None when the hook is not installed or has
 /// not fired for this session yet.
-fn pushed_model(jsonl: &std::path::Path) -> Option<String> {
+fn pushed_model(jsonl: &std::path::Path) -> Option<ModelBadge> {
     let sid = jsonl.file_stem()?.to_str()?;
     let raw = fs::read_to_string(model_push_dir().join(sid)).ok()?;
-    let model = raw.lines().next()?.trim();
-    (!model.is_empty()).then(|| model.to_string())
+    let mut lines = raw.lines();
+    let model = lines.next()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let effort = lines.nth(1).and_then(short_effort);
+    Some(ModelBadge::new(model.to_string(), effort))
 }
 
 /// Read `CLAUDE_CONFIG_DIR` off the running `claude` pid and parse a
@@ -3167,7 +3241,7 @@ struct WorkerCtx {
     /// The fence answers "what may I read right now", which is not
     /// the same question as "what is this session running".  See
     /// `model_for`.
-    last_model: HashMap<PathBuf, String>,
+    last_model: HashMap<PathBuf, ModelBadge>,
 }
 
 /// How many of a project's session files stay in `seen`.
@@ -3380,7 +3454,7 @@ impl WorkerCtx {
         path: &std::path::Path,
         claude_pid: i32,
         sid: u64,
-    ) -> Option<String> {
+    ) -> Option<ModelBadge> {
         if let Some(m) = pushed_model(path) {
             self.last_model.insert(path.to_path_buf(), m.clone());
             return Some(m);
@@ -3420,7 +3494,7 @@ impl WorkerCtx {
     /// a grid.  Read only while the model is unknown — the transcript
     /// takes over the moment it has one, and a fresh session's bytelog
     /// is small, so the replay this costs is a young pane's alone.
-    fn model_from_banner(&mut self, sid: u64) -> Option<String> {
+    fn model_from_banner(&mut self, sid: u64) -> Option<ModelBadge> {
         // A pane that never shows a banner (not claude at all, screen
         // already scrolled past it) must not buy a replay every scan,
         // so attempts are rate-limited.  But the interval keys off the
@@ -3469,6 +3543,13 @@ fn worker_main(
     res_tx: Sender<ScanResult>,
 ) {
     while req_rx.recv().is_ok() {
+        // Deliberately outside `scan_once`: this one reaches out of
+        // marspot and edits Claude Code's settings, and `scan_once`
+        // is called directly by tests that have no business doing
+        // that to the machine they run on.  The tick owns it.
+        for line in ctx.reconcile_statusline() {
+            marspot::lx_info!("plugin.claudecode.statusline_hook", &line);
+        }
         let result = ctx.scan_once();
         if res_tx.send(result).is_err() {
             // Main side hung up; nothing left to do.
@@ -3485,9 +3566,6 @@ impl WorkerCtx {
     /// runtime is invisible to the plugin host's 100ms tick budget.
     fn scan_once(&mut self) -> ScanResult {
         let mut log_lines: Vec<(LogLevel, &'static str, String)> = Vec::new();
-        for line in self.reconcile_statusline() {
-            log_lines.push((LogLevel::Info, "statusline_hook", line));
-        }
 
         // -- per-session mapping: BFS each shelld session ------------
         let mut new_mapping: HashMap<u64, String> = HashMap::new();
@@ -3662,12 +3740,12 @@ impl WorkerCtx {
             // On screen it crowded out the pane's own title and told
             // the reader nothing.
             let badge = match (tag, model) {
-                (Some(t), Some(m)) => format!("{t}@{m}"),
+                (Some(t), Some(m)) => format!("{t}@{}", m.render()),
                 (Some(t), None) => t,
                 // No profile readable, but we know what it is running:
                 // better than an empty corner, which reads as "nothing
                 // bound here".
-                (None, Some(m)) => m,
+                (None, Some(m)) => m.render(),
                 // Neither readable — but the badge must not go empty
                 // on a bound session.  The core reads "this pane has a
                 // badge" as "the cc plugin owns this pane" and uses it
@@ -3877,7 +3955,7 @@ impl WorkerCtx {
 /// Anchored on the version line rather than on the model line's own
 /// words: the model names change with every release, the frame around
 /// them does not.
-fn parse_banner_model(screen: &str) -> Option<String> {
+fn parse_banner_model(screen: &str) -> Option<ModelBadge> {
     let mut lines = screen.lines();
     while let Some(line) = lines.next() {
         if !line.contains("Claude Code v") {
@@ -3925,15 +4003,18 @@ fn parse_banner_model(screen: &str) -> Option<String> {
 /// at the first word that is neither.  Anything the banner adds
 /// after the version — today `with high effort`, tomorrow something
 /// else — ends the name rather than joining it.
-fn banner_model_token(line: &str) -> Option<String> {
+fn banner_model_token(line: &str) -> Option<ModelBadge> {
     let head = line.split('·').next().unwrap_or(line);
-    let head = match head.find('(') {
+    // The name stops at a parenthesised remark; the effort qualifier
+    // sits *after* it (`Opus 5 (1M context) with high effort`), so
+    // the two are read off different spans of the same line.
+    let name_span = match head.find('(') {
         Some(i) => &head[..i],
         None => head,
     };
     let mut name: Vec<&str> = Vec::new();
     let mut seen_version = false;
-    for tok in head.split_whitespace() {
+    for tok in name_span.split_whitespace() {
         // Strip decoration clinging to a word (`▟Fable`), then skip
         // tokens that are only decoration.
         let t = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
@@ -3967,7 +4048,18 @@ fn banner_model_token(line: &str) -> Option<String> {
     }
     let joined = name.join(" ");
     let short = short_model(&joined);
-    if short.is_empty() { None } else { Some(short) }
+    if short.is_empty() {
+        return None;
+    }
+    // The qualifier the name loop stops at: `Fable 5 with high effort`.
+    // It was being discarded as noise; it is the pane's effort level,
+    // and it is the only place a just-resumed claude states it.
+    let words: Vec<&str> = head.split_whitespace().collect();
+    let effort = words
+        .windows(3)
+        .find(|w| w[0] == "with" && w[2].starts_with("effort"))
+        .and_then(|w| short_effort(w[1]));
+    Some(ModelBadge::new(short, effort))
 }
 
 /// The live session uuid as stated by the claude process tree's own
@@ -4133,6 +4225,11 @@ mod tests {
         assert!(discover_profiles_in(&home).is_empty());
     }
 
+    /// Badges compare as what they would be drawn as.
+    fn rendered(b: Option<ModelBadge>) -> Option<String> {
+        b.map(|b| b.render())
+    }
+
     #[test]
     fn short_model_normalises_ids_and_display_names() {
         assert_eq!(short_model("claude-fable-5"), "fable-5");
@@ -4161,14 +4258,18 @@ mod tests {
 
     #[test]
     fn a_status_line_payload_yields_the_session_and_its_model() {
-        let (sid, transcript, model) =
+        let (sid, transcript, badge) =
             statusline_fields(REAL_STATUSLINE_PAYLOAD).expect("payload parses");
         assert_eq!(sid, "b0b0b0b0-1111-2222-3333-444444444444");
         assert!(transcript.ends_with("b0b0b0b0-1111-2222-3333-444444444444.jsonl"));
         // `display_name`, not `id`: the id's `[1m]` suffix is not a
         // model name and `short_model` throws the whole thing out.
-        assert_eq!(model, "opus-5");
+        assert_eq!(badge.model, "opus-5");
         assert_eq!(short_model("claude-opus-5[1m]"), "");
+        // The same payload states the effort, and the badge draws
+        // both halves.
+        assert_eq!(badge.effort.as_deref(), Some("high"));
+        assert_eq!(badge.render(), "opus-5\u{b7}high");
     }
 
     #[test]
@@ -4213,7 +4314,7 @@ mod tests {
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
-        assert_eq!(ctx.model_for(&path, 111, 0).as_deref(), Some("opus-5"));
+        assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("opus-5"));
 
         let push = model_push_dir();
         fs::create_dir_all(&push).unwrap();
@@ -4224,7 +4325,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            ctx.model_for(&path, 111, 0).as_deref(),
+            rendered(ctx.model_for(&path, 111, 0)).as_deref(),
             Some("fable-5"),
             "the badge follows claude, not the last completed turn"
         );
@@ -4237,7 +4338,7 @@ mod tests {
             "{\"role\":\"assistant\",\"model\":\"claude-sonnet-5\",\"x\":1}\n",
         )
         .unwrap();
-        assert_eq!(ctx.model_for(&other, 222, 0).as_deref(), Some("sonnet-5"));
+        assert_eq!(rendered(ctx.model_for(&other, 222, 0)).as_deref(), Some("sonnet-5"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -4368,6 +4469,87 @@ mod tests {
         assert!(json_parses("{\"a\":\"\\\\\"}"));
     }
 
+    /// The transcript names the effort on the same record as the
+    /// model, so the badge gets both halves from one line.
+    #[test]
+    fn an_assistant_record_names_the_effort_it_ran_at() {
+        let dir = std::env::temp_dir().join("cc-effort-tail-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+
+        // Shape taken from a real record: `effort` is a sibling of the
+        // record's own uuid, not a member of `message`.
+        fs::write(
+            &path,
+            "{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\
+             \"uuid\":\"u\",\"effort\":\"high\"}\n",
+        )
+        .unwrap();
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("opus-5\u{b7}high"));
+
+        // A model with no effort setting: the record simply does not
+        // carry one, and the badge says the model alone.
+        fs::write(
+            &path,
+            "{\"role\":\"assistant\",\"model\":\"claude-haiku-4-5\",\"uuid\":\"u\"}\n",
+        )
+        .unwrap();
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("haiku-4-5"));
+
+        // `/model` output names the model and nothing else.  Saying
+        // no effort is the honest reading — the model just changed,
+        // and what it will run at is the next turn's news.
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\
+             \"<local-command-stdout>Set model to \u{1b}[1mFable 5\u{1b}[22m</local-command-stdout>\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("fable-5"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A record written before the effort line existed still reads.
+    ///
+    /// The hook and the badge are separate binaries during an update
+    /// — the running shell reads what a just-replaced one wrote, and
+    /// the other way round — so the file's shape has to tolerate both
+    /// generations.
+    #[test]
+    fn a_model_record_without_an_effort_line_still_reads() {
+        let root = std::env::temp_dir().join("cc-effort-record-test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        unsafe { std::env::set_var("MARSPOT_STATE_DIR", &root) };
+        let push = model_push_dir();
+        fs::create_dir_all(&push).unwrap();
+        let jsonl = root.join("11111111-1111-1111-1111-111111111111.jsonl");
+        let name = "11111111-1111-1111-1111-111111111111";
+
+        // Two lines: what 0.7.116 wrote.
+        fs::write(push.join(name), "opus-5\n/some/path.jsonl\n").unwrap();
+        assert_eq!(
+            pushed_model(&jsonl),
+            Some(ModelBadge::new("opus-5".into(), None))
+        );
+
+        // Three lines, third blank: claude reported no effort.
+        fs::write(push.join(name), "opus-5\n/some/path.jsonl\n\n").unwrap();
+        assert_eq!(
+            pushed_model(&jsonl),
+            Some(ModelBadge::new("opus-5".into(), None))
+        );
+
+        // Three lines with one.
+        fs::write(push.join(name), "opus-5\n/some/path.jsonl\nxhigh\n").unwrap();
+        assert_eq!(
+            pushed_model(&jsonl).map(|b| b.render()).as_deref(),
+            Some("opus-5\u{b7}xhigh")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// The profile-switch case, from the other side.
     ///
     /// The transcript still says `opus-5` — the model the profile that
@@ -4427,7 +4609,7 @@ mod tests {
             last_model: HashMap::new(),
         };
         // First sighting: the transcript is this process's own.
-        assert_eq!(ctx.model_for(&path, 111, sid).as_deref(), Some("opus-5"));
+        assert_eq!(rendered(ctx.model_for(&path, 111, sid)).as_deref(), Some("opus-5"));
 
         // The switch: new pid, fence at end of file, and the records a
         // resumed process writes at startup name no model.
@@ -4437,10 +4619,11 @@ mod tests {
         drop(f);
 
         assert_eq!(
-            ctx.model_for(&path, 222, sid).as_deref(),
-            Some("fable-5"),
+            rendered(ctx.model_for(&path, 222, sid)).as_deref(),
+            Some("fable-5·high"),
             "the banner on the pane's own screen outranks the model \
-             the previous profile happened to leave behind"
+             the previous profile happened to leave behind, and it \
+             names the effort while it is there"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -4467,7 +4650,7 @@ mod tests {
         let switch_at = fs::metadata(&path).unwrap().len();
 
         // Unfenced, the old model is what you get — this is the bug.
-        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("fable-5"));
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("fable-5"));
 
         // Fenced at the switch: nothing to report yet.
         assert_eq!(
@@ -4483,7 +4666,7 @@ mod tests {
         f.write_all(post.as_bytes()).unwrap();
         drop(f);
         assert_eq!(
-            tail_model_short(&path, switch_at).as_deref(),
+            rendered(tail_model_short(&path, switch_at)).as_deref(),
             Some("opus-4-8"),
             "post-switch records must still be read"
         );
@@ -4768,7 +4951,7 @@ mod tests {
             banner_tried: HashMap::new(),
             last_model: HashMap::new(),
         };
-        assert_eq!(ctx.model_for(&path, 111, 0).as_deref(), Some("fable-5"));
+        assert_eq!(rendered(ctx.model_for(&path, 111, 0)).as_deref(), Some("fable-5"));
 
         // The switch: new pid, so the fence lands at end of file — and
         // the startup records a resumed process writes name no model.
@@ -4778,7 +4961,7 @@ mod tests {
         writeln!(f, "{{\"type\":\"permission-mode\"}}").unwrap();
         drop(f);
         assert_eq!(
-            ctx.model_for(&path, 222, 0).as_deref(),
+            rendered(ctx.model_for(&path, 222, 0)).as_deref(),
             Some("fable-5"),
             "the badge keeps what it last saw rather than going blank"
         );
@@ -4787,7 +4970,7 @@ mod tests {
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         write!(f, "{}", assistant("opus-5")).unwrap();
         drop(f);
-        assert_eq!(ctx.model_for(&path, 222, 0).as_deref(), Some("opus-5"));
+        assert_eq!(rendered(ctx.model_for(&path, 222, 0)).as_deref(), Some("opus-5"));
 
         // A session that has never named one has nothing to show, and
         // nothing is invented for it.
@@ -4809,7 +4992,7 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to \u001b[1mOpus 4.8\u001b[22m and saved as your default for new sessions</local-command-stdout>"}}"#,
             "\n",
         ));
-        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("opus-4-8"));
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("opus-4-8"));
 
         // ...and vice versa: an assistant turn after the switch wins.
         // (older "system"/"local_command" record shape)
@@ -4819,7 +5002,7 @@ mod tests {
             r#"{"type":"message","role":"assistant","model":"claude-fable-5","content":[]}"#,
             "\n",
         ));
-        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("fable-5"));
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("fable-5"));
 
         // No model anywhere -> None.
         let path = tmpfile(r#"{"type":"user","text":"hi"}"#);
@@ -4835,7 +5018,7 @@ mod tests {
             r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"marker 改锚 <local-command-stdout>Set model to 之类的-块),而 我 5"}]}}"#,
             "\n",
         ));
-        assert_eq!(tail_model_short(&path, 0).as_deref(), Some("fable-5"));
+        assert_eq!(rendered(tail_model_short(&path, 0)).as_deref(), Some("fable-5"));
     }
 
     #[test]
@@ -6543,16 +6726,16 @@ mod tests {
    ~/workspace/goliajp/devops
 
 ";
-        assert_eq!(parse_banner_model(screen).as_deref(), Some("opus-5"));
+        assert_eq!(rendered(parse_banner_model(screen)).as_deref(), Some("opus-5\u{b7}high"));
 
         // The remark after `·` is a plan, not a model.
         assert_eq!(
-            parse_banner_model("Claude Code v2.0.1\nSonnet 4.5 · Claude Pro\n").as_deref(),
+            rendered(parse_banner_model("Claude Code v2.0.1\nSonnet 4.5 · Claude Pro\n")).as_deref(),
             Some("sonnet-4-5"),
         );
         // No parenthesised remark, no separator — still just the name.
         assert_eq!(
-            parse_banner_model("Claude Code v9\nFable 5\n").as_deref(),
+            rendered(parse_banner_model("Claude Code v9\nFable 5\n")).as_deref(),
             Some("fable-5"),
         );
         // A screen with no banner says nothing rather than guessing —
@@ -6572,25 +6755,36 @@ mod tests {
     /// the whole line non-ASCII and produced *no* model, and without
     /// the logo the qualifier produced `fable-5-with-hig`.
     #[test]
-    fn a_banner_with_a_logo_and_an_effort_suffix_still_names_the_model() {
+    fn a_banner_with_a_logo_names_the_model_and_its_effort() {
         let with_logo = "  ▛▀▜  Claude Code v2.1.232\n  ▙▄▟  Fable 5 with high effort · Claude Max\n";
-        assert_eq!(parse_banner_model(with_logo).as_deref(), Some("fable-5"));
+        assert_eq!(rendered(parse_banner_model(with_logo)).as_deref(), Some("fable-5·high"));
 
         let bare = "Claude Code v2.1.232\nFable 5 with high effort · Claude Max\n";
-        assert_eq!(parse_banner_model(bare).as_deref(), Some("fable-5"));
+        assert_eq!(rendered(parse_banner_model(bare)).as_deref(), Some("fable-5·high"));
 
         // The parenthesised form used to work only because dropping
         // everything from `(` also dropped the qualifier.  It has to
-        // keep working now that the qualifier is handled on purpose.
+        // keep working now that the qualifier is read on purpose —
+        // and the qualifier lives past the `(`, so the effort has to
+        // come from the whole line, not the trimmed name.
         let paren = "Claude Code v2.1.227\nOpus 5 (1M context) with high effort · Claude Max\n";
-        assert_eq!(parse_banner_model(paren).as_deref(), Some("opus-5"));
+        assert_eq!(rendered(parse_banner_model(paren)).as_deref(), Some("opus-5·high"));
 
         // A two-word family name survives; the version still ends it.
-        let two_word = "Claude Code v9\nClaude Opus 5 with high effort · Claude Max\n";
-        assert_eq!(parse_banner_model(two_word).as_deref(), Some("claude-opus-5"));
+        let two_word = "Claude Code v9\nClaude Opus 5 with xhigh effort · Claude Max\n";
+        assert_eq!(
+            rendered(parse_banner_model(two_word)).as_deref(),
+            Some("claude-opus-5·xhigh")
+        );
+
+        // A model with no effort setting says so by not saying it,
+        // and the badge draws the model alone rather than inventing
+        // a level for it.
+        let no_effort = "Claude Code v9\nHaiku 4.5 · Claude Max\n";
+        assert_eq!(rendered(parse_banner_model(no_effort)).as_deref(), Some("haiku-4-5"));
 
         // No model line at all is still None, not a guess.
-        assert_eq!(parse_banner_model("Claude Code v9\n\n\n\n").as_deref(), None);
+        assert_eq!(rendered(parse_banner_model("Claude Code v9\n\n\n\n")).as_deref(), None);
     }
 
     /// `/clear` moves the session on; argv does not.

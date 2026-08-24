@@ -28,7 +28,36 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.119**
+Current: **0.7.120**
+
+### 0.7.120
+
+**角标除 model 外还写 effort:`P3@opus-5·high`。**
+
+effort 跟 model 是一起被说出来的 —— 三个信源没有一个只说其中一半:
+
+| 信源 | model | effort |
+|---|---|---|
+| status line 的 payload | `model.display_name` | `effort.level` |
+| transcript 的 assistant 记录 | `"model":"claude-opus-5"` | 同一行的 `"effort":"high"` |
+| 启动横幅 | `Fable 5` | `with high effort`(原来被当噪音丢掉)|
+
+所以两者合成一个 `ModelBadge`,沿同一条信源阶梯走,谁也不用把一个问题答两遍。
+
+分隔符用 `·`,是 claude 自己在那行横幅上用的
+(`Fable 5 with high effort · Claude Max`)—— 角标和它描述的那块屏幕标点一致。
+
+**没有 effort 时就不写**。有的 model 根本没有这档设置,claude 的 payload 也
+只在支持时才带 `effort`;`/model` 的确认串同样不说 —— 那一刻 model 刚换,它
+将以什么 effort 跑是下一轮的事。缺就是缺,不猜。
+
+横幅这一路有个小坑:名字在 `(` 处截断(`Opus 5 (1M context)`),而限定词在括号
+**之后**,所以两者读的是同一行的不同片段。写的时候注释先预言、测试随即撞上、
+再修 —— 括号那条用例现在钉着这件事。
+
+**顺带修一处测试污染**:对账 hook 的那段原本挂在 `scan_once` 里,而 `scan_once`
+是测试直接调用的 —— 于是单测会去读真实的 settings.toml、并按它去改真实的
+Claude Code 配置。挪到 worker 的 tick 上;测试碰不到它了。
 
 ### 0.7.119
 
