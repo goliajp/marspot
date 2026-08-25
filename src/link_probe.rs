@@ -34,6 +34,19 @@
 //! answer lands — the scanner already treats `Unknown` as "not a link
 //! yet", so nothing downstream needs a notion of pending.
 //!
+//! ## An answer, once held, is never withdrawn
+//!
+//! `Unknown` is for a path nobody has ever answered.  A lapsed TTL is
+//! not that: it means "worth asking again", and the held verdict is
+//! served while the refresh runs.  Answering `Unknown` there is what
+//! made links come and go — see `lookup_or_queue` for the three steps
+//! that left a pane sitting with its links missing until it was
+//! focused.
+//!
+//! The property this buys is worth naming: **what is on screen
+//! changes only when the filesystem's answer changes.**  No clock
+//! takes a link away.
+//!
 //! ## Bounded, per the "cannot get slower the longer it runs" rule
 //!
 //! - cache: two generations of at most `CACHE_CAP` entries each.  When
@@ -116,22 +129,44 @@ impl LinkProbe {
         self.generation.load(Ordering::Relaxed)
     }
 
-    /// Look the path up, and on a miss queue it.  Holds the lock only
-    /// for map operations — never across a syscall.
+    /// Look the path up, and queue a probe when the answer is missing
+    /// or stale.  Holds the lock only for map operations — never
+    /// across a syscall.
+    ///
+    /// **A verdict we already hold is never withdrawn.**  A lapsed TTL
+    /// means "worth asking again", not "no longer true", and answering
+    /// `Unknown` on the way to re-confirming it is what put a pane on
+    /// screen with its links missing:
+    ///
+    ///   1. the five-second TTL lapses; the next rebuild of that pane
+    ///      asks, gets `Unknown`, and draws the paths as plain text;
+    ///   2. the worker re-probes and gets *the same* answer, so
+    ///      `changed` is false and the generation does not move —
+    ///      correctly, because bumping it rebuilds all fourteen panes;
+    ///   3. nothing therefore rebuilds that pane again, and it sits
+    ///      there with no links until something unrelated disturbs it.
+    ///
+    /// Focusing the pane is one such disturbance, which is why the
+    /// links came back when you clicked into it and why they seemed to
+    /// come and go at random: whether a rebuild landed inside a lapse
+    /// window decided what you saw. Serving the held answer removes
+    /// the window — what is on screen only ever changes when the
+    /// filesystem's answer actually changes.
     fn lookup_or_queue(&self, path: &str) -> PathVerdict {
         let now = Instant::now();
         let mut c = self.cache.lock().expect("link-probe cache poisoned");
 
-        if let Some(e) = c.hot.get(path) {
+        let held = match c.hot.get(path).copied() {
+            Some(e) => Some(e),
+            // A cold hit is a live entry that merely survived a
+            // rotation; promote it so the next rotation does not lose
+            // it.
+            None => c.cold.get(path).copied().inspect(|e| {
+                insert_hot(&mut c, path.to_string(), *e);
+            }),
+        };
+        if let Some(e) = held {
             if e.fresh(now) {
-                return verdict(e.exists);
-            }
-        }
-        // A cold hit is a live entry that merely survived a rotation;
-        // promote it so the next rotation does not lose it.
-        if let Some(e) = c.cold.get(path).copied() {
-            if e.fresh(now) {
-                insert_hot(&mut c, path.to_string(), e);
                 return verdict(e.exists);
             }
         }
@@ -142,7 +177,13 @@ impl LinkProbe {
             drop(c);
             self.work.notify_one();
         }
-        PathVerdict::Unknown
+        // Stale but held: keep saying what we last knew while the
+        // refresh runs.  Only a path we have never answered is
+        // genuinely unknown.
+        match held {
+            Some(e) => verdict(e.exists),
+            None => PathVerdict::Unknown,
+        }
     }
 
     /// Worker body: take one path, probe it off-lock, record it.
@@ -271,6 +312,89 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_millis(5), "probe blocked");
     }
 
+    /// The reported defect, as a test.
+    ///
+    /// A link that has resolved must not un-resolve because a clock
+    /// ran out.  Before this, a lapsed TTL answered `Unknown`, the
+    /// pane rebuilt without its links, and — since re-confirming the
+    /// same answer moves no generation — nothing rebuilt it again.
+    /// The pane stayed link-less until it was focused.
+    #[test]
+    fn a_lapsed_verdict_is_still_served_while_it_is_rechecked() {
+        let probe = LinkProbe::new();
+        let path = "/some/answered/path";
+
+        // Stand in for a landed verdict that has since gone stale.
+        {
+            let mut c = probe.cache.lock().unwrap();
+            let stale = Entry {
+                exists: true,
+                at: Instant::now() - TTL - Duration::from_secs(1),
+                ttl: TTL,
+            };
+            c.hot.insert(path.to_string(), stale);
+        }
+
+        assert_eq!(
+            probe.probe(path),
+            PathVerdict::Exists,
+            "a lapsed TTL means 'ask again', not 'no longer true'"
+        );
+        // …and it did ask again.
+        {
+            let c = probe.cache.lock().unwrap();
+            assert!(c.inflight.contains(path), "no refresh was queued");
+        }
+        // Asking twice does not queue it twice.
+        assert_eq!(probe.probe(path), PathVerdict::Exists);
+        {
+            let c = probe.cache.lock().unwrap();
+            assert_eq!(c.queue.len(), 1);
+        }
+
+        // The same holds for a path we last saw as missing: it stays
+        // "not a link" rather than briefly becoming unknown, so the
+        // scan's answer never changes without the filesystem's.
+        let gone = "/some/answered/gone";
+        {
+            let mut c = probe.cache.lock().unwrap();
+            c.hot.insert(
+                gone.to_string(),
+                Entry {
+                    exists: false,
+                    at: Instant::now() - TTL - Duration::from_secs(1),
+                    ttl: TTL,
+                },
+            );
+        }
+        assert_eq!(probe.probe(gone), PathVerdict::Missing);
+
+        // A path nobody ever answered is the only genuine unknown.
+        assert_eq!(probe.probe("/never/asked"), PathVerdict::Unknown);
+    }
+
+    /// A stale entry that only lives in `cold` is served too — the
+    /// rotation is a cache-size mechanism, not an expiry.
+    #[test]
+    fn a_lapsed_verdict_in_the_cold_generation_is_served_and_promoted() {
+        let probe = LinkProbe::new();
+        let path = "/rotated/out/path";
+        {
+            let mut c = probe.cache.lock().unwrap();
+            c.cold.insert(
+                path.to_string(),
+                Entry {
+                    exists: true,
+                    at: Instant::now() - TTL - Duration::from_secs(1),
+                    ttl: TTL,
+                },
+            );
+        }
+        assert_eq!(probe.probe(path), PathVerdict::Exists);
+        let c = probe.cache.lock().unwrap();
+        assert!(c.hot.contains_key(path), "a served cold entry is promoted");
+    }
+
     /// Once the worker lands an answer the next ask is definite, and
     /// the generation moved so the renderer knows to repaint.
     #[test]
@@ -346,9 +470,19 @@ mod tests {
             };
             c.hot.insert("/".into(), stale);
         }
-        assert_eq!(probe.probe("/"), PathVerdict::Unknown);
+        // The held answer is served throughout — the ask that starts
+        // the refresh included.  Nothing on screen flickers while a
+        // verdict is being re-confirmed.
+        assert_eq!(probe.probe("/"), PathVerdict::Exists);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && probe.probe("/") == PathVerdict::Unknown {
+        loop {
+            let done = {
+                let c = probe.cache.lock().unwrap();
+                !c.inflight.contains("/") && c.queue.is_empty()
+            };
+            if done || Instant::now() >= deadline {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(probe.probe("/"), PathVerdict::Exists);

@@ -2648,7 +2648,46 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.151**
+Current: **0.12.155**
+
+### 0.12.155
+
+A verdict the probe already holds is never withdrawn.
+
+Reported as "an unfocused pane has no links, focusing it brings them
+back — and sometimes it has them anyway".  The refresh was not the
+waste it looked like; the answer was evaporating, and then getting
+stuck that way:
+
+1. A path verdict expires on a 5 s TTL.  `lookup_or_queue` had a held
+   answer and did not use it: it queued a re-probe and returned
+   `Unknown`.  The scanner reads `Unknown` as "not a link yet", so the
+   next rebuild of that pane drew those rows as plain text.
+2. The worker re-probed and got *the same* answer, so `changed` was
+   false and the generation did not move.  That part is right, and is
+   what 0.12.153 deliberately fixed: the counter invalidates **every**
+   pane's instance cache, and rebuilding all 14 to re-confirm an
+   answer already on screen is worse than the flicker.
+3. So nothing rebuilt that pane again.  It sat there without links
+   until something unrelated disturbed it — focusing it, for one,
+   since `window_focused` is in the pane fingerprint.
+
+"Sometimes it has them anyway" is which side of a lapse window the
+rebuild happened to land on.
+
+`Unknown` is now only for a path nobody has ever answered.  A lapsed
+TTL means "worth asking again", not "no longer true", so the held
+verdict is served while the refresh runs — in both cache generations,
+with a cold hit still promoted.
+
+The property that buys, worth stating plainly: **what is on screen
+changes only when the filesystem's answer changes.**  No clock takes a
+link away.
+
+One thing the report guessed at that is already true: the scan does
+not run per frame.  Each pane's instances are cached by fingerprint
+and the scan happens only on a real rebuild — which now means only
+when the content changes or a verdict actually flips.
 
 ### 0.12.154
 
