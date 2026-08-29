@@ -2989,13 +2989,40 @@ impl Plugin for ClaudecodePlugin {
 
     fn pane_badge_menu(
         &mut self,
-        _host: &dyn PluginHost,
+        host: &dyn PluginHost,
         shelld_session_id: u64,
     ) -> Vec<marspot::shell_proto::PaneBadgeMenuItem> {
+        // Both ways out of here used to be silent, and an empty menu
+        // opens nothing — so a right-click on the badge that did
+        // nothing left no trace anywhere to say which of the two it
+        // was.  The badge is drawn from a look this plugin published
+        // and the core holds until told otherwise; the menu is
+        // computed live from `last_meta`.  The two can disagree, and
+        // when they do the badge is on screen with nothing behind it.
         let Some(meta) = self.last_meta.get(&shelld_session_id) else {
+            host.log(
+                LogLevel::Warn,
+                "badge_menu.no_bind",
+                &format!(
+                    "shelld_session={} has a badge but no binding; menu empty",
+                    shelld_session_id
+                ),
+            );
             return Vec::new();
         };
-        badge_menu_for(meta.profile_num, &discover_profiles())
+        let profiles = discover_profiles();
+        let items = badge_menu_for(meta.profile_num, &profiles);
+        if items.is_empty() {
+            host.log(
+                LogLevel::Warn,
+                "badge_menu.empty",
+                &format!(
+                    "shelld_session={} current=P{} discovered={:?}; nothing to offer",
+                    shelld_session_id, meta.profile_num, profiles
+                ),
+            );
+        }
+        items
     }
 
     fn on_pane_badge_menu_action(
