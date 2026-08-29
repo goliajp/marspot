@@ -4240,6 +4240,13 @@ impl CoreApp {
                     .push((MsgType::PaneBadgeMenuRequest, payload));
                 return;
             }
+        } else if let Some(miss) = self.badge_miss_report(wi, x_phys, y_phys) {
+            // A right-click inside a title strip that shows a badge,
+            // yet missed it.  Says where the badge was thought to be
+            // versus where the click landed, because the geometry is
+            // computed twice — here and in the renderer — from the
+            // same inputs, and nothing was checking that they agree.
+            lx_warn!("core.badge_hit_miss", &miss);
         }
         // A right-click that lands on a recognised URL / file path
         // gets a link-specific menu (Open / Copy) instead of the
@@ -4275,6 +4282,13 @@ impl CoreApp {
         items: Vec<marspot::shell_proto::PaneBadgeMenuItem>,
     ) {
         if items.is_empty() {
+            // The plugin that owns the badge had nothing to offer.
+            // Silent until now, which made a dead right-click
+            // indistinguishable from a missed hit-test.
+            lx_warn!(
+                "core.badge_menu_empty",
+                &format!("shelld_session={sid} replied with no items")
+            );
             return;
         }
         let items = items
@@ -6388,6 +6402,59 @@ impl CoreApp {
     /// otherwise.  Mirrors the geometry the renderer uses in
     /// `render_metal::build_instances` so a visual hit lines up with
     /// the logical one.
+    /// Why a right-click inside a badge-bearing title strip missed
+    /// the badge — or `None` when it did not land in one at all.
+    ///
+    /// The badge's box is computed in two places from the same
+    /// inputs: here, and in the renderer's `push_session`.  Nothing
+    /// checks that the two agree, and when they drift the only
+    /// symptom is a badge you can see and cannot click.  This turns
+    /// that into a line naming the click, the box, and the text.
+    fn badge_miss_report(&self, wi: usize, x_phys: f64, y_phys: f64) -> Option<String> {
+        let (cell_w, _) = self.renderer.cell_dims();
+        let cell_w = cell_w as f64;
+        let padding = win!(self, wi).layout.padding;
+        let title_h = win!(self, wi).layout.cell_title_h;
+        let cell_count = win!(self, wi).layout.cells.len();
+        for (i, p) in win!(self, wi).panes.iter().enumerate().take(cell_count) {
+            let sid = p.shelld_session_id()?;
+            let rect = &win!(self, wi).layout.cells[i];
+            let y_lo = rect.y_top;
+            if y_phys < y_lo || y_phys >= y_lo + title_h {
+                continue;
+            }
+            if x_phys < rect.x || x_phys >= rect.x + rect.w {
+                continue;
+            }
+            let badge = self.pane_badges.get(&sid).cloned().unwrap_or_default();
+            if badge.is_empty() {
+                // No badge on this pane: a plain title-strip click,
+                // which is not a miss.
+                return None;
+            }
+            let reserved = if p.update_pending() && i == win!(self, wi).focused_idx {
+                cell_w * 1.5
+            } else {
+                0.0
+            };
+            let chars = badge.chars().count() as f64;
+            let lo = rect.x + rect.w - padding - reserved - chars * cell_w;
+            let prefix = badge.split(' ').next().unwrap_or("").chars().count() as f64;
+            return Some(format!(
+                "sid={sid} click=({x_phys:.1},{y_phys:.1}) \
+                 badge={badge:?} chars={chars} prefix_chars={prefix} \
+                 box=[{lo:.1},{:.1}) cell_w={cell_w:.2} reserved={reserved:.1} \
+                 pane=[{:.1},{:.1}) focused_idx={} update_pending={}",
+                lo + prefix * cell_w,
+                rect.x,
+                rect.x + rect.w,
+                win!(self, wi).focused_idx,
+                p.update_pending(),
+            ));
+        }
+        None
+    }
+
     fn hit_test_pane_badge_prefix(
         &self, wi: usize,
         x_phys: f64,

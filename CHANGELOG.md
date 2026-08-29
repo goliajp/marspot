@@ -28,7 +28,21 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.121**
+Current: **0.7.122**
+
+### 0.7.122
+
+**角标右键弹不出菜单时,至少要说一句话。**
+
+`pane_badge_menu` 有两条出路都是静默的:`last_meta` 里没有这个 session,或者
+算出来的行是空的。菜单为空 = 核心什么也不弹,于是「右键没反应」在日志里
+**不留任何痕迹** —— 三处静默(命中落空 / 这里 / 核心收到空 items)彼此
+无法分辨,这正是它难查的原因。
+
+两条出路现在各记一行 Warn,带上 session、当前 profile、以及扫到的 profile 列表。
+
+值得记下的不对称:角标是这个插件发布、核心一直留着的**看板**,而菜单是每次
+右键**现算**的。两者可以不一致 —— 不一致时,屏幕上有一个角标,背后什么都没有。
 
 ### 0.7.121
 
@@ -2648,7 +2662,35 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.155**
+Current: **0.12.156**
+
+### 0.12.156
+
+A right-click on a pane badge that does nothing now says why.
+
+Reported as "the badge no longer opens its menu; quitting and
+reopening Marspot fixes it".  Three hypotheses were measured and all
+three were wrong: the `·` in `opus-5·high` is one cell wide, not two,
+so the badge's box did not drift; reclamation is off on this machine
+and `dormant.tsv` is empty, so no pane was wearing a frozen badge with
+its binding gone; and `new_mapping` / `new_meta` are filled on the
+same line, so a pane cannot be badged without an identity.
+
+What the hunt did establish is that the chain has **three silent
+ways to do nothing** — the hit-test missing, the plugin returning no
+rows, and this side receiving none — and not one of them left a
+trace.  That is the defect worth fixing before guessing a fourth
+time.
+
+- A right-click landing in a title strip whose pane carries a badge,
+  but missing it, logs the click, the box the hit-test computed, the
+  badge text, and the terms that go into the box (`cell_w`,
+  `reserved`, `focused_idx`, `update_pending`).  The box is computed
+  twice from the same inputs — here and in the renderer — and nothing
+  was checking that the two agree.
+- An empty `PaneBadgeMenu` reply logs the session it was for.
+
+Behaviour is otherwise unchanged.  The next occurrence names itself.
 
 ### 0.12.155
 

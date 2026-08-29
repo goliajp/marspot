@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.121"  # 两行旧记录 = effort 未知,让 transcript 补上;详见 CHANGELOG.md
-core    = "0.12.155"  # 已经拿到的链接判定不再因为 TTL 到期而消失;详见 CHANGELOG.md
+shell   = "0.7.122"  # 角标菜单空手而归时会说为什么;详见 CHANGELOG.md
+core    = "0.12.156"  # 右键落空 / 回复为空不再静默,报出两边的几何;详见 CHANGELOG.md
 session = "0.11.54"  # 孤立可打印字符不再过状态机(parse 全语料 +2-4%);详见 CHANGELOG.md
