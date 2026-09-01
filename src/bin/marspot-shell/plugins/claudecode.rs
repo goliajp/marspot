@@ -4364,6 +4364,202 @@ mod tests {
         path
     }
 
+    /// The gate, wired up: a badge click on a session a background job
+    /// holds must queue the refusal, not the cycle.
+    ///
+    /// The parts either side of this are covered on their own — the
+    /// detector against real records, the refusal op's shape.  What is
+    /// left is the few lines between them, and they are the ones that
+    /// decide whether the user still has their conversation after the
+    /// click.
+    #[test]
+    fn a_click_on_a_bg_held_session_refuses_instead_of_cycling() {
+        let home = std::env::temp_dir()
+            .join(format!("cc-cycle-gate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        // Two profiles so the cycle has somewhere to go: P1 → P2.
+        for n in [1u8, 2] {
+            fs::create_dir_all(home.join(format!(".claude-profile-{n}/sessions")))
+                .unwrap();
+        }
+        let uuid = "e1e62fd9-d0bc-493a-865a-56f2de8d7ac3";
+        let me = std::process::id() as i32;
+        // The shape claude actually writes, taken off a real `claude
+        // --bg` run: `kind` is **"bg"**, not "background".  The test
+        // being `!= "interactive"` rather than a list of known kinds
+        // is what makes that not matter — and this record is here so
+        // it keeps not mattering.
+        fs::write(
+            home.join(format!(".claude-profile-2/sessions/{me}.json")),
+            format!(
+                r#"{{"pid":{me},"sessionId":"{uuid}","cwd":"/tmp","kind":"bg","status":"idle"}}"#
+            ),
+        )
+        .unwrap();
+        let _home = HomeOverride::set(&home);
+
+        let host = FakeHost::new(home.join("state"));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        let meta = BindMeta {
+            profile_num: 1,
+            config_dir: Some(
+                home.join(".claude-profile-1").to_string_lossy().into_owned(),
+            ),
+            uuid: uuid.to_string(),
+            // Never signalled — the gate returns first.  A pid that
+            // cannot exist means a regression here fails the assertion
+            // instead of killing something on the machine running it.
+            claude_pid: i32::MAX,
+            project_basename: String::new(),
+            transcript_at: SystemTime::now(),
+        };
+
+        plugin.start_profile_cycle_to(&host, 7, meta, 2);
+        host.pump_ops();
+
+        // The badge rides the PaneSession, so it takes a tick to
+        // appear — the real host drives these from its own loop.
+        struct Recording(std::sync::Mutex<Vec<String>>);
+        impl crate::plugins::PaneSessionHost for Recording {
+            fn shelld_session_id(&self) -> u64 {
+                7
+            }
+            fn end(&self) {}
+            fn set_badge(&self, text: &str) {
+                self.0.lock().unwrap().push(text.to_string());
+            }
+            fn set_pane_title(&self, _t: &str) {}
+            fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
+        }
+        let rec = Recording(std::sync::Mutex::new(Vec::new()));
+        for sess in host.sessions.lock().unwrap().iter_mut() {
+            sess.on_tick(&rec);
+        }
+
+        let badges = rec.0.lock().unwrap();
+        assert_eq!(badges.len(), 1, "one badge, for the one click");
+        // A running step gets a spinner frame appended — kept, because
+        // it is what says the click was received at all.
+        assert!(
+            badges[0].starts_with("⚠ held by bg job"),
+            "the click is answered by the refusal; `→ P2` here would mean \
+             the cycle ran and the session is gone.  got {:?}",
+            badges[0]
+        );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// `HOME` is process-global.  nextest is process-per-test and
+    /// immune, but `cargo test` runs these as threads alongside a test
+    /// that reads the real `HOME`, so serialise and put it back.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeOverride {
+        old: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeOverride {
+        fn set(dir: &std::path::Path) -> Self {
+            let guard = HOME_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let old = std::env::var_os("HOME");
+            // SAFETY: no other thread reads HOME while the lock is held.
+            unsafe { std::env::set_var("HOME", dir) };
+            Self { old, _guard: guard }
+        }
+    }
+
+    impl Drop for HomeOverride {
+        fn drop(&mut self) {
+            // SAFETY: as above — still under the lock.
+            unsafe {
+                match self.old.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    /// And the other half: with nothing holding the session, the same
+    /// click still cycles.
+    ///
+    /// A gate that is only ever tested when it fires is a gate that can
+    /// quietly refuse everything.  Same setup as above with the record
+    /// changed to `interactive`, which is what a pane running claude in
+    /// the foreground writes about itself — the ordinary case, and the
+    /// one the feature exists for.
+    #[test]
+    fn a_click_on_an_unheld_session_still_cycles() {
+        let home = std::env::temp_dir()
+            .join(format!("cc-cycle-open-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        for n in [1u8, 2] {
+            fs::create_dir_all(home.join(format!(".claude-profile-{n}/sessions")))
+                .unwrap();
+        }
+        let uuid = "e1e62fd9-d0bc-493a-865a-56f2de8d7ac3";
+        let me = std::process::id() as i32;
+        fs::write(
+            home.join(format!(".claude-profile-2/sessions/{me}.json")),
+            format!(
+                r#"{{"pid":{me},"sessionId":"{uuid}","cwd":"/tmp","kind":"interactive","status":"idle"}}"#
+            ),
+        )
+        .unwrap();
+        let _home = HomeOverride::set(&home);
+
+        let host = FakeHost::new(home.join("state"));
+        let mut plugin = ClaudecodePlugin::new();
+        plugin.shelld = Some(Arc::new(ShelldClient::new(None)));
+        let meta = BindMeta {
+            profile_num: 1,
+            config_dir: Some(
+                home.join(".claude-profile-1").to_string_lossy().into_owned(),
+            ),
+            uuid: uuid.to_string(),
+            // The cycle's first step is a settle, so nothing is
+            // signalled during this test; a pid that cannot exist
+            // keeps it that way even if that changes.
+            claude_pid: i32::MAX,
+            project_basename: String::new(),
+            transcript_at: SystemTime::now(),
+        };
+
+        plugin.start_profile_cycle_to(&host, 7, meta, 2);
+        host.pump_ops();
+
+        struct Recording(std::sync::Mutex<Vec<String>>);
+        impl crate::plugins::PaneSessionHost for Recording {
+            fn shelld_session_id(&self) -> u64 {
+                7
+            }
+            fn end(&self) {}
+            fn set_badge(&self, text: &str) {
+                self.0.lock().unwrap().push(text.to_string());
+            }
+            fn set_pane_title(&self, _t: &str) {}
+            fn log(&self, _l: LogLevel, _t: &str, _m: &str) {}
+        }
+        let rec = Recording(std::sync::Mutex::new(Vec::new()));
+        for sess in host.sessions.lock().unwrap().iter_mut() {
+            sess.on_tick(&rec);
+        }
+
+        let badges = rec.0.lock().unwrap();
+        assert_eq!(badges.len(), 1);
+        assert!(
+            badges[0].starts_with("→ P2"),
+            "an unheld session must still cycle. got {:?}",
+            badges[0]
+        );
+        drop(badges);
+        fs::remove_dir_all(&home).ok();
+    }
+
     /// A `<config-dir>/sessions/` holding one record per `(pid, kind)`,
     /// all naming `uuid`.  Records are written the way claude writes
     /// them: one JSON object per file, named for the pid.
