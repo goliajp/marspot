@@ -310,6 +310,16 @@ impl PaneBackend {
         }
     }
 
+    /// Tell the pane's L3 that L1 took its foreground program down, so
+    /// the terminal there should stop reporting mouse tracking as on.
+    /// No-op on non-L3 backends: their terminal is in this process and
+    /// nothing kills programs out from under it.
+    pub fn forward_pane_reset_mouse_reporting(&mut self) {
+        if let PaneBackend::L3(c) = self {
+            c.forward_pane_reset_mouse_reporting();
+        }
+    }
+
     /// C5 — send a `SearchScrollback` frame to the L3 session
     /// behind this pane.  No-op on non-L3 backends (search is
     /// File-backed scrollback only, which only L3 owns).
@@ -995,6 +1005,14 @@ impl L3Conn {
         let frame = Frame::new(
             MsgType::PaneHoldGrid,
             crate::shell_proto::encode_pane_hold_grid(self.session_id, on),
+        );
+        let _ = self.control.send(frame);
+    }
+
+    fn forward_pane_reset_mouse_reporting(&mut self) {
+        let frame = Frame::new(
+            MsgType::PaneResetMouseReporting,
+            crate::shell_proto::encode_pane_reset_mouse_reporting(self.session_id),
         );
         let _ = self.control.send(frame);
     }

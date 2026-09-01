@@ -51,6 +51,11 @@ pub trait PtyIo: Send + Sync {
     /// delivered without it is executed a line at a time.  Anything
     /// handing a *message* to a running program takes this route.
     fn paste(&self, sid: u64, text: &str) -> std::io::Result<()>;
+    /// Tell L3 to stop believing the foreground program wants mouse
+    /// reports.  Sent after a `terminate` step: a signal produces no
+    /// bytes, so the `CSI ? 1002 l` a clean exit would have sent never
+    /// arrives and the shell underneath inherits mouse tracking.
+    fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()>;
 }
 
 /// Everything a running op needs from the world.
@@ -466,6 +471,18 @@ impl OpRunner {
                     }
                 }
                 if !self.env.pid_alive(pid) {
+                    // We took it down, so we own what it left switched
+                    // on.  Mouse reporting is the one mode that outlives
+                    // its program here: a signal produces no bytes, so
+                    // the `CSI ? 1002 l` a clean exit would have sent
+                    // never happens, and whatever the pane falls back to
+                    // — usually a shell prompt — inherits a terminal
+                    // that encodes each scroll as `CSI < 64;x;y M` and
+                    // types it in (2026-09-01).
+                    let _ = self
+                        .env
+                        .io()
+                        .reset_mouse_reporting(host.shelld_session_id());
                     return true;
                 }
                 if let Some((after, sig)) = escalate {
@@ -1270,6 +1287,7 @@ mod tests {
         sent: Mutex<Vec<Vec<u8>>>,
         holds: Mutex<Vec<bool>>,
         pasted: Mutex<Vec<String>>,
+        mouse_resets: Mutex<Vec<u64>>,
     }
 
     struct FakeIo(Arc<FakeState>);
@@ -1284,6 +1302,10 @@ mod tests {
         }
         fn paste(&self, _sid: u64, text: &str) -> std::io::Result<()> {
             self.0.pasted.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+        fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()> {
+            self.0.mouse_resets.lock().unwrap().push(sid);
             Ok(())
         }
     }
@@ -1562,6 +1584,58 @@ mod tests {
             "then the deadline"
         );
         assert!(*host.ended.lock().unwrap(), "and the wait completes once it is gone");
+    }
+
+    /// Killing the foreground program is also giving up the modes it
+    /// owned.  Nothing sends `CSI ? 1002 l` on behalf of a process that
+    /// took a signal, so unless the terminal is told, the shell that
+    /// surfaces underneath inherits mouse reporting — and the next
+    /// scroll is typed into its prompt as `CSI < 64;x;y M`
+    /// (2026-09-01).
+    #[test]
+    fn a_terminated_program_gives_up_its_mouse_reporting() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(7);
+        let op = PtyOp::new("test.kill").step(
+            Step::terminate(7, libc::SIGTERM).timeout(Duration::from_secs(10)),
+        );
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 100);
+        assert_eq!(*state.signals.lock().unwrap(), vec![(7, libc::SIGTERM)]);
+        assert!(
+            state.mouse_resets.lock().unwrap().is_empty(),
+            "not while it is still running"
+        );
+        // It takes the signal and goes — what claude does, in ~800 ms.
+        state.alive.lock().unwrap().retain(|p| *p != 7);
+        run(&mut r, &host, &state, 100);
+        assert_eq!(
+            *state.mouse_resets.lock().unwrap(),
+            vec![1],
+            "the pane whose program we killed is told, exactly once"
+        );
+    }
+
+    /// The reset rides on the process being *gone*, not on the signal
+    /// being sent — a program that ignores SIGTERM still owns its
+    /// modes, and the escalation is what settles it.
+    #[test]
+    fn mouse_reporting_survives_until_the_process_actually_dies() {
+        let (state, env, host) = setup();
+        state.alive.lock().unwrap().push(7);
+        let op = PtyOp::new("test.kill").step(
+            Step::terminate(7, libc::SIGTERM)
+                .escalate_after(Duration::from_secs(3), libc::SIGKILL)
+                .timeout(Duration::from_secs(10)),
+        );
+        let mut r = OpRunner::new(op, env);
+        run(&mut r, &host, &state, 1_000);
+        assert!(
+            state.mouse_resets.lock().unwrap().is_empty(),
+            "still alive, still its terminal"
+        );
+        run(&mut r, &host, &state, 3_000);
+        assert_eq!(*state.mouse_resets.lock().unwrap(), vec![1], "gone now");
     }
 
     /// Every wait has a deadline, and blowing it is reported rather

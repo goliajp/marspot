@@ -114,3 +114,42 @@ fn execv_handoff_keeps_modes() {
     assert_eq!(after.mouse_tracking_mode(), MouseTrackingMode::AnyEvent);
     assert!(after.mouse_sgr_encoding());
 }
+
+/// The third case, and the one that put a screenful of `^[[<64;37;32M`
+/// at a zsh prompt on 2026-09-01: marspot itself took the foreground
+/// program down.
+///
+/// A signal produces no bytes, so the `CSI ? 1002 l` a clean exit
+/// would have sent never arrives — this terminal keeps believing a
+/// dead TUI wants mouse reports, and the shell that surfaces
+/// underneath gets every scroll typed into its prompt.
+#[test]
+fn signalled_program_gives_up_mouse_reporting_only() {
+    let mut t = Terminal::new(20, 5);
+    // A TUI that wanted the mouse, on a shell that had already set up
+    // its own line editing.
+    t.feed(b"\x1b[?2004h\x1b[?1h");
+    t.feed(b"\x1b[?1002h\x1b[?1006h");
+    assert_eq!(t.mouse_tracking_mode(), MouseTrackingMode::ButtonEvent);
+
+    t.reset_mouse_reporting();
+
+    assert_eq!(
+        t.mouse_tracking_mode(),
+        MouseTrackingMode::Off,
+        "the program that asked is gone"
+    );
+    assert!(!t.mouse_sgr_encoding());
+    // And nothing else.  Unlike the resurrection case, the shell here
+    // is the same shell it always was: bracketed paste and application
+    // cursor keys are its own, it re-asserts them per prompt, and
+    // clearing them would break a paste already in flight.
+    assert!(
+        t.bracketed_paste_mode(),
+        "bracketed paste belongs to the shell, which is still running"
+    );
+    assert!(
+        t.cursor_key_application_mode(),
+        "so do application cursor keys"
+    );
+}

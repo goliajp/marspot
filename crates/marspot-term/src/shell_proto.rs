@@ -459,6 +459,21 @@ pub enum MsgType {
     /// An older core skips an unknown type, which is exactly the
     /// behaviour wanted: it keeps its previous chrome.
     WindowChrome = 77,
+    /// L1 → L2 → L3: the program that was in the foreground is gone
+    /// because *we* took it down — drop the terminal modes it owned.
+    ///
+    /// A signal produces no bytes, so a `SIGTERM`ed TUI never gets to
+    /// send its `CSI ? 1002 l` on the way out and L3's terminal keeps
+    /// reporting mouse tracking as on.  The pane is a shell prompt by
+    /// then, and the next scroll gets encoded as `CSI < 64;x;y M` and
+    /// typed into it (2026-09-01: a profile cycle whose `--resume` was
+    /// refused left a screenful of `^[[<64;37;32M` at the prompt).
+    ///
+    /// Deliberately narrow — mouse reporting only.  Bracketed paste and
+    /// application cursor keys are set by the *shell* as well, and it
+    /// re-asserts them per prompt; clearing those here would break a
+    /// paste that is already in flight.
+    PaneResetMouseReporting = 78,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -525,6 +540,7 @@ impl MsgType {
             75 => MsgType::CliText,
             76 => MsgType::CliAutorun,
             77 => MsgType::WindowChrome,
+            78 => MsgType::PaneResetMouseReporting,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1582,6 +1598,21 @@ pub fn decode_pane_recede(payload: &[u8]) -> io::Result<(u64, u32)> {
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
     let level = u32::from_le_bytes(payload[8..12].try_into().unwrap());
     Ok((sid, level))
+}
+
+/// PaneResetMouseReporting payload: `session_id u64 LE`.
+pub fn encode_pane_reset_mouse_reporting(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_reset_mouse_reporting(payload: &[u8]) -> io::Result<u64> {
+    if payload.len() != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_reset_mouse_reporting payload != 8 bytes",
+        ));
+    }
+    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
 }
 
 /// PaneHoldGrid payload: `session_id u64 LE, on u8` (1 = hold).
@@ -3259,6 +3290,23 @@ mod tests {
         // message on one side of a swap.
         assert_eq!(MsgType::WindowChrome as u32, 77);
         assert_eq!(MsgType::from_u32(77), Some(MsgType::WindowChrome));
+        assert_eq!(
+            MsgType::from_u32(78),
+            Some(MsgType::PaneResetMouseReporting)
+        );
+    }
+
+    #[test]
+    fn pane_reset_mouse_reporting_roundtrip() {
+        let p = encode_pane_reset_mouse_reporting(0xDEAD_BEEF_1234_5678);
+        assert_eq!(
+            decode_pane_reset_mouse_reporting(&p).unwrap(),
+            0xDEAD_BEEF_1234_5678
+        );
+        // Wrong length is rejected rather than silently read short —
+        // this frame carries nothing but the id, so a mis-sized one is
+        // a bug on the sender, not a version skew.
+        assert!(decode_pane_reset_mouse_reporting(&p[..7]).is_err());
     }
 
     #[test]

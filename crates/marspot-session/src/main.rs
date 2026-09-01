@@ -178,6 +178,12 @@ enum SessionEvent {
     /// the GUI-free L3 can't read the pasteboard itself. We bracketed-wrap
     /// it (per our terminal's mode) and write it to the PTY.
     Paste(String),
+    /// L1 took the pane's foreground program down and is telling us to
+    /// stop believing it wants mouse reports.  A signal produces no
+    /// bytes, so the `CSI ? 1002 l` a clean exit would have sent never
+    /// arrives, and the shell prompt underneath inherits a terminal
+    /// that encodes every scroll as `CSI < 64;x;y M` and types it in.
+    ResetMouseReporting,
     /// cc plugin asked to push raw bytes straight into the PTY (no
     /// bracketed-paste wrap, no key encoding).  Used by the profile-
     /// cycle state machine to send `claude5 --resume <uuid>\r`.
@@ -878,6 +884,16 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         }
                     }
                 }
+                MsgType::PaneResetMouseReporting => {
+                    if marspot_term::shell_proto::decode_pane_reset_mouse_reporting(
+                        &f.payload,
+                    )
+                    .is_ok()
+                        && tx.send(SessionEvent::ResetMouseReporting).is_err()
+                    {
+                        break;
+                    }
+                }
                 MsgType::SearchScrollback => {
                     if let Ok((query_id, case_sensitive, max_total, query)) =
                         decode_search_scrollback(&f.payload)
@@ -1566,6 +1582,22 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         );
                     }
                     session.hold_grid(on);
+                }
+                SessionEvent::ResetMouseReporting => {
+                    let was = session.terminal().mouse_tracking_mode()
+                        != marspot_term::terminal::MouseTrackingMode::Off;
+                    session.terminal_mut().reset_mouse_reporting();
+                    if was {
+                        // Logged only when it changed something: L1
+                        // sends this after every `terminate` step, and
+                        // most of those took down a program that never
+                        // asked for mouse reports in the first place.
+                        lx_event!(
+                            "L3_MOUSE_REPORTING_RESET",
+                            "foreground program was taken down by L1; dropped its mouse reporting",
+                            session_id = session.id()
+                        );
+                    }
                 }
                 SessionEvent::Resize(cols, rows) => pending_resize = Some((cols, rows)),
                 SessionEvent::Scroll(off) => {

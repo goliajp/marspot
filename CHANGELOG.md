@@ -28,7 +28,22 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.122**
+Current: **0.7.123**
+
+### 0.7.123
+
+A `terminate` step now also gives up the mouse reporting the program
+it killed had switched on.
+
+A signal produces no bytes, so a `SIGTERM`ed TUI never sends the
+`CSI ? 1002 l` a clean exit would have sent — and L3's terminal goes
+on believing a process that no longer exists wants mouse reports.
+What the pane holds by then is usually a shell prompt, and every
+scroll after that is encoded as `CSI < 64;x;y M` and typed into it.
+
+Fired when the process is confirmed *gone*, not when the signal is
+sent: a program that ignores SIGTERM still owns its modes, and the
+escalation to SIGKILL is what settles it.
 
 ### 0.7.122
 
@@ -2662,7 +2677,15 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.157**
+Current: **0.12.158**
+
+### 0.12.158
+
+Routes the new `PaneResetMouseReporting` frame to the pane's L3.
+
+Forwarded rather than acted on: the terminal whose modes these are
+lives in L3, and L2's `mouse_tracking_active` is a mirror of what L3
+publishes next.  Same shape as `PaneHoldGrid`.
 
 ### 0.12.157
 
@@ -4872,7 +4895,24 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.54**
+Current: **0.11.55**
+
+### 0.11.55
+
+Understands `PaneResetMouseReporting`: L1 took this pane's foreground
+program down, so stop reporting mouse tracking as on.
+
+`Terminal::reset_mouse_reporting` is deliberately narrower than the
+`reset_process_owned_modes` used by cold resurrection.  That one runs
+against a brand-new shell where nothing on screen set anything; here
+the shell is the same shell it always was — it owns its own bracketed
+paste and application cursor keys and re-asserts them per prompt, so
+clearing those would break a paste already in flight for no gain.
+Mouse reporting is the one mode a shell never sets and a dead TUI
+never clears.
+
+Logged (`L3_MOUSE_REPORTING_RESET`) only when it changed something:
+most terminated programs never asked for mouse reports at all.
 
 ### 0.11.54
 

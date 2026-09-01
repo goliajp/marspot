@@ -54,6 +54,9 @@ pub trait InjectInputProxy: Send + Sync {
     fn hold_grid(&self, session_id: u64, on: bool) -> std::io::Result<()>;
     /// Deliver text the way a paste would arrive.
     fn paste(&self, session_id: u64, text: &str) -> std::io::Result<()>;
+    /// Tell the pane's L3 that its foreground program was taken down
+    /// by us, so mouse reporting should stop.
+    fn reset_mouse_reporting(&self, session_id: u64) -> std::io::Result<()>;
 }
 
 #[allow(dead_code)]
@@ -76,6 +79,15 @@ impl pty_op::PtyIo for ShelldClient {
     fn paste(&self, sid: u64, text: &str) -> std::io::Result<()> {
         match self.host_inject.as_ref() {
             Some(p) => p.paste(sid, text),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no InjectInputProxy on this host (test build?)",
+            )),
+        }
+    }
+    fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()> {
+        match self.host_inject.as_ref() {
+            Some(p) => p.reset_mouse_reporting(sid),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
                 "no InjectInputProxy on this host (test build?)",
@@ -5210,6 +5222,9 @@ mod tests {
         /// sequence is the whole point (hold before the kill, release
         /// only once the new picture is ready).
         holds: std::sync::Mutex<Vec<bool>>,
+        /// Every "the foreground program is gone" the op sent, so a
+        /// test can assert the kill was followed by one.
+        mouse_resets: std::sync::Mutex<Vec<u64>>,
     }
 
     impl InjectInputProxy for PtyInject {
@@ -5236,6 +5251,11 @@ mod tests {
             // Same destination as `inject_input` for the test's
             // purposes: what matters is the bytes that reach the PTY.
             self.inject_input(0, text.as_bytes())
+        }
+
+        fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()> {
+            self.mouse_resets.lock().unwrap().push(sid);
+            Ok(())
         }
     }
 
@@ -5431,6 +5451,7 @@ mod tests {
             master,
             sent: std::sync::Mutex::new(Vec::new()),
             holds: std::sync::Mutex::new(Vec::new()),
+            mouse_resets: std::sync::Mutex::new(Vec::new()),
         });
         // The host owns the queue, so give it the route to this test's
         // PTY: otherwise the reclamation half would run against a

@@ -130,6 +130,9 @@ impl crate::plugins::pty_op::PtyIo for HostPtyIo {
     fn paste(&self, sid: u64, text: &str) -> std::io::Result<()> {
         self.send_what(sid, InjectWhat::Paste(text.to_string()))
     }
+    fn reset_mouse_reporting(&self, sid: u64) -> std::io::Result<()> {
+        self.send_what(sid, InjectWhat::ResetMouseReporting)
+    }
 }
 
 /// A PTY operation on its way to the one queue that serialises them.
@@ -165,6 +168,10 @@ pub enum InjectWhat {
     /// to a running program wants, because only L3 knows whether that
     /// program has bracketed paste on.
     Paste(String),
+    /// L1 took this pane's foreground program down; L3 should stop
+    /// reporting mouse tracking as on.  See
+    /// `MsgType::PaneResetMouseReporting`.
+    ResetMouseReporting,
 }
 
 #[derive(Clone)]
@@ -312,6 +319,10 @@ impl crate::plugins::claudecode::InjectInputProxy for InjectInputForwarder {
 
     fn paste(&self, session_id: u64, text: &str) -> std::io::Result<()> {
         self.send(session_id, InjectWhat::Paste(text.to_string()))
+    }
+
+    fn reset_mouse_reporting(&self, session_id: u64) -> std::io::Result<()> {
+        self.send(session_id, InjectWhat::ResetMouseReporting)
     }
 }
 

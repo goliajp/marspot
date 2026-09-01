@@ -351,6 +351,29 @@ impl Terminal {
         self.cursor_visible = true;
     }
 
+    /// Forget that anything asked for mouse reports.
+    ///
+    /// For when marspot itself takes the foreground program down.  A
+    /// signal produces no bytes, so a `SIGTERM`ed TUI never sends the
+    /// `CSI ? 1002 l` it would have sent on a clean exit, and this
+    /// terminal goes on believing a program that no longer exists
+    /// wants mouse reports.  What the pane actually holds by then is a
+    /// shell prompt, and the next scroll gets encoded as
+    /// `CSI < 64;x;y M` and typed into it.
+    ///
+    /// Narrower than [`reset_process_owned_modes`](Self::reset_process_owned_modes)
+    /// on purpose.  That one is for a snapshot restored onto a
+    /// brand-new shell, where *nothing* on screen set any of these.
+    /// Here the shell is the same shell it always was: it owns its own
+    /// bracketed paste and application cursor keys and re-asserts them
+    /// per prompt, so clearing those would break a paste already in
+    /// flight for no gain.  Mouse reporting is the one mode a shell
+    /// never sets and a dead TUI never clears.
+    pub fn reset_mouse_reporting(&mut self) {
+        self.mouse_tracking_mode = MouseTrackingMode::Off;
+        self.mouse_sgr_encoding = false;
+    }
+
     /// Drain any bytes the terminal wants to send back to the PTY in
     /// response to capability / version queries (CSI c, CSI > 0 c,
     /// CSI > 0 q, …). Caller (Session::pump) writes them to the PTY

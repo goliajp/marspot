@@ -2783,6 +2783,12 @@ impl ShellApp {
                             &text,
                         ),
                     ),
+                    plugins::host::InjectWhat::ResetMouseReporting => conn.send(
+                        MsgType::PaneResetMouseReporting,
+                        marspot::shell_proto::encode_pane_reset_mouse_reporting(
+                            req.session_id,
+                        ),
+                    ),
                 }
             }
         }
