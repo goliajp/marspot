@@ -2479,6 +2479,12 @@ enum CoreEvent {
     /// pane's L3, which is the only layer that knows whether the
     /// program in it has bracketed paste on.
     PaneInjectPaste(u64, String),
+    /// L1 took a pane's foreground program down and is telling its L3
+    /// to stop reporting mouse tracking as on.  Forwarded, not acted
+    /// on here: the terminal whose modes these are lives in L3, and
+    /// L2's `mouse_tracking_active` is only a mirror of what L3
+    /// publishes.
+    PaneResetMouseReporting(u64),
     /// C5 — L3 → L2 `SearchResults` frame.  Carries the shelld
     /// session id (so we can route to the right pane in a multi-pane
     /// world), the query_id (so a stale batch from a cancelled
@@ -2684,6 +2690,11 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneHoldGrid => marspot::shell_proto::decode_pane_hold_grid(&f.payload)
             .ok()
             .map(|(sid, on)| CoreEvent::PaneHoldGrid(sid, on)),
+        MsgType::PaneResetMouseReporting => {
+            marspot::shell_proto::decode_pane_reset_mouse_reporting(&f.payload)
+                .ok()
+                .map(CoreEvent::PaneResetMouseReporting)
+        }
         MsgType::InjectInput => marspot::shell_proto::decode_inject_input(&f.payload)
             .ok()
             .map(|(sid, bytes)| CoreEvent::InjectInput(sid, bytes)),
@@ -3771,6 +3782,20 @@ impl CoreApp {
         for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
             if pane.session().l3_session_id() == Some(shelld_session_id) {
                 pane.session_mut().forward_pane_hold_grid(on);
+                return;
+            }
+        }
+    }
+
+    /// Tell the pane's L3 that whatever had the foreground is gone.
+    ///
+    /// Same shape as the hold: L2 does not act on it, because the
+    /// terminal that holds the mode lives in L3 and L2's copy is a
+    /// mirror of L3's next publish.
+    fn forward_pane_reset_mouse_reporting(&mut self, shelld_session_id: u64) {
+        for pane in self.windows.iter_mut().flat_map(|w| w.panes.iter_mut()) {
+            if pane.session().l3_session_id() == Some(shelld_session_id) {
+                pane.session_mut().forward_pane_reset_mouse_reporting();
                 return;
             }
         }
@@ -8011,6 +8036,25 @@ impl CoreApp {
             }
             return;
         }
+        // A plugin-held PaneSession that took the keyboard owns the
+        // wheel too.  Keys route to L1 in `key` above; the wheel used
+        // to fall straight through to the PTY, and on a mouse-tracking
+        // pane `apply_scroll_lines` encodes it as `CSI < 64;x;y M` —
+        // so scrolling during a profile cycle typed mouse reports into
+        // the shell prompt the cycle had just uncovered, and their echo
+        // kept the PTY noisy enough that `await_quiet` could only ever
+        // time out (2026-09-01, the `^[[<64;37;32M` screenful).
+        //
+        // Dropped rather than routed up: a held pane's picture is
+        // frozen, so there is no scroll for the user to see either.
+        if let Some(active_sid) = self.focused_pane_active_session(wi) {
+            if self
+                .pane_session_for(active_sid)
+                .is_some_and(|s| s.has(marspot::shell_proto::PANE_SESSION_CAP_LOCK_KEYS))
+            {
+                return;
+            }
+        }
         let (_, cell_h) = self.renderer.cell_dims();
         let lines = scroll_lines(dy_phys, precise, cell_h);
         if lines == 0 {
@@ -9735,6 +9779,9 @@ fn main() {
                 }
                 CoreEvent::PaneInjectPaste(sid, text) => {
                     app.forward_pane_paste(sid, &text);
+                }
+                CoreEvent::PaneResetMouseReporting(sid) => {
+                    app.forward_pane_reset_mouse_reporting(sid);
                 }
 
                 CoreEvent::SearchResults(sid, qid, has_more, _total_seen, hits) => {

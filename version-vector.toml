@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.122"  # 角标菜单空手而归时会说为什么;详见 CHANGELOG.md
-core    = "0.12.156"  # 右键落空 / 回复为空不再静默,报出两边的几何;详见 CHANGELOG.md
+core    = "0.12.157"  # 插件持有 pane 时滚轮跟键盘一样被吃掉;详见 CHANGELOG.md
 session = "0.11.54"  # 孤立可打印字符不再过状态机(parse 全语料 +2-4%);详见 CHANGELOG.md

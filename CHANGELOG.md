@@ -2662,7 +2662,25 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.156**
+Current: **0.12.157**
+
+### 0.12.157
+
+The wheel now goes where the keyboard goes: a pane a plugin is
+holding no longer receives scrolls.
+
+Keys have routed to L1 since RFC-003 whenever the held session asks
+for `LOCK_KEYS`; the wheel never did, and fell straight through to
+the PTY.  On a pane whose program had mouse tracking on, that means
+`apply_scroll_lines` encoded each notch as `CSI < 64;x;y M` and typed
+it in — so scrolling during a profile cycle wrote mouse reports into
+the shell prompt the cycle had just uncovered, and the echo of them
+kept the PTY busy enough that the cycle's `await_quiet` could only
+ever run out its 30 s (seen 2026-09-01: a screenful of
+`^[[<64;37;32M` at a `git:(develop)` prompt).
+
+Dropped rather than routed up to the plugin: a held pane's picture is
+frozen, so there is nothing for a scroll to move.
 
 ### 0.12.156
 
