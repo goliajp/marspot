@@ -49,5 +49,13 @@ mkdir -p "$MARSPOT_STATE_DIR"
 # from the suite, and a tool whose checksums nobody checks is a tool
 # that writes files no viewer opens.  Shipping lean and testing full
 # are not in conflict.
+# Tests that spawn a real L3 exec `target/<profile>/marspot-session`,
+# which is a plain binary and not a test target.  `nextest
+# --all-targets` builds each bin's *test harness*; it does not relink
+# the bin itself, so that file can be hours stale while the suite
+# reports green — the test then drives yesterday's session process.
+# Cost the first time this was noticed (2026-09-01): a wire change
+# visible in L3's own log, invisible to the assertion watching for it.
+cargo build --bin marspot-session
 exec cargo nextest run --workspace --all-targets --all-features \
   --test-threads "${MARSPOT_TEST_JOBS:-6}" "$@"

@@ -1548,6 +1548,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // into the single pump below, and collapse a flurry of resizes to
         // the final dims (intermediate sizes never need a reflow).
         let mut predicted = false;
+        // A mode the terminal drops without any PTY byte arriving.
+        // The publish at the bottom keys off "did the PTY do
+        // something", and mouse reporting is the one thing that stops
+        // because L1 said so rather than because the program said so —
+        // so without this the flag L2 renders from stays stale until
+        // the next byte happens to arrive, which on a pane whose
+        // program was just killed can be never.
+        let mut modes_changed = false;
         let mut pending_resize: Option<(u16, u16)> = None;
         let mut pending_scroll: Option<u16> = None;
         let mut selection_reqs: Vec<(u32, (u16, u32), (u16, u32), bool)> = Vec::new();
@@ -1588,6 +1596,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         != marspot_term::terminal::MouseTrackingMode::Off;
                     session.terminal_mut().reset_mouse_reporting();
                     if was {
+                        modes_changed = true;
                         // Logged only when it changed something: L1
                         // sends this after every `terminate` step, and
                         // most of those took down a program that never
@@ -2011,7 +2020,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         // Republish on PTY output, a local echo that painted ahead of it,
         // a resize (grid shape changed), or a scroll (window changed) —
         // even when no bytes pumped this tick.
-        if n > 0 || predicted || resized || scrolled {
+        if n > 0 || predicted || resized || scrolled || modes_changed {
             if scrolled {
                 lx_event!(
                     "L3_PUBLISH",

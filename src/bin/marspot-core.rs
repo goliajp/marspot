@@ -2179,6 +2179,80 @@ mod boot_assembly_tests {
         panic!("session {pid} outlived its deleted registry entry");
     }
 
+    /// The whole `PaneResetMouseReporting` chain, against a real L3.
+    ///
+    /// Every piece of this was unit-tested separately — the codec, the
+    /// terminal's reset, the pty_op step that sends it — and the thing
+    /// those cannot tell you is whether the frame reaches the terminal
+    /// that matters.  What went wrong on 2026-09-01 lived between the
+    /// layers, not inside one.
+    ///
+    /// Drives a shell in a real session process into mouse tracking,
+    /// checks the mirror L2 renders from agrees, then sends the frame
+    /// and waits for the mirror to say it is off.
+    #[test]
+    fn a_real_session_gives_up_mouse_reporting_when_told() {
+        // Short tag on purpose: it lands in the sandbox path, and the
+        // L3's socket under it has to fit macOS's 104-byte `sun_path`.
+        // `mouse-reset` overran it by a few bytes and the session died
+        // at `uds_bind_failed` before it could register.
+        let _sb = Sandbox::new("mreset");
+        let (tx, _rx) = mpsc::channel();
+        let sid = reg::allocate_next_session_id().unwrap();
+        let mut pane = spawn_l3_pane_with_cwd(60, 16, sid, "", &tx)
+            .expect("real L3 spawn (is marspot-session built?)");
+
+        // The shell has to *print* the mode set for the terminal to
+        // parse it: modes are set by the program's output, and
+        // anything injected here is its input.  Retried because the
+        // first bytes land before the shell is reading.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut on = false;
+        while std::time::Instant::now() < deadline {
+            pane.session_mut()
+                .forward_inject_input(b"printf '\\033[?1002h\\033[?1006h'\r");
+            for _ in 0..40 {
+                pane.pump();
+                if pane.session().l3_mouse_tracking_active() {
+                    on = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if on {
+                break;
+            }
+        }
+        assert!(on, "shell never got as far as turning mouse tracking on");
+        assert!(
+            pane.session().l3_mouse_sgr_active(),
+            "1006 rides with 1002; without it the wheel encodes the old way"
+        );
+
+        // What L1 sends once it has taken a pane's foreground program
+        // down.  Nothing here kills anything — the point is that the
+        // terminal drops the mode on the frame alone, because a signal
+        // gives it nothing else to go on.
+        pane.session_mut().forward_pane_reset_mouse_reporting();
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            pane.pump();
+            if !pane.session().l3_mouse_tracking_active() {
+                assert!(
+                    !pane.session().l3_mouse_sgr_active(),
+                    "SGR encoding must go with it, or the next wheel is \
+                     still a mouse report — just in the older form"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("L3 kept reporting mouse tracking after being told to stop");
+    }
+
     /// Duplicate sid in a corrupt saved state must not double-bind one
     /// session to two panes — the second slot falls back to a fresh id.
     #[test]

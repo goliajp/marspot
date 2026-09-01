@@ -29,4 +29,4 @@
 
 shell   = "0.7.124"  # 后台任务占着的会话不再先杀后发现 resume 被拒;详见 CHANGELOG.md
 core    = "0.12.158"  # 转发 PaneResetMouseReporting 给 pane 的 L3;详见 CHANGELOG.md
-session = "0.11.55"  # 收到 PaneResetMouseReporting 就放弃鼠标上报;详见 CHANGELOG.md
+session = "0.11.56"  # 只因模式变化而重新 publish(否则 flag 传不回 L2);详见 CHANGELOG.md

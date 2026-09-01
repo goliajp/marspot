@@ -4927,7 +4927,23 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.55**
+Current: **0.11.56**
+
+### 0.11.56
+
+Publishes when a mode changes without any PTY byte arriving.
+
+The publish at the bottom of the loop keys off "did the PTY do
+something" — bytes pumped, a local echo painted, a resize, a scroll.
+Mouse reporting is the one mode that stops because L1 said so rather
+than because the program said so, so 0.11.55 reset it correctly and
+L2 never found out: the flag it renders from stayed stale until the
+next byte happened to arrive, which on a pane whose program was just
+killed can be never.
+
+Found by the end-to-end test rather than by any of the unit tests,
+which is the point of having one — the reset was visible in L3's own
+log the whole time.
 
 ### 0.11.55
 
