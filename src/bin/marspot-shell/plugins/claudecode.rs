@@ -1597,6 +1597,32 @@ impl ClaudecodePlugin {
             );
             return;
         }
+        // Before the signal, not after it.  This cycle kills first and
+        // resumes second, so a resume the CLI was always going to
+        // refuse costs the pane its session rather than just failing.
+        let next_dir =
+            PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(format!(".claude-profile-{next_profile}"));
+        if let Some(holder) = background_session_holder(&next_dir, &meta.uuid) {
+            host.log(
+                LogLevel::Warn,
+                "cycle.background_session",
+                &format!(
+                    "pane {shelld_sid}: uuid={} is held by a background session (pid {holder}); \
+                     not cycling — `claude --resume` would refuse it and leave the pane at a \
+                     shell prompt",
+                    meta.uuid
+                ),
+            );
+            if let Err(e) = host.submit_pty_op(shelld_sid, cycle_blocked_op()) {
+                host.log(
+                    LogLevel::Warn,
+                    "cycle.blocked_badge_failed",
+                    &format!("pane {shelld_sid}: {e}"),
+                );
+            }
+            return;
+        }
         let Some(op) = profile_cycle_op(
             &meta.uuid,
             next_profile,
@@ -1724,6 +1750,92 @@ const FIRST_FRAME_BYTES: u64 = 2048;
 /// while the pane stays parked, so the new run must not kill anything
 /// again — it starts at the step that waits for the user.
 const RECLAIM_PARK_STEP: usize = 2;
+
+/// The claude session that would make a `--resume` of `uuid` fail, if
+/// there is one.
+///
+/// Worth a stat before every cycle because of the order the cycle runs
+/// in: the running claude is taken down *first*, and only then is the
+/// resume line typed.  A resume that was never going to be accepted
+/// therefore does not merely fail — the pane is left at a shell prompt
+/// with the conversation no longer in it, and the way back is `claude
+/// attach <id>` typed by hand.  The user saw a red paragraph and a
+/// screenful of mouse reports instead (2026-09-01, uuid=1bcedee1).
+///
+/// The test mirrors the CLI's own, read out of `claude` 2.1.252: among
+/// the live session records, a holder is one whose `sessionId` matches
+/// and whose `kind` is anything other than `"interactive"` — which is
+/// the case it reports as `Session <id> is running as a background
+/// session`.
+///
+/// Records are one JSON file per pid under `<config-dir>/sessions/`,
+/// named for the pid.  `config_dir` is the profile the *resuming*
+/// claude will run under, because that is the directory it will read;
+/// whether that sees another profile's sessions is the user's business
+/// (mine symlinks them all to one shared dir, which is exactly why the
+/// refusal crossed profiles at all).
+///
+/// Anything unreadable answers "no holder".  The gate is here to stop a
+/// cycle already known to be futile, not to demand proof that one is
+/// safe.
+fn background_session_holder(config_dir: &std::path::Path, uuid: &str) -> Option<i32> {
+    if uuid.is_empty() {
+        return None;
+    }
+    let needle = format!("\"sessionId\":\"{uuid}\"");
+    for e in fs::read_dir(config_dir.join("sessions")).ok()?.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(pid) = path
+            .file_stem()
+            .and_then(|x| x.to_str())
+            .and_then(|x| x.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !body.contains(&needle) {
+            continue;
+        }
+        // A record with no `kind` is not a holder — the CLI skips
+        // those too rather than guessing what they are.
+        let Some(kind) = json_string_field(&body, "\"kind\":\"") else {
+            continue;
+        };
+        if kind == "interactive" {
+            continue;
+        }
+        // The directory keeps a file per pid that ever ran, so most of
+        // what is in it is dead.  Only a live process holds anything.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            continue;
+        }
+        return Some(pid);
+    }
+    None
+}
+
+/// Answer a badge click that cannot be honoured, without touching the
+/// pane.
+///
+/// Nothing is typed and nothing is held: a click the cycle refuses must
+/// cost the user no more than a click that did nothing.  The badge is
+/// the only channel a pane has for saying so, and riding a (very short)
+/// op is what makes it appear and then put itself away — the scan loop
+/// owns the badge the rest of the time and would otherwise overwrite
+/// this within the second.
+fn cycle_blocked_op() -> pty_op::PtyOp {
+    pty_op::PtyOp::new("cc.cycle_blocked")
+        .lock_keys(false)
+        .hold_screen(false)
+        .escape_hatch(false)
+        .badge("⚠ held by bg job")
+        .step(pty_op::Step::settle(Duration::from_secs(4)).named("show"))
+}
 
 /// The profile-cycle script: take the current claude down and bring the
 /// same session back under the next profile.
@@ -4250,6 +4362,105 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    /// A `<config-dir>/sessions/` holding one record per `(pid, kind)`,
+    /// all naming `uuid`.  Records are written the way claude writes
+    /// them: one JSON object per file, named for the pid.
+    fn tmp_config_with_sessions(uuid: &str, records: &[(i32, &str)]) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "cc-bg-session-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        for (pid, kind) in records {
+            let body = format!(
+                r#"{{"pid":{pid},"sessionId":"{uuid}","cwd":"/tmp","kind":"{kind}","status":"idle"}}"#
+            );
+            fs::write(sessions.join(format!("{pid}.json")), body).unwrap();
+        }
+        dir
+    }
+
+    /// The case the gate exists for: a live record for this uuid whose
+    /// kind is not `interactive`.  `claude --resume` refuses this one,
+    /// so the cycle must not take the running claude down for it.
+    #[test]
+    fn background_holder_found_for_live_non_interactive_record() {
+        let uuid = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
+        let me = std::process::id() as i32;
+        let dir = tmp_config_with_sessions(uuid, &[(me, "background")]);
+        assert_eq!(background_session_holder(&dir, uuid), Some(me));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The ordinary case — a pane running claude in the foreground has
+    /// a record of its own, and cycling it is the whole feature.
+    #[test]
+    fn interactive_record_is_not_a_holder() {
+        let uuid = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
+        let me = std::process::id() as i32;
+        let dir = tmp_config_with_sessions(uuid, &[(me, "interactive")]);
+        assert_eq!(background_session_holder(&dir, uuid), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The directory keeps a file for every pid that ever ran, so the
+    /// common shape is a background record whose process is long gone.
+    /// Blocking on those would make the cycle unusable after the first
+    /// background job the project ever ran.
+    #[test]
+    fn dead_background_record_is_not_a_holder() {
+        let uuid = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
+        // Reserved by POSIX for the swapper / kernel; a `kill(0, ...)`
+        // would signal our own process group, which is why the code
+        // never passes it — and 2^31-1 is never a live pid here.
+        let dead = i32::MAX;
+        let dir = tmp_config_with_sessions(uuid, &[(dead, "background")]);
+        assert_eq!(background_session_holder(&dir, uuid), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Another conversation's background job says nothing about this
+    /// one — the match is on sessionId, not on "any background job in
+    /// this profile".
+    #[test]
+    fn other_uuid_background_record_is_not_a_holder() {
+        let mine = "1bcedee1-2228-4e82-a9c2-632aac03bd2d";
+        let theirs = "dc928502-4c1c-4cdc-a1b8-ab993d342c64";
+        let me = std::process::id() as i32;
+        let dir = tmp_config_with_sessions(theirs, &[(me, "background")]);
+        assert_eq!(background_session_holder(&dir, mine), None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A profile that has never run claude has no `sessions/` at all,
+    /// and an unreadable directory must not stand in for "blocked" —
+    /// the gate stops futile cycles, it does not gate on proof.
+    #[test]
+    fn missing_sessions_dir_is_not_a_holder() {
+        let dir = std::env::temp_dir().join("cc-bg-session-test-nonexistent");
+        fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            background_session_holder(&dir, "1bcedee1-2228-4e82-a9c2-632aac03bd2d"),
+            None
+        );
+    }
+
+    /// The op that answers a refused click must not take anything from
+    /// the pane: a click the cycle declines has to cost no more than a
+    /// click that did nothing at all.
+    #[test]
+    fn cycle_blocked_op_takes_nothing_from_the_pane() {
+        let op = cycle_blocked_op();
+        assert!(!op.lock_keys, "a refused click must not eat the keyboard");
+        assert!(!op.hold_screen, "nothing to hide — the pane is untouched");
+        assert_eq!(op.badge.as_deref(), Some("⚠ held by bg job"));
     }
 
     fn tmphome(entries: &[(&str, bool)]) -> PathBuf {

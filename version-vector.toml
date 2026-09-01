@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.123"  # 我们杀掉的前台程序,它的鼠标上报跟着结束;详见 CHANGELOG.md
+shell   = "0.7.124"  # 后台任务占着的会话不再先杀后发现 resume 被拒;详见 CHANGELOG.md
 core    = "0.12.158"  # 转发 PaneResetMouseReporting 给 pane 的 L3;详见 CHANGELOG.md
 session = "0.11.55"  # 收到 PaneResetMouseReporting 就放弃鼠标上报;详见 CHANGELOG.md

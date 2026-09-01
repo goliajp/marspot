@@ -28,7 +28,39 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.123**
+Current: **0.7.124**
+
+### 0.7.124
+
+The profile cycle now checks whether the session can be resumed
+*before* it takes claude down.
+
+The cycle kills first and resumes second, so a `--resume` the CLI was
+never going to accept does not merely fail — the pane loses the
+conversation outright and the way back is `claude attach <id>` typed
+by hand.  The case that does this is a session with a background job
+attached: claude answers `Session <id> is running as a background
+session` and exits within two seconds of starting.
+
+Seen 2026-09-01 on `uuid=1bcedee1`: `session.bound` at 04:08:06,
+`session.unbound` at 04:08:08, then the cycle's `await_quiet` ran out
+its 30 s against a shell prompt.
+
+The test mirrors the CLI's own, read out of `claude` 2.1.252: among
+the live session records under `<config-dir>/sessions/` (one JSON file
+per pid), a holder is one whose `sessionId` matches and whose `kind`
+is anything other than `"interactive"`.  Records outlive their
+processes, so the pid has to still be alive; the config dir checked is
+the profile the *resuming* claude would run under, because that is the
+directory it will read.
+
+Anything unreadable answers "no holder" — the gate stops a cycle
+already known to be futile, it does not demand proof that one is safe.
+
+A refused click gets a four-second `⚠ held by bg job` badge and
+nothing else: no keys taken, no screen held, nothing typed into the
+pane.  A click the cycle declines must cost no more than a click that
+did nothing.
 
 ### 0.7.123
 
