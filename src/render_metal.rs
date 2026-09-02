@@ -1274,15 +1274,17 @@ impl MetalRenderer {
     /// pixels (top-left, y-down).  Marspot's main loop has a real
     /// multi-cell `Layout` and calls `Layout::caret_view_phys_rect`
     /// directly; the geometry is shared in `Layout` so both binaries
-    /// stay in sync.  Returns `None` when the cursor is hidden or the
-    /// viewport hasn't been sized yet.
+    /// stay in sync.  Returns `None` only when the viewport hasn't
+    /// been sized yet.
+    ///
+    /// Not gated on `view.cursor_visible`: an app that hides the
+    /// cursor while it works still has an insertion point, and the
+    /// IME candidate window has to anchor to it (see
+    /// `PaneBackend::ime_caret_cell`).
     pub fn focused_caret_view_phys_rect(
         &self,
         view: &SessionView,
     ) -> Option<(f64, f64, f64, f64)> {
-        if !view.cursor_visible {
-            return None;
-        }
         if self.width_px < 1.0 || self.height_px < 1.0 {
             return None;
         }

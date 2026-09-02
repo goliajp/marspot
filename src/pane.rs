@@ -252,6 +252,25 @@ impl PaneBackend {
         }
     }
 
+    /// Where composed (IME) text will land in this pane: the grid
+    /// cursor cell as `(col, row)`, or `None` for a slot that takes
+    /// no input at all.
+    ///
+    /// Deliberately independent of `cursor_visible` (DECTCEM).  An
+    /// app that hides the cursor while it works — claudecode keeps it
+    /// hidden for the whole time a task runs — still has a
+    /// well-defined insertion point, and marspot still paints the
+    /// pre-edit there.  Anchoring the IME on cursor *visibility* left
+    /// those panes publishing no rect at all, and macOS then parked
+    /// the candidate window far away from the text being composed.
+    pub fn ime_caret_cell(&self) -> Option<(u16, u16)> {
+        match self {
+            PaneBackend::Local(_) | PaneBackend::L3(_) => Some(self.grid().cursor()),
+            // A vacant slot has no PTY to insert into.
+            PaneBackend::Vacant(_) => None,
+        }
+    }
+
     pub fn cursor_key_application_mode(&self) -> bool {
         match self {
             PaneBackend::Local(s) => s.terminal().cursor_key_application_mode(),
@@ -1942,6 +1961,56 @@ mod tests {
         let backend = PaneBackend::Vacant(VacantPane::new(11, 80, 24));
         assert!(backend.is_exited());
         assert_eq!(backend.shelld_session_id(), Some(11));
+    }
+
+    /// An app that hides the cursor still has an insertion point.
+    ///
+    /// claudecode keeps DECTCEM off for the whole time a task runs,
+    /// and that is exactly when the user types the next message.  The
+    /// pre-edit overlay is painted at the grid cursor regardless of
+    /// DECTCEM, so the IME anchor has to come from the same place —
+    /// gating it on cursor visibility published no rect at all, and
+    /// macOS then parked the candidate window away from the text
+    /// being composed.
+    #[test]
+    fn a_pane_with_a_hidden_cursor_still_anchors_the_ime() {
+        let mut writer = crate::grid_shm::GridShmWriter::create(20, 5).expect("shm region");
+        let mut grid = Grid::new(20, 5);
+        grid.set_cursor(7, 3);
+        // flags = 0 — DECTCEM says "hidden", the state a busy TUI sits in.
+        writer.publish(&grid, 0, 0);
+
+        let fd = unsafe { libc::dup(writer.fd()) };
+        assert!(fd >= 0, "dup of the shm fd");
+        let reader = GridShmReader::from_fd(fd).expect("shm reader");
+        let (control, _peer) = UnixStream::pair().expect("socketpair");
+        let (_tx, selection_rx) = std::sync::mpsc::channel();
+        // Our own pid: `reattach` never signals it, and `Drop` is
+        // documented not to kill the child.
+        let mut conn = L3Conn::reattach(
+            std::process::id() as i32,
+            control,
+            reader,
+            selection_rx,
+            1,
+        );
+        assert!(conn.poll(), "the published frame reaches the mirror");
+        assert!(!conn.cursor_visible, "the frame carried DECTCEM off");
+
+        let backend = PaneBackend::L3(conn);
+        assert_eq!(
+            backend.ime_caret_cell(),
+            Some((7, 3)),
+            "a hidden cursor must still tell the IME where text will land"
+        );
+    }
+
+    /// A vacant slot has no PTY to insert into, so it has no anchor
+    /// to offer — the one case where `None` is the honest answer.
+    #[test]
+    fn a_vacant_slot_offers_no_ime_anchor() {
+        let backend = PaneBackend::Vacant(VacantPane::new(3, 80, 24));
+        assert_eq!(backend.ime_caret_cell(), None);
     }
 
     /// A vacant slot keeps naming its session — the sid is what lets the

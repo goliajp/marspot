@@ -8270,7 +8270,7 @@ impl CoreApp {
 
     /// Render the full UI into `target_tex` and return the focused-
     /// pane caret rect (view-local physical pixels) for the IME
-    /// candidate window, or `None` when the cursor is hidden.
+    /// candidate window, or `None` when the slot takes no input.
     /// Where the renderer's last IOSurface frame spent its time —
     /// forwarded so the loop's stall report can carry it.
     fn renderer_split(&self) -> marspot::render_metal::RenderSplit {
@@ -8564,10 +8564,7 @@ impl CoreApp {
         }
 
         win!(self, wi).panes.get(focused).and_then(|pane| {
-            if !pane.session().cursor_visible() {
-                return None;
-            }
-            let (col, row) = pane.session().grid().cursor();
+            let (col, row) = pane.session().ime_caret_cell()?;
             win!(self, wi).layout
                 .caret_view_phys_rect(focused, col, row, cell_w, cell_h)
         })

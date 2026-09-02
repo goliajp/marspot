@@ -1712,11 +1712,7 @@ impl Marspot {
         // `Layout::caret_view_phys_rect`; mcli routes through the
         // renderer equivalent so both binaries stay in sync.
         let caret = self.panes.get(focused).and_then(|pane| {
-            let term = pane.session().terminal();
-            if !term.cursor_visible() {
-                return None;
-            }
-            let (col, row) = term.grid().cursor();
+            let (col, row) = pane.session().ime_caret_cell()?;
             layout.caret_view_phys_rect(focused, col, row, cell_w, cell_h)
         });
         ctx.set_caret_rect_phys(caret);

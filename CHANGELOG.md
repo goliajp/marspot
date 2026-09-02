@@ -2709,7 +2709,28 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.158**
+Current: **0.12.159**
+
+### 0.12.159
+
+The IME candidate window follows the caret into panes whose app has
+hidden the cursor.
+
+The anchor marspot hands AppKit was gated on DECTCEM: a pane whose
+program had asked for an invisible cursor published no caret rect at
+all, and macOS fell back to parking the candidate window wherever it
+liked — typically far from the pane being typed into.  claudecode
+keeps the cursor hidden for the entire time a task runs, which is
+exactly when the next message gets typed, so the same pane anchored
+correctly when idle and wrongly when busy.
+
+Visibility was never the right question.  The pre-edit overlay is
+painted at the grid cursor no matter what DECTCEM says, and the grid
+cursor is where the composed text lands either way.  The anchor now
+comes from `PaneBackend::ime_caret_cell`, which answers with the grid
+cursor for any pane that owns a PTY and `None` only for a vacant slot,
+which has nothing to insert into.  mcli's single-pane path lost the
+same gate.
 
 ### 0.12.158
 
