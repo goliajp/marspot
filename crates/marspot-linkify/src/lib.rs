@@ -766,18 +766,32 @@ fn find_input_box_rows<S: CellSource>(
         // three and the composer is half the screen.
         let reach = MAX_COMPOSER_ROWS.min(rows / 2);
         if caret_row + reach >= rows {
-            let mut top = caret_row;
             let mut r = caret_row;
             let mut walked = 0u16;
             while r > 0 && walked < MAX_COMPOSER_ROWS {
                 r -= 1;
                 walked += 1;
                 if is_separator_row(src, r, cols) {
-                    top = r;
-                    break;
+                    return Some((r, rows - 1));
                 }
             }
-            return Some((top, rows - 1));
+            // No rule above the caret: this is the chromeless
+            // composer (claudecode v2.1.212 ships one), so the
+            // caret's own row is the exemption — UNLESS that row is
+            // a soft-wrap continuation.  A composer's first row is
+            // never one: it is a prompt the app drew, not the tail
+            // of a line the terminal wrapped.
+            //
+            // Exempting it anyway truncated links in the 2026-09-04
+            // report.  A path wrapped across the last two rows had
+            // its continuation swallowed by the phantom box, so the
+            // scan saw only `…/notes/provenance-probe` — not a real
+            // path — and backed off to the longest prefix that was,
+            // `…/spg/`.  The link stopped four segments short of the
+            // file it pointed at.
+            if !src.is_soft_wrap_continuation(caret_row) {
+                return Some((caret_row, rows - 1));
+            }
         }
     }
     find_rounded_box_rows(src, rows, cols)
@@ -2301,6 +2315,31 @@ mod tests {
         );
     }
 
+    /// 2026-09-04 field report: paths in the last block of output
+    /// underlined only as far as `…/spg/`, four segments short.
+    ///
+    /// The caret had come to rest on a soft-wrap continuation — the
+    /// tail of a path the terminal had wrapped — and the chromeless-
+    /// composer branch claimed it, so the continuation never joined
+    /// the row above it.  The scan then saw a prefix that is not a
+    /// real path and backed off to the longest one that is.
+    ///
+    /// A composer's first row is drawn by the app; it is never the
+    /// tail of a wrapped line.  That is the whole distinction.
+    #[test]
+    fn a_caret_resting_on_a_wrapped_tail_is_not_a_composer() {
+        // `/etc/hosts` exists everywhere this builds.
+        let rows = ["see /etc/hos", "ts here"];
+        let mut src = StrSource::new(&rows, 12);
+        src.soft_wrapped = vec![false, true];
+        src.cursor = (7, 1); // caret parked on the continuation
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "the wrapped tail was swallowed by a phantom composer: {links:?}",
+        );
+    }
+
     /// The shape claudecode shipped in v2.1.212 — no box, no rules,
     /// just the prompt line.  There is nothing above the caret to
     /// widen to, so the caret's own row is the exemption, and the
@@ -2683,6 +2722,34 @@ mod tests {
         assert_eq!(v.iter().filter(|r| r.kind == LinkKind::File).count(), 1);
         assert_eq!(v[0].kind, LinkKind::File);
         assert_eq!(v[0].text, bin.display().to_string());
+    }
+
+    /// Pinned while chasing the 2026-09-04 truncation, which stopped
+    /// at `…/spg/` — the segment right before a dotted directory.
+    /// The scanner turned out to be innocent (the cause was upstream,
+    /// see `a_caret_resting_on_a_wrapped_tail_is_not_a_composer`), but
+    /// a dotted component IS the point a wrong answer backs off to, so
+    /// the boundary is worth holding: `.claude`, `.config`, `.git`,
+    /// `.local` are where a developer's own files live.
+    #[test]
+    fn a_dotted_directory_component_does_not_truncate_the_path() {
+        let root = std::env::temp_dir()
+            .join(format!("marspot-linkify-dotdir-{}", std::process::id()));
+        let deep = root.join(".claude").join("notes");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("provenance-exec-tax-2026-09-04.md");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+
+        let bare = scan(&p);
+        // A trailing argument is how the line actually appeared.
+        let with_arg = scan(&format!("{p} -n 5"));
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(bare.len(), 1, "bare path: {bare:?}");
+        assert_eq!(bare[0].text, p, "bare path truncated");
+        assert_eq!(with_arg.len(), 1, "path + arg: {with_arg:?}");
+        assert_eq!(with_arg[0].text, p, "path with trailing arg truncated");
     }
 
 

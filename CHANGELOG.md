@@ -2709,7 +2709,30 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.160**
+Current: **0.12.161**
+
+### 0.12.161
+
+A path that wraps onto the last row keeps its tail.
+
+The composer exemption — the rows a claudecode pane draws for its
+input area, which must not be scanned for links — has a branch for the
+chromeless composer v2.1.212 ships: no box, no rules, just a prompt
+line, so the caret's own row is the exemption.  When the upward walk
+found no rule above the caret, that branch claimed the region anyway,
+from the caret down.
+
+The caret spends most of a pane's life resting at the end of the last
+line of output.  When that line is a path long enough to soft-wrap,
+its continuation row is exactly where the caret sits — and the phantom
+exemption swallowed it.  The scan then saw only the first row,
+`…/notes/provenance-probe`, which is not a file, and backed off
+through the candidate ends to the longest one that is: `…/spg/`, four
+segments short of what the link pointed at.
+
+A composer's first row is drawn by the app; it is never the tail of a
+line the terminal wrapped.  That distinction now gates the branch, so
+a caret resting on a continuation leaves the exemption alone.
 
 ### 0.12.160
 

@@ -92,7 +92,45 @@ mod grid_tests {
     // it up as a multi-row LinkRange.  This is the production path —
     // if it passes but the user's `echo` still shows broken wrap, the
     // bug is in render-side coords or some upstream layer.
+    /// 2026-09-04 field report, at the grid level: a path that
+    /// DECAWM-wraps across the last two rows, with the caret left on
+    /// the continuation.  The stone's unit test pins the decision;
+    /// this pins that a real `Terminal` still reaches it.
     #[test]
+    fn a_wrapped_path_at_the_caret_survives_cc_mode() {
+        use crate::terminal::Terminal;
+        let root = std::env::temp_dir()
+            .join(format!("marspot-gridlinks-caret-{}", std::process::id()));
+        let deep = root.join(".claude").join("notes");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("probe.sh");
+        std::fs::write(&file, b"x").unwrap();
+        let full = file.display().to_string();
+
+        // A width that splits the path mid-name, so the row on its
+        // own is not a real path and a truncating scan has somewhere
+        // shorter to fall back to.
+        let cols = (full.chars().count() as u16) - 3;
+        let rows = 6u16;
+        let mut t = Terminal::new(cols, rows);
+        // Push the path down so its wrapped tail lands on the last
+        // row and the caret rests there — the composer branch only
+        // looks at a caret near the bottom, which is where a caret
+        // sits after ordinary output.
+        for _ in 0..(rows - 2) {
+            t.feed(b"\r\n");
+        }
+        t.feed(full.as_bytes());
+        let links = scan_visible_links(t.grid(), 0, super::ScanOpts { cc_mode: true });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            texts.iter().any(|x| *x == full),
+            "wrapped path truncated in cc_mode: {texts:?}",
+        );
+    }
+
     #[test]
     fn scan_visible_links_via_real_parser() {
         use crate::terminal::Terminal;

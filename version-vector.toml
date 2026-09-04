@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.124"  # 后台任务占着的会话不再先杀后发现 resume 被拒;详见 CHANGELOG.md
-core    = "0.12.160"  # 路径后面粘着「——中文」时,链接不再丢掉扩展名;详见 CHANGELOG.md
+core    = "0.12.161"  # 光标停在折行的尾巴上时,最后那条路径不再被输入框豁免吞掉;详见 CHANGELOG.md
 session = "0.11.56"  # 只因模式变化而重新 publish(否则 flag 传不回 L2);详见 CHANGELOG.md
