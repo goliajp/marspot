@@ -131,6 +131,45 @@ mod grid_tests {
         );
     }
 
+    /// 2026-09-04 field report, both halves, at the grid level: the
+    /// three shapes the paths actually appeared in, across the widths
+    /// the pane could have been at.  Wrapped or not, indented or not,
+    /// the caret resting on the last line must not cost the link.
+    #[test]
+    fn field_report_paths_survive_a_caret_at_the_bottom() {
+        use crate::terminal::Terminal;
+        let root = std::env::temp_dir()
+            .join(format!("marspot-gridlinks-shapes-{}", std::process::id()));
+        let deep = root.join(".claude").join("notes");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("provenance-probe.sh");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+        let n = p.chars().count() as u16;
+
+        let mut misses: Vec<String> = Vec::new();
+        // Widths that wrap it, split it mid-name, and leave it whole.
+        for cols in [n - 12, n - 3, n, n + 6, n + 40] {
+            for (label, line) in [
+                ("bare", p.clone()),
+                ("indented + trailing arg", format!("  {p} -n 5")),
+            ] {
+                let mut t = Terminal::new(cols, 8);
+                for _ in 0..5 {
+                    t.feed(b"\r\n");
+                }
+                t.feed(line.as_bytes());
+                let links = scan_visible_links(t.grid(), 0, super::ScanOpts { cc_mode: true });
+                if !links.iter().any(|l| l.text == p) {
+                    let got: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+                    misses.push(format!("cols={cols} {label}: {got:?}"));
+                }
+            }
+        }
+        std::fs::remove_dir_all(&root).ok();
+        assert!(misses.is_empty(), "link lost or truncated:\n  {}", misses.join("\n  "));
+    }
+
     #[test]
     fn scan_visible_links_via_real_parser() {
         use crate::terminal::Terminal;

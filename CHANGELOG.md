@@ -2709,7 +2709,30 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.161**
+Current: **0.12.162**
+
+### 0.12.162
+
+Links near the bottom of a claudecode pane survive the caret.
+
+0.12.161 stopped the chromeless-composer branch from claiming a
+soft-wrap continuation, which fixed the truncation it was reported
+for.  It left the larger half of the same defect standing: a path that
+does NOT wrap, on the last line of output, lost its link **entirely**.
+
+The branch exists because claudecode v2.1.212 draws a composer with no
+box and no rules — just a prompt line — so there is no chrome to find
+and the caret's own row has to be the exemption.  But the caret comes
+to rest at the end of the last line of output and stays there for most
+of a pane's life.  "The caret is on this row" identifies the composer
+about as well as it identifies any other row.
+
+The exemption is now gated on the row looking like a prompt the app
+drew (`❯ > › ⟩ » $ %` as its first non-blank glyph).  The asymmetry is
+deliberate: a wrong guess here shows one spurious link inside a
+composer, while a wrong guess the other way silently drops every link
+near the bottom of the pane — which is where the output being read
+actually is.
 
 ### 0.12.161
 

@@ -789,7 +789,9 @@ fn find_input_box_rows<S: CellSource>(
             // path — and backed off to the longest prefix that was,
             // `…/spg/`.  The link stopped four segments short of the
             // file it pointed at.
-            if !src.is_soft_wrap_continuation(caret_row) {
+            if !src.is_soft_wrap_continuation(caret_row)
+                && looks_like_prompt_row(src, caret_row, cols)
+            {
                 return Some((caret_row, rows - 1));
             }
         }
@@ -801,6 +803,29 @@ fn find_input_box_rows<S: CellSource>(
 /// Generous enough for a multi-line prompt, short enough that a
 /// missing separator cannot eat a screenful of output.
 const MAX_COMPOSER_ROWS: u16 = 12;
+
+/// Does this row look like a prompt the app drew, rather than a line
+/// of output the caret happens to be resting on?
+///
+/// This is the whole basis for exempting a chromeless composer.  The
+/// caret sits at the end of the last output line for most of a pane's
+/// life, so "the caret is here" identifies nothing — taking it as the
+/// composer blanked the links on ordinary output (2026-09-04).  What
+/// actually marks the composer is its prompt glyph.
+///
+/// Deliberately asymmetric: guessing wrong here costs one spurious
+/// link inside a composer, while guessing wrong the other way silently
+/// drops every link near the bottom of the pane.
+fn looks_like_prompt_row<S: CellSource>(src: &S, row: u16, cols: u16) -> bool {
+    for c in 0..cols {
+        match src.char_at(c, row) {
+            ' ' | '\0' => continue,
+            '❯' | '>' | '›' | '⟩' | '»' | '$' | '%' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
 
 /// A row that is drawn rule, not text: box horizontals and corners
 /// with nothing else on it.  Both claudecode chromes qualify — the
@@ -2337,6 +2362,25 @@ mod tests {
         assert!(
             links.iter().any(|l| l.text == "/etc/hosts"),
             "the wrapped tail was swallowed by a phantom composer: {links:?}",
+        );
+    }
+
+    /// 2026-09-04, the second half of the same report: with the
+    /// truncation fixed, paths that did NOT wrap lost their links
+    /// entirely near the bottom of the pane.
+    ///
+    /// The caret comes to rest at the end of the last line of output.
+    /// Treating that as the chromeless composer exempts the very line
+    /// the user is looking at — not a truncated link, no link at all.
+    #[test]
+    fn a_caret_at_the_end_of_output_does_not_blank_its_own_row() {
+        let rows = ["first line", "see /etc/hosts here"];
+        let mut src = StrSource::new(&rows, 24);
+        src.cursor = (19, 1); // caret where output left it
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "output row blanked by a phantom composer: {links:?}",
         );
     }
 
