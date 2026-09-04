@@ -2709,7 +2709,35 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.162**
+Current: **0.12.163**
+
+### 0.12.163
+
+The seam claudecode broke a line at is offered as a path end.
+
+This is the defect the 2026-09-04 report was actually about; 0.12.161
+and 0.12.162 fixed two real neighbours of it and left it standing.
+Replaying session 385's bytelog is what separated them — the rows in
+question carry `wrapped=false`, so none of the DECAWM-based
+reproductions had been touching this path at all.
+
+claudecode hard-wraps with a hanging indent, and the merge that undoes
+it pops the previous row's trailing blanks and skips this row's
+indent.  When the break landed *inside a word* that is exactly right:
+`…provenance-exec-tax` + `-2026-09-04.md` has to join seamlessly.  When
+it landed *on a space* the space is now gone from both sides, so
+`…provenance-probe.sh -n 5` merged to `…probe.sh-n 5`, which is not a
+file — and the walk back through punctuation settled on the directory,
+`…/spg/`.
+
+The two shapes are indistinguishable on the grid: both first rows fill
+the width, both continuations open with `-`.  So the seam is not
+decided either way — it becomes a candidate end, tried after the full
+span (which keeps a genuinely word-broken name matching whole) and
+before punctuation (which is a guess, where this is structure).  The
+code had promised this for a while: `LineSegment`'s comment already
+said File matches were arbitrated by a "segment-boundary retry" that
+was never actually written.
 
 ### 0.12.162
 

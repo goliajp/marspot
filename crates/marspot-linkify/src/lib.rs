@@ -223,6 +223,7 @@ pub fn scan_visible_links_with<S: CellSource>(
             phys_row: r,
             char_offset,
             cc_zero_indent: cc_cont && col_skip == 0,
+            cc_seam: cc_cont,
         });
         let mut prev_was_wide = false;
         for c in col_skip..cols {
@@ -637,6 +638,7 @@ fn scan_table_block<S: CellSource>(
                 phys_row: r,
                 char_offset: chars.len(),
                 cc_zero_indent: false,
+                cc_seam: false,
             });
             let mut prev_was_wide = false;
             for c in col_skip..right {
@@ -945,6 +947,15 @@ struct LineSegment {
     /// are not allowed to cross this boundary; File matches may
     /// (stat + segment-boundary retry arbitrate).
     cc_zero_indent: bool,
+    /// This segment was joined by the cc hard-wrap heuristic, so its
+    /// `char_offset` is a SEAM: a point where claudecode broke one
+    /// logical line in two.  When it broke at a space, that space is
+    /// gone from both rows (the previous row's trailing blanks are
+    /// popped, this row's hanging indent is skipped), so the merged
+    /// text reads `…probe.sh-n 5` for what was `…probe.sh -n 5`.
+    /// The seam is therefore a candidate end for a path, and a far
+    /// better one than any punctuation guess — see `resolve_path_end`.
+    cc_seam: bool,
 }
 
 /// Scan a logical (possibly multi-row-merged) line and emit
@@ -1034,7 +1045,7 @@ fn scan_line_into_matches(
             // marks, and a seam prefix that happens to be a real
             // *directory* must not win over the file the line points
             // at, so it is tried only after every prose cut has.
-            if let Some(b) = resolve_path_end(&chars, i, end, oracle) {
+            if let Some(b) = resolve_path_end(&chars, i, end, segments, oracle) {
                 let text = unquote_path(&chars[i..b].iter().collect::<String>());
                 emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                 i = b.max(i + 1);
@@ -1072,7 +1083,7 @@ fn scan_line_into_matches(
         {
             let end = scan_path_candidate(&chars, i);
             if end - i >= 3 {
-                if let Some(b) = resolve_path_end(&chars, i, end, oracle) {
+                if let Some(b) = resolve_path_end(&chars, i, end, segments, oracle) {
                     let text = unquote_path(&chars[i..b].iter().collect::<String>());
                     emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
                     i = b.max(i + 1);
@@ -1340,6 +1351,7 @@ fn scan_line(line: &str, row: u16, out: &mut Vec<LinkRange>) {
         phys_row: row,
         char_offset: 0,
         cc_zero_indent: false,
+        cc_seam: false,
     }];
     scan_line_into_matches(&chars, &col_map, out, &segments, cols, &FsOracle);
 }
@@ -1903,6 +1915,7 @@ fn resolve_path_end(
     chars: &[char],
     lo: usize,
     hi: usize,
+    segments: &[LineSegment],
     oracle: &dyn PathOracle,
 ) -> Option<usize> {
     let mut tried = 0usize;
@@ -1932,6 +1945,21 @@ fn resolve_path_end(
     let stripped = strip_line_col_suffix(chars, lo, hi);
     if stripped < hi && consider(stripped, &mut tried, &mut last) {
         return Some(stripped);
+    }
+    // A seam claudecode broke the line at, longest first.  When it
+    // broke at a space the space survives nowhere, so the merged text
+    // has two tokens run together; the seam is exactly where they
+    // part.  Tried before punctuation because it is structure, not a
+    // guess — and only ever ADDS a candidate: a name that really does
+    // span the seam was already offered whole, above.
+    for seg in segments.iter().rev() {
+        if !seg.cc_seam {
+            continue;
+        }
+        let end = seg.char_offset;
+        if end > lo && end < hi && consider(end, &mut tried, &mut last) {
+            return Some(end);
+        }
     }
     // Then every point prose could have started, longest first.
     for cut in (lo + 1..hi).rev() {
@@ -2340,10 +2368,10 @@ mod tests {
         );
     }
 
-    /// 2026-09-04 field report: paths in the last block of output
-    /// underlined only as far as `…/spg/`, four segments short.
-    ///
-    /// The caret had come to rest on a soft-wrap continuation — the
+    /// Also found while investigating the 2026-09-04 report, and also
+    /// not its cause: with a DECAWM soft wrap (rather than the
+    /// claudecode hard wrap that report turned out to involve), a
+    /// caret coming to rest on the continuation — the
     /// tail of a path the terminal had wrapped — and the chromeless-
     /// composer branch claimed it, so the continuation never joined
     /// the row above it.  The scan then saw a prefix that is not a
@@ -2365,9 +2393,73 @@ mod tests {
         );
     }
 
-    /// 2026-09-04, the second half of the same report: with the
-    /// truncation fixed, paths that did NOT wrap lost their links
-    /// entirely near the bottom of the pane.
+    /// 2026-09-04, the reported defect itself, reproduced from
+    /// session 385's bytelog: `…/notes/provenance-probe.sh -n 5`
+    /// underlined only as far as `…/spg/`.
+    ///
+    /// claudecode broke that line at the space.  The break costs the
+    /// space twice over — the previous row's trailing blanks are
+    /// popped and this row's hanging indent is skipped — so the merge
+    /// produces `…probe.sh-n 5`, which is not a file.  Backing off
+    /// through punctuation then lands on the directory.
+    ///
+    /// A break inside a word (`…exec-tax` + `-2026-09-04.md`) needs
+    /// exactly the seamless join this one must not have, and the two
+    /// are indistinguishable on the grid: both rows fill the width,
+    /// both continuations open with `-`.  So the seam is offered as a
+    /// candidate end rather than decided either way.
+    #[test]
+    fn a_cc_seam_where_the_line_broke_at_a_space_is_a_candidate_end() {
+        // The shape needs a shorter prefix that DOES exist, or the
+        // wrong answer has nowhere to land and the test passes for
+        // the wrong reason.  A dotted directory supplies exactly that
+        // — which is why the report ended at `…/spg/`.
+        let root = std::env::temp_dir().join(format!("marspot-seam-{}", std::process::id()));
+        let deep = root.join(".claude").join("notes");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("probe.sh");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+
+        let first = format!("  {p}");
+        let rows = [first.as_str(), "  -n 5"];
+        let cols = first.chars().count() as u16;
+        let mut src = StrSource::new(&rows, cols);
+        src.cursor = (6, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        let root_s = format!("{}/", root.display());
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            texts.iter().any(|t| *t == p),
+            "seam not offered as a path end, got {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| *t == root_s),
+            "fell back past the seam to a bare directory: {texts:?}",
+        );
+    }
+
+    /// The counter-case that keeps the seam a candidate rather than a
+    /// rule: a name really broken mid-word still matches whole,
+    /// because the full span is offered before any seam.
+    #[test]
+    fn a_word_broken_across_a_cc_seam_still_matches_whole() {
+        let rows = ["  /etc/hos", "  ts"];
+        let mut src = StrSource::new(&rows, 10);
+        src.cursor = (4, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        assert!(
+            links.iter().any(|l| l.text == "/etc/hosts"),
+            "seamless join broken: {links:?}",
+        );
+    }
+
+    /// A separate defect found while investigating the 2026-09-04
+    /// report — not its cause (that was the seam above), but real:
+    /// paths that did NOT wrap lost their links entirely near the
+    /// bottom of the pane.
     ///
     /// The caret comes to rest at the end of the last line of output.
     /// Treating that as the chromeless composer exempts the very line
@@ -3280,11 +3372,13 @@ mod tests {
                 phys_row: 0,
                 char_offset: 0,
                 cc_zero_indent: false,
+                cc_seam: false,
             },
             super::LineSegment {
                 phys_row: 1,
                 char_offset: 10,
                 cc_zero_indent: false,
+                cc_seam: false,
             },
         ];
         let mut out = Vec::new();
@@ -3316,6 +3410,7 @@ mod tests {
             phys_row: 7,
             char_offset: 0,
             cc_zero_indent: false,
+                cc_seam: false,
         }];
         let mut out = Vec::new();
         let chars: Vec<char> = line.chars().collect();

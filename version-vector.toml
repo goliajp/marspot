@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.124"  # 后台任务占着的会话不再先杀后发现 resume 被拒;详见 CHANGELOG.md
-core    = "0.12.162"  # 光标停在最后一行输出上时,该行的链接不再整条消失;详见 CHANGELOG.md
+core    = "0.12.163"  # claudecode 在空格处折行时,折缝成为路径候选端点;详见 CHANGELOG.md
 session = "0.11.56"  # 只因模式变化而重新 publish(否则 flag 传不回 L2);详见 CHANGELOG.md
