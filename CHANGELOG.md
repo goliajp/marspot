@@ -2709,7 +2709,27 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.159**
+Current: **0.12.160**
+
+### 0.12.160
+
+A path with a Chinese gloss glued to its end keeps its extension.
+
+`——` attaches an explanation to the thing just named, with no space
+in between, so the greedy path scan swallowed the gloss whole:
+`…/paper1-discovers.html——页首是三条路与定论`.  Arbitration then walks
+back through the candidate ends, longest first, asking the filesystem
+about each — but it only cuts at marks it recognises, and the dash
+family was not among them.  The walk went straight past the extension
+to `…/paper1-discovers`, missed, and settled two levels up on the
+directory that happened to exist.  The link stopped at
+`…/lab36-continus/`.
+
+The dash family (– — ― − －) joins the cut points, along with · • ． ～.
+ASCII `-` stays out — filenames are full of it.  Adding a cut point
+can only ever add a candidate, and candidates are offered to the
+filesystem longest-first, so a name that really does carry a dash is
+still matched whole before any shorter cut is tried.
 
 ### 0.12.159
 

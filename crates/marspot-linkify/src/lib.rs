@@ -1814,6 +1814,18 @@ fn is_prose_cut_point(c: char) -> bool {
             | '\u{2018}' | '\u{2019}' | '\u{201C}' | '\u{201D}' // 弯引号
             | '\u{2026}'            // …
             | '\u{30FB}'            // ・
+            // The dash family.  `——` is how Chinese prose attaches a
+            // gloss to the thing it just named, so it lands glued to
+            // the end of a path with no space to stop the greedy scan
+            // (`…/paper1-discovers.html——页首是三条路与定论`, 2026-09-04
+            // field report).  ASCII `-` stays out — filenames are full
+            // of it — but these have no business inside one, and even
+            // if a name did carry one the longer candidate is offered
+            // to the filesystem first and wins.
+            | '\u{2013}' | '\u{2014}' | '\u{2015}' // – — ―
+            | '\u{2212}' | '\u{FF0D}' // − －
+            | '\u{00B7}' | '\u{2022}' // · •
+            | '\u{FF0E}' | '\u{FF5E}' // ． ～
     )
 }
 
@@ -2974,6 +2986,68 @@ mod tests {
         // One segment per physical row it crosses.
         assert_eq!(files.len(), 2, "both rows underline");
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// 2026-09-04 field report: `——` glues a Chinese gloss straight
+    /// onto the name it just introduced, with no space for the greedy
+    /// scan to stop on.  The dash was not a place the arbitration
+    /// would cut, so the walk back went from
+    /// `…/paper1-discovers.html——页首是…` past the extension to
+    /// `…/paper1-discovers`, and the link that finally existed was the
+    /// directory two levels up.
+    #[test]
+    fn an_em_dash_gloss_does_not_eat_the_extension() {
+        let p = std::env::temp_dir().join(format!(
+            "marspot-linkify-emdash-{}.html",
+            std::process::id()
+        ));
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        let v = scan(&format!("open {text}——页首是三条路与定论"));
+        let files: Vec<&LinkRange> = v.iter().filter(|r| r.kind == LinkKind::File).collect();
+        assert_eq!(
+            files.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            vec![text.as_str()],
+            "the path ends where the gloss begins"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The field report's full shape: the same gloss, but the path
+    /// also hard-wrapped mid-token at the pane edge, so the row merge
+    /// and the dash cut both have to land for the link to come out
+    /// whole.  A dot-directory (`.claude`) sits in the middle — the
+    /// break fell inside it (`/.c` + `laude/`), which is what made the
+    /// truncated link look like a plausible one.
+    #[test]
+    fn a_wrapped_path_with_an_em_dash_gloss_is_one_link() {
+        let dir = std::env::temp_dir()
+            .join(format!("marspot-linkify-emdash-wrap-{}", std::process::id()))
+            .join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("paper1-discovers.html");
+        std::fs::write(&p, b"x").unwrap();
+        let text = p.display().to_string();
+        // Cut the path so the first row ends flush at the right edge,
+        // which is where claudecode's fixed-width wrap puts it.
+        let split = text.chars().count() - 27;
+        let head: String = format!("open {}", text.chars().take(split).collect::<String>());
+        let cols = head.chars().count() as u16;
+        let tail = format!(
+            "  {}——页首是三条路与定论",
+            text.chars().skip(split).collect::<String>()
+        );
+        let src = StrSource::new(&[&head, &tail], cols);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let files: Vec<&LinkRange> = links.iter().filter(|l| l.kind == LinkKind::File).collect();
+        assert!(!files.is_empty(), "wrapped path found no link at all");
+        assert!(
+            files.iter().all(|l| l.text == text),
+            "every segment carries the whole path: {:?}",
+            files.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        assert_eq!(files.len(), 2, "both rows underline");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[test]
