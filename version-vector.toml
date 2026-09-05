@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.129"  # RFC-008:codex 声明 /TRANSCRIPT/ 标记,让 L2 能读状态而不是记状态;详见 CHANGELOG.md
-core    = "0.12.173"  # 滚轮 marker 两边压掉空白 —— codex 标题是字母间加空格画的;详见 CHANGELOG.md
+shell   = "0.7.130"  # codex 的滚轮按键提成具名常量,marker 由单测钉在真 transcript 那一行上;详见 CHANGELOG.md
+core    = "0.12.174"  # 滚轮标记判定挪进 marspot::wheel_marker,探针与 L2 共用同一个函数;详见 CHANGELOG.md
 session = "0.11.59"  # 发布 FLAG_ALT_SCREEN,让 L2 能区分全屏 TUI 与空 scrollback 的 shell;详见 CHANGELOG.md

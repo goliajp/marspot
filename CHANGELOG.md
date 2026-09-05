@@ -28,7 +28,17 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.129**
+Current: **0.7.130**
+
+### 0.7.130
+
+Codex's wheel keys become named constants, and tests pin them.
+
+The marker is asserted to be one the shared predicate can use, and to
+match a row captured off a real transcript — the letter-spaced heading
+that the declared string failed to match for three rounds.  A blank or
+malformed marker would silently turn the wheel back into a blind
+toggle, so that case is pinned too.
 
 ### 0.7.129
 
@@ -2805,7 +2815,27 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.173**
+Current: **0.12.174**
+
+### 0.12.174
+
+The wheel-marker rule moves into `marspot::wheel_marker`.
+
+It lived in this binary, so nothing outside could call it — and a probe
+that wants to check it against a live session had to carry its own
+copy.  A copy is always right about itself.  That is how three fixes in
+a row looked correct: not one of them ever fed a real screen to the
+real predicate.
+
+The module now owns the whole rule, including "a plugin that declared
+no marker is treated as open", so that an unobservable view never gets
+a blind toggle press.  `examples/wheel_replay` replays L2's per-event
+decision against a running session and calls the same function:
+
+    real marker      → entered 1x, open across 8 ticks, content moving
+    marker that never matches → toggle re-sent every tick, ends closed
+
+The second line is the reported symptom, reproduced on demand.
 
 ### 0.12.173
 
