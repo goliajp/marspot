@@ -2709,7 +2709,23 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.164**
+Current: **0.12.165**
+
+### 0.12.165
+
+Exited session jobs are reaped.
+
+`launchd` keeps a job in the domain after its process exits until
+someone removes it, so RFC-007's per-session jobs accumulated: one per
+pane ever opened, plus one per test that spawned a real L3.  Twenty-six
+of them were sitting in `launchctl list` within an hour of shipping it
+— exactly the unbounded growth this project refuses everywhere else,
+and invisible unless that list is read.
+
+A job with no pid has already exited and holds nothing worth keeping,
+so the spawn path reaps those first.  Live jobs are never touched, and
+a dev sandbox's jobs (different label hash) are collected by the same
+pass once their processes are gone.
 
 ### 0.12.164
 

@@ -3067,6 +3067,10 @@ fn spawn_l3_with_cwd(
         Job(String),
     }
     let booted = if marspot::clean_exec::enabled() {
+        // Reap jobs whose processes are already gone.  Spawns are
+        // user-rate (boot, [+], revive), so this rides along there
+        // rather than on a timer.
+        marspot::clean_exec::gc_exited_session_jobs();
         match marspot::clean_exec::ensure_clean_copy(&session_bin) {
             Ok(clean_bin) => {
                 let label = marspot::clean_exec::session_job_label(session_id);

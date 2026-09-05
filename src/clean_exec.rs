@@ -233,6 +233,43 @@ pub fn bootout_session_job(session_id: u64) {
     let _ = std::fs::remove_file(paths::state_root().join("launchd").join(format!("{label}.plist")));
 }
 
+/// Bootout every session job that is no longer running.
+///
+/// `launchd` keeps an exited job in the domain until someone removes
+/// it, so without this they accumulate for the life of the login
+/// session — one per pane ever opened, plus one per test that spawned
+/// a real L3.  That is exactly the unbounded growth this project
+/// refuses elsewhere, and it is invisible until `launchctl list` is
+/// read.
+///
+/// The rule is deliberately blunt: a `marspot.session.*` job with no
+/// pid has already exited, and an exited job holds nothing worth
+/// keeping.  Live jobs are never touched, so a pane in use cannot be
+/// caught by it, and jobs from a dev sandbox (different label hash)
+/// are cleaned by the same pass once their processes are gone.
+pub fn gc_exited_session_jobs() {
+    let out = match Command::new("/bin/launchctl").arg("list").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return,
+    };
+    let domain = gui_domain();
+    let dir = paths::state_root().join("launchd");
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut f = line.split_whitespace();
+        let (pid, _status, label) = match (f.next(), f.next(), f.next()) {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            _ => continue,
+        };
+        if !label.starts_with("jp.golia.marspot.session.") || pid != "-" {
+            continue;
+        }
+        let _ = Command::new("/bin/launchctl")
+            .args(["bootout", &format!("{domain}/{label}")])
+            .output();
+        let _ = std::fs::remove_file(dir.join(format!("{label}.plist")));
+    }
+}
+
 /// Is the clean-exec path enabled?  On by default; `MARSPOT_CLEAN_EXEC=0`
 /// returns to the direct fork, which is what a bisect wants.
 pub fn enabled() -> bool {
