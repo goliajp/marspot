@@ -4142,7 +4142,6 @@ mod tests {
         assert_eq!(t.grid().cell(5, 0).ch, ' ', "wide-trail orphan not cleared");
     }
 
-    #[test]
     /// DSR / CPR: `CSI 6 n` must answer with the cursor's 1-based
     /// position, and `CSI 5 n` with a bare OK.  An app that asks and
     /// is ignored waits forever — readline does this to redraw a
@@ -4164,6 +4163,7 @@ mod tests {
         assert!(t.take_response().is_empty());
     }
 
+    #[test]
     fn da1_burst_tracking_records_per_response() {
         // Five DA1 queries inside the parser's single feed call should
         // surface five responses in pending_response (concatenated)
