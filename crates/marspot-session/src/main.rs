@@ -996,6 +996,37 @@ fn setup_shm() -> (GridShmWriter, u16, u16) {
             );
             (w, c, r)
         }
+        // RFC-007: a `launchd`-started L3 inherits no fds, so fall back
+        // to opening the region by the name L2 already passes.  Tried
+        // only when no fd was handed over, which keeps every existing
+        // caller (`mcli`, tests, an L2 that has not been updated) on
+        // the exact path it was on.
+        Err(_) if !std::env::var("MARSPOT_SHM_NAME").unwrap_or_default().is_empty() => {
+            let name = std::env::var("MARSPOT_SHM_NAME").unwrap_or_default();
+            let cname = std::ffi::CString::new(name.clone()).unwrap_or_else(|_| {
+                lx_error!("session.shm_name.nul", "shm name has interior NUL", name = name);
+                std::process::exit(1);
+            });
+            let w = marspot_term::grid_shm::open_region(&cname)
+                .and_then(GridShmWriter::from_fd)
+                .unwrap_or_else(|e| {
+                    lx_error!(
+                        "session.grid_shm.open_by_name_failed",
+                        &format!("{e}"),
+                        name = name
+                    );
+                    std::process::exit(1);
+                });
+            let (c, r) = (w.cols(), w.rows());
+            lx_info!(
+                "session.grid_shm.attached_by_name",
+                "grid framebuffer opened by name (RFC-007 clean exec chain)",
+                name = name,
+                cols = c,
+                rows = r
+            );
+            (w, c, r)
+        }
         Err(_) => {
             let w = GridShmWriter::create(INITIAL_COLS, INITIAL_ROWS).unwrap_or_else(|e| {
                 lx_error!("session.grid_shm.create_failed", &format!("{e}"));

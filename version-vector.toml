@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.124"  # 后台任务占着的会话不再先杀后发现 resume 被拒;详见 CHANGELOG.md
-core    = "0.12.163"  # claudecode 在空格处折行时,折缝成为路径候选端点;详见 CHANGELOG.md
-session = "0.11.56"  # 只因模式变化而重新 publish(否则 flag 传不回 L2);详见 CHANGELOG.md
+core    = "0.12.164"  # RFC-007 L3 改由 launchd 启动,用户 shell 链不再带 provenance;详见 CHANGELOG.md
+session = "0.11.57"  # RFC-007 grid region 可按名字自取(launchd job 不继承 fd);详见 CHANGELOG.md

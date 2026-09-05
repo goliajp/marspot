@@ -2709,7 +2709,46 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.163**
+Current: **0.12.164**
+
+### 0.12.164
+
+L3 is booted through `launchd`, off an unmarked copy of its binary.
+
+RFC-007.  Every process under a user-installed `.app` carries
+`com.apple.provenance`; it is inherited by children and by whoever
+execs a marked file, and every file such a process writes is marked in
+turn.  So a binary built inside marspot is marked, and its **first
+execution** pays a full Gatekeeper scan — a notarisation round trip
+(3 s timeout, retried) plus an XProtect pass, all serialised through
+one `syspolicyd`.  Same command, same minute, measured here:
+
+```text
+  clean chain     0.131 / 0.025 / 0.036 / 0.158 / 0.060 s
+  marspot's       3.630 / 0.340 / 4.135 s
+```
+
+Reports from a heavier test tier reached 30.55 s, and one harness
+268.50 s.  It reads as "the tests got slower", not as a terminal
+defect, which is why it went unattributed for so long.
+
+Not marspot's bug — iTerm2 pays it too, and its `DeveloperTool` TCC
+grant does not help (verified: no such decision appears anywhere in
+the exec log).  `Terminal.app` is exempt only for being a `/System`
+platform binary.  But it is marspot's problem, because the user's
+build-test loop lives here.
+
+Two conditions, both necessary: the process must not descend from the
+app, and the file it execs must itself be unmarked.  So `binaries/clean/`
+holds a copy written BY a clean process (`cat` + rename under a
+`launchd` job — `cp` copies extended attributes, which reproduced the
+very mark the copy exists to shed), refreshed when the source's
+(len, mtime) moves, and L3 boots from it as a per-session `launchd`
+job.  `MARSPOT_CLEAN_EXEC=0` returns to the direct fork; a failure on
+either half falls back to it with a warning rather than costing a pane.
+
+The process tree keeps its shape (L3 → shell, L3 at PPID 1), so
+pidtree, the session cap and crash isolation see what they saw.
 
 ### 0.12.163
 
@@ -5042,7 +5081,16 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.56**
+Current: **0.11.57**
+
+### 0.11.57
+
+The grid region can be taken by name, not only by inherited fd.
+
+A `launchd` job (RFC-007) inherits no descriptors, so `setup_shm`
+gains a `MARSPOT_SHM_NAME` branch over `grid_shm::open_region`.  The
+inherited-fd branch stays first and unchanged, so `mcli`, the tests and
+any L2 that still passes an fd are on exactly the path they were on.
 
 ### 0.11.56
 

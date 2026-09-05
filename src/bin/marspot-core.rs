@@ -3058,8 +3058,76 @@ fn spawn_l3_with_cwd(
             Ok(())
         });
     }
-    let child = cmd.spawn()?;
-    lx_event!("L3_SPAWNED", "L3 child running", pid = child.id());
+    // RFC-007 — boot L3 through `launchd` when the clean-exec path is
+    // on.  A `launchd` job inherits no fds, so L3 takes the region by
+    // name instead (`MARSPOT_SHM_NAME`, already in the env above); the
+    // fd branch stays first in `setup_shm`, so nothing else moves.
+    enum Booted {
+        Child(std::process::Child),
+        Job(String),
+    }
+    let booted = if marspot::clean_exec::enabled() {
+        match marspot::clean_exec::ensure_clean_copy(&session_bin) {
+            Ok(clean_bin) => {
+                let label = marspot::clean_exec::session_job_label(session_id);
+                // The job gets this process's whole environment, which
+                // is what the fork gave it, minus the two fd handles a
+                // job cannot receive.
+                let mut env: Vec<(String, String)> = std::env::vars()
+                    .filter(|(k, _)| k != ENV_SHM_FD && k != ENV_CONTROL_FD)
+                    .collect();
+                for (k, v) in [
+                    ("MARSPOT_SESSION_ID", session_id.to_string()),
+                    ("MARSPOT_L3_OWNS_PTY", "1".to_string()),
+                    ("MARSPOT_SHM_NAME", shm_name.clone()),
+                ] {
+                    env.retain(|(ek, _)| ek != k);
+                    env.push((k.to_string(), v));
+                }
+                env.retain(|(k, _)| k != "MARSPOT_INITIAL_CWD");
+                if !initial_cwd.is_empty() {
+                    env.push(("MARSPOT_INITIAL_CWD".into(), initial_cwd.to_string()));
+                }
+                match marspot::clean_exec::boot_session_job(&label, &clean_bin, &env) {
+                    Ok(()) => {
+                        lx_event!(
+                            "L3_SPAWN_LAUNCHD",
+                            "L3 booted as a launchd job (RFC-007 clean exec chain)",
+                            label = label.as_str(),
+                            bin = clean_bin.display()
+                        );
+                        Some(Booted::Job(label))
+                    }
+                    Err(e) => {
+                        lx_warn!(
+                            "core.l3.launchd_boot_failed",
+                            &format!("{e}"),
+                            session_id = session_id
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                lx_warn!(
+                    "core.l3.clean_copy_failed",
+                    &format!("{e}"),
+                    session_id = session_id
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let booted = match booted {
+        Some(b) => b,
+        None => {
+            let child = cmd.spawn()?;
+            lx_event!("L3_SPAWNED", "L3 child running", pid = child.id());
+            Booted::Child(child)
+        }
+    };
 
     // Map the region as a reader (mmap survives the fd closing, so the
     // owned `region` can drop after).
@@ -3086,8 +3154,7 @@ fn spawn_l3_with_cwd(
             lx_error!(
                 "core.l3.uds_connect_failed",
                 &format!("{e}"),
-                session_id = session_id,
-                child_pid = child.id()
+                session_id = session_id
             );
             // RFC-003 §6 Amendment 15.2 — std::process::Child::drop
             // is a no-op (Rust deliberately doesn't reap behind your
@@ -3095,10 +3162,15 @@ fn spawn_l3_with_cwd(
             // otherwise live on forever as an orphan.  Explicit
             // SIGKILL + reap so we don't leak processes (and the
             // associated PTY + vault deposit, which the kernel
-            // collects when the last reference drops).
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
+            // collects when the last reference drops).  A launchd job
+            // is torn down the way it was made.
+            match booted {
+                Booted::Child(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                Booted::Job(_) => marspot::clean_exec::bootout_session_job(session_id),
+            }
             return Err(e);
         }
     };
@@ -3107,8 +3179,17 @@ fn spawn_l3_with_cwd(
     let (selection_tx, selection_rx) = std::sync::mpsc::channel::<(u32, String)>();
     std::thread::spawn(move || l3_reader_loop(reader_stream, session_id, tx, selection_tx));
 
+    let proc = match booted {
+        Booted::Child(c) => marspot::pane::L3Process::Spawned(c),
+        // The job's pid is L3's own, and it wrote it into entry.toml
+        // before binding the socket we just connected to.
+        Booted::Job(_) => {
+            let pid = marspot_term::session_registry::read_session_entry(session_id)?.pid;
+            marspot::pane::L3Process::Reattached { pid }
+        }
+    };
     Ok(L3Spawn {
-        child,
+        child: proc,
         control,
         reader,
         selection_rx,
@@ -5246,6 +5327,10 @@ impl CoreApp {
             if let Ok(entry) = session_registry::read_session_entry(id) {
                 unsafe { libc::kill(entry.pid, libc::SIGTERM) };
             }
+            // RFC-007: the session's launchd job goes with it.
+            // Idempotent, and a no-op for sessions started by the
+            // direct-fork path.
+            marspot::clean_exec::bootout_session_job(id);
             let _ = session_registry::delete_session(id);
             // Amendment 7 step 3: also drop the named shm region so
             // the kernel actually frees the pages once every fd-holder
@@ -8872,6 +8957,10 @@ fn assemble_panes_at_boot(
                     }
                 }
             }
+            // RFC-007: the session's launchd job goes with it.
+            // Idempotent, and a no-op for sessions started by the
+            // direct-fork path.
+            marspot::clean_exec::bootout_session_job(id);
             match session_registry::retire_session_dir(id) {
                 Ok(dst) => lx_warn!(
                     "core.boot.surplus_retired",
@@ -8935,6 +9024,10 @@ fn assemble_panes_at_boot(
                 }
             }
         }
+            // RFC-007: the session's launchd job goes with it.
+            // Idempotent, and a no-op for sessions started by the
+            // direct-fork path.
+            marspot::clean_exec::bootout_session_job(id);
         match session_registry::retire_session_dir(id) {
             Ok(_) => retired += 1,
             Err(e) => lx_warn!(
