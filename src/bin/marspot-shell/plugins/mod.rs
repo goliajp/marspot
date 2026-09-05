@@ -54,6 +54,7 @@ use marspot::{lx_debug, lx_error, lx_event, lx_warn};
 
 pub mod autorun;
 pub mod claudecode;
+pub mod codex;
 pub mod host;
 pub mod pty_op;
 // F3+1 — pidtree moved to marspot lib (`src/pidtree.rs`) so L2

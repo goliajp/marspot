@@ -4335,6 +4335,12 @@ impl MarspotApp for ShellApp {
         if self.plugin_registry.is_empty() {
             self.plugin_registry
                 .register(Box::new(plugins::claudecode::ClaudecodePlugin::new()));
+            // RFC-008 — the same pane affordances for the OpenAI CLI.
+            // A pane runs one agent at a time, and each plugin claims
+            // only the sessions whose process tree it recognises, so
+            // both can be registered unconditionally.
+            self.plugin_registry
+                .register(Box::new(plugins::codex::CodexPlugin::new()));
             self.plugin_registry.init_all_with(&self.plugin_host);
             self.plugin_registry.start_all_with(&self.plugin_host);
         }

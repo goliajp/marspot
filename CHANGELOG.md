@@ -28,7 +28,39 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.126**
+Current: **0.7.127**
+
+### 0.7.127
+
+codex gets a badge (RFC-008, first slice).
+
+The plugin framework was already built for more than one agent: the
+pane→process binding takes a predicate, badges go through
+`PluginHost`, and the registry dispatches to whichever plugin
+recognises a session.  So this is a new plugin, not a fork of
+`claudecode.rs` — 200 lines against that file's 7,900.
+
+It reads `model` and `model_reasoning_effort` from
+`~/.codex/config.toml` and publishes `gpt-6-astra·high`, the shape
+claudecode's badge already uses, so a window holding both reads as one
+system rather than two unrelated tools.  Only top-level keys count:
+the file carries `[projects."…"]` tables whose own `model` would
+otherwise win by being last, and the badge would follow whichever
+project was listed rather than what codex is running.
+
+Recognition walks argv[0] rather than `comm`, for the reason
+claudecode does: a released agent renames its process.  The basename
+must match `codex` exactly — `codex-code-mode-host` is a helper codex
+spawns, and accepting it would bind a pane to the wrong pid.
+
+Sessions come from the registry rather than pane indices, because a
+pane index moves when panes are dragged or closed while a session id
+is what a badge is addressed to.
+
+Deliberately absent: claudecode's profile-cycle (SIGTERM, await-quiet,
+relaunch with `--resume`) leans on claude's session-resume semantics.
+codex's equivalent is not established, and guessing would put a plugin
+in a position to kill a running agent mid-task.
 
 ### 0.7.126
 
