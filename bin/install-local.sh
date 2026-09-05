@@ -168,20 +168,73 @@ if [[ -z "$SIGN_ID" ]]; then
   SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
             | awk -F'"' '/Developer ID Application/{print $2; exit}')
 fi
+# Signing is not advisory.  An adhoc binary costs the first-run amfid
+# stall AND fails the csreq behind the Developer Tools grant, so the
+# whole app loses its Gatekeeper exemption — every binary the user
+# compiles then pays a scan.  Both used to be a WARN and an install
+# that carried on regardless; a silent downgrade to adhoc is exactly
+# the outcome nobody would have chosen if asked.  Refuse instead, and
+# say what to do.  `MARSPOT_ALLOW_ADHOC=1` makes it a deliberate act.
+adhoc_bail() {
+  echo "" >&2
+  echo "==> REFUSING to install adhoc-signed binaries." >&2
+  echo "    $1" >&2
+  echo "" >&2
+  echo "    An adhoc binary stalls 30-60 s in amfid on first run, and does" >&2
+  echo "    not satisfy the code requirement behind the Developer Tools" >&2
+  echo "    grant — so everything you compile inside marspot pays a" >&2
+  echo "    Gatekeeper scan on ITS first run too." >&2
+  echo "" >&2
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    echo "    You are over ssh, where codesign cannot reach the login" >&2
+    echo "    keychain (errSecInternalComponent, even though" >&2
+    echo "    find-identity lists the cert).  Two ways out:" >&2
+    echo "" >&2
+    echo "      • from your workstation:  bin/install-remote.sh <host>" >&2
+    echo "        (signs locally, ships a signed bundle; no private key" >&2
+    echo "         and no keychain password ever leaves this machine)" >&2
+    echo "      • or on that host, once:" >&2
+    echo "          security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+  else
+    echo "    Install a 'Developer ID Application' certificate, or set" >&2
+    echo "    MARSPOT_SIGN_ID to the identity you want used." >&2
+  fi
+  echo "" >&2
+  echo "    MARSPOT_ALLOW_ADHOC=1 proceeds anyway, knowing the above." >&2
+  exit 1
+}
 if [[ -n "$SIGN_ID" ]]; then
   echo "==> signing release binaries"
   echo "    identity: $SIGN_ID"
   for b in marspot-shell marspot-core marspot-session; do
-    if codesign --force --sign "$SIGN_ID" --timestamp=none \
-                "$TARGET/$b" 2>&1 | sed "s/^/    /"; then
-      :
+    # No pipe around codesign: with a pipe the exit status belongs to
+    # whatever is downstream, and only `pipefail` made this work at all.
+    if ! out=$(codesign --force --sign "$SIGN_ID" --timestamp=none "$TARGET/$b" 2>&1); then
+      echo "$out" | sed "s/^/    /" >&2
+      [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] \
+        || adhoc_bail "codesign failed for $b."
+      echo "    WARN: $b stays adhoc (MARSPOT_ALLOW_ADHOC=1)" >&2
     else
-      echo "    WARN: codesign $b failed (continuing, expect amfid 30-60s on first run)" >&2
+      echo "$out" | sed "s/^/    /"
     fi
   done
+  # Verify rather than trust: codesign can exit 0 and still leave a
+  # binary the loader will not accept.
+  # Capture, then test.  `... | grep -q` under `set -o pipefail` reports
+  # failure for a correctly signed binary: grep exits at the first match
+  # and codesign dies of SIGPIPE writing into the closed pipe.
+  for b in marspot-shell marspot-core marspot-session; do
+    info=$(codesign -dv "$TARGET/$b" 2>&1 || true)
+    case "$info" in
+      *TeamIdentifier=*) ;;
+      *) [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] \
+           || adhoc_bail "$b has no TeamIdentifier after signing." ;;
+    esac
+  done
 else
-  echo "    WARN: no Developer ID Application cert in keychain;"
-  echo "          binaries stay adhoc-signed → amfid 30-60 s on first run." >&2
+  [[ -n "${MARSPOT_ALLOW_ADHOC:-}" ]] \
+    || adhoc_bail "No 'Developer ID Application' certificate found."
+  echo "    WARN: no cert; binaries stay adhoc (MARSPOT_ALLOW_ADHOC=1)" >&2
 fi
 
 # ── 2. Scaffold the bundle (first run) ────────────────────────────
