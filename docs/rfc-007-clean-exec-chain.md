@@ -1,8 +1,45 @@
 # RFC-007 — the first-execution tax: what it is, and what does not fix it
 
-Status: **implemented, measured, reverted** (2026-09-05).  Kept as the
-record of an eliminated search space — the whole value of this document
-is that nobody has to run these experiments again.
+Status: **solved** (2026-09-05).  The cause is the RESPONSIBLE process,
+and the fix is one line in L1 plus a bundle-id TCC grant.  The rest of
+this document is the eliminated search space — kept so nobody re-runs
+these experiments.
+
+## The answer
+
+`exec` replaces a process's image **and its responsible identity**.  L1
+redirected into `Application Support/binaries/current/marspot-shell` at
+startup, so the whole tree's responsible process stopped being
+`Marspot.app` and became a bare path.  A bare path cannot hold a
+bundle-id TCC grant, so the **Developer Tools** exemption — which is
+what lets a terminal run code its user just compiled without a
+Gatekeeper scan — no longer matched.  That is also why marspot's four
+`DeveloperTool` rows are `client_type=1` (path) while `Terminal` and
+`iTerm2` are `client_type=0` (bundle id), and why `tccd` was never even
+consulted on this chain.
+
+Same script, same minute, one instrument:
+
+```text
+  responsible = Marspot.app          0.00 s   performScan 0
+  responsible = current/ bare path   0.30 s   performScan every exec
+```
+
+Two conditions, both required:
+
+1. `Marspot.app` holds a bundle-id Developer Tools grant
+   (System Settings → Privacy & Security → Developer Tools).
+2. L1 does not `exec` out of the bundle — shipped in shell 0.7.125,
+   `MARSPOT_REDIRECT=1` restores the old path.
+
+L2 and L3 are unaffected and keep updating live: a forked child
+inherits the responsible process, so they cost nothing by living
+outside the bundle.  iTerm2 does exactly this with its own
+`iTermServer` helper under Application Support.
+
+The price is that a new L1 lands on the next cold launch: a bundle
+binary cannot be overwritten while its own process runs (AMFI kills it
+when the on-disk CDHash stops matching).  L1 moves rarely.
 
 ## The observation
 
@@ -63,19 +100,16 @@ spawn path is failure surface for no gain.  It had already leaked 26
 jobs in its first hour (`launchd` keeps exited jobs until booted out),
 which is the kind of cost it would keep charging.
 
-## What is left
+## Notarisation was tested, and is not it
 
-The only systematic difference between the fast rows and every slow one
-is **notarisation** — `Terminal.app` is an Apple platform binary,
-`iTerm.app` carries a stapled ticket, `Marspot.app` has neither.  The
-hypothesis is that `syspolicyd` exempts execs originating under a
-notarised app.  It is **unverified**: confirming it needs an Apple ID
-or App Store Connect key to notarise a test bundle, and no credential
-is stored on this machine.
+The last standing hypothesis was that `syspolicyd` exempts execs under
+a notarised app.  A test bundle was signed, submitted, **Accepted**,
+and stapled.  Its chain measured 0.28 / 0.29 / 0.29 s with
+`performScan` running every time — identical to the unnotarised
+build.  Notarisation changes nothing here.
 
-Until then marspot pays what `sshd` and `launchd` pay — this terminal
-is not worse than the alternatives, it simply is not exempt like the
-two that are.
+`bin/notarize.sh` is kept anyway: signing and notarising a distributed
+app is worth doing on its own merits, and it is now a one-liner.
 
 `examples/exec_tax_probe.rs` measures it inside a real marspot shell.
 Read the timing together with `syspolicyd`'s CPU delta or its
