@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.124"  # 后台任务占着的会话不再先杀后发现 resume 被拒;详见 CHANGELOG.md
-core    = "0.12.165"  # RFC-007 已退出的 session job 会被回收,不再累积;详见 CHANGELOG.md
-session = "0.11.57"  # RFC-007 grid region 可按名字自取(launchd job 不继承 fd);详见 CHANGELOG.md
+core    = "0.12.166"  # RFC-007 回退:L3 回到直接 fork,干净链实测没有收益;详见 CHANGELOG.md
+session = "0.11.58"  # RFC-007 回退:按名字自取 shm 的分支随之移除;详见 CHANGELOG.md

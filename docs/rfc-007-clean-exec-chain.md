@@ -1,88 +1,83 @@
-# RFC-007 — a clean exec chain for the user's shell
+# RFC-007 — the first-execution tax: what it is, and what does not fix it
 
-Status: implementing (2026-09-05)
+Status: **implemented, measured, reverted** (2026-09-05).  Kept as the
+record of an eliminated search space — the whole value of this document
+is that nobody has to run these experiments again.
 
-## The defect
+## The observation
 
-Every process under a user-installed `.app` carries
-`com.apple.provenance`, and it is inherited: parent → child, and also
-executable-file → process.  A file created anywhere under that tree is
-stamped too.  So a binary the user builds inside marspot is stamped,
-and its **first execution** takes a full Gatekeeper scan — a network
-round trip to Apple's notarisation service (3 s timeout, retried), an
-XProtect analysis pass, and a `syspolicyd` that serialises all of it.
+A binary built inside marspot pays a Gatekeeper scan on its **first
+execution**: `GK performScan`, a round trip to Apple's notarisation
+service (`transaction_duration_ms=182` measured, 3 s timeout with
+retries), an XProtect pass, all serialised through one `syspolicyd`.
+Idle it costs ~0.3 s; under load ~1.3 s; another project's test tier
+reported 30 s, and one harness 268 s — the same event at different
+queue depths.  A developer's build can never be notarised, so the trip
+is paid and discarded every time.
 
-Measured on this host, same command, same minute:
+It reads as "the tests got slower", not as a terminal defect.
 
-```text
-  launchd-clean chain   0.131 / 0.025 / 0.036 / 0.158 / 0.060 s   (artefacts unstamped)
-  marspot's chain       3.630 / 0.340 / 4.135 s
-```
+## What actually separates fast from slow
 
-The reported case on another project's test tier was 30.55 s, and one
-harness took 268.50 s.  It is the same mechanism throughout; what
-varies is how busy `syspolicyd` is when the queue is entered.
+Measured with one instrument (`/usr/bin/time -p`, 3–5 trials each,
+`syspolicyd` CPU delta and `performScan` counts alongside):
 
-This is not marspot's bug — iTerm2 pays it too, and its
-`kTCCServiceDeveloperTool` grant does not help (verified: no such
-decision appears anywhere in the exec log; that grant permits running
-non-conforming code, it does not skip the scan).  `Terminal.app` is
-exempt only because it is a `/System` platform binary.
+| chain | first exec | performScan | chain xattr |
+|---|---|---|---|
+| `Terminal.app` (platform binary) | **0.00 s** | **0** | none |
+| `iTerm.app` (**notarised**, stapled) | **0.00 s** | **0** | none |
+| marspot | 0.30–0.49 s | every time | provenance |
+| `launchd` job | 0.39–0.48 s | every time | none |
+| `sshd` | 0.30–0.36 s | every time | none |
 
-But it is marspot's problem: the user's build-test loop is inside
-marspot, and the cost does not look like a terminal defect.  It looks
-like "the tests got slower".
+The two fast rows do not scan **at all**.  Everything else scans every
+time, whatever its ancestry.
 
-## What does not work (all verified, not reasoned)
+## Ruled out — each with its own control
 
-| approach | result |
-|---|---|
-| strip the xattr | `xattr -d` returns 0 and silently does nothing; not removable, not even on a copy |
-| unstamped binary in an unstamped bundle, launched cleanly | process still stamped — `.app` membership alone is enough |
-| `posix_spawn` + `responsibility_spawnattrs_setdisclaim` | `rc=0`, child still stamped; it governs TCC responsibility only |
-| a `DeveloperTool` TCC grant (marspot already has four) | never consulted on this path |
-| system-side exemption | `SystemPolicyConfiguration/Default.plist` carries a kext allow-list and nothing else |
+| hypothesis | control | verdict |
+|---|---|---|
+| `com.apple.provenance` on the artefact | unmarked artefact via `launchd`/`sshd` chains | **no** — unmarked and still 0.3 s |
+| provenance on the process chain | clean chain vs marspot chain, idle AND under load | **no** — identical both ways |
+| `kTCCServiceDeveloperTool` grant | marspot holds four (path-type, csreq verified matching) | **no** — `tccd` is never consulted on this path |
+| Hardened Runtime | same app signed with/without `--options runtime` | **no** — 0.46 vs 0.47 s |
+| `cs.*` entitlements (jit, disable-library-validation, unsigned-exec-memory, dyld-env) | same app with all four | **no** — 0.28 s, unchanged |
+| install location | identical app from `~/.local` and `/Applications` | **no** — identical |
+| `posix_spawn` disclaim | `responsibility_spawnattrs_setdisclaim` | **no** — `rc=0`, child still marked |
+| stripping the attribute | `xattr -d`, on a copy, under sudo | **not possible** — returns 0, silently does nothing |
 
-The one thing that does work is not being a descendant of the app: a
-process `launchd` starts, executing a file that is itself unstamped,
-is clean — and so is everything it forks and every file they write.
+## What RFC-007 built, and why it was reverted
 
-## Design
+It booted L3 as a per-session `launchd` job off an unmarked copy of its
+binary, on the theory that provenance drove the scan.  It worked as
+designed — the L3 process and everything it wrote were unmarked, end to
+end — and **bought nothing**: the clean chain scans exactly as often and
+costs exactly as much as the marked one.  The early 60x and 11x figures
+that motivated it came from comparing two different measuring methods
+(two `python3` processes reading `perf_counter` versus
+`subprocess.run`), and from single runs.  With one instrument and
+repeated trials the difference disappears.
 
-Only the **shell's chain root** has to be clean.  L3 already owns its
-PTY, binds its own UDS, and is reached through the registry (RFC-003),
-so *how it starts* is not load-bearing for anything L2 does.  Its PPID
-is already 1.
+Reverted rather than kept: an unused `launchd` dependency on the pane
+spawn path is failure surface for no gain.  It had already leaked 26
+jobs in its first hour (`launchd` keeps exited jobs until booted out),
+which is the kind of cost it would keep charging.
 
-1. **A clean copy of the L3 binary.**  `binaries/current/marspot-session`
-   is stamped because it was installed by a stamped process, and the
-   stamp cannot be removed.  A short-lived `launchd` job copies it to
-   `binaries/clean/marspot-session`; the copy is written by a clean
-   process, so it is unstamped.  Refreshed when the source's cdhash
-   changes, which makes it self-healing across silent updates — no
-   change to `install-local.sh` is required.
+## What is left
 
-2. **L3 is started by `launchd`.**  A per-session job replaces
-   `Command::new(&session_bin)`.  Its environment carries what the
-   spawn path passes today; the job is booted out when the session
-   ends.
+The only systematic difference between the fast rows and every slow one
+is **notarisation** — `Terminal.app` is an Apple platform binary,
+`iTerm.app` carries a stapled ticket, `Marspot.app` has neither.  The
+hypothesis is that `syspolicyd` exempts execs originating under a
+notarised app.  It is **unverified**: confirming it needs an Apple ID
+or App Store Connect key to notarise a test bundle, and no credential
+is stored on this machine.
 
-3. **L3 takes its shm by name.**  Today it adopts an inherited fd
-   (`MARSPOT_SHM_FD`), which a `launchd` job cannot hand it.
-   `grid_shm::open_region` already exists; L3 gains a by-name branch
-   and keeps the inherited-fd branch first, so the change is inert for
-   every caller that still passes an fd (`mcli`, tests, an L2 that has
-   not been updated yet).
+Until then marspot pays what `sshd` and `launchd` pay — this terminal
+is not worse than the alternatives, it simply is not exempt like the
+two that are.
 
-The process tree keeps its shape — L3 → shell, L3 reparented to 1 —
-so pidtree, the session cap, and crash isolation see what they see now.
-
-## Rejected
-
-- **A resident clean spawner that receives the PTY fd over UDS.**  That
-  reinstates L4 shelld in all but name, and it changes the tree: the
-  shell would be the spawner's child, not L3's, which the pane's
-  process monitoring reads.
-- **Cleaning at install time only.**  It would work, but it fails
-  silently the moment anyone installs by another path, and leaves no
-  way to notice.  The cdhash check in (1) is self-healing instead.
+`examples/exec_tax_probe.rs` measures it inside a real marspot shell.
+Read the timing together with `syspolicyd`'s CPU delta or its
+`performScan` count; the number alone moves 10x with queue depth and
+has already misled this investigation once.

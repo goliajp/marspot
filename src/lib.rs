@@ -69,7 +69,6 @@ pub mod glyph_atlas;
 pub mod input;
 pub mod link_probe;
 pub mod iosurface;
-pub mod clean_exec;
 pub mod pane;
 pub mod pane_name;
 pub mod pane_read;

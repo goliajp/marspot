@@ -593,7 +593,7 @@ impl PaneBackend {
 /// replacement ([`L3Conn::begin_swap`]).  Keeping this a plain bundle lets
 /// `pane.rs` stay free of `Command`/`socketpair`/thread spawning.
 pub struct L3Spawn {
-    pub child: L3Process,
+    pub child: Child,
     pub control: UnixStream,
     pub reader: GridShmReader,
     pub selection_rx: Receiver<(u32, String)>,
@@ -800,7 +800,7 @@ impl L3Conn {
         let (cols, rows) = (spawn.reader.cols(), spawn.reader.rows());
         let grid = Grid::new(cols, rows);
         Self {
-            child: spawn.child,
+            child: L3Process::Spawned(spawn.child),
             control: new_control_writer(spawn.control),
             reader: spawn.reader,
             session_id,
@@ -868,7 +868,7 @@ impl L3Conn {
         let old_pid = self.child.id();
         let _ = self.child.kill();
         let _ = self.child.wait();
-        self.child = next.child;
+        self.child = L3Process::Spawned(next.child);
         self.control = new_control_writer(next.control);
         self.reader = next.reader;
         self.selection_rx = next.selection_rx;

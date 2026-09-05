@@ -2709,7 +2709,37 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.165**
+Current: **0.12.166**
+
+### 0.12.166
+
+RFC-007 reverted: L3 goes back to a direct fork.
+
+The clean-exec chain worked exactly as designed — the L3 process and
+every file it wrote were unmarked, verified end to end — and bought
+nothing.  Measured with ONE instrument and repeated trials, a chain
+with no `com.apple.provenance` anywhere pays the same first-execution
+scan as marspot's own, idle (0.39–0.48 s vs 0.30–0.49 s) and under
+load (1.28–1.33 s vs 1.16–1.35 s).  `sshd` is in the same band.
+
+The 60x and 11x figures that motivated it were artefacts: the two
+sides had been timed by different methods (two `python3` processes
+reading `perf_counter` versus `subprocess.run`), and the 11x was a
+single run of each.  With one instrument the difference is gone.
+
+What separates the fast terminals is not the chain at all.
+`Terminal.app` (an Apple platform binary) and `iTerm.app` (notarised,
+stapled ticket) log **zero** `performScan` and cost 0.00 s; everything
+else scans every time.  Provenance, Hardened Runtime, `cs.*`
+entitlements, install location, `DeveloperTool` TCC grants and
+`posix_spawn` disclaim were each ruled out with their own control —
+see `docs/rfc-007-clean-exec-chain.md`, kept as the record so the
+search space is not re-explored.
+
+Keeping an unused `launchd` dependency on the pane spawn path is
+failure surface for no gain; it had already leaked 26 jobs in its
+first hour.  `examples/exec_tax_probe.rs` survives as the measuring
+tool.
 
 ### 0.12.165
 
@@ -5097,7 +5127,16 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.57**
+Current: **0.11.58**
+
+### 0.11.58
+
+The by-name shm branch is removed with RFC-007.
+
+It existed so a `launchd`-started L3 could attach without an inherited
+fd.  With that path reverted it has no caller, and an unreachable
+second way to acquire the framebuffer is worth less than the clarity
+of having one.
 
 ### 0.11.57
 
