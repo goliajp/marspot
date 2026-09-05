@@ -20,6 +20,20 @@ use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, Permissio
             PLUGIN_API_VERSION};
 use crate::plugins::pidtree;
 
+/// How the wheel reaches codex.  Verified by injecting into a real
+/// pty: `PageUp` alone changes nothing, `Ctrl+T` opens the transcript,
+/// and `PageUp`/`PageDown` page it from there.
+///
+/// `Ctrl+T` is a TOGGLE — measured, a second one closes the view — so
+/// L2 must never send it blind.  `WHEEL_MARKER` is the rule codex
+/// draws across the top of that view (it survives paging), letting L2
+/// read the state off the screen instead of remembering it.
+const WHEEL_ENTER: &[u8] = b"\x14";
+const WHEEL_UP: &[u8] = b"\x1b[5~";
+const WHEEL_DOWN: &[u8] = b"\x1b[6~";
+const WHEEL_MARKER: &[u8] = b"/TRANSCRIPT/";
+
+
 /// Is this descendant the `codex` CLI?
 ///
 /// Same argv[0] approach `looks_like_claudecode` needs: a released
@@ -174,10 +188,10 @@ impl Plugin for CodexPlugin {
                     if host
                         .set_pane_wheel_keys(
                             sid,
-                            b"\x14",
-                            b"\x1b[5~",
-                            b"\x1b[6~",
-                            b"/TRANSCRIPT/",
+                            WHEEL_ENTER,
+                            WHEEL_UP,
+                            WHEEL_DOWN,
+                            WHEEL_MARKER,
                         )
                         .is_ok()
                     {
@@ -251,5 +265,44 @@ mod tests {
         let got = read_model_and_effort(&dir);
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(got, (Some("gpt-6-astra".into()), Some("high".into())));
+    }
+}
+
+#[cfg(test)]
+mod wheel_decl_tests {
+    use super::*;
+
+    /// The marker must be one the shared predicate can actually use —
+    /// a blank or non-UTF-8 marker reads as "no marker", which would
+    /// silently turn the wheel back into a blind toggle.
+    #[test]
+    fn the_declared_marker_is_usable() {
+        assert_eq!(
+            marspot::wheel_marker::needle(WHEEL_MARKER).as_deref(),
+            Some("/TRANSCRIPT/")
+        );
+    }
+
+    /// Pinned against a row captured off a live transcript: the
+    /// declared marker must match the screen codex actually draws,
+    /// which is letter-spaced.
+    #[test]
+    fn the_declared_marker_matches_the_real_screen() {
+        let row = "/ T R A N S C R I P T / / / / / / / / / / / / / ";
+        assert!(marspot::wheel_marker::shows_marker(
+            row.chars().count() as u16,
+            1,
+            |col, _| row.chars().nth(col as usize).unwrap_or(' '),
+            WHEEL_MARKER
+        ));
+    }
+
+    /// Entering must not be confused with paging: if `enter` were one
+    /// of the page keys, L2 could not both open and scroll.
+    #[test]
+    fn enter_is_distinct_from_the_page_keys() {
+        assert_ne!(WHEEL_ENTER, WHEEL_UP);
+        assert_ne!(WHEEL_ENTER, WHEEL_DOWN);
+        assert_ne!(WHEEL_UP, WHEEL_DOWN);
     }
 }

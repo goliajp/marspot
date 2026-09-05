@@ -73,6 +73,7 @@ pub mod pane;
 pub mod pane_name;
 pub mod pane_read;
 pub mod pane_state;
+pub mod wheel_marker;
 pub mod pidtree;
 /// PNG writer for `--snapshot`; see the `snapshot` feature in
 /// `Cargo.toml`.

@@ -34,7 +34,7 @@ fn main() {
         unsafe { std::env::set_var("MARSPOT_STATE_DIR", root) };
     }
     let sid: u64 = std::env::args().nth(2).expect("sid").parse().unwrap();
-    let keys = std::env::args().nth(3).expect("keys: pageup|pagedown|ctrl-t|up|down");
+    let keys = std::env::args().nth(3).expect("keys: pageup|pagedown|ctrl-t|up|down|enter|esc|type:TEXT");
     let typed: Vec<u8>;
     let bytes: &[u8] = match keys.as_str() {
         "pageup" => b"\x1b[5~",
@@ -43,6 +43,9 @@ fn main() {
         "up" => b"\x1b[A",
         "down" => b"\x1b[B",
         "enter" => b"\r",
+        // The key a user presses to leave a program's scroll view —
+        // needed to test that the wheel can get back in afterwards.
+        "esc" => b"\x1b",
         other => {
             //  sends the text verbatim — used to drive the
             // program into a state worth testing (a screen with more
