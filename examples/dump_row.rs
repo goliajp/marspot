@@ -24,8 +24,10 @@ fn main() {
         // Take by chars, not bytes: a CJK row would panic on a byte
         // slice exactly when the dump is needed most.
         let head = |s: &str, n: usize| s.chars().take(n).collect::<String>();
-        println!("  row{row} raw      {:?}", head(&line, 48));
-        let squeezed: String = line.chars().filter(|c| !c.is_whitespace() && *c != '\0').collect();
-        println!("  row{row} squeezed {:?}", head(&squeezed, 32));
+        println!("  row{row} |{}|", line.trim_end());
+        if std::env::var("DUMP_SQUEEZED").is_ok() {
+            let sq: String = line.chars().filter(|c| !c.is_whitespace() && *c != '\0').collect();
+            println!("  row{row} squeezed {:?}", head(&sq, 32));
+        }
     }
 }
