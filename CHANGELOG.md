@@ -2805,7 +2805,32 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.172**
+Current: **0.12.173**
+
+### 0.12.173
+
+The wheel marker is matched with whitespace squeezed out of both sides.
+
+0.12.172 moved the scroll view's state from a remembered flag to a
+marker read off the screen — the right shape, still not working.  The
+third report of the same symptom: entering codex's transcript with the
+wheel, then moving it again, flickers and drops straight back out.
+
+`examples/dump_row.rs` against a live transcript gives the reason in
+one line.  Codex draws its heading letter-spaced —
+`/ T R A N S C R I P T / / / ...` — while the plugin declares the
+compact `/TRANSCRIPT/`.  A literal match is never true, so L2 read the
+view as closed on every tick and re-sent `Ctrl+T`; being a toggle, that
+closed the view the previous tick had opened.
+
+A program draws headings for humans, not for matchers.  Both sides now
+drop whitespace (and wide chars' trailing `\0`) before comparing.  This
+cannot invent a match: a marker is a distinctive run, and squeezing only
+demands its non-blank characters appear in order.
+
+The regression test pins the row captured off the real transcript, and
+asserts the literal match on it is false — if that assertion ever fails,
+the screen changed and the test is testing nothing.
 
 ### 0.12.172
 
