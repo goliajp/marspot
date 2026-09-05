@@ -158,9 +158,43 @@ fn open_arg_for(kind: marspot::grid_links::LinkKind, text: &str) -> Option<Strin
         // `spawn` only fails when the process cannot START.  Every
         // `~/…` file link underlined correctly (linkify expands for its
         // stat) and then did nothing when clicked.
-        marspot::grid_links::LinkKind::File => marspot::grid_links::expand_user_path(link_text)
-            .map(|p| p.to_string_lossy().into_owned()),
+        marspot::grid_links::LinkKind::File => {
+            // A `file://` link carries the scheme in its text so the
+            // selection matches what is drawn; `open(1)` wants the
+            // path, and percent escapes have to come back off first
+            // (`file://…/a%20b` names `a b`).
+            let raw = link_text
+                .strip_prefix("file://")
+                .map(percent_decode)
+                .unwrap_or_else(|| link_text.to_string());
+            marspot::grid_links::expand_user_path(&raw)
+                .map(|p| p.to_string_lossy().into_owned())
+        }
     }
+}
+
+/// Undo percent-escapes in a `file://` URL's path.
+///
+/// Only `%XX` is handled, and an invalid escape is left as written —
+/// a filename may legitimately contain a bare `%`, and mangling it
+/// would turn a working link into a missing file.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 fn spawn_open(arg: &str) {

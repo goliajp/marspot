@@ -2785,7 +2785,29 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.169**
+Current: **0.12.170**
+
+### 0.12.170
+
+`file://` URLs are one link, scheme included.
+
+claudecode writes `file:///Users/…/paper1-discovers.html` when it
+points at a file it just produced.  The scheme was never recognised —
+only `http://` and `https://` were — so the path after it matched on
+its own: the click worked, but the underline started four characters
+late and left a `file:` sitting outside the link.
+
+It is emitted as `File`, not `Url`, for two reasons.  It names
+something on disk, so it should face the same `stat` a bare path does;
+a `Url` has no arbiter and would underline a file that is not there.
+And the click path prefixes anything not starting `http(s)://` with
+`http://`, which would have opened `http://file:///…`.
+
+The span covers what is drawn, so selecting the link gets the whole
+thing; the click strips the scheme and undoes percent escapes first,
+since `open(1)` wants a path and `file://…/a%20b` names `a b`.  An
+invalid escape is left as written — a filename may contain a bare `%`,
+and mangling it would turn a working link into a missing file.
 
 ### 0.12.169
 

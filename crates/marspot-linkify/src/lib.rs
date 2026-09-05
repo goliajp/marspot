@@ -1062,6 +1062,34 @@ fn scan_line_into_matches(
         // and it would be skipped as a mid-word slash.
         let at_seg_start = segments.iter().any(|s| s.char_offset == i);
 
+        // `file://` — what claudecode emits when it points at a file
+        // it just wrote.  Matched BEFORE the bare-path branch so the
+        // scheme joins the link instead of being left dangling beside
+        // it (the path after it matched on its own, so the link worked
+        // but the selection started four characters late).
+        //
+        // Emitted as `File`, not `Url`: this names something on disk,
+        // so it should face the same `stat` the bare path does — a URL
+        // has no such arbiter and would underline a file that is not
+        // there.  It also must NOT be a `Url`, because the click path
+        // prefixes anything that is not `http(s)://` with `http://`,
+        // which would open `http://file:///…`.
+        if matches_prefix(&chars, i, "file://") {
+            let end = scan_path_candidate(&chars, i);
+            // Arbitrate on the PATH the scheme names, while the link's
+            // span stays over what is drawn — the user selects and
+            // sees `file://…`, and the click resolves the file.
+            let path_start = i + "file://".len();
+            if path_start < end {
+                if let Some(b) = resolve_path_end(&chars, path_start, end, segments, oracle) {
+                    let text: String = chars[i..b].iter().collect();
+                    emit_match(out, segments, col_map, cols_per_row, i, b, LinkKind::File, text);
+                    i = b.max(i + 1);
+                    continue;
+                }
+            }
+        }
+
         if c == '/' && i + 1 < n && (at_seg_start || !is_left_boundary_alnum(&chars, i)) {
             let end = scan_path_candidate(&chars, i);
             // Greedy scan, filesystem arbitration — `resolve_path_end`
@@ -2544,6 +2572,46 @@ mod tests {
         assert!(
             !texts.iter().any(|t| *t == dir_only),
             "fell back to the directory: {texts:?}",
+        );
+    }
+
+    /// 2026-09-06 report: `file:///Users/…/paper1-discovers.html`
+    /// underlined from the `/Users` on, leaving `file:` beside the
+    /// link — the path matched on its own, so the click worked while
+    /// the selection started four characters late.
+    #[test]
+    fn a_file_url_is_one_link_including_its_scheme() {
+        let root = std::env::temp_dir().join(format!("marspot-fileurl-{}", std::process::id()));
+        let deep = root.join(".claude");
+        std::fs::create_dir_all(&deep).unwrap();
+        let f = deep.join("paper1-discovers.html");
+        std::fs::write(&f, b"x").unwrap();
+        let p = f.display().to_string();
+        let url = format!("file://{p}");
+
+        let bare = scan(&url);
+        let in_prose = scan(&format!("open {url} now"));
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert_eq!(bare[0].text, url, "the scheme belongs to the link");
+        assert_eq!(bare[0].kind, LinkKind::File, "it names a file, not a web page");
+        assert!(
+            in_prose.iter().any(|l| l.text == url),
+            "surrounded by prose it is still one link: {in_prose:?}",
+        );
+    }
+
+    /// A `file://` URL naming something that is NOT there must not be
+    /// underlined.  This is the whole reason it is a `File` and not a
+    /// `Url`: a URL has no arbiter, and would happily link a file that
+    /// does not exist.
+    #[test]
+    fn a_file_url_for_a_missing_path_is_not_a_link() {
+        let v = scan("file:///nope/definitely/not/here-9c3f1e.html");
+        assert!(
+            !v.iter().any(|l| l.text.starts_with("file://")),
+            "missing file must not link: {v:?}",
         );
     }
 

@@ -23,6 +23,7 @@ fn main() {
         (g::FLAG_CURSOR_VISIBLE, "CURSOR_VISIBLE"),
         (g::FLAG_BRACKETED_PASTE, "BRACKETED_PASTE"),
         (g::FLAG_APP_CURSOR_KEYS, "APP_CURSOR_KEYS"),
+        (g::FLAG_ALT_SCREEN, "ALT_SCREEN"),
     ] {
         println!("    {:<16} {}", label, if s.flags & bit != 0 { "on" } else { "off" });
     }
