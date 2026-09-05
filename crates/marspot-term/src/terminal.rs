@@ -289,6 +289,15 @@ impl Terminal {
         &self.grid
     }
 
+    /// Is the terminal inside the alternate screen (`?1049h`)?
+    ///
+    /// `saved_main` holds the main grid exactly while alt mode is
+    /// active, so its presence IS the state — there is no separate
+    /// flag that could drift out of sync with it.
+    pub fn in_alt_screen(&self) -> bool {
+        self.saved_main.is_some()
+    }
+
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
     }

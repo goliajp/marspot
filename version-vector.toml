@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.126"  # badge 菜单请求到达即记日志(空菜单不回复,但不再无声);详见 CHANGELOG.md
-core    = "0.12.168"  # claudecode 在比 pane 窄的内容宽度处折的路径,不再因差一列而断开;详见 CHANGELOG.md
-session = "0.11.58"  # RFC-007 回退:按名字自取 shm 的分支随之移除;详见 CHANGELOG.md
+core    = "0.12.169"  # 不要鼠标的全屏 TUI(codex)滚轮改送方向键,不再滚进空历史;详见 CHANGELOG.md
+session = "0.11.59"  # 发布 FLAG_ALT_SCREEN,让 L2 能区分全屏 TUI 与空 scrollback 的 shell;详见 CHANGELOG.md

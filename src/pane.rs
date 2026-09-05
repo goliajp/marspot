@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use crate::grid::{Cell, Grid};
 use crate::grid_shm::{
     GridShmReader, FLAG_APP_CURSOR_KEYS, FLAG_BRACKETED_PASTE, FLAG_CURSOR_VISIBLE,
-    FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
+    FLAG_ALT_SCREEN, FLAG_MOUSE_SGR, FLAG_MOUSE_TRACKING,
 };
 use crate::input::{key_event_to_bytes, MarspotKeyEvent, Modifiers};
 use crate::render::SessionView;
@@ -396,6 +396,36 @@ impl PaneBackend {
         }
     }
 
+    pub fn l3_alt_screen_active(&self) -> bool {
+        match self {
+            PaneBackend::L3(c) => c.alt_screen_active,
+            _ => false,
+        }
+    }
+
+    /// Send `n` arrow-key presses to the child.
+    ///
+    /// For a full-screen TUI that does NOT ask for mouse reporting,
+    /// this is the only way a wheel can reach it.  DECCKM decides the
+    /// encoding: an app-cursor-keys program expects `ESC O A`, and
+    /// sending it `ESC [ A` puts a stray `[` where it wanted a key.
+    pub fn l3_inject_arrows(&mut self, up: bool, n: u32) {
+        let app = matches!(self, PaneBackend::L3(c) if c.app_cursor_keys);
+        let seq: &[u8] = match (app, up) {
+            (true, true) => b"\x1bOA",
+            (true, false) => b"\x1bOB",
+            (false, true) => b"\x1b[A",
+            (false, false) => b"\x1b[B",
+        };
+        let mut buf = Vec::with_capacity(n as usize * seq.len());
+        for _ in 0..n {
+            buf.extend_from_slice(seq);
+        }
+        if let PaneBackend::L3(c) = self {
+            c.forward_inject_input(&buf);
+        }
+    }
+
     /// Encode a wheel event(`button_64`=wheel up,`button_65`=down,
     /// `n_ticks` 次)+ forward 到 L3 PTY via InjectInput.viewport
     /// 中心当 mouse 位置兜底.SGR vs X11 legacy 由 `mouse_sgr_active`
@@ -712,6 +742,7 @@ pub struct L3Conn {
     /// L2 apply_scroll_lines short-circuit,L3 mouse forwarding 永远没
     /// 机会触发.
     mouse_tracking_active: bool,
+    alt_screen_active: bool,
     /// Mouse SGR encoding(DECSET 1006).L2 mouse-on 时按这个选 SGR
     /// 字节格式 vs X11 legacy.
     mouse_sgr_active: bool,
@@ -778,6 +809,7 @@ impl L3Conn {
             cursor_visible: true,
             app_cursor_keys: false,
             mouse_tracking_active: false,
+            alt_screen_active: false,
             mouse_sgr_active: false,
             bracketed_paste: false,
             last_seq: 0,
@@ -809,6 +841,7 @@ impl L3Conn {
             cursor_visible: true,
             app_cursor_keys: false,
             mouse_tracking_active: false,
+            alt_screen_active: false,
             mouse_sgr_active: false,
             bracketed_paste: false,
             last_seq: 0,
@@ -952,6 +985,7 @@ impl L3Conn {
         self.bracketed_paste = snap.flags & FLAG_BRACKETED_PASTE != 0;
         self.mouse_tracking_active = snap.flags & FLAG_MOUSE_TRACKING != 0;
         self.mouse_sgr_active = snap.flags & FLAG_MOUSE_SGR != 0;
+        self.alt_screen_active = snap.flags & FLAG_ALT_SCREEN != 0;
         self.snap_scrollback_len = snap.scrollback_len;
         // Re-read the seq after the copy: if L3 republished mid-fill,
         // leave it stale so the next poll re-reads rather than missing a
@@ -1187,6 +1221,42 @@ impl Drop for L3Conn {
 
 /// A single live terminal session plus the small piece of UI state
 /// (scrollback view offset, …) it owns independently of any container.
+/// Where a wheel tick should go.
+///
+/// Three states look alike from outside and want opposite things, so
+/// the choice is named rather than left as nested `if`s in the middle
+/// of the scroll path:
+///
+/// - a TUI that asked for mouse reporting wants the wheel as mouse
+///   events, and does its own history (claudecode);
+/// - a TUI that did NOT ask still has no scrollback to move — it
+///   redraws in place and never pushes a line — so the wheel has to
+///   reach it as keys, or it does nothing at all (codex);
+/// - everything else scrolls the terminal's own scrollback.
+///
+/// The middle case is gated on alt-screen for a reason: a plain shell
+/// at an empty prompt looks identical by scrollback depth, and arrows
+/// there would walk shell history and rewrite what the user typed.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WheelRoute {
+    /// Encode as mouse events and inject (program asked for them).
+    MouseEvents,
+    /// Encode as arrow keys and inject (full-screen program, no mouse).
+    Arrows,
+    /// Move the terminal's own view over its scrollback.
+    Scrollback,
+}
+
+pub fn wheel_route(is_l3: bool, alt_screen: bool, mouse_tracking: bool) -> WheelRoute {
+    if is_l3 && mouse_tracking {
+        WheelRoute::MouseEvents
+    } else if is_l3 && alt_screen {
+        WheelRoute::Arrows
+    } else {
+        WheelRoute::Scrollback
+    }
+}
+
 pub struct Pane {
     session: PaneBackend,
     /// How far this pane has receded from active use (0 live,
@@ -1698,6 +1768,34 @@ impl Pane {
             }
             return true;
         }
+        // A full-screen TUI that never asks for mouse reporting.
+        //
+        // It redraws in place, so no line is ever pushed into
+        // scrollback and there is no history to scroll — the wheel
+        // used to land in an empty ring and do nothing at all (codex,
+        // 2026-09-06 report).  claudecode escapes this only because it
+        // DOES ask for mouse reporting and gets the wheel forwarded as
+        // SGR events above.
+        //
+        // Send arrows instead, which is what iTerm2 and Kitty do for
+        // the same case, and what `less`, `man` and a mouse-less `vim`
+        // already understand.  Gated on alt-screen so an ordinary
+        // shell — same empty scrollback, but arrows there would walk
+        // shell history and rewrite the user's command line — keeps
+        // the scrollback path below.
+        if wheel_route(
+            self.session.is_l3(),
+            self.session.l3_alt_screen_active(),
+            self.session.l3_mouse_tracking_active(),
+        ) == WheelRoute::Arrows
+        {
+            let rows = self.session.grid().rows();
+            let n = (delta.unsigned_abs()).min(rows.max(1) as u32);
+            if n > 0 {
+                self.session.l3_inject_arrows(delta > 0, n);
+            }
+            return true;
+        }
         // L3 owns its scrollback; L2 has only the visible-window mirror, so
         // it clamps against the depth the snapshot reported and asks L3 to
         // publish the new window. In-process backends scroll their own grid.
@@ -1916,6 +2014,45 @@ impl Pane {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-09-06: codex could not scroll at all.
+    ///
+    /// It is a full-screen TUI that redraws in place, so nothing is
+    /// ever pushed into scrollback, and unlike claudecode it does not
+    /// ask for mouse reporting — so the wheel had nowhere to go and
+    /// silently did nothing.
+    #[test]
+    fn a_mouseless_full_screen_tui_gets_the_wheel_as_arrows() {
+        assert_eq!(
+            wheel_route(true, true, false),
+            WheelRoute::Arrows,
+            "alt-screen without mouse reporting: the program must receive the wheel"
+        );
+    }
+
+    /// A program that asked for mouse reporting keeps getting mouse
+    /// events — it does its own history and would be confused by keys.
+    #[test]
+    fn a_mouse_reporting_tui_still_gets_mouse_events() {
+        assert_eq!(wheel_route(true, true, true), WheelRoute::MouseEvents);
+        // Mouse reporting wins even outside the alt screen.
+        assert_eq!(wheel_route(true, false, true), WheelRoute::MouseEvents);
+    }
+
+    /// The one that would hurt: a plain shell has the same empty
+    /// scrollback as a redraw-in-place TUI, and arrows there walk the
+    /// shell's command history — rewriting what the user has typed.
+    /// Only alt-screen may take the arrow path.
+    #[test]
+    fn a_plain_shell_never_gets_arrows_from_the_wheel() {
+        assert_eq!(
+            wheel_route(true, false, false),
+            WheelRoute::Scrollback,
+            "no alt screen: the wheel must not become arrow keys"
+        );
+        // In-process backends scroll their own grid regardless.
+        assert_eq!(wheel_route(false, true, false), WheelRoute::Scrollback);
+    }
 
     /// The pending guard must expire.
     ///

@@ -2753,7 +2753,41 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.168**
+Current: **0.12.169**
+
+### 0.12.169
+
+The wheel reaches a full-screen TUI that does not ask for a mouse.
+
+codex could not be scrolled at all.  It redraws in place, so no line
+is ever pushed into scrollback and there is no history to move; and
+unlike claudecode it never enables mouse reporting, so the wheel was
+not forwarded either.  It landed in an empty ring and did nothing.
+
+Measured, same pane geometry:
+
+```text
+  claudecode  flags=0x1d  MOUSE_TRACKING on   scrollback_len 0
+  codex       flags=0x05  MOUSE_TRACKING off  scrollback_len 0
+```
+
+Both have no scrollback — that part is correct and not the bug.  The
+difference is the one bit: claudecode gets the wheel as SGR mouse
+events and does its own history.
+
+So the wheel now takes a third route when a session is in the
+alternate screen and has NOT asked for mouse reporting: arrow keys,
+which is what iTerm2 and Kitty do for this case and what `less`,
+`man` and a mouse-less `vim` already understand.  DECCKM decides the
+encoding — an app-cursor-keys program wants `ESC O A`, and `ESC [ A`
+would leave a stray `[` in its input.
+
+The choice is a named function (`wheel_route`) rather than nested
+conditions, because the case that would hurt is invisible otherwise:
+a plain shell at an empty prompt has exactly the same scrollback depth
+as a redraw-in-place TUI, and arrows there walk shell history and
+rewrite what the user has typed.  Alt-screen is what separates them,
+and a test pins it.
 
 ### 0.12.168
 
@@ -5227,7 +5261,17 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.58**
+Current: **0.11.59**
+
+### 0.11.59
+
+Publishes whether the session is in the alternate screen.
+
+L2 could not tell a redraw-in-place TUI from a fresh shell: both
+report an empty scrollback, and the wheel has to do opposite things
+in the two cases.  `FLAG_ALT_SCREEN` is additive — an older L2 masks
+it off, an older L3 never sets it and reads as "not alt", which is
+the pre-existing path.
 
 ### 0.11.58
 

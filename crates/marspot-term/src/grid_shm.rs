@@ -100,6 +100,20 @@ pub const FLAG_MOUSE_TRACKING: u32 = 1 << 3;
 /// 还是 X11 legacy 字节格式.
 pub const FLAG_MOUSE_SGR: u32 = 1 << 4;
 
+/// The session is inside the alternate screen (`?1049h`).
+///
+/// L2 needs this to tell two states apart that look identical from the
+/// outside: a fresh shell with an empty scrollback, where the wheel
+/// should scroll history as usual, and a full-screen TUI that redraws
+/// in place and therefore never pushes a line into scrollback at all.
+/// In the second case scrolling history is meaningless — there is none
+/// — and the wheel has to reach the program instead.
+///
+/// Additive: an older L2 masks this bit off and behaves exactly as it
+/// did, and an older L3 never sets it, which reads as "not alt" — the
+/// pre-existing path.
+pub const FLAG_ALT_SCREEN: u32 = 1 << 5;
+
 /// Shared-region header. `#[repr(C)]` for a stable cross-process
 /// layout. `seq` is first and accessed only atomically (the seqlock);
 /// every other field is plain, written between the odd/even seq bumps.
@@ -143,6 +157,9 @@ impl GridSnapshot {
     }
     pub fn bracketed_paste(&self) -> bool {
         self.flags & FLAG_BRACKETED_PASTE != 0
+    }
+    pub fn alt_screen(&self) -> bool {
+        self.flags & FLAG_ALT_SCREEN != 0
     }
 }
 
