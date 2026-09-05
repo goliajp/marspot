@@ -330,6 +330,7 @@ pub trait PluginHost: Send + Sync {
         _enter: &[u8],
         _up: &[u8],
         _down: &[u8],
+        _marker: &[u8],
     ) -> Result<(), PluginError> {
         Ok(())
     }

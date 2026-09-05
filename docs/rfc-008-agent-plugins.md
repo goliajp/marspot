@@ -86,8 +86,25 @@ and moved nothing.
 
 The plugin **declares**, L2 **executes**.  A round trip to L1 per tick
 would sit inside a momentum scroll (tens of ticks), so L2 holds the
-declaration and the `entered` flag, and sends `enter` once when
-scrolling starts from the program's normal view.
+declaration and runs it.
+
+**State is read, never remembered.**  The first version kept an
+`entered` bool set when `enter` was sent and cleared on the user's
+`Esc`, and it broke the same day: leaving the transcript and scrolling
+again could not get back in.  Two things it got wrong —
+
+- the program leaves that view on its own, not only by the user's key,
+  so the flag went stale with nothing to clear it;
+- `enter` is typically a **toggle**.  Measured: a second `Ctrl+T`
+  closes codex's transcript (33 of 33 rows change back, and `PageUp`
+  stops working).  So a stale flag does not merely fail to open the
+  view — it shuts it.
+
+The declaration therefore carries a `marker`: text the program shows
+while its view is open (codex draws a `/TRANSCRIPT/` rule that
+survives paging — verified).  L2 scans the visible grid for it once
+per wheel event and sends `enter` only when it is absent.  No flag can
+go stale because there is no flag.
 
 Nothing automates leaving that view.  The user's ruling: *"滚轮主动进
 但不主动退出"* — one stray tick at the bottom would otherwise close
@@ -115,8 +132,8 @@ can move but cannot receive a wheel (`less`, `man`, a mouse-less
 - **badge right-click menu for codex.** claudecode's switches profile;
   the codex equivalent would switch model or effort, which needs a
   safe way to change them in a running session.
-- **`Ctrl+T` state tracking.** L2 assumes the view is closed until a
-  wheel opens it and an `Esc` closes it.  A user pressing `Ctrl+T`
-  themselves leaves the flag stale, costing one redundant `Ctrl+T` on
-  the next scroll.  Cheap to fix if it turns out to matter; not worth
-  a key-sniffing rule before then.
+- **A program with no on-screen marker.** The scan needs something to
+  look for.  Declaring an empty `marker` currently means "assume the
+  view is open", i.e. never send `enter` — safe (it cannot toggle the
+  view shut) but only useful for a program whose scroll keys work
+  without opening anything.

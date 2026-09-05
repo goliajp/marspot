@@ -28,7 +28,16 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.128**
+Current: **0.7.129**
+
+### 0.7.129
+
+codex declares its `/TRANSCRIPT/` marker.
+
+The rule codex draws across the top while its transcript is open, and
+it survives paging — so L2 can read the state instead of remembering
+it.  Necessary because `Ctrl+T` toggles: a remembered flag going stale
+would close the transcript rather than open it.
 
 ### 0.7.128
 
@@ -2796,7 +2805,27 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.171**
+Current: **0.12.172**
+
+### 0.12.172
+
+The scroll view's state is read off the screen, not remembered.
+
+0.12.171 kept a flag: set when `enter` was sent, cleared on the user's
+`Esc`.  Reported the same day — after leaving codex's transcript,
+scrolling could not get back in.
+
+Two things were wrong with remembering it.  The program leaves that
+view on its own as well as by the user's key, so the flag went stale
+with nothing to clear it.  And `enter` is typically a **toggle**:
+measured, a second `Ctrl+T` closes codex's transcript (33 of 33 rows
+revert, `PageUp` stops working).  So a stale flag does not merely fail
+to open the view — it shuts it, which is exactly what was seen.
+
+`PaneWheelKeys` now carries a `marker`: text the program shows while
+its view is open.  L2 scans the visible grid once per wheel event and
+sends `enter` only when the marker is absent.  There is no flag left
+to go stale.
 
 ### 0.12.171
 

@@ -157,14 +157,28 @@ impl Plugin for CodexPlugin {
                 // nothing, `Ctrl+T` opens its /TRANSCRIPT/ view, and
                 // `PageUp`/`PageDown` page it from there.
                 //
-                // Only `enter` and the two page keys are declared, and
-                // nothing leaves the view: the user asked for the
+                // Nothing leaves the view: the user asked for the
                 // wheel to take them in but never to throw them out,
                 // since one stray tick at the bottom would otherwise
                 // close what they were reading.  `Esc` stays theirs.
+                //
+                // `/TRANSCRIPT/` is the rule codex draws across the top
+                // while that view is open, and it survives paging —
+                // so L2 can read the state off the screen rather than
+                // remember it.  That matters because `Ctrl+T` is a
+                // TOGGLE: measured, a second one closes the view, so a
+                // remembered flag going stale would shut the transcript
+                // instead of opening it (2026-09-06: after leaving the
+                // view, scrolling could not get back in).
                 if !self.declared.contains(&sid) {
                     if host
-                        .set_pane_wheel_keys(sid, b"\x14", b"\x1b[5~", b"\x1b[6~")
+                        .set_pane_wheel_keys(
+                            sid,
+                            b"\x14",
+                            b"\x1b[5~",
+                            b"\x1b[6~",
+                            b"/TRANSCRIPT/",
+                        )
                         .is_ok()
                     {
                         self.declared.insert(sid);
@@ -182,7 +196,7 @@ impl Plugin for CodexPlugin {
                 }
             } else if self.last_badge.remove(&sid).is_some() {
                 if self.declared.remove(&sid) {
-                    let _ = host.set_pane_wheel_keys(sid, b"", b"", b"");
+                    let _ = host.set_pane_wheel_keys(sid, b"", b"", b"", b"");
                 }
                 // codex left this pane: clear the badge we set, and
                 // only the one we set — another plugin may own it now.
@@ -203,6 +217,21 @@ mod tests {
         assert_eq!(badge_text(Some("gpt-6-astra"), Some("high")), "gpt-6-astra·high");
         assert_eq!(badge_text(Some("gpt-6-astra"), None), "gpt-6-astra");
         assert_eq!(badge_text(None, None), "codex");
+    }
+
+    /// The declaration names codex's own on-screen marker, so L2 can
+    /// see whether the transcript is open instead of remembering that
+    /// it opened one.  `Ctrl+T` toggles: a stale flag would close the
+    /// view rather than open it.
+    #[test]
+    fn the_declaration_carries_a_marker_to_read_the_state_from() {
+        // The bytes a wheel needs, as declared to the host.
+        let (enter, up, down, marker): (&[u8], &[u8], &[u8], &[u8]) =
+            (b"\x14", b"\x1b[5~", b"\x1b[6~", b"/TRANSCRIPT/");
+        assert_eq!(enter, b"\x14", "Ctrl+T opens codex's transcript");
+        assert_eq!(up, b"\x1b[5~", "PageUp");
+        assert_eq!(down, b"\x1b[6~", "PageDown");
+        assert!(!marker.is_empty(), "without a marker L2 would have to guess");
     }
 
     /// Only the top-level scalars count.  `~/.codex/config.toml` carries

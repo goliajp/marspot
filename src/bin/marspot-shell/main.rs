@@ -2773,6 +2773,7 @@ impl ShellApp {
                         &upd.enter,
                         &upd.up,
                         &upd.down,
+                        &upd.marker,
                     ),
                 );
             }

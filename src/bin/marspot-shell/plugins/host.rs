@@ -37,6 +37,8 @@ pub struct PaneWheelKeysUpdate {
     pub enter: Vec<u8>,
     pub up: Vec<u8>,
     pub down: Vec<u8>,
+    /// On-screen text that means the scrollable view is open.
+    pub marker: Vec<u8>,
 }
 
 /// Same channel shape but for the pane's main title (resolution chain
@@ -435,6 +437,7 @@ impl PluginHost for ShellPluginHost {
         enter: &[u8],
         up: &[u8],
         down: &[u8],
+        marker: &[u8],
     ) -> Result<(), PluginError> {
         self.require(PermissionSet::SET_STATUS_LINE)?;
         let Some(tx) = self.pane_wheel_keys_tx.lock().unwrap().clone() else {
@@ -445,6 +448,7 @@ impl PluginHost for ShellPluginHost {
             enter: enter.to_vec(),
             up: up.to_vec(),
             down: down.to_vec(),
+            marker: marker.to_vec(),
         });
         Ok(())
     }

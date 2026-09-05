@@ -492,11 +492,20 @@ pub enum MsgType {
     /// describes the keys and L2 runs them; the alternative, asking L1
     /// per tick, would put a round trip inside a momentum scroll.
     ///
-    /// `enter` is sent once when scrolling starts from the program's
-    /// normal view, then `up`/`down` per tick.  Leaving that view is
-    /// deliberately NOT automated: the user asked for scrolling to
-    /// take them in but never to throw them out, since a stray tick at
-    /// the bottom would otherwise close what they were reading.
+    /// `enter` opens the program's scrollable view; `up`/`down` page
+    /// it.  Leaving is deliberately NOT automated: the user asked for
+    /// scrolling to take them in but never to throw them out, since a
+    /// stray tick at the bottom would otherwise close what they were
+    /// reading.
+    ///
+    /// `marker` is text the program puts on screen while that view is
+    /// open (codex draws a `/TRANSCRIPT/` rule).  L2 looks for it
+    /// before sending `enter`, rather than remembering whether it sent
+    /// one — the program leaves that view on its own as well as by the
+    /// user's key, and a remembered flag goes stale the moment it
+    /// does.  It also matters that `enter` is usually a TOGGLE:
+    /// measured, a second `Ctrl+T` closes codex's transcript, so a
+    /// stale flag does not merely fail to open the view, it shuts it.
     PaneWheelKeys = 79,
     // ── error (200..=255) ──
     Error = 200,
@@ -1572,10 +1581,17 @@ pub fn decode_pane_badge(payload: &[u8]) -> io::Result<(u64, String)> {
 /// own business (codex takes `Ctrl+T` then `PageUp`; the next one may
 /// want something with no name at all), and the wire should not need
 /// a new variant each time a plugin learns a new program.
-pub fn encode_pane_wheel_keys(session_id: u64, enter: &[u8], up: &[u8], down: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + 6 + enter.len() + up.len() + down.len());
+pub fn encode_pane_wheel_keys(
+    session_id: u64,
+    enter: &[u8],
+    up: &[u8],
+    down: &[u8],
+    marker: &[u8],
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(8 + 8 + enter.len() + up.len() + down.len() + marker.len());
     out.extend_from_slice(&session_id.to_le_bytes());
-    for part in [enter, up, down] {
+    for part in [enter, up, down, marker] {
         let n = part.len().min(u16::MAX as usize);
         out.extend_from_slice(&(n as u16).to_le_bytes());
         out.extend_from_slice(&part[..n]);
@@ -1583,7 +1599,9 @@ pub fn encode_pane_wheel_keys(session_id: u64, enter: &[u8], up: &[u8], down: &[
     out
 }
 
-pub fn decode_pane_wheel_keys(payload: &[u8]) -> io::Result<(u64, Vec<u8>, Vec<u8>, Vec<u8>)> {
+pub fn decode_pane_wheel_keys(
+    payload: &[u8],
+) -> io::Result<(u64, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
     if payload.len() < 8 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1592,8 +1610,8 @@ pub fn decode_pane_wheel_keys(payload: &[u8]) -> io::Result<(u64, Vec<u8>, Vec<u
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
     let mut at = 8usize;
-    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(3);
-    for _ in 0..3 {
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(4);
+    for _ in 0..4 {
         if at + 2 > payload.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1612,7 +1630,13 @@ pub fn decode_pane_wheel_keys(payload: &[u8]) -> io::Result<(u64, Vec<u8>, Vec<u
         at += n;
     }
     let mut it = parts.into_iter();
-    Ok((sid, it.next().unwrap(), it.next().unwrap(), it.next().unwrap()))
+    Ok((
+        sid,
+        it.next().unwrap(),
+        it.next().unwrap(),
+        it.next().unwrap(),
+        it.next().unwrap(),
+    ))
 }
 
 /// PaneTitle payload mirrors PaneBadge — `session_id u64 LE,
@@ -2913,18 +2937,19 @@ mod tests {
     /// and multi-byte keys.
     #[test]
     fn pane_wheel_keys_roundtrip() {
-        let p = encode_pane_wheel_keys(42, b"\x14", b"\x1b[5~", b"\x1b[6~");
-        let (sid, enter, up, down) = decode_pane_wheel_keys(&p).unwrap();
+        let p = encode_pane_wheel_keys(42, b"\x14", b"\x1b[5~", b"\x1b[6~", b"/TRANSCRIPT/");
+        let (sid, enter, up, down, marker) = decode_pane_wheel_keys(&p).unwrap();
         assert_eq!(sid, 42);
         assert_eq!(enter, b"\x14");
         assert_eq!(up, b"\x1b[5~");
         assert_eq!(down, b"\x1b[6~");
+        assert_eq!(marker, b"/TRANSCRIPT/");
 
         // Empty parts are legal and must not be confused with a
         // truncated frame — clearing a declaration sends all-empty.
-        let q = encode_pane_wheel_keys(1, b"", b"", b"");
-        let (sid2, e2, u2, d2) = decode_pane_wheel_keys(&q).unwrap();
-        assert_eq!((sid2, e2.len(), u2.len(), d2.len()), (1, 0, 0, 0));
+        let q = encode_pane_wheel_keys(1, b"", b"", b"", b"");
+        let (sid2, e2, u2, d2, m2) = decode_pane_wheel_keys(&q).unwrap();
+        assert_eq!((sid2, e2.len(), u2.len(), d2.len(), m2.len()), (1, 0, 0, 0, 0));
     }
 
     /// A short or truncated payload is an error, not a panic: this
@@ -2934,7 +2959,7 @@ mod tests {
     fn pane_wheel_keys_rejects_truncation() {
         assert!(decode_pane_wheel_keys(&[]).is_err());
         assert!(decode_pane_wheel_keys(&[0u8; 7]).is_err());
-        let mut p = encode_pane_wheel_keys(9, b"\x14", b"\x1b[5~", b"\x1b[6~");
+        let mut p = encode_pane_wheel_keys(9, b"\x14", b"\x1b[5~", b"\x1b[6~", b"/T/");
         p.truncate(p.len() - 2);
         assert!(decode_pane_wheel_keys(&p).is_err());
     }

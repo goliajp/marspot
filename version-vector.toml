@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.128"  # RFC-008:codex 声明滚轮键(Ctrl+T 进 transcript,PageUp/Down 翻页);详见 CHANGELOG.md
-core    = "0.12.171"  # RFC-008:插件可以接管本 pane 的滚轮(codex 走 Ctrl+T + 翻页);详见 CHANGELOG.md
+shell   = "0.7.129"  # RFC-008:codex 声明 /TRANSCRIPT/ 标记,让 L2 能读状态而不是记状态;详见 CHANGELOG.md
+core    = "0.12.172"  # RFC-008:滚动视图的状态改为读屏幕上的标记,不再记忆(Ctrl+T 是 toggle);详见 CHANGELOG.md
 session = "0.11.59"  # 发布 FLAG_ALT_SCREEN,让 L2 能区分全屏 TUI 与空 scrollback 的 shell;详见 CHANGELOG.md
