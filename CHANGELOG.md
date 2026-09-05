@@ -28,7 +28,18 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.127**
+Current: **0.7.128**
+
+### 0.7.128
+
+codex declares how the wheel reaches it.
+
+`Ctrl+T` to open its transcript, then `PageUp`/`PageDown` — measured
+against a real pty rather than read off its help.  No key is declared
+for leaving: that stays the user's `Esc`.
+
+The declaration is sent once per session and cleared when codex leaves
+the pane, so an unchanged two-second scan does not re-push it.
 
 ### 0.7.127
 
@@ -2785,7 +2796,31 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.170**
+Current: **0.12.171**
+
+### 0.12.171
+
+A plugin can own its pane's wheel (RFC-008, `PaneWheelKeys`).
+
+codex could not be scrolled at all: it repaints in place, so nothing
+reaches scrollback, and it asks for no mouse reporting, so the wheel
+was not forwarded either.  Reaching it means pressing its own keys,
+and only its plugin knows them — verified by injection, `PageUp` alone
+does nothing until `Ctrl+T` opens its transcript view.
+
+So the plugin declares (`enter`, `up`, `down` as bytes) and L2 runs
+it.  Asking L1 per tick would put a round trip inside a momentum
+scroll; L2 holds the declaration and the `entered` flag instead, and
+sends `enter` once when scrolling starts from the program's normal
+view.
+
+Nothing here leaves that view.  Per the user's ruling — the wheel may
+take you in, never throw you out — one stray tick at the bottom would
+otherwise close what was being read.  A real `Esc` keypress clears
+`entered`, tracked at the key-forward site rather than inferred.
+
+Panes with no declaration are untouched: claudecode still gets mouse
+events, and everything else still scrolls its own scrollback.
 
 ### 0.12.170
 

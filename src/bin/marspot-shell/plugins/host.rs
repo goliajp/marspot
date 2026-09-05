@@ -29,6 +29,16 @@ pub struct PaneBadgeUpdate {
     pub text: String,
 }
 
+/// Channel message for `PaneWheelKeys`.  A plugin declares how the
+/// wheel reaches the program it understands; empty `up`/`down` clears
+/// the declaration (the pane goes back to the terminal's own routing).
+pub struct PaneWheelKeysUpdate {
+    pub shelld_session_id: u64,
+    pub enter: Vec<u8>,
+    pub up: Vec<u8>,
+    pub down: Vec<u8>,
+}
+
 /// Same channel shape but for the pane's main title (resolution chain
 /// slot ABOVE cwd basename, BELOW user-set custom title).  Empty
 /// `text` clears the plugin-set title for that session.
@@ -77,6 +87,7 @@ pub struct ShellPluginHost {
     /// Plugin → host → channel → main loop → CoreConn::send.  None
     /// in tests / standalone hosts where no L2 is around.
     pane_badge_tx: Mutex<Option<Sender<PaneBadgeUpdate>>>,
+    pane_wheel_keys_tx: Mutex<Option<Sender<PaneWheelKeysUpdate>>>,
     pane_title_tx: Mutex<Option<Sender<PaneTitleUpdate>>>,
     /// PaneSession take-over requests bound for the main loop.
     pane_session_begin_tx: Mutex<Option<Sender<PaneSessionBeginRequest>>>,
@@ -188,6 +199,7 @@ impl ShellPluginHost {
             pane_status: Arc::new(Mutex::new(HashMap::new())),
             active_plugin: Arc::new(Mutex::new(None)),
             pane_badge_tx: Mutex::new(None),
+            pane_wheel_keys_tx: Mutex::new(None),
             pane_title_tx: Mutex::new(None),
             pane_session_begin_tx: Mutex::new(None),
             inject_input_tx: Mutex::new(None),
@@ -209,6 +221,11 @@ impl ShellPluginHost {
     /// this channel.
     pub fn attach_pane_badge_tx(&self, tx: Sender<PaneBadgeUpdate>) {
         *self.pane_badge_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Same, for wheel-key declarations.
+    pub fn attach_pane_wheel_keys_tx(&self, tx: Sender<PaneWheelKeysUpdate>) {
+        *self.pane_wheel_keys_tx.lock().unwrap() = Some(tx);
     }
 
     /// Same shape for PaneSession take-overs.
@@ -410,6 +427,26 @@ impl PluginHost for ShellPluginHost {
 
     fn clear_active_plugin(&self) {
         *self.active_plugin.lock().unwrap() = None;
+    }
+
+    fn set_pane_wheel_keys(
+        &self,
+        shelld_session_id: u64,
+        enter: &[u8],
+        up: &[u8],
+        down: &[u8],
+    ) -> Result<(), PluginError> {
+        self.require(PermissionSet::SET_STATUS_LINE)?;
+        let Some(tx) = self.pane_wheel_keys_tx.lock().unwrap().clone() else {
+            return Ok(());
+        };
+        let _ = tx.send(PaneWheelKeysUpdate {
+            shelld_session_id,
+            enter: enter.to_vec(),
+            up: up.to_vec(),
+            down: down.to_vec(),
+        });
+        Ok(())
     }
 
     fn set_pane_badge(

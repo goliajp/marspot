@@ -1172,6 +1172,7 @@ struct ShellApp {
     /// pushes into; drained each `poll_supervisor` tick and forwarded
     /// to the active core as `MsgType::PaneBadge` frames.
     pane_badge_rx: std::sync::mpsc::Receiver<plugins::host::PaneBadgeUpdate>,
+    pane_wheel_keys_rx: std::sync::mpsc::Receiver<plugins::host::PaneWheelKeysUpdate>,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
     /// Receiver for `begin_pane_session` requests.
@@ -1581,6 +1582,7 @@ impl ShellApp {
         let binaries = BinaryTree::default_for("marspot-core")
             .expect("HOME must be set to manage binary slots");
         let (pane_badge_tx, pane_badge_rx) = std::sync::mpsc::channel();
+        let (pane_wheel_keys_tx, pane_wheel_keys_rx) = std::sync::mpsc::channel();
         let pane_badge_tx_clone = pane_badge_tx.clone();
         let (pane_title_tx, pane_title_rx) = std::sync::mpsc::channel();
         let pane_title_tx_clone = pane_title_tx.clone();
@@ -1633,6 +1635,7 @@ impl ShellApp {
             plugin_host: {
                 let h = ShellPluginHost::new();
                 h.attach_pane_badge_tx(pane_badge_tx);
+                h.attach_pane_wheel_keys_tx(pane_wheel_keys_tx);
                 h.attach_pane_title_tx(pane_title_tx);
                 h.attach_pane_session_begin_tx(pane_session_begin_tx);
                 h.attach_pty_op_tx(pty_op_tx);
@@ -1665,6 +1668,7 @@ impl ShellApp {
             // the list past the windows this boot is about to restore.
             saved_window_frames: marspot::state::read_windows().unwrap_or_default(),
             pane_badge_rx,
+            pane_wheel_keys_rx,
             pane_title_rx,
             pane_session_begin_rx,
             pty_op_rx,
@@ -2760,6 +2764,19 @@ impl ShellApp {
         // during a crash gap) → just drop the update; the next tick
         // will push the current mapping again (plugins re-issue every
         // transition, not just once).
+        while let Ok(upd) = self.pane_wheel_keys_rx.try_recv() {
+            if let Some(conn) = self.active.as_ref() {
+                conn.send(
+                    MsgType::PaneWheelKeys,
+                    marspot::shell_proto::encode_pane_wheel_keys(
+                        upd.shelld_session_id,
+                        &upd.enter,
+                        &upd.up,
+                        &upd.down,
+                    ),
+                );
+            }
+        }
         while let Ok(upd) = self.pane_badge_rx.try_recv() {
             if let Some(conn) = self.active.as_ref() {
                 conn.send(

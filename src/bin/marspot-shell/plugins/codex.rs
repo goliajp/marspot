@@ -86,6 +86,9 @@ pub struct CodexPlugin {
     /// Last badge published per session, so an unchanged scan does not
     /// republish — a badge write invalidates the pane's render cache.
     last_badge: std::collections::HashMap<u64, String>,
+    /// Sessions we have already told L2 about, so an unchanged scan
+    /// does not re-send the same declaration every two seconds.
+    declared: std::collections::HashSet<u64>,
 }
 
 impl CodexPlugin {
@@ -93,6 +96,7 @@ impl CodexPlugin {
         Self {
             initialised: false,
             last_badge: std::collections::HashMap::new(),
+            declared: std::collections::HashSet::new(),
         }
     }
 }
@@ -148,6 +152,24 @@ impl Plugin for CodexPlugin {
                 .iter()
                 .any(looks_like_codex);
             if has_codex {
+                // Declare how the wheel reaches codex.  Verified by
+                // injecting into a real pty: `PageUp` alone changes
+                // nothing, `Ctrl+T` opens its /TRANSCRIPT/ view, and
+                // `PageUp`/`PageDown` page it from there.
+                //
+                // Only `enter` and the two page keys are declared, and
+                // nothing leaves the view: the user asked for the
+                // wheel to take them in but never to throw them out,
+                // since one stray tick at the bottom would otherwise
+                // close what they were reading.  `Esc` stays theirs.
+                if !self.declared.contains(&sid) {
+                    if host
+                        .set_pane_wheel_keys(sid, b"\x14", b"\x1b[5~", b"\x1b[6~")
+                        .is_ok()
+                    {
+                        self.declared.insert(sid);
+                    }
+                }
                 if self.last_badge.get(&sid).map(String::as_str) != Some(text.as_str()) {
                     if host.set_pane_badge(sid, &text).is_ok() {
                         host.log(
@@ -159,6 +181,9 @@ impl Plugin for CodexPlugin {
                     }
                 }
             } else if self.last_badge.remove(&sid).is_some() {
+                if self.declared.remove(&sid) {
+                    let _ = host.set_pane_wheel_keys(sid, b"", b"", b"");
+                }
                 // codex left this pane: clear the badge we set, and
                 // only the one we set — another plugin may own it now.
                 let _ = host.set_pane_badge(sid, "");

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.127"  # RFC-008 首片:codex 也有 badge(model·effort);详见 CHANGELOG.md
-core    = "0.12.170"  # file:// 连同 scheme 一起成为一条链接(仍走 stat 仲裁);详见 CHANGELOG.md
+shell   = "0.7.128"  # RFC-008:codex 声明滚轮键(Ctrl+T 进 transcript,PageUp/Down 翻页);详见 CHANGELOG.md
+core    = "0.12.171"  # RFC-008:插件可以接管本 pane 的滚轮(codex 走 Ctrl+T + 翻页);详见 CHANGELOG.md
 session = "0.11.59"  # 发布 FLAG_ALT_SCREEN,让 L2 能区分全屏 TUI 与空 scrollback 的 shell;详见 CHANGELOG.md

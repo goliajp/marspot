@@ -314,6 +314,26 @@ pub trait PluginHost: Send + Sync {
         Ok(())
     }
 
+    /// Declare how the wheel reaches the program in this pane.
+    ///
+    /// For a program that repaints in place and does not ask for mouse
+    /// reporting, the terminal has nothing to scroll and no way to
+    /// forward a tick — only the plugin knows which keys the program
+    /// answers to.  `enter` is sent once when scrolling begins from
+    /// the program's normal view; `up`/`down` go per tick.  Empty
+    /// `up`/`down` clears the declaration.
+    ///
+    /// Requires `SET_STATUS_LINE`.  Default no-op for test hosts.
+    fn set_pane_wheel_keys(
+        &self,
+        _shelld_session_id: u64,
+        _enter: &[u8],
+        _up: &[u8],
+        _down: &[u8],
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
     /// RFC-003 Amendment 16 cc: hand the plugin a proxy it can use
     /// to forward raw bytes into a pane's PTY via the L1→L2→L3
     /// `InjectInput` wire frame.  Default `None` for test hosts.

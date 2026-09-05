@@ -779,6 +779,7 @@ mod window_state_tests {
         CoreApp {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
             pane_badges: std::collections::HashMap::new(),
+            pane_wheel_keys: std::collections::HashMap::new(),
             pane_titles: std::collections::HashMap::new(),
             pane_cwds: std::collections::HashMap::new(),
             pending_to_shell: Vec::new(),
@@ -2456,6 +2457,17 @@ impl std::fmt::Debug for SpawnOutcome {
     }
 }
 
+/// A plugin's description of how the wheel reaches its program.
+#[derive(Clone, Debug)]
+struct WheelKeys {
+    /// Sent once, to open the program's scrollable view.
+    enter: Vec<u8>,
+    up: Vec<u8>,
+    down: Vec<u8>,
+    /// Whether `enter` has already been sent for this session.
+    entered: bool,
+}
+
 #[derive(Debug)]
 enum CoreEvent {
     /// RFC-005 step 4e — every input event names its window.  L1 tags
@@ -2556,6 +2568,8 @@ enum CoreEvent {
     /// the badge.  Originates from L1 plugins (e.g. claudecode), routed
     /// shell → control socket → here.
     PaneBadge(u64, String),
+    /// L1 → L2: how the wheel reaches this pane's program (RFC-008).
+    PaneWheelKeys(u64, Vec<u8>, Vec<u8>, Vec<u8>),
     /// L1 → L2: how far this pane has receded from active use.
     PaneRecede(u64, u32),
     /// Shell → core: context-menu items for a pane badge, replying to
@@ -2780,6 +2794,9 @@ fn decode_frame(f: &Frame) -> Option<CoreEvent> {
         MsgType::PaneBadge => marspot::shell_proto::decode_pane_badge(&f.payload)
             .ok()
             .map(|(sid, text)| CoreEvent::PaneBadge(sid, text)),
+        MsgType::PaneWheelKeys => marspot::shell_proto::decode_pane_wheel_keys(&f.payload)
+            .ok()
+            .map(|(sid, enter, up, down)| CoreEvent::PaneWheelKeys(sid, enter, up, down)),
         MsgType::PaneBadgeMenu => marspot::shell_proto::decode_pane_badge_menu(&f.payload)
             .ok()
             .map(|(sid, x, y, items)| CoreEvent::PaneBadgeMenu(sid, x, y, items)),
@@ -3658,6 +3675,12 @@ struct CoreApp {
     /// Per-shelld-session right-side badge, set by L1 plugins via
     /// `MsgType::PaneBadge`.  Empty string clears via removal.
     pane_badges: std::collections::HashMap<u64, String>,
+    /// RFC-008 — per-session wheel key declarations from a plugin.
+    /// `entered` tracks whether the program's scrollable view has been
+    /// opened, so `enter` is sent once rather than on every tick.
+    /// Nothing here ever closes that view: the user asked for the
+    /// wheel to take them in but never to throw them out.
+    pane_wheel_keys: std::collections::HashMap<u64, WheelKeys>,
     /// Per-shelld-session plugin-set title, set via `MsgType::PaneTitle`.
     /// Inserts into the title resolution chain ABOVE cwd basename,
     /// BELOW user-set custom title.  Empty payload removes the entry.
@@ -3921,6 +3944,27 @@ impl CoreApp {
         }
         pane.recede = level;
         win!(self, wi).needs_render = true;
+    }
+
+    /// Record (or clear) a plugin's wheel-key declaration.
+    ///
+    /// An empty `up` clears it, which also drops the `entered` flag —
+    /// the program is gone from that pane, so the next one starts from
+    /// its own normal view.
+    fn set_pane_wheel_keys(&mut self, sid: u64, enter: Vec<u8>, up: Vec<u8>, down: Vec<u8>) {
+        if up.is_empty() {
+            self.pane_wheel_keys.remove(&sid);
+            return;
+        }
+        let entered = self
+            .pane_wheel_keys
+            .get(&sid)
+            .map(|k| k.entered)
+            .unwrap_or(false);
+        self.pane_wheel_keys.insert(
+            sid,
+            WheelKeys { enter, up, down, entered },
+        );
     }
 
     fn set_pane_badge(&mut self, shelld_session_id: u64, text: String) {
@@ -6418,6 +6462,21 @@ impl CoreApp {
                 win!(self, wi).selection_dragging = false;
                 win!(self, wi).needs_render = true;
             }
+            // RFC-008 — an `Esc` the user actually sends is what leaves
+            // a plugin-declared scroll view, so it is also what clears
+            // `entered`.  Tracked here rather than guessed: the wheel
+            // never closes the view itself, so this keypress is the
+            // only honest signal that the program is back to its
+            // normal one.
+            if event.state == KeyState::Pressed
+                && matches!(event.logical, LogicalKey::Named(NamedKey::Escape))
+            {
+                if let Some(sid) = win!(self, wi).focused_pane_mut().session().shelld_session_id() {
+                    if let Some(k) = self.pane_wheel_keys.get_mut(&sid) {
+                        k.entered = false;
+                    }
+                }
+            }
             win!(self, wi).focused_pane_mut()
                 .session_mut()
                 .forward_key(&event, modifiers);
@@ -8206,6 +8265,39 @@ impl CoreApp {
         // Cmd-C what they picked. Only a user-initiated scroll of a
         // mouse-tracking pane clears — a real scroll can't keep a valid
         // selection, autonomous output can.
+        // RFC-008 — a plugin may own this pane's wheel.  Checked before
+        // the pane's own routing: the program repaints in place, so
+        // there is no scrollback for the terminal to move and no mouse
+        // reporting to forward through; only these keys reach it.
+        //
+        // `enter` goes once, the first time scrolling starts from the
+        // program's normal view.  Nothing here sends a key to LEAVE
+        // that view — a stray tick at the bottom would otherwise close
+        // what the user was reading.  Leaving is theirs (`Esc`), and
+        // that keypress is what clears `entered`.
+        if let Some(sid) = win!(self, wi).panes[idx].session().shelld_session_id() {
+            if self.pane_wheel_keys.contains_key(&sid) && lines != 0 {
+                let mut buf: Vec<u8> = Vec::new();
+                let ticks = lines.unsigned_abs().min(
+                    win!(self, wi).panes[idx].session().grid().rows().max(1) as u32,
+                );
+                if let Some(k) = self.pane_wheel_keys.get_mut(&sid) {
+                    if !k.entered && !k.enter.is_empty() {
+                        buf.extend_from_slice(&k.enter);
+                        k.entered = true;
+                    }
+                    let key = if lines > 0 { &k.up } else { &k.down };
+                    for _ in 0..ticks {
+                        buf.extend_from_slice(key);
+                    }
+                }
+                if !buf.is_empty() {
+                    win!(self, wi).panes[idx].session_mut().forward_inject_input(&buf);
+                    win!(self, wi).needs_render = true;
+                }
+                return;
+            }
+        }
         let tui_scroll = win!(self, wi).panes[idx].session().is_l3()
             && win!(self, wi).panes[idx].session().l3_mouse_tracking_active();
         if win!(self, wi).panes[idx].apply_scroll_lines(lines) {
@@ -9290,6 +9382,7 @@ fn main() {
     let mut app = CoreApp {
         renderer,
         pane_badges: std::collections::HashMap::new(),
+        pane_wheel_keys: std::collections::HashMap::new(),
         pane_titles: std::collections::HashMap::new(),
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),
@@ -9879,6 +9972,9 @@ fn main() {
                 }
                 CoreEvent::PaneBadge(sid, text) => {
                     app.set_pane_badge(sid, text);
+                }
+                CoreEvent::PaneWheelKeys(sid, enter, up, down) => {
+                    app.set_pane_wheel_keys(sid, enter, up, down);
                 }
                 CoreEvent::PaneRecede(sid, level) => {
                     app.set_pane_recede(sid, level);

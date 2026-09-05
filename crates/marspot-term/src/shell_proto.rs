@@ -474,6 +474,30 @@ pub enum MsgType {
     /// re-asserts them per prompt; clearing those here would break a
     /// paste that is already in flight.
     PaneResetMouseReporting = 78,
+
+    /// L1 → L2: this session's wheel should be sent to the program as
+    /// KEYS, and here are the ones to send.
+    ///
+    /// Some full-screen programs keep their history entirely to
+    /// themselves — they repaint in place, so the terminal never
+    /// receives a line to scroll, and they do not ask for mouse
+    /// reporting either, so the wheel has nowhere to go.  codex is
+    /// one: measured, it emits 36k cursor-positioning sequences and
+    /// pushes zero lines into scrollback.
+    ///
+    /// Reaching such a program means pressing its own keys, and only a
+    /// plugin knows which those are — codex needs `Ctrl+T` to open its
+    /// transcript before `PageUp` does anything at all (verified by
+    /// injection: `PageUp` alone changes nothing).  So the plugin
+    /// describes the keys and L2 runs them; the alternative, asking L1
+    /// per tick, would put a round trip inside a momentum scroll.
+    ///
+    /// `enter` is sent once when scrolling starts from the program's
+    /// normal view, then `up`/`down` per tick.  Leaving that view is
+    /// deliberately NOT automated: the user asked for scrolling to
+    /// take them in but never to throw them out, since a stray tick at
+    /// the bottom would otherwise close what they were reading.
+    PaneWheelKeys = 79,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -541,6 +565,7 @@ impl MsgType {
             76 => MsgType::CliAutorun,
             77 => MsgType::WindowChrome,
             78 => MsgType::PaneResetMouseReporting,
+            79 => MsgType::PaneWheelKeys,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1538,6 +1563,56 @@ pub fn decode_pane_badge(payload: &[u8]) -> io::Result<(u64, String)> {
     }
     let badge = String::from_utf8_lossy(&payload[10..10 + n]).into_owned();
     Ok((session_id, badge))
+}
+
+/// `PaneWheelKeys` payload: `session_id u64 LE` then three
+/// length-prefixed byte strings (`u16 LE` + bytes) — enter, up, down.
+///
+/// Bytes rather than a named key enum: what a program wants is its
+/// own business (codex takes `Ctrl+T` then `PageUp`; the next one may
+/// want something with no name at all), and the wire should not need
+/// a new variant each time a plugin learns a new program.
+pub fn encode_pane_wheel_keys(session_id: u64, enter: &[u8], up: &[u8], down: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + 6 + enter.len() + up.len() + down.len());
+    out.extend_from_slice(&session_id.to_le_bytes());
+    for part in [enter, up, down] {
+        let n = part.len().min(u16::MAX as usize);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+        out.extend_from_slice(&part[..n]);
+    }
+    out
+}
+
+pub fn decode_pane_wheel_keys(payload: &[u8]) -> io::Result<(u64, Vec<u8>, Vec<u8>, Vec<u8>)> {
+    if payload.len() < 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PaneWheelKeys payload too short",
+        ));
+    }
+    let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
+    let mut at = 8usize;
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(3);
+    for _ in 0..3 {
+        if at + 2 > payload.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PaneWheelKeys truncated",
+            ));
+        }
+        let n = u16::from_le_bytes(payload[at..at + 2].try_into().unwrap()) as usize;
+        at += 2;
+        if at + n > payload.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "PaneWheelKeys truncated",
+            ));
+        }
+        parts.push(payload[at..at + n].to_vec());
+        at += n;
+    }
+    let mut it = parts.into_iter();
+    Ok((sid, it.next().unwrap(), it.next().unwrap(), it.next().unwrap()))
 }
 
 /// PaneTitle payload mirrors PaneBadge — `session_id u64 LE,
@@ -2831,6 +2906,37 @@ mod tests {
     fn grid_scroll_roundtrip() {
         assert_eq!(decode_grid_scroll(&encode_grid_scroll(4096)).unwrap(), 4096);
         assert_eq!(MsgType::from_u32(36), Some(MsgType::GridScroll));
+    }
+
+    /// The wheel-key declaration survives the wire, including an
+    /// empty `enter` (a program whose scroll view needs no opening)
+    /// and multi-byte keys.
+    #[test]
+    fn pane_wheel_keys_roundtrip() {
+        let p = encode_pane_wheel_keys(42, b"\x14", b"\x1b[5~", b"\x1b[6~");
+        let (sid, enter, up, down) = decode_pane_wheel_keys(&p).unwrap();
+        assert_eq!(sid, 42);
+        assert_eq!(enter, b"\x14");
+        assert_eq!(up, b"\x1b[5~");
+        assert_eq!(down, b"\x1b[6~");
+
+        // Empty parts are legal and must not be confused with a
+        // truncated frame — clearing a declaration sends all-empty.
+        let q = encode_pane_wheel_keys(1, b"", b"", b"");
+        let (sid2, e2, u2, d2) = decode_pane_wheel_keys(&q).unwrap();
+        assert_eq!((sid2, e2.len(), u2.len(), d2.len()), (1, 0, 0, 0));
+    }
+
+    /// A short or truncated payload is an error, not a panic: this
+    /// crosses a process boundary and a mismatched peer must not be
+    /// able to take the shell down.
+    #[test]
+    fn pane_wheel_keys_rejects_truncation() {
+        assert!(decode_pane_wheel_keys(&[]).is_err());
+        assert!(decode_pane_wheel_keys(&[0u8; 7]).is_err());
+        let mut p = encode_pane_wheel_keys(9, b"\x14", b"\x1b[5~", b"\x1b[6~");
+        p.truncate(p.len() - 2);
+        assert!(decode_pane_wheel_keys(&p).is_err());
     }
 
     #[test]
