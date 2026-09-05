@@ -2457,12 +2457,19 @@ impl std::fmt::Debug for SpawnOutcome {
     }
 }
 
-/// Does the visible grid contain `marker` on some row?
+/// Does the visible grid show `marker` on some row?
 ///
-/// Rows are joined without separators and matched as bytes, so a
-/// marker spanning a wrap still counts, and a program drawing its rule
-/// with padding (codex writes `/TRANSCRIPT/` followed by a run of
-/// slashes) still matches on the leading text.
+/// Whitespace is squeezed out of BOTH sides before comparing.  A
+/// program draws a heading for a human, not for a matcher: codex
+/// letter-spaces its rule, so the cells actually read
+/// `/ T R A N S C R I P T / / /…` while the plugin sensibly declares
+/// `/TRANSCRIPT/`.  Matching literally missed every time, and since
+/// the enter key is a toggle, every wheel tick then opened and shut
+/// the view — the "一动就闪" report.
+///
+/// Squeezing cannot create a false match here: a marker is a
+/// distinctive run a plugin picked precisely because ordinary output
+/// does not contain it.
 ///
 /// Scanned once per wheel EVENT, not per tick: a momentum scroll
 /// delivers one event carrying many lines.
@@ -2471,20 +2478,31 @@ fn grid_shows_marker(grid: &marspot::grid::Grid, marker: &[u8]) -> bool {
         return false;
     }
     let needle = match std::str::from_utf8(marker) {
-        Ok(s) => s,
+        Ok(s) => squeeze_for_marker(s),
         Err(_) => return false,
     };
+    if needle.is_empty() {
+        return false;
+    }
     let mut line = String::with_capacity(grid.cols() as usize);
     for row in 0..grid.rows() {
         line.clear();
         for col in 0..grid.cols() {
             line.push(grid.cell(col, row).ch);
         }
-        if line.contains(needle) {
+        if squeeze_for_marker(&line).contains(needle.as_str()) {
             return true;
         }
     }
     false
+}
+
+/// Drop whitespace and wide-char trailing halves, so a heading drawn
+/// for a human matches the compact string a plugin declares.
+fn squeeze_for_marker(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '\0')
+        .collect()
 }
 
 /// A plugin's description of how the wheel reaches its program.
@@ -10299,5 +10317,46 @@ fn main() {
                 rows = rows
             );
         }
+    }
+}
+
+/// The wheel-scroll marker match, pinned against a row captured off a
+/// real codex transcript view.  Codex draws its heading letter-spaced
+/// for humans; a plugin declares the compact string it means.  Both
+/// sides get squeezed so the two meet.
+#[cfg(test)]
+mod marker_squeeze_tests {
+    use super::squeeze_for_marker;
+
+    /// Captured from `examples/dump_row.rs` against a live codex
+    /// transcript — this exact row is what made three wheel fixes look
+    /// right and behave wrong: the literal marker never matched, so
+    /// every tick re-sent the toggle and closed the view again.
+    const REAL_ROW: &str = "/ T R A N S C R I P T / / / / / / / / / / / / / ";
+
+    #[test]
+    fn letter_spaced_heading_matches_the_compact_marker() {
+        let row = squeeze_for_marker(REAL_ROW);
+        let needle = squeeze_for_marker("/TRANSCRIPT/");
+        assert!(
+            !REAL_ROW.contains("/TRANSCRIPT/"),
+            "the literal match is what regressed; if this ever passes \
+             the screen changed and this test is testing nothing"
+        );
+        assert!(row.contains(&needle), "squeezed both sides must meet");
+    }
+
+    /// A wide char's trailing half is `\0`, not a character — it must
+    /// not break a marker that straddles one.
+    #[test]
+    fn wide_char_trailing_halves_do_not_split_a_marker() {
+        assert_eq!(squeeze_for_marker("/TRAN\0SCRIPT/"), "/TRANSCRIPT/");
+    }
+
+    /// Squeezing must not invent a match out of unrelated screen text.
+    #[test]
+    fn squeezing_does_not_create_a_false_match() {
+        let row = squeeze_for_marker("run tests / start / integration");
+        assert!(!row.contains(&squeeze_for_marker("/TRANSCRIPT/")));
     }
 }
