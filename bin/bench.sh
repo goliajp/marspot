@@ -126,6 +126,8 @@ fi
 echo "==> building marspot (release)"
 ( cd "$ROOT" && cargo build --release 2>&1 | tail -3 )
 
+
+
 # Let the machine come down off the build before measuring anything.
 #
 # The per-scenario warm-up trial below already pays the cold-CACHE cost,
@@ -143,6 +145,29 @@ BENCH_SETTLE_S="${BENCH_SETTLE_S:-8}"
 if [[ "$BENCH_SETTLE_S" != "0" ]]; then
   echo "==> settling ${BENCH_SETTLE_S}s after build"
   sleep "$BENCH_SETTLE_S"
+  # A fixed wait is not enough on the remote host: a fat-LTO build
+  # leaves load high for longer than 8 s, and the FIRST scenario is
+  # measured right into it.  Four remote runs on one commit — 185.5 /
+  # 202.8 / 203.3 / 207.6 MB/s on cat-cjk when the run included a
+  # build, then 229.5 / 235.3 / 238.2 on the next run when the build
+  # was a no-op.  Half this metric's gate failures were the machine,
+  # not the code.  Wait for load to actually come down, bounded so a
+  # busy host still gets measured (the load gate refuses the hopeless
+  # ones before we get here).
+  _settle_waited=0
+  while [[ "$_settle_waited" -lt 45 ]]; do
+    _l1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+    [[ -z "$_l1" ]] && break
+    if awk -v l="$_l1" 'BEGIN { exit !(l < 2.5) }'; then
+      [[ "$_settle_waited" -gt 0 ]] && echo "    load down to $_l1 after ${_settle_waited}s"
+      break
+    fi
+    sleep 3
+    _settle_waited=$((_settle_waited + 3))
+  done
+  if [[ "$_settle_waited" -ge 45 ]]; then
+    echo "    still warm after ${_settle_waited}s (load1=$_l1) — measuring anyway"
+  fi
 fi
 
 # ---- collect current measurements ---------------------------------------
