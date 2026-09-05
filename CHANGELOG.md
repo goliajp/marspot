@@ -28,7 +28,25 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.130**
+Current: **0.7.131**
+
+### 0.7.131
+
+Wheel declarations survive a core swap.
+
+A badge is re-issued by its plugin every tick, so a frame dropped while
+no core is attached costs one tick.  A wheel declaration is issued ONCE
+per pane — the plugin says how the wheel reaches it and has nothing to
+repeat — and the drain dropped it silently when `active` was None.
+
+That is not a rare window.  It is exactly the gap a core swap opens,
+and it is where codex landed: L1 re-execed, the plugin declared a
+second later, the core was still booting, and the pane had no wheel
+keys for the rest of its life.  The wheel then did nothing at all,
+which is what was reported after the marker fix was installed.
+
+The shell now keeps the mapping and replays it on every handshake, and
+logs both the declaration and the replay.
 
 ### 0.7.130
 
@@ -2815,7 +2833,18 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.174**
+Current: **0.12.175**
+
+### 0.12.175
+
+The wheel path gets a log.
+
+It had none — not the declaration arriving, not the open/closed
+reading, not a key going out.  Three fixes in a row could be inspected
+only by asking the user to scroll, which is why each one shipped
+looking right.  Now a declaration logs on receipt, and the open/closed
+reading logs once per TRANSITION (a momentum scroll is many events; the
+thing worth seeing is whether the view opened and then stayed open).
 
 ### 0.12.174
 

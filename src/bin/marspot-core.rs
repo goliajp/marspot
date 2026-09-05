@@ -780,6 +780,7 @@ mod window_state_tests {
             renderer: MetalRenderer::new_headless().expect("headless renderer"),
             pane_badges: std::collections::HashMap::new(),
             pane_wheel_keys: std::collections::HashMap::new(),
+            pane_wheel_open: std::collections::HashMap::new(),
             pane_titles: std::collections::HashMap::new(),
             pane_cwds: std::collections::HashMap::new(),
             pending_to_shell: Vec::new(),
@@ -3689,6 +3690,9 @@ struct CoreApp {
     /// never remembered.  Nothing here ever closes it: the user asked
     /// for the wheel to take them in but never to throw them out.
     pane_wheel_keys: std::collections::HashMap<u64, WheelKeys>,
+    /// Last observed open/closed state per pane, so the log carries one
+    /// line per transition instead of one per wheel event.
+    pane_wheel_open: std::collections::HashMap<u64, bool>,
     /// Per-shelld-session plugin-set title, set via `MsgType::PaneTitle`.
     /// Inserts into the title resolution chain ABOVE cwd basename,
     /// BELOW user-set custom title.  Empty payload removes the entry.
@@ -3967,9 +3971,17 @@ impl CoreApp {
         marker: Vec<u8>,
     ) {
         if up.is_empty() {
-            self.pane_wheel_keys.remove(&sid);
+            if self.pane_wheel_keys.remove(&sid).is_some() {
+                lx_info!("core.pane_wheel_keys.cleared", &format!("sid={sid}"));
+            }
             return;
         }
+        lx_info!(
+            "core.pane_wheel_keys.set",
+            &format!(
+                "sid={sid} enter={enter:?} up={up:?} down={down:?} marker={marker:?}"
+            )
+        );
         self.pane_wheel_keys
             .insert(sid, WheelKeys { enter, up, down, marker });
     }
@@ -8297,6 +8309,18 @@ impl CoreApp {
                         buf.extend_from_slice(key);
                     }
                 }
+                // One line per change of state, not per event: a
+                // momentum scroll is many events, and the thing worth
+                // seeing is whether the view opened and stayed open.
+                // Silence here is what made three wrong fixes all look
+                // right (2026-09-06).
+                if self.pane_wheel_open.get(&sid) != Some(&open) {
+                    lx_info!(
+                        "core.pane_wheel.state",
+                        &format!("sid={sid} open={open} sent_enter={}", !open)
+                    );
+                    self.pane_wheel_open.insert(sid, open);
+                }
                 if !buf.is_empty() {
                     win!(self, wi).panes[idx].session_mut().forward_inject_input(&buf);
                     win!(self, wi).needs_render = true;
@@ -9389,6 +9413,7 @@ fn main() {
         renderer,
         pane_badges: std::collections::HashMap::new(),
         pane_wheel_keys: std::collections::HashMap::new(),
+        pane_wheel_open: std::collections::HashMap::new(),
         pane_titles: std::collections::HashMap::new(),
         pane_cwds: std::collections::HashMap::new(),
         pending_to_shell: Vec::new(),

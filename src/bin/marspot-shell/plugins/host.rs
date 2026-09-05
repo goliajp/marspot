@@ -32,6 +32,7 @@ pub struct PaneBadgeUpdate {
 /// Channel message for `PaneWheelKeys`.  A plugin declares how the
 /// wheel reaches the program it understands; empty `up`/`down` clears
 /// the declaration (the pane goes back to the terminal's own routing).
+#[derive(Clone)]
 pub struct PaneWheelKeysUpdate {
     pub shelld_session_id: u64,
     pub enter: Vec<u8>,
@@ -440,6 +441,10 @@ impl PluginHost for ShellPluginHost {
         marker: &[u8],
     ) -> Result<(), PluginError> {
         self.require(PermissionSet::SET_STATUS_LINE)?;
+        // No L2 wired (standalone host, e.g. tests); drop silently.
+        // A real shell always has this attached before plugins tick,
+        // and remembers what it forwarded — see `pane_wheel_keys` in
+        // the shell app, which re-sends on every core handshake.
         let Some(tx) = self.pane_wheel_keys_tx.lock().unwrap().clone() else {
             return Ok(());
         };

@@ -1173,6 +1173,18 @@ struct ShellApp {
     /// to the active core as `MsgType::PaneBadge` frames.
     pane_badge_rx: std::sync::mpsc::Receiver<plugins::host::PaneBadgeUpdate>,
     pane_wheel_keys_rx: std::sync::mpsc::Receiver<plugins::host::PaneWheelKeysUpdate>,
+    /// The wheel declarations currently in force, by pane.
+    ///
+    /// Badges are re-issued by their plugin every tick, so a frame
+    /// dropped while no core is attached costs one tick.  A wheel
+    /// declaration is issued ONCE per pane — a plugin says "this is
+    /// how the wheel reaches me" and has nothing to repeat.  Dropping
+    /// that one frame left the pane with no wheel keys for the rest of
+    /// its life, and it landed exactly in the gap a core swap opens
+    /// (2026-09-06: codex declared 1s after L1 re-execed, core was
+    /// mid-boot, the wheel then did nothing at all).  So the shell
+    /// keeps the mapping and replays it on every handshake.
+    pane_wheel_keys: std::collections::HashMap<u64, plugins::host::PaneWheelKeysUpdate>,
     /// Same shape as `pane_badge_rx` but for plugin-set pane titles.
     pane_title_rx: std::sync::mpsc::Receiver<plugins::host::PaneTitleUpdate>,
     /// Receiver for `begin_pane_session` requests.
@@ -1669,6 +1681,7 @@ impl ShellApp {
             saved_window_frames: marspot::state::read_windows().unwrap_or_default(),
             pane_badge_rx,
             pane_wheel_keys_rx,
+            pane_wheel_keys: std::collections::HashMap::new(),
             pane_title_rx,
             pane_session_begin_rx,
             pty_op_rx,
@@ -1704,6 +1717,39 @@ impl ShellApp {
     /// shell closed it — but why?".  The 2026-06-15 incident debugging
     /// loop made this hole obvious: six core boots in three minutes
     /// and no log entry telling us which path was firing them.
+    fn send_pane_wheel_keys(&self, upd: &plugins::host::PaneWheelKeysUpdate) {
+        let Some(conn) = self.active.as_ref() else {
+            return;
+        };
+        conn.send(
+            MsgType::PaneWheelKeys,
+            marspot::shell_proto::encode_pane_wheel_keys(
+                upd.shelld_session_id,
+                &upd.enter,
+                &upd.up,
+                &upd.down,
+                &upd.marker,
+            ),
+        );
+    }
+
+    /// Replay every wheel declaration into a freshly-attached core.
+    ///
+    /// Without this a core swap silently disarms the wheel for every
+    /// pane that had declared before it — see `pane_wheel_keys`.
+    fn replay_pane_wheel_keys(&self) {
+        if self.pane_wheel_keys.is_empty() {
+            return;
+        }
+        lx_info!(
+            "shell.pane_wheel_keys.replayed",
+            &format!("panes={}", self.pane_wheel_keys.len())
+        );
+        for upd in self.pane_wheel_keys.values() {
+            self.send_pane_wheel_keys(upd);
+        }
+    }
+
     fn shutdown_active(&mut self, reason: &'static str) {
         match self.active.take() { Some(conn) => {
             let pid = conn.child.as_ref().and_then(|c| Some(c.id())).unwrap_or(0);
@@ -2765,18 +2811,21 @@ impl ShellApp {
         // will push the current mapping again (plugins re-issue every
         // transition, not just once).
         while let Ok(upd) = self.pane_wheel_keys_rx.try_recv() {
-            if let Some(conn) = self.active.as_ref() {
-                conn.send(
-                    MsgType::PaneWheelKeys,
-                    marspot::shell_proto::encode_pane_wheel_keys(
-                        upd.shelld_session_id,
-                        &upd.enter,
-                        &upd.up,
-                        &upd.down,
-                        &upd.marker,
-                    ),
-                );
+            let sid = upd.shelld_session_id;
+            let cleared = upd.up.is_empty() && upd.down.is_empty();
+            lx_info!(
+                "shell.pane_wheel_keys.declared",
+                &format!(
+                    "sid={sid} enter={:?} up={:?} down={:?} marker={:?} cleared={cleared}",
+                    upd.enter, upd.up, upd.down, upd.marker
+                )
+            );
+            if cleared {
+                self.pane_wheel_keys.remove(&sid);
+            } else {
+                self.pane_wheel_keys.insert(sid, upd.clone());
             }
+            self.send_pane_wheel_keys(&upd);
         }
         while let Ok(upd) = self.pane_badge_rx.try_recv() {
             if let Some(conn) = self.active.as_ref() {
@@ -3350,6 +3399,7 @@ impl ShellApp {
                     }
                     lx_event!("HELLO_ACK", "core handshake OK", v = v);
                     sup_log::log("HELLO_ACK", &format!("v={v}"));
+                    self.replay_pane_wheel_keys();
                 } else {
                     lx_event!(
                         "HELLO_MISMATCH",
