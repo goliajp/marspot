@@ -444,6 +444,15 @@ for b in marspot-shell marspot-core marspot-session; do
   if (( running )); then
     echo "    $b: skipped bundle overwrite ($MACOS/$b is in use; cold launch picks up new bin on next exit)"
     sup_log "INSTALL_BUNDLE_SKIP" "$b in use; skipped bundle overwrite to avoid AMFI kill"
+    # L1 is special since the redirect was turned off: the process
+    # that runs is the BUNDLE binary, so a new L1 only takes effect
+    # once this one has exited and a later install can write it.
+    # Until then the app keeps its Gatekeeper exemption but runs the
+    # older shell.
+    if [[ "$b" == "marspot-shell" ]] && (( SHELL_CHANGED )); then
+      echo "       ↳ L1 changed: quit marspot fully, run install-local.sh again," \
+           "then reopen — that is when the new shell lands in the bundle."
+    fi
   else
     install -m 0755 "$TARGET/$b" "$MACOS/$b"
     xattr -c "$MACOS/$b" 2>/dev/null || true   # clear ALL provenance/quarantine

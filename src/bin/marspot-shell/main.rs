@@ -265,6 +265,37 @@ fn maybe_redirect_to_current_shell() {
     if std::env::var_os("MARSPOT_NO_REDIRECT").is_some() {
         return;
     }
+    // Redirecting costs the whole app its Gatekeeper exemption.
+    //
+    // `exec` replaces the image, and with it the process's RESPONSIBLE
+    // identity: it stops being `Marspot.app` and becomes a bare path
+    // under Application Support.  A bare path cannot hold a bundle-id
+    // TCC grant, so the Developer Tools exemption — the thing that
+    // lets a terminal run code its user just compiled without a
+    // Gatekeeper scan — no longer matches.  Measured on this machine,
+    // same script, same minute:
+    //
+    //   responsible = Marspot.app        0.00 s, performScan 0
+    //   responsible = current/ bare path 0.30 s, performScan every time
+    //
+    // Under load the second row is 1.3 s, and on a busy test tier it
+    // has been reported at tens of seconds.  Every binary the user
+    // builds inside marspot pays it once.  `Terminal.app` and
+    // `iTerm.app` do not, and this is the only reason.
+    //
+    // So the redirect is off by default.  The cost is that a NEW L1
+    // lands on the next cold launch instead of instantly: the bundle
+    // binary cannot be overwritten while its own process is running
+    // (AMFI kills the process when the on-disk CDHash stops matching
+    // — 2026-06-16, nine panes went blank that way).  L1 moves rarely
+    // (0.7.x against core's 0.12.x), and L2/L3 keep updating live:
+    // they are forked children, and a forked child inherits the
+    // responsible process, so they can live outside the bundle
+    // without costing anything.  `MARSPOT_REDIRECT=1` restores the
+    // old behaviour for a bisect.
+    if std::env::var_os("MARSPOT_REDIRECT").is_none() {
+        return;
+    }
     let tree = match supervisor::BinaryTree::for_shell() {
         Ok(t) => t,
         Err(_) => return,

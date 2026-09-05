@@ -28,7 +28,41 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.124**
+Current: **0.7.125**
+
+### 0.7.125
+
+The startup redirect is off: L1 keeps running the bundle binary.
+
+Redirecting cost the whole app its Gatekeeper exemption.  `exec`
+replaces the image and with it the process's RESPONSIBLE identity —
+it stops being `Marspot.app` and becomes a bare path under Application
+Support.  A bare path cannot hold a bundle-id TCC grant, so the
+Developer Tools exemption (the one that lets a terminal run code its
+user just compiled without a scan) stops matching.  Measured, same
+script, same minute:
+
+```text
+  responsible = Marspot.app          0.00 s   performScan 0
+  responsible = current/ bare path   0.30 s   performScan every time
+```
+
+Under load the second row is 1.3 s; a busy test tier reported tens of
+seconds.  Every binary built inside marspot paid it once.
+`Terminal.app` and `iTerm.app` never did, and this — not provenance,
+not notarisation, not Hardened Runtime — is the whole reason.
+
+The cost: a new L1 lands on the next cold launch rather than instantly,
+because a bundle binary cannot be overwritten while its own process
+runs (AMFI kills the process when the on-disk CDHash stops matching —
+2026-06-16, nine panes went blank exactly that way).  L1 moves rarely
+(0.7.x against core's 0.12.x) and L2/L3 still update live: a forked
+child inherits the responsible process, so they cost nothing by living
+outside the bundle.  `MARSPOT_REDIRECT=1` restores the old path.
+
+Requires the bundle-id Developer Tools grant for `Marspot.app`
+(System Settings → Privacy & Security → Developer Tools).  Without it
+this change is inert, not harmful.
 
 ### 0.7.124
 
