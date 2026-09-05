@@ -2753,7 +2753,32 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.167**
+Current: **0.12.168**
+
+### 0.12.168
+
+A path wrapped short of the pane edge joins up again.
+
+Reported: in a 73-column pane, a path claudecode had wrapped
+underlined only as far as `…/lab36-continus/` — the `.tmp/…` tail was
+dropped, and the file existed all the way down.
+
+claudecode does not wrap at the pane edge.  It wraps at its own
+content width, an indent inside it, and that width differs per block
+(`⏺`, `⎿ `, plain prose).  Here the first row stopped at column 65 of
+73 — eight cells short — and the flush test allowed exactly eight.
+Off by one.  The constant had been measured off a `⎿ ` block in July
+and was never going to hold for the next block type.
+
+So the geometry stops deciding.  A trailing token carrying a `/` is
+signal enough on its own: it widens the allowance and, for zero-indent
+continuations, replaces the old "previous row must be COMPLETELY full"
+demand outright — that demand described a mid-word wrap at the pane
+edge, which is not what claudecode produces.  Both were already backed
+by arbitration that geometry is not: a File match must survive `stat`,
+`cc_zero_indent` keeps URL and Email matches from crossing the join at
+all, and 0.12.163's seam candidate offers the break point as a path
+end when the join was wrong.  Prose keeps the tight two-cell bound.
 
 ### 0.12.167
 

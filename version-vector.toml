@@ -28,5 +28,5 @@
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
 shell   = "0.7.126"  # badge 菜单请求到达即记日志(空菜单不回复,但不再无声);详见 CHANGELOG.md
-core    = "0.12.167"  # badge 右键路径不再静默失败:修 badge_miss_report 的提前返回 + 补全链路日志;详见 CHANGELOG.md
+core    = "0.12.168"  # claudecode 在比 pane 窄的内容宽度处折的路径,不再因差一列而断开;详见 CHANGELOG.md
 session = "0.11.58"  # RFC-007 回退:按名字自取 shm 的分支随之移除;详见 CHANGELOG.md

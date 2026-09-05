@@ -358,7 +358,24 @@ fn is_hard_wrap_continuation_in<S: CellSource>(
         }
         has_sep
     };
-    let flush_slack: u16 = if last_nb_ch == '/' || trailing_is_path { 8 } else { 2 };
+    // How far short of the edge the previous row may stop.
+    //
+    // claudecode does not wrap at the pane edge: it wraps at its own
+    // CONTENT width, which sits an indent inside and differs per block
+    // (`⏺`, `⎿ `, plain prose).  A fixed 8 was measured off one block
+    // and lands exactly on the boundary for another — a 73-col pane
+    // wrapping a path at column 65 missed by ONE cell, and the link
+    // stopped at `…/lab36-continus/` (2026-09-06 field report).
+    //
+    // Stop guessing at the geometry.  A trailing token that carries a
+    // `/` is a strong signal on its own, and a File match still has to
+    // survive `stat`, with the seam offered as a candidate end if the
+    // join was wrong.  Prose keeps the tight bound.
+    let flush_slack: u16 = if last_nb_ch == '/' || trailing_is_path {
+        cols / 3
+    } else {
+        2
+    };
     if last_nb_col < cols.saturating_sub(flush_slack) {
         return false;
     }
@@ -381,7 +398,15 @@ fn is_hard_wrap_continuation_in<S: CellSource>(
     if lead - left > 4 {
         return false;
     }
-    if lead == left && last_nb_col != right - 1 {
+    // Zero indent is the weakest signal — flush prose looks identical —
+    // so it used to demand the previous row be COMPLETELY full, as a
+    // mid-word character wrap would be.  claudecode's zero-indent
+    // continuations are mid-word wraps at its content width, not the
+    // pane edge, so that demand never held for them.  Require the same
+    // path-carrying tail instead: `cc_zero_indent` already forbids URL
+    // and Email matches from crossing this join, leaving File matches,
+    // which `stat` arbitrates.
+    if lead == left && last_nb_col != right - 1 && !trailing_is_path {
         return false;
     }
     if lead >= right {
@@ -2473,6 +2498,52 @@ mod tests {
         assert!(
             links.iter().any(|l| l.text == "/etc/hosts"),
             "output row blanked by a phantom composer: {links:?}",
+        );
+    }
+
+    /// 2026-09-06 field report: a path wrapped by claudecode inside a
+    /// 73-column pane underlined only as far as `…/lab36-continus/`.
+    ///
+    /// claudecode does not wrap at the pane edge — it wraps at its own
+    /// content width, an indent inside it, and that width differs by
+    /// block.  The first row stopped at column 65 of a 73-column pane,
+    /// eight cells short, and the flush test allowed exactly eight:
+    /// off by one.  Widening the constant would only move the boundary
+    /// to the next block type, so the tail carrying a `/` is what
+    /// decides now, with `stat` and the seam candidate arbitrating.
+    #[test]
+    fn a_path_wrapped_short_of_the_pane_edge_still_joins() {
+        let root = std::env::temp_dir()
+            .join(format!("marspot-shortwrap-{}", std::process::id()));
+        // A dotted directory gives the wrong answer somewhere real to
+        // land — without it the test could pass for the wrong reason.
+        let deep = root.join(".tmp");
+        std::fs::create_dir_all(&deep).unwrap();
+        let file = deep.join("20260906-gpt6-headline-strategy-for-claude.md");
+        std::fs::write(&file, b"x").unwrap();
+        let p = file.display().to_string();
+
+        // Split mid-word, and leave the first row well short of the
+        // pane edge — which is what claudecode actually produces.
+        let cut = p.find("gpt6-").map(|i| i + "gpt6-".len()).unwrap();
+        let (a, b) = p.split_at(cut);
+        let short_of_edge = (a.chars().count() as u16) + 8;
+
+        let rows = [a, b];
+        let mut src = StrSource::new(&rows, short_of_edge);
+        src.cursor = (0, 1);
+        let links = scan_visible_links(&src, ScanOpts { tui_mode: true });
+        let texts: Vec<&str> = links.iter().map(|l| l.text.as_str()).collect();
+        let dir_only = format!("{}/", root.display());
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(
+            texts.iter().any(|t| *t == p),
+            "wrapped path not joined: {texts:?}",
+        );
+        assert!(
+            !texts.iter().any(|t| *t == dir_only),
+            "fell back to the directory: {texts:?}",
         );
     }
 
