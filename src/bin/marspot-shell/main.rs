@@ -3393,6 +3393,24 @@ impl ShellApp {
                     &self.plugin_host,
                     shelld_sid,
                 );
+                // Every step of this path used to be silent, so a
+                // right-click that did nothing left no trace of how far
+                // it got — L2 not asking, L1 not receiving, no plugin
+                // claiming the session, or a plugin returning nothing
+                // all looked identical from the outside (2026-09-05).
+                lx_debug!(
+                    "shell.badge_menu.request",
+                    "badge menu asked of the plugin registry",
+                    shelld_session_id = shelld_sid,
+                    items = items.len()
+                );
+                if items.is_empty() {
+                    lx_warn!(
+                        "shell.badge_menu.no_items",
+                        "no plugin offered a badge menu; nothing will open",
+                        shelld_session_id = shelld_sid
+                    );
+                }
                 // Empty menu still gets no reply on purpose — L2
                 // opens nothing either way, so the frame would be
                 // dead weight.

@@ -28,7 +28,17 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.125**
+Current: **0.7.126**
+
+### 0.7.126
+
+Badge-menu requests are logged on arrival.
+
+An empty menu deliberately gets no reply — L2 opens nothing either
+way.  That is still right, but it meant a right-click that reached L1
+and found no plugin willing to answer looked exactly like one that
+never arrived.  Now the request logs with its item count, and an empty
+result logs a warning naming the session.
 
 ### 0.7.125
 
@@ -2743,7 +2753,38 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.166**
+Current: **0.12.167**
+
+### 0.12.167
+
+The badge-menu path stops failing silently.
+
+Reported twice: after many hours up, right-clicking a claudecode
+pane's badge does nothing, and quitting marspot fixes it.  Not
+reproducible on demand.
+
+The path had no way to say where it broke.  `core.badge_hit_miss` is
+supposed to be exactly that witness, and it had fired **zero times in
+13,289 log lines** across the failing session — because
+`badge_miss_report` read `p.shelld_session_id()?` inside its loop.  A
+single pane with no session id yet (one still starting, one whose L3
+just died) returned from the whole function, so any pane behind it
+could never be reported.  `hit_test_pane_badge_prefix` right next to
+it does the same lookup with `continue`; this one was the odd man out.
+
+Also instrumented, because each of these was indistinguishable from
+the others at the outside — "clicked, nothing happened":
+
+- `core.badge_menu.requested` — L2 did ask (debug)
+- `core.badge_menu.no_session` — badge hit, pane has no session, the
+  click falls through to the generic menu (was silent)
+- `shell.badge_menu.request` — L1 received it, with the item count
+- `shell.badge_menu.no_items` — no plugin offered anything, so
+  nothing will open (was silent by design)
+
+The plugin already logged its own two exits (`badge_menu.no_bind`,
+`badge_menu.empty`).  With the witness repaired the next occurrence
+says which link broke instead of leaving 13k lines of nothing.
 
 ### 0.12.166
 

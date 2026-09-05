@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.125"  # 启动不再转发出 bundle,保住 Gatekeeper 豁免(首次执行 0.3s→0.00s);详见 CHANGELOG.md
-core    = "0.12.166"  # RFC-007 回退:L3 回到直接 fork,干净链实测没有收益;详见 CHANGELOG.md
+shell   = "0.7.126"  # badge 菜单请求到达即记日志(空菜单不回复,但不再无声);详见 CHANGELOG.md
+core    = "0.12.167"  # badge 右键路径不再静默失败:修 badge_miss_report 的提前返回 + 补全链路日志;详见 CHANGELOG.md
 session = "0.11.58"  # RFC-007 回退:按名字自取 shm 的分支随之移除;详见 CHANGELOG.md

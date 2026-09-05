@@ -30,3 +30,6 @@ bench/remote-runs/
 
 # Per-user Claude Code permission profile — not source.
 .claude/settings.json
+
+# Local credentials — never committed.
+.env.local

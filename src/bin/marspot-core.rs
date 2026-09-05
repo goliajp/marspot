@@ -4334,10 +4334,24 @@ impl CoreApp {
                 let payload = marspot::shell_proto::encode_pane_badge_menu_request(
                     sid, x_phys, y_phys,
                 );
+                lx_debug!(
+                    "core.badge_menu.requested",
+                    "badge right-click; asked L1 for the menu",
+                    pane = i,
+                    session = sid
+                );
                 self.pending_to_shell
                     .push((MsgType::PaneBadgeMenuRequest, payload));
                 return;
             }
+            // Hit the badge but the pane has no session to ask about.
+            // Silent before: the click fell through to the generic
+            // menu and looked like nothing happened.
+            lx_warn!(
+                "core.badge_menu.no_session",
+                "badge hit but pane has no session id; falling through",
+                pane = i
+            );
         } else if let Some(miss) = self.badge_miss_report(wi, x_phys, y_phys) {
             // A right-click inside a title strip that shows a badge,
             // yet missed it.  Says where the badge was thought to be
@@ -6515,7 +6529,17 @@ impl CoreApp {
         let title_h = win!(self, wi).layout.cell_title_h;
         let cell_count = win!(self, wi).layout.cells.len();
         for (i, p) in win!(self, wi).panes.iter().enumerate().take(cell_count) {
-            let sid = p.shelld_session_id()?;
+            // `continue`, not `?`.  A pane with no session id yet — one
+            // still starting, one whose L3 just died — is a pane to skip,
+            // not a reason to abandon the search: with `?` a single such
+            // pane ANYWHERE ahead of the clicked one silently suppressed
+            // this whole report, which is why `core.badge_hit_miss` never
+            // appeared once in 13k log lines while the badge menu was
+            // demonstrably failing (2026-09-05).
+            let sid = match p.shelld_session_id() {
+                Some(s) => s,
+                None => continue,
+            };
             let rect = &win!(self, wi).layout.cells[i];
             let y_lo = rect.y_top;
             if y_phys < y_lo || y_phys >= y_lo + title_h {
