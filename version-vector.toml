@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.134"  # 标记声明改成每 tick 重发,像 badge 一样自愈;详见 CHANGELOG.md
+shell   = "0.7.135"  # badge 改读这一格会话自己的 model/effort,不再报全局默认;详见 CHANGELOG.md
 core    = "0.12.180"  # 转发 PaneRenderMarkup 到对应 L3;详见 CHANGELOG.md
 session = "0.11.71"  # 换代探测有界,卡住的探测能重试 —— 否则一格会静默永久停在旧镜像;详见 CHANGELOG.md

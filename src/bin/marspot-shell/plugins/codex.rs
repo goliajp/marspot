@@ -95,6 +95,131 @@ fn read_model_and_effort(home: &PathBuf) -> (Option<String>, Option<String>) {
     (model, effort)
 }
 
+/// What a codex session is ACTUALLY running, read from its own record.
+///
+/// The badge used to read `~/.codex/config.toml`, which says what a
+/// FRESH codex would start with — not what the one in this pane is
+/// doing.  Two panes on different efforts both showed the global
+/// value, and a pane whose effort was changed mid-session showed the
+/// old one.
+///
+/// codex writes a `turn_context` record per turn carrying `cwd`,
+/// `model` and `effort` together, so the last one in a session's
+/// rollout is the truth.  Matched to a pane by the codex process's own
+/// working directory.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SessionFacts {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// Scan a rollout's TAIL for the last `turn_context`.
+///
+/// These files reach tens of megabytes — 63 MB in the field — so
+/// reading one whole, per pane, every two seconds is out of the
+/// question.  The last record is near the end by construction, and a
+/// window that misses it just leaves the caller with what it had.
+pub(crate) fn facts_from_tail(tail: &str, want_cwd: &str) -> Option<SessionFacts> {
+    for line in tail.lines().rev() {
+        if !line.contains("\"turn_context\"") {
+            continue;
+        }
+        // Deliberately not a JSON parse: this is a hot-ish path over a
+        // 256 KiB window, the three fields are flat strings, and a
+        // format change should degrade to "no facts" rather than to a
+        // wrong badge.
+        let cwd = json_str_field(line, "cwd")?;
+        if cwd != want_cwd {
+            continue;
+        }
+        return Some(SessionFacts {
+            model: json_str_field(line, "model"),
+            effort: json_str_field(line, "effort"),
+        });
+    }
+    None
+}
+
+/// The value of `"<key>":"<value>"`, first occurrence, no escapes.
+fn json_str_field(line: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\":\"");
+    let at = line.find(&pat)? + pat.len();
+    let rest = &line[at..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// How much of a rollout's end to look at for the last `turn_context`.
+///
+/// One record is a few hundred bytes and the last one is at the end by
+/// construction; this is slack for whatever trails it.  Reading the
+/// file whole is not an option — 63 MB in the field.
+const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The newest rollout under `~/.codex/sessions`, by modification time.
+///
+/// Bounded: only today's and yesterday's day-directories are looked
+/// at.  A session older than that is not the one a pane is running.
+fn recent_rollouts(codex_home: &std::path::Path) -> Vec<PathBuf> {
+    let mut out: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let sessions = codex_home.join("sessions");
+    // sessions/YYYY/MM/DD/rollout-*.jsonl
+    let mut days: Vec<PathBuf> = Vec::new();
+    for y in read_dirs(&sessions) {
+        for m in read_dirs(&y) {
+            days.extend(read_dirs(&m));
+        }
+    }
+    days.sort();
+    for day in days.iter().rev().take(2) {
+        let Ok(rd) = std::fs::read_dir(day) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+                out.push((m, p));
+            }
+        }
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.into_iter().map(|(_, p)| p).collect()
+}
+
+fn read_dirs(at: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(at) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Read the last `ROLLOUT_TAIL_BYTES` of a file as text.
+fn tail_of(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let from = len.saturating_sub(ROLLOUT_TAIL_BYTES);
+    f.seek(SeekFrom::Start(from)).ok()?;
+    let mut buf = Vec::with_capacity(ROLLOUT_TAIL_BYTES as usize);
+    f.take(ROLLOUT_TAIL_BYTES).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// What the codex in `cwd` is running, or None if its record cannot be
+/// found — in which case the caller keeps whatever it had.
+fn facts_for_cwd(codex_home: &std::path::Path, cwd: &str) -> Option<SessionFacts> {
+    for path in recent_rollouts(codex_home).into_iter().take(12) {
+        if let Some(f) = tail_of(&path).and_then(|t| facts_from_tail(&t, cwd)) {
+            return Some(f);
+        }
+    }
+    None
+}
+
 /// `gpt-6-astra·high` — the shape claudecode's badge already uses for
 /// its own model and effort, so the two read as one system.
 fn badge_text(model: Option<&str>, effort: Option<&str>) -> String {
@@ -159,8 +284,10 @@ impl Plugin for CodexPlugin {
             return;
         }
         let Some(home) = codex_home() else { return };
-        let (model, effort) = read_model_and_effort(&home);
-        let text = badge_text(model.as_deref(), effort.as_deref());
+        // The global config is the FALLBACK, not the answer: it says
+        // what a fresh codex would start with.  Each pane's own
+        // session is asked below.
+        let (cfg_model, cfg_effort) = read_model_and_effort(&home);
 
         // Sessions come from the registry, not from pane indices: a
         // pane index is a position in a layout that moves when panes
@@ -173,9 +300,25 @@ impl Plugin for CodexPlugin {
             if shell <= 0 {
                 continue;
             }
-            let has_codex = pidtree::descendants_of(shell, &procs)
-                .iter()
-                .any(looks_like_codex);
+            let codex_pid = pidtree::descendants_of(shell, &procs)
+                .into_iter()
+                .find(|p| looks_like_codex(p))
+                .map(|p| p.pid);
+            let has_codex = codex_pid.is_some();
+            // Ask THIS pane's session what it is running, and fall
+            // back to the global config when its record cannot be
+            // found (a session that has not written a turn yet).
+            let facts = codex_pid
+                .and_then(pidtree::proc_cwd)
+                .and_then(|cwd| facts_for_cwd(&home, &cwd.to_string_lossy()));
+            let (model, effort) = match facts {
+                Some(f) => (
+                    f.model.or_else(|| cfg_model.clone()),
+                    f.effort.or_else(|| cfg_effort.clone()),
+                ),
+                None => (cfg_model.clone(), cfg_effort.clone()),
+            };
+            let text = badge_text(model.as_deref(), effort.as_deref());
             if has_codex {
                 // Declare how the wheel reaches codex.  Verified by
                 // injecting into a real pty: `PageUp` alone changes
@@ -334,5 +477,69 @@ mod wheel_decl_tests {
         assert_ne!(WHEEL_ENTER, WHEEL_UP);
         assert_ne!(WHEEL_ENTER, WHEEL_DOWN);
         assert_ne!(WHEEL_UP, WHEEL_DOWN);
+    }
+}
+
+#[cfg(test)]
+mod session_facts_tests {
+    use super::{facts_from_tail, SessionFacts};
+
+    /// Shape taken from a real rollout: `turn_context` carries cwd,
+    /// model and effort in one record, which is why the last one is
+    /// the whole answer.
+    fn turn(cwd: &str, model: &str, effort: &str) -> String {
+        format!(
+            r#"{{"type":"turn_context","payload":{{"turn_id":"x","cwd":"{cwd}","model":"{model}","effort":"{effort}","summary":"auto"}}}}"#
+        )
+    }
+
+    #[test]
+    fn the_last_turn_wins() {
+        let tail = [
+            turn("/w/a", "gpt-6-astra", "low"),
+            r#"{"type":"response_item","payload":{}}"#.to_string(),
+            turn("/w/a", "gpt-6-astra", "high"),
+        ]
+        .join("\n");
+        assert_eq!(
+            facts_from_tail(&tail, "/w/a"),
+            Some(SessionFacts {
+                model: Some("gpt-6-astra".into()),
+                effort: Some("high".into())
+            }),
+            "a mid-session change is the point of reading this at all"
+        );
+    }
+
+    /// Another pane's session must not answer for this one.  The
+    /// rollouts all live in one directory; cwd is what tells them
+    /// apart.
+    #[test]
+    fn a_different_cwd_is_a_different_pane() {
+        let tail = turn("/w/other", "gpt-6-astra", "high");
+        assert_eq!(facts_from_tail(&tail, "/w/mine"), None);
+    }
+
+    /// A window that missed the record, or a format that changed,
+    /// leaves the caller with what it had — never with a wrong badge.
+    #[test]
+    fn nothing_recognisable_yields_nothing() {
+        assert_eq!(facts_from_tail("", "/w/a"), None);
+        assert_eq!(facts_from_tail("not json at all\nnor this", "/w/a"), None);
+        assert_eq!(
+            facts_from_tail(r#"{"type":"turn_context","payload":{"cwd":"/w/a"}}"#, "/w/a"),
+            Some(SessionFacts { model: None, effort: None }),
+            "a record without the fields is still that pane's record"
+        );
+    }
+
+    /// The tail can begin mid-line; a half record must not be read as
+    /// a whole one.
+    #[test]
+    fn a_truncated_leading_line_is_skipped() {
+        let whole = turn("/w/a", "gpt-6-astra", "high");
+        let tail = format!("ext\":\"payload\":{{\"cwd\":\"/w/a\",\"model\":\"WRONG\"\n{whole}");
+        let got = facts_from_tail(&tail, "/w/a").expect("the whole record is there");
+        assert_eq!(got.model.as_deref(), Some("gpt-6-astra"));
     }
 }
