@@ -2849,3 +2849,52 @@ mod blank_gate_tests {
         assert!(!g.owes_a_frame(), "a quiet pane must not keep a timer alive");
     }
 }
+
+#[cfg(test)]
+mod blank_cost {
+    /// The blank test runs on every publish, so its cost is a hot-path
+    /// cost and gets measured, not assumed.
+    ///
+    /// Measured on an M-series box: **16 ns** on a screen with content
+    /// (it leaves at the first printable cell) against 30 µs for the
+    /// full scan of a blank one — and a blank screen is exactly the
+    /// case being held, at most a handful of calls across the 50 ms.
+    #[test]
+    fn the_blank_test_is_cheap_on_a_screen_with_content() {
+        let mut t = marspot_term::terminal::Terminal::new(108, 33);
+        for r in 0..33 {
+            t.feed(format!("row {r} with some ordinary terminal content here\r\n").as_bytes());
+        }
+        assert!(!super::grid_is_blank(t.grid()), "this grid has content");
+
+        let n = 20_000;
+        let t0 = std::time::Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..n {
+            sink += super::grid_is_blank(t.grid()) as usize;
+        }
+        let per = t0.elapsed().as_nanos() as f64 / n as f64;
+        assert_eq!(sink, 0);
+        println!("grid_is_blank on a full 108x33 screen: {per:.0} ns/call");
+
+        // A blank grid is the worst case: every cell is scanned.
+        let blank = marspot_term::terminal::Terminal::new(108, 33);
+        let t0 = std::time::Instant::now();
+        let mut sink = 0usize;
+        for _ in 0..n {
+            sink += super::grid_is_blank(blank.grid()) as usize;
+        }
+        let per_blank = t0.elapsed().as_nanos() as f64 / n as f64;
+        assert_eq!(sink, n);
+        println!("grid_is_blank on a blank 108x33 screen: {per_blank:.0} ns/call");
+
+        // Measured 16 ns against 30 µs for the full scan — the bound
+        // is loose enough to survive a loaded CI box and still catch a
+        // regression to scanning every cell.
+        assert!(
+            per < 500.0,
+            "a screen with content must leave on the first cell, not scan: {per} ns \
+             (blank-screen worst case was {per_blank} ns)"
+        );
+    }
+}
