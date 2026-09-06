@@ -409,6 +409,17 @@ impl Terminal {
         self.alt_scroll && self.in_alt_screen()
     }
 
+    /// Put the pen back to plain.
+    ///
+    /// The style a program is drawing with is its own business, and a
+    /// terminal has no business second-guessing it — except that a
+    /// style can be left on by something that is not the program, and
+    /// then there is nothing to turn it off.  This is `reset`, scoped
+    /// to the one thing that gets stuck.
+    pub fn reset_attrs(&mut self) {
+        self.attrs = CellAttrs::default();
+    }
+
     /// Tell this terminal whether its program prints unrendered markup.
     pub fn set_render_markup(&mut self, on: bool) {
         self.render_markup = on;

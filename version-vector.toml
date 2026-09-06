@@ -29,4 +29,4 @@
 
 shell   = "0.7.134"  # 标记声明改成每 tick 重发,像 badge 一样自愈;详见 CHANGELOG.md
 core    = "0.12.180"  # 转发 PaneRenderMarkup 到对应 L3;详见 CHANGELOG.md
-session = "0.11.69"  # 程序死了它开着的样式也不该留给新 shell;详见 CHANGELOG.md
+session = "0.11.70"  # PaneResetAttrs:把笔恢复成普通,不用退出会话;详见 CHANGELOG.md

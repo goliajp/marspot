@@ -164,6 +164,8 @@ enum SessionEvent {
     /// A plugin says this pane's program prints markup it does not
     /// render — see `MsgType::PaneRenderMarkup`.
     RenderMarkup(bool),
+    /// Put the pen back to plain — see `MsgType::PaneResetAttrs`.
+    ResetAttrs,
     Key(MarspotKeyEvent, Modifiers),
     /// L2 forwarded a cell-grid resize (window/layout changed). L3 resizes
     /// its Terminal + ioctl's the PTY (via shelld) + reflows, then
@@ -886,6 +888,14 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
                         if tx.send(SessionEvent::HoldGrid(on)).is_err() {
                             break;
                         }
+                    }
+                }
+                MsgType::PaneResetAttrs => {
+                    if marspot_term::shell_proto::decode_pane_reset_attrs(&f.payload)
+                        .is_ok()
+                        && tx.send(SessionEvent::ResetAttrs).is_err()
+                    {
+                        break;
                     }
                 }
                 MsgType::PaneRenderMarkup => {
@@ -1768,6 +1778,14 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                         session.hold_grid(false);
                     }
                     predicted |= handle_key(&mut session, e, m)
+                }
+                SessionEvent::ResetAttrs => {
+                    lx_event!(
+                        "L3_RESET_ATTRS",
+                        "pen put back to plain on request",
+                        session_id = session.id()
+                    );
+                    session.terminal_mut().reset_attrs();
                 }
                 SessionEvent::RenderMarkup(on) => {
                     // Re-sent every tick by design (see the codex

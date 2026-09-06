@@ -517,6 +517,17 @@ pub enum MsgType {
     /// plugin driving a program knows the program does not render its
     /// own HTML.
     PaneRenderMarkup = 80,
+    /// Put this pane's pen back to plain — what `reset` does, for a
+    /// pane whose program is never going to send one.
+    ///
+    /// A style belongs to the program that set it, and normally the
+    /// program or the shell's next prompt turns it off.  A full-screen
+    /// program can run for hours emitting no `CSI 0 m` at all, so a
+    /// style switched on by anything else — a terminal bug, a killed
+    /// filter — rides every new cell until the program exits.  There
+    /// has to be a way to say "stop", and it cannot be one that costs
+    /// the user their session.
+    PaneResetAttrs = 81,
     // ── error (200..=255) ──
     Error = 200,
 }
@@ -586,6 +597,7 @@ impl MsgType {
             78 => MsgType::PaneResetMouseReporting,
             79 => MsgType::PaneWheelKeys,
             80 => MsgType::PaneRenderMarkup,
+            81 => MsgType::PaneResetAttrs,
             200 => MsgType::Error,
             _ => return None,
         })
@@ -1742,6 +1754,21 @@ pub fn decode_pane_hold_grid(payload: &[u8]) -> io::Result<(u64, bool)> {
     }
     let sid = u64::from_le_bytes(payload[0..8].try_into().unwrap());
     Ok((sid, payload[8] != 0))
+}
+
+/// PaneResetAttrs payload: `session_id u64 LE`.
+pub fn encode_pane_reset_attrs(session_id: u64) -> Vec<u8> {
+    session_id.to_le_bytes().to_vec()
+}
+
+pub fn decode_pane_reset_attrs(payload: &[u8]) -> io::Result<u64> {
+    if payload.len() != 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pane_reset_attrs payload != 8 bytes",
+        ));
+    }
+    Ok(u64::from_le_bytes(payload.try_into().unwrap()))
 }
 
 /// PaneRenderMarkup payload: `session_id u64 LE, on u8`.
