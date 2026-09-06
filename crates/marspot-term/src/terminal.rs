@@ -458,6 +458,15 @@ impl Terminal {
         // A new shell starts with a visible cursor; a TUI that hid it
         // is gone.
         self.cursor_visible = true;
+        // And with no styling.  A program that switched underline or a
+        // colour on and died there would otherwise hand the fresh
+        // shell its own look — and unlike a mode, nothing about a
+        // prompt necessarily turns it off again: a full-screen program
+        // can run for hours without ever emitting `CSI 0 m`, so the
+        // style rides every new cell until something happens to reset
+        // it (measured 2026-09-06 on a pane left underlined by a bug
+        // of mine: 300 KB of output, not one reset in it).
+        self.attrs = CellAttrs::default();
     }
 
     /// Forget that anything asked for mouse reports.
@@ -5852,5 +5861,29 @@ mod u_tag_tests {
         t.feed(b"a<u>bc</u>d");
         assert_eq!(row(&t, 0).trim_end(), "a<u>bc</u>d");
         assert!(!under(&t, 1));
+    }
+}
+
+#[cfg(test)]
+mod attrs_handover_tests {
+    use super::Terminal;
+
+    /// A style the dead program left on must not become the new
+    /// shell's.  Modes are already cleared here; a colour or an
+    /// underline is the same kind of debt, and worse in one way — a
+    /// mode has a prompt that usually turns it off, while a style can
+    /// ride every new cell for hours.
+    #[test]
+    fn a_style_left_on_by_a_dead_program_does_not_reach_the_new_shell() {
+        let mut t = Terminal::new(20, 2);
+        t.feed(b"\x1b[4;31munderlined red");
+        assert!(t.grid().cell(0, 0).attrs.underline);
+
+        t.reset_process_owned_modes();
+        t.feed(b"\r\n$ ");
+        assert!(
+            !t.grid().cell(0, 1).attrs.underline,
+            "the new shell's prompt wears its own look"
+        );
     }
 }

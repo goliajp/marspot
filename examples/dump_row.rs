@@ -24,6 +24,29 @@ fn main() {
         // Take by chars, not bytes: a CJK row would panic on a byte
         // slice exactly when the dump is needed most.
         let head = |s: &str, n: usize| s.chars().take(n).collect::<String>();
+        if std::env::var("DUMP_UNDERLINE").is_ok() {
+            // Mark the underlined runs, so "what is underlined" is a
+            // reading rather than a guess from a screenshot.
+            let mut marked = String::new();
+            let (mut prev, mut any) = (false, false);
+            for col in 0..s.cols as usize {
+                let c = cells[row * s.cols as usize + col];
+                let u = c.attrs.underline;
+                if u != prev {
+                    marked.push(if u { '\u{300a}' } else { '\u{300b}' });
+                    prev = u;
+                }
+                any |= u;
+                marked.push(c.ch);
+            }
+            if prev {
+                marked.push('\u{300b}');
+            }
+            if any {
+                println!("  row{row} |{}|", marked.trim_end());
+            }
+            continue;
+        }
         println!("  row{row} |{}|", line.trim_end());
         if std::env::var("DUMP_SQUEEZED").is_ok() {
             let sq: String = line.chars().filter(|c| !c.is_whitespace() && *c != '\0').collect();
