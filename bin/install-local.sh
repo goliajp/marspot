@@ -557,6 +557,31 @@ if (( ! RUNNING )); then
   exit 0
 fi
 
+# Did they actually take it?
+#
+# The fanout used to report the number of signals SENT, which is not
+# the same claim and hid a real failure: four consecutive installs
+# said "SIGTERM'd 13 L3 pids" while every pane went on serving the
+# image it already had (2026-09-06).  A signal is a request; the
+# only honest report is what is running afterwards.
+verify_l3_adoption() {
+  local want stale=0 total=0 ino p
+  want=$(stat -f %i "$TREE/current/marspot-session" 2>/dev/null) || return 0
+  sleep 3
+  for p in $(pgrep -f "$TREE/current/marspot-session" 2>/dev/null); do
+    total=$((total+1))
+    ino=$(lsof -p "$p" -a -d txt -Fi 2>/dev/null | grep '^i' | tr -d 'i' | head -1)
+    [ "$ino" = "$want" ] || stale=$((stale+1))
+  done
+  if (( stale > 0 )); then
+    echo "    WARN: $stale/$total panes are still on the previous image" >&2
+    echo "          (a pane whose probe is wedged retries on the next" >&2
+    echo "           signal; see l3.execv.probe_stuck in the log)" >&2
+  else
+    echo "    all $total panes are on this image"
+  fi
+}
+
 # Session-only fast path: when only marspot-session changed (no L1/L2
 # bin diff), the supervisor's SIGUSR1 path won't fire — it only
 # promotes pending/marspot-core (see L1 main.rs apply_update gate on
@@ -584,6 +609,7 @@ if (( STAGED )) \
     fi
   done
   echo "    promoted current/marspot-session; SIGTERM'd $signalled L3 pids"
+  verify_l3_adoption
   echo "==> done."
   exit 0
 fi
@@ -657,6 +683,7 @@ if (( STAGED )); then
       kill -TERM "$pid" 2>/dev/null && signalled=$((signalled+1))
     done
     echo "    L3 self-execv: SIGTERM'd $signalled session pids"
+    verify_l3_adoption
   fi
 else
   echo "==> running app already matches this build"
