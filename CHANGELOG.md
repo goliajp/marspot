@@ -28,7 +28,36 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.132**
+Current: **0.7.134**
+
+### 0.7.134
+
+The markup declaration is re-issued every tick, like a badge.
+
+It was issued once per pane, and the once landed in the gap a session
+image swap opens: L1 declared 1.4 s after the L3s were signalled, their
+control connections were mid-rebuild, and the frame was dropped.  No
+pane ever heard it — the feature shipped and did nothing.
+
+A badge survives that because its plugin re-issues it every tick, so a
+dropped frame costs a tick.  This now does the same: one nine-byte
+frame every two seconds per codex pane, and an L3 that receives the
+same value twice does nothing with the second.
+
+### 0.7.133
+
+The codex plugin declares that its pane's program prints markup it
+does not render (`PaneRenderMarkup`, msg 80).
+
+codex does not render HTML, so a model that writes `<u>…</u>` has its
+markup arrive on screen as text.  Whose output should be read that way
+is not a property of the terminal — it belongs to the pane, and only
+the plugin driving a program knows the program does not render its own
+HTML.  As a global setting it ate the tags out of the conversation
+specifying the feature.
+
+Declared when codex is recognised, withdrawn when it exits, and
+replayed on every core handshake for the reason the wheel keys are.
 
 ### 0.7.132
 
@@ -2846,7 +2875,34 @@ F2+2a claudecode 插件 `attach_raw_only` 永久 Unsupported 之后插 `monitor_
 
 ## L2  marspot-core
 
-Current: **0.12.178**
+Current: **0.12.180**
+
+### 0.12.180
+
+`PaneRenderMarkup` is forwarded to the pane's own L3.
+
+L2 does not act on it: the terminal that would draw the markup lives in
+L3, and L2's grid is a mirror of what L3 publishes.  A declaration that
+names a session with no pane here is logged rather than dropped — it is
+re-sent every tick, so a steady stream of those would mean the sid the
+plugin uses and the one the pane answers to have drifted apart.
+
+### 0.12.179
+
+The wheel believes the program over the screen (DEC 1007).
+
+Entering codex's transcript reads `?1049h · ?1007h · CSI J · ?2026h`.
+`?1007` is alternate scroll mode — "on this screen the wheel is the
+arrow keys" — which is xterm's name for exactly the question three
+rounds of scanning its heading for `/TRANSCRIPT/` were trying to
+answer.  Inference lost three times, most recently to letter-spacing.
+
+`view_is_open` now takes the program's own statement first and falls
+back to the marker for programs that never learned to say it.
+
+Not a new capability: `less` and `man` already got the wheel through
+the alt-screen route (0.12.169).  What is new is that the answer is
+stated rather than guessed.
 
 ### 0.12.178
 
@@ -5564,7 +5620,112 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.61**
+Current: **0.11.71**
+
+### 0.11.71
+
+The image probe is bounded, and a wedged one can be retried.
+
+A pane could sit on an old image forever, silently, from two holes at
+once.  `can_start` waited on `.status()` with no deadline — and the
+caller reads "probe outstanding" as "this signal is already handled",
+so one probe that never answers does not delay a check, it retires that
+pane's self-update for good.  And the flag was cleared only when a
+probe FAILED, so a probe that never returned left it set.
+
+The probe now gives up after 20 s and says so; the flag became a
+timestamp, and a probe with no answer after 45 s may be started again
+(`l3.execv.probe_stuck`).
+
+The first test written for this was green and proved nothing:
+`/bin/sleep --version` rejects the argument and exits at once, taking
+the answered-non-zero path.  It now runs a script that genuinely hangs,
+against an injected deadline — 0.30 s instead of 0.03 s, through the
+branch that matters.
+
+### 0.11.70
+
+`PaneResetAttrs` — put a pane's pen back to plain.
+
+A style belongs to the program that set it, and normally that program
+or the shell's next prompt turns it off.  A full-screen program can run
+for hours emitting no `CSI 0 m` at all, so a style switched on by
+anything ELSE rides every new cell until the program exits.  Telling
+someone to quit their session is not a fix.
+
+### 0.11.69
+
+A style left on by a dead program does not reach the new shell.
+
+`reset_process_owned_modes` already clears mouse reporting, bracketed
+paste and application cursor keys on the grounds that the program which
+set them is gone.  SGR attributes are the same debt and worse in one
+way: a mode usually meets a prompt that turns it off, a style can ride
+every new cell for hours.
+
+### 0.11.68
+
+The probe says why it failed.
+
+It compressed "the binary answered non-zero" and "the system refused to
+spawn it" into one `false`, and only the first means the image is bad.
+Every L3 refused a perfectly good image for half an hour and the log
+said `could not start`.
+
+### 0.11.67
+
+The markup declaration logs the change, not the heartbeat.
+
+### 0.11.66
+
+`<u>…</u>` is drawn only where a plugin says the program prints markup
+it does not render (`MsgType::PaneRenderMarkup`).
+
+As a global setting this ate `<u>` out of any conversation about
+markup — which is what a terminal is often for.  `appearance
+.render_u_tags` remains as a manual override and defaults off.
+
+### 0.11.65
+
+`<u>` rendering defaults off.
+
+The cost was larger than "someone cats an HTML file": switched on
+globally it ate the tags out of the conversation specifying the
+feature, including the user's own words coming back on screen.
+
+### 0.11.64
+
+Only a MATCHED `<u>…</u>` styles anything.
+
+Turning underline on at the opening tag underlines everything after an
+unmatched one — and text that merely mentions the tag is most of any
+conversation about this feature, so within minutes a whole pane came
+back underlined.
+
+The span is withheld until `</u>` arrives.  If it never does — a line
+feed, an escape sequence, or more than 1 KiB — the opening tag and
+everything after it are printed exactly as they came, which is the
+behaviour from before the feature existed.  A matched pair occupies no
+cells.
+
+### 0.11.63
+
+`<u>…</u>` drawn as underline (`appearance.render_u_tags`).
+
+Not a terminal convention — a concession to what the models on the
+other end emit.  Recognised on the character path, not over the byte
+stream: a byte pass cannot tell text from the inside of an escape
+sequence, and `CSI < u` carries the same characters.
+
+### 0.11.62
+
+DEC 1007 (alternate scroll) is honoured and published to L2.
+
+The mode is the program stating that on this screen the wheel is the
+arrow keys.  Carried across an execv, because a program says it once on
+entering a view it is still in — and a pane whose plugin enters with a
+TOGGLE would otherwise press that toggle on an open view and shut it.
+Cleared on leaving the alternate screen and on process handover.
 
 ### 0.11.61
 
