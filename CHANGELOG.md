@@ -5533,7 +5533,42 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.60**
+Current: **0.11.61**
+
+### 0.11.61
+
+A completely blank screen waits 50 ms before it is shown.
+
+This is the black flash on opening codex's transcript, and it was NOT
+what synchronized output fixed.  Reading the bytes shows why:
+
+    CSI ? 2026 l   ← the previous frame's batch closes
+    CSI J          ← the screen is wiped, outside any batch
+    CSI ? 2026 h   ← only now does the transcript's batch open
+
+codex wipes the screen OUTSIDE the batch it uses to protect the
+repaint.  We publish once per PTY read, the wipe and the paint arrive
+in separate reads, and the empty grid between them reached the display.
+iTerm2 does not flash because it presents on a display cadence, so a
+wipe and the repaint a millisecond later land in the same shown frame.
+
+A COMPLETELY blank screen is almost always in transit — a repaint under
+way, or a `clear` about to be followed by a prompt — so it waits.  If
+content arrives it is published instead and the blank frame is never
+seen; if the screen really is meant to be empty it goes out 50 ms
+later, which nobody can perceive.  The test is "not one printable
+cell", which no screen with content passes.
+
+Measured on a live codex, dense screen, opening the transcript:
+
+    before   38% → 0% → 44%    one frame fully blank
+    after    38% → 44% → 44%   emptiest frame 38.1%, none under 10%
+
+and the same on the way back out.  A withheld frame is *owed* until
+something is published, so a program that wipes the screen and then
+goes quiet cannot leave the pane showing what it wiped; the debt clears
+on discharge, so a quiet pane still sleeps (idle CPU measured 0.0% for
+core and session).
 
 ### 0.11.60
 

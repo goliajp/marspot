@@ -29,4 +29,4 @@
 
 shell   = "0.7.132"  # codex 滚轮改用逐行方向键,一格不再翻一屏;详见 CHANGELOG.md
 core    = "0.12.177"  # 帧提交后不再阻塞主循环,完成后才 flip + SurfaceReady;详见 CHANGELOG.md
-session = "0.11.60"  # 支持 DEC 2026 同步输出,整帧画完再上屏;详见 CHANGELOG.md
+session = "0.11.61"  # 全空的画面压 50ms —— codex 把清屏放在同步批次外面;详见 CHANGELOG.md

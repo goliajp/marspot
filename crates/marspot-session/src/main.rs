@@ -948,6 +948,14 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
 #[derive(Default)]
 struct SyncGate {
     since: Option<std::time::Instant>,
+    /// A frame was withheld and nothing has been published since.
+    ///
+    /// The loop only publishes when bytes arrive, so without this a
+    /// program that draws and then goes quiet would leave its last
+    /// frame withheld forever.  Cleared by the publish that discharges
+    /// it, so a quiet pane goes back to sleeping — idle CPU is a hard
+    /// constraint and a permanently-armed timer would break it.
+    owed: bool,
 }
 
 impl SyncGate {
@@ -965,7 +973,7 @@ impl SyncGate {
             self.since = None;
             return false;
         }
-        match self.since {
+        let held = match self.since {
             None => {
                 self.since = Some(now);
                 true
@@ -973,8 +981,98 @@ impl SyncGate {
             // Kept open too long — show what we have and stop holding
             // for this update; the closing `l` resets us.
             Some(t) => now.duration_since(t) < Self::MAX_HOLD,
+        };
+        self.owed |= held;
+        held
+    }
+
+    /// Does a withheld frame still need publishing?
+    fn owes_a_frame(&self) -> bool {
+        self.owed
+    }
+
+    /// A publish went out; nothing is owed until something is held again.
+    fn discharged(&mut self) {
+        self.owed = false;
+    }
+}
+
+/// Holds a screen that has just been wiped, in case it is a repaint.
+///
+/// codex clears the screen OUTSIDE its synchronized batch — measured,
+/// the bytes read `… CSI ? 2026 l · CSI J · CSI ? 2026 h · <paint> …`
+/// — so the wipe lands in an unprotected moment.  We publish once per
+/// PTY read, the two arrive in separate reads, and the empty grid
+/// between them reaches the display: opening codex's transcript showed
+/// a fully blank screen between the old content and the new one
+/// (measured as a `38% → 0% → 44%` fill sequence, and reported as
+/// "切入 history 会黑屏").  iTerm2 does not flash because it presents
+/// on a display cadence, so a wipe and the repaint a millisecond later
+/// land in the same shown frame.
+///
+/// A COMPLETELY blank screen is almost always in transit — a repaint
+/// under way, or a `clear` about to be followed by a prompt.  So it
+/// waits briefly: if content arrives it is published instead and the
+/// blank frame is never seen, and if the screen really is meant to be
+/// empty it goes out `MAX_HOLD` later, which nobody can perceive.
+///
+/// The test is "not one printable cell", which no screen with content
+/// passes, and the scan leaves on the first such cell — so the cost
+/// falls on blank screens, which are the rare ones.
+#[derive(Default)]
+struct BlankGate {
+    since: Option<std::time::Instant>,
+    /// See `SyncGate::owed`.
+    owed: bool,
+}
+
+impl BlankGate {
+    /// Long enough to cover the gap between a wipe and its repaint,
+    /// short enough that a screen genuinely meant to be blank appears
+    /// at once as far as anyone can tell.
+    const MAX_HOLD: std::time::Duration = std::time::Duration::from_millis(50);
+
+    fn hold(&mut self, blank: bool) -> bool {
+        self.hold_at(blank, std::time::Instant::now())
+    }
+
+    fn hold_at(&mut self, blank: bool, now: std::time::Instant) -> bool {
+        if !blank {
+            self.since = None;
+            return false;
+        }
+        let held = match self.since {
+            None => {
+                self.since = Some(now);
+                true
+            }
+            Some(t) => now.duration_since(t) < Self::MAX_HOLD,
+        };
+        self.owed |= held;
+        held
+    }
+
+    /// See `SyncGate::owes_a_frame`.
+    fn owes_a_frame(&self) -> bool {
+        self.owed
+    }
+
+    fn discharged(&mut self) {
+        self.owed = false;
+    }
+}
+
+/// Does the visible grid hold nothing a viewer could see?
+fn grid_is_blank(grid: &marspot_term::grid::Grid) -> bool {
+    for row in 0..grid.rows() {
+        for col in 0..grid.cols() {
+            let ch = grid.cell(col, row).ch;
+            if ch != ' ' && ch != '\0' {
+                return false;
+            }
         }
     }
+    true
 }
 
 /// Publish the grid and, if connected to L2, poke it so it re-reads the
@@ -984,6 +1082,7 @@ fn publish_and_poke(
     session: &mut SessionImpl,
     view_offset: u16,
     gate: &mut SyncGate,
+    blank_gate: &mut BlankGate,
     mut poke: Option<&mut ControlWriter>,
 ) {
     // Withheld frames are not lost: the bytes are already in the grid,
@@ -992,6 +1091,11 @@ fn publish_and_poke(
     if gate.hold(session.terminal().sync_output_active()) {
         return;
     }
+    if blank_gate.hold(grid_is_blank(session.terminal().grid())) {
+        return;
+    }
+    gate.discharged();
+    blank_gate.discharged();
     let changed = publish(shm, session, view_offset);
     // F3+3.6 — OSC 7 push-based cwd publish removed; L2 now pull-
     // fetches cwd via `proc_pidinfo` when the user opens LayoutModal.
@@ -1108,6 +1212,7 @@ fn main() {
     // has to fit the region (a mismatch would overflow the mapping).
     let (mut shm, cols, rows) = setup_shm();
     let mut sync_gate = SyncGate::default();
+    let mut blank_gate = BlankGate::default();
 
     // Phase 2c: when we own the PTY, also own the UDS control socket
     // + registry entry so L2 (Phase 3) can discover us after a swap.
@@ -1399,7 +1504,7 @@ fn main() {
     // bump so the two sides stay in lockstep without an extra
     // forward_scroll round-trip.
     let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
-    publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
+    publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1540,7 +1645,18 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
     let mut last_settings_check = Instant::now();
     const SETTINGS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
     loop {
-        let first = match ev_rx.recv_timeout(Duration::from_secs(5)) {
+        // A gate that is holding a frame owes a flush even if the PTY
+        // has gone quiet: without this, a program that wipes the
+        // screen and then says nothing would leave the pane showing
+        // the content it wiped, forever.  Both gates release inside
+        // their own cap, so waking a little sooner than the shorter
+        // one is enough.
+        let wait = if sync_gate.owes_a_frame() || blank_gate.owes_a_frame() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_secs(5)
+        };
+        let first = match ev_rx.recv_timeout(wait) {
             Ok(ev) => Some(ev),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => {
@@ -1977,6 +2093,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                                 &mut session,
                                 view_offset,
                                 &mut sync_gate,
+                                &mut blank_gate,
                                 poke.as_mut(),
                             );
                             lx_event!(
@@ -2006,7 +2123,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             watch.phase("resize-pump");
             let _ = session.pump();
             watch.phase("resize-publish");
-            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
             break;
         }
         let resized = pending_resize.is_some();
@@ -2068,14 +2185,23 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         last_scroll_push = cur_scroll_push;
         if session.is_exited() {
             session.pump();
-            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
             lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
             break;
         }
         // Republish on PTY output, a local echo that painted ahead of it,
         // a resize (grid shape changed), or a scroll (window changed) —
         // even when no bytes pumped this tick.
-        if n > 0 || predicted || resized || scrolled || modes_changed {
+        if n > 0
+            || predicted
+            || resized
+            || scrolled
+            || modes_changed
+            // A frame is being withheld; this tick is what discharges
+            // it once its gate's cap has run out.
+            || sync_gate.owes_a_frame()
+            || blank_gate.owes_a_frame()
+        {
             if scrolled {
                 lx_event!(
                     "L3_PUBLISH",
@@ -2086,7 +2212,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 );
             }
             watch.phase("publish");
-            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, &mut blank_gate, poke.as_mut());
         }
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
@@ -2672,5 +2798,54 @@ mod sync_gate_tests {
         let t1 = t0 + Duration::from_secs(5);
         assert!(g.hold_at(true, t1), "a later update starts a fresh hold");
         assert!(g.hold_at(true, t1 + Duration::from_millis(20)));
+    }
+}
+
+#[cfg(test)]
+mod blank_gate_tests {
+    use super::BlankGate;
+    use std::time::{Duration, Instant};
+
+    /// The wipe that precedes a repaint must not be shown.  codex
+    /// clears the screen OUTSIDE its synchronized batch, so the blank
+    /// grid between the wipe and the paint is what reached the display
+    /// as a black flash.
+    #[test]
+    fn a_wipe_followed_by_a_repaint_is_never_shown() {
+        let t0 = Instant::now();
+        let mut g = BlankGate::default();
+        assert!(g.hold_at(true, t0), "the blank screen waits");
+        assert!(
+            !g.hold_at(false, t0 + Duration::from_millis(3)),
+            "the repaint publishes instead, and the blank is never seen"
+        );
+    }
+
+    /// A screen that really is meant to be blank still appears.
+    #[test]
+    fn a_screen_meant_to_be_blank_still_appears() {
+        let t0 = Instant::now();
+        let mut g = BlankGate::default();
+        assert!(g.hold_at(true, t0));
+        assert!(!g.hold_at(true, t0 + BlankGate::MAX_HOLD));
+        assert!(
+            !g.hold_at(true, t0 + BlankGate::MAX_HOLD + Duration::from_secs(9)),
+            "and it must not start waiting all over again"
+        );
+    }
+
+    /// A withheld frame is owed until something is published, or a
+    /// program that wipes the screen and goes quiet would leave the
+    /// pane showing what it wiped.  The debt clears on discharge so a
+    /// quiet pane goes back to sleep — idle CPU is a hard constraint.
+    #[test]
+    fn a_withheld_frame_is_owed_until_it_is_published() {
+        let t0 = Instant::now();
+        let mut g = BlankGate::default();
+        assert!(!g.owes_a_frame(), "nothing held, nothing owed");
+        g.hold_at(true, t0);
+        assert!(g.owes_a_frame());
+        g.discharged();
+        assert!(!g.owes_a_frame(), "a quiet pane must not keep a timer alive");
     }
 }
