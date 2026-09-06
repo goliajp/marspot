@@ -21,16 +21,27 @@ use super::{LogLevel, Plugin, PluginError, PluginHost, PluginMetadata, Permissio
 use crate::plugins::pidtree;
 
 /// How the wheel reaches codex.  Verified by injecting into a real
-/// pty: `PageUp` alone changes nothing, `Ctrl+T` opens the transcript,
-/// and `PageUp`/`PageDown` page it from there.
+/// pty: `Ctrl+T` opens the transcript, and from there codex takes both
+/// `↑`/`↓` (one line) and `PgUp`/`PgDn` (one screen).
+///
+/// The wheel maps to the LINE keys, not the page keys.  A wheel notch
+/// means a few lines — the caller already turns the trackpad's pixels
+/// and the mouse's notches into an accelerated line count — so paging
+/// per notch threw away a whole screen for one flick of the finger
+/// (2026-09-06: "我们一下就滚一屏", against iTerm2 scrolling line by
+/// line with acceleration).
+///
+/// Plain `CSI A`, not `SS3 A`: codex never turns on application cursor
+/// keys (`CSI ? 1 h` appears zero times in a full session's byte log),
+/// so the normal-mode encoding is the one it reads.
 ///
 /// `Ctrl+T` is a TOGGLE — measured, a second one closes the view — so
 /// L2 must never send it blind.  `WHEEL_MARKER` is the rule codex
 /// draws across the top of that view (it survives paging), letting L2
 /// read the state off the screen instead of remembering it.
 const WHEEL_ENTER: &[u8] = b"\x14";
-const WHEEL_UP: &[u8] = b"\x1b[5~";
-const WHEEL_DOWN: &[u8] = b"\x1b[6~";
+const WHEEL_UP: &[u8] = b"\x1b[A";
+const WHEEL_DOWN: &[u8] = b"\x1b[B";
 const WHEEL_MARKER: &[u8] = b"/TRANSCRIPT/";
 
 

@@ -27,6 +27,6 @@
 # commit message and in CHANGELOG.md.  Do NOT keep appending to this
 # line — that grew to ~25 KB before and ate `git diff` readability.
 
-shell   = "0.7.131"  # 滚轮声明只发一次,L1 现在记住并在每次 core 握手时重放;详见 CHANGELOG.md
+shell   = "0.7.132"  # codex 滚轮改用逐行方向键,一格不再翻一屏;详见 CHANGELOG.md
 core    = "0.12.176"  # 只有向上滚才打开滚动视图,向下滚在关闭态归 pane 自己;详见 CHANGELOG.md
-session = "0.11.59"  # 发布 FLAG_ALT_SCREEN,让 L2 能区分全屏 TUI 与空 scrollback 的 shell;详见 CHANGELOG.md
+session = "0.11.60"  # 支持 DEC 2026 同步输出,整帧画完再上屏;详见 CHANGELOG.md

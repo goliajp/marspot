@@ -934,14 +934,64 @@ fn spawn_control_reader(mut reader: UnixStream, tx: Sender<SessionEvent>, genera
     });
 }
 
+/// Holds frames while a program is drawing one (DEC mode 2026).
+///
+/// `CSI ? 2026 h` means "I am about to repaint; do not show anyone
+/// what is on the way".  Publishing mid-update is what makes a full
+/// repaint flash: codex brackets every frame this way, and opening its
+/// transcript went black on us while iTerm2, which honours the mode,
+/// did not (2026-09-06).
+///
+/// The terminal cannot make a program close what it opened, so the
+/// hold is bounded.  A frame withheld for longer than `MAX_HOLD` goes
+/// out anyway: a torn frame is a blemish, a frozen pane is a bug.
+#[derive(Default)]
+struct SyncGate {
+    since: Option<std::time::Instant>,
+}
+
+impl SyncGate {
+    /// Generous next to a repaint (codex writes ~13 KB per frame) and
+    /// still under the ~200 ms where a stall stops reading as "fast".
+    const MAX_HOLD: std::time::Duration = std::time::Duration::from_millis(150);
+
+    /// Should this frame be withheld?  Call once per publish.
+    fn hold(&mut self, active: bool) -> bool {
+        self.hold_at(active, std::time::Instant::now())
+    }
+
+    fn hold_at(&mut self, active: bool, now: std::time::Instant) -> bool {
+        if !active {
+            self.since = None;
+            return false;
+        }
+        match self.since {
+            None => {
+                self.since = Some(now);
+                true
+            }
+            // Kept open too long — show what we have and stop holding
+            // for this update; the closing `l` resets us.
+            Some(t) => now.duration_since(t) < Self::MAX_HOLD,
+        }
+    }
+}
+
 /// Publish the grid and, if connected to L2, poke it so it re-reads the
 /// shm — keeps L2 event-driven instead of polling per frame.
 fn publish_and_poke(
     shm: &mut GridShmWriter,
     session: &mut SessionImpl,
     view_offset: u16,
+    gate: &mut SyncGate,
     mut poke: Option<&mut ControlWriter>,
 ) {
+    // Withheld frames are not lost: the bytes are already in the grid,
+    // and the publish that follows the closing `l` carries all of them
+    // at once — which is the whole point of the mode.
+    if gate.hold(session.terminal().sync_output_active()) {
+        return;
+    }
     let changed = publish(shm, session, view_offset);
     // F3+3.6 — OSC 7 push-based cwd publish removed; L2 now pull-
     // fetches cwd via `proc_pidinfo` when the user opens LayoutModal.
@@ -1057,6 +1107,7 @@ fn main() {
     // drive the session at exactly those dims, since the grid we publish
     // has to fit the region (a mismatch would overflow the mapping).
     let (mut shm, cols, rows) = setup_shm();
+    let mut sync_gate = SyncGate::default();
 
     // Phase 2c: when we own the PTY, also own the UDS control socket
     // + registry entry so L2 (Phase 3) can discover us after a swap.
@@ -1348,7 +1399,7 @@ fn main() {
     // bump so the two sides stay in lockstep without an extra
     // forward_scroll round-trip.
     let mut last_scroll_push: u64 = session.terminal().grid().scroll_push_count();
-    publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
+    publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
 
     // RFC-002 §4 (architectural correction over earlier step 6):
     // shelld (L4) owns the Terminal SoT now.  L3 no longer pushes
@@ -1925,6 +1976,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                                 &mut shm,
                                 &mut session,
                                 view_offset,
+                                &mut sync_gate,
                                 poke.as_mut(),
                             );
                             lx_event!(
@@ -1954,7 +2006,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
             watch.phase("resize-pump");
             let _ = session.pump();
             watch.phase("resize-publish");
-            publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
             break;
         }
         let resized = pending_resize.is_some();
@@ -2016,7 +2068,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
         last_scroll_push = cur_scroll_push;
         if session.is_exited() {
             session.pump();
-            publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
             lx_event!("SESSION_EXITED", "shelld session exited; exiting cleanly");
             break;
         }
@@ -2034,7 +2086,7 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                 );
             }
             watch.phase("publish");
-            publish_and_poke(&mut shm, &mut session, view_offset, poke.as_mut());
+            publish_and_poke(&mut shm, &mut session, view_offset, &mut sync_gate, poke.as_mut());
         }
 
         // RFC-002 §8 (step 8b — fetch side): drain any ScrollbackPage
@@ -2572,5 +2624,53 @@ mod b3_tests {
             "only B's qid should land in the dispatch sink; got {delivered:?}"
         );
         let _ = line_of; // silence dead-helper lint
+    }
+}
+
+#[cfg(test)]
+mod sync_gate_tests {
+    use super::SyncGate;
+    use std::time::{Duration, Instant};
+
+    /// The frames between `h` and `l` are held, and the one after `l`
+    /// goes out carrying all of them — that is the mode's whole point.
+    #[test]
+    fn frames_are_held_for_the_length_of_an_update() {
+        let t0 = Instant::now();
+        let mut g = SyncGate::default();
+        assert!(!g.hold_at(false, t0), "nothing to hold before the update");
+        assert!(g.hold_at(true, t0));
+        assert!(g.hold_at(true, t0 + Duration::from_millis(20)));
+        assert!(
+            !g.hold_at(false, t0 + Duration::from_millis(25)),
+            "the closing `l` releases the frame"
+        );
+    }
+
+    /// A program that never closes its update must not freeze the pane:
+    /// a torn frame is a blemish, a frozen pane is a bug.
+    #[test]
+    fn an_update_left_open_stops_holding() {
+        let t0 = Instant::now();
+        let mut g = SyncGate::default();
+        assert!(g.hold_at(true, t0));
+        assert!(g.hold_at(true, t0 + SyncGate::MAX_HOLD - Duration::from_millis(1)));
+        assert!(!g.hold_at(true, t0 + SyncGate::MAX_HOLD));
+        assert!(
+            !g.hold_at(true, t0 + SyncGate::MAX_HOLD + Duration::from_secs(9)),
+            "once it has given up it must not start holding again"
+        );
+    }
+
+    /// The next update after a release gets its own full budget.
+    #[test]
+    fn each_update_is_timed_from_its_own_start() {
+        let t0 = Instant::now();
+        let mut g = SyncGate::default();
+        assert!(g.hold_at(true, t0));
+        assert!(!g.hold_at(false, t0 + Duration::from_millis(10)));
+        let t1 = t0 + Duration::from_secs(5);
+        assert!(g.hold_at(true, t1), "a later update starts a fresh hold");
+        assert!(g.hold_at(true, t1 + Duration::from_millis(20)));
     }
 }

@@ -28,7 +28,20 @@ the regression — the entry belongs in this file.
 
 ## L1  marspot-shell
 
-Current: **0.7.131**
+Current: **0.7.132**
+
+### 0.7.132
+
+Codex's wheel maps to the LINE keys, not the page keys.
+
+`WHEEL_UP`/`WHEEL_DOWN` were `PgUp`/`PgDn`, so one flick of a finger
+threw away a whole screen.  The caller already turns a trackpad's
+pixels and a mouse's notches into an accelerated line count; handing
+that to `CSI A`/`CSI B` is what iTerm2 does, and what "一行行带加速"
+means.
+
+Plain `CSI A`, not `SS3 A`: codex never turns on application cursor
+keys — `CSI ? 1 h` appears zero times across a full session's byte log.
 
 ### 0.7.131
 
@@ -5482,7 +5495,30 @@ F3+2.1 pane title placeholder 改成被动 OSC 7 链.之前 F3+2 是每帧 proc_
 
 ## L3  marspot-session
 
-Current: **0.11.59**
+Current: **0.11.60**
+
+### 0.11.60
+
+DEC mode 2026 — synchronized output — is honoured.
+
+A program brackets a repaint with `CSI ? 2026 h` … `l` to say "do not
+show anyone what is on the way".  It was on the explicit accept-and-
+ignore list.  codex uses it for every frame — 8,493 pairs in one
+session's byte log — and so do most modern TUIs.
+
+Frames are now withheld between the two, under a 150 ms cap: the
+terminal cannot make a program close what it opened, and a torn frame
+is a blemish while a frozen pane is a bug.  A dangling update is also
+cleared on process handover, so a program that dies mid-repaint cannot
+hold the next one's first frame hostage.
+
+Measured honestly: on a short repaint this changes nothing observable
+(one PTY read already carried the whole frame, and `publish_if_changed`
+already collapsed it into a single publish — 3 published screens either
+way).  It earns its place on frames that span several reads, which is
+where a tall pane on a loaded machine lives.  It is NOT the cause of
+the black flash reported when opening codex's transcript; that remains
+open.
 
 ### 0.11.59
 

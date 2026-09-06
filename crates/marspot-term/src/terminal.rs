@@ -143,6 +143,19 @@ pub struct Terminal {
     /// auto-inserts spaces between CJK characters — the "粘贴中文都
     /// 多了空格" symptom.
     bracketed_paste_mode: bool,
+    /// DEC mode 2026 — synchronized output.
+    ///
+    /// A program brackets a whole repaint with `CSI ? 2026 h` … `l` to
+    /// say "do not show anyone a half-drawn screen".  codex uses it for
+    /// every frame (8,493 pairs in one session's byte log); without it
+    /// the intermediate states reach the display and opening its
+    /// transcript flashes black (2026-09-06, against iTerm2 which
+    /// honours the mode).
+    ///
+    /// This is only the state.  The clock lives with whoever presents:
+    /// a program that never closes its update must not freeze the pane,
+    /// so the publisher holds frames under a timeout.
+    sync_output: bool,
     /// DEC mode 25 (DECTCEM) — when false, the renderer hides the cursor.
     cursor_visible: bool,
     /// DEC mode 1000 (X11) / 1002 (button-event) / 1003 (any-event) —
@@ -271,6 +284,7 @@ impl Terminal {
             response_burst_last_warn: None,
             cursor_key_application_mode: false,
             bracketed_paste_mode: false,
+            sync_output: false,
             cursor_visible: true,
             mouse_tracking_mode: MouseTrackingMode::Off,
             mouse_sgr_encoding: false,
@@ -335,6 +349,15 @@ impl Terminal {
         self.bracketed_paste_mode
     }
 
+    /// Is a synchronized update open (`CSI ? 2026 h` with no `l` yet)?
+    ///
+    /// The presenter should hold the frame while this is true — under
+    /// its own timeout, since the terminal cannot make a program close
+    /// what it opened.
+    pub fn sync_output_active(&self) -> bool {
+        self.sync_output
+    }
+
     /// Forget the modes that belong to the process that was running,
     /// keeping everything that belongs to the *content*.
     ///
@@ -354,6 +377,9 @@ impl Terminal {
         self.mouse_tracking_mode = MouseTrackingMode::Off;
         self.mouse_sgr_encoding = false;
         self.bracketed_paste_mode = false;
+        // A dead program cannot close its update; leaving this set
+        // would hold the next program's first frame hostage.
+        self.sync_output = false;
         self.cursor_key_application_mode = false;
         // A new shell starts with a visible cursor; a TUI that hid it
         // is gone.
@@ -528,6 +554,7 @@ impl Terminal {
             let response_burst_last_warn = &mut self.response_burst_last_warn;
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
+            let sync_output = &mut self.sync_output;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -543,6 +570,7 @@ impl Terminal {
                 response_burst_last_warn,
                 cursor_key_app_mode,
                 bracketed_paste,
+                sync_output,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -670,6 +698,7 @@ impl Terminal {
             let response_burst_last_warn = &mut self.response_burst_last_warn;
             let cursor_key_app_mode = &mut self.cursor_key_application_mode;
             let bracketed_paste = &mut self.bracketed_paste_mode;
+            let sync_output = &mut self.sync_output;
             let cursor_visible = &mut self.cursor_visible;
             let mouse_tracking_mode = &mut self.mouse_tracking_mode;
             let mouse_sgr_encoding = &mut self.mouse_sgr_encoding;
@@ -685,6 +714,7 @@ impl Terminal {
                 response_burst_last_warn,
                 cursor_key_app_mode,
                 bracketed_paste,
+                sync_output,
                 cursor_visible,
                 mouse_tracking_mode,
                 mouse_sgr_encoding,
@@ -1690,6 +1720,8 @@ struct Handler<'a> {
     response_burst_last_warn: &'a mut Option<Instant>,
     cursor_key_app_mode: &'a mut bool,
     bracketed_paste: &'a mut bool,
+    /// DEC 2026 — see `Terminal::sync_output`.
+    sync_output: &'a mut bool,
     cursor_visible: &'a mut bool,
     mouse_tracking_mode: &'a mut MouseTrackingMode,
     mouse_sgr_encoding: &'a mut bool,
@@ -2319,7 +2351,6 @@ impl<'a> Handler<'a> {
             // see them.
             //   1000 / 1002 / 1003 / 1006 / 1015 — mouse reporting modes
             //   1004                — focus reporting in/out events
-            //   2026                — synchronized output (begin/end batch)
             //   2031                — color scheme update notifications
             // 1000 / 1002 / 1003 — mouse reporting modes:claudecode 等
             // TUI 进 alt-screen 后 set 这些 + 1006(SGR encoding),期望
@@ -2330,8 +2361,13 @@ impl<'a> Handler<'a> {
             1002 => *self.mouse_tracking_mode = if set { MouseTrackingMode::ButtonEvent } else { MouseTrackingMode::Off },
             1003 => *self.mouse_tracking_mode = if set { MouseTrackingMode::AnyEvent } else { MouseTrackingMode::Off },
             1006 => *self.mouse_sgr_encoding = set,
-            // 1015 / 1004 / 2026 / 2031 — silently accept but no-op.
-            1015 | 1004 | 2026 | 2031 => {}
+            // DEC 2026 — synchronized output.  `h` opens a batch, `l`
+            // closes it; the presenter holds frames in between so a
+            // half-drawn screen is never shown.  See
+            // `Terminal::sync_output`.
+            2026 => *self.sync_output = set,
+            // 1015 / 1004 / 2031 — silently accept but no-op.
+            1015 | 1004 | 2031 => {}
             _ => {} // unhandled DEC private mode — silently skip
         }
     }
@@ -5251,5 +5287,36 @@ mod tests {
         t.resize(9, 8);
         t.resize(20, 8);
         assert_eq!(logical_text(&t), before);
+    }
+}
+
+#[cfg(test)]
+mod sync_output_tests {
+    use super::Terminal;
+
+    /// DEC 2026 opens and closes a batch.  codex brackets every frame
+    /// with it; treating it as a no-op is what let half-drawn screens
+    /// reach the display.
+    #[test]
+    fn dec_2026_opens_and_closes_a_synchronized_update() {
+        let mut t = Terminal::new(20, 4);
+        assert!(!t.sync_output_active());
+        t.feed(b"\x1b[?2026h");
+        assert!(t.sync_output_active());
+        t.feed(b"hello");
+        assert!(t.sync_output_active(), "content inside the batch keeps it open");
+        t.feed(b"\x1b[?2026l");
+        assert!(!t.sync_output_active());
+    }
+
+    /// A program that dies mid-update must not hold the next one's
+    /// first frame hostage.
+    #[test]
+    fn a_process_handover_clears_a_dangling_update() {
+        let mut t = Terminal::new(20, 4);
+        t.feed(b"\x1b[?2026h");
+        assert!(t.sync_output_active());
+        t.reset_process_owned_modes();
+        assert!(!t.sync_output_active());
     }
 }
