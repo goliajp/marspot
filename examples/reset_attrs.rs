@@ -32,5 +32,9 @@ fn main() {
         .write_to(&mut ctl)
         .expect("send");
     ctl.flush().ok();
+    // Hold the socket open long enough for the frame to be read.
+    // Closing straight after the write races L3's reader, which sees
+    // the EOF and tears the client down with the frame still in it.
+    std::thread::sleep(std::time::Duration::from_millis(500));
     println!("session {sid}: pen reset");
 }
