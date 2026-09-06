@@ -620,6 +620,27 @@ if (( STAGED )); then
     sleep 0.5
   done
   echo "    applied.  $(tail -1 "$SUP_LOG" 2>/dev/null)"
+
+  # A silent update swaps L1 and L2.  It does NOT swap the L3s that
+  # are already running: the new core promotes pending/marspot-session
+  # into current/, so only panes spawned AFTER this point get the new
+  # image, and every existing pane keeps the old one for as long as it
+  # lives.  Measured 2026-09-06: L3s from two days earlier were still
+  # serving every pane, so two session-layer fixes had never once run
+  # on the machine they were installed on — and the report they were
+  # meant to close ("进 history 还是会闪黑") was correct.
+  #
+  # Same mechanism the session-only fast path above uses, and it is
+  # lossless: each L3 compares its own fingerprint against current/
+  # and either execv's into the new image carrying its PTY across, or
+  # clean-exits for L2 to respawn.  No PTY is restarted either way.
+  if (( SESSION_CHANGED )); then
+    signalled=0
+    for pid in $(pgrep -f marspot-session 2>/dev/null); do
+      kill -TERM "$pid" 2>/dev/null && signalled=$((signalled+1))
+    done
+    echo "    L3 self-execv: SIGTERM'd $signalled session pids"
+  fi
 else
   echo "==> running app already matches this build"
 fi
