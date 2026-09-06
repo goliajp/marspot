@@ -1770,12 +1770,16 @@ const PERIODIC_SNAPSHOT_TAIL_CAP: usize = 256;
                     predicted |= handle_key(&mut session, e, m)
                 }
                 SessionEvent::RenderMarkup(on) => {
-                    lx_event!(
-                        "L3_RENDER_MARKUP",
-                        "a plugin declared this pane's program prints unrendered markup",
-                        session_id = session.id(),
-                        on = on as u32
-                    );
+                    // Re-sent every tick by design (see the codex
+                    // plugin), so log the CHANGE, not the heartbeat.
+                    if session.terminal().render_markup() != on {
+                        lx_event!(
+                            "L3_RENDER_MARKUP",
+                            "a plugin declared this pane's program prints unrendered markup",
+                            session_id = session.id(),
+                            on = on as u32
+                        );
+                    }
                     session.terminal_mut().set_render_markup(on);
                 }
                 SessionEvent::HoldGrid(on) => {

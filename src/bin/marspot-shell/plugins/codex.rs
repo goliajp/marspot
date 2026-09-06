@@ -195,14 +195,23 @@ impl Plugin for CodexPlugin {
                 // remembered flag going stale would shut the transcript
                 // instead of opening it (2026-09-06: after leaving the
                 // view, scrolling could not get back in).
+                // codex does not render HTML, so a model that writes
+                // `<u>…</u>` has its markup land on screen as text.
+                // Declared per pane, never globally: a terminal is
+                // where people TALK about markup, and switched on
+                // everywhere it ate the tags out of the conversation
+                // specifying this (2026-09-06).
+                //
+                // Re-issued every tick, like the badge and unlike the
+                // wheel keys.  This one has to reach L3, and an L3
+                // that is mid-execv when it arrives simply drops it —
+                // which is exactly what happened the first time it
+                // shipped: L1 declared 1.4 s after the session images
+                // were swapped, and no pane ever heard it.  Repeating
+                // costs one small frame every two seconds and makes
+                // the restart window cost a tick instead of forever.
+                let _ = host.set_pane_render_markup(sid, true);
                 if !self.declared.contains(&sid) {
-                    // codex does not render HTML, so a model that
-                    // writes `<u>…</u>` has its markup land on screen
-                    // as text.  Declared per pane, never globally: a
-                    // terminal is where people TALK about markup, and
-                    // switched on everywhere it ate the tags out of
-                    // the conversation specifying this (2026-09-06).
-                    let _ = host.set_pane_render_markup(sid, true);
                     if host
                         .set_pane_wheel_keys(
                             sid,

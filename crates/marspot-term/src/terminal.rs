@@ -414,6 +414,12 @@ impl Terminal {
         self.render_markup = on;
     }
 
+    /// Has a plugin said so?  Read by the session to log the change
+    /// rather than the heartbeat that carries it.
+    pub fn render_markup(&self) -> bool {
+        self.render_markup
+    }
+
     /// Is a synchronized update open (`CSI ? 2026 h` with no `l` yet)?
     ///
     /// The presenter should hold the frame while this is true — under
