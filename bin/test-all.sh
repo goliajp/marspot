@@ -83,6 +83,7 @@ for arg in "$@"; do
       run test-real-update.sh "real release pipeline (signed feed e2e)"
       reset_state
       run test-negative-update.sh "release trust gate (rejects tampered/wrong-key/unsigned)"
+      run test-bundle-lander.sh "bundle lander never moves the app backwards"
       reset_state
       run test-adversarial-update.sh "adversarial (equal-version no-op + concurrent triggers + bad-candidate containment)"
       ;;
